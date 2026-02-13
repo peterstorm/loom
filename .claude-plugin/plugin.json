@@ -1,0 +1,6 @@
+{
+  "name": "loom",
+  "version": "1.0.0",
+  "description": "Loom orchestration system - multi-phase task decomposition with wave-based parallel execution",
+  "author": { "name": "peterstorm" }
+}
