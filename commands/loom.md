@@ -332,21 +332,26 @@ Detects simple → may skip brainstorm, minimal spec
 The state file `.claude/state/active_task_graph.json` is created **before Phase 0** with minimal phase-tracking fields. This activates hook enforcement for the entire lifecycle.
 
 ```bash
-# Initial state (created before Phase 0 via Bash — guard inactive since file doesn't exist yet)
-mkdir -p .claude/state
-cat > .claude/state/active_task_graph.json << 'EOF'
-{
-  "current_phase": "init",
-  "phase_artifacts": {},
-  "skipped_phases": [],
-  "spec_dir": ".claude/specs/{date_slug}",
-  "spec_file": null,
-  "plan_file": null,
-  "tasks": []
-}
-EOF
-chmod 444 .claude/state/active_task_graph.json
+# Initial state — computed from skip flags, validates spec.md exists for --skip-specify
+mkdir -p .claude/state .claude/specs/{date_slug}
+bun ${LOOM_DIR}/engine/src/cli.ts init-state \
+  [--skip-brainstorm] [--skip-clarify] [--skip-specify] \
+  --spec-dir .claude/specs/{date_slug} \
+  --output .claude/state/active_task_graph.json
 ```
+
+<!-- Schema reference (for understanding the state shape):
+{
+  "current_phase": "init",       // or "specify"/"architecture" depending on skip flags
+  "phase_artifacts": {},
+  "skipped_phases": [],          // e.g. ["brainstorm","specify","clarify"] for --skip-specify
+  "spec_dir": ".claude/specs/{date_slug}",
+  "spec_file": null,             // set automatically for --skip-specify
+  "plan_file": null,
+  "tasks": [],
+  "wave_gates": {}
+}
+-->
 
 **IMPORTANT:** Set `chmod 444` immediately after creation. This activates OS-level write protection — subagent Write tool calls will get EACCES. Only hooks writing via `StateManager` can modify the file.
 

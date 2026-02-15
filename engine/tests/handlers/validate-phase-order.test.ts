@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { detectPhase } from "../../src/handlers/pre-tool-use/validate-phase-order";
+import { VALID_TRANSITIONS } from "../../src/config";
 
 describe("detectPhase (pure)", () => {
   it("maps known phase agents", () => {
@@ -31,5 +32,16 @@ describe("detectPhase (pure)", () => {
 
   it("returns unknown for unrecognized agents", () => {
     expect(detectPhase("random-agent", "do stuff")).toBe("unknown");
+  });
+});
+
+describe("VALID_TRANSITIONS", () => {
+  it("init allows architecture (for --skip-specify)", () => {
+    expect(VALID_TRANSITIONS["init"]).toContain("architecture");
+  });
+
+  it("init allows brainstorm and specify", () => {
+    expect(VALID_TRANSITIONS["init"]).toContain("brainstorm");
+    expect(VALID_TRANSITIONS["init"]).toContain("specify");
   });
 });

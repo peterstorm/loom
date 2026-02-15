@@ -86,7 +86,7 @@ export const TEST_COMMAND_PATTERNS = [
 
 /** Valid phase transitions: from → allowed targets */
 export const VALID_TRANSITIONS: Record<string, Phase[]> = {
-  "init":         ["brainstorm", "specify"],
+  "init":         ["brainstorm", "specify", "architecture"],
   "brainstorm":   ["brainstorm", "specify"],
   "specify":      ["specify", "clarify", "architecture"],
   "clarify":      ["clarify", "architecture"],
