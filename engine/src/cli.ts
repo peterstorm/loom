@@ -7,7 +7,10 @@
  */
 
 import { match } from "ts-pattern";
+import { writeFileSync, chmodSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import type { HookResult, HookHandler } from "./types";
+import { resolveInitialState } from "./phase-init";
 
 // Eagerly buffer stdin before any async work (bun drains piped data during dynamic imports)
 const stdinPromise: Promise<string> = process.stdin.isTTY
@@ -57,12 +60,54 @@ function resultToExit(result: HookResult): never {
   process.exit(1); // unreachable, satisfies TS
 }
 
+function parseInitStateArgs(args: string[]): { skipBrainstorm: boolean; skipClarify: boolean; skipSpecify: boolean; specDir: string; output: string } {
+  let skipBrainstorm = false, skipClarify = false, skipSpecify = false;
+  let specDir = "", output = "";
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--skip-brainstorm") skipBrainstorm = true;
+    else if (args[i] === "--skip-clarify") skipClarify = true;
+    else if (args[i] === "--skip-specify") skipSpecify = true;
+    else if (args[i] === "--spec-dir" && args[i + 1]) specDir = args[++i];
+    else if (args[i] === "--output" && args[i + 1]) output = args[++i];
+  }
+  if (!specDir || !output) {
+    process.stderr.write("Usage: bun cli.ts init-state [--skip-brainstorm] [--skip-clarify] [--skip-specify] --spec-dir <dir> --output <path>\n");
+    process.exit(1);
+  }
+  return { skipBrainstorm, skipClarify, skipSpecify, specDir, output };
+}
+
 async function main() {
   const [hookType, handlerName, ...extraArgs] = process.argv.slice(2);
 
   if (!hookType || !handlerName) {
+    // Check for standalone commands
+    if (hookType === "init-state") {
+      const opts = parseInitStateArgs(process.argv.slice(3));
+      const state = resolveInitialState(
+        { skipBrainstorm: opts.skipBrainstorm, skipClarify: opts.skipClarify, skipSpecify: opts.skipSpecify },
+        opts.specDir,
+      );
+      mkdirSync(dirname(opts.output), { recursive: true });
+      writeFileSync(opts.output, JSON.stringify(state, null, 2));
+      chmodSync(opts.output, 0o444);
+      process.exit(0);
+    }
     process.stderr.write("Usage: bun cli.ts <hook-type> <handler-name> [extra-args...]\n");
     process.exit(1);
+  }
+
+  // Handle init-state even when parsed as hookType
+  if (hookType === "init-state") {
+    const opts = parseInitStateArgs([handlerName, ...extraArgs]);
+    const state = resolveInitialState(
+      { skipBrainstorm: opts.skipBrainstorm, skipClarify: opts.skipClarify, skipSpecify: opts.skipSpecify },
+      opts.specDir,
+    );
+    mkdirSync(dirname(opts.output), { recursive: true });
+    writeFileSync(opts.output, JSON.stringify(state, null, 2));
+    chmodSync(opts.output, 0o444);
+    process.exit(0);
   }
 
   const typeSet = KNOWN_HANDLERS[hookType];
