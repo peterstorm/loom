@@ -5,10 +5,22 @@
 
 import { execSync, execFileSync } from "node:child_process";
 
+/** Resolve git repo root: CLAUDE_PROJECT_DIR > git rev-parse > cwd */
+function resolveRepoRoot(): string | undefined {
+  if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR;
+  try {
+    return execSync("git rev-parse --show-toplevel", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const repoRoot = resolveRepoRoot();
+
 /** Run a fixed git command (no user input in args) */
 function exec(cmd: string): string {
   try {
-    return execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+    return execSync(cmd, { encoding: "utf-8", cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] });
   } catch (e: unknown) {
     const stderr = e && typeof e === "object" && "stderr" in e ? String((e as { stderr: unknown }).stderr) : "";
     if (stderr) process.stderr.write(`git warning: ${stderr.trim()}\n`);
@@ -19,7 +31,7 @@ function exec(cmd: string): string {
 /** Run git with array args (safe against shell injection) */
 function execArgs(args: string[]): string {
   try {
-    return execFileSync("git", args, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+    return execFileSync("git", args, { encoding: "utf-8", cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] });
   } catch {
     return "";
   }
@@ -34,7 +46,7 @@ export function headSha(): string | null {
 /** Check if in a git repo */
 export function isGitRepo(): boolean {
   try {
-    execSync("git rev-parse --git-dir", { stdio: "ignore" });
+    execSync("git rev-parse --git-dir", { cwd: repoRoot, stdio: "ignore" });
     return true;
   } catch {
     return false;
@@ -80,7 +92,7 @@ export function diffFilesStaged(files: string[]): string {
 /** Check if file is tracked by git */
 export function isTracked(file: string): boolean {
   try {
-    execFileSync("git", ["ls-files", "--error-unmatch", file], { stdio: "ignore" });
+    execFileSync("git", ["ls-files", "--error-unmatch", file], { cwd: repoRoot, stdio: "ignore" });
     return true;
   } catch {
     return false;
@@ -92,6 +104,7 @@ export function diffUntracked(file: string): string {
   try {
     return execFileSync("git", ["diff", "--no-index", "/dev/null", file], {
       encoding: "utf-8",
+      cwd: repoRoot,
       stdio: ["pipe", "pipe", "pipe"],
     });
   } catch (e: unknown) {
