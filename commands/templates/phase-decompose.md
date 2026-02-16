@@ -63,6 +63,8 @@ Output ONLY valid JSON. No markdown, no explanation, no code fences. Pure JSON:
 ```json
 {
   "plan_title": "Short title for GH issue",
+  "spec_file": "{spec_file_path}",
+  "plan_file": "{plan_file_path}",
   "tasks": [
     {
       "id": "T1",
@@ -79,7 +81,15 @@ Output ONLY valid JSON. No markdown, no explanation, no code fences. Pure JSON:
 }
 ```
 
-### Field Requirements
+### Top-Level Fields
+
+| Field | Required | Format | Notes |
+|---|---|---|---|
+| `plan_title` | yes | string | Short title for GitHub issue |
+| `spec_file` | yes | string | Absolute path to spec.md |
+| `plan_file` | yes | string | Absolute path to plan.md |
+
+### Per-Task Fields
 
 | Field | Required | Format | Notes |
 |---|---|---|---|

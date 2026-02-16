@@ -230,6 +230,72 @@ describe("parsePhaseArtifacts", () => {
   });
 });
 
+describe("parseBashTestOutput — persisted output resolution", () => {
+  const { writeFileSync, unlinkSync, mkdtempSync } = require("node:fs");
+  const { join } = require("node:path");
+  const { tmpdir } = require("node:os");
+
+  function makeJsonl(cmd: string, toolResult: string): string {
+    return [
+      `{"message":{"content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"${cmd}"}}]}}`,
+      `{"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":${JSON.stringify(toolResult)}}]}}`,
+    ].join("\n");
+  }
+
+  it("resolves persisted output file and returns full content", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loom-persist-"));
+    const filePath = join(dir, "bash-output.txt");
+    writeFileSync(filePath, "484 pass\n0 fail\n1201 expect() calls\n");
+
+    const truncatedPreview = `bun test v1.3.9\n\nsrc/config.test.ts:\n...(truncated)...\n\nFull output saved to: ${filePath}`;
+    const content = makeJsonl("bun test", truncatedPreview);
+    const result = parseBashTestOutput(content);
+
+    expect(result).toContain("484 pass");
+    expect(result).toContain("0 fail");
+    expect(result).not.toContain("truncated");
+
+    unlinkSync(filePath);
+  });
+
+  it("falls back to original text when persisted file does not exist", () => {
+    const truncatedPreview = "bun test v1.3.9\n...(truncated)...\n\nFull output saved to: /tmp/nonexistent-loom-test-file.txt";
+    const content = makeJsonl("bun test", truncatedPreview);
+    const result = parseBashTestOutput(content);
+
+    expect(result).toContain("truncated");
+    expect(result).toContain("Full output saved to");
+  });
+
+  it("resolves persisted output in nested content blocks", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loom-persist-"));
+    const filePath = join(dir, "nested-output.txt");
+    writeFileSync(filePath, "317 pass\n0 fail\n");
+
+    const toolResult = JSON.stringify([
+      { type: "text", text: `Preview...\n\nFull output saved to: ${filePath}` },
+    ]);
+    const content = [
+      '{"message":{"content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"bun test"}}]}}',
+      `{"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":${toolResult}}]}}`,
+    ].join("\n");
+    const result = parseBashTestOutput(content);
+
+    expect(result).toContain("317 pass");
+    expect(result).not.toContain("Preview");
+
+    unlinkSync(filePath);
+  });
+
+  it("handles normal output without persisted-output marker", () => {
+    const content = makeJsonl("bun test", "42 pass\n0 fail");
+    const result = parseBashTestOutput(content);
+
+    expect(result).toContain("42 pass");
+    expect(result).toContain("0 fail");
+  });
+});
+
 describe("parseBashTestOutput — malformed inputs", () => {
   it("malformed JSONL (missing closing brace) → graceful skip", () => {
     const content = [
