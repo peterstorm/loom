@@ -457,7 +457,19 @@ jq '.wave_gates' .claude/state/active_task_graph.json
 When blocked (critical findings), Edit/Write blocked too. To fix:
 1. **Re-spawn via Task** — create fix agent with findings context (subagent CAN Edit/Write)
 2. **Run `/wave-gate`** — re-reviews only blocked tasks
-3. **Emergency**: remove state file, fix manually, rebuild from GH issue
+3. **Override false positives** — pipe corrected findings through whitelisted helpers (guard hook allows these):
+   ```bash
+   # Override spec-check (e.g. FRs covered in later waves flagged as missing)
+   echo 'SPEC_CHECK_WAVE: N
+   SPEC_CHECK_CRITICAL_COUNT: 0
+   SPEC_CHECK_VERDICT: PASSED
+   MEDIUM: reason for override' | bun ${LOOM_DIR}/engine/src/cli.ts helper store-spec-check
+
+   # Override review findings (e.g. downgrade false critical to advisory)
+   echo 'ADVISORY: original finding — reason for downgrade' | bun ${LOOM_DIR}/engine/src/cli.ts helper store-review-findings --task T1
+   ```
+   Then run `complete-wave-gate` to advance. Use only when findings are genuinely false positives — requires user approval.
+4. **Emergency**: remove state file, fix manually, rebuild from GH issue
 
 ---
 

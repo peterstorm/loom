@@ -13,11 +13,9 @@ describe("categorize (pure)", () => {
 
   it("categorizes impl agents", () => {
     expect(categorize("code-implementer-agent")).toBe("impl");
-    expect(categorize("java-test-agent")).toBe("impl");
     expect(categorize("ts-test-agent")).toBe("impl");
     expect(categorize("frontend-agent")).toBe("impl");
     expect(categorize("security-agent")).toBe("impl");
-    expect(categorize("k8s-agent")).toBe("impl");
     expect(categorize("general-purpose")).toBe("impl");
   });
 
@@ -55,8 +53,7 @@ describe("categorize — exhaustive config coverage", () => {
     }
   });
 
-  it("missing impl agents covered (keycloak, dotfiles)", () => {
-    expect(categorize("keycloak-agent")).toBe("impl");
+  it("dotfiles-agent covered", () => {
     expect(categorize("dotfiles-agent")).toBe("impl");
   });
 

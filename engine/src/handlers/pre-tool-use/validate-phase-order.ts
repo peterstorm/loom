@@ -112,7 +112,7 @@ const handler: HookHandler = async (stdin) => {
         "",
         "Use a recognized phase agent:",
         "  brainstorm-agent, specify-agent, clarify-agent, architecture-agent,",
-        "  code-implementer-agent, java-test-agent, ts-test-agent, etc.",
+        "  code-implementer-agent, ts-test-agent, frontend-agent, etc.",
       ].join("\n"),
     };
   }

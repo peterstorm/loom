@@ -1,0 +1,1 @@
+/home/peterstorm/.dotfiles/claude/project/typescript/rules/typescript-patterns.md

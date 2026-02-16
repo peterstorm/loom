@@ -27,7 +27,7 @@ const KNOWN_HANDLERS: Record<string, Set<string>> = {
   "pre-tool-use": new Set([
     "block-direct-edits", "guard-state-file", "validate-phase-order",
     "validate-task-execution", "validate-template-substitution",
-    "validate-agent-model",
+    "validate-agent-model", "validate-agent-skill",
   ]),
   "subagent-stop": new Set([
     "dispatch", "advance-phase", "update-task-status",

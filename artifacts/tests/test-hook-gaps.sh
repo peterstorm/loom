@@ -466,7 +466,7 @@ ERR_COUNT=$(echo "$OUTPUT" | grep -c "  -" || true)
 # 6p: All recognized agents accepted (batch test to avoid per-agent jq overhead)
 ALL_AGENTS_OK=true
 FAILED_AGENTS=""
-for AGENT in code-implementer-agent java-test-agent ts-test-agent security-agent dotfiles-agent k8s-agent keycloak-agent frontend-agent general-purpose; do
+for AGENT in code-implementer-agent ts-test-agent security-agent dotfiles-agent frontend-agent general-purpose; do
   AGENT_JSON="{\"plan_title\":\"T\",\"plan_file\":\"x\",\"spec_file\":\"s\",\"tasks\":[{\"id\":\"T1\",\"description\":\"x\",\"agent\":\"$AGENT\",\"wave\":1,\"depends_on\":[]}]}"
   if ! echo "$AGENT_JSON" | bash "$VALIDATOR" - 2>/dev/null; then
     ALL_AGENTS_OK=false

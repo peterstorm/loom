@@ -25,12 +25,9 @@ Read the spec and plan, then decompose into parallel task graph.
 | Agent (subagent_type) | Use When |
 |---|---|
 | code-implementer-agent | implement, create, build, add, write code, model — **writes tests too** |
-| java-test-agent | add missing tests to EXISTING Java code only |
 | ts-test-agent | add missing tests to EXISTING TypeScript code only |
 | security-agent | security, auth, jwt, oauth, vulnerability |
 | dotfiles-agent | nix, nixos, home-manager, sops |
-| k8s-agent | kubernetes, k8s, kubectl, helm, argocd |
-| keycloak-agent | keycloak, realm, oidc, abac |
 | frontend-agent | frontend, ui, react, next.js, component — **writes tests too** |
 
 Fallback: `general-purpose`
@@ -40,7 +37,7 @@ Fallback: `general-purpose`
 ## Decompose Rules
 
 1. **Impl tasks include tests.** Do NOT create separate test tasks for new code. `code-implementer-agent` and `frontend-agent` write both impl AND tests. Separate test tasks cause deadlocks.
-2. **Test-only agents** (`java-test-agent`, `ts-test-agent`): only for adding tests to EXISTING code lacking coverage.
+2. **Test-only agent** (`ts-test-agent`): only for adding tests to EXISTING code lacking coverage.
 3. **Sizing** — decompose further if:
    - Task touches >5 files
    - Multiple unrelated concerns in one task

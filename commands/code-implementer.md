@@ -3,10 +3,10 @@ name: code-implementer
 version: "1.0.0"
 description: "This skill should be used when the user asks to 'implement', 'write code', 'build a feature', 'create a function', 'add functionality', 'code this', 'make this work', or needs to write production code for Java/Spring Boot or TypeScript/Next.js following FP, DDD, and testability patterns. Ensures code follows functional core/imperative shell, proper invariants, Either-based error handling, and is designed for testing without mocks."
 imports:
-  - "../../rules/architecture.md"
-  - "../../rules/java-patterns.md"
-  - "../../rules/typescript-patterns.md"
-  - "../../rules/property-testing.md"
+  - "../rules/architecture.md"
+  - "../rules/java-patterns.md"
+  - "../rules/typescript-patterns.md"
+  - "../rules/property-testing.md"
 ---
 
 # Code Implementer Skill

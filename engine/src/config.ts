@@ -28,12 +28,9 @@ export const PHASE_AGENT_MAP: Record<string, Phase> = {
 /** Impl agents → all map to "execute" phase */
 export const IMPL_AGENTS = new Set([
   "code-implementer-agent",
-  "java-test-agent",
   "ts-test-agent",
   "frontend-agent",
   "security-agent",
-  "k8s-agent",
-  "keycloak-agent",
   "dotfiles-agent",
   "general-purpose",
 ]);

@@ -1,0 +1,1 @@
+/home/peterstorm/.dotfiles/claude/project/meta/rules/architecture.md

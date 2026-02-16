@@ -15,12 +15,9 @@ function wrapTasks(tasks: Record<string, unknown>[]) {
 /** Known agents from config (subset for generation) */
 const AGENTS = [
   "code-implementer-agent",
-  "java-test-agent",
   "ts-test-agent",
   "frontend-agent",
   "security-agent",
-  "k8s-agent",
-  "keycloak-agent",
   "dotfiles-agent",
   "general-purpose",
 ];
@@ -157,7 +154,7 @@ describe("validateFull — edge cases", () => {
       wrapTasks([
         { id: "T1", description: "a", agent: "frontend-agent", wave: 1, depends_on: [] },
         { id: "T2", description: "b", agent: "ts-test-agent", wave: 1, depends_on: [] },
-        { id: "T3", description: "c", agent: "k8s-agent", wave: 1, depends_on: [] },
+        { id: "T3", description: "c", agent: "security-agent", wave: 1, depends_on: [] },
       ]),
     );
     expect(result.valid).toBe(true);
@@ -178,7 +175,7 @@ describe("validateFull — edge cases", () => {
       wrapTasks([
         { id: "T1", description: "a", agent: "frontend-agent", wave: 1, depends_on: [] },
         { id: "T2", description: "b", agent: "ts-test-agent", wave: 1, depends_on: [] },
-        { id: "T3", description: "c", agent: "k8s-agent", wave: 2, depends_on: ["T1", "T2"] },
+        { id: "T3", description: "c", agent: "security-agent", wave: 2, depends_on: ["T1", "T2"] },
       ]),
     );
     expect(result.valid).toBe(true);

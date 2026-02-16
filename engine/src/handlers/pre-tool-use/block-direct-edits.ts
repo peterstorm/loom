@@ -31,7 +31,7 @@ const handler: HookHandler = async (stdin) => {
       "",
       "Use Task tool with appropriate agent for implementation:",
       "  - code-implementer-agent for production code",
-      "  - java-test-agent or ts-test-agent for tests",
+      "  - ts-test-agent for tests",
       "  - frontend-agent for UI components",
       "",
       "This ensures proper phase sequencing and review gates.",

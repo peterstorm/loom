@@ -1,0 +1,1 @@
+/home/peterstorm/.dotfiles/claude/project/java/rules/java-patterns.md

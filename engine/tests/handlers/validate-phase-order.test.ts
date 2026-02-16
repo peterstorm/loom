@@ -13,7 +13,6 @@ describe("detectPhase (pure)", () => {
 
   it("maps impl agents to execute", () => {
     expect(detectPhase("code-implementer-agent", "")).toBe("execute");
-    expect(detectPhase("java-test-agent", "")).toBe("execute");
     expect(detectPhase("ts-test-agent", "")).toBe("execute");
     expect(detectPhase("frontend-agent", "")).toBe("execute");
   });
