@@ -32,7 +32,7 @@ const KNOWN_HANDLERS: Record<string, Set<string>> = {
   "subagent-stop": new Set([
     "dispatch", "advance-phase", "update-task-status",
     "store-reviewer-findings", "store-spec-check-findings",
-    "cleanup-subagent-flag", "validate-review-invoker",
+    "cleanup-subagent-flag",
   ]),
   "subagent-start": new Set(["mark-subagent-active"]),
   "session-start": new Set(["cleanup-stale-subagents"]),

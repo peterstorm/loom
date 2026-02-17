@@ -1,21 +1,41 @@
 /**
- * Auto-store findings when review-invoker completes.
+ * Auto-store findings when review sub-agents complete.
  * Parses Machine Summary block (primary) or legacy free-text (fallback).
- * Sets review_status per task.
+ * Merges findings from multiple agents per task, never demoting review_status.
  */
 
 import { existsSync, readFileSync } from "node:fs";
 import { match } from "ts-pattern";
-import type { HookHandler, SubagentStopInput, TaskGraph, ReviewStatus } from "../../types";
+import type { HookHandler, SubagentStopInput, TaskGraph, Task, ReviewStatus } from "../../types";
+import { REVIEW_SUB_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { extractTaskId } from "../../utils/extract-task-id";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
 
-interface ParsedFindings {
+export interface ParsedFindings {
   critical: string[];
   advisory: string[];
   criticalCount: number | null;
+}
+
+/** Pure: Check if an agent type is a recognized review agent */
+export function isReviewAgent(agentType: string): boolean {
+  return REVIEW_SUB_AGENTS.has(agentType);
+}
+
+/** Pure: Merge new findings into a task, accumulating rather than overwriting.
+ *  Never demotes review_status from "blocked" to "passed". */
+export function mergeFindings(task: Task, findings: ParsedFindings): Task {
+  const newStatus: ReviewStatus = (findings.criticalCount ?? 0) > 0 ? "blocked" : "passed";
+  const reviewStatus: ReviewStatus = task.review_status === "blocked" ? "blocked" : newStatus;
+
+  return {
+    ...task,
+    review_status: reviewStatus,
+    critical_findings: [...(task.critical_findings ?? []), ...findings.critical],
+    advisory_findings: [...(task.advisory_findings ?? []), ...findings.advisory],
+  };
 }
 
 /** Parse Machine Summary block for structured findings */
@@ -79,7 +99,7 @@ const handler: HookHandler = async (stdin) => {
   const input: SubagentStopInput = JSON.parse(stdin);
 
   const agentType = (input.agent_type ?? "").replace(/^[^:]+:/, "");
-  if (agentType !== "review-invoker") {
+  if (!isReviewAgent(agentType)) {
     return { kind: "passthrough" };
   }
 
@@ -122,24 +142,13 @@ const handler: HookHandler = async (stdin) => {
     findings.critical.push(`Review output parsing failed - ${findings.criticalCount} findings not captured`);
   }
 
-  // Determine review_status
-  const reviewStatus: ReviewStatus = findings.criticalCount > 0 ? "blocked" : "passed";
-
   await mgr.update((s) => ({
     ...s,
-    tasks: s.tasks.map((t) =>
-      t.id === taskId
-        ? {
-            ...t,
-            review_status: reviewStatus,
-            critical_findings: findings.critical,
-            advisory_findings: findings.advisory,
-          }
-        : t
-    ),
+    tasks: s.tasks.map((t) => t.id === taskId ? mergeFindings(t, findings) : t),
   }));
 
-  process.stderr.write(`Task ${taskId} review: ${reviewStatus} (${findings.criticalCount} critical)\n`);
+  const status: ReviewStatus = findings.criticalCount > 0 ? "blocked" : "passed";
+  process.stderr.write(`Task ${taskId} review: ${status} (${findings.criticalCount} critical)\n`);
   return { kind: "passthrough" };
 };
 

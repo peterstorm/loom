@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { parseMachineSummary, parseLegacyFindings } from "../../src/handlers/subagent-stop/store-reviewer-findings";
+import { parseMachineSummary, parseLegacyFindings, isReviewAgent, mergeFindings } from "../../src/handlers/subagent-stop/store-reviewer-findings";
+import { REVIEW_SUB_AGENTS } from "../../src/config";
+import type { Task } from "../../src/types";
 
 describe("parseMachineSummary (pure)", () => {
   it("parses structured Machine Summary block", () => {
@@ -132,5 +134,128 @@ describe("parseLegacyFindings (pure)", () => {
   it("returns null criticalCount when marker missing", () => {
     const result = parseLegacyFindings("no markers here");
     expect(result.criticalCount).toBeNull();
+  });
+});
+
+describe("isReviewAgent (pure)", () => {
+  it("accepts all REVIEW_SUB_AGENTS", () => {
+    for (const agent of REVIEW_SUB_AGENTS) {
+      expect(isReviewAgent(agent)).toBe(true);
+    }
+  });
+
+  it("rejects non-review agents", () => {
+    expect(isReviewAgent("spec-check-invoker")).toBe(false);
+    expect(isReviewAgent("code-implementer-agent")).toBe(false);
+    expect(isReviewAgent("random-agent")).toBe(false);
+    expect(isReviewAgent("")).toBe(false);
+  });
+});
+
+describe("mergeFindings (pure)", () => {
+  const baseTask: Task = {
+    id: "T1",
+    description: "Test task",
+    agent: "test",
+    wave: 1,
+    status: "implemented",
+    depends_on: [],
+  };
+
+  it("sets review_status to passed when no criticals", () => {
+    const result = mergeFindings(baseTask, {
+      critical: [],
+      advisory: ["Consider refactor"],
+      criticalCount: 0,
+    });
+
+    expect(result.review_status).toBe("passed");
+    expect(result.critical_findings).toEqual([]);
+    expect(result.advisory_findings).toEqual(["Consider refactor"]);
+  });
+
+  it("sets review_status to blocked when criticals present", () => {
+    const result = mergeFindings(baseTask, {
+      critical: ["SQL injection"],
+      advisory: [],
+      criticalCount: 1,
+    });
+
+    expect(result.review_status).toBe("blocked");
+    expect(result.critical_findings).toEqual(["SQL injection"]);
+  });
+
+  it("accumulates findings from multiple agents", () => {
+    const afterFirst = mergeFindings(baseTask, {
+      critical: ["Issue from code-reviewer"],
+      advisory: ["Advice from code-reviewer"],
+      criticalCount: 1,
+    });
+
+    const afterSecond = mergeFindings(afterFirst, {
+      critical: [],
+      advisory: ["Advice from silent-failure-hunter"],
+      criticalCount: 0,
+    });
+
+    expect(afterSecond.critical_findings).toEqual(["Issue from code-reviewer"]);
+    expect(afterSecond.advisory_findings).toEqual([
+      "Advice from code-reviewer",
+      "Advice from silent-failure-hunter",
+    ]);
+  });
+
+  it("never demotes blocked to passed", () => {
+    const blockedTask: Task = {
+      ...baseTask,
+      review_status: "blocked",
+      critical_findings: ["Existing critical"],
+      advisory_findings: [],
+    };
+
+    const result = mergeFindings(blockedTask, {
+      critical: [],
+      advisory: ["All good from me"],
+      criticalCount: 0,
+    });
+
+    expect(result.review_status).toBe("blocked");
+    expect(result.critical_findings).toEqual(["Existing critical"]);
+    expect(result.advisory_findings).toEqual(["All good from me"]);
+  });
+
+  it("escalates pending to blocked when criticals found", () => {
+    const pendingTask: Task = { ...baseTask, review_status: "pending" };
+
+    const result = mergeFindings(pendingTask, {
+      critical: ["New critical"],
+      advisory: [],
+      criticalCount: 1,
+    });
+
+    expect(result.review_status).toBe("blocked");
+  });
+
+  it("handles task with no prior findings (undefined arrays)", () => {
+    // baseTask has no critical_findings or advisory_findings
+    const result = mergeFindings(baseTask, {
+      critical: ["First finding"],
+      advisory: ["First advice"],
+      criticalCount: 1,
+    });
+
+    expect(result.critical_findings).toEqual(["First finding"]);
+    expect(result.advisory_findings).toEqual(["First advice"]);
+  });
+
+  it("accumulates across three agents", () => {
+    let task = baseTask;
+    task = mergeFindings(task, { critical: ["C1"], advisory: ["A1"], criticalCount: 1 });
+    task = mergeFindings(task, { critical: [], advisory: ["A2"], criticalCount: 0 });
+    task = mergeFindings(task, { critical: ["C2"], advisory: ["A3"], criticalCount: 1 });
+
+    expect(task.critical_findings).toEqual(["C1", "C2"]);
+    expect(task.advisory_findings).toEqual(["A1", "A2", "A3"]);
+    expect(task.review_status).toBe("blocked");
   });
 });

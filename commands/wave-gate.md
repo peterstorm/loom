@@ -12,7 +12,7 @@ Executes the gate sequence after all wave tasks reach "implemented". Verifies te
 
 **Resolve plugin path first** (if not already set from `/loom`):
 ```bash
-LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/plugins/loom"/*/ 2>/dev/null | tail -1 | sed 's:/$::')
+LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/ 2>/dev/null | tail -1 | sed 's:/$::')
 ```
 
 **Important:** State file writes via Bash are blocked by `guard-state-file`. All state mutations happen through SubagentStop hooks and whitelisted helper scripts. Read access (jq, cat) is allowed.
@@ -83,7 +83,14 @@ Output format required:
 - SPEC_CHECK_VERDICT: PASSED | BLOCKED
 ```
 
-2. **Review invoker per task** (for each task needing review):
+2. **Review agents per task** (for each task needing review, spawn ALL in parallel):
+   - `loom:code-reviewer` — style, patterns, best practices
+   - `loom:silent-failure-hunter` — error handling, silent swallowing
+   - `loom:pr-test-analyzer` — test coverage and quality
+   - `loom:type-design-analyzer` — type safety and design
+   - `loom:comment-analyzer` — comment accuracy and completeness
+
+Each review agent gets the same prompt:
 ```markdown
 ## Task: {task_id}
 **Description:** {task description}
@@ -91,7 +98,7 @@ Output format required:
 Files: {comma-separated files relevant to this task}
 Task: {task_id}
 
-Call: Skill(skill: "review-pr", args: "--files {files} --task {task_id}")
+Review these files and produce a Machine Summary with CRITICAL_COUNT, CRITICAL, and ADVISORY lines.
 ```
 
 **What happens automatically on completion:**
@@ -99,13 +106,17 @@ Call: Skill(skill: "review-pr", args: "--files {files} --task {task_id}")
 | Agent | SubagentStop Hook | Effect |
 |-------|-------------------|--------|
 | spec-check-invoker | `store-spec-check-findings` | Sets `spec_check.critical_count`, `spec_check.verdict` |
-| review-invoker | `store-reviewer-findings` | Sets `review_status` per task |
+| code-reviewer | `store-reviewer-findings` | Merges findings into task `review_status` |
+| silent-failure-hunter | `store-reviewer-findings` | Merges findings into task `review_status` |
+| pr-test-analyzer | `store-reviewer-findings` | Merges findings into task `review_status` |
+| type-design-analyzer | `store-reviewer-findings` | Merges findings into task `review_status` |
+| comment-analyzer | `store-reviewer-findings` | Merges findings into task `review_status` |
 
 **File-to-task mapping algorithm (for reviewers):**
 1. Read `task.files_modified` from state (set by `update-task-status` hook via transcript parsing)
 2. If `files_modified` is non-empty: use those files directly
 3. Fallback (empty `files_modified`): use all wave changes from `git diff`
-4. Pass to review-invoker: `--files {files_modified}`
+4. Pass to review sub-agents: `--files {files_modified}`
 
 ### Step 4: Post GH Comment
 
@@ -211,9 +222,9 @@ jq -r ".tasks[] | select(.wave == $WAVE) | .id" .claude/state/active_task_graph.
 
 ## Constraints
 
-- MUST spawn spec-check AND reviewers in parallel (single message)
+- MUST spawn spec-check AND review agents in parallel (single message)
 - MUST use `spec-check-invoker` agent for spec alignment
-- MUST use `review-invoker` agent with `--files` and `--task` args
+- MUST spawn review sub-agents directly (`code-reviewer`, `silent-failure-hunter`, etc.) per task
 - MUST post GH comment before advancing
 - NEVER advance if spec-check has critical findings
 - NEVER advance if code review has critical findings

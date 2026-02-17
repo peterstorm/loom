@@ -27,9 +27,15 @@ const SKILL_EXEMPT_AGENTS = new Set([
   "general-purpose",
 ]);
 
-/** Resolve agent .md path — checks git root, home dir, and plugin cache */
+/** Resolve agent .md path — checks CLAUDE_PLUGIN_ROOT, git root, home dir, and plugin cache */
 function resolveAgentPath(agentName: string, fullAgentType: string): string | null {
   const candidates: string[] = [];
+
+  // Prefer CLAUDE_PLUGIN_ROOT — set by the plugin system, portable across OS and users
+  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+  if (pluginRoot) {
+    candidates.push(join(pluginRoot, "agents", `${agentName}.md`));
+  }
 
   try {
     const root = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
@@ -38,12 +44,18 @@ function resolveAgentPath(agentName: string, fullAgentType: string): string | nu
 
   candidates.push(join(process.env.HOME ?? "", ".claude/agents", `${agentName}.md`));
 
+  // Fallback: scan plugin cache directories (covers both "plugins" and "local-plugins")
   const namespace = extractNamespace(fullAgentType);
   if (namespace) {
-    const pluginBase = join(process.env.HOME ?? "", ".claude/plugins/cache/plugins", namespace);
+    const cacheBase = join(process.env.HOME ?? "", ".claude/plugins/cache");
     try {
-      for (const version of readdirSync(pluginBase)) {
-        candidates.push(join(pluginBase, version, "agents", `${agentName}.md`));
+      for (const cacheDir of readdirSync(cacheBase)) {
+        const pluginBase = join(cacheBase, cacheDir, namespace);
+        try {
+          for (const version of readdirSync(pluginBase)) {
+            candidates.push(join(pluginBase, version, "agents", `${agentName}.md`));
+          }
+        } catch {}
       }
     } catch {}
   }

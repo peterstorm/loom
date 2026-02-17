@@ -18,8 +18,16 @@ describe("detectPhase (pure)", () => {
   });
 
   it("maps review agents to execute", () => {
-    expect(detectPhase("review-invoker", "")).toBe("execute");
     expect(detectPhase("spec-check-invoker", "")).toBe("execute");
+  });
+
+  it("maps review sub-agents to execute", () => {
+    expect(detectPhase("code-reviewer", "")).toBe("execute");
+    expect(detectPhase("silent-failure-hunter", "")).toBe("execute");
+    expect(detectPhase("pr-test-analyzer", "")).toBe("execute");
+    expect(detectPhase("type-design-analyzer", "")).toBe("execute");
+    expect(detectPhase("comment-analyzer", "")).toBe("execute");
+    expect(detectPhase("code-simplifier", "")).toBe("execute");
   });
 
   it("falls back to prompt keywords", () => {

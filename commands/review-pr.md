@@ -66,28 +66,30 @@ git diff main...HEAD --stat | tail -1
 
 ### 5. Launch Review Agents
 
-**For comprehensive review, launch these agents in parallel:**
+**For comprehensive review, launch these agents in parallel using the Task tool.**
 
-1. **code-reviewer** - CLAUDE.md compliance, bugs, architecture
+Each agent MUST be spawned via `Task` with the `subagent_type` shown below. Do NOT perform reviews inline — always dispatch to specialized agents.
+
+1. **`loom:code-reviewer`** - CLAUDE.md compliance, bugs, architecture
    - Will recommend delegation to: security-expert, keycloak-skill, frontend-design-skill
 
-2. **silent-failure-hunter** - Error handling, Either patterns, silent failures
+2. **`loom:silent-failure-hunter`** - Error handling, Either patterns, silent failures
 
-3. **pr-test-analyzer** - Test coverage, property tests, gaps
+3. **`loom:pr-test-analyzer`** - Test coverage, property tests, gaps
    - Will recommend delegation to: java-test-engineer, ts-test-engineer
 
-4. **type-design-analyzer** - Invariants, encapsulation, sealed types
+4. **`loom:type-design-analyzer`** - Invariants, encapsulation, sealed types
 
-5. **comment-analyzer** - Comment accuracy, rot, documentation
+5. **`loom:comment-analyzer`** - Comment accuracy, rot, documentation
 
-6. **architecture-agent** *(auto-triggered for large PRs)* - FC/IS adherence, coupling, testability, service layer design, brand duplication, I/O boundary placement
+6. **`loom:architecture-agent`** *(auto-triggered for large PRs)* - FC/IS adherence, coupling, testability, service layer design, brand duplication, I/O boundary placement
    - **Auto-trigger:** >500 additions OR >10 files changed OR new services/packages/DB migrations
    - **Always included** when `all` or `architecture` aspect requested
    - Prompt must include: file list, diff stats, architecture principles from CLAUDE.md
    - Reviews: FC/IS pattern, coupling, testability score, service design, refactoring priorities, unresolved questions
 
 **After fixes applied:**
-7. **code-simplifier** - Clarity, FP patterns, maintainability
+7. **`loom:code-simplifier`** - Clarity, FP patterns, maintainability
 
 ### 6. Aggregate Results
 
@@ -188,6 +190,6 @@ ADVISORY: {each non-critical finding on its own line}
 
 **Wave-gate integration:**
 ```
-# Called by review-invoker agent with scoped files
-/review-pr --files components/report-action-cell.tsx --task T3
+# Wave-gate spawns review sub-agents directly per task
+# Each sub-agent reviews scoped files and produces Machine Summary output
 ```

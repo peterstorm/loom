@@ -1057,7 +1057,7 @@ cat > "$TEST_DIR/review-summary-transcript.jsonl" << 'EOF'
 {"message": {"content": "**Task ID:** T1\n# PR Review Summary\n## Critical Issues\n- SQL injection in query builder\n## Suggestions\n- Consider logging\n\n### Machine Summary\nCRITICAL_COUNT: 1\nADVISORY_COUNT: 1\nCRITICAL: SQL injection in query builder\nADVISORY: Consider logging"}}
 EOF
 
-echo '{"session_id": "review-summary-test", "agent_type": "review-invoker", "agent_transcript_path": "'"$TEST_DIR"'/review-summary-transcript.jsonl"}' | \
+echo '{"session_id": "review-summary-test", "agent_type": "code-reviewer", "agent_transcript_path": "'"$TEST_DIR"'/review-summary-transcript.jsonl"}' | \
   bash "$DISPATCH" 2>&1 >/dev/null
 
 MS_CRITICAL=$(jq '[.tasks[] | select(.id=="T1") | .critical_findings | length] | add' "$TEST_DIR/.claude/state/active_task_graph.json")
@@ -1086,7 +1086,7 @@ cat > "$TEST_DIR/review-pass-transcript.jsonl" << 'EOF'
 {"message": {"content": "**Task ID:** T1\n# PR Review Summary\nNo issues found.\n\n### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 0"}}
 EOF
 
-echo '{"session_id": "review-pass-test", "agent_type": "review-invoker", "agent_transcript_path": "'"$TEST_DIR"'/review-pass-transcript.jsonl"}' | \
+echo '{"session_id": "review-pass-test", "agent_type": "code-reviewer", "agent_transcript_path": "'"$TEST_DIR"'/review-pass-transcript.jsonl"}' | \
   bash "$DISPATCH" 2>&1 >/dev/null
 
 PASS_STATUS=$(jq -r '.tasks[] | select(.id=="T1") | .review_status' "$TEST_DIR/.claude/state/active_task_graph.json")

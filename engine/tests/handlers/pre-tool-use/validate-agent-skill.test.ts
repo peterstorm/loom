@@ -64,7 +64,7 @@ describe("parseSkillsFromFrontmatter", () => {
   it("handles tools field without skills", () => {
     const path = writeAgent("test", [
       "---",
-      "name: review-invoker",
+      "name: some-agent",
       "model: sonnet",
       "tools:",
       "  - Skill",

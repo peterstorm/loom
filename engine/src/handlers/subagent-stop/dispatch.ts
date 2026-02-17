@@ -5,7 +5,7 @@
 
 import { match, P } from "ts-pattern";
 import type { HookHandler, SubagentStopInput } from "../../types";
-import { PHASE_AGENT_MAP, IMPL_AGENTS } from "../../config";
+import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 
@@ -13,7 +13,6 @@ import cleanupSubagentFlag from "./cleanup-subagent-flag";
 import advancePhase from "./advance-phase";
 import updateTaskStatus from "./update-task-status";
 import storeReviewerFindings from "./store-reviewer-findings";
-import validateReviewInvoker from "./validate-review-invoker";
 import storeSpecCheckFindings from "./store-spec-check-findings";
 
 type AgentCategory = "phase" | "impl" | "review" | "spec-check" | "unknown";
@@ -21,8 +20,8 @@ type AgentCategory = "phase" | "impl" | "review" | "spec-check" | "unknown";
 export function categorize(agentType: string): AgentCategory {
   if (PHASE_AGENT_MAP[agentType]) return "phase";
   if (IMPL_AGENTS.has(agentType)) return "impl";
-  if (agentType === "review-invoker") return "review";
   if (agentType === "spec-check-invoker") return "spec-check";
+  if (REVIEW_SUB_AGENTS.has(agentType)) return "review";
   return "unknown";
 }
 
@@ -55,7 +54,6 @@ const handler: HookHandler = async (stdin, args) => {
     })
     .with("review", async () => {
       await safeRun("storeReviewerFindings", () => storeReviewerFindings(stdin, args));
-      await safeRun("validateReviewInvoker", () => validateReviewInvoker(stdin, args));
     })
     .with("spec-check", async () => {
       await safeRun("storeSpecCheckFindings", () => storeSpecCheckFindings(stdin, args));

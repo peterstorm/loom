@@ -347,7 +347,7 @@ EOF
 
 echo '{"message": {"content": ""}}' > "$TEST_DIR/review-crash.jsonl"
 
-echo "{\"session_id\": \"crash-test\", \"agent_id\": \"agent-review\", \"agent_type\": \"review-invoker\", \"agent_transcript_path\": \"$TEST_DIR/review-crash.jsonl\"}" | \
+echo "{\"session_id\": \"crash-test\", \"agent_id\": \"agent-review\", \"agent_type\": \"code-reviewer\", \"agent_transcript_path\": \"$TEST_DIR/review-crash.jsonl\"}" | \
   bash "$REPO_ROOT/.claude/hooks/SubagentStop/update-task-status.sh" 2>&1
 
 T1_STILL=$(jq -r '.tasks[] | select(.id=="T1") | .status' "$TEST_DIR/.claude/state/active_task_graph.json")

@@ -41,8 +41,21 @@ export const KNOWN_AGENTS = new Set([...IMPL_AGENTS]);
 /** Utility agents allowed through phase validation */
 export const UTILITY_AGENTS = new Set(["Explore", "Plan", "haiku"]);
 
-/** Review/spec-check agents (not impl agents) */
-export const REVIEW_AGENTS = new Set(["review-invoker", "spec-check-invoker"]);
+/** Review sub-agents that produce findings per task */
+export const REVIEW_SUB_AGENTS = new Set([
+  "code-reviewer",
+  "silent-failure-hunter",
+  "pr-test-analyzer",
+  "type-design-analyzer",
+  "comment-analyzer",
+  "code-simplifier",
+]);
+
+/** All review-related agents (sub-agents + spec-check invoker) */
+export const REVIEW_AGENTS = new Set([
+  ...REVIEW_SUB_AGENTS,
+  "spec-check-invoker",
+]);
 
 /** All agents that map to execute phase (impl + review) */
 export const EXECUTE_AGENTS = new Set([...IMPL_AGENTS, ...REVIEW_AGENTS]);

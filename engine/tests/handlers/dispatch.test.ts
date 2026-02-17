@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { categorize } from "../../src/handlers/subagent-stop/dispatch";
-import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS } from "../../src/config";
+import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS, REVIEW_SUB_AGENTS } from "../../src/config";
 
 describe("categorize (pure)", () => {
   it("categorizes phase agents", () => {
@@ -19,8 +19,13 @@ describe("categorize (pure)", () => {
     expect(categorize("general-purpose")).toBe("impl");
   });
 
-  it("categorizes review-invoker", () => {
-    expect(categorize("review-invoker")).toBe("review");
+  it("categorizes review sub-agents", () => {
+    expect(categorize("code-reviewer")).toBe("review");
+    expect(categorize("silent-failure-hunter")).toBe("review");
+    expect(categorize("pr-test-analyzer")).toBe("review");
+    expect(categorize("type-design-analyzer")).toBe("review");
+    expect(categorize("comment-analyzer")).toBe("review");
+    expect(categorize("code-simplifier")).toBe("review");
   });
 
   it("categorizes spec-check-invoker", () => {
@@ -43,6 +48,12 @@ describe("categorize — exhaustive config coverage", () => {
   it("every IMPL_AGENTS member → impl", () => {
     for (const agent of IMPL_AGENTS) {
       expect(categorize(agent)).toBe("impl");
+    }
+  });
+
+  it("every REVIEW_SUB_AGENTS member → review", () => {
+    for (const agent of REVIEW_SUB_AGENTS) {
+      expect(categorize(agent)).toBe("review");
     }
   });
 

@@ -22,7 +22,7 @@ If `bun` is missing, **STOP and tell the user**. Loom hooks require bun for Type
 
 **FIRST STEP of every `/loom` invocation** — resolve loom plugin install path:
 ```bash
-LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/plugins/loom"/*/ 2>/dev/null | tail -1 | sed 's:/$::')
+LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/ 2>/dev/null | tail -1 | sed 's:/$::')
 [ -z "$LOOM_DIR" ] && echo "FATAL: loom plugin not installed" && exit 1
 echo "LOOM_DIR=$LOOM_DIR"
 ```
@@ -409,7 +409,6 @@ Hooks auto-activate when `active_task_graph.json` exists:
 | ↳ `update-task-status.sh` | via dispatch | Marks "implemented" or "failed" + test evidence + new-test verification |
 | ↳ `store-reviewer-findings.sh` | via dispatch | Parses review findings |
 | ↳ `store-spec-check-findings.sh` | via dispatch | Parses spec-check findings |
-| ↳ `validate-review-invoker.sh` | via dispatch | Validates /review-pr skill was invoked |
 | ↳ `cleanup-subagent-flag.sh` | via dispatch | Cleans up subagent tracking (always runs) |
 
 **NEVER call helpers yourself.** All helpers (`mark-tests-passed.sh`, `complete-wave-gate.sh`, `StateManager`, `populate-task-graph.sh`, etc.) run automatically via hooks or `/wave-gate`. Only exception: `populate-task-graph.sh` during Phase 4d.
