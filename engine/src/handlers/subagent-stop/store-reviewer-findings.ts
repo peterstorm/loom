@@ -52,12 +52,12 @@ export function parseMachineSummary(output: string): ParsedFindings | null {
   const advisory: string[] = [];
 
   for (const line of block.split("\n")) {
-    const critMatch = line.match(/^CRITICAL:\s*(.*)/);
+    const critMatch = line.match(/^[\s\-*]*\*{0,2}CRITICAL:?\*{0,2}\s*(.*)/);
     if (critMatch) {
       const text = critMatch[1].trim();
       if (text !== '') critical.push(text);
     }
-    const advMatch = line.match(/^ADVISORY:\s*(.*)/);
+    const advMatch = line.match(/^[\s\-*]*\*{0,2}ADVISORY:?\*{0,2}\s*(.*)/);
     if (advMatch) {
       const text = advMatch[1].trim();
       if (text !== '') advisory.push(text);
@@ -75,14 +75,14 @@ export function parseLegacyFindings(output: string): ParsedFindings {
   const critical: string[] = [];
   const advisory: string[] = [];
 
-  const critSection = output.match(/### Critical Findings[\s\S]*?(?=### )/);
+  const critSection = output.match(/### Critical Findings[\s\S]*?(?=### |$)/);
   if (critSection) {
     for (const m of critSection[0].matchAll(/^- (?:\*\*)?(.+?)(?:\*\*)?$/gm)) {
       if (m[1] !== "None") critical.push(m[1]);
     }
   }
 
-  const advSection = output.match(/### Advisory Findings[\s\S]*?(?=### )/);
+  const advSection = output.match(/### Advisory Findings[\s\S]*?(?=### |$)/);
   if (advSection) {
     for (const m of advSection[0].matchAll(/^- (?:\*\*)?(.+?)(?:\*\*)?$/gm)) {
       if (m[1] !== "None") advisory.push(m[1]);
