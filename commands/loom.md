@@ -6,7 +6,7 @@ description: "This skill should be used when the user asks to 'plan this', 'orch
 
 # Loom - Full Orchestration Skill
 
-Orchestrates the COMPLETE feature lifecycle: brainstorm → specify → clarify → architecture → decompose → execute.
+Orchestrates the COMPLETE feature lifecycle: brainstorm → specify → clarify → architecture → plan-alignment → decompose → execute.
 
 **This is the SINGLE ENTRY POINT** for multi-step features. Spawns specialized agents for each phase.
 
@@ -40,6 +40,7 @@ Store the printed path. **All subsequent references use it:**
 - `/loom --skip-brainstorm` - Skip brainstorm phase (scope already clear)
 - `/loom --skip-clarify` - Skip clarify phase (accept markers as-is)
 - `/loom --skip-specify` - Skip brainstorm/specify/clarify (use existing spec)
+- `/loom --skip-plan-alignment` - Skip plan-alignment phase (proceed directly to decompose)
 - `/loom --status` - Show current task graph status *(planned — use jq commands in Observability section)*
 - `/loom --complete` - Finalize, clean up state *(planned — manually remove state file for now)*
 - `/loom --abort` - Cancel mid-execution, clean state *(planned — manually remove state file for now)*
@@ -83,6 +84,15 @@ Store the printed path. **All subsequent references use it:**
 │ Phase 3: ARCHITECTURE                                   │
 │   Agent: architecture-agent                             │
 │   Output: .claude/plans/{slug}.md                       │
+└─────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────────────────────────────────┐
+│ Phase 3.5: PLAN ALIGNMENT                               │
+│   Agent: plan-alignment-agent                           │
+│   Output: .claude/specs/{slug}/plan-alignment.md        │
+│   Skip: --skip-plan-alignment                           │
+│   Loop: gaps found → re-run architecture (with context) │
 └─────────────────────────────────────────────────────────┘
         │
         ▼
@@ -187,6 +197,35 @@ Substitute variables:
 **Wait for agent completion.** Extract:
 - Plan file path
 - Implementation phases
+
+---
+
+## Phase 3.5: Plan Alignment
+
+**Always run** (unless `--skip-plan-alignment` flag provided).
+
+**Load template:** Read `{LOOM_DIR}/commands/templates/phase-plan-alignment.md`
+
+Substitute variables:
+- `{spec_file_path}` - Path to spec from Phase 1
+- `{plan_file_path}` - Path to plan from Phase 3
+- `{spec_dir}` - Spec directory (e.g. `.claude/specs/{date_slug}`)
+
+**Spawn plan-alignment-agent** with the substituted template as prompt.
+
+**Wait for agent completion.** Read gap report at `.claude/specs/{slug}/plan-alignment.md`.
+
+**If gaps found:** Present gap report to user. Ask:
+> "N gaps found. Re-run architecture with this feedback, or proceed to decompose?"
+
+- **If re-run:** Set `current_phase` back to `"architecture"` via StateManager. Re-spawn architecture-agent with gap report appended to prompt as additional context. When architecture completes, advance-phase transitions to plan-alignment again automatically.
+- **If proceed:** Continue to Phase 4.
+
+**Loop-back warning:** If the user has chosen to re-run architecture 2 or more times, warn: "This is loop-back attempt N. Consider proceeding to decompose or refining the spec directly."
+
+**If no gaps:** Proceed to Phase 4.
+
+**Note:** The gap report is always written (even when no gaps). Its existence at `.claude/specs/{slug}/plan-alignment.md` is required by validate-phase-order to gate decompose entry.
 
 ---
 
@@ -309,7 +348,7 @@ Substitute variables:
 ```
 /loom "Add user authentication with email/password"
 ```
-Runs: brainstorm → specify → clarify → arch → decompose → execute
+Runs: brainstorm → specify → clarify → arch → plan-alignment → decompose → execute
 
 ### Skip to architecture (spec exists):
 ```
@@ -335,7 +374,7 @@ The state file `.claude/state/active_task_graph.json` is created **before Phase 
 # Initial state — computed from skip flags, validates spec.md exists for --skip-specify
 mkdir -p .claude/state .claude/specs/{date_slug}
 bun ${LOOM_DIR}/engine/src/cli.ts init-state \
-  [--skip-brainstorm] [--skip-clarify] [--skip-specify] \
+  [--skip-brainstorm] [--skip-clarify] [--skip-specify] [--skip-plan-alignment] \
   --spec-dir .claude/specs/{date_slug} \
   --output .claude/state/active_task_graph.json
 ```
@@ -345,6 +384,7 @@ bun ${LOOM_DIR}/engine/src/cli.ts init-state \
   "current_phase": "init",       // or "specify"/"architecture" depending on skip flags
   "phase_artifacts": {},
   "skipped_phases": [],          // e.g. ["brainstorm","specify","clarify"] for --skip-specify
+                                 // e.g. ["plan-alignment"] for --skip-plan-alignment
   "spec_dir": ".claude/specs/{date_slug}",
   "spec_file": null,             // set automatically for --skip-specify
   "plan_file": null,
@@ -495,7 +535,8 @@ Blocks agent spawns if prerequisite phases not complete.
 | specify-agent | brainstorm complete OR `--skip-brainstorm` |
 | clarify-agent | spec.md exists |
 | architecture-agent | spec.md exists + markers ≤ 3 OR `--skip-clarify` |
-| impl agents | plan.md exists |
+| plan-alignment-agent | plan.md exists |
+| impl agents | plan.md exists + plan-alignment.md exists OR `--skip-plan-alignment` |
 
 ### SubagentStop: `advance-phase.sh`
 Advances `current_phase` when phase agents complete.
@@ -505,11 +546,13 @@ Advances `current_phase` when phase agents complete.
 | brainstorm-agent | specify |
 | specify-agent | clarify (if markers > 3) OR architecture |
 | clarify-agent | architecture |
-| architecture-agent | decompose |
+| architecture-agent | plan-alignment (OR decompose if `--skip-plan-alignment`) |
+| plan-alignment-agent | decompose |
 
 **Artifact verification:** `advance-phase.sh` verifies expected files exist on disk before advancing:
 - After `specify`: checks `spec_file` exists
 - After `architecture`: checks `plan_file` exists
+- After `plan-alignment`: checks `plan-alignment.md` exists in spec dir
 
 ### State Tracking
 
@@ -531,6 +574,7 @@ Advances `current_phase` when phase agents complete.
 - `--skip-brainstorm` - Adds "brainstorm" to `skipped_phases`, starts at specify
 - `--skip-clarify` - Adds "clarify" to `skipped_phases`, proceeds to architecture regardless of markers
 - `--skip-specify` - Adds brainstorm, specify, clarify to skipped; requires existing spec.md
+- `--skip-plan-alignment` - Adds "plan-alignment" to `skipped_phases`; architecture advances directly to decompose
 
 ---
 
@@ -542,6 +586,8 @@ Advances `current_phase` when phase agents complete.
 | Specify agent too technical | Re-spawn with "focus on WHAT not HOW" |
 | Clarify agent stuck | Ask user to resolve remaining markers |
 | Architecture agent off-spec | Re-spawn referencing spec requirements |
+| Plan-alignment agent fails to write report | Re-spawn plan-alignment-agent; check spec_dir is writable |
+| Plan-alignment gaps unresolvable | Use `--skip-plan-alignment` or manually amend plan before proceeding |
 | Implementation agent fails tests | Re-spawn with error context |
 | Wave gate blocked | Fix issues, re-run `/wave-gate` |
 
@@ -559,7 +605,7 @@ Advances `current_phase` when phase agents complete.
 
 Each phase spawns ONE agent (except Execute which spawns wave tasks in parallel).
 
-**Sequential phases:** brainstorm → specify → clarify → architecture
+**Sequential phases:** brainstorm → specify → clarify → architecture → plan-alignment
 **Parallel within wave:** T1, T2, T3 in same message
 
 Pass context forward between phases via agent outputs.

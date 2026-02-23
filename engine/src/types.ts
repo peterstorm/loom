@@ -37,7 +37,7 @@ export interface SubagentStartInput {
 
 // --- Task Graph state ---
 
-export type Phase = "init" | "brainstorm" | "specify" | "clarify" | "architecture" | "decompose" | "execute";
+export type Phase = "init" | "brainstorm" | "specify" | "clarify" | "architecture" | "plan-alignment" | "decompose" | "execute";
 
 export type TaskStatus = "pending" | "implemented" | "completed" | "failed";
 

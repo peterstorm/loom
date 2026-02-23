@@ -206,12 +206,23 @@ describe("resolveTransition", () => {
 
   // ── architecture ──
 
-  it("architecture → decompose when plan_file in .claude/plans/", () => {
+  it("architecture → plan-alignment (normal flow, plan-alignment not skipped)", () => {
     const planFile = join(tmpDir, ".claude", "plans", "plan.md");
     mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
     writeFileSync(planFile, "plan");
 
     const r = resolveTransition("architecture", mkState({ plan_file: planFile }));
+    expect(r).not.toBeNull();
+    expect(r!.nextPhase).toBe("plan-alignment");
+    expect(r!.artifact).toBe(planFile);
+  });
+
+  it("architecture → decompose when plan-alignment in skipped_phases", () => {
+    const planFile = join(tmpDir, ".claude", "plans", "plan.md");
+    mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
+    writeFileSync(planFile, "plan");
+
+    const r = resolveTransition("architecture", mkState({ plan_file: planFile, skipped_phases: ["plan-alignment"] }));
     expect(r).not.toBeNull();
     expect(r!.nextPhase).toBe("decompose");
     expect(r!.artifact).toBe(planFile);
@@ -225,6 +236,76 @@ describe("resolveTransition", () => {
 
   it("architecture → null when plan_file is null", () => {
     expect(resolveTransition("architecture", mkState())).toBeNull();
+  });
+
+  // ── plan-alignment ──
+
+  it("plan-alignment → decompose when gap report exists in spec_dir", () => {
+    const specDir = join(tmpDir, ".claude", "specs");
+    mkdirSync(specDir, { recursive: true });
+    const gapReport = join(specDir, "plan-alignment.md");
+    writeFileSync(gapReport, "gap report");
+
+    const r = resolveTransition("plan-alignment", mkState({ spec_dir: specDir }));
+    expect(r).not.toBeNull();
+    expect(r!.nextPhase).toBe("decompose");
+    expect(r!.artifact).toBe(gapReport);
+  });
+
+  it("plan-alignment → null when gap report missing", () => {
+    const specDir = join(tmpDir, ".claude", "specs");
+    mkdirSync(specDir, { recursive: true });
+
+    expect(resolveTransition("plan-alignment", mkState({ spec_dir: specDir }))).toBeNull();
+  });
+
+  it("plan-alignment → null when spec_dir does not exist", () => {
+    expect(resolveTransition("plan-alignment", mkState({ spec_dir: join(tmpDir, "nonexistent") }))).toBeNull();
+  });
+
+  it("plan-alignment → decompose using default spec_dir when spec_dir is null", () => {
+    // Uses .claude/specs relative to cwd (tmpDir after chdir in beforeEach)
+    const specDir = join(tmpDir, ".claude", "specs");
+    mkdirSync(specDir, { recursive: true });
+    writeFileSync(join(specDir, "plan-alignment.md"), "gap");
+
+    const r = resolveTransition("plan-alignment", mkState({ spec_dir: null }));
+    expect(r).not.toBeNull();
+    expect(r!.nextPhase).toBe("decompose");
+  });
+
+  it("plan-alignment → decompose when gap report in nested subdir of spec_dir", () => {
+    const specDir = join(tmpDir, ".claude", "specs");
+    const nested = join(specDir, "feat");
+    mkdirSync(nested, { recursive: true });
+    const gapReport = join(nested, "plan-alignment.md");
+    writeFileSync(gapReport, "nested gap");
+
+    const r = resolveTransition("plan-alignment", mkState({ spec_dir: specDir }));
+    expect(r).not.toBeNull();
+    expect(r!.nextPhase).toBe("decompose");
+    expect(r!.artifact).toBe(gapReport);
+  });
+
+  // ── loop-back: architecture re-run routes to plan-alignment again ──
+
+  it("loop-back: architecture re-completes after plan-alignment started → routes to plan-alignment", () => {
+    // Simulate: user ran architecture, got to plan-alignment, then re-ran architecture
+    // (orchestrator reset current_phase back to "architecture").
+    // The architecture case should fire again and route to plan-alignment.
+    const planFile = join(tmpDir, ".claude", "plans", "plan.md");
+    mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
+    writeFileSync(planFile, "updated plan");
+
+    const state = mkState({
+      plan_file: planFile,
+      current_phase: "architecture", // reset by orchestrator
+      skipped_phases: [],            // plan-alignment NOT skipped
+    });
+
+    const r = resolveTransition("architecture", state);
+    expect(r).not.toBeNull();
+    expect(r!.nextPhase).toBe("plan-alignment");
   });
 
   // ── decompose ──

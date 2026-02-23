@@ -11,6 +11,7 @@ export interface SkipFlags {
   skipBrainstorm?: boolean;
   skipClarify?: boolean;
   skipSpecify?: boolean;
+  skipPlanAlignment?: boolean;
 }
 
 /** Recursively search for a file by name under a directory */
@@ -53,6 +54,11 @@ export function resolveInitialState(flags: SkipFlags, specDir: string): TaskGrap
   // --skip-clarify can combine with other flags
   if (flags.skipClarify && !skippedPhases.includes("clarify")) {
     skippedPhases.push("clarify");
+  }
+
+  // --skip-plan-alignment can combine with other flags
+  if (flags.skipPlanAlignment && !skippedPhases.includes("plan-alignment")) {
+    skippedPhases.push("plan-alignment");
   }
 
   return {

@@ -1,5 +1,5 @@
 /**
- * Enforce phase ordering: brainstorm → specify → clarify → architecture → decompose → execute
+ * Enforce phase ordering: brainstorm → specify → clarify → architecture → plan-alignment → decompose → execute
  * Blocks agent spawns if prerequisite phases not complete.
  */
 
@@ -23,6 +23,7 @@ export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   if (/specify|specification|requirements|spec\.md/i.test(prompt)) return "specify";
   if (/clarify|resolve.*markers|NEEDS CLARIFICATION/i.test(prompt)) return "clarify";
   if (/architecture|design|plan\.md/i.test(prompt)) return "architecture";
+  if (/plan.alignment|gap.report/i.test(prompt)) return "plan-alignment";
 
   return "unknown";
 }
@@ -41,14 +42,15 @@ function findFile(dir: string, filename: string): boolean {
   return false;
 }
 
-interface ArtifactState {
+export interface ArtifactState {
   skipped_phases: string[];
   phase_artifacts: Record<string, string>;
   spec_file: string | null;
   plan_file: string | null;
+  spec_dir?: string | null;
 }
 
-function checkArtifacts(targetPhase: Phase, state: ArtifactState): string | null {
+export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string | null {
   return match(targetPhase)
     .with("specify", () => {
       if (state.skipped_phases.includes("brainstorm")) return null;
@@ -74,14 +76,31 @@ function checkArtifacts(targetPhase: Phase, state: ArtifactState): string | null
       }
       return null;
     })
+    .with("plan-alignment", () => {
+      const plan = state.phase_artifacts.architecture ?? state.plan_file;
+      if (!plan || !existsSync(plan)) return "architecture (no plan.md found)";
+      return null;
+    })
     .with("decompose", () => {
       const plan = state.phase_artifacts.architecture ?? state.plan_file;
       if (!plan || !existsSync(plan)) return "architecture (no plan.md found)";
+      if (!state.skipped_phases.includes("plan-alignment")) {
+        const specDir = state.spec_dir ?? ".claude/specs";
+        if (!findFile(specDir, "plan-alignment.md")) {
+          return "plan-alignment (no plan-alignment.md found)";
+        }
+      }
       return null;
     })
     .with("execute", () => {
       const plan = state.phase_artifacts.architecture ?? state.plan_file;
       if (!plan || !existsSync(plan)) return "architecture (no plan.md found)";
+      if (!state.skipped_phases.includes("plan-alignment")) {
+        const specDir = state.spec_dir ?? ".claude/specs";
+        if (!findFile(specDir, "plan-alignment.md")) {
+          return "plan-alignment (no plan-alignment.md found)";
+        }
+      }
       return null;
     })
     .otherwise(() => null);
@@ -112,7 +131,7 @@ const handler: HookHandler = async (stdin) => {
         "",
         "Use a recognized phase agent:",
         "  brainstorm-agent, specify-agent, clarify-agent, architecture-agent,",
-        "  code-implementer-agent, ts-test-agent, frontend-agent, etc.",
+        "  plan-alignment-agent, code-implementer-agent, ts-test-agent, frontend-agent, etc.",
       ].join("\n"),
     };
   }
@@ -130,7 +149,7 @@ const handler: HookHandler = async (stdin) => {
       message: [
         `BLOCKED: Invalid phase transition: ${currentPhase} → ${targetPhase}`,
         "",
-        "Expected flow: brainstorm → specify → clarify → architecture → decompose → execute",
+        "Expected flow: brainstorm → specify → clarify → architecture → plan-alignment → decompose → execute",
         `Current phase: ${currentPhase}`,
         "",
         match(currentPhase)
@@ -138,7 +157,7 @@ const handler: HookHandler = async (stdin) => {
           .with("brainstorm", () => "Next: Run specify-agent")
           .with("specify", () => "Next: Run clarify-agent or architecture-agent")
           .with("clarify", () => "Next: Run architecture-agent")
-          .with("architecture", () => "Next: Decompose tasks")
+          .with("architecture", () => "Next: Run plan-alignment-agent (or --skip-plan-alignment)")
           .otherwise(() => ""),
       ].join("\n"),
     };

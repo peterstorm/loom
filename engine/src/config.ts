@@ -13,7 +13,7 @@ export const CLARIFY_THRESHOLD = 3;
 
 /** Valid phase ordering */
 export const PHASE_ORDER: readonly Phase[] = [
-  "init", "brainstorm", "specify", "clarify", "architecture", "decompose", "execute",
+  "init", "brainstorm", "specify", "clarify", "architecture", "plan-alignment", "decompose", "execute",
 ] as const;
 
 /** Phase agents → map to their phase */
@@ -22,6 +22,7 @@ export const PHASE_AGENT_MAP: Record<string, Phase> = {
   "specify-agent": "specify",
   "clarify-agent": "clarify",
   "architecture-agent": "architecture",
+  "plan-alignment-agent": "plan-alignment",
   "decompose-agent": "decompose",
 };
 
@@ -36,7 +37,7 @@ export const IMPL_AGENTS = new Set([
 ]);
 
 /** Known agents for task graph validation */
-export const KNOWN_AGENTS = new Set([...IMPL_AGENTS]);
+export const KNOWN_AGENTS = new Set([...IMPL_AGENTS, ...Object.keys(PHASE_AGENT_MAP)]);
 
 /** Utility agents allowed through phase validation */
 export const UTILITY_AGENTS = new Set(["Explore", "Plan", "haiku"]);
@@ -96,13 +97,14 @@ export const TEST_COMMAND_PATTERNS = [
 
 /** Valid phase transitions: from → allowed targets */
 export const VALID_TRANSITIONS: Record<string, Phase[]> = {
-  "init":         ["brainstorm", "specify", "architecture"],
-  "brainstorm":   ["brainstorm", "specify"],
-  "specify":      ["specify", "clarify", "architecture"],
-  "clarify":      ["clarify", "architecture"],
-  "architecture": ["architecture", "decompose"],
-  "decompose":    ["decompose", "execute"],
-  "execute":      ["execute"],
+  "init":            ["brainstorm", "specify", "architecture"],
+  "brainstorm":      ["brainstorm", "specify"],
+  "specify":         ["specify", "clarify", "architecture"],
+  "clarify":         ["clarify", "architecture"],
+  "architecture":    ["architecture", "plan-alignment"],
+  "plan-alignment":  ["plan-alignment", "architecture", "decompose"],
+  "decompose":       ["decompose", "execute"],
+  "execute":         ["execute"],
 };
 
 /** Relative path within a repo root */

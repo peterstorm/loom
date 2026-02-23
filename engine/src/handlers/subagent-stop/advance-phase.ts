@@ -71,7 +71,16 @@ export function resolveTransition(
     .with("architecture", () => {
       const plan = state.plan_file;
       if (!plan || !existsSync(plan) || !plan.includes(".claude/plans/")) return null;
-      return { nextPhase: "decompose" as Phase, artifact: plan };
+      if (state.skipped_phases.includes("plan-alignment")) {
+        return { nextPhase: "decompose" as Phase, artifact: plan };
+      }
+      return { nextPhase: "plan-alignment" as Phase, artifact: plan };
+    })
+    .with("plan-alignment", () => {
+      const specDir = state.spec_dir ?? ".claude/specs";
+      const gapReport = findFile(specDir, "plan-alignment.md");
+      if (!gapReport) return null;
+      return { nextPhase: "decompose" as Phase, artifact: gapReport };
     })
     .with("decompose", () => {
       return { nextPhase: "execute" as Phase, artifact: "task_graph" };
