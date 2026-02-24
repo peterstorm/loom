@@ -1,6 +1,6 @@
 # Specify Phase Context
 
-Template for spawning specify-agent. Variables in `{braces}` must be substituted.
+Template for spawning specify-agent. All template variables must be substituted before use.
 
 ---
 

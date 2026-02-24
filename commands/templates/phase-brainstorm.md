@@ -1,6 +1,6 @@
 # Brainstorm Phase Context
 
-Template for spawning brainstorm-agent. Variables in `{braces}` must be substituted.
+Template for spawning brainstorm-agent. All template variables must be substituted before use.
 
 ---
 

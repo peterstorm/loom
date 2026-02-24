@@ -1,6 +1,6 @@
 # Plan Alignment Phase Context
 
-Template for spawning plan-alignment-agent. Variables in `{braces}` must be substituted.
+Template for spawning plan-alignment-agent. All template variables must be substituted before use.
 
 ---
 

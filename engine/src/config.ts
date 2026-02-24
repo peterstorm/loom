@@ -73,6 +73,7 @@ export const WHITELISTED_HELPERS = [
   "populate-task-graph",
   "store-test-evidence",
   "set-phase",
+  "cleanup-state",
 ];
 
 /** State file patterns to guard */
