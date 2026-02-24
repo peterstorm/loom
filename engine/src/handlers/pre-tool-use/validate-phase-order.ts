@@ -3,8 +3,7 @@
  * Blocks agent spawns if prerequisite phases not complete.
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookHandler, PreToolUseInput, Phase } from "../../types";
 import {
@@ -13,6 +12,7 @@ import {
 } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
+import { findFile } from "../../utils/find-file";
 
 export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   if (PHASE_AGENT_MAP[agent]) return PHASE_AGENT_MAP[agent];
@@ -23,31 +23,30 @@ export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   if (/specify|specification|requirements|spec\.md/i.test(prompt)) return "specify";
   if (/clarify|resolve.*markers|NEEDS CLARIFICATION/i.test(prompt)) return "clarify";
   if (/architecture|design|plan\.md/i.test(prompt)) return "architecture";
-  if (/plan.alignment|gap.report/i.test(prompt)) return "plan-alignment";
+  if (/plan[\s\-_]alignment|gap[\s\-_]report/i.test(prompt)) return "plan-alignment";
 
   return "unknown";
 }
 
-/** Recursively search for a file by name under a directory */
-function findFile(dir: string, filename: string): boolean {
-  if (!existsSync(dir)) return false;
-  try {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.isFile() && entry.name === filename) return true;
-      if (entry.isDirectory()) {
-        if (findFile(join(dir, entry.name), filename)) return true;
-      }
-    }
-  } catch {}
-  return false;
-}
-
 export interface ArtifactState {
-  skipped_phases: string[];
-  phase_artifacts: Record<string, string>;
+  skipped_phases: Phase[];
+  phase_artifacts: Partial<Record<Phase, string>>;
   spec_file: string | null;
   plan_file: string | null;
   spec_dir?: string | null;
+}
+
+/** Check plan-alignment gate: plan.md exists + plan-alignment.md exists (unless skipped) */
+function checkPlanAlignmentGate(state: ArtifactState): string | null {
+  const plan = state.phase_artifacts.architecture ?? state.plan_file;
+  if (!plan || !existsSync(plan)) return "architecture (no plan.md found)";
+  if (!state.skipped_phases.includes("plan-alignment")) {
+    const specDir = state.spec_dir ?? ".claude/specs";
+    if (!findFile(specDir, "plan-alignment.md")) {
+      return "plan-alignment (no plan-alignment.md found)";
+    }
+  }
+  return null;
 }
 
 export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string | null {
@@ -72,7 +71,9 @@ export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string
           const content = readFileSync(spec, "utf-8");
           const markers = (content.match(/NEEDS CLARIFICATION/g) ?? []).length;
           if (markers > CLARIFY_THRESHOLD) return `clarify (${markers} markers > ${CLARIFY_THRESHOLD})`;
-        } catch {}
+        } catch (e) {
+          return `specify (spec.md unreadable: ${(e as Error).message})`;
+        }
       }
       return null;
     })
@@ -81,29 +82,11 @@ export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string
       if (!plan || !existsSync(plan)) return "architecture (no plan.md found)";
       return null;
     })
-    .with("decompose", () => {
-      const plan = state.phase_artifacts.architecture ?? state.plan_file;
-      if (!plan || !existsSync(plan)) return "architecture (no plan.md found)";
-      if (!state.skipped_phases.includes("plan-alignment")) {
-        const specDir = state.spec_dir ?? ".claude/specs";
-        if (!findFile(specDir, "plan-alignment.md")) {
-          return "plan-alignment (no plan-alignment.md found)";
-        }
-      }
-      return null;
-    })
-    .with("execute", () => {
-      const plan = state.phase_artifacts.architecture ?? state.plan_file;
-      if (!plan || !existsSync(plan)) return "architecture (no plan.md found)";
-      if (!state.skipped_phases.includes("plan-alignment")) {
-        const specDir = state.spec_dir ?? ".claude/specs";
-        if (!findFile(specDir, "plan-alignment.md")) {
-          return "plan-alignment (no plan-alignment.md found)";
-        }
-      }
-      return null;
-    })
-    .otherwise(() => null);
+    .with("decompose", () => checkPlanAlignmentGate(state))
+    .with("execute", () => checkPlanAlignmentGate(state))
+    .with("init", () => null)
+    .with("brainstorm", () => null)
+    .exhaustive();
 }
 
 const handler: HookHandler = async (stdin) => {
@@ -158,7 +141,10 @@ const handler: HookHandler = async (stdin) => {
           .with("specify", () => "Next: Run clarify-agent or architecture-agent")
           .with("clarify", () => "Next: Run architecture-agent")
           .with("architecture", () => "Next: Run plan-alignment-agent (or --skip-plan-alignment)")
-          .otherwise(() => ""),
+          .with("plan-alignment", () => "Next: Waiting for plan-alignment-agent to complete")
+          .with("decompose", () => "")
+          .with("execute", () => "")
+          .exhaustive(),
       ].join("\n"),
     };
   }

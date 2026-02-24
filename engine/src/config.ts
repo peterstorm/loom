@@ -72,6 +72,7 @@ export const WHITELISTED_HELPERS = [
   "store-spec-check",
   "populate-task-graph",
   "store-test-evidence",
+  "set-phase",
 ];
 
 /** State file patterns to guard */
@@ -96,12 +97,12 @@ export const TEST_COMMAND_PATTERNS = [
 ];
 
 /** Valid phase transitions: from → allowed targets */
-export const VALID_TRANSITIONS: Record<string, Phase[]> = {
+export const VALID_TRANSITIONS: Record<Phase, Phase[]> = {
   "init":            ["brainstorm", "specify", "architecture"],
   "brainstorm":      ["brainstorm", "specify"],
   "specify":         ["specify", "clarify", "architecture"],
   "clarify":         ["clarify", "architecture"],
-  "architecture":    ["architecture", "plan-alignment"],
+  "architecture":    ["architecture", "plan-alignment", "decompose"],
   "plan-alignment":  ["plan-alignment", "architecture", "decompose"],
   "decompose":       ["decompose", "execute"],
   "execute":         ["execute"],

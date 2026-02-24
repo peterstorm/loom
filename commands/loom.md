@@ -218,7 +218,11 @@ Substitute variables:
 **If gaps found:** Present gap report to user. Ask:
 > "N gaps found. Re-run architecture with this feedback, or proceed to decompose?"
 
-- **If re-run:** Set `current_phase` back to `"architecture"` via StateManager. Re-spawn architecture-agent with gap report appended to prompt as additional context. When architecture completes, advance-phase transitions to plan-alignment again automatically.
+- **If re-run:** Set phase back to architecture and clear the plan-alignment artifact:
+  ```bash
+  bun ${LOOM_DIR}/engine/src/cli.ts helper set-phase --phase architecture --clear-artifact plan-alignment
+  ```
+  Re-spawn architecture-agent with gap report appended to prompt as additional context. When architecture completes, advance-phase transitions to plan-alignment again automatically.
 - **If proceed:** Continue to Phase 4.
 
 **Loop-back warning:** If the user has chosen to re-run architecture 2 or more times, warn: "This is loop-back attempt N. Consider proceeding to decompose or refining the spec directly."
@@ -354,7 +358,7 @@ Runs: brainstorm → specify → clarify → arch → plan-alignment → decompo
 ```
 /loom --skip-specify "Add user authentication"
 ```
-Runs: arch → decompose → execute (uses existing spec)
+Runs: arch → plan-alignment → decompose → execute (uses existing spec)
 
 ### Simple feature (clear scope):
 ```
@@ -514,7 +518,7 @@ When blocked (critical findings), Edit/Write blocked too. To fix:
 
 ## Constraints
 
-- **ALL phases via agents** - brainstorm, specify, clarify, architecture, decompose agents
+- **ALL phases via agents** - brainstorm, specify, clarify, architecture, plan-alignment, decompose agents
 - **ALL implementation via Task tool** - Edit/Write/MultiEdit blocked
 - **ALL state writes via hooks** - Bash writes blocked (exception: `start_sha` PreToolUse write)
 - **NEVER skip phases** unless explicit `--skip-X` flag provided

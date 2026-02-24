@@ -40,6 +40,7 @@ const KNOWN_HANDLERS: Record<string, Set<string>> = {
     "complete-wave-gate", "populate-task-graph", "validate-task-graph",
     "store-review-findings", "store-spec-check", "mark-tests-passed",
     "suggest-spec-anchors", "extract-task-id", "store-test-evidence",
+    "set-phase",
   ]),
 };
 

@@ -108,8 +108,8 @@ describe("VALID_TRANSITIONS", () => {
     expect(VALID_TRANSITIONS["plan-alignment"]).toContain("decompose");
   });
 
-  it("architecture does NOT directly allow decompose", () => {
-    expect(VALID_TRANSITIONS["architecture"]).not.toContain("decompose");
+  it("architecture allows decompose (skip path via --skip-plan-alignment)", () => {
+    expect(VALID_TRANSITIONS["architecture"]).toContain("decompose");
   });
 });
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { resolveTransition, countMarkers, findFile } from "../../../src/handlers/subagent-stop/advance-phase";
+import { resolveTransition, countMarkers } from "../../../src/handlers/subagent-stop/advance-phase";
+import { findFile } from "../../../src/utils/find-file";
 import { CLARIFY_THRESHOLD } from "../../../src/config";
 import type { TaskGraph } from "../../../src/types";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";

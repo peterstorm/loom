@@ -93,6 +93,56 @@ describe("parseMachineSummary (pure)", () => {
     expect(result!.critical).toEqual([]);
     expect(result!.advisory).toEqual([]);
   });
+
+  it("CRITICAL_COUNT line is NOT captured as a finding (negative lookahead)", () => {
+    const output = [
+      "### Machine Summary",
+      "CRITICAL_COUNT: 2",
+      "ADVISORY_COUNT: 1",
+      "CRITICAL: SQL injection in query builder",
+      "CRITICAL: Missing auth check on endpoint",
+      "ADVISORY: Consider extracting validation",
+    ].join("\n");
+
+    const result = parseMachineSummary(output);
+    expect(result).not.toBeNull();
+    // CRITICAL_COUNT should NOT appear in findings
+    expect(result!.critical).toEqual([
+      "SQL injection in query builder",
+      "Missing auth check on endpoint",
+    ]);
+    expect(result!.critical).not.toContainEqual(expect.stringContaining("_COUNT"));
+  });
+
+  it("ADVISORY_COUNT line is NOT captured as a finding (negative lookahead)", () => {
+    const output = [
+      "### Machine Summary",
+      "CRITICAL_COUNT: 0",
+      "ADVISORY_COUNT: 3",
+      "ADVISORY: Finding one",
+      "ADVISORY: Finding two",
+      "ADVISORY: Finding three",
+    ].join("\n");
+
+    const result = parseMachineSummary(output);
+    expect(result).not.toBeNull();
+    expect(result!.advisory).toHaveLength(3);
+    expect(result!.advisory).not.toContainEqual(expect.stringContaining("_COUNT"));
+  });
+
+  it("CRITICAL_COUNT: 0 followed by real CRITICAL finding captures only the finding", () => {
+    const output = [
+      "### Machine Summary",
+      "CRITICAL_COUNT: 0",
+      "ADVISORY_COUNT: 0",
+      "CRITICAL: real finding that should be captured",
+    ].join("\n");
+
+    const result = parseMachineSummary(output);
+    expect(result).not.toBeNull();
+    expect(result!.criticalCount).toBe(0);
+    expect(result!.critical).toEqual(["real finding that should be captured"]);
+  });
 });
 
 describe("parseLegacyFindings (pure)", () => {
