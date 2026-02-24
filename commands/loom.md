@@ -218,9 +218,10 @@ Substitute variables:
 **If gaps found:** Present gap report to user. Ask:
 > "N gaps found. Re-run architecture with this feedback, or proceed to decompose?"
 
-- **If re-run:** Set phase back to architecture and clear the plan-alignment artifact:
+- **If re-run:** Set phase back to architecture, clear the plan-alignment artifact from state, and delete the stale gap report from disk so advance-phase doesn't re-use it:
   ```bash
   bun ${LOOM_DIR}/engine/src/cli.ts helper set-phase --phase architecture --clear-artifact plan-alignment
+  rm -f ${spec_dir}/plan-alignment.md
   ```
   Re-spawn architecture-agent with gap report appended to prompt as additional context. When architecture completes, advance-phase transitions to plan-alignment again automatically.
 - **If proceed:** Continue to Phase 4.

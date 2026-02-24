@@ -38,14 +38,18 @@ const handler: HookHandler = async (_stdin, args) => {
     return { kind: "error", message: (e as Error).message };
   }
 
-  await mgr.update((s) => {
-    const updated = { ...s, current_phase: phase, updated_at: new Date().toISOString() };
-    if (clearArtifact && updated.phase_artifacts[clearArtifact]) {
-      const { [clearArtifact]: _, ...rest } = updated.phase_artifacts;
-      updated.phase_artifacts = rest;
-    }
-    return updated;
-  });
+  try {
+    await mgr.update((s) => {
+      const newArtifacts = clearArtifact && s.phase_artifacts[clearArtifact]
+        ? (({ [clearArtifact]: _, ...rest }) => rest)(s.phase_artifacts)
+        : s.phase_artifacts;
+      return { ...s, current_phase: phase, phase_artifacts: newArtifacts, updated_at: new Date().toISOString() };
+    });
+  } catch (e) {
+    const msg = `set-phase: failed to write state (phase=${phase}): ${(e as Error).message}`;
+    process.stderr.write(msg + "\n");
+    return { kind: "error", message: msg };
+  }
 
   process.stderr.write(`Phase set to: ${phase}\n`);
   return { kind: "allow" };

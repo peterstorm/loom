@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
@@ -95,5 +95,36 @@ describe("set-phase helper", () => {
     const { exitCode, stderr } = runSetPhase([]);
     expect(exitCode).not.toBe(0);
     expect(stderr).toContain("Invalid or missing --phase");
+  });
+
+  it("--clear-artifact with non-existent key is a no-op", () => {
+    const { exitCode } = runSetPhase(["--phase", "architecture", "--clear-artifact", "brainstorm"]);
+    expect(exitCode).toBe(0);
+
+    const state = readState();
+    // architecture artifact should still be present
+    expect(state.phase_artifacts.architecture).toBe("/tmp/plan.md");
+  });
+
+  it("returns error when no active task graph exists", () => {
+    // Create a separate tmpDir with no state file
+    const emptyDir = join(tmpdir(), `loom-sp-empty-${Date.now()}`);
+    mkdirSync(emptyDir, { recursive: true });
+    execSync("git init", { cwd: emptyDir, stdio: "ignore" });
+
+    try {
+      const result = execSync(
+        `bun "${CLI_PATH}" helper set-phase --phase architecture`,
+        { cwd: emptyDir, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+      );
+      // Should not succeed
+      expect(true).toBe(false);
+    } catch (e: unknown) {
+      const err = e as { status: number; stderr: string };
+      expect(err.status).not.toBe(0);
+      expect(err.stderr).toContain("No active task graph");
+    } finally {
+      rmSync(emptyDir, { recursive: true, force: true });
+    }
   });
 });

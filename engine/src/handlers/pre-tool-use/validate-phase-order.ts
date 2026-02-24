@@ -53,8 +53,9 @@ export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string
   return match(targetPhase)
     .with("specify", () => {
       if (state.skipped_phases.includes("brainstorm")) return null;
-      if (!findFile(".claude/specs", "brainstorm.md")) {
-        return "brainstorm (no brainstorm.md found in .claude/specs/)";
+      const specDir = state.spec_dir ?? ".claude/specs";
+      if (!findFile(specDir, "brainstorm.md")) {
+        return `brainstorm (no brainstorm.md found in ${specDir})`;
       }
       return null;
     })
@@ -92,7 +93,13 @@ export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string
 const handler: HookHandler = async (stdin) => {
   if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
 
-  const input: PreToolUseInput = JSON.parse(stdin);
+  let input: PreToolUseInput;
+  try {
+    input = JSON.parse(stdin);
+  } catch (e) {
+    process.stderr.write(`validate-phase-order: failed to parse stdin: ${(e as Error).message}\n`);
+    return { kind: "allow" };
+  }
   if (input.tool_name !== "Task") return { kind: "allow" };
 
   const prompt = (input.tool_input?.prompt as string) ?? "";
@@ -141,7 +148,7 @@ const handler: HookHandler = async (stdin) => {
           .with("specify", () => "Next: Run clarify-agent or architecture-agent")
           .with("clarify", () => "Next: Run architecture-agent")
           .with("architecture", () => "Next: Run plan-alignment-agent (or --skip-plan-alignment)")
-          .with("plan-alignment", () => "Next: Waiting for plan-alignment-agent to complete")
+          .with("plan-alignment", () => "Next: Run plan-alignment-agent, or loop back with architecture-agent")
           .with("decompose", () => "")
           .with("execute", () => "")
           .exhaustive(),

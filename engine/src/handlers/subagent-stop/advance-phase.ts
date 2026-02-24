@@ -81,7 +81,14 @@ export function resolveTransition(
 }
 
 const handler: HookHandler = async (stdin) => {
-  const input: SubagentStopInput = JSON.parse(stdin);
+  let input: SubagentStopInput;
+  try {
+    input = JSON.parse(stdin);
+  } catch (e) {
+    process.stderr.write(`advance-phase: failed to parse stdin: ${(e as Error).message}\n`);
+    return { kind: "passthrough" };
+  }
+
   const completedPhase = PHASE_AGENT_MAP[stripNamespace(input.agent_type ?? "")];
   if (!completedPhase) return { kind: "passthrough" };
 
@@ -99,23 +106,34 @@ const handler: HookHandler = async (stdin) => {
 
   // Extract artifacts from transcript before checking transition
   if (input.agent_transcript_path && existsSync(input.agent_transcript_path)) {
-    const transcriptContent = readFileSync(input.agent_transcript_path, "utf-8");
+    let transcriptContent: string;
+    try {
+      transcriptContent = readFileSync(input.agent_transcript_path, "utf-8");
+    } catch (e) {
+      process.stderr.write(`advance-phase: failed to read transcript at ${input.agent_transcript_path}: ${(e as Error).message}\n`);
+      return { kind: "passthrough" };
+    }
     const artifacts = parsePhaseArtifacts(transcriptContent, currentState.spec_dir);
 
-    await mgr.update((s) => {
-      const updates: Partial<TaskGraph> = {};
+    try {
+      await mgr.update((s) => {
+        const updates: Partial<TaskGraph> = {};
 
-      if (artifacts.spec_file && existsSync(artifacts.spec_file)
-          && artifacts.spec_file.includes(".claude/specs/")) {
-        updates.spec_file = artifacts.spec_file;
-      }
-      if (!s.plan_file && artifacts.plan_file && existsSync(artifacts.plan_file)
-          && artifacts.plan_file.includes(".claude/plans/")) {
-        updates.plan_file = artifacts.plan_file;
-      }
+        if (artifacts.spec_file && existsSync(artifacts.spec_file)
+            && artifacts.spec_file.includes(".claude/specs/")) {
+          updates.spec_file = artifacts.spec_file;
+        }
+        if (!s.plan_file && artifacts.plan_file && existsSync(artifacts.plan_file)
+            && artifacts.plan_file.includes(".claude/plans/")) {
+          updates.plan_file = artifacts.plan_file;
+        }
 
-      return Object.keys(updates).length > 0 ? { ...s, ...updates } : s;
-    });
+        return Object.keys(updates).length > 0 ? { ...s, ...updates } : s;
+      });
+    } catch (e) {
+      process.stderr.write(`advance-phase: failed to persist artifacts: ${(e as Error).message}\n`);
+      return { kind: "passthrough" };
+    }
   }
 
   // Reload after potential artifact writes
@@ -125,15 +143,20 @@ const handler: HookHandler = async (stdin) => {
 
   const { nextPhase, artifact, skipClarify } = transition;
 
-  await mgr.update((s) => ({
-    ...s,
-    current_phase: nextPhase,
-    phase_artifacts: { ...s.phase_artifacts, [completedPhase]: artifact },
-    skipped_phases: skipClarify
-      ? ([...new Set([...s.skipped_phases, "clarify" as Phase])] as Phase[])
-      : s.skipped_phases,
-    updated_at: new Date().toISOString(),
-  }));
+  try {
+    await mgr.update((s) => ({
+      ...s,
+      current_phase: nextPhase,
+      phase_artifacts: { ...s.phase_artifacts, [completedPhase]: artifact },
+      skipped_phases: skipClarify
+        ? ([...new Set([...s.skipped_phases, "clarify" as Phase])] as Phase[])
+        : s.skipped_phases,
+      updated_at: new Date().toISOString(),
+    }));
+  } catch (e) {
+    process.stderr.write(`advance-phase: failed to write phase transition: ${(e as Error).message}\n`);
+    return { kind: "passthrough" };
+  }
 
   process.stderr.write(`Phase advanced: ${completedPhase} → ${nextPhase}\n`);
   if (skipClarify) {

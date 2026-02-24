@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, mkdtempSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { detectPhase, checkArtifacts } from "../../src/handlers/pre-tool-use/validate-phase-order";
@@ -299,5 +299,13 @@ describe("checkArtifacts — existing phases (regression)", () => {
       spec_file: spec,
       skipped_phases: ["clarify"],
     }))).toBeNull();
+  });
+
+  it("architecture blocked when spec.md is unreadable", () => {
+    const spec = writeFile(tmp, "spec.md", "content");
+    chmodSync(spec, 0o000);
+    const result = checkArtifacts("architecture", baseState({ spec_file: spec }));
+    expect(result).toContain("spec.md unreadable");
+    chmodSync(spec, 0o644); // restore for cleanup
   });
 });
