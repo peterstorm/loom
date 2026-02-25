@@ -40,6 +40,7 @@ const KNOWN_HANDLERS: Record<string, Set<string>> = {
     "complete-wave-gate", "populate-task-graph", "validate-task-graph",
     "store-review-findings", "store-spec-check", "mark-tests-passed",
     "suggest-spec-anchors", "extract-task-id", "store-test-evidence",
+    "set-phase", "cleanup-state",
   ]),
 };
 
@@ -60,21 +61,22 @@ function resultToExit(result: HookResult): never {
   process.exit(1); // unreachable, satisfies TS
 }
 
-function parseInitStateArgs(args: string[]): { skipBrainstorm: boolean; skipClarify: boolean; skipSpecify: boolean; specDir: string; output: string } {
-  let skipBrainstorm = false, skipClarify = false, skipSpecify = false;
+function parseInitStateArgs(args: string[]): { skipBrainstorm: boolean; skipClarify: boolean; skipSpecify: boolean; skipPlanAlignment: boolean; specDir: string; output: string } {
+  let skipBrainstorm = false, skipClarify = false, skipSpecify = false, skipPlanAlignment = false;
   let specDir = "", output = "";
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--skip-brainstorm") skipBrainstorm = true;
     else if (args[i] === "--skip-clarify") skipClarify = true;
     else if (args[i] === "--skip-specify") skipSpecify = true;
+    else if (args[i] === "--skip-plan-alignment") skipPlanAlignment = true;
     else if (args[i] === "--spec-dir" && args[i + 1]) specDir = args[++i];
     else if (args[i] === "--output" && args[i + 1]) output = args[++i];
   }
   if (!specDir || !output) {
-    process.stderr.write("Usage: bun cli.ts init-state [--skip-brainstorm] [--skip-clarify] [--skip-specify] --spec-dir <dir> --output <path>\n");
+    process.stderr.write("Usage: bun cli.ts init-state [--skip-brainstorm] [--skip-clarify] [--skip-specify] [--skip-plan-alignment] --spec-dir <dir> --output <path>\n");
     process.exit(1);
   }
-  return { skipBrainstorm, skipClarify, skipSpecify, specDir, output };
+  return { skipBrainstorm, skipClarify, skipSpecify, skipPlanAlignment, specDir, output };
 }
 
 async function main() {
@@ -85,7 +87,7 @@ async function main() {
     if (hookType === "init-state") {
       const opts = parseInitStateArgs(process.argv.slice(3));
       const state = resolveInitialState(
-        { skipBrainstorm: opts.skipBrainstorm, skipClarify: opts.skipClarify, skipSpecify: opts.skipSpecify },
+        { skipBrainstorm: opts.skipBrainstorm, skipClarify: opts.skipClarify, skipSpecify: opts.skipSpecify, skipPlanAlignment: opts.skipPlanAlignment },
         opts.specDir,
       );
       mkdirSync(dirname(opts.output), { recursive: true });
@@ -101,7 +103,7 @@ async function main() {
   if (hookType === "init-state") {
     const opts = parseInitStateArgs([handlerName, ...extraArgs]);
     const state = resolveInitialState(
-      { skipBrainstorm: opts.skipBrainstorm, skipClarify: opts.skipClarify, skipSpecify: opts.skipSpecify },
+      { skipBrainstorm: opts.skipBrainstorm, skipClarify: opts.skipClarify, skipSpecify: opts.skipSpecify, skipPlanAlignment: opts.skipPlanAlignment },
       opts.specDir,
     );
     mkdirSync(dirname(opts.output), { recursive: true });

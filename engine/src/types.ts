@@ -37,7 +37,7 @@ export interface SubagentStartInput {
 
 // --- Task Graph state ---
 
-export type Phase = "init" | "brainstorm" | "specify" | "clarify" | "architecture" | "decompose" | "execute";
+export type Phase = "init" | "brainstorm" | "specify" | "clarify" | "architecture" | "plan-alignment" | "decompose" | "execute";
 
 export type TaskStatus = "pending" | "implemented" | "completed" | "failed";
 
@@ -87,8 +87,8 @@ export interface SpecCheck {
 
 export interface TaskGraph {
   current_phase: Phase;
-  phase_artifacts: Record<string, string>;
-  skipped_phases: string[];
+  phase_artifacts: Partial<Record<Phase, string>>;
+  skipped_phases: Phase[];
   spec_dir?: string | null;
   spec_file: string | null;
   plan_file: string | null;

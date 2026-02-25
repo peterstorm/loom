@@ -1,6 +1,6 @@
 # Implementation Agent Context
 
-Template for spawning implementation agents during Execute phase. Variables in `{braces}` must be substituted.
+Template for spawning implementation agents during Execute phase. All template variables must be substituted before use.
 
 ---
 

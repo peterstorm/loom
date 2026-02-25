@@ -52,12 +52,12 @@ export function parseMachineSummary(output: string): ParsedFindings | null {
   const advisory: string[] = [];
 
   for (const line of block.split("\n")) {
-    const critMatch = line.match(/^[\s\-*]*\*{0,2}CRITICAL:?\*{0,2}\s*(.*)/);
+    const critMatch = line.match(/^[\s\-*]*\*{0,2}CRITICAL(?!_COUNT):?\*{0,2}\s*(.*)/);
     if (critMatch) {
       const text = critMatch[1].trim();
       if (text !== '') critical.push(text);
     }
-    const advMatch = line.match(/^[\s\-*]*\*{0,2}ADVISORY:?\*{0,2}\s*(.*)/);
+    const advMatch = line.match(/^[\s\-*]*\*{0,2}ADVISORY(?!_COUNT):?\*{0,2}\s*(.*)/);
     if (advMatch) {
       const text = advMatch[1].trim();
       if (text !== '') advisory.push(text);

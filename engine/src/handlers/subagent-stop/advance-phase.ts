@@ -2,32 +2,17 @@
  * Advance current_phase when phase agents complete.
  * Extracts and stores phase artifacts from transcript.
  *
- * Phases: brainstorm → specify → clarify → architecture → decompose → execute
+ * Phases: brainstorm → specify → clarify → architecture → plan-alignment → decompose → execute
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookHandler, SubagentStopInput, Phase, TaskGraph } from "../../types";
 import { PHASE_AGENT_MAP, PHASE_ORDER, CLARIFY_THRESHOLD } from "../../config";
 import { StateManager } from "../../state-manager";
 import { parsePhaseArtifacts } from "../../parsers/parse-phase-artifacts";
 import { stripNamespace } from "../../utils/strip-namespace";
-
-/** Recursively search for a file by name under a directory */
-export function findFile(dir: string, filename: string): string | null {
-  if (!existsSync(dir)) return null;
-  try {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.isFile() && entry.name === filename) return join(dir, entry.name);
-      if (entry.isDirectory()) {
-        const found = findFile(join(dir, entry.name), filename);
-        if (found) return found;
-      }
-    }
-  } catch {}
-  return null;
-}
+import { findFile } from "../../utils/find-file";
 
 /** Count NEEDS CLARIFICATION markers in a file */
 export function countMarkers(filePath: string): number {
@@ -71,16 +56,39 @@ export function resolveTransition(
     .with("architecture", () => {
       const plan = state.plan_file;
       if (!plan || !existsSync(plan) || !plan.includes(".claude/plans/")) return null;
-      return { nextPhase: "decompose" as Phase, artifact: plan };
+      if (state.skipped_phases.includes("plan-alignment")) {
+        return { nextPhase: "decompose" as Phase, artifact: plan };
+      }
+      return { nextPhase: "plan-alignment" as Phase, artifact: plan };
+    })
+    .with("plan-alignment", () => {
+      // Loop-back (re-running architecture) is orchestrator-driven via `set-phase` helper,
+      // not handled in this hook. We only advance to decompose when the gap report exists.
+      const specDir = state.spec_dir ?? ".claude/specs";
+      const gapReport = findFile(specDir, "plan-alignment.md");
+      if (!gapReport) {
+        process.stderr.write(`plan-alignment completed but no plan-alignment.md found in ${specDir}\n`);
+        return null;
+      }
+      return { nextPhase: "decompose" as Phase, artifact: gapReport };
     })
     .with("decompose", () => {
       return { nextPhase: "execute" as Phase, artifact: "task_graph" };
     })
-    .otherwise(() => null);
+    .with("init", () => null)
+    .with("execute", () => null)
+    .exhaustive();
 }
 
 const handler: HookHandler = async (stdin) => {
-  const input: SubagentStopInput = JSON.parse(stdin);
+  let input: SubagentStopInput;
+  try {
+    input = JSON.parse(stdin);
+  } catch (e) {
+    process.stderr.write(`advance-phase: failed to parse stdin: ${(e as Error).message}\n`);
+    return { kind: "passthrough" };
+  }
+
   const completedPhase = PHASE_AGENT_MAP[stripNamespace(input.agent_type ?? "")];
   if (!completedPhase) return { kind: "passthrough" };
 
@@ -98,23 +106,34 @@ const handler: HookHandler = async (stdin) => {
 
   // Extract artifacts from transcript before checking transition
   if (input.agent_transcript_path && existsSync(input.agent_transcript_path)) {
-    const transcriptContent = readFileSync(input.agent_transcript_path, "utf-8");
+    let transcriptContent: string;
+    try {
+      transcriptContent = readFileSync(input.agent_transcript_path, "utf-8");
+    } catch (e) {
+      process.stderr.write(`advance-phase: failed to read transcript at ${input.agent_transcript_path}: ${(e as Error).message}\n`);
+      return { kind: "passthrough" };
+    }
     const artifacts = parsePhaseArtifacts(transcriptContent, currentState.spec_dir);
 
-    await mgr.update((s) => {
-      const updates: Partial<TaskGraph> = {};
+    try {
+      await mgr.update((s) => {
+        const updates: Partial<TaskGraph> = {};
 
-      if (artifacts.spec_file && existsSync(artifacts.spec_file)
-          && artifacts.spec_file.includes(".claude/specs/")) {
-        updates.spec_file = artifacts.spec_file;
-      }
-      if (!s.plan_file && artifacts.plan_file && existsSync(artifacts.plan_file)
-          && artifacts.plan_file.includes(".claude/plans/")) {
-        updates.plan_file = artifacts.plan_file;
-      }
+        if (artifacts.spec_file && existsSync(artifacts.spec_file)
+            && artifacts.spec_file.includes(".claude/specs/")) {
+          updates.spec_file = artifacts.spec_file;
+        }
+        if (!s.plan_file && artifacts.plan_file && existsSync(artifacts.plan_file)
+            && artifacts.plan_file.includes(".claude/plans/")) {
+          updates.plan_file = artifacts.plan_file;
+        }
 
-      return Object.keys(updates).length > 0 ? { ...s, ...updates } : s;
-    });
+        return Object.keys(updates).length > 0 ? { ...s, ...updates } : s;
+      });
+    } catch (e) {
+      process.stderr.write(`advance-phase: failed to persist artifacts: ${(e as Error).message}\n`);
+      return { kind: "passthrough" };
+    }
   }
 
   // Reload after potential artifact writes
@@ -124,15 +143,20 @@ const handler: HookHandler = async (stdin) => {
 
   const { nextPhase, artifact, skipClarify } = transition;
 
-  await mgr.update((s) => ({
-    ...s,
-    current_phase: nextPhase,
-    phase_artifacts: { ...s.phase_artifacts, [completedPhase]: artifact },
-    skipped_phases: skipClarify
-      ? [...new Set([...s.skipped_phases, "clarify"])]
-      : s.skipped_phases,
-    updated_at: new Date().toISOString(),
-  }));
+  try {
+    await mgr.update((s) => ({
+      ...s,
+      current_phase: nextPhase,
+      phase_artifacts: { ...s.phase_artifacts, [completedPhase]: artifact },
+      skipped_phases: skipClarify
+        ? ([...new Set([...s.skipped_phases, "clarify" as Phase])] as Phase[])
+        : s.skipped_phases,
+      updated_at: new Date().toISOString(),
+    }));
+  } catch (e) {
+    process.stderr.write(`advance-phase: failed to write phase transition: ${(e as Error).message}\n`);
+    return { kind: "passthrough" };
+  }
 
   process.stderr.write(`Phase advanced: ${completedPhase} → ${nextPhase}\n`);
   if (skipClarify) {

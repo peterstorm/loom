@@ -1,6 +1,6 @@
 # Architecture Phase Context
 
-Template for spawning architecture-agent. Variables in `{braces}` must be substituted.
+Template for spawning architecture-agent. All template variables must be substituted before use.
 
 ---
 

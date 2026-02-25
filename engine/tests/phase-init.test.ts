@@ -82,4 +82,47 @@ describe("resolveInitialState", () => {
     expect(state.tasks).toEqual([]);
     expect(state.wave_gates).toEqual({});
   });
+
+  it("--skip-plan-alignment: skipped=[plan-alignment], phase=init", () => {
+    const state = resolveInitialState({ skipPlanAlignment: true }, tmpDir);
+    expect(state.current_phase).toBe("init");
+    expect(state.skipped_phases).toContain("plan-alignment");
+    expect(state.spec_file).toBeNull();
+  });
+
+  it("--skip-plan-alignment + --skip-brainstorm: skipped=[brainstorm,plan-alignment], phase=specify", () => {
+    const state = resolveInitialState({ skipBrainstorm: true, skipPlanAlignment: true }, tmpDir);
+    expect(state.current_phase).toBe("specify");
+    expect(state.skipped_phases).toEqual(["brainstorm", "plan-alignment"]);
+  });
+
+  it("--skip-plan-alignment + --skip-specify: skipped include plan-alignment, no duplicate", () => {
+    const specDir = join(tmpDir, "specs");
+    mkdirSync(specDir, { recursive: true });
+    writeFileSync(join(specDir, "spec.md"), "# Spec");
+
+    const state = resolveInitialState({ skipSpecify: true, skipPlanAlignment: true }, specDir);
+    expect(state.current_phase).toBe("architecture");
+    expect(state.skipped_phases).toContain("plan-alignment");
+    // No duplicate
+    expect(state.skipped_phases.filter(p => p === "plan-alignment")).toHaveLength(1);
+  });
+
+  it("--skip-plan-alignment only: plan-alignment in skipped_phases but not other phases", () => {
+    const state = resolveInitialState({ skipPlanAlignment: true }, tmpDir);
+    expect(state.skipped_phases).not.toContain("brainstorm");
+    expect(state.skipped_phases).not.toContain("clarify");
+    expect(state.skipped_phases).not.toContain("specify");
+    expect(state.skipped_phases).toContain("plan-alignment");
+  });
+
+  it("--skip-specify does NOT auto-skip plan-alignment", () => {
+    const specDir = join(tmpDir, "specs");
+    mkdirSync(specDir, { recursive: true });
+    writeFileSync(join(specDir, "spec.md"), "# Spec");
+
+    const state = resolveInitialState({ skipSpecify: true }, specDir);
+    expect(state.skipped_phases).not.toContain("plan-alignment");
+  });
 });
+

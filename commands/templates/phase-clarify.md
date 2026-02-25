@@ -1,6 +1,6 @@
 # Clarify Phase Context
 
-Template for spawning clarify-agent. Variables in `{braces}` must be substituted.
+Template for spawning clarify-agent. All template variables must be substituted before use.
 
 ---
 

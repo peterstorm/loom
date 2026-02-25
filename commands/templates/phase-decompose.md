@@ -1,6 +1,6 @@
 # Decompose Phase Context
 
-Template for spawning decompose-agent. Variables in `{braces}` must be substituted.
+Template for spawning decompose-agent. All template variables must be substituted before use.
 
 ---
 

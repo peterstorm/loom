@@ -1,7 +1,7 @@
 ---
 name: brainstorm-agent
 description: Exploration agent for understanding intent, refining ideas, and proposing approaches before specification. Use when feature scope is unclear or multiple approaches possible.
-model: sonnet
+model: opus
 color: yellow
 skills:
   - brainstorming

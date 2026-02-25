@@ -1,10 +1,9 @@
 /**
- * Enforce phase ordering: brainstorm → specify → clarify → architecture → decompose → execute
+ * Enforce phase ordering: brainstorm → specify → clarify → architecture → plan-alignment → decompose → execute
  * Blocks agent spawns if prerequisite phases not complete.
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookHandler, PreToolUseInput, Phase } from "../../types";
 import {
@@ -13,6 +12,7 @@ import {
 } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
+import { findFile } from "../../utils/find-file";
 
 export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   if (PHASE_AGENT_MAP[agent]) return PHASE_AGENT_MAP[agent];
@@ -23,37 +23,39 @@ export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   if (/specify|specification|requirements|spec\.md/i.test(prompt)) return "specify";
   if (/clarify|resolve.*markers|NEEDS CLARIFICATION/i.test(prompt)) return "clarify";
   if (/architecture|design|plan\.md/i.test(prompt)) return "architecture";
+  if (/plan[\s\-_]alignment|gap[\s\-_]report/i.test(prompt)) return "plan-alignment";
 
   return "unknown";
 }
 
-/** Recursively search for a file by name under a directory */
-function findFile(dir: string, filename: string): boolean {
-  if (!existsSync(dir)) return false;
-  try {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.isFile() && entry.name === filename) return true;
-      if (entry.isDirectory()) {
-        if (findFile(join(dir, entry.name), filename)) return true;
-      }
-    }
-  } catch {}
-  return false;
-}
-
-interface ArtifactState {
-  skipped_phases: string[];
-  phase_artifacts: Record<string, string>;
+export interface ArtifactState {
+  skipped_phases: Phase[];
+  phase_artifacts: Partial<Record<Phase, string>>;
   spec_file: string | null;
   plan_file: string | null;
+  spec_dir?: string | null;
 }
 
-function checkArtifacts(targetPhase: Phase, state: ArtifactState): string | null {
+/** Check plan-alignment gate: plan.md exists + plan-alignment.md exists (unless skipped) */
+function checkPlanAlignmentGate(state: ArtifactState): string | null {
+  const plan = state.phase_artifacts.architecture ?? state.plan_file;
+  if (!plan || !existsSync(plan)) return "architecture (no plan.md found)";
+  if (!state.skipped_phases.includes("plan-alignment")) {
+    const specDir = state.spec_dir ?? ".claude/specs";
+    if (!findFile(specDir, "plan-alignment.md")) {
+      return "plan-alignment (no plan-alignment.md found)";
+    }
+  }
+  return null;
+}
+
+export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string | null {
   return match(targetPhase)
     .with("specify", () => {
       if (state.skipped_phases.includes("brainstorm")) return null;
-      if (!findFile(".claude/specs", "brainstorm.md")) {
-        return "brainstorm (no brainstorm.md found in .claude/specs/)";
+      const specDir = state.spec_dir ?? ".claude/specs";
+      if (!findFile(specDir, "brainstorm.md")) {
+        return `brainstorm (no brainstorm.md found in ${specDir})`;
       }
       return null;
     })
@@ -70,27 +72,34 @@ function checkArtifacts(targetPhase: Phase, state: ArtifactState): string | null
           const content = readFileSync(spec, "utf-8");
           const markers = (content.match(/NEEDS CLARIFICATION/g) ?? []).length;
           if (markers > CLARIFY_THRESHOLD) return `clarify (${markers} markers > ${CLARIFY_THRESHOLD})`;
-        } catch {}
+        } catch (e) {
+          return `specify (spec.md unreadable: ${(e as Error).message})`;
+        }
       }
       return null;
     })
-    .with("decompose", () => {
+    .with("plan-alignment", () => {
       const plan = state.phase_artifacts.architecture ?? state.plan_file;
       if (!plan || !existsSync(plan)) return "architecture (no plan.md found)";
       return null;
     })
-    .with("execute", () => {
-      const plan = state.phase_artifacts.architecture ?? state.plan_file;
-      if (!plan || !existsSync(plan)) return "architecture (no plan.md found)";
-      return null;
-    })
-    .otherwise(() => null);
+    .with("decompose", () => checkPlanAlignmentGate(state))
+    .with("execute", () => checkPlanAlignmentGate(state))
+    .with("init", () => null)
+    .with("brainstorm", () => null)
+    .exhaustive();
 }
 
 const handler: HookHandler = async (stdin) => {
   if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
 
-  const input: PreToolUseInput = JSON.parse(stdin);
+  let input: PreToolUseInput;
+  try {
+    input = JSON.parse(stdin);
+  } catch (e) {
+    process.stderr.write(`validate-phase-order: failed to parse stdin: ${(e as Error).message}\n`);
+    return { kind: "allow" };
+  }
   if (input.tool_name !== "Task") return { kind: "allow" };
 
   const prompt = (input.tool_input?.prompt as string) ?? "";
@@ -112,7 +121,7 @@ const handler: HookHandler = async (stdin) => {
         "",
         "Use a recognized phase agent:",
         "  brainstorm-agent, specify-agent, clarify-agent, architecture-agent,",
-        "  code-implementer-agent, ts-test-agent, frontend-agent, etc.",
+        "  plan-alignment-agent, code-implementer-agent, ts-test-agent, frontend-agent, etc.",
       ].join("\n"),
     };
   }
@@ -130,7 +139,7 @@ const handler: HookHandler = async (stdin) => {
       message: [
         `BLOCKED: Invalid phase transition: ${currentPhase} → ${targetPhase}`,
         "",
-        "Expected flow: brainstorm → specify → clarify → architecture → decompose → execute",
+        "Expected flow: brainstorm → specify → clarify → architecture → plan-alignment → decompose → execute",
         `Current phase: ${currentPhase}`,
         "",
         match(currentPhase)
@@ -138,8 +147,11 @@ const handler: HookHandler = async (stdin) => {
           .with("brainstorm", () => "Next: Run specify-agent")
           .with("specify", () => "Next: Run clarify-agent or architecture-agent")
           .with("clarify", () => "Next: Run architecture-agent")
-          .with("architecture", () => "Next: Decompose tasks")
-          .otherwise(() => ""),
+          .with("architecture", () => "Next: Run plan-alignment-agent (or --skip-plan-alignment)")
+          .with("plan-alignment", () => "Next: Run plan-alignment-agent, or loop back with architecture-agent")
+          .with("decompose", () => "")
+          .with("execute", () => "")
+          .exhaustive(),
       ].join("\n"),
     };
   }
