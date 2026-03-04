@@ -143,6 +143,66 @@ describe("parseMachineSummary (pure)", () => {
     expect(result!.criticalCount).toBe(0);
     expect(result!.critical).toEqual(["real finding that should be captured"]);
   });
+
+  it("matches ## heading level", () => {
+    const output = "## Machine Summary\nCRITICAL_COUNT: 1\nCRITICAL: issue\n";
+    const result = parseMachineSummary(output);
+    expect(result).not.toBeNull();
+    expect(result!.criticalCount).toBe(1);
+    expect(result!.critical).toEqual(["issue"]);
+  });
+
+  it("matches #### heading level", () => {
+    const output = "#### Machine Summary\nCRITICAL_COUNT: 0\n";
+    const result = parseMachineSummary(output);
+    expect(result).not.toBeNull();
+    expect(result!.criticalCount).toBe(0);
+  });
+
+  it("matches bold heading: ### **Machine Summary**", () => {
+    const output = "### **Machine Summary**\nCRITICAL_COUNT: 0\nADVISORY: minor thing\n";
+    const result = parseMachineSummary(output);
+    expect(result).not.toBeNull();
+    expect(result!.criticalCount).toBe(0);
+    expect(result!.advisory).toEqual(["minor thing"]);
+  });
+
+  it("matches MACHINE_SUMMARY (no markdown heading)", () => {
+    const output = "MACHINE_SUMMARY\nCRITICAL_COUNT: 2\nCRITICAL: a\nCRITICAL: b\n";
+    const result = parseMachineSummary(output);
+    expect(result).not.toBeNull();
+    expect(result!.criticalCount).toBe(2);
+    expect(result!.critical).toEqual(["a", "b"]);
+  });
+
+  it("matches MACHINE SUMMARY (space variant)", () => {
+    const output = "MACHINE SUMMARY\nCRITICAL_COUNT: 0\n";
+    const result = parseMachineSummary(output);
+    expect(result).not.toBeNull();
+    expect(result!.criticalCount).toBe(0);
+  });
+
+  it("handles bold CRITICAL_COUNT: **CRITICAL_COUNT** 3", () => {
+    const output = "### Machine Summary\n**CRITICAL_COUNT** 3\nCRITICAL: x\n";
+    const result = parseMachineSummary(output);
+    expect(result).not.toBeNull();
+    expect(result!.criticalCount).toBe(3);
+  });
+
+  it("strips code fences from Machine Summary block", () => {
+    const output = [
+      "### Machine Summary",
+      "```",
+      "CRITICAL_COUNT: 1",
+      "CRITICAL: found inside fence",
+      "```",
+    ].join("\n");
+
+    const result = parseMachineSummary(output);
+    expect(result).not.toBeNull();
+    expect(result!.criticalCount).toBe(1);
+    expect(result!.critical).toEqual(["found inside fence"]);
+  });
 });
 
 describe("parseLegacyFindings (pure)", () => {
@@ -184,6 +244,44 @@ describe("parseLegacyFindings (pure)", () => {
   it("returns null criticalCount when marker missing", () => {
     const result = parseLegacyFindings("no markers here");
     expect(result.criticalCount).toBeNull();
+  });
+
+  it("matches ## Critical (two hashes, no 'Findings' suffix)", () => {
+    const output = [
+      "## Critical",
+      "- XSS in template",
+      "## Advisory",
+      "- Consider refactor",
+      "## Other",
+    ].join("\n");
+
+    const result = parseLegacyFindings(output);
+    expect(result.critical).toEqual(["XSS in template"]);
+    expect(result.advisory).toEqual(["Consider refactor"]);
+  });
+
+  it("falls back to line-scan when no section headings found", () => {
+    const output = [
+      "Here is my review output.",
+      "CRITICAL_COUNT: 2",
+      "CRITICAL: SQL injection in query builder",
+      "CRITICAL: Missing auth check",
+      "ADVISORY: Consider extracting validation",
+    ].join("\n");
+
+    const result = parseLegacyFindings(output);
+    expect(result.criticalCount).toBe(2);
+    expect(result.critical).toEqual([
+      "SQL injection in query builder",
+      "Missing auth check",
+    ]);
+    expect(result.advisory).toEqual(["Consider extracting validation"]);
+  });
+
+  it("handles bold CRITICAL_COUNT in legacy mode", () => {
+    const output = "some text\n**CRITICAL_COUNT** 5\nmore text";
+    const result = parseLegacyFindings(output);
+    expect(result.criticalCount).toBe(5);
   });
 });
 

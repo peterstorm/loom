@@ -38,20 +38,16 @@ export function mergeFindings(task: Task, findings: ParsedFindings): Task {
   };
 }
 
-/** Parse Machine Summary block for structured findings */
-export function parseMachineSummary(output: string): ParsedFindings | null {
-  const idx = output.lastIndexOf("### Machine Summary");
-  if (idx === -1) return null;
-
-  let block = output.slice(idx);
-  // Trim at next ### heading (if any)
-  const nextHeading = block.indexOf("\n###", 1);
-  if (nextHeading >= 0) block = block.slice(0, nextHeading);
+/** Extract CRITICAL/ADVISORY lines and CRITICAL_COUNT from a text block.
+ *  Strips code fences and handles bold/starred markers. */
+function extractFindings(block: string): ParsedFindings {
+  // Strip code fence markers so content inside fences is parsed
+  const cleaned = block.replace(/^\`\`\`\w*$/gm, "");
 
   const critical: string[] = [];
   const advisory: string[] = [];
 
-  for (const line of block.split("\n")) {
+  for (const line of cleaned.split("\n")) {
     const critMatch = line.match(/^[\s\-*]*\*{0,2}CRITICAL(?!_COUNT):?\*{0,2}\s*(.*)/);
     if (critMatch) {
       const text = critMatch[1].trim();
@@ -64,32 +60,62 @@ export function parseMachineSummary(output: string): ParsedFindings | null {
     }
   }
 
-  const countMatch = block.match(/^CRITICAL_COUNT:\s*(\d+)/m);
+  // Match CRITICAL_COUNT with optional bold/whitespace
+  const countMatch = cleaned.match(/^\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*(\d+)/m);
   const criticalCount = countMatch ? Number(countMatch[1]) : null;
 
   return { critical, advisory, criticalCount };
 }
 
-/** Legacy fallback: parse free-text sections */
+/** Parse Machine Summary block for structured findings.
+ *  Matches heading variants: ## / ### / #### (with optional bold), MACHINE_SUMMARY, etc.
+ *  Uses the LAST match to skip skill-template echoes that precede real output. */
+export function parseMachineSummary(output: string): ParsedFindings | null {
+  // Match various heading formats agents produce
+  const headingPattern = /^(?:#{2,4}\s*\*{0,2}Machine Summary\*{0,2}|MACHINE[_ ]SUMMARY)/gim;
+
+  // Find the last match (agents often echo the template before their real summary)
+  let lastMatch: RegExpExecArray | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = headingPattern.exec(output)) !== null) {
+    lastMatch = m;
+  }
+  if (!lastMatch) return null;
+
+  let block = output.slice(lastMatch.index);
+  // Trim at next heading of same or higher level (if any)
+  const nextHeading = block.match(/\n#{2,4}\s+[^#]/);
+  if (nextHeading && nextHeading.index! > 0) block = block.slice(0, nextHeading.index!);
+
+  return extractFindings(block);
+}
+
+/** Legacy fallback: scan entire output for CRITICAL/ADVISORY lines */
 export function parseLegacyFindings(output: string): ParsedFindings {
+  // First try section-based parsing
   const critical: string[] = [];
   const advisory: string[] = [];
 
-  const critSection = output.match(/### Critical Findings[\s\S]*?(?=### |$)/);
+  const critSection = output.match(/###?\s*Critical(?:\s+Findings)?[\s\S]*?(?=###? |$)/);
   if (critSection) {
     for (const m of critSection[0].matchAll(/^- (?:\*\*)?(.+?)(?:\*\*)?$/gm)) {
       if (m[1] !== "None") critical.push(m[1]);
     }
   }
 
-  const advSection = output.match(/### Advisory Findings[\s\S]*?(?=### |$)/);
+  const advSection = output.match(/###?\s*Advisory(?:\s+Findings)?[\s\S]*?(?=###? |$)/);
   if (advSection) {
     for (const m of advSection[0].matchAll(/^- (?:\*\*)?(.+?)(?:\*\*)?$/gm)) {
       if (m[1] !== "None") advisory.push(m[1]);
     }
   }
 
-  const countMatch = output.match(/CRITICAL_COUNT:\s*(\d+)/);
+  // If section-based found nothing, scan full output for CRITICAL/ADVISORY lines
+  if (critical.length === 0 && advisory.length === 0) {
+    return extractFindings(output);
+  }
+
+  const countMatch = output.match(/\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*(\d+)/);
   const criticalCount = countMatch ? Number(countMatch[1]) : null;
 
   return { critical, advisory, criticalCount };
@@ -109,7 +135,7 @@ const handler: HookHandler = async (stdin) => {
   }
 
   const rawPath = input.agent_transcript_path ?? "";
-  const transcript = await readTranscriptWithRetry(rawPath, /CRITICAL_COUNT:\s*\d+/);
+  const transcript = await readTranscriptWithRetry(rawPath, /\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*\d+/);
   if (!transcript) {
     return { kind: "passthrough" };
   }
