@@ -313,6 +313,17 @@ chmod 444 .claude/state/active_task_graph.json
 ```
 State file stays chmod 444 at rest. Only hooks can write via `StateManager` (temporarily toggles to 644).
 
+### 4e. Context Checkpoint (Recommended)
+
+After populating the task graph and creating the GitHub issue, all planning artifacts are on disk.
+The planning conversation is no longer needed for execution.
+
+**Suggest to user:**
+> "Planning complete. All artifacts on disk. Run `/clear` to shed planning context before execution, or continue in current context."
+
+If user runs `/clear`: SessionStart hook auto-injects execution context. Continue from Phase 5.
+If user continues: Proceed to Phase 5 normally.
+
 ---
 
 ## Phase 5: Execute
