@@ -7,14 +7,14 @@ import { existsSync } from "node:fs";
 import { StateManager } from "../../state-manager";
 import { TASK_GRAPH_PATH } from "../../config";
 import type { HookHandler } from "../../types";
-import type { TaskGraph, Task } from "../../types";
+import type { TaskGraph, TaskStatus } from "../../types";
 
-function statusIcon(status: string): string {
+function statusIcon(status: TaskStatus): string {
   switch (status) {
-    case "completed": return "done";
+    case "pending":     return "-";
+    case "completed":   return "done";
     case "implemented": return "impl";
-    case "failed": return "FAIL";
-    default: return status;
+    case "failed":      return "FAIL";
   }
 }
 
@@ -22,9 +22,9 @@ function buildContextOutput(state: TaskGraph, loomDir: string): string {
   const maxWave = state.tasks.reduce((m, t) => Math.max(m, t.wave), 0);
   const currentWave = state.current_wave ?? 1;
 
-  const taskRows = state.tasks
+  const taskRows = [...state.tasks]
     .sort((a, b) => a.wave - b.wave || a.id.localeCompare(b.id))
-    .map((t: Task) => `| ${t.id} | ${t.wave} | ${t.agent} | ${statusIcon(t.status)} | ${t.description} |`)
+    .map(t => `| ${t.id} | ${t.wave} | ${t.agent} | ${statusIcon(t.status)} | ${t.description} |`)
     .join("\n");
 
   const lines = [
@@ -59,8 +59,9 @@ function buildContextOutput(state: TaskGraph, loomDir: string): string {
 function resolveLoomDir(): string {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
   if (pluginRoot) return pluginRoot;
-  // Fallback: derive from __dirname (engine/src/handlers/session-start/) → 4 levels up
-  return new URL("../../../../", import.meta.url).pathname.replace(/\/$/, "");
+  const derived = new URL("../../../../", import.meta.url).pathname.replace(/\/$/, "");
+  process.stderr.write(`[loom] resume-after-clear: CLAUDE_PLUGIN_ROOT unset, using derived: ${derived}\n`);
+  return derived;
 }
 
 const handler: HookHandler = async (_stdin, _args) => {
@@ -69,9 +70,16 @@ const handler: HookHandler = async (_stdin, _args) => {
   const sm = StateManager.fromPath(TASK_GRAPH_PATH);
   if (!sm) return { kind: "passthrough" };
 
-  const state = sm.load();
+  let state: TaskGraph;
+  try {
+    state = sm.load();
+  } catch (e) {
+    return {
+      kind: "error",
+      message: `[loom] resume-after-clear: corrupt state (${TASK_GRAPH_PATH}): ${(e as Error).message}`,
+    };
+  }
 
-  // Only inject context when in execute phase with populated tasks
   if (state.current_phase !== "execute" || state.tasks.length === 0) {
     return { kind: "passthrough" };
   }

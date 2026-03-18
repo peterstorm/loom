@@ -6,4 +6,9 @@ if [ ! -f "$GRAPH" ]; then
   exit 0
 fi
 
-exec bun ${CLAUDE_PLUGIN_ROOT}/engine/src/cli.ts session-start resume-after-clear
+if [ -z "${CLAUDE_PLUGIN_ROOT}" ]; then
+  echo "[loom] resume-after-clear: CLAUDE_PLUGIN_ROOT not set" >&2
+  exit 1
+fi
+
+exec bun "${CLAUDE_PLUGIN_ROOT}/engine/src/cli.ts" session-start resume-after-clear
