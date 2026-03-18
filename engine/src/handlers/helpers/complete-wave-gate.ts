@@ -114,7 +114,7 @@ function updateGitHubIssue(state: TaskGraph, taskIds: string[]): void {
       updated = updated.replace(new RegExp(`- \\[ \\] ${id}:`, "g"), `- [x] ${id}:`);
     }
 
-    execSync(`gh issue edit ${issue} ${repoFlag} --body ${JSON.stringify(updated)}`, { stdio: "pipe" });
+    execSync(`gh issue edit ${issue} ${repoFlag} --body-file -`, { input: updated, stdio: ["pipe", "pipe", "pipe"] });
     process.stderr.write(`Updated checkboxes in issue #${issue}\n`);
   } catch {}
 }
@@ -181,7 +181,8 @@ async function postWaveGateSummary(mgr: StateManager, waveArg: number | null): P
     const body = generateWaveGateSummary(currentWave, waveTasks, state.spec_check);
 
     const repoFlag = state.github_repo ? `--repo ${state.github_repo}` : "";
-    execSync(`gh issue comment ${githubIssue} ${repoFlag} --body ${JSON.stringify(body)}`, {
+    execSync(`gh issue comment ${githubIssue} ${repoFlag} --body-file -`, {
+      input: body,
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 15000,
     });
