@@ -93,6 +93,15 @@
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/cleanup-stale-subagents.sh"
           }
         ]
+      },
+      {
+        "matcher": "clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/resume-after-clear.sh"
+          }
+        ]
       }
     ]
   }

@@ -35,7 +35,7 @@ const KNOWN_HANDLERS: Record<string, Set<string>> = {
     "cleanup-subagent-flag",
   ]),
   "subagent-start": new Set(["mark-subagent-active"]),
-  "session-start": new Set(["cleanup-stale-subagents"]),
+  "session-start": new Set(["cleanup-stale-subagents", "resume-after-clear"]),
   "helper": new Set([
     "complete-wave-gate", "populate-task-graph", "validate-task-graph",
     "store-review-findings", "store-spec-check", "mark-tests-passed",
