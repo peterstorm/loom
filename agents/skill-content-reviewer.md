@@ -1,5 +1,6 @@
 ---
 name: skill-content-reviewer
+background: false
 description: "This agent should be used when a skill needs content quality review - evaluating whether guidance is comprehensive, accurate, and actionable. Works for any domain by first researching what good guidance in that domain should include, then evaluating the skill against those criteria."
 model: sonnet
 color: purple

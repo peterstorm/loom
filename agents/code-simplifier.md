@@ -1,5 +1,6 @@
 ---
 name: code-simplifier
+background: false
 description: Use this agent when code has been written or modified and needs to be simplified for clarity, consistency, and maintainability while preserving all functionality. Focuses on recently modified code unless instructed otherwise.
 model: sonnet
 color: blue

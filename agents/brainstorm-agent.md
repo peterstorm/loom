@@ -1,5 +1,6 @@
 ---
 name: brainstorm-agent
+background: false
 description: Exploration agent for understanding intent, refining ideas, and proposing approaches before specification. Use when feature scope is unclear or multiple approaches possible.
 model: opus
 color: yellow

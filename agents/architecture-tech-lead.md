@@ -1,5 +1,6 @@
 ---
 name: architecture-tech-lead
+background: false
 description: Use this agent for architectural review of large PRs or features. Evaluates Functional Core/Imperative Shell adherence, coupling, testability, state management, and concurrency patterns. Auto-triggered by /review-pr for PRs with >500 additions or >10 files.
 model: sonnet
 color: blue

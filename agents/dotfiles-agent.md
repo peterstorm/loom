@@ -1,5 +1,6 @@
 ---
 name: dotfiles-agent
+background: false
 description: NixOS/home-manager agent for flake-parts, SOPS secrets, role-based config
 model: sonnet
 color: cyan

@@ -1,5 +1,6 @@
 ---
 name: security-agent
+background: false
 description: Security agent for auth, JWT, OAuth, OWASP, vulnerability assessment
 model: sonnet
 color: red

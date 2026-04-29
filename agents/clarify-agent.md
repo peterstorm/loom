@@ -1,5 +1,6 @@
 ---
 name: clarify-agent
+background: false
 description: Uncertainty resolution agent that systematically resolves [NEEDS CLARIFICATION] markers in specifications through structured questioning.
 model: opus
 color: orange

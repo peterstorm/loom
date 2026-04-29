@@ -1,5 +1,6 @@
 ---
 name: ts-test-agent
+background: false
 description: TypeScript testing agent for Vitest, React Testing Library, Playwright, fast-check
 model: sonnet
 color: green

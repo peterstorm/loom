@@ -1,5 +1,6 @@
 ---
 name: decompose-agent
+background: false
 description: Decomposes feature spec + architecture plan into parallel task graph with wave scheduling. Outputs pure JSON — no markdown, no prose. Use when loom reaches Phase 4.
 model: sonnet
 tools:

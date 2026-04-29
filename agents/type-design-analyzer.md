@@ -1,5 +1,6 @@
 ---
 name: type-design-analyzer
+background: false
 description: Use this agent when you need expert analysis of type design in your codebase. Specifically use it when introducing new types, during PR creation to review types being added, or when refactoring existing types. Provides quantitative ratings on encapsulation, invariant expression, usefulness, and enforcement.
 model: sonnet
 color: pink

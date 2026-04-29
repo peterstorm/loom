@@ -1,5 +1,6 @@
 ---
 name: code-implementer-agent
+background: false
 description: Implementation agent for Java/Spring Boot or TypeScript/Next.js following FP, DDD, testability patterns
 model: sonnet
 color: blue
