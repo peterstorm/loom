@@ -48,6 +48,19 @@ function resultToExit(result: HookResult): never {
   match(result)
     .with({ kind: "allow" }, () => process.exit(0))
     .with({ kind: "passthrough" }, () => process.exit(0))
+    .with({ kind: "permit" }, ({ reason }) => {
+      // Actively grant the permission decision so Claude Code's permission
+      // layer (allowlist + interactive prompt) is bypassed. Required for
+      // background subagents that have no interactive approval path.
+      process.stdout.write(JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "allow",
+          permissionDecisionReason: reason,
+        },
+      }));
+      process.exit(0);
+    })
     .with({ kind: "block" }, ({ message }) => {
       process.stderr.write(message + "\n");
       process.exit(2);

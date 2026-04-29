@@ -16,11 +16,18 @@ const handler: HookHandler = async (stdin) => {
 
   if (!FILE_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
-  // Allow if a subagent is active
+  // Allow if a subagent is active.
+  // Use "permit" (active grant) instead of "allow" (passive passthrough) so
+  // Claude Code's permission layer is bypassed entirely — required for
+  // background subagents that have no interactive prompt path and would
+  // otherwise be auto-denied even though loom intends to allow them.
   const activeFile = `${SUBAGENT_DIR}/${input.session_id}.active`;
   try {
     if (existsSync(activeFile) && statSync(activeFile).size > 0) {
-      return { kind: "allow" };
+      return {
+        kind: "permit",
+        reason: "Subagent active under loom orchestration",
+      };
     }
   } catch {}
 

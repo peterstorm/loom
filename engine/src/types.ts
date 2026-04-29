@@ -6,6 +6,7 @@
 
 export type HookResult =
   | { kind: "allow" }
+  | { kind: "permit"; reason: string }
   | { kind: "block"; message: string }
   | { kind: "error"; message: string }
   | { kind: "passthrough" };
