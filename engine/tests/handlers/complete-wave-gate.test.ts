@@ -7,6 +7,7 @@ import {
   checkCriticalFindings,
   computeNextWave,
   generateWaveGateSummary,
+  gateCheckMessage,
 } from "../../src/handlers/helpers/complete-wave-gate";
 import type { Task, TaskGraph } from "../../src/types";
 
@@ -35,8 +36,21 @@ describe("checkTestEvidence (pure)", () => {
   it("fails when task missing test evidence", () => {
     const result = checkTestEvidence([{ ...baseTask, tests_passed: false }]);
     expect(result.passed).toBe(false);
-    expect(result.message).toContain("FAILED");
-    expect(result.message).toContain("T1");
+    expect(gateCheckMessage(result)).toContain("FAILED");
+    expect(gateCheckMessage(result)).toContain("T1");
+  });
+
+  it("passes when task has new_tests_required=false (e.g. ADR writer)", () => {
+    const adrTask: Task = {
+      ...baseTask,
+      id: "T-ADR-1",
+      new_tests_required: false,
+      tests_passed: false,
+      test_evidence: undefined,
+    };
+    const result = checkTestEvidence([adrTask]);
+    expect(result.passed).toBe(true);
+    expect(gateCheckMessage(result)).toContain("not required");
   });
 });
 
@@ -73,13 +87,13 @@ describe("checkReviews (pure)", () => {
   it("fails for pending review", () => {
     const result = checkReviews([{ ...baseTask, review_status: "pending" }]);
     expect(result.passed).toBe(false);
-    expect(result.message).toContain("Unreviewed");
+    expect(gateCheckMessage(result)).toContain("Unreviewed");
   });
 
   it("reports evidence_capture_failed separately", () => {
     const result = checkReviews([{ ...baseTask, review_status: "evidence_capture_failed" }]);
     expect(result.passed).toBe(false);
-    expect(result.message).toContain("Evidence capture failed");
+    expect(gateCheckMessage(result)).toContain("Evidence capture failed");
   });
 });
 
@@ -93,7 +107,7 @@ describe("checkCriticalFindings (pure)", () => {
     const task = { ...baseTask, critical_findings: ["SQL injection", "XSS"] };
     const result = checkCriticalFindings([task]);
     expect(result.passed).toBe(false);
-    expect(result.message).toContain("2 critical");
+    expect(gateCheckMessage(result)).toContain("2 critical");
   });
 
   it("handles undefined critical_findings", () => {
@@ -106,9 +120,9 @@ describe("checkCriticalFindings (pure)", () => {
     const task = { ...baseTask, critical_findings: ["", "  ", "Real finding"] };
     const result = checkCriticalFindings([task]);
     expect(result.passed).toBe(false);
-    expect(result.message).toContain("1 critical");
-    expect(result.message).toContain("Real finding");
-    expect(result.message).not.toContain('""');
+    expect(gateCheckMessage(result)).toContain("1 critical");
+    expect(gateCheckMessage(result)).toContain("Real finding");
+    expect(gateCheckMessage(result)).not.toContain('""');
   });
 
   it("passes when critical_findings only contains empty strings", () => {
@@ -133,7 +147,7 @@ describe("checkSpecAlignment (pure)", () => {
   it("passes when no spec-check data", () => {
     const result = checkSpecAlignment(mkState(), 1);
     expect(result.passed).toBe(true);
-    expect(result.message).toContain("skipped");
+    expect(gateCheckMessage(result)).toContain("skipped");
   });
 
   it("fails when spec-check for different wave", () => {
@@ -142,8 +156,8 @@ describe("checkSpecAlignment (pure)", () => {
     });
     const result = checkSpecAlignment(state, 2);
     expect(result.passed).toBe(false);
-    expect(result.message).toContain("wave 1");
-    expect(result.message).toContain("not 2");
+    expect(gateCheckMessage(result)).toContain("wave 1");
+    expect(gateCheckMessage(result)).toContain("not 2");
   });
 
   it("passes when spec-check matches wave with no criticals", () => {
@@ -160,7 +174,7 @@ describe("checkSpecAlignment (pure)", () => {
     });
     const result = checkSpecAlignment(state, 1);
     expect(result.passed).toBe(false);
-    expect(result.message).toContain("2 critical");
+    expect(gateCheckMessage(result)).toContain("2 critical");
   });
 });
 

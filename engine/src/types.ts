@@ -10,6 +10,18 @@ export type HookResult =
   | { kind: "error"; message: string }
   | { kind: "passthrough" };
 
+/** Defense-in-depth: collapse empty diagnostic messages to a sentinel so
+ *  a silent error/block can never reach the user. Used at the cli exit boundary. */
+export function nonEmptyMessage(s: string | undefined | null): string {
+  return s && s.trim() !== "" ? s : "<no message provided>";
+}
+
+/** Smart constructors — preferred over object literals so callers funnel through nonEmptyMessage. */
+export const allowResult = (): HookResult => ({ kind: "allow" });
+export const passthroughResult = (): HookResult => ({ kind: "passthrough" });
+export const errorResult = (message: string): HookResult => ({ kind: "error", message: nonEmptyMessage(message) });
+export const blockResult = (message: string): HookResult => ({ kind: "block", message: nonEmptyMessage(message) });
+
 // --- Handler signature ---
 
 export type HookHandler = (stdin: string, args: string[]) => Promise<HookResult>;

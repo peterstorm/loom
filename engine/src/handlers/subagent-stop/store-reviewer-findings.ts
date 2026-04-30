@@ -14,14 +14,51 @@ import { extractTaskId } from "../../utils/extract-task-id";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
 
 export interface ParsedFindings {
-  critical: string[];
-  advisory: string[];
-  criticalCount: number | null;
+  readonly critical: readonly string[];
+  readonly advisory: readonly string[];
+  readonly criticalCount: number | null;
 }
+
+/** Smart constructor: filter empty strings and freeze arrays. */
+export function makeParsedFindings(input: {
+  critical?: readonly string[];
+  advisory?: readonly string[];
+  criticalCount?: number | null;
+}): ParsedFindings {
+  const filter = (xs: readonly string[] | undefined): readonly string[] =>
+    Object.freeze((xs ?? []).filter((s) => s.trim() !== ""));
+  return Object.freeze({
+    critical: filter(input.critical),
+    advisory: filter(input.advisory),
+    criticalCount: input.criticalCount ?? null,
+  });
+}
+
+export const EMPTY_FINDINGS: ParsedFindings = makeParsedFindings({});
 
 /** Pure: Check if an agent type is a recognized review agent */
 export function isReviewAgent(agentType: string): boolean {
   return REVIEW_SUB_AGENTS.has(agentType);
+}
+
+/** Pure: Build evidence_capture_failed error message, surfacing partial findings if any. */
+export function buildEvidenceFailureMessage(findings: ParsedFindings): string {
+  const partial = findings.critical.length + findings.advisory.length;
+  return partial > 0
+    ? `CRITICAL_COUNT marker not found — partial findings extracted (${findings.critical.length} critical, ${findings.advisory.length} advisory)`
+    : "CRITICAL_COUNT marker not found in agent output";
+}
+
+/** Pure: Reconcile a count > 0 but empty-criticals findings into a self-describing entry,
+ *  so a broken parse cannot pass the wave gate silently. */
+export function reconcileFindings(findings: ParsedFindings): ParsedFindings {
+  if (findings.criticalCount !== null && findings.criticalCount > 0 && findings.critical.length === 0) {
+    return makeParsedFindings({
+      ...findings,
+      critical: [`Review output parsing failed - ${findings.criticalCount} findings not captured`],
+    });
+  }
+  return findings;
 }
 
 /** Pure: Merge new findings into a task, accumulating rather than overwriting.
@@ -41,7 +78,6 @@ export function mergeFindings(task: Task, findings: ParsedFindings): Task {
 /** Extract CRITICAL/ADVISORY lines and CRITICAL_COUNT from a text block.
  *  Strips code fences and handles bold/starred markers. */
 function extractFindings(block: string): ParsedFindings {
-  // Strip code fence markers so content inside fences is parsed
   const cleaned = block.replace(/^\`\`\`\w*$/gm, "");
 
   const critical: string[] = [];
@@ -49,22 +85,15 @@ function extractFindings(block: string): ParsedFindings {
 
   for (const line of cleaned.split("\n")) {
     const critMatch = line.match(/^[\s\-*]*\*{0,2}CRITICAL(?!_COUNT):?\*{0,2}\s*(.*)/);
-    if (critMatch) {
-      const text = critMatch[1].trim();
-      if (text !== '') critical.push(text);
-    }
+    if (critMatch) critical.push(critMatch[1].trim());
     const advMatch = line.match(/^[\s\-*]*\*{0,2}ADVISORY(?!_COUNT):?\*{0,2}\s*(.*)/);
-    if (advMatch) {
-      const text = advMatch[1].trim();
-      if (text !== '') advisory.push(text);
-    }
+    if (advMatch) advisory.push(advMatch[1].trim());
   }
 
-  // Match CRITICAL_COUNT with optional bold/whitespace
   const countMatch = cleaned.match(/^\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*(\d+)/m);
   const criticalCount = countMatch ? Number(countMatch[1]) : null;
 
-  return { critical, advisory, criticalCount };
+  return makeParsedFindings({ critical, advisory, criticalCount });
 }
 
 /** Parse Machine Summary block for structured findings.
@@ -90,9 +119,9 @@ export function parseMachineSummary(output: string): ParsedFindings | null {
   return extractFindings(block);
 }
 
-/** Legacy fallback: scan entire output for CRITICAL/ADVISORY lines */
+/** Legacy fallback: section-headed Critical/Advisory blocks first;
+ *  fall back to whole-output line scan if no sections matched. */
 export function parseLegacyFindings(output: string): ParsedFindings {
-  // First try section-based parsing
   const critical: string[] = [];
   const advisory: string[] = [];
 
@@ -110,7 +139,6 @@ export function parseLegacyFindings(output: string): ParsedFindings {
     }
   }
 
-  // If section-based found nothing, scan full output for CRITICAL/ADVISORY lines
   if (critical.length === 0 && advisory.length === 0) {
     return extractFindings(output);
   }
@@ -118,11 +146,19 @@ export function parseLegacyFindings(output: string): ParsedFindings {
   const countMatch = output.match(/\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*(\d+)/);
   const criticalCount = countMatch ? Number(countMatch[1]) : null;
 
-  return { critical, advisory, criticalCount };
+  return makeParsedFindings({ critical, advisory, criticalCount });
 }
 
 const handler: HookHandler = async (stdin) => {
-  const input: SubagentStopInput = JSON.parse(stdin);
+  let input: SubagentStopInput;
+  try {
+    input = JSON.parse(stdin);
+  } catch (e) {
+    return {
+      kind: "error",
+      message: `[loom] store-reviewer-findings: invalid JSON on stdin: ${(e as Error).message}`,
+    };
+  }
 
   const agentType = (input.agent_type ?? "").replace(/^[^:]+:/, "");
   if (!isReviewAgent(agentType)) {
@@ -137,6 +173,7 @@ const handler: HookHandler = async (stdin) => {
   const rawPath = input.agent_transcript_path ?? "";
   const transcript = await readTranscriptWithRetry(rawPath, /\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*\d+/);
   if (!transcript) {
+    process.stderr.write(`[loom] store-reviewer-findings: empty transcript for ${agentType} (path=${rawPath || "<unset>"})\n`);
     return { kind: "passthrough" };
   }
 
@@ -145,36 +182,31 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "passthrough" };
   }
 
-  // Try structured, then legacy
   const findings = parseMachineSummary(transcript) ?? parseLegacyFindings(transcript);
 
-  // Safety: no CRITICAL_COUNT → evidence_capture_failed
   if (findings.criticalCount === null) {
-    process.stderr.write(`WARNING: No CRITICAL_COUNT for ${taskId} — marking evidence_capture_failed\n`);
+    const errorMsg = buildEvidenceFailureMessage(findings);
+    process.stderr.write(`WARNING: ${errorMsg} for ${taskId} — marking evidence_capture_failed\n`);
     await mgr.update((s) => ({
       ...s,
       tasks: s.tasks.map((t) =>
         t.id === taskId
-          ? { ...t, review_status: "evidence_capture_failed" as ReviewStatus,
-              review_error: "CRITICAL_COUNT marker not found in agent output" }
+          ? { ...t, review_status: "evidence_capture_failed" as ReviewStatus, review_error: errorMsg }
           : t
       ),
     }));
     return { kind: "passthrough" };
   }
 
-  // Safety: criticalCount > 0 but no findings parsed → synthesize error
-  if (findings.criticalCount > 0 && findings.critical.length === 0) {
-    findings.critical.push(`Review output parsing failed - ${findings.criticalCount} findings not captured`);
-  }
+  const reconciled = reconcileFindings(findings);
 
   await mgr.update((s) => ({
     ...s,
-    tasks: s.tasks.map((t) => t.id === taskId ? mergeFindings(t, findings) : t),
+    tasks: s.tasks.map((t) => t.id === taskId ? mergeFindings(t, reconciled) : t),
   }));
 
-  const status: ReviewStatus = findings.criticalCount > 0 ? "blocked" : "passed";
-  process.stderr.write(`Task ${taskId} review: ${status} (${findings.criticalCount} critical)\n`);
+  const status: ReviewStatus = reconciled.criticalCount! > 0 ? "blocked" : "passed";
+  process.stderr.write(`Task ${taskId} review: ${status} (${reconciled.criticalCount} critical)\n`);
   return { kind: "passthrough" };
 };
 

@@ -65,7 +65,7 @@ const handler: HookHandler = async (stdin, args) => {
 
   // Validate decompose output before merging
   const validation = validateFull(decompose as unknown as Record<string, unknown>);
-  if (!validation.valid) {
+  if (!validation.ok) {
     if (fix) {
       decompose = JSON.parse(fixFull(decompose as unknown as Record<string, unknown>)) as DecomposeInput;
       process.stderr.write(`Auto-fixed ${validation.errors.length} issues\n`);

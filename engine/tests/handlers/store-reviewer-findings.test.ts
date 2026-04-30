@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseMachineSummary, parseLegacyFindings, isReviewAgent, mergeFindings } from "../../src/handlers/subagent-stop/store-reviewer-findings";
+import { parseMachineSummary, parseLegacyFindings, isReviewAgent, mergeFindings, buildEvidenceFailureMessage, reconcileFindings } from "../../src/handlers/subagent-stop/store-reviewer-findings";
 import { REVIEW_SUB_AGENTS } from "../../src/config";
 import type { Task } from "../../src/types";
 
@@ -405,5 +405,46 @@ describe("mergeFindings (pure)", () => {
     expect(task.critical_findings).toEqual(["C1", "C2"]);
     expect(task.advisory_findings).toEqual(["A1", "A2", "A3"]);
     expect(task.review_status).toBe("blocked");
+  });
+});
+
+describe("buildEvidenceFailureMessage (pure)", () => {
+  it("returns generic message when no partial findings", () => {
+    const msg = buildEvidenceFailureMessage({ critical: [], advisory: [], criticalCount: null });
+    expect(msg).toBe("CRITICAL_COUNT marker not found in agent output");
+  });
+
+  it("surfaces partial counts when section parsing extracted findings", () => {
+    const msg = buildEvidenceFailureMessage({
+      critical: ["XSS in template", "SQL injection"],
+      advisory: ["Refactor advised"],
+      criticalCount: null,
+    });
+    expect(msg).toContain("partial findings extracted");
+    expect(msg).toContain("2 critical");
+    expect(msg).toContain("1 advisory");
+  });
+});
+
+describe("reconcileFindings (pure)", () => {
+  it("synthesizes placeholder when count > 0 but no critical findings parsed", () => {
+    const result = reconcileFindings({ critical: [], advisory: [], criticalCount: 3 });
+    expect(result.critical).toHaveLength(1);
+    expect(result.critical[0]).toContain("3 findings not captured");
+  });
+
+  it("returns input unchanged when count and findings agree", () => {
+    const input = { critical: ["x"], advisory: [], criticalCount: 1 };
+    expect(reconcileFindings(input)).toBe(input);
+  });
+
+  it("returns input unchanged when count is 0", () => {
+    const input = { critical: [], advisory: ["a"], criticalCount: 0 };
+    expect(reconcileFindings(input)).toBe(input);
+  });
+
+  it("returns input unchanged when count is null", () => {
+    const input = { critical: [], advisory: [], criticalCount: null };
+    expect(reconcileFindings(input)).toBe(input);
   });
 });

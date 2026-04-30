@@ -12,7 +12,9 @@ function wrapTasks(tasks: Record<string, unknown>[]) {
   };
 }
 
-/** Known agents from config (subset for generation) */
+/** Known agents from config (subset for generation).
+ *  adr-writer-agent is excluded because it has wave-placement constraints
+ *  that conflict with the random-graph generator (covered by unit tests instead). */
 const AGENTS = [
   "code-implementer-agent",
   "ts-test-agent",
@@ -75,8 +77,11 @@ describe("validateFull — property tests", () => {
     fc.assert(
       fc.property(arbValidGraph(), (graph) => {
         const result = validateFull(graph);
-        expect(result.valid).toBe(true);
-        expect(result.errors).toHaveLength(0);
+        expect(result.ok).toBe(true);
+        if (!result.ok) {
+          // Unreachable when result.ok — kept for diagnostic if assertion above fails
+          expect(result.errors).toEqual([]);
+        }
       }),
       { numRuns: 200 },
     );
@@ -92,7 +97,7 @@ describe("validateFull — property tests", () => {
             { id: `T${n}`, description: "self dep", agent, wave: 1, depends_on: [`T${n}`] },
           ]);
           const result = validateFull(graph);
-          expect(result.valid).toBe(false);
+          expect(result.ok).toBe(false);
           expect(result.errors.some((e) => e.includes("self-dependency"))).toBe(true);
         },
       ),
@@ -110,7 +115,7 @@ describe("validateFull — property tests", () => {
             { id: "T2", description: "second", agent, wave, depends_on: ["T1"] },
           ]);
           const result = validateFull(graph);
-          expect(result.valid).toBe(false);
+          expect(result.ok).toBe(false);
           expect(result.errors.some((e) => e.includes("earlier wave"))).toBe(true);
         },
       ),
@@ -128,7 +133,7 @@ describe("validateFull — property tests", () => {
             { id: "T2", description: "wave2", agent, wave: baseWave + 1, depends_on: [] },
           ]);
           const result = validateFull(graph);
-          expect(result.valid).toBe(false);
+          expect(result.ok).toBe(false);
         },
       ),
     );
@@ -138,7 +143,7 @@ describe("validateFull — property tests", () => {
 describe("validateFull — edge cases", () => {
   it("rejects 0 tasks (empty array)", () => {
     const result = validateFull(wrapTasks([]));
-    expect(result.valid).toBe(false);
+    expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes("empty"))).toBe(true);
   });
 
@@ -146,7 +151,7 @@ describe("validateFull — edge cases", () => {
     const result = validateFull(
       wrapTasks([{ id: "T1", description: "solo", agent: "frontend-agent", wave: 1, depends_on: [] }]),
     );
-    expect(result.valid).toBe(true);
+    expect(result.ok).toBe(true);
   });
 
   it("accepts all tasks same wave, no deps", () => {
@@ -157,7 +162,7 @@ describe("validateFull — edge cases", () => {
         { id: "T3", description: "c", agent: "security-agent", wave: 1, depends_on: [] },
       ]),
     );
-    expect(result.valid).toBe(true);
+    expect(result.ok).toBe(true);
   });
 
   it("rejects dependency on non-existent ID", () => {
@@ -166,7 +171,7 @@ describe("validateFull — edge cases", () => {
         { id: "T1", description: "a", agent: "frontend-agent", wave: 1, depends_on: ["T99"] },
       ]),
     );
-    expect(result.valid).toBe(false);
+    expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes("non-existent"))).toBe(true);
   });
 
@@ -178,7 +183,7 @@ describe("validateFull — edge cases", () => {
         { id: "T3", description: "c", agent: "security-agent", wave: 2, depends_on: ["T1", "T2"] },
       ]),
     );
-    expect(result.valid).toBe(true);
+    expect(result.ok).toBe(true);
   });
 
   it("rejects duplicate task IDs by failing validation on second", () => {
@@ -200,7 +205,7 @@ describe("validateFull — edge cases", () => {
         { id: "T2", description: "b", agent: "ts-test-agent", wave: 3, depends_on: ["T1"] },
       ]),
     );
-    expect(result.valid).toBe(false);
+    expect(result.ok).toBe(false);
     expect(result.errors.some(e => e.includes("Wave gap"))).toBe(true);
   });
 
@@ -210,7 +215,7 @@ describe("validateFull — edge cases", () => {
         { id: "T1", description: "a", agent: "frontend-agent", wave: 999, depends_on: [] },
       ]),
     );
-    expect(result.valid).toBe(true);
+    expect(result.ok).toBe(true);
   });
 
   it("rejects unknown agent names", () => {
@@ -219,7 +224,7 @@ describe("validateFull — edge cases", () => {
         { id: "T1", description: "a", agent: "nonexistent-agent", wave: 1, depends_on: [] },
       ]),
     );
-    expect(result.valid).toBe(false);
+    expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes("unknown agent"))).toBe(true);
   });
 
@@ -229,7 +234,7 @@ describe("validateFull — edge cases", () => {
         { id: "T1", description: "a", agent: "frontend-agent", wave: 0, depends_on: [] },
       ]),
     );
-    expect(result.valid).toBe(false);
+    expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes("wave must be integer >= 1"))).toBe(true);
   });
 
@@ -239,14 +244,14 @@ describe("validateFull — edge cases", () => {
         { id: "T1", description: "a", agent: "frontend-agent", wave: 1.5, depends_on: [] },
       ]),
     );
-    expect(result.valid).toBe(false);
+    expect(result.ok).toBe(false);
   });
 
   it("rejects missing task ID", () => {
     const result = validateFull(
       wrapTasks([{ description: "no id", agent: "frontend-agent", wave: 1, depends_on: [] }]),
     );
-    expect(result.valid).toBe(false);
+    expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes("missing 'id'"))).toBe(true);
   });
 
@@ -254,7 +259,7 @@ describe("validateFull — edge cases", () => {
     const result = validateFull(
       wrapTasks([{ id: "TASK1", description: "bad id", agent: "frontend-agent", wave: 1, depends_on: [] }]),
     );
-    expect(result.valid).toBe(false);
+    expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes("must match"))).toBe(true);
   });
 });

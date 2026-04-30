@@ -11,7 +11,7 @@ Find the loom plugin directory (`ls -d "$HOME/.claude/plugins/cache/plugins/loom
 
 Your task's `plan_context` contains an AD seed (Choice / Why / Rejected) from the plan's `## Architectural Decisions` section. Expand it into a full ADR:
 
-- **Status:** `Accepted` (the decision has been made and the plan is approved).
+- **Status:** `Accepted` (set at write-time — ADR runs after impl waves so the decision has shipped).
 - **Context:** Why the decision was needed. Forces at play. State the problem, not the solution. Use the spec and plan as context.
 - **Options Considered:** At least 2 numbered options with Pros/Cons. Use the AD seed's Rejected list as a starting point. If the choice was forced (no real alternatives), say so explicitly but still document the decision.
 - **Decision:** One-line statement of the chosen option, then concrete detail (architecture, components, file paths, invariants).
