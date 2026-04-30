@@ -6,7 +6,7 @@ Template for spawning implementation agents during Execute phase. All template v
 
 ## !! MANDATORY FINAL STEP — READ THIS FIRST !!
 
-**Your LAST action before finishing MUST be running tests via the Bash tool.**
+**Your LAST action before finishing MUST be running tests via the Bash tool — UNLESS this is a docs/config-only task (your task graph entry has `new_tests_required: false`, e.g. ADR writing, migrations, config tweaks). For those, skip the test run; the engine recognizes `new_tests_required: false` and will not block the wave gate on missing test evidence.**
 
 ```
 bun test          # TypeScript/Bun projects
@@ -17,10 +17,10 @@ pytest            # Python projects
 ```
 
 A hook reads your transcript and extracts test evidence ONLY from Bash tool_result blocks.
-If you do not run tests via Bash, `tests_passed = false` and the wave gate FAILS.
+If your task DOES require tests and you do not run them via Bash, `tests_passed = false` and the wave gate FAILS.
 Writing tests without executing them counts as failure.
 
-**Do NOT finish without Bash test output showing pass markers (e.g., "X passing", "0 fail", "BUILD SUCCESS").**
+**For test-required tasks: do NOT finish without Bash test output showing pass markers (e.g., "X passing", "0 fail", "BUILD SUCCESS").**
 
 ---
 
@@ -71,6 +71,6 @@ Available at: {plan_file_path}
 
 1. Read the plan file and understand scope
 2. Implement code following the plan's patterns
-3. Write NEW tests (hook git-diffs for @Test, it(, test(, describe( patterns — no new tests = wave blocked)
-4. **Run tests via Bash tool** — fix failures, re-run until 0 failures
+3. Write NEW tests (hook git-diffs for @Test, it(, test(, describe( patterns — no new tests = wave blocked) — **skip for docs/config-only tasks where `new_tests_required: false`**
+4. **Run tests via Bash tool** — fix failures, re-run until 0 failures — **skip for docs/config-only tasks**
 5. Only then are you done

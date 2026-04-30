@@ -53,7 +53,7 @@ Fallback: `general-purpose`
    - Dependencies MUST be in earlier waves
 6. **ADR tasks:** For each `### AD-N: {Title}` block in plan.md's `## Architectural Decisions` section, create exactly one task:
    - `agent`: `adr-writer-agent`
-   - `wave`: highest wave number used by other tasks (final wave — ADRs document what shipped)
+   - `wave`: `(max wave used by impl tasks) + 1` — ADRs run in a dedicated final wave AFTER all impl waves so they can document what actually shipped. Rule 5 requires dependencies be in earlier waves; ADRs depend on all impl tasks, so they cannot share a wave with any of them.
    - `depends_on`: all impl task IDs from prior waves
    - `new_tests_required`: `false`
    - `plan_context`: the full AD-N block text (Choice / Why / Rejected verbatim)

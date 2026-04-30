@@ -17,7 +17,7 @@ interface ValidationResult {
 
 const VALID_PHASES = new Set<string>(PHASE_ORDER);
 
-const NO_TEST_KEYWORDS = /migration|config|schema|rename|bump|version|refactor|cleanup|typo|docs|interface|documentation|changelog|readme|ci|cd|pipeline|deploy|→|->|styling|css|formatting/i;
+const NO_TEST_KEYWORDS = /migration|config|schema|rename|bump|version|refactor|cleanup|typo|docs|interface|documentation|changelog|readme|ci|cd|pipeline|deploy|→|->|styling|css|formatting|adr/i;
 
 /** Validate minimal phase-tracking graph (no tasks) */
 export function validateMinimal(json: Record<string, unknown>): ValidationResult {

@@ -1,6 +1,6 @@
 # ADR Template
 
-Use this template when emitting an ADR from `phase-architecture.md` Step 6. Substitute all `{...}` placeholders. Output filename: `docs/adr/{NNNN}-{title-slug}.md`.
+Used by `adr-writer-agent` when expanding plan AD-N seeds into full ADRs (one task per AD, scheduled by `phase-decompose.md` rule 6). Substitute all `{...}` placeholders. Output filename: `docs/adr/{NNNN}-{title-slug}.md`.
 
 ---
 
