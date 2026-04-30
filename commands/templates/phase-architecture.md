@@ -72,6 +72,40 @@ Find the loom plugin directory (`ls -d "$HOME/.claude/plugins/cache/plugins/loom
 
 Commit: `git add .claude/plans/ && git commit -m "plan: {date_slug}"`
 
+### 6. Emit Architecture Decision Records (ADRs)
+
+For each significant decision made in this design, write an ADR to `docs/adr/`.
+
+**Trigger an ADR when ANY of the following:**
+- You evaluated 2+ alternatives in Step 3 and chose one (record the tradeoff)
+- The design introduces a new dependency, framework, or runtime
+- The design changes the data model (new tables, schema changes)
+- The design establishes a cross-cutting pattern (error model, logging, auth, retention)
+- The design locks in a non-obvious constraint or invariant
+
+**Skip ADRs for:**
+- Trivial naming or file-placement choices
+- Decisions fully determined by existing patterns
+
+**Filename:** `docs/adr/{NNNN}-{slug}.md` where:
+- `{NNNN}` = max existing ADR number + 1, zero-padded to 4 digits. Find via:
+  ```bash
+  ls docs/adr/ 2>/dev/null | grep -oE '^[0-9]{4}' | sort -n | tail -1
+  ```
+  If no ADRs exist yet, start at `0001`.
+- `{slug}` = kebab-case topic (e.g., `eval-framework`).
+
+**Structure:** Find the loom plugin directory (same approach as Step 5), then read `references/adr-template.md` and follow it exactly. Substitute all `{...}` placeholders. Status defaults to `Accepted`.
+
+**Numbering across multiple ADRs in this run:** When emitting N ADRs, allocate consecutive numbers — do NOT re-scan between writes.
+
+**Plan-alignment loop-back:** If re-running architecture with gap context, edit existing ADRs in place for changed decisions; create new ones for surfaced decisions; do not duplicate unchanged ADRs.
+
+**Commit:** Single commit for the batch:
+```bash
+git add docs/adr/ && git commit -m "adr: add ADRs for {date_slug}"
+```
+
 ---
 
 ## What NOT to Do
@@ -88,5 +122,6 @@ Commit: `git add .claude/plans/ && git commit -m "plan: {date_slug}"`
 - Path to created plan file
 - Implementation phases identified (count + names)
 - Key architectural decisions with rationale
+- List of ADRs emitted (paths) — empty list is fine if no decisions met the trigger criteria
 
 The architecture-agent has the `architecture-tech-lead` skill preloaded which provides FP, DDD, testability, and stack-specific domain knowledge. Use that knowledge to **design**, not to **review**.
