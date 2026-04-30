@@ -33,6 +33,7 @@ export const IMPL_AGENTS = new Set([
   "frontend-agent",
   "security-agent",
   "dotfiles-agent",
+  "adr-writer-agent",
   "general-purpose",
 ]);
 
