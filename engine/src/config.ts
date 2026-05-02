@@ -26,13 +26,18 @@ export const PHASE_AGENT_MAP: Record<string, Phase> = {
   "decompose-agent": "decompose",
 };
 
-/** Impl agents → all map to "execute" phase */
+/** Impl agents → all map to "execute" phase.
+ *  Note: agent identifiers are intentionally `string` (no brand). Bun runs
+ *  in transpile-only mode, so a TS brand would not enforce anything at
+ *  runtime; the real boundary check lives in validate-task-graph.ts via
+ *  KNOWN_AGENTS.has(agent). */
 export const IMPL_AGENTS = new Set([
   "code-implementer-agent",
   "ts-test-agent",
   "frontend-agent",
   "security-agent",
   "dotfiles-agent",
+  "adr-writer-agent",
   "general-purpose",
 ]);
 

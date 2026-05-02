@@ -3,7 +3,8 @@ import { mkdirSync, writeFileSync, chmodSync, rmSync, existsSync } from "node:fs
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
-import type { TaskGraph, Task } from "../../../src/types";
+import type { TaskGraph, Task, TaskStatus } from "../../../src/types";
+import { buildContextOutput, statusIcon } from "../../../src/handlers/session-start/resume-after-clear";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
 
@@ -61,11 +62,12 @@ describe("resume-after-clear handler", () => {
     chmodSync(statePath, 0o444);
   }
 
-  function runHandler(): { exitCode: number; stdout: string; stderr: string } {
+  function runHandler(envOverrides: NodeJS.ProcessEnv = {}): { exitCode: number; stdout: string; stderr: string } {
+    const env = { ...process.env, CLAUDE_PLUGIN_ROOT: "/test/loom-plugin", ...envOverrides };
     try {
       const stdout = execSync(
         `bun "${CLI_PATH}" session-start resume-after-clear`,
-        { cwd: tmpDir, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+        { cwd: tmpDir, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], env },
       );
       return { exitCode: 0, stdout: stdout ?? "", stderr: "" };
     } catch (e: unknown) {
@@ -224,5 +226,83 @@ describe("resume-after-clear handler", () => {
     writeState(makeGraph({ github_issue: undefined }));
     const { stdout } = runHandler();
     expect(stdout).not.toContain("**GitHub Issue:**");
+  });
+});
+
+describe("statusIcon (pure)", () => {
+  it("maps each known status", () => {
+    expect(statusIcon("pending")).toBe("-");
+    expect(statusIcon("completed")).toBe("done");
+    expect(statusIcon("implemented")).toBe("impl");
+    expect(statusIcon("failed")).toBe("FAIL");
+  });
+
+  it("returns ? sentinel for unknown status (defensive)", () => {
+    // Cast bypasses exhaustiveness — simulates a future status that hasn't been wired yet.
+    expect(statusIcon("ghost" as TaskStatus)).toBe("?");
+  });
+});
+
+describe("buildContextOutput (pure)", () => {
+  function task(overrides: Partial<Task> = {}): Task {
+    return {
+      id: "T1", description: "Build thing", agent: "code-implementer-agent",
+      wave: 1, status: "pending", depends_on: [], ...overrides,
+    };
+  }
+  function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
+    return {
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: ".claude/specs/x/spec.md", plan_file: ".claude/plans/x.md",
+      tasks: [task()], wave_gates: {}, ...overrides,
+    };
+  }
+
+  it("emits context markers and tasks table", () => {
+    const out = buildContextOutput(graph(), "/loom");
+    expect(out).toContain("<!-- LOOM RESUME CONTEXT -->");
+    expect(out).toContain("<!-- END LOOM RESUME CONTEXT -->");
+    expect(out).toContain("# Active Loom Session — Execute Phase");
+    expect(out).toContain("| ID | Wave | Agent | Status | Description |");
+    expect(out).toContain("| T1 | 1 | code-implementer-agent | - | Build thing |");
+  });
+
+  it("sorts tasks by wave then id", () => {
+    const out = buildContextOutput(graph({
+      tasks: [
+        task({ id: "T2", wave: 2 }),
+        task({ id: "T1", wave: 1 }),
+        task({ id: "T3", wave: 1 }),
+      ],
+    }), "/loom");
+    const t1 = out.indexOf("| T1 |");
+    const t3 = out.indexOf("| T3 |");
+    const t2 = out.indexOf("| T2 |");
+    expect(t1).toBeLessThan(t3);
+    expect(t3).toBeLessThan(t2);
+  });
+
+  it("renders github issue line with repo when both set", () => {
+    const out = buildContextOutput(graph({ github_issue: 42, github_repo: "owner/repo" }), "/loom");
+    expect(out).toContain("**GitHub Issue:** owner/repo#42");
+  });
+
+  it("renders github issue line without repo when repo absent", () => {
+    const out = buildContextOutput(graph({ github_issue: 42 }), "/loom");
+    expect(out).toContain("**GitHub Issue:** #42");
+  });
+
+  it("interpolates loomDir into instructions", () => {
+    const out = buildContextOutput(graph(), "/abs/loom");
+    expect(out).toContain("/abs/loom/commands/loom.md");
+    expect(out).toContain("/abs/loom/commands/templates/impl-agent-context.md");
+  });
+
+  it("computes maxWave from highest task wave", () => {
+    const out = buildContextOutput(graph({
+      tasks: [task({ id: "T1", wave: 1 }), task({ id: "T2", wave: 3 })],
+      current_wave: 2,
+    }), "/loom");
+    expect(out).toContain("**Current Wave:** 2 of 3");
   });
 });

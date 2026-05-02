@@ -72,6 +72,8 @@ Find the loom plugin directory (`ls -d "$HOME/.claude/plugins/cache/plugins/loom
 
 Commit: `git add .claude/plans/ && git commit -m "plan: {date_slug}"`
 
+**ADR seeds:** For decisions worth recording as ADRs (2+ alternatives evaluated, new dependency, data model change, cross-cutting pattern, or non-obvious invariant), ensure each is captured as a `### AD-N: {Title}` block in the plan's `## Architectural Decisions` section per `references/plan-template.md`. Decompose will turn each AD into a dedicated ADR-writing task in the final wave. Skip ADs for trivial naming or file-placement choices. Do NOT write ADRs yourself in this phase.
+
 ---
 
 ## What NOT to Do
@@ -87,6 +89,6 @@ Commit: `git add .claude/plans/ && git commit -m "plan: {date_slug}"`
 
 - Path to created plan file
 - Implementation phases identified (count + names)
-- Key architectural decisions with rationale
+- Key architectural decisions with rationale (captured as `### AD-N` blocks in the plan)
 
 The architecture-agent has the `architecture-tech-lead` skill preloaded which provides FP, DDD, testability, and stack-specific domain knowledge. Use that knowledge to **design**, not to **review**.

@@ -9,15 +9,16 @@ import { match } from "ts-pattern";
 import type { HookHandler, Phase, TaskGraph } from "../../types";
 import { PHASE_ORDER, KNOWN_AGENTS } from "../../config";
 
-interface ValidationResult {
-  valid: boolean;
-  errors: string[];
-  fixed?: string; // corrected JSON if --fix
-}
+export type ValidationResult =
+  | { ok: true }
+  | { ok: false; errors: readonly string[] };
+
+function ok(): ValidationResult { return { ok: true }; }
+function fail(errors: string[]): ValidationResult { return { ok: false, errors }; }
 
 const VALID_PHASES = new Set<string>(PHASE_ORDER);
 
-const NO_TEST_KEYWORDS = /migration|config|schema|rename|bump|version|refactor|cleanup|typo|docs|interface|documentation|changelog|readme|ci|cd|pipeline|deploy|→|->|styling|css|formatting/i;
+const NO_TEST_KEYWORDS = /migration|config|schema|rename|bump|version|refactor|cleanup|typo|docs|interface|documentation|changelog|readme|ci|cd|pipeline|deploy|→|->|styling|css|formatting|adr/i;
 
 /** Validate minimal phase-tracking graph (no tasks) */
 export function validateMinimal(json: Record<string, unknown>): ValidationResult {
@@ -34,7 +35,7 @@ export function validateMinimal(json: Record<string, unknown>): ValidationResult
   if (!("spec_file" in json)) errors.push("Missing required field: spec_file");
   if (!("plan_file" in json)) errors.push("Missing required field: plan_file");
 
-  return { valid: errors.length === 0, errors };
+  return errors.length === 0 ? ok() : fail(errors);
 }
 
 /** Fix minimal graph — preserve valid fields, default invalid ones */
@@ -62,7 +63,7 @@ export function validateFull(json: Record<string, unknown>): ValidationResult {
   const tasks = json.tasks;
   if (!Array.isArray(tasks)) {
     errors.push("'tasks' must be an array");
-    return { valid: false, errors };
+    return fail(errors);
   }
 
   if (tasks.length === 0) errors.push("'tasks' array is empty");
@@ -127,7 +128,28 @@ export function validateFull(json: Record<string, unknown>): ValidationResult {
     }
   }
 
-  return { valid: errors.length === 0, errors };
+  // ADR tasks must be in the highest wave so they document what already shipped.
+  const adrTasks = tasks.filter((t: Record<string, unknown>) => t.agent === "adr-writer-agent");
+  if (adrTasks.length > 0 && waves.length > 0) {
+    const maxWave = waves[waves.length - 1];
+    const nonImplTasks = tasks.filter((t: Record<string, unknown>) => t.agent !== "adr-writer-agent");
+    const implWaves = [...new Set(nonImplTasks.map((t: Record<string, unknown>) => t.wave as number))]
+      .filter((w): w is number => typeof w === "number" && Number.isInteger(w));
+    const maxImplWave = implWaves.length > 0 ? Math.max(...implWaves) : 0;
+
+    for (const t of adrTasks) {
+      const tid = t.id as string;
+      const tw = t.wave as number;
+      if (tw !== maxWave) {
+        errors.push(`Task ${tid}: ADR task must be in the final wave (wave ${maxWave}); found wave ${tw}`);
+      }
+      if (maxImplWave > 0 && tw <= maxImplWave) {
+        errors.push(`Task ${tid}: ADR task wave (${tw}) must be greater than max impl wave (${maxImplWave})`);
+      }
+    }
+  }
+
+  return errors.length === 0 ? ok() : fail(errors);
 }
 
 /** Fix full graph — add missing per-task defaults */
@@ -180,14 +202,14 @@ const handler: HookHandler = async (stdin, args) => {
   if (isFix) {
     const fixed = isMinimal ? fixMinimal(json) : fixFull(json);
     process.stdout.write(fixed);
-    if (!result.valid) {
+    if (!result.ok) {
       process.stderr.write(`Fixed structural defaults; ${result.errors.length} issues remain\n`);
       for (const err of result.errors) process.stderr.write(`  - ${err}\n`);
     }
     return { kind: "passthrough" };
   }
 
-  if (!result.valid) {
+  if (!result.ok) {
     return {
       kind: "error",
       message: [`Validation FAILED (${result.errors.length} errors):`, ...result.errors.map((e) => `  - ${e}`)].join("\n"),

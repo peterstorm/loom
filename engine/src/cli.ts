@@ -10,6 +10,7 @@ import { match } from "ts-pattern";
 import { writeFileSync, chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { HookResult, HookHandler } from "./types";
+import { nonEmptyMessage } from "./types";
 import { resolveInitialState } from "./phase-init";
 
 // Eagerly buffer stdin before any async work (bun drains piped data during dynamic imports)
@@ -49,11 +50,11 @@ function resultToExit(result: HookResult): never {
     .with({ kind: "allow" }, () => process.exit(0))
     .with({ kind: "passthrough" }, () => process.exit(0))
     .with({ kind: "block" }, ({ message }) => {
-      process.stderr.write(message + "\n");
+      process.stderr.write(nonEmptyMessage(message) + "\n");
       process.exit(2);
     })
     .with({ kind: "error" }, ({ message }) => {
-      process.stderr.write(message + "\n");
+      process.stderr.write(nonEmptyMessage(message) + "\n");
       process.exit(1);
     })
     .exhaustive();

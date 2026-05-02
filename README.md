@@ -391,11 +391,10 @@ The state file uses a layered protection scheme:
 ### Task Status Transitions
 
 ```
-pending -------> in_progress     (agent spawned)
-in_progress ---> implemented     (agent completes, test evidence extracted)
-in_progress ---> failed          (agent crash, retry_count incremented)
-failed --------> in_progress     (auto-retry, max 2 attempts)
-implemented ---> completed       (wave gate passed)
+pending -----> implemented     (agent completes, test evidence extracted)
+pending -----> failed          (agent crash; retry_count incremented)
+failed ------> pending         (auto-retry, max 2 attempts)
+implemented -> completed       (wave gate passed)
 ```
 
 ### State File Lifecycle
@@ -421,14 +420,14 @@ engine/
 │   ├── state-manager.ts     # Atomic state file read/write with locking
 │   ├── phase-init.ts        # Initial state resolution from skip flags
 │   ├── handlers/
-│   │   ├── pre-tool-use/    # Validation hooks (7 handlers)
-│   │   ├── subagent-stop/   # Phase/status/review hooks (6 handlers)
-│   │   ├── subagent-start/  # Lifecycle tracking (1 handler)
-│   │   ├── session-start/   # Initialization hooks (2 handlers)
-│   │   └── helpers/         # Whitelisted helper scripts (11 handlers)
+│   │   ├── pre-tool-use/    # Validation hooks
+│   │   ├── subagent-stop/   # Phase/status/review hooks
+│   │   ├── subagent-start/  # Lifecycle tracking
+│   │   ├── session-start/   # Initialization + resume-after-clear hooks
+│   │   └── helpers/         # Whitelisted helper scripts + utility modules
 │   ├── parsers/             # Extract structured data from agent transcripts
 │   └── utils/               # Git operations, file locking, file search
-└── tests/                   # 28 test files (unit, property-based, e2e)
+└── tests/                   # Unit, property-based, and e2e tests
 ```
 
 ### CLI Entry Point
@@ -468,14 +467,14 @@ The engine includes parsers for extracting structured data from agent output:
 
 ### Key Constants (`engine/src/config.ts`)
 
-| Constant | Value | Purpose |
-|----------|-------|---------|
-| `CLARIFY_THRESHOLD` | 3 | Markers above this trigger mandatory clarify phase |
-| `PHASE_ORDER` | 8 phases | Valid phase sequence |
-| `PHASE_AGENT_MAP` | 6 entries | Maps phase agents to their phase |
-| `IMPL_AGENTS` | 6 agents | Implementation agents for execute phase |
-| `REVIEW_SUB_AGENTS` | 6 agents | Review agents for wave gates |
-| `WHITELISTED_HELPERS` | 8 scripts | Scripts allowed to write to state file |
+| Constant | Purpose |
+|----------|---------|
+| `CLARIFY_THRESHOLD` | Markers above this trigger mandatory clarify phase (default: 3) |
+| `PHASE_ORDER` | Valid phase sequence |
+| `PHASE_AGENT_MAP` | Maps each phase to the agent that runs it |
+| `IMPL_AGENTS` | Implementation agents allowed to spawn during the execute phase |
+| `REVIEW_SUB_AGENTS` | Review agents whose findings feed wave gates |
+| `WHITELISTED_HELPERS` | Helper scripts allowed to write to the state file |
 
 ### Plan Limits
 
@@ -563,15 +562,15 @@ The test suite includes 28 test files covering:
 loom/
 ├── .claude-plugin/
 │   └── plugin.json            # Plugin metadata
-├── agents/                     # Agent definitions (22 .md files)
+├── agents/                     # Agent definitions
 ├── commands/                   # Skill definitions
-│   └── templates/              # Phase prompt templates (7 files)
+│   └── templates/              # Phase prompt templates
 ├── engine/                     # TypeScript hook engine
 │   ├── src/                    # Source code
 │   └── tests/                  # Test suite
 ├── hooks/
 │   ├── hooks.json              # Hook configuration
-│   └── scripts/                # Shell shims (11 files)
+│   └── scripts/                # Shell shims
 └── references/                 # Spec and plan templates
 ```
 

@@ -26,7 +26,10 @@ export async function readTranscriptWithRetry(
   markerPattern?: RegExp,
 ): Promise<string> {
   const path = rawPath.replace(/^~/, process.env.HOME ?? "~");
-  if (!path || !existsSync(path)) return "";
+  if (!path || !existsSync(path)) {
+    process.stderr.write(`[loom] read-transcript: path missing or not found: ${rawPath || "<unset>"}\n`);
+    return "";
+  }
 
   let lastSize = -1;
   let transcript = "";
@@ -53,6 +56,8 @@ export async function readTranscriptWithRetry(
     }
   }
 
-  // Return whatever we have after retries
+  if (markerPattern) {
+    process.stderr.write(`[loom] read-transcript: marker not found after ${MAX_RETRIES} retries: ${path}\n`);
+  }
   return transcript;
 }

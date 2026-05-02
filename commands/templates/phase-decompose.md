@@ -29,6 +29,7 @@ Read the spec and plan, then decompose into parallel task graph.
 | security-agent | security, auth, jwt, oauth, vulnerability |
 | dotfiles-agent | nix, nixos, home-manager, sops |
 | frontend-agent | frontend, ui, react, next.js, component — **writes tests too** |
+| adr-writer-agent | write a single ADR document — used for tasks expanding plan AD-N entries (one task per AD) |
 
 Fallback: `general-purpose`
 
@@ -50,6 +51,19 @@ Fallback: `general-purpose`
    - Wave 2: Tasks depending on Wave 1
    - Wave N: Tasks depending on Wave N-1
    - Dependencies MUST be in earlier waves
+6. **ADR tasks:** For each `### AD-N: {Title}` block in plan.md's `## Architectural Decisions` section, create exactly one task:
+   - `agent`: `adr-writer-agent`
+   - `wave`: `(max wave used by impl tasks) + 1` — ADRs run in a dedicated final wave AFTER all impl waves so they can document what actually shipped. Rule 5 requires dependencies be in earlier waves; ADRs depend on all impl tasks, so they cannot share a wave with any of them.
+   - `depends_on`: all impl task IDs from prior waves (convention — not enforced by `validate-task-graph`; the wave-ordering rule is what gates execution)
+   - `new_tests_required`: `false`
+   - `plan_context`: the full AD-N block text (Choice / Why / Rejected verbatim)
+   - `file_list`: `["docs/adr/{NNNN}-{slug}.md"]` where:
+     - `{NNNN}` = pre-allocated. Read existing `docs/adr/` (use Glob/Read), find max 4-digit prefix, increment for first AD, then sequential for subsequent ADs in plan order. If no ADRs exist, start at `0001`.
+     - `{slug}` = kebab-case from AD title (e.g., "Hono framework choice" → `hono-framework-choice`). Append `-2`, `-3` etc. on title collision within this run.
+   - `description`: `"Write ADR-{NNNN}: {AD title}"`
+   - `spec_anchors`: any FR/SC/US referenced in the AD's Why text (can be empty `[]`)
+
+   Skip ADR task creation if plan has no `## Architectural Decisions` section or it's empty.
 
 ---
 

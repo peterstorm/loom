@@ -17,38 +17,44 @@ function parseWaveArg(args: string[]): number | null {
   return null;
 }
 
-interface GateCheck {
-  passed: boolean;
-  message: string;
+export type GateCheck =
+  | { passed: true;  summary: string }
+  | { passed: false; reason: string };
+
+const pass = (summary: string): GateCheck => ({ passed: true, summary });
+const fail = (reason: string): GateCheck => ({ passed: false, reason });
+
+/** Render a check for stderr output. */
+export function gateCheckMessage(c: GateCheck): string {
+  return c.passed ? c.summary : c.reason;
 }
 
-/** Check 1: All tasks have test evidence */
+/** Check 1: All tasks have test evidence (skipped for tasks declaring no tests required) */
 export function checkTestEvidence(tasks: Task[]): GateCheck {
-  const missing = tasks.filter((t) => !t.tests_passed);
+  const missing = tasks.filter((t) => t.new_tests_required !== false && !t.tests_passed);
   if (missing.length > 0) {
-    return {
-      passed: false,
-      message: `FAILED: Not all tasks have test evidence.\n  Missing: ${missing.map((t) => t.id).join(", ")}`,
-    };
+    return fail(`FAILED: Not all tasks have test evidence.\n  Missing: ${missing.map((t) => t.id).join(", ")}`);
   }
-  const lines = tasks.map((t) => `     ${t.id}: ${t.test_evidence ?? "evidence present"}`);
-  return { passed: true, message: `1. Test evidence verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}` };
+  const lines = tasks.map((t) => {
+    const evidence = t.new_tests_required === false
+      ? "not required"
+      : (t.test_evidence ?? "evidence present");
+    return `     ${t.id}: ${evidence}`;
+  });
+  return pass(`1. Test evidence verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
 }
 
 /** Check 1b: New tests written or not required */
 export function checkNewTests(tasks: Task[]): GateCheck {
   const missing = tasks.filter((t) => t.new_tests_required !== false && !t.new_tests_written);
   if (missing.length > 0) {
-    return {
-      passed: false,
-      message: `FAILED: Not all tasks satisfied new-test requirement.\n  Missing: ${missing.map((t) => t.id).join(", ")}`,
-    };
+    return fail(`FAILED: Not all tasks satisfied new-test requirement.\n  Missing: ${missing.map((t) => t.id).join(", ")}`);
   }
   const lines = tasks.map((t) => {
     const evidence = t.new_test_evidence ?? (t.new_tests_required === false ? "not required" : "new tests present");
     return `     ${t.id}: ${evidence}`;
   });
-  return { passed: true, message: `   New tests verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}` };
+  return pass(`   New tests verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
 }
 
 /** Check 2: All tasks reviewed */
@@ -56,32 +62,29 @@ export function checkReviews(tasks: Task[]): GateCheck {
   const reviewed = tasks.filter((t) => t.review_status === "passed" || t.review_status === "blocked");
   if (reviewed.length !== tasks.length) {
     const unreviewed = tasks.filter((t) => !t.review_status || t.review_status === "pending").map((t) => t.id);
-    const failed = tasks.filter((t) => t.review_status === "evidence_capture_failed").map((t) => t.id);
+    const failedReview = tasks.filter((t) => t.review_status === "evidence_capture_failed").map((t) => t.id);
     const parts = ["FAILED: Not all tasks have been reviewed."];
-    if (failed.length > 0) parts.push(`  Evidence capture failed: ${failed.join(", ")}`);
+    if (failedReview.length > 0) parts.push(`  Evidence capture failed: ${failedReview.join(", ")}`);
     if (unreviewed.length > 0) parts.push(`  Unreviewed: ${unreviewed.join(", ")}`);
-    return { passed: false, message: parts.join("\n") };
+    return fail(parts.join("\n"));
   }
   const lines = tasks.map((t) => `     ${t.id}: ${t.review_status}`);
-  return { passed: true, message: `2. Reviews verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}` };
+  return pass(`2. Reviews verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
 }
 
 /** Check 3: Spec alignment */
 export function checkSpecAlignment(state: TaskGraph, wave: number): GateCheck {
   if (!state.spec_check) {
-    return { passed: true, message: "3. Spec alignment: skipped (no spec-check data)." };
+    return pass("3. Spec alignment: skipped (no spec-check data).");
   }
   if (state.spec_check.wave !== wave) {
-    return { passed: false, message: `FAILED: Spec alignment was run for wave ${state.spec_check.wave}, not ${wave}. Re-run /spec-check for wave ${wave}.` };
+    return fail(`FAILED: Spec alignment was run for wave ${state.spec_check.wave}, not ${wave}. Re-run /spec-check for wave ${wave}.`);
   }
   if ((state.spec_check.critical_count ?? 0) > 0) {
     const findings = (state.spec_check.critical_findings ?? []).map((f) => `  - ${f}`).join("\n");
-    return {
-      passed: false,
-      message: `FAILED: Spec alignment has ${state.spec_check.critical_count} critical findings.\n${findings}`,
-    };
+    return fail(`FAILED: Spec alignment has ${state.spec_check.critical_count} critical findings.\n${findings}`);
   }
-  return { passed: true, message: `3. Spec alignment verified (verdict: ${state.spec_check.verdict}).` };
+  return pass(`3. Spec alignment verified (verdict: ${state.spec_check.verdict}).`);
 }
 
 /** Check 4: No critical code review findings */
@@ -95,9 +98,9 @@ export function checkCriticalFindings(tasks: Task[]): GateCheck {
       .filter((t) => (t.critical_findings?.filter(f => f.trim() !== '').length ?? 0) > 0)
       .map((t) => `  ${t.id}: ${t.critical_findings!.filter(f => f.trim() !== '').join(", ")}`)
       .join("\n");
-    return { passed: false, message: `FAILED: ${totalCritical} critical code review findings.\n${details}` };
+    return fail(`FAILED: ${totalCritical} critical code review findings.\n${details}`);
   }
-  return { passed: true, message: "4. No critical code review findings." };
+  return pass("4. No critical code review findings.");
 }
 
 /** Update GitHub issue checkboxes */
@@ -116,7 +119,9 @@ function updateGitHubIssue(state: TaskGraph, taskIds: string[]): void {
 
     execSync(`gh issue edit ${issue} ${repoFlag} --body-file -`, { input: updated, stdio: ["pipe", "pipe", "pipe"] });
     process.stderr.write(`Updated checkboxes in issue #${issue}\n`);
-  } catch {}
+  } catch (e) {
+    process.stderr.write(`WARNING: Failed to update GH issue #${issue} checkboxes: ${(e as Error).message}\n`);
+  }
 }
 
 /** Compute next wave from actual wave numbers (handles non-contiguous waves) */
@@ -168,17 +173,15 @@ export function generateWaveGateSummary(
   return lines.join('\n');
 }
 
-/** Post GitHub comment summarizing wave gate results */
-async function postWaveGateSummary(mgr: StateManager, waveArg: number | null): Promise<void> {
-  const state = mgr.load();
-  const currentWave = waveArg ?? state.current_wave ?? 1;
+/** Post GitHub comment summarizing wave gate results.
+ *  Takes a snapshot of state captured under the update lock to avoid a second read. */
+function postWaveGateSummary(state: TaskGraph, completedWave: number): void {
   const githubIssue = state.github_issue;
-
   if (!githubIssue) return;
 
   try {
-    const waveTasks = state.tasks.filter((t) => t.wave === currentWave);
-    const body = generateWaveGateSummary(currentWave, waveTasks, state.spec_check);
+    const waveTasks = state.tasks.filter((t) => t.wave === completedWave);
+    const body = generateWaveGateSummary(completedWave, waveTasks, state.spec_check);
 
     const repoFlag = state.github_repo ? `--repo ${state.github_repo}` : "";
     execSync(`gh issue comment ${githubIssue} ${repoFlag} --body-file -`, {
@@ -186,7 +189,7 @@ async function postWaveGateSummary(mgr: StateManager, waveArg: number | null): P
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 15000,
     });
-    process.stderr.write(`Posted wave ${currentWave} summary to issue #${githubIssue}\n`);
+    process.stderr.write(`Posted wave ${completedWave} summary to issue #${githubIssue}\n`);
   } catch (e) {
     // Non-blocking — don't fail the gate on comment failure
     process.stderr.write(`WARNING: Failed to post GH comment: ${(e as Error).message}\n`);
@@ -203,68 +206,79 @@ const handler: HookHandler = async (_stdin, args) => {
   let errorMessage: string | null = null;
   let taskIds: string[] = [];
   let nextWave: number | null = null;
+  let completedWave: number = waveArg ?? 1;
   let githubState: { issue?: number; repo?: string } = {};
+  let snapshot: TaskGraph | null = null;
 
-  await mgr.update((s) => {
-    const wave = waveArg ?? s.current_wave ?? 1;
-    const waveTasks = s.tasks.filter((t) => t.wave === wave);
+  try {
+    await mgr.update((s) => {
+      const wave = waveArg ?? s.current_wave ?? 1;
+      completedWave = wave;
+      const waveTasks = s.tasks.filter((t) => t.wave === wave);
 
-    process.stderr.write(`Completing wave ${wave} gate...\n\n`);
+      process.stderr.write(`Completing wave ${wave} gate...\n\n`);
 
-    // Run all checks on locked state
-    const checks = [
-      checkTestEvidence(waveTasks),
-      checkNewTests(waveTasks),
-      checkReviews(waveTasks),
-      checkSpecAlignment(s, wave),
-      checkCriticalFindings(waveTasks),
-    ];
+      // Run all checks on locked state
+      const checks = [
+        checkTestEvidence(waveTasks),
+        checkNewTests(waveTasks),
+        checkReviews(waveTasks),
+        checkSpecAlignment(s, wave),
+        checkCriticalFindings(waveTasks),
+      ];
 
-    for (const check of checks) {
-      process.stderr.write(check.message + "\n");
-      if (!check.passed) {
-        errorMessage = check.message;
-        return s; // Return state unchanged
+      for (const check of checks) {
+        process.stderr.write(gateCheckMessage(check) + "\n");
+        if (!check.passed) {
+          errorMessage = check.reason;
+          return s; // Return state unchanged
+        }
       }
-    }
 
-    process.stderr.write("\nAll checks passed. Advancing...\n");
+      process.stderr.write("\nAll checks passed. Advancing...\n");
 
-    taskIds = waveTasks.map((t) => t.id);
-    githubState = { issue: s.github_issue, repo: s.github_repo };
+      taskIds = waveTasks.map((t) => t.id);
+      githubState = { issue: s.github_issue, repo: s.github_repo };
 
-    // Compute next wave from actual wave numbers
-    nextWave = computeNextWave(s.tasks, wave);
+      // Compute next wave from actual wave numbers
+      nextWave = computeNextWave(s.tasks, wave);
 
-    const defaultGate: WaveGate = { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false };
+      const defaultGate: WaveGate = { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false };
 
-    // Build updated state atomically
-    const updated: TaskGraph = {
-      ...s,
-      tasks: s.tasks.map((t) =>
-        t.wave === wave
-          ? { ...t, status: "completed" as const, review_status: "passed" as const }
-          : t
-      ),
-      wave_gates: {
-        ...s.wave_gates,
-        [String(wave)]: {
-          ...(s.wave_gates[String(wave)] ?? defaultGate),
-          tests_passed: true,
-          reviews_complete: true,
-          blocked: false,
-        },
-        ...(nextWave != null ? {
-          [String(nextWave)]: {
-            ...(s.wave_gates[String(nextWave)] ?? defaultGate),
+      // Build updated state atomically
+      const updated: TaskGraph = {
+        ...s,
+        tasks: s.tasks.map((t) =>
+          t.wave === wave
+            ? { ...t, status: "completed" as const, review_status: "passed" as const }
+            : t
+        ),
+        wave_gates: {
+          ...s.wave_gates,
+          [String(wave)]: {
+            ...(s.wave_gates[String(wave)] ?? defaultGate),
+            tests_passed: true,
+            reviews_complete: true,
+            blocked: false,
           },
-        } : {}),
-      },
-      ...(nextWave != null ? { current_wave: nextWave } : {}),
-    };
+          ...(nextWave != null ? {
+            [String(nextWave)]: {
+              ...(s.wave_gates[String(nextWave)] ?? defaultGate),
+            },
+          } : {}),
+        },
+        ...(nextWave != null ? { current_wave: nextWave } : {}),
+      };
 
-    return updated;
-  });
+      snapshot = updated;
+      return updated;
+    });
+  } catch (e) {
+    return {
+      kind: "error",
+      message: `[loom] complete-wave-gate: failed to persist state for wave ${completedWave}: ${(e as Error).message}`,
+    };
+  }
 
   if (errorMessage) {
     return { kind: "error", message: errorMessage };
@@ -281,8 +295,10 @@ const handler: HookHandler = async (_stdin, args) => {
     process.stderr.write("\n=== All waves complete! ===\nRun /loom --complete to finalize.\n");
   }
 
-  // Post GitHub comment with wave summary
-  await postWaveGateSummary(mgr, waveArg);
+  // Post GitHub comment with wave summary using snapshot from inside the lock
+  if (snapshot) {
+    postWaveGateSummary(snapshot, completedWave);
+  }
 
   return { kind: "passthrough" };
 };
