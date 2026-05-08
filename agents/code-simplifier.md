@@ -12,16 +12,16 @@ You are an expert code simplification specialist focused on enhancing code clari
 Before simplifying, identify the languages in the files under review. Read ONLY the relevant files:
 
 **Always read:**
-- `~/.dotfiles/claude/project/meta/rules/architecture.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md`
 
 **Java** (*.java):
-- `~/.dotfiles/claude/project/java/rules/java-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md`
 
 **TypeScript** (*.ts, *.tsx, *.js, *.jsx):
-- `~/.dotfiles/claude/project/typescript/rules/typescript-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/typescript-patterns.md`
 
 **Rust** (*.rs):
-- `~/.dotfiles/claude/project/rust/rules/rust-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/rust-patterns.md`
 
 Apply the loaded patterns as your simplification targets.
 

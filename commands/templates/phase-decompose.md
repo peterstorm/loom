@@ -25,9 +25,9 @@ Read the spec and plan, then decompose into parallel task graph.
 | Agent (subagent_type) | Use When |
 |---|---|
 | code-implementer-agent | implement, create, build, add, write code, model — **writes tests too** |
+| java-test-agent | add missing tests to EXISTING Java code only |
 | ts-test-agent | add missing tests to EXISTING TypeScript code only |
 | security-agent | security, auth, jwt, oauth, vulnerability |
-| dotfiles-agent | nix, nixos, home-manager, sops |
 | frontend-agent | frontend, ui, react, next.js, component — **writes tests too** |
 | adr-writer-agent | write a single ADR document — used for tasks expanding plan AD-N entries (one task per AD) |
 

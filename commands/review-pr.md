@@ -71,7 +71,7 @@ git diff main...HEAD --stat | tail -1
 Each agent MUST be spawned via `Task` with the `subagent_type` shown below. Do NOT perform reviews inline — always dispatch to specialized agents.
 
 1. **`loom:code-reviewer`** - CLAUDE.md compliance, bugs, architecture
-   - Will recommend delegation to: security-expert, keycloak-skill, frontend-design-skill
+   - Will recommend delegation to: security-expert, java-test-engineer, ts-test-engineer, nextjs-frontend-design
 
 2. **`loom:silent-failure-hunter`** - Error handling, Either patterns, silent failures
 
@@ -109,9 +109,9 @@ After agents complete, summarize:
 
 ## Delegation Recommendations
 - [ ] security-expert: [reason]
-- [ ] keycloak-skill: [reason]
 - [ ] java-test-engineer: [reason]
 - [ ] ts-test-engineer: [reason]
+- [ ] nextjs-frontend-design: [reason]
 
 ## Strengths
 - What's well-done in this PR

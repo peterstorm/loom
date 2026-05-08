@@ -56,13 +56,13 @@ Provide specific, actionable feedback:
 Before analyzing, identify the languages in the files under review. Read ONLY the relevant files to understand project conventions:
 
 **Java** (*.java):
-- `~/.dotfiles/claude/project/java/rules/java-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md`
 
 **TypeScript** (*.ts, *.tsx, *.js, *.jsx):
-- `~/.dotfiles/claude/project/typescript/rules/typescript-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/typescript-patterns.md`
 
 **Rust** (*.rs):
-- `~/.dotfiles/claude/project/rust/rules/rust-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/rust-patterns.md`
 
 Use the loaded patterns to evaluate whether comments accurately describe the codebase's conventions (e.g. Either/Result-based error handling, sealed type hierarchies, discriminated unions, enum-based domain modeling).
 
