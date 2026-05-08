@@ -16,13 +16,13 @@ Evaluate type designs with a critical eye toward invariant strength, encapsulati
 Before analyzing types, identify the language. Read ONLY the relevant files:
 
 **Java** (*.java):
-- `~/.dotfiles/claude/project/java/rules/java-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md`
 
 **TypeScript** (*.ts, *.tsx):
-- `~/.dotfiles/claude/project/typescript/rules/typescript-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/typescript-patterns.md`
 
 **Rust** (*.rs):
-- `~/.dotfiles/claude/project/rust/rules/rust-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/rust-patterns.md`
 
 Use the loaded patterns as the reference for preferred type design (records, sealed types, discriminated unions, newtypes, typestates, etc.).
 

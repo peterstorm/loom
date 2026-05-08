@@ -22,17 +22,17 @@ Don't duplicate the agent's work. If user wants a code review, point them to `/r
 Before designing, load the relevant architectural rules. Read ONLY what's needed:
 
 **Always read:**
-- `~/.dotfiles/claude/project/meta/rules/architecture.md` — core principles (FC/IS, DDD, immutability)
+- `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` — core principles (FC/IS, DDD, immutability)
 
 **Java** (if designing for Java/Spring Boot):
-- `~/.dotfiles/claude/project/java/rules/java-patterns.md` — records, sealed types, Either, railway-oriented programming
-- `~/.dotfiles/claude/project/java/rules/property-testing.md` — jqwik invariants
+- `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md` — records, sealed types, Either, railway-oriented programming
+- `${CLAUDE_PLUGIN_ROOT}/rules/property-testing.md` — jqwik invariants
 
 **TypeScript** (if designing for TypeScript/Next.js):
-- `~/.dotfiles/claude/project/typescript/rules/typescript-patterns.md` — discriminated unions, branded types, ts-pattern
+- `${CLAUDE_PLUGIN_ROOT}/rules/typescript-patterns.md` — discriminated unions, branded types, ts-pattern
 
 **Rust** (if designing for Rust):
-- `~/.dotfiles/claude/project/rust/rules/rust-patterns.md` — newtype, typestate, Result combinators
+- `${CLAUDE_PLUGIN_ROOT}/rules/rust-patterns.md` — newtype, typestate, Result combinators
 
 Apply loaded rules as architectural constraints for the design.
 

@@ -2,18 +2,32 @@
 name: code-implementer
 version: "1.0.0"
 description: "This skill should be used when the user asks to 'implement', 'write code', 'build a feature', 'create a function', 'add functionality', 'code this', 'make this work', or needs to write production code for Java/Spring Boot or TypeScript/Next.js following FP, DDD, and testability patterns. Ensures code follows functional core/imperative shell, proper invariants, Either-based error handling, and is designed for testing without mocks."
-imports:
-  - "../rules/architecture.md"
-  - "../rules/java-patterns.md"
-  - "../rules/typescript-patterns.md"
-  - "../rules/property-testing.md"
 ---
 
 # Code Implementer Skill
 
 Expert implementation guidance ensuring code follows FP principles, DDD patterns, and is designed for maximum testability.
 
-**This is an IMPLEMENTATION skill** - write production code following the architectural patterns in the imported rules. For design decisions and architectural review, use `/architecture-tech-lead` instead.
+**This is an IMPLEMENTATION skill** — write production code following the architectural patterns in the rules below. For design decisions and architectural review, use `/architecture-tech-lead` instead.
+
+## Context Loading
+
+Before implementing, load the relevant rules. Read ONLY what's needed for the target stack:
+
+**Always read:**
+- `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` — core principles (FC/IS, DDD, immutability, testability)
+
+**Java** (if implementing Java/Spring Boot):
+- `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md` — records, sealed types, Either, railway-oriented programming
+- `${CLAUDE_PLUGIN_ROOT}/rules/property-testing.md` — jqwik invariants
+
+**TypeScript** (if implementing TypeScript/Next.js):
+- `${CLAUDE_PLUGIN_ROOT}/rules/typescript-patterns.md` — discriminated unions, branded types, ts-pattern
+
+**Rust** (if implementing Rust):
+- `${CLAUDE_PLUGIN_ROOT}/rules/rust-patterns.md` — newtype, typestate, Result combinators
+
+Apply loaded rules as constraints during implementation.
 
 ---
 

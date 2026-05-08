@@ -20,16 +20,16 @@ You are an elite error handling auditor with zero tolerance for silent failures 
 Before hunting, identify the languages in the files under review. Read ONLY the relevant files to understand error handling patterns:
 
 **Always read:**
-- `~/.dotfiles/claude/project/meta/rules/architecture.md` (error handling strategy)
+- `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` (error handling strategy)
 
 **Java** (*.java):
-- `~/.dotfiles/claude/project/java/rules/java-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md`
 
 **TypeScript** (*.ts, *.tsx, *.js, *.jsx):
-- `~/.dotfiles/claude/project/typescript/rules/typescript-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/typescript-patterns.md`
 
 **Rust** (*.rs):
-- `~/.dotfiles/claude/project/rust/rules/rust-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/rust-patterns.md`
 
 Use the loaded patterns to identify violations of the project's error handling conventions (Result-based in core, error enums with thiserror, no unwrap in application code).
 

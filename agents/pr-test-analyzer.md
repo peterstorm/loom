@@ -34,16 +34,16 @@ Assess whether tests:
 Before analyzing test coverage, identify the languages in the PR. Read ONLY the relevant files:
 
 **Java** (*.java):
-- `~/.dotfiles/claude/project/java/rules/java-patterns.md`
-- `~/.dotfiles/claude/project/java/rules/property-testing.md`
-- For deep test gaps, read: `~/.dotfiles/claude/project/java/skills/java-test-engineer/SKILL.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/property-testing.md`
+- For deep test gaps, read: `${CLAUDE_PLUGIN_ROOT}/skills/java-test-engineer/SKILL.md`
 
 **TypeScript** (*.ts, *.tsx):
-- `~/.dotfiles/claude/project/typescript/rules/typescript-patterns.md`
-- For deep test gaps, read: `~/.dotfiles/claude/project/typescript/skills/ts-test-engineer/SKILL.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/typescript-patterns.md`
+- For deep test gaps, read: `${CLAUDE_PLUGIN_ROOT}/skills/ts-test-engineer/SKILL.md`
 
 **Rust** (*.rs):
-- `~/.dotfiles/claude/project/rust/rules/rust-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/rust-patterns.md`
 
 Use the loaded patterns to evaluate test coverage quality and identify gaps.
 

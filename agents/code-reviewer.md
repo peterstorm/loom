@@ -12,17 +12,17 @@ You are an expert code reviewer. Your primary responsibility is to review code a
 Before reviewing, identify the languages in the files under review. Read ONLY the relevant files:
 
 **Always read:**
-- `~/.dotfiles/claude/project/meta/rules/architecture.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md`
 
 **Java** (*.java):
-- `~/.dotfiles/claude/project/java/rules/java-patterns.md`
-- `~/.dotfiles/claude/project/java/rules/property-testing.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/property-testing.md`
 
 **TypeScript** (*.ts, *.tsx, *.js, *.jsx):
-- `~/.dotfiles/claude/project/typescript/rules/typescript-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/typescript-patterns.md`
 
 **Rust** (*.rs):
-- `~/.dotfiles/claude/project/rust/rules/rust-patterns.md`
+- `${CLAUDE_PLUGIN_ROOT}/rules/rust-patterns.md`
 
 Apply the loaded rules as your review criteria for language-specific patterns.
 
@@ -55,10 +55,9 @@ Rate each issue from 0-100:
 When detecting these patterns, recommend invoking specialized skills:
 
 - **Security/auth code, OWASP concerns** -> `security-expert`
-- **Keycloak/ABAC/JWT/UMA/realm config** -> `keycloak-skill`
 - **Java test quality, missing coverage** -> `java-test-engineer`
 - **TypeScript/React (Vite/Next.js) test quality** -> `ts-test-engineer`
-- **React components, styling, a11y** -> `frontend-design-skill`
+- **React components, styling, a11y** -> `nextjs-frontend-design`
 
 Note: Architecture review is handled directly by `architecture-agent` (auto-launched by `/review-pr` for large PRs). Do NOT recommend delegation to architecture-tech-lead.
 
