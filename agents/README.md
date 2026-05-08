@@ -2,12 +2,7 @@
 
 Agents spawned by loom orchestration (`/loom`, `/review-pr`, `/wave-gate`).
 
-## Shared agents (duplicated in dotfiles)
-
-These agents exist in both this directory and `~/.dotfiles/claude/` because
-symlinks are not supported by the plugin cache. Changes must be synced manually.
-
-**From `~/.dotfiles/claude/project/meta/agents/`:**
+## Review and analysis agents
 
 | Agent | Purpose |
 |-------|---------|
@@ -15,14 +10,13 @@ symlinks are not supported by the plugin cache. Changes must be synced manually.
 | `code-reviewer.md` | General code quality, CLAUDE.md compliance |
 | `code-simplifier.md` | Clarity and FP pattern polish |
 | `comment-analyzer.md` | Comment accuracy and documentation rot |
-| `dotfiles-agent.md` | Dotfiles/NixOS configuration |
 | `pr-test-analyzer.md` | Test coverage quality and completeness |
 | `security-agent.md` | Auth, JWT, OWASP, vulnerability assessment |
 | `silent-failure-hunter.md` | Error handling, Either patterns, silent failures |
 | `skill-content-reviewer.md` | Skill/command file quality review |
 | `type-design-analyzer.md` | Type invariants, sealed types, encapsulation |
 
-**From `~/.dotfiles/claude/project/typescript/agents/`:**
+## Implementation agents
 
 | Agent | Purpose |
 |-------|---------|
@@ -30,15 +24,9 @@ symlinks are not supported by the plugin cache. Changes must be synced manually.
 | `test-engineer.md` | TypeScript test engineering |
 | `ts-test-agent.md` | Vitest, React Testing Library, Playwright |
 
-When editing a shared agent, update both copies and verify with:
+## Orchestration agents
 
-```bash
-diff loom/agents/<name>.md ~/.dotfiles/claude/project/<path>/agents/<name>.md
-```
-
-## Loom-only agents
-
-These agents are specific to loom orchestration and do not exist in dotfiles:
+Specific to loom phase orchestration:
 
 | Agent | Purpose |
 |-------|---------|
