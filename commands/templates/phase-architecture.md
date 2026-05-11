@@ -20,6 +20,20 @@ You are running inside `/loom`. Your plan feeds into the decompose phase, which 
 
 ---
 
+## CRITICAL: Interview + Approach Gate BEFORE Writing the Plan
+
+**Do NOT write the plan on the first pass.** The user wants to be involved in shaping the architecture, not just approving a completed plan.
+
+You will run THREE stages before writing the plan:
+
+1. **Read the spec + explore the codebase** silently.
+2. **Interview** — ask ALL the questions listed below, batched across multiple `AskUserQuestion` calls (4 per call max).
+3. **Approach gate** — present 2-3 viable approaches with a trade-off table via `AskUserQuestion` (with previews), let the user pick one.
+
+Only THEN write the plan, informed by all three. Skip a specific interview question only if the spec or codebase exploration gives a confident, explicit answer. When in doubt, ask.
+
+---
+
 ## Process
 
 ### 1. Read the Specification
@@ -36,9 +50,75 @@ You are running inside `/loom`. Your plan feeds into the decompose phase, which 
 - Understand the tech stack in use
 - Note architectural constraints from existing code
 
-### 3. Evaluate Approaches
+### 3. Interview the User — Ask ALL Questions
 
-For significant decisions, present 2-3 options with trade-offs. Recommend optimal approach with justification.
+Use `AskUserQuestion` with multiple-choice options where possible. Batch across multiple calls (4 per call max). **Cover every topic below** — skip a specific question only if the spec or codebase exploration gives a confident, explicit answer.
+
+**Required interview topics:**
+
+1. **Codebase constraints** — Surface specific files/modules/patterns you found. Ask which the user wants you to conform to, which to extend, which are off-limits.
+2. **Testability bar** — Pure functional core (90%+ unit testable without mocks) vs. pragmatic mix (mocks at boundaries OK) vs. integration-first (real systems wherever possible). This shapes the entire design.
+3. **NFR primary optimization axis** — Optimize for: simplicity / performance / extensibility / shipping speed / operational cost. Force a single primary axis; secondary axes can be listed but the primary dictates trade-offs.
+4. **Concurrency & state model** — Stateless-per-request, in-memory state, persistent state, distributed state? Sync vs. async processing? Real-time vs. eventual consistency?
+5. **Data model & persistence** — New tables/collections? Reuse existing? Migration strategy? Retention?
+6. **Sensitive boundaries** — Trust/security boundaries this design crosses (auth, external APIs, sensitive data, file uploads, command exec, deserialization). Flag for `/security-expert` if so.
+7. **Tech preference signals** — Libraries/frameworks/patterns explicitly preferred or avoided beyond what's already in the codebase.
+8. **Observability requirements** — Logging level, metrics, tracing, audit events. Failure visibility.
+9. **Error-handling philosophy** — Either/Result types end-to-end, exceptions at boundaries, or pragmatic mix? Retry/backoff strategy?
+10. **Backwards compatibility & migration** — Is this greenfield, brownfield extension, or rewrite? Are there in-flight users/data to preserve? Feature flag rollout?
+11. **Deployment & environments** — Anything in the design that affects how this ships (build, runtime, infra dependencies, env config)?
+12. **Out-of-scope architecture concerns** — What does the user explicitly want kept out of this design? (multi-tenancy, i18n, advanced caching, etc.)
+
+Group related topics into single `AskUserQuestion` calls when natural (e.g., testability + error-handling fit together; data model + concurrency fit together).
+
+### 4. Approach Gate — Present Trade-offs, Let User Pick
+
+Identify **2-3 viable architectural approaches** for the feature. For each, work out:
+
+- How it works (1-2 sentences)
+- Pros and cons (3 each, concrete)
+- Testability impact
+- Fit with the existing codebase
+- Complexity / effort estimate
+
+Present them via `AskUserQuestion` with a single question and 2-3 options. **Use the `preview` field on each option** to show the full trade-off in monospace — this is what the user will compare side-by-side. Example preview format:
+
+```
+Approach A: Event-driven queue
+
+How: Producer writes to queue, consumers process async.
+
+Pros:
++ Decoupled; back-pressure is natural
++ Horizontal scaling trivial
++ Failure isolation per consumer
+
+Cons:
+- Adds queue infra dependency
+- Harder to reason about ordering
+- More moving parts to test
+
+Testability: Consumer is pure given message; producer side
+              needs integration test.
+
+Fit: We already use Bull elsewhere — pattern is familiar.
+
+Effort: ~2 days
+```
+
+State which approach you recommend in the question text and give a 1-sentence justification. Let the user pick.
+
+**If the user picks an approach you did NOT recommend, take it.** Don't argue.
+
+### 5. Design the Architecture Based on Chosen Approach
+
+Now that the approach is locked, flesh out the plan:
+
+- Define component boundaries and responsibilities
+- Design data flow between components
+- Specify complete file structure (files to create/modify)
+- Order implementation into dependency-based phases (waves)
+- Address security, performance, testability per component
 
 Apply your preloaded architecture knowledge:
 - FP principles (pure functions, immutability, push I/O to edges)
@@ -46,15 +126,7 @@ Apply your preloaded architecture knowledge:
 - Testability (functional core / imperative shell)
 - Stack-specific patterns (Java records/sealed types/Either OR TypeScript discriminated unions/ts-pattern)
 
-### 4. Design the Architecture
-
-- Define component boundaries and responsibilities
-- Design data flow between components
-- Specify complete file structure (files to create/modify)
-- Order implementation into dependency-based phases
-- Consider security, performance, testability per component
-
-### 5. Write the Plan Document
+### 6. Write the Plan Document
 
 **Output location:** `.claude/plans/{date_slug}.md`
 
@@ -70,18 +142,23 @@ Find the loom plugin directory (`ls -d "$HOME/.claude/plugins/cache/plugins/loom
 | **Architectural Decisions** | `plan_context` quoted to impl agents |
 | **Testing Strategy** | `new_tests_required` per component |
 
+Record the chosen approach (and the interview decisions that shaped it) under `## Architectural Decisions` so future readers see WHY this approach won.
+
 Commit: `git add .claude/plans/ && git commit -m "plan: {date_slug}"`
 
-**ADR seeds:** For decisions worth recording as ADRs (2+ alternatives evaluated, new dependency, data model change, cross-cutting pattern, or non-obvious invariant), ensure each is captured as a `### AD-N: {Title}` block in the plan's `## Architectural Decisions` section per `references/plan-template.md`. Decompose will turn each AD into a dedicated ADR-writing task in the final wave. Skip ADs for trivial naming or file-placement choices. Do NOT write ADRs yourself in this phase.
+**ADR seeds:** For decisions worth recording as ADRs (2+ alternatives evaluated, new dependency, data model change, cross-cutting pattern, or non-obvious invariant), ensure each is captured as a `### AD-N: {Title}` block in the plan's `## Architectural Decisions` section per `references/plan-template.md`. Decompose will turn each AD into a dedicated ADR-writing task in the final wave. The approach you picked at the gate is almost always one such AD. Skip ADs for trivial naming or file-placement choices. Do NOT write ADRs yourself in this phase.
 
 ---
 
 ## What NOT to Do
 
-- Don't use the review process from your skill (no "Identify Testability Barriers" — there's no code to review yet)
-- Don't produce review-format output (no "Issue/Impact/Root Cause" analysis)
-- Don't write implementation code (that's impl agents' job)
-- Don't design beyond spec scope (check Out of Scope section)
+- Do NOT skip the interview or the approach gate. Both are mandatory.
+- Do NOT write the plan first and gather user input retroactively.
+- Do NOT skip interview topics for speed. The user explicitly wants the full questionnaire.
+- Do NOT use the review process from your skill (no "Identify Testability Barriers" — there's no code to review yet)
+- Do NOT produce review-format output (no "Issue/Impact/Root Cause" analysis)
+- Do NOT write implementation code (that's impl agents' job)
+- Do NOT design beyond spec scope (check Out of Scope section)
 
 ---
 
@@ -90,5 +167,6 @@ Commit: `git add .claude/plans/ && git commit -m "plan: {date_slug}"`
 - Path to created plan file
 - Implementation phases identified (count + names)
 - Key architectural decisions with rationale (captured as `### AD-N` blocks in the plan)
+- Which approach the user picked at the gate (and which you had recommended, if different)
 
 The architecture-agent has the `architecture-tech-lead` skill preloaded which provides FP, DDD, testability, and stack-specific domain knowledge. Use that knowledge to **design**, not to **review**.

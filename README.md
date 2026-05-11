@@ -124,7 +124,9 @@ Skip with `--skip-brainstorm` when scope is already clear.
 
 **Agent:** `specify-agent` (Opus) | **Output:** `.claude/specs/{slug}/spec.md`
 
-Produces a formal specification with:
+**Interactive — full questionnaire.** Before writing, the agent runs a complete interview via `AskUserQuestion` (batched across multiple calls, 4 questions per call max) covering: scenario priorities, scope boundary edges, measurable success criteria, P1 acceptance bars, sensitive failure modes, user-visible error states, data/state lifecycle, permissions & access, external dependencies, out-of-scope clarifications. A topic is only skipped when brainstorm gave a confident, explicit answer for it.
+
+Only after the interview does it write the spec, which includes:
 - User scenarios (Given/When/Then)
 - Functional requirements (FR-001, FR-002, ...)
 - Success criteria and acceptance tests
@@ -144,7 +146,12 @@ Skip with `--skip-clarify` to accept markers as-is.
 
 **Agent:** `architecture-agent` (Opus) | **Output:** `.claude/plans/{slug}.md`
 
-Designs the implementation: module boundaries, data models, patterns (functional core/imperative shell, DDD, Either-based errors), technology choices, and dependency graphs. Preloads the `architecture-tech-lead` skill for domain expertise.
+**Interactive, with full questionnaire and approach gate.** Two checkpoints before the plan is written:
+
+1. **Interview — full questionnaire.** After reading the spec and exploring the codebase silently, the agent runs a complete interview via `AskUserQuestion` (batched across multiple calls, 4 per call max) covering: codebase constraints, testability bar, NFR primary axis, concurrency & state model, data model & persistence, sensitive boundaries, tech preferences, observability, error-handling philosophy, backwards compatibility & migration, deployment & environments, out-of-scope architecture concerns. A topic is only skipped when spec/codebase already answers it confidently.
+2. **Approach gate** — agent identifies 2-3 viable architectural approaches and presents them side-by-side via `AskUserQuestion` previews (how it works / pros / cons / testability / fit / effort). It states a recommendation, but the user picks.
+
+Only after both checkpoints does it write the plan: module boundaries, data models, patterns (functional core/imperative shell, DDD, Either-based errors), technology choices, and dependency graphs. The chosen approach is recorded as an `AD-N` block under Architectural Decisions. Preloads the `architecture-tech-lead` skill for domain expertise.
 
 ### Phase 3.5: Plan Alignment
 
