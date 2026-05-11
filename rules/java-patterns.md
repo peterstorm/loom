@@ -125,6 +125,66 @@ public class OrderProcessor {
 }
 ```
 
+## Ports & Adapters at I/O Boundaries
+See `architecture.md` → "Ports at I/O Boundaries" for when this applies.
+
+The port is an `interface` owned by the domain, typed in domain terms. Adapters live in the shell. Tests use plain in-memory fakes — no Mockito.
+
+```java
+// PORT: owned by the domain, no vendor types in signatures
+public interface OrderRepository {
+    Optional<Order> findById(OrderId id);
+    void save(Order order);
+}
+
+public interface Clock {
+    Instant now();
+}
+
+public interface Cache<V> {
+    Optional<V> get(String key);
+    void put(String key, V value, Duration ttl);
+}
+
+// ADAPTER: real implementation (shell)
+@Repository
+public class JdbcOrderRepository implements OrderRepository {
+    private final JdbcTemplate jdbc;
+
+    public JdbcOrderRepository(JdbcTemplate jdbc) { this.jdbc = jdbc; }
+
+    @Override
+    public Optional<Order> findById(OrderId id) {
+        return jdbc.query("SELECT * FROM orders WHERE id = ?",
+            (rs, n) -> parseOrder(rs), id.value()).stream().findFirst();
+    }
+
+    @Override
+    public void save(Order order) {
+        jdbc.update("INSERT INTO orders ...", /* ... */);
+    }
+}
+
+// TEST FAKE: in-memory, no mocking framework
+public class InMemoryOrderRepository implements OrderRepository {
+    private final Map<OrderId, Order> store = new ConcurrentHashMap<>();
+
+    @Override public Optional<Order> findById(OrderId id) {
+        return Optional.ofNullable(store.get(id));
+    }
+    @Override public void save(Order order) { store.put(order.id(), order); }
+}
+
+// Functional-interface ports collapse to a lambda in tests
+public class FixedClock implements Clock {
+    private final Instant fixed;
+    public FixedClock(Instant fixed) { this.fixed = fixed; }
+    @Override public Instant now() { return fixed; }
+}
+```
+
+Single-method ports (`Clock`, `IdGenerator`) should be `@FunctionalInterface` so tests can pass a lambda. Do not wrap Spring's own abstractions (`CacheManager`, `JdbcTemplate`) in a same-shaped port "for testability" — wrap them in a *domain-shaped* port instead.
+
 ## Railway-Oriented Programming with Either (dk.oister.util)
 ```java
 import dk.oister.util.Either;

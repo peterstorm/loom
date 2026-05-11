@@ -79,8 +79,57 @@ Use branded types when:
 ## API Integrations
 - Separate API calling from response processing
 - Make response processing pure functions
-- Use ports and adapters pattern
+- Use ports and adapters pattern (see below)
 - Test response handling with fixture data
+
+## Ports & Adapters at I/O Boundaries
+See `architecture.md` → "Ports at I/O Boundaries" for when this applies.
+
+Prefer a `type` alias of an object with method signatures over `class` + `interface` — fakes become object literals.
+
+```typescript
+// Port: owned by the domain, types are domain types
+type OrderRepository = {
+  find: (id: OrderId) => Promise<Order | null>;
+  save: (order: Order) => Promise<void>;
+};
+
+type Clock = { now: () => Date };
+
+type Cache<V> = {
+  get: (key: string) => Promise<V | null>;
+  set: (key: string, value: V, ttlSeconds?: number) => Promise<void>;
+};
+
+// Adapter: real implementation (lives in the shell)
+const pgOrderRepository = (pool: Pool): OrderRepository => ({
+  find: async (id) => {
+    const row = await pool.query('SELECT * FROM orders WHERE id = $1', [id]);
+    return row.rows[0] ? parseOrder(row.rows[0]) : null;
+  },
+  save: async (order) => {
+    await pool.query('INSERT INTO orders ...', [/* ... */]);
+  },
+});
+
+// Test fake: plain object literal, no mocking framework
+const fakeOrderRepository = (seed: Order[] = []): OrderRepository => {
+  const store = new Map(seed.map((o) => [o.id, o]));
+  return {
+    find: async (id) => store.get(id) ?? null,
+    save: async (order) => { store.set(order.id, order); },
+  };
+};
+
+// Single-method ports collapse to a function type
+type IdGenerator = () => OrderId;
+const seededIds = (start = 1): IdGenerator => {
+  let n = start;
+  return () => `order-${n++}` as OrderId;
+};
+```
+
+When a port has one method, use a function type (`type Clock = () => Date`) — don't wrap it in an object just to look like an "interface".
 
 ## State Management (Zustand)
 - Keep store actions thin - orchestrate, don't contain logic
