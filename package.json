@@ -1,0 +1,21 @@
+{
+  "name": "@peterstorm/loom",
+  "version": "1.0.1",
+  "description": "Loom orchestration system - multi-phase task decomposition with wave-based parallel execution",
+  "keywords": ["pi-package"],
+  "type": "module",
+  "author": { "name": "peterstorm" },
+  "pi": {
+    "extensions": ["./pi"],
+    "skills": ["./skills", "./commands/nextjs-frontend-design", "./commands/vercel-react-best-practices"],
+    "prompts": ["./commands"]
+  },
+  "dependencies": {
+    "ts-pattern": "^5.9.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*"
+  }
+}

@@ -1,12 +1,15 @@
 /**
- * Extract Write/Edit file paths from a Claude Code JSONL transcript
- * Returns deduplicated, sorted list of absolute file paths modified by agent
+ * Extract Write/Edit file paths from a JSONL transcript.
+ * Supports both Claude Code and pi formats (auto-detected or explicit).
  */
 
-import { parseJsonl, getContentBlocks } from "./types";
+import { parseJsonl, parsePiJsonl, getContentBlocks, detectFormat, type TranscriptFormat } from "./types";
 import { FILE_MODIFYING_TOOLS } from "../config";
 
-export function parseFilesModified(content: string): string[] {
+/** Pi tool names that modify files */
+const PI_FILE_TOOLS = new Set(["write", "edit"]);
+
+function parseClaudeFilesModified(content: string): string[] {
   const files = new Set<string>();
 
   for (const line of parseJsonl(content)) {
@@ -26,4 +29,35 @@ export function parseFilesModified(content: string): string[] {
   }
 
   return [...files].sort();
+}
+
+function parsePiFilesModified(content: string): string[] {
+  const files = new Set<string>();
+
+  for (const entry of parsePiJsonl(content)) {
+    if (entry.type !== "message") continue;
+    const msg = entry.message;
+    if (!msg || msg.role !== "assistant") continue;
+    if (!Array.isArray(msg.content)) continue;
+
+    for (const block of msg.content) {
+      // Pi embeds tool calls in assistant content as { type: "toolCall", name, arguments }
+      if (block.type !== "toolCall") continue;
+      if (!block.name || !PI_FILE_TOOLS.has(block.name)) continue;
+
+      const args = block.arguments as Record<string, unknown> | undefined;
+      const filePath = args?.path ?? args?.file_path;
+
+      if (typeof filePath === "string") {
+        files.add(filePath);
+      }
+    }
+  }
+
+  return [...files].sort();
+}
+
+export function parseFilesModified(content: string, format?: TranscriptFormat): string[] {
+  const fmt = format ?? detectFormat(content);
+  return fmt === "pi" ? parsePiFilesModified(content) : parseClaudeFilesModified(content);
 }

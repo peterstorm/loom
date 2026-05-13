@@ -114,8 +114,20 @@ export const VALID_TRANSITIONS: Record<Phase, Phase[]> = {
   "execute":         ["execute"],
 };
 
-/** Relative path within a repo root */
-const TASK_GRAPH_RELATIVE = ".claude/state/active_task_graph.json";
+/** Detect which harness is running */
+function detectHarness(): "claude" | "pi" {
+  if (process.env.PI_CODING_AGENT_DIR) return "pi";
+  return "claude";
+}
+
+/** Which harness is running */
+export const HARNESS = detectHarness();
+
+/** Relative path within a repo root — configurable via env */
+const TASK_GRAPH_RELATIVE = process.env.LOOM_STATE_PATH
+  ?? (HARNESS === "pi"
+    ? ".pi/state/active_task_graph.json"
+    : ".claude/state/active_task_graph.json");
 
 /** Find task graph by walking up from cwd to git root */
 function findTaskGraphPath(): string {
@@ -137,4 +149,4 @@ function findTaskGraphPath(): string {
 export const TASK_GRAPH_PATH = findTaskGraphPath();
 
 /** Subagent tracking directory */
-export const SUBAGENT_DIR = "/tmp/claude-subagents";
+export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";

@@ -1,9 +1,9 @@
 /**
- * Extract plain text from a Claude Code JSONL transcript
- * Parses assistant messages, tool results, and nested content blocks
+ * Extract plain text from a JSONL transcript.
+ * Supports both Claude Code and pi formats (auto-detected or explicit).
  */
 
-import { parseJsonl, getContentBlocks, type ContentBlock } from "./types";
+import { parseJsonl, parsePiJsonl, getContentBlocks, detectFormat, type ContentBlock, type TranscriptFormat } from "./types";
 
 function extractText(block: ContentBlock): string[] {
   const texts: string[] = [];
@@ -26,7 +26,7 @@ function extractText(block: ContentBlock): string[] {
   return texts;
 }
 
-export function parseTranscript(content: string): string {
+function parseClaudeTranscript(content: string): string {
   const texts: string[] = [];
 
   for (const line of parseJsonl(content)) {
@@ -43,4 +43,34 @@ export function parseTranscript(content: string): string {
   }
 
   return texts.join("\n");
+}
+
+function parsePiTranscript(content: string): string {
+  const texts: string[] = [];
+
+  for (const entry of parsePiJsonl(content)) {
+    if (entry.type !== "message") continue;
+    const msg = entry.message;
+    if (!msg) continue;
+
+    if (typeof msg.content === "string") {
+      texts.push(msg.content);
+      continue;
+    }
+
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === "text" && block.text) {
+          texts.push(block.text);
+        }
+      }
+    }
+  }
+
+  return texts.join("\n");
+}
+
+export function parseTranscript(content: string, format?: TranscriptFormat): string {
+  const fmt = format ?? detectFormat(content);
+  return fmt === "pi" ? parsePiTranscript(content) : parseClaudeTranscript(content);
 }
