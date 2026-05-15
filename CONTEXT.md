@@ -77,8 +77,8 @@ The shared vocabulary between developers and domain experts within a bounded con
 _Avoid_: Glossary (it's more than a glossary — it's the living language of the system)
 
 **Aggregate**:
-A cluster of domain objects treated as a single unit for data changes. Has a root entity that enforces invariants.
-_Avoid_: Entity group, object graph
+An immutable data cluster (root entity + value objects) treated as a single consistency unit. Command functions in the functional core take an aggregate and return a new aggregate plus domain events.
+_Avoid_: Entity group, object graph, mutable domain object
 
 **Value Object**:
 An immutable domain concept defined entirely by its attributes, with no identity. Validates invariants at construction.
@@ -97,10 +97,9 @@ _Avoid_: Result (acceptable in Rust), Optional (different semantics)
 - A **Skill** is loaded into an **Agent** to provide domain expertise
 - **Hooks** enforce invariants on the **State File** — no other actor writes to it
 - A **Spec** contains **Clarification Markers** resolved by the clarify **Phase**
-- The **Functional Core** is separated from the **Imperative Shell** by **Ports**
-- A **Bounded Context** owns its own **Ubiquitous Language** captured in `CONTEXT.md`
-- An **Aggregate** contains **Value Objects** and enforces invariants via its root
-- The **Functional Core** returns **Either** types; the **Imperative Shell** converts them to effects
+- An **Aggregate** is immutable data; command functions in the **Functional Core** produce new instances
+- The **Imperative Shell** orchestrates: load via **Port** → call **Functional Core** → persist via **Port**
+- **Domain Events** are returned by pure command functions; the **Imperative Shell** publishes them
 
 ## Example Dialogue
 

@@ -20,6 +20,23 @@ Apply these principles to all code suggestions, reviews, and implementations.
 
 DDD is not optional decoration — it's how we structure code to match the problem space.
 
+We practice **functional DDD**: the strategic patterns (bounded contexts, ubiquitous language, context mapping) are applied as-is from Evans. The tactical patterns (aggregates, entities, value objects) are adapted to work with the functional core / imperative shell split — aggregates are immutable data + pure functions, not mutable OOP objects.
+
+### How DDD Maps to Functional Core / Imperative Shell
+
+| DDD Concept | Where It Lives | Why |
+|-------------|---------------|-----|
+| Value Objects | Functional core | Pure data, validated at construction, no I/O |
+| Entities (as data) | Functional core | Immutable records identified by ID |
+| Aggregate invariants | Functional core | Pure functions: `(Aggregate, Command) → Either<Error, Aggregate>` |
+| Domain Events | Functional core | Immutable records returned alongside state changes |
+| Domain Services | Functional core | Pure functions that operate across aggregates — no I/O |
+| Repositories (port) | Port definition in core, implementation in shell | Interface is domain-typed; impl is I/O |
+| Use Cases / Application Services | Imperative shell | Orchestrate: load via port → call pure core → persist via port |
+| Anti-Corruption Layers | Imperative shell | Translation between contexts is I/O-adjacent |
+
+The key insight: traditional DDD puts behavior *on* mutable aggregate objects (`order.addItem()`). Functional DDD extracts that behavior into pure functions that take the aggregate as input and return a new aggregate (or an error). The aggregate itself is just data.
+
 ### Ubiquitous Language
 
 - Every domain concept gets ONE name, used everywhere: code, tests, docs, conversations
@@ -36,14 +53,16 @@ Immutable types defined entirely by their attributes. No identity — two value 
 - No setters; produce new instances via transformation methods
 - Equality by value, not reference
 - Use for: money, dates, addresses, email, IDs, measurements, enumerations with behavior
+- Value objects are the primary building blocks of the functional core
 
 ```java
-// Java: record with validation
+// Java: record — immutable by construction, invariants in compact constructor
 public record Money(BigDecimal amount, Currency currency) {
   public Money {
     if (amount.scale() > currency.getDefaultFractionDigits())
       throw new IllegalArgumentException("Scale exceeds currency precision");
   }
+  // Pure transformation — returns new Money, no mutation
   public Money add(Money other) {
     if (!currency.equals(other.currency)) throw new IllegalArgumentException("Currency mismatch");
     return new Money(amount.add(other.amount), currency);
@@ -52,7 +71,7 @@ public record Money(BigDecimal amount, Currency currency) {
 ```
 
 ```typescript
-// TypeScript: branded type with smart constructor
+// TypeScript: branded type with smart constructor returning Either
 type Email = string & { readonly __brand: 'Email' };
 
 function Email(raw: string): Either<ValidationError, Email> {
@@ -64,59 +83,144 @@ function Email(raw: string): Either<ValidationError, Email> {
 
 ### Entities
 
-Objects with identity that persists across state changes. Two entities with the same attributes but different IDs are different.
+Domain objects with identity that persists across state changes. Two entities with the same attributes but different IDs are different.
+
+**In functional DDD, entities are immutable data records** — not mutable objects. "State change" means producing a new instance with updated fields. The entity type carries the identity; pure functions produce new versions.
 
 **Rules:**
 - Identity is assigned at creation and never changes
 - Equality by ID only
-- Mutable state (if any) is encapsulated — changes go through methods that enforce invariants
+- Represented as immutable records/types (Java records, TS readonly types, Rust structs)
+- State transitions are pure functions returning new instances — never mutate in place
 - Keep entities small — push behavior into value objects where possible
+
+```java
+// Entity as immutable record — identity is OrderId
+public record Order(
+  OrderId id,
+  CustomerId customer,
+  List<OrderLine> lines,
+  OrderStatus status,
+  Instant createdAt
+) {
+  public Order {
+    lines = List.copyOf(lines); // defensive immutable copy
+  }
+}
+
+// State transition is a pure function, not a method that mutates
+// See Aggregates section below for the full pattern
+```
 
 ### Aggregates
 
-A cluster of entities and value objects treated as a single unit for data changes. Has a root entity that is the only entry point.
+A cluster of entities and value objects treated as a single unit for consistency. Has a root entity that is the sole external entry point.
+
+**In functional DDD, an aggregate is immutable data + pure command functions.** The traditional `aggregate.doThing()` becomes `doThing(aggregate, command) → Either<Error, AggregateWithEvents>`. This keeps all business logic in the functional core.
 
 **Rules:**
-- External objects reference the aggregate only through the root
-- The root enforces all invariants for the cluster
+- External code references the aggregate only through its root ID
+- All invariants are enforced by pure functions that produce new aggregate instances
 - Transactions don't span aggregates — one aggregate per transaction
 - Reference other aggregates by ID, never by object
 - Keep aggregates small — only group things that MUST be consistent together
 - When in doubt, make it smaller (split, don't merge)
+- Command functions return `Either<Error, Aggregate>` (or a pair of `Aggregate + List<DomainEvent>`)
 
 **Sizing heuristic:** If two things can be independently updated by different users without conflict, they're separate aggregates.
 
 ```java
-// Order is the aggregate root — LineItems can't be accessed directly
-public final class Order {
-  private final OrderId id;
-  private final List<LineItem> items; // internal; not exposed as mutable
-  private OrderStatus status;
+// Aggregate root is an immutable record
+public record Order(
+  OrderId id,
+  CustomerId customer,
+  List<OrderLine> lines,
+  OrderStatus status
+) {
+  public Order {
+    lines = List.copyOf(lines);
+  }
+}
 
-  public Either<OrderError, Order> addItem(Product product, Quantity qty) {
-    if (status != OrderStatus.DRAFT)
-      return left(new OrderError.NotModifiable(id, status));
-    // invariant: no duplicate products
-    if (items.stream().anyMatch(li -> li.product().equals(product)))
-      return left(new OrderError.DuplicateProduct(product.id()));
-    return right(new Order(id, append(items, new LineItem(product, qty)), status));
+// Command functions are pure — in a dedicated module, not methods on the record.
+// Takes aggregate + command data → returns Either<Error, NewAggregate>
+public final class OrderCommands {
+  private OrderCommands() {} // namespace, not an object
+
+  public static Either<OrderError, Order> addItem(Order order, ProductId product, Quantity qty) {
+    if (order.status() != OrderStatus.DRAFT)
+      return left(new OrderError.NotModifiable(order.id(), order.status()));
+    if (order.lines().stream().anyMatch(li -> li.productId().equals(product)))
+      return left(new OrderError.DuplicateProduct(product));
+    var newLines = append(order.lines(), new OrderLine(product, qty));
+    return right(new Order(order.id(), order.customer(), newLines, order.status()));
+  }
+
+  public static Either<OrderError, OrderWithEvents> submit(Order order) {
+    if (order.status() != OrderStatus.DRAFT)
+      return left(new OrderError.NotModifiable(order.id(), order.status()));
+    if (order.lines().isEmpty())
+      return left(new OrderError.EmptyOrder(order.id()));
+    var submitted = new Order(order.id(), order.customer(), order.lines(), OrderStatus.SUBMITTED);
+    var event = new OrderPlaced(order.id(), order.customer(), order.lines(), Instant.now());
+    return right(new OrderWithEvents(submitted, List.of(event)));
+  }
+}
+
+// Pairs aggregate state with events produced by a command
+public record OrderWithEvents(Order order, List<DomainEvent> events) {}
+```
+
+```typescript
+// TypeScript equivalent — aggregate as readonly type, commands as functions
+type Order = Readonly<{
+  id: OrderId;
+  customer: CustomerId;
+  lines: readonly OrderLine[];
+  status: 'draft' | 'submitted' | 'paid';
+}>;
+
+const addItem = (order: Order, product: ProductId, qty: Quantity): Result<Order, OrderError> =>
+  order.status !== 'draft'
+    ? err({ kind: 'not-modifiable', orderId: order.id, status: order.status })
+    : order.lines.some(li => li.productId === product)
+    ? err({ kind: 'duplicate-product', productId: product })
+    : ok({ ...order, lines: [...order.lines, { productId: product, qty }] });
+```
+
+**The imperative shell orchestrates:**
+```java
+// Shell: load → pure command → persist. No business logic here.
+public class OrderUseCases {
+  private final OrderRepository orders;
+  private final EventPublisher events;
+
+  public void submitOrder(OrderId id) {
+    var order = orders.findById(id).orElseThrow();
+    OrderCommands.submit(order)                        // pure
+      .peek(result -> {
+        orders.save(result.order());                   // I/O
+        events.publishAll(result.events());             // I/O
+      })
+      .peekLeft(error -> { throw error.toException(); });
   }
 }
 ```
 
 ### Domain Events
 
-Record that something meaningful happened in the domain. Past tense. Immutable.
+Immutable record of something meaningful that happened in the domain. Past tense.
 
 **Rules:**
 - Named in past tense using domain language: `OrderPlaced`, `PaymentFailed`, `ShipmentDispatched`
-- Immutable — they are facts that happened; never modified after creation
-- Contain all data needed to understand what happened (no lazy loading)
-- Published by the aggregate that owns the state change
-- Consumed by other aggregates or bounded contexts to react
-- Use for cross-aggregate and cross-context communication (not synchronous method calls)
+- Immutable value objects — they are facts that happened; never modified after creation
+- Contain all data needed to understand what happened (no lazy loading, no entity references)
+- **Returned by pure aggregate command functions** — not "published" from inside the core
+- The imperative shell receives them as return values and handles publication (I/O)
+- Used for cross-aggregate and cross-context communication
 
 ```java
+// Domain event is a value object — immutable record
 public record OrderPlaced(
   OrderId orderId,
   CustomerId customerId,
@@ -125,6 +229,15 @@ public record OrderPlaced(
   Instant occurredAt
 ) implements DomainEvent {}
 ```
+
+**Event flow in FC/IS:**
+```
+pure command function → returns (NewState, List<Event>)
+       ↓
+imperative shell → persists NewState, publishes Events (both I/O)
+```
+
+The functional core never calls a publisher, bus, or repository. It returns data. The shell decides what to do with it.
 
 ### Bounded Contexts
 
@@ -139,34 +252,78 @@ Explicit boundaries within which a domain model is consistent and terms have pre
 
 **Context relationships:**
 
-| Pattern | When to Use |
-|---------|-------------|
-| **Published Language** | Upstream defines a stable schema (OpenAPI, events) for consumers |
-| **Anti-Corruption Layer** | Downstream translates upstream's model into its own terms |
-| **Shared Kernel** | Two contexts co-own a small set of types (use sparingly — tight coupling) |
-| **Conformist** | Downstream accepts upstream's model as-is (OK for trivial integrations) |
+| Pattern | Where It Lives | When to Use |
+|---------|---------------|-------------|
+| **Published Language** | Between contexts | Upstream defines a stable schema (OpenAPI, events) for consumers |
+| **Anti-Corruption Layer** | Imperative shell | Downstream translates upstream's model into its own domain terms |
+| **Shared Kernel** | Functional core (shared types) | Two contexts co-own a small set of types (use sparingly — tight coupling) |
+| **Conformist** | Imperative shell | Downstream accepts upstream's model as-is (OK for trivial integrations) |
+
+ACLs live in the imperative shell because translation between external and internal representations is I/O-adjacent work — parsing external formats, calling external APIs, mapping foreign types.
 
 ### Repositories
 
 Collection-like interface for retrieving and persisting aggregates. One repository per aggregate root.
 
+A repository is a **port** (see "Ports at I/O Boundaries" below). The interface is defined in domain terms, owned by the domain. The implementation is infrastructure that lives in the imperative shell.
+
 **Rules:**
-- Return whole aggregates, not fragments
-- Interface defined in the domain (a port); implementation is infrastructure
+- Return whole immutable aggregates, not fragments
 - Methods use domain types: `findByOrderId(OrderId)`, not `findById(String)`
-- No query logic leaking into the domain — complex queries go in read-model projections
+- No query logic leaking into the domain — complex queries go in dedicated read-model projections
 - In-memory fake for tests; real implementation for production
+- See "Ports at I/O Boundaries" for the full port shape and fake pattern
 
-### Domain Services
+### Domain Services (Pure)
 
-Stateless operations that don't belong to any single entity or value object. Use sparingly.
+Stateless pure functions that operate across multiple aggregates or value objects. The "domain service" in functional DDD is just a function in the functional core.
 
 **Rules:**
-- Named using domain verbs: `TransferMoney`, `CalculateShipping`, not `MoneyService`
-- Stateless — no fields, all data comes through parameters
-- Lives in the functional core if it has no I/O
-- Lives in the imperative shell if it orchestrates I/O (but then it's really a use-case, not a domain service)
-- If you're creating a service because you don't know where to put logic, reconsider — it usually belongs on an entity or value object
+- Named using domain verbs: `calculateShipping`, `assessCreditRisk`, not `ShippingService`
+- Pure functions — all data comes through parameters, no I/O
+- Lives in the functional core, always. If it needs I/O, it's a **use case** in the imperative shell, not a domain service.
+- Returns `Either<Error, Result>` for operations that can fail
+- If you're creating one because you don't know where to put logic, reconsider — it usually belongs on a value object or in an aggregate command function
+
+```java
+// Domain service: pure function operating across aggregates
+public final class ShippingCalculator {
+  private ShippingCalculator() {}
+
+  // Pure: takes data from two aggregates, returns a value object
+  public static Either<ShippingError, ShippingCost> calculate(
+      Order order, Warehouse warehouse, ShippingZone zone) {
+    if (!warehouse.canFulfill(order.lines()))
+      return left(new ShippingError.InsufficientStock(warehouse.id()));
+    var weight = order.lines().stream()
+      .map(OrderLine::weight)
+      .reduce(Weight.ZERO, Weight::add);
+    return zone.costForWeight(weight); // pure calculation
+  }
+}
+```
+
+**Not a domain service** (this is a use case / shell orchestrator):
+```java
+// BAD: "domain service" that does I/O — this is a use case
+public class ShippingService {
+  private final WarehouseRepo warehouses; // I/O dependency = not a domain service
+  public ShippingCost calculate(OrderId orderId) { /* loads, calculates, saves */ }
+}
+
+// GOOD: use case in the shell, calls pure domain service
+public class CalculateShippingUseCase {
+  private final OrderRepository orders;
+  private final WarehouseRepository warehouses;
+
+  public ShippingCost execute(OrderId orderId, WarehouseId warehouseId) {
+    var order = orders.findById(orderId).orElseThrow();         // I/O
+    var warehouse = warehouses.findById(warehouseId).orElseThrow(); // I/O
+    return ShippingCalculator.calculate(order, warehouse, zone)  // pure
+      .getOrElseThrow(ShippingError::toException);              // shell converts
+  }
+}
+```
 
 ### Strategic Design Checklist
 
@@ -175,11 +332,14 @@ When modeling a new feature:
 1. **Identify the bounded context** — does this belong to an existing context or need a new one?
 2. **Define the ubiquitous language** — what terms does the domain expert use? Capture in `CONTEXT.md`.
 3. **Find the aggregates** — what are the consistency boundaries? What must change together atomically?
-4. **Keep aggregates small** — only group what must be transactionally consistent
-5. **Identify value objects** — what has no identity? Make these the building blocks.
-6. **Define domain events** — what state changes do other contexts need to know about?
-7. **Map context relationships** — how does this context talk to others? ACL? Published language? Shared kernel?
-8. **Place I/O at edges** — repositories and adapters implement ports; the domain is pure.
+4. **Keep aggregates small** — only group what must be transactionally consistent.
+5. **Model as immutable data** — aggregates and entities are records, not mutable objects.
+6. **Extract command functions** — `(Aggregate, Command) → Either<Error, Aggregate + Events>` in the functional core.
+7. **Identify value objects** — what has no identity? Make these the building blocks.
+8. **Define domain events** — what state changes do other contexts need to know about? Returned by commands, published by shell.
+9. **Map context relationships** — how does this context talk to others? ACL? Published language? Shared kernel?
+10. **Define ports** — repositories and external adapters as interfaces in domain terms. Shell implements them.
+11. **Write use cases** — thin shell orchestrators: load → call pure core → persist. No business logic.
 
 ## Testability Requirements
 
@@ -274,8 +434,12 @@ See `java-patterns.md`, `typescript-patterns.md`, `rust-patterns.md` for languag
 - Catch-all exception handlers
 - Mock-heavy tests (indicates missing port or wrong port shape)
 
-**DDD:**
+**DDD / Functional DDD:**
 - Anemic domain models (entities with only getters/setters, all logic in services)
+- **Mutable aggregates** (aggregate methods that mutate `this` instead of returning new instances)
+- **"Domain services" that do I/O** (if it touches a DB or API, it's a use case in the shell, not a domain service)
+- **Business logic in the shell** (use cases should be load → pure call → persist, nothing more)
+- **Events published from inside the core** (core returns events as data; shell publishes them)
 - God aggregates (aggregate that grows to encompass everything — split it)
 - Cross-aggregate object references (use IDs, not object refs)
 - Transactions spanning multiple aggregates (redesign the boundary)
