@@ -32,7 +32,7 @@ We practice **functional DDD**: the strategic patterns (bounded contexts, ubiqui
 | Domain Events | Functional core | Immutable records returned alongside state changes |
 | Domain Services | Functional core | Pure functions that operate across aggregates — no I/O |
 | Repositories (port) | Port definition in core, implementation in shell | Interface is domain-typed; impl is I/O |
-| Use Cases / Application Services | Imperative shell | Orchestrate: load via port → call pure core → persist via port |
+| Use Cases / Shell Orchestrators | Imperative shell | Orchestrate: load via port → call pure core → persist via port |
 | Anti-Corruption Layers | Imperative shell | Translation between contexts is I/O-adjacent |
 
 The key insight: traditional DDD puts behavior *on* mutable aggregate objects (`order.addItem()`). Functional DDD extracts that behavior into pure functions that take the aggregate as input and return a new aggregate (or an error). The aggregate itself is just data.
@@ -191,7 +191,7 @@ const addItem = (order: Order, product: ProductId, qty: Quantity): Result<Order,
 **The imperative shell orchestrates:**
 ```java
 // Shell: load → pure command → persist. No business logic here.
-public class OrderUseCases {
+public class OrderOrchestrator {
   private final OrderRepository orders;
   private final EventPublisher events;
   private final Clock clock;                              // I/O dependency
@@ -282,7 +282,7 @@ Stateless pure functions that operate across multiple aggregates or value object
 **Rules:**
 - Named using domain verbs: `calculateShipping`, `assessCreditRisk`, not `ShippingService`
 - Pure functions — all data comes through parameters, no I/O
-- Lives in the functional core, always. If it needs I/O, it's a **use case** in the imperative shell, not a domain service.
+- Lives in the functional core, always. If it needs I/O, it's a **shell orchestrator**, not a domain service.
 - Returns `Either<Error, Result>` for operations that can fail
 - If you're creating one because you don't know where to put logic, reconsider — it usually belongs on a value object or in an aggregate command function
 
@@ -304,16 +304,16 @@ public final class ShippingCalculator {
 }
 ```
 
-**Not a domain service** (this is a use case / shell orchestrator):
+**Not a domain service** (this is a shell orchestrator):
 ```java
-// BAD: "domain service" that does I/O — this is a use case
+// BAD: "domain service" that does I/O — this is a shell orchestrator
 public class ShippingService {
   private final WarehouseRepo warehouses; // I/O dependency = not a domain service
   public ShippingCost calculate(OrderId orderId) { /* loads, calculates, saves */ }
 }
 
-// GOOD: use case in the shell, calls pure domain service
-public class CalculateShippingUseCase {
+// GOOD: orchestrator in the shell, calls pure domain service
+public class CalculateShippingOrchestrator {
   private final OrderRepository orders;
   private final WarehouseRepository warehouses;
 
@@ -340,7 +340,7 @@ When modeling a new feature:
 8. **Define domain events** — what state changes do other contexts need to know about? Returned by commands, published by shell.
 9. **Map context relationships** — how does this context talk to others? ACL? Published language? Shared kernel?
 10. **Define ports** — repositories and external adapters as interfaces in domain terms. Shell implements them.
-11. **Write use cases** — thin shell orchestrators: load → call pure core → persist. No business logic.
+11. **Write shell orchestrators** — thin orchestrators: load → call pure core → persist. No business logic.
 
 ## Testability Requirements
 
@@ -411,7 +411,7 @@ If a candidate seam delivers neither, skip the port and call the concrete thing.
 **Do NOT port-ify:**
 - Pure domain functions — just import and call them
 - Value-object constructors / smart constructors
-- Internal orchestrators or use-cases inside the shell
+- Internal orchestrators inside the shell
 - Vendor abstractions you'd wrap *just* to add a layer (double indirection)
 - Seams used in only one place with no test-double need
 
@@ -438,8 +438,8 @@ See `java-patterns.md`, `typescript-patterns.md`, `rust-patterns.md` for languag
 **DDD / Functional DDD:**
 - Anemic domain models (types are data bags with no invariants, all logic in external services — note: immutable records with constructor invariants + separate pure command functions are NOT anemic)
 - **Mutable aggregates** (aggregate methods that mutate `this` instead of returning new instances)
-- **"Domain services" that do I/O** (if it touches a DB or API, it's a use case in the shell, not a domain service)
-- **Business logic in the shell** (use cases should be load → pure call → persist, nothing more)
+- **"Domain services" that do I/O** (if it touches a DB or API, it's a shell orchestrator, not a domain service)
+- **Business logic in the shell** (orchestrators should be load → pure call → persist, nothing more)
 - **Events published from inside the core** (core returns events as data; shell publishes them)
 - God aggregates (aggregate that grows to encompass everything — split it)
 - Cross-aggregate object references (use IDs, not object refs)

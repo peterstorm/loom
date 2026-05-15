@@ -94,10 +94,10 @@ items.stream()
 
 ## Functional Core, Imperative Shell
 ```java
-// SHELL (use case): Handles I/O, orchestrates. Named after the operation, not "Service".
+// SHELL (orchestrator): Handles I/O, orchestrates. Named after the operation, not "Service".
 // In Spring, @Service is fine for the shell — it's the DI annotation, not a DDD term.
 @Service
-public class ProcessOrderUseCase {
+public class ProcessOrderOrchestrator {
     private final OrderRepository repo;
     private final CustomerRepository customerRepo;
 

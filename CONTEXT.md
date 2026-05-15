@@ -62,7 +62,11 @@ _Avoid_: Domain layer (too vague), business logic layer
 
 **Imperative Shell**:
 Thin orchestration layer that handles I/O (DB, network, filesystem) and calls the functional core.
-_Avoid_: Service layer, infrastructure layer
+_Avoid_: Service layer, infrastructure layer, use case layer
+
+**Shell Orchestrator**:
+A class or function in the imperative shell that coordinates a single operation: load via port → call pure core → persist via port. Contains no business logic.
+_Avoid_: Service, UseCase, Handler (for this concept), Manager
 
 **Port**:
 A narrow interface owned by the domain for each real I/O collaborator. Adapters implement it; tests substitute with fakes.
