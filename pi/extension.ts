@@ -51,14 +51,9 @@ export default function (pi: ExtensionAPI) {
   // auto-discovery (the manifest covers skills/ and commands/ already,
   // but we also register agents dir for the subagent tool).
 
-  pi.on("resources_discover", () => ({
-    skillPaths: [
-      join(PACKAGE_ROOT, "skills"),
-    ],
-    promptPaths: [
-      join(PACKAGE_ROOT, "commands"),
-    ],
-  }));
+  // Resource paths handled by package.json "pi" manifest.
+  // Only register paths NOT covered there.
+  // pi.on("resources_discover", () => ({ ... }));
 
   // ─── PreToolUse Guards (tool_call event) ──────────────────────────────
 
