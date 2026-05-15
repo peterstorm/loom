@@ -316,28 +316,32 @@ impl OrderState for Draft {}
 impl OrderState for Submitted {}
 impl OrderState for Paid {}
 
+// State transitions are pure — timestamps come from the caller (imperative shell)
 impl Order<Draft> {
-    fn submit(self) -> Order<Submitted> {
+    fn submit(self, now: Instant) -> Order<Submitted> {
         Order {
             id: self.id,
             items: self.items,
-            state: Submitted { submitted_at: Instant::now() },
+            state: Submitted { submitted_at: now },
         }
     }
 }
 
 impl Order<Submitted> {
-    fn pay(self, tx_id: TransactionId) -> Order<Paid> {
+    fn pay(self, tx_id: TransactionId, now: Instant) -> Order<Paid> {
         Order {
             id: self.id,
             items: self.items,
-            state: Paid { paid_at: Instant::now(), tx_id },
+            state: Paid { paid_at: now, tx_id },
         }
     }
 }
 
 // Compile error: can't pay a draft order
-// let order = Order::<Draft>::new().pay(tx_id); // won't compile
+// let order = Order::<Draft>::new().pay(tx_id, now); // won't compile
+
+// Shell provides the clock (I/O at the edge):
+// let submitted = draft_order.submit(clock.now());
 ```
 
 ## Builder Pattern with Consuming Self

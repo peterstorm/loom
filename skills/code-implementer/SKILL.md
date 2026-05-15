@@ -94,7 +94,7 @@ After writing code, verify:
 fetch (I/O) -> transform (pure) -> persist (I/O)
 ```
 
-### Service Method Structure
+### Use Case Structure (Shell)
 ```
 1. Fetch required data (shell - I/O)
 2. Call pure function with data (core - testable)

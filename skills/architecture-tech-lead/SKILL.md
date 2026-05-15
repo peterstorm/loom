@@ -60,7 +60,7 @@ Ask the user (one question at a time):
 - Challenge aggregate boundaries — "Can these change independently? Then they're separate aggregates."
 - Distinguish value objects from entities — "Does this have identity, or is it defined by attributes?"
 - Check bounded context ownership — "Who owns this concept? Same word, different meaning = different contexts."
-- Verify invariant placement — "Where is this rule enforced? Constructors and aggregate roots, not callers."
+- Verify invariant placement — "Where is this rule enforced? Constructors and pure aggregate command functions, not callers."
 
 **Update CONTEXT.md inline:** When a domain term is defined or its meaning clarified during this step, update `CONTEXT.md` immediately — don't batch updates for later. Add the term with a tight definition, _Avoid_ list, and update Relationships if new connections emerge.
 

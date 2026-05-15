@@ -57,9 +57,9 @@ When analyzing a type:
 
 ### 5. Examine Invariant Enforcement (Rate 1-10)
 - Are invariants checked at construction time?
-- Are all mutation points guarded?
+- Are state transitions modeled as pure functions returning new instances (not mutation)?
 - Is it impossible to create invalid instances?
-- Are runtime checks appropriate and comprehensive?
+- For mutable types (where justified): are all mutation points guarded?
 
 ## Output Format
 
@@ -103,10 +103,11 @@ When analyzing a type:
 
 ## Anti-patterns to Flag
 
-- Anemic domain models with no behavior
+- Anemic domain models (logic lives entirely in external services; types are just data bags with no invariants — note: immutable records with invariant-enforcing constructors and separate pure command functions are NOT anemic)
 - Types that expose mutable internals
 - Invariants enforced only through documentation
 - Types with too many responsibilities
 - Missing validation at construction boundaries
 - Types that rely on external code to maintain invariants
 - Using primitive types where domain types would be clearer (primitive obsession)
+- Mutable aggregates (state transitions should produce new instances, not mutate)

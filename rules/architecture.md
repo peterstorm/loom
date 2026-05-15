@@ -156,13 +156,13 @@ public final class OrderCommands {
     return right(new Order(order.id(), order.customer(), newLines, order.status()));
   }
 
-  public static Either<OrderError, OrderWithEvents> submit(Order order) {
+  public static Either<OrderError, OrderWithEvents> submit(Order order, Instant now) {
     if (order.status() != OrderStatus.DRAFT)
       return left(new OrderError.NotModifiable(order.id(), order.status()));
     if (order.lines().isEmpty())
       return left(new OrderError.EmptyOrder(order.id()));
     var submitted = new Order(order.id(), order.customer(), order.lines(), OrderStatus.SUBMITTED);
-    var event = new OrderPlaced(order.id(), order.customer(), order.lines(), Instant.now());
+    var event = new OrderPlaced(order.id(), order.customer(), order.lines(), now);
     return right(new OrderWithEvents(submitted, List.of(event)));
   }
 }
@@ -194,10 +194,11 @@ const addItem = (order: Order, product: ProductId, qty: Quantity): Result<Order,
 public class OrderUseCases {
   private final OrderRepository orders;
   private final EventPublisher events;
+  private final Clock clock;                              // I/O dependency
 
   public void submitOrder(OrderId id) {
     var order = orders.findById(id).orElseThrow();
-    OrderCommands.submit(order)                        // pure
+    OrderCommands.submit(order, clock.now())              // pure (clock value passed in)
       .peek(result -> {
         orders.save(result.order());                   // I/O
         events.publishAll(result.events());             // I/O
@@ -435,7 +436,7 @@ See `java-patterns.md`, `typescript-patterns.md`, `rust-patterns.md` for languag
 - Mock-heavy tests (indicates missing port or wrong port shape)
 
 **DDD / Functional DDD:**
-- Anemic domain models (entities with only getters/setters, all logic in services)
+- Anemic domain models (types are data bags with no invariants, all logic in external services — note: immutable records with constructor invariants + separate pure command functions are NOT anemic)
 - **Mutable aggregates** (aggregate methods that mutate `this` instead of returning new instances)
 - **"Domain services" that do I/O** (if it touches a DB or API, it's a use case in the shell, not a domain service)
 - **Business logic in the shell** (use cases should be load → pure call → persist, nothing more)

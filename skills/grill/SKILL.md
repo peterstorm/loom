@@ -72,7 +72,7 @@ Challenge domain modeling decisions against DDD fundamentals:
 | **Aggregate boundaries** | "What's the consistency boundary here? Can these two things change independently?" |
 | **Value Object vs Entity** | "Does this concept have identity, or is it defined entirely by its attributes?" |
 | **Bounded Context ownership** | "Who owns this concept? If two contexts use the same word differently, we need to split it." |
-| **Invariant enforcement** | "Where is this invariant checked? If it's not in a constructor or aggregate root, it can be violated." |
+| **Invariant enforcement** | "Where is this invariant checked? If it's not in a constructor or aggregate command function, it can be violated." |
 | **Ubiquitous Language** | "Would a domain expert use this word? If not, we're leaking implementation into the model." |
 
 ### DDD Modeling Challenges
