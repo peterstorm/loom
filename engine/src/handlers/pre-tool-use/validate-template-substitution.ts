@@ -9,9 +9,9 @@ import { validateTemplateSubstitution } from "../../core/validate-template-subst
 
 const handler: HookHandler = async (stdin) => {
   const input: PreToolUseInput = JSON.parse(stdin);
-  if (input.tool_name !== "Task") return { kind: "allow" };
+  if (input.tool_name !== "Task" && input.tool_name !== "subagent") return { kind: "allow" };
 
-  const prompt = (input.tool_input?.prompt as string) ?? "";
+  const prompt = (input.tool_input?.prompt as string) ?? (input.tool_input?.task as string) ?? "";
   return validateTemplateSubstitution(prompt);
 };
 

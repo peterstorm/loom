@@ -16,11 +16,11 @@ const handler: HookHandler = async (stdin) => {
     process.stderr.write(`validate-phase-order: failed to parse stdin: ${(e as Error).message}\n`);
     return { kind: "allow" };
   }
-  if (input.tool_name !== "Task") return { kind: "allow" };
+  if (input.tool_name !== "Task" && input.tool_name !== "subagent") return { kind: "allow" };
 
   return validatePhaseOrder({
-    agentType: stripNamespace((input.tool_input?.subagent_type as string) ?? ""),
-    prompt: (input.tool_input?.prompt as string) ?? "",
+    agentType: stripNamespace((input.tool_input?.subagent_type as string) ?? (input.tool_input?.agent as string) ?? ""),
+    prompt: (input.tool_input?.prompt as string) ?? (input.tool_input?.task as string) ?? "",
   });
 };
 

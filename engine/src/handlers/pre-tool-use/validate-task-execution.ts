@@ -9,10 +9,10 @@ import { validateTaskExecution } from "../../core/validate-task-execution";
 
 const handler: HookHandler = async (stdin) => {
   const input: PreToolUseInput = JSON.parse(stdin);
-  if (input.tool_name !== "Task") return { kind: "allow" };
+  if (input.tool_name !== "Task" && input.tool_name !== "subagent") return { kind: "allow" };
 
   return validateTaskExecution({
-    prompt: (input.tool_input?.prompt as string) ?? "",
+    prompt: (input.tool_input?.prompt as string) ?? (input.tool_input?.task as string) ?? "",
     description: (input.tool_input?.description as string) ?? "",
   });
 };
