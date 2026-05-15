@@ -14,9 +14,9 @@ Pure computation, in-memory state, no I/O. Always deepenable — merge the modul
 
 ### 2. Local-Substitutable
 
-Dependencies that have local test stand-ins (PGLite for Postgres, in-memory filesystem, embedded Redis). Deepenable if the stand-in exists. The deepened module is tested with the stand-in running in the test suite. The seam is internal; no port at the module's external interface.
+Dependencies where a real-engine test stand-in exists (Testcontainers Postgres, Testcontainers Redis, real SQLite). Deepenable when the stand-in catches the same bugs as production. The seam is the port interface; the stand-in is an adapter used in integration tests.
 
-**In our model:** Use Testcontainers (not H2/embedded fakes) for repository tests. The seam is the port interface; the Testcontainers adapter is used in integration tests.
+**In our model:** Use Testcontainers (not H2/PGLite/embedded fakes) for repository and infrastructure tests — in-process substitutes lie about schema, index, and migration behavior. The port interface is the seam; the Testcontainers-backed adapter is used in integration tests, the in-memory fake is used in unit tests of the shell orchestrator.
 
 ### 3. Own Services Across Network (Port/Adapter)
 
@@ -24,11 +24,11 @@ Your own services across a network boundary (microservices, internal APIs). Defi
 
 **In our model:** This is exactly our port pattern. The port is domain-typed, owned by the consumer. The adapter adapts the vendor/transport to it. In-memory fake ships with the port for tests.
 
-### 4. True External (Mock)
+### 4. True External (Fake)
 
-Third-party services (Stripe, Twilio, etc.) you don't control. The deepened module takes the external dependency as an injected port; tests provide a mock/fake adapter.
+Third-party services (Stripe, Twilio, etc.) you don't control. The deepened module takes the external dependency as an injected port; tests provide a fake adapter.
 
-**In our model:** Same as port pattern, but the adapter may need WireMock or MSW for integration tests alongside the in-memory fake.
+**In our model:** Same as port pattern. The port is domain-typed. For unit tests, use an in-memory fake. For integration tests, use WireMock (Java) or MSW (TypeScript) to verify real HTTP contract. No mocking frameworks — plain fakes that implement the port interface.
 
 ## Seam Discipline
 

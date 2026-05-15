@@ -49,7 +49,7 @@ What maintainers get from depth. Change, bugs, knowledge, and verification conce
 |------------|------------|------------------|
 | Module | Any unit in FC or IS | Scale-agnostic; applies to value objects, aggregates, orchestrators, ports |
 | Interface | Port interface / aggregate command function signature | The surface callers and tests see |
-| Seam | Port boundary at I/O edge | Where the functional core meets the imperative shell is the primary seam |
+| Seam | Port at I/O edge | Where the functional core meets the imperative shell is the primary seam |
 | Adapter | Port implementation | In-memory fake (test) and real implementation (production) |
 | Deep module | Well-designed functional core function | Rich behaviour, small interface, trivially testable |
 | Shallow module | Pass-through orchestrator or wrapper port | Interface as complex as implementation — consider deletion |

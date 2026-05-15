@@ -56,10 +56,10 @@ The depth/seam vocabulary maps to our existing patterns:
 | Depth Concept | Our Pattern | Connection |
 |---------------|------------|------------|
 | Deep module with small interface | **Functional Core** | Pure functions with clean input/output — deep by nature |
-| Seam with adapter | **Port** at I/O boundary | Our ports ARE seams; adapters satisfy them |
+| Seam with adapter | **Port** at I/O edge | Our ports ARE seams; adapters satisfy them |
 | Shallow pass-through | Anti-pattern: wrapper-for-the-sake-of-wrapping | Our rules say "skip the port and call the concrete thing" |
 | Internal seam | Private test fake | A deep module can have internal seams its own tests use |
-| Locality | **Aggregate** boundary | Invariants concentrate in one place (pure command functions) |
+| Locality | **Aggregate** consistency boundary | Invariants concentrate in one place (pure command functions) |
 
 When proposing deepenings, frame them in terms of our FC/IS + DDD model:
 - "This logic is scattered across 3 shell orchestrators — extract a pure domain function in the functional core"
@@ -106,9 +106,9 @@ Once the user picks a candidate, drop into an interactive design session. Walk t
 - What are the constraints any new interface must satisfy?
 - What dependencies does this module have? Classify them (see [DEEPENING.md](./references/DEEPENING.md)):
   - **In-process** (pure, no I/O) → merge freely
-  - **Local-substitutable** (PGLite, in-memory FS) → internal seam, test with stand-in
+  - **Local-substitutable** (Testcontainers Postgres, in-memory FS) → port interface as seam, real-engine stand-in for integration tests
   - **Port/Adapter** (own services across network) → port at seam, in-memory fake for tests
-  - **True external** (Stripe, Twilio) → injected port, mock adapter
+  - **True external** (Stripe, Twilio) → injected port, fake adapter
 - What sits behind the seam? What's the interface?
 - What tests survive the refactor? What gets deleted?
 
