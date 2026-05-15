@@ -19,10 +19,11 @@ Don't duplicate the agent's work. If user wants a code review, point them to `/r
 
 ## Context Loading
 
-Before designing, load the relevant architectural rules. Read ONLY what's needed:
+Before designing, load the relevant architectural rules and domain context. Read ONLY what's needed:
 
 **Always read:**
 - `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` — core principles (FC/IS, DDD, immutability)
+- `CONTEXT.md` at the repo root (if it exists) — ubiquitous language and domain relationships
 
 **Java** (if designing for Java/Spring Boot):
 - `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md` — records, sealed types, Either, railway-oriented programming
@@ -46,12 +47,22 @@ Ask the user (one question at a time):
 - What are the domain concepts? (nouns = entities, verbs = operations)
 - What side effects exist? (DB, APIs, filesystem, time, randomness)
 
+**Terminology check:** If the user introduces a term that conflicts with `CONTEXT.md`, call it out immediately. If they use a vague or overloaded term, propose a precise canonical term from the glossary or suggest adding a new one.
+
 ### Step 2: Model the Domain
 
 - Identify domain entities, value objects, aggregates
 - Map bounded contexts if multiple domains involved
 - Define the "functional core" — pure business logic, no I/O
 - Define the "imperative shell" — thin orchestration layer handling I/O
+
+**DDD validation during modeling:**
+- Challenge aggregate boundaries — "Can these change independently? Then they're separate aggregates."
+- Distinguish value objects from entities — "Does this have identity, or is it defined by attributes?"
+- Check bounded context ownership — "Who owns this concept? Same word, different meaning = different contexts."
+- Verify invariant placement — "Where is this rule enforced? Constructors and aggregate roots, not callers."
+
+**Update CONTEXT.md inline:** When a domain term is defined or its meaning clarified during this step, update `CONTEXT.md` immediately — don't batch updates for later. Add the term with a tight definition, _Avoid_ list, and update Relationships if new connections emerge.
 
 ### Step 3: Evaluate Approaches
 
