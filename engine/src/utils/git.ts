@@ -161,3 +161,9 @@ export function countAssertions(diffContent: string): number {
 
   return count;
 }
+
+/** List untracked files in src/test (or equivalent test directories) */
+export function listUntrackedTestFiles(): string[] {
+  const result = exec("git ls-files --others --exclude-standard -- src/test test tests __tests__ spec").trim();
+  return result ? result.split("\n").filter(Boolean) : [];
+}

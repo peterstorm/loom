@@ -149,15 +149,26 @@ function collectDiff(filesModified: string[], startSha: string | undefined): str
     if (combined.trim()) return combined;
   }
 
-  // Fallback: SHA-based or branch-based diff
+  // Fallback: SHA-based or branch-based diff + untracked test files
+  const parts: string[] = [];
+
   if (startSha) {
-    return [git.diff(startSha, "HEAD"), git.diff(), git.diffStaged()].join("\n");
+    parts.push(git.diff(startSha, "HEAD"), git.diff(), git.diffStaged());
+  } else {
+    const branch = git.defaultBranch();
+    const base = git.mergeBase(branch);
+    parts.push(base ? git.diff(base, "HEAD") : git.diff("HEAD~1", "HEAD"));
+    parts.push(git.diff(), git.diffStaged());
   }
 
-  const branch = git.defaultBranch();
-  const base = git.mergeBase(branch);
-  const committed = base ? git.diff(base, "HEAD") : git.diff("HEAD~1", "HEAD");
-  return [committed, git.diff(), git.diffStaged()].join("\n");
+  // Also include untracked test files (common when agent creates new test files
+  // without committing — e.g. pi subagents working on unstaged branches)
+  const untrackedTests = git.listUntrackedTestFiles();
+  for (const f of untrackedTests) {
+    parts.push(git.diffUntracked(f));
+  }
+
+  return parts.join("\n");
 }
 
 const handler: HookHandler = async (stdin) => {

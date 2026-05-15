@@ -20,7 +20,7 @@ function parseClaudeFilesModified(content: string): string[] {
       if (!FILE_MODIFYING_TOOLS.has(name)) continue;
 
       const input = block.input as Record<string, unknown> | undefined;
-      const filePath = input?.file_path;
+      const filePath = input?.file_path ?? input?.path;
 
       if (typeof filePath === "string") {
         files.add(filePath);
