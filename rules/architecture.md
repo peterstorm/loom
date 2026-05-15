@@ -191,12 +191,12 @@ const addItem = (order: Order, product: ProductId, qty: Quantity): Result<Order,
 **The imperative shell orchestrates:**
 ```java
 // Shell: load → pure command → persist. No business logic here.
-public class OrderOrchestrator {
+public class SubmitOrderOrchestrator {
   private final OrderRepository orders;
   private final EventPublisher events;
   private final Clock clock;                              // I/O dependency
 
-  public void submitOrder(OrderId id) {
+  public void execute(OrderId id) {
     var order = orders.findById(id).orElseThrow();
     OrderCommands.submit(order, clock.now())              // pure (clock value passed in)
       .peek(result -> {
@@ -207,6 +207,15 @@ public class OrderOrchestrator {
   }
 }
 ```
+
+**Orchestrator naming:**
+
+| Pattern | When | Example |
+|---------|------|---------|
+| **Operation-named** (single method) | Complex operations, cross-aggregate coordination, saga-like flows | `CalculateShippingOrchestrator`, `SubmitOldIccOrchestrator` |
+| **Aggregate-named** (multiple methods) | Simple thin operations on the same aggregate that share ports | `OrderOrchestrator` with `.submit()`, `.cancel()`, `.addItem()` |
+
+Both are acceptable. The real anti-patterns are `XxxService` naming and putting business logic in the orchestrator. When an operation grows complex enough to warrant its own class, extract it.
 
 ### Domain Events
 
@@ -280,7 +289,7 @@ A repository is a **port** (see "Ports at I/O Boundaries" below). The interface 
 Stateless pure functions that operate across multiple aggregates or value objects. The "domain service" in functional DDD is just a function in the functional core.
 
 **Rules:**
-- Named using domain verbs: `calculateShipping`, `assessCreditRisk`, not `ShippingService`
+- Named using domain verbs: `calculateShipping`, `assessCreditRisk`, not `ShippingService`. In Java (where a class is needed to hold static functions), the class is just a namespace — name the function as the verb (`calculate`), and use a domain-noun class as the container (`ShippingCalculator.calculate(...)`)
 - Pure functions — all data comes through parameters, no I/O
 - Lives in the functional core, always. If it needs I/O, it's a **shell orchestrator**, not a domain service.
 - Returns `Either<Error, Result>` for operations that can fail
@@ -420,7 +429,15 @@ If a candidate seam delivers neither, skip the port and call the concrete thing.
 - Domain-typed: takes/returns your types, not vendor types (`Order`, not `RedisHash`)
 - Stable: the port belongs to the consumer; the adapter adapts the vendor to it, never the reverse
 - Real fake: every port ships with an in-memory implementation used by the core's tests
+- Return meaningful types: when a port method produces a domain-meaningful result, return it — prefer `Either<Error, OrderPlaced>` over `Either<Error, Void>` or `Either<Error, Boolean>`. Infrastructure write methods (`save`, `publish`) that have no meaningful return value may use `void` and throw on infrastructure failure (per the shell error handling strategy).
 
+**Placement:**
+- Port interface lives in `domain/port/` — it is owned by and visible to the domain and orchestrators
+- Adapter lives in `infra/{system}/` — it implements the port, imports vendor SDKs
+- In-memory fake lives in `src/test/.../testfixtures/` — ships with the port for orchestrator tests
+- Orchestrators depend on the port interface. They never import from `infra/` directly. Spring DI wires the adapter at runtime.
+
+See `java-patterns.md` → "Package Structure" for the full layout convention.
 See `java-patterns.md`, `typescript-patterns.md`, `rust-patterns.md` for language-specific shapes.
 
 ## Anti-Patterns to Flag
@@ -448,6 +465,9 @@ See `java-patterns.md`, `typescript-patterns.md`, `rust-patterns.md` for languag
 - Domain types named after technical concepts (`UserDTO`, `OrderEntity`) instead of domain language
 - Missing ubiquitous language (team uses different words for the same concept)
 - `Service` or `Manager` suffix on what should be a domain concept with real behavior
+- Shell orchestrators in a `service/` package (use `orchestrator/` — "service" is overloaded with DDD domain services and Spring stereotypes)
+- `XxxService` naming for orchestrators (use operation or aggregate names — see "Orchestrator naming" table above)
+- Orchestrators importing from `infra/` directly (they should depend on port interfaces in `domain/port/`)
 
 ## When to Invoke `/architecture-tech-lead`
 

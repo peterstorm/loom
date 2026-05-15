@@ -65,6 +65,9 @@ When proposing deepenings, frame them in terms of our FC/IS + DDD model:
 - "This logic is scattered across 3 shell orchestrators — extract a pure domain function in the functional core"
 - "These 5 small validators are shallow; merge into one aggregate command function with a rich Either error type"
 - "This port wraps another port — one adapter, hypothetical seam, delete the indirection"
+- "This orchestrator imports from infra/ directly — introduce a port in domain/port/, move the concrete to infra/"
+
+Refer to the package structure in `java-patterns.md` or `typescript-patterns.md` → "Package Structure" when proposing where things move.
 
 ---
 

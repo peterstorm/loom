@@ -39,7 +39,7 @@ When the user uses a term that conflicts with the existing language in `CONTEXT.
 
 When the user uses vague or overloaded terms, propose a precise canonical term:
 
-> "You're saying 'service' — do you mean the **Imperative Shell** (I/O orchestration), a **Port** (interface at the boundary), or something else entirely? Those are different concepts in our architecture."
+> "You're saying 'service' — do you mean a **shell orchestrator** (sequences I/O via ports + pure logic), a **Port** (interface at the I/O boundary), or a **domain function** (pure logic in the functional core)? Those are different concepts in our architecture — and 'service' isn't any of them."
 
 ### Discuss Concrete Scenarios
 

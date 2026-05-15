@@ -48,13 +48,15 @@ Before writing code, verify:
 
 ### Structure Code as Functional Core + Imperative Shell
 
-**Imperative Shell (thin)**:
+Follow the package structure defined in `java-patterns.md` or `typescript-patterns.md` → "Package Structure".
+
+**Imperative Shell (`orchestrator/` or `tools/`)** — thin:
 - Fetches data (DB, APIs)
 - Calls pure functions
 - Persists results
 - Handles I/O errors
 
-**Functional Core (where logic lives)**:
+**Functional Core (`domain/`)** — where logic lives:
 - Pure functions, no side effects
 - Receives all data as parameters
 - Returns new data, never mutates

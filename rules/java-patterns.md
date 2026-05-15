@@ -5,6 +5,50 @@ globs: "**/*.java"
 
 # Java 21+ Architecture Patterns
 
+## Package Structure
+
+Organize packages to mirror the Functional Core / Imperative Shell / Infrastructure layering. Dependency arrows point inward: infra → domain, orchestrator → domain. Never outward.
+
+```
+{base}/
+├── domain/              Pure functional core (no Spring annotations, no I/O)
+│   ├── model/           Value objects, entities, sealed types, records
+│   ├── port/            Port interfaces (seams — owned by domain, implemented in infra)
+│   └── error/           Error types (sealed hierarchies)
+│   └── *.java           Pure logic classes (static functions, no state)
+│
+├── orchestrator/        Shell orchestrators (sequence ports + pure domain logic)
+│                        Named after the operation or aggregate, never "Service".
+│                        Depends on domain/port/ interfaces, never imports infra/ directly.
+│
+├── tools/ | api/        Outermost shell (framework entry points: MCP tools, REST controllers)
+│                        Also orchestrators — they call orchestrator/ or ports directly.
+│
+├── infra/               Adapters (port implementations) + vendor SDK wrappers
+│   └── {system}/        Grouped by external system (rator/, kafka/, oracle/, etc.)
+│
+├── auth/                Authentication/identity boundary (I/O — may implement a port)
+└── config/              Spring Boot configuration, properties, security, bean wiring
+```
+
+**Import rules (enforced by convention or ArchUnit):**
+- `domain/` imports nothing from `orchestrator/`, `infra/`, `tools/`, or `config/`
+- `orchestrator/` imports from `domain/` (ports + model + logic). Never from `infra/`.
+- `infra/` imports from `domain/port/` (to implement) and vendor SDKs. Never from `orchestrator/`.
+- `tools/` imports from `domain/` and `orchestrator/`. Never from `infra/`.
+- No class in `domain/` carries `@Component`, `@Service`, `@Repository`, or any Spring annotation.
+
+**Why `orchestrator/` cannot import `infra/`:**
+The orchestrator depends on port *interfaces* (e.g., `SimCardPort`). Spring DI injects the adapter (e.g., `RatorSimCardAdapter`) at runtime. This means:
+- Tests substitute a plain in-memory fake — no Mockito, no WireMock.
+- Swapping the backend only changes `infra/` — orchestrators don't recompile.
+- The compiler enforces the boundary: any `import ...infra...` in an orchestrator is a visible violation.
+
+**Naming:**
+- Orchestrators: named after the operation (`SubmitOldIccOrchestrator`) or aggregate (`OrderOrchestrator`) — never `XxxService`. Use operation-named for complex/cross-aggregate flows; aggregate-named for simple thin operations sharing the same ports.
+- Adapters: named after the system + role (`RatorSimCardAdapter`, `OracleWorkflowAdapter`)
+- Ports: named after the domain capability (`SimCardPort`, `CooldownPort`)
+
 ## Records for Immutable Domain Models
 ```java
 // Prefer records over classes for DTOs and value objects
@@ -77,24 +121,19 @@ public class PricingRules {
 
 ## Iteration: Streams over For Loops
 ```java
-// BAD: imperative for loop
-for (var item : items) {
-    process(item);
-}
-
-// GOOD: stream/forEach
-items.forEach(this::process);
-
-// GOOD: stream with transformation
+// GOOD: stream with transformation (pure — preferred)
 items.stream()
     .filter(Item::isActive)
     .map(this::transform)
     .toList();
+
+// OK in shell: forEach for side-effectful operations (I/O)
+items.forEach(this::persist);
 ```
 
 ## Functional Core, Imperative Shell
 ```java
-// SHELL (orchestrator): Handles I/O, orchestrates. Named after the operation, not "Service".
+// SHELL (orchestrator): Handles I/O, orchestrates. Named after the operation or aggregate, never "Service".
 // In Spring, @Service is fine for the shell — it's the DI annotation, not a DDD term.
 @Service
 public class ProcessOrderOrchestrator {

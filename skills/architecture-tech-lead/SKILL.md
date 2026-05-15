@@ -54,7 +54,9 @@ Ask the user (one question at a time):
 - Identify domain entities, value objects, aggregates
 - Map bounded contexts if multiple domains involved
 - Define the "functional core" — pure business logic, no I/O
-- Define the "imperative shell" — thin orchestration layer handling I/O
+- Define the "imperative shell" — thin shell orchestrators handling I/O via ports
+
+Refer to the package structure in `java-patterns.md` or `typescript-patterns.md` → "Package Structure" for where each concept lives (`domain/`, `orchestrator/`, `infra/`).
 
 **DDD validation during modeling:**
 - Challenge aggregate boundaries — "Can these change independently? Then they're separate aggregates."

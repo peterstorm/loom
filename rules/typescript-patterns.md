@@ -5,6 +5,61 @@ globs: "**/*.{ts,tsx}"
 
 # TypeScript/Next.js Architecture Patterns
 
+## Package Structure
+
+Organize modules to mirror the Functional Core / Imperative Shell / Infrastructure layering. Dependency arrows point inward: infra → domain, orchestrator → domain. Never outward.
+
+### General TypeScript Backend
+
+```
+src/
+├── domain/              Pure functional core (no I/O, no framework imports)
+│   ├── model/           Types, branded types, discriminated unions
+│   ├── port/            Port type aliases (seams — owned by domain, implemented in infra)
+│   └── error/           Result/Error types
+│   └── *.ts             Pure logic functions
+│
+├── orchestrator/        Shell orchestrators (sequence ports + pure domain logic)
+│                        Named after the operation, not "service".
+│                        Imports from domain/ only. Never from infra/.
+│
+├── api/ | routes/       Outermost shell (framework entry points: Express handlers, tRPC routers)
+│                        Also orchestrators — call orchestrator/ or ports directly.
+│
+├── infra/               Adapters (port implementations) + SDK wrappers
+│   └── {system}/        Grouped by external system (stripe/, postgres/, redis/)
+│
+└── config/              Environment, feature flags, DI wiring
+```
+
+### Next.js App Router
+
+```
+app/                     Route handlers (outermost shell — framework entry points)
+├── api/                 API routes
+└── (pages)/             Server components as orchestrators
+
+src/ | lib/
+├── domain/              Pure functional core
+│   ├── model/           Types, Zod schemas (source of truth)
+│   ├── port/            Port type aliases
+│   └── *.ts             Pure logic
+├── orchestrator/        Shell orchestrators (server actions often live here)
+├── infra/               Adapters
+└── config/              Environment, providers
+```
+
+**Import rules (enforced by convention or eslint-plugin-boundaries):**
+- `domain/` imports nothing from `orchestrator/`, `infra/`, `api/`, or `config/`
+- `orchestrator/` imports from `domain/` (ports + model + logic). Never from `infra/`.
+- `infra/` imports from `domain/port/` (to implement) and vendor SDKs. Never from `orchestrator/`.
+- `api/` / `app/` imports from `domain/` and `orchestrator/`. Never from `infra/`.
+
+**Naming:**
+- Orchestrators: named after the operation (`calculateShipping`) or aggregate (`orderOrchestrator`) — never `XxxService`
+- Adapters: named after the system + role (`stripePaymentAdapter`, `pgOrderAdapter`)
+- Ports: named after the domain capability (`OrderRepository`, `PaymentGateway`)
+
 ## Discriminated Unions with ts-pattern
 ```typescript
 // Domain state modeling - exhaustive, type-safe
@@ -94,7 +149,8 @@ type OrderRepository = {
   save: (order: Order) => Promise<void>;
 };
 
-type Clock = { now: () => Date };
+// Single-method ports are just function types
+type Clock = () => Date;
 
 type Cache<V> = {
   get: (key: string) => Promise<V | null>;
@@ -123,13 +179,14 @@ const fakeOrderRepository = (seed: Order[] = []): OrderRepository => {
 
 // Single-method ports collapse to a function type
 type IdGenerator = () => OrderId;
+
 const seededIds = (start = 1): IdGenerator => {
   let n = start;
   return () => `order-${n++}` as OrderId;
 };
 ```
 
-When a port has one method, use a function type (`type Clock = () => Date`) — don't wrap it in an object just to look like an "interface".
+When a port has one method, use a function type — don't wrap it in an object just to look like an "interface". Multi-method ports use object types.
 
 ## State Management (Zustand)
 - Keep store actions thin - orchestrate, don't contain logic
@@ -140,7 +197,7 @@ When a port has one method, use a function type (`type Clock = () => Date`) — 
 ```typescript
 // Minimal logic in route handlers
 // Extract request validation into pure functions
-// Route handlers: parse -> call service -> format response
+// Route handlers: parse -> call orchestrator -> format response
 
 export async function POST(req: Request) {
     const body = await req.json();
@@ -149,8 +206,8 @@ export async function POST(req: Request) {
     const validated = validateOrderRequest(body);
     if (!validated.success) return Response.json(validated.error, { status: 400 });
 
-    // Call service (I/O boundary)
-    const result = await orderService.create(validated.data);
+    // Orchestrate (I/O boundary)
+    const result = await createOrder(validated.data);
 
     // Pure response formatting
     return Response.json(formatOrderResponse(result));
