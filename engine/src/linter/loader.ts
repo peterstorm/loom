@@ -10,6 +10,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { type RegexRule, type Rule, type Tier, type RuleSource, isRegexRule } from "./types";
 import { analyzeRegex } from "./safety";
+import { PROGRAMMATIC_RULES } from "./programmatic/index";
 
 // --- Public API ---
 
@@ -28,7 +29,8 @@ import { analyzeRegex } from "./safety";
 export function loadRules(
   defaultDir: string,
   projectDir: string | null,
-  tier: Tier
+  tier: Tier,
+  options?: { includeProgrammatic?: boolean }
 ): RegexRule[] | Rule[] {
   // Validate defaultDir exists (installation error if missing)
   if (!existsSync(defaultDir)) {
@@ -55,6 +57,18 @@ export function loadRules(
   // Apply tier filtering
   if (tier === "immediate") {
     return enabled.filter(isRegexRule);
+  }
+
+  // Full tier: include programmatic rules (also subject to project overrides)
+  if (options?.includeProgrammatic !== false) {
+    const programmaticEnabled = PROGRAMMATIC_RULES.filter((rule) => {
+      // Check if a project rule disabled this programmatic rule by name
+      const override = projectRules.find((p) => p.name === rule.name);
+      if (override && !override.enabled) return false;
+      return rule.enabled;
+    });
+
+    return [...enabled, ...programmaticEnabled];
   }
 
   return enabled;

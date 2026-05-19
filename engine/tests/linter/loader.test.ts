@@ -52,7 +52,7 @@ describe("loadRules", () => {
       writeRule(defaultDir, "rule1.json", makeValidRule({ name: "rule-one" }));
       writeRule(defaultDir, "rule2.json", makeValidRule({ name: "rule-two", pattern: "foo" }));
 
-      const rules = loadRules(defaultDir, null, "full");
+      const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false });
 
       expect(rules).toHaveLength(2);
       expect(rules.every((r) => r.source === "default")).toBe(true);
@@ -65,7 +65,7 @@ describe("loadRules", () => {
       writeFileSync(join(defaultDir, "README.md"), "# Not a rule");
       writeFileSync(join(defaultDir, "notes.txt"), "Some notes");
 
-      const rules = loadRules(defaultDir, null, "full");
+      const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false });
 
       expect(rules).toHaveLength(1);
       expect(rules[0].name).toBe("valid-rule");
@@ -75,7 +75,7 @@ describe("loadRules", () => {
       writeRule(defaultDir, "default.json", makeValidRule({ name: "default-rule" }));
       writeRule(projectDir, "project.json", makeValidRule({ name: "project-rule", pattern: "bar" }));
 
-      const rules = loadRules(defaultDir, projectDir, "full");
+      const rules = loadRules(defaultDir, projectDir, "full", { includeProgrammatic: false });
 
       const projectRules = rules.filter((r) => r.source === "project");
       expect(projectRules).toHaveLength(1);
@@ -86,7 +86,7 @@ describe("loadRules", () => {
       // defaultDir exists but has no json files
       writeFileSync(join(defaultDir, "readme.md"), "empty");
 
-      const rules = loadRules(defaultDir, null, "full");
+      const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false });
 
       expect(rules).toHaveLength(0);
     });
@@ -107,7 +107,7 @@ describe("loadRules", () => {
         fixHint: "Project hint",
       }));
 
-      const rules = loadRules(defaultDir, projectDir, "full");
+      const rules = loadRules(defaultDir, projectDir, "full", { includeProgrammatic: false });
 
       expect(rules).toHaveLength(1);
       expect(rules[0].name).toBe("no-console");
@@ -121,7 +121,7 @@ describe("loadRules", () => {
       writeRule(defaultDir, "default.json", makeValidRule({ name: "default-rule" }));
       writeRule(projectDir, "extra.json", makeValidRule({ name: "extra-rule", pattern: "debugger" }));
 
-      const rules = loadRules(defaultDir, projectDir, "full");
+      const rules = loadRules(defaultDir, projectDir, "full", { includeProgrammatic: false });
 
       expect(rules).toHaveLength(2);
       expect(rules.map((r) => r.name).sort()).toEqual(["default-rule", "extra-rule"]);
@@ -137,7 +137,7 @@ describe("loadRules", () => {
         description: "Overridden B",
       }));
 
-      const rules = loadRules(defaultDir, projectDir, "full");
+      const rules = loadRules(defaultDir, projectDir, "full", { includeProgrammatic: false });
 
       expect(rules).toHaveLength(3);
       const ruleB = rules.find((r) => r.name === "rule-b")!;
@@ -160,7 +160,7 @@ describe("loadRules", () => {
         enabled: false,
       }));
 
-      const rules = loadRules(defaultDir, projectDir, "full");
+      const rules = loadRules(defaultDir, projectDir, "full", { includeProgrammatic: false });
 
       // Disabled rule is excluded from results — zero leakage
       expect(rules).toHaveLength(0);
@@ -172,7 +172,7 @@ describe("loadRules", () => {
       writeRule(defaultDir, "b.json", makeValidRule({ name: "rule-b", pattern: "bbb" }));
       writeRule(projectDir, "disable-a.json", makeValidRule({ name: "rule-a", enabled: false }));
 
-      const rules = loadRules(defaultDir, projectDir, "full");
+      const rules = loadRules(defaultDir, projectDir, "full", { includeProgrammatic: false });
 
       expect(rules).toHaveLength(1);
       expect(rules[0].name).toBe("rule-b");
@@ -184,7 +184,7 @@ describe("loadRules", () => {
         enabled: false,
       }));
 
-      const rules = loadRules(defaultDir, null, "full");
+      const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false });
 
       expect(rules).toHaveLength(0);
     });
@@ -211,7 +211,7 @@ describe("loadRules", () => {
         pattern: "foo",
       }));
 
-      const rules = loadRules(defaultDir, null, "full");
+      const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false });
 
       expect(rules).toHaveLength(1);
     });
@@ -231,7 +231,7 @@ describe("loadRules", () => {
     it("null projectDir only loads defaults", () => {
       writeRule(defaultDir, "rule.json", makeValidRule({ name: "default-only" }));
 
-      const rules = loadRules(defaultDir, null, "full");
+      const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false });
 
       expect(rules).toHaveLength(1);
       expect(rules[0].source).toBe("default");
@@ -241,7 +241,7 @@ describe("loadRules", () => {
       writeRule(defaultDir, "rule.json", makeValidRule({ name: "default-only" }));
       const nonExistent = join(tmpdir(), "does-not-exist-" + Date.now());
 
-      const rules = loadRules(defaultDir, nonExistent, "full");
+      const rules = loadRules(defaultDir, nonExistent, "full", { includeProgrammatic: false });
 
       expect(rules).toHaveLength(1);
       expect(rules[0].source).toBe("default");
@@ -263,13 +263,13 @@ describe("loadRules", () => {
     it("throws on malformed JSON", () => {
       writeFileSync(join(defaultDir, "bad.json"), "{ invalid json!!!");
 
-      expect(() => loadRules(defaultDir, null, "full")).toThrow(/Malformed JSON/);
+      expect(() => loadRules(defaultDir, null, "full", { includeProgrammatic: false })).toThrow(/Malformed JSON/);
     });
 
     it("throws on JSON that is not an object", () => {
       writeFileSync(join(defaultDir, "array.json"), "[1, 2, 3]");
 
-      expect(() => loadRules(defaultDir, null, "full")).toThrow(/expected a JSON object/);
+      expect(() => loadRules(defaultDir, null, "full", { includeProgrammatic: false })).toThrow(/expected a JSON object/);
     });
 
     it("throws on missing required fields", () => {
@@ -278,7 +278,7 @@ describe("loadRules", () => {
         // missing name, description, etc.
       }));
 
-      expect(() => loadRules(defaultDir, null, "full")).toThrow(/must be a non-empty string/);
+      expect(() => loadRules(defaultDir, null, "full", { includeProgrammatic: false })).toThrow(/must be a non-empty string/);
     });
 
     it("throws on missing pattern for regex rule", () => {
@@ -292,7 +292,7 @@ describe("loadRules", () => {
         // missing pattern
       }));
 
-      expect(() => loadRules(defaultDir, null, "full")).toThrow(
+      expect(() => loadRules(defaultDir, null, "full", { includeProgrammatic: false })).toThrow(
         /regex rule must have a 'pattern' string/
       );
     });
@@ -303,7 +303,7 @@ describe("loadRules", () => {
         pattern: "(a+)+$",  // classic ReDoS
       }));
 
-      expect(() => loadRules(defaultDir, null, "full")).toThrow(/unsafe regex pattern/);
+      expect(() => loadRules(defaultDir, null, "full", { includeProgrammatic: false })).toThrow(/unsafe regex pattern/);
     });
 
     it("throws on unknown rule kind", () => {
@@ -312,7 +312,7 @@ describe("loadRules", () => {
         kind: "unknown-kind",
       }));
 
-      expect(() => loadRules(defaultDir, null, "full")).toThrow(/unknown rule kind/);
+      expect(() => loadRules(defaultDir, null, "full", { includeProgrammatic: false })).toThrow(/unknown rule kind/);
     });
 
     it("throws on programmatic rules in JSON", () => {
@@ -325,7 +325,7 @@ describe("loadRules", () => {
         enabled: true,
       });
 
-      expect(() => loadRules(defaultDir, null, "full")).toThrow(
+      expect(() => loadRules(defaultDir, null, "full", { includeProgrammatic: false })).toThrow(
         /programmatic rules cannot be defined in JSON/
       );
     });
@@ -341,7 +341,7 @@ describe("loadRules", () => {
         enabled: true,
       }));
 
-      expect(() => loadRules(defaultDir, null, "full")).toThrow(
+      expect(() => loadRules(defaultDir, null, "full", { includeProgrammatic: false })).toThrow(
         /all extensions must be strings/
       );
     });
@@ -357,7 +357,7 @@ describe("loadRules", () => {
         enabled: "true",
       }));
 
-      expect(() => loadRules(defaultDir, null, "full")).toThrow(
+      expect(() => loadRules(defaultDir, null, "full", { includeProgrammatic: false })).toThrow(
         /'enabled' must be a boolean/
       );
     });
@@ -370,7 +370,7 @@ describe("loadRules", () => {
       const { existsSync } = require("node:fs");
       if (!existsSync(realDefaultDir)) return;
 
-      const rules = loadRules(realDefaultDir, null, "full");
+      const rules = loadRules(realDefaultDir, null, "full", { includeProgrammatic: false });
 
       expect(rules.length).toBeGreaterThan(0);
       expect(rules.every((r) => r.source === "default")).toBe(true);
@@ -392,7 +392,7 @@ describe("loadRules", () => {
         enabled: true,
       });
 
-      const rules = loadRules(defaultDir, null, "full") as RegexRule[];
+      const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false }) as RegexRule[];
 
       expect(rules).toHaveLength(1);
       const rule = rules[0];
@@ -412,7 +412,7 @@ describe("loadRules", () => {
       delete (ruleData as any).flags;
       writeRule(defaultDir, "noflag.json", ruleData);
 
-      const rules = loadRules(defaultDir, null, "full") as RegexRule[];
+      const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false }) as RegexRule[];
 
       expect(rules[0].flags).toBe("");
     });
@@ -425,7 +425,7 @@ describe("loadRules", () => {
         flags: 123,
       }));
 
-      expect(() => loadRules(defaultDir, null, "full")).toThrow(
+      expect(() => loadRules(defaultDir, null, "full", { includeProgrammatic: false })).toThrow(
         /'flags' must be a string/
       );
     });
@@ -436,7 +436,7 @@ describe("loadRules", () => {
         flags: ["g", "i"],
       }));
 
-      expect(() => loadRules(defaultDir, null, "full")).toThrow(
+      expect(() => loadRules(defaultDir, null, "full", { includeProgrammatic: false })).toThrow(
         /'flags' must be a string/
       );
     });
@@ -447,7 +447,7 @@ describe("loadRules", () => {
         flags: true,
       }));
 
-      expect(() => loadRules(defaultDir, null, "full")).toThrow(
+      expect(() => loadRules(defaultDir, null, "full", { includeProgrammatic: false })).toThrow(
         /'flags' must be a string/
       );
     });
@@ -457,7 +457,7 @@ describe("loadRules", () => {
       delete (ruleData as any).flags;
       writeRule(defaultDir, "noflag.json", ruleData);
 
-      const rules = loadRules(defaultDir, null, "full") as RegexRule[];
+      const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false }) as RegexRule[];
 
       expect(rules).toHaveLength(1);
       expect(rules[0].flags).toBe("");
@@ -469,7 +469,7 @@ describe("loadRules", () => {
         flags: "gi",
       }));
 
-      const rules = loadRules(defaultDir, null, "full") as RegexRule[];
+      const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false }) as RegexRule[];
 
       expect(rules).toHaveLength(1);
       expect(rules[0].flags).toBe("gi");
@@ -481,7 +481,7 @@ describe("loadRules", () => {
         flags: "i",
       }));
 
-      const rules = loadRules(defaultDir, null, "full") as RegexRule[];
+      const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false }) as RegexRule[];
 
       expect(rules).toHaveLength(1);
       expect(rules[0].flags).toBe("i");
@@ -493,7 +493,7 @@ describe("loadRules", () => {
         flags: "gm",
       }));
 
-      const rules = loadRules(defaultDir, null, "full") as RegexRule[];
+      const rules = loadRules(defaultDir, null, "full", { includeProgrammatic: false }) as RegexRule[];
 
       expect(rules).toHaveLength(1);
       expect(rules[0].flags).toBe("gm");
@@ -505,7 +505,7 @@ describe("loadRules", () => {
         flags: 42,
       }));
 
-      expect(() => loadRules(defaultDir, null, "full")).toThrow(/my-special-rule/);
+      expect(() => loadRules(defaultDir, null, "full", { includeProgrammatic: false })).toThrow(/my-special-rule/);
     });
   });
 
