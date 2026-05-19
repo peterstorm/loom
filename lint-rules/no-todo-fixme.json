@@ -6,5 +6,6 @@
   "pattern": "//\\s*(TODO|FIXME)",
   "flags": "",
   "fixHint": "Resolve the TODO/FIXME issue or create a tracked issue and remove the comment",
-  "enabled": true
+  "enabled": true,
+  "excludePatterns": [".test.ts", ".spec.ts", ".test.tsx"]
 }

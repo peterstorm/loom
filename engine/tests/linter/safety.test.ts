@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { analyzeRegex, execWithTimeout, createDeadlineChecker } from "../../src/linter/safety";
+import { analyzeRegex, assertDurationWithin, createDeadlineChecker } from "../../src/linter/safety";
 
 describe("analyzeRegex", () => {
   describe("safe patterns", () => {
@@ -154,20 +154,20 @@ describe("analyzeRegex", () => {
   });
 });
 
-describe("execWithTimeout", () => {
+describe("assertDurationWithin", () => {
   it("returns result of fast function", () => {
-    const result = execWithTimeout(() => 42, 100);
+    const result = assertDurationWithin(() => 42, 100);
     expect(result).toBe(42);
   });
 
   it("returns complex result types", () => {
-    const result = execWithTimeout(() => ({ a: 1, b: "hi" }), 100);
+    const result = assertDurationWithin(() => ({ a: 1, b: "hi" }), 100);
     expect(result).toEqual({ a: 1, b: "hi" });
   });
 
   it("propagates exceptions from the function", () => {
     expect(() =>
-      execWithTimeout(() => {
+      assertDurationWithin(() => {
         throw new Error("inner error");
       }, 100)
     ).toThrow("inner error");
@@ -182,7 +182,7 @@ describe("execWithTimeout", () => {
       }
       return "done";
     };
-    expect(() => execWithTimeout(slowFn, 10)).toThrow(/exceeded timeout/);
+    expect(() => assertDurationWithin(slowFn, 10)).toThrow(/exceeded timeout/);
   });
 });
 

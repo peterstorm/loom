@@ -147,7 +147,10 @@ describe("Pi extension tool_result handler fail-closed (try/catch)", () => {
 
       const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, throwingLint);
 
-      expect(result!.content[0].text).toBe("❌ LINT ENGINE ERROR: ENOENT: no such file or directory");
+      // processToolResult catches the throw and wraps it as a lint error result,
+      // which formatBlockMessage renders with the file path and error detail
+      expect(result!.content[0].text).toContain("ENOENT: no such file or directory");
+      expect(result!.isError).toBe(true);
     });
 
     it("stringifies non-Error throws", () => {
@@ -155,8 +158,7 @@ describe("Pi extension tool_result handler fail-closed (try/catch)", () => {
 
       const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, throwingLint);
 
-      expect(result!.content[0].text).toContain("❌ LINT ENGINE ERROR");
-      // String({code: ...}) produces [object Object]
+      expect(result!.content[0].text).toContain("LINT ENGINE ERROR");
       expect(result!.content[0].text).toContain("[object Object]");
     });
   });

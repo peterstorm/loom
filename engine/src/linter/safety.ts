@@ -351,11 +351,17 @@ function setsIntersect(a: MatchSet, b: MatchSet): boolean {
 
 // --- Runtime Timeout ---
 
-/** @internal — utility retained for testing; not used in production execution path */
-export function execWithTimeout<T>(fn: () => T, timeoutMs: number): T {
-  const deadline = performance.now() + timeoutMs;
+/** Clock function type — defaults to performance.now, injectable for testing */
+export type NowFn = () => number;
+
+/**
+ * @internal — post-hoc duration assertion (cannot interrupt blocking work).
+ * Retained for test assertions only. NOT a real timeout.
+ */
+export function assertDurationWithin<T>(fn: () => T, timeoutMs: number, now: NowFn = performance.now.bind(performance)): T {
+  const start = now();
   const result = fn();
-  const elapsed = performance.now() - (deadline - timeoutMs);
+  const elapsed = now() - start;
   if (elapsed > timeoutMs) {
     throw new Error(
       `Execution exceeded timeout of ${timeoutMs}ms (took ${Math.round(elapsed)}ms)`
@@ -367,13 +373,15 @@ export function execWithTimeout<T>(fn: () => T, timeoutMs: number): T {
 /**
  * Creates a deadline checker function for use in line-by-line processing loops.
  * The caller should invoke checkDeadline() periodically (e.g., every N lines).
- * 
+ *
+ * @param timeoutMs - Maximum allowed execution time
+ * @param now - Clock function (injectable for deterministic testing)
  * @throws Error if the deadline has passed when checked
  */
-export function createDeadlineChecker(timeoutMs: number): () => void {
-  const deadline = performance.now() + timeoutMs;
+export function createDeadlineChecker(timeoutMs: number, now: NowFn = performance.now.bind(performance)): () => void {
+  const deadline = now() + timeoutMs;
   return () => {
-    if (performance.now() > deadline) {
+    if (now() > deadline) {
       throw new Error(
         `Execution exceeded timeout of ${timeoutMs}ms`
       );

@@ -3,12 +3,13 @@
  * line-by-line with safety timeout wrapping.
  *
  * Functional core: pure aggregation logic.
- * Imperative shell: deadline checking (side-effectful time reads).
+ * The deadline checker is injected by the caller (imperative shell),
+ * keeping this module free of non-deterministic time reads.
  *
  * Zero external dependencies beyond Node path.extname.
  */
 
-import { extname } from "path";
+import { extname } from "node:path";
 import {
   type Rule,
   type RegexRule,
@@ -18,13 +19,10 @@ import {
   isProgrammaticRule,
   makeViolation,
 } from "./types";
-import { analyzeRegex, createDeadlineChecker } from "./safety";
+import { analyzeRegex } from "./safety";
 
 /** How often (in lines) to check the deadline — amortizes overhead */
 const DEADLINE_CHECK_INTERVAL = 100;
-
-/** Default timeout budget for a single file (ms) */
-const DEFAULT_TIMEOUT_MS = 50;
 
 /**
  * Executes all matching rules against a file's content.
@@ -37,7 +35,7 @@ const DEFAULT_TIMEOUT_MS = 50;
  * @param rules - Pre-loaded rules (may include disabled or non-matching rules)
  * @param filePath - Absolute file path (used for extension matching + violation context)
  * @param content - Full file content as a string
- * @param timeoutMs - Execution budget in milliseconds (default: 50ms)
+ * @param checkDeadline - Injected deadline checker (throws if time exceeded)
  * @returns Aggregated Violation[] (may be empty)
  * @throws Error on timeout or handler exception (fail-closed)
  */
@@ -45,14 +43,22 @@ export function executeRules(
   rules: readonly Rule[],
   filePath: string,
   content: string,
-  timeoutMs: number = DEFAULT_TIMEOUT_MS
-): Violation[] {
+  checkDeadline: () => void
+): readonly Violation[] {
   const ext = extname(filePath); // e.g. ".ts"
-  const checkDeadline = createDeadlineChecker(timeoutMs);
 
   // Filter: only enabled rules whose extensions include this file's extension
+  // and whose excludePatterns don't match the file path
   const matchingRules = rules.filter(
-    (rule) => rule.enabled && rule.extensions.includes(ext)
+    (rule) => {
+      if (!rule.enabled) return false;
+      if (!rule.extensions.includes(ext)) return false;
+      if (isRegexRule(rule) && rule.excludePatterns?.length) {
+        const normalizedPath = filePath.replace(/\\/g, "/");
+        if (rule.excludePatterns.some(p => normalizedPath.endsWith(p))) return false;
+      }
+      return true;
+    }
   );
 
   if (matchingRules.length === 0) {
@@ -101,7 +107,7 @@ function executeRegexRule(
 
   for (let i = 0; i < lines.length; i++) {
     // Amortized deadline check
-    if (i > 0 && i % DEADLINE_CHECK_INTERVAL === 0) {
+    if (i % DEADLINE_CHECK_INTERVAL === 0) {
       checkDeadline();
     }
 
@@ -137,5 +143,5 @@ function executeProgrammaticRule(
 
   // Handler is responsible for returning well-formed violations
   // If it throws, we let it propagate (fail-closed per spec)
-  return rule.handler(content, filePath);
+  return [...rule.handler(content, filePath)];
 }

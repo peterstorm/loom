@@ -5,6 +5,7 @@
 
 import { describe, it, expect } from "vitest";
 import { executeRules } from "../../src/linter/executor";
+import { createDeadlineChecker } from "../../src/linter/safety";
 import type {
   RegexRule,
   ProgrammaticRule,
@@ -14,6 +15,12 @@ import type {
 import { makeViolation } from "../../src/linter/types";
 
 // --- Test Helpers ---
+
+/** No-op deadline checker that never expires (for non-timeout tests) */
+const noopDeadline = () => {};
+
+/** Create a real deadline checker for timeout tests */
+const tightDeadline = (ms: number) => createDeadlineChecker(ms);
 
 function makeRegexRule(overrides: Partial<RegexRule> = {}): RegexRule {
   return {
@@ -52,14 +59,14 @@ describe("executeRules — extension matching", () => {
   it("matches rules when file extension is in rule extensions array", () => {
     const rule = makeRegexRule({ extensions: [".ts", ".tsx"] });
     const content = "console.log('hello');";
-    const violations = executeRules([rule], "/src/app.ts", content, 1000);
+    const violations = executeRules([rule], "/src/app.ts", content, noopDeadline);
     expect(violations.length).toBe(1);
   });
 
   it("does NOT match rules when file extension differs (SC-003 zero false positives)", () => {
     const rule = makeRegexRule({ extensions: [".ts", ".tsx"] });
     const content = "console.log('hello');";
-    const violations = executeRules([rule], "/src/app.js", content, 1000);
+    const violations = executeRules([rule], "/src/app.js", content, noopDeadline);
     expect(violations).toEqual([]);
   });
 
@@ -67,26 +74,26 @@ describe("executeRules — extension matching", () => {
     const rule = makeRegexRule({ extensions: [".ts"] });
     const content = "console.log('hello');";
     // .gitignore has extension "" from path.extname
-    const violations = executeRules([rule], "/project/.gitignore", content, 1000);
+    const violations = executeRules([rule], "/project/.gitignore", content, noopDeadline);
     expect(violations).toEqual([]);
   });
 
   it("matches .tsx extension specifically", () => {
     const rule = makeRegexRule({ extensions: [".tsx"] });
     const content = "console.log('render');";
-    const violations = executeRules([rule], "/src/Component.tsx", content, 1000);
+    const violations = executeRules([rule], "/src/Component.tsx", content, noopDeadline);
     expect(violations.length).toBe(1);
   });
 
   it("does not fire disabled rules even if extension matches", () => {
     const rule = makeRegexRule({ enabled: false });
     const content = "console.log('hello');";
-    const violations = executeRules([rule], "/src/app.ts", content, 1000);
+    const violations = executeRules([rule], "/src/app.ts", content, noopDeadline);
     expect(violations).toEqual([]);
   });
 
   it("returns empty array when rules array is empty", () => {
-    const violations = executeRules([], "/src/app.ts", "console.log('hi');", 1000);
+    const violations = executeRules([], "/src/app.ts", "console.log('hi');", noopDeadline);
     expect(violations).toEqual([]);
   });
 });
@@ -97,7 +104,7 @@ describe("executeRules — regex line-by-line execution", () => {
   it("finds violations on matching lines with 1-indexed line numbers", () => {
     const rule = makeRegexRule({ pattern: "TODO" });
     const content = "line 1\n// TODO: fix this\nline 3\n// TODO: another";
-    const violations = executeRules([rule], "/src/app.ts", content, 1000);
+    const violations = executeRules([rule], "/src/app.ts", content, noopDeadline);
 
     expect(violations.length).toBe(2);
     expect(violations[0].line).toBe(2);
@@ -112,7 +119,7 @@ describe("executeRules — regex line-by-line execution", () => {
       fixHint: "Use logger instead",
     });
     const content = "console.log('x');";
-    const violations = executeRules([rule], "/src/index.ts", content, 1000);
+    const violations = executeRules([rule], "/src/index.ts", content, noopDeadline);
 
     expect(violations[0].rule).toBe("no-console");
     expect(violations[0].file).toBe("/src/index.ts");
@@ -122,7 +129,7 @@ describe("executeRules — regex line-by-line execution", () => {
   it("trims matched line text", () => {
     const rule = makeRegexRule({ pattern: "console\\.log" });
     const content = "  console.log('hello');  ";
-    const violations = executeRules([rule], "/src/app.ts", content, 1000);
+    const violations = executeRules([rule], "/src/app.ts", content, noopDeadline);
 
     expect(violations[0].text).toBe("console.log('hello');");
   });
@@ -130,21 +137,21 @@ describe("executeRules — regex line-by-line execution", () => {
   it("returns empty when no lines match", () => {
     const rule = makeRegexRule({ pattern: "console\\.log" });
     const content = "const x = 1;\nconst y = 2;";
-    const violations = executeRules([rule], "/src/app.ts", content, 1000);
+    const violations = executeRules([rule], "/src/app.ts", content, noopDeadline);
     expect(violations).toEqual([]);
   });
 
   it("handles regex with flags (case-insensitive)", () => {
     const rule = makeRegexRule({ pattern: "todo", flags: "i" });
     const content = "// TODO: fix\n// Todo: later\n// nothing";
-    const violations = executeRules([rule], "/src/app.ts", content, 1000);
+    const violations = executeRules([rule], "/src/app.ts", content, noopDeadline);
     expect(violations.length).toBe(2);
   });
 
   it("handles global flag correctly (resets lastIndex per line)", () => {
     const rule = makeRegexRule({ pattern: "x", flags: "g" });
     const content = "x\ny\nx";
-    const violations = executeRules([rule], "/src/app.ts", content, 1000);
+    const violations = executeRules([rule], "/src/app.ts", content, noopDeadline);
     expect(violations.length).toBe(2);
     expect(violations[0].line).toBe(1);
     expect(violations[1].line).toBe(3);
@@ -156,7 +163,7 @@ describe("executeRules — regex line-by-line execution", () => {
       i % 5 === 0 ? "match here" : "no hit"
     );
     const content = lines.join("\n");
-    const violations = executeRules([rule], "/src/app.ts", content, 1000);
+    const violations = executeRules([rule], "/src/app.ts", content, noopDeadline);
     // Lines 0, 5, 10, 15, 20, 25, 30, 35, 40, 45 => 10 matches (1-indexed: 1,6,11,16,21,26,31,36,41,46)
     expect(violations.length).toBe(10);
   });
@@ -164,14 +171,14 @@ describe("executeRules — regex line-by-line execution", () => {
   it("handles empty content (single empty line)", () => {
     const rule = makeRegexRule({ pattern: "." }); // matches any char
     const content = "";
-    const violations = executeRules([rule], "/src/app.ts", content, 1000);
+    const violations = executeRules([rule], "/src/app.ts", content, noopDeadline);
     expect(violations).toEqual([]);
   });
 
   it("handles content with only newlines", () => {
     const rule = makeRegexRule({ pattern: "x" });
     const content = "\n\n\n";
-    const violations = executeRules([rule], "/src/app.ts", content, 1000);
+    const violations = executeRules([rule], "/src/app.ts", content, noopDeadline);
     expect(violations).toEqual([]);
   });
 });
@@ -190,7 +197,7 @@ describe("executeRules — multi-rule aggregation", () => {
       fixHint: "Resolve TODO",
     });
     const content = "console.log('hi');\n// TODO: fix";
-    const violations = executeRules([rule1, rule2], "/src/app.ts", content, 1000);
+    const violations = executeRules([rule1, rule2], "/src/app.ts", content, noopDeadline);
 
     expect(violations.length).toBe(2);
     expect(violations[0].rule).toBe("no-console");
@@ -209,7 +216,7 @@ describe("executeRules — multi-rule aggregation", () => {
       pattern: "bad",
     });
     const content = "bad code";
-    const violations = executeRules([tsRule, jsRule], "/src/app.ts", content, 1000);
+    const violations = executeRules([tsRule, jsRule], "/src/app.ts", content, noopDeadline);
 
     expect(violations.length).toBe(1);
     expect(violations[0].rule).toBe("ts-only");
@@ -219,7 +226,7 @@ describe("executeRules — multi-rule aggregation", () => {
     const rule1 = makeRegexRule({ name: "rule-a", pattern: "foo" });
     const rule2 = makeRegexRule({ name: "rule-b", pattern: "bar" });
     const content = "foobar";
-    const violations = executeRules([rule1, rule2], "/src/app.ts", content, 1000);
+    const violations = executeRules([rule1, rule2], "/src/app.ts", content, noopDeadline);
 
     expect(violations.length).toBe(2);
     expect(violations.map((v) => v.rule).sort()).toEqual(["rule-a", "rule-b"]);
@@ -236,7 +243,7 @@ describe("executeRules — timeout / deadline", () => {
 
     // With a 1ms timeout and 10000 lines, deadline check should trigger
     // Note: deadline is checked every 100 lines
-    expect(() => executeRules([rule], "/src/big.ts", content, 1)).toThrow(
+    expect(() => executeRules([rule], "/src/big.ts", content, tightDeadline(1))).toThrow(
       /exceeded timeout/
     );
   });
@@ -247,7 +254,7 @@ describe("executeRules — timeout / deadline", () => {
 
     // 1000ms is plenty for 2 lines
     expect(() =>
-      executeRules([rule], "/src/app.ts", content, 1000)
+      executeRules([rule], "/src/app.ts", content, noopDeadline)
     ).not.toThrow();
   });
 });
@@ -262,7 +269,7 @@ describe("executeRules — unsafe regex rejection", () => {
     });
     const content = "aaa";
 
-    expect(() => executeRules([rule], "/src/app.ts", content, 1000)).toThrow(
+    expect(() => executeRules([rule], "/src/app.ts", content, noopDeadline)).toThrow(
       /unsafe regex/
     );
   });
@@ -274,7 +281,7 @@ describe("executeRules — unsafe regex rejection", () => {
     });
     const content = "test";
 
-    expect(() => executeRules([rule], "/src/app.ts", content, 1000)).toThrow(
+    expect(() => executeRules([rule], "/src/app.ts", content, noopDeadline)).toThrow(
       /unsafe regex/
     );
   });
@@ -290,7 +297,7 @@ describe("executeRules — programmatic rules", () => {
         makeViolation("custom-check", filePath, 1, "bad line", "Fix it"),
       ],
     });
-    const violations = executeRules([rule], "/src/app.ts", "bad line\nok", 1000);
+    const violations = executeRules([rule], "/src/app.ts", "bad line\nok", noopDeadline);
 
     expect(violations.length).toBe(1);
     expect(violations[0].rule).toBe("custom-check");
@@ -309,7 +316,7 @@ describe("executeRules — programmatic rules", () => {
       },
     });
 
-    executeRules([rule], "/src/test.ts", "hello world", 1000);
+    executeRules([rule], "/src/test.ts", "hello world", noopDeadline);
 
     expect(receivedContent).toBe("hello world");
     expect(receivedPath).toBe("/src/test.ts");
@@ -322,7 +329,7 @@ describe("executeRules — programmatic rules", () => {
       },
     });
 
-    expect(() => executeRules([rule], "/src/app.ts", "test", 1000)).toThrow(
+    expect(() => executeRules([rule], "/src/app.ts", "test", noopDeadline)).toThrow(
       "Handler exploded"
     );
   });
@@ -334,7 +341,7 @@ describe("executeRules — programmatic rules", () => {
     });
 
     // File is .ts, rule targets .java — should not fire
-    const violations = executeRules([rule], "/src/app.ts", "anything", 1000);
+    const violations = executeRules([rule], "/src/app.ts", "anything", noopDeadline);
     expect(violations).toEqual([]);
   });
 
@@ -344,7 +351,7 @@ describe("executeRules — programmatic rules", () => {
       handler: () => [makeViolation("p-rule", "/src/app.ts", 1, "x", "fix")],
     });
 
-    const violations = executeRules([rule], "/src/app.ts", "anything", 1000);
+    const violations = executeRules([rule], "/src/app.ts", "anything", noopDeadline);
     expect(violations).toEqual([]);
   });
 });
@@ -370,7 +377,7 @@ describe("executeRules — mixed regex + programmatic rules", () => {
       [regexRule, progRule],
       "/src/app.ts",
       content,
-      1000
+      noopDeadline
     );
 
     expect(violations.length).toBe(2);

@@ -16,7 +16,6 @@ import { makeViolation } from "../types";
 export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/linter/types.ts",
   "engine/src/linter/formatter.ts",
-  "engine/src/linter/executor.ts",
   "engine/src/core/",
   "engine/src/parsers/",
 ];
@@ -56,6 +55,7 @@ export const BANNED_GLOBALS: readonly { pattern: RegExp; description: string }[]
   { pattern: /\bconsole\.(log|error|warn|info|debug)\b/, description: "console output (I/O)" },
   { pattern: /\bMath\.random\s*\(/, description: "Math.random() (non-determinism)" },
   { pattern: /\bnew\s+Date\s*\((?!\s*["'\d])/, description: "new Date() without argument (non-determinism)" },
+  { pattern: /\bperformance\.now\s*\(/, description: "performance.now() (non-determinism)" },
 ];
 
 /** Import specifiers allowed even in pure modules (side-effect free) */

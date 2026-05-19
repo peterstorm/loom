@@ -80,6 +80,10 @@ _Avoid_: Module, service, package (unless referring to code packaging)
 The shared vocabulary between developers and domain experts within a bounded context. Enforced in code, docs, and conversation.
 _Avoid_: Glossary (it's more than a glossary — it's the living language of the system)
 
+**Tier**:
+An execution scope that determines which lint rules apply. "Immediate" (PostEdit, regex-only, <50ms budget) or "full" (wave-gate boundary, all rules including programmatic structural analysis).
+_Avoid_: Level, mode, severity
+
 **Aggregate**:
 An immutable data cluster (root entity + value objects) treated as a single consistency unit. Command functions in the functional core take an aggregate and return a new aggregate plus domain events.
 _Avoid_: Entity group, object graph, mutable domain object
@@ -97,6 +101,7 @@ _Avoid_: Result (acceptable in Rust), Optional (different semantics)
 - A **Phase** produces one or more artifacts consumed by subsequent **Phases**
 - A **Plan** is decomposed into **Tasks** grouped into **Waves**
 - A **Wave Gate** validates all **Tasks** in a **Wave** before the next **Wave** begins
+- A **Tier** determines which lint rules execute: "immediate" runs regex-only at PostEdit, "full" runs all rules at wave-gate boundaries
 - An **Agent** executes exactly one **Task** or one **Phase**
 - A **Skill** is loaded into an **Agent** to provide domain expertise
 - **Hooks** enforce invariants on the **State File** — no other actor writes to it

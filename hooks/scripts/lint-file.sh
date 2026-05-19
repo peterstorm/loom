@@ -20,4 +20,12 @@ if ! command -v bun &>/dev/null; then
   exit 2
 fi
 
-exec bun "${CLAUDE_PLUGIN_ROOT}/engine/src/cli.ts" post-tool-use lint-file
+# OS-level timeout (5s) as last-resort safety net for cooperative deadline checker.
+# If the regex engine hangs (bypassing the amortized deadline), this kills the process.
+# `timeout` exits 124 on timeout; set -e propagates it as failure → fail-closed.
+if command -v timeout &>/dev/null; then
+  exec timeout 5 bun "${CLAUDE_PLUGIN_ROOT}/engine/src/cli.ts" post-tool-use lint-file
+else
+  # macOS coreutils may not have `timeout` — fall back to direct exec
+  exec bun "${CLAUDE_PLUGIN_ROOT}/engine/src/cli.ts" post-tool-use lint-file
+fi

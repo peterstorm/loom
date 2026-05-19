@@ -15,9 +15,8 @@ import { existsSync } from "node:fs";
 import type { HookHandler, HookResult, Task } from "../../types";
 import { TASK_GRAPH_PATH, DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../config";
 import { StateManager } from "../../state-manager";
-import { lintFile } from "../../linter/index";
-import { formatOutput, formatBlockMessage } from "../../linter/formatter";
-import type { LintResult, LintOutput } from "../../linter/types";
+import { lintFile, lintFiles as lintFilesBatch, formatOutput, formatBlockMessage } from "../../linter/index";
+import type { LintResult, LintOutput } from "../../linter/index";
 
 // --- Pure logic (extracted for testability) ---
 
@@ -105,16 +104,28 @@ export function aggregateResults(results: readonly FileLintResult[]): HookResult
 
 /**
  * Runs lintFile on each file path and collects results.
- * Pure orchestration — lint function is injected for testability.
+ * Uses batch loading (rules loaded once) for efficiency.
+ * lintFn injectable for testability.
  */
 export function lintFiles(
   files: readonly string[],
   defaultRulesDir: string,
   projectRulesDir: string | null,
-  lintFn: (filePath: string, tier: "full", defaultDir: string, projectDir: string | null) => LintResult = lintFile
+  lintFn?: (filePath: string, tier: "full", defaultDir: string, projectDir: string | null) => LintResult
 ): readonly FileLintResult[] {
+  // If custom lintFn provided (tests), use per-file invocation
+  if (lintFn) {
+    return files.map((file) => {
+      const result = lintFn(file, "full", defaultRulesDir, projectRulesDir);
+      const output = formatOutput(result, file);
+      return { file, result, output };
+    });
+  }
+
+  // Production path: use batch linting (loads rules once)
+  const resultsMap = lintFilesBatch(files, "full", defaultRulesDir, projectRulesDir);
   return files.map((file) => {
-    const result = lintFn(file, "full", defaultRulesDir, projectRulesDir);
+    const result = resultsMap.get(file) ?? { kind: "error" as const, message: "File not in results map" };
     const output = formatOutput(result, file);
     return { file, result, output };
   });

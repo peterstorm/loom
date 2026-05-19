@@ -15,6 +15,10 @@ import { loadProjectConfig } from "./programmatic/config";
 
 // --- Public API ---
 
+export interface LoadOptions {
+  readonly includeProgrammatic?: boolean;
+}
+
 /**
  * Loads and merges rules from default and project directories.
  *
@@ -30,9 +34,27 @@ import { loadProjectConfig } from "./programmatic/config";
 export function loadRules(
   defaultDir: string,
   projectDir: string | null,
+  tier: "immediate",
+  options?: LoadOptions
+): readonly RegexRule[];
+export function loadRules(
+  defaultDir: string,
+  projectDir: string | null,
+  tier: "full",
+  options?: LoadOptions
+): readonly Rule[];
+export function loadRules(
+  defaultDir: string,
+  projectDir: string | null,
   tier: Tier,
-  options?: { includeProgrammatic?: boolean }
-): RegexRule[] | Rule[] {
+  options?: LoadOptions
+): readonly Rule[];
+export function loadRules(
+  defaultDir: string,
+  projectDir: string | null,
+  tier: Tier,
+  options?: LoadOptions
+): readonly Rule[] {
   // Validate defaultDir exists (installation error if missing)
   if (!existsSync(defaultDir)) {
     throw new Error(
@@ -199,6 +221,15 @@ function parseRegexRule(
   }
   const flags = typeof obj.flags === "string" ? obj.flags : "";
 
+  // Optional excludePatterns (file path suffixes to skip)
+  let excludePatterns: readonly string[] | undefined;
+  if (obj.excludePatterns !== undefined) {
+    if (!Array.isArray(obj.excludePatterns) || !obj.excludePatterns.every((p: unknown) => typeof p === "string")) {
+      throw new Error(`Rule '${base.name}' in ${filePath}: 'excludePatterns' must be an array of strings`);
+    }
+    excludePatterns = obj.excludePatterns as string[];
+  }
+
   // Safety check — fail-closed on unsafe patterns
   const safety = analyzeRegex(pattern, flags);
   if (!safety.safe) {
@@ -217,6 +248,7 @@ function parseRegexRule(
     fixHint: base.fixHint,
     enabled: base.enabled,
     source,
+    ...(excludePatterns ? { excludePatterns } : {}),
   };
 }
 

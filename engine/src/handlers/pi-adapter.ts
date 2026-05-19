@@ -10,8 +10,8 @@
  */
 
 import { match } from "ts-pattern";
-import type { LintResult } from "../linter/types";
-import { formatOutput, formatBlockMessage } from "../linter/formatter";
+import type { LintResult } from "../linter/index";
+import { formatOutput, formatBlockMessage } from "../linter/index";
 
 // --- Response type (mirrors Pi's ToolResultEventResult) ---
 
@@ -23,7 +23,7 @@ export interface PiToolResultResponse {
 // --- Tool names that trigger lint ---
 
 // Pi tool names are lowercase (vs PascalCase in Claude Code's PostToolUse)
-const LINT_TRIGGER_TOOLS = new Set(["edit", "write"]);
+const LINT_TRIGGER_TOOLS = new Set(["edit", "write", "multi_edit"]);
 
 /**
  * Determines whether a tool_result event should trigger linting.
@@ -66,7 +66,7 @@ export function handleLintResult(
       return {
         content: [{ type: "text" as const, text: message }],
         isError: true,
-      } as PiToolResultResponse;
+      } satisfies PiToolResultResponse;
     })
     .with({ kind: "error" }, (r) => {
       const output = formatOutput(r, filePath);
@@ -74,7 +74,7 @@ export function handleLintResult(
       return {
         content: [{ type: "text" as const, text: message }],
         isError: true,
-      } as PiToolResultResponse;
+      } satisfies PiToolResultResponse;
     })
     .exhaustive();
 }

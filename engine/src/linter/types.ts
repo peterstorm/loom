@@ -28,6 +28,7 @@ export interface RegexRule {
   readonly fixHint: string;
   readonly enabled: boolean;
   readonly source: RuleSource;
+  readonly excludePatterns?: readonly string[];  // file path suffixes to skip (e.g. [".test.ts"])
 }
 
 export interface ProgrammaticRule {
@@ -35,7 +36,7 @@ export interface ProgrammaticRule {
   readonly name: string;
   readonly description: string;
   readonly extensions: readonly string[];
-  readonly handler: (content: string, filePath: string) => Violation[];
+  readonly handler: (content: string, filePath: string) => readonly Violation[];
   readonly fixHint: string;
   readonly enabled: boolean;
   readonly source: RuleSource;

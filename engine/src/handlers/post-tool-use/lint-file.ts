@@ -15,8 +15,7 @@
 
 import type { HookHandler, HookResult } from "../../types";
 import { allowResult, blockResult, passthroughResult } from "../../types";
-import { lintFile } from "../../linter/index";
-import { formatOutput, formatBlockMessage } from "../../linter/formatter";
+import { lintFile, formatOutput, formatBlockMessage } from "../../linter/index";
 import { DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../config";
 import { match } from "ts-pattern";
 

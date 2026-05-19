@@ -351,4 +351,46 @@ describe("processToolResult", () => {
       expect(r3!.isError).toBe(true);
     });
   });
+
+  describe("fail-closed on throwing lintFn", () => {
+    it("catches lintFn that throws an Error and returns error response", () => {
+      const throwingLint = (): never => { throw new Error("catastrophic regex engine failure"); };
+
+      const result = processToolResult("edit", { path: "/src/app.ts" }, throwingLint);
+
+      expect(result).toBeDefined();
+      expect(result!.isError).toBe(true);
+      expect(result!.content[0].text).toContain("LINT ENGINE ERROR");
+      expect(result!.content[0].text).toContain("catastrophic regex engine failure");
+    });
+
+    it("catches lintFn that throws a non-Error value", () => {
+      const throwingLint = (): never => { throw "raw string error"; };
+
+      const result = processToolResult("edit", { path: "/src/app.ts" }, throwingLint);
+
+      expect(result).toBeDefined();
+      expect(result!.isError).toBe(true);
+      expect(result!.content[0].text).toContain("raw string error");
+    });
+
+    it("does not return undefined (pass) when lintFn throws", () => {
+      const throwingLint = (): never => { throw new Error("boom"); };
+
+      const result = processToolResult("write", { path: "/src/index.ts" }, throwingLint);
+
+      // Must NOT be undefined (which would mean "pass") — must be an error response
+      expect(result).not.toBeUndefined();
+      expect(result!.isError).toBe(true);
+    });
+
+    it("works with multi_edit tool name", () => {
+      const throwingLint = (): never => { throw new Error("timeout"); };
+
+      const result = processToolResult("multi_edit", { path: "/src/app.ts" }, throwingLint);
+
+      expect(result).toBeDefined();
+      expect(result!.isError).toBe(true);
+    });
+  });
 });

@@ -121,7 +121,9 @@ export default function (pi: ExtensionAPI) {
               writeFileSync(taskGraphFile, resolve(TASK_GRAPH_PATH));
             }
           }
-        } catch {}
+        } catch (err) {
+          process.stderr.write(`loom: subagent tracking write failed: ${(err as Error).message}\n`);
+        }
       }
     }
   });
@@ -138,9 +140,11 @@ export default function (pi: ExtensionAPI) {
           const path = join(SUBAGENT_DIR, entry);
           try {
             if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
-          } catch {}
+          } catch { /* individual file cleanup is best-effort */ }
         }
-      } catch {}
+      } catch (err) {
+        process.stderr.write(`loom: session cleanup failed: ${(err as Error).message}\n`);
+      }
     }
   });
 
@@ -182,7 +186,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_result", async (event, _ctx) => {
     try {
-      if (event.toolName !== "edit" && event.toolName !== "write") return;
+      if (event.toolName !== "edit" && event.toolName !== "write" && event.toolName !== "multi_edit") return;
 
       // Skip if the tool itself errored (file may not exist on disk)
       if (event.isError) return;
@@ -239,7 +243,9 @@ export default function (pi: ExtensionAPI) {
       try {
         const activeFile = `${SUBAGENT_DIR}/${sessionId}.active`;
         if (existsSync(activeFile)) unlinkSync(activeFile);
-      } catch {}
+      } catch (err) {
+        process.stderr.write(`loom: subagent flag cleanup failed: ${(err as Error).message}\n`);
+      }
 
       const mgr = StateManager.fromSession(sessionId);
       if (!mgr) continue;
@@ -266,7 +272,9 @@ export default function (pi: ExtensionAPI) {
               }
             }
           }
-        } catch {}
+        } catch (err) {
+          process.stderr.write(`loom: spec/plan extraction failed: ${(err as Error).message}\n`);
+        }
 
         const state = mgr.load();
         const currentIdx = PHASE_ORDER.indexOf(state.current_phase);
@@ -288,7 +296,9 @@ export default function (pi: ExtensionAPI) {
                   : s.skipped_phases,
                 updated_at: new Date().toISOString(),
               }));
-            } catch {}
+            } catch (err) {
+              process.stderr.write(`loom: phase advancement failed: ${(err as Error).message}\n`);
+            }
           }
         }
         continue;
