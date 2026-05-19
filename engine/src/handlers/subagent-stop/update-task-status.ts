@@ -134,7 +134,7 @@ export function analyzeNewTests(
 
 // --- Git diff collection ---
 
-function collectDiff(filesModified: string[], startSha: string | undefined): string {
+export function collectDiff(filesModified: string[], startSha: string | undefined): string {
   if (filesModified.length > 0) {
     const tracked = filesModified.filter((f) => git.isTracked(f));
     const untracked = filesModified.filter((f) => existsSync(f) && !git.isTracked(f));
@@ -144,6 +144,17 @@ function collectDiff(filesModified: string[], startSha: string | undefined): str
       git.diffFilesStaged(tracked),
       ...untracked.map((f) => git.diffUntracked(f)),
     ];
+
+    // Also include untracked test files NOT already in filesModified.
+    // parseFilesModified often misses test files due to transcript parsing gaps
+    // (e.g. tool name casing, truncated transcripts, partial captures).
+    const alreadyIncluded = new Set(filesModified);
+    const untrackedTests = git.listUntrackedTestFiles();
+    for (const f of untrackedTests) {
+      if (!alreadyIncluded.has(f)) {
+        parts.push(git.diffUntracked(f));
+      }
+    }
 
     const combined = parts.join("\n");
     if (combined.trim()) return combined;

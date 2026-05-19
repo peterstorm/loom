@@ -57,7 +57,7 @@ const TOOL_NAME_MAP: Record<string, string> = {
 
 // --- Types ---
 
-interface PiContentBlock {
+export interface PiContentBlock {
   type: string;
   text?: string;
   id?: string;
@@ -65,7 +65,7 @@ interface PiContentBlock {
   arguments?: Record<string, unknown>;
 }
 
-interface PiMessage {
+export interface PiMessage {
   role: string;
   content: PiContentBlock[];
   toolCallId?: string;

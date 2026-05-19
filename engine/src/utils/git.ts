@@ -162,8 +162,19 @@ export function countAssertions(diffContent: string): number {
   return count;
 }
 
-/** List untracked files in src/test (or equivalent test directories) */
+/** Pure filter: given a list of file paths, return those that look like test files */
+export function filterTestFiles(files: string[]): string[] {
+  return files.filter((f) =>
+    // Match files in test directories at any depth
+    /(?:^|\/)(?:tests?|__tests__|spec)\//.test(f) ||
+    // Match files with test/spec suffix (e.g. foo.test.ts, bar.spec.js)
+    /\.(?:test|spec)\.[jt]sx?$/.test(f)
+  );
+}
+
+/** List untracked files that look like test files (directories or suffixes) */
 export function listUntrackedTestFiles(): string[] {
-  const result = exec("git ls-files --others --exclude-standard -- src/test test tests __tests__ spec").trim();
-  return result ? result.split("\n").filter(Boolean) : [];
+  const result = exec("git ls-files --others --exclude-standard").trim();
+  if (!result) return [];
+  return filterTestFiles(result.split("\n"));
 }
