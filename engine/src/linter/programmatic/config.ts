@@ -37,7 +37,14 @@ export function loadProjectConfig(configDir: string | null): ProgrammaticConfig 
   const configPath = join(configDir, "config.json");
   if (!existsSync(configPath)) return EMPTY_CONFIG;
 
-  const content = readFileSync(configPath, "utf-8");
+  let content: string;
+  try {
+    content = readFileSync(configPath, "utf-8");
+  } catch (e) {
+    throw new Error(
+      `Cannot read linter config at ${configPath}: ${e instanceof Error ? e.message : String(e)}. Check file permissions.`
+    );
+  }
 
   let json: unknown;
   try {
@@ -87,6 +94,9 @@ function parseConfig(obj: Record<string, unknown>, filePath: string): Programmat
     if (!Array.isArray(obj.excludeFromMaxLines)) {
       throw new Error(`${filePath}: 'excludeFromMaxLines' must be an array`);
     }
+    if (!obj.excludeFromMaxLines.every((e: unknown) => typeof e === "string")) {
+      throw new Error(`${filePath}: 'excludeFromMaxLines' entries must be strings`);
+    }
     config.excludeFromMaxLines = obj.excludeFromMaxLines as string[];
   }
 
@@ -105,8 +115,14 @@ function parseBoundary(raw: unknown, filePath: string, index: number): BoundaryR
   if (!Array.isArray(b.allow)) {
     throw new Error(`${filePath}: boundaries[${index}].allow must be an array`);
   }
+  if (!b.allow.every((a: unknown) => typeof a === "string")) {
+    throw new Error(`${filePath}: boundaries[${index}].allow entries must be strings`);
+  }
   if (!Array.isArray(b.deny)) {
     throw new Error(`${filePath}: boundaries[${index}].deny must be an array`);
+  }
+  if (!b.deny.every((d: unknown) => typeof d === "string")) {
+    throw new Error(`${filePath}: boundaries[${index}].deny entries must be strings`);
   }
 
   return {

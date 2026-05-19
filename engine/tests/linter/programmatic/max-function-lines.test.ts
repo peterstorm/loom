@@ -171,3 +171,92 @@ describe("max-function-lines", () => {
     });
   });
 });
+
+describe("max-function-lines (extended)", () => {
+  describe("countBraces — string awareness", () => {
+    it("does not count braces inside double-quoted strings", () => {
+      const content = [
+        'function foo() {',
+        '  const json = "{ \\"key\\": \\"value\\" }";',
+        '  return json;',
+        '}',
+      ].join("\n");
+      const fns = detectFunctions(content);
+      expect(fns).toHaveLength(1);
+      expect(fns[0].name).toBe("foo");
+      expect(fns[0].bodyLines).toBe(2);
+    });
+
+    it("does not count braces inside single-quoted strings", () => {
+      const content = [
+        "function bar() {",
+        "  const s = '{ not a brace }';",
+        "  return s;",
+        "}",
+      ].join("\n");
+      const fns = detectFunctions(content);
+      expect(fns).toHaveLength(1);
+      expect(fns[0].bodyLines).toBe(2);
+    });
+
+    it("does not count braces inside template literals", () => {
+      const content = [
+        "function baz() {",
+        "  const t = `template { with } braces`;",
+        "  return t;",
+        "}",
+      ].join("\n");
+      const fns = detectFunctions(content);
+      expect(fns).toHaveLength(1);
+      expect(fns[0].bodyLines).toBe(2);
+    });
+
+    it("handles escaped quotes inside strings", () => {
+      const content = [
+        "function escaped() {",
+        '  const s = "she said \\"}\\"";',
+        "  return s;",
+        "}",
+      ].join("\n");
+      const fns = detectFunctions(content);
+      expect(fns).toHaveLength(1);
+      expect(fns[0].bodyLines).toBe(2);
+    });
+  });
+
+  describe("method name detection", () => {
+    it("detects function named formatIfNeeded", () => {
+      const lines = ["function formatIfNeeded() {"];
+      for (let i = 0; i < 55; i++) lines.push(`  x${i};`);
+      lines.push("}");
+      const content = lines.join("\n");
+
+      const violations = handler(content, "src/foo.ts", 50);
+      expect(violations).toHaveLength(1);
+      expect(violations[0].fixHint).toContain("formatIfNeeded");
+    });
+
+    it("detects method named searchForItems", () => {
+      const lines = ["  searchForItems(query: string) {"];
+      for (let i = 0; i < 55; i++) lines.push(`    x${i};`);
+      lines.push("  }");
+      const content = lines.join("\n");
+
+      const fns = detectFunctions(content);
+      expect(fns.length).toBeGreaterThanOrEqual(1);
+      expect(fns[0].name).toBe("searchForItems");
+    });
+
+    it("does NOT detect 'if' as a function", () => {
+      const content = "  if (condition) {\n    doStuff();\n  }\n";
+      const fns = detectFunctions(content);
+      expect(fns.filter(f => f.name === "if")).toHaveLength(0);
+    });
+
+    it("does NOT detect 'while' as a function", () => {
+      const content = "  while (running) {\n    tick();\n  }\n";
+      const fns = detectFunctions(content);
+      expect(fns.filter(f => f.name === "while")).toHaveLength(0);
+    });
+  });
+});

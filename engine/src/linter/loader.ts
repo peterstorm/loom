@@ -64,9 +64,8 @@ export function loadRules(
   if (options?.includeProgrammatic !== false) {
     // Load project-local config for programmatic rules
     const projectConfig = loadProjectConfig(projectDir);
-    const programmaticRules = projectConfig.boundaries || projectConfig.pureModules || projectConfig.maxFunctionLines
-      ? createProgrammaticRules(projectConfig)
-      : PROGRAMMATIC_RULES;
+    // Always create with config — createProgrammaticRules handles defaults via ??
+    const programmaticRules = createProgrammaticRules(projectConfig);
 
     const programmaticEnabled = programmaticRules.filter((rule) => {
       // Check if a project rule disabled this programmatic rule by name

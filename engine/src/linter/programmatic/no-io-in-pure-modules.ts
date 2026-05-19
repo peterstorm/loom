@@ -23,6 +23,7 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
 
 /** Import specifiers that indicate I/O capability */
 export const IO_IMPORTS: readonly string[] = [
+  // Node.js / TypeScript
   "node:fs",
   "node:net",
   "node:http",
@@ -36,6 +37,15 @@ export const IO_IMPORTS: readonly string[] = [
   "http",
   "https",
   "child_process",
+  // Java
+  "java.io",
+  "java.nio.file",
+  "java.net",
+  "java.sql",
+  "javax.sql",
+  "jakarta.servlet",
+  "javax.servlet",
+  "java.lang.ProcessBuilder",
 ];
 
 /** Global expressions that indicate side effects or non-determinism */
@@ -93,15 +103,22 @@ export function handler(
 
   const violations: Violation[] = [];
   const lines = content.split("\n");
+  let inBlockComment = false;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmed = line.trim();
 
-    // Skip comments
-    if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) {
+    // Track block comments
+    if (inBlockComment) {
+      if (trimmed.includes("*/")) inBlockComment = false;
       continue;
     }
+    if (trimmed.startsWith("/*")) {
+      if (!trimmed.includes("*/")) inBlockComment = true;
+      continue;
+    }
+    if (trimmed.startsWith("//")) continue;
 
     // Check for I/O imports
     const importMatch = line.match(/(?:from|import|require)\s*\(?["']([^"']+)["']\)?/);

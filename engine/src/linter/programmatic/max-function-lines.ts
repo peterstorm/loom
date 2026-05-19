@@ -4,7 +4,8 @@
  * Enforces a maximum function body length. AI agents frequently generate
  * 200+ line functions that should be decomposed.
  *
- * Uses bracket-depth tracking (no AST dependency). Handles:
+ * Uses bracket-depth tracking with string/template literal awareness.
+ * Handles:
  * - function declarations
  * - arrow functions with block bodies
  * - method definitions
@@ -39,6 +40,57 @@ interface FunctionSpan {
   readonly bodyLines: number;  // endLine - startLine - 1 (excluding braces)
 }
 
+/** Control-flow keywords that look like method calls but aren't functions */
+const CONTROL_FLOW_KEYWORDS = new Set(["if", "for", "while", "switch", "catch"]);
+
+/**
+ * Counts braces on a line, properly skipping string literals, template literals,
+ * and inline comments.
+ */
+function countBraces(line: string): { open: number; close: number } {
+  let open = 0;
+  let close = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inTemplate = false;
+
+  for (let j = 0; j < line.length; j++) {
+    const ch = line[j];
+
+    // Skip escape sequences inside strings
+    if ((inSingleQuote || inDoubleQuote || inTemplate) && ch === "\\") {
+      j++; // skip next char
+      continue;
+    }
+
+    // String tracking
+    if (ch === "'" && !inDoubleQuote && !inTemplate) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (ch === '"' && !inSingleQuote && !inTemplate) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (ch === "`" && !inSingleQuote && !inDoubleQuote) {
+      inTemplate = !inTemplate;
+      continue;
+    }
+
+    // Skip content inside strings
+    if (inSingleQuote || inDoubleQuote || inTemplate) continue;
+
+    // Rest-of-line comment
+    if (ch === "/" && j + 1 < line.length && line[j + 1] === "/") break;
+
+    // Count structural braces
+    if (ch === "{") open++;
+    if (ch === "}") close++;
+  }
+
+  return { open, close };
+}
+
 /**
  * Detects function declarations and their line spans using bracket-depth tracking.
  * Returns all functions with their body line counts.
@@ -47,49 +99,36 @@ export function detectFunctions(content: string): readonly FunctionSpan[] {
   const lines = content.split("\n");
   const functions: FunctionSpan[] = [];
 
-  // Track state for bracket counting
   let currentFunction: { name: string; startLine: number; braceDepth: number } | null = null;
-  let globalBraceDepth = 0;
-  let inString = false;
-  let inTemplate = false;
   let inBlockComment = false;
 
   // Patterns that indicate a function start
   const functionDeclRe = /^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)/;
   const arrowFnRe = /^\s*(?:export\s+)?(?:const|let)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[^=])\s*(?::\s*[^=]+)?\s*=>\s*\{/;
   const methodRe = /^\s*(?:async\s+)?(?:private\s+|protected\s+|public\s+|static\s+|readonly\s+)*(\w+)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{/;
-  const classMethodRe = /^\s*(?:get|set)\s+(\w+)\s*\(/;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    const trimmed = line.trim();
 
     // Track block comments
     if (inBlockComment) {
-      if (line.includes("*/")) {
+      if (trimmed.includes("*/")) {
         inBlockComment = false;
       }
       continue;
     }
-    if (line.trim().startsWith("/*")) {
+    if (trimmed.startsWith("/*")) {
       inBlockComment = true;
-      if (line.includes("*/")) inBlockComment = false;
+      if (trimmed.includes("*/")) inBlockComment = false;
       continue;
     }
 
     // Skip single-line comments
-    const trimmed = line.trim();
     if (trimmed.startsWith("//")) continue;
 
-    // Count braces (simplified — doesn't handle braces in strings perfectly,
-    // but good enough for structural detection)
-    let lineOpenBraces = 0;
-    let lineCloseBraces = 0;
-    for (let j = 0; j < line.length; j++) {
-      const ch = line[j];
-      if (ch === "/" && j + 1 < line.length && line[j + 1] === "/") break; // rest is comment
-      if (ch === "{") lineOpenBraces++;
-      if (ch === "}") lineCloseBraces++;
-    }
+    // Count braces (string-aware)
+    const { open: lineOpenBraces, close: lineCloseBraces } = countBraces(line);
 
     // If we're tracking a function, update its brace depth
     if (currentFunction) {
@@ -122,8 +161,12 @@ export function detectFunctions(content: string): readonly FunctionSpan[] {
         funcName = arrowMatch[1];
       } else {
         const methodMatch = methodRe.exec(line);
-        if (methodMatch && !line.includes("if") && !line.includes("for") && !line.includes("while")) {
-          funcName = methodMatch[1];
+        if (methodMatch) {
+          const name = methodMatch[1];
+          // Exclude control-flow keywords that look like method calls
+          if (!CONTROL_FLOW_KEYWORDS.has(name)) {
+            funcName = name;
+          }
         }
       }
     }

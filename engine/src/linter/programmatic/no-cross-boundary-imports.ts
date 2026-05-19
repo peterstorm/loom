@@ -4,11 +4,11 @@
  * Enforces bounded context import boundaries. Detects when a module imports
  * from a sibling bounded context it should not depend on.
  *
- * Uses regex-based import detection (no AST needed — import statements are
- * syntactically unambiguous at the textual level).
+ * Supports both TypeScript (import/require with quotes) and Java (import pkg.Class;).
+ * Uses regex-based import detection (no AST needed).
  */
 
-import { relative, resolve, dirname, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
 
@@ -17,9 +17,9 @@ import { makeViolation } from "../types";
 export interface BoundaryRule {
   /** Module prefix (relative to repo root, with trailing /) */
   readonly module: string;
-  /** Allowed import prefixes (relative imports "./" always allowed) */
+  /** Allowed import prefixes — imports must match at least one (allowlist) */
   readonly allow: readonly string[];
-  /** Denied import prefixes — checked before allow */
+  /** Denied import prefixes — checked first, overrides allow */
   readonly deny: readonly string[];
 }
 
@@ -30,7 +30,7 @@ export interface BoundaryRule {
 export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
   {
     module: "engine/src/linter/",
-    allow: ["./", "node:", "ts-pattern"],
+    allow: ["./", "engine/src/linter/", "node:", "ts-pattern"],
     deny: [
       "engine/src/core/",
       "engine/src/handlers/",
@@ -41,7 +41,7 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
   },
   {
     module: "engine/src/core/",
-    allow: ["./", "node:", "engine/src/types", "engine/src/config", "ts-pattern"],
+    allow: ["./", "engine/src/core/", "node:", "engine/src/types", "engine/src/config", "ts-pattern"],
     deny: [
       "engine/src/linter/",
       "engine/src/handlers/",
@@ -50,7 +50,7 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
   },
   {
     module: "engine/src/parsers/",
-    allow: ["./", "node:", "engine/src/types", "ts-pattern"],
+    allow: ["./", "engine/src/parsers/", "node:", "engine/src/types", "ts-pattern"],
     deny: [
       "engine/src/linter/",
       "engine/src/handlers/",
@@ -63,8 +63,10 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
 // --- Import extraction ---
 
 /**
- * Extracts import specifiers from TypeScript/JavaScript source.
- * Returns array of { line, specifier } for each import/require.
+ * Extracts import specifiers from TypeScript/JavaScript/Java source.
+ * Handles:
+ *   - TS/JS: import ... from "specifier", import "specifier", require("specifier")
+ *   - Java: import com.example.package.Class;
  */
 export function extractImports(
   content: string
@@ -72,24 +74,39 @@ export function extractImports(
   const lines = content.split("\n");
   const imports: { line: number; specifier: string; text: string }[] = [];
 
-  // Match: import ... from "specifier"
-  // Match: import "specifier"
-  // Match: require("specifier")
-  // Match: import("specifier") — dynamic import
-  const importFromRe = /(?:from|import|require)\s*\(?["']([^"']+)["']\)?/;
+  // TS/JS: import/require with quoted specifier
+  const tsImportRe = /(?:from|import|require)\s*\(?["']([^"']+)["']\)?/;
+  // Java: import com.example.Foo; or import static com.example.Foo.bar; or import java.util.*;
+  const javaImportRe = /^\s*import\s+(?:static\s+)?([\w.*]+)\s*;/;
+
+  let inBlockComment = false;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-
-    // Skip comments
     const trimmed = line.trim();
-    if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) {
+
+    // Track block comments
+    if (inBlockComment) {
+      if (trimmed.includes("*/")) inBlockComment = false;
+      continue;
+    }
+    if (trimmed.startsWith("/*")) {
+      if (!trimmed.includes("*/")) inBlockComment = true;
+      continue;
+    }
+    if (trimmed.startsWith("//")) continue;
+
+    // Try TS/JS import first
+    const tsMatch = tsImportRe.exec(line);
+    if (tsMatch) {
+      imports.push({ line: i + 1, specifier: tsMatch[1], text: line });
       continue;
     }
 
-    const match = importFromRe.exec(line);
-    if (match) {
-      imports.push({ line: i + 1, specifier: match[1], text: line });
+    // Try Java import
+    const javaMatch = javaImportRe.exec(line);
+    if (javaMatch) {
+      imports.push({ line: i + 1, specifier: javaMatch[1], text: line });
     }
   }
 
@@ -98,21 +115,30 @@ export function extractImports(
 
 /**
  * Resolves a relative import specifier to a repo-relative path.
- * E.g., given filePath "engine/src/linter/loader.ts" and specifier "../types",
- * returns "engine/src/types".
+ * Uses purely relative path math — no process.cwd() dependency.
+ *
+ * For relative specifiers (./foo, ../bar): joins against file's directory.
+ * For bare/absolute specifiers: returns as-is.
  */
 export function resolveImportPath(filePath: string, specifier: string): string {
   if (!specifier.startsWith(".")) {
-    return specifier; // absolute/bare specifier — return as-is
+    return specifier; // bare/absolute specifier — return as-is
   }
   const fileDir = dirname(filePath);
-  const resolved = resolve(fileDir, specifier);
-  // Convert back to relative-to-cwd (repo root)
-  return relative(process.cwd(), resolved).split(sep).join("/");
+  // Pure path join without resolve() — stays relative to repo root
+  const joined = join(fileDir, specifier);
+  // Normalize separators to forward slashes
+  return joined.split(sep).join("/");
 }
 
 /**
  * Checks if a resolved import path violates any boundary rules for the given file.
+ *
+ * Enforcement model:
+ *   1. Find the boundary rule matching this file's path
+ *   2. Check DENY list first — explicit denials always block
+ *   3. Check ALLOW list — import must match at least one allow entry
+ *   4. If neither deny nor allow matches — violation (fail-closed allowlist)
  */
 export function checkBoundaryViolation(
   filePath: string,
@@ -128,14 +154,20 @@ export function checkBoundaryViolation(
     return null; // No boundary rule applies — allow
   }
 
-  // Check deny list first (takes priority)
+  // Check deny list first (takes priority over allow)
   for (const denied of boundary.deny) {
     if (resolvedImport.startsWith(denied)) {
       return `Module "${boundary.module}" must not import from "${denied}" — violates bounded context boundary`;
     }
   }
 
-  return null; // Not denied — allow
+  // Check allow list — import must match at least one entry
+  const isAllowed = boundary.allow.some((allowed) => resolvedImport.startsWith(allowed));
+  if (!isAllowed) {
+    return `Module "${boundary.module}" may only import from [${boundary.allow.join(", ")}] — "${resolvedImport}" is not allowed`;
+  }
+
+  return null; // Explicitly allowed and not denied
 }
 
 // --- Rule handler ---
