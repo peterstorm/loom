@@ -1,0 +1,205 @@
+/**
+ * Programmatic rule: no-cross-boundary-imports
+ *
+ * Enforces bounded context import boundaries. Detects when a module imports
+ * from a sibling bounded context it should not depend on.
+ *
+ * Supports both TypeScript (import/require with quotes) and Java (import pkg.Class;).
+ * Uses regex-based import detection (no AST needed).
+ */
+
+import { dirname, join, sep } from "node:path";
+import type { Violation } from "../types";
+import { makeViolation } from "../types";
+
+// --- Boundary Configuration ---
+
+export interface BoundaryRule {
+  /** Module prefix (relative to repo root, with trailing /) */
+  readonly module: string;
+  /** Allowed import prefixes — imports must match at least one (allowlist) */
+  readonly allow: readonly string[];
+  /** Denied import prefixes — checked first, overrides allow */
+  readonly deny: readonly string[];
+}
+
+/**
+ * Default boundary rules for the loom engine.
+ * These encode the architectural constraint: dependency arrows point inward.
+ */
+export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
+  {
+    module: "engine/src/linter/",
+    allow: ["./", "engine/src/linter/", "node:", "ts-pattern"],
+    deny: [
+      "engine/src/core/",
+      "engine/src/handlers/",
+      "engine/src/parsers/",
+      "engine/src/state-manager",
+      "engine/src/cli",
+    ],
+  },
+  {
+    module: "engine/src/core/",
+    allow: ["./", "engine/src/core/", "node:", "engine/src/types", "engine/src/config", "ts-pattern"],
+    deny: [
+      "engine/src/linter/",
+      "engine/src/handlers/",
+      "engine/src/parsers/",
+    ],
+  },
+  {
+    module: "engine/src/parsers/",
+    allow: ["./", "engine/src/parsers/", "node:", "engine/src/types", "ts-pattern"],
+    deny: [
+      "engine/src/linter/",
+      "engine/src/handlers/",
+      "engine/src/core/",
+      "engine/src/state-manager",
+    ],
+  },
+];
+
+// --- Import extraction ---
+
+/**
+ * Extracts import specifiers from TypeScript/JavaScript/Java source.
+ * Handles:
+ *   - TS/JS: import ... from "specifier", import "specifier", require("specifier")
+ *   - Java: import com.example.package.Class;
+ */
+export function extractImports(
+  content: string
+): readonly { line: number; specifier: string; text: string }[] {
+  const lines = content.split("\n");
+  const imports: { line: number; specifier: string; text: string }[] = [];
+
+  // TS/JS: import/require with quoted specifier
+  const tsImportRe = /(?:from|import|require)\s*\(?["']([^"']+)["']\)?/;
+  // Java: import com.example.Foo; or import static com.example.Foo.bar; or import java.util.*;
+  const javaImportRe = /^\s*import\s+(?:static\s+)?([\w.*]+)\s*;/;
+
+  let inBlockComment = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // Track block comments
+    if (inBlockComment) {
+      if (trimmed.includes("*/")) inBlockComment = false;
+      continue;
+    }
+    if (trimmed.startsWith("/*")) {
+      if (!trimmed.includes("*/")) inBlockComment = true;
+      continue;
+    }
+    if (trimmed.startsWith("//")) continue;
+
+    // Try TS/JS import first
+    const tsMatch = tsImportRe.exec(line);
+    if (tsMatch) {
+      imports.push({ line: i + 1, specifier: tsMatch[1], text: line });
+      continue;
+    }
+
+    // Try Java import
+    const javaMatch = javaImportRe.exec(line);
+    if (javaMatch) {
+      imports.push({ line: i + 1, specifier: javaMatch[1], text: line });
+    }
+  }
+
+  return imports;
+}
+
+/**
+ * Resolves a relative import specifier to a repo-relative path.
+ * Uses purely relative path math — no process.cwd() dependency.
+ *
+ * For relative specifiers (./foo, ../bar): joins against file's directory.
+ * For bare/absolute specifiers: returns as-is.
+ */
+export function resolveImportPath(filePath: string, specifier: string): string {
+  if (!specifier.startsWith(".")) {
+    return specifier; // bare/absolute specifier — return as-is
+  }
+  const fileDir = dirname(filePath);
+  // Pure path join without resolve() — stays relative to repo root
+  const joined = join(fileDir, specifier);
+  // Normalize separators to forward slashes
+  return joined.split(sep).join("/");
+}
+
+/**
+ * Checks if a resolved import path violates any boundary rules for the given file.
+ *
+ * Enforcement model:
+ *   1. Find the boundary rule matching this file's path
+ *   2. Check DENY list first — explicit denials always block
+ *   3. Check ALLOW list — import must match at least one allow entry
+ *   4. If neither deny nor allow matches — violation (fail-closed allowlist)
+ */
+export function checkBoundaryViolation(
+  filePath: string,
+  resolvedImport: string,
+  boundaries: readonly BoundaryRule[]
+): string | null {
+  // Normalize file path to forward slashes
+  const normalizedFile = filePath.split(sep).join("/");
+
+  // Find applicable boundary rule for this file
+  const boundary = boundaries.find((b) => normalizedFile.startsWith(b.module));
+  if (!boundary) {
+    return null; // No boundary rule applies — allow
+  }
+
+  // Check deny list first (takes priority over allow)
+  for (const denied of boundary.deny) {
+    if (resolvedImport.startsWith(denied)) {
+      return `Module "${boundary.module}" must not import from "${denied}" — violates bounded context boundary`;
+    }
+  }
+
+  // Check allow list — import must match at least one entry
+  const isAllowed = boundary.allow.some((allowed) => resolvedImport.startsWith(allowed));
+  if (!isAllowed) {
+    return `Module "${boundary.module}" may only import from [${boundary.allow.join(", ")}] — "${resolvedImport}" is not allowed`;
+  }
+
+  return null; // Explicitly allowed and not denied
+}
+
+// --- Rule handler ---
+
+/**
+ * Programmatic rule handler for no-cross-boundary-imports.
+ * Scans imports and checks each against boundary rules.
+ */
+export function handler(
+  content: string,
+  filePath: string,
+  boundaries: readonly BoundaryRule[] = DEFAULT_BOUNDARIES
+): Violation[] {
+  const imports = extractImports(content);
+  const violations: Violation[] = [];
+
+  for (const imp of imports) {
+    const resolved = resolveImportPath(filePath, imp.specifier);
+    const violation = checkBoundaryViolation(filePath, resolved, boundaries);
+
+    if (violation) {
+      violations.push(
+        makeViolation(
+          "no-cross-boundary-imports",
+          filePath,
+          imp.line,
+          imp.text,
+          `Remove this import. ${violation}`
+        )
+      );
+    }
+  }
+
+  return violations;
+}

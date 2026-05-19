@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "prefer-ts-pattern",
+  "description": "Prefer ts-pattern match().exhaustive() over plain switch for discriminated unions",
+  "extensions": [".ts", ".tsx"],
+  "pattern": "switch\\s*\\(",
+  "flags": "",
+  "fixHint": "Use match(value).with(...).exhaustive() from ts-pattern instead of switch for discriminated unions. See architecture.md TypeScript Patterns.",
+  "enabled": false
+}

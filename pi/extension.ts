@@ -34,12 +34,17 @@ import {
 import { parseSpecCheckOutput } from "../engine/src/handlers/subagent-stop/store-spec-check-findings";
 import type { ReviewStatus, SpecCheck, Phase } from "../engine/src/types";
 
-import { TASK_GRAPH_PATH, SUBAGENT_DIR, HARNESS, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER } from "../engine/src/config";
+import { TASK_GRAPH_PATH, SUBAGENT_DIR, HARNESS, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR } from "../engine/src/config";
 import { StateManager } from "../engine/src/state-manager";
 import { buildContextOutput } from "../engine/src/handlers/session-start/resume-after-clear";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import * as git from "../engine/src/utils/git";
+
+// Linter integration (PostEdit lint via tool_result)
+import { processToolResult } from "../engine/src/handlers/pi-adapter";
+import { lintFile } from "../engine/src/linter/index";
+import type { PiMessage } from "./loom-bridge";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const AGENTS_DIR = join(PACKAGE_ROOT, "agents");
@@ -116,7 +121,9 @@ export default function (pi: ExtensionAPI) {
               writeFileSync(taskGraphFile, resolve(TASK_GRAPH_PATH));
             }
           }
-        } catch {}
+        } catch (err) {
+          process.stderr.write(`loom: subagent tracking write failed: ${(err as Error).message}\n`);
+        }
       }
     }
   });
@@ -133,9 +140,11 @@ export default function (pi: ExtensionAPI) {
           const path = join(SUBAGENT_DIR, entry);
           try {
             if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
-          } catch {}
+          } catch { /* individual file cleanup is best-effort */ }
         }
-      } catch {}
+      } catch (err) {
+        process.stderr.write(`loom: session cleanup failed: ${(err as Error).message}\n`);
+      }
     }
   });
 
@@ -168,6 +177,47 @@ export default function (pi: ExtensionAPI) {
     };
   });
 
+
+  // ─── PostEdit Lint (tool_result event for edit/write) ─────────────────
+  // After edit/write lands on disk, run immediate-tier lint.
+  // If violations: inject error content so agent sees and fixes.
+  // If pass: return undefined (no injection).
+  // If error: fail-closed — inject error content.
+
+  pi.on("tool_result", async (event, _ctx) => {
+    try {
+      if (event.toolName !== "edit" && event.toolName !== "write" && event.toolName !== "multi_edit") return;
+
+      // Skip if the tool itself errored (file may not exist on disk)
+      if (event.isError) return;
+
+      const projectRoot = process.cwd();
+      const projectRulesPath = join(projectRoot, PROJECT_RULES_DIR);
+      const projectRulesDir = existsSync(projectRulesPath) ? projectRulesPath : null;
+
+      const loomDefaultRulesDir = join(PACKAGE_ROOT, "lint-rules");
+      const response = processToolResult(
+        event.toolName,
+        event.input,
+        (filePath) => lintFile(filePath, "immediate", loomDefaultRulesDir, projectRulesDir)
+      );
+
+      if (response) {
+        return {
+          content: response.content.map(c => ({ type: c.type as "text", text: c.text })),
+          isError: response.isError,
+        };
+      }
+    } catch (error: unknown) {
+      // Fail-closed: any error \u2192 inject error content to block the edit
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        content: [{ type: "text" as const, text: `\u274c LINT ENGINE ERROR: ${message}` }],
+        isError: true,
+      };
+    }
+  });
+
   // ─── SubagentStop Dispatch (tool_result event) ────────────────────────
   // When a subagent completes, handle phase advancement, task status
   // updates, and review findings — equivalent of SubagentStop hooks.
@@ -193,7 +243,9 @@ export default function (pi: ExtensionAPI) {
       try {
         const activeFile = `${SUBAGENT_DIR}/${sessionId}.active`;
         if (existsSync(activeFile)) unlinkSync(activeFile);
-      } catch {}
+      } catch (err) {
+        process.stderr.write(`loom: subagent flag cleanup failed: ${(err as Error).message}\n`);
+      }
 
       const mgr = StateManager.fromSession(sessionId);
       if (!mgr) continue;
@@ -201,6 +253,29 @@ export default function (pi: ExtensionAPI) {
       // --- Phase agent → advance phase ---
       const completedPhase = PHASE_AGENT_MAP[agentType];
       if (completedPhase) {
+        // Extract spec_file/plan_file from subagent messages (Pi format)
+        // Pi messages use { type: "toolCall", name: "write", arguments: { path } }
+        try {
+          const specDir = mgr.load().spec_dir ?? ".claude/specs";
+          for (const msg of (result.messages ?? []) as PiMessage[]) {
+            if (msg.role !== "assistant") continue;
+            for (const block of msg.content ?? []) {
+              if (block.type !== "toolCall" || (block.name !== "write" && block.name !== "Write")) continue;
+              const filePath = (block.arguments as Record<string, unknown>)?.path as string
+                ?? (block.arguments as Record<string, unknown>)?.file_path as string;
+              if (!filePath) continue;
+              if (filePath.includes(".claude/specs/") && filePath.endsWith("/spec.md")) {
+                await mgr.update((s) => ({ ...s, spec_file: filePath }));
+              }
+              if (filePath.includes(".claude/plans/") && filePath.endsWith(".md")) {
+                await mgr.update((s) => ({ ...s, plan_file: filePath }));
+              }
+            }
+          }
+        } catch (err) {
+          process.stderr.write(`loom: spec/plan extraction failed: ${(err as Error).message}\n`);
+        }
+
         const state = mgr.load();
         const currentIdx = PHASE_ORDER.indexOf(state.current_phase);
         const completedIdx = PHASE_ORDER.indexOf(completedPhase);
@@ -213,12 +288,17 @@ export default function (pi: ExtensionAPI) {
                 ...s,
                 current_phase: transition.nextPhase,
                 phase_artifacts: { ...s.phase_artifacts, [completedPhase]: transition.artifact },
+                // Also persist spec_file/plan_file if transition found them
+                ...(transition.artifact.endsWith("/spec.md") ? { spec_file: transition.artifact } : {}),
+                ...(transition.artifact.includes(".claude/plans/") ? { plan_file: transition.artifact } : {}),
                 skipped_phases: transition.skipClarify
                   ? ([...new Set([...s.skipped_phases, "clarify" as const])])
                   : s.skipped_phases,
                 updated_at: new Date().toISOString(),
               }));
-            } catch {}
+            } catch (err) {
+              process.stderr.write(`loom: phase advancement failed: ${(err as Error).message}\n`);
+            }
           }
         }
         continue;

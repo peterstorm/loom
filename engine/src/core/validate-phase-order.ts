@@ -17,6 +17,27 @@ import { StateManager } from "../state-manager";
 import { stripNamespace } from "../utils/strip-namespace";
 import { findFile } from "../utils/find-file";
 
+/**
+ * Resolves an artifact reference to an existing file path.
+ * Phase artifacts may contain:
+ *   - An actual file path (from advance-phase transcript parsing)
+ *   - "completed" (from advance-phase when no path was extractable)
+ *   - null/undefined
+ * Falls back to the explicit file field (spec_file/plan_file) when the artifact
+ * isn't a valid path.
+ */
+function resolveArtifact(artifact: string | undefined, fallback: string | null): string | null {
+  // If artifact is a real file path that exists, use it
+  if (artifact && artifact !== "completed" && existsSync(artifact)) {
+    return artifact;
+  }
+  // Fall back to the explicit field
+  if (fallback && existsSync(fallback)) {
+    return fallback;
+  }
+  return null;
+}
+
 export interface ValidatePhaseOrderInput {
   agentType: string;   // bare or namespaced agent name
   prompt: string;      // task prompt
@@ -44,8 +65,8 @@ export interface ArtifactState {
 }
 
 function checkPlanAlignmentGate(state: ArtifactState): string | null {
-  const plan = state.phase_artifacts.architecture ?? state.plan_file;
-  if (!plan || !existsSync(plan)) return "architecture (no plan.md found)";
+  const plan = resolveArtifact(state.phase_artifacts.architecture, state.plan_file);
+  if (!plan) return "architecture (no plan.md found)";
   if (!state.skipped_phases.includes("plan-alignment")) {
     const specDir = state.spec_dir ?? ".claude/specs";
     if (!findFile(specDir, "plan-alignment.md")) {
@@ -66,12 +87,24 @@ export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string
       return null;
     })
     .with("clarify", () => {
-      const spec = state.phase_artifacts.specify ?? state.spec_file;
+      let spec = resolveArtifact(state.phase_artifacts.specify, state.spec_file);
+      if (!spec) {
+        // Only fall back to disk search if spec_dir is explicitly set
+        if (state.spec_dir) {
+          spec = findFile(state.spec_dir, "spec.md");
+        }
+      }
       if (!spec || !existsSync(spec)) return "specify (no spec.md found)";
       return null;
     })
     .with("architecture", () => {
-      const spec = state.phase_artifacts.specify ?? state.spec_file;
+      let spec = resolveArtifact(state.phase_artifacts.specify, state.spec_file);
+      if (!spec) {
+        // Only fall back to disk search if spec_dir is explicitly set
+        if (state.spec_dir) {
+          spec = findFile(state.spec_dir, "spec.md");
+        }
+      }
       if (!spec || !existsSync(spec)) return "specify (no spec.md found)";
       if (!state.skipped_phases.includes("clarify")) {
         try {
@@ -85,8 +118,8 @@ export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string
       return null;
     })
     .with("plan-alignment", () => {
-      const plan = state.phase_artifacts.architecture ?? state.plan_file;
-      if (!plan || !existsSync(plan)) return "architecture (no plan.md found)";
+      const plan = resolveArtifact(state.phase_artifacts.architecture, state.plan_file);
+      if (!plan) return "architecture (no plan.md found)";
       return null;
     })
     .with("decompose", () => checkPlanAlignmentGate(state))

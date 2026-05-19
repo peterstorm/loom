@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-any-type",
+  "description": "Disallow explicit 'any' type annotations — use specific types or 'unknown'",
+  "extensions": [".ts", ".tsx"],
+  "pattern": "[\\w)>]\\s*:\\s*any\\b(?!\\s*\\w)",
+  "flags": "",
+  "fixHint": "Replace 'any' with a specific type, 'unknown', or a generic type parameter",
+  "enabled": true
+}

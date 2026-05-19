@@ -5,7 +5,7 @@
  * Phases: brainstorm → specify → clarify → architecture → plan-alignment → decompose → execute
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookHandler, SubagentStopInput, Phase, TaskGraph } from "../../types";
 import { PHASE_AGENT_MAP, PHASE_ORDER, CLARIFY_THRESHOLD } from "../../config";
@@ -38,8 +38,18 @@ export function resolveTransition(
       return { nextPhase: "specify" as Phase, artifact: file };
     })
     .with("specify", () => {
-      const spec = state.spec_file;
-      if (!spec || !existsSync(spec) || !spec.includes(".claude/specs/")) return null;
+      // Try state.spec_file first, fall back to finding spec.md on disk
+      let spec = state.spec_file;
+      if (spec && !spec.includes(".claude/specs/")) {
+        // spec_file set but not in expected location — reject and try fallback
+        spec = null;
+      }
+      if (!spec || !existsSync(spec)) {
+        if (state.spec_dir) {
+          spec = findFile(state.spec_dir, "spec.md");
+        }
+      }
+      if (!spec || !existsSync(spec)) return null;
       const markers = countMarkers(spec);
       if (markers > CLARIFY_THRESHOLD) {
         return { nextPhase: "clarify" as Phase, artifact: spec };
@@ -47,15 +57,46 @@ export function resolveTransition(
       return { nextPhase: "architecture" as Phase, artifact: spec, skipClarify: true };
     })
     .with("clarify", () => {
-      const spec = state.spec_file;
+      // Try state.spec_file first, fall back to finding spec.md on disk
+      let spec = state.spec_file;
+      if (!spec || !existsSync(spec)) {
+        if (state.spec_dir) {
+          spec = findFile(state.spec_dir, "spec.md");
+        }
+      }
       if (!spec || !existsSync(spec)) return null;
       const markers = countMarkers(spec);
       if (markers > 0) return null; // All markers must be resolved before advancing
       return { nextPhase: "architecture" as Phase, artifact: spec };
     })
     .with("architecture", () => {
-      const plan = state.plan_file;
-      if (!plan || !existsSync(plan) || !plan.includes(".claude/plans/")) return null;
+      // Try state.plan_file first, fall back to deriving plan path from spec_dir slug
+      let plan = state.plan_file;
+      if (plan && !plan.includes(".claude/plans/")) {
+        // plan_file set but not in expected location — reject
+        return null;
+      }
+      if (!plan || !existsSync(plan)) {
+        // plan_file not set or file missing — try deriving from spec_dir slug
+        if (state.spec_dir) {
+          const slug = state.spec_dir.split("/").pop() ?? "";
+          if (slug) {
+            const candidate = `.claude/plans/${slug}.md`;
+            if (existsSync(candidate)) plan = candidate;
+          }
+          // Final fallback: look for any plan matching the date prefix
+          if (!plan || !existsSync(plan)) {
+            const datePrefix = slug.slice(0, 10); // "2026-05-18"
+            if (datePrefix && existsSync(".claude/plans")) {
+              const files = readdirSync(".claude/plans").filter(
+                (f: string) => f.startsWith(datePrefix) && f.endsWith(".md")
+              );
+              if (files.length === 1) plan = `.claude/plans/${files[0]}`;
+            }
+          }
+        }
+      }
+      if (!plan || !existsSync(plan)) return null;
       if (state.skipped_phases.includes("plan-alignment")) {
         return { nextPhase: "decompose" as Phase, artifact: plan };
       }

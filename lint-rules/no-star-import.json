@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-star-import",
+  "description": "Disallow wildcard imports — use explicit imports for clarity",
+  "extensions": [".java"],
+  "pattern": "^import\\s+[\\w.]+\\.\\*\\s*;",
+  "flags": "",
+  "fixHint": "Replace wildcard import with explicit imports. Star imports hide dependencies and can cause naming conflicts.",
+  "enabled": true
+}

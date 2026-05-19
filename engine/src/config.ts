@@ -5,7 +5,8 @@
 
 import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Phase } from "./types";
 
 /** Markers above this trigger mandatory clarify phase */
@@ -150,3 +151,14 @@ export const TASK_GRAPH_PATH = findTaskGraphPath();
 
 /** Subagent tracking directory */
 export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
+
+// --- Linter Configuration ---
+
+/** Default rules directory (shipped with loom) — resolved from this file's location */
+const CONFIG_DIR = dirname(fileURLToPath(import.meta.url));
+export const DEFAULT_RULES_DIR = join(CONFIG_DIR, "..", "..", "lint-rules");
+
+/** Project-local rules directory — resolved relative to repo root */
+export const PROJECT_RULES_DIR = HARNESS === "pi"
+  ? ".pi/linter/rules"
+  : ".claude/linter/rules";

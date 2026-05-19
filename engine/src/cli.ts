@@ -35,13 +35,14 @@ const KNOWN_HANDLERS: Record<string, Set<string>> = {
     "store-reviewer-findings", "store-spec-check-findings",
     "cleanup-subagent-flag",
   ]),
+  "post-tool-use": new Set(["lint-file"]),
   "subagent-start": new Set(["mark-subagent-active"]),
   "session-start": new Set(["cleanup-stale-subagents", "resume-after-clear"]),
   "helper": new Set([
     "complete-wave-gate", "populate-task-graph", "validate-task-graph",
     "store-review-findings", "store-spec-check", "mark-tests-passed",
     "suggest-spec-anchors", "extract-task-id", "store-test-evidence",
-    "set-phase", "cleanup-state",
+    "set-phase", "cleanup-state", "lint-wave-gate",
   ]),
 };
 

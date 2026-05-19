@@ -1,0 +1,11 @@
+{
+  "kind": "regex",
+  "name": "no-console-log",
+  "description": "Disallow console.log() calls — use structured logging or remove debug statements",
+  "extensions": [".ts", ".tsx"],
+  "pattern": "(?<![\"'`])console\\.log\\(",
+  "flags": "",
+  "fixHint": "Remove console.log() or replace with a structured logger (e.g., logger.info())",
+  "enabled": true,
+  "excludePatterns": [".test.ts", ".spec.ts", ".test.tsx"]
+}
