@@ -79,7 +79,6 @@ function detectUnsafePattern(pattern: string): string | null {
 function hasNestedQuantifiers(pattern: string): boolean {
   // Find groups (handling nesting) and check if both the group content
   // and the group itself have quantifiers
-  const quantifierSuffixRe = /[+*]\)?[+*?{]/;
 
   // Simple approach: tokenize by looking for quantifier-on-group patterns
   // Match: group with internal quantifier followed by external quantifier
@@ -352,19 +351,7 @@ function setsIntersect(a: MatchSet, b: MatchSet): boolean {
 
 // --- Runtime Timeout ---
 
-/**
- * Executes a synchronous function with a timeout deadline.
- * 
- * IMPORTANT: This is NOT a preemptive timeout. JavaScript is single-threaded,
- * so a truly blocking operation cannot be interrupted. This function is designed
- * to be used with batch-processing loops where the loop checks the deadline
- * between iterations (e.g., between processing each line of a file).
- * 
- * For the linter use case, the executor calls this once per batch of lines,
- * checking the deadline between batches.
- * 
- * @throws Error if the function exceeds the timeout
- */
+/** @internal — utility retained for testing; not used in production execution path */
 export function execWithTimeout<T>(fn: () => T, timeoutMs: number): T {
   const deadline = performance.now() + timeoutMs;
   const result = fn();

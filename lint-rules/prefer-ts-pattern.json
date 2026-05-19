@@ -6,5 +6,5 @@
   "pattern": "switch\\s*\\(",
   "flags": "",
   "fixHint": "Use match(value).with(...).exhaustive() from ts-pattern instead of switch for discriminated unions. See architecture.md TypeScript Patterns.",
-  "enabled": true
+  "enabled": false
 }

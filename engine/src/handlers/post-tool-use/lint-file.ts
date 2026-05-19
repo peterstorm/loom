@@ -18,6 +18,7 @@ import { allowResult, blockResult, passthroughResult } from "../../types";
 import { lintFile } from "../../linter/index";
 import { formatOutput, formatBlockMessage } from "../../linter/formatter";
 import { DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../config";
+import { match } from "ts-pattern";
 
 /** Tool names that trigger file linting */
 const LINT_TRIGGER_TOOLS = new Set(["Edit", "Write", "MultiEdit"]);
@@ -58,10 +59,10 @@ const handler: HookHandler = async (stdin) => {
       return passthroughResult();
     }
 
-    // Extract file path — passthrough if not available
+    // Extract file path — fail-closed if not available for a lint-triggering tool
     const filePath = extractFilePath(input.tool_input);
     if (!filePath) {
-      return passthroughResult();
+      return blockResult("Lint hook error: Could not extract file_path from tool_input");
     }
 
     // Resolve project rules dir (may not exist — lintFile handles gracefully)
@@ -71,26 +72,15 @@ const handler: HookHandler = async (stdin) => {
     const result = lintFile(filePath, "immediate", DEFAULT_RULES_DIR, projectRulesDir);
 
     // Map LintResult to HookResult
-    switch (result.kind) {
-      case "pass":
-        return allowResult();
-
-      case "violations": {
-        const output = formatOutput(result, filePath);
+    return match(result)
+      .with({ kind: "pass" }, () => allowResult())
+      .with({ kind: "violations" }, (r) => {
+        const output = formatOutput(r, filePath);
         const message = formatBlockMessage(output);
         return blockResult(message);
-      }
-
-      case "error":
-        // Fail-closed: lint engine error → block the edit
-        return blockResult(`Lint engine error: ${result.message}`);
-
-      default: {
-        // Exhaustive check — should never reach here
-        const _exhaustive: never = result;
-        return blockResult(`Unexpected lint result: ${JSON.stringify(_exhaustive)}`);
-      }
-    }
+      })
+      .with({ kind: "error" }, (r) => blockResult(`Lint engine error: ${r.message}`))
+      .exhaustive();
   } catch (error: unknown) {
     // Fail-closed: any unexpected error → block
     const message = error instanceof Error ? error.message : String(error);

@@ -9,6 +9,7 @@
  * - SC-005: Parseable by both Claude Code and Pi consumers without transformation
  */
 
+import { match } from "ts-pattern";
 import type { LintResult, LintOutput, Violation } from "./types";
 
 /**
@@ -19,18 +20,11 @@ import type { LintResult, LintOutput, Violation } from "./types";
  * - `{ kind: "error", message }` → `{ status: "error", file, error: message }`
  */
 export function formatOutput(result: LintResult, filePath: string): LintOutput {
-  switch (result.kind) {
-    case "pass":
-      return { status: "pass", file: filePath };
-    case "violations":
-      return { status: "fail", file: filePath, violations: result.violations };
-    case "error":
-      return { status: "error", file: filePath, error: result.message };
-    default: {
-      const _exhaustive: never = result;
-      return { status: 'error' as const, file: filePath, error: `Unknown result kind: ${JSON.stringify(_exhaustive)}` };
-    }
-  }
+  return match(result)
+    .with({ kind: "pass" }, () => ({ status: "pass" as const, file: filePath }))
+    .with({ kind: "violations" }, ({ violations }) => ({ status: "fail" as const, file: filePath, violations }))
+    .with({ kind: "error" }, ({ message }) => ({ status: "error" as const, file: filePath, error: message }))
+    .exhaustive();
 }
 
 /**
@@ -41,26 +35,18 @@ export function formatOutput(result: LintResult, filePath: string): LintOutput {
  * - For "error": renders error message
  */
 export function formatBlockMessage(output: LintOutput): string {
-  switch (output.status) {
-    case "pass":
-      return "";
-
-    case "fail": {
-      const header = `❌ LINT VIOLATIONS in ${output.file}`;
-      const violationLines = (output.violations ?? []).map(formatViolationBlock);
+  return match(output)
+    .with({ status: "pass" }, () => "")
+    .with({ status: "fail" }, (o) => {
+      const header = `❌ LINT VIOLATIONS in ${o.file}`;
+      const violationLines = o.violations.map(formatViolationBlock);
       return [header, "", ...violationLines].join("\n");
-    }
-
-    case "error": {
-      const header = `❌ LINT ENGINE ERROR in ${output.file}`;
-      return [header, "", `  Error: ${output.error ?? "Unknown error"}`].join("\n");
-    }
-
-    default: {
-      const _exhaustive: never = output.status;
-      return `❌ LINT ENGINE ERROR in ${output.file}\n\n  Error: Unexpected status: ${String(_exhaustive)}`;
-    }
-  }
+    })
+    .with({ status: "error" }, (o) => {
+      const header = `❌ LINT ENGINE ERROR in ${o.file}`;
+      return [header, "", `  Error: ${o.error}`].join("\n");
+    })
+    .exhaustive();
 }
 
 function formatViolationBlock(v: Violation): string {

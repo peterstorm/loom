@@ -9,12 +9,14 @@ import { TASK_GRAPH_PATH } from "../../config";
 import type { HookHandler } from "../../types";
 import type { TaskGraph, TaskStatus } from "../../types";
 
-export function statusIcon(status: TaskStatus): string {
+export function statusIcon(status: TaskStatus | null | undefined): string {
   switch (status) {
     case "pending":     return "-";
     case "completed":   return "done";
     case "implemented": return "impl";
     case "failed":      return "FAIL";
+    case null:
+    case undefined:     return "-";  // treat missing status as pending
     default: {
       const _exhaustive: never = status;
       process.stderr.write(`[loom] resume-after-clear: unknown TaskStatus '${String(_exhaustive)}'\n`);
@@ -53,9 +55,24 @@ export function buildContextOutput(state: TaskGraph, loomDir: string): string {
   lines.push(taskRows);
   lines.push("");
   lines.push("## Instructions");
-  lines.push(`Read the loom skill at \`${loomDir}/commands/loom.md\`, specifically Phase 5: Execute.`);
-  lines.push(`Spawn all pending wave ${currentWave} tasks in parallel using the Task tool.`);
-  lines.push(`Load impl-agent-context template from \`${loomDir}/commands/templates/impl-agent-context.md\`.`);
+
+  // Check if wave-gate needs running before spawning tasks
+  const currentWaveGate = state.wave_gates?.[String(currentWave)];
+  const prevWaveGate = currentWave > 1 ? state.wave_gates?.[String(currentWave - 1)] : null;
+  const needsWaveGate = currentWaveGate?.impl_complete && !currentWaveGate?.reviews_complete;
+  const prevWaveBlocked = prevWaveGate && !prevWaveGate.reviews_complete;
+
+  if (prevWaveBlocked) {
+    lines.push(`**\u26a0\ufe0f BLOCKED: Wave ${currentWave - 1} review gate not passed. Run \`/wave-gate\` first.**`);
+    lines.push(`Read \`${loomDir}/commands/wave-gate.md\` and spawn review subagents for wave ${currentWave - 1}.`);
+  } else if (needsWaveGate) {
+    lines.push(`**\u26a0\ufe0f Wave ${currentWave} implementation complete but NOT reviewed. Run \`/wave-gate\` first.**`);
+    lines.push(`Read \`${loomDir}/commands/wave-gate.md\` and spawn review subagents for wave ${currentWave}.`);
+  } else {
+    lines.push(`Read the loom skill at \`${loomDir}/commands/loom.md\`, specifically Phase 5: Execute.`);
+    lines.push(`Spawn all pending wave ${currentWave} tasks in parallel using the Task tool.`);
+    lines.push(`Load impl-agent-context template from \`${loomDir}/commands/templates/impl-agent-context.md\`.`);
+  }
   lines.push("<!-- END LOOM RESUME CONTEXT -->");
 
   return lines.join("\n");

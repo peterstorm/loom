@@ -76,29 +76,43 @@ describe("PostToolUse lint-file handler", () => {
       const result = await handler(stdin, []);
       expect(result).toEqual({ kind: "passthrough" });
     });
+  });
 
-    it("returns passthrough when tool_input is null", async () => {
+  describe("fail-closed: missing file path blocks for lint-triggering tools", () => {
+    it("returns block when tool_input is null", async () => {
       const stdin = makeStdin({ tool_input: null });
       const result = await handler(stdin, []);
-      expect(result).toEqual({ kind: "passthrough" });
+      expect(result.kind).toBe("block");
+      expect((result as { kind: "block"; message: string }).message).toContain(
+        "Could not extract file_path from tool_input"
+      );
     });
 
-    it("returns passthrough when file_path is missing from tool_input", async () => {
+    it("returns block when file_path is missing from tool_input", async () => {
       const stdin = makeStdin({ tool_input: { content: "hello" } });
       const result = await handler(stdin, []);
-      expect(result).toEqual({ kind: "passthrough" });
+      expect(result.kind).toBe("block");
+      expect((result as { kind: "block"; message: string }).message).toContain(
+        "Could not extract file_path from tool_input"
+      );
     });
 
-    it("returns passthrough when file_path is empty string", async () => {
+    it("returns block when file_path is empty string", async () => {
       const stdin = makeStdin({ tool_input: { file_path: "" } });
       const result = await handler(stdin, []);
-      expect(result).toEqual({ kind: "passthrough" });
+      expect(result.kind).toBe("block");
+      expect((result as { kind: "block"; message: string }).message).toContain(
+        "Could not extract file_path from tool_input"
+      );
     });
 
-    it("returns passthrough when file_path is whitespace only", async () => {
+    it("returns block when file_path is whitespace only", async () => {
       const stdin = makeStdin({ tool_input: { file_path: "   " } });
       const result = await handler(stdin, []);
-      expect(result).toEqual({ kind: "passthrough" });
+      expect(result.kind).toBe("block");
+      expect((result as { kind: "block"; message: string }).message).toContain(
+        "Could not extract file_path from tool_input"
+      );
     });
   });
 

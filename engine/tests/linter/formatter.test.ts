@@ -28,8 +28,8 @@ describe("formatOutput", () => {
       const result = passResult();
       const output = formatOutput(result, filePath);
 
-      expect(output.violations).toBeUndefined();
-      expect(output.error).toBeUndefined();
+      expect("violations" in output).toBe(false);
+      expect("error" in output).toBe(false);
     });
   });
 
@@ -55,10 +55,13 @@ describe("formatOutput", () => {
       const result: LintResult = { kind: "violations", violations };
       const output = formatOutput(result, filePath);
 
-      expect(output.violations).toHaveLength(3);
-      expect(output.violations![0].line).toBe(10);
-      expect(output.violations![1].line).toBe(20);
-      expect(output.violations![2].line).toBe(30);
+      expect(output.status).toBe("fail");
+      if (output.status === "fail") {
+        expect(output.violations).toHaveLength(3);
+        expect(output.violations[0].line).toBe(10);
+        expect(output.violations[1].line).toBe(20);
+        expect(output.violations[2].line).toBe(30);
+      }
     });
 
     it("does not include error field on fail", () => {
@@ -68,7 +71,7 @@ describe("formatOutput", () => {
       const result = violationsResult(violations);
       const output = formatOutput(result, filePath);
 
-      expect(output.error).toBeUndefined();
+      expect("error" in output).toBe(false);
     });
   });
 
@@ -88,7 +91,7 @@ describe("formatOutput", () => {
       const result = lintErrorResult("Timeout");
       const output = formatOutput(result, filePath);
 
-      expect(output.violations).toBeUndefined();
+      expect("violations" in output).toBe(false);
     });
   });
 
@@ -192,10 +195,11 @@ describe("formatBlockMessage", () => {
       // No violation blocks, just header
     });
 
-    it("handles undefined violations gracefully", () => {
+    it("handles empty violations array gracefully in block message", () => {
       const output: LintOutput = {
         status: "fail",
         file: "src/index.ts",
+        violations: [],
       };
       const msg = formatBlockMessage(output);
 
@@ -216,15 +220,16 @@ describe("formatBlockMessage", () => {
       expect(msg).toContain("Error: Failed to read file: ENOENT");
     });
 
-    it("handles undefined error gracefully", () => {
+    it("renders error message correctly", () => {
       const output: LintOutput = {
         status: "error",
         file: "src/broken.ts",
+        error: "Unexpected parse failure",
       };
       const msg = formatBlockMessage(output);
 
       expect(msg).toContain("❌ LINT ENGINE ERROR in src/broken.ts");
-      expect(msg).toContain("Error: Unknown error");
+      expect(msg).toContain("Error: Unexpected parse failure");
     });
   });
 

@@ -7,7 +7,7 @@
 
 // --- Tier & Kind ---
 
-/** Execution tier: immediate (PostEdit <50ms) or full (wave-gate, all rules) */
+/** Execution tier: immediate (PostEdit, single-file fast path) or full (wave-gate, complete rule suite) */
 export type Tier = "immediate" | "full";
 
 /** Rule classification: regex (declarative JSON) or programmatic (TS handler) */
@@ -24,7 +24,7 @@ export interface RegexRule {
   readonly description: string;
   readonly extensions: readonly string[];  // e.g. [".ts", ".tsx"]
   readonly pattern: string;                // regex source
-  readonly flags?: string;                 // regex flags (default: none)
+  readonly flags: string;                  // regex flags (empty string = none)
   readonly fixHint: string;
   readonly enabled: boolean;
   readonly source: RuleSource;
@@ -60,14 +60,12 @@ export type LintResult =
   | { readonly kind: "violations"; readonly violations: readonly Violation[] }
   | { readonly kind: "error"; readonly message: string };
 
-// --- LintOutput (serializable JSON output) ---
+// --- LintOutput (discriminated union on `status`) ---
 
-export interface LintOutput {
-  readonly status: "pass" | "fail" | "error";
-  readonly file: string;
-  readonly violations?: readonly Violation[];
-  readonly error?: string;
-}
+export type LintOutput =
+  | { readonly status: "pass"; readonly file: string }
+  | { readonly status: "fail"; readonly file: string; readonly violations: readonly Violation[] }
+  | { readonly status: "error"; readonly file: string; readonly error: string };
 
 // --- Type Guards ---
 

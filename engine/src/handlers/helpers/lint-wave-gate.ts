@@ -87,6 +87,9 @@ export function aggregateResults(results: readonly FileLintResult[]): HookResult
       const blockMsg = formatBlockMessage(r.output);
       if (blockMsg) {
         failures.push(blockMsg);
+      } else {
+        // Defensive: if formatting fails to produce a message for a failure, still block
+        failures.push(`❌ ${r.file}: lint ${r.result.kind} (formatting produced empty message)`);
       }
     }
   }

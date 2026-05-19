@@ -9,6 +9,7 @@
  * The imperative shell (pi/extension.ts) calls this with the lint result.
  */
 
+import { match } from "ts-pattern";
 import type { LintResult } from "../linter/types";
 import { formatOutput, formatBlockMessage } from "../linter/formatter";
 
@@ -21,6 +22,7 @@ export interface PiToolResultResponse {
 
 // --- Tool names that trigger lint ---
 
+// Pi tool names are lowercase (vs PascalCase in Claude Code's PostToolUse)
 const LINT_TRIGGER_TOOLS = new Set(["edit", "write"]);
 
 /**
@@ -56,37 +58,25 @@ export function handleLintResult(
   filePath: string,
   lintResult: LintResult
 ): PiToolResultResponse | undefined {
-  switch (lintResult.kind) {
-    case "pass":
-      return undefined;
-
-    case "violations": {
-      const output = formatOutput(lintResult, filePath);
+  return match(lintResult)
+    .with({ kind: "pass" }, () => undefined)
+    .with({ kind: "violations" }, (r) => {
+      const output = formatOutput(r, filePath);
       const message = formatBlockMessage(output);
       return {
-        content: [{ type: "text", text: message }],
+        content: [{ type: "text" as const, text: message }],
         isError: true,
-      };
-    }
-
-    case "error": {
-      const output = formatOutput(lintResult, filePath);
+      } as PiToolResultResponse;
+    })
+    .with({ kind: "error" }, (r) => {
+      const output = formatOutput(r, filePath);
       const message = formatBlockMessage(output);
       return {
-        content: [{ type: "text", text: message }],
+        content: [{ type: "text" as const, text: message }],
         isError: true,
-      };
-    }
-
-    default: {
-      // Exhaustive check — fail-closed on unknown kind
-      const _exhaustive: never = lintResult;
-      return {
-        content: [{ type: "text", text: `❌ LINT ENGINE ERROR: Unknown result kind: ${JSON.stringify(_exhaustive)}` }],
-        isError: true,
-      };
-    }
-  }
+      } as PiToolResultResponse;
+    })
+    .exhaustive();
 }
 
 /**
@@ -117,6 +107,13 @@ export function processToolResult(
     };
   }
 
-  const lintResult = lintFn(filePath);
+  let lintResult: LintResult;
+  try {
+    lintResult = lintFn(filePath);
+  } catch (error: unknown) {
+    // Fail-closed: lintFn throwing is treated as a lint engine error
+    const message = error instanceof Error ? error.message : String(error);
+    lintResult = { kind: "error", message: `lintFn threw: ${message}` };
+  }
   return handleLintResult(filePath, lintResult);
 }

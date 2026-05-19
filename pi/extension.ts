@@ -181,26 +181,35 @@ export default function (pi: ExtensionAPI) {
   // If error: fail-closed — inject error content.
 
   pi.on("tool_result", async (event, _ctx) => {
-    if (event.toolName !== "edit" && event.toolName !== "write") return;
+    try {
+      if (event.toolName !== "edit" && event.toolName !== "write") return;
 
-    // Skip if the tool itself errored (file may not exist on disk)
-    if (event.isError) return;
+      // Skip if the tool itself errored (file may not exist on disk)
+      if (event.isError) return;
 
-    const projectRoot = process.cwd();
-    const projectRulesPath = join(projectRoot, PROJECT_RULES_DIR);
-    const projectRulesDir = existsSync(projectRulesPath) ? projectRulesPath : null;
+      const projectRoot = process.cwd();
+      const projectRulesPath = join(projectRoot, PROJECT_RULES_DIR);
+      const projectRulesDir = existsSync(projectRulesPath) ? projectRulesPath : null;
 
-    const loomDefaultRulesDir = join(PACKAGE_ROOT, "lint-rules");
-    const response = processToolResult(
-      event.toolName,
-      event.input,
-      (filePath) => lintFile(filePath, "immediate", loomDefaultRulesDir, projectRulesDir)
-    );
+      const loomDefaultRulesDir = join(PACKAGE_ROOT, "lint-rules");
+      const response = processToolResult(
+        event.toolName,
+        event.input,
+        (filePath) => lintFile(filePath, "immediate", loomDefaultRulesDir, projectRulesDir)
+      );
 
-    if (response) {
+      if (response) {
+        return {
+          content: response.content.map(c => ({ type: c.type as "text", text: c.text })),
+          isError: response.isError,
+        };
+      }
+    } catch (error: unknown) {
+      // Fail-closed: any error \u2192 inject error content to block the edit
+      const message = error instanceof Error ? error.message : String(error);
       return {
-        content: response.content.map(c => ({ type: c.type as "text", text: c.text })),
-        isError: response.isError,
+        content: [{ type: "text" as const, text: `\u274c LINT ENGINE ERROR: ${message}` }],
+        isError: true,
       };
     }
   });

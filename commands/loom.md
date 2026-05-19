@@ -334,9 +334,24 @@ For each wave:
 2. Spawn ALL wave tasks in parallel (single message, multiple Task calls)
 3. Wait for all to reach "implemented"
 4. If any tasks `failed`: auto-retry up to 2 times (re-spawn with error context)
-5. Invoke `/wave-gate` (test + spec-check + review)
+5. **RUN `/wave-gate` — MANDATORY, via subagents** (see below)
 6. If passed: advance to next wave
 7. If blocked: fix issues, re-run `/wave-gate`
+
+### Wave-Gate Enforcement (NON-NEGOTIABLE)
+
+**You MUST invoke `/wave-gate` by spawning review subagents.** You are NEVER allowed to:
+- Review code yourself inline and declare it "passed"
+- Skip the wave-gate and proceed to the next wave
+- Manually set `reviews_complete: true` in state
+
+**The wave-gate spawns these agents (see `commands/wave-gate.md` for full protocol):**
+1. `spec-check-invoker` — verifies implementation satisfies spec anchors (1 per wave)
+2. Per task: `code-reviewer`, `silent-failure-hunter`, `pr-test-analyzer`, `type-design-analyzer`, `comment-analyzer`
+
+**All spawned in parallel via Task/subagent tool.** SubagentStop hooks automatically update state. Then `complete-wave-gate` helper advances the wave.
+
+**The `validate-task-execution` hook enforces this:** it blocks next-wave impl agents if `wave_gates[N-1].reviews_complete == false`. Even if you try to skip, the hook will BLOCK.
 
 **Auto-retry logic:** After spawning, check for `failed` tasks:
 ```bash

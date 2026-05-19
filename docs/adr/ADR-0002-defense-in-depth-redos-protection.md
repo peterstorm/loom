@@ -45,7 +45,7 @@ Patterns that fail static analysis are rejected immediately. The rule is marked 
 
 During execution, the rule executor tracks elapsed time with an amortized deadline check every N lines (rather than per-regex-match, which would add unacceptable overhead). If the cumulative time exceeds the 50ms budget, execution halts and the linter returns a fail-closed timeout error identifying the offending rule.
 
-The amortized approach balances safety with performance: checking `Date.now()` on every single regex match would add measurable overhead to the fast path, while checking every N lines keeps overhead negligible while bounding worst-case latency to N × (single-line worst case).
+The amortized approach balances safety with performance: checking `performance.now()` on every single regex match would add measurable overhead to the fast path, while checking every N lines keeps overhead negligible while bounding worst-case latency to N × (single-line worst case).
 
 ### Invariants
 - A pattern rejected by static analysis never executes at runtime

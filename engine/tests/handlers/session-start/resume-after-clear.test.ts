@@ -237,6 +237,11 @@ describe("statusIcon (pure)", () => {
     expect(statusIcon("failed")).toBe("FAIL");
   });
 
+  it("treats null/undefined status as pending", () => {
+    expect(statusIcon(null)).toBe("-");
+    expect(statusIcon(undefined)).toBe("-");
+  });
+
   it("returns ? sentinel for unknown status (defensive)", () => {
     // Cast bypasses exhaustiveness — simulates a future status that hasn't been wired yet.
     expect(statusIcon("ghost" as TaskStatus)).toBe("?");
@@ -304,5 +309,45 @@ describe("buildContextOutput (pure)", () => {
       current_wave: 2,
     }), "/loom");
     expect(out).toContain("**Current Wave:** 2 of 3");
+  });
+
+  it("shows wave-gate warning when prev wave reviews incomplete", () => {
+    const out = buildContextOutput(graph({
+      current_wave: 2,
+      tasks: [task({ id: "T1", wave: 1, status: "completed" }), task({ id: "T2", wave: 2 })],
+      wave_gates: {
+        "1": { impl_complete: true, tests_passed: true, reviews_complete: false, blocked: false },
+        "2": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false },
+      },
+    }), "/loom");
+    expect(out).toContain("BLOCKED: Wave 1 review gate not passed");
+    expect(out).toContain("/wave-gate");
+    expect(out).not.toContain("Spawn all pending wave");
+  });
+
+  it("shows wave-gate warning when current wave impl complete but not reviewed", () => {
+    const out = buildContextOutput(graph({
+      current_wave: 1,
+      tasks: [task({ id: "T1", wave: 1, status: "implemented" })],
+      wave_gates: {
+        "1": { impl_complete: true, tests_passed: true, reviews_complete: false, blocked: false },
+      },
+    }), "/loom");
+    expect(out).toContain("implementation complete but NOT reviewed");
+    expect(out).toContain("/wave-gate");
+    expect(out).not.toContain("Spawn all pending wave");
+  });
+
+  it("shows normal instructions when wave-gate is clear", () => {
+    const out = buildContextOutput(graph({
+      current_wave: 2,
+      tasks: [task({ id: "T1", wave: 1, status: "completed" }), task({ id: "T2", wave: 2 })],
+      wave_gates: {
+        "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
+        "2": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false },
+      },
+    }), "/loom");
+    expect(out).toContain("Spawn all pending wave 2 tasks");
+    expect(out).not.toContain("BLOCKED");
   });
 });

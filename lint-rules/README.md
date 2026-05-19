@@ -38,13 +38,13 @@ The linter loads rules from two directories, merged at runtime:
 
 1. **Default rules** — Bundled with loom in the `lint-rules/` directory. These ship with every installation and provide baseline code quality checks.
 
-2. **Project-local rules** — Defined in `.claude/rules/*.json` (or `.pi/rules/*.json` for Pi projects). These are project-specific and live alongside other project configuration.
+2. **Project-local rules** — Defined in `.claude/linter/rules/*.json` (or `.pi/linter/rules/*.json` for Pi projects). These are project-specific and live alongside other project configuration.
 
 ### Load Order
 
 ```
 lint-rules/*.json          → tagged source: "default"
-.claude/rules/*.json       → tagged source: "project"
+.claude/linter/rules/*.json    → tagged source: "project"  (or .pi/linter/rules/ for Pi)
 ```
 
 The `source` field is set automatically by the loader — do **not** include it in your JSON files.
@@ -61,7 +61,7 @@ Project-local rules can override or disable default rules:
 
 ### Disabling a Default Rule
 
-To disable the bundled `no-console-log` rule for your project, create `.claude/rules/no-console-log.json`:
+To disable the bundled `no-console-log` rule for your project, create `.claude/linter/rules/no-console-log.json`:
 
 ```json
 {
@@ -112,7 +112,7 @@ The `fixHint` is shown to the AI agent (or developer) when a violation fires. Ma
 ### Step 4: Place the File
 
 - For rules that should ship with loom: add to `lint-rules/`
-- For project-specific rules: add to `.claude/rules/` (or `.pi/rules/`)
+- For project-specific rules: add to `.claude/linter/rules/` (or `.pi/linter/rules/`)
 
 ### More Examples
 

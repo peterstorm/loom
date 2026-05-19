@@ -84,6 +84,8 @@ function executeRegexRule(
   content: string,
   checkDeadline: () => void
 ): Violation[] {
+  // Defense-in-depth: re-validate safety even though loader already checked
+  // (guards against direct executeRules calls bypassing the loader)
   const safetyResult = analyzeRegex(rule.pattern, rule.flags);
 
   if (!safetyResult.safe) {
@@ -113,6 +115,9 @@ function executeRegexRule(
       );
     }
   }
+
+  // Final deadline check — catches timeout for files under DEADLINE_CHECK_INTERVAL lines
+  checkDeadline();
 
   return violations;
 }
