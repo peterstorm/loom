@@ -10,7 +10,8 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { type RegexRule, type Rule, type Tier, type RuleSource, isRegexRule } from "./types";
 import { analyzeRegex } from "./safety";
-import { PROGRAMMATIC_RULES } from "./programmatic/index";
+import { PROGRAMMATIC_RULES, createProgrammaticRules } from "./programmatic/index";
+import { loadProjectConfig } from "./programmatic/config";
 
 // --- Public API ---
 
@@ -61,7 +62,13 @@ export function loadRules(
 
   // Full tier: include programmatic rules (also subject to project overrides)
   if (options?.includeProgrammatic !== false) {
-    const programmaticEnabled = PROGRAMMATIC_RULES.filter((rule) => {
+    // Load project-local config for programmatic rules
+    const projectConfig = loadProjectConfig(projectDir);
+    const programmaticRules = projectConfig.boundaries || projectConfig.pureModules || projectConfig.maxFunctionLines
+      ? createProgrammaticRules(projectConfig)
+      : PROGRAMMATIC_RULES;
+
+    const programmaticEnabled = programmaticRules.filter((rule) => {
       // Check if a project rule disabled this programmatic rule by name
       const override = projectRules.find((p) => p.name === rule.name);
       if (override && !override.enabled) return false;

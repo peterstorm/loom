@@ -144,13 +144,17 @@ export function checkBoundaryViolation(
  * Programmatic rule handler for no-cross-boundary-imports.
  * Scans imports and checks each against boundary rules.
  */
-export function handler(content: string, filePath: string): Violation[] {
+export function handler(
+  content: string,
+  filePath: string,
+  boundaries: readonly BoundaryRule[] = DEFAULT_BOUNDARIES
+): Violation[] {
   const imports = extractImports(content);
   const violations: Violation[] = [];
 
   for (const imp of imports) {
     const resolved = resolveImportPath(filePath, imp.specifier);
-    const violation = checkBoundaryViolation(filePath, resolved, DEFAULT_BOUNDARIES);
+    const violation = checkBoundaryViolation(filePath, resolved, boundaries);
 
     if (violation) {
       violations.push(

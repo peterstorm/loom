@@ -82,8 +82,12 @@ export function isPureModule(
  * Programmatic rule handler for no-io-in-pure-modules.
  * Only fires for files matching the pure module list.
  */
-export function handler(content: string, filePath: string): Violation[] {
-  if (!isPureModule(filePath)) {
+export function handler(
+  content: string,
+  filePath: string,
+  pureModules: readonly string[] = DEFAULT_PURE_MODULES
+): Violation[] {
+  if (!isPureModule(filePath, pureModules)) {
     return []; // Not a pure module — no restrictions
   }
 

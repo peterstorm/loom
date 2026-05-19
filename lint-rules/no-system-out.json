@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-system-out",
+  "description": "Disallow System.out/System.err print calls — use structured logging (SLF4J/Logback)",
+  "extensions": [".java"],
+  "pattern": "System\\.(out|err)\\.(print|println|printf)\\(",
+  "flags": "",
+  "fixHint": "Replace with a structured logger: private static final Logger log = LoggerFactory.getLogger(ClassName.class); then use log.info(), log.debug(), etc.",
+  "enabled": true
+}

@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-mutable-entity-fields",
+  "description": "Disallow non-final instance fields in domain classes — prefer immutable records or final fields",
+  "extensions": [".java"],
+  "pattern": "^\\s+(private|protected)\\s+(?!static|final|transient)[A-Z][\\w]*\\s+\\w+\\s*[;=]",
+  "flags": "",
+  "fixHint": "Make this field final, or convert the class to a Java record. Mutable fields in domain objects violate immutability-first and make concurrent access unsafe.",
+  "enabled": false
+}

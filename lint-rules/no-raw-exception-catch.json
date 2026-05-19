@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-raw-exception-catch",
+  "description": "Disallow catching raw Exception — catch specific exception types",
+  "extensions": [".java"],
+  "pattern": "catch\\s*\\(\\s*(Exception|Throwable)\\s+",
+  "flags": "",
+  "fixHint": "Catch a specific exception type (e.g., IOException, IllegalArgumentException) instead of raw Exception/Throwable. If you must catch broadly, at minimum re-throw as a domain-specific exception.",
+  "enabled": true
+}

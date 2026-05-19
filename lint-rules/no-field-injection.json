@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-field-injection",
+  "description": "Disallow field injection (@Autowired/@Inject on fields) — use constructor injection",
+  "extensions": [".java"],
+  "pattern": "^\\s*@(Autowired|Inject)\\s*$",
+  "flags": "",
+  "fixHint": "Use constructor injection instead of field injection. Add the dependency as a constructor parameter (final field). Constructor injection makes dependencies explicit and enables testing without a DI container.",
+  "enabled": true
+}

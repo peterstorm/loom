@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-null-return",
+  "description": "Disallow returning null — use Optional, empty collections, or throw",
+  "extensions": [".java"],
+  "pattern": "return\\s+null\\s*;",
+  "flags": "",
+  "fixHint": "Return Optional.empty() instead of null, or an empty collection, or throw a domain exception. Null returns push null-checking burden to every caller.",
+  "enabled": true
+}
