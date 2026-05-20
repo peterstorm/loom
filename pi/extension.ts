@@ -323,9 +323,20 @@ export default function (pi: ExtensionAPI) {
         const testEvidence = extractTestEvidence(bashOutput);
 
         let newTestEvidence = { written: false, evidence: "" };
-        if (git.isGitRepo() && task.start_sha) {
-          const diff = git.diff(task.start_sha, "HEAD");
-          newTestEvidence = analyzeNewTests(diff, task.new_tests_required);
+        if (git.isGitRepo()) {
+          // Collect diff: prefer start_sha-based, fall back to untracked test files
+          let diff = "";
+          if (task.start_sha) {
+            diff = git.diff(task.start_sha, "HEAD");
+          }
+          // Also include untracked test files (agents create new files without committing)
+          const untrackedTests = git.listUntrackedTestFiles();
+          for (const f of untrackedTests) {
+            diff += "\n" + git.diffUntracked(f);
+          }
+          if (diff.trim()) {
+            newTestEvidence = analyzeNewTests(diff, task.new_tests_required);
+          }
         }
 
         await mgr.update((s) => ({
