@@ -44,8 +44,8 @@ export interface ValidatePhaseOrderInput {
 }
 
 export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
-  if (PHASE_AGENT_MAP[agent]) return PHASE_AGENT_MAP[agent];
-  if (IMPL_AGENTS.has(agent) || REVIEW_AGENTS.has(agent)) return "execute";
+  if (PHASE_AGENT_MAP[agent]) return PHASE_AGENT_MAP[agent]; if (PHASE_AGENT_MAP[agent + "-agent"]) return PHASE_AGENT_MAP[agent + "-agent"];
+  if (IMPL_AGENTS.has(agent) || IMPL_AGENTS.has(agent + "-agent") || REVIEW_AGENTS.has(agent) || REVIEW_AGENTS.has(agent + "-agent")) return "execute";
 
   if (/brainstorm|explore.*intent|refine.*idea/i.test(prompt)) return "brainstorm";
   if (/specify|specification|requirements|spec\.md/i.test(prompt)) return "specify";
@@ -135,7 +135,7 @@ export function validatePhaseOrder(input: ValidatePhaseOrderInput): HookResult {
   const bareAgent = stripNamespace(input.agentType);
 
   // Allow utility agents
-  if (UTILITY_AGENTS.has(bareAgent)) return { kind: "allow" };
+  if (UTILITY_AGENTS.has(bareAgent) || UTILITY_AGENTS.has(bareAgent + "-agent")) return { kind: "allow" };
 
   const targetPhase = detectPhase(bareAgent, input.prompt);
 
