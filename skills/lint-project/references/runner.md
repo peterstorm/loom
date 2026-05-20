@@ -32,7 +32,7 @@ const RULES_DIR = existsSync(join(ROOT, ".claude/linter/rules")) ? join(ROOT, ".
   : existsSync(join(ROOT, ".pi/linter/rules")) ? join(ROOT, ".pi/linter/rules") : null;
 
 // --- Walk source files ---
-const SKIP = new Set(["node_modules", ".git", ".claude", ".pi", "dist", "build", "out", ".next", "target", ".gradle", "__pycache__"]);
+const SKIP = new Set(["node_modules", ".git", ".claude", ".pi", "dist", "build", "out", ".next", "target", ".gradle", "__pycache__", ".direnv", ".devenv", ".nix-defexpr", "result", "vendor", "coverage", ".turbo", ".cache"]);
 const EXTS = new Set([".ts", ".tsx", ".js", ".jsx", ".java", ".kt"]);
 
 function walk(dir: string, includeTests: boolean): string[] {

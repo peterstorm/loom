@@ -78,6 +78,8 @@ const RULES_DIR = join(LINTER_DIR, "rules");
 const SKIP_DIRS = new Set([
   "node_modules", ".git", ".claude", ".pi", "dist", "build", "out",
   ".next", "target", ".gradle", "__pycache__",
+  ".direnv", ".devenv", ".nix-defexpr", "result",
+  "vendor", "coverage", ".turbo", ".cache",
 ]);
 
 const SOURCE_EXTENSIONS = new Set([
