@@ -106,10 +106,11 @@ export function loadRules(
 
 /**
  * Reads all *.json files from a directory and parses them into Rule objects.
+ * Skips `config.json` which is reserved for programmatic rule configuration.
  * Throws on malformed JSON or invalid rule structure (fail-closed).
  */
 function loadRulesFromDir(dir: string, source: RuleSource): Rule[] {
-  const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+  const files = readdirSync(dir).filter((f) => f.endsWith(".json") && f !== "config.json");
   const rules: Rule[] = [];
 
   for (const file of files) {
