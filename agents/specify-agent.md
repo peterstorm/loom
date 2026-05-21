@@ -1,7 +1,6 @@
 ---
 name: specify-agent
 description: Specification agent that produces formal requirements (WHAT/WHY) before architecture. Runs a full interview with the user before drafting spec.md.
-model: opus
 color: cyan
 skills:
   - specify

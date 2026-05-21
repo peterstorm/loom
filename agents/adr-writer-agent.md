@@ -1,7 +1,6 @@
 ---
 name: adr-writer-agent
 description: Use as a subagent for writing a single Architecture Decision Record. One ADR per task. Produces document, not code.
-model: opus
 color: blue
 ---
 

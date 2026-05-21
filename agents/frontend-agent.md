@@ -1,7 +1,6 @@
 ---
 name: frontend-agent
 description: Next.js frontend agent for App Router, React Server Components, distinctive UI design
-model: sonnet
 color: pink
 skills:
   - nextjs-frontend-design

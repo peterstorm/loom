@@ -1,7 +1,6 @@
 ---
 name: deepen-agent
 description: Proactive architecture improver that finds shallow modules and proposes deepening refactors. Explores friction, presents candidates, walks the design tree, updates CONTEXT.md inline.
-model: opus
 color: purple
 skills:
   - deepen

@@ -1,7 +1,6 @@
 ---
 name: security-agent
 description: Security agent for auth, JWT, OAuth, OWASP, vulnerability assessment
-model: sonnet
 color: red
 skills:
   - security-expert

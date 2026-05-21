@@ -1,7 +1,6 @@
 ---
 name: java-test-agent
 description: Java testing agent for JUnit 5, jqwik property tests, AssertJ, Testcontainers, Spring Boot test slices
-model: sonnet
 color: green
 skills:
   - java-test-engineer

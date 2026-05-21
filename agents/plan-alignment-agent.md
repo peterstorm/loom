@@ -1,7 +1,6 @@
 ---
 name: plan-alignment-agent
 description: Compares architecture plan against spec requirements, produces gap report. Use when loom reaches plan-alignment phase.
-model: opus
 color: cyan
 tools:
   - Read

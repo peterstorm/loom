@@ -1,7 +1,6 @@
 ---
 name: clarify-agent
 description: Uncertainty resolution agent that systematically resolves [NEEDS CLARIFICATION] markers in specifications through structured questioning.
-model: opus
 color: orange
 skills:
   - clarify

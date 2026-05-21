@@ -1,7 +1,6 @@
 ---
 name: ts-test-agent
 description: TypeScript testing agent for Vitest, React Testing Library, Playwright, fast-check
-model: sonnet
 color: green
 skills:
   - ts-test-engineer

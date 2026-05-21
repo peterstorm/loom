@@ -1,7 +1,6 @@
 ---
 name: grill-agent
 description: Domain-aware design challenger that stress-tests plans against the project's ubiquitous language, DDD model, and documented decisions. Updates CONTEXT.md inline.
-model: opus
 color: red
 skills:
   - grill
