@@ -1,8 +1,12 @@
 # Loom
 
-A Claude Code plugin for orchestrating complex, multi-phase software development features with wave-based parallel task execution.
+A Claude Code plugin for orchestrating complex, multi-phase software features with wave-based parallel task execution — and a toolbox of standalone skills, agents, and a programmatic linter you can use independently.
 
-Loom decomposes large features into structured phases (brainstorm, specify, architect, decompose), then executes implementation through parallel waves of specialized agents — with automated test verification, spec alignment checks, and code review gates at every stage.
+Loom turns a feature description into shipping code through a structured pipeline: **brainstorm → specify → clarify → architect → plan-alignment → decompose → execute (waves) → wave-gate (test + spec-check + review)**. Each phase is run by a specialized agent. Hooks enforce phase ordering, capture artifacts, extract test evidence from transcripts, and protect the state file. A built-in linter runs on every file edit and again at wave-gate boundaries.
+
+Loom also runs on [Pi](https://github.com/earendil-works/pi-coding-agent) — the engine is harness-agnostic and ships a Pi extension.
+
+---
 
 ## Table of Contents
 
@@ -10,513 +14,687 @@ Loom decomposes large features into structured phases (brainstorm, specify, arch
 - [How It Works](#how-it-works)
 - [Orchestration Phases](#orchestration-phases)
 - [Wave Execution & Gates](#wave-execution--gates)
-- [Skills (Commands)](#skills-commands)
+- [Slash Commands](#slash-commands)
+- [Skills](#skills)
 - [Agents](#agents)
 - [Hook System](#hook-system)
+- [Linter](#linter)
 - [State Management](#state-management)
 - [Engine](#engine)
 - [Configuration](#configuration)
+- [Directory Layout](#directory-layout)
+- [Pi Harness](#pi-harness)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
+
+---
 
 ## Quick Start
 
 ### Prerequisites
 
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
-- [Bun](https://bun.sh/) runtime (hooks use TypeScript via bun)
-- GitHub CLI (`gh`) for issue tracking
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (primary harness) **or** [Pi Coding Agent](https://github.com/earendil-works/pi-coding-agent)
+- [Bun](https://bun.sh/) runtime — hooks dispatch through a TypeScript CLI run by bun
+- [GitHub CLI](https://cli.github.com/) (`gh`) — for issue creation and wave-gate comment posting
 
 ### Installation
-
-Install as a Claude Code plugin:
 
 ```bash
 claude plugin add /path/to/loom
 ```
 
-### Usage
+### Common usage
 
 ```bash
-# Full orchestration flow
+# Full orchestration — the typical entry point
 /loom "Add user authentication with email/password"
 
-# Skip brainstorm (scope already clear)
+# Skip phases when you don't need them
 /loom --skip-brainstorm "Add logout button to navbar"
+/loom --skip-specify "Use the existing spec at .claude/specs/auth/spec.md"
+/loom --skip-clarify "Accept any remaining [NEEDS CLARIFICATION] markers"
+/loom --skip-plan-alignment "Trivial change, no alignment check needed"
 
-# Skip to architecture (spec already exists)
-/loom --skip-specify "Add user authentication"
+# Status / lifecycle
+/loom --status                # Print current phase + wave + task statuses
+/loom --complete              # Tear down state file after success
+/loom --abort                 # Tear down state file on abandonment
 
-# Skip plan alignment
-/loom --skip-plan-alignment "Simple CRUD feature"
+# After a wave's implementation tasks finish
+/wave-gate                    # Tests + spec-check + 5 review agents + advance
 
-# After wave implementation completes
-/wave-gate
-
-# Standalone PR review
-/review-pr
-/review-pr code errors tests
+# Standalone (no orchestration needed)
+/review-pr                    # Full multi-agent review of the current diff
+/review-pr code errors        # Subset of aspects
+/review-pr --files src/a.ts,src/b.ts --task T3
+/review-and-fix               # Review → plan → implement → commit → push
+/spec-check                   # Standalone spec-alignment audit
+/specify "Feature X"          # Write a spec only
+/clarify                      # Resolve [NEEDS CLARIFICATION] markers
+/brainstorming                # Standalone idea-to-design exploration
 ```
+
+---
 
 ## How It Works
 
-Loom turns a feature description into working code through a structured pipeline:
-
 ```
-  Feature Description
+  Feature description
          |
          v
-  +------------------+     +------------------+     +------------------+
-  | Phase 0:         | --> | Phase 1:         | --> | Phase 2:         |
-  | BRAINSTORM       |     | SPECIFY          |     | CLARIFY          |
-  | Explore intent,  |     | Formal spec with |     | Resolve [NEEDS   |
-  | propose approaches|     | FRs, scenarios   |     | CLARIFICATION]   |
-  +------------------+     +------------------+     +------------------+
-                                                            |
-         +--------------------------------------------------+
+  +------------+   +----------+   +----------+
+  | Phase 0    |-->| Phase 1  |-->| Phase 2  |
+  | BRAINSTORM |   | SPECIFY  |   | CLARIFY  |
+  +------------+   +----------+   +----------+
+                                       |
+         +-----------------------------+
          v
-  +------------------+     +------------------+     +------------------+
-  | Phase 3:         | --> | Phase 3.5:       | --> | Phase 4:         |
-  | ARCHITECTURE     |     | PLAN ALIGNMENT   |     | DECOMPOSE        |
-  | Design decisions,|     | Verify plan      |     | Task graph, wave |
-  | patterns, modules|     | covers spec      |     | schedule, GH issue|
-  +------------------+     +------------------+     +------------------+
-                                                            |
-         +--------------------------------------------------+
-         v
-  +------------------+
-  | Phase 5:         |
-  | EXECUTE          |
-  | Wave-by-wave     |
-  | parallel impl    |
-  +------------------+
-         |
-    +----+----+----+
-    v    v    v    v       (parallel agents per wave)
-   T1   T2   T3   T4
-    |    |    |    |
-    +----+----+----+
-         |
-         v
-  +------------------+
-  | WAVE GATE        |
-  | Tests + Spec     |
-  | Check + Review   |
-  +------------------+
-         |
-         v
-    Next wave...
+  +--------------+   +-----------------+   +-------------+
+  | Phase 3      |-->| Phase 3.5       |-->| Phase 4     |
+  | ARCHITECTURE |   | PLAN ALIGNMENT  |   | DECOMPOSE   |
+  +--------------+   +-----------------+   +-------------+
+         ^                  |                    |
+         +--gap loop--------+                    |
+                                                 v
+                                       +-------------------+
+                                       | Phase 5: EXECUTE  |
+                                       +-------------------+
+                                                 |
+                                  +----+---------+---------+----+
+                                  v    v                   v    v   (parallel agents per wave)
+                                 T1   T2 ...              Tn
+                                  |    |                   |
+                                  +----+---------+---------+
+                                                 |
+                                                 v
+                                       +-------------------+
+                                       | WAVE GATE         |
+                                       | tests + spec-     |
+                                       | check + 5 reviews |
+                                       +-------------------+
+                                                 |
+                                                 v
+                                            Next wave...
 ```
 
-Each phase is executed by a specialized agent. Hooks enforce ordering, capture artifacts, and manage state transitions automatically.
+Each phase is executed by a specialized agent. Hooks enforce ordering, capture artifacts, and manage state transitions automatically. The state file (`.claude/state/active_task_graph.json`) is the single source of truth, write-protected at the filesystem level.
+
+---
 
 ## Orchestration Phases
 
-### Phase 0: Brainstorm
+### Phase 0 — Brainstorm
 
-**Agent:** `brainstorm-agent` (Opus) | **Output:** `.claude/specs/{slug}/brainstorm.md`
+| | |
+|--|--|
+| Agent | `brainstorm-agent` (preloads `brainstorming` skill) |
+| Output | `.claude/specs/{slug}/brainstorm.md` |
+| Skip with | `--skip-brainstorm` |
 
-Explores the problem space. The agent asks clarifying questions, proposes 2-3 approaches with trade-offs, and gets user confirmation on direction. No code is written.
+Explores the problem space. The agent asks clarifying questions, proposes 2–3 approaches with trade-offs, and gets user confirmation on direction before any code is written.
 
-Skip with `--skip-brainstorm` when scope is already clear.
+### Phase 1 — Specify
 
-### Phase 1: Specify
+| | |
+|--|--|
+| Agent | `specify-agent` (preloads `specify` skill) |
+| Output | `.claude/specs/{slug}/spec.md` |
+| Skip with | `--skip-specify` |
 
-**Agent:** `specify-agent` (Opus) | **Output:** `.claude/specs/{slug}/spec.md`
+**Interactive — full questionnaire.** Before writing, the agent runs a complete interview via `AskUserQuestion` (batched, max 4 questions per call) covering: scenario priorities, scope boundaries, measurable success criteria, P1 acceptance bars, sensitive failure modes, user-visible error states, data lifecycle, permissions, external dependencies, out-of-scope clarifications. A topic is only skipped when brainstorm already gave an explicit answer.
 
-**Interactive — full questionnaire.** Before writing, the agent runs a complete interview via `AskUserQuestion` (batched across multiple calls, 4 questions per call max) covering: scenario priorities, scope boundary edges, measurable success criteria, P1 acceptance bars, sensitive failure modes, user-visible error states, data/state lifecycle, permissions & access, external dependencies, out-of-scope clarifications. A topic is only skipped when brainstorm gave a confident, explicit answer for it.
-
-Only after the interview does it write the spec, which includes:
+The spec contains:
 - User scenarios (Given/When/Then)
-- Functional requirements (FR-001, FR-002, ...)
+- Functional requirements (FR-001, FR-002, …)
 - Success criteria and acceptance tests
 - Out-of-scope boundaries
+- `[NEEDS CLARIFICATION]` markers for any unresolved ambiguity
 
-Markers like `[NEEDS CLARIFICATION]` flag unresolved ambiguities.
+### Phase 2 — Clarify
 
-### Phase 2: Clarify
+| | |
+|--|--|
+| Agent | `clarify-agent` (preloads `clarify` skill) |
+| Output | Updated `spec.md` + `.claude/specs/{slug}/clarifications/log.md` |
+| Trigger | More than 3 `[NEEDS CLARIFICATION]` markers (threshold in `config.ts`) |
+| Skip with | `--skip-clarify` |
 
-**Agent:** `clarify-agent` (Opus) | **Output:** Updated `spec.md`
+The agent asks structured questions to resolve each ambiguity (mostly multiple choice, max 5 questions per round), then updates the spec in place and logs decisions.
 
-Triggered automatically when the spec contains more than 3 `[NEEDS CLARIFICATION]` markers. The agent asks the user structured questions to resolve each ambiguity, then updates the spec in place.
+### Phase 3 — Architecture
 
-Skip with `--skip-clarify` to accept markers as-is.
+| | |
+|--|--|
+| Agent | `architecture-agent` (preloads `architecture-tech-lead` skill) |
+| Output | `.claude/plans/{slug}.md` |
 
-### Phase 3: Architecture
+**Two interactive checkpoints before the plan is written.**
 
-**Agent:** `architecture-agent` (Opus) | **Output:** `.claude/plans/{slug}.md`
+1. **Interview — full questionnaire.** Codebase constraints, testability bar, NFR primary axis, concurrency & state model, data/persistence, sensitive boundaries, tech preferences, observability, error-handling philosophy, backwards compatibility, deployment, out-of-scope concerns.
+2. **Approach gate.** The agent identifies 2–3 viable architectural approaches and presents them side-by-side via `AskUserQuestion` previews (how it works / pros / cons / testability / fit / effort). It states a recommendation, but the user picks.
 
-**Interactive, with full questionnaire and approach gate.** Two checkpoints before the plan is written:
+The plan covers module boundaries, data models, patterns (functional core / imperative shell, DDD, Either-based errors), technology choices, and dependency graphs. The chosen approach is recorded as an `AD-N` (Architectural Decision) block.
 
-1. **Interview — full questionnaire.** After reading the spec and exploring the codebase silently, the agent runs a complete interview via `AskUserQuestion` (batched across multiple calls, 4 per call max) covering: codebase constraints, testability bar, NFR primary axis, concurrency & state model, data model & persistence, sensitive boundaries, tech preferences, observability, error-handling philosophy, backwards compatibility & migration, deployment & environments, out-of-scope architecture concerns. A topic is only skipped when spec/codebase already answers it confidently.
-2. **Approach gate** — agent identifies 2-3 viable architectural approaches and presents them side-by-side via `AskUserQuestion` previews (how it works / pros / cons / testability / fit / effort). It states a recommendation, but the user picks.
+### Phase 3.5 — Plan Alignment
 
-Only after both checkpoints does it write the plan: module boundaries, data models, patterns (functional core/imperative shell, DDD, Either-based errors), technology choices, and dependency graphs. The chosen approach is recorded as an `AD-N` block under Architectural Decisions. Preloads the `architecture-tech-lead` skill for domain expertise.
+| | |
+|--|--|
+| Agent | `plan-alignment-agent` |
+| Output | `.claude/specs/{slug}/plan-alignment.md` |
+| Skip with | `--skip-plan-alignment` |
 
-### Phase 3.5: Plan Alignment
+Compares the architecture plan against the spec to detect gaps — requirements the plan doesn't address. If gaps are found, the user can choose to re-run architecture with the gap report as additional context, creating a feedback loop back to Phase 3.
 
-**Agent:** `plan-alignment-agent` (Opus) | **Output:** `.claude/specs/{slug}/plan-alignment.md`
+### Phase 4 — Decompose
 
-Compares the architecture plan against the spec to detect gaps — requirements that aren't addressed by the plan. If gaps are found, the user can choose to re-run architecture with the gap report as additional context, creating a feedback loop.
+| | |
+|--|--|
+| Agent | `decompose-agent` |
+| Output | JSON task graph populated into state file |
 
-Skip with `--skip-plan-alignment`.
+Converts spec + plan into a concrete task graph:
+- **8–12 tasks max** • **4–5 waves max** • **4–6 parallel tasks per wave**
+- Each task is assigned to a specialized implementation agent
+- Dependencies flow backward only (a wave depends only on prior waves)
+- Each task records spec anchors (FR-XXX) it satisfies
 
-### Phase 4: Decompose
+On user approval the plugin: validates the task-graph schema, creates a GitHub Issue for tracking, and populates the state file with tasks and wave schedule.
 
-**Agent:** `decompose-agent` (Sonnet) | **Output:** JSON task graph
-
-Converts the spec + plan into a concrete task graph:
-- 8-12 tasks maximum
-- 4-5 waves
-- 4-6 parallel tasks per wave
-- Each task assigned to a specialized agent
-- Dependencies only flow backward (wave N depends on waves 1..N-1)
-- Spec anchors (FR-XXX) mapped to each task
-
-On user approval, the plugin:
-1. Validates the task graph schema
-2. Creates a GitHub Issue for tracking
-3. Populates the state file with tasks and wave schedule
-
-### Phase 5: Execute
+### Phase 5 — Execute
 
 For each wave, all tasks are spawned as parallel agents in a single message. Each implementation agent must:
 
-1. Read the plan and understand its assigned task
-2. Implement code following project patterns
-3. Write tests
-4. **Run tests via Bash** (mandatory — hooks extract evidence from transcripts)
+1. Read the plan and its assigned task
+2. Implement following project patterns (FP/DDD, ports at I/O boundaries, Either for errors)
+3. Write new tests
+4. **Run the tests via Bash** — mandatory; hooks extract pass/fail evidence from the transcript
 5. Verify all tests pass
 
-After all wave tasks reach "implemented", run `/wave-gate` to verify and advance.
+After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance.
+
+---
 
 ## Wave Execution & Gates
 
-The `/wave-gate` skill runs a 5-step verification sequence after each wave completes:
-
-### Gate Sequence
+`/wave-gate` runs a five-step verification sequence after each wave's implementation completes.
 
 | Step | What | How |
 |------|------|-----|
-| 1 | **Test evidence** | Verify all wave tasks have `tests_passed == true` (auto-extracted by hooks) |
-| 2 | **New test verification** | Verify agents wrote new test methods (git diff per task) |
-| 3 | **Spec alignment** | Spawn `spec-check-invoker` — mechanically verifies code satisfies each FR |
-| 4 | **Code review** | Spawn 5 review agents per task in parallel |
-| 5 | **Advance** | `complete-wave-gate` helper validates all checks and advances |
+| 1 | **State check** | Confirm `current_wave` and `impl_complete == true` |
+| 2 | **Test evidence** | Verify every task has `tests_passed == true` (auto-extracted by `update-task-status` hook from agent transcripts) and `new_tests_written == true` (or `new_tests_required == false`) |
+| 3 | **Spec-check + reviews (parallel)** | Spawn `spec-check-invoker` once for the wave; spawn 5 reviewers per task in parallel |
+| 4 | **GitHub comment** | Post a summary to the issue (fallback: write to `.claude/state/wave-{N}-review.md`) |
+| 5 | **Advance** | `complete-wave-gate` helper performs final checks and either advances or blocks |
 
-### Review Agents (spawned per task)
+### Review agents (per task, in parallel)
 
 | Agent | Focus |
-|-------|-------|
+|---|---|
 | `code-reviewer` | Style, patterns, CLAUDE.md compliance, bugs |
 | `silent-failure-hunter` | Error handling, Either patterns, silent swallowing |
 | `pr-test-analyzer` | Test coverage quality, property tests, gaps |
 | `type-design-analyzer` | Type invariants, encapsulation, sealed types |
 | `comment-analyzer` | Comment accuracy, documentation rot |
 
-### Gate Outcomes
+### Gate outcomes
 
-- **PASSED** — All 5 checks clear. Tasks marked "completed", wave advances, GitHub issue updated.
-- **BLOCKED** — Critical findings exist. Fix issues and re-run `/wave-gate`. On re-run, only blocked tasks are re-reviewed.
+- **PASSED** — Tasks marked `completed`, wave advances, GitHub issue checkboxes update.
+- **BLOCKED** — One or more critical findings (in spec-check or code review) or missing evidence. Fix and re-run `/wave-gate`; on re-run only blocked tasks are re-reviewed.
 
-## Skills (Commands)
+The five mandatory checks performed by the `complete-wave-gate` helper:
 
-Skills are user-invokable commands defined in `/commands/`. Each provides structured instructions for Claude to follow.
+1. Per-task test evidence (`tests_passed == true`)
+2. New tests written (`new_tests_written == true` OR `new_tests_required == false`)
+3. Spec alignment (`spec_check.critical_count == 0`)
+4. Per-task review status (no `pending`)
+5. No critical findings in code review
 
-| Skill | Usage | Purpose |
-|-------|-------|---------|
-| `/loom` | `/loom "description"` | Full orchestration entry point |
-| `/wave-gate` | `/wave-gate` | Test + spec + review gate after wave completion |
-| `/review-pr` | `/review-pr [aspects] [--files f1,f2]` | Standalone PR review with parallel agents |
-| `/spec-check` | `/spec-check` | Verify implementation aligns with spec |
-| `/brainstorming` | (used by brainstorm-agent) | Problem exploration process |
-| `/specify` | (used by specify-agent) | Formal specification process |
-| `/clarify` | (used by clarify-agent) | Uncertainty resolution process |
-| `/code-implementer` | (used by code-implementer-agent) | FP/DDD implementation patterns |
-| `/architecture-tech-lead` | (used by architecture-agent) | Architecture design process |
+---
 
-Additional bundled skills:
-- `/nextjs-frontend-design` — Next.js App Router, React Server Components, distinctive UI
-- `/vercel-react-best-practices` — React/Next.js performance rules from Vercel Engineering (57 rules)
+## Slash Commands
+
+User-invokable commands defined under `/commands/`.
+
+| Command | Usage | Purpose |
+|---|---|---|
+| `/loom` | `/loom "description" [--skip-…]` | Full orchestration entry point |
+| `/wave-gate` | `/wave-gate` | Test + spec + review gate after a wave finishes |
+| `/review-pr` | `/review-pr [aspects] [--files …] [--task …] [--dry-run]` | Standalone multi-agent PR review |
+| `/review-and-fix` | `/review-and-fix [aspects] [--no-push] [--dry-run] [--commit-msg …]` | Review → plan → implement → commit → push |
+| `/spec-check` | `/spec-check` | Standalone drift audit against the active spec |
+| `/specify` | `/specify "description" [--update] [--status]` | Write/update a formal spec (no plan, no code) |
+| `/clarify` | `/clarify [spec-path]` | Resolve `[NEEDS CLARIFICATION]` markers |
+| `/brainstorming` | `/brainstorming` | Standalone interactive idea-to-design session |
+
+`/review-pr` aspect keywords: `code`, `errors`, `tests`, `types`, `comments`, `architecture`, `simplify`, `all`. The `architecture-tech-lead` agent auto-triggers when the diff is large (>500 additions or >10 files).
+
+Prompt templates for phase agents live in `/commands/templates/` (`phase-brainstorm.md`, `phase-specify.md`, `phase-clarify.md`, `phase-architecture.md`, `phase-plan-alignment.md`, `phase-decompose.md`, `impl-agent-context.md`). Variables like `{feature_description}`, `{spec_file_path}`, `{date_slug}` are substituted before spawning; the `validate-template-substitution` hook blocks any unresolved `{variable}` placeholder.
+
+---
+
+## Skills
+
+Skills live under `/skills/<name>/SKILL.md` and are preloaded into agents via the `skills:` frontmatter field. They are also user-invocable as slash commands.
+
+| Skill | When it triggers |
+|---|---|
+| `architecture-tech-lead` | Designing a feature, evaluating approaches, modelling domains, choosing patterns |
+| `code-implementer` | Writing production code under FP/DDD, functional core / imperative shell, Either errors |
+| `deepen` | Proactively improving existing architecture — finding shallow modules, deepening interfaces |
+| `grill` | Stress-testing a plan against the project's `CONTEXT.md` (ubiquitous language, DDD model) |
+| `java-test-engineer` | JUnit 5, jqwik property tests, AssertJ, Testcontainers, Spring Boot test slices |
+| `ts-test-engineer` | Vitest, React Testing Library, Playwright, fast-check property tests, MSW |
+| `lint-project` | Setting up or running loom's programmatic linter |
+| `security-expert` | Auth (JWT, OAuth, Keycloak), authorization (RBAC/ABAC), OWASP, injection prevention, secrets |
+| `nextjs-frontend-design` | Distinctive Next.js App Router + RSC + type-safe API design |
+| `review-and-fix` | End-to-end PR remediation (the skill counterpart to the slash command) |
+
+Two additional bundled skills live alongside the commands rather than in `/skills/`:
+- `vercel-react-best-practices` — 57 React/Next.js performance rules from Vercel Engineering
+- `nextjs-frontend-design` is exposed both ways
+
+---
 
 ## Agents
 
-Agents are specialized subprocesses defined in `/agents/`. Each has a model, optional skills, and focused instructions.
+Agents live under `/agents/<name>.md`. Each is a markdown persona with optional `skills:` preloads. All agents inherit the orchestrator's model unless explicitly overridden.
 
-### Phase Agents (sequential)
+### Phase agents (sequential)
 
-| Agent | Model | Skills | Role |
-|-------|-------|--------|------|
-| `brainstorm-agent` | Opus | brainstorming | Explore intent, propose approaches |
-| `specify-agent` | Opus | specify | Write formal spec |
-| `clarify-agent` | Opus | clarify | Resolve spec ambiguities |
-| `architecture-agent` | Opus | architecture-tech-lead | Design implementation plan |
-| `plan-alignment-agent` | Opus | — | Compare plan vs spec, gap report |
-| `decompose-agent` | Sonnet | — | Spec+plan into JSON task graph |
+| Agent | Preloaded skill | Role |
+|---|---|---|
+| `brainstorm-agent` | `brainstorming` | Explore intent, propose approaches |
+| `specify-agent` | `specify` | Run interview, write formal spec |
+| `clarify-agent` | `clarify` | Resolve spec ambiguities |
+| `architecture-agent` | `architecture-tech-lead` | Interview + approach gate + design plan |
+| `plan-alignment-agent` | — | Compare plan vs. spec, gap report |
+| `decompose-agent` | — | Spec + plan → JSON task graph + wave schedule |
 
-### Implementation Agents (parallel per wave)
+### Implementation agents (parallel per wave)
 
-| Agent | Model | Skills | Role |
-|-------|-------|--------|------|
-| `code-implementer-agent` | Sonnet | code-implementer | Java/Spring Boot or TS/Next.js implementation |
-| `frontend-agent` | Sonnet | — | React/Next.js frontend components |
-| `ts-test-agent` | Sonnet | — | TypeScript testing (Vitest, RTL, Playwright) |
-| `security-agent` | Sonnet | — | Auth, JWT, OAuth, vulnerability assessment |
-| `dotfiles-agent` | Sonnet | — | NixOS, home-manager, SOPS secrets |
+| Agent | Preloaded skill | Role |
+|---|---|---|
+| `code-implementer-agent` | `code-implementer` | Java/Spring Boot or TS/Next.js production code |
+| `frontend-agent` | `nextjs-frontend-design` | React/Next.js UI components |
+| `ts-test-agent` | `ts-test-engineer` | Vitest/RTL/Playwright/fast-check tests |
+| `java-test-agent` | `java-test-engineer` | JUnit 5, jqwik, Testcontainers tests |
+| `security-agent` | `security-expert` | Auth, JWT, OAuth, vulnerability work |
+| `adr-writer-agent` | — | Expand AD seeds into full ADRs |
 
-### Review Agents (parallel per task at wave gate)
-
-| Agent | Model | Role |
-|-------|-------|------|
-| `code-reviewer` | Sonnet | Style, bugs, patterns |
-| `silent-failure-hunter` | Sonnet | Error handling, silent failures |
-| `pr-test-analyzer` | Sonnet | Test coverage quality |
-| `type-design-analyzer` | Sonnet | Type safety and design |
-| `comment-analyzer` | Sonnet | Comment accuracy |
-| `code-simplifier` | Sonnet | Clarity and maintainability |
-| `spec-check-invoker` | Sonnet | Runs /spec-check for wave gates |
-
-### Utility Agents
+### Review agents (parallel per task at wave gate)
 
 | Agent | Role |
-|-------|------|
-| `architecture-tech-lead` | Architectural review of large PRs |
-| `skill-content-reviewer` | Skill/command quality review |
-| `test-engineer` | General test engineering |
+|---|---|
+| `code-reviewer` | Style, bugs, project-guideline compliance (≥80 confidence) |
+| `silent-failure-hunter` | Error handling, Either patterns, silent swallowing |
+| `pr-test-analyzer` | Test coverage quality (1–10 rating, 8–10 = critical gap) |
+| `type-design-analyzer` | Type invariants, encapsulation (1–10 per dimension) |
+| `comment-analyzer` | Comment accuracy and rot |
+| `code-simplifier` | Clarity and FP patterns (post-fix) |
+| `spec-check-invoker` | Runs `/spec-check` once per wave; emits machine-readable footer |
+
+### Utility agents
+
+| Agent | Role |
+|---|---|
+| `architecture-tech-lead` | Architectural review of large PRs (FC/IS, coupling, testability) |
+| `deepen-agent` | Proactive deepening proposals, walks the design tree, updates `CONTEXT.md` |
+| `grill-agent` | Aggressive design challenger against the ubiquitous language |
+| `skill-content-reviewer` | Quality review of skills against domain best practices |
+| `test-engineer` | Project-scoped general test engineering |
+
+---
 
 ## Hook System
 
-Hooks are the enforcement and automation backbone. They fire on Claude Code lifecycle events and are configured in `/hooks/hooks.json`.
+Hooks are the enforcement and automation backbone. They fire on Claude Code lifecycle events and are configured in `/hooks/hooks.json`. Every shell shim under `/hooks/scripts/` delegates to a single bun CLI: `exec bun ${LOOM_DIR}/engine/src/cli.ts <hook-type> <handler> [args]`.
 
-### Hook Events
-
-#### PreToolUse — Validation & Blocking
-
-Fires before a tool executes. Can block the tool call with an error message.
+### PreToolUse — validation & blocking
 
 | Hook | Matcher | Purpose |
-|------|---------|---------|
-| `validate-phase-order` | Task | Blocks agent spawns if prerequisites incomplete |
-| `validate-task-execution` | Task | Validates wave ordering during execution |
+|---|---|---|
+| `validate-phase-order` | Task | Blocks agent spawns if prerequisite phases aren't complete |
+| `validate-task-execution` | Task | Validates wave ordering and task graph structure during execution |
 | `validate-template-substitution` | Task | Blocks unsubstituted `{variable}` patterns in prompts |
-| `validate-agent-model` | Task | Validates agent model field |
-| `validate-agent-skill` | Task | Validates agent skill field |
-| `block-direct-edits` | Edit/Write/MultiEdit | Forces all file changes through Task tool (subagents) |
-| `guard-state-file` | Bash | Blocks direct writes to state file (only whitelisted helpers allowed) |
+| `validate-agent-model` | Task | Validates the agent's `model:` field |
+| `validate-agent-skill` | Task | Validates the agent's `skills:` field resolves to real skills |
+| `block-direct-edits` | Edit, Write, MultiEdit | Forces file changes through the Task tool (subagents) during orchestration |
+| `guard-state-file` | Bash | Blocks any bash command that writes to the state file (only whitelisted helpers allowed) |
 
-#### SubagentStart — Lifecycle Tracking
+### PostToolUse — linting
 
 | Hook | Matcher | Purpose |
-|------|---------|---------|
+|---|---|---|
+| `lint-file` | Edit, Write, MultiEdit | Runs the **immediate-tier** linter (regex + a small set of programmatic rules, ≤50ms/file) on every modified file |
+
+### SubagentStart — lifecycle tracking
+
+| Hook | Matcher | Purpose |
+|---|---|---|
 | `mark-subagent-active` | * | Tracks active subagents in `/tmp/claude-subagents/` |
 
-#### SubagentStop — Phase Advancement & Status
+### SubagentStop — phase advancement & status
 
-All SubagentStop events route through `dispatch`, which examines the agent type and delegates:
+All SubagentStop events route through `dispatch`, which inspects agent type and delegates:
 
-| Handler | Fires For | Purpose |
-|---------|-----------|---------|
-| `advance-phase` | Phase agents | Advances `current_phase`, captures artifact paths |
-| `update-task-status` | Implementation agents | Extracts test evidence from transcript, sets `tests_passed`, `new_tests_written`, `files_modified` |
-| `store-reviewer-findings` | Review agents | Parses review findings into per-task `critical_findings` / `advisory_findings` |
-| `store-spec-check-findings` | spec-check-invoker | Parses spec-check output into `spec_check.verdict` |
-| `cleanup-subagent-flag` | All agents | Cleans up tracking files |
+| Handler | Fires for | Purpose |
+|---|---|---|
+| `advance-phase` | Phase agents | Advances `current_phase`, captures artifact paths via the artifact parser |
+| `update-task-status` | Implementation agents | Extracts test pass/fail evidence from transcript, sets `tests_passed`, `new_tests_written`, `files_modified` |
+| `store-reviewer-findings` | Review agents | Parses findings into per-task `critical_findings` / `advisory_findings` |
+| `store-spec-check-findings` | `spec-check-invoker` | Parses `SPEC_CHECK_*` footer into `spec_check.verdict` |
+| `cleanup-subagent-flag` | All | Cleans up tracking files |
 
-#### SessionStart — Initialization
+### SessionStart — initialization
 
 | Hook | Matcher | Purpose |
-|------|---------|---------|
+|---|---|---|
 | `cleanup-stale-subagents` | * | Clears stale tracking files |
-| `resume-after-clear` | clear | Restores execution context after `/clear` command |
+| `resume-after-clear` | clear | Restores execution context after `/clear` |
 
-### Hook Pipeline Flow
+### Pipeline flow
 
 ```
 Agent spawn requested
        |
        v
-  PreToolUse hooks fire (sequentially)
-  [validate-phase-order] --> [validate-task-execution] --> [validate-template-substitution] --> ...
-       |
+  PreToolUse: validate-phase-order → validate-task-execution → validate-template-substitution → …
        | (all pass)
        v
-  Agent starts
+  Agent starts → SubagentStart: mark-subagent-active
        |
        v
-  SubagentStart: mark-subagent-active
+  Agent executes…
+       |
+       | (on every Edit/Write/MultiEdit)
+       +---> PostToolUse: lint-file (immediate tier, ≤50ms)
        |
        v
-  Agent executes...
+  Agent completes → SubagentStop: dispatch
        |
-       v
-  Agent completes
-       |
-       v
-  SubagentStop: dispatch
-       |
-       +---> Phase agent?  --> advance-phase (update current_phase, capture artifacts)
-       +---> Impl agent?   --> update-task-status (extract test evidence, set status)
-       +---> Review agent?  --> store-reviewer-findings (parse findings)
-       +---> Spec-check?    --> store-spec-check-findings (parse verdict)
-       +---> Always         --> cleanup-subagent-flag
+       +---> Phase agent      → advance-phase
+       +---> Impl agent       → update-task-status
+       +---> Review agent     → store-reviewer-findings
+       +---> spec-check       → store-spec-check-findings
+       +---> Always           → cleanup-subagent-flag
 ```
+
+---
+
+## Linter
+
+Loom ships a two-tier linter that runs automatically as part of the hook pipeline.
+
+### Tiers
+
+| Tier | When | Rules | Budget |
+|---|---|---|---|
+| **Immediate** | PostToolUse on Edit/Write/MultiEdit | Regex rules + a fast subset of programmatic rules | ≤50ms per file |
+| **Full** | At wave-gate boundaries (`lint-wave-gate` helper) | All rules including expensive structural analysis | No hard deadline |
+
+### Rule kinds
+
+- **Regex rules** — JSON files under `/lint-rules/` (and project overrides under `.claude/linter/rules/` or `.pi/linter/rules/`). Schema: `kind`, `name`, `description`, `extensions`, `pattern`, `flags`, `fixHint`, `enabled`.
+- **Programmatic rules** — TypeScript under `engine/src/linter/programmatic/`. Shipped: `max-function-lines` (>60), `no-cross-boundary-imports`, `no-io-in-pure-modules`.
+
+### Bundled regex rules
+
+`no-any-type`, `no-console-log`, `no-field-injection`, `no-mutable-entity-fields`, `no-null-return`, `no-raw-exception-catch`, `no-star-import`, `no-system-out`, `no-todo-fixme`, `prefer-ts-pattern`.
+
+### Safety
+
+- Pattern analyzer detects potentially catastrophic backtracking before execution.
+- Per-file deadline (50ms) enforced for regex rules.
+- Binary files detected (null bytes in first 8KB) and skipped silently.
+- Fails closed: any crash in the linter blocks the edit (exit 1) rather than silently passing bad code.
+
+Run the linter manually over an arbitrary path:
+
+```bash
+bun scripts/lint-project.ts <path>
+```
+
+Or invoke via the skill: `/lint-project`.
+
+---
 
 ## State Management
 
-### State File
+### State file
 
-**Path:** `.claude/state/active_task_graph.json`
+**Path:** `.claude/state/active_task_graph.json` (or `.pi/state/…` under Pi).
 
-The state file is the single source of truth for orchestration progress. It tracks:
+The state file is the single source of truth for orchestration progress. Top-level shape:
 
 ```typescript
 interface TaskGraph {
-  current_phase: Phase;              // Current orchestration phase
-  phase_artifacts: Record<Phase, string>; // File paths for phase outputs
-  skipped_phases: Phase[];           // Phases bypassed with --skip-X flags
-  spec_dir: string;                  // Spec directory path
-  spec_file: string | null;          // Path to spec.md
-  plan_file: string | null;          // Path to plan.md
-  tasks: Task[];                     // Task definitions + status
-  current_wave: number;              // Active execution wave
-  executing_tasks: string[];         // IDs of tasks in progress
-  wave_gates: Record<string, WaveGate>; // Per-wave verification status
-  github_issue: number;              // GitHub Issue number
-  spec_check: SpecCheck;             // Latest spec alignment result
+  current_phase: Phase
+  phase_artifacts: Partial<Record<Phase, string>>
+  skipped_phases: Phase[]
+  spec_dir?: string | null
+  spec_file: string | null
+  plan_file: string | null
+  plan_title?: string
+  tasks: Task[]
+  current_wave?: number
+  executing_tasks?: string[]
+  wave_gates: Record<string, WaveGate>
+  github_issue?: number
+  github_repo?: string
+  spec_check?: SpecCheck
+  updated_at?: string
 }
 ```
 
-### Protection Model
+`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `tests_passed`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `review_status`, `critical_findings`, `advisory_findings`, `start_sha`, `failure_reason`, `retry_count`.
 
-The state file uses a layered protection scheme:
+### Protection model
 
-1. **File permissions:** `chmod 444` at rest (read-only). Only `StateManager` can write by temporarily toggling to 644.
-2. **Hook guard:** `guard-state-file` blocks any Bash command that writes to the state file, except whitelisted helpers.
-3. **Atomic writes:** `StateManager` uses file locking + tmp-file-then-rename for crash safety.
-4. **Subagent isolation:** Subagents cannot directly edit the state file — only hooks running in the parent process can.
+1. **File permissions** — `chmod 444` at rest. Only `StateManager` can write by temporarily toggling to 644.
+2. **Hook guard** — `guard-state-file` blocks any bash command writing to the state file unless it's a whitelisted helper.
+3. **Atomic writes** — File-based mutex + tmp-file-then-rename for crash safety.
+4. **Subagent isolation** — Subagents cannot edit the state file directly; only hooks running in the parent process can.
 
-### Task Status Transitions
+### Task status transitions
 
 ```
-pending -----> implemented     (agent completes, test evidence extracted)
-pending -----> failed          (agent crash; retry_count incremented)
-failed ------> pending         (auto-retry, max 2 attempts)
-implemented -> completed       (wave gate passed)
+pending      ──▶ implemented   (agent completes, evidence extracted from transcript)
+pending      ──▶ failed        (agent crash; retry_count incremented)
+failed       ──▶ pending       (auto-retry, max 2 attempts)
+implemented  ──▶ completed     (wave gate passed)
 ```
 
-### State File Lifecycle
+### State file lifecycle
 
-1. **Created** at `/loom` invocation (before Phase 0) with minimal fields
-2. **Updated** by hooks as phases advance and artifacts are captured
-3. **Populated** at Phase 4 with full task graph after decompose
-4. **Updated** during execution as tasks progress through statuses
-5. **Removed** on `/loom --complete` or `/loom --abort`
+1. **Created** at `/loom` invocation (before Phase 0) with minimal fields from `phase-init.ts`.
+2. **Updated** by hooks as phases advance and artifacts are captured.
+3. **Populated** at Phase 4 with the full task graph after decompose.
+4. **Updated** during execution as tasks progress through statuses.
+5. **Removed** on `/loom --complete` or `/loom --abort`.
+
+---
 
 ## Engine
 
-The TypeScript engine (`/engine/`) provides the runtime for all hooks and helpers.
+The TypeScript engine (`/engine/`) provides the runtime for every hook and helper.
 
 ### Architecture
 
 ```
-engine/
-├── src/
-│   ├── cli.ts              # Single entry point — dynamic handler dispatch
-│   ├── config.ts            # Constants (thresholds, agent maps, patterns)
-│   ├── types.ts             # Core type definitions
-│   ├── state-manager.ts     # Atomic state file read/write with locking
-│   ├── phase-init.ts        # Initial state resolution from skip flags
-│   ├── handlers/
-│   │   ├── pre-tool-use/    # Validation hooks
-│   │   ├── subagent-stop/   # Phase/status/review hooks
-│   │   ├── subagent-start/  # Lifecycle tracking
-│   │   ├── session-start/   # Initialization + resume-after-clear hooks
-│   │   └── helpers/         # Whitelisted helper scripts + utility modules
-│   ├── parsers/             # Extract structured data from agent transcripts
-│   └── utils/               # Git operations, file locking, file search
-└── tests/                   # Unit, property-based, and e2e tests
+engine/src/
+├── cli.ts              # Single entry point — dynamic handler dispatch
+├── config.ts           # Constants (thresholds, agent maps, patterns, paths)
+├── types.ts            # TaskGraph, Task, Phase, HookResult, etc.
+├── state-manager.ts    # Atomic state file read/write with locking + chmod
+├── phase-init.ts       # Resolve initial TaskGraph from skip flags
+├── core/               # Pure functions (harness-agnostic, reusable in Pi)
+│   ├── block-direct-edits.ts
+│   ├── guard-state-file.ts
+│   ├── validate-phase-order.ts
+│   ├── validate-task-execution.ts
+│   └── validate-template-substitution.ts
+├── handlers/
+│   ├── pre-tool-use/      # validate-phase-order, validate-task-execution, …
+│   ├── post-tool-use/     # lint-file
+│   ├── subagent-start/    # mark-subagent-active
+│   ├── subagent-stop/     # dispatch, advance-phase, update-task-status, …
+│   ├── session-start/     # cleanup-stale-subagents, resume-after-clear
+│   └── helpers/           # complete-wave-gate, populate-task-graph,
+│                          # validate-task-graph, store-review-findings,
+│                          # store-spec-check, mark-tests-passed,
+│                          # set-phase, cleanup-state, lint-wave-gate, …
+├── parsers/            # Extract structured data from transcripts
+│   ├── parse-transcript.ts
+│   ├── parse-bash-test-output.ts   # Maven/Gradle/Vitest/Jest/pytest/cargo/go/dotnet/…
+│   ├── parse-files-modified.ts
+│   └── parse-phase-artifacts.ts
+├── linter/             # Two-tier programmatic + regex linter
+│   ├── loader.ts
+│   ├── executor.ts
+│   ├── formatter.ts
+│   ├── safety.ts
+│   └── programmatic/   # max-function-lines, no-cross-boundary-imports,
+│                       # no-io-in-pure-modules
+└── utils/              # git, lock, find-file, read-transcript-with-retry, …
 ```
 
-### CLI Entry Point
-
-All shell shims in `/hooks/scripts/` delegate to the single CLI:
+### CLI entry point
 
 ```bash
 exec bun ${LOOM_DIR}/engine/src/cli.ts <hook-type> <handler-name> [extra-args...]
 ```
 
-The CLI reads JSON from stdin (provided by Claude Code), dynamically imports the handler module, executes it, and maps the `HookResult` to an exit code:
+The CLI reads JSON from stdin (provided by the harness), dynamically imports the handler module, executes it, and maps the `HookResult` to an exit code:
 
-| Result | Exit Code | Meaning |
-|--------|-----------|---------|
+| Result | Exit code | Meaning |
+|---|---|---|
 | `allow` | 0 | Tool call proceeds |
 | `passthrough` | 0 | Hook doesn't apply, pass through |
-| `block` | 2 | Tool call blocked (message shown to Claude) |
-| `error` | 1 | Hook error |
+| `block` | 2 | Tool call blocked (message shown to the agent) |
+| `error` | 1 | Hook error (fail-closed) |
 
 ### Parsers
 
-The engine includes parsers for extracting structured data from agent output:
+- **Bash test output** — pass/fail markers for Maven, Gradle, npm/Vitest/Jest, pytest, cargo, go, dotnet, and more (30+ patterns).
+- **Phase artifacts** — file paths from agent transcripts mapped to the right phase.
+- **Files modified** — changed file lists from git diff output.
+- **Transcript** — general-purpose extraction of skill invocations and outputs.
 
-- **Test output parser** — Recognizes pass/fail markers from Maven, Vitest, Jest, pytest, cargo test, Go test, and more
-- **Phase artifact parser** — Extracts file paths from agent transcripts
-- **Files modified parser** — Extracts changed file lists from git diff output
-- **Transcript parser** — General-purpose transcript extraction
-
-### Technology Stack
+### Tech stack
 
 - **Runtime:** [Bun](https://bun.sh/)
 - **Language:** TypeScript
-- **Pattern matching:** [ts-pattern](https://github.com/gvergnaud/ts-pattern) (exhaustive matching on HookResult)
-- **Testing:** [Vitest](https://vitest.dev/) + [fast-check](https://github.com/dubzzz/fast-check) (property-based testing)
+- **Pattern matching:** [ts-pattern](https://github.com/gvergnaud/ts-pattern) — exhaustive matching on `HookResult`
+- **Testing:** [Vitest](https://vitest.dev/) + [fast-check](https://github.com/dubzzz/fast-check)
+
+---
 
 ## Configuration
 
-### Key Constants (`engine/src/config.ts`)
+### Key constants (`engine/src/config.ts`)
 
 | Constant | Purpose |
-|----------|---------|
+|---|---|
 | `CLARIFY_THRESHOLD` | Markers above this trigger mandatory clarify phase (default: 3) |
 | `PHASE_ORDER` | Valid phase sequence |
 | `PHASE_AGENT_MAP` | Maps each phase to the agent that runs it |
-| `IMPL_AGENTS` | Implementation agents allowed to spawn during the execute phase |
-| `REVIEW_SUB_AGENTS` | Review agents whose findings feed wave gates |
+| `PHASE_TRANSITIONS` | Allowed phase-to-phase transitions |
+| `IMPL_AGENTS` | Implementation agents allowed during execute (incl. `code-implementer-agent`, `ts-test-agent`, `frontend-agent`, `security-agent`, `dotfiles-agent`, `adr-writer-agent`, `general-purpose`) |
+| `REVIEW_SUB_AGENTS` | Review agents whose findings feed the wave gate |
+| `REVIEW_AGENTS` | `REVIEW_SUB_AGENTS` + `spec-check-invoker` |
+| `EXECUTE_AGENTS` | `IMPL_AGENTS` + `REVIEW_AGENTS` |
+| `UTILITY_AGENTS` | `Explore`, `Plan`, `haiku` |
 | `WHITELISTED_HELPERS` | Helper scripts allowed to write to the state file |
+| `STATE_FILE_PATTERNS` | Regex matching state file names |
+| `WRITE_PATTERNS` | Regex matching dangerous bash operations (`>>`, `rm`, `mv`, `cp`, `sed -i`, …) |
+| `TEST_COMMAND_PATTERNS` | 30+ patterns for recognizing test runners |
+| `TASK_GRAPH_PATH` | Resolved from cwd or git root (`.claude/state/…` or `.pi/state/…`) |
+| `SUBAGENT_DIR` | `/tmp/claude-subagents` |
+| `HARNESS` | Detects `claude` (Claude Code) or `pi` (Pi) at runtime |
 
-### Plan Limits
+### Plan limits
 
 | Limit | Value |
-|-------|-------|
-| Max tasks | 8-12 |
-| Max waves | 4-5 |
-| Max parallel per wave | 4-6 |
+|---|---|
+| Max tasks | 8–12 |
+| Max waves | 4–5 |
+| Max parallel per wave | 4–6 |
 
-### Valid Phase Transitions
+### Valid phase transitions
 
 ```
-init            -> brainstorm, specify, architecture
-brainstorm      -> brainstorm, specify
-specify         -> specify, clarify, architecture
-clarify         -> clarify, architecture
-architecture    -> architecture, plan-alignment, decompose
-plan-alignment  -> plan-alignment, architecture, decompose
-decompose       -> decompose, execute
-execute         -> execute
+init            → brainstorm, specify, architecture
+brainstorm      → brainstorm, specify
+specify         → specify, clarify, architecture
+clarify         → clarify, architecture
+architecture    → architecture, plan-alignment, decompose
+plan-alignment  → plan-alignment, architecture, decompose
+decompose       → decompose, execute
+execute         → execute
 ```
+
+---
+
+## Directory Layout
+
+```
+loom/
+├── .claude-plugin/
+│   └── plugin.json            # Plugin metadata
+├── agents/                     # Agent personas (markdown)
+├── commands/                   # User-invokable slash commands
+│   ├── templates/              # Phase prompt templates
+│   ├── nextjs-frontend-design/ # Bundled skill exposed as command
+│   └── vercel-react-best-practices/
+├── skills/                     # Reusable knowledge modules preloaded into agents
+├── engine/                     # TypeScript hook engine
+│   ├── src/                    # Source (cli, config, handlers, parsers, linter, core)
+│   └── tests/                  # Vitest + fast-check test suite (46 files)
+├── hooks/
+│   ├── hooks.json              # Hook configuration
+│   └── scripts/                # Shell shims → bun CLI
+├── lint-rules/                 # Bundled JSON regex rules
+├── rules/                      # Domain rules (architecture, java/ts/rust patterns, property testing)
+├── references/                 # Spec, plan, ADR templates
+├── pi/                         # Pi harness extension + bridge
+├── scripts/                    # lint-project.ts, sync-pi-agents.sh
+├── artifacts/                  # Captured artifacts from runs (specs/tests/reviews)
+├── docs/                       # ADRs, Pi usage / migration notes
+├── CONTEXT.md                  # Ubiquitous language + domain model (used by /grill)
+└── README.md
+```
+
+The `/rules/` directory holds domain rule files (`architecture.md`, `java-patterns.md`, `typescript-patterns.md`, `rust-patterns.md`, `property-testing.md`) that agents reference during implementation and review. `architecture.md` defines the **Ports at I/O Boundaries** rule (every real I/O collaborator gets a narrow domain-owned port).
+
+The `/references/` directory holds templates used by phase agents: `spec-template.md`, `plan-template.md`, `adr-template.md`, plus a design evaluator.
+
+---
+
+## Pi Harness
+
+Loom's engine is harness-agnostic. The `/pi/` directory ships a Pi extension (`extension.ts`) and a bridge (`loom-bridge.ts`) that adapts Pi's `tool_call` / `tool_result` events to the same handlers used under Claude Code.
+
+- The `HARNESS` constant in `config.ts` detects `claude` vs `pi` at runtime.
+- Everything in `engine/src/core/` is pure and has zero harness dependency.
+- The Pi adapter (`engine/src/handlers/pi-adapter.ts`) maps lint results to Pi's `ToolResultResponse` shape.
+- State paths shift from `.claude/state/…` to `.pi/state/…`.
+
+See `docs/pi-usage.md` and `docs/migration-claude-code-to-pi.md` for details.
+
+---
 
 ## Troubleshooting
 
-### Common Issues
-
 | Symptom | Cause | Fix |
-|---------|-------|-----|
-| Task stuck `in_progress` | Agent hung without crash | Re-spawn the task |
-| `tests_passed` missing | Agent didn't run tests via Bash | Re-spawn — agent MUST execute tests |
-| `new_tests_written` false | Agent reused existing tests | Re-spawn — agent must write new tests |
+|---|---|---|
+| Task stuck `in_progress` | Agent hung without crashing | Re-spawn the task |
+| `tests_passed` missing | Agent didn't run tests via Bash | Re-spawn — agents MUST execute tests |
+| `new_tests_written` false | Agent reused existing tests | Re-spawn — agents must write new tests |
 | Wave not advancing | Gate blocked by critical findings | Fix issues, re-run `/wave-gate` |
-| State write blocked | Guard hook active | All writes go through hooks; reads are fine |
-| Phase agent blocked | Prerequisite phase not complete | Check `current_phase` in state; complete prerequisites |
-| Template variables in prompt | `{variable}` not substituted | Hook blocks this — substitute all variables before spawning |
+| State write blocked | `guard-state-file` active | All writes go through hooks; reads are fine |
+| Phase agent blocked | Prerequisite phase incomplete | Check `current_phase`; complete prerequisites |
+| Template variables in prompt | `{variable}` not substituted | Hook blocks this — substitute before spawning |
+| Lint failure on Edit | Linter caught a rule violation | Fix the violation; the hook is fail-closed |
 
 ### Observability
 
@@ -525,61 +703,59 @@ execute         -> execute
 jq '.' .claude/state/active_task_graph.json
 
 # Per-task status
-jq '.tasks[] | {id, status, tests_passed, review_status}' .claude/state/active_task_graph.json
+jq '.tasks[] | {id, status, tests_passed, new_tests_written, review_status}' \
+   .claude/state/active_task_graph.json
 
 # Current wave and gate status
 jq '{wave: .current_wave, gates: .wave_gates}' .claude/state/active_task_graph.json
 
-# Spec-check results
+# Latest spec-check result
 jq '.spec_check' .claude/state/active_task_graph.json
 ```
 
-### Fixing Blocked Waves
+### Fixing blocked waves
 
-When a wave gate is blocked by critical findings:
+1. **Spawn a fix agent via Task** — subagents can still Edit/Write (only the orchestrator is blocked from direct edits).
+2. **Re-run `/wave-gate`** — re-reviews only the blocked tasks.
+3. **Override false positives** — use whitelisted helpers to correct findings (requires user approval).
+4. **Emergency** — remove the state file, fix manually, rebuild from the GitHub issue.
 
-1. **Spawn a fix agent via Task** — subagents can still Edit/Write (only the orchestrator is blocked)
-2. **Re-run `/wave-gate`** — re-reviews only blocked tasks
-3. **Override false positives** — use whitelisted helpers to correct findings (requires user approval)
-4. **Emergency** — remove state file, fix manually, rebuild from GitHub issue
+---
 
 ## Development
 
-### Running Tests
+### Running tests
 
 ```bash
 cd engine
-bun test              # Run all tests
+bun test              # Run all tests (46 test files)
 bun test --watch      # Watch mode
 bunx tsc --noEmit     # Type checking
 ```
 
-### Test Coverage
+### Test coverage
 
-The test suite includes 28 test files covering:
+The suite includes:
 
-- **Unit tests** — Every handler, parser, and utility
-- **Property-based tests** — Git utilities, task status transitions, task graph validation (via fast-check)
-- **E2E tests** — Full hook pipeline sequencing
-- **Integration tests** — State manager with file locking
+- **Unit tests** — every handler, parser, and utility (22 handler tests, 6 parser-related, 5 util tests)
+- **Linter tests** — executor, loader, formatter, safety analyzer, each programmatic rule, integration (11 tests)
+- **Core tests** — pure functions, state manager, phase initialization
+- **Property-based tests** — git operations, task graph validation, linter safety (fast-check)
+- **E2E** — full hook pipeline sequencing
 
-### Project Structure
+### Linting the engine itself
 
+```bash
+bun scripts/lint-project.ts engine/src
 ```
-loom/
-├── .claude-plugin/
-│   └── plugin.json            # Plugin metadata
-├── agents/                     # Agent definitions
-├── commands/                   # Skill definitions
-│   └── templates/              # Phase prompt templates
-├── engine/                     # TypeScript hook engine
-│   ├── src/                    # Source code
-│   └── tests/                  # Test suite
-├── hooks/
-│   ├── hooks.json              # Hook configuration
-│   └── scripts/                # Shell shims
-└── references/                 # Spec and plan templates
+
+### Pi agent sync
+
+```bash
+bash scripts/sync-pi-agents.sh
 ```
+
+---
 
 ## License
 
