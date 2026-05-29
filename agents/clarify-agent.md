@@ -1,6 +1,6 @@
 ---
 name: clarify-agent
-description: Uncertainty resolution agent that systematically resolves [NEEDS CLARIFICATION] markers in specifications through structured questioning.
+description: "Uncertainty resolution agent that systematically resolves [NEEDS CLARIFICATION] markers in specifications through structured questioning."
 color: orange
 skills:
   - clarify

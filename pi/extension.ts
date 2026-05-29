@@ -306,13 +306,19 @@ export default function (pi: ExtensionAPI) {
 
       // --- Impl agent → update task status ---
       if (IMPL_AGENTS.has(agentType)) {
-        // Get transcript text from subagent result content
-        const transcriptText = event.content
-          .filter((c: { type: string }) => c.type === "text")
-          .map((c: { type: string; text?: string }) => c.text ?? "")
+        // Extract task ID from the original task prompt (works in parallel mode)
+        // Then get transcript from per-result messages for test evidence
+        const taskId = extractTaskId(result.task ?? "") ?? extractTaskId(
+          event.content.filter((c: { type: string }) => c.type === "text").map((c: { type: string; text?: string }) => c.text ?? "").join("\n")
+        );
+        // Build transcript from per-result messages (each parallel result has its own messages)
+        const resultMessages = (result.messages ?? []) as PiMessage[];
+        const transcriptText = resultMessages
+          .filter((m: PiMessage) => m.role === "assistant" || m.role === "toolResult")
+          .flatMap((m: PiMessage) => (m.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? ""))
           .join("\n");
 
-        const taskId = extractTaskId(transcriptText);
+
         if (!taskId) continue;
 
         const state = mgr.load();
@@ -380,12 +386,14 @@ export default function (pi: ExtensionAPI) {
 
       // --- Review agent → store findings ---
       if (isReviewAgent(agentType)) {
-        const transcriptText = event.content
-          .filter((c: { type: string }) => c.type === "text")
-          .map((c: { type: string; text?: string }) => c.text ?? "")
+        const taskId = extractTaskId(result.task ?? "") ?? extractTaskId(
+          event.content.filter((c: { type: string }) => c.type === "text").map((c: { type: string; text?: string }) => c.text ?? "").join("\n")
+        );
+        const resultMessages = (result.messages ?? []) as PiMessage[];
+        const transcriptText = resultMessages
+          .filter((m: PiMessage) => m.role === "assistant" || m.role === "toolResult")
+          .flatMap((m: PiMessage) => (m.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? ""))
           .join("\n");
-
-        const taskId = extractTaskId(transcriptText);
         if (!taskId) continue;
 
         const findings = parseMachineSummary(transcriptText) ?? parseLegacyFindings(transcriptText);
@@ -413,9 +421,10 @@ export default function (pi: ExtensionAPI) {
 
       // --- Spec-check invoker → store spec-check findings ---
       if (agentType === "spec-check-invoker") {
-        const transcriptText = event.content
-          .filter((c: { type: string }) => c.type === "text")
-          .map((c: { type: string; text?: string }) => c.text ?? "")
+        const resultMessages = (result.messages ?? []) as PiMessage[];
+        const transcriptText = resultMessages
+          .filter((m: PiMessage) => m.role === "assistant" || m.role === "toolResult")
+          .flatMap((m: PiMessage) => (m.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? ""))
           .join("\n");
 
         const findings = parseSpecCheckOutput(transcriptText);
