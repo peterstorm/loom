@@ -7,6 +7,7 @@
 import type { HookHandler, ReviewStatus, Task } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
+import { isNoFindingSentinel } from "../../utils/no-finding-sentinel";
 
 /** Pure: Parse CRITICAL/ADVISORY lines from stdin */
 export function parseFindings(stdin: string): { critical: string[]; advisory: string[] } {
@@ -17,13 +18,13 @@ export function parseFindings(stdin: string): { critical: string[]; advisory: st
     const critMatch = line.match(/^CRITICAL:\s*(.*)/);
     if (critMatch) {
       const text = critMatch[1].trim();
-      if (text !== '') critical.push(text);
+      if (text !== '' && !isNoFindingSentinel(text)) critical.push(text);
       continue;
     }
     const advMatch = line.match(/^ADVISORY:\s*(.*)/);
     if (advMatch) {
       const text = advMatch[1].trim();
-      if (text !== '') advisory.push(text);
+      if (text !== '' && !isNoFindingSentinel(text)) advisory.push(text);
     }
   }
 

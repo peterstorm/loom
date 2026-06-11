@@ -11,6 +11,7 @@ import { REVIEW_SUB_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { extractTaskId } from "../../utils/extract-task-id";
+import { dropNoFindingSentinels } from "../../utils/no-finding-sentinel";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
 
 export interface ParsedFindings {
@@ -26,7 +27,7 @@ export function makeParsedFindings(input: {
   criticalCount?: number | null;
 }): ParsedFindings {
   const filter = (xs: readonly string[] | undefined): readonly string[] =>
-    Object.freeze((xs ?? []).filter((s) => s.trim() !== ""));
+    Object.freeze(dropNoFindingSentinels(xs ?? []));
   return Object.freeze({
     critical: filter(input.critical),
     advisory: filter(input.advisory),

@@ -9,6 +9,7 @@ import type { HookHandler, SubagentStopInput, SpecCheck } from "../../types";
 import { StateManager } from "../../state-manager";
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
+import { isNoFindingSentinel } from "../../utils/no-finding-sentinel";
 
 interface SpecCheckFindings {
   critical: string[];
@@ -44,11 +45,11 @@ export function parseSpecCheckOutput(output: string): SpecCheckFindings {
 
   for (const line of searchBlock.split("\n")) {
     const critMatch = line.match(/^CRITICAL:\s*(.*)/);
-    if (critMatch) { const t = critMatch[1].trim(); if (t !== '') critical.push(t); continue; }
+    if (critMatch) { const t = critMatch[1].trim(); if (t !== '' && !isNoFindingSentinel(t)) critical.push(t); continue; }
     const highMatch = line.match(/^HIGH:\s*(.*)/);
-    if (highMatch) { const t = highMatch[1].trim(); if (t !== '') high.push(t); continue; }
+    if (highMatch) { const t = highMatch[1].trim(); if (t !== '' && !isNoFindingSentinel(t)) high.push(t); continue; }
     const medMatch = line.match(/^MEDIUM:\s*(.*)/);
-    if (medMatch) { const t = medMatch[1].trim(); if (t !== '') medium.push(t); }
+    if (medMatch) { const t = medMatch[1].trim(); if (t !== '' && !isNoFindingSentinel(t)) medium.push(t); }
   }
 
   const critCount = searchBlock.match(/SPEC_CHECK_CRITICAL_COUNT:\s*(\d+)/);

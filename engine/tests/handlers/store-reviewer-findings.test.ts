@@ -144,6 +144,20 @@ describe("parseMachineSummary (pure)", () => {
     expect(result!.critical).toEqual(["real finding that should be captured"]);
   });
 
+  it("CRITICAL_COUNT: 0 with a 'CRITICAL: none' sentinel yields no findings", () => {
+    const output = [
+      "### Machine Summary",
+      "CRITICAL_COUNT: 0",
+      "ADVISORY_COUNT: 0",
+      "CRITICAL: none",
+    ].join("\n");
+
+    const result = parseMachineSummary(output);
+    expect(result).not.toBeNull();
+    expect(result!.criticalCount).toBe(0);
+    expect(result!.critical).toEqual([]);
+  });
+
   it("matches ## heading level", () => {
     const output = "## Machine Summary\nCRITICAL_COUNT: 1\nCRITICAL: issue\n";
     const result = parseMachineSummary(output);
