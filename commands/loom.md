@@ -335,8 +335,9 @@ For each wave:
 3. Wait for all to reach "implemented"
 4. If any tasks `failed`: auto-retry up to 2 times (re-spawn with error context)
 5. **RUN `/wave-gate` — MANDATORY, via subagents** (see below)
-6. If passed: advance to next wave
-7. If blocked: fix issues, re-run `/wave-gate`
+6. If blocked (critical findings): spawn fix agents with the findings, re-run `/wave-gate`
+7. **Triage advisory findings and fix the RELEVANT ones** before advancing (see [Addressing Advisories](#addressing-advisories)). Advisories do not block the gate, but must not be silently dropped.
+8. Once the gate passes AND relevant advisories are addressed: advance to next wave
 
 ### Wave-Gate Enforcement (NON-NEGOTIABLE)
 
@@ -540,6 +541,18 @@ When blocked (critical findings), Edit/Write blocked too. To fix:
    ```
    Then run `complete-wave-gate` to advance. Use only when findings are genuinely false positives — requires user approval.
 4. **Emergency**: remove state file, fix manually, rebuild from GH issue
+
+### Addressing Advisories
+
+Critical findings **block** the gate. Advisory findings do **not** — but loom does not ignore them. After each wave gate, triage every advisory finding before advancing:
+
+**Classify each advisory:**
+- **Relevant** — in scope for the task, actionable, and consistent with project standards (the repo's `CLAUDE.md` / conventions). These get **fixed**.
+- **Not relevant** — out-of-scope refactor, nitpick that contradicts an established project convention, false positive, or work deliberately deferred to a later wave. These are **recorded** with a one-line reason, not fixed.
+
+**Fix relevant advisories** the same way as criticals — spawn a fix subagent via Task (Edit/Write are blocked for the orchestrator), give it the advisory text + file context, and have it make the minimal change. Re-run `/wave-gate` so the fix is re-reviewed.
+
+**Best-effort, non-blocking:** if a relevant advisory can't be fixed cleanly (breaks tests, needs an upstream change), defer it with a reason rather than blocking the wave. Never silently drop an advisory — every advisory ends as *fixed*, *deferred (reason)*, or *dismissed (reason)*.
 
 ---
 

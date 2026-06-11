@@ -153,6 +153,24 @@ EOF
 - Proceed with gate logic - don't block on comment failure
 - Retry comment post after gate decision
 
+### Step 4b: Triage & Fix Relevant Advisories
+
+Critical findings block the gate (Step 5). Advisory findings do **not** block — but they must not be silently dropped. Before advancing, triage every advisory finding across the wave's tasks.
+
+**Read the advisories:**
+```bash
+WAVE=$(jq -r '.current_wave' .claude/state/active_task_graph.json)
+jq -r --argjson w "$WAVE" '.tasks[] | select(.wave == $w) | select((.advisory_findings // []) | length > 0) | {id, advisory_findings}' .claude/state/active_task_graph.json
+```
+
+**Classify each advisory:**
+- **Relevant** — in scope for the task, actionable, and consistent with project standards (the repo's `CLAUDE.md` / conventions) → **fix it**.
+- **Not relevant** — out-of-scope refactor, nitpick that contradicts an established project convention, false positive, or work deliberately deferred to a later wave → record a one-line reason, leave it.
+
+**Fix relevant advisories** by spawning a fix subagent via Task (the orchestrator's Edit/Write are blocked by `block-direct-edits`). Give it the advisory text + file context and have it make the **minimal** change, then re-run `/wave-gate` so the fix is re-reviewed.
+
+**Non-blocking:** if a relevant advisory can't be fixed cleanly (breaks tests, needs an upstream change), defer it with a reason rather than holding the wave. Every advisory must end as *fixed*, *deferred (reason)*, or *dismissed (reason)* — never silently ignored.
+
 ### Step 5: Advance
 
 Call `complete-wave-gate` — it handles ALL verification and advancement:
@@ -226,6 +244,7 @@ jq -r ".tasks[] | select(.wave == $WAVE) | .id" .claude/state/active_task_graph.
 - MUST use `spec-check-invoker` agent for spec alignment
 - MUST spawn review sub-agents directly (`code-reviewer`, `silent-failure-hunter`, etc.) per task
 - MUST post GH comment before advancing
+- MUST triage advisory findings and fix the relevant ones before advancing — advisories don't block, but must not be silently dropped
 - NEVER advance if spec-check has critical findings
 - NEVER advance if code review has critical findings
 - NEVER manually write to state file (guard hook blocks it)
