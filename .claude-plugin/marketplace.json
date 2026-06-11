@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "loom",
+  "description": "Loom orchestration plugin marketplace",
+  "owner": { "name": "peterstorm" },
+  "plugins": [
+    {
+      "name": "loom",
+      "description": "Loom orchestration system - multi-phase task decomposition with wave-based parallel execution",
+      "version": "1.0.1",
+      "author": { "name": "peterstorm" },
+      "source": ".",
+      "category": "development"
+    }
+  ]
+}
