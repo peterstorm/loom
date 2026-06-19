@@ -24,6 +24,14 @@ Writing tests without executing them counts as failure.
 
 ---
 
+## Architecture & Language Rules — BINDING
+
+The project's architecture and language-pattern rules are inlined below. They are NOT optional and NOT "read later" — they are binding constraints for this codebase. Apply them to every file you write or modify. The wave-gate review agents (code-reviewer, type-design-analyzer) enforce them, and violations block the wave.
+
+{rules_content}
+
+---
+
 ## Task Assignment
 
 **Task ID:** {task_id}
@@ -69,8 +77,9 @@ Available at: {plan_file_path}
 
 ## Required Workflow
 
-1. Read the plan file and understand scope
-2. Implement code following the plan's patterns
-3. Write NEW tests (hook git-diffs for @Test, it(, test(, describe( patterns — no new tests = wave blocked) — **skip for docs/config-only tasks where `new_tests_required: false`**
-4. **Run tests via Bash tool** — fix failures, re-run until 0 failures — **skip for docs/config-only tasks**
-5. Only then are you done
+1. Read & apply the **Architecture & Language Rules** inlined above — binding constraints, not suggestions
+2. Read the plan file and understand scope
+3. Implement code following the plan's patterns AND the rules above
+4. Write NEW tests (hook git-diffs for @Test, it(, test(, describe( patterns — no new tests = wave blocked) — **skip for docs/config-only tasks where `new_tests_required: false`**
+5. **Run tests via Bash tool** — fix failures, re-run until 0 failures — **skip for docs/config-only tasks**
+6. Only then are you done

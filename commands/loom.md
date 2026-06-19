@@ -369,6 +369,7 @@ Substitute variables:
 - `{plan_context}` - Relevant section from plan
 - `{file_list}` - Files to create/modify
 - `{plan_file_path}` - Path to full plan
+- `{rules_content}` - **Inline the binding rules (do NOT leave a file path).** Read `{LOOM_DIR}/rules/architecture.md` (always) plus the stack-specific file(s) — `typescript-patterns.md` for TypeScript/Next.js, `java-patterns.md` + `property-testing.md` for Java, `rust-patterns.md` for Rust — and substitute their full concatenated contents here. The `validate-template-substitution` hook blocks the spawn if `{rules_content}` is left unsubstituted. For docs/config-only tasks (e.g. ADR writing) substitute the literal text `N/A — no code in this task.`
 
 **Spawn implementation agent** with the substituted template as prompt.
 
