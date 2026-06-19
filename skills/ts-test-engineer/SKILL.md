@@ -8,6 +8,14 @@ description: "This skill should be used when the user asks to 'write unit tests'
 
 Expert guidance for writing, reviewing, and fixing tests in TypeScript/Next.js applications.
 
+## Context Loading (MANDATORY)
+
+Before writing tests, you MUST read and apply the binding project rules:
+- `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` — FC/IS, DDD, immutability, testability (always)
+- `${CLAUDE_PLUGIN_ROOT}/rules/typescript-patterns.md` — discriminated unions, branded types, ts-pattern, ports & in-memory fakes
+
+These are not optional. Tests must exercise the functional core without mocks and follow the port/fake patterns described there.
+
 ---
 
 ## Workflow

@@ -8,6 +8,14 @@ description: "This skill should be used when the user asks to 'secure my API', '
 
 Expert guidance for API security, authentication, authorization, and identity management.
 
+## Context Loading (MANDATORY)
+
+When implementing or modifying code (not only advising), you MUST read and apply the binding project rules:
+- `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` — FC/IS, DDD, immutability, Either-based errors, ports at I/O boundaries (always)
+- `${CLAUDE_PLUGIN_ROOT}/rules/typescript-patterns.md` (TypeScript) or `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md` (Java) — language patterns
+
+These constrain how security-sensitive code is structured; the wave-gate review agents enforce them.
+
 ## Reference Routing
 
 Load the reference that matches the user's problem:

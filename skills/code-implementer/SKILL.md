@@ -12,7 +12,7 @@ Expert implementation guidance ensuring code follows FP principles, DDD patterns
 
 ## Context Loading
 
-Before implementing, load the relevant rules. Read ONLY what's needed for the target stack:
+Before implementing, you **MUST** read and apply the relevant rules — these are binding constraints, not optional references. Read what's needed for the target stack:
 
 **Always read:**
 - `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md` — core principles (FC/IS, DDD, immutability, testability)
@@ -27,7 +27,7 @@ Before implementing, load the relevant rules. Read ONLY what's needed for the ta
 **Rust** (if implementing Rust):
 - `${CLAUDE_PLUGIN_ROOT}/rules/rust-patterns.md` — newtype, typestate, Result combinators
 
-Apply loaded rules as constraints during implementation.
+Apply loaded rules as binding constraints during implementation. Code that violates them is rejected at the wave gate.
 
 ---
 
