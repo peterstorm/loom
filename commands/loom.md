@@ -497,7 +497,7 @@ Hooks auto-activate when `active_task_graph.json` exists:
 | `resume-after-clear.sh` | SessionStart: clear | Restores loom context after /clear |
 | `dispatch.sh` | SubagentStop | Routes to hooks below by agent type |
 | ↳ `advance-phase.sh` | via dispatch | Advances phase + captures spec_file/plan_file from transcript |
-| ↳ `update-task-status.sh` | via dispatch | Marks "implemented" or "failed" + test evidence + new-test verification |
+| ↳ `update-task-status.sh` | via dispatch | Marks "implemented" + test evidence + new-test verification |
 | ↳ `store-reviewer-findings.sh` | via dispatch | Parses review findings |
 | ↳ `store-spec-check-findings.sh` | via dispatch | Parses spec-check findings |
 | ↳ `cleanup-subagent-flag.sh` | via dispatch | Cleans up subagent tracking + machine bindings (always runs) |

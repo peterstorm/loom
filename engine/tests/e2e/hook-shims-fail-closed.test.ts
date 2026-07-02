@@ -13,7 +13,7 @@
 
 import { describe, it, expect, afterAll } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -64,6 +64,27 @@ function runShim(script: string, env: Record<string, string | undefined>): ShimR
   return { status: result.status, stderr: result.stderr ?? "" };
 }
 
+/** Resolve a binary the shim needs (ls, cat) via the CURRENT PATH. */
+function resolveBin(name: string): string {
+  const result = spawnSync("bash", ["-c", `command -v ${name}`], { encoding: "utf-8" });
+  const path = (result.stdout ?? "").trim();
+  if (!path) throw new Error(`test setup: cannot resolve ${name}`);
+  return path;
+}
+
+/**
+ * A PATH containing ONLY the external binaries the shims use before their
+ * bun check (ls, cat, bash) — `command -v bun` then genuinely fails,
+ * simulating PATH drift that removed the runtime.
+ */
+function bunlessPath(): string {
+  const bin = tempDir();
+  for (const name of ["ls", "cat", "bash"]) {
+    symlinkSync(resolveBin(name), join(bin, name));
+  }
+  return bin;
+}
+
 describe("enforce-phase-tools.sh — fail-closed branches", () => {
   it.skipIf(isRoot)("existing-but-unreadable SUBAGENT_DIR → exit 2", () => {
     const dir = tempDir();
@@ -91,6 +112,18 @@ describe("enforce-phase-tools.sh — fail-closed branches", () => {
     const { status } = runShim(ENFORCE, { LOOM_SUBAGENT_DIR: join(tempDir(), "never-created") });
     expect(status).toBe(0);
   });
+
+  it("binding present + bun not found on PATH → exit 2 (runtime gone ≠ gate off)", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "shim-test.machine"), "a-1\tcode-implementer-agent\t1\n");
+    const { status, stderr } = runShim(ENFORCE, {
+      LOOM_SUBAGENT_DIR: dir,
+      CLAUDE_PLUGIN_ROOT: "/tmp/fake-plugin-root", // set, so only the bun check can fail
+      PATH: bunlessPath(),
+    });
+    expect(stderr).toContain("bun not found");
+    expect(status).toBe(2);
+  });
 });
 
 describe("record-evidence.sh — fail-open, never silent", () => {
@@ -107,6 +140,27 @@ describe("record-evidence.sh — fail-open, never silent", () => {
     const dir = tempDir();
     const { status, stderr } = runShim(RECORD, { LOOM_SUBAGENT_DIR: dir });
     expect(stderr).toBe("");
+    expect(status).toBe(0);
+  });
+
+  it("binding present + CLAUDE_PLUGIN_ROOT unset → exit 0 WITH a 'runtime unavailable' note", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "shim-test.machine"), "a-1\tcode-implementer-agent\t1\n");
+    const { status, stderr } = runShim(RECORD, { LOOM_SUBAGENT_DIR: dir });
+    expect(stderr).toContain("runtime unavailable");
+    expect(stderr).toContain("evidence not recorded");
+    expect(status).toBe(0); // fail-open recorder — but never silent
+  });
+
+  it("binding present + bun not found on PATH → exit 0 WITH a 'runtime unavailable' note", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "shim-test.machine"), "a-1\tcode-implementer-agent\t1\n");
+    const { status, stderr } = runShim(RECORD, {
+      LOOM_SUBAGENT_DIR: dir,
+      CLAUDE_PLUGIN_ROOT: "/tmp/fake-plugin-root",
+      PATH: bunlessPath(),
+    });
+    expect(stderr).toContain("runtime unavailable");
     expect(status).toBe(0);
   });
 });

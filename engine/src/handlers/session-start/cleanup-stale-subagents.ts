@@ -76,13 +76,27 @@ export function sweepStaleSessions(dir: string, cutoffMs: number): void {
         mtimes.set(entry, statSync(join(dir, entry)).mtimeMs);
       } catch {}
     }
+    let failedRemovals = 0;
     for (const entry of staleEntries(mtimes, cutoffMs)) {
       // rmSync handles both files and the `.cleanup` mkdir-lock directories.
       try {
         rmSync(join(dir, entry), { recursive: true, force: true });
-      } catch {}
+      } catch {
+        failedRemovals++;
+      }
     }
-  } catch {}
+    if (failedRemovals > 0) {
+      process.stderr.write(
+        `cleanup-stale-subagents: ${failedRemovals} stale tracking entr${failedRemovals === 1 ? "y" : "ies"} could not be removed under ${dir}\n`,
+      );
+    }
+  } catch (e) {
+    // A failed sweep leaks stale bindings/rosters until the NEXT session
+    // start — mirror the pi twin's logging instead of swallowing it.
+    process.stderr.write(
+      `loom: session cleanup failed for ${dir}: ${e instanceof Error ? e.message : String(e)}\n`,
+    );
+  }
 }
 
 const handler: HookHandler = async (_stdin, _args) => {

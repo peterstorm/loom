@@ -6,9 +6,8 @@
  * that the phase doesn't list is structurally unavailable — the bad
  * transition doesn't exist.
  *
- * Failure policy (deliberate, per review): once ANY binding exists for the
- * session, unexpected errors fail CLOSED — a gate that crashes open is no
- * gate. When attribution is impossible (multiple bindings, or any second
+ * Failure policy: once ANY binding exists for the session, unexpected
+ * errors fail CLOSED — a gate that crashes open is no gate. When attribution is impossible (multiple bindings, or any second
  * subagent active in the session — the harness gives tool calls no agent
  * identity), the gate stands down with a stderr note; SubagentStop's
  * per-epoch resolution still applies.

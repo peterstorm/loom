@@ -126,14 +126,85 @@ function isMavenHead(lowerSegment: string): boolean {
 }
 
 /**
+ * Strip an unquoted trailing comment — quote-aware, matching the splitter's
+ * quote semantics: a `#` inside `"…"`, `'…'`, or backticks is argument text
+ * (`npm test -- --grep "issue #123"`), never a comment. Only a `#` at the
+ * segment start or preceded by whitespace, OUTSIDE quotes, truncates.
+ */
+export function stripComment(segment: string): string {
+  let quote: QuoteChar | null = null;
+  for (let i = 0; i < segment.length; i++) {
+    const c = segment[i];
+    if (quote !== null) {
+      if (quote !== "'" && c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "\\") {
+      i++;
+      continue;
+    }
+    if (isQuoteChar(c)) {
+      quote = c;
+      continue;
+    }
+    if (c === "#" && (i === 0 || /\s/.test(segment[i - 1]))) return segment.slice(0, i);
+  }
+  return segment;
+}
+
+/**
+ * Strip leading VAR=value assignments so `CI=1 npm test` matches — quote-
+ * aware: the VALUE may contain quoted whitespace (`FOO="a b" npm test`), so
+ * it is consumed with the same quote semantics as the splitter, not up to
+ * the first raw space.
+ */
+export function stripEnvPrefix(segment: string): string {
+  let rest = segment;
+  for (;;) {
+    const m = rest.match(/^[A-Za-z_][A-Za-z0-9_]*=/);
+    if (!m) return rest;
+    let i = m[0].length;
+    let quote: QuoteChar | null = null;
+    while (i < rest.length) {
+      const c = rest[i];
+      if (quote !== null) {
+        if (quote !== "'" && c === "\\") {
+          i += 2;
+          continue;
+        }
+        if (c === quote) quote = null;
+        i++;
+        continue;
+      }
+      if (c === "\\") {
+        i += 2;
+        continue;
+      }
+      if (isQuoteChar(c)) {
+        quote = c;
+        i++;
+        continue;
+      }
+      if (/\s/.test(c)) break;
+      i++;
+    }
+    rest = rest.slice(i).trimStart();
+    if (rest === "") return "";
+  }
+}
+
+/**
  * The simple-command segment that a test-runner pattern matches at head
  * position, or null when the command is not a test invocation.
  */
 export function classifyTestCommand(command: string): string | null {
   const segments = splitCommandSegments(command)
-    .map((s) => s.replace(/(^|\s)#.*$/, "").trim())
-    // Strip leading VAR=value assignments so `CI=1 npm test` matches.
-    .map((s) => s.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, ""))
+    .map((s) => stripComment(s).trim())
+    .map((s) => stripEnvPrefix(s))
     .filter((s) => s !== "");
 
   for (const segment of segments) {

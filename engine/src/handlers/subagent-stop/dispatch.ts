@@ -1,6 +1,7 @@
 /**
  * SubagentStop dispatcher — routes by agent_type to relevant handlers.
- * Replaces dispatch.sh: reads stdin once, calls only relevant handlers.
+ * Invoked via the dispatch.sh shim; reads stdin once, calls only relevant
+ * handlers.
  */
 
 import { match, P } from "ts-pattern";
@@ -8,11 +9,11 @@ import type { HookHandler, SubagentStopInput } from "../../types";
 import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
-import { readEvidence, type EvidenceRecord } from "../../machine";
+import { readEvidence } from "../../machine";
 
 import cleanupSubagentFlag from "./cleanup-subagent-flag";
 import advancePhase from "./advance-phase";
-import { runUpdateTaskStatus } from "./update-task-status";
+import { runUpdateTaskStatus, type EvidenceSnapshot } from "./update-task-status";
 import storeReviewerFindings from "./store-reviewer-findings";
 import storeSpecCheckFindings from "./store-spec-check-findings";
 
@@ -51,17 +52,18 @@ const handler: HookHandler = async (stdin, args) => {
   // Snapshot the ledger BEFORE cleanup unbinds: the next bind with zero
   // bindings truncates the ledger, so update-task-status must judge this
   // epoch's evidence from a pre-unbind snapshot, not whatever file is on
-  // disk by the time it runs. Null means "the snapshot READ FAILED" — a
-  // distinct state from a genuinely empty ledger ([]): downstream must
-  // re-read (or fail loudly) rather than treat the failure as absence of
-  // evidence and quietly mint a degraded verdict.
-  let evidenceSnapshot: readonly EvidenceRecord[] | null = null;
+  // disk by the time it runs. The EvidenceSnapshot union (owned by
+  // update-task-status.ts — keep both sides in sync) keeps a FAILED read
+  // distinct from a genuinely empty ledger: downstream labels the verdict
+  // snapshot-read-failed instead of minting a misleading "degraded".
+  let evidenceSnapshot: EvidenceSnapshot;
   try {
-    evidenceSnapshot = readEvidence(input.session_id);
+    evidenceSnapshot = { kind: "snapshot", events: readEvidence(input.session_id) };
   } catch (e) {
     process.stderr.write(
       `dispatch: evidence snapshot failed for ${input.session_id}: ${e instanceof Error ? e.message : String(e)}\n`,
     );
+    evidenceSnapshot = { kind: "snapshot-failed" };
   }
 
   // Cleanup always runs — but must never abort the rest of the pipeline
@@ -81,7 +83,7 @@ const handler: HookHandler = async (stdin, args) => {
     })
     .with("impl", async () => {
       await safeRun("updateTaskStatus", () =>
-        runUpdateTaskStatus(stdin, args, evidenceSnapshot ?? undefined),
+        runUpdateTaskStatus(stdin, args, evidenceSnapshot),
       );
     })
     .with("review", async () => {

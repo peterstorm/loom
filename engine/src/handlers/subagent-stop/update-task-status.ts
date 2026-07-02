@@ -146,12 +146,28 @@ type TestRunEvidence = Extract<Evidence, { kind: "TestRun" }>;
  *                  failure: the fallback is running where ground truth was
  *                  expected)
  * - "fallback"   — no ledger coverage at all (unbound/legacy runs)
+ * - "snapshot-read-failed" — the dispatcher could not READ the ledger
+ *                  (`snapshotFailed`): ledger contents are unknown, which is
+ *                  distinct from a genuinely-empty ledger — never mislabel
+ *                  it "degraded". `ledgerEvents` are ignored in this mode.
  */
 export function resolveTestEvidence(
   ledgerEvents: readonly Evidence[],
   bashOutput: string,
   machineBound: boolean,
+  snapshotFailed: boolean = false,
 ): ResolvedTestEvidence {
+  if (snapshotFailed) {
+    const label = "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)";
+    const fromTranscript = extractTestEvidence(bashOutput);
+    if (!fromTranscript.passed) {
+      return { result: { verdict: "untrusted", passed: false, label }, evidence: "" };
+    }
+    return {
+      result: { verdict: "untrusted", passed: true, label },
+      evidence: `${label}: ${fromTranscript.evidence}`,
+    };
+  }
   // Judge TestRuns keeping their POSITION in the ordered ledger, so later
   // non-TestRun events (FileWrite) can be related to the deciding run.
   const judged = ledgerEvents.flatMap((event, index) =>
@@ -335,6 +351,19 @@ export function collectDiff(
 }
 
 /**
+ * The dispatcher's pre-unbind ledger snapshot, as a discriminated union so
+ * a FAILED read is never confused with a genuinely empty ledger:
+ * - "snapshot"        — the ledger was read; `events` may legitimately be []
+ * - "snapshot-failed" — the read THREW; ledger contents are unknown, so the
+ *                       verdict is labeled snapshot-read-failed instead of
+ *                       minting a misleading "degraded"
+ * dispatch.ts builds it; this module consumes it — keep both in sync.
+ */
+export type EvidenceSnapshot =
+  | { readonly kind: "snapshot"; readonly events: readonly EvidenceRecord[] }
+  | { readonly kind: "snapshot-failed" };
+
+/**
  * Handler core. `evidenceSnapshot` lets the dispatcher pass ledger records
  * captured BEFORE cleanup unbound the machine — a subsequent bind truncates
  * the ledger, so reading the file here can race a fresh run's truncation.
@@ -343,7 +372,7 @@ export function collectDiff(
 export const runUpdateTaskStatus = async (
   stdin: string,
   _args: string[],
-  evidenceSnapshot?: readonly EvidenceRecord[],
+  evidenceSnapshot?: EvidenceSnapshot,
 ): Promise<HookResult> => {
   const input: SubagentStopInput = JSON.parse(stdin);
   const agentType = stripNamespace(input.agent_type ?? "");
@@ -401,27 +430,43 @@ export const runUpdateTaskStatus = async (
   const legacyNote = legacyTestsPassedNote(task);
   if (legacyNote) process.stderr.write(`[loom] ${legacyNote}\n`);
 
-  // Skip if already completed or has valid test evidence (regardless of status).
-  // Guards against crash-detection cascade: if another agent's hook set status="failed"
-  // via crash detection, we still preserve previously-set test evidence.
+  // Invariant: previously-set evidence is preserved regardless of the
+  // task's current status — a completed task or one already carrying a
+  // passing test_result is never overwritten by a later hook run.
   if (task.status === "completed") return { kind: "passthrough" };
   if (testResultPassed(task.test_result)) return { kind: "passthrough" };
 
   // Section 1: Test evidence — the agent's OWN epoch in the ledger first
   // (execution-time ground truth, attribution via agent_id), transcript
   // regex as explicit labeled fallback. Foreign epochs are never consulted.
-  // Identity is PARSED before epoch construction: a reserved character in
-  // the hook input could never have been bound/recorded (the bind boundary
-  // rejects it), so it yields no epoch events and routes to the existing
-  // degraded/fallback path instead of silently mis-keying the lookup.
-  const machineBound = isMachineBound(loadMachine(MACHINES_DIR, agentType));
-  const records = evidenceSnapshot ?? readEvidence(input.session_id);
+  // Identity is PARSED before epoch construction AND before loadMachine: a
+  // reserved or path-unsafe character in the hook input could never have
+  // been bound/recorded (the bind boundary rejects it) and must never name
+  // a machine file, so it yields no epoch events, no machine, and routes to
+  // the existing fallback path instead of silently mis-keying the lookup.
   const epochAgentId = input.agent_id ? parseAgentId(input.agent_id) : null;
   const epochAgentType = parseAgentType(agentType);
+  const machineBound =
+    epochAgentType !== null && isMachineBound(loadMachine(MACHINES_DIR, epochAgentType));
+  // A failed dispatcher snapshot means ledger contents are UNKNOWN — say so
+  // and let resolveTestEvidence label the verdict snapshot-read-failed
+  // instead of pretending the ledger was empty ("degraded").
+  const snapshotFailed = evidenceSnapshot?.kind === "snapshot-failed";
+  if (snapshotFailed) {
+    process.stderr.write(
+      `update-task-status: evidence snapshot for ${input.session_id} failed — ledger unavailable; verdict will be labeled snapshot-read-failed\n`,
+    );
+  }
+  const records: readonly EvidenceRecord[] =
+    evidenceSnapshot === undefined
+      ? readEvidence(input.session_id)
+      : evidenceSnapshot.kind === "snapshot"
+        ? evidenceSnapshot.events
+        : [];
   const epochEvents = epochAgentId && epochAgentType
     ? eventsForEpoch(records, epochOf(epochAgentId, epochAgentType))
     : [];
-  const testEvidence = resolveTestEvidence(epochEvents, bashTestOutput, machineBound);
+  const testEvidence = resolveTestEvidence(epochEvents, bashTestOutput, machineBound, snapshotFailed);
 
   // Section 2: New test verification via git diff
   let newTestEvidence: NewTestEvidence = { written: false, evidence: "" };

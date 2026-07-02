@@ -16,7 +16,7 @@ mvn test          # Java/Maven projects
 pytest            # Python projects
 ```
 
-Test evidence is resolved ledger-first: a PostToolUse hook records every Bash test run (real exit codes and report artifacts) into an evidence ledger, and the SubagentStop hook judges your task from that ledger — transcript scanning is only a labeled-untrusted fallback when no ledger evidence exists.
+Test evidence is resolved ledger-first: a PostToolUse hook records every Bash test run (real exit codes and report artifacts) into an evidence ledger, and the SubagentStop hook judges your task from that ledger — it falls back to transcript scanning whenever the ledger yields no trusted verdict (no ledger evidence at all, an exit-0 run with no report artifact, or a pass invalidated by later file writes), and that fallback is always labeled untrusted.
 Either way, evidence only exists for tests EXECUTED via the Bash tool: if your task DOES require tests and you do not run them via Bash, the task's `test_result` will not show a pass and the wave gate FAILS.
 Writing tests without executing them counts as failure.
 

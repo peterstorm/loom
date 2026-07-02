@@ -8,16 +8,27 @@
 import { readFileSync, writeFileSync, chmodSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { withLock } from "./utils/lock";
-import { TASK_GRAPH_PATH, SUBAGENT_DIR } from "./config";
+import { TASK_GRAPH_PATH } from "./config";
+import { parseSessionId, sessionScopedPath } from "./machine";
 import type { TaskGraph } from "./types";
 
-/** Resolve task graph path for cross-repo access */
+/** Resolve task graph path for cross-repo access. The session id comes from
+ *  hook input, so it is PARSED before naming a file under SUBAGENT_DIR — an
+ *  unparseable id is ignored loudly (fail closed: no session pointer read)
+ *  and resolution falls back to the local task graph. */
 export function resolveTaskGraph(sessionId?: string): string | null {
   if (sessionId) {
-    const sessionFile = `${SUBAGENT_DIR}/${sessionId}.task_graph`;
-    if (existsSync(sessionFile)) {
-      const absPath = readFileSync(sessionFile, "utf-8").trim();
-      if (existsSync(absPath)) return absPath;
+    const parsed = parseSessionId(sessionId);
+    if (parsed === null) {
+      process.stderr.write(
+        `resolveTaskGraph: invalid session id ${JSON.stringify(sessionId)} — ignoring session task-graph pointer\n`,
+      );
+    } else {
+      const sessionFile = sessionScopedPath(parsed, ".task_graph");
+      if (existsSync(sessionFile)) {
+        const absPath = readFileSync(sessionFile, "utf-8").trim();
+        if (existsSync(absPath)) return absPath;
+      }
     }
   }
 

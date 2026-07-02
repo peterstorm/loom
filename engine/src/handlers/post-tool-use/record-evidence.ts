@@ -17,13 +17,16 @@
  */
 
 import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type { HookHandler } from "../../types";
 import { passthroughResult } from "../../types";
 import {
   appendEvidence,
+  eventsForEpoch,
   extractEvidence,
   findReport,
   machineBindingPath,
+  readEvidence,
   refreshBindingActivity,
   soleActiveBinding,
 } from "../../machine";
@@ -66,9 +69,19 @@ const handler: HookHandler = async (stdin) => {
     const toolInput = input.tool_input ?? {};
     const cwd = input.cwd ?? process.cwd();
 
-    const events = extractEvidence(toolName, toolInput, input.tool_response, (segment, stdout) =>
-      findReport(segment, cwd, stdout, Date.now()),
-    );
+    const events = extractEvidence(toolName, toolInput, input.tool_response, (segment, stdout) => {
+      // Cheap hardening against agent-authored report artifacts: an explicit
+      // --outputFile path the agent WROTE earlier this epoch (a FileWrite in
+      // its own ledger) must not vouch as a report — findReport rejects it
+      // loudly. Computed lazily here: this closure only runs for classified
+      // test commands.
+      const epochWrites = new Set(
+        eventsForEpoch(readEvidence(sessionId), binding.epoch).flatMap((e) =>
+          e.kind === "FileWrite" ? [resolve(cwd, e.path)] : [],
+        ),
+      );
+      return findReport(segment, cwd, stdout, Date.now(), (absPath) => epochWrites.has(absPath));
+    });
     appendEvidence(sessionId, binding.epoch, events);
 
     return passthroughResult();

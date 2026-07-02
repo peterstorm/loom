@@ -13,29 +13,39 @@ import type { Epoch, Evidence, EvidenceRecord, TestReportSummary } from "./types
 // --- Branded agent identity ---
 
 /**
- * Branded agent identity. The binding file is `\t`-separated lines and the
- * epoch key is `<agent_id>:<agent_type>` — an id containing `\t`, `\n`,
- * `\r`, or `:` would desync the recorder's epoch from the reader's
- * (epochOf), silently degrading evidence. The smart constructors below are
- * the only producers, so every AgentId/AgentType in the system is
- * serialization-safe by construction.
+ * Branded agent identity. The brand proves binding-encoding AND path
+ * safety. The binding file is `\t`-separated lines and the epoch key is
+ * `<agent_id>:<agent_type>` — an id containing whitespace or `:` would
+ * desync the recorder's epoch from the reader's (epochOf), silently
+ * degrading evidence. An agent TYPE also names the machine-definition file
+ * (`<machinesDir>/<agent_type>.machine.json`), so `/`, `\`, and `..`
+ * traversal would let hook input load a machine from OUTSIDE machinesDir —
+ * a traversal-substituted permissive machine would defeat the gate. The
+ * smart constructors below are the only producers, so every
+ * AgentId/AgentType in the system is safe for both encodings by
+ * construction.
  */
 declare const AGENT_ID: unique symbol;
 declare const AGENT_TYPE: unique symbol;
 export type AgentId = string & { readonly [AGENT_ID]: true };
 export type AgentType = string & { readonly [AGENT_TYPE]: true };
 
-/** Characters reserved by the binding-file and epoch encodings. */
-const BINDING_UNSAFE = /[\t\n\r:]/;
+/**
+ * Characters reserved by the binding-file and epoch encodings (whitespace,
+ * `:`) plus the path separators that would escape machineDefPath (`/`, `\`).
+ * `..` sequences are rejected separately below.
+ */
+const BINDING_UNSAFE = /[\s:/\\]/;
 
 /** Smart constructor: null when the raw id cannot be safely bound/attributed. */
 export function parseAgentId(raw: string): AgentId | null {
-  return raw !== "" && !BINDING_UNSAFE.test(raw) ? (raw as AgentId) : null;
+  return raw !== "" && !BINDING_UNSAFE.test(raw) && !raw.includes("..") ? (raw as AgentId) : null;
 }
 
-/** Smart constructor: null when the raw type cannot be safely bound/attributed. */
+/** Smart constructor: null when the raw type cannot be safely bound/attributed
+ *  or safely name a machine-definition file. */
 export function parseAgentType(raw: string): AgentType | null {
-  return raw !== "" && !BINDING_UNSAFE.test(raw) ? (raw as AgentType) : null;
+  return raw !== "" && !BINDING_UNSAFE.test(raw) && !raw.includes("..") ? (raw as AgentType) : null;
 }
 
 // --- Branded session identity ---
@@ -207,10 +217,13 @@ export function resolveSoleActiveBinding(
 
 /**
  * The binding/active-roster/ledger lifecycle as a port, owned by the core.
- * The production adapter (session-registry.ts) is the ledger's fs code; an
+ * The fs adapter (session-registry.ts) wraps the ledger's fs code; an
  * in-memory fake ships with the tests so the sole-active and
  * snapshot-before-unbind invariants are checkable as properties over
- * interleavings instead of only through tmpdirs.
+ * interleavings instead of only through tmpdirs. NOTE: production handlers
+ * currently call the ledger functions directly — the port is exercised by
+ * the property tests (with the fs adapter conformance-checked), not yet
+ * threaded through the handlers.
  */
 export interface SessionRegistry {
   readonly bind: (sessionId: string, agentType: AgentType, agentId: AgentId) => Promise<void>;

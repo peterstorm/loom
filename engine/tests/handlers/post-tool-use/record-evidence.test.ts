@@ -10,21 +10,24 @@
  */
 
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { existsSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import recordEvidence from "../../../src/handlers/post-tool-use/record-evidence";
 import {
+  appendEvidence,
   bindMachineAgent,
   ledgerPath,
   machineBindingPath,
   readEvidence,
   unbindMachineAgent,
 } from "../../../src/machine/ledger";
-import { parseAgentId, parseAgentType } from "../../../src/machine/evidence";
+import { epochOf, parseAgentId, parseAgentType } from "../../../src/machine/evidence";
 import { SUBAGENT_DIR } from "../../../src/config";
 
 const run = `record-evidence-${process.pid}-${Date.now()}`;
 const sid = (name: string) => `${run}-${name}`;
-const sessions = ["contended", "leaked", "ungated"].map(sid);
+const sessions = ["contended", "leaked", "ungated", "forged-report", "honest-report"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
@@ -131,5 +134,83 @@ describe("recorder stands down LOUDLY on unattributable gated sessions", () => {
     } finally {
       stderrSpy.mockRestore();
     }
+  });
+});
+
+describe("agent-authored --outputFile artifacts cannot vouch (epoch FileWrite veto)", () => {
+  it("an explicit --outputFile the agent WROTE this epoch is rejected loudly — TestRun keeps report: null", async () => {
+    const s = sid("forged-report");
+    const dir = mkdtempSync(join(tmpdir(), "loom-forged-report-"));
+    const reportPath = join(dir, "results.json");
+    const epoch = epochOf(parseAgentId("a-1")!, parseAgentType("code-implementer-agent")!);
+    await bind(s, "code-implementer-agent", "a-1");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n");
+    // The agent wrote the "report" itself (a FileWrite in its own epoch)…
+    writeFileSync(reportPath, JSON.stringify({ numTotalTests: 5, numFailedTests: 0 }));
+    appendEvidence(s, epoch, [{ kind: "FileWrite", path: reportPath }]);
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      // …then ran a "test" whose --outputFile points at that very file.
+      const result = await recordEvidence(
+        JSON.stringify({
+          session_id: s,
+          tool_name: "Bash",
+          tool_input: { command: `npx vitest run --outputFile=${reportPath}` },
+          tool_response: { exit_code: 0, stdout: "" },
+          cwd: dir,
+        }),
+        [],
+      );
+      expect(result.kind).toBe("passthrough");
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain(`rejecting --outputFile '${reportPath}'`);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    const events = readEvidence(s).map((r) => r.event);
+    const testRun = events.find((e) => e.kind === "TestRun");
+    expect(testRun).toBeDefined();
+    // report: null → judgeTestRun says untrusted, never trusted-pass.
+    expect(testRun && testRun.kind === "TestRun" && testRun.report).toBeNull();
+
+    await unbindMachineAgent(s, "code-implementer-agent", "a-1");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("control: an --outputFile NOT written by the agent still vouches (report parsed)", async () => {
+    const s = sid("honest-report");
+    const dir = mkdtempSync(join(tmpdir(), "loom-honest-report-"));
+    const reportPath = join(dir, "results.json");
+    await bind(s, "code-implementer-agent", "a-1");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n");
+    // Written by the runner (no FileWrite in the epoch), fresh mtime.
+    writeFileSync(reportPath, JSON.stringify({ numTotalTests: 5, numFailedTests: 0 }));
+
+    const result = await recordEvidence(
+      JSON.stringify({
+        session_id: s,
+        tool_name: "Bash",
+        tool_input: { command: `npx vitest run --outputFile=${reportPath}` },
+        tool_response: { exit_code: 0, stdout: "" },
+        cwd: dir,
+      }),
+      [],
+    );
+    expect(result.kind).toBe("passthrough");
+
+    const events = readEvidence(s).map((r) => r.event);
+    const testRun = events.find((e) => e.kind === "TestRun");
+    expect(testRun && testRun.kind === "TestRun" && testRun.report).toEqual({
+      total: 5,
+      failed: 0,
+      source: "vitest-json",
+    });
+
+    await unbindMachineAgent(s, "code-implementer-agent", "a-1");
+    rmSync(dir, { recursive: true, force: true });
   });
 });

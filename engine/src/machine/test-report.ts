@@ -66,8 +66,8 @@ export function mergeSummaries(summaries: readonly TestReportSummary[]): TestRep
  * The three possible trust verdicts on a TestRun. A "trusted pass" and a
  * "trusted fail" are ground truth; "untrusted" means the run proves
  * nothing either way (downstream falls back to labeled low-trust
- * evidence). The impossible {passed: true, trusted: false} of the old
- * two-boolean shape is unrepresentable.
+ * evidence). An inconsistent {passed: true, trusted: false} state is
+ * unrepresentable in this shape.
  */
 export type TestVerdict =
   | { readonly verdict: "trusted-pass" }
@@ -78,7 +78,7 @@ export type TestVerdict =
 export type TrustedTestVerdict = Extract<TestVerdict, { verdict: "trusted-pass" | "trusted-fail" }>;
 
 /**
- * The R2 trust rule:
+ * The TestRun trust rule:
  * - exit 0 + report with ≥1 test and 0 failures  → trusted-pass
  * - exit 0 + report with 0 tests                 → trusted-fail (nothing ran)
  * - exit 0 + report with failures                → trusted-fail

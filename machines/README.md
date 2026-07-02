@@ -96,11 +96,14 @@ Known residual limits, on purpose and documented:
   windows recorded.
 - Report freshness checks *recency* (15-minute window), not that the
   artifact postdates the command — so it bounds, but does not eliminate,
-  same-family cross-run artifact vouching, and a *planted* report still
-  works: a pre-planted `--outputFile` JSON, or a "test" script that itself
-  echoes runner-shaped JSON, can mint a trusted-pass. Stamping reports
-  with an mtime-≥-command-start bound is the known follow-up (needs
-  PreToolUse timestamps).
+  same-family cross-run artifact vouching, and a *planted* report can still
+  work. The recorder rejects (loudly) an explicit `--outputFile` path that
+  the agent itself wrote earlier this epoch (a `FileWrite` in its own
+  ledger), but a report planted via Bash, written before the epoch began,
+  or produced by a "test" script that itself echoes runner-shaped JSON can
+  still mint a trusted-pass. Stamping reports with an
+  mtime-≥-command-start bound is the known follow-up (needs PreToolUse
+  timestamps).
 - A consistent forgery of ledger *facts* via Bash is blocked by the
   guard-state-file hook (the ledger and binding paths are guarded state
   files); full integrity (HMAC or out-of-agent-reach storage) is a

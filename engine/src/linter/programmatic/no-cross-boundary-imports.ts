@@ -41,7 +41,21 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
   },
   {
     module: "engine/src/core/",
-    allow: ["./", "engine/src/core/", "node:", "engine/src/types", "engine/src/config", "ts-pattern"],
+    allow: [
+      "./",
+      "engine/src/core/",
+      "node:",
+      "engine/src/types",
+      "engine/src/config",
+      // Pure machine-core modules only: identity brands (parseSessionId in
+      // block-direct-edits) and the gate-wired tool vocabulary source
+      // (tool-vocabulary derives FILE_MODIFYING_TOOLS from GATE_WIRED_TOOLS).
+      // The machine's fs shell (ledger/report-discovery) stays denied by
+      // omission — this allowlist is fail-closed.
+      "engine/src/machine/evidence",
+      "engine/src/machine/types",
+      "ts-pattern",
+    ],
     deny: [
       "engine/src/linter/",
       "engine/src/handlers/",

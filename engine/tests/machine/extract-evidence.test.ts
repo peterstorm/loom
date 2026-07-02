@@ -72,6 +72,30 @@ describe("classifyTestCommand — parse, don't substring-match", () => {
     expect(classifyTestCommand("echo `; cargo test `; echo done")).toBeNull();
   });
 
+  it("comment strip is quote-aware: a quoted '#' is argument text, not a comment", () => {
+    // Old behavior stripped from the quoted '#', leaving an unbalanced quote
+    // that the fail-closed check then refused — legitimate evidence dropped.
+    expect(classifyTestCommand('npm test -- --grep "issue #123"')).toBe(
+      'npm test -- --grep "issue #123"',
+    );
+    expect(classifyTestCommand("pytest -k 'not #slow'")).toBe("pytest -k 'not #slow'");
+    // …while an actual trailing comment (unquoted #) still strips:
+    expect(classifyTestCommand("echo hi # npm test")).toBeNull();
+    expect(classifyTestCommand("npm test # just checking")).toBe("npm test");
+  });
+
+  it("env-prefix strip is quote-aware: quoted whitespace in the value stays in the value", () => {
+    // Old behavior consumed only up to the first raw space (`FOO="a`),
+    // leaving `b" npm test` whose head is not a runner — evidence dropped.
+    expect(classifyTestCommand('FOO="a b" npm test')).toBe("npm test");
+    expect(classifyTestCommand("NODE_OPTIONS='--max-old-space-size=4096 --trace-warnings' bun test")).toBe(
+      "bun test",
+    );
+    expect(classifyTestCommand('A=1 B="x y" CI=true pytest -x')).toBe("pytest -x");
+    // An env-prefix-only segment classifies nothing:
+    expect(classifyTestCommand('FOO="a b"')).toBeNull();
+  });
+
   it("refuses to classify segments with unbalanced quotes (fail closed)", () => {
     expect(classifyTestCommand('npm test "unclosed')).toBeNull();
     expect(classifyTestCommand("bun test 'unclosed")).toBeNull();

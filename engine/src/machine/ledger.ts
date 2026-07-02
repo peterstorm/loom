@@ -39,6 +39,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   statSync,
   unlinkSync,
   utimesSync,
@@ -52,6 +53,7 @@ import {
   type AgentType,
   type MachineBinding,
   type PersistedBinding,
+  type SessionId,
   epochOf,
   formatBindingLine,
   isBindingFresh,
@@ -90,6 +92,41 @@ export const machineBindingPath = (sessionId: string): string =>
 const activeFlagPath = (sessionId: string): string => sessionFilePath(sessionId, ".active");
 
 const bindingLock = (sessionId: string): string => sessionFilePath(sessionId, ".cleanup");
+
+/** Every per-session file suffix written under SUBAGENT_DIR — keep in sync
+ *  with cleanup-stale-subagents' SESSION_SUFFIXES. */
+export type SessionFileSuffix =
+  | ".evidence.jsonl"
+  | ".machine"
+  | ".active"
+  | ".cleanup"
+  | ".task_graph";
+
+/**
+ * Session-scoped path for callers OUTSIDE this module (task-graph pointer,
+ * active-flag reads). Takes the BRANDED SessionId so raw hook input must go
+ * through parseSessionId first — callers fail closed (loudly) on a parse
+ * failure instead of interpolating an unvalidated id into SUBAGENT_DIR.
+ * Reuses sessionFilePath so the throwing parse boundary stays singular
+ * (it cannot throw for a branded id).
+ */
+export function sessionScopedPath(sessionId: SessionId, suffix: SessionFileSuffix): string {
+  return sessionFilePath(sessionId, suffix);
+}
+
+/**
+ * Full-file rewrite via temp-file + rename in the SAME directory: readers
+ * take no lock, so an in-place writeFileSync could expose a torn (partial)
+ * file mid-write. rename(2) is atomic on the same filesystem — a reader
+ * sees the old content or the new, never a prefix. Appends stay plain
+ * appendFileSync (single O_APPEND writes; the parsers skip a torn tail
+ * line loudly).
+ */
+function rewriteFileAtomic(path: string, content: string): void {
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, content);
+  renameSync(tmp, path);
+}
 
 // --- Bindings ---
 
@@ -194,7 +231,7 @@ export async function refreshBindingActivity(sessionId: string, nowMs: number = 
         unlinkSync(path);
         return;
       }
-      writeFileSync(path, kept.map((l) => l.raw).join("\n") + "\n");
+      rewriteFileAtomic(path, kept.map((l) => l.raw).join("\n") + "\n");
     }
     if (kept.some((l) => l.kind === "fresh")) {
       const anchor = new Date(nowMs);
@@ -255,7 +292,7 @@ export async function removeActiveAgent(sessionId: string, agentId: string): Pro
       if (remaining.trim() === "") {
         unlinkSync(path);
       } else {
-        writeFileSync(path, remaining + "\n");
+        rewriteFileAtomic(path, remaining + "\n");
       }
     } catch (e) {
       process.stderr.write(`removeActiveAgent: .active update failed for ${sessionId}: ${e}\n`);
@@ -294,7 +331,7 @@ export async function bindMachineAgent(
     const binding: MachineBinding = { agentId, agentType, epoch: epochOf(agentId, agentType) };
     const content =
       [...kept.map((l) => l.raw), formatBindingLine(binding, nowMs)].join("\n") + "\n";
-    writeFileSync(machineBindingPath(sessionId), content);
+    rewriteFileAtomic(machineBindingPath(sessionId), content);
   });
 }
 
@@ -326,7 +363,7 @@ export async function unbindMachineAgent(
       if (remaining.length === 0) {
         unlinkSync(path);
       } else {
-        writeFileSync(path, remaining.map((l) => l.raw).join("\n") + "\n");
+        rewriteFileAtomic(path, remaining.map((l) => l.raw).join("\n") + "\n");
       }
     } catch (e) {
       process.stderr.write(`unbindMachineAgent: failed for ${agentId}/${sessionId}: ${e}\n`);
@@ -359,7 +396,14 @@ export function readEvidence(sessionId: string): EvidenceRecord[] {
 
 // --- Machine registry (definitions shipped with the plugin) ---
 
-export function machineDefPath(machinesDir: string, agentType: string): string {
+/**
+ * Path of an agent type's machine definition. Takes the BRANDED AgentType:
+ * parseAgentType refuses `/`, `\`, whitespace, and `..`, so an unvalidated
+ * agent_type from hook input can never address a machine file outside
+ * machinesDir (a traversal-substituted permissive machine would defeat the
+ * gate).
+ */
+export function machineDefPath(machinesDir: string, agentType: AgentType): string {
   return `${machinesDir}/${agentType}.machine.json`;
 }
 
@@ -369,11 +413,12 @@ export type LoadedMachine =
   | { readonly kind: "invalid"; readonly error: string };
 
 /**
- * Load the machine for an agent type. Returns "none" when the agent has no
- * machine (gating is opt-in per agent). A machine file that exists but
- * fails to parse is an error the caller must surface — never ignore.
+ * Load the machine for an agent type (branded — parse at the boundary, see
+ * machineDefPath). Returns "none" when the agent has no machine (gating is
+ * opt-in per agent). A machine file that exists but fails to parse is an
+ * error the caller must surface — never ignore.
  */
-export function loadMachine(machinesDir: string, agentType: string): LoadedMachine {
+export function loadMachine(machinesDir: string, agentType: AgentType): LoadedMachine {
   const path = machineDefPath(machinesDir, agentType);
   if (!existsSync(path)) return { kind: "none" };
   const parsed = parseMachineJson(readFileSync(path, "utf-8"));

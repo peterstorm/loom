@@ -85,12 +85,24 @@ export function isTerminal(machine: MachineDef, state: PhaseState): boolean {
   return currentPhase(machine, state).terminal;
 }
 
+/**
+ * Sentinel returned when the terminal-is-last invariant is somehow broken
+ * (a MachineDef that did not come from parseMachine). `min: Infinity` is
+ * unsatisfiable by construction — the impossible state reads as a FAILURE
+ * (requirements forever missing), never as clean completion.
+ */
+export const MACHINE_INVARIANT_VIOLATED: Requirement = {
+  event: "TestRunPassed",
+  min: Number.POSITIVE_INFINITY,
+};
+
 /** Terminal requirements not yet met — empty means clean completion. */
 export function missingRequirements(machine: MachineDef, state: PhaseState): Requirement[] {
   const last = machine.phases[machine.phases.length - 1];
-  // parseMachine guarantees the last phase is terminal; the narrowing check
-  // is the type-level proof of that invariant, not a runtime possibility.
-  if (!last.terminal) return [];
+  // parseMachine guarantees the last phase is terminal, so this branch is
+  // unreachable for parsed machines — but if it ever fires, the impossible
+  // state must read as failure (fail closed), not as "nothing missing".
+  if (!last.terminal) return [MACHINE_INVARIANT_VIOLATED];
   return last.requires.filter((r) => !satisfied(r, state.counts));
 }
 

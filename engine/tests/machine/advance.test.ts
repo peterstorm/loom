@@ -134,3 +134,22 @@ describe("Requirement.min > 1 (thresholds are counted, not boolean)", () => {
     expect(currentPhase(threshold, s).id).toBe("implement");
   });
 });
+
+describe("missingRequirements — broken terminal-is-last invariant fails CLOSED", () => {
+  it("a non-terminal last phase (unparseable via parseMachine, forced structurally) reads as failure, never []", async () => {
+    const { MACHINE_INVARIANT_VIOLATED } = await import("../../src/machine/advance");
+    const { satisfied } = await import("../../src/machine/advance");
+    // parseMachine enforces terminal-is-last, so this MachineDef can only be
+    // forged by casting — exactly the impossible state the sentinel guards.
+    const broken = {
+      agent: "broken-agent",
+      enforcedTools: ["Edit"],
+      phases: [{ id: "a", terminal: false, allowedTools: [], advance: { event: "FileRead", min: 1 } }],
+    } as unknown as typeof machine;
+    const missing = missingRequirements(broken, initialState);
+    expect(missing).toEqual([MACHINE_INVARIANT_VIOLATED]);
+    // The sentinel is unsatisfiable by construction — the impossible state
+    // can never be reported as clean completion.
+    expect(satisfied(MACHINE_INVARIANT_VIOLATED, { FileRead: 9999, FileWrite: 9999, TestRun: 9999, TestRunPassed: 9999 })).toBe(false);
+  });
+});

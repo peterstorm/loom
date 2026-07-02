@@ -10,6 +10,7 @@ export {
   isToolAllowed,
   isTerminal,
   missingRequirements,
+  MACHINE_INVARIANT_VIOLATED,
   blockExplanation,
   satisfied,
   tokensFor,
@@ -56,6 +57,8 @@ export { findReport, outputFileFromCommand } from "./report-discovery";
 export {
   ledgerPath,
   machineBindingPath,
+  sessionScopedPath,
+  type SessionFileSuffix,
   appendEvidence,
   readEvidence,
   readBindings,

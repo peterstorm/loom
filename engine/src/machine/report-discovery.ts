@@ -85,7 +85,10 @@ const JVM_RUNNER_PREFIXES = ["mvn", "mvnw", "./mvnw", "gradle", "./gradlew"];
  * SEGMENT (the head-matched simple command from classifyTestCommand — never
  * the whole prose command line). Sources, scoped to the runner family so an
  * artifact can't vouch for an unrelated command:
- * 1. Explicit `--outputFile` path on the segment (vitest/jest JSON)
+ * 1. Explicit `--outputFile` path on the segment (vitest/jest JSON) —
+ *    unless `vetoExplicitPath` rejects it (the recorder vetoes paths the
+ *    agent itself wrote earlier this epoch: an agent-authored artifact
+ *    must not mint a trusted pass)
  * 2. JSON on stdout when the segment asked for a JSON reporter
  * 3. Fresh JUnit XML in conventional dirs — JVM runners only
  */
@@ -94,11 +97,18 @@ export function findReport(
   cwd: string,
   stdout: string,
   nowMs: number,
+  vetoExplicitPath: (absolutePath: string) => boolean = () => false,
 ): TestReportSummary | null {
   const explicit = outputFileFromCommand(segment);
   if (explicit) {
     const path = isAbsolute(explicit) ? explicit : resolve(cwd, explicit);
-    if (existsSync(path) && isFresh(path, nowMs)) {
+    if (vetoExplicitPath(path)) {
+      // Loud rejection: silently ignoring the artifact would look identical
+      // to "no report was written". The run keeps report: null (untrusted).
+      process.stderr.write(
+        `findReport: rejecting --outputFile '${path}' — the path was written by the agent this epoch; an agent-authored artifact cannot vouch as a report\n`,
+      );
+    } else if (existsSync(path) && isFresh(path, nowMs)) {
       try {
         const parsed = parseVitestJson(readFileSync(path, "utf-8"));
         if (parsed) return parsed;

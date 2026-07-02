@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { StateManager } from "../src/state-manager";
+import { StateManager, resolveTaskGraph } from "../src/state-manager";
+import { SUBAGENT_DIR } from "../src/config";
 import type { TaskGraph } from "../src/types";
 
 function makeTmpDir(): string {
@@ -151,5 +152,37 @@ describe("StateManager", () => {
     chmodSync(statePath, 0o444);
     const mgr = new StateManager(statePath);
     expect(() => mgr.load()).toThrow("not an object");
+  });
+});
+
+describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR files", () => {
+  it("a valid session id resolves through its .task_graph pointer", () => {
+    const s = `sm-resolve-${process.pid}-${Date.now()}`;
+    const dir = makeTmpDir();
+    const statePath = join(dir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify(minimalGraph()));
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
+    writeFileSync(pointer, statePath);
+    try {
+      expect(resolveTaskGraph(s)).toBe(statePath);
+    } finally {
+      rmSync(pointer, { force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a traversal session id is ignored LOUDLY — no path outside SUBAGENT_DIR is ever read", () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      // Falls back to the local task graph resolution (null when none) —
+      // never throws, never reads a `../..`-addressed file.
+      const result = resolveTaskGraph("../../etc/passwd");
+      expect(result === null || !result.includes("..")).toBe(true);
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("invalid session id");
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 });

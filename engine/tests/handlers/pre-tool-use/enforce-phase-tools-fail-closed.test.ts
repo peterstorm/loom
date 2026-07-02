@@ -90,6 +90,10 @@ describe("gate fails closed on broken machinery (Fix 4)", () => {
   it("invalid machine definition → block with the parse error", async () => {
     const s = sid("invalid-machine");
     const machines = mkdtempSync(join(tmpdir(), "loom-bad-machines-"));
+    // Mutating process.env is safe ONLY because bun test runs all files in
+    // one process sequentially (no parallel test workers) and machinesDir()
+    // re-reads the env at call time; the finally block restores it before
+    // any other test observes the mutation.
     process.env.LOOM_MACHINES_DIR = machines;
     try {
       writeFileSync(join(machines, "corrupt-agent.machine.json"), "{broken");

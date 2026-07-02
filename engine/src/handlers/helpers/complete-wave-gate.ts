@@ -60,7 +60,7 @@ export function checkTestEvidence(tasks: Task[]): GateCheck {
   return pass(`1. Test evidence verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
 }
 
-/** Check 1b: New tests written or not required */
+/** Check 2: New tests written or not required */
 export function checkNewTests(tasks: Task[]): GateCheck {
   const missing = tasks.filter((t) => t.new_tests_required !== false && !t.new_tests_written);
   if (missing.length > 0) {
@@ -70,10 +70,10 @@ export function checkNewTests(tasks: Task[]): GateCheck {
     const evidence = t.new_test_evidence ?? (t.new_tests_required === false ? "not required" : "new tests present");
     return `     ${t.id}: ${evidence}`;
   });
-  return pass(`   New tests verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
+  return pass(`2. New tests verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
 }
 
-/** Check 2: All tasks reviewed */
+/** Check 3: All tasks reviewed */
 export function checkReviews(tasks: Task[]): GateCheck {
   const reviewed = tasks.filter((t) => t.review_status === "passed" || t.review_status === "blocked");
   if (reviewed.length !== tasks.length) {
@@ -85,13 +85,13 @@ export function checkReviews(tasks: Task[]): GateCheck {
     return fail(parts.join("\n"));
   }
   const lines = tasks.map((t) => `     ${t.id}: ${t.review_status}`);
-  return pass(`2. Reviews verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
+  return pass(`3. Reviews verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
 }
 
-/** Check 3: Spec alignment */
+/** Check 4: Spec alignment */
 export function checkSpecAlignment(state: TaskGraph, wave: number): GateCheck {
   if (!state.spec_check) {
-    return pass("3. Spec alignment: skipped (no spec-check data).");
+    return pass("4. Spec alignment: skipped (no spec-check data).");
   }
   if (state.spec_check.wave !== wave) {
     return fail(`FAILED: Spec alignment was run for wave ${state.spec_check.wave}, not ${wave}. Re-run /spec-check for wave ${wave}.`);
@@ -100,10 +100,10 @@ export function checkSpecAlignment(state: TaskGraph, wave: number): GateCheck {
     const findings = (state.spec_check.critical_findings ?? []).map((f) => `  - ${f}`).join("\n");
     return fail(`FAILED: Spec alignment has ${state.spec_check.critical_count} critical findings.\n${findings}`);
   }
-  return pass(`3. Spec alignment verified (verdict: ${state.spec_check.verdict}).`);
+  return pass(`4. Spec alignment verified (verdict: ${state.spec_check.verdict}).`);
 }
 
-/** Check 4: No critical code review findings */
+/** Check 5: No critical code review findings */
 export function checkCriticalFindings(tasks: Task[]): GateCheck {
   const totalCritical = tasks.reduce(
     (sum, t) => sum + (t.critical_findings?.filter(f => f.trim() !== '').length ?? 0),
@@ -116,7 +116,7 @@ export function checkCriticalFindings(tasks: Task[]): GateCheck {
       .join("\n");
     return fail(`FAILED: ${totalCritical} critical code review findings.\n${details}`);
   }
-  return pass("4. No critical code review findings.");
+  return pass("5. No critical code review findings.");
 }
 
 /** How the plan's executable models were obtained for gate checks */
@@ -126,7 +126,7 @@ export type PlanModelsSource =
   | { kind: "loaded"; models: PlanModels };
 
 /**
- * Check 5: Lifecycle machine artifacts exist (executable-models policy).
+ * Check 6: Lifecycle machine artifacts exist (executable-models policy).
  *
  * Decompose-time binding is a promise; this is the evidence check — any
  * lifecycle machine file bound to a task in this wave must exist on disk
@@ -140,7 +140,7 @@ export function checkLifecycleArtifacts(
   fileExists: (path: string) => boolean,
 ): GateCheck {
   if (source.kind === "none") {
-    return pass("5. Lifecycle artifacts: skipped (no plan file in state).");
+    return pass("6. Lifecycle artifacts: skipped (no plan file in state).");
   }
   if (source.kind === "unreadable") {
     return fail(`FAILED: plan file '${source.path}' is unreadable — cannot verify lifecycle machine artifacts (fail-closed): ${source.error}`);
@@ -150,7 +150,7 @@ export function checkLifecycleArtifacts(
     (lc) => lc.machineFile !== null && waveFiles.some((f) => pathsMatch(f, lc.machineFile!))
   );
   if (bound.length === 0) {
-    return pass("5. Lifecycle artifacts: none bound to this wave.");
+    return pass("6. Lifecycle artifacts: none bound to this wave.");
   }
   // An artifact is satisfied when ANY matched form exists: binding
   // validation (pathsMatch) accepts a task file_list path that is a deeper
@@ -168,7 +168,7 @@ export function checkLifecycleArtifacts(
     );
   }
   return pass(
-    `5. Lifecycle artifacts verified (${bound.length}):\n` +
+    `6. Lifecycle artifacts verified (${bound.length}):\n` +
     bound.map((lc) => `     ${lc.id}: ${lc.machineFile}`).join("\n")
   );
 }

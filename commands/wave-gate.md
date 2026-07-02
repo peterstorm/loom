@@ -40,7 +40,7 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper mark-tests-passed
 
 This prints per-task evidence status. Exit 0 = all tasks have evidence, exit 1 = missing.
 
-**If evidence missing** → re-spawn the implementation agent for that task. The agent MUST run tests and the SubagentStop hook must see pass markers in the transcript.
+**If evidence missing** → re-spawn the implementation agent for that task. The agent MUST run tests and must produce ledger evidence (a real Bash test run) or transcript pass markers.
 
 **New test verification:** The `update-task-status` SubagentStop hook also checks that agents wrote NEW test methods (not just reran existing). It diffs against the per-task `start_sha` baseline (set by PreToolUse hook) to scope detection to each task's changes. Both a passing `test_result` and `new_tests_written == true` are required for the wave gate to pass.
 

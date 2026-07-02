@@ -284,6 +284,41 @@ describe("isMachineBound — an invalid machine still counts as bound (pure)", (
   });
 });
 
+describe("resolveTestEvidence — snapshot-read-failed labeling (pure)", () => {
+  it("snapshotFailed routes to the transcript fallback with the snapshot-read-failed label, never 'degraded'", () => {
+    const resolved = resolveTestEvidence([], "12 passing", true, true);
+    expect(resolved.result).toEqual({
+      verdict: "untrusted",
+      passed: true,
+      label: "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)",
+    });
+    expect(resolved.evidence).toContain("snapshot-read-failed");
+  });
+
+  it("snapshotFailed + no transcript pass markers → untrusted failure with the same label", () => {
+    const resolved = resolveTestEvidence([], "no test output at all", true, true);
+    expect(resolved.result).toEqual({
+      verdict: "untrusted",
+      passed: false,
+      label: "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)",
+    });
+  });
+
+  it("snapshotFailed never mints a trusted verdict even if events are (wrongly) supplied", () => {
+    const trustedPass = {
+      kind: "TestRun" as const,
+      command: "npm test",
+      exit: 0,
+      report: { total: 5, failed: 0, source: "vitest-json" as const },
+    };
+    const resolved = resolveTestEvidence([trustedPass], "12 passing", true, true);
+    expect(resolved.result.verdict).toBe("untrusted");
+    expect(resolved.result.verdict === "untrusted" && resolved.result.label).toContain(
+      "snapshot-read-failed",
+    );
+  });
+});
+
 describe("analyzeNewTests (pure)", () => {
   it("detects Java @Test methods with assertions", () => {
     const diff = [

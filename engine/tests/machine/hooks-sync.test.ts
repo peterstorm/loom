@@ -8,9 +8,10 @@
 
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { GATE_WIRED_TOOLS } from "../../src/machine/types";
 import { FILE_MODIFYING_TOOLS } from "../../src/core/tool-vocabulary";
+import { KNOWN_HANDLERS } from "../../src/handler-routes";
 
 interface HookEntry {
   readonly matcher?: string;
@@ -65,6 +66,36 @@ describe("GATE_WIRED_TOOLS ↔ hooks.json (PreToolUse gate wiring)", () => {
         ).toBe(true);
       }
     }
+  });
+});
+
+describe("hooks.json shim routes ⊆ cli.ts KNOWN_HANDLERS", () => {
+  it("every cli.ts route a wired shim invokes is a known handler route", () => {
+    const scriptsDir = join(__dirname, "../../../hooks/scripts");
+    const wiredScripts = new Set(
+      Object.values(hooksJson.hooks)
+        .flat()
+        .flatMap((entry) => entry.hooks.map((h) => basename(h.command.trim().split(/\s+/).pop() ?? ""))),
+    );
+    expect(wiredScripts.size).toBeGreaterThan(0);
+
+    let routesChecked = 0;
+    for (const script of wiredScripts) {
+      const content = readFileSync(join(scriptsDir, script), "utf-8");
+      for (const m of content.matchAll(/engine\/src\/cli\.ts"?\s+([a-z-]+)\s+([a-z-]+)/g)) {
+        routesChecked++;
+        const [, hookType, handler] = m;
+        const typeSet = KNOWN_HANDLERS[hookType];
+        expect(typeSet, `${script} invokes unknown hook type "${hookType}"`).toBeDefined();
+        expect(
+          typeSet?.has(handler),
+          `${script} invokes cli.ts ${hookType} ${handler}, which KNOWN_HANDLERS does not route — the shim would exit "Unknown handler" at runtime`,
+        ).toBe(true);
+      }
+    }
+    // Sanity: the regex actually found routes (a format change must fail
+    // loudly here, not silently check nothing).
+    expect(routesChecked).toBeGreaterThan(5);
   });
 });
 

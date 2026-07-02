@@ -12,6 +12,7 @@ import { dirname } from "node:path";
 import type { HookResult, HookHandler } from "./types";
 import { nonEmptyMessage } from "./types";
 import { resolveInitialState } from "./phase-init";
+import { KNOWN_HANDLERS } from "./handler-routes";
 
 /**
  * Failure polarity for the top-level catch, derived from argv BEFORE
@@ -38,29 +39,6 @@ const stdinPromise: Promise<string> = process.stdin.isTTY
 // dynamic import) — mark it handled so the crash routes through main's
 // await → the top-level catch, not an unhandled-rejection abort.
 stdinPromise.catch(() => {});
-
-/** Known handler routes — validated before dynamic import */
-const KNOWN_HANDLERS: Record<string, Set<string>> = {
-  "pre-tool-use": new Set([
-    "block-direct-edits", "guard-state-file", "validate-phase-order",
-    "validate-task-execution", "validate-template-substitution",
-    "validate-agent-model", "validate-agent-skill", "enforce-phase-tools",
-  ]),
-  "subagent-stop": new Set([
-    "dispatch", "advance-phase", "update-task-status",
-    "store-reviewer-findings", "store-spec-check-findings",
-    "cleanup-subagent-flag",
-  ]),
-  "post-tool-use": new Set(["lint-file", "record-evidence"]),
-  "subagent-start": new Set(["mark-subagent-active"]),
-  "session-start": new Set(["cleanup-stale-subagents", "resume-after-clear"]),
-  "helper": new Set([
-    "complete-wave-gate", "populate-task-graph", "validate-task-graph",
-    "store-review-findings", "store-spec-check", "mark-tests-passed",
-    "suggest-spec-anchors", "extract-task-id", "store-test-evidence",
-    "set-phase", "cleanup-state", "lint-wave-gate", "validate-lint-rules",
-  ]),
-};
 
 function resultToExit(result: HookResult): never {
   match(result)

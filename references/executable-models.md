@@ -196,6 +196,14 @@ The plan declares invariants in an `## Invariants` section, each tiered:
   file must exist; that it exports a real reducer is verified by its property
   tests and the trusted test-evidence machinery, not by the gate. An empty
   file at the declared path passes the gate and fails at test evidence.
+- **Report artifacts are agent-writable.** A trusted-pass verdict rests on a
+  report artifact (vitest JSON / JUnit XML) that the agent's own tools can
+  write. The recorder rejects an explicit `--outputFile` path that appears as
+  a `FileWrite` in the agent's own epoch (loudly), but the residual remains:
+  an artifact planted via Bash, written in a previous epoch, or produced by a
+  "test" script that emits runner-shaped JSON can still vouch. Full integrity
+  (mtime-≥-command-start stamping, HMAC / out-of-reach storage) is the known
+  follow-up.
 
 ## What NOT to do
 

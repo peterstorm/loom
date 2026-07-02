@@ -62,9 +62,9 @@ export type ReviewStatus = "pending" | "passed" | "blocked" | "evidence_capture_
  * verdicts come from the evidence ledger (real exit status cross-checked
  * against a parsed report artifact) and need no qualifier; an untrusted
  * verdict carries what the low-trust source claimed (`passed`) and a label
- * naming exactly how weak that source is. The old
- * `tests_passed`/`tests_trusted` boolean pair permitted the impossible
- * {passed: true, trusted: false → "trusted"?} drift — this shape does not.
+ * naming exactly how weak that source is. An independent boolean pair
+ * would permit the impossible {passed: true, trusted: false → "trusted"?}
+ * drift — this shape does not.
  */
 export type TaskTestResult =
   | { readonly verdict: "trusted-pass" }

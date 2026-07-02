@@ -89,6 +89,25 @@ describe("evidence ledger", () => {
     });
   });
 
+  it("a malformed report sub-object demotes to report: null (isReportSummary rejection)", () => {
+    const parse = (report: unknown) =>
+      ledger.parseEvidenceLine(
+        JSON.stringify({ epoch: "a:b", event: { kind: "TestRun", command: "npm test", exit: 0, report } }),
+      );
+    const demoted = { epoch: "a:b", event: { kind: "TestRun", command: "npm test", exit: 0, report: null } };
+    // wrong types / missing fields / unknown source / non-object
+    expect(parse({ total: "5", failed: 0, source: "vitest-json" })).toEqual(demoted);
+    expect(parse({ total: 5, source: "vitest-json" })).toEqual(demoted);
+    expect(parse({ total: 5, failed: 0, source: "handwritten" })).toEqual(demoted);
+    expect(parse("5 passed")).toEqual(demoted);
+    expect(parse([])).toEqual(demoted);
+    // a well-formed report survives
+    expect(parse({ total: 5, failed: 0, source: "vitest-json" })).toEqual({
+      epoch: "a:b",
+      event: { kind: "TestRun", command: "npm test", exit: 0, report: { total: 5, failed: 0, source: "vitest-json" } },
+    });
+  });
+
   it("stored judgments are ignored — only facts survive the parse", () => {
     const forged = JSON.stringify({
       epoch: "a:b",
@@ -208,6 +227,25 @@ describe("branded agent identity — the bind boundary charset", () => {
     expect(ledger.parseAgentType("code-implementer-agent")).toBe("code-implementer-agent");
   });
 
+  it("parseAgentId / parseAgentType reject path-unsafe input — the brand also proves machineDefPath safety", () => {
+    for (const bad of [
+      "a/b",
+      "/etc",
+      "a\\b",
+      "..",
+      "a..b",
+      "../../outside",
+      "a b",
+      " ",
+      "evil/../../machines",
+    ]) {
+      expect(ledger.parseAgentId(bad), `id ${JSON.stringify(bad)}`).toBeNull();
+      expect(ledger.parseAgentType(bad), `type ${JSON.stringify(bad)}`).toBeNull();
+    }
+    // A single dot stays valid — only `..` traversal is rejected.
+    expect(ledger.parseAgentType("agent.v2")).toBe("agent.v2");
+  });
+
   it("readBindings drops lines whose fields contain reserved characters (epoch would desync)", () => {
     const s = sid("s8");
     // a ':' inside the id would make the recorded epoch ambiguous with the
@@ -276,7 +314,9 @@ describe("machine registry", () => {
   it("loadMachine: none for unknown agents, machine for valid files, invalid for bad files", () => {
     const machines = mkdtempSync(join(tmpdir(), "loom-machines-"));
     try {
-      expect(ledger.loadMachine(machines, "nope-agent")).toEqual({ kind: "none" });
+      // loadMachine takes BRANDED AgentType — the parse boundary is what
+      // keeps machineDefPath inside machinesDir.
+      expect(ledger.loadMachine(machines, agentType("nope-agent"))).toEqual({ kind: "none" });
 
       writeFileSync(
         join(machines, "good-agent.machine.json"),
@@ -289,10 +329,10 @@ describe("machine registry", () => {
           ],
         }),
       );
-      expect(ledger.loadMachine(machines, "good-agent").kind).toBe("machine");
+      expect(ledger.loadMachine(machines, agentType("good-agent")).kind).toBe("machine");
 
       writeFileSync(join(machines, "bad-agent.machine.json"), "{broken");
-      expect(ledger.loadMachine(machines, "bad-agent").kind).toBe("invalid");
+      expect(ledger.loadMachine(machines, agentType("bad-agent")).kind).toBe("invalid");
 
       writeFileSync(
         join(machines, "mismatch-agent.machine.json"),
@@ -305,7 +345,7 @@ describe("machine registry", () => {
           ],
         }),
       );
-      expect(ledger.loadMachine(machines, "mismatch-agent").kind).toBe("invalid");
+      expect(ledger.loadMachine(machines, agentType("mismatch-agent")).kind).toBe("invalid");
     } finally {
       rmSync(machines, { recursive: true, force: true });
     }

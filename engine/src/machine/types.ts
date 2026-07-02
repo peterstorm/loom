@@ -73,11 +73,13 @@ export const ZERO_COUNTS: EventCounts = {
 // --- Machine definition ---
 
 /**
- * Tools the PreToolUse gate is actually wired to intercept — MUST stay in
- * sync with the `enforce-phase-tools.sh` matchers in `hooks/hooks.json`
- * (Edit / Write / MultiEdit). A machine enforcing a tool outside this set
- * would declare a guarantee the hook never delivers, so parseMachine
- * rejects it.
+ * Tools the PreToolUse gate is actually wired to intercept — pinned against
+ * the `enforce-phase-tools.sh` matchers in `hooks/hooks.json` by
+ * tests/machine/hooks-sync.test.ts (Edit / Write / MultiEdit). A machine
+ * enforcing a tool outside this set would declare a guarantee the hook
+ * never delivers, so parseMachine rejects it. FILE_MODIFYING_TOOLS
+ * (core/tool-vocabulary.ts) is DERIVED from this tuple — one source of
+ * truth for "tools that write files".
  */
 export const GATE_WIRED_TOOLS = ["Edit", "Write", "MultiEdit"] as const;
 

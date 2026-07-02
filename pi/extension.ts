@@ -162,7 +162,10 @@ export default function (pi: ExtensionAPI) {
     let state;
     try {
       state = sm.load();
-    } catch {
+    } catch (err) {
+      process.stderr.write(
+        `loom(pi): resume context skipped — task graph unreadable: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
       return;
     }
 
@@ -229,7 +232,16 @@ export default function (pi: ExtensionAPI) {
     const details = event.details as Record<string, unknown> | undefined;
     if (!details) return;
 
-    const results = (details.results ?? []) as Array<{
+    // Shape guard: a pi version drifting details.results away from an array
+    // must be a LOUD no-op, not a silent one (or a throw mid-dispatch).
+    const rawResults = details.results ?? [];
+    if (!Array.isArray(rawResults)) {
+      process.stderr.write(
+        `loom(pi): subagent tool_result has unrecognized details.results shape (${typeof rawResults}) — no task status updated\n`,
+      );
+      return;
+    }
+    const results = rawResults as Array<{
       agent: string;
       task: string;
       exitCode: number;
@@ -237,6 +249,10 @@ export default function (pi: ExtensionAPI) {
     }>;
 
     for (const result of results) {
+      // Per-result error isolation (mirrors dispatch.ts's safeRun): a throw
+      // while processing result #1 must not abort results #2..N — that
+      // leaves tasks stuck "executing" with zero diagnostics.
+      try {
       const agentType = stripNamespace(result.agent);
       const sessionId = _ctx.sessionManager.getSessionId() ?? "unknown";
 
@@ -477,6 +493,19 @@ export default function (pi: ExtensionAPI) {
           return updated;
         });
         continue;
+      }
+      } catch (err) {
+        // Loud + isolated: name the agent, the task (best effort), and the
+        // cause, then continue with the next result.
+        let taskIdForLog = "<unknown>";
+        try {
+          taskIdForLog = extractTaskId(result?.task ?? "") ?? "<unknown>";
+        } catch {
+          /* best-effort only — the log line must never throw */
+        }
+        process.stderr.write(
+          `loom(pi): subagent-stop processing failed for agent ${String(result?.agent ?? "<unknown>")} (task ${taskIdForLog}): ${err instanceof Error ? err.message : String(err)} — continuing with remaining results\n`,
+        );
       }
     }
   });

@@ -151,7 +151,7 @@ describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7
     const result = await runUpdateTaskStatus(
       JSON.stringify({ session_id: s, agent_id: "a-1", agent_type: "code-implementer-agent" }),
       [],
-      snapshot,
+      { kind: "snapshot", events: snapshot },
     );
     stderrSpy.mockRestore();
     expect(result.kind).toBe("passthrough");
@@ -163,17 +163,18 @@ describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7
   }, 30000);
 });
 
-describe("a FAILED evidence snapshot is never laundered into 'genuinely empty' (null sentinel)", () => {
-  it("unreadable ledger → snapshot fails loudly and the task is NOT credited a degraded verdict", async () => {
+describe("a FAILED evidence snapshot is never laundered into 'genuinely empty' (snapshot-failed sentinel)", () => {
+  it("unreadable ledger → verdict is labeled snapshot-read-failed, never 'degraded'", async () => {
     const s = sid("snapshot-fail");
     const dir = tempDir();
     const statePath = writeState(dir);
     pointSessionAt(s, statePath);
 
     // A DIRECTORY at the ledger path makes readEvidence throw (EISDIR):
-    // the dispatcher's snapshot read fails. With the old `[]` sentinel the
-    // handler would treat this as an empty ledger and mint a degraded
-    // verdict; with the null sentinel it re-reads (and fails loudly).
+    // the dispatcher's snapshot read fails. The { kind: "snapshot-failed" }
+    // sentinel routes update-task-status to the transcript-only fallback
+    // with a snapshot-read-failed label — never the misleading "degraded
+    // (machine bound, no ledger evidence)" that a laundered [] would mint.
     const ledgerDir = `${SUBAGENT_DIR}/${s}.evidence.jsonl`;
     mkdirSync(ledgerDir, { recursive: true });
     sessionFiles.push(ledgerDir);
@@ -188,12 +189,19 @@ describe("a FAILED evidence snapshot is never laundered into 'genuinely empty' (
 
     expect(result.kind).toBe("passthrough"); // dispatcher never crashes the pipeline
     expect(text).toContain(`evidence snapshot failed for ${s}`);
-    // The re-read also fails → update-task-status errors instead of writing
-    // a fabricated "degraded (machine bound, no ledger evidence)" verdict.
-    expect(text).toContain("ERROR in updateTaskStatus");
+    // The handler proceeds (labeled), it does not crash:
+    expect(text).not.toContain("ERROR in updateTaskStatus");
+    expect(text).toContain("labeled snapshot-read-failed");
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.tasks[0].status).toBe("in_progress"); // untouched — fail closed
-    expect(state.tasks[0].test_result).toBeUndefined();
+    expect(state.tasks[0].status).toBe("implemented");
+    // No transcript in this run → the fallback found no pass markers; the
+    // labeled untrusted verdict carries exactly that.
+    expect(state.tasks[0].test_result).toEqual({
+      verdict: "untrusted",
+      passed: false,
+      label: "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)",
+    });
+    expect(state.tasks[0].test_result.label).not.toContain("degraded");
   }, 30000);
 });

@@ -126,7 +126,7 @@ describe("guarded machine — full hook lifecycle", () => {
       // ':' in the id would make the recorded epoch ambiguous with epochOf
       await markActive(start(s, "evil:id"), []);
       const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
-      expect(text).toContain("reserved characters");
+      expect(text).toContain("reserved or path-unsafe characters");
       expect(text).toContain("UNGATED");
     } finally {
       stderrSpy.mockRestore();

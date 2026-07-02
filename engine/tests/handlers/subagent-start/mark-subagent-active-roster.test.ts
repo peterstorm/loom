@@ -79,4 +79,42 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     expect(existsSync(join(SUBAGENT_DIR, `${s}.machine`))).toBe(true);
     expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(true);
   });
+
+  it("an unparseable (traversal) session_id refuses ALL session-file writes, loudly", async () => {
+    process.env.LOOM_STATE_PATH = statePath;
+    const evil = "../mark-active-escape";
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await markActive(start(evil), []);
+      expect(result.kind).toBe("passthrough");
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("invalid session_id");
+      expect(text).toContain("task_graph pointer not written");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    // The traversal path was never created — neither inside nor above the dir.
+    expect(existsSync(join(SUBAGENT_DIR, `${evil}.task_graph`))).toBe(false);
+    expect(existsSync(join(SUBAGENT_DIR, `${evil}.active`))).toBe(false);
+    expect(existsSync(join(SUBAGENT_DIR, `${evil}.machine`))).toBe(false);
+  });
+
+  it("an unparseable agent_type (path traversal) never reaches loadMachine — no bind, loud stderr", async () => {
+    const s = session("evil-type");
+    process.env.LOOM_STATE_PATH = statePath;
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await markActive(start(s, "a-1", "../../outside/evil-agent"), []);
+      expect(result.kind).toBe("passthrough");
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("path-unsafe characters");
+      expect(text).toContain("UNGATED");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.machine`))).toBe(false);
+    // Roster + task_graph writes still happen — only the machine bind refuses.
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.active`))).toBe(true);
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(true);
+  });
 });
