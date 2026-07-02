@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
+import gateHandler, {
   checkLifecycleArtifacts,
   loadPlanModelsSource,
   type PlanModelsSource,
@@ -94,11 +94,12 @@ describe("complete-wave-gate handler wiring (check 5 is actually in the gate)", 
     delete process.env.LOOM_STATE_PATH;
   });
 
-  async function loadGateWithState(statePath: string) {
+  // The handler resolves LOOM_STATE_PATH lazily (taskGraphPath() at call
+  // time), so pointing it at a per-test state file needs no module reload —
+  // this runs identically under `bun test` and `vitest run`.
+  function loadGateWithState(statePath: string): typeof gateHandler {
     process.env.LOOM_STATE_PATH = statePath;
-    const { vi } = await import("vitest");
-    vi.resetModules();
-    return (await import("../../src/handlers/helpers/complete-wave-gate")).default;
+    return gateHandler;
   }
 
   function writeGateState(dir: string, planFile: string, machineFile: string): string {
@@ -129,7 +130,7 @@ describe("complete-wave-gate handler wiring (check 5 is actually in the gate)", 
     const machineFile = join(dir, "src", "order-machine.ts"); // never written
     writeFileSync(planFile, `# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** ${machineFile}\n`);
     const statePath = writeGateState(dir, planFile, machineFile);
-    const gate = await loadGateWithState(statePath);
+    const gate = loadGateWithState(statePath);
     const result = await gate("", ["--wave", "1"]);
     expect(result.kind).toBe("error");
     if (result.kind === "error") {
@@ -145,7 +146,7 @@ describe("complete-wave-gate handler wiring (check 5 is actually in the gate)", 
     writeFileSync(planFile, `# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** ${machineFile}\n`);
     writeFileSync(machineFile, "export const machine = 1;\n");
     const statePath = writeGateState(dir, planFile, machineFile);
-    const gate = await loadGateWithState(statePath);
+    const gate = loadGateWithState(statePath);
     const result = await gate("", ["--wave", "1"]);
     expect(result.kind).toBe("passthrough");
   });
@@ -160,7 +161,7 @@ describe("complete-wave-gate handler wiring (check 5 is actually in the gate)", 
     state.plan_file = null;
     state.phase_artifacts = { architecture: planFile };
     writeFileSync(statePath, JSON.stringify(state));
-    const gate = await loadGateWithState(statePath);
+    const gate = loadGateWithState(statePath);
     const result = await gate("", ["--wave", "1"]);
     expect(result.kind).toBe("error");
     if (result.kind === "error") expect(result.message).toContain("LC-1");

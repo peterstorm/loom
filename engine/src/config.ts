@@ -82,11 +82,20 @@ export const WHITELISTED_HELPERS = [
   "cleanup-state",
 ];
 
+/** Subagent tracking directory */
+export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
+
+const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /** State file patterns to guard.
- * Includes the guarded-machine evidence ledger + binding files: an agent
- * writing them via Bash would forge trusted test evidence (the ledger
- * stores facts, but consistently-forged facts still judge as trusted). */
-export const STATE_FILE_PATTERNS = /active_task_graph|review-invocations|claude-subagents.*\.(evidence\.jsonl|machine)/;
+ * Includes the guarded-machine subagent dir (derived from SUBAGENT_DIR, not
+ * hardcoded): an agent writing the evidence ledger or binding files via Bash
+ * would forge trusted test evidence, appending to `.active` would fake
+ * attribution, and `rm` of the directory itself would silently disarm the
+ * gate — so ANY reference to the dir combined with a write pattern blocks. */
+export const STATE_FILE_PATTERNS = new RegExp(
+  `active_task_graph|review-invocations|${escapeRegex(SUBAGENT_DIR)}`
+);
 
 /** Write patterns to block on state files.
  * Note: `(?:^|\s)>>?(?!&)` avoids matching `2>&1` redirects in read-only commands */
@@ -127,37 +136,52 @@ function detectHarness(): "claude" | "pi" {
 /** Which harness is running */
 export const HARNESS = detectHarness();
 
-/** Relative path within a repo root — configurable via env */
-const TASK_GRAPH_RELATIVE = process.env.LOOM_STATE_PATH
-  ?? (HARNESS === "pi"
-    ? ".pi/state/active_task_graph.json"
-    : ".claude/state/active_task_graph.json");
+/** Relative path within a repo root — configurable via env (read at call time) */
+function taskGraphRelative(): string {
+  return process.env.LOOM_STATE_PATH
+    ?? (HARNESS === "pi"
+      ? ".pi/state/active_task_graph.json"
+      : ".claude/state/active_task_graph.json");
+}
 
 /** Find task graph by walking up from cwd to git root */
 function findTaskGraphPath(): string {
+  const relative = taskGraphRelative();
+
   // Try relative first (works when cwd = repo root)
-  if (existsSync(TASK_GRAPH_RELATIVE)) return TASK_GRAPH_RELATIVE;
+  if (existsSync(relative)) return relative;
 
   // Walk up via git rev-parse
   try {
     const root = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
-    const abs = join(root, TASK_GRAPH_RELATIVE);
+    const abs = join(root, relative);
     if (existsSync(abs)) return abs;
   } catch {}
 
   // Fallback to relative (callers check existsSync anyway)
-  return TASK_GRAPH_RELATIVE;
+  return relative;
 }
 
-/** Task graph path — resolved from cwd or git root */
+/**
+ * Task graph path, resolved lazily — reads LOOM_STATE_PATH at call time so
+ * handlers observe per-test env changes without a module reload.
+ */
+export const taskGraphPath = (): string => findTaskGraphPath();
+
+/** Task graph path — resolved once at import (consumers that never re-point) */
 export const TASK_GRAPH_PATH = findTaskGraphPath();
 
-/** Subagent tracking directory */
-export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
+const DEFAULT_MACHINES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "machines");
 
-/** Guarded-skill-machine definitions directory (shipped with loom, per agent type) */
-export const MACHINES_DIR = process.env.LOOM_MACHINES_DIR
-  ?? join(dirname(fileURLToPath(import.meta.url)), "..", "..", "machines");
+/**
+ * Guarded-skill-machine definitions directory (shipped with loom, per agent
+ * type), resolved lazily — reads LOOM_MACHINES_DIR at call time so the gate
+ * can be pointed at fixture machines per-test without a module reload.
+ */
+export const machinesDir = (): string => process.env.LOOM_MACHINES_DIR ?? DEFAULT_MACHINES_DIR;
+
+/** Machines directory — resolved once at import (consumers that never re-point) */
+export const MACHINES_DIR = machinesDir();
 
 // --- Linter Configuration ---
 

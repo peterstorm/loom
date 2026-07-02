@@ -6,6 +6,7 @@
 
 import {
   EVENT_TOKENS,
+  GATE_WIRED_TOOLS,
   type EventToken,
   type MachineDef,
   type PhaseDef,
@@ -86,6 +87,15 @@ export function parseMachine(raw: unknown): ParseResult<MachineDef> {
   const enforcedTools = raw.enforcedTools;
   if (!isStringArray(enforcedTools) || enforcedTools.length === 0) {
     return parseErr("machine: enforcedTools must be a non-empty array of tool names");
+  }
+  // Every enforced tool must be one the PreToolUse hook actually intercepts —
+  // enforcing a tool the gate never sees is a guarantee that cannot be kept.
+  for (const tool of enforcedTools) {
+    if (!(GATE_WIRED_TOOLS as readonly string[]).includes(tool)) {
+      return parseErr(
+        `machine: enforcedTools contains "${tool}" — the PreToolUse gate is only wired for ${GATE_WIRED_TOOLS.join(", ")} (hooks/hooks.json)`,
+      );
+    }
   }
 
   const phasesRaw = raw.phases;

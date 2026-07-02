@@ -8,10 +8,11 @@ import type { HookHandler, SubagentStopInput } from "../../types";
 import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
+import { readEvidence, type EvidenceRecord } from "../../machine";
 
 import cleanupSubagentFlag from "./cleanup-subagent-flag";
 import advancePhase from "./advance-phase";
-import updateTaskStatus from "./update-task-status";
+import { runUpdateTaskStatus } from "./update-task-status";
 import storeReviewerFindings from "./store-reviewer-findings";
 import storeSpecCheckFindings from "./store-spec-check-findings";
 
@@ -26,7 +27,18 @@ export function categorize(agentType: string): AgentCategory {
 }
 
 const handler: HookHandler = async (stdin, args) => {
-  const input: SubagentStopInput = JSON.parse(stdin);
+  let input: SubagentStopInput;
+  try {
+    input = JSON.parse(stdin);
+  } catch (e) {
+    // Malformed stop input: no session to clean. Say exactly what breaks —
+    // cleanup skipped means the .active roster and machine bindings may leak
+    // until the SessionStart stale-sweep runs.
+    process.stderr.write(
+      `dispatch: malformed SubagentStop input — cleanup skipped, bindings may leak: ${(e as Error).message}\n`,
+    );
+    return { kind: "passthrough" };
+  }
 
   const safeRun = async (name: string, fn: () => Promise<unknown>) => {
     try {
@@ -35,6 +47,17 @@ const handler: HookHandler = async (stdin, args) => {
       process.stderr.write(`ERROR in ${name}: ${(e as Error).message}\n`);
     }
   };
+
+  // Snapshot the ledger BEFORE cleanup unbinds: the next bind with zero
+  // bindings truncates the ledger, so update-task-status must judge this
+  // epoch's evidence from a pre-unbind snapshot, not whatever file is on
+  // disk by the time it runs.
+  let evidenceSnapshot: readonly EvidenceRecord[] = [];
+  try {
+    evidenceSnapshot = readEvidence(input.session_id);
+  } catch (e) {
+    process.stderr.write(`dispatch: evidence snapshot failed for ${input.session_id}: ${(e as Error).message}\n`);
+  }
 
   // Cleanup always runs — but must never abort the rest of the pipeline
   // (a lock-acquisition failure here would otherwise leave the task stuck
@@ -52,7 +75,7 @@ const handler: HookHandler = async (stdin, args) => {
       await safeRun("advancePhase", () => advancePhase(stdin, args));
     })
     .with("impl", async () => {
-      await safeRun("updateTaskStatus", () => updateTaskStatus(stdin, args));
+      await safeRun("updateTaskStatus", () => runUpdateTaskStatus(stdin, args, evidenceSnapshot));
     })
     .with("review", async () => {
       await safeRun("storeReviewerFindings", () => storeReviewerFindings(stdin, args));

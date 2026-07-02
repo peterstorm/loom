@@ -34,8 +34,10 @@ add hard gates. See the v2 convergence plan (vault:
   `fallback`) and always sets `tests_trusted: false`.
 
 A `TestRun` is trusted only when ground truth confirms it: a nonzero exit
-is trustworthy failure on its own; a zero exit needs a report artifact with
-≥1 test and 0 failures. Command classification parses the command into
+is trustworthy failure on its own; a zero exit is trusted whenever a report
+artifact was parsed — but it counts as a PASS only when that report shows
+≥1 test and 0 failures (a zero-test report is a trusted non-pass: nothing
+ran). Command classification parses the command into
 segments and requires a runner at head position — `echo "npm test: 5
 passing"` and `git grep "npm test"` produce no TestRun at all.
 
@@ -45,8 +47,10 @@ The harness gives tool calls no agent identity, so evidence attribution
 rests on the **sole-active rule**: evidence is recorded and the live gate
 enforces ONLY while exactly one subagent is active and exactly one machine
 is bound. Any contention — a second subagent of any type, a second binding
-— stands both down (with a stderr note). SubagentStop resolution is safe
-either way, because it reads only the stopping agent's epoch.
+— stands both down: the gate with a stderr note, the recorder silently
+(it never blocks, so a bound-but-empty ledger surfaces downstream as the
+`degraded` label instead). SubagentStop resolution is safe either way,
+because it reads only the stopping agent's epoch.
 
 Known residual limits, on purpose and documented:
 - Parallel waves therefore run without the live gate; the per-epoch
@@ -79,5 +83,7 @@ stateDiagram-v2
 
 An agent that tries to Edit/Write before reading any file is blocked at
 the tool call with an explanation of what advances the phase. The terminal
-phase's `requires` is computed (`missingRequirements`) and surfaced in
-evidence labeling; hard-blocking completion on it is Phase A follow-up.
+phase's `requires` can be computed (`missingRequirements` is exported for
+it) but is not yet consulted anywhere at runtime; both surfacing it in
+evidence labeling and hard-blocking completion on it are Phase A
+follow-ups.

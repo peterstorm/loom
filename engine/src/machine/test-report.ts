@@ -157,8 +157,15 @@ export function findReport(
   if (explicit) {
     const path = isAbsolute(explicit) ? explicit : resolve(cwd, explicit);
     if (existsSync(path) && isFresh(path, nowMs)) {
-      const parsed = parseVitestJson(readFileSync(path, "utf-8"));
-      if (parsed) return parsed;
+      try {
+        const parsed = parseVitestJson(readFileSync(path, "utf-8"));
+        if (parsed) return parsed;
+      } catch (e) {
+        // Unreadable explicit report (permissions, race, path is a dir):
+        // fall through to the next report source — the TestRun fact must
+        // survive with report: null instead of crashing the recorder.
+        process.stderr.write(`findReport: cannot read --outputFile '${path}': ${(e as Error).message}\n`);
+      }
     }
   }
 

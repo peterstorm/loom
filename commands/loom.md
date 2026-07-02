@@ -483,16 +483,24 @@ Hooks auto-activate when `active_task_graph.json` exists:
 | Hook | Event | Purpose |
 |------|-------|---------|
 | `block-direct-edits.sh` | PreToolUse: Edit/Write/MultiEdit | Forces Task tool |
-| `guard-state-file.sh` | PreToolUse: Bash | Blocks state writes (whitelisted helpers only) |
+| `enforce-phase-tools.sh` | PreToolUse: Edit/Write/MultiEdit | Guarded-skill-machine gate: denies enforced tools the bound agent's phase doesn't allow (fails closed) |
+| `guard-state-file.sh` | PreToolUse: Bash | Blocks state writes (whitelisted helpers only) — covers task graph + subagent evidence/binding files |
 | `validate-task-execution.sh` | PreToolUse: Task | Validates wave order |
 | `validate-phase-order.sh` | PreToolUse: Task | Enforces phase sequencing |
 | `validate-template-substitution.sh` | PreToolUse: Task | Blocks unsubstituted `{variable}` patterns |
+| `validate-agent-model.sh` | PreToolUse: Task | Validates agent model assignment |
+| `validate-agent-skill.sh` | PreToolUse: Task | Validates agent skill preload |
+| `mark-subagent-active.sh` | SubagentStart | Tracks active subagents + binds the guarded skill machine (epoch) |
+| `record-evidence.sh` | PostToolUse: Read/Edit/Write/MultiEdit/Bash | Appends epoch-stamped facts (FileRead/FileWrite/TestRun) to the evidence ledger |
+| `lint-file.sh` | PostToolUse: Edit/Write/MultiEdit | Runs the programmatic linter on the touched file |
+| `cleanup-stale-subagents.sh` | SessionStart | Sweeps stale subagent tracking/binding files |
+| `resume-after-clear.sh` | SessionStart: clear | Restores loom context after /clear |
 | `dispatch.sh` | SubagentStop | Routes to hooks below by agent type |
 | ↳ `advance-phase.sh` | via dispatch | Advances phase + captures spec_file/plan_file from transcript |
 | ↳ `update-task-status.sh` | via dispatch | Marks "implemented" or "failed" + test evidence + new-test verification |
 | ↳ `store-reviewer-findings.sh` | via dispatch | Parses review findings |
 | ↳ `store-spec-check-findings.sh` | via dispatch | Parses spec-check findings |
-| ↳ `cleanup-subagent-flag.sh` | via dispatch | Cleans up subagent tracking (always runs) |
+| ↳ `cleanup-subagent-flag.sh` | via dispatch | Cleans up subagent tracking + machine bindings (always runs) |
 
 **NEVER call helpers yourself.** All helpers (`mark-tests-passed`, `complete-wave-gate`, `StateManager`, `populate-task-graph`, etc. — invoked as `bun cli.ts helper <name>`) run automatically via hooks or `/wave-gate`. Only exception: `populate-task-graph` during Phase 4d.
 

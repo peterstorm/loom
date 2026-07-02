@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, vi } from "vitest";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +10,7 @@ import { SUBAGENT_DIR } from "../../src/config";
 // session ids + targeted cleanup instead of env manipulation.
 const run = `ledger-test-${process.pid}-${Date.now()}`;
 const sid = (name: string) => `${run}-${name}`;
-const sessions = ["s1", "s2", "s3", "s4", "s5", "never-seen"].map(sid);
+const sessions = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "never-seen"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
@@ -109,6 +109,33 @@ describe("machine binding lifecycle", () => {
     // Even if truncation had failed, the new epoch sees nothing:
     expect(ledger.eventsForEpoch(ledger.readEvidence(s), "a-2:code-implementer-agent")).toEqual([]);
     await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-2");
+  });
+
+  it("logs skipped malformed binding lines instead of silently dropping them", () => {
+    const s = sid("s6");
+    writeFileSync(ledger.machineBindingPath(s), "garbage-line-without-a-tab\na-1\tcode-implementer-agent\n");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(ledger.readBindings(s)).toEqual([
+        { agentId: "a-1", agentType: "code-implementer-agent", epoch: "a-1:code-implementer-agent" },
+      ]);
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("skipped 1 malformed binding line(s)");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("a leaked binding — the sole active agent is NOT the bound one — voids attribution", async () => {
+    const s = sid("s7");
+    await ledger.bindMachineAgent(s, "code-implementer-agent", "a-1");
+    // a-1's binding leaked (its cleanup was lost); a-9 is the agent running
+    writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-9\n");
+    expect(ledger.soleActiveBinding(s)).toBeNull();
+    // the bound agent itself active → attribution restored
+    writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n");
+    expect(ledger.soleActiveBinding(s)?.agentId).toBe("a-1");
+    await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-1");
   });
 
   it("contention: second binding or second active agent voids soleActiveBinding", async () => {

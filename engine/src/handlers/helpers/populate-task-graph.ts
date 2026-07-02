@@ -8,7 +8,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
-import { TASK_GRAPH_PATH } from "../../config";
+import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { validateFull, fixFull } from "./validate-task-graph";
 import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
@@ -58,8 +58,10 @@ function buildWaveGates(tasks: Task[]): Record<string, WaveGate> {
 }
 
 const handler: HookHandler = async (stdin, args) => {
-  if (!existsSync(TASK_GRAPH_PATH)) {
-    return { kind: "error", message: `No task graph at ${TASK_GRAPH_PATH}` };
+  // Resolved at call time (not import time) so env re-pointing is honored.
+  const statePath = taskGraphPath();
+  if (!existsSync(statePath)) {
+    return { kind: "error", message: `No task graph at ${statePath}` };
   }
 
   const { issue, repo, fix, force } = parseArgs(args);
@@ -86,7 +88,7 @@ const handler: HookHandler = async (stdin, args) => {
     }
   }
 
-  const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
+  const mgr = StateManager.fromPath(statePath);
   if (!mgr) return { kind: "error", message: "Cannot open task graph" };
 
   // Executable-models policy: this is the only whitelisted helper that

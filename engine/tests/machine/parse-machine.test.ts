@@ -42,6 +42,15 @@ describe("parseMachine", () => {
     expect(parseMachine({ ...valid, enforcedTools: [] }).ok).toBe(false);
   });
 
+  it("rejects enforcedTools outside the gate's wired jurisdiction (hooks.json matchers)", () => {
+    const result = parseMachine({ ...valid, enforcedTools: ["Edit", "Bash"] });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('"Bash"');
+      expect(result.error).toContain("only wired for");
+    }
+  });
+
   it("rejects fewer than 2 phases", () => {
     expect(parseMachine({ ...valid, phases: [valid.phases[1]] }).ok).toBe(false);
   });

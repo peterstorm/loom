@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { extractTestEvidence, analyzeNewTests } from "../../src/handlers/subagent-stop/update-task-status";
+import { extractTestEvidence, analyzeNewTests, resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
+import type { Evidence } from "../../src/machine";
 
 describe("extractTestEvidence (pure)", () => {
   it("detects Maven BUILD SUCCESS", () => {
@@ -149,6 +150,31 @@ describe("extractTestEvidence (pure)", () => {
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(true);
     expect(result.evidence).toContain("50 pass");
+  });
+});
+
+describe("resolveTestEvidence — stale trusted failure vs later untrusted run (pure)", () => {
+  const trustedFail: Evidence = { kind: "TestRun", command: "npm test", exit: 1, report: null };
+  const untrustedExitZero: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: null };
+
+  it("[fail, untrusted exit-0] routes to the labeled low-trust fallback — the stale failure does not outrank it", () => {
+    const resolved = resolveTestEvidence([trustedFail, untrustedExitZero], "12 passing", true);
+    expect(resolved.passed).toBe(true);
+    expect(resolved.trusted).toBe(false); // never promoted to a trusted pass
+    expect(resolved.evidence).toContain("low-trust");
+  });
+
+  it("[fail, untrusted exit-0] with no transcript signal stays failed and untrusted (never promoted)", () => {
+    const resolved = resolveTestEvidence([trustedFail, untrustedExitZero], "no test output here", true);
+    expect(resolved.passed).toBe(false);
+    expect(resolved.trusted).toBe(false);
+  });
+
+  it("a trusted failure with no later exit-0 run keeps its trusted verdict", () => {
+    const resolved = resolveTestEvidence([untrustedExitZero, trustedFail], "12 passing", true);
+    expect(resolved.passed).toBe(false);
+    expect(resolved.trusted).toBe(true);
+    expect(resolved.evidence).toContain("ledger: exit 1");
   });
 });
 

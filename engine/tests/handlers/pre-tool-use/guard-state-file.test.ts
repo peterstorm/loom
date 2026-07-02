@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fc from "fast-check";
-import { WRITE_PATTERNS, STATE_FILE_PATTERNS, WHITELISTED_HELPERS } from "../../../src/config";
+import { WRITE_PATTERNS, STATE_FILE_PATTERNS, WHITELISTED_HELPERS, SUBAGENT_DIR } from "../../../src/config";
 
 /**
  * Test the pure regex logic from guard-state-file directly.
@@ -60,7 +60,7 @@ describe("guard-state-file — property tests", () => {
     fc.assert(
       fc.property(
         fc.string({ minLength: 1, maxLength: 200 }).filter(
-          (s) => !s.includes("active_task_graph") && !s.includes("review-invocations"),
+          (s) => !s.includes("active_task_graph") && !s.includes("review-invocations") && !s.includes(SUBAGENT_DIR),
         ),
         (cmd) => {
           expect(guardDecision(cmd)).toBe("allow");
@@ -106,5 +106,16 @@ describe("guard-state-file — edge cases", () => {
 
   it("cp with state file in source position → block (still matches cp pattern)", () => {
     expect(guardDecision("cp active_task_graph.json /tmp/backup.json")).toBe("block");
+  });
+
+  it("subagent ledger/binding/active files AND the directory itself are guarded (derived from SUBAGENT_DIR)", () => {
+    expect(guardDecision(`echo forged >> ${SUBAGENT_DIR}/s.evidence.jsonl`)).toBe("block");
+    expect(guardDecision(`echo a-1 >> ${SUBAGENT_DIR}/s.active`)).toBe("block");
+    expect(guardDecision(`echo bind > ${SUBAGENT_DIR}/s.machine`)).toBe("block");
+    expect(guardDecision(`rm -rf ${SUBAGENT_DIR}`)).toBe("block");
+    expect(guardDecision(`rm ${SUBAGENT_DIR}/s.machine`)).toBe("block");
+    // reads stay allowed
+    expect(guardDecision(`cat ${SUBAGENT_DIR}/s.evidence.jsonl`)).toBe("allow");
+    expect(guardDecision(`ls ${SUBAGENT_DIR}`)).toBe("allow");
   });
 });

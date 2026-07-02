@@ -62,6 +62,15 @@ export const ZERO_COUNTS: EventCounts = {
 
 // --- Machine definition ---
 
+/**
+ * Tools the PreToolUse gate is actually wired to intercept — MUST stay in
+ * sync with the `enforce-phase-tools.sh` matchers in `hooks/hooks.json`
+ * (Edit / Write / MultiEdit). A machine enforcing a tool outside this set
+ * would declare a guarantee the hook never delivers, so parseMachine
+ * rejects it.
+ */
+export const GATE_WIRED_TOOLS = ["Edit", "Write", "MultiEdit"] as const;
+
 /** A guard: "at least `min` events of `event` observed". No expressions. */
 export interface Requirement {
   readonly event: EventToken;

@@ -12,7 +12,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { match, P } from "ts-pattern";
-import type { HookHandler, SubagentStopInput, TaskGraph, Task } from "../../types";
+import type { HookHandler, HookResult, SubagentStopInput, TaskGraph, Task } from "../../types";
 import { IMPL_AGENTS, REVIEW_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
@@ -23,7 +23,7 @@ import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
 import * as git from "../../utils/git";
 import { MACHINES_DIR } from "../../config";
 import { epochOf, eventsForEpoch, judgeTestRun, loadMachine, readEvidence } from "../../machine";
-import type { Evidence } from "../../machine";
+import type { Evidence, EvidenceRecord } from "../../machine";
 
 // --- Pure: extract test pass evidence from bash output ---
 
@@ -110,10 +110,15 @@ interface ResolvedTestEvidence extends TestEvidence {
 /**
  * Ground truth beats transcript regex. The agent's own epoch in the
  * evidence ledger decides when it has a trusted TestRun (judgment derived
- * from stored FACTS via judgeTestRun — never read back from the ledger);
- * the transcript-regex extractor is the explicit lower-trust fallback,
- * labeled by exactly how weak it is:
- * - "low-trust"  — an untrusted exit-0 run exists (no report artifact)
+ * from stored FACTS via judgeTestRun — never read back from the ledger).
+ * The verdict comes from the LAST trusted run — except that a trusted
+ * FAILURE is considered stale once a later exit-0 run exists (the agent
+ * plausibly fixed and re-ran without a report artifact): that case routes
+ * to the labeled low-trust fallback, and an untrusted run is NEVER
+ * promoted to a trusted pass. The transcript-regex extractor is the
+ * explicit lower-trust fallback, labeled by exactly how weak it is:
+ * - "low-trust"  — some exit-0 ledger run exists but the verdict could not
+ *                  be trusted (no report artifact for the deciding run)
  * - "degraded"   — the machine was bound but the ledger is empty (recorder
  *                  failure: the fallback is running where ground truth was
  *                  expected)
@@ -128,18 +133,24 @@ export function resolveTestEvidence(
     (e): e is Extract<Evidence, { kind: "TestRun" }> => e.kind === "TestRun",
   );
   const judged = runs.map((r) => ({ run: r, ...judgeTestRun(r.exit, r.report) }));
-  const trustedRuns = judged.filter((j) => j.trusted);
+  const lastTrustedIdx = judged.map((j) => j.trusted).lastIndexOf(true);
 
-  const last = trustedRuns[trustedRuns.length - 1];
-  if (last) {
-    const report = last.run.report
-      ? `, report: ${last.run.report.total} tests / ${last.run.report.failed} failed`
-      : "";
-    return {
-      passed: last.passed,
-      trusted: true,
-      evidence: `ledger: exit ${last.run.exit}${report} (${last.run.command})`,
-    };
+  if (lastTrustedIdx >= 0) {
+    const verdict = judged[lastTrustedIdx];
+    // A stale trusted failure must not outrank a later untrusted exit-0
+    // run — but that later run earns only the low-trust fallback below,
+    // never a trusted pass.
+    const laterExitZero = judged.slice(lastTrustedIdx + 1).some((j) => j.run.exit === 0);
+    if (verdict.passed || !laterExitZero) {
+      const report = verdict.run.report
+        ? `, report: ${verdict.run.report.total} tests / ${verdict.run.report.failed} failed`
+        : "";
+      return {
+        passed: verdict.passed,
+        trusted: true,
+        evidence: `ledger: exit ${verdict.run.exit}${report} (${verdict.run.command})`,
+      };
+    }
   }
 
   const fallback = extractTestEvidence(bashOutput);
@@ -192,25 +203,59 @@ export function analyzeNewTests(
 
 // --- Git diff collection ---
 
-export function collectDiff(filesModified: string[], startSha: string | undefined): string {
+/**
+ * Injectable I/O seam for collectDiff — tests substitute plain object
+ * literals (no module mocking, which bun's vitest shim does not support).
+ */
+export interface DiffDeps {
+  readonly isTracked: (file: string) => boolean;
+  readonly diffFiles: (files: string[]) => string;
+  readonly diffFilesStaged: (files: string[]) => string;
+  readonly diffUntracked: (file: string) => string;
+  readonly listUntrackedTestFiles: () => string[];
+  readonly diff: (from?: string, to?: string) => string;
+  readonly diffStaged: () => string;
+  readonly defaultBranch: () => string;
+  readonly mergeBase: (branch: string) => string | null;
+  readonly fileExists: (path: string) => boolean;
+}
+
+const REAL_DIFF_DEPS: DiffDeps = {
+  isTracked: git.isTracked,
+  diffFiles: git.diffFiles,
+  diffFilesStaged: git.diffFilesStaged,
+  diffUntracked: git.diffUntracked,
+  listUntrackedTestFiles: git.listUntrackedTestFiles,
+  diff: git.diff,
+  diffStaged: git.diffStaged,
+  defaultBranch: git.defaultBranch,
+  mergeBase: git.mergeBase,
+  fileExists: existsSync,
+};
+
+export function collectDiff(
+  filesModified: string[],
+  startSha: string | undefined,
+  deps: DiffDeps = REAL_DIFF_DEPS,
+): string {
   if (filesModified.length > 0) {
-    const tracked = filesModified.filter((f) => git.isTracked(f));
-    const untracked = filesModified.filter((f) => existsSync(f) && !git.isTracked(f));
+    const tracked = filesModified.filter((f) => deps.isTracked(f));
+    const untracked = filesModified.filter((f) => deps.fileExists(f) && !deps.isTracked(f));
 
     const parts = [
-      git.diffFiles(tracked),
-      git.diffFilesStaged(tracked),
-      ...untracked.map((f) => git.diffUntracked(f)),
+      deps.diffFiles(tracked),
+      deps.diffFilesStaged(tracked),
+      ...untracked.map((f) => deps.diffUntracked(f)),
     ];
 
     // Also include untracked test files NOT already in filesModified.
     // parseFilesModified often misses test files due to transcript parsing gaps
     // (e.g. tool name casing, truncated transcripts, partial captures).
     const alreadyIncluded = new Set(filesModified);
-    const untrackedTests = git.listUntrackedTestFiles();
+    const untrackedTests = deps.listUntrackedTestFiles();
     for (const f of untrackedTests) {
       if (!alreadyIncluded.has(f)) {
-        parts.push(git.diffUntracked(f));
+        parts.push(deps.diffUntracked(f));
       }
     }
 
@@ -222,25 +267,35 @@ export function collectDiff(filesModified: string[], startSha: string | undefine
   const parts: string[] = [];
 
   if (startSha) {
-    parts.push(git.diff(startSha, "HEAD"), git.diff(), git.diffStaged());
+    parts.push(deps.diff(startSha, "HEAD"), deps.diff(), deps.diffStaged());
   } else {
-    const branch = git.defaultBranch();
-    const base = git.mergeBase(branch);
-    parts.push(base ? git.diff(base, "HEAD") : git.diff("HEAD~1", "HEAD"));
-    parts.push(git.diff(), git.diffStaged());
+    const branch = deps.defaultBranch();
+    const base = deps.mergeBase(branch);
+    parts.push(base ? deps.diff(base, "HEAD") : deps.diff("HEAD~1", "HEAD"));
+    parts.push(deps.diff(), deps.diffStaged());
   }
 
   // Also include untracked test files (common when agent creates new test files
   // without committing — e.g. pi subagents working on unstaged branches)
-  const untrackedTests = git.listUntrackedTestFiles();
+  const untrackedTests = deps.listUntrackedTestFiles();
   for (const f of untrackedTests) {
-    parts.push(git.diffUntracked(f));
+    parts.push(deps.diffUntracked(f));
   }
 
   return parts.join("\n");
 }
 
-const handler: HookHandler = async (stdin) => {
+/**
+ * Handler core. `evidenceSnapshot` lets the dispatcher pass ledger records
+ * captured BEFORE cleanup unbound the machine — a subsequent bind truncates
+ * the ledger, so reading the file here can race a fresh run's truncation.
+ * Standalone invocation (no snapshot) reads the ledger directly.
+ */
+export const runUpdateTaskStatus = async (
+  stdin: string,
+  _args: string[],
+  evidenceSnapshot?: readonly EvidenceRecord[],
+): Promise<HookResult> => {
   const input: SubagentStopInput = JSON.parse(stdin);
   const agentType = stripNamespace(input.agent_type ?? "");
 
@@ -301,8 +356,9 @@ const handler: HookHandler = async (stdin) => {
   // (execution-time ground truth, attribution via agent_id), transcript
   // regex as explicit labeled fallback. Foreign epochs are never consulted.
   const machineBound = loadMachine(MACHINES_DIR, agentType).kind === "machine";
+  const records = evidenceSnapshot ?? readEvidence(input.session_id);
   const epochEvents = input.agent_id
-    ? eventsForEpoch(readEvidence(input.session_id), epochOf(input.agent_id, agentType))
+    ? eventsForEpoch(records, epochOf(input.agent_id, agentType))
     : [];
   const testEvidence = resolveTestEvidence(epochEvents, bashTestOutput, machineBound);
 
@@ -362,5 +418,7 @@ const handler: HookHandler = async (stdin) => {
 
   return { kind: "passthrough" };
 };
+
+const handler: HookHandler = (stdin, args) => runUpdateTaskStatus(stdin, args);
 
 export default handler;

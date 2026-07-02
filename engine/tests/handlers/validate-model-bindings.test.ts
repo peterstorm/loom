@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import handler from "../../src/handlers/helpers/validate-task-graph";
+import populate from "../../src/handlers/helpers/populate-task-graph";
 import {
   validateModelBindings,
   checkPlanModelBindings,
@@ -310,13 +311,14 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
     for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
     dirs = [];
     delete process.env.LOOM_STATE_PATH;
-    vi.resetModules();
   });
 
-  async function loadPopulateWithState(statePath: string) {
+  // The handler resolves LOOM_STATE_PATH lazily (taskGraphPath() at call
+  // time), so pointing it at a per-test state file needs no module reload —
+  // this runs identically under `bun test` and `vitest run`.
+  function pointStateAt(statePath: string): typeof populate {
     process.env.LOOM_STATE_PATH = statePath;
-    vi.resetModules();
-    return (await import("../../src/handlers/helpers/populate-task-graph")).default;
+    return populate;
   }
 
   function decomposeJson(planFile: string, fileList: string[]): string {
@@ -347,8 +349,8 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
     const planFile = join(dir, "plan.md");
     writeFileSync(planFile, "# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** `src/order-machine.ts`\n");
     const statePath = writeState(dir, planFile);
-    const populate = await loadPopulateWithState(statePath);
-    const result = await populate(decomposeJson(planFile, ["src/other.ts"]), []);
+    const populateHandler = pointStateAt(statePath);
+    const result = await populateHandler(decomposeJson(planFile, ["src/other.ts"]), []);
     expect(result.kind).toBe("error");
     if (result.kind === "error") {
       expect(result.message).toContain("task graph not populated");
@@ -363,9 +365,9 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
     const decoyPlan = join(dir, "decoy.md");
     writeFileSync(decoyPlan, "# Plan\n\nNo models.\n");
     const statePath = writeState(dir, realPlan);
-    const populate = await loadPopulateWithState(statePath);
+    const populateHandler = pointStateAt(statePath);
     // decompose tries to point at a model-free plan; state's plan wins
-    const result = await populate(decomposeJson(decoyPlan, ["src/other.ts"]), []);
+    const result = await populateHandler(decomposeJson(decoyPlan, ["src/other.ts"]), []);
     expect(result.kind).toBe("error");
     if (result.kind === "error") expect(result.message).toContain("LC-1");
   });
@@ -375,8 +377,8 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
     const planFile = join(dir, "plan.md");
     writeFileSync(planFile, "# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** `src/order-machine.ts`\n");
     const statePath = writeState(dir, planFile);
-    const populate = await loadPopulateWithState(statePath);
-    const result = await populate(decomposeJson(planFile, ["src/order-machine.ts", "src/order-machine.test.ts"]), []);
+    const populateHandler = pointStateAt(statePath);
+    const result = await populateHandler(decomposeJson(planFile, ["src/order-machine.ts", "src/order-machine.test.ts"]), []);
     expect(result.kind).toBe("passthrough");
     const written = JSON.parse(readFileSync(statePath, "utf-8"));
     expect(written.tasks).toHaveLength(1);
@@ -390,9 +392,9 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
     const decoyPlan = join(dir, "decoy.md");
     writeFileSync(decoyPlan, "# Plan\n\nNo models.\n");
     const statePath = writeState(dir, realPlan);
-    const populate = await loadPopulateWithState(statePath);
+    const populateHandler = pointStateAt(statePath);
     // bindings PASS (task implements the machine) but payload points at the decoy
-    const result = await populate(decomposeJson(decoyPlan, ["src/order-machine.ts"]), []);
+    const result = await populateHandler(decomposeJson(decoyPlan, ["src/order-machine.ts"]), []);
     expect(result.kind).toBe("passthrough");
     const written = JSON.parse(readFileSync(statePath, "utf-8"));
     expect(written.plan_file).toBe(realPlan); // NOT the decoy
@@ -414,9 +416,9 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
       tasks: [],
       wave_gates: {},
     }));
-    const populate = await loadPopulateWithState(statePath);
+    const populateHandler = pointStateAt(statePath);
     // payload re-points at the decoy AND omits the machine file — must be blocked
-    const result = await populate(decomposeJson(decoyPlan, ["src/other.ts"]), []);
+    const result = await populateHandler(decomposeJson(decoyPlan, ["src/other.ts"]), []);
     expect(result.kind).toBe("error");
     if (result.kind === "error") expect(result.message).toContain("LC-1");
   });

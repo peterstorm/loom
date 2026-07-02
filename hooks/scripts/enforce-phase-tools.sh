@@ -11,6 +11,14 @@ set -euo pipefail
 
 SUBAGENT_DIR="${LOOM_SUBAGENT_DIR:-/tmp/claude-subagents}"
 
+# An unreadable SUBAGENT_DIR is NOT "no bindings" — bindings may exist that
+# we cannot see, so fail closed instead of silently degating every session.
+if [[ -e "${SUBAGENT_DIR}" && ( ! -d "${SUBAGENT_DIR}" || ! -r "${SUBAGENT_DIR}" || ! -x "${SUBAGENT_DIR}" ) ]]; then
+  cat > /dev/null 2>/dev/null || true
+  echo "[loom machine] gate cannot read ${SUBAGENT_DIR} — blocking enforced tools" >&2
+  exit 2
+fi
+
 # Fast path: no machine binding anywhere → allow without spawning bun
 if ! ls "${SUBAGENT_DIR}"/*.machine &>/dev/null; then
   cat > /dev/null

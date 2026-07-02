@@ -17,13 +17,14 @@
 import { existsSync, readdirSync } from "node:fs";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import { allowResult, blockResult, passthroughResult } from "../../types";
-import { MACHINES_DIR, SUBAGENT_DIR } from "../../config";
+import { machinesDir, SUBAGENT_DIR } from "../../config";
 import {
   blockExplanation,
   eventsForEpoch,
   foldEvidence,
   isToolAllowed,
   loadMachine,
+  machineBindingPath,
   readBindings,
   readEvidence,
   soleActiveBinding,
@@ -51,11 +52,24 @@ const handler: HookHandler = async (stdin) => {
   }
 
   const { session_id, tool_name } = input;
-  if (!session_id || !tool_name) return passthroughResult();
+  if (!session_id || !tool_name) {
+    // Well-formed JSON missing identity fields is as unattributable as
+    // malformed stdin — same fail-closed policy while any gate is armed.
+    return anyBindingExists()
+      ? blockResult("[loom machine] gate input missing session_id/tool_name — failing closed")
+      : passthroughResult();
+  }
 
   try {
     const bindings = readBindings(session_id);
-    if (bindings.length === 0) return passthroughResult();
+    if (bindings.length === 0) {
+      // Distinguish "no binding file" (ungated session → passthrough) from
+      // "binding file present but zero bindings parsed" (a corrupt binding
+      // file must not silently open the gate).
+      return existsSync(machineBindingPath(session_id))
+        ? blockResult(`[loom machine] binding file for ${session_id} exists but contains no parseable bindings — failing closed`)
+        : passthroughResult();
+    }
 
     const binding = soleActiveBinding(session_id);
     if (binding === null) {
@@ -65,7 +79,7 @@ const handler: HookHandler = async (stdin) => {
       return passthroughResult();
     }
 
-    const loaded = loadMachine(MACHINES_DIR, binding.agentType);
+    const loaded = loadMachine(machinesDir(), binding.agentType);
     if (loaded.kind === "none") return passthroughResult(); // stale binding
     if (loaded.kind === "invalid") {
       // Fail closed: an invalid machine must not silently disable its guarantees.

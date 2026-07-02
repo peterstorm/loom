@@ -173,7 +173,7 @@ Read `references/plan-template.md` from the loom plugin dir (`$LOOM_DIR`, resolv
 
 Record the chosen approach (and the interview decisions that shaped it) under `## Architectural Decisions` so future readers see WHY this approach won.
 
-Commit: `git add .claude/plans/ .claude/linter/rules/ && git commit -m "plan: {date_slug}"` (the linter rules path covers any checkable-invariant rules you wrote; the plans path covers the plan and any AuthoredDag sidecar)
+Commit: `git add .claude/plans/ && git commit -m "plan: {date_slug}"` — and when you wrote checkable-invariant rules, add them first with `git add .claude/linter/rules/`. Do NOT combine both paths in one `git add` unless both directories exist: a missing pathspec makes the whole `git add` fail, and the plan would silently go uncommitted.
 
 **ADR seeds:** For decisions worth recording as ADRs (2+ alternatives evaluated, new dependency, data model change, cross-cutting pattern, or non-obvious invariant), ensure each is captured as a `### AD-N: <Title>` block in the plan's `## Architectural Decisions` section per `references/plan-template.md`. Decompose will turn each AD into a dedicated ADR-writing task in the final wave. The approach you picked at the gate is almost always one such AD. Skip ADs for trivial naming or file-placement choices. Do NOT write ADRs yourself in this phase.
 

@@ -38,6 +38,7 @@ export {
   epochOf,
   readBindings,
   soleActiveBinding,
+  markAgentActive,
   bindMachineAgent,
   unbindMachineAgent,
   machineDefPath,

@@ -9,7 +9,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
-import { TASK_GRAPH_PATH } from "../../config";
+import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { parsePlanModels, type PlanModels } from "../../parsers/parse-plan-models";
 import { pathsMatch } from "./validate-model-bindings";
@@ -256,8 +256,10 @@ function postWaveGateSummary(state: TaskGraph, completedWave: number): void {
 }
 
 const handler: HookHandler = async (_stdin, args) => {
-  const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
-  if (!mgr) return { kind: "error", message: `No task graph at ${TASK_GRAPH_PATH}` };
+  // Resolved at call time (not import time) so env re-pointing is honored.
+  const statePath = taskGraphPath();
+  const mgr = StateManager.fromPath(statePath);
+  if (!mgr) return { kind: "error", message: `No task graph at ${statePath}` };
 
   const waveArg = parseWaveArg(args);
 

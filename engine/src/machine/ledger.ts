@@ -54,13 +54,14 @@ export interface MachineBinding {
 
 export const epochOf = (agentId: string, agentType: string): string => `${agentId}:${agentType}`;
 
-/** Parse the binding file. Malformed lines are skipped (and count as noise, not bindings). */
+/** Parse the binding file. Malformed lines are skipped (and count as noise, not bindings) — loudly, mirroring readEvidence: a binding file that silently parses to zero bindings would open the gate. */
 export function readBindings(sessionId: string): MachineBinding[] {
   const path = machineBindingPath(sessionId);
   if (!existsSync(path)) return [];
-  return readFileSync(path, "utf-8")
+  const lines = readFileSync(path, "utf-8")
     .split("\n")
-    .filter((l) => l.trim() !== "")
+    .filter((l) => l.trim() !== "");
+  const bindings = lines
     .map((l) => {
       const [agentId, agentType] = l.split("\t");
       return agentId && agentType
@@ -68,26 +69,48 @@ export function readBindings(sessionId: string): MachineBinding[] {
         : null;
     })
     .filter((b): b is MachineBinding => b !== null);
+  const dropped = lines.length - bindings.length;
+  if (dropped > 0) {
+    process.stderr.write(`readBindings: skipped ${dropped} malformed binding line(s) for ${sessionId}\n`);
+  }
+  return bindings;
 }
 
-function countActiveAgents(sessionId: string): number {
+function readActiveAgents(sessionId: string): string[] {
   const path = activeFlagPath(sessionId);
-  if (!existsSync(path)) return 0;
+  if (!existsSync(path)) return [];
   return readFileSync(path, "utf-8")
     .split("\n")
-    .filter((l) => l.trim() !== "").length;
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
 }
 
 /**
  * The binding evidence may be attributed to, or null when attribution is
- * impossible: no binding, more than one binding, or any additional subagent
- * active in the session (the harness gives tool calls no agent identity).
+ * impossible: no binding, more than one binding, any additional subagent
+ * active in the session (the harness gives tool calls no agent identity),
+ * or a leaked binding — the sole active agent is not the bound one, so
+ * attributing its tool calls to the stale binding would cross-credit.
  */
 export function soleActiveBinding(sessionId: string): MachineBinding | null {
   const bindings = readBindings(sessionId);
   if (bindings.length !== 1) return null;
-  if (countActiveAgents(sessionId) > 1) return null;
+  const active = readActiveAgents(sessionId);
+  if (active.length > 1) return null;
+  if (active.length === 1 && active[0] !== bindings[0].agentId) return null;
   return bindings[0];
+}
+
+/**
+ * Append an agent to the session's `.active` roster under the SAME lock
+ * cleanup takes to rewrite it — an unlocked append racing a cleanup rewrite
+ * could be lost, leaving attribution counting a ghost (or missing) agent.
+ */
+export async function markAgentActive(sessionId: string, agentId: string): Promise<void> {
+  mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+  await withLock(bindingLock(sessionId), () => {
+    appendFileSync(activeFlagPath(sessionId), `${agentId}\n`);
+  });
 }
 
 /**

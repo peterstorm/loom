@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -151,5 +151,22 @@ describe("findReport", () => {
 
   it("returns null when no artifact exists (echo-spoof shape)", () => {
     expect(findReport('echo "npm test: 5 passing"', cwd, 'npm test: 5 passing', Date.now())).toBeNull();
+  });
+
+  it("an unreadable explicit --outputFile falls through instead of crashing (TestRun keeps report: null)", () => {
+    // A DIRECTORY at the declared path: exists + fresh, but readFileSync throws
+    mkdirSync(join(cwd, "out.json"));
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      let report: unknown = "unset";
+      expect(() => {
+        report = findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", Date.now());
+      }).not.toThrow();
+      expect(report).toBeNull();
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("cannot read --outputFile");
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 });
