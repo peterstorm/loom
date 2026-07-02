@@ -2,6 +2,11 @@ import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { validateFull } from "../../src/handlers/helpers/validate-task-graph";
 
+/** Narrowing helper: errors of a failed validation, [] when ok */
+function errorsOf(r: import("../../src/handlers/helpers/validate-task-graph").ValidationResult): readonly string[] {
+  return r.ok ? [] : r.errors;
+}
+
 /** Build a minimal valid top-level graph wrapper around tasks */
 function wrapTasks(tasks: Record<string, unknown>[]) {
   return {
@@ -80,7 +85,7 @@ describe("validateFull — property tests", () => {
         expect(result.ok).toBe(true);
         if (!result.ok) {
           // Unreachable when result.ok — kept for diagnostic if assertion above fails
-          expect(result.errors).toEqual([]);
+          expect(errorsOf(result)).toEqual([]);
         }
       }),
       { numRuns: 200 },
@@ -98,7 +103,7 @@ describe("validateFull — property tests", () => {
           ]);
           const result = validateFull(graph);
           expect(result.ok).toBe(false);
-          expect(result.errors.some((e) => e.includes("self-dependency"))).toBe(true);
+          expect(errorsOf(result).some((e) => e.includes("self-dependency"))).toBe(true);
         },
       ),
     );
@@ -116,7 +121,7 @@ describe("validateFull — property tests", () => {
           ]);
           const result = validateFull(graph);
           expect(result.ok).toBe(false);
-          expect(result.errors.some((e) => e.includes("earlier wave"))).toBe(true);
+          expect(errorsOf(result).some((e) => e.includes("earlier wave"))).toBe(true);
         },
       ),
     );
@@ -144,7 +149,7 @@ describe("validateFull — edge cases", () => {
   it("rejects 0 tasks (empty array)", () => {
     const result = validateFull(wrapTasks([]));
     expect(result.ok).toBe(false);
-    expect(result.errors.some((e) => e.includes("empty"))).toBe(true);
+    expect(errorsOf(result).some((e) => e.includes("empty"))).toBe(true);
   });
 
   it("accepts 1 task with no deps", () => {
@@ -172,7 +177,7 @@ describe("validateFull — edge cases", () => {
       ]),
     );
     expect(result.ok).toBe(false);
-    expect(result.errors.some((e) => e.includes("non-existent"))).toBe(true);
+    expect(errorsOf(result).some((e) => e.includes("non-existent"))).toBe(true);
   });
 
   it("accepts diamond dependency (T3 → T1, T3 → T2, both wave 1)", () => {
@@ -206,7 +211,7 @@ describe("validateFull — edge cases", () => {
       ]),
     );
     expect(result.ok).toBe(false);
-    expect(result.errors.some(e => e.includes("Wave gap"))).toBe(true);
+    expect(errorsOf(result).some(e => e.includes("Wave gap"))).toBe(true);
   });
 
   it("accepts very large wave numbers", () => {
@@ -225,7 +230,7 @@ describe("validateFull — edge cases", () => {
       ]),
     );
     expect(result.ok).toBe(false);
-    expect(result.errors.some((e) => e.includes("unknown agent"))).toBe(true);
+    expect(errorsOf(result).some((e) => e.includes("unknown agent"))).toBe(true);
   });
 
   it("rejects wave < 1", () => {
@@ -235,7 +240,7 @@ describe("validateFull — edge cases", () => {
       ]),
     );
     expect(result.ok).toBe(false);
-    expect(result.errors.some((e) => e.includes("wave must be integer >= 1"))).toBe(true);
+    expect(errorsOf(result).some((e) => e.includes("wave must be integer >= 1"))).toBe(true);
   });
 
   it("rejects non-integer wave", () => {
@@ -252,7 +257,7 @@ describe("validateFull — edge cases", () => {
       wrapTasks([{ description: "no id", agent: "frontend-agent", wave: 1, depends_on: [] }]),
     );
     expect(result.ok).toBe(false);
-    expect(result.errors.some((e) => e.includes("missing 'id'"))).toBe(true);
+    expect(errorsOf(result).some((e) => e.includes("missing 'id'"))).toBe(true);
   });
 
   it("rejects task ID not matching T\\d+", () => {
@@ -260,6 +265,6 @@ describe("validateFull — edge cases", () => {
       wrapTasks([{ id: "TASK1", description: "bad id", agent: "frontend-agent", wave: 1, depends_on: [] }]),
     );
     expect(result.ok).toBe(false);
-    expect(result.errors.some((e) => e.includes("must match"))).toBe(true);
+    expect(errorsOf(result).some((e) => e.includes("must match"))).toBe(true);
   });
 });

@@ -64,7 +64,8 @@ export function loadProjectConfig(configDir: string | null): ProgrammaticConfig 
 }
 
 function parseConfig(obj: Record<string, unknown>, filePath: string): ProgrammaticConfig {
-  const config: Partial<ProgrammaticConfig> = {};
+  // Mutable while assembling; returned as the readonly ProgrammaticConfig
+  const config: { -readonly [K in keyof ProgrammaticConfig]?: ProgrammaticConfig[K] } = {};
 
   if (obj.boundaries !== undefined) {
     if (!Array.isArray(obj.boundaries)) {

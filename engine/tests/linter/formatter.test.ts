@@ -41,7 +41,7 @@ describe("formatOutput", () => {
       const result = violationsResult(violations);
       const output = formatOutput(result, filePath);
 
-      expect(output.status).toBe("fail");
+      if (output.status !== "fail") throw new Error("expected fail output");
       expect(output.file).toBe(filePath);
       expect(output.violations).toEqual(violations);
     });

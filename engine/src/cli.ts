@@ -28,14 +28,14 @@ const KNOWN_HANDLERS: Record<string, Set<string>> = {
   "pre-tool-use": new Set([
     "block-direct-edits", "guard-state-file", "validate-phase-order",
     "validate-task-execution", "validate-template-substitution",
-    "validate-agent-model", "validate-agent-skill",
+    "validate-agent-model", "validate-agent-skill", "enforce-phase-tools",
   ]),
   "subagent-stop": new Set([
     "dispatch", "advance-phase", "update-task-status",
     "store-reviewer-findings", "store-spec-check-findings",
     "cleanup-subagent-flag",
   ]),
-  "post-tool-use": new Set(["lint-file"]),
+  "post-tool-use": new Set(["lint-file", "record-evidence"]),
   "subagent-start": new Set(["mark-subagent-active"]),
   "session-start": new Set(["cleanup-stale-subagents", "resume-after-clear"]),
   "helper": new Set([

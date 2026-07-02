@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { isNoFindingSentinel, dropNoFindingSentinels } from "../../src/utils/no-finding-sentinel";
 
 describe("isNoFindingSentinel", () => {

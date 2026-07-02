@@ -6,7 +6,9 @@
 import { existsSync, appendFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import type { HookHandler, SubagentStartInput } from "../../types";
-import { TASK_GRAPH_PATH, SUBAGENT_DIR } from "../../config";
+import { TASK_GRAPH_PATH, SUBAGENT_DIR, MACHINES_DIR } from "../../config";
+import { stripNamespace } from "../../utils/strip-namespace";
+import { bindMachineAgent, loadMachine } from "../../machine";
 
 const handler: HookHandler = async (stdin) => {
   const input: SubagentStartInput = JSON.parse(stdin);
@@ -17,6 +19,18 @@ const handler: HookHandler = async (stdin) => {
   // Track active agent for cleanup
   if (agent_id) {
     appendFileSync(`${SUBAGENT_DIR}/${session_id}.active`, `${agent_id}\n`);
+  }
+
+  // Bind guarded skill machine when this agent type ships one (opt-in per
+  // agent). Binding starts a fresh evidence epoch for sequential runs.
+  const agentType = stripNamespace(input.agent_type ?? "");
+  if (agentType) {
+    const loaded = loadMachine(MACHINES_DIR, agentType);
+    if (loaded.kind === "machine") {
+      bindMachineAgent(session_id, agentType);
+    } else if (loaded.kind === "invalid") {
+      process.stderr.write(`mark-subagent-active: NOT binding machine — ${loaded.error}\n`);
+    }
   }
 
   // Store task graph absolute path for cross-repo access

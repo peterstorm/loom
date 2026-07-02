@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { validateMinimal, validateFull } from "../../src/handlers/helpers/validate-task-graph";
 
+/** Narrowing helper: errors of a failed validation, [] when ok */
+function errorsOf(r: import("../../src/handlers/helpers/validate-task-graph").ValidationResult): readonly string[] {
+  return r.ok ? [] : r.errors;
+}
+
 describe("validateMinimal (pure)", () => {
   it("accepts valid minimal graph", () => {
     const result = validateMinimal({
@@ -16,32 +21,32 @@ describe("validateMinimal (pure)", () => {
   it("rejects missing current_phase", () => {
     const result = validateMinimal({ phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null });
     expect(result.ok).toBe(false);
-    expect(result.errors).toContain("Missing required field: current_phase");
+    expect(errorsOf(result)).toContain("Missing required field: current_phase");
   });
 
   it("rejects invalid phase value", () => {
     const result = validateMinimal({ current_phase: "invalid", phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null });
     expect(result.ok).toBe(false);
-    expect(result.errors[0]).toContain("not a valid phase");
+    expect(errorsOf(result)[0]).toContain("not a valid phase");
   });
 
   it("rejects non-object phase_artifacts", () => {
     const result = validateMinimal({ current_phase: "init", phase_artifacts: "string", skipped_phases: [], spec_file: null, plan_file: null });
     expect(result.ok).toBe(false);
-    expect(result.errors[0]).toContain("phase_artifacts must be object");
+    expect(errorsOf(result)[0]).toContain("phase_artifacts must be object");
   });
 
   it("rejects non-array skipped_phases", () => {
     const result = validateMinimal({ current_phase: "init", phase_artifacts: {}, skipped_phases: "string", spec_file: null, plan_file: null });
     expect(result.ok).toBe(false);
-    expect(result.errors[0]).toContain("skipped_phases must be array");
+    expect(errorsOf(result)[0]).toContain("skipped_phases must be array");
   });
 
   it("rejects missing spec_file and plan_file keys", () => {
     const result = validateMinimal({ current_phase: "init", phase_artifacts: {}, skipped_phases: [] });
     expect(result.ok).toBe(false);
-    expect(result.errors).toContain("Missing required field: spec_file");
-    expect(result.errors).toContain("Missing required field: plan_file");
+    expect(errorsOf(result)).toContain("Missing required field: spec_file");
+    expect(errorsOf(result)).toContain("Missing required field: plan_file");
   });
 });
 
@@ -67,19 +72,19 @@ describe("validateFull (pure)", () => {
   it("rejects missing required top-level fields", () => {
     const result = validateFull({ tasks: [validTask] });
     expect(result.ok).toBe(false);
-    expect(result.errors).toContain("Missing required field: plan_title");
+    expect(errorsOf(result)).toContain("Missing required field: plan_title");
   });
 
   it("rejects non-array tasks", () => {
     const result = validateFull({ plan_title: "x", plan_file: "x", spec_file: "x", tasks: "not-array" });
     expect(result.ok).toBe(false);
-    expect(result.errors).toContain("'tasks' must be an array");
+    expect(errorsOf(result)).toContain("'tasks' must be an array");
   });
 
   it("rejects empty tasks array", () => {
     const result = validateFull({ plan_title: "x", plan_file: "x", spec_file: "x", tasks: [] });
     expect(result.ok).toBe(false);
-    expect(result.errors).toContain("'tasks' array is empty");
+    expect(errorsOf(result)).toContain("'tasks' array is empty");
   });
 
   it("validates task ID format", () => {
@@ -88,7 +93,7 @@ describe("validateFull (pure)", () => {
       tasks: [{ ...validTask, id: "bad-id" }],
     });
     expect(result.ok).toBe(false);
-    expect(result.errors[0]).toContain("id must match");
+    expect(errorsOf(result)[0]).toContain("id must match");
   });
 
   it("rejects unknown agent", () => {
@@ -97,7 +102,7 @@ describe("validateFull (pure)", () => {
       tasks: [{ ...validTask, agent: "fake-agent" }],
     });
     expect(result.ok).toBe(false);
-    expect(result.errors[0]).toContain("unknown agent");
+    expect(errorsOf(result)[0]).toContain("unknown agent");
   });
 
   it("rejects self-dependency", () => {
@@ -106,7 +111,7 @@ describe("validateFull (pure)", () => {
       tasks: [{ ...validTask, depends_on: ["T1"] }],
     });
     expect(result.ok).toBe(false);
-    expect(result.errors[0]).toContain("self-dependency");
+    expect(errorsOf(result)[0]).toContain("self-dependency");
   });
 
   it("rejects dependency on non-existent task", () => {
@@ -115,7 +120,7 @@ describe("validateFull (pure)", () => {
       tasks: [{ ...validTask, depends_on: ["T99"] }],
     });
     expect(result.ok).toBe(false);
-    expect(result.errors[0]).toContain("non-existent");
+    expect(errorsOf(result)[0]).toContain("non-existent");
   });
 
   it("rejects dependency on same-or-later wave", () => {
@@ -127,7 +132,7 @@ describe("validateFull (pure)", () => {
       ],
     });
     expect(result.ok).toBe(false);
-    expect(result.errors[0]).toContain("deps must be in earlier wave");
+    expect(errorsOf(result)[0]).toContain("deps must be in earlier wave");
   });
 
   it("accepts valid cross-wave dependency", () => {
@@ -150,7 +155,7 @@ describe("validateFull (pure)", () => {
       ],
     });
     expect(result.ok).toBe(false);
-    expect(result.errors[0]).toContain("Wave gap");
+    expect(errorsOf(result)[0]).toContain("Wave gap");
   });
 
   it("detects multiple wave gaps (1 → 3 → 7)", () => {
@@ -163,7 +168,7 @@ describe("validateFull (pure)", () => {
       ],
     });
     expect(result.ok).toBe(false);
-    const gapErrors = result.errors.filter(e => e.includes("Wave gap"));
+    const gapErrors = errorsOf(result).filter(e => e.includes("Wave gap"));
     expect(gapErrors).toHaveLength(2);
   });
 
@@ -215,7 +220,7 @@ describe("validateFull (pure)", () => {
       ],
     });
     expect(result.ok).toBe(false);
-    expect(result.errors.some(e => e.includes("ADR task wave"))).toBe(true);
+    expect(errorsOf(result).some(e => e.includes("ADR task wave"))).toBe(true);
   });
 
   it("rejects ADR task in non-final wave", () => {
@@ -229,7 +234,7 @@ describe("validateFull (pure)", () => {
       ],
     });
     expect(result.ok).toBe(false);
-    expect(result.errors.some(e => e.includes("must be in the final wave"))).toBe(true);
+    expect(errorsOf(result).some(e => e.includes("must be in the final wave"))).toBe(true);
   });
 
   it("accepts contiguous waves (1, 2, 3)", () => {

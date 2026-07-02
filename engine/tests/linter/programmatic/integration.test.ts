@@ -1,6 +1,7 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { join } from "node:path";
 import { loadRules } from "../../../src/linter/loader";
+import type { Rule } from "../../../src/linter/types";
 
 /**
  * Integration test: verifies programmatic rules are included in the full tier
@@ -11,7 +12,7 @@ describe("programmatic rules integration", () => {
 
   it("full tier includes programmatic rules by default", () => {
     const rules = loadRules(realDefaultDir, null, "full");
-    const programmatic = rules.filter((r) => r.kind === "programmatic");
+    const programmatic = rules.filter((r: Rule) => r.kind === "programmatic");
 
     expect(programmatic.length).toBe(3);
     const names = programmatic.map((r) => r.name).sort();
@@ -24,19 +25,19 @@ describe("programmatic rules integration", () => {
 
   it("immediate tier does NOT include programmatic rules", () => {
     const rules = loadRules(realDefaultDir, null, "immediate");
-    const programmatic = rules.filter((r) => r.kind === "programmatic");
+    const programmatic = rules.filter((r: Rule) => r.kind === "programmatic");
     expect(programmatic.length).toBe(0);
   });
 
   it("includeProgrammatic: false excludes them", () => {
     const rules = loadRules(realDefaultDir, null, "full", { includeProgrammatic: false });
-    const programmatic = rules.filter((r) => r.kind === "programmatic");
+    const programmatic = rules.filter((r: Rule) => r.kind === "programmatic");
     expect(programmatic.length).toBe(0);
   });
 
   it("all programmatic rules have required fields", () => {
     const rules = loadRules(realDefaultDir, null, "full");
-    const programmatic = rules.filter((r) => r.kind === "programmatic");
+    const programmatic = rules.filter((r: Rule) => r.kind === "programmatic");
 
     for (const rule of programmatic) {
       expect(rule.name).toBeTruthy();

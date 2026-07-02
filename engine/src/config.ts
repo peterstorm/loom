@@ -152,6 +152,10 @@ export const TASK_GRAPH_PATH = findTaskGraphPath();
 /** Subagent tracking directory */
 export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
 
+/** Guarded-skill-machine definitions directory (shipped with loom, per agent type) */
+export const MACHINES_DIR = process.env.LOOM_MACHINES_DIR
+  ?? join(dirname(fileURLToPath(import.meta.url)), "..", "..", "machines");
+
 // --- Linter Configuration ---
 
 /** Default rules directory (shipped with loom) — resolved from this file's location */

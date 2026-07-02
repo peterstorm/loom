@@ -1,16 +1,16 @@
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// Use a mutable state object so test overrides propagate through bun's mock.module
-const mockState = {
+// Mutable state object so per-test overrides propagate through the hoisted vi.mock factories
+const mockState = vi.hoisted(() => ({
   untrackedTestFiles: ["engine/tests/new.test.ts", "apps/web/tests/login.spec.ts"] as string[],
   diffUntrackedFn: (f: string) => `diff --untracked ${f}\n+new content in ${f}`,
   diffFilesFn: (files: string[]) => files.length ? `diff --tracked\n${files.map(f => `+modified ${f}`).join("\n")}` : "",
   diffFilesStagedFn: (_files: string[]) => "",
   isTrackedFn: (f: string) => !f.startsWith("untracked/"),
   existsSyncFn: (_path: string) => true,
-};
+}));
 
-mock.module("../../src/utils/git", () => ({
+vi.mock("../../src/utils/git", () => ({
   isTracked: (f: string) => mockState.isTrackedFn(f),
   diffFiles: (files: string[]) => mockState.diffFilesFn(files),
   diffFilesStaged: (files: string[]) => mockState.diffFilesStagedFn(files),
@@ -27,50 +27,13 @@ mock.module("../../src/utils/git", () => ({
   filterTestFiles: (files: string[]) => files,
 }));
 
-// Mock node:fs so existsSync is controllable
-mock.module("node:fs", () => ({
-  existsSync: (p: string) => mockState.existsSyncFn(p),
-  readFileSync: () => "",
-  writeFileSync: () => {},
-  mkdirSync: () => {},
-  readdirSync: () => [],
-  statSync: () => ({ isFile: () => true, isDirectory: () => false }),
-  rmSync: () => {},
-  unlinkSync: () => {},
-  renameSync: () => {},
-  copyFileSync: () => {},
-  accessSync: () => {},
-  constants: { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1 },
+// collectDiff consults existsSync for untracked filesModified entries
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
+  existsSync: (p: string) => mockState.existsSyncFn(String(p)),
 }));
 
-mock.module("../../src/state-manager", () => ({
-  StateManager: class {
-    static fromSession() { return new this(); }
-    readGraph() { return { metadata: {}, tasks: [] }; }
-    writeGraph() {}
-  },
-}));
-mock.module("../../src/config", () => ({
-  IMPL_AGENTS: ["code-implementer-agent"],
-  REVIEW_AGENTS: ["reviewer-agent"],
-}));
-mock.module("../../src/parsers/parse-transcript", () => ({
-  parseTranscript: () => ({ messages: [] }),
-}));
-mock.module("../../src/parsers/parse-files-modified", () => ({
-  parseFilesModified: () => [],
-}));
-mock.module("../../src/parsers/parse-bash-test-output", () => ({
-  parseBashTestOutput: () => "",
-}));
-mock.module("../../src/utils/strip-namespace", () => ({
-  stripNamespace: (s: string) => s,
-}));
-mock.module("../../src/utils/extract-task-id", () => ({
-  extractTaskId: () => null,
-}));
-
-const { collectDiff } = await import("../../src/handlers/subagent-stop/update-task-status");
+import { collectDiff } from "../../src/handlers/subagent-stop/update-task-status";
 
 describe("collectDiff", () => {
   beforeEach(() => {

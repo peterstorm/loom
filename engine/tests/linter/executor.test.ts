@@ -29,7 +29,7 @@ function makeRegexRule(overrides: Partial<RegexRule> = {}): RegexRule {
     description: "A test rule",
     extensions: [".ts", ".tsx"],
     pattern: "console\\.log",
-    flags: undefined,
+    flags: "",
     fixHint: "Remove console.log",
     enabled: true,
     source: "default",

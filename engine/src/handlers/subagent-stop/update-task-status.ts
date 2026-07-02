@@ -18,6 +18,8 @@ import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
 import * as git from "../../utils/git";
+import { readEvidence } from "../../machine";
+import type { Evidence } from "../../machine";
 
 // --- Pure: extract test pass evidence from bash output ---
 
@@ -92,6 +94,41 @@ export function extractTestEvidence(bashOutput: string): TestEvidence {
   }
 
   return { passed: false, evidence: "" };
+}
+
+// --- Pure: resolve test evidence, ledger first ---
+
+/**
+ * Ground truth beats transcript regex. The evidence ledger (PostToolUse,
+ * real exit codes + report artifacts) decides when it has a trusted
+ * TestRun; the transcript-regex extractor is the explicit lower-trust
+ * fallback for sessions without ledger coverage.
+ */
+export function resolveTestEvidence(ledgerEvents: readonly Evidence[], bashOutput: string): TestEvidence {
+  const runs = ledgerEvents.filter(
+    (e): e is Extract<Evidence, { kind: "TestRun" }> => e.kind === "TestRun",
+  );
+  const trustedRuns = runs.filter((r) => r.trusted);
+
+  const last = trustedRuns[trustedRuns.length - 1];
+  if (last) {
+    const report = last.report ? `, report: ${last.report.total} tests / ${last.report.failed} failed` : "";
+    return {
+      passed: last.passed,
+      evidence: `ledger: exit ${last.exit}${report} (${last.command})`,
+    };
+  }
+
+  // No trusted run. Fall back to transcript regex — but label honestly:
+  // an untrusted exit-0 run (no report artifact) means the regex is the
+  // only pass signal, and that combination is spoofable. Projects gain
+  // full trust by configuring a JSON/JUnit reporter.
+  const fallback = extractTestEvidence(bashOutput);
+  if (!fallback.passed) return fallback;
+  const label = runs.some((r) => r.exit === 0)
+    ? "low-trust (exit 0, no report artifact; transcript-regex)"
+    : "transcript-regex (fallback)";
+  return { passed: true, evidence: `${label}: ${fallback.evidence}` };
 }
 
 // --- Pure: determine new test evidence from diff ---
@@ -239,8 +276,9 @@ const handler: HookHandler = async (stdin) => {
   if (task.status === "completed") return { kind: "passthrough" };
   if (task.tests_passed === true) return { kind: "passthrough" };
 
-  // Section 1: Test evidence from bash output
-  const testEvidence = extractTestEvidence(bashTestOutput);
+  // Section 1: Test evidence — ledger (execution-time ground truth) first,
+  // transcript regex as explicit fallback
+  const testEvidence = resolveTestEvidence(readEvidence(input.session_id), bashTestOutput);
 
   // Section 2: New test verification via git diff
   let newTestEvidence: NewTestEvidence = { written: false, evidence: "" };

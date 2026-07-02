@@ -19,7 +19,7 @@ import { processToolResult } from "../../src/handlers/pi-adapter";
 function simulateExtensionHandler(
   toolName: string,
   input: Record<string, unknown>,
-  lintFn: (filePath: string) => never | ReturnType<typeof processToolResult> extends infer R ? R : never,
+  lintFn: Parameters<typeof processToolResult>[2],
 ) {
   try {
     if (toolName !== "edit" && toolName !== "write") return undefined;
@@ -27,7 +27,7 @@ function simulateExtensionHandler(
     const response = processToolResult(
       toolName,
       input,
-      lintFn as Parameters<typeof processToolResult>[2]
+      lintFn
     );
 
     if (response) {
