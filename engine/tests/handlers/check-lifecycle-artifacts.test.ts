@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { describe, it, expect, afterEach } from "vitest";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -76,6 +76,94 @@ describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {
     const source = loaded([{ id: "LC-1", title: "A", machineFile: null }]);
     const check = checkLifecycleArtifacts(source, [waveTask(["x.ts"])], () => false);
     expect(check.passed).toBe(true);
+  });
+});
+
+describe("complete-wave-gate handler wiring (check 5 is actually in the gate)", () => {
+  let dirs: string[] = [];
+
+  function tempDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), "loom-gate-handler-"));
+    dirs.push(dir);
+    return dir;
+  }
+
+  afterEach(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    dirs = [];
+    delete process.env.LOOM_STATE_PATH;
+  });
+
+  async function loadGateWithState(statePath: string) {
+    process.env.LOOM_STATE_PATH = statePath;
+    const { vi } = await import("vitest");
+    vi.resetModules();
+    return (await import("../../src/handlers/helpers/complete-wave-gate")).default;
+  }
+
+  function writeGateState(dir: string, planFile: string, machineFile: string): string {
+    const statePath = join(dir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: planFile,
+      current_wave: 1,
+      executing_tasks: [],
+      tasks: [{
+        id: "T1", description: "implement machine", agent: "code-implementer-agent",
+        wave: 1, status: "implemented", depends_on: [],
+        new_tests_required: true, tests_passed: true, new_tests_written: true,
+        review_status: "passed", critical_findings: [], advisory_findings: [],
+        file_list: [machineFile],
+      }],
+      wave_gates: { "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false } },
+    }));
+    return statePath;
+  }
+
+  it("BLOCKS the gate when the bound machine file was never created", async () => {
+    const dir = tempDir();
+    const planFile = join(dir, "plan.md");
+    const machineFile = join(dir, "src", "order-machine.ts"); // never written
+    writeFileSync(planFile, `# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** ${machineFile}\n`);
+    const statePath = writeGateState(dir, planFile, machineFile);
+    const gate = await loadGateWithState(statePath);
+    const result = await gate("", ["--wave", "1"]);
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      expect(result.message).toContain("LC-1");
+      expect(result.message).toContain("not created");
+    }
+  });
+
+  it("passes the gate when the machine file exists on disk", async () => {
+    const dir = tempDir();
+    const planFile = join(dir, "plan.md");
+    const machineFile = join(dir, "order-machine.ts");
+    writeFileSync(planFile, `# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** ${machineFile}\n`);
+    writeFileSync(machineFile, "export const machine = 1;\n");
+    const statePath = writeGateState(dir, planFile, machineFile);
+    const gate = await loadGateWithState(statePath);
+    const result = await gate("", ["--wave", "1"]);
+    expect(result.kind).toBe("passthrough");
+  });
+
+  it("falls back to the architecture phase artifact when plan_file is null", async () => {
+    const dir = tempDir();
+    const planFile = join(dir, "plan.md");
+    const machineFile = join(dir, "order-machine.ts"); // never written
+    writeFileSync(planFile, `# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** ${machineFile}\n`);
+    const statePath = writeGateState(dir, planFile, machineFile);
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    state.plan_file = null;
+    state.phase_artifacts = { architecture: planFile };
+    writeFileSync(statePath, JSON.stringify(state));
+    const gate = await loadGateWithState(statePath);
+    const result = await gate("", ["--wave", "1"]);
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("LC-1");
   });
 });
 

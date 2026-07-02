@@ -284,7 +284,11 @@ const handler: HookHandler = async (_stdin, args) => {
         checkReviews(waveTasks),
         checkSpecAlignment(s, wave),
         checkCriticalFindings(waveTasks),
-        checkLifecycleArtifacts(loadPlanModelsSource(s.plan_file), waveTasks, existsSync),
+        checkLifecycleArtifacts(
+          loadPlanModelsSource(s.plan_file ?? s.phase_artifacts?.architecture),
+          waveTasks,
+          existsSync,
+        ),
       ];
 
       for (const check of checks) {

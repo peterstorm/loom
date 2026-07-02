@@ -68,7 +68,7 @@ Fallback: `general-purpose`
    - Create exactly one task that implements the declared `**Machine file:**` — the statechart/typed reducer plus its tests.
    - `agent`: `code-implementer-agent`, `new_tests_required`: `true`
    - `wave`: the earliest wave possible (usually 1) — the machine is a foundation.
-   - `file_list`: MUST include the `**Machine file:**` path exactly as declared (plus its test file); the validator tolerates only `./` and absolute/relative prefix differences. Validation fails if no task's `file_list` contains it.
+   - `file_list`: MUST include the `**Machine file:**` path exactly as declared (plus its test file). The validator's only tolerance is one-directional: a repo-relative declared path also matches a task path with an absolute prefix (and `./` is normalized). A relative task path never satisfies an absolute declared path, and a bare basename never satisfies a pathed one. Validation fails if no task's `file_list` contains it.
    - `plan_context`: the full LC-N block verbatim (states + transition table), PLUS this line so the implementing agent sees the test bar: `You are implementing this machine. Write property tests proving no undeclared transition is representable or accepted.`
    - Every other task that touches this lifecycle: add the machine task to its `depends_on` (later wave), and prepend the LC-N block to its `plan_context` with the line: `The lifecycle machine at <machine file path> is the single source of truth — import it; never re-implement transitions or duplicate state literals.`
 8. **Pipeline tasks:** If the plan has a `## Pipeline` section with an `**AuthoredDag:**` path (skip rule if absent):

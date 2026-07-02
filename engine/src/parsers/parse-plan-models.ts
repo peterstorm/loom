@@ -74,19 +74,35 @@ export function hasModels(models: PlanModels): boolean {
   );
 }
 
-/** Blank out fenced code blocks, preserving line structure */
-function stripFences(markdown: string): string {
-  let inFence = false;
-  return markdown
+/**
+ * Blank out fenced code blocks, preserving line structure. Tracks which
+ * marker opened the fence (``` vs ~~~) so a mixed marker can't close it
+ * early, and reports an unterminated fence — everything after one is
+ * invisible to the parser, which must be a stray, never a silent opt-out.
+ */
+function stripFences(markdown: string): { text: string; unterminated: boolean } {
+  let fenceMarker: "```" | "~~~" | null = null;
+  const text = markdown
     .split("\n")
     .map((line) => {
-      if (/^\s*(```|~~~)/.test(line)) {
-        inFence = !inFence;
+      const open = /^\s*(```|~~~)/.exec(line);
+      if (open) {
+        const marker = open[1] as "```" | "~~~";
+        if (fenceMarker === null) {
+          fenceMarker = marker;
+          return "";
+        }
+        if (fenceMarker === marker) {
+          fenceMarker = null;
+          return "";
+        }
+        // other marker inside an open fence — still fenced content
         return "";
       }
-      return inFence ? "" : line;
+      return fenceMarker !== null ? "" : line;
     })
     .join("\n");
+  return { text, unterminated: fenceMarker !== null };
 }
 
 interface Section {
@@ -213,8 +229,16 @@ function collectStrays(
   return strays;
 }
 
+/** A section that opted in must contain at least one block heading */
+function emptySectionStray(s: Section | null, name: string): string[] {
+  if (s === null || /^###\s+/m.test(s.body)) return [];
+  return [
+    `'## ${name}' section is declared but contains no '### ' blocks — declare the model or remove the section`,
+  ];
+}
+
 export function parsePlanModels(markdown: string): PlanModels {
-  const text = stripFences(markdown);
+  const { text, unterminated } = stripFences(markdown);
 
   const lifecyclesSection = section(text, "Lifecycles");
   const lifecycles: PlanLifecycle[] = lifecyclesSection === null
@@ -240,7 +264,14 @@ export function parsePlanModels(markdown: string): PlanModels {
         ruleFile: fieldValue(block, "Rule file"),
       }));
 
-  const strays = collectStrays(text, lifecyclesSection, pipelineSection, invariantsSection);
+  const strays = [
+    ...(unterminated
+      ? ["unterminated code fence — everything after it is invisible to the model parser; close the fence"]
+      : []),
+    ...emptySectionStray(lifecyclesSection, "Lifecycles"),
+    ...emptySectionStray(invariantsSection, "Invariants"),
+    ...collectStrays(text, lifecyclesSection, pipelineSection, invariantsSection),
+  ];
 
   return { lifecycles, pipeline, invariants, strays };
 }

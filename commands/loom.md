@@ -304,7 +304,7 @@ gh issue create --title "Plan: {title}" --body "$(cat .claude/plans/{slug}.md)"
 
 **B. State File:** Populate `.claude/state/active_task_graph.json` with tasks.
 
-Use the `populate-task-graph.sh` helper (whitelisted in guard-state-file.sh):
+Use the `populate-task-graph` helper (one of the state-writing helpers whitelisted in `engine/src/config.ts` and enforced by the guard-state-file hook). It re-runs the executable-model binding checks fail-closed before writing:
 
 ```bash
 echo "$DECOMPOSE_OUTPUT" | bun ${LOOM_DIR}/engine/src/cli.ts helper populate-task-graph --issue ISSUE_NUMBER --repo OWNER/REPO
@@ -438,7 +438,7 @@ bun ${LOOM_DIR}/engine/src/cli.ts init-state \
 
 **IMPORTANT:** Set `chmod 444` immediately after creation. This activates OS-level write protection — subagent Write tool calls will get EACCES. Only hooks writing via `StateManager` can modify the file.
 
-After Phase 4 (Decompose), the task graph is populated with tasks, waves, and GitHub issue info. This is done by passing decompose output through `validate-task-graph.sh` and writing the full state.
+After Phase 4 (Decompose), the task graph is populated with tasks, waves, and GitHub issue info. This is done by passing decompose output through the `validate-task-graph` helper and writing the full state via `populate-task-graph`.
 
 **Hook activation timeline:**
 - State file created → all PreToolUse hooks activate (block-direct-edits, guard-state-file, validate-phase-order, validate-task-execution)
@@ -494,7 +494,7 @@ Hooks auto-activate when `active_task_graph.json` exists:
 | ↳ `store-spec-check-findings.sh` | via dispatch | Parses spec-check findings |
 | ↳ `cleanup-subagent-flag.sh` | via dispatch | Cleans up subagent tracking (always runs) |
 
-**NEVER call helpers yourself.** All helpers (`mark-tests-passed.sh`, `complete-wave-gate.sh`, `StateManager`, `populate-task-graph.sh`, etc.) run automatically via hooks or `/wave-gate`. Only exception: `populate-task-graph.sh` during Phase 4d.
+**NEVER call helpers yourself.** All helpers (`mark-tests-passed`, `complete-wave-gate`, `StateManager`, `populate-task-graph`, etc. — invoked as `bun cli.ts helper <name>`) run automatically via hooks or `/wave-gate`. Only exception: `populate-task-graph` during Phase 4d.
 
 ---
 

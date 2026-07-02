@@ -217,11 +217,12 @@ Per component, not global.
 - Never describe a lifecycle/pipeline in prose without the executable binding
   — `validate-task-graph` blocks decompose on unbound models AND on near-miss
   declarations (typo'd headings/labels are errors, not opt-outs).
-- **Exact grammar** — these sections are regex-parsed: headings exactly
-  `## Lifecycles` / `## Pipeline` (one per plan) / `## Invariants`; blocks
-  `### LC-<n>: <title>` / `### INV-<n>: <title>` (uppercase, numeric, colon);
-  labels like `**Machine file:**` at column 0, colon inside the bold, never
-  as bullets.
+- **Exact grammar** — these sections are regex-parsed: headings
+  `## Lifecycles` / `## Pipeline` (one per plan) / `## Invariants` with no
+  suffix or colon; blocks `### LC-<n>: <title>` / `### INV-<n>: <title>`
+  (uppercase, numeric, colon); labels like `**Machine file:**` at column 0,
+  colon inside the bold, never as bullets. Machine-file paths repo-relative.
+  Close every code fence — an unterminated fence hides everything after it.
 - Rule files go in the project rules dir: `.claude/linter/rules/` (or
   `.pi/linter/rules/` under the pi harness) — the linter loads only from the
   harness-appropriate dir.

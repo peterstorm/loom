@@ -89,14 +89,20 @@ const handler: HookHandler = async (stdin, args) => {
   const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
   if (!mgr) return { kind: "error", message: "Cannot open task graph" };
 
-  // Executable-models policy: this is the only whitelisted writer of
-  // active_task_graph.json, so bindings are enforced here fail-closed —
-  // validate-task-graph's 4a run is advisory to the orchestrator, this is
-  // the gate. The plan path prefers existing state (set by advance-phase from
-  // real Write evidence) over the decompose payload, so a decompose agent
-  // cannot re-point plan_file to a model-free file to disarm the check.
-  const statePlanFile = mgr.load().plan_file;
-  const planFile = statePlanFile ?? decompose.plan_file;
+  // Executable-models policy: this is the only whitelisted helper that
+  // populates tasks into active_task_graph.json, so bindings are enforced
+  // here fail-closed — validate-task-graph's 4a run is advisory to the
+  // orchestrator, this is the gate. The plan path prefers evidence-derived
+  // state (plan_file set by advance-phase from real Write evidence, else the
+  // architecture phase artifact recorded from disk) over the decompose
+  // payload, so a decompose agent cannot re-point plan_file at a model-free
+  // file to disarm the check. The SAME resolved path is persisted below —
+  // persisting the payload's path would disarm the wave-gate lifecycle check.
+  const existingState = mgr.load();
+  const planFile =
+    existingState.plan_file ??
+    existingState.phase_artifacts?.architecture ??
+    decompose.plan_file;
   const bindings = checkPlanModelBindings(
     planFile,
     decompose.tasks as unknown as Record<string, unknown>[],
@@ -111,24 +117,23 @@ const handler: HookHandler = async (stdin, args) => {
       ].join("\n"),
     };
   }
+  // checkPlanModelBindings only passes when planFile is a readable string
+  const validatedPlanFile = planFile as string;
 
   // Guard against overwriting non-pending tasks
-  if (!force) {
-    const existing = mgr.load();
-    if (existing.tasks.some((t) => t.status !== "pending")) {
-      return {
-        kind: "error",
-        message: "Cannot overwrite task graph with non-pending tasks. Use --force to override.",
-      };
-    }
+  if (!force && existingState.tasks.some((t) => t.status !== "pending")) {
+    return {
+      kind: "error",
+      message: "Cannot overwrite task graph with non-pending tasks. Use --force to override.",
+    };
   }
 
   await mgr.update((existing) => {
     const merged: TaskGraph = {
       ...existing,
       plan_title: decompose.plan_title,
-      plan_file: decompose.plan_file ?? existing.plan_file,
-      spec_file: decompose.spec_file ?? existing.spec_file,
+      plan_file: validatedPlanFile,
+      spec_file: existing.spec_file ?? decompose.spec_file ?? null,
       tasks: decompose.tasks.map(t => ({
         ...t,
         status: t.status ?? "pending",

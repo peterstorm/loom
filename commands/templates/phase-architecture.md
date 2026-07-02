@@ -130,7 +130,7 @@ Apply your preloaded architecture knowledge:
 **Executable models — standing policy** (binding). First resolve the loom plugin directory — you need it for the policy doc and the validation command below:
 
 ```bash
-LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/ 2>/dev/null | head -1)
+LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/ 2>/dev/null | tail -1 | sed 's:/$::')
 ```
 
 Then read `references/executable-models.md` from it.
@@ -143,11 +143,12 @@ A model either executes or it doesn't exist. Never describe a lifecycle, pipelin
   - `checkable` → write the lint rule JSON yourself into the project rules dir — `.claude/linter/rules/inv-<n>-<slug>.json` (or `.pi/linter/rules/` when the project runs the pi harness; the linter only loads from the harness-appropriate dir). Use the regex rule format per loom's `lint-rules/README.md`, set the JSON `name` field to the same `inv-<n>-<slug>` as the filename, then prove all rules load:
     ```bash
     bun "$LOOM_DIR"/engine/src/cli.ts helper validate-lint-rules .claude/linter/rules
+    # (pass .pi/linter/rules instead under the pi harness)
     ```
     A failing load means fix the rule now — it would otherwise block every edit in wave 1.
   - `advisory` → prose only, never pretended to be enforced.
 
-**These sections are parsed deterministically by a regex grammar — exact spelling matters.** Section headings must be exactly `## Lifecycles`, `## Pipeline`, `## Invariants` (no suffixes, no colon). Block headings must be `### LC-<n>: <title>` / `### INV-<n>: <title>` (uppercase prefix, numeric id, colon). Field labels (`**Machine file:**`, `**AuthoredDag:**`, `**Tier:**`, `**Rule file:**`) start at column 0 with the colon inside the bold, never bulletized. Near-miss variants are rejected by validation, not silently ignored — but don't make it guess.
+**These sections are parsed deterministically by a regex grammar — exact spelling matters.** Section headings must be `## Lifecycles`, `## Pipeline`, `## Invariants` — no suffixes, no colon (case is tolerated, but write them as shown). Block headings must be `### LC-<n>: <title>` / `### INV-<n>: <title>` (uppercase prefix, numeric id, colon). Field labels (`**Machine file:**`, `**AuthoredDag:**`, `**Tier:**`, `**Rule file:**`) start at column 0 with the colon inside the bold, never bulletized. Declare machine-file paths repo-relative. Close every code fence — an unterminated fence hides everything after it. Near-miss variants are rejected by validation, not silently ignored — but don't make it guess.
 
 Most features need none of these sections. A CRUD endpoint has no lifecycle; two sequential steps are not a pipeline. When in doubt, leave the section out — `validate-task-graph` fail-closes on declared-but-unbound models and near-miss declarations, not on absent sections.
 
@@ -174,7 +175,7 @@ Record the chosen approach (and the interview decisions that shaped it) under `#
 
 Commit: `git add .claude/plans/ .claude/linter/rules/ && git commit -m "plan: {date_slug}"` (the linter rules path covers any checkable-invariant rules you wrote; the plans path covers the plan and any AuthoredDag sidecar)
 
-**ADR seeds:** For decisions worth recording as ADRs (2+ alternatives evaluated, new dependency, data model change, cross-cutting pattern, or non-obvious invariant), ensure each is captured as a `### AD-N: {Title}` block in the plan's `## Architectural Decisions` section per `references/plan-template.md`. Decompose will turn each AD into a dedicated ADR-writing task in the final wave. The approach you picked at the gate is almost always one such AD. Skip ADs for trivial naming or file-placement choices. Do NOT write ADRs yourself in this phase.
+**ADR seeds:** For decisions worth recording as ADRs (2+ alternatives evaluated, new dependency, data model change, cross-cutting pattern, or non-obvious invariant), ensure each is captured as a `### AD-N: <Title>` block in the plan's `## Architectural Decisions` section per `references/plan-template.md`. Decompose will turn each AD into a dedicated ADR-writing task in the final wave. The approach you picked at the gate is almost always one such AD. Skip ADs for trivial naming or file-placement choices. Do NOT write ADRs yourself in this phase.
 
 ---
 

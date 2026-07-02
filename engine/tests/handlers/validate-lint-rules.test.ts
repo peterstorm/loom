@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,9 +35,16 @@ describe("validate-lint-rules helper", () => {
     if (result.kind === "error") expect(result.message).toContain("does not exist");
   });
 
-  it("passes with no explicit dir when the default project dir is absent (defaults still validated)", async () => {
-    const result = await handler("", []);
-    expect(result.kind).toBe("passthrough");
+  it("passes with no explicit dir when the default project dir is absent — but says so on stderr", async () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await handler("", []);
+      expect(result.kind).toBe("passthrough");
+      const stderrText = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(stderrText).toContain("0 project rules validated");
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 
   it("passes with a well-formed project rule", async () => {

@@ -206,6 +206,29 @@ describe("parsePlanModels", () => {
       expect(models.lifecycles).toEqual([{ id: "LC-1", title: "A", machineFile: "m.ts" }]);
       expect(models.strays).toEqual([]);
     });
+
+    it("an UNTERMINATED fence is a stray, not a silent opt-out", () => {
+      const plan = "# Plan\n\nSnippet:\n\n```bash\necho hi\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** m.ts\n";
+      const models = parsePlanModels(plan);
+      expect(models.lifecycles).toEqual([]); // blanked by the open fence…
+      expect(models.strays.some((s) => s.includes("unterminated code fence"))).toBe(true); // …but loudly
+      expect(hasModels(models)).toBe(true);
+    });
+
+    it("a ``` fence is not closed early by a ~~~ line (and vice versa)", () => {
+      const plan = "## Lifecycles\n\n### LC-1: A\n\n```md\n~~~\n### LC-9: Phantom\n~~~\n```\n\n**Machine file:** m.ts\n";
+      const models = parsePlanModels(plan);
+      expect(models.lifecycles).toEqual([{ id: "LC-1", title: "A", machineFile: "m.ts" }]);
+      expect(models.strays).toEqual([]);
+    });
+
+    it("a declared section with zero blocks is a stray", () => {
+      const lc = parsePlanModels("## Lifecycles\n\nProse about lifecycles but no blocks.\n");
+      expect(lc.strays.some((s) => s.includes("contains no '### ' blocks"))).toBe(true);
+      expect(hasModels(lc)).toBe(true);
+      const inv = parsePlanModels("## Invariants\n\nNothing formal.\n");
+      expect(inv.strays.some((s) => s.includes("contains no '### ' blocks"))).toBe(true);
+    });
   });
 });
 

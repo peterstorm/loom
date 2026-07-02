@@ -158,7 +158,7 @@ export function validateFull(json: Record<string, unknown>): ValidationResult {
 
 /** Fix full graph — add missing per-task defaults */
 export function fixFull(json: Record<string, unknown>): string {
-  const tasks = (json.tasks as Record<string, unknown>[]) ?? [];
+  const tasks = Array.isArray(json.tasks) ? (json.tasks as Record<string, unknown>[]) : [];
   const fixed = {
     ...json,
     tasks: tasks.map((t) => ({

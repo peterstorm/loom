@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import handler from "../../src/handlers/helpers/validate-task-graph";
@@ -370,7 +370,7 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
     if (result.kind === "error") expect(result.message).toContain("LC-1");
   });
 
-  it("populates when bindings hold", async () => {
+  it("populates when bindings hold — and actually writes the tasks", async () => {
     const dir = tempDir();
     const planFile = join(dir, "plan.md");
     writeFileSync(planFile, "# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** `src/order-machine.ts`\n");
@@ -378,5 +378,62 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
     const populate = await loadPopulateWithState(statePath);
     const result = await populate(decomposeJson(planFile, ["src/order-machine.ts", "src/order-machine.test.ts"]), []);
     expect(result.kind).toBe("passthrough");
+    const written = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(written.tasks).toHaveLength(1);
+    expect(written.plan_file).toBe(planFile);
+  });
+
+  it("PERSISTS the validated plan path, not the decompose payload's (wave-gate stays armed)", async () => {
+    const dir = tempDir();
+    const realPlan = join(dir, "plan.md");
+    writeFileSync(realPlan, "# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** `src/order-machine.ts`\n");
+    const decoyPlan = join(dir, "decoy.md");
+    writeFileSync(decoyPlan, "# Plan\n\nNo models.\n");
+    const statePath = writeState(dir, realPlan);
+    const populate = await loadPopulateWithState(statePath);
+    // bindings PASS (task implements the machine) but payload points at the decoy
+    const result = await populate(decomposeJson(decoyPlan, ["src/order-machine.ts"]), []);
+    expect(result.kind).toBe("passthrough");
+    const written = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(written.plan_file).toBe(realPlan); // NOT the decoy
+  });
+
+  it("falls back to the architecture phase artifact when state plan_file is null", async () => {
+    const dir = tempDir();
+    const realPlan = join(dir, "plan.md");
+    writeFileSync(realPlan, "# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** `src/order-machine.ts`\n");
+    const decoyPlan = join(dir, "decoy.md");
+    writeFileSync(decoyPlan, "# Plan\n\nNo models.\n");
+    const statePath = join(dir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute",
+      phase_artifacts: { architecture: realPlan },
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      tasks: [],
+      wave_gates: {},
+    }));
+    const populate = await loadPopulateWithState(statePath);
+    // payload re-points at the decoy AND omits the machine file — must be blocked
+    const result = await populate(decomposeJson(decoyPlan, ["src/other.ts"]), []);
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("LC-1");
+  });
+});
+
+describe("validateFull path-field type checks", () => {
+  it("rejects non-string spec_file and plan_title", async () => {
+    const { validateFull } = await import("../../src/handlers/helpers/validate-task-graph");
+    const base = {
+      plan_title: "t", plan_file: "p.md", spec_file: "s.md",
+      tasks: [{ id: "T1", description: "x", agent: "code-implementer-agent", wave: 1, depends_on: [] }],
+    };
+    const specResult = validateFull({ ...base, spec_file: 42 });
+    expect(specResult.ok).toBe(false);
+    expect(errorsOf(specResult).some((e) => e.includes("'spec_file' must be a string"))).toBe(true);
+    const titleResult = validateFull({ ...base, plan_title: {} });
+    expect(titleResult.ok).toBe(false);
+    expect(errorsOf(titleResult).some((e) => e.includes("'plan_title' must be a string"))).toBe(true);
   });
 });

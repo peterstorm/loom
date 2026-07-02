@@ -52,11 +52,14 @@ in a `## Lifecycles` section:
   unrepresentable or rejected) or `xstate` (when the project already uses it).
 - The states/transitions table is for humans and impl agents; the machine file
   is the source of truth the moment it exists.
-- **Exact grammar**: these sections are regex-parsed. Headings exactly
-  `## Lifecycles` / `## Pipeline` / `## Invariants`; blocks
-  `### LC-<n>: <title>` / `### INV-<n>: <title>`; labels at column 0 with the
-  colon inside the bold. Near-miss variants are validation errors ("stray
-  model markers"), never silent opt-outs.
+- **Exact grammar**: these sections are regex-parsed. Headings
+  `## Lifecycles` / `## Pipeline` / `## Invariants` with no suffix or colon
+  (heading and label case is tolerated; block ids are uppercase-only);
+  blocks `### LC-<n>: <title>` / `### INV-<n>: <title>` (numeric id, colon);
+  labels at column 0 with the colon inside the bold. Machine-file paths are
+  repo-relative. Near-miss variants, unterminated code fences, and declared
+  sections with no blocks are validation errors ("stray model markers"),
+  never silent opt-outs.
 
 **Decompose** maps each `LC-N` to a dedicated task in the earliest possible
 wave: implement the machine file plus property tests (no undeclared
@@ -129,11 +132,12 @@ The plan declares invariants in an `## Invariants` section, each tiered:
   dir — so it is enforced fail-closed from the very first edit of wave 1,
   before any implementation agent runs. Filename and JSON `name` field share
   the same `inv-<n>-<slug>`. After writing rules, the architecture phase
-  proves they load (`LOOM_DIR` = the loom plugin directory,
-  `ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/`):
+  proves they load (`LOOM_DIR` = the loom plugin directory, resolved as
+  `LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/ 2>/dev/null | tail -1 | sed 's:/$::')`):
 
   ```bash
   bun "$LOOM_DIR"/engine/src/cli.ts helper validate-lint-rules .claude/linter/rules
+  # (.pi/linter/rules under the pi harness)
   ```
 
   Passing a nonexistent directory is an error — the proof step never treats a
@@ -157,11 +161,12 @@ The plan declares invariants in an `## Invariants` section, each tiered:
    `INV-N` rule file exists and is rule-shaped; near-miss declarations (typo'd
    headings/labels) are errors; an unreadable `plan_file` is an error, never a
    skipped check.
-2. **`populate-task-graph`** — the only whitelisted writer of
-   `active_task_graph.json` — runs the same binding checks before any state
-   write, resolving the plan path from state (evidence-derived) in preference
-   to the decompose payload. The 4a run advises the orchestrator; this one is
-   the gate.
+2. **`populate-task-graph`** — the only whitelisted helper that populates
+   tasks into `active_task_graph.json` — runs the same binding checks before
+   any state write, resolving the plan path from evidence-derived state
+   (`plan_file`, else the recorded architecture phase artifact) in preference
+   to the decompose payload, and persists the same path it validated. The 4a
+   run advises the orchestrator; this one is the gate.
 3. **`validate-lint-rules`** proves invariant rules load through the linter's
    fail-closed loader (malformed JSON, missing fields, ReDoS-unsafe patterns
    all fail) before implementation starts.
@@ -170,6 +175,10 @@ The plan declares invariants in an `## Invariants` section, each tiered:
 5. **`complete-wave-gate`** verifies as evidence that every lifecycle machine
    file bound to a completing wave's tasks actually exists on disk — the
    decompose-time promise is re-checked when the wave claims it delivered.
+   The plan is resolved from state `plan_file`, falling back to the recorded
+   architecture phase artifact; a named-but-unreadable plan fails the gate.
+   Only when state carries neither (legacy flows that never ran the
+   architecture phase) is the check skipped, and it says so.
 
 ## Known residuals (honest limits)
 
@@ -185,7 +194,8 @@ The plan declares invariants in an `## Invariants` section, each tiered:
   emit a project lint rule marking the generated paths do-not-edit.
 - **Wave-gate artifact verification is existence, not semantics.** The machine
   file must exist; that it exports a real reducer is verified by its property
-  tests (R2/R3 machinery), not by the gate.
+  tests and the trusted test-evidence machinery, not by the gate. An empty
+  file at the declared path passes the gate and fails at test evidence.
 
 ## What NOT to do
 

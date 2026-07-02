@@ -11,8 +11,8 @@
  * Pure core (`validateModelBindings`) with filesystem access injected via
  * `ModelBindingDeps`; `checkPlanModelBindings` is the shared fail-closed
  * entry point used by both the validate-task-graph handler and
- * populate-task-graph (the whitelisted state writer), so neither path can
- * skip enforcement.
+ * populate-task-graph (the only whitelisted helper that populates tasks
+ * into state), so neither path can skip enforcement.
  */
 
 import { parsePlanModels, hasModels, type PlanModels } from "../../parsers/parse-plan-models";
