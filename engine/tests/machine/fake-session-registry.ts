@@ -3,8 +3,8 @@
  * adapter's nominal semantics exactly:
  *   - bind appends; a bind when NO binding is live truncates the ledger
  *   - unbind removes every binding matching (agentId, agentType)
- *   - soleActiveBinding: exactly one binding, at most one active agent, and
- *     an active agent must BE the bound one
+ *   - soleActiveBinding: the SHARED pure decision (resolveSoleActiveBinding)
+ *     — exactly one binding AND the roster is exactly the bound agent
  *   - appendEvidence stamps records with the given epoch; readEvidence
  *     returns an immutable snapshot
  *
@@ -18,8 +18,8 @@ import type {
   MachineBinding,
   SessionRegistry,
 } from "../../src/machine/evidence";
-import { epochOf } from "../../src/machine/evidence";
-import type { Evidence, EvidenceRecord } from "../../src/machine/types";
+import { epochOf, resolveSoleActiveBinding } from "../../src/machine/evidence";
+import type { Epoch, Evidence, EvidenceRecord } from "../../src/machine/types";
 
 export function inMemorySessionRegistry(): SessionRegistry {
   const bindings = new Map<string, MachineBinding[]>();
@@ -55,16 +55,10 @@ export function inMemorySessionRegistry(): SessionRegistry {
 
     countActiveAgents: (sessionId: string): number => (active.get(sessionId) ?? []).length,
 
-    soleActiveBinding: (sessionId: string): MachineBinding | null => {
-      const bound = bindings.get(sessionId) ?? [];
-      if (bound.length !== 1) return null;
-      const roster = active.get(sessionId) ?? [];
-      if (roster.length > 1) return null;
-      if (roster.length === 1 && roster[0] !== bound[0].agentId) return null;
-      return bound[0];
-    },
+    soleActiveBinding: (sessionId: string): MachineBinding | null =>
+      resolveSoleActiveBinding(bindings.get(sessionId) ?? [], active.get(sessionId) ?? []),
 
-    appendEvidence: (sessionId: string, epoch: string, events: readonly Evidence[]): void => {
+    appendEvidence: (sessionId: string, epoch: Epoch, events: readonly Evidence[]): void => {
       if (events.length === 0) return;
       ledger.set(sessionId, [
         ...(ledger.get(sessionId) ?? []),

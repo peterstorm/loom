@@ -3,8 +3,9 @@
  * start (markActive + bind) / record / stop (snapshot + unbind + removeActive):
  *
  * (a) soleActiveBinding returns a binding only when exactly one binding
- *     exists, at most one agent is active, and any active agent IS the
- *     bound one — checked against an independent pure model after every op.
+ *     exists AND the active roster is exactly the bound agent (an empty
+ *     roster is a leaked binding — attribution stands down) — checked
+ *     against an independent pure model after every op.
  * (b) evidence recorded under an epoch is never attributed to another
  *     epoch: the registry ledger always equals the model ledger record for
  *     record, epoch for epoch.
@@ -32,6 +33,7 @@ import {
   eventsForEpoch,
   parseAgentId,
   parseAgentType,
+  resolveSoleActiveBinding,
   type MachineBinding,
   type SessionRegistry,
 } from "../../src/machine/evidence";
@@ -100,9 +102,8 @@ interface Model {
 
 function modelSole(m: Model): MachineBinding | null {
   if (m.bindings.length !== 1) return null;
-  if (m.active.length > 1) return null;
-  if (m.active.length === 1 && m.active[0] !== m.bindings[0].agentId) return null;
-  return m.bindings[0];
+  if (m.active.length !== 1) return null;
+  return m.active[0] === m.bindings[0].agentId ? m.bindings[0] : null;
 }
 
 /** Run one op against registry + model, asserting invariants (a) and (b). */
@@ -216,4 +217,42 @@ describe("SessionRegistry invariants (fs adapter conformance)", () => {
       { numRuns: 12 },
     );
   }, 60000);
+});
+
+// --- The leaked-binding shape: a binding with an EMPTY roster stands down ---
+//
+// The op model can't produce this (start rosters before binding; stop unbinds
+// and de-rosters together), so it is pinned directly: the shape arises when a
+// bound agent's roster entry is lost (crash between the paired writes) while
+// its binding survives.
+
+describe("empty roster + one binding = leaked binding → no attribution", () => {
+  const agent = POOL[0];
+
+  it("resolveSoleActiveBinding (the shared pure rule) refuses an empty roster", () => {
+    const binding = bindingOf(agent);
+    expect(resolveSoleActiveBinding([binding], [])).toBeNull();
+    expect(resolveSoleActiveBinding([binding], [agent.id])).toEqual(binding);
+    expect(resolveSoleActiveBinding([binding], ["someone-else"])).toBeNull();
+    expect(resolveSoleActiveBinding([binding], [agent.id, "second"])).toBeNull();
+    expect(resolveSoleActiveBinding([], [agent.id])).toBeNull();
+  });
+
+  it("in-memory fake: bind without markActive → soleActiveBinding null; roster arrival restores it", async () => {
+    const reg = inMemorySessionRegistry();
+    const s = "leaked-binding-fake";
+    await reg.bind(s, parseAgentType(agent.type)!, parseAgentId(agent.id)!);
+    expect(reg.soleActiveBinding(s)).toBeNull(); // leaked shape stands down
+    await reg.markActive(s, parseAgentId(agent.id)!);
+    expect(reg.soleActiveBinding(s)?.agentId).toBe(agent.id);
+  });
+
+  it("fs adapter: bind without markActive → soleActiveBinding null; roster arrival restores it", async () => {
+    const s = `${run}-leaked-binding-fs`;
+    fsSessions.push(s);
+    await fsSessionRegistry.bind(s, parseAgentType(agent.type)!, parseAgentId(agent.id)!);
+    expect(fsSessionRegistry.soleActiveBinding(s)).toBeNull(); // leaked shape stands down
+    await fsSessionRegistry.markActive(s, parseAgentId(agent.id)!);
+    expect(fsSessionRegistry.soleActiveBinding(s)?.agentId).toBe(agent.id);
+  });
 });

@@ -241,13 +241,14 @@ After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance
 - **PASSED** — Tasks marked `completed`, wave advances, GitHub issue checkboxes update.
 - **BLOCKED** — One or more critical findings (in spec-check or code review) or missing evidence. Fix and re-run `/wave-gate`; on re-run only blocked tasks are re-reviewed.
 
-The five mandatory checks performed by the `complete-wave-gate` helper:
+The six mandatory checks performed by the `complete-wave-gate` helper (in evaluation order):
 
 1. Per-task test evidence (a passing `test_result`)
 2. New tests written (`new_tests_written == true` OR `new_tests_required == false`)
-3. Spec alignment (`spec_check.critical_count == 0`)
-4. Per-task review status (no `pending`)
+3. Per-task review status (no `pending`)
+4. Spec alignment (`spec_check.critical_count == 0`)
 5. No critical findings in code review
+6. Lifecycle machine artifacts exist on disk for every lifecycle the plan binds to this wave (a named-but-unreadable plan fails the gate, fail-closed)
 
 ---
 

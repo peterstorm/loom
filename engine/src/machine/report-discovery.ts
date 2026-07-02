@@ -34,10 +34,15 @@ const JUNIT_REPORT_DIRS = [
  */
 const FRESHNESS_MS = 15 * 60 * 1000;
 
+const errMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
 function isFresh(path: string, nowMs: number): boolean {
   try {
     return nowMs - statSync(path).mtimeMs <= FRESHNESS_MS;
-  } catch {
+  } catch (e) {
+    // Unstatable report → treated as stale (fail closed), but say so: a
+    // silently-ignored artifact looks identical to "no report was written".
+    process.stderr.write(`findReport: cannot stat report '${path}': ${errMessage(e)}\n`);
     return false;
   }
 }
@@ -51,7 +56,10 @@ function readJunitDir(dir: string, nowMs: number): TestReportSummary[] {
       .filter((p) => isFresh(p, nowMs))
       .map((p) => parseJunitXml(readFileSync(p, "utf-8")))
       .filter((s): s is TestReportSummary => s !== null);
-  } catch {
+  } catch (e) {
+    // Unreadable report dir → no reports (fail closed), logged so a
+    // permissions/race problem is distinguishable from an empty dir.
+    process.stderr.write(`findReport: cannot read JUnit dir '${dir}': ${errMessage(e)}\n`);
     return [];
   }
 }
@@ -62,7 +70,9 @@ function moduleDirs(cwd: string): string[] {
     return readdirSync(cwd, { withFileTypes: true })
       .filter((d) => d.isDirectory() && !d.name.startsWith(".") && d.name !== "node_modules")
       .map((d) => join(cwd, d.name));
-  } catch {
+  } catch (e) {
+    // Unlistable cwd → no module dirs (fail closed), logged loudly.
+    process.stderr.write(`findReport: cannot list module dirs under '${cwd}': ${errMessage(e)}\n`);
     return [];
   }
 }
@@ -96,7 +106,7 @@ export function findReport(
         // Unreadable explicit report (permissions, race, path is a dir):
         // fall through to the next report source — the TestRun fact must
         // survive with report: null instead of crashing the recorder.
-        process.stderr.write(`findReport: cannot read --outputFile '${path}': ${(e as Error).message}\n`);
+        process.stderr.write(`findReport: cannot read --outputFile '${path}': ${errMessage(e)}\n`);
       }
     }
   }

@@ -20,8 +20,10 @@ export function loadPlanModelsSource(planFile: string | null | undefined): PlanM
   if (typeof planFile !== "string" || planFile.trim().length === 0) return { kind: "none" };
   try {
     return { kind: "loaded", models: parsePlanModels(readFileSync(planFile, "utf-8")) };
-  } catch {
-    return { kind: "unreadable", path: planFile };
+  } catch (e) {
+    // Carry the cause: ENOENT (typo'd path) and EACCES (permissions) demand
+    // different operator responses — a bare "unreadable" hides which.
+    return { kind: "unreadable", path: planFile, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -120,7 +122,7 @@ export function checkCriticalFindings(tasks: Task[]): GateCheck {
 /** How the plan's executable models were obtained for gate checks */
 export type PlanModelsSource =
   | { kind: "none" }
-  | { kind: "unreadable"; path: string }
+  | { kind: "unreadable"; path: string; error: string }
   | { kind: "loaded"; models: PlanModels };
 
 /**
@@ -141,7 +143,7 @@ export function checkLifecycleArtifacts(
     return pass("5. Lifecycle artifacts: skipped (no plan file in state).");
   }
   if (source.kind === "unreadable") {
-    return fail(`FAILED: plan file '${source.path}' is unreadable — cannot verify lifecycle machine artifacts (fail-closed).`);
+    return fail(`FAILED: plan file '${source.path}' is unreadable — cannot verify lifecycle machine artifacts (fail-closed): ${source.error}`);
   }
   const waveFiles = waveTasks.flatMap((t) => t.file_list ?? []);
   const bound = source.models.lifecycles.filter(
@@ -150,7 +152,15 @@ export function checkLifecycleArtifacts(
   if (bound.length === 0) {
     return pass("5. Lifecycle artifacts: none bound to this wave.");
   }
-  const missing = bound.filter((lc) => !fileExists(lc.machineFile!));
+  // An artifact is satisfied when ANY matched form exists: binding
+  // validation (pathsMatch) accepts a task file_list path that is a deeper
+  // /absolute form of the declared plan path, so the artifact may live at
+  // the task's spelling (e.g. plan declares src/machines/x.machine.json,
+  // the task wrote engine/src/machines/x.machine.json).
+  const missing = bound.filter((lc) => {
+    const variants = [lc.machineFile!, ...waveFiles.filter((f) => pathsMatch(f, lc.machineFile!))];
+    return !variants.some(fileExists);
+  });
   if (missing.length > 0) {
     return fail(
       `FAILED: lifecycle machine files declared in the plan were not created by this wave:\n` +
@@ -191,17 +201,38 @@ export type GateIO = GateDeps;
  * races with. Paths outside the snapshot resolve to false (fail closed).
  */
 export function snapshotGateDeps(state: TaskGraph, io: GateIO): GateDeps {
-  const source = io.loadPlanModels(state.plan_file ?? state.phase_artifacts?.architecture);
+  const snapshotPlan = state.plan_file ?? state.phase_artifacts?.architecture ?? null;
+  const source = io.loadPlanModels(snapshotPlan);
   const exists = new Map<string, boolean>();
   if (source.kind === "loaded") {
+    // Stat every form a lifecycle artifact can legitimately live at: the
+    // declared plan path AND every task file_list entry that suffix-matches
+    // it (pathsMatch — the same tolerance binding validation applies), so
+    // checkLifecycleArtifacts can count ANY matched form as satisfied.
+    const taskFiles = state.tasks.flatMap((t) => t.file_list ?? []);
     for (const lc of source.models.lifecycles) {
-      if (lc.machineFile !== null && !exists.has(lc.machineFile)) {
-        exists.set(lc.machineFile, io.fileExists(lc.machineFile));
+      if (lc.machineFile === null) continue;
+      const candidates = [lc.machineFile, ...taskFiles.filter((f) => pathsMatch(f, lc.machineFile!))];
+      for (const path of candidates) {
+        if (!exists.has(path)) exists.set(path, io.fileExists(path));
       }
     }
   }
   return {
-    loadPlanModels: () => source,
+    // The snapshot was taken for ONE plan path. Evaluation passes the
+    // LOCKED state's plan path back in — they must agree (plan_file is
+    // written once at decompose and never mutated by the handlers this
+    // lock races). If they ever diverge, serving the snapshot would
+    // silently check the wrong plan: fail closed with the drift on record.
+    loadPlanModels: (requested) => {
+      const requestedPlan = typeof requested === "string" ? requested : null;
+      if (requestedPlan === snapshotPlan) return source;
+      return {
+        kind: "unreadable",
+        path: requestedPlan ?? "<none>",
+        error: `gate deps were snapshotted for plan '${snapshotPlan ?? "<none>"}' but evaluation requested '${requestedPlan ?? "<none>"}' — plan path drifted between snapshot and locked evaluation`,
+      };
+    },
     fileExists: (path) => exists.get(path) ?? false,
   };
 }

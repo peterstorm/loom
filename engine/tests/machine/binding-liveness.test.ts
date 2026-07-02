@@ -183,6 +183,7 @@ describe("stale bindings are absent and reaped", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       await bindMachineAgent(s, parseAgentType(impl)!, parseAgentId("a-live")!);
+      writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-live\n"); // sole-active needs the bound agent rostered
       expect(readBindings(s)).toEqual([binding("a-live", impl)]);
       // NOT contended: the dead binding no longer voids attribution.
       expect(soleActiveBinding(s)?.agentId).toBe("a-live");
@@ -196,6 +197,7 @@ describe("fresh bindings and activity refresh", () => {
   it("a freshly-bound machine is honored", async () => {
     const s = sid("fresh");
     await bindMachineAgent(s, parseAgentType(impl)!, parseAgentId("a-1")!);
+    writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n"); // sole-active needs the bound agent rostered
     expect(readBindings(s)).toEqual([binding("a-1", impl)]);
     expect(soleActiveBinding(s)?.epoch).toBe(`a-1:${impl}`);
     await refreshBindingActivity(s);

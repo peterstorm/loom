@@ -35,7 +35,7 @@ const handler: HookHandler = async (stdin, args) => {
     // cleanup skipped means the .active roster and machine bindings may leak
     // until the SessionStart stale-sweep runs.
     process.stderr.write(
-      `dispatch: malformed SubagentStop input — cleanup skipped, bindings may leak: ${(e as Error).message}\n`,
+      `dispatch: malformed SubagentStop input — cleanup skipped, bindings may leak: ${e instanceof Error ? e.message : String(e)}\n`,
     );
     return { kind: "passthrough" };
   }
@@ -44,19 +44,24 @@ const handler: HookHandler = async (stdin, args) => {
     try {
       await fn();
     } catch (e) {
-      process.stderr.write(`ERROR in ${name}: ${(e as Error).message}\n`);
+      process.stderr.write(`ERROR in ${name}: ${e instanceof Error ? e.message : String(e)}\n`);
     }
   };
 
   // Snapshot the ledger BEFORE cleanup unbinds: the next bind with zero
   // bindings truncates the ledger, so update-task-status must judge this
   // epoch's evidence from a pre-unbind snapshot, not whatever file is on
-  // disk by the time it runs.
-  let evidenceSnapshot: readonly EvidenceRecord[] = [];
+  // disk by the time it runs. Null means "the snapshot READ FAILED" — a
+  // distinct state from a genuinely empty ledger ([]): downstream must
+  // re-read (or fail loudly) rather than treat the failure as absence of
+  // evidence and quietly mint a degraded verdict.
+  let evidenceSnapshot: readonly EvidenceRecord[] | null = null;
   try {
     evidenceSnapshot = readEvidence(input.session_id);
   } catch (e) {
-    process.stderr.write(`dispatch: evidence snapshot failed for ${input.session_id}: ${(e as Error).message}\n`);
+    process.stderr.write(
+      `dispatch: evidence snapshot failed for ${input.session_id}: ${e instanceof Error ? e.message : String(e)}\n`,
+    );
   }
 
   // Cleanup always runs — but must never abort the rest of the pipeline
@@ -75,7 +80,9 @@ const handler: HookHandler = async (stdin, args) => {
       await safeRun("advancePhase", () => advancePhase(stdin, args));
     })
     .with("impl", async () => {
-      await safeRun("updateTaskStatus", () => runUpdateTaskStatus(stdin, args, evidenceSnapshot));
+      await safeRun("updateTaskStatus", () =>
+        runUpdateTaskStatus(stdin, args, evidenceSnapshot ?? undefined),
+      );
     })
     .with("review", async () => {
       await safeRun("storeReviewerFindings", () => storeReviewerFindings(stdin, args));

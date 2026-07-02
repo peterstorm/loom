@@ -100,3 +100,37 @@ describe("advance", () => {
     expect(s.counts).toEqual(initialState.counts);
   });
 });
+
+describe("Requirement.min > 1 (thresholds are counted, not boolean)", () => {
+  const thresholdParsed = parseMachine({
+    agent: "code-implementer-agent",
+    enforcedTools: ["Edit", "Write", "MultiEdit"],
+    phases: [
+      { id: "read-context", allowedTools: [], advance: { event: "FileRead", min: 2 } },
+      { id: "implement", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "FileWrite", min: 1 } },
+      { id: "done", terminal: true, allowedTools: ["Edit", "Write", "MultiEdit"], requires: [{ event: "TestRunPassed", min: 1 }] },
+    ],
+  });
+  if (!thresholdParsed.ok) throw new Error(thresholdParsed.error);
+  const threshold = thresholdParsed.value;
+
+  it("one FileRead does NOT satisfy min: 2 — still blocked, explanation shows the shortfall", () => {
+    const s = foldEvidence(threshold, [read("/a.ts")]);
+    expect(currentPhase(threshold, s).id).toBe("read-context");
+    expect(isToolAllowed(threshold, s, "Write")).toBe(false);
+
+    const msg = blockExplanation(threshold, s, "Write");
+    expect(msg).toContain("FileRead ≥ 2 (currently 1)");
+  });
+
+  it("two FileReads satisfy min: 2 and advance the phase", () => {
+    const s = foldEvidence(threshold, [read("/a.ts"), read("/b.ts")]);
+    expect(currentPhase(threshold, s).id).toBe("implement");
+    expect(isToolAllowed(threshold, s, "Write")).toBe(true);
+  });
+
+  it("the same path read twice counts twice — the guard counts events, not distinct paths", () => {
+    const s = foldEvidence(threshold, [read("/a.ts"), read("/a.ts")]);
+    expect(currentPhase(threshold, s).id).toBe("implement");
+  });
+});

@@ -75,8 +75,10 @@ export function currentPhase(machine: MachineDef, state: PhaseState) {
  * them; tools outside enforcedTools always pass.
  */
 export function isToolAllowed(machine: MachineDef, state: PhaseState, toolName: string): boolean {
-  if (!machine.enforcedTools.includes(toolName)) return true;
-  return currentPhase(machine, state).allowedTools.includes(toolName);
+  // Widen for the membership test: toolName is any tool the harness reports,
+  // the machine's arrays are proven GateWiredTool[] — membership is the question.
+  if (!(machine.enforcedTools as readonly string[]).includes(toolName)) return true;
+  return (currentPhase(machine, state).allowedTools as readonly string[]).includes(toolName);
 }
 
 export function isTerminal(machine: MachineDef, state: PhaseState): boolean {

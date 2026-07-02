@@ -33,7 +33,7 @@ async function bind(session: string, type: string, id: string): Promise<void> {
 
 const run = `gate-fail-closed-${process.pid}-${Date.now()}`;
 const sid = (name: string) => `${run}-${name}`;
-const sessions = ["missing-fields", "corrupt-binding", "absent", "invalid-machine", "crash"].map(sid);
+const sessions = ["missing-fields", "corrupt-binding", "absent", "invalid-machine", "vanished-machine", "crash"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
@@ -94,6 +94,8 @@ describe("gate fails closed on broken machinery (Fix 4)", () => {
     try {
       writeFileSync(join(machines, "corrupt-agent.machine.json"), "{broken");
       await bind(s, "corrupt-agent", "a-1");
+      // sole-active attribution requires the bound agent on the roster
+      writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n");
       const result = await enforce(pre(s, "Write"), []);
       expect(result.kind).toBe("block");
       if (result.kind === "block") {
@@ -102,6 +104,30 @@ describe("gate fails closed on broken machinery (Fix 4)", () => {
     } finally {
       delete process.env.LOOM_MACHINES_DIR;
       await unbindMachineAgent(s, "corrupt-agent", "a-1");
+      rmSync(machines, { recursive: true, force: true });
+    }
+  });
+
+  it("a machine definition that VANISHED for a bound agent → block, never passthrough", async () => {
+    // A binding can only exist because a machine existed at bind time —
+    // "none" at gate time means the file was deleted or the machines dir
+    // resolved elsewhere. Silent passthrough here would disarm the gate.
+    const s = sid("vanished-machine");
+    const machines = mkdtempSync(join(tmpdir(), "loom-empty-machines-"));
+    process.env.LOOM_MACHINES_DIR = machines; // empty dir: loadMachine → none
+    try {
+      await bind(s, "code-implementer-agent", "a-1");
+      // sole-active attribution requires the bound agent on the roster
+      writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n");
+      const result = await enforce(pre(s, "Write"), []);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") {
+        expect(result.message).toContain("vanished");
+        expect(result.message).toContain("code-implementer-agent");
+      }
+    } finally {
+      delete process.env.LOOM_MACHINES_DIR;
+      await unbindMachineAgent(s, "code-implementer-agent", "a-1");
       rmSync(machines, { recursive: true, force: true });
     }
   });

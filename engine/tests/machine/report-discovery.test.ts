@@ -89,4 +89,31 @@ describe("findReport", () => {
       stderrSpy.mockRestore();
     }
   });
+
+  it("an unreadable JUnit dir stays fail-closed but says so on stderr", () => {
+    // A FILE where a report DIR is expected: existsSync passes, readdirSync throws
+    mkdirSync(join(cwd, "target"), { recursive: true });
+    writeFileSync(join(cwd, "target/surefire-reports"), "not a directory");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(findReport("mvn test", cwd, "", Date.now())).toBeNull();
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("cannot read JUnit dir");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("an unlistable cwd (module-dir walk) stays fail-closed but says so on stderr", () => {
+    const notADir = join(cwd, "plain-file");
+    writeFileSync(notADir, "x");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(findReport("mvn test", notADir, "", Date.now())).toBeNull();
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("cannot list module dirs");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
 });

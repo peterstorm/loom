@@ -6,22 +6,24 @@
  * execution time, never the agent's narrative about it.
  *
  * Records ONLY when attribution is sound: exactly one machine binding and
- * no other active subagent (soleActiveBinding). Contended sessions record
- * nothing — commingled evidence is worse than no evidence, because the
- * SubagentStop resolver treats ledger data as high-trust.
+ * the active roster is exactly the bound agent (soleActiveBinding).
+ * Contended sessions record nothing, with a stderr note — commingled
+ * evidence is worse than no evidence, because the SubagentStop resolver
+ * treats ledger data as high-trust.
  *
  * Never blocks: the PreToolUse gate fails closed on missing evidence, and
  * the SubagentStop resolver labels a bound-but-empty ledger as degraded —
  * so a broken recorder surfaces downstream instead of silently passing.
  */
 
+import { existsSync } from "node:fs";
 import type { HookHandler } from "../../types";
 import { passthroughResult } from "../../types";
 import {
   appendEvidence,
-  extractBashOutcome,
   extractEvidence,
   findReport,
+  machineBindingPath,
   refreshBindingActivity,
   soleActiveBinding,
 } from "../../machine";
@@ -48,20 +50,30 @@ const handler: HookHandler = async (stdin) => {
     await refreshBindingActivity(sessionId);
 
     const binding = soleActiveBinding(sessionId);
-    if (binding === null) return passthroughResult();
+    if (binding === null) {
+      // Bound-but-unattributable (contended session, leaked binding): say
+      // so once, like the gate does — a silently-standing-down recorder is
+      // indistinguishable from a broken one. Sessions with no binding file
+      // at all are simply ungated; stay quiet for those.
+      if (existsSync(machineBindingPath(sessionId))) {
+        process.stderr.write(
+          `record-evidence: standing down for ${sessionId} — binding exists but attribution is unsound (contended or leaked); nothing recorded\n`,
+        );
+      }
+      return passthroughResult();
+    }
 
     const toolInput = input.tool_input ?? {};
-    const outcome = extractBashOutcome(input.tool_response);
     const cwd = input.cwd ?? process.cwd();
 
-    const events = extractEvidence(toolName, toolInput, outcome, (segment, stdout) =>
+    const events = extractEvidence(toolName, toolInput, input.tool_response, (segment, stdout) =>
       findReport(segment, cwd, stdout, Date.now()),
     );
     appendEvidence(sessionId, binding.epoch, events);
 
     return passthroughResult();
   } catch (e) {
-    process.stderr.write(`record-evidence: ${(e as Error).message}\n`);
+    process.stderr.write(`record-evidence: ${e instanceof Error ? e.message : String(e)}\n`);
     return passthroughResult();
   }
 };

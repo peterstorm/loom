@@ -30,7 +30,17 @@ import {
   parseAgentType,
   readEvidence,
 } from "../../machine";
-import type { Evidence, EvidenceRecord, TrustedTestVerdict } from "../../machine";
+import type { Evidence, EvidenceRecord, LoadedMachine, TrustedTestVerdict } from "../../machine";
+
+/**
+ * Is the agent's machine BOUND for evidence purposes? "invalid" counts as
+ * bound: a machine definition exists for this agent — ground truth was
+ * expected — so an empty ledger must surface as "degraded", not be
+ * mislabeled as an unbound/legacy "fallback" run.
+ */
+export function isMachineBound(loaded: LoadedMachine): boolean {
+  return loaded.kind !== "none";
+}
 
 // --- Pure: extract test pass evidence from bash output ---
 
@@ -129,7 +139,9 @@ type TestRunEvidence = Extract<Evidence, { kind: "TestRun" }>;
  * promoted to a trusted pass. The transcript-regex extractor is the
  * explicit lower-trust fallback, labeled by exactly how weak it is:
  * - "low-trust"  — some exit-0 ledger run exists but the verdict could not
- *                  be trusted (no report artifact for the deciding run)
+ *                  be trusted (no report artifact for the deciding run), OR
+ *                  files were modified AFTER the deciding trusted pass (the
+ *                  pass vouches for code that no longer exists)
  * - "degraded"   — the machine was bound but the ledger is empty (recorder
  *                  failure: the fallback is running where ground truth was
  *                  expected)
@@ -140,22 +152,37 @@ export function resolveTestEvidence(
   bashOutput: string,
   machineBound: boolean,
 ): ResolvedTestEvidence {
-  const runs = ledgerEvents.filter((e): e is TestRunEvidence => e.kind === "TestRun");
-  const judged = runs.map((r) => ({ run: r, verdict: judgeTestRun(r.exit, r.report) }));
+  // Judge TestRuns keeping their POSITION in the ordered ledger, so later
+  // non-TestRun events (FileWrite) can be related to the deciding run.
+  const judged = ledgerEvents.flatMap((event, index) =>
+    event.kind === "TestRun"
+      ? [{ run: event as TestRunEvidence, index, verdict: judgeTestRun(event.exit, event.report) }]
+      : [],
+  );
 
-  // Last GROUND-TRUTH run (trusted-pass or trusted-fail), with its index.
+  // Last GROUND-TRUTH run (trusted-pass or trusted-fail), with its ledger index.
   const lastTrusted = judged.reduce<
     { index: number; run: TestRunEvidence; verdict: TrustedTestVerdict } | null
-  >((acc, { run, verdict }, index) => {
+  >((acc, { run, index, verdict }) => {
     return verdict.verdict === "untrusted" ? acc : { index, run, verdict };
   }, null);
 
+  let demotionLabel: string | null = null;
   if (lastTrusted !== null) {
+    // A trusted PASS is stale once any FileWrite follows it in the ledger:
+    // the run vouched for code that has since been modified. Demote to the
+    // labeled low-trust fallback — never keep (or re-mint) trusted-pass.
+    const laterFileWrite = ledgerEvents
+      .slice(lastTrusted.index + 1)
+      .some((e) => e.kind === "FileWrite");
     // A stale trusted failure must not outrank a later untrusted exit-0
     // run — but that later run earns only the low-trust fallback below,
     // never a trusted pass.
-    const laterExitZero = judged.slice(lastTrusted.index + 1).some((j) => j.run.exit === 0);
-    if (lastTrusted.verdict.verdict === "trusted-pass" || !laterExitZero) {
+    const laterExitZero = judged.some((j) => j.index > lastTrusted.index && j.run.exit === 0);
+
+    const keepTrusted =
+      lastTrusted.verdict.verdict === "trusted-pass" ? !laterFileWrite : !laterExitZero;
+    if (keepTrusted) {
       const report = lastTrusted.run.report
         ? `, report: ${lastTrusted.run.report.total} tests / ${lastTrusted.run.report.failed} failed`
         : "";
@@ -164,13 +191,17 @@ export function resolveTestEvidence(
         evidence: `ledger: exit ${lastTrusted.run.exit}${report} (${lastTrusted.run.command})`,
       };
     }
+    if (lastTrusted.verdict.verdict === "trusted-pass") {
+      demotionLabel = "low-trust (files modified after last trusted pass; transcript-regex)";
+    }
   }
 
-  const label = judged.some((j) => j.run.exit === 0)
-    ? "low-trust (exit 0, no report artifact; transcript-regex)"
-    : machineBound && ledgerEvents.length === 0
-      ? "degraded (machine bound, no ledger evidence; transcript-regex)"
-      : "transcript-regex (fallback)";
+  const label = demotionLabel
+    ?? (judged.some((j) => j.run.exit === 0)
+      ? "low-trust (exit 0, no report artifact; transcript-regex)"
+      : machineBound && ledgerEvents.length === 0
+        ? "degraded (machine bound, no ledger evidence; transcript-regex)"
+        : "transcript-regex (fallback)");
   const fallback = extractTestEvidence(bashOutput);
   if (!fallback.passed) {
     return { result: { verdict: "untrusted", passed: false, label }, evidence: "" };
@@ -383,7 +414,7 @@ export const runUpdateTaskStatus = async (
   // the hook input could never have been bound/recorded (the bind boundary
   // rejects it), so it yields no epoch events and routes to the existing
   // degraded/fallback path instead of silently mis-keying the lookup.
-  const machineBound = loadMachine(MACHINES_DIR, agentType).kind === "machine";
+  const machineBound = isMachineBound(loadMachine(MACHINES_DIR, agentType));
   const records = evidenceSnapshot ?? readEvidence(input.session_id);
   const epochAgentId = input.agent_id ? parseAgentId(input.agent_id) : null;
   const epochAgentType = parseAgentType(agentType);

@@ -96,14 +96,30 @@ export const STALE_SUBAGENT_TTL_MS = 60 * 60_000;
 
 const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const DEFAULT_MACHINES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "machines");
+
+/**
+ * Guarded-skill-machine definitions directory (shipped with loom, per agent
+ * type), resolved lazily — reads LOOM_MACHINES_DIR at call time so the gate
+ * can be pointed at fixture machines per-test without a module reload.
+ */
+export const machinesDir = (): string => process.env.LOOM_MACHINES_DIR ?? DEFAULT_MACHINES_DIR;
+
+/** Machines directory — resolved once at import (consumers that never re-point) */
+export const MACHINES_DIR = machinesDir();
+
 /** State file patterns to guard.
  * Includes the guarded-machine subagent dir (derived from SUBAGENT_DIR, not
  * hardcoded): an agent writing the evidence ledger or binding files via Bash
  * would forge trusted test evidence, appending to `.active` would fake
  * attribution, and `rm` of the directory itself would silently disarm the
- * gate — so ANY reference to the dir combined with a write pattern blocks. */
+ * gate — so ANY reference to the dir combined with a write pattern blocks.
+ * The machine-definitions dir is guarded for the same reason: `rm` of a
+ * machine file via Bash would make the gate see "no machine" for a BOUND
+ * agent (which now fails closed — but deleting definitions must be blocked
+ * at the source too). */
 export const STATE_FILE_PATTERNS = new RegExp(
-  `active_task_graph|review-invocations|${escapeRegex(SUBAGENT_DIR)}`
+  `active_task_graph|review-invocations|${escapeRegex(SUBAGENT_DIR)}|${escapeRegex(MACHINES_DIR)}`
 );
 
 /** Write patterns to block on state files.
@@ -165,18 +181,6 @@ export const taskGraphPath = (): string => findTaskGraphPath();
 
 /** Task graph path — resolved once at import (consumers that never re-point) */
 export const TASK_GRAPH_PATH = findTaskGraphPath();
-
-const DEFAULT_MACHINES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "machines");
-
-/**
- * Guarded-skill-machine definitions directory (shipped with loom, per agent
- * type), resolved lazily — reads LOOM_MACHINES_DIR at call time so the gate
- * can be pointed at fixture machines per-test without a module reload.
- */
-export const machinesDir = (): string => process.env.LOOM_MACHINES_DIR ?? DEFAULT_MACHINES_DIR;
-
-/** Machines directory — resolved once at import (consumers that never re-point) */
-export const MACHINES_DIR = machinesDir();
 
 // --- Linter Configuration ---
 

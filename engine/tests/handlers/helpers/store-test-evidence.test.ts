@@ -1,0 +1,161 @@
+/**
+ * store-test-evidence trusted-verdict guard: the helper's stdin is
+ * agent-controlled text. It may set an UNTRUSTED result on a task — it must
+ * NEVER overwrite a trusted verdict the evidence ledger produced. Without
+ * the guard, an agent could launder a ledger `trusted-fail` into
+ * `{verdict: "untrusted", passed: true}`, which the wave gate accepts.
+ *
+ * Spawns the real CLI in a tmp git repo (same pattern as set-phase.test.ts)
+ * so TASK_GRAPH_PATH resolution is exercised end to end.
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { execSync, spawnSync } from "node:child_process";
+import type { TaskGraph, Task } from "../../../src/types";
+
+const CLI_PATH = join(__dirname, "../../../src/cli.ts");
+
+function makeTmpDir(): string {
+  const dir = join(tmpdir(), `loom-ste-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function graphWith(task: Partial<Task>): TaskGraph {
+  return {
+    current_phase: "execute",
+    phase_artifacts: {},
+    skipped_phases: [],
+    spec_file: null,
+    plan_file: null,
+    tasks: [
+      {
+        id: "T1",
+        description: "impl",
+        agent: "code-implementer-agent",
+        wave: 1,
+        status: "pending",
+        depends_on: [],
+        ...task,
+      } as Task,
+    ],
+    wave_gates: {},
+  };
+}
+
+describe("store-test-evidence helper — trusted verdicts survive", () => {
+  let tmpDir: string;
+  let statePath: string;
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
+    const stateDir = join(tmpDir, ".claude", "state");
+    mkdirSync(stateDir, { recursive: true });
+    execSync("git init", { cwd: tmpDir, stdio: "ignore" });
+    statePath = join(stateDir, "active_task_graph.json");
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function runHelper(stdin: string): { exitCode: number; stderr: string } {
+    const result = spawnSync("bun", [CLI_PATH, "helper", "store-test-evidence", "--task", "T1"], {
+      cwd: tmpDir,
+      encoding: "utf-8",
+      input: stdin,
+    });
+    return { exitCode: result.status ?? -1, stderr: result.stderr ?? "" };
+  }
+
+  function readState(): TaskGraph {
+    return JSON.parse(readFileSync(statePath, "utf-8"));
+  }
+
+  it("a ledger trusted-fail survives an attempted untrusted-pass overwrite (with a stderr note)", () => {
+    writeFileSync(
+      statePath,
+      JSON.stringify(
+        graphWith({
+          status: "implemented",
+          test_result: { verdict: "trusted-fail" },
+          test_evidence: "ledger: exit 1 (npm test)",
+        }),
+        null,
+        2,
+      ),
+    );
+
+    // The agent claims success via helper stdin — the classic laundering move.
+    const { exitCode, stderr } = runHelper(
+      "TEST_PASSED: true\nTEST_EVIDENCE: all 999 tests pass, honest\nNEW_TESTS_WRITTEN: true\n",
+    );
+    expect(exitCode).toBe(0);
+
+    const task = readState().tasks[0];
+    expect(task.test_result).toEqual({ verdict: "trusted-fail" }); // untouched
+    expect(task.test_evidence).toBe("ledger: exit 1 (npm test)"); // untouched
+    expect(task.new_tests_written).toBeUndefined(); // nothing else laundered in either
+    expect(stderr).toContain("refusing to overwrite");
+  });
+
+  it("a trusted-pass verdict is equally protected", () => {
+    writeFileSync(
+      statePath,
+      JSON.stringify(graphWith({ status: "implemented", test_result: { verdict: "trusted-pass" } }), null, 2),
+    );
+
+    const { exitCode } = runHelper("TEST_PASSED: false\nTEST_EVIDENCE: fabricated failure\n");
+    expect(exitCode).toBe(0);
+
+    const task = readState().tasks[0];
+    expect(task.test_result).toEqual({ verdict: "trusted-pass" });
+  });
+
+  it("without a trusted verdict the helper stores the (labeled untrusted) result as before", () => {
+    writeFileSync(statePath, JSON.stringify(graphWith({}), null, 2));
+
+    const { exitCode } = runHelper(
+      "TEST_PASSED: true\nTEST_EVIDENCE: 12 passing\nNEW_TESTS_WRITTEN: true\nNEW_TEST_EVIDENCE: 3 new tests\n",
+    );
+    expect(exitCode).toBe(0);
+
+    const task = readState().tasks[0];
+    expect(task.status).toBe("implemented");
+    expect(task.test_result).toEqual({
+      verdict: "untrusted",
+      passed: true,
+      label: "helper-reported (store-test-evidence stdin)",
+    });
+    expect(task.test_evidence).toBe("12 passing");
+    expect(task.new_tests_written).toBe(true);
+    expect(task.new_test_evidence).toBe("3 new tests");
+  });
+
+  it("an existing UNTRUSTED result may be overwritten (helper is the same trust tier)", () => {
+    writeFileSync(
+      statePath,
+      JSON.stringify(
+        graphWith({
+          status: "implemented",
+          test_result: { verdict: "untrusted", passed: false, label: "transcript-regex (fallback)" },
+        }),
+        null,
+        2,
+      ),
+    );
+
+    const { exitCode } = runHelper("TEST_PASSED: true\nTEST_EVIDENCE: 5 passing\n");
+    expect(exitCode).toBe(0);
+
+    const task = readState().tasks[0];
+    expect(task.test_result).toEqual({
+      verdict: "untrusted",
+      passed: true,
+      label: "helper-reported (store-test-evidence stdin)",
+    });
+  });
+});

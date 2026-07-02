@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { extractTestEvidence, analyzeNewTests, resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
+import { extractTestEvidence, analyzeNewTests, isMachineBound, resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
 import { legacyTestsPassedNote } from "../../src/types";
-import type { Evidence } from "../../src/machine";
+import { parseMachineJson } from "../../src/machine";
+import type { Evidence, LoadedMachine } from "../../src/machine";
 
 describe("legacyTestsPassedNote (pure)", () => {
   it("flags a pre-refactor task carrying tests_passed without test_result", () => {
@@ -207,6 +208,79 @@ describe("resolveTestEvidence — stale trusted failure vs later untrusted run (
     const resolved = resolveTestEvidence([untrustedExitZero, trustedFail], "12 passing", true);
     expect(resolved.result).toEqual({ verdict: "trusted-fail" });
     expect(resolved.evidence).toContain("ledger: exit 1");
+  });
+});
+
+describe("resolveTestEvidence — a trusted pass goes stale when files change after it (pure)", () => {
+  const trustedPass: Evidence = {
+    kind: "TestRun",
+    command: "npm test",
+    exit: 0,
+    report: { total: 5, failed: 0, source: "vitest-json" },
+  };
+  const fileWrite: Evidence = { kind: "FileWrite", path: "/src/thing.ts" };
+  const fileRead: Evidence = { kind: "FileRead", path: "/src/thing.ts" };
+
+  it("[pass, FileWrite] demotes to the labeled low-trust path — the pass vouched for old code", () => {
+    const resolved = resolveTestEvidence([trustedPass, fileWrite], "12 passing", true);
+    expect(resolved.result).toEqual({
+      verdict: "untrusted",
+      passed: true,
+      label: "low-trust (files modified after last trusted pass; transcript-regex)",
+    });
+    expect(resolved.evidence).toContain("files modified after last trusted pass");
+  });
+
+  it("[pass, FileWrite] with no transcript signal is an untrusted non-pass, same label", () => {
+    const resolved = resolveTestEvidence([trustedPass, fileWrite], "no test output", true);
+    expect(resolved.result).toEqual({
+      verdict: "untrusted",
+      passed: false,
+      label: "low-trust (files modified after last trusted pass; transcript-regex)",
+    });
+  });
+
+  it("FileWrite BEFORE the deciding pass does not demote (write → test → pass is the happy path)", () => {
+    const resolved = resolveTestEvidence([fileWrite, trustedPass], "", true);
+    expect(resolved.result).toEqual({ verdict: "trusted-pass" });
+  });
+
+  it("FileRead after the pass does not demote — only modifications invalidate it", () => {
+    const resolved = resolveTestEvidence([trustedPass, fileRead], "", true);
+    expect(resolved.result).toEqual({ verdict: "trusted-pass" });
+  });
+
+  it("write-after-pass followed by a NEW trusted pass is trusted again", () => {
+    const resolved = resolveTestEvidence([trustedPass, fileWrite, trustedPass], "", true);
+    expect(resolved.result).toEqual({ verdict: "trusted-pass" });
+  });
+});
+
+describe("isMachineBound — an invalid machine still counts as bound (pure)", () => {
+  it("kind 'machine' and kind 'invalid' are bound; only 'none' is unbound", () => {
+    const parsed = parseMachineJson(JSON.stringify({
+      agent: "good-agent",
+      enforcedTools: ["Edit"],
+      phases: [
+        { id: "a", allowedTools: [], advance: { event: "FileRead" } },
+        { id: "z", terminal: true, allowedTools: ["Edit"], requires: [] },
+      ],
+    }));
+    if (!parsed.ok) throw new Error(parsed.error);
+    const machine: LoadedMachine = { kind: "machine", machine: parsed.value };
+    const invalid: LoadedMachine = { kind: "invalid", error: "corrupt json" };
+    const none: LoadedMachine = { kind: "none" };
+
+    expect(isMachineBound(machine)).toBe(true);
+    expect(isMachineBound(invalid)).toBe(true); // bound-but-broken → "degraded", never "fallback"
+    expect(isMachineBound(none)).toBe(false);
+  });
+
+  it("an invalid machine with an empty ledger resolves to the degraded label, not fallback", () => {
+    const invalid: LoadedMachine = { kind: "invalid", error: "corrupt json" };
+    const resolved = resolveTestEvidence([], "12 passing", isMachineBound(invalid));
+    expect(resolved.result.verdict).toBe("untrusted");
+    expect(resolved.result.verdict === "untrusted" && resolved.result.label).toContain("degraded");
   });
 });
 

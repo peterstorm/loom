@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fc from "fast-check";
-import { WRITE_PATTERNS, STATE_FILE_PATTERNS, WHITELISTED_HELPERS, SUBAGENT_DIR } from "../../../src/config";
+import { WRITE_PATTERNS, STATE_FILE_PATTERNS, WHITELISTED_HELPERS, SUBAGENT_DIR, MACHINES_DIR } from "../../../src/config";
 
 /**
  * Test the pure regex logic from guard-state-file directly.
@@ -60,7 +60,7 @@ describe("guard-state-file — property tests", () => {
     fc.assert(
       fc.property(
         fc.string({ minLength: 1, maxLength: 200 }).filter(
-          (s) => !s.includes("active_task_graph") && !s.includes("review-invocations") && !s.includes(SUBAGENT_DIR),
+          (s) => !s.includes("active_task_graph") && !s.includes("review-invocations") && !s.includes(SUBAGENT_DIR) && !s.includes(MACHINES_DIR),
         ),
         (cmd) => {
           expect(guardDecision(cmd)).toBe("allow");
@@ -117,5 +117,15 @@ describe("guard-state-file — edge cases", () => {
     // reads stay allowed
     expect(guardDecision(`cat ${SUBAGENT_DIR}/s.evidence.jsonl`)).toBe("allow");
     expect(guardDecision(`ls ${SUBAGENT_DIR}`)).toBe("allow");
+  });
+
+  it("machine definition files are guarded (derived from MACHINES_DIR) — rm cannot silently disarm the gate", () => {
+    expect(guardDecision(`rm ${MACHINES_DIR}/code-implementer-agent.machine.json`)).toBe("block");
+    expect(guardDecision(`rm -rf ${MACHINES_DIR}`)).toBe("block");
+    expect(guardDecision(`echo '{}' > ${MACHINES_DIR}/code-implementer-agent.machine.json`)).toBe("block");
+    expect(guardDecision(`mv ${MACHINES_DIR}/code-implementer-agent.machine.json /tmp/`)).toBe("block");
+    // reads stay allowed
+    expect(guardDecision(`cat ${MACHINES_DIR}/code-implementer-agent.machine.json`)).toBe("allow");
+    expect(guardDecision(`ls ${MACHINES_DIR}`)).toBe("allow");
   });
 });

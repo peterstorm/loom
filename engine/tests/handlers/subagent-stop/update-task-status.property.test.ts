@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { extractTestEvidence, analyzeNewTests } from "../../../src/handlers/subagent-stop/update-task-status";
+import { extractTestEvidence, analyzeNewTests, resolveTestEvidence } from "../../../src/handlers/subagent-stop/update-task-status";
+import { judgeTestRun } from "../../../src/machine";
+import type { Evidence } from "../../../src/machine";
 
 describe("extractTestEvidence — property tests", () => {
   it("random strings without test keywords → passed: false", () => {
@@ -133,6 +135,74 @@ describe("analyzeNewTests — property tests", () => {
           expect(result.evidence).toContain("skipped");
         },
       ),
+    );
+  });
+});
+
+describe("resolveTestEvidence — property tests", () => {
+  const eventArb: fc.Arbitrary<Evidence> = fc.oneof(
+    fc.record({ kind: fc.constant("FileRead" as const), path: fc.constantFrom("/a.ts", "/b.ts") }),
+    fc.record({ kind: fc.constant("FileWrite" as const), path: fc.constantFrom("/a.ts", "/b.ts") }),
+    fc.record({
+      kind: fc.constant("TestRun" as const),
+      command: fc.constantFrom("npm test", "bun test"),
+      exit: fc.constantFrom<number | null>(0, 1, null),
+      report: fc.constantFrom(
+        null,
+        { total: 5, failed: 0, source: "vitest-json" as const },
+        { total: 5, failed: 2, source: "vitest-json" as const },
+        { total: 0, failed: 0, source: "vitest-json" as const },
+      ),
+    }),
+  );
+
+  /** Independent restatement: the deciding run is the LAST trusted TestRun. */
+  function decidingRun(events: readonly Evidence[]): { index: number; verdict: string } | null {
+    let deciding: { index: number; verdict: string } | null = null;
+    events.forEach((e, index) => {
+      if (e.kind !== "TestRun") return;
+      const v = judgeTestRun(e.exit, e.report);
+      if (v.verdict !== "untrusted") deciding = { index, verdict: v.verdict };
+    });
+    return deciding;
+  }
+
+  it("for ALL event sequences: a FileWrite after the deciding pass ⇒ verdict is never trusted-pass", () => {
+    fc.assert(
+      fc.property(
+        fc.array(eventArb, { minLength: 0, maxLength: 25 }),
+        fc.constantFrom("12 passing", "no test output here"),
+        (events, transcript) => {
+          const resolved = resolveTestEvidence(events, transcript, true);
+          const deciding = decidingRun(events);
+          const writeAfterDecidingPass =
+            deciding !== null &&
+            deciding.verdict === "trusted-pass" &&
+            events.slice(deciding.index + 1).some((e) => e.kind === "FileWrite");
+          if (writeAfterDecidingPass) {
+            expect(resolved.result.verdict).not.toBe("trusted-pass");
+            expect(
+              resolved.result.verdict === "untrusted" && resolved.result.label,
+            ).toContain("files modified after last trusted pass");
+          }
+        },
+      ),
+      { numRuns: 500 },
+    );
+  });
+
+  it("for ALL event sequences: trusted-pass is returned ONLY when the deciding run is a pass with no later FileWrite", () => {
+    fc.assert(
+      fc.property(fc.array(eventArb, { minLength: 0, maxLength: 25 }), (events) => {
+        const resolved = resolveTestEvidence(events, "12 passing", true);
+        if (resolved.result.verdict === "trusted-pass") {
+          const deciding = decidingRun(events);
+          expect(deciding).not.toBeNull();
+          expect(deciding!.verdict).toBe("trusted-pass");
+          expect(events.slice(deciding!.index + 1).some((e) => e.kind === "FileWrite")).toBe(false);
+        }
+      }),
+      { numRuns: 500 },
     );
   });
 });

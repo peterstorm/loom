@@ -19,7 +19,7 @@ import {
   readEvidence,
   soleActiveBinding,
 } from "../../src/machine/ledger";
-import { eventsForEpoch } from "../../src/machine/evidence";
+import { eventsForEpoch, parseEpoch } from "../../src/machine/evidence";
 import { SUBAGENT_DIR } from "../../src/config";
 
 const run = `handlers-e2e-${process.pid}-${Date.now()}`;
@@ -81,8 +81,8 @@ describe("guarded machine — full hook lifecycle", () => {
     expect(records).toHaveLength(1);
     expect(records[0].epoch).toBe("a-1:code-implementer-agent");
     expect(records[0].event).toEqual({ kind: "TestRun", command: "npm test", exit: 1, report: null });
-    // Foreign epochs see nothing:
-    expect(eventsForEpoch(records, "a-9:code-implementer-agent")).toEqual([]);
+    // Foreign epochs see nothing (parseEpoch: the branded deserialization boundary):
+    expect(eventsForEpoch(records, parseEpoch("a-9:code-implementer-agent")!)).toEqual([]);
     await cleanup(stop(s), []);
   });
 

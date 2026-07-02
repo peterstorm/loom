@@ -88,7 +88,16 @@ const handler: HookHandler = async (stdin) => {
     }
 
     const loaded = loadMachine(machinesDir(), binding.agentType);
-    if (loaded.kind === "none") return passthroughResult(); // stale binding
+    if (loaded.kind === "none") {
+      // A binding can only exist because a machine existed at bind time
+      // (mark-subagent-active binds through the same machinesDir()), so
+      // "none" here means the definition vanished — deleted machine file or
+      // a re-pointed machines dir. Fail closed: a gate whose machine
+      // disappears must not silently disarm.
+      return blockResult(
+        `[loom machine] machine definition for bound agent "${binding.agentType}" vanished from ${machinesDir()} — failing closed`,
+      );
+    }
     if (loaded.kind === "invalid") {
       // Fail closed: an invalid machine must not silently disable its guarantees.
       return blockResult(`[loom machine] invalid machine definition — ${loaded.error}`);
@@ -101,7 +110,7 @@ const handler: HookHandler = async (stdin) => {
     return blockResult(blockExplanation(loaded.machine, state, tool_name));
   } catch (e) {
     // A binding exists for this session — an evaluation crash must not open the gate.
-    return blockResult(`[loom machine] gate evaluation failed — failing closed: ${(e as Error).message}`);
+    return blockResult(`[loom machine] gate evaluation failed — failing closed: ${e instanceof Error ? e.message : String(e)}`);
   }
 };
 

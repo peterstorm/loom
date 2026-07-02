@@ -37,13 +37,23 @@ export type Evidence =
     };
 
 /**
+ * Branded attribution key (`<agent_id>:<agent_type>`, minted at
+ * SubagentStart). Only `epochOf` (composition from branded identity) and
+ * `parseEpoch` (the deserialization boundary) in evidence.ts produce one —
+ * a raw string can never silently flow into epoch stamps or comparisons,
+ * so the recorder's stamp and the reader's key cannot desync by
+ * construction. Serialized as a plain JSON string; wire format unchanged.
+ */
+declare const EPOCH: unique symbol;
+export type Epoch = string & { readonly [EPOCH]: true };
+
+/**
  * A ledger line: an evidence event stamped with the epoch it belongs to.
- * The epoch (`<agent_id>:<agent_type>`, minted at SubagentStart) is what
- * makes evidence attributable — readers fold only their own epoch, so a
- * stale or foreign ledger line is inert rather than cross-credited.
+ * Readers fold only their own epoch, so a stale or foreign ledger line is
+ * inert rather than cross-credited.
  */
 export interface EvidenceRecord {
-  readonly epoch: string;
+  readonly epoch: Epoch;
   readonly event: Evidence;
 }
 
@@ -71,6 +81,14 @@ export const ZERO_COUNTS: EventCounts = {
  */
 export const GATE_WIRED_TOOLS = ["Edit", "Write", "MultiEdit"] as const;
 
+/**
+ * A tool the PreToolUse gate is wired for. `enforcedTools`/`allowedTools`
+ * carry this type (not `string`) because parseMachine PROVES membership in
+ * GATE_WIRED_TOOLS before constructing a MachineDef — the type records the
+ * proof instead of discarding it.
+ */
+export type GateWiredTool = (typeof GATE_WIRED_TOOLS)[number];
+
 /** A guard: "at least `min` events of `event` observed". No expressions. */
 export interface Requirement {
   readonly event: EventToken;
@@ -94,14 +112,14 @@ export type PhaseDef =
        * permits. Deny-by-default within the jurisdiction: an enforced tool not
        * listed here is blocked while this phase is current.
        */
-      readonly allowedTools: readonly string[];
+      readonly allowedTools: readonly GateWiredTool[];
       /** Guard to advance past this phase. */
       readonly advance: Requirement;
     }
   | {
       readonly terminal: true;
       readonly id: string;
-      readonly allowedTools: readonly string[];
+      readonly allowedTools: readonly GateWiredTool[];
       /** Evidence that must exist for clean completion. */
       readonly requires: readonly Requirement[];
     };
@@ -123,7 +141,7 @@ export type MachineDef = {
    * Tools outside this set always pass the gate — the machine is honest
    * about its jurisdiction instead of pretending to enforce everything.
    */
-  readonly enforcedTools: readonly string[];
+  readonly enforcedTools: readonly GateWiredTool[];
   readonly phases: readonly PhaseDef[];
 } & { readonly [MACHINE_PARSED]: true };
 

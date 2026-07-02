@@ -8,7 +8,20 @@ import { stripNamespace } from "../../utils/strip-namespace";
 import { removeActiveAgent, rosterAgentId, unbindMachineAgent } from "../../machine";
 
 const handler: HookHandler = async (stdin) => {
-  const input: SubagentStopInput = JSON.parse(stdin);
+  // Guard the standalone CLI route: dispatch parses stdin before calling
+  // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
+  // where a bare JSON.parse throw would surface as an uncontextualized
+  // "Hook error". Malformed input means the roster entry and any binding
+  // cannot be released — say so; the liveness TTL eventually reaps them.
+  let input: SubagentStopInput;
+  try {
+    input = JSON.parse(stdin);
+  } catch (e) {
+    return {
+      kind: "error",
+      message: `cleanup-subagent-flag: malformed SubagentStop input — roster entry and machine binding NOT released (liveness TTL will reap them): ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
   const { session_id, agent_id } = input;
 
   // Release guarded-machine binding. unbindMachineAgent locks internally

@@ -58,18 +58,38 @@ import {
   parseAgentId,
   parseBindingLine,
   parseEvidenceLine,
+  parseSessionId,
+  resolveSoleActiveBinding,
 } from "./evidence";
-import type { Evidence, EvidenceRecord, MachineDef } from "./types";
+import type { Epoch, Evidence, EvidenceRecord, MachineDef } from "./types";
+
+/**
+ * The single path-construction boundary for session files. Session ids come
+ * from hook input — parseSessionId refuses separators, `..` traversal, and
+ * whitespace, so an unvalidated id can never address files outside
+ * SUBAGENT_DIR. Throwing is the fail-closed convention here: every caller
+ * either catches-and-stands-down (recorder, dispatcher snapshot, safeRun)
+ * or fails closed at the CLI boundary (the gate).
+ */
+function sessionFilePath(sessionId: string, suffix: string): string {
+  const parsed = parseSessionId(sessionId);
+  if (parsed === null) {
+    throw new Error(
+      `invalid session id ${JSON.stringify(sessionId)} — refusing to construct a ${suffix} path`,
+    );
+  }
+  return `${SUBAGENT_DIR}/${parsed}${suffix}`;
+}
 
 export const ledgerPath = (sessionId: string): string =>
-  `${SUBAGENT_DIR}/${sessionId}.evidence.jsonl`;
+  sessionFilePath(sessionId, ".evidence.jsonl");
 
 export const machineBindingPath = (sessionId: string): string =>
-  `${SUBAGENT_DIR}/${sessionId}.machine`;
+  sessionFilePath(sessionId, ".machine");
 
-const activeFlagPath = (sessionId: string): string => `${SUBAGENT_DIR}/${sessionId}.active`;
+const activeFlagPath = (sessionId: string): string => sessionFilePath(sessionId, ".active");
 
-const bindingLock = (sessionId: string): string => `${SUBAGENT_DIR}/${sessionId}.cleanup`;
+const bindingLock = (sessionId: string): string => sessionFilePath(sessionId, ".cleanup");
 
 // --- Bindings ---
 
@@ -137,18 +157,13 @@ export function countActiveAgents(sessionId: string): number {
 
 /**
  * The binding evidence may be attributed to, or null when attribution is
- * impossible: no (fresh) binding, more than one binding, any additional
- * subagent active in the session (the harness gives tool calls no agent
- * identity), or a leaked binding — the sole active agent is not the bound
- * one, so attributing its tool calls to the stale binding would cross-credit.
+ * impossible. The decision itself is the pure resolveSoleActiveBinding
+ * (evidence.ts) — exactly one fresh binding AND a roster of exactly the
+ * bound agent; anything else (contention, a leaked binding over an empty
+ * or foreign roster) stands down. This adapter only supplies the files.
  */
 export function soleActiveBinding(sessionId: string, nowMs: number = Date.now()): MachineBinding | null {
-  const bindings = readBindings(sessionId, nowMs);
-  if (bindings.length !== 1) return null;
-  const active = readActiveAgents(sessionId);
-  if (active.length > 1) return null;
-  if (active.length === 1 && active[0] !== bindings[0].agentId) return null;
-  return bindings[0];
+  return resolveSoleActiveBinding(readBindings(sessionId, nowMs), readActiveAgents(sessionId));
 }
 
 /**
@@ -321,7 +336,7 @@ export async function unbindMachineAgent(
 
 // --- Ledger IO ---
 
-export function appendEvidence(sessionId: string, epoch: string, events: readonly Evidence[]): void {
+export function appendEvidence(sessionId: string, epoch: Epoch, events: readonly Evidence[]): void {
   if (events.length === 0) return;
   mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
   const lines = events.map((event) => JSON.stringify({ epoch, event })).join("\n") + "\n";

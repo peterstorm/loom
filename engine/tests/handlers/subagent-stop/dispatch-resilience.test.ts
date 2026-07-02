@@ -15,6 +15,7 @@ import dispatch from "../../../src/handlers/subagent-stop/dispatch";
 import markActive from "../../../src/handlers/subagent-start/mark-subagent-active";
 import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-task-status";
 import { SUBAGENT_DIR } from "../../../src/config";
+import { parseEpoch } from "../../../src/machine";
 import type { EvidenceRecord } from "../../../src/machine";
 
 const run = `dispatch-resilience-${process.pid}-${Date.now()}`;
@@ -137,7 +138,7 @@ describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7
     // No <session>.evidence.jsonl exists — the snapshot is the only source,
     // exactly the bind-time truncation window the dispatcher closes.
     const snapshot: readonly EvidenceRecord[] = [{
-      epoch: "a-1:code-implementer-agent",
+      epoch: parseEpoch("a-1:code-implementer-agent")!,
       event: {
         kind: "TestRun",
         command: "npm test",
@@ -159,5 +160,40 @@ describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7
     expect(state.tasks[0].status).toBe("implemented");
     expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-pass" });
     expect(state.tasks[0].test_evidence).toContain("ledger: exit 0");
+  }, 30000);
+});
+
+describe("a FAILED evidence snapshot is never laundered into 'genuinely empty' (null sentinel)", () => {
+  it("unreadable ledger → snapshot fails loudly and the task is NOT credited a degraded verdict", async () => {
+    const s = sid("snapshot-fail");
+    const dir = tempDir();
+    const statePath = writeState(dir);
+    pointSessionAt(s, statePath);
+
+    // A DIRECTORY at the ledger path makes readEvidence throw (EISDIR):
+    // the dispatcher's snapshot read fails. With the old `[]` sentinel the
+    // handler would treat this as an empty ledger and mint a degraded
+    // verdict; with the null sentinel it re-reads (and fails loudly).
+    const ledgerDir = `${SUBAGENT_DIR}/${s}.evidence.jsonl`;
+    mkdirSync(ledgerDir, { recursive: true });
+    sessionFiles.push(ledgerDir);
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const result = await dispatch(
+      JSON.stringify({ session_id: s, agent_id: "a-1", agent_type: "code-implementer-agent" }),
+      [],
+    );
+    const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+    stderrSpy.mockRestore();
+
+    expect(result.kind).toBe("passthrough"); // dispatcher never crashes the pipeline
+    expect(text).toContain(`evidence snapshot failed for ${s}`);
+    // The re-read also fails → update-task-status errors instead of writing
+    // a fabricated "degraded (machine bound, no ledger evidence)" verdict.
+    expect(text).toContain("ERROR in updateTaskStatus");
+
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.tasks[0].status).toBe("in_progress"); // untouched — fail closed
+    expect(state.tasks[0].test_result).toBeUndefined();
   }, 30000);
 });

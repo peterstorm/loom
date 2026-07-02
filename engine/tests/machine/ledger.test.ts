@@ -41,6 +41,18 @@ function agentType(s: string) {
 const bind = (s: string, type: string, id: string) =>
   ledger.bindMachineAgent(s, agentType(type), agentId(id));
 
+// Epochs are branded — tests go through the same parse boundary readers use.
+function ep(s: string) {
+  const v = ledger.parseEpoch(s);
+  if (v === null) throw new Error(`test fixture: invalid epoch ${JSON.stringify(s)}`);
+  return v;
+}
+
+/** Put exactly these agents on the session's `.active` roster. */
+function roster(s: string, ...ids: string[]): void {
+  writeFileSync(`${SUBAGENT_DIR}/${s}.active`, ids.map((i) => `${i}\n`).join(""));
+}
+
 const read = (path: string): Evidence => ({ kind: "FileRead", path });
 const testRun: Evidence = {
   kind: "TestRun",
@@ -52,14 +64,14 @@ const testRun: Evidence = {
 describe("evidence ledger", () => {
   it("roundtrips epoch-stamped records through append + read", () => {
     const s = sid("s1");
-    ledger.appendEvidence(s, "a1:code-implementer-agent", [read("/a.ts"), testRun]);
+    ledger.appendEvidence(s, ep("a1:code-implementer-agent"), [read("/a.ts"), testRun]);
     const records = ledger.readEvidence(s);
     expect(records).toEqual([
       { epoch: "a1:code-implementer-agent", event: read("/a.ts") },
       { epoch: "a1:code-implementer-agent", event: testRun },
     ]);
-    expect(ledger.eventsForEpoch(records, "a1:code-implementer-agent")).toEqual([read("/a.ts"), testRun]);
-    expect(ledger.eventsForEpoch(records, "other:agent")).toEqual([]);
+    expect(ledger.eventsForEpoch(records, ep("a1:code-implementer-agent"))).toEqual([read("/a.ts"), testRun]);
+    expect(ledger.eventsForEpoch(records, ep("other:agent"))).toEqual([]);
   });
 
   it("reads [] for a session with no ledger", () => {
@@ -95,18 +107,21 @@ describe("evidence ledger", () => {
       ledger.ledgerPath(s),
       `${JSON.stringify({ epoch: "a:b", event: read("/ok.ts") })}\n{torn line\n${JSON.stringify({ epoch: "a:b", event: testRun })}\n`,
     );
-    expect(ledger.eventsForEpoch(ledger.readEvidence(s), "a:b")).toEqual([read("/ok.ts"), testRun]);
+    expect(ledger.eventsForEpoch(ledger.readEvidence(s), ep("a:b"))).toEqual([read("/ok.ts"), testRun]);
   });
 });
 
 describe("machine binding lifecycle", () => {
-  it("bind → sole binding → unbind → gone", async () => {
+  it("bind → sole binding (with the bound agent rostered) → unbind → gone", async () => {
     const s = sid("s2");
     expect(ledger.readBindings(s)).toEqual([]);
     await bind(s, "code-implementer-agent", "a-1");
     expect(ledger.readBindings(s)).toEqual([
       { agentId: "a-1", agentType: "code-implementer-agent", epoch: "a-1:code-implementer-agent" },
     ]);
+    // A binding with an EMPTY roster is the leaked-binding shape → stand down.
+    expect(ledger.soleActiveBinding(s)).toBeNull();
+    roster(s, "a-1");
     expect(ledger.soleActiveBinding(s)?.epoch).toBe("a-1:code-implementer-agent");
     await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-1");
     expect(ledger.readBindings(s)).toEqual([]);
@@ -116,13 +131,13 @@ describe("machine binding lifecycle", () => {
   it("a fresh bind truncates the previous run's ledger (epochs make leftovers inert anyway)", async () => {
     const s = sid("s3");
     await bind(s, "code-implementer-agent", "a-1");
-    ledger.appendEvidence(s, "a-1:code-implementer-agent", [read("/old.ts")]);
+    ledger.appendEvidence(s, ep("a-1:code-implementer-agent"), [read("/old.ts")]);
     await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-1");
 
     await bind(s, "code-implementer-agent", "a-2");
     expect(ledger.readEvidence(s)).toEqual([]);
     // Even if truncation had failed, the new epoch sees nothing:
-    expect(ledger.eventsForEpoch(ledger.readEvidence(s), "a-2:code-implementer-agent")).toEqual([]);
+    expect(ledger.eventsForEpoch(ledger.readEvidence(s), ep("a-2:code-implementer-agent"))).toEqual([]);
     await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-2");
   });
 
@@ -160,6 +175,7 @@ describe("machine binding lifecycle", () => {
   it("contention: second binding or second active agent voids soleActiveBinding", async () => {
     const s = sid("s4");
     await bind(s, "code-implementer-agent", "a-1");
+    roster(s, "a-1");
     expect(ledger.soleActiveBinding(s)).not.toBeNull();
 
     // Same-type parallel binding → no attribution
@@ -169,10 +185,14 @@ describe("machine binding lifecycle", () => {
     expect(ledger.soleActiveBinding(s)).not.toBeNull();
 
     // A second ACTIVE subagent (any type, no machine) also voids it
-    writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\na-9\n");
+    roster(s, "a-1", "a-9");
     expect(ledger.soleActiveBinding(s)).toBeNull();
-    writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n");
+    roster(s, "a-1");
     expect(ledger.soleActiveBinding(s)).not.toBeNull();
+
+    // An EMPTY roster (leaked binding) also voids it
+    roster(s);
+    expect(ledger.soleActiveBinding(s)).toBeNull();
 
     await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-1");
   });
@@ -207,6 +227,48 @@ describe("branded agent identity — the bind boundary charset", () => {
     } finally {
       stderrSpy.mockRestore();
     }
+  });
+});
+
+describe("branded session identity — the path-construction boundary", () => {
+  it("parseSessionId rejects separators, traversal, whitespace, and empty", () => {
+    for (const bad of ["", "a/b", "a\\b", "..", "a..b", "../../etc/passwd", "a b", "a\tb", "a\nb"]) {
+      expect(ledger.parseSessionId(bad)).toBeNull();
+    }
+    expect(ledger.parseSessionId("abc-123_DEF.4")).toBe("abc-123_DEF.4");
+  });
+
+  it("path constructors THROW on an invalid session id — no traversal path is ever built", () => {
+    for (const evil of ["../../../etc/cron.d/x", "a/b", "..", " "]) {
+      expect(() => ledger.ledgerPath(evil)).toThrow(/invalid session id/);
+      expect(() => ledger.machineBindingPath(evil)).toThrow(/invalid session id/);
+    }
+  });
+
+  it("readers fail safe (throw, caught by callers) instead of reading outside SUBAGENT_DIR", () => {
+    expect(() => ledger.readEvidence("../outside")).toThrow(/invalid session id/);
+    expect(() => ledger.readBindings("../outside")).toThrow(/invalid session id/);
+    expect(() => ledger.soleActiveBinding("../outside")).toThrow(/invalid session id/);
+  });
+});
+
+describe("branded epochs — the deserialization boundary", () => {
+  it("parseEpoch accepts exactly what epochOf produces", () => {
+    expect(ledger.parseEpoch("a-1:code-implementer-agent")).toBe("a-1:code-implementer-agent");
+    const id = ledger.parseAgentId("a-1")!;
+    const type = ledger.parseAgentType("code-implementer-agent")!;
+    expect(ledger.parseEpoch(ledger.epochOf(id, type))).toBe(ledger.epochOf(id, type));
+  });
+
+  it("parseEpoch rejects colon-less, empty-half, and multi-colon strings", () => {
+    for (const bad of ["", "no-colon", ":type", "id:", "a:b:c", "a\tb:c", "a:b\nc"]) {
+      expect(ledger.parseEpoch(bad)).toBeNull();
+    }
+  });
+
+  it("ledger lines with corrupt epochs are skipped at read time", () => {
+    expect(ledger.parseEvidenceLine('{"epoch":"no-colon","event":{"kind":"FileRead","path":"/a.ts"}}')).toBeNull();
+    expect(ledger.parseEvidenceLine('{"epoch":"a:b:c","event":{"kind":"FileRead","path":"/a.ts"}}')).toBeNull();
   });
 });
 

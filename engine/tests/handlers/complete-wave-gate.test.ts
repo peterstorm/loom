@@ -406,6 +406,54 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
     expect(deps.fileExists("/never/resolved.ts")).toBe(false);
   });
 
+  it("snapshotGateDeps stats suffix-matched task file_list variants too (plan/task path divergence)", () => {
+    // Plan declares src/machines/x.machine.json; the task file_list carries
+    // engine/src/machines/x.machine.json and the artifact exists ONLY there.
+    const statted: string[] = [];
+    const state = mkGraph({
+      plan_file: "plan.md",
+      tasks: [{ ...baseTask, file_list: ["engine/src/machines/x.machine.json"] }],
+    });
+    const deps = snapshotGateDeps(state, {
+      loadPlanModels: () => ({
+        kind: "loaded",
+        models: {
+          lifecycles: [{ id: "LC-1", title: "X", machineFile: "src/machines/x.machine.json" }],
+          pipeline: null,
+          invariants: [],
+          strays: [],
+        },
+      }),
+      fileExists: (p) => {
+        statted.push(p);
+        return p === "engine/src/machines/x.machine.json";
+      },
+    });
+    expect(statted).toContain("src/machines/x.machine.json");
+    expect(statted).toContain("engine/src/machines/x.machine.json");
+
+    // …and the full evaluation counts the variant as the artifact: the gate passes.
+    const decision = evaluateWaveGate(state, null, deps);
+    expect(decision.verdict.kind).toBe("pass");
+  });
+
+  it("snapshotGateDeps.loadPlanModels fails CLOSED when asked for a different plan than it snapshotted", () => {
+    const deps = snapshotGateDeps(mkGraph({ plan_file: "plan.md" }), {
+      loadPlanModels: () => ({ kind: "none" }),
+      fileExists: () => true,
+    });
+    // The snapshotted path is served…
+    expect(deps.loadPlanModels("plan.md")).toEqual({ kind: "none" });
+    // …any other path is a drift, never silently answered from the snapshot.
+    const drifted = deps.loadPlanModels("other-plan.md");
+    expect(drifted.kind).toBe("unreadable");
+    if (drifted.kind === "unreadable") {
+      expect(drifted.path).toBe("other-plan.md");
+      expect(drifted.error).toContain("drift");
+      expect(drifted.error).toContain("plan.md");
+    }
+  });
+
   it("a task-state change AFTER the deps snapshot is honored by evaluation (SubagentStop lands before the lock)", () => {
     // Deps are snapshotted from the pre-lock read of a PASSING state…
     const preRead = mkGraph();

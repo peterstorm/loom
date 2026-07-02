@@ -32,10 +32,17 @@ describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {
     expect(check.passed).toBe(true);
   });
 
-  it("fails closed when the plan is named but unreadable", () => {
-    const check = checkLifecycleArtifacts({ kind: "unreadable", path: "/gone/plan.md" }, [], () => true);
+  it("fails closed when the plan is named but unreadable — and names the cause", () => {
+    const check = checkLifecycleArtifacts(
+      { kind: "unreadable", path: "/gone/plan.md", error: "ENOENT: no such file or directory" },
+      [],
+      () => true,
+    );
     expect(check.passed).toBe(false);
-    if (!check.passed) expect(check.reason).toContain("unreadable");
+    if (!check.passed) {
+      expect(check.reason).toContain("unreadable");
+      expect(check.reason).toContain("ENOENT"); // ENOENT vs EACCES must be distinguishable
+    }
   });
 
   it("passes when no lifecycle is bound to this wave", () => {
@@ -76,6 +83,30 @@ describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {
     const source = loaded([{ id: "LC-1", title: "A", machineFile: null }]);
     const check = checkLifecycleArtifacts(source, [waveTask(["x.ts"])], () => false);
     expect(check.passed).toBe(true);
+  });
+
+  it("counts a suffix-matched task file_list variant as the artifact (binding-validation parity)", () => {
+    // Plan declares the repo-relative path; the task's file_list carries the
+    // deeper form pathsMatch accepts — the artifact exists ONLY at the
+    // task's spelling. The check must pass, not demand the declared spelling.
+    const source = loaded([{ id: "LC-1", title: "X", machineFile: "src/machines/x.machine.json" }]);
+    const check = checkLifecycleArtifacts(
+      source,
+      [waveTask(["engine/src/machines/x.machine.json"])],
+      (p) => p === "engine/src/machines/x.machine.json",
+    );
+    expect(check.passed).toBe(true);
+  });
+
+  it("still fails when neither the declared path nor any matched variant exists", () => {
+    const source = loaded([{ id: "LC-1", title: "X", machineFile: "src/machines/x.machine.json" }]);
+    const check = checkLifecycleArtifacts(
+      source,
+      [waveTask(["engine/src/machines/x.machine.json"])],
+      () => false,
+    );
+    expect(check.passed).toBe(false);
+    if (!check.passed) expect(check.reason).toContain("LC-1");
   });
 });
 
@@ -175,9 +206,13 @@ describe("loadPlanModelsSource", () => {
     expect(loadPlanModelsSource("  ").kind).toBe("none");
   });
 
-  it("returns unreadable for a missing file", () => {
+  it("returns unreadable for a missing file, carrying the fs error message", () => {
     const source = loadPlanModelsSource("/nonexistent/plan.md");
     expect(source.kind).toBe("unreadable");
+    if (source.kind === "unreadable") {
+      expect(source.path).toBe("/nonexistent/plan.md");
+      expect(source.error).toContain("ENOENT");
+    }
   });
 
   it("returns loaded models for a real plan", () => {

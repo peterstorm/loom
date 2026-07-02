@@ -12,6 +12,7 @@ import {
   EVENT_TOKENS,
   GATE_WIRED_TOOLS,
   type EventToken,
+  type GateWiredTool,
   type MachineDef,
   type PhaseDef,
   type Requirement,
@@ -19,6 +20,20 @@ import {
   parseOk,
   parseErr,
 } from "./types";
+
+/** Type guard for the proof-site narrowing below — the sole GateWiredTool witness. */
+function isGateWired(tool: string): tool is GateWiredTool {
+  return (GATE_WIRED_TOOLS as readonly string[]).includes(tool);
+}
+
+/**
+ * Phase shape before tool names are proven gate-wired. Identical to PhaseDef
+ * except tools are raw strings; parseMachine narrows after validating the
+ * allowedTools ⊆ enforcedTools ⊆ GATE_WIRED_TOOLS chain.
+ */
+type RawPhaseDef =
+  | { readonly terminal: false; readonly id: string; readonly allowedTools: readonly string[]; readonly advance: Requirement }
+  | { readonly terminal: true; readonly id: string; readonly allowedTools: readonly string[]; readonly requires: readonly Requirement[] };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -41,7 +56,7 @@ function parseRequirement(v: unknown, ctx: string): ParseResult<Requirement> {
   return parseOk({ event: event as EventToken, min });
 }
 
-function parsePhase(v: unknown, index: number, isLast: boolean): ParseResult<PhaseDef> {
+function parsePhase(v: unknown, index: number, isLast: boolean): ParseResult<RawPhaseDef> {
   const ctx = `phases[${index}]`;
   if (!isRecord(v)) return parseErr(`${ctx}: must be an object`);
 
@@ -109,7 +124,7 @@ export function parseMachine(raw: unknown): ParseResult<MachineDef> {
     return parseErr("machine: phases must be an array with at least 2 phases (one working, one terminal)");
   }
 
-  const phases: PhaseDef[] = [];
+  const phases: RawPhaseDef[] = [];
   const seen = new Set<string>();
   for (let i = 0; i < phasesRaw.length; i++) {
     const parsed = parsePhase(phasesRaw[i], i, i === phasesRaw.length - 1);
@@ -130,8 +145,19 @@ export function parseMachine(raw: unknown): ParseResult<MachineDef> {
     }
   }
 
+  // Proof-site narrowing: the loops above rejected any enforced tool outside
+  // GATE_WIRED_TOOLS and any allowed tool outside enforcedTools, so every
+  // tool name is transitively gate-wired — these filters drop nothing, they
+  // only restate the proof in the type system.
+  const wiredEnforced: GateWiredTool[] = enforcedTools.filter(isGateWired);
+  const wiredPhases: PhaseDef[] = phases.map((p) =>
+    p.terminal
+      ? { terminal: true, id: p.id, allowedTools: p.allowedTools.filter(isGateWired), requires: p.requires }
+      : { terminal: false, id: p.id, allowedTools: p.allowedTools.filter(isGateWired), advance: p.advance },
+  );
+
   // The single blessed brand application: everything above proved the shape.
-  return parseOk({ agent, enforcedTools, phases } as unknown as MachineDef);
+  return parseOk({ agent, enforcedTools: wiredEnforced, phases: wiredPhases } as unknown as MachineDef);
 }
 
 export function parseMachineJson(json: string): ParseResult<MachineDef> {

@@ -13,6 +13,18 @@ import type { HookResult, HookHandler } from "./types";
 import { nonEmptyMessage } from "./types";
 import { resolveInitialState } from "./phase-init";
 
+/**
+ * Failure polarity for the top-level catch, derived from argv BEFORE
+ * anything can throw. Exit 1 is NON-blocking for PreToolUse hooks, so a
+ * crash outside the handler (dynamic-import failure, stdin error) would
+ * fail the enforce-phase-tools gate OPEN — for that route ANY crash must
+ * exit 2 (blocking). Every other route keeps exit 1.
+ */
+function topLevelFailureExitCode(argv: readonly string[]): 1 | 2 {
+  return argv[0] === "pre-tool-use" && argv[1] === "enforce-phase-tools" ? 2 : 1;
+}
+const FAILURE_EXIT_CODE = topLevelFailureExitCode(process.argv.slice(2));
+
 // Eagerly buffer stdin before any async work (bun drains piped data during dynamic imports)
 const stdinPromise: Promise<string> = process.stdin.isTTY
   ? Promise.resolve("")
@@ -22,6 +34,10 @@ const stdinPromise: Promise<string> = process.stdin.isTTY
       process.stdin.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
       process.stdin.on("error", reject);
     });
+// A stdin error may fire before main() awaits the promise (e.g. during the
+// dynamic import) — mark it handled so the crash routes through main's
+// await → the top-level catch, not an unhandled-rejection abort.
+stdinPromise.catch(() => {});
 
 /** Known handler routes — validated before dynamic import */
 const KNOWN_HANDLERS: Record<string, Set<string>> = {
@@ -138,5 +154,5 @@ async function main() {
 
 main().catch((err) => {
   process.stderr.write(`Hook error: ${err?.message ?? err}\n`);
-  process.exit(1);
+  process.exit(FAILURE_EXIT_CODE);
 });

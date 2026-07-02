@@ -46,7 +46,7 @@ describe("R2 — real exit status beats happy output text", () => {
   });
 
   it("NEW: a ledger failure fact (exit 1) overrides the text — trusted failure", () => {
-    const ledger = extractEvidence("Bash", { command: "mvn test" }, { exit: 1, stdout: lyingOutput }, () => null);
+    const ledger = extractEvidence("Bash", { command: "mvn test" }, { exit_code: 1, stdout: lyingOutput }, () => null);
     const resolved = resolveTestEvidence(ledger, bashOutput, true);
     expect(resolved.result).toEqual({ verdict: "trusted-fail" }); // a real nonzero exit is trustworthy failure
     expect(resolved.evidence).toContain("ledger: exit 1");
@@ -58,7 +58,7 @@ describe("R2 — reporter-confirmed pass carries explicit provenance in the verd
     const ledger = extractEvidence(
       "Bash",
       { command: "npx vitest run --reporter=json --outputFile=out.json" },
-      { exit: 0, stdout: "" },
+      { exit_code: 0, stdout: "" },
       () => ({ total: 9, failed: 0, source: "vitest-json" }),
     );
     const resolved = resolveTestEvidence(ledger, "", true);
@@ -67,10 +67,10 @@ describe("R2 — reporter-confirmed pass carries explicit provenance in the verd
   });
 
   it("NEW: report cross-check — failures or zero-tests never pass", () => {
-    const failing = extractEvidence("Bash", { command: "npm test" }, { exit: 0, stdout: "" }, () => ({ total: 9, failed: 2, source: "vitest-json" }));
+    const failing = extractEvidence("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }, () => ({ total: 9, failed: 2, source: "vitest-json" }));
     expect(resolveTestEvidence(failing, "irrelevant", true).result).toEqual({ verdict: "trusted-fail" });
 
-    const empty = extractEvidence("Bash", { command: "npm test" }, { exit: 0, stdout: "" }, () => ({ total: 0, failed: 0, source: "vitest-json" }));
+    const empty = extractEvidence("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }, () => ({ total: 0, failed: 0, source: "vitest-json" }));
     expect(resolveTestEvidence(empty, "", true).result).toEqual({ verdict: "trusted-fail" });
   });
 
@@ -94,14 +94,14 @@ describe("R2 — the spoofs the review found are dead", () => {
     // The review's end-to-end trusted-pass forgery:
     const cmd = `echo '{"numTotalTests":5,"numFailedTests":0}' # npm test --json`;
     expect(classifyTestCommand(cmd)).toBeNull();
-    expect(extractEvidence("Bash", { command: cmd }, { exit: 0, stdout: '{"numTotalTests":5,"numFailedTests":0}' }, () => {
+    expect(extractEvidence("Bash", { command: cmd }, { exit_code: 0, stdout: '{"numTotalTests":5,"numFailedTests":0}' }, () => {
       throw new Error("report discovery must not even run for unclassified commands");
     })).toEqual([]);
   });
 
   it("prose false-failures are dead: grep exiting 1 is not a trusted failure", () => {
     const cmd = 'git grep "cargo test" src/';
-    expect(extractEvidence("Bash", { command: cmd }, { exit: 1, stdout: "" }, () => null)).toEqual([]);
+    expect(extractEvidence("Bash", { command: cmd }, { exit_code: 1, stdout: "" }, () => null)).toEqual([]);
   });
 
   it("plain echo spoof: still labeled low-trust in the fallback, never trusted, machine never satisfied", () => {
@@ -117,7 +117,7 @@ describe("R2 — the spoofs the review found are dead", () => {
     // NEW: no ledger TestRun (echo never classifies); the transcript fallback
     // still passes — honest tiering, not prevention — but the verdict is
     // "untrusted" with its weakness labeled IN the data, so wave gates can tell.
-    const ledger = extractEvidence("Bash", { command: spoofCmd }, { exit: 0, stdout: "npm test: 5 passing" }, () => null);
+    const ledger = extractEvidence("Bash", { command: spoofCmd }, { exit_code: 0, stdout: "npm test: 5 passing" }, () => null);
     expect(ledger).toEqual([]);
     const resolved = resolveTestEvidence(ledger, bashOutput, true);
     expect(resolved.result).toEqual({
@@ -177,13 +177,13 @@ describe("R1 — write-before-read is structurally impossible for the bound agen
 describe("transcript text is never evidence (standing invariant)", () => {
   it("narrative text claiming success produces zero evidence events", () => {
     expect(
-      extractEvidence("Bash", { command: "ls -la" }, { exit: 0, stdout: "BUILD SUCCESS 99 passing" }, () => null),
+      extractEvidence("Bash", { command: "ls -la" }, { exit_code: 0, stdout: "BUILD SUCCESS 99 passing" }, () => null),
     ).toEqual([]);
   });
 
   it("unknown tool_response shapes yield exit: null → judged untrusted, never success", () => {
     expect(extractBashOutcome({ weird: true })).toEqual({ exit: null, stdout: "" });
-    const ledger = extractEvidence("Bash", { command: "npm test" }, { exit: null, stdout: "5 passing" }, () => null);
+    const ledger = extractEvidence("Bash", { command: "npm test" }, { weird: true, stdout: "5 passing" }, () => null);
     const resolved = resolveTestEvidence(ledger, "", true);
     expect(resolved.result.verdict).toBe("untrusted");
   });

@@ -145,27 +145,54 @@ export function validateModelBindings(
 }
 
 /**
+ * Outcome of the fail-closed plan-binding check. A discriminated union
+ * instead of `ValidationResult & { models?: PlanModels }`: `models` is
+ * present exactly when the plan was readable enough to parse — the type
+ * states it, callers never guess. `ok` doubles as the pass/fail
+ * discriminant so gate callers keep their `if (!check.ok)` shape.
+ */
+export type PlanBindingCheck =
+  /** The plan itself could not be consulted (missing path / unreadable file) — nothing was parsed. */
+  | { readonly kind: "plan-unavailable"; readonly ok: false; readonly errors: readonly string[] }
+  /** Models were declared and at least one binding is broken. */
+  | { readonly kind: "invalid-bindings"; readonly ok: false; readonly errors: readonly string[]; readonly models: PlanModels }
+  /** The plan parsed and declares no models — genuine opt-out, zero checks. */
+  | { readonly kind: "opted-out"; readonly ok: true; readonly models: PlanModels }
+  /** Models were declared and every binding validated. */
+  | { readonly kind: "validated"; readonly ok: true; readonly models: PlanModels };
+
+/**
  * Fail-closed entry point: read the plan, parse models, validate bindings.
  *
- * - Non-string or empty `planFile` → error (the graph names no plan to check)
- * - Plan file unreadable → error (a graph must not pass validation because
- *   its plan cannot be read — that would let a typo'd path disarm the gate)
- * - Plan readable, no models declared → ok (genuine opt-out)
+ * - Non-string or empty `planFile` → plan-unavailable (the graph names no plan to check)
+ * - Plan file unreadable → plan-unavailable (a graph must not pass validation
+ *   because its plan cannot be read — that would let a typo'd path disarm the gate)
+ * - Plan readable, no models declared → opted-out (genuine opt-out)
  */
 export function checkPlanModelBindings(
   planFile: unknown,
   tasks: readonly Record<string, unknown>[],
   deps: ModelBindingDeps,
-): ValidationResult & { models?: PlanModels } {
+): PlanBindingCheck {
   if (typeof planFile !== "string" || planFile.trim().length === 0) {
-    return fail(["plan_file must be a non-empty string path — executable-model bindings cannot be verified without the plan"]);
+    return {
+      kind: "plan-unavailable",
+      ok: false,
+      errors: ["plan_file must be a non-empty string path — executable-model bindings cannot be verified without the plan"],
+    };
   }
   const content = deps.readFile(planFile);
   if (content === null) {
-    return fail([`plan_file '${planFile}' not found or unreadable — executable-model bindings cannot be verified (fix the path or run from the repo root)`]);
+    return {
+      kind: "plan-unavailable",
+      ok: false,
+      errors: [`plan_file '${planFile}' not found or unreadable — executable-model bindings cannot be verified (fix the path or run from the repo root)`],
+    };
   }
   const models = parsePlanModels(content);
-  if (!hasModels(models)) return { ok: true, models };
+  if (!hasModels(models)) return { kind: "opted-out", ok: true, models };
   const result = validateModelBindings(models, tasks, deps);
-  return { ...result, models };
+  return result.ok
+    ? { kind: "validated", ok: true, models }
+    : { kind: "invalid-bindings", ok: false, errors: result.errors, models };
 }

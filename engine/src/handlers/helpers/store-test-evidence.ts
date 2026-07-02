@@ -21,28 +21,44 @@ const handler: HookHandler = async (stdin, args) => {
   const newWritten = /NEW_TESTS_WRITTEN:\s*true/i.test(stdin);
   const newEvidenceMatch = stdin.match(/NEW_TEST_EVIDENCE:\s*(.*)/);
 
+  // A trusted verdict (ledger-derived ground truth) must never be laundered
+  // away by agent-controlled stdin — an untrusted "passed: true" replacing a
+  // trusted-fail would sail through the wave gate. Mirror update-task-status's
+  // skip guard: leave the task untouched and say so. Decided INSIDE the
+  // locked update so a concurrently-written trusted verdict is honored.
+  let skippedTrustedVerdict = false;
   await mgr.update((s) => ({
     ...s,
-    tasks: s.tasks.map((t) =>
-      t.id === taskId
-        ? {
-            ...t,
-            status: "implemented" as const,
-            // Helper-reported stdin is agent-controlled text — never trusted.
-            test_result: {
-              verdict: "untrusted" as const,
-              passed,
-              label: "helper-reported (store-test-evidence stdin)",
-            },
-            test_evidence: evidenceMatch?.[1] ?? "",
-            new_tests_written: newWritten,
-            new_test_evidence: newEvidenceMatch?.[1] ?? "",
-          }
-        : t
-    ),
+    tasks: s.tasks.map((t) => {
+      if (t.id !== taskId) return t;
+      const verdict = t.test_result?.verdict;
+      if (verdict === "trusted-pass" || verdict === "trusted-fail") {
+        skippedTrustedVerdict = true;
+        return t;
+      }
+      return {
+        ...t,
+        status: "implemented" as const,
+        // Helper-reported stdin is agent-controlled text — never trusted.
+        test_result: {
+          verdict: "untrusted" as const,
+          passed,
+          label: "helper-reported (store-test-evidence stdin)",
+        },
+        test_evidence: evidenceMatch?.[1] ?? "",
+        new_tests_written: newWritten,
+        new_test_evidence: newEvidenceMatch?.[1] ?? "",
+      };
+    }),
   }));
 
-  process.stderr.write(`Test evidence stored for ${taskId}: passed=${passed} new_tests=${newWritten}\n`);
+  if (skippedTrustedVerdict) {
+    process.stderr.write(
+      `store-test-evidence: ${taskId} already carries a trusted verdict from the evidence ledger — refusing to overwrite it with helper-reported (untrusted) results\n`,
+    );
+  } else {
+    process.stderr.write(`Test evidence stored for ${taskId}: passed=${passed} new_tests=${newWritten}\n`);
+  }
   return { kind: "passthrough" };
 };
 

@@ -8,7 +8,7 @@
  * transitively touching node:fs.
  */
 
-import type { Evidence, EvidenceRecord, TestReportSummary } from "./types";
+import type { Epoch, Evidence, EvidenceRecord, TestReportSummary } from "./types";
 
 // --- Branded agent identity ---
 
@@ -38,13 +38,33 @@ export function parseAgentType(raw: string): AgentType | null {
   return raw !== "" && !BINDING_UNSAFE.test(raw) ? (raw as AgentType) : null;
 }
 
+// --- Branded session identity ---
+
+/**
+ * Branded session identity. Session ids are interpolated into SUBAGENT_DIR
+ * file paths (`<session>.evidence.jsonl`, `<session>.machine`, …) — a raw
+ * id containing a path separator, a `..` traversal, or whitespace would let
+ * hook input address files outside the subagent dir. The smart constructor
+ * is the only producer, mirroring parseAgentId.
+ */
+declare const SESSION_ID: unique symbol;
+export type SessionId = string & { readonly [SESSION_ID]: true };
+
+/** Characters/sequences that would escape the SUBAGENT_DIR path encoding. */
+const SESSION_UNSAFE = /[/\\\s]|\.\./;
+
+/** Smart constructor: null when the raw id cannot safely name session files. */
+export function parseSessionId(raw: string): SessionId | null {
+  return raw !== "" && !SESSION_UNSAFE.test(raw) ? (raw as SessionId) : null;
+}
+
 // --- Bindings (wire format: "<agent_id>\t<agent_type>\t<bound_at_ms>") ---
 
 export interface MachineBinding {
   readonly agentId: AgentId;
   readonly agentType: AgentType;
   /** Attribution key stamped on every evidence record of this run. */
-  readonly epoch: string;
+  readonly epoch: Epoch;
 }
 
 /** A binding as persisted on disk: the binding plus its bind-time stamp. */
@@ -54,8 +74,22 @@ export interface PersistedBinding {
   readonly boundAtMs: number;
 }
 
-export const epochOf = (agentId: AgentId, agentType: AgentType): string =>
-  `${agentId}:${agentType}`;
+export const epochOf = (agentId: AgentId, agentType: AgentType): Epoch =>
+  `${agentId}:${agentType}` as Epoch;
+
+/**
+ * Deserialization boundary for epochs read back from ledger lines. Accepts
+ * exactly what epochOf produces: `<agent_id>:<agent_type>` where both
+ * halves satisfy their smart constructors (AgentId cannot contain `:`, so
+ * a valid epoch has exactly one). Anything else is corrupt and yields null.
+ */
+export function parseEpoch(raw: string): Epoch | null {
+  const idx = raw.indexOf(":");
+  if (idx < 0) return null;
+  const agentId = parseAgentId(raw.slice(0, idx));
+  const agentType = parseAgentType(raw.slice(idx + 1));
+  return agentId !== null && agentType !== null ? (raw as Epoch) : null;
+}
 
 /**
  * Parse one binding-file line. Null for malformed lines: wrong field count,
@@ -139,14 +173,34 @@ export function parseEvidenceLine(line: string): EvidenceRecord | null {
   }
   if (typeof raw !== "object" || raw === null) return null;
   const o = raw as Record<string, unknown>;
-  if (typeof o.epoch !== "string" || o.epoch === "") return null;
+  if (typeof o.epoch !== "string") return null;
+  const epoch = parseEpoch(o.epoch);
+  if (epoch === null) return null;
   const event = parseEvent(o.event);
-  return event ? { epoch: o.epoch, event } : null;
+  return event ? { epoch, event } : null;
 }
 
 /** Events attributable to one run. */
-export function eventsForEpoch(records: readonly EvidenceRecord[], epoch: string): Evidence[] {
+export function eventsForEpoch(records: readonly EvidenceRecord[], epoch: Epoch): Evidence[] {
   return records.filter((r) => r.epoch === epoch).map((r) => r.event);
+}
+
+/**
+ * The sole-active attribution rule, as one pure decision shared by the fs
+ * adapter (ledger.ts) and the in-memory test fake: evidence may be
+ * attributed ONLY when exactly one machine binding exists AND the active
+ * roster contains exactly the bound agent. An EMPTY roster is a leaked
+ * binding shape (the bound agent's roster entry is gone but its binding
+ * survived) — attributing session activity to it would credit whoever is
+ * actually running, so it stands down like any other contention.
+ */
+export function resolveSoleActiveBinding(
+  bindings: readonly MachineBinding[],
+  activeRoster: readonly string[],
+): MachineBinding | null {
+  if (bindings.length !== 1) return null;
+  if (activeRoster.length !== 1) return null;
+  return activeRoster[0] === bindings[0].agentId ? bindings[0] : null;
 }
 
 // --- SessionRegistry port ---
@@ -165,6 +219,6 @@ export interface SessionRegistry {
   readonly removeActive: (sessionId: string, agentId: string) => Promise<void>;
   readonly countActiveAgents: (sessionId: string) => number;
   readonly soleActiveBinding: (sessionId: string) => MachineBinding | null;
-  readonly appendEvidence: (sessionId: string, epoch: string, events: readonly Evidence[]) => void;
+  readonly appendEvidence: (sessionId: string, epoch: Epoch, events: readonly Evidence[]) => void;
   readonly readEvidence: (sessionId: string) => EvidenceRecord[];
 }

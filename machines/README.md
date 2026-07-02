@@ -50,9 +50,9 @@ The harness gives tool calls no agent identity, so evidence attribution
 rests on the **sole-active rule**: evidence is recorded and the live gate
 enforces ONLY while exactly one subagent is active and exactly one machine
 is bound. Any contention — a second subagent of any type, a second binding
-— stands both down: the gate with a stderr note, the recorder silently
-(it never blocks, so a bound-but-empty ledger surfaces downstream as the
-`degraded` label instead). SubagentStop resolution is safe either way,
+— stands both down, each with a stderr note (the recorder still never
+blocks, so a bound-but-empty ledger surfaces downstream as the
+`degraded` label). SubagentStop resolution is safe either way,
 because it reads only the stopping agent's epoch.
 
 **Binding liveness.** A binding is normally released by the agent's
@@ -89,15 +89,22 @@ additionally walks the import closure so the reducer can never re-acquire
   invariants over interleavings).
 
 Known residual limits, on purpose and documented:
-- Parallel waves therefore run without the live gate; the per-epoch
-  SubagentStop audit still applies to whatever the sole-active windows
-  recorded.
+- The sole-active rule means parallel waves run without the live gate:
+  tool calls carry no agent identity, so with more than one subagent
+  active the gate and recorder stand down rather than cross-credit. The
+  per-epoch SubagentStop audit still applies to whatever the sole-active
+  windows recorded.
+- Report freshness checks *recency* (15-minute window), not that the
+  artifact postdates the command — so it bounds, but does not eliminate,
+  same-family cross-run artifact vouching, and a *planted* report still
+  works: a pre-planted `--outputFile` JSON, or a "test" script that itself
+  echoes runner-shaped JSON, can mint a trusted-pass. Stamping reports
+  with an mtime-≥-command-start bound is the known follow-up (needs
+  PreToolUse timestamps).
 - A consistent forgery of ledger *facts* via Bash is blocked by the
   guard-state-file hook (the ledger and binding paths are guarded state
   files); full integrity (HMAC or out-of-agent-reach storage) is a
   follow-up.
-- The report freshness window (15 min) bounds, but does not eliminate,
-  same-family cross-run artifact vouching.
 - `FileRead` means the Read tool specifically — context gathered only via
   Grep/Glob/Bash does not advance `read-context`.
 
