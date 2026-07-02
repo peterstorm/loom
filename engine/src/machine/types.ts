@@ -16,6 +16,15 @@ export interface TestReportSummary {
   readonly source: "vitest-json" | "junit-xml";
 }
 
+/**
+ * Evidence stores FACTS ONLY — never derived judgments. `passed`/`trusted`
+ * are computed from `exit` + `report` via `judgeTestRun` at read time, so a
+ * ledger line can never carry an inconsistent (or forged-inconsistent)
+ * judgment. Note the residual limit: a consistent forgery of the facts
+ * themselves is only mitigated by the guard-state-file Bash hook protecting
+ * the ledger path — full integrity (HMAC / out-of-reach storage) is a
+ * documented follow-up.
+ */
 export type Evidence =
   | { readonly kind: "FileRead"; readonly path: string }
   | { readonly kind: "FileWrite"; readonly path: string }
@@ -25,16 +34,18 @@ export type Evidence =
       /** Real exit status captured at execution time; null when the harness didn't expose one. */
       readonly exit: number | null;
       readonly report: TestReportSummary | null;
-      /** Derived by judgeTestRun — true only when ground truth confirms a pass. */
-      readonly passed: boolean;
-      /**
-       * Whether this event is strong enough to act on:
-       * a nonzero exit is trustworthy failure on its own; a zero exit is
-       * trustworthy only when a report artifact confirms it (an agent can
-       * run `echo "npm test: 5 passing"` — echo exits 0 but writes no report).
-       */
-      readonly trusted: boolean;
     };
+
+/**
+ * A ledger line: an evidence event stamped with the epoch it belongs to.
+ * The epoch (`<agent_id>:<agent_type>`, minted at SubagentStart) is what
+ * makes evidence attributable — readers fold only their own epoch, so a
+ * stale or foreign ledger line is inert rather than cross-credited.
+ */
+export interface EvidenceRecord {
+  readonly epoch: string;
+  readonly event: Evidence;
+}
 
 /** Countable event tokens the machine's guards reference. */
 export const EVENT_TOKENS = ["FileRead", "FileWrite", "TestRun", "TestRunPassed"] as const;

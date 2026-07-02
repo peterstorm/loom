@@ -22,14 +22,21 @@ const handler: HookHandler = async (stdin) => {
   }
 
   // Bind guarded skill machine when this agent type ships one (opt-in per
-  // agent). Binding starts a fresh evidence epoch for sequential runs.
+  // agent). An INVALID machine binds too: the PreToolUse gate then fails
+  // closed with the parse error, instead of a corrupt machine file silently
+  // switching enforcement off. Binding requires agent_id (the epoch key).
   const agentType = stripNamespace(input.agent_type ?? "");
   if (agentType) {
     const loaded = loadMachine(MACHINES_DIR, agentType);
-    if (loaded.kind === "machine") {
-      bindMachineAgent(session_id, agentType);
-    } else if (loaded.kind === "invalid") {
-      process.stderr.write(`mark-subagent-active: NOT binding machine — ${loaded.error}\n`);
+    if (loaded.kind !== "none") {
+      if (agent_id) {
+        await bindMachineAgent(session_id, agentType, agent_id);
+      } else {
+        process.stderr.write(`mark-subagent-active: cannot bind machine for ${agentType} — no agent_id in hook input\n`);
+      }
+      if (loaded.kind === "invalid") {
+        process.stderr.write(`mark-subagent-active: machine invalid (gate will fail closed) — ${loaded.error}\n`);
+      }
     }
   }
 

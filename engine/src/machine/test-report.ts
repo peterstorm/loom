@@ -93,7 +93,13 @@ const JUNIT_REPORT_DIRS = [
   "build/test-results/test",
 ];
 
-/** Reports older than this are ignored — a stale artifact from an earlier run must not vouch for this one. */
+/**
+ * Reports older than this are ignored. Time-based, not run-based: this
+ * BOUNDS cross-run attribution (an artifact from hours ago can't vouch) but
+ * does not eliminate it — a same-family runner command within the window
+ * can still pick up a sibling run's report. Runner-family scoping in
+ * findReport narrows the blast radius further.
+ */
 const FRESHNESS_MS = 15 * 60 * 1000;
 
 function isFresh(path: string, nowMs: number): boolean {
@@ -129,20 +135,25 @@ function moduleDirs(cwd: string): string[] {
   }
 }
 
+/** Runners whose reports are JUnit XML in conventional build dirs. */
+const JVM_RUNNER_PREFIXES = ["mvn", "mvnw", "./mvnw", "gradle", "./gradlew"];
+
 /**
- * Find a machine-readable report artifact for a completed test command.
- * Sources, in order:
- * 1. Explicit `--outputFile` path from the command (vitest/jest JSON)
- * 2. JSON on stdout when the command asked for a JSON reporter
- * 3. Fresh JUnit XML in conventional dirs (cwd and one module level down)
+ * Find a machine-readable report artifact for a classified test command
+ * SEGMENT (the head-matched simple command from classifyTestCommand — never
+ * the whole prose command line). Sources, scoped to the runner family so an
+ * artifact can't vouch for an unrelated command:
+ * 1. Explicit `--outputFile` path on the segment (vitest/jest JSON)
+ * 2. JSON on stdout when the segment asked for a JSON reporter
+ * 3. Fresh JUnit XML in conventional dirs — JVM runners only
  */
 export function findReport(
-  command: string,
+  segment: string,
   cwd: string,
   stdout: string,
   nowMs: number,
 ): TestReportSummary | null {
-  const explicit = outputFileFromCommand(command);
+  const explicit = outputFileFromCommand(segment);
   if (explicit) {
     const path = isAbsolute(explicit) ? explicit : resolve(cwd, explicit);
     if (existsSync(path) && isFresh(path, nowMs)) {
@@ -151,10 +162,13 @@ export function findReport(
     }
   }
 
-  if (/--reporter[= ]json|--json\b/.test(command)) {
+  if (/--reporter[= ]json|--json\b/.test(segment)) {
     const parsed = parseVitestJson(stdout.trim());
     if (parsed) return parsed;
   }
+
+  const lower = segment.toLowerCase();
+  if (!JVM_RUNNER_PREFIXES.some((p) => lower.startsWith(p))) return null;
 
   const junit = [
     ...JUNIT_REPORT_DIRS.flatMap((d) => readJunitDir(resolve(cwd, d), nowMs)),

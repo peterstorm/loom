@@ -65,6 +65,8 @@ export interface Task {
   spec_anchors?: string[];
   new_tests_required?: boolean;
   tests_passed?: boolean;
+  /** True only when tests_passed came from a trusted ledger TestRun (real exit + report), not transcript regex. */
+  tests_trusted?: boolean;
   test_evidence?: string;
   new_tests_written?: boolean;
   new_test_evidence?: string;

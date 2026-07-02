@@ -3,35 +3,63 @@
 Deterministic phase machines that **drive** subagent runs — the runtime
 enforces phase order and tool availability; the agent's tool calls are the
 events that advance the machine. Prose skills stay for judgment; machines
-add hard gates. See the v2 convergence plan for the design rationale.
+add hard gates. See the v2 convergence plan (vault:
+`reclaw/plans/deterministic-core-convergence-v2`) for the design rationale.
 
 ## How it works
 
 - `<agent-type>.machine.json` here opts that agent type into gating
   (no file → no gating; a one-file bugfix agent doesn't need a machine).
-- **SubagentStart** binds the machine to the session and starts a fresh
-  evidence epoch.
-- **PostToolUse** (`record-evidence`) appends ground-truth events to
-  `<session>.evidence.jsonl`: `FileRead`, `FileWrite`, and `TestRun` with
-  the real exit status plus a parsed report artifact (vitest/jest JSON via
-  `--outputFile`/stdout, JUnit XML from surefire/failsafe/gradle dirs).
-  Transcript text is never evidence.
-- **PreToolUse** (`enforce-phase-tools`) folds the ledger into the current
-  phase and denies enforced tools the phase doesn't list — deny-by-default
-  within the machine's declared `enforcedTools` jurisdiction.
-- **SubagentStop** resolves `tests_passed` ledger-first: a trusted
-  `TestRun` (exit code + report cross-checked) beats transcript regex,
-  which remains as an explicitly labeled lower-trust fallback.
+  Gating is active only during orchestrated loom runs (the SubagentStart
+  shim requires an active task graph); ad-hoc subagent launches are ungated.
+- **SubagentStart** binds the machine to the session with an **epoch**
+  (`<agent_id>:<agent_type>`). An *invalid* machine file binds too — the
+  gate then fails closed with the parse error instead of enforcement
+  silently switching off.
+- **PostToolUse** (`record-evidence`) appends epoch-stamped, **facts-only**
+  records to `<session>.evidence.jsonl`: `FileRead`, `FileWrite`, and
+  `TestRun` carrying the real exit status plus a parsed report artifact
+  (vitest/jest JSON via `--outputFile`/stdout, JUnit XML — JVM runners
+  only). Judgments (`passed`/`trusted`) are derived from the facts at read
+  time, never stored. Transcript text is never evidence.
+- **PreToolUse** (`enforce-phase-tools`) folds the agent's own epoch into
+  the current phase and denies enforced tools the phase doesn't list —
+  deny-by-default within the machine's declared `enforcedTools`
+  jurisdiction. Unexpected evaluation errors fail **closed** once a binding
+  exists.
+- **SubagentStop** resolves `tests_passed` from the stopping agent's own
+  epoch only. A trusted `TestRun` (exit + report cross-checked) sets
+  `tests_trusted: true` on the task; the transcript-regex fallback remains
+  but is labeled by exactly how weak it is (`low-trust` / `degraded` /
+  `fallback`) and always sets `tests_trusted: false`.
 
 A `TestRun` is trusted only when ground truth confirms it: a nonzero exit
-is trustworthy failure on its own; a zero exit needs a report artifact
-with ≥1 test and 0 failures (`echo "npm test: 5 passing"` exits 0 but
-writes no report — it can no longer spoof test evidence).
+is trustworthy failure on its own; a zero exit needs a report artifact with
+≥1 test and 0 failures. Command classification parses the command into
+segments and requires a runner at head position — `echo "npm test: 5
+passing"` and `git grep "npm test"` produce no TestRun at all.
 
-**Known relaxation:** subagents share `session_id` with the orchestrator,
-so when multiple machine-gated agents run in parallel, per-agent evidence
-attribution is impossible and the PreToolUse gate stands down rather than
-emit false blocks. SubagentStop auditing still applies per task.
+## Attribution model (read this before adding a machine)
+
+The harness gives tool calls no agent identity, so evidence attribution
+rests on the **sole-active rule**: evidence is recorded and the live gate
+enforces ONLY while exactly one subagent is active and exactly one machine
+is bound. Any contention — a second subagent of any type, a second binding
+— stands both down (with a stderr note). SubagentStop resolution is safe
+either way, because it reads only the stopping agent's epoch.
+
+Known residual limits, on purpose and documented:
+- Parallel waves therefore run without the live gate; the per-epoch
+  SubagentStop audit still applies to whatever the sole-active windows
+  recorded.
+- A consistent forgery of ledger *facts* via Bash is blocked by the
+  guard-state-file hook (the ledger and binding paths are guarded state
+  files); full integrity (HMAC or out-of-agent-reach storage) is a
+  follow-up.
+- The report freshness window (15 min) bounds, but does not eliminate,
+  same-family cross-run artifact vouching.
+- `FileRead` means the Read tool specifically — context gathered only via
+  Grep/Glob/Bash does not advance `read-context`.
 
 ## code-implementer-agent
 
@@ -50,4 +78,6 @@ stateDiagram-v2
 ```
 
 An agent that tries to Edit/Write before reading any file is blocked at
-the tool call with an explanation of what advances the phase.
+the tool call with an explanation of what advances the phase. The terminal
+phase's `requires` is computed (`missingRequirements`) and surfaced in
+evidence labeling; hard-blocking completion on it is Phase A follow-up.

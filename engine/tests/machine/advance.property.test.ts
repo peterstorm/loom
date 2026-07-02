@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { advance, foldEvidence, isTerminal, missingRequirements, tokensFor } from "../../src/machine/advance";
+import { advance, foldEvidence, isTerminal, isToolAllowed, missingRequirements, tokensFor } from "../../src/machine/advance";
 import { initialState, type Evidence, type MachineDef } from "../../src/machine/types";
 
 const machine: MachineDef = {
@@ -29,23 +29,39 @@ const evidenceArb: fc.Arbitrary<Evidence> = fc.oneof(
       }),
       { nil: null },
     ),
-    passed: fc.boolean(),
-    trusted: fc.boolean(),
   }),
 );
 
+/** The judgment the reducer must derive: exit 0 + confirming report. */
+const isTrustedPass = (e: Evidence): boolean =>
+  e.kind === "TestRun" && e.exit === 0 && e.report !== null && e.report.total > 0 && e.report.failed === 0;
+
 describe("phase machine — invariants", () => {
-  it("terminal is unreachable without a trusted passing TestRun", () => {
+  it("terminal is unreachable without a fact-confirmed passing TestRun", () => {
     fc.assert(
       fc.property(fc.array(evidenceArb, { maxLength: 50 }), (events) => {
         const s = foldEvidence(machine, events);
-        const trustedPass = events.some((e) => e.kind === "TestRun" && e.passed && e.trusted);
-        if (!trustedPass) {
+        if (!events.some(isTrustedPass)) {
           expect(isTerminal(machine, s)).toBe(false);
           expect(missingRequirements(machine, s).length).toBeGreaterThan(0);
         }
       }),
       { numRuns: 500 },
+    );
+  });
+
+  it("stored judgments cannot exist — a ledger roundtrip preserves fold state", () => {
+    fc.assert(
+      fc.property(fc.array(evidenceArb, { maxLength: 30 }), (events) => {
+        // Serialize as ledger records and re-parse: state must be identical
+        // (this is the replayability property the fold design rests on).
+        const lines = events.map((event) => JSON.stringify({ epoch: "a:b", event }));
+        const reparsed = lines
+          .map((l) => JSON.parse(l) as { event: Evidence })
+          .map((r) => r.event);
+        expect(foldEvidence(machine, reparsed)).toEqual(foldEvidence(machine, events));
+      }),
+      { numRuns: 200 },
     );
   });
 
@@ -90,5 +106,18 @@ describe("phase machine — invariants", () => {
   it("initialState never allows enforced tools before evidence", () => {
     expect(initialState.phaseIndex).toBe(0);
     expect(machine.phases[0].allowedTools).toEqual([]);
+  });
+
+  it("gate soundness: Write is never allowed while no FileRead has been observed", () => {
+    fc.assert(
+      fc.property(fc.array(evidenceArb, { maxLength: 50 }), (events) => {
+        const s = foldEvidence(machine, events);
+        if (s.counts.FileRead === 0) {
+          expect(isToolAllowed(machine, s, "Write")).toBe(false);
+          expect(isToolAllowed(machine, s, "Edit")).toBe(false);
+        }
+      }),
+      { numRuns: 300 },
+    );
   });
 });

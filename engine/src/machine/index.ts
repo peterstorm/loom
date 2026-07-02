@@ -21,17 +21,28 @@ export {
   outputFileFromCommand,
   findReport,
 } from "./test-report";
-export { extractEvidence, extractBashOutcome, isTestCommand, type BashOutcome } from "./extract-evidence";
+export {
+  extractEvidence,
+  extractBashOutcome,
+  isTestCommand,
+  classifyTestCommand,
+  type BashOutcome,
+} from "./extract-evidence";
 export {
   ledgerPath,
   machineBindingPath,
   parseEvidenceLine,
   appendEvidence,
   readEvidence,
-  activeMachineAgents,
+  eventsForEpoch,
+  epochOf,
+  readBindings,
+  soleActiveBinding,
   bindMachineAgent,
   unbindMachineAgent,
   machineDefPath,
   loadMachine,
+  type MachineBinding,
+  type LoadedMachine,
 } from "./ledger";
 export { machineToMermaid } from "./mermaid";

@@ -23,13 +23,12 @@ const machine: MachineDef = {
 
 const read = (path = "/a.ts"): Evidence => ({ kind: "FileRead", path });
 const write = (path = "/a.ts"): Evidence => ({ kind: "FileWrite", path });
+// Facts only — judgment is derived at fold time via judgeTestRun.
 const testRun = (over: Partial<Extract<Evidence, { kind: "TestRun" }>> = {}): Evidence => ({
   kind: "TestRun",
   command: "npm test",
   exit: 0,
   report: { total: 5, failed: 0, source: "vitest-json" },
-  passed: true,
-  trusted: true,
   ...over,
 });
 
@@ -59,14 +58,19 @@ describe("advance", () => {
     expect(missingRequirements(machine, s)).toEqual([]);
   });
 
-  it("an untrusted 'passing' TestRun never advances verify", () => {
-    const s = foldEvidence(machine, [read(), write(), testRun({ passed: true, trusted: false })]);
+  it("an untrusted 'pass' (exit 0, no report) never advances verify", () => {
+    const s = foldEvidence(machine, [read(), write(), testRun({ report: null })]);
     expect(currentPhase(machine, s).id).toBe("verify");
     expect(missingRequirements(machine, s)).toEqual([{ event: "TestRunPassed", min: 1 }]);
   });
 
-  it("a trusted failing TestRun never advances verify", () => {
-    const s = foldEvidence(machine, [read(), write(), testRun({ passed: false, exit: 1, report: null })]);
+  it("a trusted failing TestRun (exit 1) never advances verify", () => {
+    const s = foldEvidence(machine, [read(), write(), testRun({ exit: 1, report: null })]);
+    expect(currentPhase(machine, s).id).toBe("verify");
+  });
+
+  it("a report showing failures never advances verify even on exit 0", () => {
+    const s = foldEvidence(machine, [read(), write(), testRun({ report: { total: 5, failed: 1, source: "vitest-json" } })]);
     expect(currentPhase(machine, s).id).toBe("verify");
   });
 

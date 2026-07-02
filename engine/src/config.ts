@@ -82,8 +82,11 @@ export const WHITELISTED_HELPERS = [
   "cleanup-state",
 ];
 
-/** State file patterns to guard */
-export const STATE_FILE_PATTERNS = /active_task_graph|review-invocations/;
+/** State file patterns to guard.
+ * Includes the guarded-machine evidence ledger + binding files: an agent
+ * writing them via Bash would forge trusted test evidence (the ledger
+ * stores facts, but consistently-forged facts still judge as trusted). */
+export const STATE_FILE_PATTERNS = /active_task_graph|review-invocations|claude-subagents.*\.(evidence\.jsonl|machine)/;
 
 /** Write patterns to block on state files.
  * Note: `(?:^|\s)>>?(?!&)` avoids matching `2>&1` redirects in read-only commands */

@@ -2,8 +2,8 @@
  * Handler-level e2e: SubagentStart binding → PostToolUse evidence →
  * PreToolUse gating, through the real hook handlers with stdin JSON.
  *
- * bun test runs all files in one process, so SUBAGENT_DIR resolves once
- * globally — isolate via unique session ids + targeted cleanup.
+ * Isolation via unique session ids + targeted cleanup (SUBAGENT_DIR is
+ * process-global).
  */
 
 import { describe, it, expect, afterAll } from "vitest";
@@ -12,7 +12,7 @@ import markActive from "../../src/handlers/subagent-start/mark-subagent-active";
 import recordEvidence from "../../src/handlers/post-tool-use/record-evidence";
 import enforce from "../../src/handlers/pre-tool-use/enforce-phase-tools";
 import cleanup from "../../src/handlers/subagent-stop/cleanup-subagent-flag";
-import { ledgerPath, machineBindingPath, readEvidence } from "../../src/machine/ledger";
+import { ledgerPath, machineBindingPath, readEvidence, eventsForEpoch } from "../../src/machine/ledger";
 import { SUBAGENT_DIR } from "../../src/config";
 
 const run = `handlers-e2e-${process.pid}-${Date.now()}`;
@@ -47,36 +47,35 @@ describe("guarded machine — full hook lifecycle", () => {
     const s = sid("e2e-1");
     await markActive(start(s), []);
 
-    // R1: Write blocked in read-context
     const blocked = await enforce(pre(s, "Write"), []);
     expect(blocked.kind).toBe("block");
     if (blocked.kind === "block") {
       expect(blocked.message).toContain("read-context");
     }
 
-    // Unenforced tools pass while writes are gated
     expect((await enforce(pre(s, "Read"), [])).kind).toBe("allow");
     expect((await enforce(pre(s, "Bash"), [])).kind).toBe("allow");
 
-    // A real Read is recorded as evidence → phase advances
     await recordEvidence(post(s, "Read", { file_path: "/plan.md" }), []);
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("allow");
 
-    // Unbind → gate stands down entirely
     await cleanup(stop(s), []);
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
   });
 
-  it("records TestRun ground truth from Bash tool calls", async () => {
+  it("records epoch-stamped TestRun facts from Bash tool calls", async () => {
     const s = sid("e2e-2");
     await markActive(start(s), []);
     await recordEvidence(
       post(s, "Bash", { command: "npm test" }, { exit_code: 1, stdout: "BUILD SUCCESS 5 passing" }),
       [],
     );
-    const events = readEvidence(s);
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ kind: "TestRun", exit: 1, passed: false, trusted: true });
+    const records = readEvidence(s);
+    expect(records).toHaveLength(1);
+    expect(records[0].epoch).toBe("a-1:code-implementer-agent");
+    expect(records[0].event).toEqual({ kind: "TestRun", command: "npm test", exit: 1, report: null });
+    // Foreign epochs see nothing:
+    expect(eventsForEpoch(records, "a-9:code-implementer-agent")).toEqual([]);
     await cleanup(stop(s), []);
   });
 
@@ -87,16 +86,22 @@ describe("guarded machine — full hook lifecycle", () => {
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
   });
 
-  it("keeps gating when a second, machine-less agent joins the session", async () => {
+  it("stands down when ANY second subagent joins the session, re-arms when it leaves", async () => {
     const s = sid("e2e-4");
     await markActive(start(s), []);
-    await markActive(start(s, "a-2", "ts-test-agent"), []);
-
-    // ts-test-agent ships no machine → still exactly one distinct bound type → gated
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("block");
 
-    await cleanup(stop(s), []);
+    // A second active subagent (machine-less) makes attribution impossible:
+    // both the gate and the recorder stand down.
+    await markActive(start(s, "a-2", "ts-test-agent"), []);
+    expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
+    await recordEvidence(post(s, "Read", { file_path: "/other.ts" }), []);
+    expect(readEvidence(s)).toEqual([]); // nothing recorded while contended
+
     await cleanup(start(s, "a-2", "ts-test-agent"), []);
+    expect((await enforce(pre(s, "Write"), [])).kind).toBe("block"); // re-armed
+
+    await cleanup(stop(s), []);
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
   });
 
@@ -105,5 +110,13 @@ describe("guarded machine — full hook lifecycle", () => {
     await markActive(start(s, "a-9", "brainstorm-agent"), []);
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
     await cleanup(start(s, "a-9", "brainstorm-agent"), []);
+  });
+
+  it("the gate fails closed on malformed stdin while any binding exists", async () => {
+    const s = sid("e2e-1"); // reuse cleaned session name space
+    await markActive(start(s), []);
+    const result = await enforce("{not json", []);
+    expect(result.kind).toBe("block");
+    await cleanup(stop(s), []);
   });
 });

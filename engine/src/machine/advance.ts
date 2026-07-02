@@ -1,25 +1,29 @@
 /**
  * Pure phase-machine reducer.
  *
- * State is always a fold of the evidence ledger — the persisted state file
- * is a cache, rebuildable from the ledger after any crash. No IO here.
+ * State is always a fold of the evidence ledger — there is no persisted
+ * phase state to drift or corrupt; any reader rebuilds it from the ledger.
+ * Judgments (did a test run pass, is it trustworthy) are derived here from
+ * stored facts via judgeTestRun — never read back from the ledger. No IO.
  */
 
+import { match } from "ts-pattern";
 import type { Evidence, EventCounts, EventToken, MachineDef, PhaseState, Requirement } from "./types";
 import { initialState } from "./types";
+import { judgeTestRun } from "./test-report";
 
 /** Which countable tokens an evidence event increments. */
 export function tokensFor(e: Evidence): EventToken[] {
-  switch (e.kind) {
-    case "FileRead":
-      return ["FileRead"];
-    case "FileWrite":
-      return ["FileWrite"];
-    case "TestRun":
-      // A passing run counts as TestRunPassed only when ground truth
-      // confirms it (trusted) — an untrusted "pass" never advances a guard.
-      return e.passed && e.trusted ? ["TestRun", "TestRunPassed"] : ["TestRun"];
-  }
+  return match(e)
+    .with({ kind: "FileRead" }, (): EventToken[] => ["FileRead"])
+    .with({ kind: "FileWrite" }, (): EventToken[] => ["FileWrite"])
+    .with({ kind: "TestRun" }, (run): EventToken[] => {
+      // Judgment is derived from facts at fold time: a run counts as
+      // TestRunPassed only when ground truth confirms it (trusted pass).
+      const { passed, trusted } = judgeTestRun(run.exit, run.report);
+      return passed && trusted ? ["TestRun", "TestRunPassed"] : ["TestRun"];
+    })
+    .exhaustive();
 }
 
 function increment(counts: EventCounts, tokens: EventToken[]): EventCounts {
@@ -50,13 +54,13 @@ export function advance(machine: MachineDef, state: PhaseState, event: Evidence)
   return settle(machine, { ...state, counts });
 }
 
-/** Rebuild state from the full ledger. */
+/** Rebuild state from the (epoch-filtered) ledger. */
 export function foldEvidence(machine: MachineDef, events: readonly Evidence[]): PhaseState {
   return events.reduce((s, e) => advance(machine, s, e), settle(machine, initialState));
 }
 
 export function currentPhase(machine: MachineDef, state: PhaseState) {
-  return machine.phases[Math.min(state.phaseIndex, machine.phases.length - 1)];
+  return machine.phases[Math.min(Math.max(state.phaseIndex, 0), machine.phases.length - 1)];
 }
 
 /**

@@ -1,7 +1,8 @@
 /**
- * Improvement proof — before/after demonstrations that Phase A changed
- * real outcomes, not just architecture. Each test states the OLD behavior
- * (transcript-regex only, no gating) and asserts the NEW behavior.
+ * Improvement proof — before/after demonstrations that Phase A (as remediated
+ * post-review) changed real outcomes. Each test states the OLD behavior
+ * (transcript-regex only, substring command matching, no gating) and asserts
+ * the NEW behavior, including the honest limits.
  */
 
 import { describe, it, expect } from "vitest";
@@ -12,7 +13,7 @@ import {
   resolveTestEvidence,
 } from "../../src/handlers/subagent-stop/update-task-status";
 import { parseBashTestOutput } from "../../src/parsers/parse-bash-test-output";
-import { extractEvidence, extractBashOutcome } from "../../src/machine/extract-evidence";
+import { classifyTestCommand, extractEvidence, extractBashOutcome } from "../../src/machine/extract-evidence";
 import { foldEvidence, isToolAllowed, isTerminal, blockExplanation } from "../../src/machine/advance";
 import { parseMachineJson } from "../../src/machine/parse-machine";
 import { machineToMermaid } from "../../src/machine/mermaid";
@@ -36,8 +37,6 @@ function bashTranscript(command: string, output: string): string {
 }
 
 describe("R2 — real exit status beats happy output text", () => {
-  // An agent runs `mvn test`; the build prints BUILD SUCCESS-shaped text
-  // but the process actually exited 1 (e.g. failure in a later module).
   const lyingOutput = "BUILD SUCCESS\nTests run: 12, Failures: 0, Errors: 0";
   const transcript = bashTranscript("mvn test", lyingOutput);
   const bashOutput = parseBashTestOutput(transcript);
@@ -46,92 +45,101 @@ describe("R2 — real exit status beats happy output text", () => {
     expect(extractTestEvidence(bashOutput).passed).toBe(true); // the documented weakness
   });
 
-  it("NEW: a trusted ledger failure (exit 1) overrides the text", () => {
-    const ledger = extractEvidence(
-      "Bash",
-      { command: "mvn test" },
-      { exit: 1, stdout: lyingOutput },
-      () => null,
-    );
-    const resolved = resolveTestEvidence(ledger, bashOutput);
+  it("NEW: a ledger failure fact (exit 1) overrides the text and is marked untrusted=false? no — trusted failure", () => {
+    const ledger = extractEvidence("Bash", { command: "mvn test" }, { exit: 1, stdout: lyingOutput }, () => null);
+    const resolved = resolveTestEvidence(ledger, bashOutput, true);
     expect(resolved.passed).toBe(false);
+    expect(resolved.trusted).toBe(true); // a real nonzero exit is trustworthy failure
     expect(resolved.evidence).toContain("ledger: exit 1");
   });
 });
 
-describe("R2 — reporter-confirmed pass carries explicit provenance", () => {
-  it("NEW: exit 0 + parsed report → trusted pass, evidence names the ground truth", () => {
+describe("R2 — reporter-confirmed pass carries explicit provenance and a trust bit", () => {
+  it("NEW: exit 0 + parsed report → trusted pass, tests_trusted derivable", () => {
     const ledger = extractEvidence(
       "Bash",
       { command: "npx vitest run --reporter=json --outputFile=out.json" },
       { exit: 0, stdout: "" },
       () => ({ total: 9, failed: 0, source: "vitest-json" }),
     );
-    const resolved = resolveTestEvidence(ledger, "");
-    expect(resolved.passed).toBe(true);
-    expect(resolved.evidence).toContain("ledger: exit 0");
+    const resolved = resolveTestEvidence(ledger, "", true);
+    expect(resolved).toMatchObject({ passed: true, trusted: true });
     expect(resolved.evidence).toContain("9 tests / 0 failed");
   });
 
-  it("NEW: exit 0 but the report shows failures → not passed (report cross-check)", () => {
-    const ledger = extractEvidence(
-      "Bash",
-      { command: "npx vitest run --reporter=json" },
-      { exit: 0, stdout: "" },
-      () => ({ total: 9, failed: 2, source: "vitest-json" }),
-    );
-    expect(resolveTestEvidence(ledger, "irrelevant").passed).toBe(false);
+  it("NEW: report cross-check — failures or zero-tests never pass", () => {
+    const failing = extractEvidence("Bash", { command: "npm test" }, { exit: 0, stdout: "" }, () => ({ total: 9, failed: 2, source: "vitest-json" }));
+    expect(resolveTestEvidence(failing, "irrelevant", true).passed).toBe(false);
+
+    const empty = extractEvidence("Bash", { command: "npm test" }, { exit: 0, stdout: "" }, () => ({ total: 0, failed: 0, source: "vitest-json" }));
+    expect(resolveTestEvidence(empty, "", true).passed).toBe(false);
   });
 
-  it("NEW: exit 0 with a report saying 0 tests ran → not passed (nothing was verified)", () => {
-    const ledger = extractEvidence(
-      "Bash",
-      { command: "npx vitest run --reporter=json" },
-      { exit: 0, stdout: "" },
-      () => ({ total: 0, failed: 0, source: "vitest-json" }),
-    );
-    expect(resolveTestEvidence(ledger, "").passed).toBe(false);
+  it("NEW: last trusted run wins — pass-then-fail fails, fail-then-pass passes", () => {
+    const pass: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: { total: 5, failed: 0, source: "vitest-json" } };
+    const fail: Evidence = { kind: "TestRun", command: "npm test", exit: 1, report: null };
+    expect(resolveTestEvidence([pass, fail], "", true).passed).toBe(false);
+    expect(resolveTestEvidence([fail, pass], "", true).passed).toBe(true);
+  });
+
+  it("NEW: an untrusted exit-0 run never displaces a trusted verdict", () => {
+    const pass: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: { total: 5, failed: 0, source: "vitest-json" } };
+    const noise: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: null };
+    const resolved = resolveTestEvidence([pass, noise], "", true);
+    expect(resolved).toMatchObject({ passed: true, trusted: true });
   });
 });
 
-describe("R2 — the echo spoof is no longer silent", () => {
-  // The crafted-command spoof from the critique: the command matches test
-  // patterns, exits 0, and its output matches the pass regex.
-  const spoofCmd = 'echo "npm test: 5 passing"';
-  const spoofOut = "npm test: 5 passing";
-  const transcript = bashTranscript(spoofCmd, spoofOut);
-  const bashOutput = parseBashTestOutput(transcript);
+describe("R2 — the spoofs the review found are dead", () => {
+  it("comment spoof mints no TestRun at all", () => {
+    // The review's end-to-end trusted-pass forgery:
+    const cmd = `echo '{"numTotalTests":5,"numFailedTests":0}' # npm test --json`;
+    expect(classifyTestCommand(cmd)).toBeNull();
+    expect(extractEvidence("Bash", { command: cmd }, { exit: 0, stdout: '{"numTotalTests":5,"numFailedTests":0}' }, () => {
+      throw new Error("report discovery must not even run for unclassified commands");
+    })).toEqual([]);
+  });
 
-  it("OLD: spoof passes with evidence indistinguishable from a real run", () => {
+  it("prose false-failures are dead: grep exiting 1 is not a trusted failure", () => {
+    const cmd = 'git grep "cargo test" src/';
+    expect(extractEvidence("Bash", { command: cmd }, { exit: 1, stdout: "" }, () => null)).toEqual([]);
+  });
+
+  it("plain echo spoof: still labeled low-trust in the fallback, never trusted, machine never satisfied", () => {
+    const spoofCmd = 'echo "npm test: 5 passing"';
+    const transcript = bashTranscript(spoofCmd, "npm test: 5 passing");
+    const bashOutput = parseBashTestOutput(transcript);
+
+    // OLD: silent pass with clean-looking evidence
     const old = extractTestEvidence(bashOutput);
     expect(old.passed).toBe(true);
-    expect(old.evidence).toBe("node: 5 passing"); // looks legit — invisible spoof
+    expect(old.evidence).toBe("node: 5 passing");
+
+    // NEW: no ledger TestRun (echo never classifies); the transcript fallback
+    // still passes — honest tiering, not prevention — but it is labeled and
+    // the trust bit is false, so wave gates can tell.
+    const ledger = extractEvidence("Bash", { command: spoofCmd }, { exit: 0, stdout: "npm test: 5 passing" }, () => null);
+    expect(ledger).toEqual([]);
+    const resolved = resolveTestEvidence(ledger, bashOutput, true);
+    expect(resolved.passed).toBe(true); // documented residual: reporterless fallback
+    expect(resolved.trusted).toBe(false);
+    expect(resolved.evidence).toContain("degraded (machine bound, no ledger evidence");
   });
 
-  it("NEW: spoof is flagged low-trust in the evidence trail (no report artifact)", () => {
-    const ledger = extractEvidence("Bash", { command: spoofCmd }, { exit: 0, stdout: spoofOut }, () => null);
-    const resolved = resolveTestEvidence(ledger, bashOutput);
-    // Honest tiering, not silent pass: reporterless projects fall back,
-    // but the evidence names the weakness for the wave gate / humans.
-    expect(resolved.evidence).toContain("low-trust");
-    expect(resolved.evidence).toContain("no report artifact");
+  it("recorder failure is visible: machine bound + empty ledger → degraded label", () => {
+    const resolved = resolveTestEvidence([], "12 passing", true);
+    expect(resolved.trusted).toBe(false);
+    expect(resolved.evidence).toContain("degraded");
   });
 
-  it("NEW: the spoof never satisfies the machine — terminal stays unreachable", () => {
-    const ledger = extractEvidence("Bash", { command: spoofCmd }, { exit: 0, stdout: spoofOut }, () => null);
-    const events: Evidence[] = [{ kind: "FileRead", path: "/a.ts" }, { kind: "FileWrite", path: "/a.ts" }, ...ledger];
-    const state = foldEvidence(machine, events);
-    expect(isTerminal(machine, state)).toBe(false); // untrusted "pass" advances nothing
+  it("unbound runs keep the plain fallback label", () => {
+    const resolved = resolveTestEvidence([], "12 passing", false);
+    expect(resolved.evidence).toContain("transcript-regex (fallback)");
   });
 });
 
-describe("R1 — write-before-read is now structurally impossible", () => {
-  it("OLD: nothing gated tool order (prose-only 'You MUST read first')", () => {
-    // No assertion possible — there was no mechanism. This test documents it.
-    expect(true).toBe(true);
-  });
-
-  it("NEW: Write/Edit/MultiEdit are denied in read-context, with a precise message", () => {
+describe("R1 — write-before-read is structurally impossible for the bound agent", () => {
+  it("NEW: Write/Edit/MultiEdit denied in read-context, with a precise message", () => {
     const state = foldEvidence(machine, []);
     for (const tool of ["Write", "Edit", "MultiEdit"]) {
       expect(isToolAllowed(machine, state, tool)).toBe(false);
@@ -152,20 +160,29 @@ describe("R1 — write-before-read is now structurally impossible", () => {
       expect(isToolAllowed(machine, state, tool)).toBe(true);
     }
   });
+
+  it("machine terminal stays unreachable without a fact-confirmed pass", () => {
+    const events: Evidence[] = [
+      { kind: "FileRead", path: "/a.ts" },
+      { kind: "FileWrite", path: "/a.ts" },
+      { kind: "TestRun", command: "npm test", exit: 0, report: null }, // no artifact
+    ];
+    expect(isTerminal(machine, foldEvidence(machine, events))).toBe(false);
+  });
 });
 
 describe("transcript text is never evidence (standing invariant)", () => {
   it("narrative text claiming success produces zero evidence events", () => {
-    // extractEvidence only sees tool calls; narrative has no entry point.
-    // And the Bash path requires a test command — plain prose can't reach it.
-    expect(extractEvidence("Bash", { command: "ls -la" }, { exit: 0, stdout: "BUILD SUCCESS 99 passing" }, () => null)).toEqual([]);
+    expect(
+      extractEvidence("Bash", { command: "ls -la" }, { exit: 0, stdout: "BUILD SUCCESS 99 passing" }, () => null),
+    ).toEqual([]);
   });
 
-  it("unknown tool_response shapes yield exit: null → never trusted as success", () => {
+  it("unknown tool_response shapes yield exit: null → judged untrusted, never success", () => {
     expect(extractBashOutcome({ weird: true })).toEqual({ exit: null, stdout: "" });
-    expect(extractBashOutcome("raw string output")).toEqual({ exit: null, stdout: "raw string output" });
     const ledger = extractEvidence("Bash", { command: "npm test" }, { exit: null, stdout: "5 passing" }, () => null);
-    expect(ledger[0]).toMatchObject({ kind: "TestRun", passed: false, trusted: false });
+    const resolved = resolveTestEvidence(ledger, "", true);
+    expect(resolved.trusted).toBe(false);
   });
 });
 

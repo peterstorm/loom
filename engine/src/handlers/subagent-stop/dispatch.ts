@@ -28,15 +28,6 @@ export function categorize(agentType: string): AgentCategory {
 const handler: HookHandler = async (stdin, args) => {
   const input: SubagentStopInput = JSON.parse(stdin);
 
-  // Cleanup always runs
-  await cleanupSubagentFlag(stdin, args);
-
-  // No task graph → no orchestration hooks
-  const mgr = StateManager.fromSession(input.session_id);
-  if (!mgr) return { kind: "passthrough" };
-
-  const category = categorize(stripNamespace(input.agent_type ?? ""));
-
   const safeRun = async (name: string, fn: () => Promise<unknown>) => {
     try {
       await fn();
@@ -44,6 +35,17 @@ const handler: HookHandler = async (stdin, args) => {
       process.stderr.write(`ERROR in ${name}: ${(e as Error).message}\n`);
     }
   };
+
+  // Cleanup always runs — but must never abort the rest of the pipeline
+  // (a lock-acquisition failure here would otherwise leave the task stuck
+  // in executing with no status update).
+  await safeRun("cleanupSubagentFlag", () => cleanupSubagentFlag(stdin, args));
+
+  // No task graph → no orchestration hooks
+  const mgr = StateManager.fromSession(input.session_id);
+  if (!mgr) return { kind: "passthrough" };
+
+  const category = categorize(stripNamespace(input.agent_type ?? ""));
 
   await match(category)
     .with("phase", async () => {

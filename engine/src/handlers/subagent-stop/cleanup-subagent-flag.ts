@@ -16,14 +16,16 @@ const handler: HookHandler = async (stdin) => {
 
   const lockFile = `${SUBAGENT_DIR}/${session_id}.cleanup`;
 
-  // Release guarded-machine binding regardless of agent_id presence
+  // Release guarded-machine binding. unbindMachineAgent locks internally
+  // (same lock file) and logs its own failures — do NOT nest it inside
+  // withLock here, the mkdir lock is not reentrant.
   const agentType = stripNamespace(input.agent_type ?? "");
-  if (agentType) {
-    await withLock(lockFile, () => {
-      try {
-        unbindMachineAgent(session_id, agentType);
-      } catch {}
-    });
+  if (agentType && agent_id) {
+    try {
+      await unbindMachineAgent(session_id, agentType, agent_id);
+    } catch (e) {
+      process.stderr.write(`cleanup-subagent-flag: unbind failed for ${agent_id}/${session_id}: ${e}\n`);
+    }
   }
 
   if (!agent_id) return { kind: "passthrough" };
@@ -45,7 +47,9 @@ const handler: HookHandler = async (stdin) => {
       } else {
         writeFileSync(activeFile, remaining + "\n");
       }
-    } catch {}
+    } catch (e) {
+      process.stderr.write(`cleanup-subagent-flag: .active update failed for ${session_id}: ${e}\n`);
+    }
   });
 
   return { kind: "passthrough" };

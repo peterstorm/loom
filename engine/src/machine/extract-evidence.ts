@@ -3,15 +3,39 @@
  *
  * Pure given its inputs — the Bash outcome (exit/stdout) and report lookup
  * are supplied by the caller so this module stays testable without IO.
+ *
+ * Command classification parses, it does not substring-match: the command
+ * is split into simple-command segments, comments stripped, env prefixes
+ * removed, and a runner pattern must match at the HEAD of a segment. That
+ * kills the prose spoofs (`echo '...' # npm test --json`, `git grep "npm
+ * test"` minting trusted failures) that whole-string `.includes` allowed.
  */
 
 import { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "../config";
-import { judgeTestRun } from "./test-report";
 import type { Evidence, TestReportSummary } from "./types";
 
+/**
+ * The simple-command segment that a test-runner pattern matches at head
+ * position, or null when the command is not a test invocation.
+ */
+export function classifyTestCommand(command: string): string | null {
+  const segments = command
+    .split(/&&|\|\||;|\||\r?\n/)
+    .map((s) => s.replace(/(^|\s)#.*$/, "").trim())
+    // Strip leading VAR=value assignments so `CI=1 npm test` matches.
+    .map((s) => s.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, ""))
+    .filter((s) => s !== "");
+
+  for (const segment of segments) {
+    const lower = segment.toLowerCase();
+    if (TEST_COMMAND_PATTERNS.some((p) => lower.startsWith(p))) return segment;
+  }
+  return null;
+}
+
+/** Backwards-compatible boolean view of classifyTestCommand. */
 export function isTestCommand(command: string): boolean {
-  const lower = command.toLowerCase().trim();
-  return TEST_COMMAND_PATTERNS.some((p) => lower.includes(p));
+  return classifyTestCommand(command) !== null;
 }
 
 /** Outcome of a Bash call as reported by the harness at execution time. */
@@ -47,14 +71,15 @@ function filePathOf(toolInput: Record<string, unknown>): string | null {
 }
 
 /**
- * Evidence for one tool call. Returns [] for tool calls that carry no
- * ground-truth signal (the vocabulary is closed on purpose).
+ * Evidence for one tool call — facts only; judgments happen at fold time.
+ * Returns [] for tool calls that carry no ground-truth signal (the
+ * vocabulary is closed on purpose).
  */
 export function extractEvidence(
   toolName: string,
   toolInput: Record<string, unknown>,
   outcome: BashOutcome,
-  findReportForCommand: (command: string, stdout: string) => TestReportSummary | null,
+  findReportForSegment: (segment: string, stdout: string) => TestReportSummary | null,
 ): Evidence[] {
   if (toolName === "Read") {
     const path = filePathOf(toolInput);
@@ -68,10 +93,10 @@ export function extractEvidence(
 
   if (toolName === "Bash") {
     const command = typeof toolInput.command === "string" ? toolInput.command : "";
-    if (!isTestCommand(command)) return [];
-    const report = findReportForCommand(command, outcome.stdout);
-    const { passed, trusted } = judgeTestRun(outcome.exit, report);
-    return [{ kind: "TestRun", command, exit: outcome.exit, report, passed, trusted }];
+    const segment = classifyTestCommand(command);
+    if (segment === null) return [];
+    const report = findReportForSegment(segment, outcome.stdout);
+    return [{ kind: "TestRun", command, exit: outcome.exit, report }];
   }
 
   return [];

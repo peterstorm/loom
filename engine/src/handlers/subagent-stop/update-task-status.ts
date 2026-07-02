@@ -1,9 +1,12 @@
 /**
  * Mark task "implemented" when impl agent completes.
  *
- * 1. Extract test evidence from Bash tool output (anti-spoofing)
+ * 1. Resolve test evidence — the agent's own epoch in the evidence ledger
+ *    (execution-time ground truth) first; transcript regex as the labeled,
+ *    lower-trust fallback
  * 2. Verify new tests written via git diff + assertion density
- * 3. Atomic state write with files_modified, tests_passed, new_tests_written
+ * 3. Atomic state write: files_modified, tests_passed, tests_trusted,
+ *    new_tests_written
  * 4. Detect wave completion → signal /wave-gate
  */
 
@@ -18,7 +21,8 @@ import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
 import * as git from "../../utils/git";
-import { readEvidence } from "../../machine";
+import { MACHINES_DIR } from "../../config";
+import { epochOf, eventsForEpoch, judgeTestRun, loadMachine, readEvidence } from "../../machine";
 import type { Evidence } from "../../machine";
 
 // --- Pure: extract test pass evidence from bash output ---
@@ -98,37 +102,54 @@ export function extractTestEvidence(bashOutput: string): TestEvidence {
 
 // --- Pure: resolve test evidence, ledger first ---
 
+interface ResolvedTestEvidence extends TestEvidence {
+  /** True only when the verdict came from a trusted ledger TestRun (real exit + report cross-check). */
+  trusted: boolean;
+}
+
 /**
- * Ground truth beats transcript regex. The evidence ledger (PostToolUse,
- * real exit codes + report artifacts) decides when it has a trusted
- * TestRun; the transcript-regex extractor is the explicit lower-trust
- * fallback for sessions without ledger coverage.
+ * Ground truth beats transcript regex. The agent's own epoch in the
+ * evidence ledger decides when it has a trusted TestRun (judgment derived
+ * from stored FACTS via judgeTestRun — never read back from the ledger);
+ * the transcript-regex extractor is the explicit lower-trust fallback,
+ * labeled by exactly how weak it is:
+ * - "low-trust"  — an untrusted exit-0 run exists (no report artifact)
+ * - "degraded"   — the machine was bound but the ledger is empty (recorder
+ *                  failure: the fallback is running where ground truth was
+ *                  expected)
+ * - "fallback"   — no ledger coverage at all (unbound/legacy runs)
  */
-export function resolveTestEvidence(ledgerEvents: readonly Evidence[], bashOutput: string): TestEvidence {
+export function resolveTestEvidence(
+  ledgerEvents: readonly Evidence[],
+  bashOutput: string,
+  machineBound: boolean,
+): ResolvedTestEvidence {
   const runs = ledgerEvents.filter(
     (e): e is Extract<Evidence, { kind: "TestRun" }> => e.kind === "TestRun",
   );
-  const trustedRuns = runs.filter((r) => r.trusted);
+  const judged = runs.map((r) => ({ run: r, ...judgeTestRun(r.exit, r.report) }));
+  const trustedRuns = judged.filter((j) => j.trusted);
 
   const last = trustedRuns[trustedRuns.length - 1];
   if (last) {
-    const report = last.report ? `, report: ${last.report.total} tests / ${last.report.failed} failed` : "";
+    const report = last.run.report
+      ? `, report: ${last.run.report.total} tests / ${last.run.report.failed} failed`
+      : "";
     return {
       passed: last.passed,
-      evidence: `ledger: exit ${last.exit}${report} (${last.command})`,
+      trusted: true,
+      evidence: `ledger: exit ${last.run.exit}${report} (${last.run.command})`,
     };
   }
 
-  // No trusted run. Fall back to transcript regex — but label honestly:
-  // an untrusted exit-0 run (no report artifact) means the regex is the
-  // only pass signal, and that combination is spoofable. Projects gain
-  // full trust by configuring a JSON/JUnit reporter.
   const fallback = extractTestEvidence(bashOutput);
-  if (!fallback.passed) return fallback;
-  const label = runs.some((r) => r.exit === 0)
+  if (!fallback.passed) return { ...fallback, trusted: false };
+  const label = judged.some((j) => j.run.exit === 0)
     ? "low-trust (exit 0, no report artifact; transcript-regex)"
-    : "transcript-regex (fallback)";
-  return { passed: true, evidence: `${label}: ${fallback.evidence}` };
+    : machineBound && ledgerEvents.length === 0
+      ? "degraded (machine bound, no ledger evidence; transcript-regex)"
+      : "transcript-regex (fallback)";
+  return { passed: true, trusted: false, evidence: `${label}: ${fallback.evidence}` };
 }
 
 // --- Pure: determine new test evidence from diff ---
@@ -276,9 +297,14 @@ const handler: HookHandler = async (stdin) => {
   if (task.status === "completed") return { kind: "passthrough" };
   if (task.tests_passed === true) return { kind: "passthrough" };
 
-  // Section 1: Test evidence — ledger (execution-time ground truth) first,
-  // transcript regex as explicit fallback
-  const testEvidence = resolveTestEvidence(readEvidence(input.session_id), bashTestOutput);
+  // Section 1: Test evidence — the agent's OWN epoch in the ledger first
+  // (execution-time ground truth, attribution via agent_id), transcript
+  // regex as explicit labeled fallback. Foreign epochs are never consulted.
+  const machineBound = loadMachine(MACHINES_DIR, agentType).kind === "machine";
+  const epochEvents = input.agent_id
+    ? eventsForEpoch(readEvidence(input.session_id), epochOf(input.agent_id, agentType))
+    : [];
+  const testEvidence = resolveTestEvidence(epochEvents, bashTestOutput, machineBound);
 
   // Section 2: New test verification via git diff
   let newTestEvidence: NewTestEvidence = { written: false, evidence: "" };
@@ -295,6 +321,7 @@ const handler: HookHandler = async (stdin) => {
             ...t,
             status: "implemented" as const,
             tests_passed: testEvidence.passed,
+            tests_trusted: testEvidence.trusted,
             test_evidence: testEvidence.evidence,
             files_modified: filesModified,
             new_tests_written: newTestEvidence.written,
