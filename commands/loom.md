@@ -525,7 +525,7 @@ implemented → completed   (wave gate passed: tests + review + no critical find
 jq '.' .claude/state/active_task_graph.json
 
 # Per-task status
-jq '.tasks[] | {id, status, tests_passed, review_status}' .claude/state/active_task_graph.json
+jq '.tasks[] | {id, status, test_result, review_status}' .claude/state/active_task_graph.json
 
 # Wave gate status
 jq '.wave_gates' .claude/state/active_task_graph.json
@@ -537,7 +537,7 @@ jq '.wave_gates' .claude/state/active_task_graph.json
 |---------|-------|-----|
 | Task `failed` | Agent crash detected | Auto-retried up to 2x; check `retry_count` |
 | Task stuck `in_progress` | Agent hung (no crash) | Re-spawn same task |
-| `tests_passed` missing | No recognizable output | Re-spawn, ensure test markers in output |
+| `test_result` missing or not a pass | No recognizable output | Re-spawn, ensure test markers in output |
 | Wave not advancing | Gate blocked | Check `wave_gates[N].blocked`, run `/wave-gate` |
 | State write blocked | Guard hook active | State writes via hooks only; reads OK |
 | Test task blocked, impl wrote tests | Separate test task for new code | Don't create separate test tasks; mark superseded or merge |

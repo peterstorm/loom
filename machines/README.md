@@ -27,11 +27,14 @@ add hard gates. See the v2 convergence plan (vault:
   deny-by-default within the machine's declared `enforcedTools`
   jurisdiction. Unexpected evaluation errors fail **closed** once a binding
   exists.
-- **SubagentStop** resolves `tests_passed` from the stopping agent's own
-  epoch only. A trusted `TestRun` (exit + report cross-checked) sets
-  `tests_trusted: true` on the task; the transcript-regex fallback remains
-  but is labeled by exactly how weak it is (`low-trust` / `degraded` /
-  `fallback`) and always sets `tests_trusted: false`.
+- **SubagentStop** resolves the task's `test_result` from the stopping
+  agent's own epoch only. A trusted `TestRun` (exit + report cross-checked)
+  yields `{ verdict: "trusted-pass" }` or `{ verdict: "trusted-fail" }`;
+  the transcript-regex fallback remains but yields
+  `{ verdict: "untrusted", passed, label }` with the label naming exactly
+  how weak it is (`low-trust` / `degraded` / `fallback`) — trust
+  provenance lives in the data, so an untrusted pass can never masquerade
+  as a trusted one.
 
 A `TestRun` is trusted only when ground truth confirms it: a nonzero exit
 is trustworthy failure on its own; a zero exit is trusted whenever a report
@@ -51,6 +54,39 @@ is bound. Any contention — a second subagent of any type, a second binding
 (it never blocks, so a bound-but-empty ledger surfaces downstream as the
 `degraded` label instead). SubagentStop resolution is safe either way,
 because it reads only the stopping agent's epoch.
+
+**Binding liveness.** A binding is normally released by the agent's
+SubagentStop hook — but a gated subagent that dies without the hook firing
+must not gate the session until the next SessionStart sweep. Each binding
+line carries its bind timestamp, and the binding file's mtime is the
+activity anchor: the gate and the recorder refresh it on EVERY tool call
+they see for the session. Because tool calls carry no agent identity, this
+is **session-activity** liveness, not per-agent liveness — any activity in
+the session (the parent's included) keeps every binding fresh, so a dead
+subagent's binding survives while the session is being used. A binding
+idle past `STALE_SUBAGENT_TTL_MS` (shared with the 60-minute SessionStart
+sweep) is treated as absent by every reader and reaped under the binding
+lock — recovery happens after the session idles for the TTL (or at the
+next SessionStart sweep), not the moment the agent dies.
+
+## Module layout (machine-checked purity)
+
+`engine/src/machine/` is split along the FC/IS boundary and the split is
+**self-linted** — `no-io-in-pure-modules` lists the pure core in its
+shipped defaults, and `engine/tests/linter/programmatic/machine-purity.test.ts`
+additionally walks the import closure so the reducer can never re-acquire
+`node:fs` through a dependency:
+
+- **Pure core** (no I/O, no env, no clock): `types.ts`, `advance.ts`
+  (the reducer), `parse-machine.ts`, `extract-evidence.ts`, `mermaid.ts`,
+  `test-report.ts` (report parsing + the trust judgment), `evidence.ts`
+  (identity brands, binding/ledger line parsing, epoch attribution, the
+  `SessionRegistry` port).
+- **Imperative shell**: `ledger.ts` (binding/roster/ledger files + locks),
+  `report-discovery.ts` (finding report artifacts on disk),
+  `session-registry.ts` (the fs adapter of the `SessionRegistry` port; an
+  in-memory fake lives with the tests for property-testing attribution
+  invariants over interleavings).
 
 Known residual limits, on purpose and documented:
 - Parallel waves therefore run without the live gate; the per-epoch

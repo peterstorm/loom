@@ -9,6 +9,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
+import { legacyTestsPassedNote, testResultPassed } from "../../types";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { parsePlanModels, type PlanModels } from "../../parsers/parse-plan-models";
@@ -44,7 +45,7 @@ export function gateCheckMessage(c: GateCheck): string {
 
 /** Check 1: All tasks have test evidence (skipped for tasks declaring no tests required) */
 export function checkTestEvidence(tasks: Task[]): GateCheck {
-  const missing = tasks.filter((t) => t.new_tests_required !== false && !t.tests_passed);
+  const missing = tasks.filter((t) => t.new_tests_required !== false && !testResultPassed(t.test_result));
   if (missing.length > 0) {
     return fail(`FAILED: Not all tasks have test evidence.\n  Missing: ${missing.map((t) => t.id).join(", ")}`);
   }
@@ -162,6 +163,136 @@ export function checkLifecycleArtifacts(
   );
 }
 
+// --- Gate decision (evaluate once, apply pure) ---
+
+/** I/O seams the gate evaluation needs — injected so evaluation is testable
+ *  with plain data. In production these are PRE-RESOLVED into plain data
+ *  (snapshotGateDeps) before the state lock, so evaluation inside the locked
+ *  update is pure and retry-safe. */
+export interface GateDeps {
+  readonly loadPlanModels: (planFile: string | null | undefined) => PlanModelsSource;
+  readonly fileExists: (path: string) => boolean;
+}
+
+/** The real fs seams snapshotGateDeps resolves — same shape as GateDeps. */
+export type GateIO = GateDeps;
+
+/**
+ * Resolve every fs input the gate checks can need into plain data, BEFORE
+ * the state lock: the plan's models are read once, and every machine file
+ * a lifecycle can name is stat'ed once. The returned GateDeps are pure
+ * closures over that snapshot, so `evaluateWaveGate(lockedState, ...)`
+ * INSIDE the update callback is deterministic and repeats no I/O if the
+ * write retries — while the checks themselves see the LOCKED state, never
+ * a pre-lock snapshot that a concurrent SubagentStop may have outdated.
+ *
+ * The plan file is resolved from the pre-lock state: it is written once at
+ * decompose time and never mutated by the SubagentStop handlers this lock
+ * races with. Paths outside the snapshot resolve to false (fail closed).
+ */
+export function snapshotGateDeps(state: TaskGraph, io: GateIO): GateDeps {
+  const source = io.loadPlanModels(state.plan_file ?? state.phase_artifacts?.architecture);
+  const exists = new Map<string, boolean>();
+  if (source.kind === "loaded") {
+    for (const lc of source.models.lifecycles) {
+      if (lc.machineFile !== null && !exists.has(lc.machineFile)) {
+        exists.set(lc.machineFile, io.fileExists(lc.machineFile));
+      }
+    }
+  }
+  return {
+    loadPlanModels: () => source,
+    fileExists: (path) => exists.get(path) ?? false,
+  };
+}
+
+/**
+ * The immutable result of evaluating every gate check against one state
+ * snapshot. Built INSIDE the locked update from the locked state and
+ * pre-resolved deps (snapshotGateDeps) — evaluation is pure there, so a
+ * retried state write repeats no fs read or stderr write, while a
+ * SubagentStop landing before the lock is still seen by every check.
+ */
+export interface GateDecision {
+  readonly wave: number;
+  /** All checks, in evaluation order (rendering stops at the first failure). */
+  readonly checks: readonly GateCheck[];
+  readonly verdict:
+    | { readonly kind: "fail"; readonly reason: string }
+    | { readonly kind: "pass"; readonly taskIds: readonly string[]; readonly nextWave: number | null };
+}
+
+/** Evaluate every gate check against a state snapshot. Deterministic given
+ *  its deps; performs no writes. */
+export function evaluateWaveGate(state: TaskGraph, waveArg: number | null, deps: GateDeps): GateDecision {
+  const wave = waveArg ?? state.current_wave ?? 1;
+  const waveTasks = state.tasks.filter((t) => t.wave === wave);
+
+  const checks: readonly GateCheck[] = [
+    checkTestEvidence(waveTasks),
+    checkNewTests(waveTasks),
+    checkReviews(waveTasks),
+    checkSpecAlignment(state, wave),
+    checkCriticalFindings(waveTasks),
+    checkLifecycleArtifacts(
+      deps.loadPlanModels(state.plan_file ?? state.phase_artifacts?.architecture),
+      waveTasks,
+      deps.fileExists,
+    ),
+  ];
+
+  const failed = checks.find((c): c is Extract<GateCheck, { passed: false }> => !c.passed);
+  if (failed) {
+    return { wave, checks, verdict: { kind: "fail", reason: failed.reason } };
+  }
+  return {
+    wave,
+    checks,
+    verdict: {
+      kind: "pass",
+      taskIds: waveTasks.map((t) => t.id),
+      nextWave: computeNextWave(state.tasks, wave),
+    },
+  };
+}
+
+/**
+ * Pure: apply a passing decision to the task graph — complete the wave's
+ * tasks, stamp the wave gate, advance current_wave. A failing decision
+ * returns the state unchanged. Safe to re-run: no side effects, and
+ * applying the same decision twice yields the same state.
+ */
+export function applyGateDecision(state: TaskGraph, decision: GateDecision): TaskGraph {
+  if (decision.verdict.kind !== "pass") return state;
+  const { wave } = decision;
+  const { nextWave } = decision.verdict;
+  const defaultGate: WaveGate = { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false };
+
+  return {
+    ...state,
+    tasks: state.tasks.map((t) =>
+      t.wave === wave
+        ? { ...t, status: "completed" as const, review_status: "passed" as const }
+        : t
+    ),
+    wave_gates: {
+      ...state.wave_gates,
+      [String(wave)]: {
+        ...(state.wave_gates[String(wave)] ?? defaultGate),
+        tests_passed: true,
+        reviews_complete: true,
+        blocked: false,
+      },
+      ...(nextWave != null ? {
+        [String(nextWave)]: {
+          ...(state.wave_gates[String(nextWave)] ?? defaultGate),
+        },
+      } : {}),
+    },
+    ...(nextWave != null ? { current_wave: nextWave } : {}),
+  };
+}
+
 /** Update GitHub issue checkboxes */
 function updateGitHubIssue(state: TaskGraph, taskIds: string[]): void {
   const issue = state.github_issue;
@@ -255,6 +386,17 @@ function postWaveGateSummary(state: TaskGraph, completedWave: number): void {
   }
 }
 
+/** One stderr line per wave task still carrying the pre-refactor
+ *  `tests_passed` field — otherwise its "missing evidence" gate failure is
+ *  inexplicable to the operator. Advisory only; never affects the verdict. */
+function warnLegacyTestsPassed(tasks: readonly Task[], wave: number): void {
+  for (const task of tasks) {
+    if (task.wave !== wave) continue;
+    const note = legacyTestsPassedNote(task);
+    if (note) process.stderr.write(`[loom] ${note}\n`);
+  }
+}
+
 const handler: HookHandler = async (_stdin, args) => {
   // Resolved at call time (not import time) so env re-pointing is honored.
   const statePath = taskGraphPath();
@@ -263,107 +405,74 @@ const handler: HookHandler = async (_stdin, args) => {
 
   const waveArg = parseWaveArg(args);
 
-  // Single locked update: run all checks on locked state, then mutate atomically
-  let errorMessage: string | null = null;
-  let taskIds: string[] = [];
-  let nextWave: number | null = null;
-  let completedWave: number = waveArg ?? 1;
-  let githubState: { issue?: number; repo?: string } = {};
-  let snapshot: TaskGraph | null = null;
+  // Pre-resolve the fs inputs (plan read + machine-file stats) into plain
+  // data BEFORE the lock. These never race the SubagentStop handlers this
+  // lock contends with — but the task graph does, so the checks themselves
+  // must run on the LOCKED state below, never this pre-lock read.
+  const preRead = mgr.load();
+  const gateDeps = snapshotGateDeps(preRead, {
+    loadPlanModels: loadPlanModelsSource,
+    fileExists: existsSync,
+  });
 
+  warnLegacyTestsPassed(preRead.tasks, waveArg ?? preRead.current_wave ?? 1);
+
+  // Single locked update: evaluate every check against the locked state —
+  // a SubagentStop landing between the pre-read and this lock (reviewer
+  // findings, a trusted-fail test_result, a crash status) is seen by the
+  // checks instead of being force-overwritten by a stale decision. With
+  // deps pre-resolved, evaluation is pure, so a retried callback repeats
+  // no I/O; stderr rendering stays outside, after the lock.
+  let decision: GateDecision | undefined;
+  let snapshot: TaskGraph | null = null;
   try {
     await mgr.update((s) => {
-      const wave = waveArg ?? s.current_wave ?? 1;
-      completedWave = wave;
-      const waveTasks = s.tasks.filter((t) => t.wave === wave);
-
-      process.stderr.write(`Completing wave ${wave} gate...\n\n`);
-
-      // Run all checks on locked state
-      const checks = [
-        checkTestEvidence(waveTasks),
-        checkNewTests(waveTasks),
-        checkReviews(waveTasks),
-        checkSpecAlignment(s, wave),
-        checkCriticalFindings(waveTasks),
-        checkLifecycleArtifacts(
-          loadPlanModelsSource(s.plan_file ?? s.phase_artifacts?.architecture),
-          waveTasks,
-          existsSync,
-        ),
-      ];
-
-      for (const check of checks) {
-        process.stderr.write(gateCheckMessage(check) + "\n");
-        if (!check.passed) {
-          errorMessage = check.reason;
-          return s; // Return state unchanged
-        }
-      }
-
-      process.stderr.write("\nAll checks passed. Advancing...\n");
-
-      taskIds = waveTasks.map((t) => t.id);
-      githubState = { issue: s.github_issue, repo: s.github_repo };
-
-      // Compute next wave from actual wave numbers
-      nextWave = computeNextWave(s.tasks, wave);
-
-      const defaultGate: WaveGate = { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false };
-
-      // Build updated state atomically
-      const updated: TaskGraph = {
-        ...s,
-        tasks: s.tasks.map((t) =>
-          t.wave === wave
-            ? { ...t, status: "completed" as const, review_status: "passed" as const }
-            : t
-        ),
-        wave_gates: {
-          ...s.wave_gates,
-          [String(wave)]: {
-            ...(s.wave_gates[String(wave)] ?? defaultGate),
-            tests_passed: true,
-            reviews_complete: true,
-            blocked: false,
-          },
-          ...(nextWave != null ? {
-            [String(nextWave)]: {
-              ...(s.wave_gates[String(nextWave)] ?? defaultGate),
-            },
-          } : {}),
-        },
-        ...(nextWave != null ? { current_wave: nextWave } : {}),
-      };
-
+      const d = evaluateWaveGate(s, waveArg, gateDeps);
+      decision = d;
+      if (d.verdict.kind !== "pass") return s;
+      const updated = applyGateDecision(s, d);
       snapshot = updated;
       return updated;
     });
   } catch (e) {
     return {
       kind: "error",
-      message: `[loom] complete-wave-gate: failed to persist state for wave ${completedWave}: ${(e as Error).message}`,
+      message: `[loom] complete-wave-gate: failed to evaluate/persist wave gate: ${(e as Error).message}`,
     };
   }
-
-  if (errorMessage) {
-    return { kind: "error", message: errorMessage };
+  if (decision === undefined) {
+    // Unreachable: mgr.update either ran the callback or threw above.
+    return { kind: "error", message: "[loom] complete-wave-gate: state update returned without evaluating the gate" };
   }
+
+  process.stderr.write(`Completing wave ${decision.wave} gate...\n\n`);
+  for (const check of decision.checks) {
+    process.stderr.write(gateCheckMessage(check) + "\n");
+    if (!check.passed) break;
+  }
+
+  if (decision.verdict.kind === "fail") {
+    return { kind: "error", message: decision.verdict.reason };
+  }
+  const verdict = decision.verdict;
+
+  process.stderr.write("\nAll checks passed. Advancing...\n");
 
   // I/O at edge: update GitHub issue outside lock
-  if (githubState.issue) {
-    updateGitHubIssue({ github_issue: githubState.issue, github_repo: githubState.repo } as TaskGraph, taskIds);
+  const github: TaskGraph = snapshot ?? mgr.load();
+  if (github.github_issue) {
+    updateGitHubIssue(github, [...verdict.taskIds]);
   }
 
-  if (nextWave != null) {
-    process.stderr.write(`Advanced to wave ${nextWave}.\n`);
+  if (verdict.nextWave != null) {
+    process.stderr.write(`Advanced to wave ${verdict.nextWave}.\n`);
   } else {
     process.stderr.write("\n=== All waves complete! ===\nRun /loom --complete to finalize.\n");
   }
 
-  // Post GitHub comment with wave summary using snapshot from inside the lock
+  // Post GitHub comment with wave summary using the snapshot from inside the lock
   if (snapshot) {
-    postWaveGateSummary(snapshot, completedWave);
+    postWaveGateSummary(snapshot, decision.wave);
   }
 
   return { kind: "passthrough" };

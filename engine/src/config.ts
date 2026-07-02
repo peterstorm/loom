@@ -67,8 +67,8 @@ export const REVIEW_AGENTS = new Set([
 /** All agents that map to execute phase (impl + review) */
 export const EXECUTE_AGENTS = new Set([...IMPL_AGENTS, ...REVIEW_AGENTS]);
 
-/** Tools that modify files */
-export const FILE_MODIFYING_TOOLS = new Set(["Write", "Edit", "MultiEdit"]);
+/** Tools that modify files (defined in core/tool-vocabulary — re-exported here, config stays the documented home) */
+export { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "./core/tool-vocabulary";
 
 /** Whitelisted helper scripts in guard-state-file */
 export const WHITELISTED_HELPERS = [
@@ -85,6 +85,15 @@ export const WHITELISTED_HELPERS = [
 /** Subagent tracking directory */
 export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
 
+/**
+ * One TTL for every liveness judgment about subagent tracking files: the
+ * SessionStart sweep deletes files whose mtime is older than this, and the
+ * machine-binding reader treats bindings whose last activity (bind stamp or
+ * binding-file mtime, whichever is later) exceeds it as absent. A single
+ * constant keeps the two mechanisms from drifting apart.
+ */
+export const STALE_SUBAGENT_TTL_MS = 60 * 60_000;
+
 const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** State file patterns to guard.
@@ -100,20 +109,6 @@ export const STATE_FILE_PATTERNS = new RegExp(
 /** Write patterns to block on state files.
  * Note: `(?:^|\s)>>?(?!&)` avoids matching `2>&1` redirects in read-only commands */
 export const WRITE_PATTERNS = /(?:^|\s)>>?(?!&)|(?:^|\s)rm |mv |cp |tee |sed -i|perl -i|(?:^|\s)dd |sponge |chmod |python3? .*(open|write)|node .*(writeFile|fs\.)/;
-
-/** Test command patterns (for bash test output parsing) */
-export const TEST_COMMAND_PATTERNS = [
-  "mvn test", "mvn verify", "mvn -pl",
-  "mvnw test", "mvnw verify",
-  "./gradlew test", "./gradlew check",
-  "gradle test", "gradle check",
-  "npm test", "npm run test",
-  "npx vitest", "npx jest",
-  "yarn test", "pnpm test", "bun test",
-  "pytest", "python -m pytest", "python3 -m pytest",
-  "cargo test", "go test", "dotnet test",
-  "mix test", "make test", "make check",
-];
 
 /** Valid phase transitions: from → allowed targets */
 export const VALID_TRANSITIONS: Record<Phase, Phase[]> = {

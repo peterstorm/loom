@@ -1,7 +1,11 @@
 /**
  * Parse a machine definition JSON into a MachineDef, or fail with a
- * precise error. Invalid machines are rejected before any agent runs —
- * a MachineDef that exists is structurally valid by construction.
+ * precise error. Invalid machines are rejected before any agent runs.
+ *
+ * MachineDef is BRANDED (module-private symbol on the type): this parser
+ * is its only producer, so a MachineDef that exists is structurally valid
+ * by construction — consumers cannot be handed a hand-rolled object
+ * literal that skipped validation.
  */
 
 import {
@@ -51,29 +55,31 @@ function parsePhase(v: unknown, index: number, isLast: boolean): ParseResult<Pha
   const allowedTools = v.allowedTools ?? [];
   if (!isStringArray(allowedTools)) return parseErr(`${ctx} ("${id}"): allowedTools must be an array of tool names`);
 
-  let advance: Requirement | null = null;
+  // The raw JSON is still validated loudly (a declared-but-ignored guard
+  // would be a config lie), but the constructed variant makes the illegal
+  // combinations unrepresentable downstream.
   if (terminal) {
     if (v.advance !== undefined) return parseErr(`${ctx} ("${id}"): terminal phase cannot have advance`);
-  } else {
-    if (v.advance === undefined) return parseErr(`${ctx} ("${id}"): non-terminal phase requires advance`);
-    const parsed = parseRequirement(v.advance, `${ctx} ("${id}").advance`);
-    if (!parsed.ok) return parsed;
-    advance = parsed.value;
+    const requiresRaw = v.requires ?? [];
+    if (!Array.isArray(requiresRaw)) return parseErr(`${ctx} ("${id}"): requires must be an array`);
+    const requires: Requirement[] = [];
+    for (let i = 0; i < requiresRaw.length; i++) {
+      const parsed = parseRequirement(requiresRaw[i], `${ctx} ("${id}").requires[${i}]`);
+      if (!parsed.ok) return parsed;
+      requires.push(parsed.value);
+    }
+    return parseOk({ terminal: true, id, allowedTools, requires });
   }
 
+  if (v.advance === undefined) return parseErr(`${ctx} ("${id}"): non-terminal phase requires advance`);
+  const advance = parseRequirement(v.advance, `${ctx} ("${id}").advance`);
+  if (!advance.ok) return advance;
   const requiresRaw = v.requires ?? [];
-  if (!terminal && Array.isArray(requiresRaw) && requiresRaw.length > 0) {
+  if (!Array.isArray(requiresRaw)) return parseErr(`${ctx} ("${id}"): requires must be an array`);
+  if (requiresRaw.length > 0) {
     return parseErr(`${ctx} ("${id}"): requires is only valid on the terminal phase`);
   }
-  if (!Array.isArray(requiresRaw)) return parseErr(`${ctx} ("${id}"): requires must be an array`);
-  const requires: Requirement[] = [];
-  for (let i = 0; i < requiresRaw.length; i++) {
-    const parsed = parseRequirement(requiresRaw[i], `${ctx} ("${id}").requires[${i}]`);
-    if (!parsed.ok) return parsed;
-    requires.push(parsed.value);
-  }
-
-  return parseOk({ id, allowedTools, advance, terminal, requires });
+  return parseOk({ terminal: false, id, allowedTools, advance: advance.value });
 }
 
 export function parseMachine(raw: unknown): ParseResult<MachineDef> {
@@ -124,7 +130,8 @@ export function parseMachine(raw: unknown): ParseResult<MachineDef> {
     }
   }
 
-  return parseOk({ agent, enforcedTools, phases });
+  // The single blessed brand application: everything above proved the shape.
+  return parseOk({ agent, enforcedTools, phases } as unknown as MachineDef);
 }
 
 export function parseMachineJson(json: string): ParseResult<MachineDef> {

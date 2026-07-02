@@ -27,6 +27,7 @@ import {
   machineBindingPath,
   readBindings,
   readEvidence,
+  refreshBindingActivity,
   soleActiveBinding,
 } from "../../machine";
 
@@ -61,6 +62,13 @@ const handler: HookHandler = async (stdin) => {
   }
 
   try {
+    // The gate acting for this session IS binding activity: reap bindings
+    // whose subagent died silently (TTL exceeded) and refresh the activity
+    // anchor of live ones — a fully-stale binding file is deleted here, so
+    // the fail-closed "file exists but no bindings" check below never fires
+    // for a merely-expired binding.
+    await refreshBindingActivity(session_id);
+
     const bindings = readBindings(session_id);
     if (bindings.length === 0) {
       // Distinguish "no binding file" (ungated session → passthrough) from

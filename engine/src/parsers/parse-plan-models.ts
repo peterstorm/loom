@@ -24,7 +24,67 @@
  * quote the template don't produce phantom declarations.
  */
 
+import { match } from "ts-pattern";
+
 export type InvariantTier = "checkable" | "advisory";
+
+/** Model sections that carry `### ` id-blocks. */
+export type BlockSection = "Lifecycles" | "Invariants";
+
+/** All canonical model sections. */
+export type ModelSection = BlockSection | "Pipeline";
+
+/**
+ * A near-miss or misplaced model marker. Each variant carries the context
+ * needed to explain itself (`renderStray`); validation treats ANY stray as
+ * an error — a typo must never read as an opt-out.
+ */
+export type Stray =
+  | { readonly kind: "unterminated-fence" }
+  | { readonly kind: "empty-section"; readonly section: BlockSection }
+  | { readonly kind: "near-miss-heading"; readonly heading: string }
+  | {
+      readonly kind: "bad-block-grammar";
+      readonly heading: string;
+      readonly section: BlockSection;
+      readonly prefix: "LC" | "INV";
+    }
+  | { readonly kind: "misplaced-heading"; readonly heading: string; readonly home: BlockSection }
+  | { readonly kind: "misplaced-label"; readonly label: string; readonly home: ModelSection };
+
+/** Human-readable description of a stray, for validation error messages. */
+export function renderStray(s: Stray): string {
+  return match(s)
+    .with(
+      { kind: "unterminated-fence" },
+      () => "unterminated code fence — everything after it is invisible to the model parser; close the fence",
+    )
+    .with(
+      { kind: "empty-section" },
+      ({ section }) =>
+        `'## ${section}' section is declared but contains no '### ' blocks — declare the model or remove the section`,
+    )
+    .with(
+      { kind: "near-miss-heading" },
+      ({ heading }) =>
+        `near-miss section heading '${heading}' — model sections must be exactly '## Lifecycles', '## Pipeline', or '## Invariants'`,
+    )
+    .with(
+      { kind: "bad-block-grammar" },
+      ({ heading, section, prefix }) =>
+        `heading '### ${heading}' inside '## ${section}' does not match '### ${prefix}-<n>: <title>' (uppercase ${prefix}, numeric id, colon)`,
+    )
+    .with(
+      { kind: "misplaced-heading" },
+      ({ heading, home }) =>
+        `heading '### ${heading}' found outside its '## ${home}' section — declarations there are not parsed`,
+    )
+    .with(
+      { kind: "misplaced-label" },
+      ({ label, home }) => `'**${label}:**' line found outside a '## ${home}' section — it binds nothing there`,
+    )
+    .exhaustive();
+}
 
 export interface PlanLifecycle {
   /** e.g. "LC-1" */
@@ -59,10 +119,11 @@ export interface PlanModels {
    * that don't match the block grammar (`### INV-A1:`, `### lc-1:`, missing
    * colon), LC/INV headings outside their sections, and model field labels
    * (`**Machine file:**` etc.) outside their sections. Each entry is a
-   * human-readable description. Any stray means the plan tried to declare a
-   * model and failed — validation must error, not skip.
+   * discriminated Stray carrying its context; render with `renderStray`.
+   * Any stray means the plan tried to declare a model and failed —
+   * validation must error, not skip.
    */
-  readonly strays: readonly string[];
+  readonly strays: readonly Stray[];
 }
 
 export function hasModels(models: PlanModels): boolean {
@@ -162,8 +223,8 @@ function collectStrays(
   lifecycles: Section | null,
   pipeline: Section | null,
   invariants: Section | null,
-): string[] {
-  const strays: string[] = [];
+): Stray[] {
+  const strays: Stray[] = [];
 
   // Near-miss `##` section headings: start with a model-section word but
   // don't match the canonical heading exactly.
@@ -173,25 +234,21 @@ function collectStrays(
       new RegExp(`^##\\s+${name}\\s*$`, "i").test(line)
     );
     if (!exact) {
-      strays.push(
-        `near-miss section heading '${line}' — model sections must be exactly '## Lifecycles', '## Pipeline', or '## Invariants'`
-      );
+      strays.push({ kind: "near-miss-heading", heading: line });
     }
   }
 
   // `###` headings inside a model section must match the block grammar.
-  const blockGrammar: Array<{ s: Section | null; prefix: string; name: string }> = [
-    { s: lifecycles, prefix: "LC", name: "Lifecycles" },
-    { s: invariants, prefix: "INV", name: "Invariants" },
+  const blockGrammar: Array<{ s: Section | null; prefix: "LC" | "INV"; section: BlockSection }> = [
+    { s: lifecycles, prefix: "LC", section: "Lifecycles" },
+    { s: invariants, prefix: "INV", section: "Invariants" },
   ];
-  for (const { s, prefix, name } of blockGrammar) {
+  for (const { s, prefix, section: sectionName } of blockGrammar) {
     if (s === null) continue;
     for (const m of s.body.matchAll(/^###\s+([^\n]+)$/gm)) {
       const heading = m[1].trim();
       if (!new RegExp(`^${prefix}-\\d+:\\s*.+$`).test(heading)) {
-        strays.push(
-          `heading '### ${heading}' inside '## ${name}' does not match '### ${prefix}-<n>: <title>' (uppercase ${prefix}, numeric id, colon)`
-        );
+        strays.push({ kind: "bad-block-grammar", heading, section: sectionName, prefix });
       }
     }
   }
@@ -202,26 +259,26 @@ function collectStrays(
     const isLC = /^lc/i.test(m[1]);
     const home = isLC ? lifecycles : invariants;
     if (!inRange(idx, home)) {
-      strays.push(
-        `heading '### ${m[1].trim()}' found outside its '## ${isLC ? "Lifecycles" : "Invariants"}' section — declarations there are not parsed`
-      );
+      strays.push({
+        kind: "misplaced-heading",
+        heading: m[1].trim(),
+        home: isLC ? "Lifecycles" : "Invariants",
+      });
     }
   }
 
   // Model field labels outside their sections.
-  const labelHomes: Array<{ label: string; s: Section | null; name: string }> = [
-    { label: "Machine file", s: lifecycles, name: "Lifecycles" },
-    { label: "AuthoredDag", s: pipeline, name: "Pipeline" },
-    { label: "Rule file", s: invariants, name: "Invariants" },
-    { label: "Tier", s: invariants, name: "Invariants" },
+  const labelHomes: Array<{ label: string; s: Section | null; home: ModelSection }> = [
+    { label: "Machine file", s: lifecycles, home: "Lifecycles" },
+    { label: "AuthoredDag", s: pipeline, home: "Pipeline" },
+    { label: "Rule file", s: invariants, home: "Invariants" },
+    { label: "Tier", s: invariants, home: "Invariants" },
   ];
-  for (const { label, s, name } of labelHomes) {
+  for (const { label, s, home } of labelHomes) {
     for (const m of text.matchAll(new RegExp(`^\\*\\*${label}:\\*\\*[^\\n]*$`, "gim"))) {
       const idx = m.index ?? 0;
       if (!inRange(idx, s)) {
-        strays.push(
-          `'**${label}:**' line found outside a '## ${name}' section — it binds nothing there`
-        );
+        strays.push({ kind: "misplaced-label", label, home });
       }
     }
   }
@@ -230,11 +287,9 @@ function collectStrays(
 }
 
 /** A section that opted in must contain at least one block heading */
-function emptySectionStray(s: Section | null, name: string): string[] {
+function emptySectionStray(s: Section | null, section: BlockSection): Stray[] {
   if (s === null || /^###\s+/m.test(s.body)) return [];
-  return [
-    `'## ${name}' section is declared but contains no '### ' blocks — declare the model or remove the section`,
-  ];
+  return [{ kind: "empty-section", section }];
 }
 
 export function parsePlanModels(markdown: string): PlanModels {
@@ -264,10 +319,8 @@ export function parsePlanModels(markdown: string): PlanModels {
         ruleFile: fieldValue(block, "Rule file"),
       }));
 
-  const strays = [
-    ...(unterminated
-      ? ["unterminated code fence — everything after it is invisible to the model parser; close the fence"]
-      : []),
+  const strays: Stray[] = [
+    ...(unterminated ? [{ kind: "unterminated-fence" } as const] : []),
     ...emptySectionStray(lifecyclesSection, "Lifecycles"),
     ...emptySectionStray(invariantsSection, "Invariants"),
     ...collectStrays(text, lifecyclesSection, pipelineSection, invariantsSection),

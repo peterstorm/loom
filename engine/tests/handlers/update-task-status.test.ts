@@ -1,6 +1,35 @@
 import { describe, it, expect } from "vitest";
 import { extractTestEvidence, analyzeNewTests, resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
+import { legacyTestsPassedNote } from "../../src/types";
 import type { Evidence } from "../../src/machine";
+
+describe("legacyTestsPassedNote (pure)", () => {
+  it("flags a pre-refactor task carrying tests_passed without test_result", () => {
+    const note = legacyTestsPassedNote({ id: "T1", tests_passed: true });
+    expect(note).toContain("legacy tests_passed found on task T1");
+    expect(note).toContain("re-run task or regenerate graph");
+    expect(note).toContain("replaced by test_result");
+  });
+
+  it("flags the legacy field regardless of its value (presence, not truthiness)", () => {
+    expect(legacyTestsPassedNote({ id: "T1", tests_passed: false })).not.toBeNull();
+    expect(legacyTestsPassedNote({ id: "T1", tests_passed: null })).not.toBeNull();
+  });
+
+  it("stays silent when test_result is present alongside the stray field, or the field is absent", () => {
+    expect(
+      legacyTestsPassedNote({ id: "T1", tests_passed: true, test_result: { verdict: "trusted-pass" } }),
+    ).toBeNull();
+    expect(legacyTestsPassedNote({ id: "T1", test_result: { verdict: "trusted-pass" } })).toBeNull();
+    expect(legacyTestsPassedNote({ id: "T1" })).toBeNull();
+  });
+
+  it("handles non-object and id-less input without throwing", () => {
+    expect(legacyTestsPassedNote(null)).toBeNull();
+    expect(legacyTestsPassedNote("task")).toBeNull();
+    expect(legacyTestsPassedNote({ tests_passed: true })).toContain("<unknown>");
+  });
+});
 
 describe("extractTestEvidence (pure)", () => {
   it("detects Maven BUILD SUCCESS", () => {
@@ -159,21 +188,24 @@ describe("resolveTestEvidence — stale trusted failure vs later untrusted run (
 
   it("[fail, untrusted exit-0] routes to the labeled low-trust fallback — the stale failure does not outrank it", () => {
     const resolved = resolveTestEvidence([trustedFail, untrustedExitZero], "12 passing", true);
-    expect(resolved.passed).toBe(true);
-    expect(resolved.trusted).toBe(false); // never promoted to a trusted pass
+    // never promoted to a trusted pass — the verdict stays untrusted, labeled
+    expect(resolved.result).toEqual({
+      verdict: "untrusted",
+      passed: true,
+      label: "low-trust (exit 0, no report artifact; transcript-regex)",
+    });
     expect(resolved.evidence).toContain("low-trust");
   });
 
   it("[fail, untrusted exit-0] with no transcript signal stays failed and untrusted (never promoted)", () => {
     const resolved = resolveTestEvidence([trustedFail, untrustedExitZero], "no test output here", true);
-    expect(resolved.passed).toBe(false);
-    expect(resolved.trusted).toBe(false);
+    expect(resolved.result.verdict).toBe("untrusted");
+    expect(resolved.result.verdict === "untrusted" && resolved.result.passed).toBe(false);
   });
 
   it("a trusted failure with no later exit-0 run keeps its trusted verdict", () => {
     const resolved = resolveTestEvidence([untrustedExitZero, trustedFail], "12 passing", true);
-    expect(resolved.passed).toBe(false);
-    expect(resolved.trusted).toBe(true);
+    expect(resolved.result).toEqual({ verdict: "trusted-fail" });
     expect(resolved.evidence).toContain("ledger: exit 1");
   });
 });

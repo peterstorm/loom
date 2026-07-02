@@ -5,15 +5,14 @@
  *    (execution-time ground truth) first; transcript regex as the labeled,
  *    lower-trust fallback
  * 2. Verify new tests written via git diff + assertion density
- * 3. Atomic state write: files_modified, tests_passed, tests_trusted,
- *    new_tests_written
+ * 3. Atomic state write: files_modified, test_result, new_tests_written
  * 4. Detect wave completion → signal /wave-gate
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { match, P } from "ts-pattern";
-import type { HookHandler, HookResult, SubagentStopInput, TaskGraph, Task } from "../../types";
-import { IMPL_AGENTS, REVIEW_AGENTS } from "../../config";
+import type { HookHandler, HookResult, SubagentStopInput, TaskTestResult } from "../../types";
+import { legacyTestsPassedNote, testResultPassed } from "../../types";
+import { IMPL_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { extractTaskId } from "../../utils/extract-task-id";
@@ -22,8 +21,16 @@ import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
 import * as git from "../../utils/git";
 import { MACHINES_DIR } from "../../config";
-import { epochOf, eventsForEpoch, judgeTestRun, loadMachine, readEvidence } from "../../machine";
-import type { Evidence, EvidenceRecord } from "../../machine";
+import {
+  epochOf,
+  eventsForEpoch,
+  judgeTestRun,
+  loadMachine,
+  parseAgentId,
+  parseAgentType,
+  readEvidence,
+} from "../../machine";
+import type { Evidence, EvidenceRecord, TrustedTestVerdict } from "../../machine";
 
 // --- Pure: extract test pass evidence from bash output ---
 
@@ -102,10 +109,14 @@ export function extractTestEvidence(bashOutput: string): TestEvidence {
 
 // --- Pure: resolve test evidence, ledger first ---
 
-interface ResolvedTestEvidence extends TestEvidence {
-  /** True only when the verdict came from a trusted ledger TestRun (real exit + report cross-check). */
-  trusted: boolean;
+export interface ResolvedTestEvidence {
+  /** Verdict + trust provenance — exactly what gets persisted on the Task. */
+  readonly result: TaskTestResult;
+  /** Human-readable provenance line for test_evidence. */
+  readonly evidence: string;
 }
+
+type TestRunEvidence = Extract<Evidence, { kind: "TestRun" }>;
 
 /**
  * Ground truth beats transcript regex. The agent's own epoch in the
@@ -129,38 +140,45 @@ export function resolveTestEvidence(
   bashOutput: string,
   machineBound: boolean,
 ): ResolvedTestEvidence {
-  const runs = ledgerEvents.filter(
-    (e): e is Extract<Evidence, { kind: "TestRun" }> => e.kind === "TestRun",
-  );
-  const judged = runs.map((r) => ({ run: r, ...judgeTestRun(r.exit, r.report) }));
-  const lastTrustedIdx = judged.map((j) => j.trusted).lastIndexOf(true);
+  const runs = ledgerEvents.filter((e): e is TestRunEvidence => e.kind === "TestRun");
+  const judged = runs.map((r) => ({ run: r, verdict: judgeTestRun(r.exit, r.report) }));
 
-  if (lastTrustedIdx >= 0) {
-    const verdict = judged[lastTrustedIdx];
+  // Last GROUND-TRUTH run (trusted-pass or trusted-fail), with its index.
+  const lastTrusted = judged.reduce<
+    { index: number; run: TestRunEvidence; verdict: TrustedTestVerdict } | null
+  >((acc, { run, verdict }, index) => {
+    return verdict.verdict === "untrusted" ? acc : { index, run, verdict };
+  }, null);
+
+  if (lastTrusted !== null) {
     // A stale trusted failure must not outrank a later untrusted exit-0
     // run — but that later run earns only the low-trust fallback below,
     // never a trusted pass.
-    const laterExitZero = judged.slice(lastTrustedIdx + 1).some((j) => j.run.exit === 0);
-    if (verdict.passed || !laterExitZero) {
-      const report = verdict.run.report
-        ? `, report: ${verdict.run.report.total} tests / ${verdict.run.report.failed} failed`
+    const laterExitZero = judged.slice(lastTrusted.index + 1).some((j) => j.run.exit === 0);
+    if (lastTrusted.verdict.verdict === "trusted-pass" || !laterExitZero) {
+      const report = lastTrusted.run.report
+        ? `, report: ${lastTrusted.run.report.total} tests / ${lastTrusted.run.report.failed} failed`
         : "";
       return {
-        passed: verdict.passed,
-        trusted: true,
-        evidence: `ledger: exit ${verdict.run.exit}${report} (${verdict.run.command})`,
+        result: lastTrusted.verdict,
+        evidence: `ledger: exit ${lastTrusted.run.exit}${report} (${lastTrusted.run.command})`,
       };
     }
   }
 
-  const fallback = extractTestEvidence(bashOutput);
-  if (!fallback.passed) return { ...fallback, trusted: false };
   const label = judged.some((j) => j.run.exit === 0)
     ? "low-trust (exit 0, no report artifact; transcript-regex)"
     : machineBound && ledgerEvents.length === 0
       ? "degraded (machine bound, no ledger evidence; transcript-regex)"
       : "transcript-regex (fallback)";
-  return { passed: true, trusted: false, evidence: `${label}: ${fallback.evidence}` };
+  const fallback = extractTestEvidence(bashOutput);
+  if (!fallback.passed) {
+    return { result: { verdict: "untrusted", passed: false, label }, evidence: "" };
+  }
+  return {
+    result: { verdict: "untrusted", passed: true, label },
+    evidence: `${label}: ${fallback.evidence}`,
+  };
 }
 
 // --- Pure: determine new test evidence from diff ---
@@ -346,19 +364,31 @@ export const runUpdateTaskStatus = async (
   const task = state.tasks.find((t) => t.id === taskId);
   if (!task) return { kind: "passthrough" };
 
+  // Pre-refactor graphs carried `tests_passed` on the task (replaced by
+  // `test_result`, no compat read — unshipped branch). Explain the
+  // otherwise-mystifying "missing evidence" once, where we touch the task.
+  const legacyNote = legacyTestsPassedNote(task);
+  if (legacyNote) process.stderr.write(`[loom] ${legacyNote}\n`);
+
   // Skip if already completed or has valid test evidence (regardless of status).
   // Guards against crash-detection cascade: if another agent's hook set status="failed"
   // via crash detection, we still preserve previously-set test evidence.
   if (task.status === "completed") return { kind: "passthrough" };
-  if (task.tests_passed === true) return { kind: "passthrough" };
+  if (testResultPassed(task.test_result)) return { kind: "passthrough" };
 
   // Section 1: Test evidence — the agent's OWN epoch in the ledger first
   // (execution-time ground truth, attribution via agent_id), transcript
   // regex as explicit labeled fallback. Foreign epochs are never consulted.
+  // Identity is PARSED before epoch construction: a reserved character in
+  // the hook input could never have been bound/recorded (the bind boundary
+  // rejects it), so it yields no epoch events and routes to the existing
+  // degraded/fallback path instead of silently mis-keying the lookup.
   const machineBound = loadMachine(MACHINES_DIR, agentType).kind === "machine";
   const records = evidenceSnapshot ?? readEvidence(input.session_id);
-  const epochEvents = input.agent_id
-    ? eventsForEpoch(records, epochOf(input.agent_id, agentType))
+  const epochAgentId = input.agent_id ? parseAgentId(input.agent_id) : null;
+  const epochAgentType = parseAgentType(agentType);
+  const epochEvents = epochAgentId && epochAgentType
+    ? eventsForEpoch(records, epochOf(epochAgentId, epochAgentType))
     : [];
   const testEvidence = resolveTestEvidence(epochEvents, bashTestOutput, machineBound);
 
@@ -376,8 +406,7 @@ export const runUpdateTaskStatus = async (
         ? {
             ...t,
             status: "implemented" as const,
-            tests_passed: testEvidence.passed,
-            tests_trusted: testEvidence.trusted,
+            test_result: testEvidence.result,
             test_evidence: testEvidence.evidence,
             files_modified: filesModified,
             new_tests_written: newTestEvidence.written,

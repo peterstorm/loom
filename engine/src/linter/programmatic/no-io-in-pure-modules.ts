@@ -18,6 +18,16 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/linter/formatter.ts",
   "engine/src/core/",
   "engine/src/parsers/",
+  // Guarded-skill-machine pure core: the reducer and everything it may
+  // transitively import. The fs shell is ledger.ts / report-discovery.ts /
+  // session-registry.ts — deliberately NOT listed here.
+  "engine/src/machine/types.ts",
+  "engine/src/machine/advance.ts",
+  "engine/src/machine/parse-machine.ts",
+  "engine/src/machine/extract-evidence.ts",
+  "engine/src/machine/mermaid.ts",
+  "engine/src/machine/test-report.ts",
+  "engine/src/machine/evidence.ts",
 ];
 
 /** Import specifiers that indicate I/O capability */

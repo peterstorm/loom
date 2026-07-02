@@ -221,7 +221,7 @@ After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance
 | Step | What | How |
 |------|------|-----|
 | 1 | **State check** | Confirm `current_wave` and `impl_complete == true` |
-| 2 | **Test evidence** | Verify every task has `tests_passed == true` (auto-extracted by `update-task-status` hook from agent transcripts) and `new_tests_written == true` (or `new_tests_required == false`) |
+| 2 | **Test evidence** | Verify every task has a passing `test_result` (resolved by the `update-task-status` hook — evidence ledger first, transcript fallback) and `new_tests_written == true` (or `new_tests_required == false`) |
 | 3 | **Spec-check + reviews (parallel)** | Spawn `spec-check-invoker` once for the wave; spawn 5 reviewers per task in parallel |
 | 4 | **GitHub comment** | Post a summary to the issue (fallback: write to `.claude/state/wave-{N}-review.md`) |
 | 5 | **Advance** | `complete-wave-gate` helper performs final checks and either advances or blocks |
@@ -243,7 +243,7 @@ After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance
 
 The five mandatory checks performed by the `complete-wave-gate` helper:
 
-1. Per-task test evidence (`tests_passed == true`)
+1. Per-task test evidence (a passing `test_result`)
 2. New tests written (`new_tests_written == true` OR `new_tests_required == false`)
 3. Spec alignment (`spec_check.critical_count == 0`)
 4. Per-task review status (no `pending`)
@@ -380,7 +380,7 @@ All SubagentStop events route through `dispatch`, which inspects agent type and 
 | Handler | Fires for | Purpose |
 |---|---|---|
 | `advance-phase` | Phase agents | Advances `current_phase`, captures artifact paths via the artifact parser |
-| `update-task-status` | Implementation agents | Extracts test pass/fail evidence from transcript, sets `tests_passed`, `new_tests_written`, `files_modified` |
+| `update-task-status` | Implementation agents | Resolves test evidence (evidence ledger first, transcript fallback), sets `test_result` (verdict + trust provenance), `new_tests_written`, `files_modified` |
 | `store-reviewer-findings` | Review agents | Parses findings into per-task `critical_findings` / `advisory_findings` |
 | `store-spec-check-findings` | `spec-check-invoker` | Parses `SPEC_CHECK_*` footer into `spec_check.verdict` |
 | `cleanup-subagent-flag` | All | Cleans up tracking files |
@@ -486,7 +486,7 @@ interface TaskGraph {
 }
 ```
 
-`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `tests_passed`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `review_status`, `critical_findings`, `advisory_findings`, `start_sha`, `failure_reason`, `retry_count`.
+`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `test_result`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `review_status`, `critical_findings`, `advisory_findings`, `start_sha`, `failure_reason`, `retry_count`.
 
 ### Protection model
 
@@ -530,9 +530,16 @@ engine/src/
 ├── core/               # Pure functions (harness-agnostic, reusable in Pi)
 │   ├── block-direct-edits.ts
 │   ├── guard-state-file.ts
+│   ├── tool-vocabulary.ts          # FILE_MODIFYING_TOOLS / TEST_COMMAND_PATTERNS (zero imports)
 │   ├── validate-phase-order.ts
 │   ├── validate-task-execution.ts
 │   └── validate-template-substitution.ts
+├── machine/            # Guarded skill machine (see machines/README.md)
+│   │                   # Pure core — self-linted via no-io-in-pure-modules:
+│   ├── types.ts, advance.ts, parse-machine.ts, extract-evidence.ts,
+│   ├── mermaid.ts, test-report.ts, evidence.ts
+│   │                   # Imperative shell (fs + locks):
+│   └── ledger.ts, report-discovery.ts, session-registry.ts
 ├── handlers/
 │   ├── pre-tool-use/      # validate-phase-order, validate-task-execution, …
 │   ├── post-tool-use/     # lint-file
@@ -688,7 +695,7 @@ See `docs/pi-usage.md` and `docs/migration-claude-code-to-pi.md` for details.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Task stuck `in_progress` | Agent hung without crashing | Re-spawn the task |
-| `tests_passed` missing | Agent didn't run tests via Bash | Re-spawn — agents MUST execute tests |
+| `test_result` missing or not a pass | Agent didn't run tests via Bash | Re-spawn — agents MUST execute tests |
 | `new_tests_written` false | Agent reused existing tests | Re-spawn — agents must write new tests |
 | Wave not advancing | Gate blocked by critical findings | Fix issues, re-run `/wave-gate` |
 | State write blocked | `guard-state-file` active | All writes go through hooks; reads are fine |
@@ -703,7 +710,7 @@ See `docs/pi-usage.md` and `docs/migration-claude-code-to-pi.md` for details.
 jq '.' .claude/state/active_task_graph.json
 
 # Per-task status
-jq '.tasks[] | {id, status, tests_passed, new_tests_written, review_status}' \
+jq '.tasks[] | {id, status, test_result, new_tests_written, review_status}' \
    .claude/state/active_task_graph.json
 
 # Current wave and gate status

@@ -5,6 +5,7 @@
  */
 
 import type { HookHandler, Task } from "../../types";
+import { testResultPassed } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
 
@@ -17,13 +18,13 @@ const handler: HookHandler = async (_stdin, args) => {
   const wave = waveIdx >= 0 ? Number(args[waveIdx + 1]) : (state.current_wave ?? 1);
   const tasks = state.tasks.filter((t) => t.wave === wave);
 
-  const withTests = tasks.filter((t) => t.tests_passed);
+  const withTests = tasks.filter((t) => testResultPassed(t.test_result));
   const newTestOk = tasks.filter((t) => t.new_tests_required === false || t.new_tests_written);
 
   process.stderr.write(`Wave ${wave} test evidence: ${withTests.length}/${tasks.length} passed, ${newTestOk.length}/${tasks.length} new-test OK\n`);
 
   for (const t of tasks) {
-    const testStatus = t.tests_passed ? "PASS" : "MISSING";
+    const testStatus = testResultPassed(t.test_result) ? "PASS" : "MISSING";
     const newStatus = t.new_tests_required === false
       ? "N/A"
       : t.new_tests_written ? `YES (${t.new_test_evidence})` : "MISSING";
@@ -36,7 +37,7 @@ const handler: HookHandler = async (_stdin, args) => {
     return { kind: "passthrough" };
   }
 
-  const missing = tasks.filter((t) => !t.tests_passed).map((t) => t.id);
+  const missing = tasks.filter((t) => !testResultPassed(t.test_result)).map((t) => t.id);
   const missingNew = tasks.filter((t) => t.new_tests_required !== false && !t.new_tests_written).map((t) => t.id);
 
   const parts = [];

@@ -43,7 +43,11 @@
 9. **hooks/scripts/enforce-phase-tools.sh:15** — unreadable SUBAGENT_DIR → exit 2 (fail closed), distinct from "no bindings". (silent-failure-hunter)
 10. **Doc fixes** (comment-analyzer, all 7): machines/README.md:36 (trusted vs trusted-pass), :48 (silent recorder stand-down), :82 (missingRequirements claim); update-task-status.ts:117 label-taxonomy comment; agents/decompose-agent.md:19 + commands/templates/phase-decompose.md:71 (pathsMatch suffix-match reality); commands/templates/phase-architecture.md:176 (git add pathspec failure); commands/loom.md:481 (hook table + new hooks).
 
-## Deferred (documented, not in this pass — architectural refactors beyond minimal-fix scope)
+## Deferred — RESOLVED later the same day (2026-07-02)
+
+All items below were implemented in the follow-up "deferred refactors" pass (two implementation waves + regression review + fixes). Additions beyond the list: pureModules self-lint test for the machine core, binding-liveness TTL uses a session-activity heartbeat (not pid — hook processes exit immediately), SessionRegistry fs adapter + in-memory fake + fast-check interleaving properties. Regressions caught by post-refactor review and fixed: wave-gate checks moved back inside the locked update (with pre-resolved fs deps for retry purity), unparseable agent ids still count on the .active roster via a hashed placeholder, unbind preserves malformed binding lines, liveness docs state session-activity semantics, legacy tests_passed emits an operator note.
+
+### Original deferred list (architectural refactors beyond minimal-fix scope)
 
 - PhaseDef discriminated union on `terminal`; branded MachineDef; branded AgentId/AgentType; three-variant judgeTestRun verdict; Stray discriminated union; `test_result` discriminated Task field (type-design-analyzer — all valid, all reshape types across many call sites).
 - Binding liveness/TTL (pid-stamped bindings mirroring isStaleLock) (architecture).

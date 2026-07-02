@@ -10,3 +10,4 @@ export type { ValidatePhaseOrderInput, ArtifactState } from "./validate-phase-or
 export { validateTaskExecution } from "./validate-task-execution";
 export type { ValidateTaskExecutionInput } from "./validate-task-execution";
 export { validateTemplateSubstitution } from "./validate-template-substitution";
+export { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "./tool-vocabulary";

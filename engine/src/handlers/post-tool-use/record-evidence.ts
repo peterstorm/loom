@@ -22,6 +22,7 @@ import {
   extractBashOutcome,
   extractEvidence,
   findReport,
+  refreshBindingActivity,
   soleActiveBinding,
 } from "../../machine";
 
@@ -41,6 +42,10 @@ const handler: HookHandler = async (stdin) => {
     const sessionId = input.session_id;
     const toolName = input.tool_name;
     if (!sessionId || !toolName) return passthroughResult();
+
+    // Recorder activity keeps a live binding fresh (and reaps expired ones)
+    // — no-op for ungated sessions (no binding file, no lock taken).
+    await refreshBindingActivity(sessionId);
 
     const binding = soleActiveBinding(sessionId);
     if (binding === null) return passthroughResult();

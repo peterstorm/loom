@@ -13,18 +13,26 @@ const valid = {
 };
 
 describe("parseMachine", () => {
-  it("accepts a valid machine", () => {
+  it("accepts a valid machine and constructs the discriminated variants", () => {
     const result = parseMachine(valid);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.value.phases).toHaveLength(2);
-      expect(result.value.phases[1].requires[0]).toEqual({ event: "TestRunPassed", min: 1 });
+      const [read, done] = result.value.phases;
+      expect(read.terminal).toBe(false);
+      if (!read.terminal) expect(read.advance).toEqual({ event: "FileRead", min: 1 });
+      expect(done.terminal).toBe(true);
+      if (done.terminal) expect(done.requires[0]).toEqual({ event: "TestRunPassed", min: 1 });
     }
   });
 
   it("defaults requirement min to 1", () => {
     const result = parseMachine(valid);
-    expect(result.ok && result.value.phases[0].advance?.min).toBe(1);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const read = result.value.phases[0];
+      expect(!read.terminal && read.advance.min).toBe(1);
+    }
   });
 
   it("rejects non-object input", () => {

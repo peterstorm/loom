@@ -31,7 +31,7 @@ Abort if `impl_complete != true`.
 
 ### Step 2: Verify Test Evidence
 
-Test evidence is set **automatically** by the `update-task-status` SubagentStop hook when implementation agents complete. It extracts pass markers (Maven, Node, Vitest, pytest) from agent transcripts and stores per-task `tests_passed` + `test_evidence`.
+Test evidence is set **automatically** by the `update-task-status` SubagentStop hook when implementation agents complete. It resolves each task's `test_result` — a trusted verdict from the evidence ledger (`{"verdict": "trusted-pass"}` / `{"verdict": "trusted-fail"}`) when execution-time ground truth exists, or a labeled `{"verdict": "untrusted", "passed": ..., "label": ...}` when only transcript pass markers (Maven, Node, Vitest, pytest) are available — plus a human-readable `test_evidence` line.
 
 **Check evidence status (read-only):**
 ```bash
@@ -42,7 +42,7 @@ This prints per-task evidence status. Exit 0 = all tasks have evidence, exit 1 =
 
 **If evidence missing** → re-spawn the implementation agent for that task. The agent MUST run tests and the SubagentStop hook must see pass markers in the transcript.
 
-**New test verification:** The `update-task-status` SubagentStop hook also checks that agents wrote NEW test methods (not just reran existing). It diffs against the per-task `start_sha` baseline (set by PreToolUse hook) to scope detection to each task's changes. Both `tests_passed` and `new_tests_written` must be true for the wave gate to pass.
+**New test verification:** The `update-task-status` SubagentStop hook also checks that agents wrote NEW test methods (not just reran existing). It diffs against the per-task `start_sha` baseline (set by PreToolUse hook) to scope detection to each task's changes. Both a passing `test_result` and `new_tests_written == true` are required for the wave gate to pass.
 
 **Do NOT manually run tests or set test flags.** The guard hook blocks direct state file writes. Evidence can only come from agent execution → SubagentStop hook extraction.
 
@@ -180,7 +180,7 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper complete-wave-gate
 ```
 
 The helper performs **five checks** before advancing:
-1. **Per-task test evidence** — all wave tasks must have `tests_passed == true`
+1. **Per-task test evidence** — all wave tasks must have a passing `test_result` (`{"verdict": "trusted-pass"}`, or an untrusted result with `passed: true`)
 2. **New tests written** — all wave tasks must have `new_tests_written == true` OR `new_tests_required == false`
 3. **Spec alignment** — `spec_check.critical_count == 0`
 4. **Per-task review status** — all wave tasks must have `review_status != "pending"`
@@ -229,7 +229,7 @@ jq '.spec_check' .claude/state/active_task_graph.json
 **Debugging:**
 ```bash
 # Check per-task review status
-jq '.tasks[] | {id, review_status, tests_passed}' .claude/state/active_task_graph.json
+jq '.tasks[] | {id, review_status, test_result}' .claude/state/active_task_graph.json
 
 # Check wave tasks
 WAVE=$(jq -r '.current_wave' .claude/state/active_task_graph.json)

@@ -4,7 +4,7 @@
  */
 
 import { parseJsonl, parsePiJsonl, getContentBlocks, detectFormat, type TranscriptFormat } from "./types";
-import { FILE_MODIFYING_TOOLS } from "../config";
+import { FILE_MODIFYING_TOOLS } from "../core/tool-vocabulary";
 
 /** Pi tool names that modify files */
 const PI_FILE_TOOLS = new Set(["write", "edit"]);

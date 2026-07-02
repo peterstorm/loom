@@ -28,7 +28,12 @@ const handler: HookHandler = async (stdin, args) => {
         ? {
             ...t,
             status: "implemented" as const,
-            tests_passed: passed,
+            // Helper-reported stdin is agent-controlled text — never trusted.
+            test_result: {
+              verdict: "untrusted" as const,
+              passed,
+              label: "helper-reported (store-test-evidence stdin)",
+            },
             test_evidence: evidenceMatch?.[1] ?? "",
             new_tests_written: newWritten,
             new_test_evidence: newEvidenceMatch?.[1] ?? "",

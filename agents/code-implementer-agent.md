@@ -21,4 +21,4 @@ You MUST follow this exact sequence for every task:
 
 ## Why This Matters
 
-A SubagentStop hook reads your transcript and extracts test evidence ONLY from Bash tool_result blocks. If you skip step 4, `tests_passed` will be `false` and the entire wave gate will fail. Writing tests is not enough — you must EXECUTE them via Bash.
+A SubagentStop hook reads your transcript and extracts test evidence ONLY from Bash tool_result blocks. If you skip step 4, the task's `test_result` will not show a pass and the entire wave gate will fail. Writing tests is not enough — you must EXECUTE them via Bash.

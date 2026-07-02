@@ -62,10 +62,19 @@ describe("validateModelBindings", () => {
   });
 
   it("turns every parser stray into an error (typos are not opt-outs)", () => {
-    const models: PlanModels = { ...NO_MODELS, strays: ["near-miss section heading '## Lifecycles:'", "heading '### INV-A1: x' inside '## Invariants'"] };
+    const models: PlanModels = {
+      ...NO_MODELS,
+      strays: [
+        { kind: "near-miss-heading", heading: "## Lifecycles:" },
+        { kind: "bad-block-grammar", heading: "INV-A1: x", section: "Invariants", prefix: "INV" },
+      ],
+    };
     const result = validateModelBindings(models, [], NO_FILES);
     expect(errorsOf(result)).toHaveLength(2);
     expectError(result, "Model declaration problem");
+    // rendered context survives into the error text
+    expectError(result, "near-miss section heading '## Lifecycles:'");
+    expectError(result, "'### INV-A1: x' inside '## Invariants'");
   });
 
   describe("lifecycles", () => {
@@ -186,7 +195,7 @@ describe("validateModelBindings", () => {
       lifecycles: [{ id: "LC-1", title: "A", machineFile: null }],
       pipeline: { dagFile: null },
       invariants: [{ id: "INV-1", title: "B", tier: "checkable", ruleFile: null }],
-      strays: ["near-miss section heading '## Lifecycles:'"],
+      strays: [{ kind: "near-miss-heading", heading: "## Lifecycles:" }],
     };
     expect(errorsOf(validateModelBindings(models, [], NO_FILES))).toHaveLength(4);
   });

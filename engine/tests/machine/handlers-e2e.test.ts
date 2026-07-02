@@ -6,18 +6,25 @@
  * process-global).
  */
 
-import { describe, it, expect, afterAll } from "vitest";
-import { unlinkSync } from "node:fs";
+import { describe, it, expect, afterAll, vi } from "vitest";
+import { existsSync, unlinkSync } from "node:fs";
 import markActive from "../../src/handlers/subagent-start/mark-subagent-active";
 import recordEvidence from "../../src/handlers/post-tool-use/record-evidence";
 import enforce from "../../src/handlers/pre-tool-use/enforce-phase-tools";
 import cleanup from "../../src/handlers/subagent-stop/cleanup-subagent-flag";
-import { ledgerPath, machineBindingPath, readEvidence, eventsForEpoch } from "../../src/machine/ledger";
+import {
+  countActiveAgents,
+  ledgerPath,
+  machineBindingPath,
+  readEvidence,
+  soleActiveBinding,
+} from "../../src/machine/ledger";
+import { eventsForEpoch } from "../../src/machine/evidence";
 import { SUBAGENT_DIR } from "../../src/config";
 
 const run = `handlers-e2e-${process.pid}-${Date.now()}`;
 const sid = (name: string) => `${run}-${name}`;
-const sessions = ["e2e-1", "e2e-2", "e2e-3", "e2e-4", "e2e-5"].map(sid);
+const sessions = ["e2e-1", "e2e-2", "e2e-3", "e2e-4", "e2e-5", "e2e-6", "e2e-7"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
@@ -110,6 +117,62 @@ describe("guarded machine — full hook lifecycle", () => {
     await markActive(start(s, "a-9", "brainstorm-agent"), []);
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
     await cleanup(start(s, "a-9", "brainstorm-agent"), []);
+  });
+
+  it("an agent_id with reserved characters is refused LOUDLY at the bind boundary (never desyncs the epoch)", async () => {
+    const s = sid("e2e-6");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      // ':' in the id would make the recorded epoch ambiguous with epochOf
+      await markActive(start(s, "evil:id"), []);
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("reserved characters");
+      expect(text).toContain("UNGATED");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    // No binding was written — the session is simply ungated (fail-unarmed,
+    // which the gate's binding-exists checks already cover). But the agent
+    // IS on the roster (as a sanitized placeholder) so contention counting
+    // still sees it.
+    expect(existsSync(machineBindingPath(s))).toBe(false);
+    expect(countActiveAgents(s)).toBe(1);
+    expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
+    await cleanup(stop(s, "evil:id"), []);
+    expect(countActiveAgents(s)).toBe(0); // stop removes the same placeholder
+  });
+
+  it("an unparseable agent_id still counts on the roster — attribution stands down instead of cross-crediting", async () => {
+    const s = sid("e2e-7");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      // A validly-bound agent…
+      await markActive(start(s), []);
+      expect(soleActiveBinding(s)?.agentId).toBe("a-1");
+
+      // …then a rogue agent whose id the bind boundary rejects joins the
+      // session. It cannot be bound — but it MUST still count as active,
+      // otherwise its tool calls (including trusted TestRun evidence)
+      // would be attributed to a-1's epoch.
+      await markActive(start(s, "evil:id"), []);
+      expect(countActiveAgents(s)).toBe(2);
+      expect(soleActiveBinding(s)).toBeNull(); // contended → stand down
+
+      // Gate and recorder both stand down while contended.
+      expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
+      await recordEvidence(
+        post(s, "Bash", { command: "npm test" }, { exit_code: 0, stdout: "5 passing" }),
+        [],
+      );
+      expect(readEvidence(s)).toEqual([]); // the rogue run credited NOTHING
+
+      // The rogue agent stops → symmetric placeholder removal re-arms a-1.
+      await cleanup(stop(s, "evil:id"), []);
+      expect(soleActiveBinding(s)?.agentId).toBe("a-1");
+      await cleanup(stop(s), []);
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 
   it("the gate fails closed on malformed stdin while any binding exists", async () => {

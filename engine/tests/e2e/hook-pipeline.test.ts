@@ -80,7 +80,9 @@ function markImplemented(path: string, taskId: string, testsPassed: boolean) {
         ? {
             ...t,
             status: "implemented" as const,
-            tests_passed: testsPassed,
+            test_result: testsPassed
+              ? ({ verdict: "trusted-pass" } as const)
+              : ({ verdict: "trusted-fail" } as const),
             test_evidence: testsPassed ? "mock evidence" : "",
             new_tests_written: true,
             new_test_evidence: "1 new test, 1 assertion",
@@ -172,7 +174,7 @@ describe("E2E: hook pipeline state machine", () => {
     markImplemented(statePath, "T1", true);
     state = readState(statePath);
     expect(state.tasks.find((t) => t.id === "T1")!.status).toBe("implemented");
-    expect(state.tasks.find((t) => t.id === "T1")!.tests_passed).toBe(true);
+    expect(state.tasks.find((t) => t.id === "T1")!.test_result).toEqual({ verdict: "trusted-pass" });
 
     // Step 4: T3 still blocked (T2 not done, wave 1 not complete)
     expect(validateExecution("T3", state)).toBe("block");
@@ -215,7 +217,7 @@ describe("E2E: hook pipeline state machine", () => {
     markImplemented(statePath, "T1", false);
     const state = readState(statePath);
     expect(state.tasks.find((t) => t.id === "T1")!.status).toBe("implemented");
-    expect(state.tasks.find((t) => t.id === "T1")!.tests_passed).toBe(false);
+    expect(state.tasks.find((t) => t.id === "T1")!.test_result).toEqual({ verdict: "trusted-fail" });
   });
 
   it("state file permissions restored after update", () => {

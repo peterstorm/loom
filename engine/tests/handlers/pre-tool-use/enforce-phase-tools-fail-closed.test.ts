@@ -20,7 +20,16 @@ import {
   machineBindingPath,
   unbindMachineAgent,
 } from "../../../src/machine/ledger";
+import { parseAgentId, parseAgentType } from "../../../src/machine/evidence";
 import { SUBAGENT_DIR } from "../../../src/config";
+
+/** bindMachineAgent takes branded identity — parse like production does. */
+async function bind(session: string, type: string, id: string): Promise<void> {
+  const agentType = parseAgentType(type);
+  const agentId = parseAgentId(id);
+  if (!agentType || !agentId) throw new Error(`test fixture: invalid identity ${type}/${id}`);
+  await bindMachineAgent(session, agentType, agentId);
+}
 
 const run = `gate-fail-closed-${process.pid}-${Date.now()}`;
 const sid = (name: string) => `${run}-${name}`;
@@ -42,7 +51,7 @@ const pre = (session: string, tool: string) =>
 describe("gate fails closed on unattributable input (Fix 1)", () => {
   it("valid JSON missing session_id/tool_name blocks while any binding exists", async () => {
     const s = sid("missing-fields");
-    await bindMachineAgent(s, "code-implementer-agent", "a-1");
+    await bind(s, "code-implementer-agent", "a-1");
     try {
       const noSession = await enforce(JSON.stringify({ tool_name: "Write", tool_input: {} }), []);
       expect(noSession.kind).toBe("block");
@@ -84,7 +93,7 @@ describe("gate fails closed on broken machinery (Fix 4)", () => {
     process.env.LOOM_MACHINES_DIR = machines;
     try {
       writeFileSync(join(machines, "corrupt-agent.machine.json"), "{broken");
-      await bindMachineAgent(s, "corrupt-agent", "a-1");
+      await bind(s, "corrupt-agent", "a-1");
       const result = await enforce(pre(s, "Write"), []);
       expect(result.kind).toBe("block");
       if (result.kind === "block") {
@@ -99,7 +108,7 @@ describe("gate fails closed on broken machinery (Fix 4)", () => {
 
   it("an evaluation crash → block (catch-all), never passthrough", async () => {
     const s = sid("crash");
-    await bindMachineAgent(s, "code-implementer-agent", "a-1");
+    await bind(s, "code-implementer-agent", "a-1");
     // A DIRECTORY at the .active path makes attribution reading throw
     // mid-evaluation — the catch-all must fail closed, not open.
     mkdirSync(`${SUBAGENT_DIR}/${s}.active`, { recursive: true });

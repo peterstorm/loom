@@ -77,22 +77,45 @@ export interface Requirement {
   readonly min: number;
 }
 
-export interface PhaseDef {
-  readonly id: string;
-  /**
-   * Tools from the machine's `enforcedTools` jurisdiction that this phase
-   * permits. Deny-by-default within the jurisdiction: an enforced tool not
-   * listed here is blocked while this phase is current.
-   */
-  readonly allowedTools: readonly string[];
-  /** Guard to advance past this phase. Absent only on the terminal phase. */
-  readonly advance: Requirement | null;
-  readonly terminal: boolean;
-  /** Terminal phase only: evidence that must exist for clean completion. */
-  readonly requires: readonly Requirement[];
-}
+/**
+ * A phase is EITHER working (has an advance guard, no completion
+ * requirements) OR terminal (has completion requirements, nothing to
+ * advance to). The discriminant makes the illegal combinations —
+ * terminal-with-advance, working-without-advance, working-with-requires —
+ * unrepresentable, so consumers never null-check `advance` or guess
+ * whether `requires` is meaningful.
+ */
+export type PhaseDef =
+  | {
+      readonly terminal: false;
+      readonly id: string;
+      /**
+       * Tools from the machine's `enforcedTools` jurisdiction that this phase
+       * permits. Deny-by-default within the jurisdiction: an enforced tool not
+       * listed here is blocked while this phase is current.
+       */
+      readonly allowedTools: readonly string[];
+      /** Guard to advance past this phase. */
+      readonly advance: Requirement;
+    }
+  | {
+      readonly terminal: true;
+      readonly id: string;
+      readonly allowedTools: readonly string[];
+      /** Evidence that must exist for clean completion. */
+      readonly requires: readonly Requirement[];
+    };
 
-export interface MachineDef {
+/**
+ * Brand: only `parseMachine` produces a MachineDef. The symbol is declared
+ * (never exported, never given a runtime value), so no other module can
+ * structurally construct one — "a MachineDef that exists is structurally
+ * valid by construction" is now enforced by the type system, not by a
+ * header comment.
+ */
+declare const MACHINE_PARSED: unique symbol;
+
+export type MachineDef = {
   /** Agent type this machine binds to (e.g. "code-implementer-agent"). */
   readonly agent: string;
   /**
@@ -102,7 +125,7 @@ export interface MachineDef {
    */
   readonly enforcedTools: readonly string[];
   readonly phases: readonly PhaseDef[];
-}
+} & { readonly [MACHINE_PARSED]: true };
 
 // --- Runtime state (a pure fold over the evidence ledger) ---
 

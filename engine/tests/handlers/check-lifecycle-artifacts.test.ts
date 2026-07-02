@@ -115,7 +115,7 @@ describe("complete-wave-gate handler wiring (check 5 is actually in the gate)", 
       tasks: [{
         id: "T1", description: "implement machine", agent: "code-implementer-agent",
         wave: 1, status: "implemented", depends_on: [],
-        new_tests_required: true, tests_passed: true, new_tests_written: true,
+        new_tests_required: true, test_result: { verdict: "trusted-pass" }, new_tests_written: true,
         review_status: "passed", critical_findings: [], advisory_findings: [],
         file_list: [machineFile],
       }],

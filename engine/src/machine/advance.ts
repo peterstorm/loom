@@ -17,12 +17,15 @@ export function tokensFor(e: Evidence): EventToken[] {
   return match(e)
     .with({ kind: "FileRead" }, (): EventToken[] => ["FileRead"])
     .with({ kind: "FileWrite" }, (): EventToken[] => ["FileWrite"])
-    .with({ kind: "TestRun" }, (run): EventToken[] => {
+    .with({ kind: "TestRun" }, (run): EventToken[] =>
       // Judgment is derived from facts at fold time: a run counts as
       // TestRunPassed only when ground truth confirms it (trusted pass).
-      const { passed, trusted } = judgeTestRun(run.exit, run.report);
-      return passed && trusted ? ["TestRun", "TestRunPassed"] : ["TestRun"];
-    })
+      match(judgeTestRun(run.exit, run.report))
+        .with({ verdict: "trusted-pass" }, (): EventToken[] => ["TestRun", "TestRunPassed"])
+        .with({ verdict: "trusted-fail" }, (): EventToken[] => ["TestRun"])
+        .with({ verdict: "untrusted" }, (): EventToken[] => ["TestRun"])
+        .exhaustive(),
+    )
     .exhaustive();
 }
 
@@ -41,8 +44,11 @@ export function satisfied(req: Requirement, counts: EventCounts): boolean {
 function settle(machine: MachineDef, state: PhaseState): PhaseState {
   let index = state.phaseIndex;
   while (index < machine.phases.length - 1) {
-    const guard = machine.phases[index].advance;
-    if (guard === null || !satisfied(guard, state.counts)) break;
+    const phase = machine.phases[index];
+    // A terminal phase before the last index is unrepresentable in parsed
+    // machines (parseMachine enforces terminal-is-last); the check exists
+    // purely to narrow the union.
+    if (phase.terminal || !satisfied(phase.advance, state.counts)) break;
     index++;
   }
   return index === state.phaseIndex ? state : { ...state, phaseIndex: index };
@@ -79,17 +85,19 @@ export function isTerminal(machine: MachineDef, state: PhaseState): boolean {
 
 /** Terminal requirements not yet met — empty means clean completion. */
 export function missingRequirements(machine: MachineDef, state: PhaseState): Requirement[] {
-  const terminal = machine.phases[machine.phases.length - 1];
-  return terminal.requires.filter((r) => !satisfied(r, state.counts));
+  const last = machine.phases[machine.phases.length - 1];
+  // parseMachine guarantees the last phase is terminal; the narrowing check
+  // is the type-level proof of that invariant, not a runtime possibility.
+  if (!last.terminal) return [];
+  return last.requires.filter((r) => !satisfied(r, state.counts));
 }
 
 /** Human-readable explanation for a blocked tool call. */
 export function blockExplanation(machine: MachineDef, state: PhaseState, toolName: string): string {
   const phase = currentPhase(machine, state);
-  const guard = phase.advance;
-  const progress = guard
-    ? `advance guard: ${guard.event} ≥ ${guard.min} (currently ${state.counts[guard.event]})`
-    : "terminal phase";
+  const progress = phase.terminal
+    ? "terminal phase"
+    : `advance guard: ${phase.advance.event} ≥ ${phase.advance.min} (currently ${state.counts[phase.advance.event]})`;
   return [
     `[loom machine: ${machine.agent}] ${toolName} is not available in phase "${phase.id}".`,
     `Allowed here: ${phase.allowedTools.length > 0 ? phase.allowedTools.join(", ") : "none of the enforced tools"}.`,

@@ -3,14 +3,14 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync, existsSync, unlinkS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Evidence } from "../../src/machine/types";
-import * as ledger from "../../src/machine/ledger";
+import * as ledger from "../../src/machine";
 import { SUBAGENT_DIR } from "../../src/config";
 
 // bun/vitest may share SUBAGENT_DIR across suites — isolate via unique
 // session ids + targeted cleanup instead of env manipulation.
 const run = `ledger-test-${process.pid}-${Date.now()}`;
 const sid = (name: string) => `${run}-${name}`;
-const sessions = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "never-seen"].map(sid);
+const sessions = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "never-seen"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
@@ -25,6 +25,21 @@ afterAll(() => {
     }
   }
 });
+
+// bindMachineAgent takes BRANDED identity — tests go through the same
+// smart constructors production uses.
+function agentId(s: string) {
+  const v = ledger.parseAgentId(s);
+  if (v === null) throw new Error(`test fixture: invalid agent id ${JSON.stringify(s)}`);
+  return v;
+}
+function agentType(s: string) {
+  const v = ledger.parseAgentType(s);
+  if (v === null) throw new Error(`test fixture: invalid agent type ${JSON.stringify(s)}`);
+  return v;
+}
+const bind = (s: string, type: string, id: string) =>
+  ledger.bindMachineAgent(s, agentType(type), agentId(id));
 
 const read = (path: string): Evidence => ({ kind: "FileRead", path });
 const testRun: Evidence = {
@@ -88,7 +103,7 @@ describe("machine binding lifecycle", () => {
   it("bind → sole binding → unbind → gone", async () => {
     const s = sid("s2");
     expect(ledger.readBindings(s)).toEqual([]);
-    await ledger.bindMachineAgent(s, "code-implementer-agent", "a-1");
+    await bind(s, "code-implementer-agent", "a-1");
     expect(ledger.readBindings(s)).toEqual([
       { agentId: "a-1", agentType: "code-implementer-agent", epoch: "a-1:code-implementer-agent" },
     ]);
@@ -100,11 +115,11 @@ describe("machine binding lifecycle", () => {
 
   it("a fresh bind truncates the previous run's ledger (epochs make leftovers inert anyway)", async () => {
     const s = sid("s3");
-    await ledger.bindMachineAgent(s, "code-implementer-agent", "a-1");
+    await bind(s, "code-implementer-agent", "a-1");
     ledger.appendEvidence(s, "a-1:code-implementer-agent", [read("/old.ts")]);
     await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-1");
 
-    await ledger.bindMachineAgent(s, "code-implementer-agent", "a-2");
+    await bind(s, "code-implementer-agent", "a-2");
     expect(ledger.readEvidence(s)).toEqual([]);
     // Even if truncation had failed, the new epoch sees nothing:
     expect(ledger.eventsForEpoch(ledger.readEvidence(s), "a-2:code-implementer-agent")).toEqual([]);
@@ -113,14 +128,18 @@ describe("machine binding lifecycle", () => {
 
   it("logs skipped malformed binding lines instead of silently dropping them", () => {
     const s = sid("s6");
-    writeFileSync(ledger.machineBindingPath(s), "garbage-line-without-a-tab\na-1\tcode-implementer-agent\n");
+    // A line without the bind stamp (old 2-field wire format) is malformed too.
+    writeFileSync(
+      ledger.machineBindingPath(s),
+      `garbage-line-without-a-tab\na-1\tcode-implementer-agent\na-1\tcode-implementer-agent\t${Date.now()}\n`,
+    );
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       expect(ledger.readBindings(s)).toEqual([
         { agentId: "a-1", agentType: "code-implementer-agent", epoch: "a-1:code-implementer-agent" },
       ]);
       const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
-      expect(text).toContain("skipped 1 malformed binding line(s)");
+      expect(text).toContain("skipped 2 malformed binding line(s)");
     } finally {
       stderrSpy.mockRestore();
     }
@@ -128,7 +147,7 @@ describe("machine binding lifecycle", () => {
 
   it("a leaked binding — the sole active agent is NOT the bound one — voids attribution", async () => {
     const s = sid("s7");
-    await ledger.bindMachineAgent(s, "code-implementer-agent", "a-1");
+    await bind(s, "code-implementer-agent", "a-1");
     // a-1's binding leaked (its cleanup was lost); a-9 is the agent running
     writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-9\n");
     expect(ledger.soleActiveBinding(s)).toBeNull();
@@ -140,11 +159,11 @@ describe("machine binding lifecycle", () => {
 
   it("contention: second binding or second active agent voids soleActiveBinding", async () => {
     const s = sid("s4");
-    await ledger.bindMachineAgent(s, "code-implementer-agent", "a-1");
+    await bind(s, "code-implementer-agent", "a-1");
     expect(ledger.soleActiveBinding(s)).not.toBeNull();
 
     // Same-type parallel binding → no attribution
-    await ledger.bindMachineAgent(s, "code-implementer-agent", "a-2");
+    await bind(s, "code-implementer-agent", "a-2");
     expect(ledger.soleActiveBinding(s)).toBeNull();
     await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-2");
     expect(ledger.soleActiveBinding(s)).not.toBeNull();
@@ -156,6 +175,38 @@ describe("machine binding lifecycle", () => {
     expect(ledger.soleActiveBinding(s)).not.toBeNull();
 
     await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-1");
+  });
+});
+
+describe("branded agent identity — the bind boundary charset", () => {
+  it("parseAgentId / parseAgentType reject reserved characters and empty strings", () => {
+    for (const bad of ["", "a\tb", "a\nb", "a\rb", "a:b", "a-1:code-implementer-agent"]) {
+      expect(ledger.parseAgentId(bad)).toBeNull();
+      expect(ledger.parseAgentType(bad)).toBeNull();
+    }
+    expect(ledger.parseAgentId("a-1")).toBe("a-1");
+    expect(ledger.parseAgentType("code-implementer-agent")).toBe("code-implementer-agent");
+  });
+
+  it("readBindings drops lines whose fields contain reserved characters (epoch would desync)", () => {
+    const s = sid("s8");
+    // a ':' inside the id would make the recorded epoch ambiguous with the
+    // reader's epochOf(agent_id, agent_type) — such a line is malformed.
+    const now = Date.now();
+    writeFileSync(
+      ledger.machineBindingPath(s),
+      `evil:id\tcode-implementer-agent\t${now}\na-1\tcode-implementer-agent\t${now}\textra-field\na-1\tcode-implementer-agent\t${now}\n`,
+    );
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(ledger.readBindings(s)).toEqual([
+        { agentId: "a-1", agentType: "code-implementer-agent", epoch: "a-1:code-implementer-agent" },
+      ]);
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("skipped 2 malformed binding line(s)");
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 });
 

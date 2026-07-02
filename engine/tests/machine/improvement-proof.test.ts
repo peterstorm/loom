@@ -45,17 +45,16 @@ describe("R2 — real exit status beats happy output text", () => {
     expect(extractTestEvidence(bashOutput).passed).toBe(true); // the documented weakness
   });
 
-  it("NEW: a ledger failure fact (exit 1) overrides the text and is marked untrusted=false? no — trusted failure", () => {
+  it("NEW: a ledger failure fact (exit 1) overrides the text — trusted failure", () => {
     const ledger = extractEvidence("Bash", { command: "mvn test" }, { exit: 1, stdout: lyingOutput }, () => null);
     const resolved = resolveTestEvidence(ledger, bashOutput, true);
-    expect(resolved.passed).toBe(false);
-    expect(resolved.trusted).toBe(true); // a real nonzero exit is trustworthy failure
+    expect(resolved.result).toEqual({ verdict: "trusted-fail" }); // a real nonzero exit is trustworthy failure
     expect(resolved.evidence).toContain("ledger: exit 1");
   });
 });
 
-describe("R2 — reporter-confirmed pass carries explicit provenance and a trust bit", () => {
-  it("NEW: exit 0 + parsed report → trusted pass, tests_trusted derivable", () => {
+describe("R2 — reporter-confirmed pass carries explicit provenance in the verdict", () => {
+  it("NEW: exit 0 + parsed report → trusted-pass verdict on the task", () => {
     const ledger = extractEvidence(
       "Bash",
       { command: "npx vitest run --reporter=json --outputFile=out.json" },
@@ -63,30 +62,30 @@ describe("R2 — reporter-confirmed pass carries explicit provenance and a trust
       () => ({ total: 9, failed: 0, source: "vitest-json" }),
     );
     const resolved = resolveTestEvidence(ledger, "", true);
-    expect(resolved).toMatchObject({ passed: true, trusted: true });
+    expect(resolved.result).toEqual({ verdict: "trusted-pass" });
     expect(resolved.evidence).toContain("9 tests / 0 failed");
   });
 
   it("NEW: report cross-check — failures or zero-tests never pass", () => {
     const failing = extractEvidence("Bash", { command: "npm test" }, { exit: 0, stdout: "" }, () => ({ total: 9, failed: 2, source: "vitest-json" }));
-    expect(resolveTestEvidence(failing, "irrelevant", true).passed).toBe(false);
+    expect(resolveTestEvidence(failing, "irrelevant", true).result).toEqual({ verdict: "trusted-fail" });
 
     const empty = extractEvidence("Bash", { command: "npm test" }, { exit: 0, stdout: "" }, () => ({ total: 0, failed: 0, source: "vitest-json" }));
-    expect(resolveTestEvidence(empty, "", true).passed).toBe(false);
+    expect(resolveTestEvidence(empty, "", true).result).toEqual({ verdict: "trusted-fail" });
   });
 
   it("NEW: last trusted run wins — pass-then-fail fails, fail-then-pass passes", () => {
     const pass: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: { total: 5, failed: 0, source: "vitest-json" } };
     const fail: Evidence = { kind: "TestRun", command: "npm test", exit: 1, report: null };
-    expect(resolveTestEvidence([pass, fail], "", true).passed).toBe(false);
-    expect(resolveTestEvidence([fail, pass], "", true).passed).toBe(true);
+    expect(resolveTestEvidence([pass, fail], "", true).result).toEqual({ verdict: "trusted-fail" });
+    expect(resolveTestEvidence([fail, pass], "", true).result).toEqual({ verdict: "trusted-pass" });
   });
 
   it("NEW: an untrusted exit-0 run never displaces a trusted verdict", () => {
     const pass: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: { total: 5, failed: 0, source: "vitest-json" } };
     const noise: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: null };
     const resolved = resolveTestEvidence([pass, noise], "", true);
-    expect(resolved).toMatchObject({ passed: true, trusted: true });
+    expect(resolved.result).toEqual({ verdict: "trusted-pass" });
   });
 });
 
@@ -116,24 +115,28 @@ describe("R2 — the spoofs the review found are dead", () => {
     expect(old.evidence).toBe("node: 5 passing");
 
     // NEW: no ledger TestRun (echo never classifies); the transcript fallback
-    // still passes — honest tiering, not prevention — but it is labeled and
-    // the trust bit is false, so wave gates can tell.
+    // still passes — honest tiering, not prevention — but the verdict is
+    // "untrusted" with its weakness labeled IN the data, so wave gates can tell.
     const ledger = extractEvidence("Bash", { command: spoofCmd }, { exit: 0, stdout: "npm test: 5 passing" }, () => null);
     expect(ledger).toEqual([]);
     const resolved = resolveTestEvidence(ledger, bashOutput, true);
-    expect(resolved.passed).toBe(true); // documented residual: reporterless fallback
-    expect(resolved.trusted).toBe(false);
+    expect(resolved.result).toEqual({
+      verdict: "untrusted",
+      passed: true, // documented residual: reporterless fallback
+      label: "degraded (machine bound, no ledger evidence; transcript-regex)",
+    });
     expect(resolved.evidence).toContain("degraded (machine bound, no ledger evidence");
   });
 
   it("recorder failure is visible: machine bound + empty ledger → degraded label", () => {
     const resolved = resolveTestEvidence([], "12 passing", true);
-    expect(resolved.trusted).toBe(false);
-    expect(resolved.evidence).toContain("degraded");
+    expect(resolved.result.verdict).toBe("untrusted");
+    expect(resolved.result.verdict === "untrusted" && resolved.result.label).toContain("degraded");
   });
 
   it("unbound runs keep the plain fallback label", () => {
     const resolved = resolveTestEvidence([], "12 passing", false);
+    expect(resolved.result).toEqual({ verdict: "untrusted", passed: true, label: "transcript-regex (fallback)" });
     expect(resolved.evidence).toContain("transcript-regex (fallback)");
   });
 });
@@ -182,7 +185,7 @@ describe("transcript text is never evidence (standing invariant)", () => {
     expect(extractBashOutcome({ weird: true })).toEqual({ exit: null, stdout: "" });
     const ledger = extractEvidence("Bash", { command: "npm test" }, { exit: null, stdout: "5 passing" }, () => null);
     const resolved = resolveTestEvidence(ledger, "", true);
-    expect(resolved.trusted).toBe(false);
+    expect(resolved.result.verdict).toBe("untrusted");
   });
 });
 

@@ -4,7 +4,7 @@
  */
 
 import { parseJsonl, getContentBlocks, type ContentBlock } from "./types";
-import { TEST_COMMAND_PATTERNS } from "../config";
+import { TEST_COMMAND_PATTERNS } from "../core/tool-vocabulary";
 import { existsSync, readFileSync } from "node:fs";
 
 function isTestCommand(cmd: string): boolean {

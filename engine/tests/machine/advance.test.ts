@@ -8,18 +8,23 @@ import {
   missingRequirements,
   blockExplanation,
 } from "../../src/machine/advance";
-import { initialState, type Evidence, type MachineDef } from "../../src/machine/types";
+import { initialState, type Evidence } from "../../src/machine/types";
+import { parseMachine } from "../../src/machine/parse-machine";
 
-const machine: MachineDef = {
+// MachineDef is branded: parseMachine is its only producer, so tests build
+// the machine the same way production does — from a raw definition.
+const parsed = parseMachine({
   agent: "code-implementer-agent",
   enforcedTools: ["Edit", "Write", "MultiEdit"],
   phases: [
-    { id: "read-context", allowedTools: [], advance: { event: "FileRead", min: 1 }, terminal: false, requires: [] },
-    { id: "implement", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "FileWrite", min: 1 }, terminal: false, requires: [] },
-    { id: "verify", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "TestRunPassed", min: 1 }, terminal: false, requires: [] },
-    { id: "done", allowedTools: ["Edit", "Write", "MultiEdit"], advance: null, terminal: true, requires: [{ event: "TestRunPassed", min: 1 }] },
+    { id: "read-context", allowedTools: [], advance: { event: "FileRead", min: 1 } },
+    { id: "implement", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "FileWrite", min: 1 } },
+    { id: "verify", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "TestRunPassed", min: 1 } },
+    { id: "done", terminal: true, allowedTools: ["Edit", "Write", "MultiEdit"], requires: [{ event: "TestRunPassed", min: 1 }] },
   ],
-};
+});
+if (!parsed.ok) throw new Error(parsed.error);
+const machine = parsed.value;
 
 const read = (path = "/a.ts"): Evidence => ({ kind: "FileRead", path });
 const write = (path = "/a.ts"): Evidence => ({ kind: "FileWrite", path });

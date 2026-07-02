@@ -2,6 +2,8 @@
  * Core types for loom hook handlers
  */
 
+import { match } from "ts-pattern";
+
 // --- Hook Result (discriminated union) ---
 
 export type HookResult =
@@ -55,6 +57,47 @@ export type TaskStatus = "pending" | "implemented" | "completed" | "failed";
 
 export type ReviewStatus = "pending" | "passed" | "blocked" | "evidence_capture_failed";
 
+/**
+ * Per-task test outcome with its trust provenance IN the data. Trusted
+ * verdicts come from the evidence ledger (real exit status cross-checked
+ * against a parsed report artifact) and need no qualifier; an untrusted
+ * verdict carries what the low-trust source claimed (`passed`) and a label
+ * naming exactly how weak that source is. The old
+ * `tests_passed`/`tests_trusted` boolean pair permitted the impossible
+ * {passed: true, trusted: false → "trusted"?} drift — this shape does not.
+ */
+export type TaskTestResult =
+  | { readonly verdict: "trusted-pass" }
+  | { readonly verdict: "trusted-fail" }
+  | { readonly verdict: "untrusted"; readonly passed: boolean; readonly label: string };
+
+/** Did the task's test evidence show a pass at ANY trust level? (Gate checks
+ *  that need trust must match on `verdict` instead.) */
+export function testResultPassed(result: TaskTestResult | undefined): boolean {
+  if (result === undefined) return false;
+  return match(result)
+    .with({ verdict: "trusted-pass" }, () => true)
+    .with({ verdict: "trusted-fail" }, () => false)
+    .with({ verdict: "untrusted" }, ({ passed }) => passed)
+    .exhaustive();
+}
+
+/**
+ * Pre-refactor task graphs stored `tests_passed: boolean` on the task; the
+ * field was replaced by `test_result` with NO compat read (the branch never
+ * shipped). Such a task now reads as missing evidence — correct, but
+ * mystifying without a note. Pure: returns the operator-facing explanation
+ * when the raw task object carries the legacy field without its
+ * replacement, null otherwise.
+ */
+export function legacyTestsPassedNote(task: unknown): string | null {
+  if (typeof task !== "object" || task === null) return null;
+  const raw = task as Record<string, unknown>;
+  if (!("tests_passed" in raw) || "test_result" in raw) return null;
+  const id = typeof raw.id === "string" ? raw.id : "<unknown>";
+  return `legacy tests_passed found on task ${id}; re-run task or regenerate graph — field replaced by test_result`;
+}
+
 export interface Task {
   id: string;
   description: string;
@@ -66,9 +109,8 @@ export interface Task {
   new_tests_required?: boolean;
   /** Files this task creates/modifies (decompose contract); older graphs may lack it */
   file_list?: string[];
-  tests_passed?: boolean;
-  /** True only when tests_passed came from a trusted ledger TestRun (real exit + report), not transcript regex. */
-  tests_trusted?: boolean;
+  /** Test outcome + trust provenance; absent until an impl agent completes. */
+  test_result?: TaskTestResult;
   test_evidence?: string;
   new_tests_written?: boolean;
   new_test_evidence?: string;

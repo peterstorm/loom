@@ -1,18 +1,23 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { advance, foldEvidence, isTerminal, isToolAllowed, missingRequirements, tokensFor } from "../../src/machine/advance";
-import { initialState, type Evidence, type MachineDef } from "../../src/machine/types";
+import { initialState, type Evidence } from "../../src/machine/types";
+import { parseMachine } from "../../src/machine/parse-machine";
 
-const machine: MachineDef = {
+// MachineDef is branded: parseMachine is its only producer, so tests build
+// the machine the same way production does — from a raw definition.
+const parsed = parseMachine({
   agent: "code-implementer-agent",
   enforcedTools: ["Edit", "Write", "MultiEdit"],
   phases: [
-    { id: "read-context", allowedTools: [], advance: { event: "FileRead", min: 1 }, terminal: false, requires: [] },
-    { id: "implement", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "FileWrite", min: 1 }, terminal: false, requires: [] },
-    { id: "verify", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "TestRunPassed", min: 1 }, terminal: false, requires: [] },
-    { id: "done", allowedTools: ["Edit", "Write", "MultiEdit"], advance: null, terminal: true, requires: [{ event: "TestRunPassed", min: 1 }] },
+    { id: "read-context", allowedTools: [], advance: { event: "FileRead", min: 1 } },
+    { id: "implement", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "FileWrite", min: 1 } },
+    { id: "verify", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "TestRunPassed", min: 1 } },
+    { id: "done", terminal: true, allowedTools: ["Edit", "Write", "MultiEdit"], requires: [{ event: "TestRunPassed", min: 1 }] },
   ],
-};
+});
+if (!parsed.ok) throw new Error(parsed.error);
+const machine = parsed.value;
 
 const evidenceArb: fc.Arbitrary<Evidence> = fc.oneof(
   fc.record({ kind: fc.constant("FileRead" as const), path: fc.constant("/f.ts") }),

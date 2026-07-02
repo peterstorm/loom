@@ -1,9 +1,28 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { parsePlanModels, hasModels, type PlanModels } from "../../src/parsers/parse-plan-models";
+import { parsePlanModels, hasModels, renderStray, type PlanModels, type Stray } from "../../src/parsers/parse-plan-models";
 import { validateModelBindings, type ModelBindingDeps } from "../../src/handlers/helpers/validate-model-bindings";
 
 const NO_FILES: ModelBindingDeps = { readFile: () => null };
+
+const STRAY_KINDS: ReadonlyArray<Stray["kind"]> = [
+  "unterminated-fence",
+  "empty-section",
+  "near-miss-heading",
+  "bad-block-grammar",
+  "misplaced-heading",
+  "misplaced-label",
+];
+
+function isWellShapedStray(s: Stray): boolean {
+  return (
+    typeof s === "object" &&
+    s !== null &&
+    STRAY_KINDS.includes(s.kind) &&
+    typeof renderStray(s) === "string" &&
+    renderStray(s).length > 0
+  );
+}
 
 function isWellShaped(models: PlanModels): boolean {
   return (
@@ -13,7 +32,7 @@ function isWellShaped(models: PlanModels): boolean {
     Array.isArray(models.invariants) &&
     models.invariants.every((inv) => /^INV-\d+$/.test(inv.id) && (inv.tier === null || inv.tier === "checkable" || inv.tier === "advisory")) &&
     Array.isArray(models.strays) &&
-    models.strays.every((s) => typeof s === "string")
+    models.strays.every(isWellShapedStray)
   );
 }
 

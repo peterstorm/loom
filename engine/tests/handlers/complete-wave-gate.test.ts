@@ -1,13 +1,18 @@
 import { describe, it, expect } from "vitest";
 import {
+  applyGateDecision,
   checkTestEvidence,
   checkNewTests,
   checkReviews,
   checkSpecAlignment,
   checkCriticalFindings,
   computeNextWave,
+  evaluateWaveGate,
   generateWaveGateSummary,
   gateCheckMessage,
+  snapshotGateDeps,
+  type GateDeps,
+  type GateIO,
 } from "../../src/handlers/helpers/complete-wave-gate";
 import type { Task, TaskGraph } from "../../src/types";
 
@@ -18,7 +23,7 @@ const baseTask: Task = {
   wave: 1,
   status: "implemented",
   depends_on: [],
-  tests_passed: true,
+  test_result: { verdict: "trusted-pass" },
   test_evidence: "vitest: Tests 5 passed",
   new_tests_written: true,
   new_test_evidence: "1 new test, 1 assertion",
@@ -33,11 +38,31 @@ describe("checkTestEvidence (pure)", () => {
     expect(result.passed).toBe(true);
   });
 
-  it("fails when task missing test evidence", () => {
-    const result = checkTestEvidence([{ ...baseTask, tests_passed: false }]);
+  it("fails when task has a trusted failure", () => {
+    const result = checkTestEvidence([{ ...baseTask, test_result: { verdict: "trusted-fail" } }]);
     expect(result.passed).toBe(false);
     expect(gateCheckMessage(result)).toContain("FAILED");
     expect(gateCheckMessage(result)).toContain("T1");
+  });
+
+  it("fails when task has no test result at all", () => {
+    const result = checkTestEvidence([{ ...baseTask, test_result: undefined }]);
+    expect(result.passed).toBe(false);
+    expect(gateCheckMessage(result)).toContain("T1");
+  });
+
+  it("fails on an untrusted result that did not claim a pass", () => {
+    const result = checkTestEvidence([
+      { ...baseTask, test_result: { verdict: "untrusted", passed: false, label: "transcript-regex (fallback)" } },
+    ]);
+    expect(result.passed).toBe(false);
+  });
+
+  it("passes on a labeled untrusted pass (honest tiering — trust gating is separate)", () => {
+    const result = checkTestEvidence([
+      { ...baseTask, test_result: { verdict: "untrusted", passed: true, label: "transcript-regex (fallback)" } },
+    ]);
+    expect(result.passed).toBe(true);
   });
 
   it("passes when task has new_tests_required=false (e.g. ADR writer)", () => {
@@ -45,7 +70,7 @@ describe("checkTestEvidence (pure)", () => {
       ...baseTask,
       id: "T-ADR-1",
       new_tests_required: false,
-      tests_passed: false,
+      test_result: { verdict: "trusted-fail" },
       test_evidence: undefined,
     };
     const result = checkTestEvidence([adrTask]);
@@ -301,5 +326,147 @@ describe("generateWaveGateSummary (pure)", () => {
     const summary = generateWaveGateSummary(1, tasks);
 
     expect(summary).toContain("Keep this advisory");
+  });
+});
+
+describe("evaluateWaveGate + applyGateDecision — fs resolved once before the lock, checks on locked state", () => {
+  const mkGraph = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
+    current_phase: "execute",
+    phase_artifacts: {},
+    skipped_phases: [],
+    spec_file: null,
+    plan_file: null,
+    current_wave: 1,
+    tasks: [baseTask, { ...baseTask, id: "T2", wave: 2 }],
+    wave_gates: { "1": { impl_complete: true, tests_passed: null, reviews_complete: false, blocked: false } },
+    ...overrides,
+  });
+
+  const countingDeps = () => {
+    const calls = { loadPlanModels: 0, fileExists: 0 };
+    const deps: GateDeps = {
+      loadPlanModels: () => {
+        calls.loadPlanModels++;
+        return { kind: "none" };
+      },
+      fileExists: () => {
+        calls.fileExists++;
+        return true;
+      },
+    };
+    return { deps, calls };
+  };
+
+  it("snapshotGateDeps resolves the fs seams exactly once — evaluation and (re)application repeat no I/O", () => {
+    const calls = { loadPlanModels: 0, fileExists: 0 };
+    const io: GateIO = {
+      loadPlanModels: () => {
+        calls.loadPlanModels++;
+        return {
+          kind: "loaded",
+          models: {
+            lifecycles: [{ id: "LC-1", title: "Order", machineFile: "src/order-machine.ts" }],
+            pipeline: null,
+            invariants: [],
+            strays: [],
+          },
+        };
+      },
+      fileExists: () => {
+        calls.fileExists++;
+        return true;
+      },
+    };
+    const state = mkGraph({
+      plan_file: "plan.md",
+      tasks: [{ ...baseTask, file_list: ["src/order-machine.ts"] }],
+    });
+
+    // All fs inputs resolve at snapshot time, BEFORE the state lock…
+    const deps = snapshotGateDeps(state, io);
+    expect(calls).toEqual({ loadPlanModels: 1, fileExists: 1 });
+
+    // …so evaluating (even repeatedly, as a retried update callback would)
+    // and applying never touch the seams again.
+    const decision = evaluateWaveGate(state, null, deps);
+    const again = evaluateWaveGate(state, null, deps);
+    const once = applyGateDecision(state, decision);
+    const twice = applyGateDecision(state, decision);
+    expect(calls).toEqual({ loadPlanModels: 1, fileExists: 1 });
+    expect(decision.verdict.kind).toBe("pass");
+    expect(again).toEqual(decision);
+    expect(twice).toEqual(once);
+  });
+
+  it("snapshotGateDeps fails closed for paths outside the snapshot", () => {
+    const deps = snapshotGateDeps(mkGraph(), {
+      loadPlanModels: () => ({ kind: "none" }),
+      fileExists: () => true,
+    });
+    expect(deps.fileExists("/never/resolved.ts")).toBe(false);
+  });
+
+  it("a task-state change AFTER the deps snapshot is honored by evaluation (SubagentStop lands before the lock)", () => {
+    // Deps are snapshotted from the pre-lock read of a PASSING state…
+    const preRead = mkGraph();
+    const deps = snapshotGateDeps(preRead, {
+      loadPlanModels: () => ({ kind: "none" }),
+      fileExists: () => true,
+    });
+
+    // …then a SubagentStop lands before the locked update: T1 now carries a
+    // trusted failure. Evaluation runs on the LOCKED state, so the gate
+    // must fail — never force-complete the wave from the stale pre-read.
+    const locked = mkGraph({
+      tasks: [
+        { ...baseTask, test_result: { verdict: "trusted-fail" } },
+        { ...baseTask, id: "T2", wave: 2 },
+      ],
+    });
+    const decision = evaluateWaveGate(locked, null, deps);
+    expect(decision.verdict.kind).toBe("fail");
+    if (decision.verdict.kind === "fail") {
+      expect(decision.verdict.reason).toContain("T1");
+    }
+    expect(applyGateDecision(locked, decision)).toBe(locked); // no-op, nothing stamped
+  });
+
+  it("a passing decision carries the wave's task ids and the next wave", () => {
+    const decision = evaluateWaveGate(mkGraph(), null, countingDeps().deps);
+    expect(decision.wave).toBe(1);
+    expect(decision.checks).toHaveLength(6);
+    expect(decision.verdict).toEqual({ kind: "pass", taskIds: ["T1"], nextWave: 2 });
+  });
+
+  it("applyGateDecision completes the wave, stamps the gate, advances current_wave — and does not mutate its input", () => {
+    const state = mkGraph();
+    const frozen = JSON.parse(JSON.stringify(state));
+    const decision = evaluateWaveGate(state, null, countingDeps().deps);
+
+    const updated = applyGateDecision(state, decision);
+    expect(state).toEqual(frozen); // input untouched
+    expect(updated.tasks.find((t) => t.id === "T1")?.status).toBe("completed");
+    expect(updated.tasks.find((t) => t.id === "T2")?.status).toBe("implemented"); // other waves untouched
+    expect(updated.wave_gates["1"]).toMatchObject({ tests_passed: true, reviews_complete: true, blocked: false });
+    expect(updated.wave_gates["2"]).toBeDefined();
+    expect(updated.current_wave).toBe(2);
+  });
+
+  it("a failing decision names the first failing check and applies as a no-op", () => {
+    const state = mkGraph({
+      tasks: [{ ...baseTask, test_result: { verdict: "trusted-fail" } }],
+    });
+    const decision = evaluateWaveGate(state, null, countingDeps().deps);
+    expect(decision.verdict.kind).toBe("fail");
+    if (decision.verdict.kind === "fail") {
+      expect(decision.verdict.reason).toContain("test evidence");
+    }
+    expect(applyGateDecision(state, decision)).toBe(state); // unchanged, same reference
+  });
+
+  it("an explicit --wave argument overrides current_wave", () => {
+    const decision = evaluateWaveGate(mkGraph({ current_wave: 1 }), 2, countingDeps().deps);
+    expect(decision.wave).toBe(2);
+    expect(decision.verdict).toMatchObject({ kind: "pass", taskIds: ["T2"], nextWave: null });
   });
 });

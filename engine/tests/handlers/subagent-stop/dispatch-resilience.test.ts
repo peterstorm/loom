@@ -157,8 +157,7 @@ describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
     expect(state.tasks[0].status).toBe("implemented");
-    expect(state.tasks[0].tests_passed).toBe(true);
-    expect(state.tasks[0].tests_trusted).toBe(true);
+    expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-pass" });
     expect(state.tasks[0].test_evidence).toContain("ledger: exit 0");
   }, 30000);
 });

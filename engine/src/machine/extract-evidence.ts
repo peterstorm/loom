@@ -11,7 +11,7 @@
  * test"` minting trusted failures) that whole-string `.includes` allowed.
  */
 
-import { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "../config";
+import { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "../core/tool-vocabulary";
 import type { Evidence, TestReportSummary } from "./types";
 
 /**

@@ -1,5 +1,6 @@
 /** Guarded Skill Machine — public surface. */
 
+// Pure core
 export * from "./types";
 export { parseMachine, parseMachineJson } from "./parse-machine";
 export {
@@ -18,8 +19,8 @@ export {
   parseJunitXml,
   mergeSummaries,
   judgeTestRun,
-  outputFileFromCommand,
-  findReport,
+  type TestVerdict,
+  type TrustedTestVerdict,
 } from "./test-report";
 export {
   extractEvidence,
@@ -29,21 +30,40 @@ export {
   type BashOutcome,
 } from "./extract-evidence";
 export {
-  ledgerPath,
-  machineBindingPath,
   parseEvidenceLine,
-  appendEvidence,
-  readEvidence,
   eventsForEpoch,
   epochOf,
+  parseAgentId,
+  parseAgentType,
+  parseBindingLine,
+  formatBindingLine,
+  isBindingFresh,
+  type AgentId,
+  type AgentType,
+  type MachineBinding,
+  type PersistedBinding,
+  type SessionRegistry,
+} from "./evidence";
+export { machineToMermaid } from "./mermaid";
+
+// Imperative shell
+export { findReport, outputFileFromCommand } from "./report-discovery";
+export {
+  ledgerPath,
+  machineBindingPath,
+  appendEvidence,
+  readEvidence,
   readBindings,
   soleActiveBinding,
+  countActiveAgents,
+  refreshBindingActivity,
+  rosterAgentId,
   markAgentActive,
+  removeActiveAgent,
   bindMachineAgent,
   unbindMachineAgent,
   machineDefPath,
   loadMachine,
-  type MachineBinding,
   type LoadedMachine,
 } from "./ledger";
-export { machineToMermaid } from "./mermaid";
+export { fsSessionRegistry } from "./session-registry";

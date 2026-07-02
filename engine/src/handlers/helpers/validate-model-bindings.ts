@@ -15,7 +15,7 @@
  * into state), so neither path can skip enforcement.
  */
 
-import { parsePlanModels, hasModels, type PlanModels } from "../../parsers/parse-plan-models";
+import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../parsers/parse-plan-models";
 import type { ValidationResult } from "./validate-task-graph";
 
 export interface ModelBindingDeps {
@@ -67,7 +67,7 @@ export function validateModelBindings(
   const allFiles = taskFileLists(tasks);
 
   for (const stray of models.strays) {
-    errors.push(`Model declaration problem: ${stray}`);
+    errors.push(`Model declaration problem: ${renderStray(stray)}`);
   }
 
   for (const lc of models.lifecycles) {

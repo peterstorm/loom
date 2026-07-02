@@ -33,6 +33,7 @@ import {
 } from "../engine/src/handlers/subagent-stop/store-reviewer-findings";
 import { parseSpecCheckOutput } from "../engine/src/handlers/subagent-stop/store-spec-check-findings";
 import type { ReviewStatus, SpecCheck, Phase } from "../engine/src/types";
+import { testResultPassed } from "../engine/src/types";
 
 import { TASK_GRAPH_PATH, SUBAGENT_DIR, HARNESS, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR } from "../engine/src/config";
 import { StateManager } from "../engine/src/state-manager";
@@ -323,7 +324,7 @@ export default function (pi: ExtensionAPI) {
 
         const state = mgr.load();
         const task = state.tasks.find((t) => t.id === taskId);
-        if (!task || task.status === "completed" || task.tests_passed === true) continue;
+        if (!task || task.status === "completed" || testResultPassed(task.test_result)) continue;
 
         const bashOutput = parseBashTestOutput(transcriptText);
         const testEvidence = extractTestEvidence(bashOutput);
@@ -352,7 +353,13 @@ export default function (pi: ExtensionAPI) {
               ? {
                   ...t,
                   status: "implemented" as const,
-                  tests_passed: testEvidence.passed,
+                  // pi has no evidence ledger — transcript regex is the only
+                  // source here, so the verdict is always untrusted+labeled.
+                  test_result: {
+                    verdict: "untrusted" as const,
+                    passed: testEvidence.passed,
+                    label: "transcript-regex (fallback)",
+                  },
                   test_evidence: testEvidence.evidence,
                   new_tests_written: newTestEvidence.written,
                   new_test_evidence: newTestEvidence.evidence,

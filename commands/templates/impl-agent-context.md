@@ -17,7 +17,7 @@ pytest            # Python projects
 ```
 
 A hook reads your transcript and extracts test evidence ONLY from Bash tool_result blocks.
-If your task DOES require tests and you do not run them via Bash, `tests_passed = false` and the wave gate FAILS.
+If your task DOES require tests and you do not run them via Bash, the task's `test_result` will not show a pass and the wave gate FAILS.
 Writing tests without executing them counts as failure.
 
 **For test-required tasks: do NOT finish without Bash test output showing pass markers (e.g., "X passing", "0 fail", "BUILD SUCCESS").**

@@ -16,12 +16,11 @@ export function machineToMermaid(machine: MachineDef): string {
 
   for (let i = 0; i < machine.phases.length; i++) {
     const phase = machine.phases[i];
-    if (phase.advance && i + 1 < machine.phases.length) {
-      lines.push(`    ${phase.id} --> ${machine.phases[i + 1].id} : ${guardLabel(phase.advance)}`);
-    }
     if (phase.terminal) {
       const requires = phase.requires.map(guardLabel).join(" AND ");
       lines.push(`    ${phase.id} --> [*]${requires ? ` : requires ${requires}` : ""}`);
+    } else if (i + 1 < machine.phases.length) {
+      lines.push(`    ${phase.id} --> ${machine.phases[i + 1].id} : ${guardLabel(phase.advance)}`);
     }
     if (phase.allowedTools.length > 0) {
       lines.push(`    note right of ${phase.id} : allows ${phase.allowedTools.join(", ")}`);

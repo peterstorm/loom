@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parsePlanModels, hasModels } from "../../src/parsers/parse-plan-models";
+import { parsePlanModels, hasModels, renderStray, type Stray } from "../../src/parsers/parse-plan-models";
 
 const FULL_PLAN = `# Plan: Order Processing
 
@@ -139,57 +139,75 @@ describe("parsePlanModels", () => {
     it("flags LC headings outside the Lifecycles section", () => {
       const models = parsePlanModels("## Notes\n\n### LC-1: Not a lifecycle\n\n**Machine file:** x.ts\n");
       expect(models.lifecycles).toEqual([]);
-      expect(models.strays.some((s) => s.includes("LC-1") && s.includes("outside"))).toBe(true);
+      expect(models.strays).toContainEqual({
+        kind: "misplaced-heading",
+        heading: "LC-1: Not a lifecycle",
+        home: "Lifecycles",
+      });
       // the misplaced Machine file label is flagged too
-      expect(models.strays.some((s) => s.includes("Machine file"))).toBe(true);
+      expect(models.strays).toContainEqual({
+        kind: "misplaced-label",
+        label: "Machine file",
+        home: "Lifecycles",
+      });
       expect(hasModels(models)).toBe(true);
     });
 
     it("flags a near-miss section heading with a trailing colon", () => {
       const models = parsePlanModels("## Lifecycles:\n\n### LC-1: Order\n\n**Machine file:** m.ts\n");
       expect(models.lifecycles).toEqual([]);
-      expect(models.strays.some((s) => s.includes("near-miss section heading"))).toBe(true);
+      expect(models.strays).toContainEqual({ kind: "near-miss-heading", heading: "## Lifecycles:" });
     });
 
     it("flags a decorated section heading", () => {
       const models = parsePlanModels("## Invariants (enforced)\n\n### INV-1: B\n\n**Tier:** checkable\n");
       expect(models.invariants).toEqual([]);
-      expect(models.strays.some((s) => s.includes("near-miss section heading"))).toBe(true);
+      expect(models.strays).toContainEqual({ kind: "near-miss-heading", heading: "## Invariants (enforced)" });
     });
 
     it("flags a pluralized Pipeline heading", () => {
       const models = parsePlanModels("## Pipelines\n\n**AuthoredDag:** x.json\n");
       expect(models.pipeline).toBeNull();
-      expect(models.strays.some((s) => s.includes("near-miss section heading"))).toBe(true);
+      expect(models.strays).toContainEqual({ kind: "near-miss-heading", heading: "## Pipelines" });
     });
 
     it("flags a malformed block id inside its section (letter in the number)", () => {
       const models = parsePlanModels("## Invariants\n\n### INV-A1: Typo id\n\n**Tier:** checkable\n");
       expect(models.invariants).toEqual([]);
-      expect(models.strays.some((s) => s.includes("INV-A1"))).toBe(true);
+      expect(models.strays).toContainEqual({
+        kind: "bad-block-grammar",
+        heading: "INV-A1: Typo id",
+        section: "Invariants",
+        prefix: "INV",
+      });
     });
 
     it("flags a lowercase block id (block grammar is case-sensitive by policy)", () => {
       const models = parsePlanModels("## Lifecycles\n\n### lc-1: Order\n\n**Machine file:** m.ts\n");
       expect(models.lifecycles).toEqual([]);
-      expect(models.strays.some((s) => s.includes("lc-1"))).toBe(true);
+      expect(models.strays.some((s) => s.kind === "bad-block-grammar" && s.heading === "lc-1: Order")).toBe(true);
     });
 
     it("flags a block heading missing its colon", () => {
       const models = parsePlanModels("## Lifecycles\n\n### LC-1 Order\n\n**Machine file:** m.ts\n");
       expect(models.lifecycles).toEqual([]);
-      expect(models.strays.length).toBeGreaterThan(0);
+      expect(models.strays.some((s) => s.kind === "bad-block-grammar")).toBe(true);
     });
 
     it("flags non-model ### headings inside a model section", () => {
       const models = parsePlanModels("## Lifecycles\n\n### Order lifecycle\n\n**Machine file:** m.ts\n");
-      expect(models.strays.some((s) => s.includes("does not match"))).toBe(true);
+      expect(models.strays).toContainEqual({
+        kind: "bad-block-grammar",
+        heading: "Order lifecycle",
+        section: "Lifecycles",
+        prefix: "LC",
+      });
     });
 
     it("flags model field labels outside their sections", () => {
       const models = parsePlanModels("## Component Design\n\n### Pipeline\n\n**AuthoredDag:** x.json\n");
       expect(models.pipeline).toBeNull();
-      expect(models.strays.some((s) => s.includes("AuthoredDag") && s.includes("outside"))).toBe(true);
+      expect(models.strays).toContainEqual({ kind: "misplaced-label", label: "AuthoredDag", home: "Pipeline" });
     });
 
     it("a well-formed plan quoting the template inside a code fence produces no strays", () => {
@@ -211,7 +229,7 @@ describe("parsePlanModels", () => {
       const plan = "# Plan\n\nSnippet:\n\n```bash\necho hi\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** m.ts\n";
       const models = parsePlanModels(plan);
       expect(models.lifecycles).toEqual([]); // blanked by the open fence…
-      expect(models.strays.some((s) => s.includes("unterminated code fence"))).toBe(true); // …but loudly
+      expect(models.strays).toContainEqual({ kind: "unterminated-fence" }); // …but loudly
       expect(hasModels(models)).toBe(true);
     });
 
@@ -224,11 +242,36 @@ describe("parsePlanModels", () => {
 
     it("a declared section with zero blocks is a stray", () => {
       const lc = parsePlanModels("## Lifecycles\n\nProse about lifecycles but no blocks.\n");
-      expect(lc.strays.some((s) => s.includes("contains no '### ' blocks"))).toBe(true);
+      expect(lc.strays).toContainEqual({ kind: "empty-section", section: "Lifecycles" });
       expect(hasModels(lc)).toBe(true);
       const inv = parsePlanModels("## Invariants\n\nNothing formal.\n");
-      expect(inv.strays.some((s) => s.includes("contains no '### ' blocks"))).toBe(true);
+      expect(inv.strays).toContainEqual({ kind: "empty-section", section: "Invariants" });
     });
+  });
+});
+
+describe("renderStray — every variant renders its context", () => {
+  it("produces the human-readable message for each stray kind", () => {
+    const cases: Array<[Stray, string]> = [
+      [{ kind: "unterminated-fence" }, "unterminated code fence"],
+      [{ kind: "empty-section", section: "Lifecycles" }, "'## Lifecycles' section is declared but contains no '### ' blocks"],
+      [{ kind: "near-miss-heading", heading: "## Lifecycles:" }, "near-miss section heading '## Lifecycles:'"],
+      [
+        { kind: "bad-block-grammar", heading: "INV-A1: x", section: "Invariants", prefix: "INV" },
+        "heading '### INV-A1: x' inside '## Invariants' does not match '### INV-<n>: <title>'",
+      ],
+      [
+        { kind: "misplaced-heading", heading: "LC-1: Order", home: "Lifecycles" },
+        "heading '### LC-1: Order' found outside its '## Lifecycles' section",
+      ],
+      [
+        { kind: "misplaced-label", label: "AuthoredDag", home: "Pipeline" },
+        "'**AuthoredDag:**' line found outside a '## Pipeline' section",
+      ],
+    ];
+    for (const [stray, expected] of cases) {
+      expect(renderStray(stray)).toContain(expected);
+    }
   });
 });
 
