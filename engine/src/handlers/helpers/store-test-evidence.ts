@@ -26,11 +26,13 @@ const handler: HookHandler = async (stdin, args) => {
   // trusted-fail would sail through the wave gate. Mirror update-task-status's
   // skip guard: leave the task untouched and say so. Decided INSIDE the
   // locked update so a concurrently-written trusted verdict is honored.
+  let matched = false;
   let skippedTrustedVerdict = false;
   await mgr.update((s) => ({
     ...s,
     tasks: s.tasks.map((t) => {
       if (t.id !== taskId) return t;
+      matched = true;
       const verdict = t.test_result?.verdict;
       if (verdict === "trusted-pass" || verdict === "trusted-fail") {
         skippedTrustedVerdict = true;
@@ -51,6 +53,12 @@ const handler: HookHandler = async (stdin, args) => {
       };
     }),
   }));
+
+  // A --task that matches nothing is a silent success otherwise: the caller
+  // believes evidence was stored while the graph is untouched.
+  if (!matched) {
+    return { kind: "error", message: `store-test-evidence: no task ${taskId} in the task graph — nothing stored` };
+  }
 
   if (skippedTrustedVerdict) {
     process.stderr.write(

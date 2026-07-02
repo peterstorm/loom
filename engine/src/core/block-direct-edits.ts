@@ -39,7 +39,14 @@ export function shouldBlockDirectEdit(
     if (existsSync(activeFile) && statSync(activeFile).size > 0) {
       return { kind: "allow" };
     }
-  } catch {}
+  } catch (e) {
+    // An unstatable .active flag cannot prove a subagent is running — fall
+    // through to block (fail closed), but say why: silence here makes a
+    // permissions/race problem indistinguishable from "no subagent active".
+    process.stderr.write(
+      `block-direct-edits: cannot check ${activeFile}: ${e instanceof Error ? e.message : String(e)} — falling through to block\n`,
+    );
+  }
 
   return {
     kind: "block",

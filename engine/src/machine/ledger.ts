@@ -53,6 +53,7 @@ import {
   type AgentType,
   type MachineBinding,
   type PersistedBinding,
+  type SessionFileSuffix,
   type SessionId,
   epochOf,
   formatBindingLine,
@@ -92,15 +93,6 @@ export const machineBindingPath = (sessionId: string): string =>
 const activeFlagPath = (sessionId: string): string => sessionFilePath(sessionId, ".active");
 
 const bindingLock = (sessionId: string): string => sessionFilePath(sessionId, ".cleanup");
-
-/** Every per-session file suffix written under SUBAGENT_DIR — keep in sync
- *  with cleanup-stale-subagents' SESSION_SUFFIXES. */
-export type SessionFileSuffix =
-  | ".evidence.jsonl"
-  | ".machine"
-  | ".active"
-  | ".cleanup"
-  | ".task_graph";
 
 /**
  * Session-scoped path for callers OUTSIDE this module (task-graph pointer,

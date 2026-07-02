@@ -531,7 +531,7 @@ engine/src/
 ├── core/               # Pure functions (harness-agnostic, reusable in Pi)
 │   ├── block-direct-edits.ts
 │   ├── guard-state-file.ts
-│   ├── tool-vocabulary.ts          # FILE_MODIFYING_TOOLS / TEST_COMMAND_PATTERNS (zero imports)
+│   ├── tool-vocabulary.ts          # FILE_MODIFYING_TOOLS / TEST_COMMAND_PATTERNS (pure constants — sole import: machine/types)
 │   ├── validate-phase-order.ts
 │   ├── validate-task-execution.ts
 │   └── validate-template-substitution.ts
@@ -543,7 +543,7 @@ engine/src/
 │   └── ledger.ts, report-discovery.ts, session-registry.ts
 ├── handlers/
 │   ├── pre-tool-use/      # validate-phase-order, validate-task-execution, …
-│   ├── post-tool-use/     # lint-file
+│   ├── post-tool-use/     # lint-file, record-evidence
 │   ├── subagent-start/    # mark-subagent-active
 │   ├── subagent-stop/     # dispatch, advance-phase, update-task-status, …
 │   ├── session-start/     # cleanup-stale-subagents, resume-after-clear
@@ -555,7 +555,8 @@ engine/src/
 │   ├── parse-transcript.ts
 │   ├── parse-bash-test-output.ts   # Maven/Gradle/Vitest/Jest/pytest/cargo/go/dotnet/…
 │   ├── parse-files-modified.ts
-│   └── parse-phase-artifacts.ts
+│   ├── parse-phase-artifacts.ts
+│   └── parse-plan-models.ts        # Executable models (lifecycles, pipeline, invariants) from plan markdown
 ├── linter/             # Two-tier programmatic + regex linter
 │   ├── loader.ts
 │   ├── executor.ts

@@ -7,6 +7,8 @@
  * (PostToolUse) — transcript text is never evidence.
  */
 
+import type { AgentType } from "./evidence";
+
 // --- Evidence (ground truth events) ---
 
 /** Summary parsed from a machine-readable test report artifact. */
@@ -136,8 +138,10 @@ export type PhaseDef =
 declare const MACHINE_PARSED: unique symbol;
 
 export type MachineDef = {
-  /** Agent type this machine binds to (e.g. "code-implementer-agent"). */
-  readonly agent: string;
+  /** Agent type this machine binds to (e.g. "code-implementer-agent").
+   *  BRANDED: parseMachine proves it through parseAgentType, so a machine's
+   *  agent can always safely name its definition file and key epochs. */
+  readonly agent: AgentType;
   /**
    * The closed set of tools this machine claims authority over.
    * Tools outside this set always pass the gate — the machine is honest

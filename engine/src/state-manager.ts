@@ -8,8 +8,9 @@
 import { readFileSync, writeFileSync, chmodSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { withLock } from "./utils/lock";
-import { TASK_GRAPH_PATH } from "./config";
-import { parseSessionId, sessionScopedPath } from "./machine";
+import { PHASE_ORDER, TASK_GRAPH_PATH } from "./config";
+import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
+import { REVIEW_STATUSES, TASK_STATUSES } from "./types";
 import type { TaskGraph } from "./types";
 
 /** Resolve task graph path for cross-repo access. The session id comes from
@@ -26,8 +27,19 @@ export function resolveTaskGraph(sessionId?: string): string | null {
     } else {
       const sessionFile = sessionScopedPath(parsed, ".task_graph");
       if (existsSync(sessionFile)) {
-        const absPath = readFileSync(sessionFile, "utf-8").trim();
-        if (existsSync(absPath)) return absPath;
+        try {
+          const absPath = readFileSync(sessionFile, "utf-8").trim();
+          if (existsSync(absPath)) return absPath;
+          // A dangling pointer silently re-targets every session-scoped
+          // handler at the LOCAL graph — say so instead of quietly diverging.
+          process.stderr.write(
+            `resolveTaskGraph: session pointer ${sessionFile} names missing graph '${absPath}' — falling back to local task graph\n`,
+          );
+        } catch (e) {
+          process.stderr.write(
+            `resolveTaskGraph: cannot read session pointer ${sessionFile}: ${e instanceof Error ? e.message : String(e)} — falling back to local task graph\n`,
+          );
+        }
       }
     }
   }
@@ -35,6 +47,74 @@ export function resolveTaskGraph(sessionId?: string): string | null {
   if (existsSync(TASK_GRAPH_PATH)) return TASK_GRAPH_PATH;
 
   return null;
+}
+
+// --- Parse, don't validate: disk JSON → TaskGraph ---
+
+/** Pure: the union-typed fields of one raw task, proven or precisely refused.
+ *  Returns an error string, or null when the task's unions all parse. */
+function taskUnionError(v: unknown, index: number): string | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    return `tasks[${index}] must be an object`;
+  }
+  const t = v as Record<string, unknown>;
+  const id = typeof t.id === "string" ? t.id : `#${index}`;
+  if (!(TASK_STATUSES as readonly string[]).includes(t.status as string)) {
+    return `tasks[${index}] ("${id}"): status ${JSON.stringify(t.status)} is not one of ${TASK_STATUSES.join(", ")}`;
+  }
+  if (t.review_status !== undefined && !(REVIEW_STATUSES as readonly string[]).includes(t.review_status as string)) {
+    return `tasks[${index}] ("${id}"): review_status ${JSON.stringify(t.review_status)} is not one of ${REVIEW_STATUSES.join(", ")}`;
+  }
+  if (t.test_result !== undefined) {
+    if (typeof t.test_result !== "object" || t.test_result === null) {
+      return `tasks[${index}] ("${id}"): test_result must be an object`;
+    }
+    const r = t.test_result as Record<string, unknown>;
+    if (r.verdict === "untrusted") {
+      if (typeof r.passed !== "boolean" || typeof r.label !== "string") {
+        return `tasks[${index}] ("${id}"): untrusted test_result requires a boolean passed and a string label`;
+      }
+    } else if (r.verdict !== "trusted-pass" && r.verdict !== "trusted-fail") {
+      return `tasks[${index}] ("${id}"): test_result.verdict ${JSON.stringify(r.verdict)} is not one of trusted-pass, trusted-fail, untrusted`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse raw disk JSON into a TaskGraph, mirroring parseMachine: every
+ * union-typed field (current_phase, task status / review_status /
+ * test_result.verdict) is PROVEN in the union before the cast, so a
+ * drifted or hand-edited value fails loudly at the load boundary instead
+ * of exploding later inside an `.exhaustive()` match (testResultPassed) or
+ * silently flowing through typed gate logic. Unknown extra fields pass
+ * through untouched (legacyTestsPassedNote still fires downstream);
+ * missing tasks/wave_gates default for early phases (populated in Phase 4).
+ */
+export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return parseErr("not an object");
+  }
+  const obj = raw as Record<string, unknown>;
+  if (!("current_phase" in obj)) return parseErr("missing current_phase");
+  if (!("phase_artifacts" in obj)) return parseErr("missing phase_artifacts");
+  if (!(PHASE_ORDER as readonly string[]).includes(obj.current_phase as string)) {
+    return parseErr(
+      `current_phase ${JSON.stringify(obj.current_phase)} is not one of ${PHASE_ORDER.join(", ")}`,
+    );
+  }
+  const tasks = obj.tasks ?? [];
+  if (!Array.isArray(tasks)) return parseErr("tasks must be an array");
+  for (let i = 0; i < tasks.length; i++) {
+    const err = taskUnionError(tasks[i], i);
+    if (err !== null) return parseErr(err);
+  }
+  const waveGates = obj.wave_gates ?? {};
+  if (typeof waveGates !== "object" || waveGates === null || Array.isArray(waveGates)) {
+    return parseErr("wave_gates must be an object");
+  }
+  // The single blessed cast: every union field above is proven in place.
+  return parseOk({ ...obj, tasks, wave_gates: waveGates } as unknown as TaskGraph);
 }
 
 export class StateManager {
@@ -61,16 +141,9 @@ export class StateManager {
     } catch (e) {
       throw new Error(`Corrupt state file (invalid JSON): ${this.path} — ${(e as Error).message}`);
     }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw new Error(`Corrupt state file (not an object): ${this.path}`);
-    }
-    const obj = parsed as Record<string, unknown>;
-    if (!("current_phase" in obj)) throw new Error(`Corrupt state file (missing current_phase): ${this.path}`);
-    if (!("phase_artifacts" in obj)) throw new Error(`Corrupt state file (missing phase_artifacts): ${this.path}`);
-    // Default tasks and wave_gates for early phases (populated in Phase 4)
-    if (!("tasks" in obj)) (obj as Record<string, unknown>).tasks = [];
-    if (!("wave_gates" in obj)) (obj as Record<string, unknown>).wave_gates = {};
-    return obj as unknown as TaskGraph;
+    const graph = parseTaskGraph(parsed);
+    if (!graph.ok) throw new Error(`Corrupt state file (${graph.error}): ${this.path}`);
+    return graph.value;
   }
 
   getPath(): string {

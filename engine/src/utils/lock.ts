@@ -39,7 +39,11 @@ export async function acquireLock(lockFile: string): Promise<void> {
       mkdirSync(lockDir);
       writeFileSync(`${lockDir}/pid`, `${process.pid}`);
       return;
-    } catch {
+    } catch (err) {
+      // Only EEXIST (lock held by someone) is retryable — EACCES / ENOENT /
+      // ENOSPC can never succeed on a later attempt, so surface them
+      // immediately instead of spinning through MAX_ATTEMPTS.
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
       // Check for stale lock on first retry
       if (attempt === 0 && isStaleLock(lockDir)) {
         try {

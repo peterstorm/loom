@@ -5,6 +5,7 @@
  */
 
 import type { HookHandler, SpecCheck } from "../../types";
+import { parseSpecCheckVerdict } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
 
@@ -33,6 +34,13 @@ const handler: HookHandler = async (stdin) => {
   if (!critCount) return { kind: "error", message: "SPEC_CHECK_CRITICAL_COUNT marker required" };
   if (!verdict) return { kind: "error", message: "SPEC_CHECK_VERDICT marker required" };
 
+  // The regex above only admits PASSED|BLOCKED; the parse restates that
+  // proof in the type (closed SpecCheckVerdict union) instead of a cast.
+  const parsedVerdict = parseSpecCheckVerdict(verdict[1]);
+  if (parsedVerdict === null) {
+    return { kind: "error", message: `SPEC_CHECK_VERDICT ${JSON.stringify(verdict[1])} is not a recognized verdict` };
+  }
+
   const state = mgr.load();
   const waveNum = wave ? Number(wave[1]) : state.current_wave ?? 1;
 
@@ -44,7 +52,7 @@ const handler: HookHandler = async (stdin) => {
     critical_findings: critical,
     high_findings: high,
     medium_findings: medium,
-    verdict: verdict[1],
+    verdict: parsedVerdict,
   };
 
   await mgr.update((s) => ({ ...s, spec_check: specCheck }));

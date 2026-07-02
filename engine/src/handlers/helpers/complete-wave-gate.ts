@@ -1,6 +1,7 @@
 /**
  * Complete wave gate after reviews pass.
- * Verifies: test evidence, new tests, reviews, spec alignment, no critical findings.
+ * Verifies: test evidence, new tests, reviews, spec alignment, no critical
+ * findings, lifecycle machine artifacts.
  * Then marks wave tasks completed, updates GitHub issue checkboxes, advances wave.
  *
  * Usage: bun cli.ts helper complete-wave-gate [--wave N]
@@ -27,10 +28,18 @@ export function loadPlanModelsSource(planFile: string | null | undefined): PlanM
   }
 }
 
-function parseWaveArg(args: string[]): number | null {
+/** Parses --wave N from CLI args (null when absent). A non-integer or
+ *  sub-1 value throws — an unvalidated Number() here would evaluate (and
+ *  stamp) wave_gates["NaN"], passing the gate vacuously. Mirrors
+ *  lint-wave-gate's parseWaveArg. */
+export function parseWaveArg(args: string[]): number | null {
   const idx = args.indexOf("--wave");
-  if (idx >= 0 && args[idx + 1]) return Number(args[idx + 1]);
-  return null;
+  if (idx < 0 || !args[idx + 1]) return null;
+  const n = Number(args[idx + 1]);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+    throw new Error(`Invalid --wave value: "${args[idx + 1]}" (must be a positive integer)`);
+  }
+  return n;
 }
 
 export type GateCheck =
@@ -259,6 +268,20 @@ export function evaluateWaveGate(state: TaskGraph, waveArg: number | null, deps:
   const wave = waveArg ?? state.current_wave ?? 1;
   const waveTasks = state.tasks.filter((t) => t.wave === wave);
 
+  // An empty wave must FAIL, never pass vacuously: every check below is
+  // trivially satisfied by zero tasks, which would stamp the gate and
+  // advance on a typo'd --wave or an unpopulated task graph.
+  if (waveTasks.length === 0) {
+    return {
+      wave,
+      checks: [],
+      verdict: {
+        kind: "fail",
+        reason: `FAILED: wave ${wave} has no tasks — nothing to gate (wrong --wave or unpopulated task graph?)`,
+      },
+    };
+  }
+
   const checks: readonly GateCheck[] = [
     checkTestEvidence(waveTasks),
     checkNewTests(waveTasks),
@@ -434,7 +457,12 @@ const handler: HookHandler = async (_stdin, args) => {
   const mgr = StateManager.fromPath(statePath);
   if (!mgr) return { kind: "error", message: `No task graph at ${statePath}` };
 
-  const waveArg = parseWaveArg(args);
+  let waveArg: number | null;
+  try {
+    waveArg = parseWaveArg(args);
+  } catch (e) {
+    return { kind: "error", message: `[loom] complete-wave-gate: ${(e as Error).message}` };
+  }
 
   // Pre-resolve the fs inputs (plan read + machine-file stats) into plain
   // data BEFORE the lock. These never race the SubagentStop handlers this

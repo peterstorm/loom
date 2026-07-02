@@ -17,6 +17,14 @@ describe("parseVitestJson", () => {
     expect(parseVitestJson("not json")).toBeNull();
     expect(parseVitestJson("null")).toBeNull();
   });
+
+  it("rejects insane counts — negatives, non-integers, failed > total (fail closed to untrusted)", () => {
+    expect(parseVitestJson(JSON.stringify({ numTotalTests: -1, numFailedTests: 0 }))).toBeNull();
+    expect(parseVitestJson(JSON.stringify({ numTotalTests: 5, numFailedTests: -2 }))).toBeNull();
+    expect(parseVitestJson(JSON.stringify({ numTotalTests: 5.5, numFailedTests: 0 }))).toBeNull();
+    expect(parseVitestJson(JSON.stringify({ numTotalTests: 5, numFailedTests: 0.5 }))).toBeNull();
+    expect(parseVitestJson(JSON.stringify({ numTotalTests: 3, numFailedTests: 7 }))).toBeNull();
+  });
 });
 
 describe("parseJunitXml", () => {
@@ -32,6 +40,10 @@ describe("parseJunitXml", () => {
   it("returns null for XML without testsuite counts", () => {
     expect(parseJunitXml("<foo/>")).toBeNull();
     expect(parseJunitXml("<testsuite>")).toBeNull();
+  });
+
+  it("rejects a malformed report whose failures+errors exceed tests (fail closed to untrusted)", () => {
+    expect(parseJunitXml('<testsuite tests="1" failures="1" errors="1"/>')).toBeNull();
   });
 });
 

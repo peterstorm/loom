@@ -11,8 +11,8 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import type { HookHandler, HookResult, SubagentStopInput, TaskTestResult } from "../../types";
-import { legacyTestsPassedNote, testResultPassed } from "../../types";
-import { IMPL_AGENTS } from "../../config";
+import { legacyTestsPassedNote } from "../../types";
+import { IMPL_AGENTS, machinesDir } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { extractTaskId } from "../../utils/extract-task-id";
@@ -20,7 +20,6 @@ import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
 import * as git from "../../utils/git";
-import { MACHINES_DIR } from "../../config";
 import {
   epochOf,
   eventsForEpoch,
@@ -145,7 +144,10 @@ type TestRunEvidence = Extract<Evidence, { kind: "TestRun" }>;
  * - "degraded"   — the machine was bound but the ledger is empty (recorder
  *                  failure: the fallback is running where ground truth was
  *                  expected)
- * - "fallback"   — no ledger coverage at all (unbound/legacy runs)
+ * - "fallback"   — no machine is bound for this agent type (unbound/legacy
+ *                  runs): ground truth was never expected here, so the
+ *                  transcript regex is the NORMAL source for the run, not a
+ *                  degradation — the label still marks it untrusted
  * - "snapshot-read-failed" — the dispatcher could not READ the ledger
  *                  (`snapshotFailed`): ledger contents are unknown, which is
  *                  distinct from a genuinely-empty ledger — never mislabel
@@ -374,7 +376,19 @@ export const runUpdateTaskStatus = async (
   _args: string[],
   evidenceSnapshot?: EvidenceSnapshot,
 ): Promise<HookResult> => {
-  const input: SubagentStopInput = JSON.parse(stdin);
+  // Guard the standalone CLI route: dispatch parses stdin before calling
+  // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
+  // where a bare JSON.parse throw would surface as an uncontextualized
+  // "Hook error" (mirrors cleanup-subagent-flag).
+  let input: SubagentStopInput;
+  try {
+    input = JSON.parse(stdin);
+  } catch (e) {
+    return {
+      kind: "error",
+      message: `update-task-status: malformed SubagentStop input — task status and test evidence NOT updated: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
   const agentType = stripNamespace(input.agent_type ?? "");
 
   // Skip non-impl agents
@@ -430,12 +444,6 @@ export const runUpdateTaskStatus = async (
   const legacyNote = legacyTestsPassedNote(task);
   if (legacyNote) process.stderr.write(`[loom] ${legacyNote}\n`);
 
-  // Invariant: previously-set evidence is preserved regardless of the
-  // task's current status — a completed task or one already carrying a
-  // passing test_result is never overwritten by a later hook run.
-  if (task.status === "completed") return { kind: "passthrough" };
-  if (testResultPassed(task.test_result)) return { kind: "passthrough" };
-
   // Section 1: Test evidence — the agent's OWN epoch in the ledger first
   // (execution-time ground truth, attribution via agent_id), transcript
   // regex as explicit labeled fallback. Foreign epochs are never consulted.
@@ -446,8 +454,11 @@ export const runUpdateTaskStatus = async (
   // the existing fallback path instead of silently mis-keying the lookup.
   const epochAgentId = input.agent_id ? parseAgentId(input.agent_id) : null;
   const epochAgentType = parseAgentType(agentType);
+  // machinesDir() is resolved at call time (not the import-frozen constant)
+  // so a re-pointed LOOM_MACHINES_DIR is honored without a module reload —
+  // the same dir the gate and recorder consult.
   const machineBound =
-    epochAgentType !== null && isMachineBound(loadMachine(MACHINES_DIR, epochAgentType));
+    epochAgentType !== null && isMachineBound(loadMachine(machinesDir(), epochAgentType));
   // A failed dispatcher snapshot means ledger contents are UNKNOWN — say so
   // and let resolveTestEvidence label the verdict snapshot-read-failed
   // instead of pretending the ledger was empty ("degraded").
@@ -475,8 +486,28 @@ export const runUpdateTaskStatus = async (
     newTestEvidence = analyzeNewTests(fullDiff, task.new_tests_required);
   }
 
-  // Section 3: Atomic state write
+  // Section 3: Atomic state write. The preserve-evidence guards run INSIDE
+  // the locked update (a pre-lock read can be outdated by a concurrent
+  // writer before this write lands — TOCTOU) and are TRUST-aware: only a
+  // completed task or a ledger-trusted verdict (trusted-pass/trusted-fail)
+  // is preserved. An untrusted result — e.g. a helper-reported "pass" from
+  // agent-controlled stdin — must never preempt this handler's resolution:
+  // skipping on it would let laundered text outrank the ledger's ground
+  // truth (mirrors store-test-evidence's skippedTrustedVerdict pattern).
+  let skippedExistingVerdict = false;
   await mgr.update((s) => {
+    const target = s.tasks.find((t) => t.id === taskId);
+    const verdict = target?.test_result?.verdict;
+    if (
+      !target ||
+      target.status === "completed" ||
+      verdict === "trusted-pass" ||
+      verdict === "trusted-fail"
+    ) {
+      skippedExistingVerdict = true;
+      return s;
+    }
+
     const updatedTasks = s.tasks.map((t) =>
       t.id === taskId
         ? {
@@ -497,6 +528,13 @@ export const runUpdateTaskStatus = async (
       executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
     };
   });
+
+  if (skippedExistingVerdict) {
+    process.stderr.write(
+      `update-task-status: ${taskId} is completed or already carries a trusted verdict — leaving it untouched\n`,
+    );
+    return { kind: "passthrough" };
+  }
 
   process.stderr.write(`Task ${taskId} implemented.\n`);
 

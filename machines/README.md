@@ -32,7 +32,8 @@ add hard gates. See the v2 convergence plan (vault:
   yields `{ verdict: "trusted-pass" }` or `{ verdict: "trusted-fail" }`;
   the transcript-regex fallback remains but yields
   `{ verdict: "untrusted", passed, label }` with the label naming exactly
-  how weak it is (`low-trust` / `degraded` / `fallback`) — trust
+  how weak it is (e.g. `low-trust` / `degraded` / `fallback` /
+  `snapshot-read-failed` / `helper-reported`) — trust
   provenance lives in the data, so an untrusted pass can never masquerade
   as a trusted one.
 

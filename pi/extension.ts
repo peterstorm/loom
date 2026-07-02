@@ -33,7 +33,6 @@ import {
 } from "../engine/src/handlers/subagent-stop/store-reviewer-findings";
 import { parseSpecCheckOutput } from "../engine/src/handlers/subagent-stop/store-spec-check-findings";
 import type { ReviewStatus, SpecCheck, Phase } from "../engine/src/types";
-import { testResultPassed } from "../engine/src/types";
 
 import { TASK_GRAPH_PATH, SUBAGENT_DIR, HARNESS, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR } from "../engine/src/config";
 import { StateManager } from "../engine/src/state-manager";
@@ -340,7 +339,12 @@ export default function (pi: ExtensionAPI) {
 
         const state = mgr.load();
         const task = state.tasks.find((t) => t.id === taskId);
-        if (!task || task.status === "completed" || testResultPassed(task.test_result)) continue;
+        if (!task || task.status === "completed") continue;
+        // Trust-aware skip (mirrors update-task-status): only a ledger-trusted
+        // verdict is preserved. An untrusted pass (e.g. helper-reported) must
+        // not preempt this handler's — equally untrusted, but labeled — result.
+        const priorVerdict = task.test_result?.verdict;
+        if (priorVerdict === "trusted-pass" || priorVerdict === "trusted-fail") continue;
 
         const bashOutput = parseBashTestOutput(transcriptText);
         const testEvidence = extractTestEvidence(bashOutput);

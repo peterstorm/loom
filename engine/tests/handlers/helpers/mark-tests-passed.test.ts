@@ -53,8 +53,8 @@ function task(id: string, over: Partial<Task> = {}): Task {
   };
 }
 
-function runHelper(statePath: string): { status: number | null; stderr: string } {
-  const result = spawnSync("bun", [CLI_PATH, "helper", "mark-tests-passed"], {
+function runHelper(statePath: string, extraArgs: string[] = []): { status: number | null; stderr: string } {
+  const result = spawnSync("bun", [CLI_PATH, "helper", "mark-tests-passed", ...extraArgs], {
     env: { ...process.env, LOOM_STATE_PATH: statePath },
     input: "",
     encoding: "utf-8",
@@ -118,6 +118,31 @@ describe("mark-tests-passed — error polarity", () => {
     const { status, stderr } = runHelper(join(tempDir(), "never-created.json"));
     expect(status).toBe(1);
     expect(stderr).toContain("No active task graph");
+  });
+
+  it("an invalid --wave value → exit 1 (an unvalidated Number() would report vacuous success for wave NaN)", () => {
+    const dir = tempDir();
+    const statePath = join(dir, "active_task_graph.json");
+    writeFileSync(
+      statePath,
+      JSON.stringify(graph([task("T1", { test_result: { verdict: "trusted-pass" }, new_tests_written: true })])),
+    );
+    const { status, stderr } = runHelper(statePath, ["--wave", "banana"]);
+    expect(status).toBe(1);
+    expect(stderr).toContain("Invalid --wave value");
+  });
+
+  it("a wave with zero tasks → exit 1, never 'all tasks have test evidence'", () => {
+    const dir = tempDir();
+    const statePath = join(dir, "active_task_graph.json");
+    writeFileSync(
+      statePath,
+      JSON.stringify(graph([task("T1", { test_result: { verdict: "trusted-pass" }, new_tests_written: true })])),
+    );
+    const { status, stderr } = runHelper(statePath, ["--wave", "7"]);
+    expect(status).toBe(1);
+    expect(stderr).toContain("Wave 7 has no tasks");
+    expect(stderr).not.toContain("All tasks have test evidence");
   });
 
   it("read-only: the state file is byte-identical after a failing run", () => {

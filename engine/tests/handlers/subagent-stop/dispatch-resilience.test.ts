@@ -43,7 +43,7 @@ afterEach(() => {
 });
 
 /** State with one executing task so update-task-status has unambiguous work. */
-function writeState(dir: string): string {
+function writeState(dir: string, taskOverrides: Record<string, unknown> = {}): string {
   const statePath = join(dir, "active_task_graph.json");
   writeFileSync(statePath, JSON.stringify({
     current_phase: "execute",
@@ -55,8 +55,11 @@ function writeState(dir: string): string {
     executing_tasks: ["T1"],
     tasks: [{
       id: "T1", description: "impl", agent: "code-implementer-agent",
-      wave: 1, status: "in_progress", depends_on: [],
+      // "pending": parseTaskGraph rejects out-of-union statuses at load —
+      // the executing marker is executing_tasks, not a status value.
+      wave: 1, status: "pending", depends_on: [],
       new_tests_required: true,
+      ...taskOverrides,
     }],
     wave_gates: { "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false } },
   }));
@@ -160,6 +163,82 @@ describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7
     expect(state.tasks[0].status).toBe("implemented");
     expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-pass" });
     expect(state.tasks[0].test_evidence).toContain("ledger: exit 0");
+  }, 30000);
+});
+
+describe("trust-aware skip guard — decided INSIDE the locked update", () => {
+  const stopInput = (s: string) =>
+    JSON.stringify({ session_id: s, agent_id: "a-1", agent_type: "code-implementer-agent" });
+
+  it("an untrusted helper-reported 'pass' does NOT preempt the ledger's trusted-fail (laundering hole closed)", async () => {
+    const s = sid("launder");
+    const dir = tempDir();
+    // The classic laundering move: store-test-evidence stdin wrote an
+    // untrusted pass BEFORE SubagentStop fired. The old any-trust skip
+    // guard would have preserved it and dropped the ground truth.
+    const statePath = writeState(dir, {
+      status: "implemented",
+      test_result: { verdict: "untrusted", passed: true, label: "helper-reported (store-test-evidence stdin)" },
+      test_evidence: "all 999 tests pass, honest",
+    });
+    pointSessionAt(s, statePath);
+
+    const snapshot: readonly EvidenceRecord[] = [{
+      epoch: parseEpoch("a-1:code-implementer-agent")!,
+      event: { kind: "TestRun", command: "npm test", exit: 1, report: null },
+    }];
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const result = await runUpdateTaskStatus(stopInput(s), [], { kind: "snapshot", events: snapshot });
+    stderrSpy.mockRestore();
+    expect(result.kind).toBe("passthrough");
+
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-fail" }); // ground truth persisted
+    expect(state.tasks[0].test_evidence).toContain("ledger: exit 1");
+  }, 30000);
+
+  it("a trusted verdict on the task IS preserved (skip fires inside the lock)", async () => {
+    const s = sid("trusted-kept");
+    const dir = tempDir();
+    const statePath = writeState(dir, {
+      status: "implemented",
+      test_result: { verdict: "trusted-fail" },
+      test_evidence: "ledger: exit 1 (npm test)",
+      new_tests_written: true,
+    });
+    pointSessionAt(s, statePath);
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    // Empty snapshot + no transcript: the handler would write an untrusted
+    // failure — the existing trusted verdict must survive it.
+    const result = await runUpdateTaskStatus(stopInput(s), [], { kind: "snapshot", events: [] });
+    const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+    stderrSpy.mockRestore();
+    expect(result.kind).toBe("passthrough");
+    expect(text).toContain("leaving it untouched");
+
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-fail" });
+    expect(state.tasks[0].test_evidence).toBe("ledger: exit 1 (npm test)");
+    expect(state.tasks[0].new_tests_written).toBe(true);
+    expect(state.executing_tasks).toEqual(["T1"]); // untouched, like the old early return
+  }, 30000);
+
+  it("a completed task is never reopened", async () => {
+    const s = sid("completed-kept");
+    const dir = tempDir();
+    const statePath = writeState(dir, { status: "completed" });
+    pointSessionAt(s, statePath);
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const result = await runUpdateTaskStatus(stopInput(s), [], { kind: "snapshot", events: [] });
+    stderrSpy.mockRestore();
+    expect(result.kind).toBe("passthrough");
+
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.tasks[0].status).toBe("completed");
+    expect(state.tasks[0].test_result).toBeUndefined();
   }, 30000);
 });
 

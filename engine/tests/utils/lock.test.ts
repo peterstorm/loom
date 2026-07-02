@@ -58,6 +58,17 @@ describe("lock", () => {
     releaseLock(lockFile);
   });
 
+  it("a non-EEXIST mkdir failure surfaces immediately instead of spinning through retries", async () => {
+    tmpDir = makeTmpDir();
+    // Parent dir of the lock does not exist → mkdirSync throws ENOENT,
+    // which no amount of retrying can fix. Before the fix this spun for
+    // MAX_ATTEMPTS * RETRY_MS (~5s) and reported a misleading
+    // "could not acquire lock".
+    const started = Date.now();
+    await expect(acquireLock(join(tmpDir, "missing-parent", "test"))).rejects.toThrow(/ENOENT/);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
   it("does not consider lock stale when EPERM (process exists, no permission)", () => {
     tmpDir = makeTmpDir();
     const lockDir = join(tmpDir, "eperm.lock");

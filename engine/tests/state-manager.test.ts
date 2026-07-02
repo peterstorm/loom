@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { StateManager, resolveTaskGraph } from "../src/state-manager";
+import { StateManager, parseTaskGraph, resolveTaskGraph } from "../src/state-manager";
 import { SUBAGENT_DIR } from "../src/config";
 import type { TaskGraph } from "../src/types";
 
@@ -152,6 +152,121 @@ describe("StateManager", () => {
     chmodSync(statePath, 0o444);
     const mgr = new StateManager(statePath);
     expect(() => mgr.load()).toThrow("not an object");
+  });
+});
+
+describe("parseTaskGraph — disk unions are proven, not cast (parse, don't validate)", () => {
+  const validTask = {
+    id: "T1",
+    description: "impl",
+    agent: "code-implementer-agent",
+    wave: 1,
+    status: "implemented",
+    depends_on: [],
+  };
+  const validGraph = {
+    current_phase: "execute",
+    phase_artifacts: {},
+    skipped_phases: [],
+    spec_file: null,
+    plan_file: null,
+    tasks: [validTask],
+    wave_gates: {},
+  };
+
+  it("accepts a valid graph, defaulting tasks and wave_gates for early phases", () => {
+    const full = parseTaskGraph(validGraph);
+    expect(full.ok).toBe(true);
+
+    const early = parseTaskGraph({ current_phase: "init", phase_artifacts: {} });
+    expect(early.ok).toBe(true);
+    if (early.ok) {
+      expect(early.value.tasks).toEqual([]);
+      expect(early.value.wave_gates).toEqual({});
+    }
+  });
+
+  it("preserves unknown extra fields (legacy tests_passed still visible downstream)", () => {
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, tests_passed: true }],
+      updated_at: "2026-01-01",
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect((parsed.value.tasks[0] as unknown as Record<string, unknown>).tests_passed).toBe(true);
+      expect(parsed.value.updated_at).toBe("2026-01-01");
+    }
+  });
+
+  it("rejects an out-of-union current_phase loudly, naming the value", () => {
+    const parsed = parseTaskGraph({ ...validGraph, current_phase: "vibing" });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain('"vibing"');
+  });
+
+  it("rejects an out-of-union task status (drifted 'in_progress' fails at load, not inside .exhaustive())", () => {
+    const parsed = parseTaskGraph({ ...validGraph, tasks: [{ ...validTask, status: "in_progress" }] });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.error).toContain("T1");
+      expect(parsed.error).toContain('"in_progress"');
+    }
+  });
+
+  it("rejects an out-of-union review_status", () => {
+    const parsed = parseTaskGraph({ ...validGraph, tasks: [{ ...validTask, review_status: "meh" }] });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("review_status");
+  });
+
+  it("rejects a drifted test_result.verdict — the value that would explode testResultPassed", () => {
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, test_result: { verdict: "passed" } }],
+    });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("test_result.verdict");
+  });
+
+  it("rejects an untrusted test_result missing its passed/label payload", () => {
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, test_result: { verdict: "untrusted" } }],
+    });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("untrusted");
+  });
+
+  it("accepts every valid verdict shape", () => {
+    for (const test_result of [
+      { verdict: "trusted-pass" },
+      { verdict: "trusted-fail" },
+      { verdict: "untrusted", passed: true, label: "transcript-regex (fallback)" },
+    ]) {
+      const parsed = parseTaskGraph({ ...validGraph, tasks: [{ ...validTask, test_result }] });
+      expect(parsed.ok, JSON.stringify(test_result)).toBe(true);
+    }
+  });
+
+  it("rejects non-array tasks and non-object wave_gates", () => {
+    expect(parseTaskGraph({ ...validGraph, tasks: "none" }).ok).toBe(false);
+    expect(parseTaskGraph({ ...validGraph, wave_gates: [] }).ok).toBe(false);
+  });
+
+  it("StateManager.load surfaces the parse error as a contextual throw", () => {
+    const dir = makeTmpDir();
+    const statePath = join(dir, "active_task_graph.json");
+    writeFileSync(
+      statePath,
+      JSON.stringify({ ...validGraph, tasks: [{ ...validTask, status: "in_progress" }] }),
+    );
+    try {
+      const mgr = new StateManager(statePath);
+      expect(() => mgr.load()).toThrow(/Corrupt state file.*in_progress/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

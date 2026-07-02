@@ -20,6 +20,7 @@ import {
   parseOk,
   parseErr,
 } from "./types";
+import { parseAgentType } from "./evidence";
 
 /** Type guard for the proof-site narrowing below — the sole GateWiredTool witness. */
 function isGateWired(tool: string): tool is GateWiredTool {
@@ -100,9 +101,18 @@ function parsePhase(v: unknown, index: number, isLast: boolean): ParseResult<Raw
 export function parseMachine(raw: unknown): ParseResult<MachineDef> {
   if (!isRecord(raw)) return parseErr("machine: must be a JSON object");
 
-  const agent = raw.agent;
-  if (typeof agent !== "string" || agent.trim() === "") {
+  const agentRaw = raw.agent;
+  if (typeof agentRaw !== "string" || agentRaw.trim() === "") {
     return parseErr("machine: agent must be a non-empty string");
+  }
+  // The agent type names the machine-definition file and keys evidence
+  // epochs — the same reserved-character/traversal rules the bind boundary
+  // enforces apply here (parse, don't validate).
+  const agent = parseAgentType(agentRaw);
+  if (agent === null) {
+    return parseErr(
+      `machine: agent ${JSON.stringify(agentRaw)} is not a bindable agent type (whitespace, ':', path separators, and '..' are reserved)`,
+    );
   }
 
   const enforcedTools = raw.enforcedTools;

@@ -16,17 +16,7 @@ import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { HookHandler } from "../../types";
 import { STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../../config";
-
-/** Every per-session file suffix written under SUBAGENT_DIR — keep in sync
- *  with machine/ledger.ts path helpers and mark-subagent-active. Ordered so
- *  the multi-dot suffix wins over any accidental shorter match. */
-const SESSION_SUFFIXES = [
-  ".evidence.jsonl",
-  ".machine",
-  ".active",
-  ".cleanup",
-  ".task_graph",
-] as const;
+import { SESSION_SUFFIXES } from "../../machine";
 
 /** Pure: session id for a tracking file, or null when the name matches no
  *  known per-session suffix. */
@@ -71,10 +61,20 @@ export function sweepStaleSessions(dir: string, cutoffMs: number): void {
 
   try {
     const mtimes = new Map<string, number>();
+    let failedStats = 0;
     for (const entry of readdirSync(dir)) {
       try {
         mtimes.set(entry, statSync(join(dir, entry)).mtimeMs);
-      } catch {}
+      } catch {
+        failedStats++;
+      }
+    }
+    if (failedStats > 0) {
+      // An unstatable entry is excluded from its session group's max-mtime
+      // anchor AND from the sweep — say so once (mirrors failedRemovals).
+      process.stderr.write(
+        `cleanup-stale-subagents: could not stat ${failedStats} tracking entr${failedStats === 1 ? "y" : "ies"} under ${dir} — skipped this sweep\n`,
+      );
     }
     let failedRemovals = 0;
     for (const entry of staleEntries(mtimes, cutoffMs)) {

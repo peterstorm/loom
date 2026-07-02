@@ -68,6 +68,23 @@ export function parseSessionId(raw: string): SessionId | null {
   return raw !== "" && !SESSION_UNSAFE.test(raw) ? (raw as SessionId) : null;
 }
 
+/**
+ * Every per-session file suffix written under SUBAGENT_DIR — the single
+ * source of truth for the ledger's path helpers (ledger.ts) and the
+ * SessionStart sweep's group detection (cleanup-stale-subagents). Ordered
+ * so the multi-dot suffix wins over any accidental shorter match when
+ * suffix-matching file names.
+ */
+export const SESSION_SUFFIXES = [
+  ".evidence.jsonl",
+  ".machine",
+  ".active",
+  ".cleanup",
+  ".task_graph",
+] as const;
+
+export type SessionFileSuffix = (typeof SESSION_SUFFIXES)[number];
+
 // --- Bindings (wire format: "<agent_id>\t<agent_type>\t<bound_at_ms>") ---
 
 export interface MachineBinding {

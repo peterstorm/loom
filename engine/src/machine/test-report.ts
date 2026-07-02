@@ -27,6 +27,11 @@ export function parseVitestJson(content: string): TestReportSummary | null {
   const total = o.numTotalTests;
   const failed = o.numFailedTests;
   if (typeof total !== "number" || typeof failed !== "number") return null;
+  // Counts must be sane: non-negative integers with failed ≤ total. A
+  // report claiming otherwise is malformed and must not vouch (fail closed
+  // to null → the run stays untrusted).
+  if (!Number.isInteger(total) || !Number.isInteger(failed)) return null;
+  if (total < 0 || failed < 0 || failed > total) return null;
   return { total, failed, source: "vitest-json" };
 }
 
@@ -47,7 +52,12 @@ export function parseJunitXml(content: string): TestReportSummary | null {
     const errors = tag.match(/\berrors="(\d+)"/);
     failed += Number(failures?.[1] ?? 0) + Number(errors?.[1] ?? 0);
   }
-  return sawCounts ? { total, failed, source: "junit-xml" } : null;
+  // \d+ capture groups guarantee non-negative integers per suite, but the
+  // failures+errors sum can still exceed tests in a malformed report —
+  // refuse it (fail closed) rather than vouch with impossible counts.
+  return sawCounts && Number.isInteger(total) && Number.isInteger(failed) && failed <= total
+    ? { total, failed, source: "junit-xml" }
+    : null;
 }
 
 /** Merge summaries from multiple report files of one run. */

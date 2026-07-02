@@ -12,19 +12,15 @@ import { dirname } from "node:path";
 import type { HookResult, HookHandler } from "./types";
 import { nonEmptyMessage } from "./types";
 import { resolveInitialState } from "./phase-init";
-import { KNOWN_HANDLERS } from "./handler-routes";
+import { KNOWN_HANDLERS, failureExitCode } from "./handler-routes";
 
 /**
  * Failure polarity for the top-level catch, derived from argv BEFORE
- * anything can throw. Exit 1 is NON-blocking for PreToolUse hooks, so a
- * crash outside the handler (dynamic-import failure, stdin error) would
- * fail the enforce-phase-tools gate OPEN — for that route ANY crash must
- * exit 2 (blocking). Every other route keeps exit 1.
+ * anything can throw. The fail-closed routes (any crash must exit 2,
+ * blocking) are route metadata in handler-routes.ts — see
+ * FAIL_CLOSED_ROUTES. Every other route keeps exit 1.
  */
-function topLevelFailureExitCode(argv: readonly string[]): 1 | 2 {
-  return argv[0] === "pre-tool-use" && argv[1] === "enforce-phase-tools" ? 2 : 1;
-}
-const FAILURE_EXIT_CODE = topLevelFailureExitCode(process.argv.slice(2));
+const FAILURE_EXIT_CODE = failureExitCode(process.argv[2], process.argv[3]);
 
 // Eagerly buffer stdin before any async work (bun drains piped data during dynamic imports)
 const stdinPromise: Promise<string> = process.stdin.isTTY

@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import {
   bindMachineAgent,
   ledgerPath,
@@ -38,7 +38,7 @@ import enforce from "../../src/handlers/pre-tool-use/enforce-phase-tools";
 
 const run = `liveness-${process.pid}-${Date.now()}`;
 const sid = (name: string) => `${run}-${name}`;
-const sessions = ["stale", "fresh", "extend", "mixed", "gate-stale", "bind-reaps", "unbind-malformed"].map(sid);
+const sessions = ["stale", "fresh", "extend", "mixed", "mixed-reap", "gate-stale", "bind-reaps", "unbind-malformed"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
@@ -173,6 +173,40 @@ describe("stale bindings are absent and reaped", () => {
     } finally {
       stderrSpy.mockRestore();
     }
+  });
+
+  it("a mixed stale+fresh reap keeps the fresh line, drops the stale one, and advances the anchor", async () => {
+    const s = sid("mixed-reap");
+    const path = machineBindingPath(s);
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const now = Date.now();
+    const staleAt = now - STALE_SUBAGENT_TTL_MS - 60_000;
+    const freshAt = now - 1_000;
+    const freshLine = formatBindingLine(binding("a-live", impl), freshAt);
+    writeFileSync(path, `${formatBindingLine(binding("a-dead", impl), staleAt)}\n${freshLine}\n`);
+    // Anchor (mtime) in the past: the stale line is judged by it, while the
+    // fresh line's recent bind stamp keeps it alive on its own.
+    utimesSync(path, new Date(staleAt), new Date(staleAt));
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await refreshBindingActivity(s, now);
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("reaped 1 stale binding(s)");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    // Fresh line survives verbatim, stale line is gone…
+    expect(readFileSync(path, "utf-8")).toBe(freshLine + "\n");
+    expect(readBindings(s, now)).toEqual([binding("a-live", impl)]);
+    // …and the activity anchor advanced to `now`: at a probe instant past
+    // the survivor's ORIGINAL expiry (bind stamp + TTL) but within the
+    // refreshed one, the binding is still alive.
+    expect(Math.abs(statSync(path).mtimeMs - now)).toBeLessThan(1_000);
+    expect(readBindings(s, freshAt + STALE_SUBAGENT_TTL_MS + 500)).toEqual([
+      binding("a-live", impl),
+    ]);
   });
 
   it("a fresh bind reaps stale leftovers and is honored as the sole binding", async () => {

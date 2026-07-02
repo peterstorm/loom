@@ -53,9 +53,13 @@ export interface SubagentStartInput {
 
 export type Phase = "init" | "brainstorm" | "specify" | "clarify" | "architecture" | "plan-alignment" | "decompose" | "execute";
 
-export type TaskStatus = "pending" | "implemented" | "completed" | "failed";
+/** Task status values — the const tuple is the source of truth so parsers
+ *  (parseTaskGraph) can prove disk values against it. */
+export const TASK_STATUSES = ["pending", "implemented", "completed", "failed"] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
 
-export type ReviewStatus = "pending" | "passed" | "blocked" | "evidence_capture_failed";
+export const REVIEW_STATUSES = ["pending", "passed", "blocked", "evidence_capture_failed"] as const;
+export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
 
 /**
  * Per-task test outcome with its trust provenance IN the data. Trusted
@@ -131,6 +135,19 @@ export interface WaveGate {
   blocked: boolean;
 }
 
+/**
+ * Closed verdict union for spec-check runs, parsed at the store boundaries
+ * (store-spec-check helper, store-spec-check-findings hook) — free-text
+ * verdicts never reach the gate's typed logic.
+ */
+export const SPEC_CHECK_VERDICTS = ["PASSED", "BLOCKED", "EVIDENCE_CAPTURE_FAILED", "UNKNOWN"] as const;
+export type SpecCheckVerdict = (typeof SPEC_CHECK_VERDICTS)[number];
+
+/** Smart constructor: null when the raw text is not a known verdict. */
+export function parseSpecCheckVerdict(raw: string): SpecCheckVerdict | null {
+  return (SPEC_CHECK_VERDICTS as readonly string[]).includes(raw) ? (raw as SpecCheckVerdict) : null;
+}
+
 export interface SpecCheck {
   wave: number;
   run_at: string;
@@ -139,7 +156,7 @@ export interface SpecCheck {
   critical_findings?: string[];
   high_findings?: string[];
   medium_findings?: string[];
-  verdict: string;
+  verdict: SpecCheckVerdict;
   error?: string;
 }
 

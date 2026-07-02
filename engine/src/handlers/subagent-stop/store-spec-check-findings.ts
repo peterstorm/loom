@@ -5,7 +5,8 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import type { HookHandler, SubagentStopInput, SpecCheck } from "../../types";
+import type { HookHandler, SubagentStopInput, SpecCheck, SpecCheckVerdict } from "../../types";
+import { parseSpecCheckVerdict } from "../../types";
 import { StateManager } from "../../state-manager";
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
@@ -17,7 +18,8 @@ interface SpecCheckFindings {
   medium: string[];
   criticalCount: number | null;
   highCount: number | null;
-  verdict: string | null;
+  /** Parsed into the closed union at this boundary — never free text. */
+  verdict: SpecCheckVerdict | null;
   wave: number | null;
 }
 
@@ -63,7 +65,7 @@ export function parseSpecCheckOutput(output: string): SpecCheckFindings {
     medium,
     criticalCount: critCount ? Number(critCount[1]) : null,
     highCount: highCount ? Number(highCount[1]) : null,
-    verdict: verdict?.[1] ?? null,
+    verdict: verdict ? parseSpecCheckVerdict(verdict[1]) : null,
     wave: wave ? Number(wave[1]) : null,
   };
 }

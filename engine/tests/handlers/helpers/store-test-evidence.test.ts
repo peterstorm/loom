@@ -62,8 +62,8 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function runHelper(stdin: string): { exitCode: number; stderr: string } {
-    const result = spawnSync("bun", [CLI_PATH, "helper", "store-test-evidence", "--task", "T1"], {
+  function runHelper(stdin: string, taskId: string = "T1"): { exitCode: number; stderr: string } {
+    const result = spawnSync("bun", [CLI_PATH, "helper", "store-test-evidence", "--task", taskId], {
       cwd: tmpDir,
       encoding: "utf-8",
       input: stdin,
@@ -133,6 +133,17 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     expect(task.test_evidence).toBe("12 passing");
     expect(task.new_tests_written).toBe(true);
     expect(task.new_test_evidence).toBe("3 new tests");
+  });
+
+  it("a --task matching no task is an ERROR, not a silent success", () => {
+    const original = JSON.stringify(graphWith({}), null, 2);
+    writeFileSync(statePath, original);
+
+    const { exitCode, stderr } = runHelper("TEST_PASSED: true\nTEST_EVIDENCE: 12 passing\n", "T9");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("no task T9");
+    // …and nothing was stored anywhere.
+    expect(readState().tasks[0].test_result).toBeUndefined();
   });
 
   it("an existing UNTRUSTED result may be overwritten (helper is the same trust tier)", () => {

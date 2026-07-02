@@ -19,6 +19,7 @@ import cleanup, {
   staleEntries,
   sweepStaleSessions,
 } from "../../../src/handlers/session-start/cleanup-stale-subagents";
+import { SESSION_SUFFIXES } from "../../../src/machine";
 
 const subDir = mkdtempSync(join(tmpdir(), "loom-sweep-"));
 
@@ -27,18 +28,17 @@ afterAll(() => {
 });
 
 describe("sessionOfEntry (pure)", () => {
-  it("maps every per-session suffix to its session id", () => {
-    expect(sessionOfEntry("s-1.machine")).toBe("s-1");
-    expect(sessionOfEntry("s-1.active")).toBe("s-1");
-    expect(sessionOfEntry("s-1.evidence.jsonl")).toBe("s-1");
-    expect(sessionOfEntry("s-1.cleanup")).toBe("s-1");
-    expect(sessionOfEntry("s-1.task_graph")).toBe("s-1");
+  it("maps every per-session suffix (single-sourced SESSION_SUFFIXES) to its session id", () => {
+    // Driven by the shared machine/evidence tuple — a suffix added to the
+    // ledger's path helpers is automatically covered here.
+    for (const suffix of SESSION_SUFFIXES) {
+      expect(sessionOfEntry(`s-1${suffix}`), suffix).toBe("s-1");
+      expect(sessionOfEntry(suffix), `bare ${suffix}`).toBeNull();
+    }
   });
 
-  it("returns null for unknown names and bare suffixes", () => {
+  it("returns null for unknown names", () => {
     expect(sessionOfEntry("random.txt")).toBeNull();
-    expect(sessionOfEntry(".machine")).toBeNull();
-    expect(sessionOfEntry(".evidence.jsonl")).toBeNull();
   });
 });
 

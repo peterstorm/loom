@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import { closeSync, mkdtempSync, openSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { FAIL_CLOSED_ROUTES, KNOWN_HANDLERS, failureExitCode } from "../../src/handler-routes";
 
 const CLI_PATH = join(__dirname, "../../src/cli.ts");
 const crashDir = mkdtempSync(join(tmpdir(), "loom-cli-crash-"));
@@ -47,5 +48,21 @@ describe("cli top-level failure polarity", () => {
     const { status, stderr } = runWithCrashingStdin(["subagent-stop", "cleanup-subagent-flag"]);
     expect(stderr).toContain("Hook error");
     expect(status).toBe(1);
+  });
+});
+
+describe("failure polarity is route metadata (handler-routes.ts)", () => {
+  it("failureExitCode derives the polarity from FAIL_CLOSED_ROUTES", () => {
+    expect(failureExitCode("pre-tool-use", "enforce-phase-tools")).toBe(2);
+    expect(failureExitCode("subagent-stop", "cleanup-subagent-flag")).toBe(1);
+    expect(failureExitCode("helper", "complete-wave-gate")).toBe(1);
+    expect(failureExitCode(undefined, undefined)).toBe(1);
+  });
+
+  it("every fail-closed route is a real route in the routing table", () => {
+    for (const route of FAIL_CLOSED_ROUTES) {
+      const [hookType, handlerName] = route.split("/");
+      expect(KNOWN_HANDLERS[hookType]?.has(handlerName), route).toBe(true);
+    }
   });
 });

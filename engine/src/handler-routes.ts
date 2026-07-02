@@ -26,3 +26,19 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
     "set-phase", "cleanup-state", "lint-wave-gate", "validate-lint-rules",
   ]),
 };
+
+/**
+ * Routes whose top-level crash must BLOCK (exit 2). Exit 1 is NON-blocking
+ * for PreToolUse hooks, so a crash outside the handler (dynamic-import
+ * failure, stdin error) on a gate route would fail the gate OPEN. Modeled
+ * as route metadata next to the routing table — the polarity decision lives
+ * with the routes, not as a string comparison buried in cli.ts.
+ */
+export const FAIL_CLOSED_ROUTES: ReadonlySet<string> = new Set([
+  "pre-tool-use/enforce-phase-tools",
+]);
+
+/** Exit code for a crash outside the handler, derived from the route. */
+export function failureExitCode(hookType: string | undefined, handlerName: string | undefined): 1 | 2 {
+  return FAIL_CLOSED_ROUTES.has(`${hookType}/${handlerName}`) ? 2 : 1;
+}

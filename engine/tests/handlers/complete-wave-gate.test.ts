@@ -10,6 +10,7 @@ import {
   evaluateWaveGate,
   generateWaveGateSummary,
   gateCheckMessage,
+  parseWaveArg,
   snapshotGateDeps,
   type GateDeps,
   type GateIO,
@@ -177,7 +178,7 @@ describe("checkSpecAlignment (pure)", () => {
 
   it("fails when spec-check for different wave", () => {
     const state = mkState({
-      spec_check: { wave: 1, run_at: "", verdict: "pass" },
+      spec_check: { wave: 1, run_at: "", verdict: "PASSED" },
     });
     const result = checkSpecAlignment(state, 2);
     expect(result.passed).toBe(false);
@@ -187,7 +188,7 @@ describe("checkSpecAlignment (pure)", () => {
 
   it("passes when spec-check matches wave with no criticals", () => {
     const state = mkState({
-      spec_check: { wave: 2, run_at: "", verdict: "pass", critical_count: 0 },
+      spec_check: { wave: 2, run_at: "", verdict: "PASSED", critical_count: 0 },
     });
     const result = checkSpecAlignment(state, 2);
     expect(result.passed).toBe(true);
@@ -195,7 +196,7 @@ describe("checkSpecAlignment (pure)", () => {
 
   it("fails when spec-check has critical findings", () => {
     const state = mkState({
-      spec_check: { wave: 1, run_at: "", verdict: "fail", critical_count: 2, critical_findings: ["drift", "missing"] },
+      spec_check: { wave: 1, run_at: "", verdict: "BLOCKED", critical_count: 2, critical_findings: ["drift", "missing"] },
     });
     const result = checkSpecAlignment(state, 1);
     expect(result.passed).toBe(false);
@@ -248,7 +249,7 @@ describe("generateWaveGateSummary (pure)", () => {
     const specCheck = {
       wave: 1,
       run_at: "2024-01-01",
-      verdict: "aligned",
+      verdict: "PASSED" as const,
       critical_count: 0,
       medium_findings: ["Minor drift in validation"],
     };
@@ -256,7 +257,7 @@ describe("generateWaveGateSummary (pure)", () => {
     const summary = generateWaveGateSummary(1, tasks, specCheck);
 
     expect(summary).toContain("## Wave 1 — Gate Passed");
-    expect(summary).toContain("### Spec Alignment: aligned (0 critical)");
+    expect(summary).toContain("### Spec Alignment: PASSED (0 critical)");
     expect(summary).toContain("- MEDIUM: Minor drift in validation");
     expect(summary).toContain("### Code Review");
     expect(summary).toContain("#### T1: Task T1");
@@ -516,5 +517,38 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
     const decision = evaluateWaveGate(mkGraph({ current_wave: 1 }), 2, countingDeps().deps);
     expect(decision.wave).toBe(2);
     expect(decision.verdict).toMatchObject({ kind: "pass", taskIds: ["T2"], nextWave: null });
+  });
+
+  it("an EMPTY wave fails — never a vacuous pass that stamps the gate", () => {
+    const decision = evaluateWaveGate(mkGraph(), 7, countingDeps().deps);
+    expect(decision.wave).toBe(7);
+    expect(decision.checks).toHaveLength(0);
+    expect(decision.verdict.kind).toBe("fail");
+    if (decision.verdict.kind === "fail") {
+      expect(decision.verdict.reason).toContain("wave 7 has no tasks");
+    }
+    // …and applying the failing decision is a no-op: nothing completed,
+    // no wave_gates["7"] stamped.
+    const state = mkGraph();
+    expect(applyGateDecision(state, decision)).toBe(state);
+  });
+
+  it("an empty task graph fails the same way (unpopulated graph)", () => {
+    const decision = evaluateWaveGate(mkGraph({ tasks: [] }), null, countingDeps().deps);
+    expect(decision.verdict.kind).toBe("fail");
+  });
+});
+
+describe("parseWaveArg — an unvalidated Number() would gate wave NaN vacuously", () => {
+  it("parses a positive integer and returns null when absent", () => {
+    expect(parseWaveArg(["--wave", "2"])).toBe(2);
+    expect(parseWaveArg([])).toBeNull();
+    expect(parseWaveArg(["--wave"])).toBeNull();
+  });
+
+  it("throws on non-numeric, non-integer, and sub-1 values", () => {
+    for (const bad of ["abc", "NaN", "1.5", "0", "-1", "Infinity"]) {
+      expect(() => parseWaveArg(["--wave", bad]), bad).toThrow("Invalid --wave value");
+    }
   });
 });

@@ -46,6 +46,16 @@ describe("parseMachine", () => {
     expect(parseMachine({ ...valid, agent: undefined }).ok).toBe(false);
   });
 
+  it("rejects an agent that is not a bindable agent type (traversal, separators, epoch-reserved chars)", () => {
+    // The agent names the machine file and keys epochs — parseAgentType's
+    // rules apply at this boundary too.
+    for (const bad of ["../evil-agent", "a/b", "a\\b", "a:b", "a b"]) {
+      const result = parseMachine({ ...valid, agent: bad });
+      expect(result.ok, bad).toBe(false);
+      if (!result.ok) expect(result.error).toContain("not a bindable agent type");
+    }
+  });
+
   it("rejects empty enforcedTools", () => {
     expect(parseMachine({ ...valid, enforcedTools: [] }).ok).toBe(false);
   });

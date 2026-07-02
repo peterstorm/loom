@@ -59,6 +59,24 @@ describe("findReport", () => {
     expect(report).toEqual({ total: 2, failed: 1, source: "junit-xml" });
   });
 
+  it("runner-family scoping: fresh surefire XML cannot vouch for a non-JVM command", () => {
+    const dir = join(cwd, "target/surefire-reports");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "TEST-a.xml"), '<testsuite tests="4" failures="0" errors="0"/>');
+    // A sibling JVM run's artifact must not vouch for `npm test`.
+    expect(findReport("npm test", cwd, "", Date.now())).toBeNull();
+  });
+
+  it("ignores a stale explicit --outputFile report — freshness bounds cross-run attribution", () => {
+    const file = join(cwd, "out.json");
+    writeFileSync(file, JSON.stringify({ numTotalTests: 3, numFailedTests: 0 }));
+    const old = (Date.now() - 60 * 60 * 1000) / 1000;
+    utimesSync(file, old, old);
+    expect(
+      findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", Date.now()),
+    ).toBeNull();
+  });
+
   it("ignores stale reports — an old artifact cannot vouch for this run", () => {
     const dir = join(cwd, "target/surefire-reports");
     mkdirSync(dir, { recursive: true });
