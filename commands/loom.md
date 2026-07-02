@@ -197,6 +197,7 @@ Substitute variables:
 **Wait for agent completion.** Extract:
 - Plan file path
 - Implementation phases
+- Executable models declared, if any (LC-N lifecycles, Pipeline AuthoredDag, INV-N invariants + rule files) — these are validated against the task graph in Phase 4a
 
 ---
 
@@ -255,7 +256,9 @@ Run schema validator on agent output:
 echo "$DECOMPOSE_OUTPUT" | bun ${LOOM_DIR}/engine/src/cli.ts helper validate-task-graph -
 ```
 
-If validation fails → re-spawn decompose-agent with error details.
+The validator also cross-checks executable-model bindings when the plan declares them (`## Lifecycles` / `## Pipeline` / `## Invariants`): every LC-N machine file must appear in a task's `file_list`, the AuthoredDag sidecar must exist and be structurally sound, and every checkable INV-N rule file must exist. See `references/executable-models.md`.
+
+If validation fails → re-spawn decompose-agent with error details. If the failure is a missing AuthoredDag sidecar or missing invariant rule file, the gap is in the *plan* — loop back to Phase 3 instead.
 
 ### 4b. Map Spec Anchors
 

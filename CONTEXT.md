@@ -96,6 +96,18 @@ _Avoid_: DTO (DTOs carry no invariants), data class (too implementation-specific
 A sum type representing success (`Right`) or failure (`Left`). Used for error handling in the functional core — never throw.
 _Avoid_: Result (acceptable in Rust), Optional (different semantics)
 
+**Executable Model**:
+A model the system imports, runs, or enforces — a lifecycle machine, an AuthoredDag, or a lint rule. The only kind of model loom permits: a model either executes or it doesn't exist (`references/executable-models.md`).
+_Avoid_: Behavioral model, descriptive model, structural diff (these name the forbidden alternative)
+
+**Lifecycle Machine**:
+A statechart or typed reducer bound to a plan's `LC-N` declaration. The single source of truth for a domain lifecycle; implementation code imports it and never re-implements its transitions.
+_Avoid_: State diagram, workflow doc, lifecycle description
+
+**Checkable Invariant**:
+A plan invariant (`INV-N`, tier `checkable`) expressed as a lint rule enforced fail-closed on every edit. Invariants that cannot be deterministically checked are tiered `advisory` and stay honest prose.
+_Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory rules are never enforced)
+
 ## Relationships
 
 - A **Phase** produces one or more artifacts consumed by subsequent **Phases**
@@ -109,6 +121,9 @@ _Avoid_: Result (acceptable in Rust), Optional (different semantics)
 - An **Aggregate** is immutable data; command functions in the **Functional Core** produce new instances
 - The **Imperative Shell** orchestrates: load via **Port** → call **Functional Core** → persist via **Port**
 - **Domain Events** are returned by pure command functions; the **Imperative Shell** publishes them
+- A **Plan** may declare **Executable Models**; decompose validation blocks a declared model that no **Task** binds to an artifact
+- A **Lifecycle Machine** is implemented by a dedicated **Task** in the earliest wave; dependent **Tasks** import it
+- A **Checkable Invariant** is written as a lint rule during the architecture **Phase** and enforced by **Hooks** on every edit thereafter
 
 ## Example Dialogue
 

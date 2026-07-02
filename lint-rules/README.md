@@ -74,6 +74,12 @@ The `source` field is set automatically by the loader — do **not** include it 
 - **Override a rule:** Same `name`, different pattern/extensions
 - **Add custom rules:** New `name` in project rules dir
 
+**Invariant rules (Phase C):** the loom architecture phase writes checkable plan invariants (`INV-N`) as project-local rules named `inv-{n}-{slug}` — see `references/executable-models.md`. Validate any hand- or agent-written rules load cleanly with:
+
+```bash
+bun engine/src/cli.ts helper validate-lint-rules [projectRulesDir]
+```
+
 ---
 
 ## Override Semantics

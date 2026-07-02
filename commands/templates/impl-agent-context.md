@@ -32,6 +32,16 @@ The project's architecture and language-pattern rules are inlined below. They ar
 
 ---
 
+## Executable Models — BINDING (when your plan context declares them)
+
+- **Lifecycle (`LC-N` block in your context):** the machine file it names is the single source of truth for that lifecycle. Import it. Never re-implement transition logic, duplicate state-name string literals, or store lifecycle state outside the machine's types.
+- **Pipeline node body (context references an AuthoredDag node):** fill ONLY the node body (fetch impl, `buildInput`, prompt). Never hand-write or edit `defineDag`/graph wiring — it is generated code. The node's declared input/output schemas are binding contracts, not suggestions.
+- **Invariants (`INV-N`):** `checkable` invariants are lint rules — the linter blocks your edits fail-closed if you violate them, so design with them, not around them. `advisory` invariants are design guidance, honestly unenforced.
+
+If your plan context declares none of these, this section imposes nothing.
+
+---
+
 ## Task Assignment
 
 **Task ID:** {task_id}

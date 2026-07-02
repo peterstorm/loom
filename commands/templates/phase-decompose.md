@@ -64,6 +64,18 @@ Fallback: `general-purpose`
    - `spec_anchors`: any FR/SC/US referenced in the AD's Why text (can be empty `[]`)
 
    Skip ADR task creation if plan has no `## Architectural Decisions` section or it's empty.
+7. **Lifecycle tasks:** For each `### LC-N: {Title}` block in the plan's `## Lifecycles` section (skip rule if section absent):
+   - Create exactly one task that implements the declared `**Machine file:**` — the statechart/typed reducer plus its tests (property tests: no undeclared transition is representable/accepted).
+   - `agent`: `code-implementer-agent`, `new_tests_required`: `true`
+   - `wave`: the earliest wave possible (usually 1) — the machine is a foundation.
+   - `file_list`: MUST include the exact `**Machine file:**` path (plus its test file). Validation fails if no task's `file_list` contains it.
+   - `plan_context`: the full LC-N block verbatim (states + transition table).
+   - Every other task that touches this lifecycle: add the machine task to its `depends_on` (later wave), and prepend the LC-N block to its `plan_context` with the line: `The lifecycle machine at {machine file} is the single source of truth — import it; never re-implement transitions or duplicate state literals.`
+8. **Pipeline tasks:** If the plan has a `## Pipeline` section with an `**AuthoredDag:**` path (skip rule if absent):
+   - Read the AuthoredDag JSON file.
+   - Create one wave-1 task: "Run `fugue new --from {dag path}` and commit the generated graph code" — `agent`: `code-implementer-agent`, `new_tests_required`: `false` (deterministic codegen, no hand-written code).
+   - Create one task per node needing a real body (fetch impls, `buildInput`, prompts), depending on the codegen task. `plan_context` MUST include the node's purpose and declared input/output schemas from the AuthoredDag, plus the line: `Fill only the node body. Never hand-write or edit defineDag/graph wiring — it is generated. The declared schemas are binding contracts.`
+9. **Invariant tasks: none.** Checkable `INV-N` invariants are already lint rules enforced on every edit — do NOT create tasks for them. For tasks working in files an invariant governs, you may append the INV-N statement to `plan_context`. Advisory invariants may be quoted as guidance; never present them as enforced.
 
 ---
 

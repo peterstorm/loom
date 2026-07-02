@@ -68,6 +68,7 @@ Use `AskUserQuestion` with multiple-choice options where possible. Batch across 
 10. **Backwards compatibility & migration** — Is this greenfield, brownfield extension, or rewrite? Are there in-flight users/data to preserve? Feature flag rollout?
 11. **Deployment & environments** — Anything in the design that affects how this ships (build, runtime, infra dependencies, env config)?
 12. **Out-of-scope architecture concerns** — What does the user explicitly want kept out of this design? (multi-tenancy, i18n, advanced caching, etc.)
+13. **Executable models** (conditional — ask only if exploration surfaced one) — If the feature contains a real domain lifecycle (order, payment, subscription, document workflow): confirm it should be modeled as a statechart/typed reducer the implementation imports. If the feature is a real multi-stage pipeline AND the project already uses fugue: ask whether to model it as an `AuthoredDag` (the loom↔fugue bridge is opt-in per feature — no fugue in the project means no pipeline modeling, don't ask).
 
 Group related topics into single `AskUserQuestion` calls when natural (e.g., testability + error-handling fit together; data model + concurrency fit together).
 
@@ -126,6 +127,22 @@ Apply your preloaded architecture knowledge:
 - Testability (functional core / imperative shell)
 - Stack-specific patterns (Java records/sealed types/Either OR TypeScript discriminated unions/ts-pattern)
 
+**Executable models — standing policy** (read `references/executable-models.md` from the loom plugin dir; it is binding):
+
+A model either executes or it doesn't exist. Never describe a lifecycle, pipeline, or invariant in prose that code is "compared against" — bind it to an executable artifact or leave it out:
+
+- **Real lifecycle found** → declare it as `### LC-N` in a `## Lifecycles` section with a `**Machine file:**` path. The implementation will import that machine; decompose creates a dedicated task for it.
+- **Real pipeline + fugue in project + user opted in** (interview topic 13) → author the `AuthoredDag` sidecar JSON yourself (Write tool) next to the plan, declare it under `## Pipeline` with an `**AuthoredDag:**` line. Graph code is later generated via `fugue new --from` — never hand-written.
+- **Invariants** → declare as `### INV-N` in `## Invariants`, tiered honestly:
+  - `checkable` → write the lint rule JSON yourself into `.claude/linter/rules/inv-{n}-{slug}.json` (regex rule format per loom's `lint-rules/README.md`), then prove all rules load:
+    ```bash
+    bun {loom_plugin_dir}/engine/src/cli.ts helper validate-lint-rules
+    ```
+    A failing load means fix the rule now — it would otherwise block every edit in wave 1.
+  - `advisory` → prose only, never pretended to be enforced.
+
+Most features need none of these sections. A CRUD endpoint has no lifecycle; two sequential steps are not a pipeline. When in doubt, leave the section out — `validate-task-graph` fail-closes on declared-but-unbound models, not on absent ones.
+
 ### 6. Write the Plan Document
 
 **Output location:** `.claude/plans/{date_slug}.md`
@@ -141,10 +158,13 @@ Find the loom plugin directory (`ls -d "$HOME/.claude/plugins/cache/plugins/loom
 | **Implementation Phases** | `wave` ordering + `depends_on` |
 | **Architectural Decisions** | `plan_context` quoted to impl agents |
 | **Testing Strategy** | `new_tests_required` per component |
+| **Lifecycles** (opt-in) | Dedicated machine-file task per LC-N; dependents wired to it |
+| **Pipeline** (opt-in) | Codegen task + one node-body task per node |
+| **Invariants** (opt-in) | Nothing — checkable rules already enforce; advisory quoted as guidance |
 
 Record the chosen approach (and the interview decisions that shaped it) under `## Architectural Decisions` so future readers see WHY this approach won.
 
-Commit: `git add .claude/plans/ && git commit -m "plan: {date_slug}"`
+Commit: `git add .claude/plans/ .claude/linter/rules/ && git commit -m "plan: {date_slug}"` (the linter rules path covers any checkable-invariant rules you wrote; the plans path covers the plan and any AuthoredDag sidecar)
 
 **ADR seeds:** For decisions worth recording as ADRs (2+ alternatives evaluated, new dependency, data model change, cross-cutting pattern, or non-obvious invariant), ensure each is captured as a `### AD-N: {Title}` block in the plan's `## Architectural Decisions` section per `references/plan-template.md`. Decompose will turn each AD into a dedicated ADR-writing task in the final wave. The approach you picked at the gate is almost always one such AD. Skip ADs for trivial naming or file-placement choices. Do NOT write ADRs yourself in this phase.
 
@@ -168,5 +188,6 @@ Commit: `git add .claude/plans/ && git commit -m "plan: {date_slug}"`
 - Implementation phases identified (count + names)
 - Key architectural decisions with rationale (captured as `### AD-N` blocks in the plan)
 - Which approach the user picked at the gate (and which you had recommended, if different)
+- Executable models declared, if any: LC-N lifecycles (+ machine file paths), Pipeline AuthoredDag path, INV-N invariants (+ tier; rule file paths for checkable ones, with `validate-lint-rules` output)
 
 The architecture-agent has the `architecture-tech-lead` skill preloaded which provides FP, DDD, testability, and stack-specific domain knowledge. Use that knowledge to **design**, not to **review**.

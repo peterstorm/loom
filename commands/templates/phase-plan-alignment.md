@@ -43,6 +43,16 @@ For each requirement from the spec, determine if the plan addresses it **by mean
 A requirement is **covered** if the plan's design would implement or satisfy it.
 A requirement is **a gap** if the plan does not address it, or addresses it so vaguely that an implementer would not know how to proceed.
 
+### 3.5 Check the Executable-Models Policy
+
+Loom's standing policy (`references/executable-models.md`): a model either executes or it doesn't exist. Flag as a gap (ID `MODEL-N`):
+
+- The plan describes a domain **lifecycle** in prose (state lists, transition narratives) WITHOUT a `## Lifecycles` section binding it to a `**Machine file:**`
+- The plan describes a multi-stage **pipeline** WITHOUT either a `## Pipeline` AuthoredDag binding or an explicit statement that the fugue bridge was declined
+- An `## Invariants` entry tiered `checkable` whose stated property a regex lint rule could not actually check (mis-tiered — should be `advisory`)
+
+Do NOT flag the mere absence of these sections — they are opt-in; most features need none.
+
 ### 4. Write Gap Report
 
 Write to: `{spec_dir}/plan-alignment.md`
