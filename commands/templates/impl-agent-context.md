@@ -34,8 +34,11 @@ The project's architecture and language-pattern rules are inlined below. They ar
 
 ## Executable Models — BINDING (when your plan context declares them)
 
-- **Lifecycle (`LC-N` block in your context):** the machine file it names is the single source of truth for that lifecycle. Import it. Never re-implement transition logic, duplicate state-name string literals, or store lifecycle state outside the machine's types.
+- **Lifecycle (`LC-N` block in your context):**
+  - **If the machine file is in YOUR file list, you are implementing it.** Build the statechart/typed reducer exactly as the declared states and transition table specify, and write property tests proving no undeclared transition is representable or accepted. The wave gate verifies the file exists at the declared path.
+  - **Otherwise you are a consumer.** The machine file is the single source of truth for that lifecycle. Import it. Never re-implement transition logic, duplicate state-name string literals, or store lifecycle state outside the machine's types.
 - **Pipeline node body (context references an AuthoredDag node):** fill ONLY the node body (fetch impl, `buildInput`, prompt). Never hand-write or edit `defineDag`/graph wiring — it is generated code. The node's declared input/output schemas are binding contracts, not suggestions.
+- **Pipeline codegen task:** run the `fugue new --from` command from your plan context. If it fails its validation gauntlet, the authored dag is defective — report the failure verbatim and stop; never hand-patch generated code to make it pass.
 - **Invariants (`INV-N`):** `checkable` invariants are lint rules — the linter blocks your edits fail-closed if you violate them, so design with them, not around them. `advisory` invariants are design guidance, honestly unenforced.
 
 If your plan context declares none of these, this section imposes nothing.

@@ -127,27 +127,35 @@ Apply your preloaded architecture knowledge:
 - Testability (functional core / imperative shell)
 - Stack-specific patterns (Java records/sealed types/Either OR TypeScript discriminated unions/ts-pattern)
 
-**Executable models — standing policy** (read `references/executable-models.md` from the loom plugin dir; it is binding):
+**Executable models — standing policy** (binding). First resolve the loom plugin directory — you need it for the policy doc and the validation command below:
+
+```bash
+LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/ 2>/dev/null | head -1)
+```
+
+Then read `references/executable-models.md` from it.
 
 A model either executes or it doesn't exist. Never describe a lifecycle, pipeline, or invariant in prose that code is "compared against" — bind it to an executable artifact or leave it out:
 
 - **Real lifecycle found** → declare it as `### LC-N` in a `## Lifecycles` section with a `**Machine file:**` path. The implementation will import that machine; decompose creates a dedicated task for it.
-- **Real pipeline + fugue in project + user opted in** (interview topic 13) → author the `AuthoredDag` sidecar JSON yourself (Write tool) next to the plan, declare it under `## Pipeline` with an `**AuthoredDag:**` line. Graph code is later generated via `fugue new --from` — never hand-written.
+- **Real pipeline + fugue in project + user opted in** (interview topic 13) → author the `AuthoredDag` sidecar JSON yourself (Write tool) next to the plan, declare it under `## Pipeline` with an `**AuthoredDag:**` line. Graph code is later generated via `fugue new --from` — never hand-written. One pipeline per plan.
 - **Invariants** → declare as `### INV-N` in `## Invariants`, tiered honestly:
-  - `checkable` → write the lint rule JSON yourself into `.claude/linter/rules/inv-{n}-{slug}.json` (regex rule format per loom's `lint-rules/README.md`), then prove all rules load:
+  - `checkable` → write the lint rule JSON yourself into the project rules dir — `.claude/linter/rules/inv-<n>-<slug>.json` (or `.pi/linter/rules/` when the project runs the pi harness; the linter only loads from the harness-appropriate dir). Use the regex rule format per loom's `lint-rules/README.md`, set the JSON `name` field to the same `inv-<n>-<slug>` as the filename, then prove all rules load:
     ```bash
-    bun {loom_plugin_dir}/engine/src/cli.ts helper validate-lint-rules
+    bun "$LOOM_DIR"/engine/src/cli.ts helper validate-lint-rules .claude/linter/rules
     ```
     A failing load means fix the rule now — it would otherwise block every edit in wave 1.
   - `advisory` → prose only, never pretended to be enforced.
 
-Most features need none of these sections. A CRUD endpoint has no lifecycle; two sequential steps are not a pipeline. When in doubt, leave the section out — `validate-task-graph` fail-closes on declared-but-unbound models, not on absent ones.
+**These sections are parsed deterministically by a regex grammar — exact spelling matters.** Section headings must be exactly `## Lifecycles`, `## Pipeline`, `## Invariants` (no suffixes, no colon). Block headings must be `### LC-<n>: <title>` / `### INV-<n>: <title>` (uppercase prefix, numeric id, colon). Field labels (`**Machine file:**`, `**AuthoredDag:**`, `**Tier:**`, `**Rule file:**`) start at column 0 with the colon inside the bold, never bulletized. Near-miss variants are rejected by validation, not silently ignored — but don't make it guess.
+
+Most features need none of these sections. A CRUD endpoint has no lifecycle; two sequential steps are not a pipeline. When in doubt, leave the section out — `validate-task-graph` fail-closes on declared-but-unbound models and near-miss declarations, not on absent sections.
 
 ### 6. Write the Plan Document
 
 **Output location:** `.claude/plans/{date_slug}.md`
 
-Find the loom plugin directory (`ls -d "$HOME/.claude/plugins/cache/plugins/loom"/*/` — use latest), then read `references/plan-template.md` from it and follow its structure.
+Read `references/plan-template.md` from the loom plugin dir (`$LOOM_DIR`, resolved above) and follow its structure.
 
 **Required sections** (decompose agent parses these):
 

@@ -29,8 +29,14 @@ afterEach(() => {
 });
 
 describe("validate-lint-rules helper", () => {
-  it("passes when default rules load and no project dir exists", async () => {
+  it("FAILS when an explicitly-passed project dir does not exist — the proof step must prove something", async () => {
     const result = await handler("", ["/nonexistent/rules/dir"]);
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("does not exist");
+  });
+
+  it("passes with no explicit dir when the default project dir is absent (defaults still validated)", async () => {
+    const result = await handler("", []);
     expect(result.kind).toBe("passthrough");
   });
 

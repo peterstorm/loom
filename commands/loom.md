@@ -256,9 +256,16 @@ Run schema validator on agent output:
 echo "$DECOMPOSE_OUTPUT" | bun ${LOOM_DIR}/engine/src/cli.ts helper validate-task-graph -
 ```
 
-The validator also cross-checks executable-model bindings when the plan declares them (`## Lifecycles` / `## Pipeline` / `## Invariants`): every LC-N machine file must appear in a task's `file_list`, the AuthoredDag sidecar must exist and be structurally sound, and every checkable INV-N rule file must exist. See `references/executable-models.md`.
+The validator also cross-checks executable-model bindings when the plan declares them (`## Lifecycles` / `## Pipeline` / `## Invariants`): every LC-N machine file must appear in a task's `file_list`, the AuthoredDag sidecar must exist and be structurally sound, every checkable INV-N rule file must exist, and near-miss declarations (typo'd headings/labels) are errors. See `references/executable-models.md`. These same checks run fail-closed inside `populate-task-graph` (4d), so they cannot be skipped.
 
-If validation fails → re-spawn decompose-agent with error details. If the failure is a missing AuthoredDag sidecar or missing invariant rule file, the gap is in the *plan* — loop back to Phase 3 instead.
+**Routing validation failures — read the error text:**
+- Errors about the *task graph* (unknown agent, wave ordering, or an LC machine file "not in any task's file_list") → **re-spawn decompose-agent** with the error details. Decompose can fix these.
+- Errors about the *plan or its artifacts* (missing `**Machine file:**` / `**Tier:**` / `**Rule file:**` lines, "Model declaration problem" / near-miss headings, AuthoredDag or rule file missing/malformed, plan_file unreadable) → decompose can NEVER fix these; re-spawning it just loops. **Loop back to Phase 3** with the same mechanics as the plan-alignment loop-back:
+  ```bash
+  bun ${LOOM_DIR}/engine/src/cli.ts helper set-phase --phase architecture --clear-artifact plan-alignment
+  rm -f ${spec_dir}/plan-alignment.md
+  ```
+  Re-spawn architecture-agent with the validator errors appended as additional context.
 
 ### 4b. Map Spec Anchors
 

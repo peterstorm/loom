@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookHandler, Phase, TaskGraph } from "../../types";
 import { PHASE_ORDER, KNOWN_AGENTS } from "../../config";
-import { parsePlanModels, hasModels, type PlanModels } from "../../parsers/parse-plan-models";
+import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
 
 export type ValidationResult =
   | { ok: true }
@@ -19,7 +19,7 @@ function fail(errors: string[]): ValidationResult { return { ok: false, errors }
 
 const VALID_PHASES = new Set<string>(PHASE_ORDER);
 
-const NO_TEST_KEYWORDS = /migration|config|schema|rename|bump|version|refactor|cleanup|typo|docs|interface|documentation|changelog|readme|ci|cd|pipeline|deploy|→|->|styling|css|formatting|adr/i;
+const NO_TEST_KEYWORDS = /migration|config|schema|rename|bump|version|refactor|cleanup|typo|docs|interface|documentation|changelog|readme|ci|cd|pipeline|deploy|→|->|styling|css|formatting|adr|codegen|generated/i;
 
 /** Validate minimal phase-tracking graph (no tasks) */
 export function validateMinimal(json: Record<string, unknown>): ValidationResult {
@@ -56,10 +56,13 @@ export function validateFull(json: Record<string, unknown>): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  // Required top-level fields
-  for (const field of ["plan_title", "plan_file", "spec_file", "tasks"]) {
+  // Required top-level fields — path fields must be real strings, not merely
+  // truthy, or a garbage value silently disarms downstream plan-based checks
+  for (const field of ["plan_title", "plan_file", "spec_file"]) {
     if (!json[field]) errors.push(`Missing required field: ${field}`);
+    else if (typeof json[field] !== "string") errors.push(`Field '${field}' must be a string`);
   }
+  if (!json.tasks) errors.push("Missing required field: tasks");
 
   const tasks = json.tasks;
   if (!Array.isArray(tasks)) {
@@ -153,105 +156,6 @@ export function validateFull(json: Record<string, unknown>): ValidationResult {
   return errors.length === 0 ? ok() : fail(errors);
 }
 
-/**
- * Validate executable-model bindings (Phase C — "executable models only").
- *
- * Opt-in: a plan with no `## Lifecycles` / `## Pipeline` / `## Invariants`
- * sections produces zero checks. A plan that declares a model must bind it
- * to an executable artifact — a descriptive model with nothing to run is a
- * validation error, not a warning.
- *
- * Pure: filesystem access is injected via `deps`.
- */
-export interface ModelBindingDeps {
-  /** Returns file content, or null when the file does not exist / is unreadable */
-  readonly readFile: (path: string) => string | null;
-}
-
-function normalizePath(p: string): string {
-  return p.replace(/\\/g, "/").replace(/^\.\//, "");
-}
-
-/** Suffix-tolerant match so relative plan paths bind to absolute task paths */
-function pathsMatch(a: string, b: string): boolean {
-  const na = normalizePath(a);
-  const nb = normalizePath(b);
-  return na === nb || na.endsWith(`/${nb}`) || nb.endsWith(`/${na}`);
-}
-
-function taskFileLists(tasks: readonly Record<string, unknown>[]): string[] {
-  return tasks.flatMap((t) =>
-    Array.isArray(t.file_list) ? (t.file_list as unknown[]).filter((f): f is string => typeof f === "string") : []
-  );
-}
-
-export function validateModelBindings(
-  models: PlanModels,
-  tasks: readonly Record<string, unknown>[],
-  deps: ModelBindingDeps,
-): ValidationResult {
-  const errors: string[] = [];
-  const allFiles = taskFileLists(tasks);
-
-  for (const lc of models.lifecycles) {
-    if (lc.machineFile === null) {
-      errors.push(`${lc.id} ("${lc.title}"): no '**Machine file:**' declared — a lifecycle without an executable machine is a descriptive model (see references/executable-models.md)`);
-      continue;
-    }
-    if (!allFiles.some((f) => pathsMatch(f, lc.machineFile!))) {
-      errors.push(`${lc.id}: machine file '${lc.machineFile}' is not in any task's file_list — decompose must emit a task that implements the statechart/reducer`);
-    }
-  }
-
-  if (models.pipeline !== null) {
-    const dagFile = models.pipeline.dagFile;
-    if (dagFile === null) {
-      errors.push("Pipeline section declares no '**AuthoredDag:**' path — a pipeline without an authored DAG is a descriptive model (see references/executable-models.md)");
-    } else {
-      const content = deps.readFile(dagFile);
-      if (content === null) {
-        errors.push(`Pipeline: AuthoredDag file '${dagFile}' not found — the architecture phase must author it before decompose`);
-      } else {
-        try {
-          const dag = JSON.parse(content) as Record<string, unknown>;
-          if (typeof dag !== "object" || dag === null || Array.isArray(dag) || !Array.isArray(dag.nodes)) {
-            errors.push(`Pipeline: AuthoredDag file '${dagFile}' must be a JSON object with a 'nodes' array (deep validation is fugue's job — 'fugue new --from' gates codegen)`);
-          }
-        } catch {
-          errors.push(`Pipeline: AuthoredDag file '${dagFile}' is not valid JSON`);
-        }
-      }
-    }
-  }
-
-  for (const inv of models.invariants) {
-    if (inv.tier === null) {
-      errors.push(`${inv.id} ("${inv.title}"): missing or unrecognized '**Tier:**' — must be 'checkable' or 'advisory'`);
-      continue;
-    }
-    if (inv.tier === "advisory") continue;
-    if (inv.ruleFile === null) {
-      errors.push(`${inv.id} ("${inv.title}"): tier is 'checkable' but no '**Rule file:**' declared — a checkable invariant must be a lint rule, or be honestly tiered 'advisory'`);
-      continue;
-    }
-    const content = deps.readFile(inv.ruleFile);
-    if (content === null) {
-      errors.push(`${inv.id}: rule file '${inv.ruleFile}' not found — the architecture phase must write it (validate with: bun cli.ts helper validate-lint-rules)`);
-      continue;
-    }
-    try {
-      const rule = JSON.parse(content) as Record<string, unknown>;
-      if (typeof rule !== "object" || rule === null || Array.isArray(rule) || typeof rule.kind !== "string" || typeof rule.name !== "string") {
-        errors.push(`${inv.id}: rule file '${inv.ruleFile}' must be a JSON object with 'kind' and 'name' (full fail-closed load happens in the linter)`);
-      }
-    } catch {
-      errors.push(`${inv.id}: rule file '${inv.ruleFile}' is not valid JSON`);
-    }
-  }
-
-  return errors.length === 0 ? ok() : fail(errors);
-}
-
 /** Fix full graph — add missing per-task defaults */
 export function fixFull(json: Record<string, unknown>): string {
   const tasks = (json.tasks as Record<string, unknown>[]) ?? [];
@@ -267,6 +171,21 @@ export function fixFull(json: Record<string, unknown>): string {
     })),
   };
   return JSON.stringify(fixed, null, 2);
+}
+
+/** Production filesystem port for model-binding checks — honest null on any read failure */
+const PROD_DEPS: ModelBindingDeps = {
+  readFile: (p) => {
+    try {
+      return readFileSync(p, "utf-8");
+    } catch {
+      return null;
+    }
+  },
+};
+
+function tasksOf(json: Record<string, unknown>): Record<string, unknown>[] {
+  return Array.isArray(json.tasks) ? (json.tasks as Record<string, unknown>[]) : [];
 }
 
 const handler: HookHandler = async (stdin, args) => {
@@ -306,6 +225,16 @@ const handler: HookHandler = async (stdin, args) => {
       process.stderr.write(`Fixed structural defaults; ${result.errors.length} issues remain\n`);
       for (const err of result.errors) process.stderr.write(`  - ${err}\n`);
     }
+    // --fix is a transformation, not a gate — but binding problems are not
+    // structurally fixable, so surface them rather than dropping them.
+    // populate-task-graph enforces bindings fail-closed before any state write.
+    if (!isMinimal) {
+      const bindings = checkPlanModelBindings(json.plan_file, tasksOf(json), PROD_DEPS);
+      if (!bindings.ok) {
+        process.stderr.write(`Executable-model binding issues (not fixable by --fix; populate-task-graph will block):\n`);
+        for (const err of bindings.errors) process.stderr.write(`  - ${err}\n`);
+      }
+    }
     return { kind: "passthrough" };
   }
 
@@ -316,25 +245,20 @@ const handler: HookHandler = async (stdin, args) => {
     };
   }
 
-  // Phase C: cross-check executable-model bindings declared in the plan.
-  // Opt-in — plans without model sections produce zero checks.
-  if (!isMinimal && typeof json.plan_file === "string") {
-    if (existsSync(json.plan_file)) {
-      const models = parsePlanModels(readFileSync(json.plan_file, "utf-8"));
-      if (hasModels(models)) {
-        const bindings = validateModelBindings(models, json.tasks as Record<string, unknown>[], {
-          readFile: (p) => (existsSync(p) ? readFileSync(p, "utf-8") : null),
-        });
-        if (!bindings.ok) {
-          return {
-            kind: "error",
-            message: [`Executable-model binding validation FAILED (${bindings.errors.length} errors):`, ...bindings.errors.map((e) => `  - ${e}`)].join("\n"),
-          };
-        }
-        process.stderr.write(`Executable-model bindings valid: ${models.lifecycles.length} lifecycles, ${models.pipeline ? 1 : 0} pipeline, ${models.invariants.length} invariants\n`);
-      }
-    } else {
-      process.stderr.write(`WARNING: plan_file '${json.plan_file}' not found — executable-model bindings not checked\n`);
+  // Executable-models policy: cross-check model bindings declared in the plan.
+  // Fail-closed — an unreadable plan is an error, not a skipped check; plans
+  // without model sections produce zero checks (genuine opt-out).
+  if (!isMinimal) {
+    const bindings = checkPlanModelBindings(json.plan_file, tasksOf(json), PROD_DEPS);
+    if (!bindings.ok) {
+      return {
+        kind: "error",
+        message: [`Executable-model binding validation FAILED (${bindings.errors.length} errors):`, ...bindings.errors.map((e) => `  - ${e}`)].join("\n"),
+      };
+    }
+    const models = bindings.models;
+    if (models && (models.lifecycles.length > 0 || models.pipeline !== null || models.invariants.length > 0)) {
+      process.stderr.write(`Executable-model bindings valid: ${models.lifecycles.length} lifecycles, ${models.pipeline ? 1 : 0} pipeline, ${models.invariants.length} invariants\n`);
     }
   }
 

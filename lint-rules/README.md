@@ -74,11 +74,13 @@ The `source` field is set automatically by the loader — do **not** include it 
 - **Override a rule:** Same `name`, different pattern/extensions
 - **Add custom rules:** New `name` in project rules dir
 
-**Invariant rules (Phase C):** the loom architecture phase writes checkable plan invariants (`INV-N`) as project-local rules named `inv-{n}-{slug}` — see `references/executable-models.md`. Validate any hand- or agent-written rules load cleanly with:
+**Invariant rules (executable-models policy):** the loom architecture phase writes checkable plan invariants (`INV-N`) as project-local rules — see `references/executable-models.md`. Both the filename and the JSON `name` field use the same `inv-<n>-<slug>` (override matching keys on `name`). Validate that hand- or agent-written rules load cleanly (from the loom plugin dir, or pass the project rules dir explicitly):
 
 ```bash
-bun engine/src/cli.ts helper validate-lint-rules [projectRulesDir]
+bun <loom-plugin-dir>/engine/src/cli.ts helper validate-lint-rules <project-rules-dir>
 ```
+
+Passing a directory that doesn't exist is an error — the helper proves rules load; it never treats a typo'd path as "no rules".
 
 ---
 

@@ -7,9 +7,22 @@
  */
 
 import { execSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
+import { parsePlanModels, type PlanModels } from "../../parsers/parse-plan-models";
+import { pathsMatch } from "./validate-model-bindings";
+
+/** Resolve the plan's executable models from state — effectful shell helper */
+export function loadPlanModelsSource(planFile: string | null | undefined): PlanModelsSource {
+  if (typeof planFile !== "string" || planFile.trim().length === 0) return { kind: "none" };
+  try {
+    return { kind: "loaded", models: parsePlanModels(readFileSync(planFile, "utf-8")) };
+  } catch {
+    return { kind: "unreadable", path: planFile };
+  }
+}
 
 function parseWaveArg(args: string[]): number | null {
   const idx = args.indexOf("--wave");
@@ -101,6 +114,52 @@ export function checkCriticalFindings(tasks: Task[]): GateCheck {
     return fail(`FAILED: ${totalCritical} critical code review findings.\n${details}`);
   }
   return pass("4. No critical code review findings.");
+}
+
+/** How the plan's executable models were obtained for gate checks */
+export type PlanModelsSource =
+  | { kind: "none" }
+  | { kind: "unreadable"; path: string }
+  | { kind: "loaded"; models: PlanModels };
+
+/**
+ * Check 5: Lifecycle machine artifacts exist (executable-models policy).
+ *
+ * Decompose-time binding is a promise; this is the evidence check — any
+ * lifecycle machine file bound to a task in this wave must exist on disk
+ * before the wave can pass. No plan in state → skipped (legacy flows);
+ * plan named but unreadable → fail closed (Phase 3 committed it, so a
+ * missing plan at gate time is an error, never an opt-out).
+ */
+export function checkLifecycleArtifacts(
+  source: PlanModelsSource,
+  waveTasks: Task[],
+  fileExists: (path: string) => boolean,
+): GateCheck {
+  if (source.kind === "none") {
+    return pass("5. Lifecycle artifacts: skipped (no plan file in state).");
+  }
+  if (source.kind === "unreadable") {
+    return fail(`FAILED: plan file '${source.path}' is unreadable — cannot verify lifecycle machine artifacts (fail-closed).`);
+  }
+  const waveFiles = waveTasks.flatMap((t) => t.file_list ?? []);
+  const bound = source.models.lifecycles.filter(
+    (lc) => lc.machineFile !== null && waveFiles.some((f) => pathsMatch(f, lc.machineFile!))
+  );
+  if (bound.length === 0) {
+    return pass("5. Lifecycle artifacts: none bound to this wave.");
+  }
+  const missing = bound.filter((lc) => !fileExists(lc.machineFile!));
+  if (missing.length > 0) {
+    return fail(
+      `FAILED: lifecycle machine files declared in the plan were not created by this wave:\n` +
+      missing.map((lc) => `  ${lc.id}: ${lc.machineFile}`).join("\n")
+    );
+  }
+  return pass(
+    `5. Lifecycle artifacts verified (${bound.length}):\n` +
+    bound.map((lc) => `     ${lc.id}: ${lc.machineFile}`).join("\n")
+  );
 }
 
 /** Update GitHub issue checkboxes */
@@ -225,6 +284,7 @@ const handler: HookHandler = async (_stdin, args) => {
         checkReviews(waveTasks),
         checkSpecAlignment(s, wave),
         checkCriticalFindings(waveTasks),
+        checkLifecycleArtifacts(loadPlanModelsSource(s.plan_file), waveTasks, existsSync),
       ];
 
       for (const check of checks) {

@@ -1,8 +1,9 @@
 # Executable Models Only — Standing Policy
 
-Phase C of deterministic-core-convergence v2. This is not a feature — it is a
-standing policy the architecture, decompose, and implementation phases follow
-whenever a feature contains a real lifecycle, pipeline, or checkable invariant.
+A standing policy the architecture, decompose, and implementation phases
+follow whenever a feature contains a real lifecycle, pipeline, or checkable
+invariant. (Introduced by deterministic-core-convergence v2, "Phase C" — but
+it is policy, not a feature, and outlives that plan.)
 
 **The rule: a model either executes or it doesn't exist.** Descriptive models —
 JSON or prose that code is "compared against" — are a second source of truth
@@ -51,11 +52,16 @@ in a `## Lifecycles` section:
   unrepresentable or rejected) or `xstate` (when the project already uses it).
 - The states/transitions table is for humans and impl agents; the machine file
   is the source of truth the moment it exists.
+- **Exact grammar**: these sections are regex-parsed. Headings exactly
+  `## Lifecycles` / `## Pipeline` / `## Invariants`; blocks
+  `### LC-<n>: <title>` / `### INV-<n>: <title>`; labels at column 0 with the
+  colon inside the bold. Near-miss variants are validation errors ("stray
+  model markers"), never silent opt-outs.
 
 **Decompose** maps each `LC-N` to a dedicated task in the earliest possible
-wave: implement the machine file plus property tests (no event sequence
-reaches a terminal state through an undeclared transition). Every other task
-that touches the lifecycle depends on it.
+wave: implement the machine file plus property tests (no undeclared
+transition is representable or accepted). Every other task that touches the
+lifecycle depends on it.
 
 **Implementation agents** import the machine. Re-implementing transition
 logic, duplicating state-name string literals, or storing lifecycle state
@@ -84,10 +90,13 @@ schema) next to the plan and declares it:
 
 - Loom validates the sidecar **structurally only** (exists, parses, has a
   `nodes` array). Deep validation belongs to fugue: `fugue new --from` runs
-  the full codegen → `defineDag` → lint gauntlet.
+  the full codegen → `defineDag` → lint gauntlet. One pipeline per plan.
 - **The LLM never hand-writes `defineDag`.** Graph code is always generated;
   agents only fill node *bodies* (fetch impls, `buildInput`, prompts — the
   imperative shell), constrained by the node's declared input/output schemas.
+- If `fugue new --from` fails its gauntlet, the authored dag is defective —
+  the failure is reported and routed back to the architecture phase; generated
+  code is never hand-patched to pass.
 
 **Decompose** emits a wave-1 task that runs `fugue new --from <sidecar>`
 (deterministic codegen, `new_tests_required: false`), then one task per node
@@ -115,34 +124,68 @@ The plan declares invariants in an `## Invariants` section, each tiered:
 
 - `checkable` invariants require a `**Rule file:**`. The **architecture phase
   itself writes the rule JSON** (regex rule format, see `lint-rules/README.md`)
-  into the project's `.claude/linter/rules/` — so it is enforced fail-closed
-  from the very first edit of wave 1, before any implementation agent runs.
-  After writing rules, the architecture phase proves they load:
+  into the project rules dir — `.claude/linter/rules/`, or `.pi/linter/rules/`
+  under the pi harness; the linter loads only from the harness-appropriate
+  dir — so it is enforced fail-closed from the very first edit of wave 1,
+  before any implementation agent runs. Filename and JSON `name` field share
+  the same `inv-<n>-<slug>`. After writing rules, the architecture phase
+  proves they load (`LOOM_DIR` = the loom plugin directory,
+  `ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/`):
 
   ```bash
-  bun ${LOOM_DIR}/engine/src/cli.ts helper validate-lint-rules
+  bun "$LOOM_DIR"/engine/src/cli.ts helper validate-lint-rules .claude/linter/rules
   ```
+
+  Passing a nonexistent directory is an error — the proof step never treats a
+  typo'd path as "no rules to check".
 
 - `advisory` invariants stay prose. They are never enforced and never
   pretended to be — impl agents see them as design guidance, wave gates do
-  not block on them.
+  not block on them. An advisory invariant that declares a rule file is a
+  validation error (mis-tiered intent).
 - A "checkable" invariant that can't actually be expressed as a rule is not
   checkable. Re-tier it `advisory` rather than writing a rule that doesn't
   test the real property.
 
 ---
 
-## Enforcement points (deterministic, already wired)
+## Enforcement points (deterministic, wired)
 
-1. **`validate-task-graph`** (Phase 4a) cross-checks bindings: every `LC-N`
-   machine file appears in some task's `file_list`; the `AuthoredDag` sidecar
-   exists and is structurally sound; every checkable `INV-N` rule file exists
-   and is rule-shaped. A declared-but-unbound model blocks decompose.
-2. **`validate-lint-rules`** proves invariant rules load through the linter's
+1. **`validate-task-graph`** (Phase 4a) cross-checks bindings fail-closed:
+   every `LC-N` machine file appears in some task's `file_list`; the
+   `AuthoredDag` sidecar exists and is structurally sound; every checkable
+   `INV-N` rule file exists and is rule-shaped; near-miss declarations (typo'd
+   headings/labels) are errors; an unreadable `plan_file` is an error, never a
+   skipped check.
+2. **`populate-task-graph`** — the only whitelisted writer of
+   `active_task_graph.json` — runs the same binding checks before any state
+   write, resolving the plan path from state (evidence-derived) in preference
+   to the decompose payload. The 4a run advises the orchestrator; this one is
+   the gate.
+3. **`validate-lint-rules`** proves invariant rules load through the linter's
    fail-closed loader (malformed JSON, missing fields, ReDoS-unsafe patterns
    all fail) before implementation starts.
-3. **PostToolUse `lint-file`** enforces checkable invariants on every edit,
+4. **PostToolUse `lint-file`** enforces checkable invariants on every edit,
    forever — they outlive the feature that introduced them.
+5. **`complete-wave-gate`** verifies as evidence that every lifecycle machine
+   file bound to a completing wave's tasks actually exists on disk — the
+   decompose-time promise is re-checked when the wave claims it delivered.
+
+## Known residuals (honest limits)
+
+- **Import discipline is advisory-plus-lint.** "Dependents import the machine,
+  never re-implement transitions" is enforced only where a paired checkable
+  invariant (e.g. a no-raw-state-literals rule) can catch the violation;
+  otherwise it is prompt guidance verified by wave-gate reviewers, not by the
+  deterministic core. Mandating auto-generated rules from state lists is
+  future work.
+- **Generated-code hand-edit protection inside loom waves is prompt-level.**
+  Fugue's gauntlet re-verifies whenever fugue runs, but loom does not guard
+  the generated file paths at PostToolUse. If this bites, the codegen task can
+  emit a project lint rule marking the generated paths do-not-edit.
+- **Wave-gate artifact verification is existence, not semantics.** The machine
+  file must exist; that it exports a real reducer is verified by its property
+  tests (R2/R3 machinery), not by the gate.
 
 ## What NOT to do
 

@@ -11,6 +11,18 @@ import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
 import { validateFull, fixFull } from "./validate-task-graph";
+import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
+
+/** Honest null on any read failure — the binding check reports it in context */
+const BINDING_DEPS: ModelBindingDeps = {
+  readFile: (p) => {
+    try {
+      return readFileSync(p, "utf-8");
+    } catch {
+      return null;
+    }
+  },
+};
 
 interface DecomposeInput {
   plan_title: string;
@@ -76,6 +88,29 @@ const handler: HookHandler = async (stdin, args) => {
 
   const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
   if (!mgr) return { kind: "error", message: "Cannot open task graph" };
+
+  // Executable-models policy: this is the only whitelisted writer of
+  // active_task_graph.json, so bindings are enforced here fail-closed —
+  // validate-task-graph's 4a run is advisory to the orchestrator, this is
+  // the gate. The plan path prefers existing state (set by advance-phase from
+  // real Write evidence) over the decompose payload, so a decompose agent
+  // cannot re-point plan_file to a model-free file to disarm the check.
+  const statePlanFile = mgr.load().plan_file;
+  const planFile = statePlanFile ?? decompose.plan_file;
+  const bindings = checkPlanModelBindings(
+    planFile,
+    decompose.tasks as unknown as Record<string, unknown>[],
+    BINDING_DEPS,
+  );
+  if (!bindings.ok) {
+    return {
+      kind: "error",
+      message: [
+        `Executable-model binding validation FAILED (${bindings.errors.length} errors) — task graph not populated:`,
+        ...bindings.errors.map((e) => `  - ${e}`),
+      ].join("\n"),
+    };
+  }
 
   // Guard against overwriting non-pending tasks
   if (!force) {

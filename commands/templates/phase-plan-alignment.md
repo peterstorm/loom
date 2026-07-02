@@ -45,7 +45,7 @@ A requirement is **a gap** if the plan does not address it, or addresses it so v
 
 ### 3.5 Check the Executable-Models Policy
 
-Loom's standing policy (`references/executable-models.md`): a model either executes or it doesn't exist. Flag as a gap (ID `MODEL-N`):
+Loom's standing policy: a model either executes or it doesn't exist (documented in the loom plugin's `references/executable-models.md`; the criteria below are self-contained — you do not need to read it). Flag as a gap (ID `MODEL-N`):
 
 - The plan describes a domain **lifecycle** in prose (state lists, transition narratives) WITHOUT a `## Lifecycles` section binding it to a `**Machine file:**`
 - The plan describes a multi-stage **pipeline** WITHOUT either a `## Pipeline` AuthoredDag binding or an explicit statement that the fugue bridge was declined

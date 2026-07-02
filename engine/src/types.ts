@@ -64,6 +64,8 @@ export interface Task {
   depends_on: string[];
   spec_anchors?: string[];
   new_tests_required?: boolean;
+  /** Files this task creates/modifies (decompose contract); older graphs may lack it */
+  file_list?: string[];
   tests_passed?: boolean;
   /** True only when tests_passed came from a trusted ledger TestRun (real exit + report), not transcript regex. */
   tests_trusted?: boolean;

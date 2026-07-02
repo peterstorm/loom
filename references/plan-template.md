@@ -89,8 +89,10 @@ machine file that a task implements, or decompose validation fails.
 ### LC-1: {Lifecycle Name}
 
 **Machine file:** `{path/to/machine.ts}`
-**Kind:** typed-reducer | xstate
+**Kind:** typed-reducer
 **States:** {state, state, state}
+
+(Kind is `typed-reducer` — a pure `transition(state, event)` over closed unions, no new dependency — or `xstate` when the project already uses it. Write one concrete value, never both.)
 
 | Event | From | To |
 |---|---|---|
@@ -213,7 +215,16 @@ Per component, not global.
   implementation imports; pipeline → AuthoredDag that generates the graph;
   checkable invariant → lint rule enforced fail-closed on every edit.
 - Never describe a lifecycle/pipeline in prose without the executable binding
-  — `validate-task-graph` blocks decompose on unbound models.
+  — `validate-task-graph` blocks decompose on unbound models AND on near-miss
+  declarations (typo'd headings/labels are errors, not opt-outs).
+- **Exact grammar** — these sections are regex-parsed: headings exactly
+  `## Lifecycles` / `## Pipeline` (one per plan) / `## Invariants`; blocks
+  `### LC-<n>: <title>` / `### INV-<n>: <title>` (uppercase, numeric, colon);
+  labels like `**Machine file:**` at column 0, colon inside the bold, never
+  as bullets.
+- Rule files go in the project rules dir: `.claude/linter/rules/` (or
+  `.pi/linter/rules/` under the pi harness) — the linter loads only from the
+  harness-appropriate dir.
 - Full policy: `references/executable-models.md`
 
 **What NOT to include:**
