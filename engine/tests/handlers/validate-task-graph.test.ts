@@ -87,6 +87,33 @@ describe("validateFull (pure)", () => {
     expect(errorsOf(result)).toContain("'tasks' array is empty");
   });
 
+  it("rejects a non-array depends_on", () => {
+    const result = validateFull({
+      plan_title: "x", plan_file: "x", spec_file: "x",
+      tasks: [{ ...validTask, depends_on: "T2" }],
+    });
+    expect(result.ok).toBe(false);
+    expect(errorsOf(result)).toContain("Task T1: 'depends_on' must be array");
+  });
+
+  it("rejects a non-array spec_anchors when present", () => {
+    const result = validateFull({
+      plan_title: "x", plan_file: "x", spec_file: "x",
+      tasks: [{ ...validTask, spec_anchors: "REQ-1" }],
+    });
+    expect(result.ok).toBe(false);
+    expect(errorsOf(result)).toContain("Task T1: 'spec_anchors' must be array if present");
+  });
+
+  it("rejects a non-boolean new_tests_required when present", () => {
+    const result = validateFull({
+      plan_title: "x", plan_file: "x", spec_file: "x",
+      tasks: [{ ...validTask, new_tests_required: "yes" }],
+    });
+    expect(result.ok).toBe(false);
+    expect(errorsOf(result)).toContain("Task T1: 'new_tests_required' must be boolean if present");
+  });
+
   it("validates task ID format", () => {
     const result = validateFull({
       plan_title: "x", plan_file: "x", spec_file: "x",

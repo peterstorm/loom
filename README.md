@@ -221,7 +221,7 @@ After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance
 | Step | What | How |
 |------|------|-----|
 | 1 | **State check** | Confirm `current_wave` and `impl_complete == true` |
-| 2 | **Test evidence** | Verify every task has a passing `test_result` (resolved by the `update-task-status` hook — evidence ledger first, transcript fallback) and `new_tests_written == true` (or `new_tests_required == false`) |
+| 2 | **Test evidence** | Verify every task has a passing `test_result` (resolved by the `update-task-status` hook — evidence ledger first, transcript fallback) and `new_tests_written == true` — both requirements are waived for tasks declaring `new_tests_required == false` |
 | 3 | **Spec-check + reviews (parallel)** | Spawn `spec-check-invoker` once for the wave; spawn 5 reviewers per task in parallel |
 | 4 | **GitHub comment** | Post a summary to the issue (fallback: write to `.claude/state/wave-{N}-review.md`) |
 | 5 | **Advance** | `complete-wave-gate` helper performs final checks and either advances or blocks |
@@ -243,7 +243,7 @@ After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance
 
 The six mandatory checks performed by the `complete-wave-gate` helper (in evaluation order):
 
-1. Per-task test evidence (a passing `test_result`)
+1. Per-task test evidence (a passing `test_result`, except tasks declaring `new_tests_required == false`, which are exempt)
 2. New tests written (`new_tests_written == true` OR `new_tests_required == false`)
 3. Per-task review status (no `pending`)
 4. Spec alignment (`spec_check.critical_count == 0`)

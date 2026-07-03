@@ -3,11 +3,33 @@ import {
   extractImports,
   resolveImportPath,
   checkBoundaryViolation,
+  underPrefix,
   handler,
   DEFAULT_BOUNDARIES,
 } from "../../../src/linter/programmatic/no-cross-boundary-imports";
 
 describe("no-cross-boundary-imports", () => {
+  describe("underPrefix", () => {
+    it("matches directory prefixes (trailing slash) by containment", () => {
+      expect(underPrefix("engine/src/core/x.ts", "engine/src/core/")).toBe(true);
+      expect(underPrefix("engine/src/coreX/x.ts", "engine/src/core/")).toBe(false);
+    });
+
+    it("matches a bare file-stem only at a path boundary — not mid-segment siblings", () => {
+      expect(underPrefix("engine/src/state-manager", "engine/src/state-manager")).toBe(true);
+      expect(underPrefix("engine/src/state-manager.ts", "engine/src/state-manager")).toBe(true);
+      expect(underPrefix("engine/src/state-manager/sub", "engine/src/state-manager")).toBe(true);
+      // the sibling-collision the plain startsWith allowed:
+      expect(underPrefix("engine/src/state-managerX/foo", "engine/src/state-manager")).toBe(false);
+      expect(underPrefix("engine/src/state-manager-utils", "engine/src/state-manager")).toBe(false);
+    });
+
+    it("matches namespace prefixes (no embedded slash) by plain containment", () => {
+      expect(underPrefix("node:fs", "node:")).toBe(true);
+      expect(underPrefix("ts-pattern", "ts-pattern")).toBe(true);
+    });
+  });
+
   describe("extractImports", () => {
     it("extracts ESM import from", () => {
       const content = `import { foo } from "../core/bar";`;

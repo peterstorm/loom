@@ -1,5 +1,6 @@
 /**
- * Core business logic — pure functions, no Claude Code stdin parsing.
+ * Core business logic — harness-agnostic decision functions, no Claude Code
+ * stdin parsing. Not all pure: some read the filesystem or write to stderr.
  * Both Claude Code handlers and pi extension import from here.
  */
 

@@ -1,6 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { extractTestEvidence, analyzeNewTests, isMachineBound, resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
+import updateTaskStatus, { extractTestEvidence, analyzeNewTests, isMachineBound, resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
 import { legacyTestsPassedNote } from "../../src/types";
+
+describe("update-task-status — malformed stdin guard (directly-registered route)", () => {
+  it("returns a contextual error naming that status/evidence was NOT updated, not a bare throw", async () => {
+    const result = await updateTaskStatus("this is not json", []);
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      expect(result.message).toContain("malformed SubagentStop input");
+      expect(result.message).toContain("NOT updated");
+    }
+  });
+});
 import { parseMachineJson } from "../../src/machine";
 import type { Evidence, LoadedMachine } from "../../src/machine";
 

@@ -12,12 +12,20 @@ import { makeViolation } from "../types";
 
 // --- Configuration ---
 
-/** Modules classified as pure (functional core). Glob-like matching. */
+/**
+ * Modules classified as pure (functional core). Glob-like matching.
+ *
+ * These are the shipped DEFAULTS: running loom's own linter with them must
+ * not flag loom's own code, so only genuinely-pure modules belong here.
+ * `engine/src/core/` and `engine/src/parsers/` are NOT listed — despite the
+ * "core"/"parser" naming, most of those files are harness-agnostic decision
+ * functions that legitimately peek at the filesystem (existsSync) or write
+ * to stderr, so they are not pure and would self-flag. The machine pure core
+ * below is the only group verified by machine-purity.test.ts.
+ */
 export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/linter/types.ts",
   "engine/src/linter/formatter.ts",
-  "engine/src/core/",
-  "engine/src/parsers/",
   // Guarded-skill-machine pure core: the reducer and everything it may
   // transitively import. The fs shell is ledger.ts / report-discovery.ts /
   // session-registry.ts — deliberately NOT listed here.

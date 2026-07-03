@@ -9,6 +9,7 @@
  */
 
 import type { Epoch, Evidence, EvidenceRecord, TestReportSummary } from "./types";
+import { parseReportSummary } from "./test-report";
 
 // --- Branded agent identity ---
 
@@ -165,11 +166,11 @@ export function isBindingFresh(
 function isReportSummary(v: unknown): v is TestReportSummary {
   if (typeof v !== "object" || v === null) return false;
   const o = v as Record<string, unknown>;
-  return (
-    typeof o.total === "number" &&
-    typeof o.failed === "number" &&
-    (o.source === "vitest-json" || o.source === "junit-xml")
-  );
+  if (o.source !== "vitest-json" && o.source !== "junit-xml") return false;
+  // Share the artifact parsers' count-sanity gate: a ledger record with
+  // impossible counts (fractional/negative total, failed > total) must not
+  // read back as a valid summary and vouch.
+  return parseReportSummary(o.total, o.failed, o.source) !== null;
 }
 
 function parseEvent(raw: unknown): Evidence | null {

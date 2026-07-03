@@ -14,6 +14,24 @@ import type { TestReportSummary } from "./types";
 
 // --- Pure parsers ---
 
+/**
+ * The single count-sanity gate for every TestReportSummary: a summary that
+ * exists has non-negative integer counts with failed ≤ total. Every
+ * construction site (the artifact parsers below AND the ledger read-back in
+ * evidence.ts) funnels through here, so an impossible-count report can never
+ * exist to vouch — fail closed to null (→ the run stays untrusted).
+ */
+export function parseReportSummary(
+  total: unknown,
+  failed: unknown,
+  source: TestReportSummary["source"],
+): TestReportSummary | null {
+  if (typeof total !== "number" || typeof failed !== "number") return null;
+  if (!Number.isInteger(total) || !Number.isInteger(failed)) return null;
+  if (total < 0 || failed < 0 || failed > total) return null;
+  return { total, failed, source };
+}
+
 /** vitest `--reporter=json` / jest `--json` share the summary shape. */
 export function parseVitestJson(content: string): TestReportSummary | null {
   let raw: unknown;
@@ -24,15 +42,7 @@ export function parseVitestJson(content: string): TestReportSummary | null {
   }
   if (typeof raw !== "object" || raw === null) return null;
   const o = raw as Record<string, unknown>;
-  const total = o.numTotalTests;
-  const failed = o.numFailedTests;
-  if (typeof total !== "number" || typeof failed !== "number") return null;
-  // Counts must be sane: non-negative integers with failed ≤ total. A
-  // report claiming otherwise is malformed and must not vouch (fail closed
-  // to null → the run stays untrusted).
-  if (!Number.isInteger(total) || !Number.isInteger(failed)) return null;
-  if (total < 0 || failed < 0 || failed > total) return null;
-  return { total, failed, source: "vitest-json" };
+  return parseReportSummary(o.numTotalTests, o.numFailedTests, "vitest-json");
 }
 
 /** Sum tests/failures/errors across <testsuite> elements (surefire, failsafe, gradle). */
@@ -54,10 +64,8 @@ export function parseJunitXml(content: string): TestReportSummary | null {
   }
   // \d+ capture groups guarantee non-negative integers per suite, but the
   // failures+errors sum can still exceed tests in a malformed report —
-  // refuse it (fail closed) rather than vouch with impossible counts.
-  return sawCounts && Number.isInteger(total) && Number.isInteger(failed) && failed <= total
-    ? { total, failed, source: "junit-xml" }
-    : null;
+  // parseReportSummary refuses it (fail closed) rather than vouch.
+  return sawCounts ? parseReportSummary(total, failed, "junit-xml") : null;
 }
 
 /** Merge summaries from multiple report files of one run. */

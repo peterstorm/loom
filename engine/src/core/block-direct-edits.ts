@@ -1,6 +1,7 @@
 /**
  * Core: Block Edit/Write from the MAIN agent during loom orchestration.
- * Pure function — no stdin parsing.
+ * Harness-agnostic — no stdin parsing. Not pure: reads the filesystem
+ * (existsSync/statSync) and writes to stderr.
  */
 
 import { existsSync, statSync } from "node:fs";

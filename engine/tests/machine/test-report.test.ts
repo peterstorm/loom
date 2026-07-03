@@ -1,10 +1,26 @@
 import { describe, it, expect } from "vitest";
 import {
+  parseReportSummary,
   parseVitestJson,
   parseJunitXml,
   mergeSummaries,
   judgeTestRun,
 } from "../../src/machine/test-report";
+
+describe("parseReportSummary (shared count-sanity gate)", () => {
+  it("accepts sane non-negative integer counts with failed ≤ total", () => {
+    expect(parseReportSummary(5, 0, "vitest-json")).toEqual({ total: 5, failed: 0, source: "vitest-json" });
+    expect(parseReportSummary(3, 3, "junit-xml")).toEqual({ total: 3, failed: 3, source: "junit-xml" });
+  });
+
+  it("rejects non-number, fractional, negative, and failed>total counts (fail closed to null)", () => {
+    expect(parseReportSummary("5", 0, "vitest-json")).toBeNull();
+    expect(parseReportSummary(0.5, 0, "vitest-json")).toBeNull();
+    expect(parseReportSummary(5, -1, "vitest-json")).toBeNull();
+    expect(parseReportSummary(-1, 0, "vitest-json")).toBeNull();
+    expect(parseReportSummary(2, 3, "junit-xml")).toBeNull();
+  });
+});
 
 describe("parseVitestJson", () => {
   it("parses vitest/jest JSON summary", () => {

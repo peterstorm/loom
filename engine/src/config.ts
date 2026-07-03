@@ -7,15 +7,13 @@ import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Phase } from "./types";
+import { PHASES, type Phase } from "./types";
 
 /** Markers above this trigger mandatory clarify phase */
 export const CLARIFY_THRESHOLD = 3;
 
-/** Valid phase ordering */
-export const PHASE_ORDER: readonly Phase[] = [
-  "init", "brainstorm", "specify", "clarify", "architecture", "plan-alignment", "decompose", "execute",
-] as const;
+/** Valid phase ordering — re-exported from the single source tuple in types. */
+export const PHASE_ORDER: readonly Phase[] = PHASES;
 
 /** Phase agents → map to their phase */
 export const PHASE_AGENT_MAP: Record<string, Phase> = {

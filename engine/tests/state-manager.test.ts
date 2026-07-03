@@ -287,6 +287,26 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
     }
   });
 
+  it("a dangling pointer (names a missing graph) falls back to the local graph LOUDLY", () => {
+    const s = `sm-dangling-${process.pid}-${Date.now()}`;
+    const missing = join(makeTmpDir(), "gone", "active_task_graph.json");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
+    writeFileSync(pointer, missing);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = resolveTaskGraph(s);
+      // Never returns the dangling target — falls back to local resolution.
+      expect(result).not.toBe(missing);
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("names missing graph");
+      expect(text).toContain("falling back to local task graph");
+    } finally {
+      stderrSpy.mockRestore();
+      rmSync(pointer, { force: true });
+    }
+  });
+
   it("a traversal session id is ignored LOUDLY — no path outside SUBAGENT_DIR is ever read", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
