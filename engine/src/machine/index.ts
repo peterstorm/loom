@@ -26,10 +26,16 @@ export {
 export {
   extractEvidence,
   extractBashOutcome,
+  extractShellWriteTargets,
   isTestCommand,
   isToolFailure,
+  attributeExit,
   classifyTestCommand,
+  classifyTestCommandDetailed,
   type BashOutcome,
+  type ClassifiedTestCommand,
+  type CommandSegment,
+  type SegmentOp,
 } from "./extract-evidence";
 export {
   parseEvidenceLine,

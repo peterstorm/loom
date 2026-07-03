@@ -100,11 +100,20 @@ Known residual limits, on purpose and documented:
   same-family cross-run artifact vouching, and a *planted* report can still
   work. The recorder rejects (loudly) an explicit `--outputFile` path that
   the agent itself wrote earlier this epoch (a `FileWrite` in its own
-  ledger), but a report planted via Bash, written before the epoch began,
-  or produced by a "test" script that itself echoes runner-shaped JSON can
-  still mint a trusted-pass. Stamping reports with an
-  mtime-≥-command-start bound is the known follow-up (needs PreToolUse
-  timestamps).
+  ledger — Edit/Write tools AND Bash redirect/`tee` targets, which mint
+  `FileWrite` too), but a report staged via a Bash write with no static
+  target in the command text — `cp`/`mv`, `dd of=`, or a file authored by
+  an interpreter (`python -c 'open(...).write(...)'`) — mints nothing and
+  can still vouch, as can a report written before the epoch began or
+  produced by a "test" script that itself echoes runner-shaped JSON.
+  Stamping reports with an mtime-≥-command-start bound is the known
+  follow-up (needs PreToolUse timestamps).
+- Exit-status attribution is composition-aware and fails closed: the
+  line's exit is credited to the classified test segment only when
+  ownership is provable (a sole command; or the LAST command after `&&`,
+  `;`, or `|` for exit 0 — after `;` only for nonzero). Compositions like
+  `false && npx vitest …; true` or `npm test || true` therefore yield
+  `exit: null` (untrusted), while `cd engine && bun test` keeps its exit.
 - A consistent forgery of ledger *facts* via Bash is blocked by the
   guard-state-file hook (the ledger and binding paths are guarded state
   files); full integrity (HMAC or out-of-agent-reach storage) is a

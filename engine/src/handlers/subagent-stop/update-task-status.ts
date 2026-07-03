@@ -488,21 +488,26 @@ export const runUpdateTaskStatus = async (
 
   // Section 3: Atomic state write. The preserve-evidence guards run INSIDE
   // the locked update (a pre-lock read can be outdated by a concurrent
-  // writer before this write lands — TOCTOU) and are TRUST-aware: only a
-  // completed task or a ledger-trusted verdict (trusted-pass/trusted-fail)
-  // is preserved. An untrusted result — e.g. a helper-reported "pass" from
-  // agent-controlled stdin — must never preempt this handler's resolution:
-  // skipping on it would let laundered text outrank the ledger's ground
-  // truth (mirrors store-test-evidence's skippedTrustedVerdict pattern).
+  // writer before this write lands — TOCTOU) and are TRUST-aware ON BOTH
+  // SIDES: an existing ledger-trusted verdict is preserved only against an
+  // UNTRUSTED incoming resolution. An untrusted result — e.g. a
+  // helper-reported "pass" from agent-controlled stdin — must never preempt
+  // ground truth (mirrors store-test-evidence's skippedTrustedVerdict
+  // pattern), but NEWER ground truth supersedes older: a re-spawned agent's
+  // fresh epoch yielding trusted-pass/trusted-fail must land, or the first
+  // real red run would wedge the task forever (the gate treats trusted-fail
+  // as missing evidence and store-test-evidence also refuses trusted).
+  // A completed task is never reopened, at any trust level.
   let skippedExistingVerdict = false;
   await mgr.update((s) => {
     const target = s.tasks.find((t) => t.id === taskId);
     const verdict = target?.test_result?.verdict;
+    const existingTrusted = verdict === "trusted-pass" || verdict === "trusted-fail";
+    const incomingTrusted = testEvidence.result.verdict !== "untrusted";
     if (
       !target ||
       target.status === "completed" ||
-      verdict === "trusted-pass" ||
-      verdict === "trusted-fail"
+      (existingTrusted && !incomingTrusted)
     ) {
       skippedExistingVerdict = true;
       return s;
@@ -531,7 +536,7 @@ export const runUpdateTaskStatus = async (
 
   if (skippedExistingVerdict) {
     process.stderr.write(
-      `update-task-status: ${taskId} is completed or already carries a trusted verdict — leaving it untouched\n`,
+      `update-task-status: ${taskId} is completed or carries a trusted verdict this untrusted resolution cannot supersede — leaving it untouched\n`,
     );
     return { kind: "passthrough" };
   }

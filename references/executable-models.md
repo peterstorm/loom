@@ -199,9 +199,12 @@ The plan declares invariants in an `## Invariants` section, each tiered:
 - **Report artifacts are agent-writable.** A trusted-pass verdict rests on a
   report artifact (vitest JSON / JUnit XML) that the agent's own tools can
   write. The recorder rejects an explicit `--outputFile` path that appears as
-  a `FileWrite` in the agent's own epoch (loudly), but the residual remains:
-  an artifact planted via Bash, written in a previous epoch, or produced by a
-  "test" script that emits runner-shaped JSON can still vouch. Full integrity
+  a `FileWrite` in the agent's own epoch (loudly) — Edit/Write tool calls AND
+  Bash redirect/`tee` targets both mint `FileWrite` — but the residual
+  remains: a Bash write with no static target in the command text (`cp`/`mv`,
+  `dd of=`, an interpreter-authored file via `python -c 'open(...)'`), an
+  artifact written in a previous epoch, or a "test" script that emits
+  runner-shaped JSON can still vouch. Full integrity
   (mtime-≥-command-start stamping, HMAC / out-of-reach storage) is the known
   follow-up.
 

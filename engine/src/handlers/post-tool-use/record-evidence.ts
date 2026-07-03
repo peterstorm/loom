@@ -71,10 +71,15 @@ const handler: HookHandler = async (stdin) => {
 
     const events = extractEvidence(toolName, toolInput, input.tool_response, (segment, stdout) => {
       // Cheap hardening against agent-authored report artifacts: an explicit
-      // --outputFile path the agent WROTE earlier this epoch (a FileWrite in
-      // its own ledger) must not vouch as a report — findReport rejects it
-      // loudly. Computed lazily here: this closure only runs for classified
-      // test commands.
+      // --outputFile path the agent wrote earlier this epoch must not vouch
+      // as a report — findReport rejects it loudly. The veto set covers
+      // Edit/Write/MultiEdit FileWrites AND Bash-authored writes (redirect/
+      // tee targets minted by extractShellWriteTargets). Known residual:
+      // writes with no static target in the command text — cp/mv/dd of=,
+      // or a file authored by an interpreter (`python -c 'open(...)'`) —
+      // mint nothing and can still stage an artifact (documented in
+      // machines/README.md "known residuals"). Computed lazily here: this
+      // closure only runs for classified test commands.
       const epochWrites = new Set(
         eventsForEpoch(readEvidence(sessionId), binding.epoch).flatMap((e) =>
           e.kind === "FileWrite" ? [resolve(cwd, e.path)] : [],

@@ -1,12 +1,23 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import {
+  attributeExit,
   classifyTestCommand,
+  classifyTestCommandDetailed,
   extractBashOutcome,
   extractEvidence,
+  extractShellWriteTargets,
   isToolFailure,
 } from "../../src/machine/extract-evidence";
+import { judgeTestRun } from "../../src/machine/test-report";
 import { TEST_COMMAND_PATTERNS } from "../../src/core/tool-vocabulary";
+
+/** The TestRun event extractEvidence minted for a Bash call, or null. */
+function mintTestRun(command: string, exit: number, stdout = "") {
+  const events = extractEvidence("Bash", { command }, { exit_code: exit, stdout }, () => null);
+  const run = events.find((e) => e.kind === "TestRun");
+  return run && run.kind === "TestRun" ? run : null;
+}
 
 describe("classifyTestCommand — parse, don't substring-match", () => {
   it("matches runners at segment head", () => {
@@ -139,6 +150,159 @@ describe("classifyTestCommand — parse, don't substring-match", () => {
       ),
       { numRuns: 300 },
     );
+  });
+});
+
+describe("classifyTestCommand — backslash escapes mirror sh semantics", () => {
+  it('an escaped quote (\\") does not open quote state — the separator after it still splits', () => {
+    // A quote-state bug here would swallow the `;` and hide the runner.
+    expect(classifyTestCommand('echo \\" ; npm test')).toBe("npm test");
+    // …while a REAL quote does open state: the `;` and runner stay inside it.
+    expect(classifyTestCommand('echo " ; npm test"')).toBeNull();
+  });
+
+  it("an escaped \\# is argument text, not a comment — an unquoted # still truncates", () => {
+    expect(classifyTestCommand("npm test \\#not-a-comment")).toBe("npm test \\#not-a-comment");
+    expect(classifyTestCommand("npm test # a real comment")).toBe("npm test");
+  });
+
+  it("escaped separators do not split: the runner never becomes a segment head", () => {
+    expect(classifyTestCommand("echo one\\; npm test")).toBeNull();
+    // …while the unescaped separator splits and classifies:
+    expect(classifyTestCommand("echo one; npm test")).toBe("npm test");
+    // An escaped space inside the head breaks the runner match too:
+    expect(classifyTestCommand("npm\\ test")).toBeNull();
+  });
+});
+
+describe("exit-status ownership — the line's exit is attributed only when provable (fail closed)", () => {
+  it("kills the guarded-dead-runner forgery: `false && npx vitest …; true` exit 0 is NOT a passing run", () => {
+    // The whole line exits 0 (from `true`) while vitest never executed —
+    // the old code credited exit 0 to the vitest segment.
+    const run = mintTestRun("false && npx vitest run --outputFile=/tmp/r.json; true", 0);
+    expect(run).not.toBeNull();
+    expect(run!.exit).toBeNull();
+    expect(judgeTestRun(run!.exit, run!.report)).toEqual({ verdict: "untrusted" });
+  });
+
+  it("kills the `npm test || true` red-run launderer: exit 0 belongs to the fallback, not the test", () => {
+    const run = mintTestRun("npm test || true", 0);
+    expect(run!.exit).toBeNull();
+    expect(judgeTestRun(run!.exit, run!.report)).toEqual({ verdict: "untrusted" });
+  });
+
+  it("exit 0 after `||` is never attributed even when the test IS the last segment", () => {
+    // `false || npm test` exit 0 could also be `true || npm test` where the
+    // test never ran — ownership is unprovable from the command text.
+    const run = mintTestRun("some-flaky-setup || npm test", 0);
+    expect(run!.exit).toBeNull();
+  });
+
+  it("a nonzero exit after `&&` is not a trusted failure — the guard may have failed, not the test", () => {
+    const run = mintTestRun("cd missing-dir && npm test", 1);
+    expect(run!.exit).toBeNull();
+    expect(judgeTestRun(run!.exit, run!.report)).toEqual({ verdict: "untrusted" });
+  });
+
+  it("a nonzero exit after `;` IS the test's — trusted failure stands", () => {
+    const run = mintTestRun("echo start; npm test", 1);
+    expect(run!.exit).toBe(1);
+    expect(judgeTestRun(run!.exit, run!.report)).toEqual({ verdict: "trusted-fail" });
+  });
+
+  it("PIN (usability regression guard): `cd engine && bun test` exit 0 keeps its exit — still trustable", () => {
+    const run = mintTestRun("cd engine && bun test", 0);
+    expect(run!.exit).toBe(0);
+    // …and with a report it still judges trusted-pass end to end:
+    const report = { total: 5, failed: 0, source: "vitest-json" as const };
+    const events = extractEvidence(
+      "Bash",
+      { command: "cd engine && npx vitest run --reporter=json" },
+      { exit_code: 0, stdout: "" },
+      () => report,
+    );
+    const testRun = events.find((e) => e.kind === "TestRun");
+    expect(testRun && testRun.kind === "TestRun" && judgeTestRun(testRun.exit, testRun.report)).toEqual({
+      verdict: "trusted-pass",
+    });
+  });
+
+  it("multi-line sequencing (newline = `;`): last-segment exits are owned in both polarities", () => {
+    expect(mintTestRun("cd engine\nbun test", 0)!.exit).toBe(0);
+    expect(mintTestRun("cd engine\nbun test", 1)!.exit).toBe(1);
+  });
+
+  it("a sole test command is attributed as-is, both polarities", () => {
+    expect(mintTestRun("npm test", 0)!.exit).toBe(0);
+    expect(mintTestRun("npm test", 1)!.exit).toBe(1);
+  });
+
+  it("a trailing comment or `;` does not demote the test to 'not last'", () => {
+    expect(mintTestRun("cd pkg && npm test # verify", 0)!.exit).toBe(0);
+    expect(mintTestRun("cd pkg && npm test;", 0)!.exit).toBe(0);
+  });
+
+  it("a test masked by a trailing pipe (`mvn test | tee`) never owns exit 0 — tee exits 0 regardless", () => {
+    const run = mintTestRun("mvn test | tee out.log", 0);
+    expect(run!.exit).toBeNull();
+  });
+
+  it("a test at the END of a pipe owns exit 0 (pipeline exit is the last command's)", () => {
+    const run = mintTestRun("cat cases.txt | npm test", 0);
+    expect(run!.exit).toBe(0);
+  });
+
+  it("attributeExit is fail-closed on unknown exits regardless of position", () => {
+    const classified = classifyTestCommandDetailed("cd engine && bun test")!;
+    expect(attributeExit(null, classified)).toBeNull();
+  });
+});
+
+describe("extractShellWriteTargets — Bash-authored writes are visible to the veto", () => {
+  it("collects >, >>, &> and fd-redirect targets, unquoted", () => {
+    expect(extractShellWriteTargets("cat > /tmp/r.json")).toEqual(["/tmp/r.json"]);
+    expect(extractShellWriteTargets("echo x >> log.txt")).toEqual(["log.txt"]);
+    expect(extractShellWriteTargets("cmd &> all.log")).toEqual(["all.log"]);
+    expect(extractShellWriteTargets("cmd 2> err.log")).toEqual(["err.log"]);
+    expect(extractShellWriteTargets('cat > "/tmp/my report.json"')).toEqual(["/tmp/my report.json"]);
+  });
+
+  it("kills the heredoc staging move: `cat > /tmp/r.json <<EOF …` mints the target", () => {
+    const cmd = 'cat > /tmp/r.json <<EOF\n{"numTotalTests":5,"numFailedTests":0}\nEOF';
+    expect(extractShellWriteTargets(cmd)).toContain("/tmp/r.json");
+  });
+
+  it("collects tee targets (flags skipped), across pipe segments", () => {
+    expect(extractShellWriteTargets("npm test | tee out.log")).toEqual(["out.log"]);
+    expect(extractShellWriteTargets("npm test | tee -a a.log b.log")).toEqual(["a.log", "b.log"]);
+  });
+
+  it("fd dups and input redirects are not write targets; quoted '>' is argument text", () => {
+    expect(extractShellWriteTargets("npm test 2>&1")).toEqual([]);
+    expect(extractShellWriteTargets("sort < in.txt")).toEqual([]);
+    expect(extractShellWriteTargets('grep ">" file.txt')).toEqual([]);
+    expect(extractShellWriteTargets("echo hi # > not-a-write.txt")).toEqual([]);
+  });
+
+  it("extractEvidence mints Bash FileWrites BEFORE the TestRun — a test's own redirect never reads as write-after-pass", () => {
+    const events = extractEvidence(
+      "Bash",
+      { command: "npm test 2>&1 | tee /tmp/test.log" },
+      { exit_code: 0, stdout: "" },
+      () => null,
+    );
+    expect(events.map((e) => e.kind)).toEqual(["FileWrite", "TestRun"]);
+    expect(events[0]).toEqual({ kind: "FileWrite", path: "/tmp/test.log" });
+  });
+
+  it("a redirect-only Bash call mints FileWrite even on an error-shaped response (the shell truncates the target before the command runs)", () => {
+    const events = extractEvidence(
+      "Bash",
+      { command: "cat > /tmp/r.json" },
+      { is_error: true, exit_code: 1 },
+      () => null,
+    );
+    expect(events).toEqual([{ kind: "FileWrite", path: "/tmp/r.json" }]);
   });
 });
 

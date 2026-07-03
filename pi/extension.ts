@@ -340,9 +340,11 @@ export default function (pi: ExtensionAPI) {
         const state = mgr.load();
         const task = state.tasks.find((t) => t.id === taskId);
         if (!task || task.status === "completed") continue;
-        // Trust-aware skip (mirrors update-task-status): only a ledger-trusted
-        // verdict is preserved. An untrusted pass (e.g. helper-reported) must
-        // not preempt this handler's — equally untrusted, but labeled — result.
+        // Trust-aware skip (mirrors update-task-status): a trusted verdict is
+        // preserved only against an UNTRUSTED incoming resolution — newer
+        // ground truth supersedes older. pi has no evidence ledger, so this
+        // handler's resolution is ALWAYS untrusted (see below): the rule
+        // degenerates to "never overwrite a trusted verdict here".
         const priorVerdict = task.test_result?.verdict;
         if (priorVerdict === "trusted-pass" || priorVerdict === "trusted-fail") continue;
 

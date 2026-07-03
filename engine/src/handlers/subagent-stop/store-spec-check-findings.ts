@@ -71,7 +71,19 @@ export function parseSpecCheckOutput(output: string): SpecCheckFindings {
 }
 
 const handler: HookHandler = async (stdin) => {
-  const input: SubagentStopInput = JSON.parse(stdin);
+  // Guard the standalone CLI route: dispatch parses stdin before calling
+  // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
+  // where a bare JSON.parse throw would surface as an uncontextualized
+  // "Hook error" (mirrors cleanup-subagent-flag / update-task-status).
+  let input: SubagentStopInput;
+  try {
+    input = JSON.parse(stdin);
+  } catch (e) {
+    return {
+      kind: "error",
+      message: `store-spec-check-findings: malformed SubagentStop input — spec-check findings NOT stored: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
 
   const agentType = (input.agent_type ?? "").replace(/^[^:]+:/, "");
   if (agentType !== "spec-check-invoker") return { kind: "passthrough" };

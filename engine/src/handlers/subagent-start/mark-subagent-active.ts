@@ -50,7 +50,17 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "passthrough" };
   }
 
-  mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+  try {
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+  } catch (e) {
+    // Every session file below lives under this dir — name the blast radius
+    // instead of surfacing an uncontextualized "Hook error". The guarded
+    // per-write handling below (roster, bind, pointer) reports its own
+    // consequences when the writes then fail.
+    process.stderr.write(
+      `mark-subagent-active: cannot create ${SUBAGENT_DIR} — roster tracking, machine binding, and the task_graph pointer will all fail for ${sessionId}: ${e instanceof Error ? e.message : String(e)}\n`,
+    );
+  }
 
   // Parse identity at the boundary: an agent_id containing a reserved or
   // path-unsafe character (whitespace / colon / slash / `..`) would desync
@@ -134,7 +144,16 @@ const handler: HookHandler = async (stdin) => {
   const taskGraph = taskGraphPath();
   const taskGraphFile = sessionScopedPath(sessionId, ".task_graph");
   if (existsSync(taskGraph) && !existsSync(taskGraphFile)) {
-    writeFileSync(taskGraphFile, resolve(taskGraph));
+    try {
+      writeFileSync(taskGraphFile, resolve(taskGraph));
+    } catch (e) {
+      // Name the degradation: without the pointer, a cross-repo
+      // SubagentStop resolves to the LOCAL task graph — task status and
+      // test evidence land in the wrong graph (or nowhere) silently.
+      process.stderr.write(
+        `mark-subagent-active: failed to write task_graph pointer for ${sessionId} — cross-repo SubagentStop will resolve to the LOCAL task graph: ${e instanceof Error ? e.message : String(e)}\n`,
+      );
+    }
   }
 
   return { kind: "passthrough" };
