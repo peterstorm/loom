@@ -67,32 +67,26 @@ import {
 import type { Epoch, Evidence, EvidenceRecord, MachineDef } from "./types";
 
 /**
- * The single path-construction boundary for session files. Session ids come
- * from hook input — parseSessionId refuses separators, `..` traversal, and
- * whitespace, so an unvalidated id can never address files outside
- * SUBAGENT_DIR. Throwing is the fail-closed convention here: every caller
- * either catches-and-stands-down (recorder, dispatcher snapshot, safeRun)
- * or fails closed at the CLI boundary (the gate).
+ * The single path-construction boundary for session files. It takes the
+ * BRANDED SessionId, whose sole producer (parseSessionId) already refused
+ * separators, `..` traversal, and whitespace — so an id that reaches here
+ * cannot address files outside SUBAGENT_DIR. The old runtime throw for an
+ * unvalidated id is now unreachable-by-type: every caller parses hook input
+ * at its own boundary (fail-closed there) and threads SessionId inward.
  */
-function sessionFilePath(sessionId: string, suffix: string): string {
-  const parsed = parseSessionId(sessionId);
-  if (parsed === null) {
-    throw new Error(
-      `invalid session id ${JSON.stringify(sessionId)} — refusing to construct a ${suffix} path`,
-    );
-  }
-  return `${SUBAGENT_DIR}/${parsed}${suffix}`;
+function sessionFilePath(sessionId: SessionId, suffix: string): string {
+  return `${SUBAGENT_DIR}/${sessionId}${suffix}`;
 }
 
-export const ledgerPath = (sessionId: string): string =>
+export const ledgerPath = (sessionId: SessionId): string =>
   sessionFilePath(sessionId, ".evidence.jsonl");
 
-export const machineBindingPath = (sessionId: string): string =>
+export const machineBindingPath = (sessionId: SessionId): string =>
   sessionFilePath(sessionId, ".machine");
 
-const activeFlagPath = (sessionId: string): string => sessionFilePath(sessionId, ".active");
+const activeFlagPath = (sessionId: SessionId): string => sessionFilePath(sessionId, ".active");
 
-const bindingLock = (sessionId: string): string => sessionFilePath(sessionId, ".cleanup");
+const bindingLock = (sessionId: SessionId): string => sessionFilePath(sessionId, ".cleanup");
 
 /**
  * Session-scoped path for callers OUTSIDE this module (task-graph pointer,
@@ -133,7 +127,7 @@ type ClassifiedLine =
  * The activity anchor is the file's mtime (touched by refreshBindingActivity
  * on gate/recorder activity); the bind stamp is the lower bound.
  */
-function classifyBindingLines(sessionId: string, nowMs: number): ClassifiedLine[] {
+function classifyBindingLines(sessionId: SessionId, nowMs: number): ClassifiedLine[] {
   const path = machineBindingPath(sessionId);
   if (!existsSync(path)) return [];
   const anchorMs = statSync(path).mtimeMs;
@@ -157,7 +151,7 @@ function classifyBindingLines(sessionId: string, nowMs: number): ClassifiedLine[
  * activity exceeds the TTL are treated as ABSENT (their subagent plausibly
  * died without SubagentStop) — refreshBindingActivity reaps them.
  */
-export function readBindings(sessionId: string, nowMs: number = Date.now()): MachineBinding[] {
+export function readBindings(sessionId: SessionId, nowMs: number = Date.now()): MachineBinding[] {
   const lines = classifyBindingLines(sessionId, nowMs);
   const malformed = lines.filter((l) => l.kind === "malformed").length;
   if (malformed > 0) {
@@ -170,7 +164,7 @@ export function readBindings(sessionId: string, nowMs: number = Date.now()): Mac
   return lines.flatMap((l) => (l.kind === "fresh" ? [l.persisted.binding] : []));
 }
 
-function readActiveAgents(sessionId: string): string[] {
+function readActiveAgents(sessionId: SessionId): string[] {
   const path = activeFlagPath(sessionId);
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf-8")
@@ -180,7 +174,7 @@ function readActiveAgents(sessionId: string): string[] {
 }
 
 /** Number of agents currently on the session's `.active` roster. */
-export function countActiveAgents(sessionId: string): number {
+export function countActiveAgents(sessionId: SessionId): number {
   return readActiveAgents(sessionId).length;
 }
 
@@ -191,7 +185,7 @@ export function countActiveAgents(sessionId: string): number {
  * bound agent; anything else (contention, a leaked binding over an empty
  * or foreign roster) stands down. This adapter only supplies the files.
  */
-export function soleActiveBinding(sessionId: string, nowMs: number = Date.now()): MachineBinding | null {
+export function soleActiveBinding(sessionId: SessionId, nowMs: number = Date.now()): MachineBinding | null {
   return resolveSoleActiveBinding(readBindings(sessionId, nowMs), readActiveAgents(sessionId));
 }
 
@@ -207,7 +201,7 @@ export function soleActiveBinding(sessionId: string, nowMs: number = Date.now())
  * they are the fail-closed evidence of a corrupt binding file, never
  * silently laundered away by a reap.
  */
-export async function refreshBindingActivity(sessionId: string, nowMs: number = Date.now()): Promise<void> {
+export async function refreshBindingActivity(sessionId: SessionId, nowMs: number = Date.now()): Promise<void> {
   const path = machineBindingPath(sessionId);
   if (!existsSync(path)) return;
   await withLock(bindingLock(sessionId), () => {
@@ -260,7 +254,7 @@ export function rosterAgentId(raw: string): AgentId {
  * cleanup takes to rewrite it — an unlocked append racing a cleanup rewrite
  * could be lost, leaving attribution counting a ghost (or missing) agent.
  */
-export async function markAgentActive(sessionId: string, agentId: AgentId): Promise<void> {
+export async function markAgentActive(sessionId: SessionId, agentId: AgentId): Promise<void> {
   mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
   await withLock(bindingLock(sessionId), () => {
     appendFileSync(activeFlagPath(sessionId), `${agentId}\n`);
@@ -272,7 +266,7 @@ export async function markAgentActive(sessionId: string, agentId: AgentId): Prom
  * markAgentActive). Failures are logged — a ghost roster entry silently
  * voids attribution for the rest of the session otherwise.
  */
-export async function removeActiveAgent(sessionId: string, agentId: string): Promise<void> {
+export async function removeActiveAgent(sessionId: SessionId, agentId: string): Promise<void> {
   const path = activeFlagPath(sessionId);
   if (!existsSync(path)) return;
   await withLock(bindingLock(sessionId), () => {
@@ -302,7 +296,7 @@ export async function removeActiveAgent(sessionId: string, agentId: string): Pro
  * lines inert, so a failed truncate is logged, never fatal.
  */
 export async function bindMachineAgent(
-  sessionId: string,
+  sessionId: SessionId,
   agentType: AgentType,
   agentId: AgentId,
   nowMs: number = Date.now(),
@@ -337,7 +331,7 @@ export async function bindMachineAgent(
  *  still fires. Failures are logged — a leaked binding disables gating
  *  silently otherwise. */
 export async function unbindMachineAgent(
-  sessionId: string,
+  sessionId: SessionId,
   agentType: string,
   agentId: string,
   nowMs: number = Date.now(),
@@ -365,14 +359,14 @@ export async function unbindMachineAgent(
 
 // --- Ledger IO ---
 
-export function appendEvidence(sessionId: string, epoch: Epoch, events: readonly Evidence[]): void {
+export function appendEvidence(sessionId: SessionId, epoch: Epoch, events: readonly Evidence[]): void {
   if (events.length === 0) return;
   mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
   const lines = events.map((event) => JSON.stringify({ epoch, event })).join("\n") + "\n";
   appendFileSync(ledgerPath(sessionId), lines);
 }
 
-export function readEvidence(sessionId: string): EvidenceRecord[] {
+export function readEvidence(sessionId: SessionId): EvidenceRecord[] {
   const path = ledgerPath(sessionId);
   if (!existsSync(path)) return [];
   const lines = readFileSync(path, "utf-8")

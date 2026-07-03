@@ -21,14 +21,13 @@ import { resolve } from "node:path";
 import type { HookHandler } from "../../types";
 import { passthroughResult } from "../../types";
 import {
-  appendEvidence,
   eventsForEpoch,
   extractEvidence,
   findReport,
+  fsSessionRegistry,
   machineBindingPath,
-  readEvidence,
-  refreshBindingActivity,
-  soleActiveBinding,
+  parseSessionId,
+  type SessionRegistry,
 } from "../../machine";
 
 interface RecordEvidenceInput {
@@ -39,20 +38,32 @@ interface RecordEvidenceInput {
   cwd?: string;
 }
 
-const handler: HookHandler = async (stdin) => {
+export const runRecordEvidence = async (
+  stdin: string,
+  registry: SessionRegistry = fsSessionRegistry,
+) => {
   try {
     if (!stdin || stdin.trim() === "") return passthroughResult();
     const input: RecordEvidenceInput = JSON.parse(stdin);
 
-    const sessionId = input.session_id;
     const toolName = input.tool_name;
-    if (!sessionId || !toolName) return passthroughResult();
+    if (!input.session_id || !toolName) return passthroughResult();
+    // Parse the session id once at this boundary. A present-but-unparseable id
+    // can address no ledger file — say so (it may signal an attack or a bug)
+    // and stand down, exactly as the old in-ledger throw+catch did.
+    const sessionId = parseSessionId(input.session_id);
+    if (sessionId === null) {
+      process.stderr.write(
+        `record-evidence: invalid session id ${JSON.stringify(input.session_id)} — nothing recorded\n`,
+      );
+      return passthroughResult();
+    }
 
     // Recorder activity keeps a live binding fresh (and reaps expired ones)
     // — no-op for ungated sessions (no binding file, no lock taken).
-    await refreshBindingActivity(sessionId);
+    await registry.refreshBindingActivity(sessionId);
 
-    const binding = soleActiveBinding(sessionId);
+    const binding = registry.soleActiveBinding(sessionId);
     if (binding === null) {
       // Bound-but-unattributable (contended session, leaked binding): say
       // so once, like the gate does — a silently-standing-down recorder is
@@ -81,13 +92,13 @@ const handler: HookHandler = async (stdin) => {
       // machines/README.md "known residuals"). Computed lazily here: this
       // closure only runs for classified test commands.
       const epochWrites = new Set(
-        eventsForEpoch(readEvidence(sessionId), binding.epoch).flatMap((e) =>
+        eventsForEpoch(registry.readEvidence(sessionId), binding.epoch).flatMap((e) =>
           e.kind === "FileWrite" ? [resolve(cwd, e.path)] : [],
         ),
       );
       return findReport(segment, cwd, stdout, Date.now(), (absPath) => epochWrites.has(absPath));
     });
-    appendEvidence(sessionId, binding.epoch, events);
+    registry.appendEvidence(sessionId, binding.epoch, events);
 
     return passthroughResult();
   } catch (e) {
@@ -95,5 +106,7 @@ const handler: HookHandler = async (stdin) => {
     return passthroughResult();
   }
 };
+
+const handler: HookHandler = (stdin) => runRecordEvidence(stdin);
 
 export default handler;

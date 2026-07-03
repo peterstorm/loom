@@ -3,13 +3,16 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync, existsSync, unlinkS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Evidence } from "../../src/machine/types";
+import type { SessionId } from "../../src/machine";
 import * as ledger from "../../src/machine";
 import { SUBAGENT_DIR } from "../../src/config";
 
 // bun/vitest may share SUBAGENT_DIR across suites — isolate via unique
 // session ids + targeted cleanup instead of env manipulation.
 const run = `ledger-test-${process.pid}-${Date.now()}`;
-const sid = (name: string) => `${run}-${name}`;
+// The ledger API takes the branded SessionId — parse once at construction
+// (the run/name chars are all SessionId-legal, so the assertion never fires).
+const sid = (name: string) => ledger.parseSessionId(`${run}-${name}`)!;
 const sessions = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "never-seen"].map(sid);
 
 afterAll(() => {
@@ -38,7 +41,7 @@ function agentType(s: string) {
   if (v === null) throw new Error(`test fixture: invalid agent type ${JSON.stringify(s)}`);
   return v;
 }
-const bind = (s: string, type: string, id: string) =>
+const bind = (s: SessionId, type: string, id: string) =>
   ledger.bindMachineAgent(s, agentType(type), agentId(id));
 
 // Epochs are branded — tests go through the same parse boundary readers use.
@@ -276,17 +279,21 @@ describe("branded session identity — the path-construction boundary", () => {
     expect(ledger.parseSessionId("abc-123_DEF.4")).toBe("abc-123_DEF.4");
   });
 
-  it("path constructors THROW on an invalid session id — no traversal path is ever built", () => {
-    for (const evil of ["../../../etc/cron.d/x", "a/b", "..", " "]) {
-      expect(() => ledger.ledgerPath(evil)).toThrow(/invalid session id/);
-      expect(() => ledger.machineBindingPath(evil)).toThrow(/invalid session id/);
+  it("a traversal string never yields a branded id, so no path constructor can be reached with one", () => {
+    // The runtime throw in the ledger is gone by design: parseSessionId is the
+    // single boundary, and every path constructor/reader now takes the branded
+    // SessionId (unreachable-by-type with a raw string). The traversal defense
+    // therefore lives entirely at this parse step.
+    for (const evil of ["../../../etc/cron.d/x", "a/b", "..", " ", "../outside"]) {
+      expect(ledger.parseSessionId(evil)).toBeNull();
     }
   });
 
-  it("readers fail safe (throw, caught by callers) instead of reading outside SUBAGENT_DIR", () => {
-    expect(() => ledger.readEvidence("../outside")).toThrow(/invalid session id/);
-    expect(() => ledger.readBindings("../outside")).toThrow(/invalid session id/);
-    expect(() => ledger.soleActiveBinding("../outside")).toThrow(/invalid session id/);
+  it("a branded id builds paths only under SUBAGENT_DIR", () => {
+    const s = ledger.parseSessionId("branded-abc.123_DEF")!;
+    expect(ledger.ledgerPath(s).startsWith(`${SUBAGENT_DIR}/`)).toBe(true);
+    expect(ledger.machineBindingPath(s).startsWith(`${SUBAGENT_DIR}/`)).toBe(true);
+    expect(ledger.ledgerPath(s)).not.toContain("..");
   });
 });
 

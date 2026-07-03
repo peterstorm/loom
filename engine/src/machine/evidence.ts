@@ -238,18 +238,23 @@ export function resolveSoleActiveBinding(
  * The fs adapter (session-registry.ts) wraps the ledger's fs code; an
  * in-memory fake ships with the tests so the sole-active and
  * snapshot-before-unbind invariants are checkable as properties over
- * interleavings instead of only through tmpdirs. NOTE: production handlers
- * currently call the ledger functions directly — the port is exercised by
- * the property tests (with the fs adapter conformance-checked), not yet
- * threaded through the handlers.
+ * interleavings instead of only through tmpdirs. Production handlers depend
+ * on this port (fsSessionRegistry is their default dependency), so a handler
+ * core can run against the fake without tmpdirs.
+ *
+ * Every sessionId is the BRANDED SessionId: handlers parse hook input once at
+ * their boundary (fail-closed) and thread the brand inward, so no adapter
+ * re-validates and the fs path boundary cannot be reached with a raw id.
  */
 export interface SessionRegistry {
-  readonly bind: (sessionId: string, agentType: AgentType, agentId: AgentId) => Promise<void>;
-  readonly unbind: (sessionId: string, agentType: string, agentId: string) => Promise<void>;
-  readonly markActive: (sessionId: string, agentId: AgentId) => Promise<void>;
-  readonly removeActive: (sessionId: string, agentId: string) => Promise<void>;
-  readonly countActiveAgents: (sessionId: string) => number;
-  readonly soleActiveBinding: (sessionId: string) => MachineBinding | null;
-  readonly appendEvidence: (sessionId: string, epoch: Epoch, events: readonly Evidence[]) => void;
-  readonly readEvidence: (sessionId: string) => EvidenceRecord[];
+  readonly bind: (sessionId: SessionId, agentType: AgentType, agentId: AgentId) => Promise<void>;
+  readonly unbind: (sessionId: SessionId, agentType: string, agentId: string) => Promise<void>;
+  readonly markActive: (sessionId: SessionId, agentId: AgentId) => Promise<void>;
+  readonly removeActive: (sessionId: SessionId, agentId: string) => Promise<void>;
+  readonly countActiveAgents: (sessionId: SessionId) => number;
+  readonly soleActiveBinding: (sessionId: SessionId) => MachineBinding | null;
+  readonly refreshBindingActivity: (sessionId: SessionId) => Promise<void>;
+  readonly readBindings: (sessionId: SessionId) => readonly MachineBinding[];
+  readonly appendEvidence: (sessionId: SessionId, epoch: Epoch, events: readonly Evidence[]) => void;
+  readonly readEvidence: (sessionId: SessionId) => EvidenceRecord[];
 }

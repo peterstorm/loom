@@ -21,13 +21,12 @@ import {
   blockExplanation,
   eventsForEpoch,
   foldEvidence,
+  fsSessionRegistry,
   isToolAllowed,
   loadMachine,
   machineBindingPath,
-  readBindings,
-  readEvidence,
-  refreshBindingActivity,
-  soleActiveBinding,
+  parseSessionId,
+  type SessionRegistry,
 } from "../../machine";
 
 function anyBindingExists(): boolean {
@@ -39,7 +38,10 @@ function anyBindingExists(): boolean {
   }
 }
 
-const handler: HookHandler = async (stdin) => {
+export const runEnforcePhaseTools = async (
+  stdin: string,
+  registry: SessionRegistry = fsSessionRegistry,
+) => {
   let input: PreToolUseInput;
   try {
     input = JSON.parse(stdin);
@@ -52,11 +54,13 @@ const handler: HookHandler = async (stdin) => {
   }
 
   const { session_id, tool_name } = input;
-  if (!session_id || !tool_name) {
-    // Well-formed JSON missing identity fields is as unattributable as
-    // malformed stdin — same fail-closed policy while any gate is armed.
+  // Parse the session id once at this boundary. Missing OR unparseable (raw
+  // hook input that fails the SessionId format) is unattributable — same
+  // fail-closed policy while any gate is armed, passthrough otherwise.
+  const sessionId = session_id ? parseSessionId(session_id) : null;
+  if (!sessionId || !tool_name) {
     return anyBindingExists()
-      ? blockResult("[loom machine] gate input missing session_id/tool_name — failing closed")
+      ? blockResult("[loom machine] gate input missing or invalid session_id/tool_name — failing closed")
       : passthroughResult();
   }
 
@@ -66,23 +70,23 @@ const handler: HookHandler = async (stdin) => {
     // anchor of live ones — a fully-stale binding file is deleted here, so
     // the fail-closed "file exists but no bindings" check below never fires
     // for a merely-expired binding.
-    await refreshBindingActivity(session_id);
+    await registry.refreshBindingActivity(sessionId);
 
-    const bindings = readBindings(session_id);
+    const bindings = registry.readBindings(sessionId);
     if (bindings.length === 0) {
       // Distinguish "no binding file" (ungated session → passthrough) from
       // "binding file present but zero bindings parsed" (a corrupt binding
       // file must not silently open the gate).
-      return existsSync(machineBindingPath(session_id))
-        ? blockResult(`[loom machine] binding file for ${session_id} exists but contains no parseable bindings — failing closed`)
+      return existsSync(machineBindingPath(sessionId))
+        ? blockResult(`[loom machine] binding file for ${sessionId} exists but contains no parseable bindings — failing closed`)
         : passthroughResult();
     }
 
-    const binding = soleActiveBinding(session_id);
+    const binding = registry.soleActiveBinding(sessionId);
     if (binding === null) {
       // Contended session: no per-agent attribution possible. Stand down
       // loudly rather than gate one agent on another's evidence.
-      process.stderr.write(`[loom machine] gate standing down for ${session_id}: contended session\n`);
+      process.stderr.write(`[loom machine] gate standing down for ${sessionId}: contended session\n`);
       return passthroughResult();
     }
 
@@ -102,7 +106,7 @@ const handler: HookHandler = async (stdin) => {
       return blockResult(`[loom machine] invalid machine definition — ${loaded.error}`);
     }
 
-    const events = eventsForEpoch(readEvidence(session_id), binding.epoch);
+    const events = eventsForEpoch(registry.readEvidence(sessionId), binding.epoch);
     const state = foldEvidence(loaded.machine, events);
     if (isToolAllowed(loaded.machine, state, tool_name)) return allowResult();
 
@@ -112,5 +116,7 @@ const handler: HookHandler = async (stdin) => {
     return blockResult(`[loom machine] gate evaluation failed — failing closed: ${e instanceof Error ? e.message : String(e)}`);
   }
 };
+
+const handler: HookHandler = (stdin) => runEnforcePhaseTools(stdin);
 
 export default handler;

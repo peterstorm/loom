@@ -58,6 +58,12 @@ export function inMemorySessionRegistry(): SessionRegistry {
     soleActiveBinding: (sessionId: string): MachineBinding | null =>
       resolveSoleActiveBinding(bindings.get(sessionId) ?? [], active.get(sessionId) ?? []),
 
+    // The fake models live sessions with no TTL, so refreshing the activity
+    // anchor is a no-op — liveness is an fs-layer concern (binding-liveness).
+    refreshBindingActivity: async (): Promise<void> => {},
+
+    readBindings: (sessionId: string): readonly MachineBinding[] => bindings.get(sessionId) ?? [],
+
     appendEvidence: (sessionId: string, epoch: Epoch, events: readonly Evidence[]): void => {
       if (events.length === 0) return;
       ledger.set(sessionId, [

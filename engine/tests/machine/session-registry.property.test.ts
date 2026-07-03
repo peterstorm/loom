@@ -33,8 +33,10 @@ import {
   eventsForEpoch,
   parseAgentId,
   parseAgentType,
+  parseSessionId,
   resolveSoleActiveBinding,
   type MachineBinding,
+  type SessionId,
   type SessionRegistry,
 } from "../../src/machine/evidence";
 import { fsSessionRegistry } from "../../src/machine/session-registry";
@@ -107,7 +109,7 @@ function modelSole(m: Model): MachineBinding | null {
 }
 
 /** Run one op against registry + model, asserting invariants (a) and (b). */
-async function step(reg: SessionRegistry, s: string, m: Model, op: Op): Promise<void> {
+async function step(reg: SessionRegistry, s: SessionId, m: Model, op: Op): Promise<void> {
   if (op.op === "start") {
     const agent = POOL[op.agent];
     if (m.started.has(agent.key)) return; // an agent instance starts once
@@ -170,7 +172,7 @@ async function step(reg: SessionRegistry, s: string, m: Model, op: Op): Promise<
   expect(reg.readEvidence(s)).toEqual(m.ledger);
 }
 
-async function runScenario(reg: SessionRegistry, session: string, ops: readonly Op[]): Promise<void> {
+async function runScenario(reg: SessionRegistry, session: SessionId, ops: readonly Op[]): Promise<void> {
   const model: Model = { bindings: [], active: [], ledger: [], epochEvents: new Map(), started: new Set() };
   for (const op of ops) {
     await step(reg, session, model, op);
@@ -183,7 +185,7 @@ describe("SessionRegistry invariants (in-memory fake)", () => {
   it("(a) sole-active (b) epoch attribution (c) snapshot-before-unbind hold under arbitrary interleavings", async () => {
     await fc.assert(
       fc.asyncProperty(fc.array(opArb, { minLength: 1, maxLength: 30 }), async (ops) => {
-        await runScenario(inMemorySessionRegistry(), "prop-session", ops);
+        await runScenario(inMemorySessionRegistry(), parseSessionId("prop-session")!, ops);
       }),
       { numRuns: 250 },
     );
@@ -193,7 +195,7 @@ describe("SessionRegistry invariants (in-memory fake)", () => {
 // --- Conformance: the production fs adapter satisfies the same properties ---
 
 const run = `registry-prop-${process.pid}-${Date.now()}`;
-const fsSessions: string[] = [];
+const fsSessions: SessionId[] = [];
 
 afterAll(() => {
   for (const s of fsSessions) {
@@ -210,7 +212,7 @@ describe("SessionRegistry invariants (fs adapter conformance)", () => {
     let n = 0;
     await fc.assert(
       fc.asyncProperty(fc.array(opArb, { minLength: 1, maxLength: 15 }), async (ops) => {
-        const session = `${run}-${n++}`;
+        const session = parseSessionId(`${run}-${n++}`)!;
         fsSessions.push(session);
         await runScenario(fsSessionRegistry, session, ops);
       }),
@@ -240,7 +242,7 @@ describe("empty roster + one binding = leaked binding → no attribution", () =>
 
   it("in-memory fake: bind without markActive → soleActiveBinding null; roster arrival restores it", async () => {
     const reg = inMemorySessionRegistry();
-    const s = "leaked-binding-fake";
+    const s = parseSessionId("leaked-binding-fake")!;
     await reg.bind(s, parseAgentType(agent.type)!, parseAgentId(agent.id)!);
     expect(reg.soleActiveBinding(s)).toBeNull(); // leaked shape stands down
     await reg.markActive(s, parseAgentId(agent.id)!);
@@ -248,7 +250,7 @@ describe("empty roster + one binding = leaked binding → no attribution", () =>
   });
 
   it("fs adapter: bind without markActive → soleActiveBinding null; roster arrival restores it", async () => {
-    const s = `${run}-leaked-binding-fs`;
+    const s = parseSessionId(`${run}-leaked-binding-fs`)!;
     fsSessions.push(s);
     await fsSessionRegistry.bind(s, parseAgentType(agent.type)!, parseAgentId(agent.id)!);
     expect(fsSessionRegistry.soleActiveBinding(s)).toBeNull(); // leaked shape stands down

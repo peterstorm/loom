@@ -30,14 +30,17 @@ import {
   parseAgentId,
   parseAgentType,
   parseBindingLine,
+  parseSessionId,
   epochOf,
   type MachineBinding,
+  type SessionId,
 } from "../../src/machine/evidence";
 import { STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../../src/config";
 import enforce from "../../src/handlers/pre-tool-use/enforce-phase-tools";
 
 const run = `liveness-${process.pid}-${Date.now()}`;
-const sid = (name: string) => `${run}-${name}`;
+// Ledger API takes the branded SessionId; parse once at construction.
+const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
 const sessions = ["stale", "fresh", "extend", "mixed", "mixed-reap", "gate-stale", "bind-reaps", "unbind-malformed"].map(sid);
 
 afterAll(() => {
@@ -58,7 +61,7 @@ function binding(id: string, type: string): MachineBinding {
 }
 
 /** Write a binding file whose bind stamp AND mtime anchor are both `atMs`. */
-function writeBindingAt(session: string, b: MachineBinding, atMs: number): void {
+function writeBindingAt(session: SessionId, b: MachineBinding, atMs: number): void {
   mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
   const path = machineBindingPath(session);
   writeFileSync(path, formatBindingLine(b, atMs) + "\n");

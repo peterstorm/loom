@@ -22,11 +22,12 @@ import {
   readEvidence,
   unbindMachineAgent,
 } from "../../../src/machine/ledger";
-import { epochOf, parseAgentId, parseAgentType } from "../../../src/machine/evidence";
+import { epochOf, parseAgentId, parseAgentType, parseSessionId, type SessionId } from "../../../src/machine/evidence";
 import { SUBAGENT_DIR } from "../../../src/config";
 
 const run = `record-evidence-${process.pid}-${Date.now()}`;
-const sid = (name: string) => `${run}-${name}`;
+// Ledger API takes the branded SessionId; parse once at construction.
+const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
 const sessions = ["contended", "leaked", "ungated", "forged-report", "honest-report"].map(sid);
 
 afterAll(() => {
@@ -39,14 +40,14 @@ afterAll(() => {
   }
 });
 
-async function bind(session: string, type: string, id: string): Promise<void> {
+async function bind(session: SessionId, type: string, id: string): Promise<void> {
   const agentType = parseAgentType(type);
   const agentId = parseAgentId(id);
   if (!agentType || !agentId) throw new Error(`test fixture: invalid identity ${type}/${id}`);
   await bindMachineAgent(session, agentType, agentId);
 }
 
-const post = (session: string, tool: string, input: Record<string, unknown> = {}) =>
+const post = (session: SessionId, tool: string, input: Record<string, unknown> = {}) =>
   JSON.stringify({ session_id: session, tool_name: tool, tool_input: input, cwd: "/tmp" });
 
 describe("recorder never blocks — degenerate input contract", () => {

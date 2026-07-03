@@ -27,6 +27,7 @@ import {
   loadMachine,
   parseAgentId,
   parseAgentType,
+  parseSessionId,
   readEvidence,
 } from "../../machine";
 import type { Evidence, EvidenceRecord, LoadedMachine, TrustedTestVerdict } from "../../machine";
@@ -468,9 +469,16 @@ export const runUpdateTaskStatus = async (
       `update-task-status: evidence snapshot for ${input.session_id} failed — ledger unavailable; verdict will be labeled snapshot-read-failed\n`,
     );
   }
+  // Standalone route (no dispatcher snapshot): read the ledger directly, but
+  // parse the session id at this boundary first — an unparseable id names no
+  // ledger file, so it resolves to no evidence rather than throwing.
+  const standaloneSessionId =
+    evidenceSnapshot === undefined && input.session_id ? parseSessionId(input.session_id) : null;
   const records: readonly EvidenceRecord[] =
     evidenceSnapshot === undefined
-      ? readEvidence(input.session_id)
+      ? standaloneSessionId
+        ? readEvidence(standaloneSessionId)
+        : []
       : evidenceSnapshot.kind === "snapshot"
         ? evidenceSnapshot.events
         : [];

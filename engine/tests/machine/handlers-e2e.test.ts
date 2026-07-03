@@ -19,11 +19,12 @@ import {
   readEvidence,
   soleActiveBinding,
 } from "../../src/machine/ledger";
-import { eventsForEpoch, parseEpoch } from "../../src/machine/evidence";
+import { eventsForEpoch, parseEpoch, parseSessionId } from "../../src/machine/evidence";
 import { SUBAGENT_DIR } from "../../src/config";
 
 const run = `handlers-e2e-${process.pid}-${Date.now()}`;
-const sid = (name: string) => `${run}-${name}`;
+// Ledger API takes the branded SessionId; parse once at construction.
+const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
 const sessions = ["e2e-1", "e2e-2", "e2e-3", "e2e-4", "e2e-5", "e2e-6", "e2e-7"].map(sid);
 
 afterAll(() => {

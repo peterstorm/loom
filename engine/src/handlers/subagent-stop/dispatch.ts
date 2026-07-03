@@ -9,7 +9,7 @@ import type { HookHandler, SubagentStopInput } from "../../types";
 import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
-import { readEvidence } from "../../machine";
+import { parseSessionId, readEvidence } from "../../machine";
 
 import cleanupSubagentFlag from "./cleanup-subagent-flag";
 import advancePhase from "./advance-phase";
@@ -56,14 +56,24 @@ const handler: HookHandler = async (stdin, args) => {
   // update-task-status.ts — keep both sides in sync) keeps a FAILED read
   // distinct from a genuinely empty ledger: downstream labels the verdict
   // snapshot-read-failed instead of minting a misleading "degraded".
+  // Parse the session id once at this boundary — an unparseable id can name no
+  // ledger file, so the snapshot is a (typed) failed read, not empty.
+  const sessionId = input.session_id ? parseSessionId(input.session_id) : null;
   let evidenceSnapshot: EvidenceSnapshot;
-  try {
-    evidenceSnapshot = { kind: "snapshot", events: readEvidence(input.session_id) };
-  } catch (e) {
+  if (sessionId === null) {
     process.stderr.write(
-      `dispatch: evidence snapshot failed for ${input.session_id}: ${e instanceof Error ? e.message : String(e)}\n`,
+      `dispatch: evidence snapshot failed for ${input.session_id ?? "(missing)"}: invalid session id\n`,
     );
     evidenceSnapshot = { kind: "snapshot-failed" };
+  } else {
+    try {
+      evidenceSnapshot = { kind: "snapshot", events: readEvidence(sessionId) };
+    } catch (e) {
+      process.stderr.write(
+        `dispatch: evidence snapshot failed for ${sessionId}: ${e instanceof Error ? e.message : String(e)}\n`,
+      );
+      evidenceSnapshot = { kind: "snapshot-failed" };
+    }
   }
 
   // Cleanup always runs — but must never abort the rest of the pipeline

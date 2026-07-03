@@ -20,11 +20,11 @@ import {
   machineBindingPath,
   unbindMachineAgent,
 } from "../../../src/machine/ledger";
-import { parseAgentId, parseAgentType } from "../../../src/machine/evidence";
+import { parseAgentId, parseAgentType, parseSessionId, type SessionId } from "../../../src/machine/evidence";
 import { SUBAGENT_DIR } from "../../../src/config";
 
 /** bindMachineAgent takes branded identity — parse like production does. */
-async function bind(session: string, type: string, id: string): Promise<void> {
+async function bind(session: SessionId, type: string, id: string): Promise<void> {
   const agentType = parseAgentType(type);
   const agentId = parseAgentId(id);
   if (!agentType || !agentId) throw new Error(`test fixture: invalid identity ${type}/${id}`);
@@ -32,7 +32,8 @@ async function bind(session: string, type: string, id: string): Promise<void> {
 }
 
 const run = `gate-fail-closed-${process.pid}-${Date.now()}`;
-const sid = (name: string) => `${run}-${name}`;
+// Ledger API takes the branded SessionId; parse once at construction.
+const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
 const sessions = ["missing-fields", "corrupt-binding", "absent", "invalid-machine", "vanished-machine", "crash"].map(sid);
 
 afterAll(() => {
@@ -56,7 +57,7 @@ describe("gate fails closed on unattributable input (Fix 1)", () => {
       const noSession = await enforce(JSON.stringify({ tool_name: "Write", tool_input: {} }), []);
       expect(noSession.kind).toBe("block");
       if (noSession.kind === "block") {
-        expect(noSession.message).toContain("missing session_id/tool_name");
+        expect(noSession.message).toContain("session_id/tool_name");
       }
 
       const noTool = await enforce(JSON.stringify({ session_id: s, tool_input: {} }), []);
