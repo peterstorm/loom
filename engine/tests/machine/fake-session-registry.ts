@@ -23,7 +23,7 @@ import type { Epoch, Evidence, EvidenceRecord } from "../../src/machine/types";
 
 export function inMemorySessionRegistry(): SessionRegistry {
   const bindings = new Map<string, MachineBinding[]>();
-  const active = new Map<string, string[]>();
+  const active = new Map<string, AgentId[]>();
   const ledger = new Map<string, EvidenceRecord[]>();
 
   return {

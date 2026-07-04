@@ -164,13 +164,20 @@ export function readBindings(sessionId: SessionId, nowMs: number = Date.now()): 
   return lines.flatMap((l) => (l.kind === "fresh" ? [l.persisted.binding] : []));
 }
 
-function readActiveAgents(sessionId: SessionId): string[] {
+function readActiveAgents(sessionId: SessionId): AgentId[] {
   const path = activeFlagPath(sessionId);
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf-8")
     .split("\n")
     .map((l) => l.trim())
-    .filter((l) => l !== "");
+    .filter((l) => l !== "")
+    // Re-parse through the SAME producer that wrote the roster (rosterAgentId),
+    // so the read-back carries the AgentId brand instead of a raw string and
+    // the sole-active comparison in resolveSoleActiveBinding stays brand-to-
+    // brand. Mapping (not dropping) preserves the count: rosterAgentId is
+    // total and idempotent on already-written lines, so a corrupt line can
+    // never silently shrink the roster into a false 2→1 attribution.
+    .map((l) => rosterAgentId(l));
 }
 
 /** Number of agents currently on the session's `.active` roster. */

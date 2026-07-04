@@ -236,11 +236,12 @@ describe("empty roster + one binding = leaked binding → no attribution", () =>
 
   it("resolveSoleActiveBinding (the shared pure rule) refuses an empty roster", () => {
     const binding = bindingOf(agent);
+    const id = parseAgentId(agent.id)!;
     expect(resolveSoleActiveBinding([binding], [])).toBeNull();
-    expect(resolveSoleActiveBinding([binding], [agent.id])).toEqual(binding);
-    expect(resolveSoleActiveBinding([binding], ["someone-else"])).toBeNull();
-    expect(resolveSoleActiveBinding([binding], [agent.id, "second"])).toBeNull();
-    expect(resolveSoleActiveBinding([], [agent.id])).toBeNull();
+    expect(resolveSoleActiveBinding([binding], [id])).toEqual(binding);
+    expect(resolveSoleActiveBinding([binding], [parseAgentId("someone-else")!])).toBeNull();
+    expect(resolveSoleActiveBinding([binding], [id, parseAgentId("second")!])).toBeNull();
+    expect(resolveSoleActiveBinding([], [id])).toBeNull();
   });
 
   it("in-memory fake: bind without markActive → soleActiveBinding null; roster arrival restores it", async () => {

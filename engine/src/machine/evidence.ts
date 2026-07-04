@@ -224,7 +224,7 @@ export function eventsForEpoch(records: readonly EvidenceRecord[], epoch: Epoch)
  */
 export function resolveSoleActiveBinding(
   bindings: readonly MachineBinding[],
-  activeRoster: readonly string[],
+  activeRoster: readonly AgentId[],
 ): MachineBinding | null {
   if (bindings.length !== 1) return null;
   if (activeRoster.length !== 1) return null;
