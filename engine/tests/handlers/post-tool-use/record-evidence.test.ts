@@ -102,8 +102,8 @@ describe("recorder stands down LOUDLY on unattributable gated sessions", () => {
       expect(readEvidence(s)).toEqual([]);
     } finally {
       stderrSpy.mockRestore();
-      await unbindMachineAgent(s, "code-implementer-agent", "a-1");
-      await unbindMachineAgent(s, "code-implementer-agent", "a-2");
+      await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+      await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-2")!);
     }
   });
 
@@ -120,7 +120,7 @@ describe("recorder stands down LOUDLY on unattributable gated sessions", () => {
       expect(readEvidence(s)).toEqual([]);
     } finally {
       stderrSpy.mockRestore();
-      await unbindMachineAgent(s, "code-implementer-agent", "a-1");
+      await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
     }
   });
 
@@ -177,7 +177,7 @@ describe("agent-authored --outputFile artifacts cannot vouch (epoch FileWrite ve
     // report: null → judgeTestRun says untrusted, never trusted-pass.
     expect(testRun && testRun.kind === "TestRun" && testRun.report).toBeNull();
 
-    await unbindMachineAgent(s, "code-implementer-agent", "a-1");
+    await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -211,7 +211,7 @@ describe("agent-authored --outputFile artifacts cannot vouch (epoch FileWrite ve
       source: "vitest-json",
     });
 
-    await unbindMachineAgent(s, "code-implementer-agent", "a-1");
+    await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
     rmSync(dir, { recursive: true, force: true });
   });
 });

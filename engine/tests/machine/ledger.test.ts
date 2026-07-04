@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Evidence } from "../../src/machine/types";
 import type { SessionId } from "../../src/machine";
+import { reportSummary } from "./report-summary";
 import * as ledger from "../../src/machine";
 import { SUBAGENT_DIR } from "../../src/config";
 
@@ -61,7 +62,7 @@ const testRun: Evidence = {
   kind: "TestRun",
   command: "npm test",
   exit: 0,
-  report: { total: 5, failed: 0, source: "vitest-json" },
+  report: reportSummary(5, 0),
 };
 
 describe("evidence ledger", () => {
@@ -145,7 +146,7 @@ describe("machine binding lifecycle", () => {
     expect(ledger.soleActiveBinding(s)).toBeNull();
     roster(s, "a-1");
     expect(ledger.soleActiveBinding(s)?.epoch).toBe("a-1:code-implementer-agent");
-    await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-1");
+    await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("a-1"));
     expect(ledger.readBindings(s)).toEqual([]);
     expect(existsSync(ledger.machineBindingPath(s))).toBe(false);
   });
@@ -154,13 +155,13 @@ describe("machine binding lifecycle", () => {
     const s = sid("s3");
     await bind(s, "code-implementer-agent", "a-1");
     ledger.appendEvidence(s, ep("a-1:code-implementer-agent"), [read("/old.ts")]);
-    await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-1");
+    await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("a-1"));
 
     await bind(s, "code-implementer-agent", "a-2");
     expect(ledger.readEvidence(s)).toEqual([]);
     // Even if truncation had failed, the new epoch sees nothing:
     expect(ledger.eventsForEpoch(ledger.readEvidence(s), ep("a-2:code-implementer-agent"))).toEqual([]);
-    await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-2");
+    await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("a-2"));
   });
 
   it("logs skipped malformed binding lines instead of silently dropping them", () => {
@@ -191,7 +192,7 @@ describe("machine binding lifecycle", () => {
     // the bound agent itself active → attribution restored
     writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n");
     expect(ledger.soleActiveBinding(s)?.agentId).toBe("a-1");
-    await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-1");
+    await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("a-1"));
   });
 
   it("contention: second binding or second active agent voids soleActiveBinding", async () => {
@@ -203,7 +204,7 @@ describe("machine binding lifecycle", () => {
     // Same-type parallel binding → no attribution
     await bind(s, "code-implementer-agent", "a-2");
     expect(ledger.soleActiveBinding(s)).toBeNull();
-    await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-2");
+    await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("a-2"));
     expect(ledger.soleActiveBinding(s)).not.toBeNull();
 
     // A second ACTIVE subagent (any type, no machine) also voids it
@@ -216,7 +217,7 @@ describe("machine binding lifecycle", () => {
     roster(s);
     expect(ledger.soleActiveBinding(s)).toBeNull();
 
-    await ledger.unbindMachineAgent(s, "code-implementer-agent", "a-1");
+    await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("a-1"));
   });
 });
 

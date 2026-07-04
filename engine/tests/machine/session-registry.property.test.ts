@@ -43,6 +43,7 @@ import { fsSessionRegistry } from "../../src/machine/session-registry";
 import { ledgerPath, machineBindingPath } from "../../src/machine/ledger";
 import { SUBAGENT_DIR } from "../../src/config";
 import { inMemorySessionRegistry } from "./fake-session-registry";
+import { reportSummary } from "./report-summary";
 
 // --- Agent pool (mix of machine-gated and ungated agents) ---
 
@@ -81,7 +82,7 @@ const eventArb: fc.Arbitrary<Evidence> = fc.oneof(
     kind: fc.constant("TestRun" as const),
     command: fc.constantFrom("npm test", "bun test"),
     exit: fc.constantFrom<number | null>(0, 1, null),
-    report: fc.constantFrom(null, { total: 5, failed: 0, source: "vitest-json" as const }),
+    report: fc.constantFrom(null, reportSummary(5, 0)),
   }),
 );
 
@@ -146,8 +147,8 @@ async function step(reg: SessionRegistry, s: SessionId, m: Model, op: Op): Promi
     // Production order (dispatch → cleanup): snapshot BEFORE unbind, then
     // unbind, then roster removal.
     const snapshot = reg.readEvidence(s);
-    await reg.unbind(s, agent.type, agent.id);
-    await reg.removeActive(s, agent.id);
+    await reg.unbind(s, parseAgentType(agent.type)!, parseAgentId(agent.id)!);
+    await reg.removeActive(s, parseAgentId(agent.id)!);
     m.bindings = m.bindings.filter((b) => !(b.agentId === agent.id && b.agentType === agent.type));
     m.active = m.active.filter((a) => a !== agent.id);
 
@@ -163,9 +164,11 @@ async function step(reg: SessionRegistry, s: SessionId, m: Model, op: Op): Promi
   // Invariant (a): registry agrees with the independent model, op by op.
   const sole = reg.soleActiveBinding(s);
   expect(sole).toEqual(modelSole(m));
-  if (sole !== null) {
-    expect(reg.countActiveAgents(s)).toBeLessThanOrEqual(1);
-  }
+  // The roster count must equal the independent model's active roster size
+  // EXACTLY — an upper bound (≤ 1) would miss an off-by-one that
+  // under-counts (dropping an active agent silently re-opens attribution) or
+  // over-counts. The model is the sole source of truth for the roster.
+  expect(reg.countActiveAgents(s)).toBe(m.active.length);
 
   // Invariant (b): every ledger record carries exactly the epoch the model
   // attributed it to — no cross-epoch bleed, no lost/extra records.

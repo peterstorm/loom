@@ -17,6 +17,7 @@ import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-
 import { SUBAGENT_DIR } from "../../../src/config";
 import { parseEpoch } from "../../../src/machine";
 import type { EvidenceRecord } from "../../../src/machine";
+import { reportSummary } from "../../machine/report-summary";
 
 const run = `dispatch-resilience-${process.pid}-${Date.now()}`;
 const sid = (name: string) => `${run}-${name}`;
@@ -146,7 +147,7 @@ describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7
         kind: "TestRun",
         command: "npm test",
         exit: 0,
-        report: { total: 5, failed: 0, source: "vitest-json" },
+        report: reportSummary(5, 0),
       },
     }];
 

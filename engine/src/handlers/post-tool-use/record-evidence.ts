@@ -102,7 +102,15 @@ export const runRecordEvidence = async (
 
     return passthroughResult();
   } catch (e) {
-    process.stderr.write(`record-evidence: ${e instanceof Error ? e.message : String(e)}\n`);
+    // Fail-open (never block) — but this catch wraps JSON.parse,
+    // refreshBindingActivity, extractEvidence, readEvidence and appendEvidence,
+    // so anything landing here is an UNEXPECTED handler exception (a
+    // programming error or an fs-write failure), NOT one of the expected
+    // no-evidence stand-downs above. Flag it as such so a genuine bug is
+    // distinguishable from benign "nothing recorded" in the logs.
+    process.stderr.write(
+      `record-evidence: UNEXPECTED handler exception — evidence for this call may be lost (failing open): ${e instanceof Error ? e.message : String(e)}\n`,
+    );
     return passthroughResult();
   }
 };

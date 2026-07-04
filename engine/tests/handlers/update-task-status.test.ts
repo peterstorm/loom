@@ -14,6 +14,7 @@ describe("update-task-status — malformed stdin guard (directly-registered rout
 });
 import { parseMachineJson } from "../../src/machine";
 import type { Evidence, LoadedMachine } from "../../src/machine";
+import { reportSummary } from "../machine/report-summary";
 
 describe("legacyTestsPassedNote (pure)", () => {
   it("flags a pre-refactor task carrying tests_passed without test_result", () => {
@@ -227,7 +228,7 @@ describe("resolveTestEvidence — a trusted pass goes stale when files change af
     kind: "TestRun",
     command: "npm test",
     exit: 0,
-    report: { total: 5, failed: 0, source: "vitest-json" },
+    report: reportSummary(5, 0),
   };
   const fileWrite: Evidence = { kind: "FileWrite", path: "/src/thing.ts" };
   const fileRead: Evidence = { kind: "FileRead", path: "/src/thing.ts" };
@@ -320,7 +321,7 @@ describe("resolveTestEvidence — snapshot-read-failed labeling (pure)", () => {
       kind: "TestRun" as const,
       command: "npm test",
       exit: 0,
-      report: { total: 5, failed: 0, source: "vitest-json" as const },
+      report: reportSummary(5, 0),
     };
     const resolved = resolveTestEvidence([trustedPass], "12 passing", true, true);
     expect(resolved.result.verdict).toBe("untrusted");

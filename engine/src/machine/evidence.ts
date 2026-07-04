@@ -248,9 +248,9 @@ export function resolveSoleActiveBinding(
  */
 export interface SessionRegistry {
   readonly bind: (sessionId: SessionId, agentType: AgentType, agentId: AgentId) => Promise<void>;
-  readonly unbind: (sessionId: SessionId, agentType: string, agentId: string) => Promise<void>;
+  readonly unbind: (sessionId: SessionId, agentType: AgentType, agentId: AgentId) => Promise<void>;
   readonly markActive: (sessionId: SessionId, agentId: AgentId) => Promise<void>;
-  readonly removeActive: (sessionId: SessionId, agentId: string) => Promise<void>;
+  readonly removeActive: (sessionId: SessionId, agentId: AgentId) => Promise<void>;
   readonly countActiveAgents: (sessionId: SessionId) => number;
   readonly soleActiveBinding: (sessionId: SessionId) => MachineBinding | null;
   readonly refreshBindingActivity: (sessionId: SessionId) => Promise<void>;

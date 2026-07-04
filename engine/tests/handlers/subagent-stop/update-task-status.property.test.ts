@@ -3,6 +3,7 @@ import fc from "fast-check";
 import { extractTestEvidence, analyzeNewTests, resolveTestEvidence } from "../../../src/handlers/subagent-stop/update-task-status";
 import { judgeTestRun } from "../../../src/machine";
 import type { Evidence } from "../../../src/machine";
+import { reportSummary } from "../../machine/report-summary";
 
 describe("extractTestEvidence — property tests", () => {
   it("random strings without test keywords → passed: false", () => {
@@ -149,9 +150,9 @@ describe("resolveTestEvidence — property tests", () => {
       exit: fc.constantFrom<number | null>(0, 1, null),
       report: fc.constantFrom(
         null,
-        { total: 5, failed: 0, source: "vitest-json" as const },
-        { total: 5, failed: 2, source: "vitest-json" as const },
-        { total: 0, failed: 0, source: "vitest-json" as const },
+        reportSummary(5, 0),
+        reportSummary(5, 2),
+        reportSummary(0, 0),
       ),
     }),
   );

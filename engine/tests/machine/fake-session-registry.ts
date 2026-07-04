@@ -36,7 +36,7 @@ export function inMemorySessionRegistry(): SessionRegistry {
       ]);
     },
 
-    unbind: async (sessionId: string, agentType: string, agentId: string): Promise<void> => {
+    unbind: async (sessionId: string, agentType: AgentType, agentId: AgentId): Promise<void> => {
       bindings.set(
         sessionId,
         (bindings.get(sessionId) ?? []).filter(
@@ -49,7 +49,7 @@ export function inMemorySessionRegistry(): SessionRegistry {
       active.set(sessionId, [...(active.get(sessionId) ?? []), agentId]);
     },
 
-    removeActive: async (sessionId: string, agentId: string): Promise<void> => {
+    removeActive: async (sessionId: string, agentId: AgentId): Promise<void> => {
       active.set(sessionId, (active.get(sessionId) ?? []).filter((a) => a !== agentId));
     },
 

@@ -33,8 +33,14 @@ function anyBindingExists(): boolean {
   try {
     if (!existsSync(SUBAGENT_DIR)) return false;
     return readdirSync(SUBAGENT_DIR).some((f) => f.endsWith(".machine"));
-  } catch {
-    return true; // can't verify → assume a binding exists → fail closed below
+  } catch (e) {
+    // Can't scan the dir (e.g. EACCES/ENOENT on readdir) → assume a binding
+    // exists → fail closed below. Log it so the generic downstream
+    // "missing/invalid session_id — failing closed" message isn't misleading.
+    process.stderr.write(
+      `enforce-phase-tools: cannot scan SUBAGENT_DIR (${e instanceof Error ? e.message : String(e)}) — assuming a binding exists, failing closed\n`,
+    );
+    return true;
   }
 }
 

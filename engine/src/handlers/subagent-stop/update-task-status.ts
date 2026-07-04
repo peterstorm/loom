@@ -474,6 +474,15 @@ export const runUpdateTaskStatus = async (
   // ledger file, so it resolves to no evidence rather than throwing.
   const standaloneSessionId =
     evidenceSnapshot === undefined && input.session_id ? parseSessionId(input.session_id) : null;
+  // A PRESENT-but-unparseable session id yields no records here, which is
+  // indistinguishable from a genuinely empty ledger downstream — the verdict
+  // would be mislabeled "degraded"/"fallback" instead of reflecting that the
+  // ledger was never read. Say so once, mirroring dispatch.ts.
+  if (evidenceSnapshot === undefined && input.session_id && standaloneSessionId === null) {
+    process.stderr.write(
+      `update-task-status: invalid session id ${input.session_id} — ledger not read; verdict may be mislabeled\n`,
+    );
+  }
   const records: readonly EvidenceRecord[] =
     evidenceSnapshot === undefined
       ? standaloneSessionId

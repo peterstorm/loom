@@ -29,7 +29,9 @@ export function parseReportSummary(
   if (typeof total !== "number" || typeof failed !== "number") return null;
   if (!Number.isInteger(total) || !Number.isInteger(failed)) return null;
   if (total < 0 || failed < 0 || failed > total) return null;
-  return { total, failed, source };
+  // Sole producer of the branded TestReportSummary: the count-sanity checks
+  // above ARE the brand's invariant, so the cast is justified exactly here.
+  return { total, failed, source } as TestReportSummary;
 }
 
 /** vitest `--reporter=json` / jest `--json` share the summary shape. */
@@ -71,11 +73,18 @@ export function parseJunitXml(content: string): TestReportSummary | null {
 /** Merge summaries from multiple report files of one run. */
 export function mergeSummaries(summaries: readonly TestReportSummary[]): TestReportSummary | null {
   if (summaries.length === 0) return null;
-  return summaries.reduce((a, b) => ({
-    total: a.total + b.total,
-    failed: a.failed + b.failed,
-    source: a.source,
-  }));
+  // Route the summed counts back through the sole smart constructor rather
+  // than casting a fresh literal: summing sane summaries stays sane, but the
+  // brand must be minted where its invariant is (re)checked. Sum first, then
+  // parse once with the first summary's source (all inputs share a source in
+  // practice — mergeSummaries is only called per-source).
+  let total = 0;
+  let failed = 0;
+  for (const s of summaries) {
+    total += s.total;
+    failed += s.failed;
+  }
+  return parseReportSummary(total, failed, summaries[0].source);
 }
 
 // --- Pure judgment ---

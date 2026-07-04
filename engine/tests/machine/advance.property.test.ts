@@ -3,6 +3,7 @@ import fc from "fast-check";
 import { advance, foldEvidence, isTerminal, isToolAllowed, missingRequirements, tokensFor } from "../../src/machine/advance";
 import { initialState, type Evidence } from "../../src/machine/types";
 import { parseMachine } from "../../src/machine/parse-machine";
+import { parseReportSummary } from "../../src/machine/test-report";
 
 // MachineDef is branded: parseMachine is its only producer, so tests build
 // the machine the same way production does — from a raw definition.
@@ -26,14 +27,17 @@ const evidenceArb: fc.Arbitrary<Evidence> = fc.oneof(
     kind: fc.constant("TestRun" as const),
     command: fc.constantFrom("npm test", "bun test", "mvn test", 'echo "npm test: 5 passing"'),
     exit: fc.option(fc.integer({ min: 0, max: 2 }), { nil: null }),
-    report: fc.option(
-      fc.record({
+    // TestReportSummary is branded (parseReportSummary is its sole producer):
+    // generate raw counts, then mint through the parser. Impossible counts
+    // (failed > total) parse to null — which is exactly the report: null the
+    // reducer must already tolerate, so coverage is preserved.
+    report: fc
+      .record({
         total: fc.integer({ min: 0, max: 100 }),
         failed: fc.integer({ min: 0, max: 100 }),
         source: fc.constantFrom("vitest-json" as const, "junit-xml" as const),
-      }),
-      { nil: null },
-    ),
+      })
+      .map((r) => parseReportSummary(r.total, r.failed, r.source)),
   }),
 );
 

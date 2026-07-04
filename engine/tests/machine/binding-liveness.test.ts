@@ -158,7 +158,7 @@ describe("stale bindings are absent and reaped", () => {
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      await unbindMachineAgent(s, impl, "a-1");
+      await unbindMachineAgent(s, parseAgentType(impl)!, parseAgentId("a-1")!);
       // The valid binding is gone, but the malformed line is NOT laundered
       // away and the file is NOT unlinked…
       expect(existsSync(path)).toBe(true);

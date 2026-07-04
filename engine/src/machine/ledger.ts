@@ -266,7 +266,7 @@ export async function markAgentActive(sessionId: SessionId, agentId: AgentId): P
  * markAgentActive). Failures are logged — a ghost roster entry silently
  * voids attribution for the rest of the session otherwise.
  */
-export async function removeActiveAgent(sessionId: SessionId, agentId: string): Promise<void> {
+export async function removeActiveAgent(sessionId: SessionId, agentId: AgentId): Promise<void> {
   const path = activeFlagPath(sessionId);
   if (!existsSync(path)) return;
   await withLock(bindingLock(sessionId), () => {
@@ -321,19 +321,22 @@ export async function bindMachineAgent(
   });
 }
 
-/** Remove one binding (locked). Takes raw strings deliberately: unbind only
- *  COMPARES against already-parsed bindings and rewrites from them, so an
- *  unparseable id is merely a no-op (it could never have been bound). Stale
- *  lines are reaped in the same rewrite; MALFORMED lines are preserved
- *  (mirroring refreshBindingActivity and bindMachineAgent) — they are the
- *  fail-closed evidence of a corrupt binding file, and while any remain the
- *  file must survive so the gate's file-present-but-zero-bindings check
- *  still fires. Failures are logged — a leaked binding disables gating
- *  silently otherwise. */
+/** Remove one binding (locked). Takes BRANDED identity to match
+ *  bindMachineAgent — the two adjacent id params were a compiler-invisible
+ *  argument-swap hazard as raw strings. unbind only COMPARES against
+ *  already-parsed bindings and rewrites from them; an unparseable id could
+ *  never have been bound, so the caller (cleanup-subagent-flag) simply skips
+ *  the call when parseAgentId/parseAgentType return null — preserving the
+ *  original harmless no-op. Stale lines are reaped in the same rewrite;
+ *  MALFORMED lines are preserved (mirroring refreshBindingActivity and
+ *  bindMachineAgent) — they are the fail-closed evidence of a corrupt binding
+ *  file, and while any remain the file must survive so the gate's
+ *  file-present-but-zero-bindings check still fires. Failures are logged — a
+ *  leaked binding disables gating silently otherwise. */
 export async function unbindMachineAgent(
   sessionId: SessionId,
-  agentType: string,
-  agentId: string,
+  agentType: AgentType,
+  agentId: AgentId,
   nowMs: number = Date.now(),
 ): Promise<void> {
   const path = machineBindingPath(sessionId);

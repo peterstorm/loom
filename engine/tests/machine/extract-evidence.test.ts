@@ -10,6 +10,7 @@ import {
   isToolFailure,
 } from "../../src/machine/extract-evidence";
 import { judgeTestRun } from "../../src/machine/test-report";
+import { reportSummary } from "./report-summary";
 import { TEST_COMMAND_PATTERNS } from "../../src/core/tool-vocabulary";
 
 /** The TestRun event extractEvidence minted for a Bash call, or null. */
@@ -214,7 +215,7 @@ describe("exit-status ownership — the line's exit is attributed only when prov
     const run = mintTestRun("cd engine && bun test", 0);
     expect(run!.exit).toBe(0);
     // …and with a report it still judges trusted-pass end to end:
-    const report = { total: 5, failed: 0, source: "vitest-json" as const };
+    const report = reportSummary(5, 0);
     const events = extractEvidence(
       "Bash",
       { command: "cd engine && npx vitest run --reporter=json" },
@@ -333,7 +334,7 @@ describe("extractBashOutcome — defensive harness-shape parsing", () => {
 
 describe("extractEvidence — facts only", () => {
   it("emits TestRun facts for classified commands, nothing for prose", () => {
-    const report = { total: 3, failed: 0, source: "vitest-json" as const };
+    const report = reportSummary(3, 0);
     const events = extractEvidence("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }, () => report);
     expect(events).toEqual([{ kind: "TestRun", command: "npm test", exit: 0, report }]);
 

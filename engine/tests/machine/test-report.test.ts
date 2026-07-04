@@ -67,8 +67,8 @@ describe("mergeSummaries", () => {
   it("adds totals and failures", () => {
     expect(
       mergeSummaries([
-        { total: 3, failed: 1, source: "junit-xml" },
-        { total: 4, failed: 0, source: "junit-xml" },
+        parseReportSummary(3, 1, "junit-xml")!,
+        parseReportSummary(4, 0, "junit-xml")!,
       ]),
     ).toEqual({ total: 7, failed: 1, source: "junit-xml" });
   });
@@ -79,18 +79,18 @@ describe("mergeSummaries", () => {
 });
 
 describe("judgeTestRun — the R2 trust rule", () => {
-  const report = { total: 5, failed: 0, source: "vitest-json" as const };
+  const report = parseReportSummary(5, 0, "vitest-json")!;
 
   it("exit 0 + clean report → trusted-pass", () => {
     expect(judgeTestRun(0, report)).toEqual({ verdict: "trusted-pass" });
   });
 
   it("exit 0 + report with failures → trusted-fail", () => {
-    expect(judgeTestRun(0, { ...report, failed: 1 })).toEqual({ verdict: "trusted-fail" });
+    expect(judgeTestRun(0, parseReportSummary(5, 1, "vitest-json")!)).toEqual({ verdict: "trusted-fail" });
   });
 
   it("exit 0 + report with 0 tests → trusted-fail (nothing ran)", () => {
-    expect(judgeTestRun(0, { ...report, total: 0 })).toEqual({ verdict: "trusted-fail" });
+    expect(judgeTestRun(0, parseReportSummary(0, 0, "vitest-json")!)).toEqual({ verdict: "trusted-fail" });
   });
 
   it("exit 0 + no report → untrusted (echo-spoof shape)", () => {

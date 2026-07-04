@@ -5,7 +5,14 @@
 
 import type { HookHandler, SubagentStopInput } from "../../types";
 import { stripNamespace } from "../../utils/strip-namespace";
-import { fsSessionRegistry, parseSessionId, rosterAgentId, type SessionRegistry } from "../../machine";
+import {
+  fsSessionRegistry,
+  parseAgentId,
+  parseAgentType,
+  parseSessionId,
+  rosterAgentId,
+  type SessionRegistry,
+} from "../../machine";
 
 export const runCleanupSubagentFlag = async (
   stdin: string,
@@ -38,11 +45,16 @@ export const runCleanupSubagentFlag = async (
 
   // Release guarded-machine binding. unbind locks internally (same lock file)
   // and logs its own failures — do NOT nest it inside another withLock here,
-  // the mkdir lock is not reentrant.
-  const agentType = stripNamespace(input.agent_type ?? "");
-  if (agentType && agent_id) {
+  // the mkdir lock is not reentrant. Parse the identity to the SAME branded
+  // types bind used: unbind only compares against already-parsed bindings, so
+  // an unparseable id could never have been bound — skipping the call is the
+  // exact harmless no-op the old raw-string path produced, and branding both
+  // params removes the adjacent-string argument-swap hazard.
+  const boundAgentType = agent_id ? parseAgentType(stripNamespace(input.agent_type ?? "")) : null;
+  const boundAgentId = agent_id ? parseAgentId(agent_id) : null;
+  if (boundAgentType && boundAgentId) {
     try {
-      await registry.unbind(sessionId, agentType, agent_id);
+      await registry.unbind(sessionId, boundAgentType, boundAgentId);
     } catch (e) {
       process.stderr.write(`cleanup-subagent-flag: unbind failed for ${agent_id}/${sessionId}: ${e}\n`);
     }

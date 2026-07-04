@@ -18,6 +18,7 @@ import { foldEvidence, isToolAllowed, isTerminal, blockExplanation } from "../..
 import { parseMachineJson } from "../../src/machine/parse-machine";
 import { machineToMermaid } from "../../src/machine/mermaid";
 import type { Evidence } from "../../src/machine/types";
+import { reportSummary } from "./report-summary";
 
 const machinePath = join(__dirname, "../../../machines/code-implementer-agent.machine.json");
 const parsed = parseMachineJson(readFileSync(machinePath, "utf-8"));
@@ -59,7 +60,7 @@ describe("R2 — reporter-confirmed pass carries explicit provenance in the verd
       "Bash",
       { command: "npx vitest run --reporter=json --outputFile=out.json" },
       { exit_code: 0, stdout: "" },
-      () => ({ total: 9, failed: 0, source: "vitest-json" }),
+      () => reportSummary(9, 0),
     );
     const resolved = resolveTestEvidence(ledger, "", true);
     expect(resolved.result).toEqual({ verdict: "trusted-pass" });
@@ -67,22 +68,22 @@ describe("R2 — reporter-confirmed pass carries explicit provenance in the verd
   });
 
   it("NEW: report cross-check — failures or zero-tests never pass", () => {
-    const failing = extractEvidence("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }, () => ({ total: 9, failed: 2, source: "vitest-json" }));
+    const failing = extractEvidence("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }, () => reportSummary(9, 2));
     expect(resolveTestEvidence(failing, "irrelevant", true).result).toEqual({ verdict: "trusted-fail" });
 
-    const empty = extractEvidence("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }, () => ({ total: 0, failed: 0, source: "vitest-json" }));
+    const empty = extractEvidence("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }, () => reportSummary(0, 0));
     expect(resolveTestEvidence(empty, "", true).result).toEqual({ verdict: "trusted-fail" });
   });
 
   it("NEW: last trusted run wins — pass-then-fail fails, fail-then-pass passes", () => {
-    const pass: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: { total: 5, failed: 0, source: "vitest-json" } };
+    const pass: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: reportSummary(5, 0) };
     const fail: Evidence = { kind: "TestRun", command: "npm test", exit: 1, report: null };
     expect(resolveTestEvidence([pass, fail], "", true).result).toEqual({ verdict: "trusted-fail" });
     expect(resolveTestEvidence([fail, pass], "", true).result).toEqual({ verdict: "trusted-pass" });
   });
 
   it("NEW: an untrusted exit-0 run never displaces a trusted verdict", () => {
-    const pass: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: { total: 5, failed: 0, source: "vitest-json" } };
+    const pass: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: reportSummary(5, 0) };
     const noise: Evidence = { kind: "TestRun", command: "npm test", exit: 0, report: null };
     const resolved = resolveTestEvidence([pass, noise], "", true);
     expect(resolved.result).toEqual({ verdict: "trusted-pass" });

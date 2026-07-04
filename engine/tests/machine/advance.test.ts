@@ -10,6 +10,7 @@ import {
 } from "../../src/machine/advance";
 import { initialState, type Evidence } from "../../src/machine/types";
 import { parseMachine } from "../../src/machine/parse-machine";
+import { reportSummary } from "./report-summary";
 
 // MachineDef is branded: parseMachine is its only producer, so tests build
 // the machine the same way production does — from a raw definition.
@@ -33,7 +34,7 @@ const testRun = (over: Partial<Extract<Evidence, { kind: "TestRun" }>> = {}): Ev
   kind: "TestRun",
   command: "npm test",
   exit: 0,
-  report: { total: 5, failed: 0, source: "vitest-json" },
+  report: reportSummary(5, 0),
   ...over,
 });
 
@@ -75,7 +76,7 @@ describe("advance", () => {
   });
 
   it("a report showing failures never advances verify even on exit 0", () => {
-    const s = foldEvidence(machine, [read(), write(), testRun({ report: { total: 5, failed: 1, source: "vitest-json" } })]);
+    const s = foldEvidence(machine, [read(), write(), testRun({ report: reportSummary(5, 1) })]);
     expect(currentPhase(machine, s).id).toBe("verify");
   });
 

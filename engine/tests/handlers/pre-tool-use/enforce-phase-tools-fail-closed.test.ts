@@ -34,7 +34,7 @@ async function bind(session: SessionId, type: string, id: string): Promise<void>
 const run = `gate-fail-closed-${process.pid}-${Date.now()}`;
 // Ledger API takes the branded SessionId; parse once at construction.
 const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
-const sessions = ["missing-fields", "corrupt-binding", "absent", "invalid-machine", "vanished-machine", "crash"].map(sid);
+const sessions = ["missing-fields", "missing-fields-armed", "corrupt-binding", "absent", "invalid-machine", "vanished-machine", "crash"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
@@ -63,7 +63,32 @@ describe("gate fails closed on unattributable input (Fix 1)", () => {
       const noTool = await enforce(JSON.stringify({ session_id: s, tool_input: {} }), []);
       expect(noTool.kind).toBe("block");
     } finally {
-      await unbindMachineAgent(s, "code-implementer-agent", "a-1");
+      await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+    }
+  });
+
+  it("PRESENT-but-unparseable session_id blocks while any binding exists (the SessionId brand's security path)", async () => {
+    // The armed binding lives under a DIFFERENT (valid) session; the attacker
+    // supplies a path-traversal/whitespace session_id that parseSessionId
+    // rejects. anyBindingExists() scans the process-global SUBAGENT_DIR, so a
+    // binding anywhere arms the gate. An unparseable id is unattributable and
+    // MUST fail closed rather than silently pass — this is the exact path the
+    // SessionId brand was minted to close (a raw id could have named a file
+    // outside the subagent dir).
+    const armed = sid("missing-fields-armed");
+    await bind(armed, "code-implementer-agent", "a-1");
+    try {
+      for (const evil of ["../escape", "with space", "a/b", "..", "tab\tid"]) {
+        // Sanity: the boundary parser rejects exactly these.
+        expect(parseSessionId(evil)).toBeNull();
+        const result = await enforce(pre(evil, "Write"), []);
+        expect(result.kind).toBe("block");
+        if (result.kind === "block") {
+          expect(result.message).toContain("invalid session_id");
+        }
+      }
+    } finally {
+      await unbindMachineAgent(armed, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
     }
   });
 });
@@ -108,7 +133,7 @@ describe("gate fails closed on broken machinery (Fix 4)", () => {
       }
     } finally {
       delete process.env.LOOM_MACHINES_DIR;
-      await unbindMachineAgent(s, "corrupt-agent", "a-1");
+      await unbindMachineAgent(s, parseAgentType("corrupt-agent")!, parseAgentId("a-1")!);
       rmSync(machines, { recursive: true, force: true });
     }
   });
@@ -132,7 +157,7 @@ describe("gate fails closed on broken machinery (Fix 4)", () => {
       }
     } finally {
       delete process.env.LOOM_MACHINES_DIR;
-      await unbindMachineAgent(s, "code-implementer-agent", "a-1");
+      await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
       rmSync(machines, { recursive: true, force: true });
     }
   });
@@ -151,7 +176,7 @@ describe("gate fails closed on broken machinery (Fix 4)", () => {
       }
     } finally {
       rmSync(`${SUBAGENT_DIR}/${s}.active`, { recursive: true, force: true });
-      await unbindMachineAgent(s, "code-implementer-agent", "a-1");
+      await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
     }
   });
 });
