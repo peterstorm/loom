@@ -50,6 +50,7 @@ export {
   isBindingFresh,
   resolveSoleActiveBinding,
   SESSION_SUFFIXES,
+  MACHINE_SUFFIX,
   type AgentId,
   type AgentType,
   type SessionFileSuffix,

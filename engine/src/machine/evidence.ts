@@ -76,9 +76,14 @@ export function parseSessionId(raw: string): SessionId | null {
  * so the multi-dot suffix wins over any accidental shorter match when
  * suffix-matching file names.
  */
+/** The per-session binding file suffix — the presence of a `<session>.machine`
+ * file is what marks a session as gated. Named so the gate's binding scan
+ * (enforce-phase-tools) cannot drift from the suffix vocabulary below. */
+export const MACHINE_SUFFIX = ".machine" as const;
+
 export const SESSION_SUFFIXES = [
   ".evidence.jsonl",
-  ".machine",
+  MACHINE_SUFFIX,
   ".active",
   ".cleanup",
   ".task_graph",

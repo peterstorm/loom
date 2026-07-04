@@ -25,6 +25,7 @@ import {
   isToolAllowed,
   loadMachine,
   machineBindingPath,
+  MACHINE_SUFFIX,
   parseSessionId,
   type SessionRegistry,
 } from "../../machine";
@@ -32,7 +33,7 @@ import {
 function anyBindingExists(): boolean {
   try {
     if (!existsSync(SUBAGENT_DIR)) return false;
-    return readdirSync(SUBAGENT_DIR).some((f) => f.endsWith(".machine"));
+    return readdirSync(SUBAGENT_DIR).some((f) => f.endsWith(MACHINE_SUFFIX));
   } catch (e) {
     // Can't scan the dir (e.g. EACCES/ENOENT on readdir) → assume a binding
     // exists → fail closed below. Log it so the generic downstream

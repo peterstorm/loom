@@ -36,6 +36,7 @@ import type { ReviewStatus, SpecCheck, Phase } from "../engine/src/types";
 
 import { TASK_GRAPH_PATH, SUBAGENT_DIR, HARNESS, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR } from "../engine/src/config";
 import { StateManager } from "../engine/src/state-manager";
+import { parseSessionId } from "../engine/src/machine";
 import { buildContextOutput } from "../engine/src/handlers/session-start/resume-after-clear";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
@@ -111,18 +112,29 @@ export default function (pi: ExtensionAPI) {
           return { block: true, reason: taskResult.message };
         }
 
-        // Mark subagent active (equivalent of SubagentStart hook)
-        try {
-          mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
-          appendFileSync(`${SUBAGENT_DIR}/${sessionId}.active`, `${agent}\n`);
-          if (existsSync(TASK_GRAPH_PATH)) {
-            const taskGraphFile = `${SUBAGENT_DIR}/${sessionId}.task_graph`;
-            if (!existsSync(taskGraphFile)) {
-              writeFileSync(taskGraphFile, resolve(TASK_GRAPH_PATH));
+        // Mark subagent active (equivalent of SubagentStart hook).
+        // Parse the session id before interpolating it into SUBAGENT_DIR paths
+        // — a raw id with a separator/`..`/whitespace could address files
+        // outside the subagent dir. Stand down loudly on an unsafe id, mirroring
+        // the engine's record-evidence boundary.
+        const safeSessionId = parseSessionId(sessionId);
+        if (safeSessionId === null) {
+          process.stderr.write(
+            `loom: invalid session id ${JSON.stringify(sessionId)} — subagent tracking skipped\n`,
+          );
+        } else {
+          try {
+            mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+            appendFileSync(`${SUBAGENT_DIR}/${safeSessionId}.active`, `${agent}\n`);
+            if (existsSync(TASK_GRAPH_PATH)) {
+              const taskGraphFile = `${SUBAGENT_DIR}/${safeSessionId}.task_graph`;
+              if (!existsSync(taskGraphFile)) {
+                writeFileSync(taskGraphFile, resolve(TASK_GRAPH_PATH));
+              }
             }
+          } catch (err) {
+            process.stderr.write(`loom: subagent tracking write failed: ${(err as Error).message}\n`);
           }
-        } catch (err) {
-          process.stderr.write(`loom: subagent tracking write failed: ${(err as Error).message}\n`);
         }
       }
     }
@@ -255,12 +267,21 @@ export default function (pi: ExtensionAPI) {
       const agentType = stripNamespace(result.agent);
       const sessionId = _ctx.sessionManager.getSessionId() ?? "unknown";
 
-      // Cleanup subagent flag
-      try {
-        const activeFile = `${SUBAGENT_DIR}/${sessionId}.active`;
-        if (existsSync(activeFile)) unlinkSync(activeFile);
-      } catch (err) {
-        process.stderr.write(`loom: subagent flag cleanup failed: ${(err as Error).message}\n`);
+      // Cleanup subagent flag. Parse the session id before interpolating it
+      // into the SUBAGENT_DIR path (path-traversal guard); an unsafe id could
+      // never have named a tracking file, so there is nothing to clean up.
+      const safeSessionId = parseSessionId(sessionId);
+      if (safeSessionId === null) {
+        process.stderr.write(
+          `loom: invalid session id ${JSON.stringify(sessionId)} — subagent flag cleanup skipped\n`,
+        );
+      } else {
+        try {
+          const activeFile = `${SUBAGENT_DIR}/${safeSessionId}.active`;
+          if (existsSync(activeFile)) unlinkSync(activeFile);
+        } catch (err) {
+          process.stderr.write(`loom: subagent flag cleanup failed: ${(err as Error).message}\n`);
+        }
       }
 
       const mgr = StateManager.fromSession(sessionId);
