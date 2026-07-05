@@ -276,3 +276,89 @@ describe("validateFull (pure)", () => {
     expect(result.ok).toBe(true);
   });
 });
+
+describe("handler routes — fixMinimal and the file-arg path (round-10 gap 23)", () => {
+  it("--minimal --fix with invalid JSON stdin emits a valid default minimal graph on stdout", async () => {
+    const handler = (await import("../../src/handlers/helpers/validate-task-graph")).default;
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      const result = await handler("{definitely not json", ["--minimal", "--fix"]);
+      expect(result.kind).toBe("passthrough");
+      const out = stdoutSpy.mock.calls.map((c) => String(c[0])).join("");
+      const fixed = JSON.parse(out);
+      expect(fixed.current_phase).toBe("init");
+      expect(fixed.phase_artifacts).toEqual({});
+      expect(fixed.skipped_phases).toEqual([]);
+      expect(fixed.spec_file).toBeNull();
+      expect(fixed.plan_file).toBeNull();
+      // Round-trip: the fixed output itself validates.
+      expect(validateMinimal(fixed).ok).toBe(true);
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+  });
+
+  it("--minimal --fix preserves valid fields and defaults only the broken ones", async () => {
+    const handler = (await import("../../src/handlers/helpers/validate-task-graph")).default;
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await handler(
+        JSON.stringify({
+          current_phase: "execute",       // valid → preserved
+          phase_artifacts: ["not", "an", "object"], // invalid → {}
+          skipped_phases: "nope",         // invalid → []
+          spec_file: "spec.md",           // present → preserved
+          // plan_file missing → null
+        }),
+        ["--minimal", "--fix"],
+      );
+      expect(result.kind).toBe("passthrough");
+      const fixed = JSON.parse(stdoutSpy.mock.calls.map((c) => String(c[0])).join(""));
+      expect(fixed.current_phase).toBe("execute");
+      expect(fixed.phase_artifacts).toEqual({});
+      expect(fixed.skipped_phases).toEqual([]);
+      expect(fixed.spec_file).toBe("spec.md");
+      expect(fixed.plan_file).toBeNull();
+    } finally {
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("file-arg route: a missing file is a typed error, an existing file is read and validated", async () => {
+    const handler = (await import("../../src/handlers/helpers/validate-task-graph")).default;
+    const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+
+    const missing = await handler("", ["/nonexistent/graph.json"]);
+    expect(missing.kind).toBe("error");
+    if (missing.kind === "error") expect(missing.message).toContain("File not found");
+
+    const dir = mkdtempSync(join(tmpdir(), "loom-vtg-"));
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const good = join(dir, "minimal.json");
+      writeFileSync(good, JSON.stringify({
+        current_phase: "init",
+        phase_artifacts: {},
+        skipped_phases: [],
+        spec_file: null,
+        plan_file: null,
+      }));
+      // stdin is IGNORED when a file arg is present — pass garbage to prove it.
+      const result = await handler("{garbage stdin", ["--minimal", good]);
+      expect(result.kind).toBe("passthrough");
+
+      const bad = join(dir, "broken.json");
+      writeFileSync(bad, "{not json");
+      const broken = await handler("", ["--minimal", bad]);
+      expect(broken.kind).toBe("error");
+      if (broken.kind === "error") expect(broken.message).toContain("Invalid JSON");
+    } finally {
+      stderrSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

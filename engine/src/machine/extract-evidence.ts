@@ -26,8 +26,11 @@ function isQuoteChar(c: string): c is QuoteChar {
 }
 
 /** Shell separator between two simple-command segments. Newlines count as
- *  `;` — both sequence unconditionally with the same exit semantics. */
-export type SegmentOp = "&&" | "||" | ";" | "|";
+ *  `;` — both sequence unconditionally with the same exit semantics. A single
+ *  `&` backgrounds the segment BEFORE it: that segment's exit is never the
+ *  line's exit (the shell reports 0 immediately), so exit attribution must
+ *  know about it. */
+export type SegmentOp = "&&" | "||" | ";" | "|" | "&";
 
 /** A simple-command segment plus the operator that PRECEDED it (null for
  *  the first segment) — the fact exit attribution needs. */
@@ -79,9 +82,20 @@ export function splitCommandSegmentsWithOps(command: string): CommandSegment[] {
       current += c;
       continue;
     }
-    if (c === "&" && command[i + 1] === "&") {
-      push("&&");
-      i++;
+    if (c === "&") {
+      if (command[i + 1] === "&") {
+        push("&&");
+        i++;
+        continue;
+      }
+      // NOT a separator: `&>` / `&>>` redirects and `>&N` fd dups keep the
+      // `&` inside the segment (it belongs to the redirect syntax).
+      if (command[i + 1] === ">" || command[i - 1] === ">") {
+        current += c;
+        continue;
+      }
+      // A single unquoted `&` backgrounds the preceding segment.
+      push("&");
       continue;
     }
     if (c === "|") {
@@ -234,6 +248,11 @@ export interface ClassifiedTestCommand {
   readonly isSole: boolean;
   readonly isLast: boolean;
   readonly opBefore: SegmentOp | null;
+  /** The operator immediately FOLLOWING the matched segment (null when none):
+   *  `&` here means the segment is backgrounded — its exit is never the
+   *  line's exit. Computed over the RAW segment list, so a trailing blank
+   *  fragment (`npx vitest &`) still reveals the `&`. */
+  readonly opAfter: SegmentOp | null;
 }
 
 /**
@@ -244,8 +263,9 @@ export interface ClassifiedTestCommand {
  * command — the shell's exit would be the assignment's, not the test's.
  */
 export function classifyTestCommandDetailed(command: string): ClassifiedTestCommand | null {
-  const segments = splitCommandSegmentsWithOps(command)
-    .map((s) => ({ ...s, text: stripComment(s.text).trim() }))
+  const raw = splitCommandSegmentsWithOps(command);
+  const segments = raw
+    .map((s, rawIndex) => ({ text: stripComment(s.text).trim(), opBefore: s.opBefore, rawIndex }))
     .filter((s) => s.text !== "");
 
   for (let i = 0; i < segments.length; i++) {
@@ -260,6 +280,7 @@ export function classifyTestCommandDetailed(command: string): ClassifiedTestComm
       isSole: segments.length === 1,
       isLast: i === segments.length - 1,
       opBefore: segments[i].opBefore,
+      opAfter: raw[segments[i].rawIndex + 1]?.opBefore ?? null,
     };
   }
   return null;
@@ -285,16 +306,21 @@ export function classifyTestCommand(command: string): string | null {
  * - last segment, exit 0: attributable after `&&`, `;`, or `|` (the test
  *   ran and the pipeline exit is its own) — but never after `||`, where
  *   exit 0 can mean the guard succeeded and the test never ran
- * - last segment, nonzero exit: attributable only after `;` — after `&&`
- *   the nonzero exit may be the guard's, with the test never executed
+ * - last segment, nonzero exit: attributable only after `;` or `&` (both
+ *   sequence unconditionally — the test definitely ran) — after `&&` the
+ *   nonzero exit may be the guard's, with the test never executed
  *   (a wrongly-attributed nonzero would mint a false trusted-fail)
+ * - BACKGROUNDED segment (`npx vitest &`): the shell reports exit 0 without
+ *   waiting for the test — the line's exit is never the test's, whatever
+ *   the position. Always null.
  */
 export function attributeExit(exit: number | null, classified: ClassifiedTestCommand): number | null {
   if (exit === null) return null;
+  if (classified.opAfter === "&") return null;
   if (classified.isSole) return exit;
   if (!classified.isLast) return null;
   if (exit === 0) return classified.opBefore === "||" ? null : exit;
-  return classified.opBefore === ";" ? exit : null;
+  return classified.opBefore === ";" || classified.opBefore === "&" ? exit : null;
 }
 
 /** Backwards-compatible boolean view of classifyTestCommand. */
@@ -541,7 +567,15 @@ export function extractEvidence(
   toolName: string,
   toolInput: Record<string, unknown>,
   toolResponse: unknown,
-  findReportForSegment: (segment: string, stdout: string) => TestReportSummary | null,
+  findReportForSegment: (
+    segment: string,
+    stdout: string,
+    /** Write targets of THIS command line (raw, unresolved) — the report
+     *  lookup must veto them too: a one-call `printf '{…}' > r.json; npx
+     *  vitest --outputFile=r.json` stages an artifact the persisted ledger
+     *  cannot know about yet. */
+    currentCallWrites: readonly string[],
+  ) => TestReportSummary | null,
 ): Evidence[] {
   if (toolName === "Read") {
     if (isToolFailure(toolResponse)) return [];
@@ -552,7 +586,7 @@ export function extractEvidence(
   if (FILE_MODIFYING_TOOLS.has(toolName)) {
     if (isToolFailure(toolResponse)) return [];
     const path = filePathOf(toolInput);
-    return path ? [{ kind: "FileWrite", path }] : [];
+    return path ? [{ kind: "FileWrite", path, via: "tool" }] : [];
   }
 
   if (toolName === "Bash") {
@@ -562,16 +596,21 @@ export function extractEvidence(
     // tool_response shape: the shell opens/truncates a redirect target BEFORE
     // the command runs, so even a failing call wrote the file — and
     // over-minting only ever vetoes or demotes downstream, never vouches.
-    // Ordered BEFORE any TestRun from the same call, so a test command's own
-    // `| tee log` / `> log` redirect does not read as "files modified AFTER
-    // the pass" and self-demote a trusted verdict.
-    for (const path of extractShellWriteTargets(command)) {
-      events.push({ kind: "FileWrite", path });
+    // Minted with via: "shell": the PreToolUse gate cannot enforce Bash, so
+    // a shell write must never advance a guard the gate is supposed to own
+    // (tokensFor skips them) — it still feeds the artifact veto and the
+    // modified-after-pass demotion. Ordered BEFORE any TestRun from the same
+    // call, so a test command's own `| tee log` / `> log` redirect does not
+    // read as "files modified AFTER the pass" and self-demote a trusted
+    // verdict.
+    const shellWrites = extractShellWriteTargets(command);
+    for (const path of shellWrites) {
+      events.push({ kind: "FileWrite", path, via: "shell" });
     }
     const classified = classifyTestCommandDetailed(command);
     if (classified !== null) {
       const outcome = extractBashOutcome(toolResponse);
-      const report = findReportForSegment(classified.segment, outcome.stdout);
+      const report = findReportForSegment(classified.segment, outcome.stdout, shellWrites);
       // The line's exit is attributed to the test segment only when the
       // composition proves ownership (attributeExit) — `false && npx vitest
       // …; true` exits 0 without vitest running, and must not classify as a

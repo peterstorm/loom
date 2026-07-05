@@ -31,7 +31,9 @@ describe("record-evidence core against the SessionRegistry fake (no fs)", () => 
 
     const records = reg.readEvidence(sessionId);
     expect(records).toHaveLength(1);
-    expect(records[0].event).toEqual({ kind: "FileWrite", path: "src/x.ts" });
+    // Paths are resolved at MINT time against the call's cwd (a later
+    // reader's cwd may differ), and tool writes carry via: "tool".
+    expect(records[0].event).toEqual({ kind: "FileWrite", path: "/repo/src/x.ts", via: "tool" });
     expect(records[0].epoch).toBe(reg.soleActiveBinding(sessionId)!.epoch);
   });
 

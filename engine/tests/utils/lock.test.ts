@@ -80,3 +80,50 @@ describe("lock", () => {
     expect(isStaleLock(lockDir)).toBe(false);
   });
 });
+
+describe("stealStaleLock — live-lock restore path (round-10 gap 18)", () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("a LIVE lock grabbed by the tomb rename is put back, and the steal reports false", async () => {
+    tmpDir = makeTmpDir();
+    const lockDir = join(tmpDir, "live.lock");
+    // A live lock: pid file names THIS (running) process.
+    mkdirSync(lockDir);
+    writeFileSync(join(lockDir, "pid"), `${process.pid}`);
+
+    const { stealStaleLock } = await import("../../src/utils/lock");
+    expect(stealStaleLock(lockDir)).toBe(false);
+    // Restored in place: dir exists, pid intact, no tomb left behind.
+    expect(existsSync(lockDir)).toBe(true);
+    expect(existsSync(join(lockDir, "pid"))).toBe(true);
+    const { readdirSync } = await import("node:fs");
+    expect(readdirSync(tmpDir).filter((e) => e.includes(".tomb-"))).toEqual([]);
+  });
+
+  it("a genuinely stale lock is reaped and the steal reports true", async () => {
+    tmpDir = makeTmpDir();
+    const lockDir = join(tmpDir, "stale.lock");
+    mkdirSync(lockDir);
+    writeFileSync(join(lockDir, "pid"), "999999999"); // dead pid
+
+    const { stealStaleLock } = await import("../../src/utils/lock");
+    const { vi } = await import("vitest");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(stealStaleLock(lockDir)).toBe(true);
+      expect(existsSync(lockDir)).toBe(false);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("a lock that vanished before the rename is a normal retry (false), never a crash", async () => {
+    tmpDir = makeTmpDir();
+    const { stealStaleLock } = await import("../../src/utils/lock");
+    expect(stealStaleLock(join(tmpDir, "never-existed.lock"))).toBe(false);
+  });
+});

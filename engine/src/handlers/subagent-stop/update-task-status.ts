@@ -23,14 +23,16 @@ import * as git from "../../utils/git";
 import {
   epochOf,
   eventsForEpoch,
+  foldEvidence,
   judgeTestRun,
   loadMachine,
+  missingRequirements,
   parseAgentId,
   parseAgentType,
   parseSessionId,
   readEvidence,
 } from "../../machine";
-import type { Evidence, EvidenceRecord, LoadedMachine, TrustedTestVerdict } from "../../machine";
+import type { Evidence, EvidenceRecord, LoadedMachine, Requirement, TrustedTestVerdict } from "../../machine";
 
 /**
  * Is the agent's machine BOUND for evidence purposes? "invalid" counts as
@@ -228,6 +230,29 @@ export function resolveTestEvidence(
   return {
     result: { verdict: "untrusted", passed: true, label },
     evidence: `${label}: ${fallback.evidence}`,
+  };
+}
+
+/**
+ * The machine's completion judgment, applied to the resolved verdict: when
+ * the agent's machine declares terminal requirements the epoch's evidence
+ * does not satisfy, a resolution claiming a TRUSTED PASS is capped at
+ * untrusted with a "machine-incomplete" label naming exactly what is
+ * missing — completion must not be self-reported past the machine. A
+ * trusted FAIL is already ground truth of non-completion (the gate treats
+ * it as missing evidence) and is kept as-is; untrusted resolutions are
+ * already at the floor.
+ */
+export function capVerdictForMachineCompletion(
+  resolved: ResolvedTestEvidence,
+  missing: readonly Requirement[],
+): ResolvedTestEvidence {
+  if (missing.length === 0 || resolved.result.verdict !== "trusted-pass") return resolved;
+  const reqs = missing.map((r) => `${r.event} ≥ ${r.min}`).join(", ");
+  const label = `machine-incomplete: ${reqs}`;
+  return {
+    result: { verdict: "untrusted", passed: true, label },
+    evidence: `${label} — ${resolved.evidence}`,
   };
 }
 
@@ -458,8 +483,9 @@ export const runUpdateTaskStatus = async (
   // machinesDir() is resolved at call time (not the import-frozen constant)
   // so a re-pointed LOOM_MACHINES_DIR is honored without a module reload —
   // the same dir the gate and recorder consult.
-  const machineBound =
-    epochAgentType !== null && isMachineBound(loadMachine(machinesDir(), epochAgentType));
+  const loadedMachine: LoadedMachine =
+    epochAgentType !== null ? loadMachine(machinesDir(), epochAgentType) : { kind: "none" };
+  const machineBound = isMachineBound(loadedMachine);
   // A failed dispatcher snapshot means ledger contents are UNKNOWN — say so
   // and let resolveTestEvidence label the verdict snapshot-read-failed
   // instead of pretending the ledger was empty ("degraded").
@@ -494,7 +520,26 @@ export const runUpdateTaskStatus = async (
   const epochEvents = epochAgentId && epochAgentType
     ? eventsForEpoch(records, epochOf(epochAgentId, epochAgentType))
     : [];
-  const testEvidence = resolveTestEvidence(epochEvents, bashTestOutput, machineBound, snapshotFailed);
+  let testEvidence = resolveTestEvidence(epochEvents, bashTestOutput, machineBound, snapshotFailed);
+  // Machine-bound agents don't self-report completion: fold this epoch's
+  // evidence through the machine and consult its terminal requirements —
+  // unmet requirements cap a trusted-pass at untrusted, labeled with what is
+  // missing. Skipped when the snapshot failed (ledger contents unknown — the
+  // snapshot-read-failed label already says so) and for invalid machines
+  // (nothing to fold; the gate fails closed on those independently).
+  if (!snapshotFailed && loadedMachine.kind === "machine") {
+    const missing = missingRequirements(
+      loadedMachine.machine,
+      foldEvidence(loadedMachine.machine, epochEvents),
+    );
+    const capped = capVerdictForMachineCompletion(testEvidence, missing);
+    if (capped !== testEvidence) {
+      process.stderr.write(
+        `update-task-status: machine ${loadedMachine.machine.agent} reports unmet terminal requirements — capping verdict at untrusted (${capped.result.verdict === "untrusted" ? capped.result.label : ""})\n`,
+      );
+      testEvidence = capped;
+    }
+  }
 
   // Section 2: New test verification via git diff
   let newTestEvidence: NewTestEvidence = { written: false, evidence: "" };

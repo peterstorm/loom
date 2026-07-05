@@ -157,13 +157,13 @@ export function formatBindingLine(binding: MachineBinding, boundAtMs: number): s
  * session stays active, and expires only after the whole session idles
  * past the TTL — bounded recovery instead of gating the session forever.
  */
-export function isBindingFresh(
-  boundAtMs: number,
-  anchorMs: number,
-  nowMs: number,
-  ttlMs: number,
-): boolean {
-  return nowMs - Math.max(boundAtMs, anchorMs) <= ttlMs;
+export function isBindingFresh(args: {
+  readonly boundAtMs: number;
+  readonly anchorMs: number;
+  readonly nowMs: number;
+  readonly ttlMs: number;
+}): boolean {
+  return args.nowMs - Math.max(args.boundAtMs, args.anchorMs) <= args.ttlMs;
 }
 
 // --- Evidence record parsing (parse, don't validate) ---
@@ -183,8 +183,17 @@ function parseEvent(raw: unknown): Evidence | null {
   const o = raw as Record<string, unknown>;
   switch (o.kind) {
     case "FileRead":
-    case "FileWrite":
       return typeof o.path === "string" && o.path !== "" ? { kind: o.kind, path: o.path } : null;
+    case "FileWrite": {
+      if (typeof o.path !== "string" || o.path === "") return null;
+      // Absent via = "tool" (old records — only tool writes were minted
+      // historically). An UNRECOGNIZED via fails closed to "shell": the
+      // write still vetoes/demotes but never advances a guard — the
+      // fail-closed direction for both consumers.
+      if (o.via === undefined) return { kind: o.kind, path: o.path };
+      const via = o.via === "tool" ? "tool" : "shell";
+      return { kind: o.kind, path: o.path, via };
+    }
     case "TestRun": {
       if (typeof o.command !== "string") return null;
       const exit = typeof o.exit === "number" ? o.exit : null;
@@ -210,12 +219,37 @@ export function parseEvidenceLine(line: string): EvidenceRecord | null {
   const epoch = parseEpoch(o.epoch);
   if (epoch === null) return null;
   const event = parseEvent(o.event);
-  return event ? { epoch, event } : null;
+  if (event === null) return null;
+  // callId is the optional idempotency stamp (harness tool_use_id) —
+  // additive wire change: absent or non-string reads as "no stamp".
+  return typeof o.callId === "string" && o.callId !== ""
+    ? { epoch, event, callId: o.callId }
+    : { epoch, event };
 }
 
-/** Events attributable to one run. */
+/**
+ * Events attributable to one run — the fold boundary every reader (gate,
+ * recorder veto, SubagentStop resolver) goes through. Duplicate DELIVERIES
+ * are dropped here: a re-sent PostToolUse appends identical records, so a
+ * record whose (callId, event) pair was already seen within the epoch is a
+ * duplicate of the same tool call, never a second call (one call mints each
+ * of its events at most once — shell targets are Set-deduped, one TestRun).
+ * Records with NO callId (old ledgers, harnesses without tool_use_id) are
+ * never deduplicated — absent evidence of duplication, keep everything.
+ */
 export function eventsForEpoch(records: readonly EvidenceRecord[], epoch: Epoch): Evidence[] {
-  return records.filter((r) => r.epoch === epoch).map((r) => r.event);
+  const seen = new Set<string>();
+  const events: Evidence[] = [];
+  for (const r of records) {
+    if (r.epoch !== epoch) continue;
+    if (r.callId !== undefined) {
+      const key = `${r.callId} ${JSON.stringify(r.event)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    events.push(r.event);
+  }
+  return events;
 }
 
 /**
@@ -260,6 +294,12 @@ export interface SessionRegistry {
   readonly soleActiveBinding: (sessionId: SessionId) => MachineBinding | null;
   readonly refreshBindingActivity: (sessionId: SessionId) => Promise<void>;
   readonly readBindings: (sessionId: SessionId) => readonly MachineBinding[];
-  readonly appendEvidence: (sessionId: SessionId, epoch: Epoch, events: readonly Evidence[]) => void;
-  readonly readEvidence: (sessionId: SessionId) => EvidenceRecord[];
+  readonly appendEvidence: (
+    sessionId: SessionId,
+    epoch: Epoch,
+    events: readonly Evidence[],
+    /** Idempotency stamp (harness tool_use_id) — see EvidenceRecord.callId. */
+    callId?: string,
+  ) => void;
+  readonly readEvidence: (sessionId: SessionId) => readonly EvidenceRecord[];
 }

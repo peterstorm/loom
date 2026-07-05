@@ -38,9 +38,20 @@ export type TestReportSummary = {
  * the ledger path — full integrity (HMAC / out-of-reach storage) is a
  * documented follow-up.
  */
+/**
+ * Provenance of a FileWrite: "tool" = the harness's own file-modifying tools
+ * (Edit/Write/MultiEdit — the gate can enforce them), "shell" = a Bash
+ * redirect/tee target (the gate can NOT enforce Bash). Guard advancement
+ * counts only tool writes (tokensFor); shell writes still feed the
+ * agent-authored-artifact veto and the modified-after-pass demotion.
+ * Absent on the wire means "tool" — historically only tool writes were
+ * minted, and the recorder now stamps every shell write explicitly.
+ */
+export type FileWriteVia = "tool" | "shell";
+
 export type Evidence =
   | { readonly kind: "FileRead"; readonly path: string }
-  | { readonly kind: "FileWrite"; readonly path: string }
+  | { readonly kind: "FileWrite"; readonly path: string; readonly via?: FileWriteVia }
   | {
       readonly kind: "TestRun";
       readonly command: string;
@@ -68,6 +79,15 @@ export type Epoch = string & { readonly [EPOCH]: true };
 export interface EvidenceRecord {
   readonly epoch: Epoch;
   readonly event: Evidence;
+  /**
+   * Idempotency key: the harness's tool_use_id for the call that minted this
+   * record. A re-delivered PostToolUse appends byte-identical lines; the fold
+   * boundary (eventsForEpoch) drops duplicates on (epoch, callId, event) so a
+   * duplicated hook cannot double-count guard evidence. Optional and additive:
+   * old records (and harnesses that expose no id) carry none and are never
+   * deduplicated — the pre-existing behavior.
+   */
+  readonly callId?: string;
 }
 
 /** Countable event tokens the machine's guards reference. */

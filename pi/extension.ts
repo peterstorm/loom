@@ -7,7 +7,7 @@
 
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync, readFileSync, readdirSync, statSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
+import { existsSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
@@ -34,7 +34,8 @@ import {
 import { parseSpecCheckOutput } from "../engine/src/handlers/subagent-stop/store-spec-check-findings";
 import type { ReviewStatus, SpecCheck, Phase } from "../engine/src/types";
 
-import { TASK_GRAPH_PATH, SUBAGENT_DIR, HARNESS, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR } from "../engine/src/config";
+import { TASK_GRAPH_PATH, SUBAGENT_DIR, HARNESS, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
+import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { parseSessionId } from "../engine/src/machine";
 import { buildContextOutput } from "../engine/src/handlers/session-start/resume-after-clear";
@@ -64,100 +65,113 @@ export default function (pi: ExtensionAPI) {
   // ─── PreToolUse Guards (tool_call event) ──────────────────────────────
 
   pi.on("tool_call", async (event, ctx) => {
-    const sessionId = ctx.sessionManager.getSessionId() ?? "unknown";
+    // Fail CLOSED on a crashed guard: an uncaught throw in this chain has
+    // undefined polarity in pi (whether the tool proceeds is the harness's
+    // choice) — a guard that dies must block, loudly naming itself, or a
+    // crash in e.g. guardStateFile silently waves state-file writes through.
+    let currentGuard = "session-id";
+    try {
+      const sessionId = ctx.sessionManager.getSessionId() ?? "unknown";
 
-    // Block direct edits during orchestration
-    if (isToolCallEventType("edit", event) || isToolCallEventType("write", event)) {
-      const result = shouldBlockDirectEdit(event.toolName, sessionId);
-      if (result.kind === "block") {
-        return { block: true, reason: result.message };
+      // Block direct edits during orchestration
+      if (isToolCallEventType("edit", event) || isToolCallEventType("write", event)) {
+        currentGuard = "block-direct-edits";
+        const result = shouldBlockDirectEdit(event.toolName, sessionId);
+        if (result.kind === "block") {
+          return { block: true, reason: result.message };
+        }
       }
-    }
 
-    // Guard state file from bash writes
-    if (isToolCallEventType("bash", event)) {
-      const result = guardStateFile(event.input.command ?? "");
-      if (result.kind === "block") {
-        return { block: true, reason: result.message };
+      // Guard state file from bash writes
+      if (isToolCallEventType("bash", event)) {
+        currentGuard = "guard-state-file";
+        const result = guardStateFile(event.input.command ?? "");
+        if (result.kind === "block") {
+          return { block: true, reason: result.message };
+        }
       }
-    }
 
-    // Subagent tool → phase and task validation
-    if (event.toolName === "subagent") {
-      const agent = (event.input as Record<string, unknown>).agent as string | undefined;
-      const task = (event.input as Record<string, unknown>).task as string | undefined;
+      // Subagent tool → phase and task validation
+      if (event.toolName === "subagent") {
+        const agent = (event.input as Record<string, unknown>).agent as string | undefined;
+        const task = (event.input as Record<string, unknown>).task as string | undefined;
 
-      if (agent && task) {
-        // Phase order validation
-        const phaseResult = validatePhaseOrder({
-          agentType: agent,
-          prompt: task,
-        });
-        if (phaseResult.kind === "block") {
-          return { block: true, reason: phaseResult.message };
-        }
+        if (agent && task) {
+          // Phase order validation
+          currentGuard = "validate-phase-order";
+          const phaseResult = validatePhaseOrder({
+            agentType: agent,
+            prompt: task,
+          });
+          if (phaseResult.kind === "block") {
+            return { block: true, reason: phaseResult.message };
+          }
 
-        // Template substitution check
-        const templateResult = validateTemplateSubstitution(task);
-        if (templateResult.kind === "block") {
-          return { block: true, reason: templateResult.message };
-        }
+          // Template substitution check
+          currentGuard = "validate-template-substitution";
+          const templateResult = validateTemplateSubstitution(task);
+          if (templateResult.kind === "block") {
+            return { block: true, reason: templateResult.message };
+          }
 
-        // Task execution validation (wave order, deps, review gates)
-        const taskResult = await validateTaskExecution({
-          prompt: task,
-          description: (event.input as Record<string, unknown>).description as string ?? "",
-        });
-        if (taskResult.kind === "block") {
-          return { block: true, reason: taskResult.message };
-        }
+          // Task execution validation (wave order, deps, review gates)
+          currentGuard = "validate-task-execution";
+          const taskResult = await validateTaskExecution({
+            prompt: task,
+            description: (event.input as Record<string, unknown>).description as string ?? "",
+          });
+          if (taskResult.kind === "block") {
+            return { block: true, reason: taskResult.message };
+          }
 
-        // Mark subagent active (equivalent of SubagentStart hook).
-        // Parse the session id before interpolating it into SUBAGENT_DIR paths
-        // — a raw id with a separator/`..`/whitespace could address files
-        // outside the subagent dir. Stand down loudly on an unsafe id, mirroring
-        // the engine's record-evidence boundary.
-        const safeSessionId = parseSessionId(sessionId);
-        if (safeSessionId === null) {
-          process.stderr.write(
-            `loom: invalid session id ${JSON.stringify(sessionId)} — subagent tracking skipped\n`,
-          );
-        } else {
-          try {
-            mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
-            appendFileSync(`${SUBAGENT_DIR}/${safeSessionId}.active`, `${agent}\n`);
-            if (existsSync(TASK_GRAPH_PATH)) {
-              const taskGraphFile = `${SUBAGENT_DIR}/${safeSessionId}.task_graph`;
-              if (!existsSync(taskGraphFile)) {
-                writeFileSync(taskGraphFile, resolve(TASK_GRAPH_PATH));
+          // Mark subagent active (equivalent of SubagentStart hook).
+          // Parse the session id before interpolating it into SUBAGENT_DIR paths
+          // — a raw id with a separator/`..`/whitespace could address files
+          // outside the subagent dir. Stand down loudly on an unsafe id, mirroring
+          // the engine's record-evidence boundary.
+          currentGuard = "subagent-tracking";
+          const safeSessionId = parseSessionId(sessionId);
+          if (safeSessionId === null) {
+            process.stderr.write(
+              `loom: invalid session id ${JSON.stringify(sessionId)} — subagent tracking skipped\n`,
+            );
+          } else {
+            try {
+              mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+              appendFileSync(`${SUBAGENT_DIR}/${safeSessionId}.active`, `${agent}\n`);
+              if (existsSync(TASK_GRAPH_PATH)) {
+                const taskGraphFile = `${SUBAGENT_DIR}/${safeSessionId}.task_graph`;
+                if (!existsSync(taskGraphFile)) {
+                  writeFileSync(taskGraphFile, resolve(TASK_GRAPH_PATH));
+                }
               }
+            } catch (err) {
+              process.stderr.write(`loom: subagent tracking write failed: ${(err as Error).message}\n`);
             }
-          } catch (err) {
-            process.stderr.write(`loom: subagent tracking write failed: ${(err as Error).message}\n`);
           }
         }
       }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        `loom(pi): tool_call guard '${currentGuard}' crashed — blocking the call (fail-closed): ${message}\n`,
+      );
+      return {
+        block: true,
+        reason: `loom guard '${currentGuard}' crashed (failing closed): ${message}`,
+      };
     }
   });
 
   // ─── Session Lifecycle ────────────────────────────────────────────────
 
-  pi.on("session_start", async (_event, ctx) => {
-    // Cleanup stale subagent tracking files (> 60 min old)
-    if (existsSync(SUBAGENT_DIR)) {
-      const cutoff = Date.now() - 60 * 60_000;
-      try {
-        const { statSync, unlinkSync } = await import("node:fs");
-        for (const entry of readdirSync(SUBAGENT_DIR)) {
-          const path = join(SUBAGENT_DIR, entry);
-          try {
-            if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
-          } catch { /* individual file cleanup is best-effort */ }
-        }
-      } catch (err) {
-        process.stderr.write(`loom: session cleanup failed: ${(err as Error).message}\n`);
-      }
-    }
+  pi.on("session_start", async (_event, _ctx) => {
+    // Cleanup stale subagent tracking files — the ENGINE's sweep, not a
+    // per-file twin: staleness is judged per session GROUP (max mtime across
+    // the session's files), and the TTL is the shared STALE_SUBAGENT_TTL_MS,
+    // so a live session's roster/ledger can't be reaped out from under a
+    // fresh `.machine` anchor.
+    sweepStaleSessions(SUBAGENT_DIR, Date.now() - STALE_SUBAGENT_TTL_MS);
   });
 
   // ─── Resume Context (before_agent_start) ──────────────────────────────
@@ -345,7 +359,7 @@ export default function (pi: ExtensionAPI) {
       if (IMPL_AGENTS.has(agentType)) {
         // Extract task ID from the original task prompt (works in parallel mode)
         // Then get transcript from per-result messages for test evidence
-        const taskId = extractTaskId(result.task ?? "") ?? extractTaskId(
+        let taskId = extractTaskId(result.task ?? "") ?? extractTaskId(
           event.content.filter((c: { type: string }) => c.type === "text").map((c: { type: string; text?: string }) => c.text ?? "").join("\n")
         );
         // Build transcript from per-result messages (each parallel result has its own messages)
@@ -355,8 +369,28 @@ export default function (pi: ExtensionAPI) {
           .flatMap((m: PiMessage) => (m.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? ""))
           .join("\n");
 
-
-        if (!taskId) continue;
+        // Mirrors the engine's update-task-status: an unextractable task ID
+        // must not vanish silently. Exactly one executing task → infer it;
+        // ambiguous/empty → warn and clear executing_tasks (never mark tasks
+        // failed — that cascades into evidence overwrites downstream).
+        if (!taskId) {
+          const st = mgr.load();
+          const executing = st.executing_tasks ?? [];
+          if (executing.length === 1) {
+            process.stderr.write(
+              `WARNING: ${agentType} task ID extraction failed, inferred task ${executing[0]} from executing_tasks\n`,
+            );
+            taskId = executing[0];
+          } else {
+            if (executing.length > 0) {
+              process.stderr.write(
+                `WARNING: ${agentType} completed without task ID, ${executing.length} tasks executing (ambiguous)\n`,
+              );
+            }
+            await mgr.update((s) => ({ ...s, executing_tasks: [] }));
+            continue;
+          }
+        }
 
         const state = mgr.load();
         const task = state.tasks.find((t) => t.id === taskId);
@@ -444,7 +478,16 @@ export default function (pi: ExtensionAPI) {
           .filter((m: PiMessage) => m.role === "assistant" || m.role === "toolResult")
           .flatMap((m: PiMessage) => (m.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? ""))
           .join("\n");
-        if (!taskId) continue;
+        if (!taskId) {
+          // A review whose task ID is unextractable stores nothing — its
+          // findings silently never gate the wave. Say so instead of
+          // vanishing (review agents don't sit in executing_tasks, so there
+          // is no inference to fall back on).
+          process.stderr.write(
+            `WARNING: ${agentType} review completed without an extractable task ID — findings NOT stored\n`,
+          );
+          continue;
+        }
 
         const findings = parseMachineSummary(transcriptText) ?? parseLegacyFindings(transcriptText);
 

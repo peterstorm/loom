@@ -87,12 +87,13 @@ describe("pure liveness primitives", () => {
   it("isBindingFresh uses the LATER of bind stamp and activity anchor", () => {
     const ttl = STALE_SUBAGENT_TTL_MS;
     const now = 1_000_000_000_000;
-    expect(isBindingFresh(now - ttl, now - ttl, now, ttl)).toBe(true); // exactly at TTL
-    expect(isBindingFresh(now - ttl - 1, now - ttl - 1, now, ttl)).toBe(false);
+    // exactly at TTL
+    expect(isBindingFresh({ boundAtMs: now - ttl, anchorMs: now - ttl, nowMs: now, ttlMs: ttl })).toBe(true);
+    expect(isBindingFresh({ boundAtMs: now - ttl - 1, anchorMs: now - ttl - 1, nowMs: now, ttlMs: ttl })).toBe(false);
     // old bind stamp, recent activity → fresh
-    expect(isBindingFresh(now - 2 * ttl, now - 1000, now, ttl)).toBe(true);
+    expect(isBindingFresh({ boundAtMs: now - 2 * ttl, anchorMs: now - 1000, nowMs: now, ttlMs: ttl })).toBe(true);
     // recent bind stamp, old anchor (clock skew) → fresh
-    expect(isBindingFresh(now - 1000, now - 2 * ttl, now, ttl)).toBe(true);
+    expect(isBindingFresh({ boundAtMs: now - 1000, anchorMs: now - 2 * ttl, nowMs: now, ttlMs: ttl })).toBe(true);
   });
 });
 

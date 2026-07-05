@@ -28,7 +28,7 @@ import { SUBAGENT_DIR } from "../../../src/config";
 const run = `record-evidence-${process.pid}-${Date.now()}`;
 // Ledger API takes the branded SessionId; parse once at construction.
 const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
-const sessions = ["contended", "leaked", "ungated", "forged-report", "honest-report"].map(sid);
+const sessions = ["contended", "leaked", "ungated", "forged-report", "honest-report", "one-call-forge", "dup-delivery"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
@@ -181,6 +181,99 @@ describe("agent-authored --outputFile artifacts cannot vouch (epoch FileWrite ve
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("ONE-call staging is vetoed too: `printf '{…}' > r.json; npx vitest --outputFile=r.json` cannot vouch (round-10 Fix 1)", async () => {
+    const s = sid("one-call-forge");
+    const dir = mkdtempSync(join(tmpdir(), "loom-one-call-forge-"));
+    const reportPath = join(dir, "r.json");
+    await bind(s, "code-implementer-agent", "a-1");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n");
+    // The forged artifact exists and is fresh, exactly as if the printf in
+    // the SAME command line had just written it. The persisted ledger is
+    // EMPTY — only the current call's own shell-write targets can veto.
+    writeFileSync(reportPath, JSON.stringify({ numTotalTests: 5, numFailedTests: 0 }));
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await recordEvidence(
+        JSON.stringify({
+          session_id: s,
+          tool_name: "Bash",
+          tool_input: {
+            command: `printf '{"numTotalTests":5,"numFailedTests":0}' > ${reportPath}; npx vitest --version --outputFile=${reportPath}`,
+          },
+          tool_response: { exit_code: 0, stdout: "" },
+          cwd: dir,
+        }),
+        [],
+      );
+      expect(result.kind).toBe("passthrough");
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain(`rejecting --outputFile '${reportPath}'`);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    const events = readEvidence(s).map((r) => r.event);
+    const testRun = events.find((e) => e.kind === "TestRun");
+    expect(testRun).toBeDefined();
+    // report: null → judgeTestRun says untrusted — never a forged trusted-pass.
+    expect(testRun && testRun.kind === "TestRun" && testRun.report).toBeNull();
+    // The staged target itself was minted as a SHELL write (never advances guards).
+    const staged = events.find((e) => e.kind === "FileWrite");
+    expect(staged && staged.kind === "FileWrite" && staged.via).toBe("shell");
+
+    await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("a RELATIVE staged target is vetoed against the call's cwd (mint-time resolution, round-10 Fix 8)", async () => {
+    const s = sid("one-call-forge");
+    const dir = mkdtempSync(join(tmpdir(), "loom-relative-forge-"));
+    const reportPath = join(dir, "r.json");
+    await bind(s, "code-implementer-agent", "a-1");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n");
+    writeFileSync(reportPath, JSON.stringify({ numTotalTests: 5, numFailedTests: 0 }));
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      // First call stages via a RELATIVE redirect target…
+      await recordEvidence(
+        JSON.stringify({
+          session_id: s,
+          tool_name: "Bash",
+          tool_input: { command: "printf '{}' > r.json" },
+          tool_response: { exit_code: 0, stdout: "" },
+          cwd: dir,
+        }),
+        [],
+      );
+      // …second call vouches with the ABSOLUTE path. The ledger recorded the
+      // stage resolved against the FIRST call's cwd, so the veto still hits.
+      await recordEvidence(
+        JSON.stringify({
+          session_id: s,
+          tool_name: "Bash",
+          tool_input: { command: `npx vitest --version --outputFile=${reportPath}` },
+          tool_response: { exit_code: 0, stdout: "" },
+          cwd: dir,
+        }),
+        [],
+      );
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain(`rejecting --outputFile '${reportPath}'`);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    const staged = readEvidence(s).map((r) => r.event).find((e) => e.kind === "FileWrite");
+    // Mint-time resolution: the ledger carries the absolute path.
+    expect(staged && staged.kind === "FileWrite" && staged.path).toBe(reportPath);
+
+    await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("control: an --outputFile NOT written by the agent still vouches (report parsed)", async () => {
     const s = sid("honest-report");
     const dir = mkdtempSync(join(tmpdir(), "loom-honest-report-"));
@@ -213,5 +306,35 @@ describe("agent-authored --outputFile artifacts cannot vouch (epoch FileWrite ve
 
     await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("duplicated PostToolUse deliveries never double-count (round-10 Fix 6)", () => {
+  it("the same tool_use_id delivered twice folds to ONE event set", async () => {
+    const s = sid("dup-delivery");
+    await bind(s, "code-implementer-agent", "a-1");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n");
+
+    const delivery = JSON.stringify({
+      session_id: s,
+      tool_name: "Write",
+      tool_input: { file_path: "/tmp/impl.ts" },
+      tool_use_id: "toolu_dup_01",
+      cwd: "/tmp",
+    });
+    await recordEvidence(delivery, []);
+    await recordEvidence(delivery, []); // re-delivered by the harness
+
+    const records = readEvidence(s);
+    expect(records).toHaveLength(2); // both lines land in the append-only ledger…
+    const epoch = epochOf(parseAgentId("a-1")!, parseAgentType("code-implementer-agent")!);
+    // …but the fold boundary sees the call ONCE.
+    const { eventsForEpoch } = await import("../../../src/machine/evidence");
+    expect(eventsForEpoch(records, epoch)).toEqual([
+      { kind: "FileWrite", path: "/tmp/impl.ts", via: "tool" },
+    ]);
+
+    await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
   });
 });

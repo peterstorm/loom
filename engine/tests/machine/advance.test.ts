@@ -7,6 +7,7 @@ import {
   isTerminal,
   missingRequirements,
   blockExplanation,
+  tokensFor,
 } from "../../src/machine/advance";
 import { initialState, type Evidence } from "../../src/machine/types";
 import { parseMachine } from "../../src/machine/parse-machine";
@@ -152,5 +153,22 @@ describe("missingRequirements — broken terminal-is-last invariant fails CLOSED
     // The sentinel is unsatisfiable by construction — the impossible state
     // can never be reported as clean completion.
     expect(satisfied(MACHINE_INVARIANT_VIOLATED, { FileRead: 9999, FileWrite: 9999, TestRun: 9999, TestRunPassed: 9999 })).toBe(false);
+  });
+});
+
+describe("tokensFor — shell writes never advance guards (round-10 Fix 5)", () => {
+  it("via: 'shell' counts nothing; via: 'tool' and absent (old records) count FileWrite", () => {
+    expect(tokensFor({ kind: "FileWrite", path: "/x", via: "shell" })).toEqual([]);
+    expect(tokensFor({ kind: "FileWrite", path: "/x", via: "tool" })).toEqual(["FileWrite"]);
+    expect(tokensFor({ kind: "FileWrite", path: "/x" })).toEqual(["FileWrite"]);
+  });
+
+  it("a Bash redirect cannot push the machine past the implement guard", () => {
+    // read → implement; a shell write must leave the machine in implement.
+    const viaShell = foldEvidence(machine, [read(), { kind: "FileWrite", path: "/x", via: "shell" }]);
+    expect(currentPhase(machine, viaShell).id).toBe("implement");
+    // …while a tool write advances to verify.
+    const viaTool = foldEvidence(machine, [read(), write()]);
+    expect(currentPhase(machine, viaTool).id).toBe("verify");
   });
 });

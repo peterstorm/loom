@@ -29,6 +29,9 @@ export function inMemorySessionRegistry(): SessionRegistry {
   return {
     bind: async (sessionId: string, agentType: AgentType, agentId: AgentId): Promise<void> => {
       const current = bindings.get(sessionId) ?? [];
+      // Idempotent on (agentId, agentType), mirroring bindMachineAgent: a
+      // duplicated SubagentStart must not create a contended-looking session.
+      if (current.some((b) => b.agentId === agentId && b.agentType === agentType)) return;
       if (current.length === 0) ledger.set(sessionId, []); // truncate previous run
       bindings.set(sessionId, [
         ...current,
@@ -46,7 +49,10 @@ export function inMemorySessionRegistry(): SessionRegistry {
     },
 
     markActive: async (sessionId: string, agentId: AgentId): Promise<void> => {
-      active.set(sessionId, [...(active.get(sessionId) ?? []), agentId]);
+      const roster = active.get(sessionId) ?? [];
+      // Set semantics keyed by agentId, mirroring markAgentActive.
+      if (roster.includes(agentId)) return;
+      active.set(sessionId, [...roster, agentId]);
     },
 
     removeActive: async (sessionId: string, agentId: AgentId): Promise<void> => {
@@ -64,14 +70,19 @@ export function inMemorySessionRegistry(): SessionRegistry {
 
     readBindings: (sessionId: string): readonly MachineBinding[] => bindings.get(sessionId) ?? [],
 
-    appendEvidence: (sessionId: string, epoch: Epoch, events: readonly Evidence[]): void => {
+    appendEvidence: (
+      sessionId: string,
+      epoch: Epoch,
+      events: readonly Evidence[],
+      callId?: string,
+    ): void => {
       if (events.length === 0) return;
       ledger.set(sessionId, [
         ...(ledger.get(sessionId) ?? []),
-        ...events.map((event) => ({ epoch, event })),
+        ...events.map((event) => (callId !== undefined ? { epoch, event, callId } : { epoch, event })),
       ]);
     },
 
-    readEvidence: (sessionId: string): EvidenceRecord[] => [...(ledger.get(sessionId) ?? [])],
+    readEvidence: (sessionId: string): readonly EvidenceRecord[] => [...(ledger.get(sessionId) ?? [])],
   };
 }

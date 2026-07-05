@@ -285,3 +285,25 @@ describe("a FAILED evidence snapshot is never laundered into 'genuinely empty' (
     expect(state.tasks[0].test_result.label).not.toContain("degraded");
   }, 30000);
 });
+
+describe("an INVALID session id is a typed snapshot failure, never an empty snapshot (round-10 gap 22)", () => {
+  it("session_id with reserved characters → 'invalid session id' stderr + passthrough", async () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const result = await dispatch(
+      JSON.stringify({
+        session_id: "../../etc/evil session",
+        agent_id: "a-1",
+        agent_type: "code-implementer-agent",
+      }),
+      [],
+    );
+    const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+    stderrSpy.mockRestore();
+
+    expect(result.kind).toBe("passthrough"); // dispatcher never crashes the pipeline
+    // The snapshot is labeled FAILED (invalid id can name no ledger file) —
+    // downstream would label the verdict snapshot-read-failed, never "degraded".
+    expect(text).toContain("evidence snapshot failed");
+    expect(text).toContain("invalid session id");
+  });
+});

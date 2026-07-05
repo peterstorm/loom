@@ -293,7 +293,7 @@ describe("extractShellWriteTargets — Bash-authored writes are visible to the v
       () => null,
     );
     expect(events.map((e) => e.kind)).toEqual(["FileWrite", "TestRun"]);
-    expect(events[0]).toEqual({ kind: "FileWrite", path: "/tmp/test.log" });
+    expect(events[0]).toEqual({ kind: "FileWrite", path: "/tmp/test.log", via: "shell" });
   });
 
   it("a redirect-only Bash call mints FileWrite even on an error-shaped response (the shell truncates the target before the command runs)", () => {
@@ -303,7 +303,7 @@ describe("extractShellWriteTargets — Bash-authored writes are visible to the v
       { is_error: true, exit_code: 1 },
       () => null,
     );
-    expect(events).toEqual([{ kind: "FileWrite", path: "/tmp/r.json" }]);
+    expect(events).toEqual([{ kind: "FileWrite", path: "/tmp/r.json", via: "shell" }]);
   });
 });
 
@@ -362,7 +362,7 @@ describe("extractEvidence — facts only", () => {
       { kind: "FileRead", path: "/a" },
     ]);
     expect(extractEvidence("Edit", { path: "/b" }, {}, () => null)).toEqual([
-      { kind: "FileWrite", path: "/b" },
+      { kind: "FileWrite", path: "/b", via: "tool" },
     ]);
     expect(extractEvidence("Write", { file_path: "  " }, {}, () => null)).toEqual([]);
     expect(extractEvidence("Grep", { pattern: "x" }, {}, () => null)).toEqual([]);
@@ -417,5 +417,74 @@ describe("extractEvidence — facts mean the tool SUCCEEDED", () => {
     expect(isToolFailure("plain text output")).toBe(false);
     expect(isToolFailure(null)).toBe(false);
     expect(isToolFailure(undefined)).toBe(false);
+  });
+});
+
+describe("unquoted & — background compositions (round-10 Fix 3)", () => {
+  it("a backgrounded test never owns the line's exit: `npx vitest &` → exit null", () => {
+    // The shell reports 0 immediately without waiting for the test.
+    expect(mintTestRun("npx vitest run &", 0)!.exit).toBeNull();
+    expect(mintTestRun("npm test &", 0)!.exit).toBeNull();
+    expect(mintTestRun("npm test & echo done", 0)!.exit).toBeNull();
+  });
+
+  it("`X & npm test`: the foreground test owns the exit (both polarities — `&` sequences unconditionally)", () => {
+    expect(mintTestRun("false & npm test", 0)!.exit).toBe(0);
+    expect(mintTestRun("false & npm test", 1)!.exit).toBe(1);
+  });
+
+  it("`&` splits segments: a runner after `&` classifies; a quoted `&` does not split", () => {
+    expect(classifyTestCommand("sleep 1 & npm test")).toBe("npm test");
+    expect(classifyTestCommand('echo "a & npm test"')).toBeNull();
+  });
+
+  it("`&>` redirects and `2>&1` fd dups are NOT background separators", () => {
+    // `npm test &> log`: the `&` belongs to the redirect — sole segment, owns exit.
+    expect(mintTestRun("npm test &> /tmp/all.log", 0)!.exit).toBe(0);
+    expect(mintTestRun("npm test 2>&1", 1)!.exit).toBe(1);
+    // …and the &> target is still a shell write.
+    expect(extractShellWriteTargets("npm test &> /tmp/all.log")).toEqual(["/tmp/all.log"]);
+  });
+
+  it("classifyTestCommandDetailed exposes opAfter '&' even with only blank text after it", () => {
+    const c = classifyTestCommandDetailed("npx vitest run &")!;
+    expect(c.opAfter).toBe("&");
+    expect(attributeExit(0, c)).toBeNull();
+  });
+});
+
+describe("extractShellWriteTargets — backslash-escape property (round-10 gap 19)", () => {
+  // Simple filename material with no shell metacharacters.
+  const plainName = fc
+    .stringMatching(/^[A-Za-z0-9._/-]{1,20}$/)
+    .filter((s) => !s.includes("..") && !s.startsWith("-"));
+
+  it("an escaped `\\>` never mints a write target; a real `>` always does", () => {
+    fc.assert(
+      fc.property(plainName, (name) => {
+        // `echo a \> f` passes a literal ">" argument — nothing is written.
+        expect(extractShellWriteTargets(`echo a \\> ${name}`)).toEqual([]);
+        // The unescaped twin writes the file.
+        expect(extractShellWriteTargets(`echo a > ${name}`)).toEqual([name]);
+      }),
+    );
+  });
+
+  it("backslash-escaped characters INSIDE a target are preserved unescaped", () => {
+    fc.assert(
+      fc.property(plainName, plainName, (a, b) => {
+        // `> a\ b` writes the single file "a b" (escaped space).
+        expect(extractShellWriteTargets(`cmd > ${a}\\ ${b}`)).toEqual([`${a} ${b}`]);
+      }),
+    );
+  });
+
+  it("a trailing backslash never crashes a scanner and mints nothing beyond the text", () => {
+    fc.assert(
+      fc.property(plainName, (name) => {
+        expect(() => extractShellWriteTargets(`echo ${name} \\`)).not.toThrow();
+        expect(() => extractShellWriteTargets(`cmd > ${name}\\`)).not.toThrow();
+      }),
+    );
   });
 });

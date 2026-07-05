@@ -106,3 +106,23 @@ describe("judgeTestRun — the R2 trust rule", () => {
     expect(judgeTestRun(null, report)).toEqual({ verdict: "untrusted" });
   });
 });
+
+describe("mergeSummaries — source homogeneity enforced at runtime (round-10 Fix 16)", () => {
+  it("mixed sources fail closed to null instead of mislabeling the sum", () => {
+    expect(
+      mergeSummaries([
+        parseReportSummary(3, 1, "junit-xml")!,
+        parseReportSummary(4, 0, "vitest-json")!,
+      ]),
+    ).toBeNull();
+  });
+
+  it("homogeneous sources still merge", () => {
+    expect(
+      mergeSummaries([
+        parseReportSummary(1, 0, "vitest-json")!,
+        parseReportSummary(2, 2, "vitest-json")!,
+      ]),
+    ).toEqual({ total: 3, failed: 2, source: "vitest-json" });
+  });
+});

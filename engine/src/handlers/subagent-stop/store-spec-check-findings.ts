@@ -93,7 +93,26 @@ const handler: HookHandler = async (stdin) => {
 
   const rawPath = input.agent_transcript_path ?? "";
   const transcript = await readTranscriptWithRetry(rawPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/);
-  if (!transcript) return { kind: "passthrough" };
+  if (!transcript) {
+    // Fail CLOSED, mirroring the missing-count path below: recording nothing
+    // here would let wave-gate check 4 pass vacuously as "skipped (no
+    // spec-check data)" — an unreadable/empty transcript must read as a
+    // capture failure, never as a clean skip.
+    process.stderr.write(
+      `WARNING: spec-check transcript empty or unreadable (path=${rawPath || "<unset>"}) — marking evidence_capture_failed\n`,
+    );
+    const state = mgr.load();
+    await mgr.update((s) => ({
+      ...s,
+      spec_check: {
+        wave: state.current_wave ?? 1,
+        run_at: new Date().toISOString(),
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: "spec-check agent transcript empty or unreadable - re-run /wave-gate",
+      },
+    }));
+    return { kind: "passthrough" };
+  }
 
   const findings = parseSpecCheckOutput(transcript);
   const state = mgr.load();

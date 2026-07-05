@@ -36,6 +36,9 @@ interface RecordEvidenceInput {
   tool_input?: Record<string, unknown>;
   tool_response?: unknown;
   cwd?: string;
+  /** Harness id of this tool call — stamped on ledger records as the
+   *  idempotency key so a duplicated PostToolUse never double-counts. */
+  tool_use_id?: string;
 }
 
 export const runRecordEvidence = async (
@@ -80,25 +83,43 @@ export const runRecordEvidence = async (
     const toolInput = input.tool_input ?? {};
     const cwd = input.cwd ?? process.cwd();
 
-    const events = extractEvidence(toolName, toolInput, input.tool_response, (segment, stdout) => {
-      // Cheap hardening against agent-authored report artifacts: an explicit
-      // --outputFile path the agent wrote earlier this epoch must not vouch
-      // as a report — findReport rejects it loudly. The veto set covers
-      // Edit/Write/MultiEdit FileWrites AND Bash-authored writes (redirect/
-      // tee targets minted by extractShellWriteTargets). Known residual:
-      // writes with no static target in the command text — cp/mv/dd of=,
-      // or a file authored by an interpreter (`python -c 'open(...)'`) —
-      // mint nothing and can still stage an artifact (documented in
-      // machines/README.md "known residuals"). Computed lazily here: this
-      // closure only runs for classified test commands.
-      const epochWrites = new Set(
-        eventsForEpoch(registry.readEvidence(sessionId), binding.epoch).flatMap((e) =>
-          e.kind === "FileWrite" ? [resolve(cwd, e.path)] : [],
-        ),
-      );
-      return findReport(segment, cwd, stdout, Date.now(), (absPath) => epochWrites.has(absPath));
-    });
-    registry.appendEvidence(sessionId, binding.epoch, events);
+    const extracted = extractEvidence(
+      toolName,
+      toolInput,
+      input.tool_response,
+      (segment, stdout, currentCallWrites) => {
+        // Cheap hardening against agent-authored report artifacts: an explicit
+        // --outputFile path the agent wrote earlier this epoch must not vouch
+        // as a report — findReport rejects it loudly. The veto set covers
+        // Edit/Write/MultiEdit FileWrites, Bash-authored writes (redirect/
+        // tee targets minted by extractShellWriteTargets) from PRIOR calls,
+        // AND this very call's own write targets (currentCallWrites) — a
+        // one-call `printf '{…}' > r.json; npx vitest --outputFile=r.json`
+        // stages an artifact the persisted ledger cannot know about yet.
+        // Known residual: writes with no static target in the command text —
+        // cp/mv/dd of=, or a file authored by an interpreter
+        // (`python -c 'open(...)'`) — mint nothing and can still stage an
+        // artifact (documented in machines/README.md "known residuals").
+        // Computed lazily here: this closure only runs for classified test
+        // commands. The read-time resolve is a no-op for records minted
+        // absolute (see below) and covers old relative-path records.
+        const epochWrites = new Set([
+          ...eventsForEpoch(registry.readEvidence(sessionId), binding.epoch).flatMap((e) =>
+            e.kind === "FileWrite" ? [resolve(cwd, e.path)] : [],
+          ),
+          ...currentCallWrites.map((p) => resolve(cwd, p)),
+        ]);
+        return findReport(segment, cwd, stdout, Date.now(), (absPath) => epochWrites.has(absPath));
+      },
+    );
+    // Resolve FileWrite paths at MINT time, against THIS call's cwd: a later
+    // reader's cwd may differ (the agent cd'd), and resolving a relative
+    // redirect target against the wrong base would let a staged artifact
+    // slip past the veto.
+    const events = extracted.map((e) =>
+      e.kind === "FileWrite" ? { ...e, path: resolve(cwd, e.path) } : e,
+    );
+    registry.appendEvidence(sessionId, binding.epoch, events, input.tool_use_id);
 
     return passthroughResult();
   } catch (e) {

@@ -165,7 +165,14 @@ function findTaskGraphPath(): string {
     const root = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
     const abs = join(root, relative);
     if (existsSync(abs)) return abs;
-  } catch {}
+  } catch (e) {
+    // Not a git repo (or git missing): the walk-up is skipped and only the
+    // cwd-relative path can resolve — say so, or a task graph sitting at the
+    // repo root looks mysteriously absent from a subdirectory cwd.
+    process.stderr.write(
+      `loom: git rev-parse walk-up failed while locating ${relative} — falling back to cwd-relative: ${e instanceof Error ? e.message : String(e)}\n`,
+    );
+  }
 
   // Fallback to relative (callers check existsSync anyway)
   return relative;

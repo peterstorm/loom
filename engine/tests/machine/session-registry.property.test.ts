@@ -262,3 +262,29 @@ describe("empty roster + one binding = leaked binding → no attribution", () =>
     expect(fsSessionRegistry.soleActiveBinding(s)?.agentId).toBe(agent.id);
   });
 });
+
+describe("duplicate SubagentStart deliveries are idempotent on the fake (round-10 Fix 4)", () => {
+  it("property: any number of duplicate start deliveries never disarms soleActiveBinding", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.integer({ min: 2, max: 6 }), async (deliveries) => {
+        const reg = inMemorySessionRegistry();
+        const session = parseSessionId("dup-start-prop")!;
+        const gated = POOL[0];
+        const b = bindingOf(gated);
+        for (let i = 0; i < deliveries; i++) {
+          await reg.markActive(session, b.agentId);
+          await reg.bind(session, b.agentType, b.agentId);
+        }
+        // Exactly one binding, exactly one roster entry — attribution armed.
+        expect(reg.readBindings(session)).toHaveLength(1);
+        expect(reg.countActiveAgents(session)).toBe(1);
+        expect(reg.soleActiveBinding(session)?.epoch).toBe(b.epoch);
+        // Evidence recorded between duplicate deliveries survives the re-bind.
+        reg.appendEvidence(session, b.epoch, [{ kind: "FileRead", path: "/a.ts" }]);
+        await reg.bind(session, b.agentType, b.agentId);
+        expect(eventsForEpoch(reg.readEvidence(session), b.epoch)).toHaveLength(1);
+      }),
+      { numRuns: 25 },
+    );
+  });
+});

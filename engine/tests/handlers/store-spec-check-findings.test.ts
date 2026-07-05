@@ -156,3 +156,59 @@ describe("handler reads file content (not path)", () => {
     try { chmodSync(statePath, 0o644); } catch {}
   });
 });
+
+describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
+  it("malformed stdin → contextual error naming that findings were NOT stored (parity with update-task-status)", async () => {
+    const result = await handler("{not json", []);
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      expect(result.message).toContain("malformed SubagentStop input");
+      expect(result.message).toContain("NOT stored");
+    }
+  });
+
+  it("empty/unreadable transcript → EVIDENCE_CAPTURE_FAILED recorded, never a silent skip", async () => {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    const { mkdirSync: mkdir } = await import("node:fs");
+    const tmpDir = join(tmpdir(), `spec-check-empty-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+    const statePath = join(tmpDir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      current_wave: 3,
+      tasks: [],
+      wave_gates: {},
+    }));
+    const session = `spec-check-empty-${process.pid}-${Date.now()}`;
+    mkdir(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(pointer, statePath);
+
+    const { vi } = await import("vitest");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await handler(JSON.stringify({
+        session_id: session,
+        agent_type: "spec-check-invoker",
+        agent_transcript_path: join(tmpDir, "does-not-exist.jsonl"),
+      }), []);
+      expect(result.kind).toBe("passthrough");
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("marking evidence_capture_failed");
+
+      const state = JSON.parse(readFileSync(statePath, "utf-8"));
+      // Wave-gate check 4 now sees a verdict, not a vacuous "no spec-check data".
+      expect(state.spec_check.verdict).toBe("EVIDENCE_CAPTURE_FAILED");
+      expect(state.spec_check.wave).toBe(3);
+      expect(state.spec_check.error).toContain("re-run /wave-gate");
+    } finally {
+      stderrSpy.mockRestore();
+      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(pointer, { force: true });
+    }
+  });
+});

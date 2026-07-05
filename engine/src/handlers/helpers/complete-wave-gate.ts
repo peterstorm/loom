@@ -363,14 +363,14 @@ function updateGitHubIssue(state: TaskGraph, taskIds: string[]): void {
 
   try {
     const repoFlag = state.github_repo ? `--repo ${state.github_repo}` : "";
-    const body = execSync(`gh issue view ${issue} ${repoFlag} --json body -q '.body'`, { encoding: "utf-8" });
+    const body = execSync(`gh issue view ${issue} ${repoFlag} --json body -q '.body'`, { encoding: "utf-8", timeout: 15000 });
 
     let updated = body;
     for (const id of taskIds) {
       updated = updated.replace(new RegExp(`- \\[ \\] ${id}:`, "g"), `- [x] ${id}:`);
     }
 
-    execSync(`gh issue edit ${issue} ${repoFlag} --body-file -`, { input: updated, stdio: ["pipe", "pipe", "pipe"] });
+    execSync(`gh issue edit ${issue} ${repoFlag} --body-file -`, { input: updated, stdio: ["pipe", "pipe", "pipe"], timeout: 15000 });
     process.stderr.write(`Updated checkboxes in issue #${issue}\n`);
   } catch (e) {
     process.stderr.write(`WARNING: Failed to update GH issue #${issue} checkboxes: ${(e as Error).message}\n`);

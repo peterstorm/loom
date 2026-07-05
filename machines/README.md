@@ -99,21 +99,31 @@ Known residual limits, on purpose and documented:
   artifact postdates the command — so it bounds, but does not eliminate,
   same-family cross-run artifact vouching, and a *planted* report can still
   work. The recorder rejects (loudly) an explicit `--outputFile` path that
-  the agent itself wrote earlier this epoch (a `FileWrite` in its own
-  ledger — Edit/Write tools AND Bash redirect/`tee` targets, which mint
-  `FileWrite` too), but a report staged via a Bash write with no static
+  the agent itself wrote this epoch (a `FileWrite` in its own ledger —
+  Edit/Write tools AND Bash redirect/`tee` targets, which mint `FileWrite`
+  too, INCLUDING targets of the very command line being judged, so a
+  one-call `printf '{…}' > r.json; npx vitest --outputFile=r.json` stage
+  is vetoed), but a report staged via a Bash write with no static
   target in the command text — `cp`/`mv`, `dd of=`, or a file authored by
   an interpreter (`python -c 'open(...).write(...)'`) — mints nothing and
   can still vouch, as can a report written before the epoch began or
   produced by a "test" script that itself echoes runner-shaped JSON.
   Stamping reports with an mtime-≥-command-start bound is the known
   follow-up (needs PreToolUse timestamps).
+- Bash-minted `FileWrite` events carry `via: "shell"` and never advance a
+  guard (the gate cannot enforce Bash) — they exist for the artifact veto
+  and the modified-after-pass demotion. Tool writes (`via: "tool"`, or
+  absent on pre-`via` records) are the only guard-advancing writes.
 - Exit-status attribution is composition-aware and fails closed: the
   line's exit is credited to the classified test segment only when
   ownership is provable (a sole command; or the LAST command after `&&`,
-  `;`, or `|` for exit 0 — after `;` only for nonzero). Compositions like
-  `false && npx vitest …; true` or `npm test || true` therefore yield
+  `;`, `&`, or `|` for exit 0 — after `;`/`&` only for nonzero). A
+  BACKGROUNDED test (`npx vitest &`) never owns the exit. Compositions
+  like `false && npx vitest …; true` or `npm test || true` therefore yield
   `exit: null` (untrusted), while `cd engine && bun test` keeps its exit.
+- Ledger records carry the harness `tool_use_id` as an optional `callId`;
+  the fold boundary drops duplicated deliveries of the same call, so a
+  re-sent PostToolUse cannot double-count guard evidence.
 - A consistent forgery of ledger *facts* via Bash is blocked by the
   guard-state-file hook (the ledger and binding paths are guarded state
   files); full integrity (HMAC or out-of-agent-reach storage) is a

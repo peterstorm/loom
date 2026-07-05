@@ -137,7 +137,7 @@ function classifyBindingLines(sessionId: SessionId, nowMs: number): ClassifiedLi
     .map((raw): ClassifiedLine => {
       const persisted = parseBindingLine(raw);
       if (persisted === null) return { kind: "malformed", raw };
-      return isBindingFresh(persisted.boundAtMs, anchorMs, nowMs, STALE_SUBAGENT_TTL_MS)
+      return isBindingFresh({ boundAtMs: persisted.boundAtMs, anchorMs, nowMs, ttlMs: STALE_SUBAGENT_TTL_MS })
         ? { kind: "fresh", raw, persisted }
         : { kind: "stale", raw, persisted };
     });
@@ -260,11 +260,27 @@ export function rosterAgentId(raw: string): AgentId {
  * Append an agent to the session's `.active` roster under the SAME lock
  * cleanup takes to rewrite it — an unlocked append racing a cleanup rewrite
  * could be lost, leaving attribution counting a ghost (or missing) agent.
+ * SET semantics keyed by agentId (idempotent): a duplicated SubagentStart
+ * delivery must not put the same agent on the roster twice — a double entry
+ * makes soleActiveBinding stand down for the rest of the run (roster count
+ * 2 ≠ 1), silently disarming the recorder and the gate's evidence fold.
  */
 export async function markAgentActive(sessionId: SessionId, agentId: AgentId): Promise<void> {
   mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
   await withLock(bindingLock(sessionId), () => {
-    appendFileSync(activeFlagPath(sessionId), `${agentId}\n`);
+    const path = activeFlagPath(sessionId);
+    if (existsSync(path)) {
+      const already = readFileSync(path, "utf-8")
+        .split("\n")
+        .some((l) => l.trim() === `${agentId}`);
+      if (already) {
+        process.stderr.write(
+          `markAgentActive: ${agentId} already on the roster for ${sessionId} — duplicate SubagentStart ignored\n`,
+        );
+        return;
+      }
+    }
+    appendFileSync(path, `${agentId}\n`);
   });
 }
 
@@ -312,6 +328,24 @@ export async function bindMachineAgent(
   await withLock(bindingLock(sessionId), () => {
     const lines = classifyBindingLines(sessionId, nowMs);
     const kept = lines.filter((l) => l.kind !== "stale");
+    // Idempotent on (agentId, agentType): a duplicated SubagentStart must
+    // not write a second binding line — two bindings make soleActiveBinding
+    // stand down (contended shape), disarming the gate fail-open. The stale
+    // reap and activity anchor were already settled by the classify above;
+    // re-appending would ALSO re-truncate nothing (a fresh twin exists), so
+    // skipping is the entire fix.
+    const duplicate = kept.some(
+      (l) =>
+        l.kind === "fresh" &&
+        l.persisted.binding.agentId === agentId &&
+        l.persisted.binding.agentType === agentType,
+    );
+    if (duplicate) {
+      process.stderr.write(
+        `bindMachineAgent: ${agentId}/${agentType} already bound for ${sessionId} — duplicate SubagentStart ignored\n`,
+      );
+      return;
+    }
     if (!kept.some((l) => l.kind === "fresh")) {
       try {
         unlinkSync(ledgerPath(sessionId));
@@ -369,14 +403,24 @@ export async function unbindMachineAgent(
 
 // --- Ledger IO ---
 
-export function appendEvidence(sessionId: SessionId, epoch: Epoch, events: readonly Evidence[]): void {
+export function appendEvidence(
+  sessionId: SessionId,
+  epoch: Epoch,
+  events: readonly Evidence[],
+  callId?: string,
+): void {
   if (events.length === 0) return;
   mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
-  const lines = events.map((event) => JSON.stringify({ epoch, event })).join("\n") + "\n";
+  const lines =
+    events
+      .map((event) =>
+        JSON.stringify(callId !== undefined ? { epoch, event, callId } : { epoch, event }),
+      )
+      .join("\n") + "\n";
   appendFileSync(ledgerPath(sessionId), lines);
 }
 
-export function readEvidence(sessionId: SessionId): EvidenceRecord[] {
+export function readEvidence(sessionId: SessionId): readonly EvidenceRecord[] {
   const path = ledgerPath(sessionId);
   if (!existsSync(path)) return [];
   const lines = readFileSync(path, "utf-8")

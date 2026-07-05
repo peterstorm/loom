@@ -41,3 +41,21 @@ describe("HookResult smart constructors", () => {
     expect(passthroughResult()).toEqual({ kind: "passthrough" });
   });
 });
+
+describe("parseSpecCheckVerdict (round-10 gap 21)", () => {
+  it("accepts exactly the closed verdict union", async () => {
+    const { parseSpecCheckVerdict, SPEC_CHECK_VERDICTS } = await import("../src/types");
+    for (const v of SPEC_CHECK_VERDICTS) {
+      expect(parseSpecCheckVerdict(v)).toBe(v);
+    }
+  });
+
+  it("rejects free text, casing drift, and padding — never launders into the union", async () => {
+    const { parseSpecCheckVerdict } = await import("../src/types");
+    expect(parseSpecCheckVerdict("passed")).toBeNull();
+    expect(parseSpecCheckVerdict(" PASSED")).toBeNull();
+    expect(parseSpecCheckVerdict("PASSED_WITH_WARNINGS")).toBeNull();
+    expect(parseSpecCheckVerdict("")).toBeNull();
+    expect(parseSpecCheckVerdict("garbage")).toBeNull();
+  });
+});

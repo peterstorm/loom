@@ -14,7 +14,7 @@ const run = `ledger-test-${process.pid}-${Date.now()}`;
 // The ledger API takes the branded SessionId — parse once at construction
 // (the run/name chars are all SessionId-legal, so the assertion never fires).
 const sid = (name: string) => ledger.parseSessionId(`${run}-${name}`)!;
-const sessions = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "never-seen"].map(sid);
+const sessions = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "never-seen"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
@@ -357,5 +357,102 @@ describe("machine registry", () => {
     } finally {
       rmSync(machines, { recursive: true, force: true });
     }
+  });
+});
+
+describe("duplicate SubagentStart events are idempotent (round-10 Fix 4)", () => {
+  it("markAgentActive is a set keyed by agentId — the duplicate never disarms soleActiveBinding", async () => {
+    const s = sid("s9");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await bind(s, "code-implementer-agent", "a-1");
+      await ledger.markAgentActive(s, agentId("a-1"));
+      await ledger.markAgentActive(s, agentId("a-1")); // duplicate delivery
+      expect(ledger.countActiveAgents(s)).toBe(1);
+      expect(ledger.soleActiveBinding(s)?.agentId).toBe("a-1");
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("duplicate SubagentStart ignored");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    // …while a genuinely different agent still contends:
+    await ledger.markAgentActive(s, agentId("a-2"));
+    expect(ledger.countActiveAgents(s)).toBe(2);
+    expect(ledger.soleActiveBinding(s)).toBeNull();
+  });
+
+  it("bindMachineAgent skips the duplicate line — the session never LOOKS contended", async () => {
+    const s = sid("s10");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await bind(s, "code-implementer-agent", "a-1");
+      // Evidence recorded between the two deliveries must survive: the
+      // duplicate bind must NOT re-truncate the ledger either.
+      ledger.appendEvidence(s, ep("a-1:code-implementer-agent"), [read("/a.ts")]);
+      await bind(s, "code-implementer-agent", "a-1"); // duplicate delivery
+      expect(ledger.readBindings(s)).toHaveLength(1);
+      expect(ledger.readEvidence(s)).toHaveLength(1);
+      roster(s, "a-1");
+      expect(ledger.soleActiveBinding(s)?.agentId).toBe("a-1");
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("duplicate SubagentStart ignored");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+});
+
+describe("callId idempotency stamp (round-10 Fix 6)", () => {
+  it("appendEvidence stamps callId; parseEvidenceLine round-trips it; absent stays absent", () => {
+    const s = sid("s11");
+    ledger.appendEvidence(s, ep("a-1:code-implementer-agent"), [read("/a.ts")], "toolu_01");
+    ledger.appendEvidence(s, ep("a-1:code-implementer-agent"), [read("/b.ts")]); // no stamp
+    const records = ledger.readEvidence(s);
+    expect(records).toEqual([
+      { epoch: "a-1:code-implementer-agent", event: read("/a.ts"), callId: "toolu_01" },
+      { epoch: "a-1:code-implementer-agent", event: read("/b.ts") },
+    ]);
+  });
+
+  it("eventsForEpoch drops a duplicated delivery (same epoch, callId, event) — old stampless records never dedupe", () => {
+    const e = ep("a-1:code-implementer-agent");
+    const dup = { epoch: e, event: read("/a.ts"), callId: "toolu_01" } as const;
+    const stampless = { epoch: e, event: read("/a.ts") } as const;
+    expect(ledger.eventsForEpoch([dup, dup, stampless, stampless], e)).toEqual([
+      read("/a.ts"), // deduped delivery
+      read("/a.ts"), // old records: kept
+      read("/a.ts"),
+    ]);
+    // Same callId, DIFFERENT events (one call minting several facts): all kept.
+    const multi = [
+      { epoch: e, event: read("/a.ts"), callId: "c1" },
+      { epoch: e, event: { kind: "FileWrite", path: "/x", via: "shell" } as Evidence, callId: "c1" },
+      { epoch: e, event: { kind: "FileWrite", path: "/y", via: "shell" } as Evidence, callId: "c1" },
+    ];
+    expect(ledger.eventsForEpoch(multi, e)).toHaveLength(3);
+  });
+
+  it("parseEvidenceLine reads back callId and the FileWrite via field; unknown via fails closed to shell", () => {
+    expect(
+      ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileRead","path":"/a"},"callId":"toolu_9"}'),
+    ).toEqual({ epoch: "a:b", event: { kind: "FileRead", path: "/a" }, callId: "toolu_9" });
+    expect(
+      ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w","via":"shell"}}')!.event,
+    ).toEqual({ kind: "FileWrite", path: "/w", via: "shell" });
+    expect(
+      ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w","via":"tool"}}')!.event,
+    ).toEqual({ kind: "FileWrite", path: "/w", via: "tool" });
+    // Absent via = old record = tool write (only tool writes were minted historically).
+    expect(
+      ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w"}}')!.event,
+    ).toEqual({ kind: "FileWrite", path: "/w" });
+    // Garbage via fails CLOSED to "shell": still vetoes, never advances a guard.
+    expect(
+      ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w","via":"nonsense"}}')!.event,
+    ).toEqual({ kind: "FileWrite", path: "/w", via: "shell" });
+    // A non-string callId is ignored, not a parse failure.
+    expect(
+      ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileRead","path":"/a"},"callId":42}'),
+    ).toEqual({ epoch: "a:b", event: { kind: "FileRead", path: "/a" } });
   });
 });

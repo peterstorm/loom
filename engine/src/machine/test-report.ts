@@ -70,14 +70,16 @@ export function parseJunitXml(content: string): TestReportSummary | null {
   return sawCounts ? parseReportSummary(total, failed, "junit-xml") : null;
 }
 
-/** Merge summaries from multiple report files of one run. */
+/** Merge summaries from multiple report files of one run. The inputs must
+ *  share ONE source — enforced at runtime, not by comment: a mixed-source
+ *  merge would stamp the sum with the first summary's source, silently
+ *  mislabeling half the counts. Fail closed to null instead. */
 export function mergeSummaries(summaries: readonly TestReportSummary[]): TestReportSummary | null {
   if (summaries.length === 0) return null;
+  if (summaries.some((s) => s.source !== summaries[0].source)) return null;
   // Route the summed counts back through the sole smart constructor rather
   // than casting a fresh literal: summing sane summaries stays sane, but the
-  // brand must be minted where its invariant is (re)checked. Sum first, then
-  // parse once with the first summary's source (all inputs share a source in
-  // practice — mergeSummaries is only called per-source).
+  // brand must be minted where its invariant is (re)checked.
   let total = 0;
   let failed = 0;
   for (const s of summaries) {
