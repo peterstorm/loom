@@ -109,7 +109,16 @@ export const runRecordEvidence = async (
           ),
           ...currentCallWrites.map((p) => resolve(cwd, p)),
         ]);
-        return findReport(segment, cwd, stdout, Date.now(), (absPath) => epochWrites.has(absPath));
+        // Call-scoped freshness: the PreToolUse stamp for THIS call orders
+        // artifacts against the call start. No tool_use_id / no stamp →
+        // null, and findReport fails closed on the artifact-backed sources.
+        const callStartMs =
+          input.tool_use_id !== undefined && input.tool_use_id !== ""
+            ? registry.callStartFor(sessionId, input.tool_use_id)
+            : null;
+        return findReport(segment, cwd, stdout, Date.now(), callStartMs, (absPath) =>
+          epochWrites.has(absPath),
+        );
       },
     );
     // Resolve FileWrite paths at MINT time, against THIS call's cwd: a later

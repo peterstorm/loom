@@ -34,6 +34,9 @@ export interface PreToolUseInput {
   tool_name: string;
   tool_input: Record<string, unknown>;
   session_id: string;
+  /** Harness id of this tool call — stamped as the call-start key so the
+   *  PostToolUse recorder can scope report artifacts to THIS call. */
+  tool_use_id?: string;
 }
 
 export interface SubagentStopInput {

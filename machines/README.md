@@ -95,21 +95,31 @@ Known residual limits, on purpose and documented:
   active the gate and recorder stand down rather than cross-credit. The
   per-epoch SubagentStop audit still applies to whatever the sole-active
   windows recorded.
-- Report freshness checks *recency* (15-minute window), not that the
-  artifact postdates the command — so it bounds, but does not eliminate,
-  same-family cross-run artifact vouching, and a *planted* report can still
-  work. The recorder rejects (loudly) an explicit `--outputFile` path that
-  the agent itself wrote this epoch (a `FileWrite` in its own ledger —
-  Edit/Write tools AND Bash redirect/`tee` targets, which mint `FileWrite`
-  too, INCLUDING targets of the very command line being judged, so a
-  one-call `printf '{…}' > r.json; npx vitest --outputFile=r.json` stage
-  is vetoed), but a report staged via a Bash write with no static
-  target in the command text — `cp`/`mv`, `dd of=`, or a file authored by
-  an interpreter (`python -c 'open(...).write(...)'`) — mints nothing and
-  can still vouch, as can a report written before the epoch began or
-  produced by a "test" script that itself echoes runner-shaped JSON.
-  Stamping reports with an mtime-≥-command-start bound is the known
-  follow-up (needs PreToolUse timestamps).
+- Report freshness is *call-scoped*: the PreToolUse Bash hook stamps the
+  start of every tool call (`<session>.callstart.json`, keyed by the
+  harness `tool_use_id`), and a disk artifact (explicit `--outputFile`
+  JSON, JUnit XML in conventional dirs) may vouch only when its mtime is
+  at/after that call's start (minus ~2s of filesystem-mtime slack) AND
+  inside the 15-minute recency cap. This closes the old recency-window
+  residual — a later same-family command that ran no tests
+  (`mvn test -DskipTests`) can no longer re-vouch a stale sibling artifact
+  still inside the window. A MISSING stamp (no `tool_use_id`, stamp hook
+  not wired, stamp pruned) fails closed: artifact-backed sources are
+  rejected loudly, and only stdout-printed reporter JSON — inherently
+  call-scoped — can still vouch. The residual is therefore the safe
+  direction: environments without the PreToolUse stamp cannot mint
+  artifact-backed trusted passes. The recorder ALSO rejects (loudly) an
+  explicit `--outputFile` path that the agent itself wrote this epoch (a
+  `FileWrite` in its own ledger — Edit/Write tools AND Bash
+  redirect/`tee` targets, which mint `FileWrite` too, INCLUDING targets of
+  the very command line being judged, so a one-call
+  `printf '{…}' > r.json; npx vitest --outputFile=r.json` stage is
+  vetoed). A report staged via a Bash write with no static target in the
+  command text — `cp`/`mv`, `dd of=`, or a file authored by an interpreter
+  (`python -c 'open(...).write(...)'`) — still mints no `FileWrite`, but
+  the staging now has to happen DURING the judged call itself (an earlier
+  stage fails the ordering check), as does a "test" script that itself
+  echoes runner-shaped JSON.
 - Bash-minted `FileWrite` events carry `via: "shell"` and never advance a
   guard (the gate cannot enforce Bash) — they exist for the artifact veto
   and the modified-after-pass demotion. Tool writes (`via: "tool"`, or

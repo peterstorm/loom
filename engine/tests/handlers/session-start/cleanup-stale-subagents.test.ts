@@ -98,7 +98,7 @@ describe("sweepStaleSessions (fs)", () => {
     writeFileSync(join(subDir, "live.machine"), "a-1\tcode-implementer-agent\t1\n"); // fresh mtime
 
     // Dead session: every file old, including the mkdir-lock directory.
-    for (const suffix of ["machine", "active", "evidence.jsonl", "task_graph"]) {
+    for (const suffix of ["machine", "active", "evidence.jsonl", "task_graph", "callstart.json"]) {
       const p = join(subDir, `dead.${suffix}`);
       writeFileSync(p, "x\n");
       oldms(p);
@@ -119,7 +119,7 @@ describe("sweepStaleSessions (fs)", () => {
     expect(existsSync(join(subDir, "live.evidence.jsonl"))).toBe(true);
 
     // Dead group is gone ENTIRELY, lock dir included.
-    for (const suffix of ["machine", "active", "evidence.jsonl", "task_graph", "cleanup"]) {
+    for (const suffix of ["machine", "active", "evidence.jsonl", "task_graph", "callstart.json", "cleanup"]) {
       expect(existsSync(join(subDir, `dead.${suffix}`)), `dead.${suffix} should be swept`).toBe(false);
     }
 

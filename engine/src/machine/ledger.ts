@@ -55,7 +55,11 @@ import {
   type PersistedBinding,
   type SessionFileSuffix,
   type SessionId,
+  CALL_START_CAP,
+  CALL_START_SUFFIX,
   epochOf,
+  parseCallStartMap,
+  pruneCallStarts,
   formatBindingLine,
   isBindingFresh,
   parseAgentId,
@@ -418,6 +422,72 @@ export function appendEvidence(
       )
       .join("\n") + "\n";
   appendFileSync(ledgerPath(sessionId), lines);
+}
+
+// --- Call-start stamps ---
+
+const callStartPath = (sessionId: SessionId): string =>
+  sessionFilePath(sessionId, CALL_START_SUFFIX);
+
+/**
+ * Stamp the START of one tool call (PreToolUse), locked read-modify-write
+ * under the session's binding lock (concurrent PreToolUse deliveries would
+ * otherwise lose stamps to a torn rewrite). Retention is bounded: the key
+ * is re-inserted (delete-then-set) so insertion order is recency order, and
+ * pruneCallStarts keeps only the CALL_START_CAP most-recent entries. A
+ * corrupt stamp file is replaced (loudly) — its stale contents could only
+ * ever REJECT artifacts, so starting fresh is the honest recovery.
+ */
+export async function recordCallStart(
+  sessionId: SessionId,
+  toolUseId: string,
+  startMs: number,
+): Promise<void> {
+  mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+  await withLock(bindingLock(sessionId), () => {
+    const path = callStartPath(sessionId);
+    let current: Readonly<Record<string, number>> = {};
+    if (existsSync(path)) {
+      const parsed = parseCallStartMap(readFileSync(path, "utf-8"));
+      if (parsed === null) {
+        process.stderr.write(
+          `recordCallStart: corrupt call-start file for ${sessionId} — starting a fresh stamp map\n`,
+        );
+      } else {
+        current = parsed;
+      }
+    }
+    const reinserted: Record<string, number> = { ...current };
+    delete reinserted[toolUseId];
+    reinserted[toolUseId] = startMs;
+    rewriteFileAtomic(path, JSON.stringify(pruneCallStarts(reinserted, CALL_START_CAP)));
+  });
+}
+
+/**
+ * The call-start stamp for one tool call, or null when none exists (no
+ * stamp file, unknown/pruned toolUseId, or a corrupt file — logged). The
+ * consumer (report freshness) fails CLOSED on null: disk artifacts cannot
+ * vouch without proof they postdate the call.
+ */
+export function callStartFor(sessionId: SessionId, toolUseId: string): number | null {
+  const path = callStartPath(sessionId);
+  if (!existsSync(path)) return null;
+  try {
+    const map = parseCallStartMap(readFileSync(path, "utf-8"));
+    if (map === null) {
+      process.stderr.write(
+        `callStartFor: corrupt call-start file for ${sessionId} — treating as unstamped (fail closed)\n`,
+      );
+      return null;
+    }
+    return map[toolUseId] ?? null;
+  } catch (e) {
+    process.stderr.write(
+      `callStartFor: cannot read call-start file for ${sessionId}: ${e instanceof Error ? e.message : String(e)}\n`,
+    );
+    return null;
+  }
 }
 
 export function readEvidence(sessionId: SessionId): readonly EvidenceRecord[] {

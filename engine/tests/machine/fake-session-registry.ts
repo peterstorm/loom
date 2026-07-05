@@ -18,13 +18,16 @@ import type {
   MachineBinding,
   SessionRegistry,
 } from "../../src/machine/evidence";
-import { epochOf, resolveSoleActiveBinding } from "../../src/machine/evidence";
+import { CALL_START_CAP, epochOf, resolveSoleActiveBinding } from "../../src/machine/evidence";
 import type { Epoch, Evidence, EvidenceRecord } from "../../src/machine/types";
 
 export function inMemorySessionRegistry(): SessionRegistry {
   const bindings = new Map<string, MachineBinding[]>();
   const active = new Map<string, AgentId[]>();
   const ledger = new Map<string, EvidenceRecord[]>();
+  // Insertion order IS recency order (delete-then-set on stamp), so pruning
+  // to CALL_START_CAP drops the oldest stamps — mirroring recordCallStart.
+  const callStarts = new Map<string, Map<string, number>>();
 
   return {
     bind: async (sessionId: string, agentType: AgentType, agentId: AgentId): Promise<void> => {
@@ -84,5 +87,20 @@ export function inMemorySessionRegistry(): SessionRegistry {
     },
 
     readEvidence: (sessionId: string): readonly EvidenceRecord[] => [...(ledger.get(sessionId) ?? [])],
+
+    recordCallStart: async (sessionId: string, toolUseId: string, startMs: number): Promise<void> => {
+      const stamps = callStarts.get(sessionId) ?? new Map<string, number>();
+      stamps.delete(toolUseId);
+      stamps.set(toolUseId, startMs);
+      while (stamps.size > CALL_START_CAP) {
+        const oldest = stamps.keys().next().value;
+        if (oldest === undefined) break;
+        stamps.delete(oldest);
+      }
+      callStarts.set(sessionId, stamps);
+    },
+
+    callStartFor: (sessionId: string, toolUseId: string): number | null =>
+      callStarts.get(sessionId)?.get(toolUseId) ?? null,
   };
 }

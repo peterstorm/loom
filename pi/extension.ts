@@ -37,7 +37,7 @@ import type { ReviewStatus, SpecCheck, Phase } from "../engine/src/types";
 import { TASK_GRAPH_PATH, SUBAGENT_DIR, HARNESS, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
-import { parseSessionId } from "../engine/src/machine";
+import { fsSessionRegistry, parseSessionId } from "../engine/src/machine";
 import { buildContextOutput } from "../engine/src/handlers/session-start/resume-after-clear";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
@@ -86,6 +86,22 @@ export default function (pi: ExtensionAPI) {
       if (isToolCallEventType("bash", event)) {
         currentGuard = "guard-state-file";
         const result = guardStateFile(event.input.command ?? "");
+        // Call-start stamp (engine parity): decided FIRST, stamped AFTER,
+        // in its own catch — a thrown stamp write must never change the
+        // guard's polarity (and must not trip the fail-closed outer catch).
+        // The tool-call id is read defensively; absent → no stamp, and the
+        // recorder downstream fails closed on artifact-backed reports.
+        try {
+          const toolUseId = (event as { toolCallId?: unknown }).toolCallId;
+          const safeSessionId = parseSessionId(sessionId);
+          if (safeSessionId !== null && typeof toolUseId === "string" && toolUseId !== "") {
+            await fsSessionRegistry.recordCallStart(safeSessionId, toolUseId, Date.now());
+          }
+        } catch (err) {
+          process.stderr.write(
+            `loom(pi): call-start stamp failed (guard decision unaffected): ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
         if (result.kind === "block") {
           return { block: true, reason: result.message };
         }

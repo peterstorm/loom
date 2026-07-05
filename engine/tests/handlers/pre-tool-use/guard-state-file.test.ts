@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fc from "fast-check";
 import { WRITE_PATTERNS, STATE_FILE_PATTERNS, WHITELISTED_HELPERS, SUBAGENT_DIR, MACHINES_DIR } from "../../../src/config";
+import { runGuardStateFile, stampCallStart } from "../../../src/handlers/pre-tool-use/guard-state-file";
+import { parseSessionId, type SessionRegistry } from "../../../src/machine/evidence";
+import { inMemorySessionRegistry } from "../../machine/fake-session-registry";
+import type { HookResult } from "../../../src/types";
 
 /**
  * Test the pure regex logic from guard-state-file directly.
@@ -127,5 +131,100 @@ describe("guard-state-file — edge cases", () => {
     // reads stay allowed
     expect(guardDecision(`cat ${MACHINES_DIR}/code-implementer-agent.machine.json`)).toBe("allow");
     expect(guardDecision(`ls ${MACHINES_DIR}`)).toBe("allow");
+  });
+});
+
+describe("guard-state-file handler — call-start stamping never changes the guard outcome", () => {
+  const stdin = (extra: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      session_id: "stamp-session",
+      tool_name: "Bash",
+      tool_input: { command: "echo hi" },
+      tool_use_id: "toolu_stamp_01",
+      ...extra,
+    });
+
+  /** A registry whose stamp op always throws — the failure mode the
+   *  fail-open contract is about. */
+  const throwingRegistry = (): SessionRegistry => ({
+    ...inMemorySessionRegistry(),
+    recordCallStart: async () => {
+      throw new Error("disk full");
+    },
+  });
+
+  it("stamps the call start for the session (readable by callStartFor)", async () => {
+    const reg = inMemorySessionRegistry();
+    const result = await runGuardStateFile(stdin(), reg);
+    expect(result.kind).toBe("allow");
+    const sessionId = parseSessionId("stamp-session")!;
+    const stamp = reg.callStartFor(sessionId, "toolu_stamp_01");
+    expect(stamp).not.toBeNull();
+    expect(Math.abs(Date.now() - stamp!)).toBeLessThan(60_000);
+  });
+
+  it("an ALLOW stays an allow when the stamp write throws (loud stderr, no exception)", async () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await runGuardStateFile(stdin(), throwingRegistry());
+      expect(result.kind).toBe("allow");
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("call-start stamp failed");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("a BLOCK stays a block when the stamp write throws — stamping runs AFTER the decision", async () => {
+    const blockingGuard = (): HookResult => ({ kind: "block", message: "state file write" });
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await runGuardStateFile(stdin(), throwingRegistry(), blockingGuard);
+      expect(result.kind).toBe("block");
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("call-start stamp failed");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("a BLOCK also stays a block when stamping SUCCEEDS (stamp is side-band bookkeeping)", async () => {
+    const blockingGuard = (): HookResult => ({ kind: "block", message: "state file write" });
+    const reg = inMemorySessionRegistry();
+    const result = await runGuardStateFile(stdin(), reg, blockingGuard);
+    expect(result.kind).toBe("block");
+    // The stamp still landed — a blocked call's PostToolUse never fires, but
+    // the stamp is bounded and harmless.
+    expect(reg.callStartFor(parseSessionId("stamp-session")!, "toolu_stamp_01")).not.toBeNull();
+  });
+
+  it("no tool_use_id / unparseable session id → no stamp, guard outcome unchanged", async () => {
+    const reg = inMemorySessionRegistry();
+    expect((await runGuardStateFile(stdin({ tool_use_id: undefined }), reg)).kind).toBe("allow");
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const evil = await runGuardStateFile(stdin({ session_id: "../../escape" }), reg);
+      expect(evil.kind).toBe("allow");
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("invalid session id");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("stampCallStart itself never throws (fail-open with stderr)", async () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await expect(
+        stampCallStart(
+          { session_id: "s-1", tool_name: "Bash", tool_input: {}, tool_use_id: "toolu_x" },
+          throwingRegistry(),
+        ),
+      ).resolves.toBeUndefined();
+      expect(stderrSpy.mock.calls.map((c) => String(c[0])).join("")).toContain("call-start stamp failed");
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 });

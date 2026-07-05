@@ -49,8 +49,12 @@ export {
   formatBindingLine,
   isBindingFresh,
   resolveSoleActiveBinding,
+  parseCallStartMap,
+  pruneCallStarts,
   SESSION_SUFFIXES,
   MACHINE_SUFFIX,
+  CALL_START_SUFFIX,
+  CALL_START_CAP,
   type AgentId,
   type AgentType,
   type SessionFileSuffix,
@@ -62,13 +66,15 @@ export {
 export { machineToMermaid } from "./mermaid";
 
 // Imperative shell
-export { findReport, outputFileFromCommand } from "./report-discovery";
+export { findReport, outputFileFromCommand, CALL_START_SLACK_MS } from "./report-discovery";
 export {
   ledgerPath,
   machineBindingPath,
   sessionScopedPath,
   appendEvidence,
   readEvidence,
+  recordCallStart,
+  callStartFor,
   readBindings,
   soleActiveBinding,
   countActiveAgents,

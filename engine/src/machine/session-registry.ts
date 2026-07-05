@@ -11,10 +11,12 @@ import type { SessionRegistry } from "./evidence";
 import {
   appendEvidence,
   bindMachineAgent,
+  callStartFor,
   countActiveAgents,
   markAgentActive,
   readBindings,
   readEvidence,
+  recordCallStart,
   refreshBindingActivity,
   removeActiveAgent,
   soleActiveBinding,
@@ -32,4 +34,6 @@ export const fsSessionRegistry: SessionRegistry = {
   readBindings: (sessionId) => readBindings(sessionId),
   appendEvidence,
   readEvidence,
+  recordCallStart,
+  callStartFor,
 };

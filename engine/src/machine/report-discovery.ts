@@ -26,19 +26,34 @@ const JUNIT_REPORT_DIRS = [
 ];
 
 /**
- * Reports older than this are ignored. Time-based, not run-based: this
- * BOUNDS cross-run attribution (an artifact from hours ago can't vouch) but
- * does not eliminate it — a same-family runner command within the window
- * can still pick up a sibling run's report. Runner-family scoping in
- * findReport narrows the blast radius further.
+ * Upper freshness bound: reports older than this are ignored regardless of
+ * ordering. The ORDERING check below (mtime at/after the call start) is
+ * what scopes an artifact to the current tool call; this window remains as
+ * a belt-and-braces cap on clock-skewed or replayed stamps.
  */
 const FRESHNESS_MS = 15 * 60 * 1000;
 
+/**
+ * Slack subtracted from the call-start stamp when comparing against an
+ * artifact's mtime — filesystem mtimes can be coarser than the stamp clock
+ * (1s granularity on some filesystems), and the stamp is taken a moment
+ * after the shell actually forks.
+ */
+export const CALL_START_SLACK_MS = 2000;
+
 const errMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-function isFresh(path: string, nowMs: number): boolean {
+/**
+ * Ordered freshness: the artifact must postdate the START of the current
+ * tool call (within CALL_START_SLACK_MS) AND fall inside the recency
+ * window. Ordering is the load-bearing half — a window alone BOUNDS but
+ * does not ORDER, so a stale sibling artifact minutes old could be
+ * re-vouched by a later command that ran no tests.
+ */
+function isFresh(path: string, nowMs: number, callStartMs: number): boolean {
   try {
-    return nowMs - statSync(path).mtimeMs <= FRESHNESS_MS;
+    const mtimeMs = statSync(path).mtimeMs;
+    return mtimeMs >= callStartMs - CALL_START_SLACK_MS && nowMs - mtimeMs <= FRESHNESS_MS;
   } catch (e) {
     // Unstatable report → treated as stale (fail closed), but say so: a
     // silently-ignored artifact looks identical to "no report was written".
@@ -47,13 +62,13 @@ function isFresh(path: string, nowMs: number): boolean {
   }
 }
 
-function readJunitDir(dir: string, nowMs: number): TestReportSummary[] {
+function readJunitDir(dir: string, nowMs: number, callStartMs: number): TestReportSummary[] {
   if (!existsSync(dir)) return [];
   try {
     return readdirSync(dir)
       .filter((f) => f.endsWith(".xml"))
       .map((f) => join(dir, f))
-      .filter((p) => isFresh(p, nowMs))
+      .filter((p) => isFresh(p, nowMs, callStartMs))
       .map((p) => parseJunitXml(readFileSync(p, "utf-8")))
       .filter((s): s is TestReportSummary => s !== null);
   } catch (e) {
@@ -91,14 +106,31 @@ const JVM_RUNNER_PREFIXES = ["mvn", "mvnw", "./mvnw", "gradle", "./gradlew"];
  *    must not mint a trusted pass)
  * 2. JSON on stdout when the segment asked for a JSON reporter
  * 3. Fresh JUnit XML in conventional dirs — JVM runners only
+ *
+ * `callStartMs` is the PreToolUse call-start stamp for THIS tool call.
+ * Artifact-backed sources (1 and 3) require it: an on-disk artifact may
+ * vouch only when its mtime is at/after the call start, so a command that
+ * ran no tests cannot re-vouch a stale sibling artifact still inside the
+ * recency window. When null (no stamp: missing tool_use_id, stamp hook not
+ * wired, stamp pruned) the artifact sources are REJECTED loudly — fail
+ * closed, matching the trust-minting doctrine. Source 2 (stdout JSON) is
+ * inherently call-scoped (the command printed it during THIS call) and
+ * stays allowed without a stamp.
  */
 export function findReport(
   segment: string,
   cwd: string,
   stdout: string,
   nowMs: number,
+  callStartMs: number | null,
   vetoExplicitPath: (absolutePath: string) => boolean = () => false,
 ): TestReportSummary | null {
+  const noStamp = (source: string): void => {
+    process.stderr.write(
+      `findReport: no call-start stamp for this tool call — ${source} cannot vouch (disk artifacts require proof they postdate the call; failing closed)\n`,
+    );
+  };
+
   const explicit = outputFileFromCommand(segment);
   if (explicit) {
     const path = isAbsolute(explicit) ? explicit : resolve(cwd, explicit);
@@ -108,7 +140,9 @@ export function findReport(
       process.stderr.write(
         `findReport: rejecting --outputFile '${path}' — the path was written by the agent this epoch; an agent-authored artifact cannot vouch as a report\n`,
       );
-    } else if (existsSync(path) && isFresh(path, nowMs)) {
+    } else if (callStartMs === null) {
+      noStamp(`--outputFile '${path}'`);
+    } else if (existsSync(path) && isFresh(path, nowMs, callStartMs)) {
       try {
         const parsed = parseVitestJson(readFileSync(path, "utf-8"));
         if (parsed) return parsed;
@@ -129,9 +163,15 @@ export function findReport(
   const lower = segment.toLowerCase();
   if (!JVM_RUNNER_PREFIXES.some((p) => lower.startsWith(p))) return null;
 
+  if (callStartMs === null) {
+    noStamp("JUnit report dirs");
+    return null;
+  }
   const junit = [
-    ...JUNIT_REPORT_DIRS.flatMap((d) => readJunitDir(resolve(cwd, d), nowMs)),
-    ...moduleDirs(cwd).flatMap((m) => JUNIT_REPORT_DIRS.flatMap((d) => readJunitDir(join(m, d), nowMs))),
+    ...JUNIT_REPORT_DIRS.flatMap((d) => readJunitDir(resolve(cwd, d), nowMs, callStartMs)),
+    ...moduleDirs(cwd).flatMap((m) =>
+      JUNIT_REPORT_DIRS.flatMap((d) => readJunitDir(join(m, d), nowMs, callStartMs)),
+    ),
   ];
   return mergeSummaries(junit);
 }

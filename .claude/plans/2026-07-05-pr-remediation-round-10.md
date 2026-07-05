@@ -91,9 +91,8 @@
 - **Reason:** Cross-cutting refactor touching every handler that reads/writes the task graph; too large for a remediation round on a 13k-line PR.
 - **Recommendation:** Dedicated follow-up phase; the WaveGate discriminated union should be designed alongside the wave-gate v2 work.
 
-### Call-scoped report freshness (call-start stamp)
-- **Reason:** Requires new PreToolUse plumbing (stamp file per tool call); attempt only if it lands cleanly, else defer.
-- **Recommendation:** Thread tool_use_id → callstart stamp; change isFresh to require callStartMs ≤ mtime.
+### ~~Call-scoped report freshness (call-start stamp)~~ — LANDED (follow-up commit, 2026-07-05)
+- Implemented: PreToolUse Bash stamps tool_use_id → startMs into `<session>.callstart.json` (capped map of 32, swept via SESSION_SUFFIXES); findReport requires `mtime ≥ callStartMs − 2s` in addition to the 15-min bound; missing stamp fails closed for artifact-backed sources (stdout reporter JSON, inherently call-scoped, stays allowed); pi twin stamps in tool_call.
 
 ## Validation Commands
 ```bash

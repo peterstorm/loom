@@ -81,15 +81,70 @@ export function parseSessionId(raw: string): SessionId | null {
  * (enforce-phase-tools) cannot drift from the suffix vocabulary below. */
 export const MACHINE_SUFFIX = ".machine" as const;
 
+/** The per-session call-start stamp file suffix — a small JSON map of recent
+ * tool_use_id → call-start-ms entries, written at PreToolUse and consumed by
+ * the report-freshness ordering check (a disk artifact may vouch only when
+ * its mtime is at/after the START of the tool call being judged). */
+export const CALL_START_SUFFIX = ".callstart.json" as const;
+
 export const SESSION_SUFFIXES = [
   ".evidence.jsonl",
   MACHINE_SUFFIX,
   ".active",
   ".cleanup",
   ".task_graph",
+  CALL_START_SUFFIX,
 ] as const;
 
 export type SessionFileSuffix = (typeof SESSION_SUFFIXES)[number];
+
+// --- Call-start stamps (wire format: JSON object { [toolUseId]: startMs }) ---
+
+/**
+ * Bound on retained call-start entries per session. Stamps are consumed by
+ * the SAME call's PostToolUse, so only a handful need to survive — but
+ * interleaved calls in a busy session must not evict each other instantly,
+ * hence a bound comfortably above realistic concurrency instead of 1.
+ */
+export const CALL_START_CAP = 32;
+
+/**
+ * Deserialization boundary for the call-start stamp file. Accepts exactly
+ * what recordCallStart writes: a JSON object whose values are non-negative
+ * safe-integer epoch-ms stamps. toolUseId keys are UNTRUSTED harness text —
+ * they live only as JSON map keys, never in a filesystem path, so any
+ * non-empty string key is acceptable. Entries with a malformed value are
+ * dropped (fail closed: a missing stamp only ever REJECTS artifacts); a
+ * file that is not a JSON object at all yields null so callers can log the
+ * corruption instead of silently reading "no stamps".
+ */
+export function parseCallStartMap(raw: string): Readonly<Record<string, number>> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const entries = Object.entries(parsed).filter(
+    ([key, value]): boolean =>
+      key !== "" && typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+  ) as [string, number][];
+  return Object.fromEntries(entries);
+}
+
+/**
+ * Keep only the LAST `cap` entries in insertion order. recordCallStart
+ * re-inserts the stamped key (delete-then-set), so insertion order IS
+ * recency order and pruning drops the oldest stamps first.
+ */
+export function pruneCallStarts(
+  map: Readonly<Record<string, number>>,
+  cap: number,
+): Readonly<Record<string, number>> {
+  const entries = Object.entries(map);
+  return Object.fromEntries(entries.slice(Math.max(0, entries.length - cap)));
+}
 
 // --- Bindings (wire format: "<agent_id>\t<agent_type>\t<bound_at_ms>") ---
 
@@ -302,4 +357,19 @@ export interface SessionRegistry {
     callId?: string,
   ) => void;
   readonly readEvidence: (sessionId: SessionId) => readonly EvidenceRecord[];
+  /**
+   * Persist the call-start stamp for one tool call (PreToolUse). toolUseId
+   * is untrusted harness text — implementations store it as a JSON map key
+   * only, never in a filesystem path. Retention is bounded (CALL_START_CAP
+   * most-recent entries), so a stamp is a short-lived fact, not a ledger.
+   */
+  readonly recordCallStart: (
+    sessionId: SessionId,
+    toolUseId: string,
+    startMs: number,
+  ) => Promise<void>;
+  /** The call-start stamp for one tool call, or null when none was recorded
+   *  (missing tool_use_id, no PreToolUse stamp hook, pruned, or corrupt file)
+   *  — the consumer fails closed on null: disk artifacts cannot vouch. */
+  readonly callStartFor: (sessionId: SessionId, toolUseId: string) => number | null;
 }
