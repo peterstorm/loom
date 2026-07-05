@@ -120,6 +120,15 @@ export const STATE_FILE_PATTERNS = new RegExp(
   `active_task_graph|review-invocations|${escapeRegex(SUBAGENT_DIR)}|${escapeRegex(MACHINES_DIR)}`
 );
 
+/** Dirs whose writes are NEVER whitelisted, even for helper invocations:
+ * a write into the subagent dir forges trusted evidence (`.evidence.jsonl`),
+ * fakes attribution (`.active`), or disarms the gate (`.machine`), and a
+ * write into the machine-definitions dir deletes/rewrites the gate's rules.
+ * guard-state-file checks these BEFORE the helper allow. */
+export const PROTECTED_DIR_PATTERNS = new RegExp(
+  `${escapeRegex(SUBAGENT_DIR)}|${escapeRegex(MACHINES_DIR)}`
+);
+
 /** Write patterns to block on state files.
  * Note: `(?:^|\s)>>?(?!&)` avoids matching `2>&1` redirects in read-only commands */
 export const WRITE_PATTERNS = /(?:^|\s)>>?(?!&)|(?:^|\s)rm |mv |cp |tee |sed -i|perl -i|(?:^|\s)dd |sponge |chmod |python3? .*(open|write)|node .*(writeFile|fs\.)/;

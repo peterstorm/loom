@@ -29,7 +29,7 @@ if (!parsed.ok) throw new Error(parsed.error);
 const machine = parsed.value;
 
 const read = (path = "/a.ts"): Evidence => ({ kind: "FileRead", path });
-const write = (path = "/a.ts"): Evidence => ({ kind: "FileWrite", path });
+const write = (path = "/a.ts"): Evidence => ({ kind: "FileWrite", path, via: "tool" });
 // Facts only — judgment is derived at fold time via judgeTestRun.
 const testRun = (over: Partial<Extract<Evidence, { kind: "TestRun" }>> = {}): Evidence => ({
   kind: "TestRun",
@@ -157,10 +157,9 @@ describe("missingRequirements — broken terminal-is-last invariant fails CLOSED
 });
 
 describe("tokensFor — shell writes never advance guards (round-10 Fix 5)", () => {
-  it("via: 'shell' counts nothing; via: 'tool' and absent (old records) count FileWrite", () => {
+  it("via: 'shell' counts nothing; via: 'tool' counts FileWrite (absent via maps to 'tool' at the parse boundary)", () => {
     expect(tokensFor({ kind: "FileWrite", path: "/x", via: "shell" })).toEqual([]);
     expect(tokensFor({ kind: "FileWrite", path: "/x", via: "tool" })).toEqual(["FileWrite"]);
-    expect(tokensFor({ kind: "FileWrite", path: "/x" })).toEqual(["FileWrite"]);
   });
 
   it("a Bash redirect cannot push the machine past the implement guard", () => {

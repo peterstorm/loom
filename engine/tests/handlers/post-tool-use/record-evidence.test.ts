@@ -157,7 +157,7 @@ describe("agent-authored --outputFile artifacts cannot vouch (epoch FileWrite ve
     writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n");
     // The agent wrote the "report" itself (a FileWrite in its own epoch)…
     writeFileSync(reportPath, JSON.stringify({ numTotalTests: 5, numFailedTests: 0 }));
-    appendEvidence(s, epoch, [{ kind: "FileWrite", path: reportPath }]);
+    appendEvidence(s, epoch, [{ kind: "FileWrite", path: reportPath, via: "tool" }]);
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {

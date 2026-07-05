@@ -572,7 +572,13 @@ export const runUpdateTaskStatus = async (
       (existingTrusted && !incomingTrusted)
     ) {
       skippedExistingVerdict = true;
-      return s;
+      // The verdict stands down, but the agent still STOPPED: leaving the
+      // task on executing_tasks would ghost-block validate-task-execution's
+      // duplicate-spawn check for the rest of the session.
+      return {
+        ...s,
+        executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
+      };
     }
 
     const updatedTasks = s.tasks.map((t) =>

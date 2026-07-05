@@ -81,8 +81,9 @@ export function parseSessionId(raw: string): SessionId | null {
  * (enforce-phase-tools) cannot drift from the suffix vocabulary below. */
 export const MACHINE_SUFFIX = ".machine" as const;
 
-/** The per-session call-start stamp file suffix — a small JSON map of recent
- * tool_use_id → call-start-ms entries, written at PreToolUse and consumed by
+/** The per-session call-start stamp file suffix — a small recency-ordered
+ * JSON array of `{ id, startMs }` entries (harness tool_use_id →
+ * call-start-ms), written at PreToolUse and consumed by
  * the report-freshness ordering check (a disk artifact may vouch only when
  * its mtime is at/after the START of the tool call being judged). */
 export const CALL_START_SUFFIX = ".callstart.json" as const;
@@ -98,7 +99,7 @@ export const SESSION_SUFFIXES = [
 
 export type SessionFileSuffix = (typeof SESSION_SUFFIXES)[number];
 
-// --- Call-start stamps (wire format: JSON object { [toolUseId]: startMs }) ---
+// --- Call-start stamps (wire format: JSON array [{ id, startMs }, …], oldest first) ---
 
 /**
  * Bound on retained call-start entries per session. Stamps are consumed by
@@ -108,42 +109,65 @@ export type SessionFileSuffix = (typeof SESSION_SUFFIXES)[number];
  */
 export const CALL_START_CAP = 32;
 
+/** One call-start stamp: the harness tool_use_id and the epoch-ms start. */
+export interface CallStartEntry {
+  readonly id: string;
+  readonly startMs: number;
+}
+
 /**
  * Deserialization boundary for the call-start stamp file. Accepts exactly
- * what recordCallStart writes: a JSON object whose values are non-negative
- * safe-integer epoch-ms stamps. toolUseId keys are UNTRUSTED harness text —
- * they live only as JSON map keys, never in a filesystem path, so any
- * non-empty string key is acceptable. Entries with a malformed value are
- * dropped (fail closed: a missing stamp only ever REJECTS artifacts); a
- * file that is not a JSON object at all yields null so callers can log the
- * corruption instead of silently reading "no stamps".
+ * what recordCallStart writes: a JSON ARRAY of `{ id, startMs }` entries in
+ * recency order (oldest first) — an explicit ordering on the wire, not a
+ * reliance on JS object key-ordering semantics. `id` is UNTRUSTED harness
+ * text — it lives only inside the JSON payload, never in a filesystem path,
+ * so any non-empty string is acceptable. Entries with a malformed id/stamp
+ * are dropped (fail closed: a missing stamp only ever REJECTS artifacts); a
+ * file that is not a JSON array at all — including the pre-array Record
+ * shape — yields null so callers can log the corruption instead of silently
+ * reading "no stamps".
  */
-export function parseCallStartMap(raw: string): Readonly<Record<string, number>> | null {
+export function parseCallStartEntries(raw: string): readonly CallStartEntry[] | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
     return null;
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
-  const entries = Object.entries(parsed).filter(
-    ([key, value]): boolean =>
-      key !== "" && typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
-  ) as [string, number][];
-  return Object.fromEntries(entries);
+  if (!Array.isArray(parsed)) return null;
+  return parsed.flatMap((entry): CallStartEntry[] => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const o = entry as Record<string, unknown>;
+    return typeof o.id === "string" &&
+      o.id !== "" &&
+      typeof o.startMs === "number" &&
+      Number.isSafeInteger(o.startMs) &&
+      o.startMs >= 0
+      ? [{ id: o.id, startMs: o.startMs }]
+      : [];
+  });
 }
 
 /**
- * Keep only the LAST `cap` entries in insertion order. recordCallStart
- * re-inserts the stamped key (delete-then-set), so insertion order IS
- * recency order and pruning drops the oldest stamps first.
+ * Keep only the LAST `cap` entries. The array is recency-ordered (oldest
+ * first — recordCallStart removes any prior entry for the id and appends),
+ * so slicing from the end drops the oldest stamps first.
  */
 export function pruneCallStarts(
-  map: Readonly<Record<string, number>>,
+  entries: readonly CallStartEntry[],
   cap: number,
-): Readonly<Record<string, number>> {
-  const entries = Object.entries(map);
-  return Object.fromEntries(entries.slice(Math.max(0, entries.length - cap)));
+): readonly CallStartEntry[] {
+  return entries.slice(Math.max(0, entries.length - cap));
+}
+
+/** The stamp for one tool call, or null when absent. Scanned from the END so
+ *  a duplicate id (which recordCallStart never writes, but a hand-edited or
+ *  merged file could) resolves to the most recent stamp. */
+export function callStartOf(entries: readonly CallStartEntry[], toolUseId: string): number | null {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].id === toolUseId) return entries[i].startMs;
+  }
+  return null;
 }
 
 // --- Bindings (wire format: "<agent_id>\t<agent_type>\t<bound_at_ms>") ---
@@ -242,10 +266,11 @@ function parseEvent(raw: unknown): Evidence | null {
     case "FileWrite": {
       if (typeof o.path !== "string" || o.path === "") return null;
       // Absent via = "tool" (old records — only tool writes were minted
-      // historically). An UNRECOGNIZED via fails closed to "shell": the
-      // write still vetoes/demotes but never advances a guard — the
-      // fail-closed direction for both consumers.
-      if (o.via === undefined) return { kind: o.kind, path: o.path };
+      // historically); the parse boundary makes the default explicit so the
+      // domain type carries `via` unconditionally. An UNRECOGNIZED via fails
+      // closed to "shell": the write still vetoes/demotes but never advances
+      // a guard — the fail-closed direction for both consumers.
+      if (o.via === undefined) return { kind: o.kind, path: o.path, via: "tool" };
       const via = o.via === "tool" ? "tool" : "shell";
       return { kind: o.kind, path: o.path, via };
     }
@@ -298,7 +323,7 @@ export function eventsForEpoch(records: readonly EvidenceRecord[], epoch: Epoch)
   for (const r of records) {
     if (r.epoch !== epoch) continue;
     if (r.callId !== undefined) {
-      const key = `${r.callId} ${JSON.stringify(r.event)}`;
+      const key = JSON.stringify([r.callId, r.event]);
       if (seen.has(key)) continue;
       seen.add(key);
     }

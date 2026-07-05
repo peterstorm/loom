@@ -59,6 +59,24 @@ function taskUnionError(v: unknown, index: number): string | null {
   }
   const t = v as Record<string, unknown>;
   const id = typeof t.id === "string" ? t.id : `#${index}`;
+  // Structural fields the cast below asserts — proven, not assumed: a
+  // drifted or hand-edited graph must fail at the load boundary, not
+  // explode later inside typed gate logic that trusts Task's shape.
+  if (typeof t.id !== "string" || t.id === "") {
+    return `tasks[${index}]: id must be a non-empty string, got ${JSON.stringify(t.id)}`;
+  }
+  if (typeof t.wave !== "number" || !Number.isFinite(t.wave)) {
+    return `tasks[${index}] ("${id}"): wave must be a finite number, got ${JSON.stringify(t.wave)}`;
+  }
+  if (!Array.isArray(t.depends_on) || t.depends_on.some((d) => typeof d !== "string")) {
+    return `tasks[${index}] ("${id}"): depends_on must be an array of strings`;
+  }
+  if (
+    t.file_list !== undefined &&
+    (!Array.isArray(t.file_list) || t.file_list.some((f) => typeof f !== "string"))
+  ) {
+    return `tasks[${index}] ("${id}"): file_list must be an array of strings when present`;
+  }
   if (!(TASK_STATUSES as readonly string[]).includes(t.status as string)) {
     return `tasks[${index}] ("${id}"): status ${JSON.stringify(t.status)} is not one of ${TASK_STATUSES.join(", ")}`;
   }

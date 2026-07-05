@@ -36,6 +36,8 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
  */
 export const FAIL_CLOSED_ROUTES: ReadonlySet<string> = new Set([
   "pre-tool-use/enforce-phase-tools",
+  "pre-tool-use/guard-state-file",
+  "pre-tool-use/block-direct-edits",
 ]);
 
 /** Exit code for a crash outside the handler, derived from the route. */

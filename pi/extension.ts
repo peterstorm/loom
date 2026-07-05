@@ -86,11 +86,14 @@ export default function (pi: ExtensionAPI) {
       if (isToolCallEventType("bash", event)) {
         currentGuard = "guard-state-file";
         const result = guardStateFile(event.input.command ?? "");
-        // Call-start stamp (engine parity): decided FIRST, stamped AFTER,
-        // in its own catch — a thrown stamp write must never change the
-        // guard's polarity (and must not trip the fail-closed outer catch).
-        // The tool-call id is read defensively; absent → no stamp, and the
-        // recorder downstream fails closed on artifact-backed reports.
+        // Call-start stamp (PRODUCER only — pi has no PostToolUse evidence
+        // recorder yet, so nothing on the pi side consumes these stamps;
+        // they exist so the engine's recorder can order artifacts if it
+        // reads the same session): decided FIRST, stamped AFTER, in its own
+        // catch — a thrown stamp write must never change the guard's
+        // polarity (and must not trip the fail-closed outer catch). The
+        // tool-call id is read defensively; absent → no stamp, and the
+        // engine recorder fails closed on artifact-backed reports.
         try {
           const toolUseId = (event as { toolCallId?: unknown }).toolCallId;
           const safeSessionId = parseSessionId(sessionId);

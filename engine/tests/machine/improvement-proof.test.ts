@@ -168,7 +168,7 @@ describe("R1 — write-before-read is structurally impossible for the bound agen
   it("machine terminal stays unreachable without a fact-confirmed pass", () => {
     const events: Evidence[] = [
       { kind: "FileRead", path: "/a.ts" },
-      { kind: "FileWrite", path: "/a.ts" },
+      { kind: "FileWrite", path: "/a.ts", via: "tool" },
       { kind: "TestRun", command: "npm test", exit: 0, report: null }, // no artifact
     ];
     expect(isTerminal(machine, foldEvidence(machine, events))).toBe(false);

@@ -303,9 +303,10 @@ export function classifyTestCommand(command: string): string | null {
  * - not the last segment: the line's exit belongs to a LATER command
  *   (`false && npx vitest …; true` exits 0 without vitest ever running,
  *   `npm test || true` launders a red run) — never attribute
- * - last segment, exit 0: attributable after `&&`, `;`, or `|` (the test
- *   ran and the pipeline exit is its own) — but never after `||`, where
- *   exit 0 can mean the guard succeeded and the test never ran
+ * - last segment, exit 0: attributable after any operator except `||` —
+ *   `&&`, `;`, `|`, and `&` all mean the test ran and the line's exit 0 is
+ *   its own, but after `||` exit 0 can mean the guard succeeded and the
+ *   test never ran
  * - last segment, nonzero exit: attributable only after `;` or `&` (both
  *   sequence unconditionally — the test definitely ran) — after `&&` the
  *   nonzero exit may be the guard's, with the test never executed

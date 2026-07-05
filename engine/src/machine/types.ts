@@ -44,14 +44,16 @@ export type TestReportSummary = {
  * redirect/tee target (the gate can NOT enforce Bash). Guard advancement
  * counts only tool writes (tokensFor); shell writes still feed the
  * agent-authored-artifact veto and the modified-after-pass demotion.
- * Absent on the wire means "tool" — historically only tool writes were
- * minted, and the recorder now stamps every shell write explicitly.
+ * Absent on the WIRE means "tool" (historically only tool writes were
+ * minted) — the parse boundary (parseEvent) maps absence to "tool", so the
+ * domain type carries `via` unconditionally and consumers never re-derive
+ * the default.
  */
 export type FileWriteVia = "tool" | "shell";
 
 export type Evidence =
   | { readonly kind: "FileRead"; readonly path: string }
-  | { readonly kind: "FileWrite"; readonly path: string; readonly via?: FileWriteVia }
+  | { readonly kind: "FileWrite"; readonly path: string; readonly via: FileWriteVia }
   | {
       readonly kind: "TestRun";
       readonly command: string;

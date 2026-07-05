@@ -116,7 +116,7 @@ export const runRecordEvidence = async (
           input.tool_use_id !== undefined && input.tool_use_id !== ""
             ? registry.callStartFor(sessionId, input.tool_use_id)
             : null;
-        return findReport(segment, cwd, stdout, Date.now(), callStartMs, (absPath) =>
+        return findReport(segment, cwd, stdout, { nowMs: Date.now(), callStartMs }, (absPath) =>
           epochWrites.has(absPath),
         );
       },

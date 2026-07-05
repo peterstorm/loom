@@ -52,7 +52,18 @@ export const runGuardStateFile = async (
   registry: SessionRegistry = fsSessionRegistry,
   guard: (command: string) => HookResult = guardStateFile,
 ): Promise<HookResult> => {
-  const input: PreToolUseInput = JSON.parse(stdin);
+  let input: PreToolUseInput;
+  try {
+    input = JSON.parse(stdin);
+  } catch (e) {
+    // Malformed hook input on a guard route: fail CLOSED. A parse crash
+    // would exit 1 — NON-blocking for PreToolUse — silently waving the
+    // Bash call past the state-file guard.
+    return {
+      kind: "block",
+      message: `guard-state-file: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
   const command = (input.tool_input?.command as string) ?? "";
   // Decide FIRST, stamp AFTER: the stamp is side-band bookkeeping and must
   // not sit between the input and the block/allow decision.

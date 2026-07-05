@@ -69,6 +69,18 @@ describe("GATE_WIRED_TOOLS ↔ hooks.json (PreToolUse gate wiring)", () => {
   });
 });
 
+describe("guard-state-file ↔ hooks.json (PreToolUse Bash wiring)", () => {
+  it("guard-state-file.sh is wired for the PreToolUse Bash matcher — the state-file guard and the call-start stamp both ride on it", () => {
+    const guardEntries = entriesWiring("PreToolUse", "guard-state-file.sh");
+    expect(guardEntries.length).toBeGreaterThan(0);
+    const covered = new Set(guardEntries.flatMap((e) => matcherTools(e.matcher ?? "*")));
+    expect(
+      covered.has("Bash") || covered.has("*"),
+      "guard-state-file.sh is not wired for Bash — state-file writes would go unguarded and call-start stamps would never be written",
+    ).toBe(true);
+  });
+});
+
 describe("hooks.json shim routes ⊆ cli.ts KNOWN_HANDLERS", () => {
   it("every cli.ts route a wired shim invokes is a known handler route", () => {
     const scriptsDir = join(__dirname, "../../../hooks/scripts");

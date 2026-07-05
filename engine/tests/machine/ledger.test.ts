@@ -442,10 +442,11 @@ describe("callId idempotency stamp (round-10 Fix 6)", () => {
     expect(
       ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w","via":"tool"}}')!.event,
     ).toEqual({ kind: "FileWrite", path: "/w", via: "tool" });
-    // Absent via = old record = tool write (only tool writes were minted historically).
+    // Absent via = old record = tool write (only tool writes were minted
+    // historically) — the parse boundary makes the default EXPLICIT.
     expect(
       ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w"}}')!.event,
-    ).toEqual({ kind: "FileWrite", path: "/w" });
+    ).toEqual({ kind: "FileWrite", path: "/w", via: "tool" });
     // Garbage via fails CLOSED to "shell": still vetoes, never advances a guard.
     expect(
       ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w","via":"nonsense"}}')!.event,

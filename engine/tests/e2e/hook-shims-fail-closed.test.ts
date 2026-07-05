@@ -20,6 +20,8 @@ import { join } from "node:path";
 const SCRIPTS = join(__dirname, "../../../hooks/scripts");
 const ENFORCE = join(SCRIPTS, "enforce-phase-tools.sh");
 const RECORD = join(SCRIPTS, "record-evidence.sh");
+const GUARD = join(SCRIPTS, "guard-state-file.sh");
+const DISPATCH = join(SCRIPTS, "dispatch.sh");
 
 // chmod 000 does not bar root — these tests are meaningless under uid 0.
 const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
@@ -48,9 +50,17 @@ interface ShimResult {
 function runShim(script: string, env: Record<string, string | undefined>): ShimResult {
   // Build the env explicitly so CLAUDE_PLUGIN_ROOT can be genuinely ABSENT,
   // not empty — the shim tests `-z`, but absence is the real-world drift.
+  // CLAUDE_PROJECT_DIR is stripped too: graph presence must be under the
+  // test's control, never inherited from the invoking session.
   const base: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && k !== "CLAUDE_PLUGIN_ROOT" && k !== "LOOM_SUBAGENT_DIR") base[k] = v;
+    if (
+      v !== undefined &&
+      k !== "CLAUDE_PLUGIN_ROOT" &&
+      k !== "LOOM_SUBAGENT_DIR" &&
+      k !== "CLAUDE_PROJECT_DIR"
+    )
+      base[k] = v;
   }
   for (const [k, v] of Object.entries(env)) {
     if (v !== undefined) base[k] = v;
@@ -79,7 +89,7 @@ function resolveBin(name: string): string {
  */
 function bunlessPath(): string {
   const bin = tempDir();
-  for (const name of ["ls", "cat", "bash"]) {
+  for (const name of ["ls", "cat", "bash", "date"]) {
     symlinkSync(resolveBin(name), join(bin, name));
   }
   return bin;
@@ -161,6 +171,81 @@ describe("record-evidence.sh — fail-open, never silent", () => {
       PATH: bunlessPath(),
     });
     expect(stderr).toContain("runtime unavailable");
+    expect(status).toBe(0);
+  });
+});
+
+/** A CLAUDE_PROJECT_DIR with no task graph in it. */
+function graphlessProjectDir(): string {
+  return tempDir();
+}
+
+describe("guard-state-file.sh — runs on binding-without-graph, fails CLOSED on runtime drift", () => {
+  it("no graph + no bindings → exit 0 fast path (no runtime needed at all)", () => {
+    const { status, stderr } = runShim(GUARD, {
+      CLAUDE_PROJECT_DIR: graphlessProjectDir(),
+      LOOM_SUBAGENT_DIR: tempDir(), // empty: no *.machine anywhere
+    });
+    expect(stderr).toBe("");
+    expect(status).toBe(0);
+  });
+
+  it("no graph + binding present + CLAUDE_PLUGIN_ROOT unset → exit 2 (the shim SPAWNS for bindings, and fails closed)", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "shim-test.machine"), "a-1\tcode-implementer-agent\t1\n");
+    const { status, stderr } = runShim(GUARD, {
+      CLAUDE_PROJECT_DIR: graphlessProjectDir(),
+      LOOM_SUBAGENT_DIR: dir,
+    });
+    expect(stderr).toContain("CLAUDE_PLUGIN_ROOT unset");
+    expect(status).toBe(2);
+  });
+
+  it("no graph + binding present + bun not found on PATH → exit 2 (runtime gone ≠ guard off)", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "shim-test.machine"), "a-1\tcode-implementer-agent\t1\n");
+    const { status, stderr } = runShim(GUARD, {
+      CLAUDE_PROJECT_DIR: graphlessProjectDir(),
+      LOOM_SUBAGENT_DIR: dir,
+      CLAUDE_PLUGIN_ROOT: "/tmp/fake-plugin-root",
+      PATH: bunlessPath(),
+    });
+    expect(stderr).toContain("bun not found");
+    expect(status).toBe(2);
+  });
+});
+
+describe("dispatch.sh — runs on binding-without-graph, fails OPEN loudly on runtime drift", () => {
+  it("no graph + no bindings → exit 0 skip, quiet", () => {
+    const { status, stderr } = runShim(DISPATCH, {
+      CLAUDE_PROJECT_DIR: graphlessProjectDir(),
+      LOOM_SUBAGENT_DIR: tempDir(),
+    });
+    expect(stderr).toBe("");
+    expect(status).toBe(0);
+  });
+
+  it("no graph + binding present + CLAUDE_PLUGIN_ROOT unset → exit 0 WITH a 'bindings may leak' note (proves the graph-missing skip no longer swallows cleanup)", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "shim-test.machine"), "a-1\tcode-implementer-agent\t1\n");
+    const { status, stderr } = runShim(DISPATCH, {
+      CLAUDE_PROJECT_DIR: graphlessProjectDir(),
+      LOOM_SUBAGENT_DIR: dir,
+    });
+    expect(stderr).toContain("bindings may leak");
+    expect(status).toBe(0);
+  });
+
+  it("no graph + binding present + bun not found on PATH → exit 0 WITH a 'bindings may leak' note", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "shim-test.machine"), "a-1\tcode-implementer-agent\t1\n");
+    const { status, stderr } = runShim(DISPATCH, {
+      CLAUDE_PROJECT_DIR: graphlessProjectDir(),
+      LOOM_SUBAGENT_DIR: dir,
+      CLAUDE_PLUGIN_ROOT: "/tmp/fake-plugin-root",
+      PATH: bunlessPath(),
+    });
+    expect(stderr).toContain("bindings may leak");
     expect(status).toBe(0);
   });
 });

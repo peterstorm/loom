@@ -19,9 +19,10 @@ export function tokensFor(e: Evidence): EventToken[] {
     // Only TOOL-authored writes advance guards: the PreToolUse gate enforces
     // Edit/Write/MultiEdit, never Bash — a shell redirect (`echo > f.ts`)
     // counting as FileWrite would advance a phase the gate cannot police.
-    // `via` absent means "tool" (old records; only tool writes were minted
-    // historically). Shell writes stay in the ledger for the artifact veto
-    // and the modified-after-pass demotion — they just count nothing here.
+    // `via` is required on the domain type; the parse boundary (parseEvent)
+    // maps absent wire values (old records) to "tool". Shell writes stay in
+    // the ledger for the artifact veto and the modified-after-pass demotion
+    // — they just count nothing here.
     .with({ kind: "FileWrite" }, (w): EventToken[] => (w.via === "shell" ? [] : ["FileWrite"]))
     .with({ kind: "TestRun" }, (run): EventToken[] =>
       // Judgment is derived from facts at fold time: a run counts as

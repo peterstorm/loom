@@ -16,7 +16,8 @@ import { unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import {
   CALL_START_CAP,
   CALL_START_SUFFIX,
-  parseCallStartMap,
+  callStartOf,
+  parseCallStartEntries,
   parseSessionId,
   pruneCallStarts,
   type SessionRegistry,
@@ -38,28 +39,48 @@ afterAll(() => {
 });
 
 describe("pure call-start vocabulary", () => {
-  it("parseCallStartMap accepts what recordCallStart writes and drops malformed values", () => {
-    expect(parseCallStartMap('{"toolu_1":1000,"toolu_2":2000}')).toEqual({
-      toolu_1: 1000,
-      toolu_2: 2000,
-    });
-    // Malformed VALUES are dropped entry-by-entry (fail closed: a dropped
+  it("parseCallStartEntries accepts what recordCallStart writes and drops malformed entries", () => {
+    expect(
+      parseCallStartEntries('[{"id":"toolu_1","startMs":1000},{"id":"toolu_2","startMs":2000}]'),
+    ).toEqual([
+      { id: "toolu_1", startMs: 1000 },
+      { id: "toolu_2", startMs: 2000 },
+    ]);
+    // Malformed ENTRIES are dropped one-by-one (fail closed: a dropped
     // stamp only ever rejects artifacts)…
     expect(
-      parseCallStartMap('{"a":1,"neg":-5,"frac":1.5,"str":"9","":3,"huge":9007199254740993}'),
-    ).toEqual({ a: 1 });
-    // …while a non-object file is corruption the caller must log.
-    expect(parseCallStartMap("not json")).toBeNull();
-    expect(parseCallStartMap("[1,2]")).toBeNull();
-    expect(parseCallStartMap('"str"')).toBeNull();
-    expect(parseCallStartMap("null")).toBeNull();
+      parseCallStartEntries(
+        '[{"id":"a","startMs":1},{"id":"neg","startMs":-5},{"id":"frac","startMs":1.5},' +
+          '{"id":"str","startMs":"9"},{"id":"","startMs":3},{"id":"huge","startMs":9007199254740993},' +
+          '1,"x",null,{"startMs":4},{"id":"nostamp"}]',
+      ),
+    ).toEqual([{ id: "a", startMs: 1 }]);
+    // …while a non-array file is corruption the caller must log — INCLUDING
+    // the pre-array Record shape, which fails closed instead of being read
+    // through JS key-ordering semantics.
+    expect(parseCallStartEntries('{"toolu_1":1000,"toolu_2":2000}')).toBeNull();
+    expect(parseCallStartEntries("not json")).toBeNull();
+    expect(parseCallStartEntries('"str"')).toBeNull();
+    expect(parseCallStartEntries("null")).toBeNull();
   });
 
-  it("pruneCallStarts keeps the LAST cap entries in insertion order", () => {
-    const map = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`t-${i}`, i]));
-    expect(Object.keys(pruneCallStarts(map, 3))).toEqual(["t-2", "t-3", "t-4"]);
-    expect(pruneCallStarts(map, 10)).toEqual(map);
-    expect(pruneCallStarts({}, 3)).toEqual({});
+  it("pruneCallStarts keeps the LAST cap entries in order (oldest dropped first)", () => {
+    const entries = Array.from({ length: 5 }, (_, i) => ({ id: `t-${i}`, startMs: i }));
+    expect(pruneCallStarts(entries, 3).map((e) => e.id)).toEqual(["t-2", "t-3", "t-4"]);
+    expect(pruneCallStarts(entries, 10)).toEqual(entries);
+    expect(pruneCallStarts([], 3)).toEqual([]);
+  });
+
+  it("callStartOf scans from the END so a duplicate id resolves to the most recent stamp", () => {
+    const entries = [
+      { id: "t", startMs: 100 },
+      { id: "other", startMs: 150 },
+      { id: "t", startMs: 200 },
+    ];
+    expect(callStartOf(entries, "t")).toBe(200);
+    expect(callStartOf(entries, "other")).toBe(150);
+    expect(callStartOf(entries, "missing")).toBeNull();
+    expect(callStartOf([], "t")).toBeNull();
   });
 });
 
@@ -117,5 +138,23 @@ describe("call-start stamps — fs corruption handling", () => {
       stderrSpy.mockRestore();
     }
     expect(fsSessionRegistry.callStartFor(s, "toolu_x")).toBe(777);
+  });
+
+  it("an old Record-shaped stamp file fails closed as corruption and is replaced by the next stamp", async () => {
+    const s = sid("corrupt");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(`${SUBAGENT_DIR}/${s}${CALL_START_SUFFIX}`, '{"toolu_old":123}');
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(fsSessionRegistry.callStartFor(s, "toolu_old")).toBeNull();
+      await fsSessionRegistry.recordCallStart(s, "toolu_new", 999);
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("corrupt call-start file");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    expect(fsSessionRegistry.callStartFor(s, "toolu_new")).toBe(999);
+    expect(fsSessionRegistry.callStartFor(s, "toolu_old")).toBeNull();
   });
 });

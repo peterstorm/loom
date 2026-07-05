@@ -223,7 +223,9 @@ describe("trust-aware skip guard — decided INSIDE the locked update", () => {
     expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-fail" });
     expect(state.tasks[0].test_evidence).toBe("ledger: exit 1 (npm test)");
     expect(state.tasks[0].new_tests_written).toBe(true);
-    expect(state.executing_tasks).toEqual(["T1"]); // untouched, like the old early return
+    // The VERDICT stands down, but the agent still STOPPED: the task must
+    // leave executing_tasks or the duplicate-spawn check ghost-blocks re-runs.
+    expect(state.executing_tasks).toEqual([]);
   }, 30000);
 
   it("a completed task is never reopened", async () => {

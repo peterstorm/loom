@@ -159,7 +159,10 @@ stateDiagram-v2
 
 An agent that tries to Edit/Write before reading any file is blocked at
 the tool call with an explanation of what advances the phase. The terminal
-phase's `requires` can be computed (`missingRequirements` is exported for
-it) but is not yet consulted anywhere at runtime; both surfacing it in
-evidence labeling and hard-blocking completion on it are Phase A
-follow-ups.
+phase's `requires` IS consulted at runtime for evidence labeling: the
+SubagentStop resolver (update-task-status) folds the epoch's evidence
+through the machine and, when `missingRequirements` reports unmet terminal
+requirements, caps a trusted-pass verdict at untrusted with a
+`machine-incomplete` label naming what is missing. Hard-BLOCKING completion
+on unmet requirements (rather than demoting the verdict) remains the Phase
+A follow-up.

@@ -200,13 +200,16 @@ The plan declares invariants in an `## Invariants` section, each tiered:
   report artifact (vitest JSON / JUnit XML) that the agent's own tools can
   write. The recorder rejects an explicit `--outputFile` path that appears as
   a `FileWrite` in the agent's own epoch (loudly) — Edit/Write tool calls AND
-  Bash redirect/`tee` targets both mint `FileWrite` — but the residual
-  remains: a Bash write with no static target in the command text (`cp`/`mv`,
-  `dd of=`, an interpreter-authored file via `python -c 'open(...)'`), an
-  artifact written in a previous epoch, or a "test" script that emits
-  runner-shaped JSON can still vouch. Full integrity
-  (mtime-≥-command-start stamping, HMAC / out-of-reach storage) is the known
-  follow-up.
+  Bash redirect/`tee` targets both mint `FileWrite`, including targets of the
+  very command line being judged — and report freshness is call-scoped: a
+  disk artifact may vouch only when its mtime is at/after the START of the
+  tool call being judged (the PreToolUse call-start stamp orders it), so a
+  previous-epoch or pre-staged artifact fails the ordering check. The
+  remaining residuals (see machines/README.md "known residual limits") are
+  same-call staging via a Bash write with no static target in the command
+  text (`cp`/`mv`, `dd of=`, an interpreter-authored file via
+  `python -c 'open(...)'`) and a "test" script that itself emits runner-shaped
+  JSON. Full integrity (HMAC / out-of-reach storage) is the known follow-up.
 
 ## What NOT to do
 

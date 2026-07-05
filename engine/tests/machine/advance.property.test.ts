@@ -22,7 +22,7 @@ const machine = parsed.value;
 
 const evidenceArb: fc.Arbitrary<Evidence> = fc.oneof(
   fc.record({ kind: fc.constant("FileRead" as const), path: fc.constant("/f.ts") }),
-  fc.record({ kind: fc.constant("FileWrite" as const), path: fc.constant("/f.ts") }),
+  fc.record({ kind: fc.constant("FileWrite" as const), path: fc.constant("/f.ts"), via: fc.constant("tool" as const) }),
   fc.record({
     kind: fc.constant("TestRun" as const),
     command: fc.constantFrom("npm test", "bun test", "mvn test", 'echo "npm test: 5 passing"'),

@@ -41,13 +41,13 @@ describe("findReport", () => {
 
   it("reads an explicit --outputFile vitest report", () => {
     writeFileSync(join(cwd, "out.json"), JSON.stringify({ numTotalTests: 3, numFailedTests: 0 }));
-    const report = findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", Date.now(), callStart);
+    const report = findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", { nowMs: Date.now(), callStartMs: callStart });
     expect(report).toEqual({ total: 3, failed: 0, source: "vitest-json" });
   });
 
   it("parses JSON from stdout when a JSON reporter was requested", () => {
     const stdout = JSON.stringify({ numTotalTests: 8, numFailedTests: 1 });
-    const report = findReport("npx vitest run --reporter=json", cwd, stdout, Date.now(), callStart);
+    const report = findReport("npx vitest run --reporter=json", cwd, stdout, { nowMs: Date.now(), callStartMs: callStart });
     expect(report).toEqual({ total: 8, failed: 1, source: "vitest-json" });
   });
 
@@ -55,7 +55,7 @@ describe("findReport", () => {
     const dir = join(cwd, "target/surefire-reports");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "TEST-a.xml"), '<testsuite tests="4" failures="0" errors="0"/>');
-    const report = findReport("mvn test", cwd, "", Date.now(), callStart);
+    const report = findReport("mvn test", cwd, "", { nowMs: Date.now(), callStartMs: callStart });
     expect(report).toEqual({ total: 4, failed: 0, source: "junit-xml" });
   });
 
@@ -63,7 +63,7 @@ describe("findReport", () => {
     const dir = join(cwd, "core/target/surefire-reports");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "TEST-a.xml"), '<testsuite tests="2" failures="1" errors="0"/>');
-    const report = findReport("mvn test", cwd, "", Date.now(), callStart);
+    const report = findReport("mvn test", cwd, "", { nowMs: Date.now(), callStartMs: callStart });
     expect(report).toEqual({ total: 2, failed: 1, source: "junit-xml" });
   });
 
@@ -72,7 +72,7 @@ describe("findReport", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "TEST-a.xml"), '<testsuite tests="4" failures="0" errors="0"/>');
     // A sibling JVM run's artifact must not vouch for `npm test`.
-    expect(findReport("npm test", cwd, "", Date.now(), callStart)).toBeNull();
+    expect(findReport("npm test", cwd, "", { nowMs: Date.now(), callStartMs: callStart })).toBeNull();
   });
 
   it("ignores a stale explicit --outputFile report — freshness bounds cross-run attribution", () => {
@@ -87,8 +87,7 @@ describe("findReport", () => {
         "npx vitest run --reporter=json --outputFile=out.json",
         cwd,
         "",
-        Date.now(),
-        Date.now() - 2 * 60 * 60 * 1000,
+        { nowMs: Date.now(), callStartMs: Date.now() - 2 * 60 * 60 * 1000 },
       ),
     ).toBeNull();
   });
@@ -100,11 +99,11 @@ describe("findReport", () => {
     writeFileSync(file, '<testsuite tests="4" failures="0" errors="0"/>');
     const old = (Date.now() - 60 * 60 * 1000) / 1000;
     utimesSync(file, old, old);
-    expect(findReport("mvn test", cwd, "", Date.now(), Date.now() - 2 * 60 * 60 * 1000)).toBeNull();
+    expect(findReport("mvn test", cwd, "", { nowMs: Date.now(), callStartMs: Date.now() - 2 * 60 * 60 * 1000 })).toBeNull();
   });
 
   it("returns null when no artifact exists (echo-spoof shape)", () => {
-    expect(findReport('echo "npm test: 5 passing"', cwd, 'npm test: 5 passing', Date.now(), callStart)).toBeNull();
+    expect(findReport('echo "npm test: 5 passing"', cwd, 'npm test: 5 passing', { nowMs: Date.now(), callStartMs: callStart })).toBeNull();
   });
 
   it("an unreadable explicit --outputFile falls through instead of crashing (TestRun keeps report: null)", () => {
@@ -114,7 +113,7 @@ describe("findReport", () => {
     try {
       let report: unknown = "unset";
       expect(() => {
-        report = findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", Date.now(), callStart);
+        report = findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", { nowMs: Date.now(), callStartMs: callStart });
       }).not.toThrow();
       expect(report).toBeNull();
       const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
@@ -130,7 +129,7 @@ describe("findReport", () => {
     writeFileSync(join(cwd, "target/surefire-reports"), "not a directory");
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      expect(findReport("mvn test", cwd, "", Date.now(), callStart)).toBeNull();
+      expect(findReport("mvn test", cwd, "", { nowMs: Date.now(), callStartMs: callStart })).toBeNull();
       const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
       expect(text).toContain("cannot read JUnit dir");
     } finally {
@@ -143,7 +142,7 @@ describe("findReport", () => {
     writeFileSync(notADir, "x");
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      expect(findReport("mvn test", notADir, "", Date.now(), callStart)).toBeNull();
+      expect(findReport("mvn test", notADir, "", { nowMs: Date.now(), callStartMs: callStart })).toBeNull();
       const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
       expect(text).toContain("cannot list module dirs");
     } finally {
@@ -172,7 +171,7 @@ describe("findReport — call-start ordering (a window bounds, the stamp orders)
     // …but the CALL started just now: a run that produced nothing must not
     // re-vouch the sibling artifact.
     expect(
-      findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", Date.now(), Date.now() - 1000),
+      findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", { nowMs: Date.now(), callStartMs: Date.now() - 1000 }),
     ).toBeNull();
   });
 
@@ -183,7 +182,24 @@ describe("findReport — call-start ordering (a window bounds, the stamp orders)
     writeFileSync(file, '<testsuite tests="4" failures="0" errors="0"/>');
     const mtime = (Date.now() - 5 * 60 * 1000) / 1000;
     utimesSync(file, mtime, mtime);
-    expect(findReport("mvn test -DskipTests", cwd, "", Date.now(), Date.now() - 1000)).toBeNull();
+    expect(findReport("mvn test -DskipTests", cwd, "", { nowMs: Date.now(), callStartMs: Date.now() - 1000 })).toBeNull();
+  });
+
+  it("a mixed-mtime JUnit dir counts ONLY files fresh for this call — a stale failing XML beside a fresh passing one does not pollute the merge", () => {
+    const dir = join(cwd, "target/surefire-reports");
+    mkdirSync(dir, { recursive: true });
+    // Stale FAILING report from a previous run (5 minutes before the call)…
+    const stale = join(dir, "TEST-old.xml");
+    writeFileSync(stale, '<testsuite tests="6" failures="3" errors="0"/>');
+    const staleMtime = (Date.now() - 5 * 60 * 1000) / 1000;
+    utimesSync(stale, staleMtime, staleMtime);
+    // …beside a fresh PASSING report written during this call.
+    writeFileSync(join(dir, "TEST-new.xml"), '<testsuite tests="4" failures="0" errors="0"/>');
+    const report = findReport("mvn test", cwd, "", {
+      nowMs: Date.now(),
+      callStartMs: Date.now() - 1000,
+    });
+    expect(report).toEqual({ total: 4, failed: 0, source: "junit-xml" });
   });
 
   it("an artifact at/after the call start (within slack) is accepted", () => {
@@ -192,7 +208,7 @@ describe("findReport — call-start ordering (a window bounds, the stamp orders)
     // Call "started" slightly AFTER the write — coarse-mtime slack absorbs it.
     const callStart = Date.now() + CALL_START_SLACK_MS - 500;
     expect(
-      findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", Date.now(), callStart),
+      findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", { nowMs: Date.now(), callStartMs: callStart }),
     ).toEqual({ total: 3, failed: 0, source: "vitest-json" });
   });
 
@@ -202,7 +218,7 @@ describe("findReport — call-start ordering (a window bounds, the stamp orders)
     const mtime = (Date.now() - CALL_START_SLACK_MS - 5000) / 1000;
     utimesSync(file, mtime, mtime);
     expect(
-      findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", Date.now(), Date.now()),
+      findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", { nowMs: Date.now(), callStartMs: Date.now() }),
     ).toBeNull();
   });
 
@@ -212,7 +228,7 @@ describe("findReport — call-start ordering (a window bounds, the stamp orders)
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       expect(
-        findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", Date.now(), null),
+        findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", { nowMs: Date.now(), callStartMs: null }),
       ).toBeNull();
       const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
       expect(text).toContain("no call-start stamp");
@@ -227,7 +243,7 @@ describe("findReport — call-start ordering (a window bounds, the stamp orders)
     writeFileSync(join(dir, "TEST-a.xml"), '<testsuite tests="4" failures="0" errors="0"/>');
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      expect(findReport("mvn test", cwd, "", Date.now(), null)).toBeNull();
+      expect(findReport("mvn test", cwd, "", { nowMs: Date.now(), callStartMs: null })).toBeNull();
       const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
       expect(text).toContain("no call-start stamp");
     } finally {
@@ -237,7 +253,7 @@ describe("findReport — call-start ordering (a window bounds, the stamp orders)
 
   it("null call start → stdout reporter JSON STILL vouches (inherently call-scoped)", () => {
     const stdout = JSON.stringify({ numTotalTests: 8, numFailedTests: 1 });
-    expect(findReport("npx vitest run --reporter=json", cwd, stdout, Date.now(), null)).toEqual({
+    expect(findReport("npx vitest run --reporter=json", cwd, stdout, { nowMs: Date.now(), callStartMs: null })).toEqual({
       total: 8,
       failed: 1,
       source: "vitest-json",
@@ -250,7 +266,7 @@ describe("findReport — call-start ordering (a window bounds, the stamp orders)
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       expect(
-        findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", Date.now(), null, () => true),
+        findReport("npx vitest run --reporter=json --outputFile=out.json", cwd, "", { nowMs: Date.now(), callStartMs: null }, () => true),
       ).toBeNull();
       const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
       expect(text).toContain("rejecting --outputFile");

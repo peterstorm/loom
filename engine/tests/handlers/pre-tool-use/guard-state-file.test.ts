@@ -1,23 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fc from "fast-check";
-import { WRITE_PATTERNS, STATE_FILE_PATTERNS, WHITELISTED_HELPERS, SUBAGENT_DIR, MACHINES_DIR } from "../../../src/config";
+import { WHITELISTED_HELPERS, SUBAGENT_DIR, MACHINES_DIR } from "../../../src/config";
+import { guardStateFileDecision } from "../../../src/core/guard-state-file";
 import { runGuardStateFile, stampCallStart } from "../../../src/handlers/pre-tool-use/guard-state-file";
 import { parseSessionId, type SessionRegistry } from "../../../src/machine/evidence";
 import { inMemorySessionRegistry } from "../../machine/fake-session-registry";
 import type { HookResult } from "../../../src/types";
 
 /**
- * Test the pure regex logic from guard-state-file directly.
- * The handler wraps FS checks around these regexes — we test the regexes themselves.
+ * Test the REAL pure guard decision (guardStateFileDecision) — the handler
+ * only wraps the task-graph-exists FS check around it.
  */
-
-/** Simulate the core guard decision (extracted from handler logic) */
 function guardDecision(command: string): "allow" | "block" {
-  if (!command) return "allow";
-  if (WHITELISTED_HELPERS.some((h) => command.includes(h))) return "allow";
-  if (!STATE_FILE_PATTERNS.test(command)) return "allow";
-  if (WRITE_PATTERNS.test(command)) return "block";
-  return "allow";
+  return guardStateFileDecision(command).kind === "block" ? "block" : "allow";
 }
 
 describe("guard-state-file — property tests", () => {
@@ -83,7 +78,55 @@ describe("guard-state-file — edge cases", () => {
   it("whitelisted helpers bypass guard even with write patterns", () => {
     for (const helper of WHITELISTED_HELPERS) {
       expect(guardDecision(`bun cli.ts helper ${helper} > active_task_graph.json`)).toBe("allow");
+      expect(
+        guardDecision(`bun \${CLAUDE_PLUGIN_ROOT}/engine/src/cli.ts helper ${helper} --wave 2`),
+      ).toBe("allow");
     }
+  });
+
+  it("a helper name in an echo argument does NOT bypass the guard (substring spoof)", () => {
+    expect(guardDecision('echo cleanup-state; echo forged >> active_task_graph.json')).toBe("block");
+    expect(guardDecision('echo "complete-wave-gate" >> active_task_graph.json')).toBe("block");
+    expect(guardDecision(`echo set-phase && echo forged >> ${SUBAGENT_DIR}/s.evidence.jsonl`)).toBe(
+      "block",
+    );
+  });
+
+  it("a helper name in a comment does NOT bypass the guard", () => {
+    expect(guardDecision('echo x >> active_task_graph.json # cleanup-state')).toBe("block");
+    expect(guardDecision('# set-phase\necho x >> active_task_graph.json')).toBe("block");
+  });
+
+  it("a helper name in a file path does NOT bypass the guard", () => {
+    expect(guardDecision("cat /tmp/cleanup-state.txt > active_task_graph.json")).toBe("block");
+    expect(guardDecision(`cp /tmp/mark-tests-passed ${SUBAGENT_DIR}/s.machine`)).toBe("block");
+  });
+
+  it("a REAL helper invocation on the same line as a forged ledger append still blocks (protected dirs checked first)", () => {
+    expect(
+      guardDecision(
+        `bun cli.ts helper set-phase execute; echo forged >> ${SUBAGENT_DIR}/s.evidence.jsonl`,
+      ),
+    ).toBe("block");
+    expect(
+      guardDecision(`bun cli.ts helper cleanup-state && rm -rf ${MACHINES_DIR}`),
+    ).toBe("block");
+  });
+
+  it("forged appends to the evidence ledger are blocked regardless of helper-shaped noise", () => {
+    expect(
+      guardDecision(
+        `true "; bun cli.ts helper cleanup-state"; echo '{"epoch":"a:b"}' >> ${SUBAGENT_DIR}/s.evidence.jsonl`,
+      ),
+    ).toBe("block");
+  });
+
+  it("helper-invocation matching requires the documented bun/cli.ts/helper head shape", () => {
+    // Right helper name, wrong invocation shape → no bypass.
+    expect(guardDecision("cleanup-state > active_task_graph.json")).toBe("block");
+    expect(guardDecision("bun other.ts helper cleanup-state > active_task_graph.json")).toBe("block");
+    expect(guardDecision("bun cli.ts run cleanup-state > active_task_graph.json")).toBe("block");
+    expect(guardDecision("bun cli.ts helper not-whitelisted > active_task_graph.json")).toBe("block");
   });
 
   it("review-invocations file also guarded", () => {

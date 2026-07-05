@@ -6,8 +6,8 @@
  * long-lived session's `.active` roster or `.evidence.jsonl` ledger would
  * look stale on its own mtime while the session is demonstrably live. A
  * session's files are deleted only when the MAX mtime across ALL of its
- * files (`.machine` / `.active` / `.evidence.jsonl` / `.cleanup` /
- * `.task_graph`) exceeds STALE_SUBAGENT_TTL_MS (shared with the
+ * files (every SESSION_SUFFIXES entry — the single source of truth in
+ * machine/evidence.ts) exceeds STALE_SUBAGENT_TTL_MS (shared with the
  * machine-binding liveness TTL). Files that match no known session suffix
  * fall back to their own mtime.
  */

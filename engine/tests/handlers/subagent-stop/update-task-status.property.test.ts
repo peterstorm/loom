@@ -143,7 +143,7 @@ describe("analyzeNewTests — property tests", () => {
 describe("resolveTestEvidence — property tests", () => {
   const eventArb: fc.Arbitrary<Evidence> = fc.oneof(
     fc.record({ kind: fc.constant("FileRead" as const), path: fc.constantFrom("/a.ts", "/b.ts") }),
-    fc.record({ kind: fc.constant("FileWrite" as const), path: fc.constantFrom("/a.ts", "/b.ts") }),
+    fc.record({ kind: fc.constant("FileWrite" as const), path: fc.constantFrom("/a.ts", "/b.ts"), via: fc.constantFrom("tool" as const, "shell" as const) }),
     fc.record({
       kind: fc.constant("TestRun" as const),
       command: fc.constantFrom("npm test", "bun test"),

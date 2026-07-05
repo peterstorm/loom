@@ -107,7 +107,12 @@ const JVM_RUNNER_PREFIXES = ["mvn", "mvnw", "./mvnw", "gradle", "./gradlew"];
  * 2. JSON on stdout when the segment asked for a JSON reporter
  * 3. Fresh JUnit XML in conventional dirs — JVM runners only
  *
- * `callStartMs` is the PreToolUse call-start stamp for THIS tool call.
+ * `times` is a named-args object on purpose: `nowMs` and `callStartMs` are
+ * two same-typed epoch-ms values whose positional swap would silently
+ * invert the freshness check — the field names make the call sites
+ * compiler-checked.
+ *
+ * `times.callStartMs` is the PreToolUse call-start stamp for THIS tool call.
  * Artifact-backed sources (1 and 3) require it: an on-disk artifact may
  * vouch only when its mtime is at/after the call start, so a command that
  * ran no tests cannot re-vouch a stale sibling artifact still inside the
@@ -121,10 +126,10 @@ export function findReport(
   segment: string,
   cwd: string,
   stdout: string,
-  nowMs: number,
-  callStartMs: number | null,
+  times: { readonly nowMs: number; readonly callStartMs: number | null },
   vetoExplicitPath: (absolutePath: string) => boolean = () => false,
 ): TestReportSummary | null {
+  const { nowMs, callStartMs } = times;
   const noStamp = (source: string): void => {
     process.stderr.write(
       `findReport: no call-start stamp for this tool call — ${source} cannot vouch (disk artifacts require proof they postdate the call; failing closed)\n`,

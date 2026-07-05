@@ -230,7 +230,7 @@ describe("resolveTestEvidence — a trusted pass goes stale when files change af
     exit: 0,
     report: reportSummary(5, 0),
   };
-  const fileWrite: Evidence = { kind: "FileWrite", path: "/src/thing.ts" };
+  const fileWrite: Evidence = { kind: "FileWrite", path: "/src/thing.ts", via: "tool" };
   const fileRead: Evidence = { kind: "FileRead", path: "/src/thing.ts" };
 
   it("[pass, FileWrite] demotes to the labeled low-trust path — the pass vouched for old code", () => {

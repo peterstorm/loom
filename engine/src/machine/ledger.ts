@@ -55,10 +55,12 @@ import {
   type PersistedBinding,
   type SessionFileSuffix,
   type SessionId,
+  type CallStartEntry,
   CALL_START_CAP,
   CALL_START_SUFFIX,
+  callStartOf,
   epochOf,
-  parseCallStartMap,
+  parseCallStartEntries,
   pruneCallStarts,
   formatBindingLine,
   isBindingFresh,
@@ -432,11 +434,13 @@ const callStartPath = (sessionId: SessionId): string =>
 /**
  * Stamp the START of one tool call (PreToolUse), locked read-modify-write
  * under the session's binding lock (concurrent PreToolUse deliveries would
- * otherwise lose stamps to a torn rewrite). Retention is bounded: the key
- * is re-inserted (delete-then-set) so insertion order is recency order, and
- * pruneCallStarts keeps only the CALL_START_CAP most-recent entries. A
- * corrupt stamp file is replaced (loudly) — its stale contents could only
- * ever REJECT artifacts, so starting fresh is the honest recovery.
+ * otherwise lose stamps to a torn rewrite). The wire format is an explicit
+ * recency-ordered ARRAY (oldest first): any prior entry for the id is
+ * removed and the new stamp appended, and pruneCallStarts keeps only the
+ * CALL_START_CAP most-recent entries by slicing. A corrupt stamp file —
+ * including the pre-array Record shape — is replaced (loudly); its stale
+ * contents could only ever REJECT artifacts, so starting fresh is the
+ * honest recovery.
  */
 export async function recordCallStart(
   sessionId: SessionId,
@@ -446,20 +450,21 @@ export async function recordCallStart(
   mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
   await withLock(bindingLock(sessionId), () => {
     const path = callStartPath(sessionId);
-    let current: Readonly<Record<string, number>> = {};
+    let current: readonly CallStartEntry[] = [];
     if (existsSync(path)) {
-      const parsed = parseCallStartMap(readFileSync(path, "utf-8"));
+      const parsed = parseCallStartEntries(readFileSync(path, "utf-8"));
       if (parsed === null) {
         process.stderr.write(
-          `recordCallStart: corrupt call-start file for ${sessionId} — starting a fresh stamp map\n`,
+          `recordCallStart: corrupt call-start file for ${sessionId} — starting a fresh stamp list\n`,
         );
       } else {
         current = parsed;
       }
     }
-    const reinserted: Record<string, number> = { ...current };
-    delete reinserted[toolUseId];
-    reinserted[toolUseId] = startMs;
+    const reinserted: CallStartEntry[] = [
+      ...current.filter((e) => e.id !== toolUseId),
+      { id: toolUseId, startMs },
+    ];
     rewriteFileAtomic(path, JSON.stringify(pruneCallStarts(reinserted, CALL_START_CAP)));
   });
 }
@@ -474,14 +479,14 @@ export function callStartFor(sessionId: SessionId, toolUseId: string): number | 
   const path = callStartPath(sessionId);
   if (!existsSync(path)) return null;
   try {
-    const map = parseCallStartMap(readFileSync(path, "utf-8"));
-    if (map === null) {
+    const entries = parseCallStartEntries(readFileSync(path, "utf-8"));
+    if (entries === null) {
       process.stderr.write(
         `callStartFor: corrupt call-start file for ${sessionId} — treating as unstamped (fail closed)\n`,
       );
       return null;
     }
-    return map[toolUseId] ?? null;
+    return callStartOf(entries, toolUseId);
   } catch (e) {
     process.stderr.write(
       `callStartFor: cannot read call-start file for ${sessionId}: ${e instanceof Error ? e.message : String(e)}\n`,

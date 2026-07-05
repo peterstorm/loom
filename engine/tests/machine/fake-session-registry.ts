@@ -18,16 +18,23 @@ import type {
   MachineBinding,
   SessionRegistry,
 } from "../../src/machine/evidence";
-import { CALL_START_CAP, epochOf, resolveSoleActiveBinding } from "../../src/machine/evidence";
+import {
+  type CallStartEntry,
+  CALL_START_CAP,
+  callStartOf,
+  epochOf,
+  pruneCallStarts,
+  resolveSoleActiveBinding,
+} from "../../src/machine/evidence";
 import type { Epoch, Evidence, EvidenceRecord } from "../../src/machine/types";
 
 export function inMemorySessionRegistry(): SessionRegistry {
   const bindings = new Map<string, MachineBinding[]>();
   const active = new Map<string, AgentId[]>();
   const ledger = new Map<string, EvidenceRecord[]>();
-  // Insertion order IS recency order (delete-then-set on stamp), so pruning
-  // to CALL_START_CAP drops the oldest stamps — mirroring recordCallStart.
-  const callStarts = new Map<string, Map<string, number>>();
+  // Recency-ordered array (oldest first), mirroring the fs adapter's wire
+  // format exactly: remove-then-append on stamp, prune by slicing.
+  const callStarts = new Map<string, readonly CallStartEntry[]>();
 
   return {
     bind: async (sessionId: string, agentType: AgentType, agentId: AgentId): Promise<void> => {
@@ -89,18 +96,15 @@ export function inMemorySessionRegistry(): SessionRegistry {
     readEvidence: (sessionId: string): readonly EvidenceRecord[] => [...(ledger.get(sessionId) ?? [])],
 
     recordCallStart: async (sessionId: string, toolUseId: string, startMs: number): Promise<void> => {
-      const stamps = callStarts.get(sessionId) ?? new Map<string, number>();
-      stamps.delete(toolUseId);
-      stamps.set(toolUseId, startMs);
-      while (stamps.size > CALL_START_CAP) {
-        const oldest = stamps.keys().next().value;
-        if (oldest === undefined) break;
-        stamps.delete(oldest);
-      }
-      callStarts.set(sessionId, stamps);
+      const current = callStarts.get(sessionId) ?? [];
+      const reinserted: CallStartEntry[] = [
+        ...current.filter((e) => e.id !== toolUseId),
+        { id: toolUseId, startMs },
+      ];
+      callStarts.set(sessionId, pruneCallStarts(reinserted, CALL_START_CAP));
     },
 
     callStartFor: (sessionId: string, toolUseId: string): number | null =>
-      callStarts.get(sessionId)?.get(toolUseId) ?? null,
+      callStartOf(callStarts.get(sessionId) ?? [], toolUseId),
   };
 }
