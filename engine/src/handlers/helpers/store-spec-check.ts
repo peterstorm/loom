@@ -41,14 +41,33 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "error", message: `SPEC_CHECK_VERDICT ${JSON.stringify(verdict[1])} is not a recognized verdict` };
   }
 
+  // Fail closed on a count/findings mismatch, mirroring the auto handler
+  // (store-spec-check-findings): the wave gate reads critical_count, so a
+  // reported 0 alongside listed CRITICAL lines (or vice versa) would forge
+  // a pass or manufacture a block.
+  const reportedCritical = Number(critCount[1]);
+  if (reportedCritical !== critical.length) {
+    return {
+      kind: "error",
+      message: `SPEC_CHECK_CRITICAL_COUNT is ${reportedCritical} but ${critical.length} CRITICAL: line(s) were provided — counts must match the findings`,
+    };
+  }
+  const reportedHigh = highCount ? Number(highCount[1]) : 0;
+  if (highCount && reportedHigh !== high.length) {
+    return {
+      kind: "error",
+      message: `SPEC_CHECK_HIGH_COUNT is ${reportedHigh} but ${high.length} HIGH: line(s) were provided — counts must match the findings`,
+    };
+  }
+
   const state = mgr.load();
   const waveNum = wave ? Number(wave[1]) : state.current_wave ?? 1;
 
   const specCheck: SpecCheck = {
     wave: waveNum,
     run_at: new Date().toISOString(),
-    critical_count: Number(critCount[1]),
-    high_count: highCount ? Number(highCount[1]) : 0,
+    critical_count: reportedCritical,
+    high_count: reportedHigh,
     critical_findings: critical,
     high_findings: high,
     medium_findings: medium,

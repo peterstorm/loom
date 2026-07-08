@@ -8,6 +8,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
+import { newWaveGate } from "../../types";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { validateFull, fixFull } from "./validate-task-graph";
@@ -47,12 +48,39 @@ function parseArgs(args: string[]): { issue?: number; repo?: string; fix: boolea
   return { issue, repo, fix, force };
 }
 
+/**
+ * Decompose stdin is agent-controlled text: it may DESCRIBE work (id,
+ * description, agent, wave, deps, spec anchors, test requirements, file
+ * list) but must never carry execution state. The decompose-contract fields
+ * are picked explicitly (never spread) so a payload that pre-stamps
+ * `test_result: {verdict: "trusted-pass"}`, `status: "completed"`, or
+ * `review_status: "passed"` cannot reach the persisted graph — trusted
+ * verdicts exist only via the evidence ledger, mirroring the refusal in
+ * store-test-evidence.
+ */
+function sanitizeDecomposedTask(t: Task): Task {
+  return {
+    id: t.id,
+    description: t.description,
+    agent: t.agent,
+    wave: t.wave,
+    status: "pending",
+    depends_on: t.depends_on ?? [],
+    ...(t.spec_anchors !== undefined ? { spec_anchors: t.spec_anchors } : {}),
+    ...(t.new_tests_required !== undefined ? { new_tests_required: t.new_tests_required } : {}),
+    ...(t.file_list !== undefined ? { file_list: t.file_list } : {}),
+    review_status: "pending",
+    critical_findings: [],
+    advisory_findings: [],
+  };
+}
+
 /** Build wave gates for all waves */
 function buildWaveGates(tasks: Task[]): Record<string, WaveGate> {
   const waves = [...new Set(tasks.map((t) => t.wave))].sort((a, b) => a - b);
   const gates: Record<string, WaveGate> = {};
   for (const w of waves) {
-    gates[String(w)] = { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false };
+    gates[String(w)] = newWaveGate();
   }
   return gates;
 }
@@ -82,6 +110,17 @@ const handler: HookHandler = async (stdin, args) => {
   if (!validation.ok) {
     if (fix) {
       decompose = JSON.parse(fixFull(decompose as unknown as Record<string, unknown>)) as DecomposeInput;
+      // fixFull only defaults missing optional fields — structural errors
+      // (unknown agent, wave gaps, self-dependency) are unfixable. Re-validate
+      // so they fail loudly instead of reaching the persisted graph under a
+      // misleading "Auto-fixed" banner.
+      const revalidation = validateFull(decompose as unknown as Record<string, unknown>);
+      if (!revalidation.ok) {
+        return {
+          kind: "error",
+          message: `--fix could not repair all issues:\n${revalidation.errors.map(e => `  - ${e}`).join("\n")}`,
+        };
+      }
       process.stderr.write(`Auto-fixed ${validation.errors.length} issues\n`);
     } else {
       return { kind: "error", message: `Decompose validation failed:\n${validation.errors.map(e => `  - ${e}`).join("\n")}` };
@@ -136,14 +175,7 @@ const handler: HookHandler = async (stdin, args) => {
       plan_title: decompose.plan_title,
       plan_file: validatedPlanFile,
       spec_file: existing.spec_file ?? decompose.spec_file ?? null,
-      tasks: decompose.tasks.map(t => ({
-        ...t,
-        status: t.status ?? "pending",
-        review_status: t.review_status ?? "pending",
-        depends_on: t.depends_on ?? [],
-        critical_findings: t.critical_findings ?? [],
-        advisory_findings: t.advisory_findings ?? [],
-      })),
+      tasks: decompose.tasks.map(sanitizeDecomposedTask),
       current_wave: 1,
       executing_tasks: [],
       wave_gates: buildWaveGates(decompose.tasks),

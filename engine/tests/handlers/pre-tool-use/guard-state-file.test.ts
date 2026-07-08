@@ -113,6 +113,37 @@ describe("guard-state-file — edge cases", () => {
     ).toBe("block");
   });
 
+  it("a REAL helper invocation cannot vouch for a task-graph write in ANOTHER segment (segment-scoped allow)", () => {
+    // The round-11 fix covered SUBAGENT_DIR/MACHINES_DIR; these pin the
+    // task-graph / review-invocations variant of the same smuggle.
+    expect(
+      guardDecision(
+        "bun cli.ts helper set-phase execute && chmod 644 .claude/state/active_task_graph.json && cp /tmp/forged.json .claude/state/active_task_graph.json",
+      ),
+    ).toBe("block");
+    expect(
+      guardDecision(
+        "bun cli.ts helper cleanup-state && sed -i 's/trusted-fail/trusted-pass/' .claude/state/active_task_graph.json",
+      ),
+    ).toBe("block");
+    expect(
+      guardDecision('bun cli.ts helper set-phase execute; echo forged > active_task_graph.json'),
+    ).toBe("block");
+    expect(
+      guardDecision(
+        "bun cli.ts helper mark-tests-passed T1; jq '.verdict=\"PASSED\"' review-invocations.json | sponge review-invocations.json",
+      ),
+    ).toBe("block");
+    // Non-write helper companions stay allowed — the scoping only bites on
+    // write-bearing non-helper segments.
+    expect(
+      guardDecision("bun cli.ts helper set-phase execute && cat active_task_graph.json"),
+    ).toBe("allow");
+    expect(
+      guardDecision("bun cli.ts helper complete-wave-gate --wave 2 && echo done"),
+    ).toBe("allow");
+  });
+
   it("forged appends to the evidence ledger are blocked regardless of helper-shaped noise", () => {
     expect(
       guardDecision(

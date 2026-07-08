@@ -69,13 +69,6 @@ export function parseSessionId(raw: string): SessionId | null {
   return raw !== "" && !SESSION_UNSAFE.test(raw) ? (raw as SessionId) : null;
 }
 
-/**
- * Every per-session file suffix written under SUBAGENT_DIR — the single
- * source of truth for the ledger's path helpers (ledger.ts) and the
- * SessionStart sweep's group detection (cleanup-stale-subagents). Ordered
- * so the multi-dot suffix wins over any accidental shorter match when
- * suffix-matching file names.
- */
 /** The per-session binding file suffix — the presence of a `<session>.machine`
  * file is what marks a session as gated. Named so the gate's binding scan
  * (enforce-phase-tools) cannot drift from the suffix vocabulary below. */
@@ -88,6 +81,13 @@ export const MACHINE_SUFFIX = ".machine" as const;
  * its mtime is at/after the START of the tool call being judged). */
 export const CALL_START_SUFFIX = ".callstart.json" as const;
 
+/**
+ * Every per-session file suffix written under SUBAGENT_DIR — the single
+ * source of truth for the ledger's path helpers (ledger.ts) and the
+ * SessionStart sweep's group detection (cleanup-stale-subagents). Ordered
+ * so the multi-dot suffix wins over any accidental shorter match when
+ * suffix-matching file names.
+ */
 export const SESSION_SUFFIXES = [
   ".evidence.jsonl",
   MACHINE_SUFFIX,

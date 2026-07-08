@@ -10,7 +10,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
-import { legacyTestsPassedNote, testResultPassed } from "../../types";
+import { legacyTestsPassedNote, testResultPassed, newWaveGate } from "../../types";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { parsePlanModels, type PlanModels } from "../../parsers/parse-plan-models";
@@ -28,19 +28,8 @@ export function loadPlanModelsSource(planFile: string | null | undefined): PlanM
   }
 }
 
-/** Parses --wave N from CLI args (null when absent). A non-integer or
- *  sub-1 value throws — an unvalidated Number() here would evaluate (and
- *  stamp) wave_gates["NaN"], passing the gate vacuously. Mirrors
- *  lint-wave-gate's parseWaveArg. */
-export function parseWaveArg(args: string[]): number | null {
-  const idx = args.indexOf("--wave");
-  if (idx < 0 || !args[idx + 1]) return null;
-  const n = Number(args[idx + 1]);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
-    throw new Error(`Invalid --wave value: "${args[idx + 1]}" (must be a positive integer)`);
-  }
-  return n;
-}
+export { parseWaveArg } from "./wave-args";
+import { parseWaveArg } from "./wave-args";
 
 export type GateCheck =
   | { passed: true;  summary: string }
@@ -329,7 +318,7 @@ export function applyGateDecision(state: TaskGraph, decision: GateDecision): Tas
   if (decision.verdict.kind !== "pass") return state;
   const { wave } = decision;
   const { nextWave } = decision.verdict;
-  const defaultGate: WaveGate = { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false };
+  const defaultGate: WaveGate = newWaveGate();
 
   return {
     ...state,

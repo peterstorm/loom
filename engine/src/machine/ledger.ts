@@ -3,10 +3,15 @@
  * pure reducer. Line parsing and epoch attribution are pure and live in
  * evidence.ts; this module owns the files and the locks.
  *
- * Per session under SUBAGENT_DIR:
- *   <session>.evidence.jsonl — append-only { epoch, event } records
- *   <session>.machine        — one "<agent_id>\t<agent_type>\t<bound_at_ms>"
- *                              line per active machine-gated subagent
+ * Per session under SUBAGENT_DIR (the full suffix vocabulary is
+ * SESSION_SUFFIXES in evidence.ts):
+ *   <session>.evidence.jsonl  — append-only { epoch, event } records
+ *   <session>.machine         — one "<agent_id>\t<agent_type>\t<bound_at_ms>"
+ *                               line per active machine-gated subagent
+ *   <session>.active          — active-subagent roster (attribution)
+ *   <session>.cleanup         — cleanup lock marker
+ *   <session>.callstart.json  — recency-ordered call-start stamps
+ *                               (recordCallStart / callStartFor)
  *
  * Epochs make attribution structural: every evidence line is stamped with
  * the binding's epoch (`<agent_id>:<agent_type>`), and readers fold only

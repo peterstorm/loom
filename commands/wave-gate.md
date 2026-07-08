@@ -180,9 +180,9 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper complete-wave-gate
 ```
 
 The helper performs **six checks** before advancing (in evaluation order):
-1. **Per-task test evidence** — all wave tasks must have a passing `test_result` (`{"verdict": "trusted-pass"}`, or an untrusted result with `passed: true`)
+1. **Per-task test evidence** — all wave tasks must have a passing `test_result` (`{"verdict": "trusted-pass"}`, or an untrusted result with `passed: true`); tasks declaring `new_tests_required == false` are exempt
 2. **New tests written** — all wave tasks must have `new_tests_written == true` OR `new_tests_required == false`
-3. **Per-task review status** — all wave tasks must have `review_status != "pending"`
+3. **Per-task review status** — every wave task's `review_status` must be `passed` or `blocked` (`pending`, absent, or `evidence_capture_failed` all fail the check)
 4. **Spec alignment** — `spec_check.critical_count == 0`
 5. **No critical findings** — code review `critical_findings` count must be 0
 6. **Lifecycle machine artifacts** — every lifecycle machine file the plan binds to this wave's tasks must exist on disk (at the declared path or a suffix-matched task `file_list` path); no plan in state skips the check, but a plan that is named yet unreadable **fails the gate** (fail-closed)

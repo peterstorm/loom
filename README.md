@@ -2,7 +2,7 @@
 
 A Claude Code plugin for orchestrating complex, multi-phase software features with wave-based parallel task execution — and a toolbox of standalone skills, agents, and a programmatic linter you can use independently.
 
-Loom turns a feature description into shipping code through a structured pipeline: **brainstorm → specify → clarify → architect → plan-alignment → decompose → execute (waves) → wave-gate (test + spec-check + review)**. Each phase is run by a specialized agent. Hooks enforce phase ordering, capture artifacts, extract test evidence from transcripts, and protect the state file. A built-in linter runs on every file edit and again at wave-gate boundaries.
+Loom turns a feature description into shipping code through a structured pipeline: **brainstorm → specify → clarify → architect → plan-alignment → decompose → execute (waves) → wave-gate (test + spec-check + review)**. Each phase is run by a specialized agent. Hooks enforce phase ordering, capture artifacts, resolve test evidence (evidence ledger first, labeled transcript fallback), and protect the state file. A built-in linter runs on every file edit and again at wave-gate boundaries.
 
 Loom also runs on [Pi](https://github.com/earendil-works/pi-coding-agent) — the engine is harness-agnostic and ships a Pi extension.
 
@@ -245,7 +245,7 @@ The six mandatory checks performed by the `complete-wave-gate` helper (in evalua
 
 1. Per-task test evidence (a passing `test_result`, except tasks declaring `new_tests_required == false`, which are exempt)
 2. New tests written (`new_tests_written == true` OR `new_tests_required == false`)
-3. Per-task review status (no `pending`)
+3. Per-task review status (every task's `review_status` is `passed` or `blocked` — `pending`, absent, or `evidence_capture_failed` all fail the check)
 4. Spec alignment (`spec_check.critical_count == 0`)
 5. No critical findings in code review
 6. Lifecycle machine artifacts exist on disk for every lifecycle the plan binds to this wave (a named-but-unreadable plan fails the gate, fail-closed)
@@ -360,19 +360,21 @@ Hooks are the enforcement and automation backbone. They fire on Claude Code life
 | `validate-agent-model` | Task | Validates the agent's `model:` field |
 | `validate-agent-skill` | Task | Validates the agent's `skills:` field resolves to real skills |
 | `block-direct-edits` | Edit, Write, MultiEdit | Forces file changes through the Task tool (subagents) during orchestration |
+| `enforce-phase-tools` | Edit, Write, MultiEdit | Guarded-skill-machine gate: denies enforced tools the bound agent's phase doesn't allow (fails closed) |
 | `guard-state-file` | Bash | Blocks any bash command that writes to the state file (only whitelisted helpers allowed) |
 
-### PostToolUse — linting
+### PostToolUse — linting & evidence
 
 | Hook | Matcher | Purpose |
 |---|---|---|
-| `lint-file` | Edit, Write, MultiEdit | Runs the **immediate-tier** linter (regex + a small set of programmatic rules, ≤50ms/file) on every modified file |
+| `lint-file` | Edit, Write, MultiEdit | Runs the **immediate-tier** linter (regex rules only, ≤50ms/file) on every modified file; programmatic rules run at the full tier (wave gate) |
+| `record-evidence` | Read, Edit, Write, MultiEdit, Bash | Appends epoch-stamped facts (FileRead/FileWrite/TestRun) to the evidence ledger |
 
 ### SubagentStart — lifecycle tracking
 
 | Hook | Matcher | Purpose |
 |---|---|---|
-| `mark-subagent-active` | * | Tracks active subagents in `/tmp/claude-subagents/` |
+| `mark-subagent-active` | * | Tracks active subagents in `/tmp/claude-subagents/` + binds the guarded skill machine (mints the attribution epoch) |
 
 ### SubagentStop — phase advancement & status
 
@@ -402,13 +404,16 @@ Agent spawn requested
   PreToolUse: validate-phase-order → validate-task-execution → validate-template-substitution → …
        | (all pass)
        v
-  Agent starts → SubagentStart: mark-subagent-active
+  Agent starts → SubagentStart: mark-subagent-active (binds machine, mints epoch)
        |
        v
   Agent executes…
        |
        | (on every Edit/Write/MultiEdit)
-       +---> PostToolUse: lint-file (immediate tier, ≤50ms)
+       +---> PreToolUse: enforce-phase-tools (machine gate) → PostToolUse: lint-file (immediate tier, ≤50ms)
+       |
+       | (on every Read/Edit/Write/MultiEdit/Bash)
+       +---> PostToolUse: record-evidence (epoch-stamped ledger facts)
        |
        v
   Agent completes → SubagentStop: dispatch
@@ -430,7 +435,7 @@ Loom ships a two-tier linter that runs automatically as part of the hook pipelin
 
 | Tier | When | Rules | Budget |
 |---|---|---|---|
-| **Immediate** | PostToolUse on Edit/Write/MultiEdit | Regex rules + a fast subset of programmatic rules | ≤50ms per file |
+| **Immediate** | PostToolUse on Edit/Write/MultiEdit | Regex rules only (programmatic rules run at the full tier) | ≤50ms per file |
 | **Full** | At wave-gate boundaries (`lint-wave-gate` helper) | All rules including expensive structural analysis | No hard deadline |
 
 ### Rule kinds
@@ -499,7 +504,7 @@ interface TaskGraph {
 ### Task status transitions
 
 ```
-pending      ──▶ implemented   (agent completes, evidence extracted from transcript)
+pending      ──▶ implemented   (agent completes, test evidence resolved — evidence ledger first, labeled transcript fallback)
 pending      ──▶ failed        (agent crash; retry_count incremented)
 failed       ──▶ pending       (auto-retry, max 2 attempts)
 implemented  ──▶ completed     (wave gate passed)

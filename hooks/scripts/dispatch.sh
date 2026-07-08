@@ -11,15 +11,23 @@
 # runtime-unavailable path says so on stderr. Handler stderr is surfaced to
 # the harness, not diverted into the debug log.
 # Keep SUBAGENT_DIR default in sync with config.ts.
+
+# Debug timing log is opt-in (LOOM_DEBUG=1): an always-on append to a fixed
+# world-writable /tmp path grows unbounded and is a symlink hazard. Best
+# effort — a failed append must never affect dispatch.
+debug_log() {
+  [ -n "${LOOM_DEBUG:-}" ] && echo "$1" >> "${LOOM_DEBUG_LOG:-/tmp/loom-hook-debug.log}" 2>/dev/null || true
+}
+
 START=$(date +%s%N)
-echo "---$(date)--- START dispatch.sh PID=$$ PPID=$PPID CLAUDE_PROJECT_DIR=${CLAUDE_PROJECT_DIR:-unset}" >> /tmp/loom-hook-debug.log
+debug_log "---$(date)--- START dispatch.sh PID=$$ PPID=$PPID CLAUDE_PROJECT_DIR=${CLAUDE_PROJECT_DIR:-unset}"
 
 GRAPH="${CLAUDE_PROJECT_DIR:-.}/.claude/state/active_task_graph.json"
 SUBAGENT_DIR="${LOOM_SUBAGENT_DIR:-/tmp/claude-subagents}"
 if [ ! -f "$GRAPH" ] && ! ls "${SUBAGENT_DIR}"/*.machine &>/dev/null; then
   END=$(date +%s%N)
   ELAPSED=$(( (END - START) / 1000000 ))
-  echo "  SKIPPED (no graph, no bindings) ${ELAPSED}ms" >> /tmp/loom-hook-debug.log
+  debug_log "  SKIPPED (no graph, no bindings) ${ELAPSED}ms"
   cat > /dev/null
   exit 0
 fi
@@ -27,7 +35,7 @@ fi
 if [ -z "${CLAUDE_PLUGIN_ROOT:-}" ] || ! command -v bun &>/dev/null; then
   cat > /dev/null 2>/dev/null || true
   echo "dispatch: runtime unavailable (bun/CLAUDE_PLUGIN_ROOT) — SubagentStop cleanup skipped, bindings may leak" >&2
-  echo "  SKIPPED (runtime unavailable)" >> /tmp/loom-hook-debug.log
+  debug_log "  SKIPPED (runtime unavailable)"
   exit 0
 fi
 
@@ -35,5 +43,5 @@ cat | bun "${CLAUDE_PLUGIN_ROOT}/engine/src/cli.ts" subagent-stop dispatch
 EXIT_CODE=$?
 END=$(date +%s%N)
 ELAPSED=$(( (END - START) / 1000000 ))
-echo "  DONE bun ${ELAPSED}ms exit=$EXIT_CODE" >> /tmp/loom-hook-debug.log
+debug_log "  DONE bun ${ELAPSED}ms exit=$EXIT_CODE"
 exit $EXIT_CODE

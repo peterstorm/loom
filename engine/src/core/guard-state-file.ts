@@ -11,7 +11,9 @@
  * guard. Writes into SUBAGENT_DIR / MACHINES_DIR are blocked BEFORE the
  * helper allow — even a legitimate helper invocation must not smuggle a
  * forged append to `<session>.evidence.jsonl` or an `rm` of a machine
- * definition on the same command line.
+ * definition on the same command line. The helper allow itself is
+ * segment-scoped: a non-helper segment on the same line that writes the
+ * task graph or review-invocations blocks too.
  */
 
 import { existsSync } from "node:fs";
@@ -70,6 +72,23 @@ export function commandInvokesWhitelistedHelper(command: string): boolean {
 }
 
 /**
+ * Does any NON-helper segment of the command line carry a state-file write?
+ * The helper allow is segment-scoped, not line-wide: a real helper invocation
+ * must not vouch for the OTHER segments on its line. Helpers legitimately
+ * write the task graph, so a redirect inside the helper segment itself stays
+ * allowed — but `bun cli.ts helper set-phase execute && sed -i … active_task_graph.json`
+ * blocks, because the forging segment is not a helper invocation.
+ */
+function nonHelperSegmentWritesStateFile(command: string): boolean {
+  return splitCommandSegments(command).some(
+    (segment) =>
+      !segmentInvokesHelper(segment) &&
+      STATE_FILE_PATTERNS.test(segment) &&
+      WRITE_PATTERNS.test(segment)
+  );
+}
+
+/**
  * The pure guard decision (no fs) — exported so tests exercise the REAL
  * logic instead of a simulation. guardStateFile wraps it with the
  * task-graph-exists check.
@@ -84,8 +103,13 @@ export function guardStateFileDecision(command: string): HookResult {
     return BLOCK;
   }
 
-  // Allow whitelisted helper scripts — only on an actual invocation segment.
+  // Allow whitelisted helper scripts — only on an actual invocation segment,
+  // and only for that segment: any other segment on the same line that both
+  // references a guarded state file and matches a write pattern blocks
+  // (round 11 closed the SUBAGENT_DIR/MACHINES_DIR variant above; this closes
+  // the task-graph / review-invocations variant).
   if (commandInvokesWhitelistedHelper(command)) {
+    if (nonHelperSegmentWritesStateFile(command)) return BLOCK;
     return { kind: "allow" };
   }
 

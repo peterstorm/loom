@@ -6,7 +6,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import type { HookHandler, SubagentStopInput, SpecCheck, SpecCheckVerdict } from "../../types";
-import { parseSpecCheckVerdict } from "../../types";
+import { parseSpecCheckVerdict, newWaveGate } from "../../types";
 import { StateManager } from "../../state-manager";
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
@@ -151,7 +151,7 @@ const handler: HookHandler = async (stdin) => {
       updated.wave_gates = {
         ...s.wave_gates,
         [waveKey]: {
-          ...(s.wave_gates[waveKey] ?? { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false }),
+          ...(s.wave_gates[waveKey] ?? newWaveGate()),
           blocked: true,
         },
       };

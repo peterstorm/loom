@@ -9,19 +9,7 @@ import { testResultPassed } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
 
-/** Parses --wave N from CLI args (null when absent). A non-integer or
- *  sub-1 value throws — an unvalidated Number() would filter on NaN,
- *  matching zero tasks and reporting vacuous success. Mirrors
- *  lint-wave-gate's parseWaveArg. */
-function parseWaveArg(args: string[]): number | null {
-  const idx = args.indexOf("--wave");
-  if (idx < 0 || !args[idx + 1]) return null;
-  const n = Number(args[idx + 1]);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
-    throw new Error(`Invalid --wave value: "${args[idx + 1]}" (must be a positive integer)`);
-  }
-  return n;
-}
+import { parseWaveArg } from "./wave-args";
 
 const handler: HookHandler = async (_stdin, args) => {
   const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
@@ -47,13 +35,18 @@ const handler: HookHandler = async (_stdin, args) => {
     };
   }
 
-  const withTests = tasks.filter((t) => testResultPassed(t.test_result));
+  // Same exemption as complete-wave-gate's checkTestEvidence: a task
+  // declaring new_tests_required == false needs no test_result — the helper
+  // and the final gate must agree or this verifier reports false MISSINGs.
+  const withTests = tasks.filter((t) => t.new_tests_required === false || testResultPassed(t.test_result));
   const newTestOk = tasks.filter((t) => t.new_tests_required === false || t.new_tests_written);
 
   process.stderr.write(`Wave ${wave} test evidence: ${withTests.length}/${tasks.length} passed, ${newTestOk.length}/${tasks.length} new-test OK\n`);
 
   for (const t of tasks) {
-    const testStatus = testResultPassed(t.test_result) ? "PASS" : "MISSING";
+    const testStatus = t.new_tests_required === false && !testResultPassed(t.test_result)
+      ? "N/A"
+      : testResultPassed(t.test_result) ? "PASS" : "MISSING";
     const newStatus = t.new_tests_required === false
       ? "N/A"
       : t.new_tests_written ? `YES (${t.new_test_evidence})` : "MISSING";
@@ -66,7 +59,7 @@ const handler: HookHandler = async (_stdin, args) => {
     return { kind: "passthrough" };
   }
 
-  const missing = tasks.filter((t) => !testResultPassed(t.test_result)).map((t) => t.id);
+  const missing = tasks.filter((t) => t.new_tests_required !== false && !testResultPassed(t.test_result)).map((t) => t.id);
   const missingNew = tasks.filter((t) => t.new_tests_required !== false && !t.new_tests_written).map((t) => t.id);
 
   const parts = [];

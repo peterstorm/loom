@@ -11,7 +11,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import type { HookHandler, HookResult, SubagentStopInput, TaskTestResult } from "../../types";
-import { legacyTestsPassedNote } from "../../types";
+import { legacyTestsPassedNote, newWaveGate } from "../../types";
 import { IMPL_AGENTS, machinesDir } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
@@ -57,7 +57,8 @@ interface MatchWithIndex extends RegExpMatchArray {
 }
 
 function lastMatch(str: string, regex: RegExp): MatchWithIndex | null {
-  const matches = [...str.matchAll(new RegExp(regex.source, 'g'))];
+  const flags = regex.flags.includes("g") ? regex.flags : regex.flags + "g";
+  const matches = [...str.matchAll(new RegExp(regex.source, flags))];
   if (matches.length === 0) return null;
   const last = matches[matches.length - 1];
   return last as MatchWithIndex;
@@ -98,8 +99,11 @@ export function extractTestEvidence(bashOutput: string): TestEvidence {
     }
   }
 
-  // pytest: "N passed" without "N failed" (or failed comes before passed)
-  const pytest = lastMatch(bashOutput, /(\d+) passed/);
+  // pytest: "N passed … in X.XXs" (runner summary shape) without "N failed"
+  // (or failed comes before passed). Anchored to the timing suffix so prose
+  // like "3 passed review" cannot mint a passing result — this path already
+  // yields only untrusted evidence, but unbound/legacy agents' gates accept it.
+  const pytest = lastMatch(bashOutput, /(\d+) passed\b[^\n]*\bin \d+(?:\.\d+)?s/);
   if (pytest) {
     const pyFail = lastMatch(bashOutput, /(\d+) failed/);
     if (!pyFail || pyFail[1] === "0" || pyFail.index < pytest.index) {
@@ -107,10 +111,12 @@ export function extractTestEvidence(bashOutput: string): TestEvidence {
     }
   }
 
-  // Bun: "N pass" without "N fail" (or "0 fail" or fail comes before pass)
-  const bunPass = lastMatch(bashOutput, /(\d+) pass\b/);
+  // Bun: "N pass" without "N fail" (or "0 fail" or fail comes before pass).
+  // Line-start anchored (bun prints each counter on its own line) so
+  // mid-sentence prose like "all 5 pass rates" never matches.
+  const bunPass = lastMatch(bashOutput, /^\s*(\d+) pass\b/m);
   if (bunPass) {
-    const bunFail = lastMatch(bashOutput, /(\d+) fail\b/);
+    const bunFail = lastMatch(bashOutput, /^\s*(\d+) fail\b/m);
     if (!bunFail || bunFail[1] === "0" || bunFail.index < bunPass.index) {
       return { passed: true, evidence: `bun: ${bunPass[0]}` };
     }
@@ -624,7 +630,7 @@ export const runUpdateTaskStatus = async (
       wave_gates: {
         ...s.wave_gates,
         [String(currentWave)]: {
-          ...(s.wave_gates[String(currentWave)] ?? { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false }),
+          ...(s.wave_gates[String(currentWave)] ?? newWaveGate()),
           impl_complete: true,
         },
       },

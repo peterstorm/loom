@@ -64,6 +64,7 @@ describe("store-spec-check helper", () => {
         "SPEC_CHECK_VERDICT: BLOCKED",
         "CRITICAL: requirement REQ-1 not implemented",
         "HIGH: partial coverage of REQ-2",
+        "HIGH: missing error path for REQ-3",
       ].join("\n"),
     );
     expect(exitCode).toBe(0);
@@ -73,6 +74,33 @@ describe("store-spec-check helper", () => {
     expect(spec!.critical_count).toBe(1);
     expect(spec!.high_count).toBe(2);
     expect(spec!.critical_findings).toEqual(["requirement REQ-1 not implemented"]);
+  });
+
+  it("fails closed when CRITICAL_COUNT disagrees with the CRITICAL: lines (forged-zero shape)", () => {
+    const { exitCode, stderr } = runHelper(
+      [
+        "SPEC_CHECK_CRITICAL_COUNT: 0",
+        "SPEC_CHECK_VERDICT: PASSED",
+        "CRITICAL: requirement REQ-1 not implemented",
+      ].join("\n"),
+    );
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("counts must match the findings");
+    expect(readState().spec_check).toBeUndefined();
+  });
+
+  it("fails closed when HIGH_COUNT disagrees with the HIGH: lines", () => {
+    const { exitCode, stderr } = runHelper(
+      [
+        "SPEC_CHECK_CRITICAL_COUNT: 0",
+        "SPEC_CHECK_HIGH_COUNT: 3",
+        "SPEC_CHECK_VERDICT: PASSED",
+        "HIGH: partial coverage of REQ-2",
+      ].join("\n"),
+    );
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("counts must match the findings");
+    expect(readState().spec_check).toBeUndefined();
   });
 
   it("fails when the required CRITICAL_COUNT marker is absent", () => {

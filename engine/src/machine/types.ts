@@ -30,15 +30,6 @@ export type TestReportSummary = {
 } & { readonly [REPORT_SUMMARY_PARSED]: true };
 
 /**
- * Evidence stores FACTS ONLY — never derived judgments. `passed`/`trusted`
- * are computed from `exit` + `report` via `judgeTestRun` at read time, so a
- * ledger line can never carry an inconsistent (or forged-inconsistent)
- * judgment. Note the residual limit: a consistent forgery of the facts
- * themselves is only mitigated by the guard-state-file Bash hook protecting
- * the ledger path — full integrity (HMAC / out-of-reach storage) is a
- * documented follow-up.
- */
-/**
  * Provenance of a FileWrite: "tool" = the harness's own file-modifying tools
  * (Edit/Write/MultiEdit — the gate can enforce them), "shell" = a Bash
  * redirect/tee target (the gate can NOT enforce Bash). Guard advancement
@@ -51,6 +42,15 @@ export type TestReportSummary = {
  */
 export type FileWriteVia = "tool" | "shell";
 
+/**
+ * Evidence stores FACTS ONLY — never derived judgments. `passed`/`trusted`
+ * are computed from `exit` + `report` via `judgeTestRun` at read time, so a
+ * ledger line can never carry an inconsistent (or forged-inconsistent)
+ * judgment. Note the residual limit: a consistent forgery of the facts
+ * themselves is only mitigated by the guard-state-file Bash hook protecting
+ * the ledger path — full integrity (HMAC / out-of-reach storage) is a
+ * documented follow-up.
+ */
 export type Evidence =
   | { readonly kind: "FileRead"; readonly path: string }
   | { readonly kind: "FileWrite"; readonly path: string; readonly via: FileWriteVia }

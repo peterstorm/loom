@@ -144,6 +144,13 @@ export interface WaveGate {
   blocked: boolean;
 }
 
+/** The initial (nothing verified yet) wave gate — the one shape every
+ *  writer must start from. A factory instead of a shared literal so adding
+ *  a field to WaveGate updates every construction site at once. */
+export function newWaveGate(): WaveGate {
+  return { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false };
+}
+
 /**
  * Closed verdict union for spec-check runs, parsed at the store boundaries
  * (store-spec-check helper, store-spec-check-findings hook) — free-text
