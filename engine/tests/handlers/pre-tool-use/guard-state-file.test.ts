@@ -16,7 +16,7 @@ function guardDecision(command: string): "allow" | "block" {
 }
 
 describe("guard-state-file — property tests", () => {
-  it("any command with state file + WRITE_PATTERN → block", () => {
+  it("write operations on state files → block (deny-by-default head check)", () => {
     const writeOps = [
       "> active_task_graph.json",
       ">> active_task_graph.json",
@@ -44,7 +44,7 @@ describe("guard-state-file — property tests", () => {
       "jq '.tasks' active_task_graph.json",
       "cat active_task_graph.json",
       "head -20 active_task_graph.json",
-      "less active_task_graph.json",
+      "tail -5 active_task_graph.json",
       "wc -l active_task_graph.json",
       "grep 'T1' active_task_graph.json",
       "jq '.current_wave' active_task_graph.json",
@@ -273,6 +273,106 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("ls .claude/state/")).toBe("allow");
     expect(guardDecision("jq .tasks .claude/state/*.json")).toBe("allow");
     expect(guardDecision("cat .claude/state/active_task*.json")).toBe("allow");
+  });
+
+  it("UNENUMERATED writers block — the allowlist inversion's whole point", () => {
+    // None of these ever appeared in the retired WRITE_PATTERNS denylist;
+    // rounds 11-14 each shipped a critical for a writer nobody had listed.
+    // Deny-by-default makes the class unrepresentable.
+    expect(guardDecision("patch .claude/state/active_task_graph.json < /tmp/evil.diff")).toBe("block");
+    expect(guardDecision("rsync /tmp/forged.json .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision("shred -u review-invocations.json")).toBe("block");
+    expect(guardDecision("awk -i inplace '{gsub(/trusted-fail/,\"trusted-pass\")}1' active_task_graph.json")).toBe("block");
+    expect(guardDecision("ex -sc '%s/trusted-fail/trusted-pass/g|x' active_task_graph.json")).toBe("block");
+    expect(guardDecision("touch -d '1 hour ago' .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision("frobnicate active_task_graph.json")).toBe("block");
+    // git restores are verdict forgeries: checkout -- rewrites the work tree.
+    expect(guardDecision("git checkout -- .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision("git restore .claude/state/active_task_graph.json")).toBe("block");
+  });
+
+  it("write-capable 'readers' are NOT allowlisted (flag-level write channels)", () => {
+    // Each of these reads by default but owns a file-writing flag/operand:
+    // sort -o, uniq <in> <out>, less -o, xxd -r <out>. Membership requires
+    // NO write capability under any flags, so they block even in read shape
+    // (fail-closed over-block, documented in config.ts).
+    expect(guardDecision("sort -o active_task_graph.json active_task_graph.json")).toBe("block");
+    expect(guardDecision("sort active_task_graph.json")).toBe("block");
+    expect(guardDecision("uniq /tmp/forged.json active_task_graph.json")).toBe("block");
+    expect(guardDecision("less -o active_task_graph.json /tmp/forged.json")).toBe("block");
+    expect(guardDecision("less active_task_graph.json")).toBe("block");
+    expect(guardDecision("xxd -r /tmp/forged.hex .claude/state/active_task_graph.json")).toBe("block");
+  });
+
+  it("wrapper/executor commands cannot launder a write (they inherit what they wrap)", () => {
+    expect(guardDecision("env sed -i s/trusted-fail/trusted-pass/ active_task_graph.json")).toBe("block");
+    expect(guardDecision("timeout 5 sed -i s/x/y/ .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision("sudo tee active_task_graph.json < /tmp/forged.json")).toBe("block");
+    expect(guardDecision("nohup cp /tmp/forged.json active_task_graph.json")).toBe("block");
+    // Exact-head matching: a path-qualified or relative binary never inherits
+    // the trust of its PATH-resolved basename.
+    expect(guardDecision("./cat active_task_graph.json")).toBe("block");
+    expect(guardDecision("/tmp/evil/jq . active_task_graph.json")).toBe("block");
+  });
+
+  it("pipe-chains are one trust unit: a guarded token cannot flow into an executor", () => {
+    // The path travels through the pipe as DATA and comes out as a write
+    // argument (xargs) or a command (sh) — segment-scoped checks alone would
+    // miss it because the writing segment is token-free.
+    expect(
+      guardDecision("echo .claude/state/active_task_graph.json | xargs sed -i s/trusted-fail/trusted-pass/"),
+    ).toBe("block");
+    expect(
+      guardDecision('echo "sed -i s/x/y/ active_task_graph.json" | sh'),
+    ).toBe("block");
+    expect(
+      guardDecision('printf \'Bun.write(".claude/state/active_task_graph.json","{}")\' | bun -'),
+    ).toBe("block");
+    expect(guardDecision("cat active_task_graph.json | tee /tmp/copy.json")).toBe("block");
+    // Read-only chains stay read-only: every segment allowlisted → allow.
+    expect(guardDecision("cat active_task_graph.json | jq .tasks")).toBe("allow");
+    expect(guardDecision("jq . .claude/state/active_task_graph.json | grep T1 | head -3")).toBe("allow");
+    // Chains WITHOUT a guarded token are out of scope even on a guarded line.
+    expect(guardDecision("npm install | tee /tmp/log && jq .tasks active_task_graph.json")).toBe("allow");
+  });
+
+  it("all output-redirect forms count as writes; fd-dups and quoted '>' do not", () => {
+    // `&>`, `3>`, and `>|` slipped past the whitespace-anchored denylist.
+    expect(guardDecision("echo forged &> active_task_graph.json")).toBe("block");
+    expect(guardDecision("echo forged 3> .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision("echo forged >| active_task_graph.json")).toBe("block");
+    // fd-dup is not a file write; quoted `>` is argument text. Both were
+    // over-blocked by the retired denylist (`jq 'select(.x > 1)'` used to
+    // trip the redirect pattern) — the quote-aware check is MORE precise.
+    expect(guardDecision("cat active_task_graph.json 2>&1")).toBe("allow");
+    expect(guardDecision("jq 'select(.count > 1)' active_task_graph.json")).toBe("allow");
+  });
+
+  it("substitution bodies are judged recursively; placeholders preserve the guarded token", () => {
+    // Token constructed INSIDE a substitution: the outer sed never names the
+    // file, the placeholder carries the token status out of the body.
+    expect(
+      guardDecision("sed -i s/x/y/ /repo/$(printf '.claude/state/active_task_graph.json')"),
+    ).toBe("block");
+    expect(
+      guardDecision("sed -i s/x/y/ `printf active_task_graph.json`"),
+    ).toBe("block");
+    // Benign nested reads flatten cleanly: every body and the outer chain
+    // are read-only.
+    expect(guardDecision("cat $(echo active_task_graph.json)")).toBe("allow");
+    expect(guardDecision("cat $(cat $(echo active_task_graph.json))")).toBe("allow");
+    // Unbalanced substitution syntax on a guarded line is unparseable → block.
+    expect(guardDecision('echo "active_task_graph $(oops"')).toBe("block");
+    expect(guardDecision("cat `active_task_graph.json")).toBe("block");
+  });
+
+  it("binding a guarded path to a variable blocks — the indirection seed", () => {
+    // A pure assignment has no read-only head; allowing it would hand the
+    // path to ANY later segment (the round-13 bypass shape). Reads never
+    // need the binding — inline the path instead.
+    expect(guardDecision("F=active_task_graph.json && cat $F")).toBe("block");
+    expect(guardDecision("F=.claude/state/active_task_graph.json; sed -i s/x/y/ $F")).toBe("block");
+    expect(guardDecision("export G=review-invocations.json; sponge $G < /tmp/forged.json")).toBe("block");
   });
 
   it("forged appends to the evidence ledger are blocked regardless of helper-shaped noise", () => {

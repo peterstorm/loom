@@ -361,7 +361,7 @@ Hooks are the enforcement and automation backbone. They fire on Claude Code life
 | `validate-agent-skill` | Task | Validates the agent's `skills:` field resolves to real skills |
 | `block-direct-edits` | Edit, Write, MultiEdit | Forces file changes through the Task tool (subagents) during orchestration |
 | `enforce-phase-tools` | Edit, Write, MultiEdit | Guarded-skill-machine gate: denies enforced tools the bound agent's phase doesn't allow (fails closed) |
-| `guard-state-file` | Bash | Blocks any bash command that writes to the state file (only whitelisted helpers allowed) |
+| `guard-state-file` | Bash | Deny-by-default on guarded state paths: only read-only commands (`jq`, `cat`, `grep`, …) and whitelisted helpers pass |
 
 ### PostToolUse — linting & evidence
 
@@ -497,7 +497,7 @@ interface TaskGraph {
 ### Protection model
 
 1. **File permissions** — `chmod 444` at rest. Only `StateManager` can write by temporarily toggling to 644.
-2. **Hook guard** — `guard-state-file` blocks any bash command writing to the state file unless it's a whitelisted helper.
+2. **Hook guard** — `guard-state-file` is deny-by-default: a bash command referencing guarded state passes only as a read-only command (allowlisted head, no output redirect) or a whitelisted helper; substitution bodies are judged recursively.
 3. **Atomic writes** — File-based mutex + tmp-file-then-rename for crash safety.
 4. **Subagent isolation** — Subagents cannot edit the state file directly; only hooks running in the parent process can.
 
@@ -619,7 +619,7 @@ The CLI reads JSON from stdin (provided by the harness), dynamically imports the
 | `UTILITY_AGENTS` | `Explore`, `Plan`, `haiku` |
 | `WHITELISTED_HELPERS` | Helper scripts allowed to write to the state file |
 | `STATE_FILE_PATTERNS` | Regex matching state file names |
-| `WRITE_PATTERNS` | Regex matching dangerous bash operations (`>>`, `rm`, `mv`, `cp`, `sed -i`, …) |
+| `READ_ONLY_STATE_COMMANDS` | Allowlist of commands that cannot write files (`jq`, `cat`, `grep`, …) — anything else touching guarded state blocks (deny-by-default) |
 | `TEST_COMMAND_PATTERNS` | 30+ patterns for recognizing test runners |
 | `TASK_GRAPH_PATH` | Resolved from cwd or git root (`.claude/state/…` or `.pi/state/…`) |
 | `SUBAGENT_DIR` | `/tmp/claude-subagents` |

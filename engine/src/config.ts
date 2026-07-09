@@ -133,19 +133,35 @@ export const PROTECTED_DIR_PATTERNS = new RegExp(
   `${escapeRegex(SUBAGENT_DIR)}|${escapeRegex(MACHINES_DIR)}`
 );
 
-/** Write patterns to block on state files.
- * Note: `(?:^|\s)>>?(?!&)` avoids matching `2>&1` redirects in read-only commands.
- * `ln`/`truncate`/`install` replace or empty a file just as effectively as
- * `mv`/`cp`/`>` — a symlink swap or `truncate -s0` corrupts/forges the graph.
- * `truncate`/`install` are whitespace-anchored like `ln`, and `install`
- * additionally excludes package-manager invocations via lookbehind (`npm
- * install` etc. never take a file-path operand) so a dependency install
- * alongside a state-file READ is not over-blocked. Interpreter eval-writes
- * are covered for bun — the one interpreter guaranteed present — (`-e`/
- * `--eval`/`Bun.write`/`fs.`) and for perl/ruby `-e` eval forms
- * (flag-cluster tolerant: `-we`, `-pi -e`), alongside the existing
- * python/node forms. */
-export const WRITE_PATTERNS = /(?:^|\s)>>?(?!&)|(?:^|\s)rm |mv |cp |tee |sed -i|perl -i|(?:^|\s)dd |sponge |chmod |(?:^|\s)ln |(?:^|\s)truncate |(?<!npm|pnpm|yarn|bun)(?:^|\s)install |python3? .*(open|write)|node .*(writeFile|fs\.)|bun .*(-e |--eval|write|fs\.)|perl -[a-zA-Z]*e |ruby -[a-zA-Z]*e /;
+/** Commands allowed to touch guarded state paths: deny-by-default allowlist.
+ *
+ * This replaced the WRITE_PATTERNS denylist after rounds 11-14 each shipped
+ * a critical bypass of the same class ("write tool not yet enumerated" —
+ * substitution escapes, `bun -e`, glob paths, `ln`/`truncate`). An allowlist
+ * inverts the residual: instead of enumerating writers (unbounded), it
+ * enumerates readers (small, stable), so an unknown command on a guarded
+ * path blocks instead of slipping through.
+ *
+ * Membership criterion: the command must be unable to write a file under ANY
+ * flag combination. Deliberately excluded, with the flag that disqualifies
+ * them: `sort` (-o), `uniq` (second file operand), `less` (-o/-O),
+ * `xxd` (-r <outfile>), `base64` (macOS -o), `sed`/`awk` (-i / in-script
+ * `w`/`print >`), `find` (-delete/-exec), `git` (checkout/restore rewrite the
+ * work tree — a `git checkout -- <state>` is a verdict-restore forgery),
+ * `touch` (mtime forgery defeats report freshness), and wrapper/executor
+ * commands that run OTHER commands (`env`, `xargs`, `sudo`, `timeout`,
+ * `nohup`, `nice`, `command`, shells, interpreters) — a wrapper inherits the
+ * write capability of whatever it wraps. Heads match exactly (no basename
+ * resolution): `./cat` or `/tmp/evil/jq` must not inherit the trust of a
+ * PATH-resolved name. */
+export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = new Set([
+  "jq", "cat", "grep", "egrep", "fgrep", "rg",
+  "head", "tail", "wc", "ls", "stat", "file",
+  "diff", "cmp", "md5sum", "sha1sum", "sha256sum",
+  "cut", "tr", "nl", "od", "hexdump", "strings", "more",
+  "echo", "printf", "test", "[", "[[", "true", "false",
+  "cd", "pwd", "dirname", "basename", "readlink", "realpath", "du",
+]);
 
 /** Valid phase transitions: from → allowed targets */
 export const VALID_TRANSITIONS: Record<Phase, Phase[]> = {

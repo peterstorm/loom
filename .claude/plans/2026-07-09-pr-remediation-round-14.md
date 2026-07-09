@@ -77,8 +77,9 @@
 ### store-spec-check marker-parsing unification (architecture-tech-lead)
 - **Reason:** Structural extraction of a shared `parseSpecCheckMarkers`; Fix 5 closes the fail-closed gap now, unification batched for a dedicated refactor.
 
-### WRITE_PATTERNS allowlist inversion (architecture-tech-lead)
-- **Reason:** Recommended long-term shape (read-only allowlist for state-file-referencing segments) — a semantic redesign of the guard, too large for minimal-edit remediation. Fixes 1-3 close all live-verified bypasses this round.
+### WRITE_PATTERNS allowlist inversion (architecture-tech-lead) — COMPLETED (follow-up commit)
+- **Reason it was deferred initially:** a semantic redesign of the guard, too large for the minimal-edit remediation pass.
+- **Done:** WRITE_PATTERNS denylist retired and replaced with `READ_ONLY_STATE_COMMANDS` deny-by-default. On any line referencing a guarded path, every pipe-chain segment touching guarded state must be a whitelisted helper or a read-only command (allowlisted head + no output redirect); substitution bodies (`$(…)`/`` ` ``/`<(…)`/`>(…)`) are extracted and judged recursively with token-preserving placeholders; pipe-chains are grouped into one trust unit (a guarded token piped into `xargs`/`sh` blocks); bare `VAR=<guarded-path>` bindings block. This makes the recurring "writer not yet enumerated" class (rounds 11-14) unrepresentable — the residual is now "a read-only command that can secretly write" (small, closed, enumerated in config.ts) instead of "a write tool not on the list" (unbounded). Verified: 40 guard tests + a 25-probe live adversarial sweep (17 historical/new bypasses block, 8 legit reads/helpers allow), full suite 1475 pass / 0 fail.
 
 ## Validation Commands
 ```bash
