@@ -33,6 +33,7 @@ import {
 } from "../engine/src/handlers/subagent-stop/store-reviewer-findings";
 import { parseSpecCheckOutput } from "../engine/src/handlers/subagent-stop/store-spec-check-findings";
 import type { ReviewStatus, SpecCheck, Phase } from "../engine/src/types";
+import { newWaveGate } from "../engine/src/types";
 
 import { TASK_GRAPH_PATH, SUBAGENT_DIR, HARNESS, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
@@ -334,7 +335,7 @@ export default function (pi: ExtensionAPI) {
               const filePath = (block.arguments as Record<string, unknown>)?.path as string
                 ?? (block.arguments as Record<string, unknown>)?.file_path as string;
               if (!filePath) continue;
-              if (filePath.includes(".claude/specs/") && filePath.endsWith("/spec.md")) {
+              if (filePath.includes(specDir) && filePath.endsWith("/spec.md")) {
                 await mgr.update((s) => ({ ...s, spec_file: filePath }));
               }
               if (filePath.includes(".claude/plans/") && filePath.endsWith(".md")) {
@@ -411,6 +412,10 @@ export default function (pi: ExtensionAPI) {
           }
         }
 
+        // Pre-lock snapshot: needed for start_sha / new_tests_required in the
+        // evidence collection below. The skip guards here are only a cheap
+        // fast path — the authoritative re-check runs INSIDE the locked
+        // update (TOCTOU, see below).
         const state = mgr.load();
         const task = state.tasks.find((t) => t.id === taskId);
         if (!task || task.status === "completed") continue;
@@ -442,28 +447,58 @@ export default function (pi: ExtensionAPI) {
           }
         }
 
-        await mgr.update((s) => ({
-          ...s,
-          tasks: s.tasks.map((t) =>
-            t.id === taskId
-              ? {
-                  ...t,
-                  status: "implemented" as const,
-                  // pi has no evidence ledger — transcript regex is the only
-                  // source here, so the verdict is always untrusted+labeled.
-                  test_result: {
-                    verdict: "untrusted" as const,
-                    passed: testEvidence.passed,
-                    label: "transcript-regex (fallback)",
-                  },
-                  test_evidence: testEvidence.evidence,
-                  new_tests_written: newTestEvidence.written,
-                  new_test_evidence: newTestEvidence.evidence,
-                }
-              : t
-          ),
-          executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
-        }));
+        // Atomic state write. The completed/trusted-verdict guards above ran
+        // on a PRE-LOCK snapshot that a concurrent writer can outdate before
+        // this write lands (TOCTOU) — so the target is re-found and re-checked
+        // INSIDE the locked update, mirroring the engine's
+        // skippedExistingVerdict pattern (update-task-status Section 3). The
+        // incoming resolution is ALWAYS untrusted here, so an existing
+        // trusted verdict (or a completed task) always stands.
+        let skippedExistingVerdict = false;
+        await mgr.update((s) => {
+          const target = s.tasks.find((t) => t.id === taskId);
+          const verdict = target?.test_result?.verdict;
+          const existingTrusted = verdict === "trusted-pass" || verdict === "trusted-fail";
+          if (!target || target.status === "completed" || existingTrusted) {
+            skippedExistingVerdict = true;
+            // The verdict stands, but the agent still STOPPED: leaving the
+            // task on executing_tasks would ghost-block duplicate-spawn
+            // checks for the rest of the session.
+            return {
+              ...s,
+              executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
+            };
+          }
+          return {
+            ...s,
+            tasks: s.tasks.map((t) =>
+              t.id === taskId
+                ? {
+                    ...t,
+                    status: "implemented" as const,
+                    // pi has no evidence ledger — transcript regex is the only
+                    // source here, so the verdict is always untrusted+labeled.
+                    test_result: {
+                      verdict: "untrusted" as const,
+                      passed: testEvidence.passed,
+                      label: "transcript-regex (fallback)",
+                    },
+                    test_evidence: testEvidence.evidence,
+                    new_tests_written: newTestEvidence.written,
+                    new_test_evidence: newTestEvidence.evidence,
+                  }
+                : t
+            ),
+            executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
+          };
+        });
+
+        if (skippedExistingVerdict) {
+          process.stderr.write(
+            `loom(pi): ${taskId} is completed or carries a trusted verdict this untrusted resolution cannot supersede — leaving it untouched\n`,
+          );
+          continue;
+        }
 
         // Check wave completion
         const updated = mgr.load();
@@ -478,7 +513,7 @@ export default function (pi: ExtensionAPI) {
             wave_gates: {
               ...s.wave_gates,
               [String(currentWave)]: {
-                ...(s.wave_gates[String(currentWave)] ?? { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false }),
+                ...(s.wave_gates[String(currentWave)] ?? newWaveGate()),
                 impl_complete: true,
               },
             },
@@ -574,7 +609,7 @@ export default function (pi: ExtensionAPI) {
             updated.wave_gates = {
               ...s.wave_gates,
               [waveKey]: {
-                ...(s.wave_gates[waveKey] ?? { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false }),
+                ...(s.wave_gates[waveKey] ?? newWaveGate()),
                 blocked: true,
               },
             };

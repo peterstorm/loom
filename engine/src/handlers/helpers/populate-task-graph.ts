@@ -134,7 +134,8 @@ const handler: HookHandler = async (stdin, args) => {
   // populates tasks into active_task_graph.json, so bindings are enforced
   // here fail-closed — validate-task-graph's 4a run is advisory to the
   // orchestrator, this is the gate. The plan path prefers evidence-derived
-  // state (plan_file set by advance-phase from real Write evidence, else the
+  // state (plan_file set by advance-phase from transcript-parsed Write tool
+  // calls (existence-checked), else the
   // architecture phase artifact recorded from disk) over the decompose
   // payload, so a decompose agent cannot re-point plan_file at a model-free
   // file to disarm the check. The SAME resolved path is persisted below —

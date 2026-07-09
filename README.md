@@ -207,7 +207,7 @@ For each wave, all tasks are spawned as parallel agents in a single message. Eac
 1. Read the plan and its assigned task
 2. Implement following project patterns (FP/DDD, ports at I/O boundaries, Either for errors)
 3. Write new tests
-4. **Run the tests via Bash** — mandatory; hooks extract pass/fail evidence from the transcript
+4. **Run the tests via Bash** — mandatory; pass/fail evidence is resolved by hooks from the evidence ledger first, with transcript extraction as the labeled fallback
 5. Verify all tests pass
 
 After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance.
@@ -532,7 +532,7 @@ engine/src/
 ├── types.ts            # TaskGraph, Task, Phase, HookResult, etc.
 ├── state-manager.ts    # Atomic state file read/write with locking + chmod
 ├── phase-init.ts       # Resolve initial TaskGraph from skip flags
-├── core/               # Pure functions (harness-agnostic, reusable in Pi)
+├── core/               # Harness-agnostic functions (reusable in Pi)
 │   ├── block-direct-edits.ts
 │   ├── guard-state-file.ts
 │   ├── tool-vocabulary.ts          # FILE_MODIFYING_TOOLS / TEST_COMMAND_PATTERNS (pure constants — sole import: machine/types)
@@ -688,7 +688,7 @@ The `/references/` directory holds templates used by phase agents: `spec-templat
 Loom's engine is harness-agnostic. The `/pi/` directory ships a Pi extension (`extension.ts`) and a bridge (`loom-bridge.ts`) that adapts Pi's `tool_call` / `tool_result` events to the same handlers used under Claude Code.
 
 - The `HARNESS` constant in `config.ts` detects `claude` vs `pi` at runtime.
-- Everything in `engine/src/core/` is pure and has zero harness dependency.
+- Everything in `engine/src/core/` has zero harness dependency.
 - The Pi adapter (`engine/src/handlers/pi-adapter.ts`) maps lint results to Pi's `ToolResultResponse` shape.
 - State paths shift from `.claude/state/…` to `.pi/state/…`.
 
@@ -700,7 +700,7 @@ See `docs/pi-usage.md` and `docs/migration-claude-code-to-pi.md` for details.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Task stuck `in_progress` | Agent hung without crashing | Re-spawn the task |
+| Task stays `pending`, agent still running | Agent live (no crash; tracked via `executing_tasks`, there is no `in_progress` status) | Wait for it, or re-spawn if hung |
 | `test_result` missing or not a pass | Agent didn't run tests via Bash | Re-spawn — agents MUST execute tests |
 | `new_tests_written` false | Agent reused existing tests | Re-spawn — agents must write new tests |
 | Wave not advancing | Gate blocked by critical findings | Fix issues, re-run `/wave-gate` |

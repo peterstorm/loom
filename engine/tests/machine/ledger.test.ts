@@ -93,7 +93,7 @@ describe("evidence ledger", () => {
     });
   });
 
-  it("a malformed report sub-object demotes to report: null (isReportSummary rejection)", () => {
+  it("a malformed report sub-object demotes to report: null (parseReportField rejection)", () => {
     const parse = (report: unknown) =>
       ledger.parseEvidenceLine(
         JSON.stringify({ epoch: "a:b", event: { kind: "TestRun", command: "npm test", exit: 0, report } }),
@@ -107,6 +107,13 @@ describe("evidence ledger", () => {
     expect(parse([])).toEqual(demoted);
     // a well-formed report survives
     expect(parse({ total: 5, failed: 0, source: "vitest-json" })).toEqual({
+      epoch: "a:b",
+      event: { kind: "TestRun", command: "npm test", exit: 0, report: { total: 5, failed: 0, source: "vitest-json" } },
+    });
+    // Re-mint: valid counts carrying a SMUGGLED extra field parse to EXACTLY
+    // {total, failed, source} — the branded summary never carries riders
+    // that could ride back out on re-serialization.
+    expect(parse({ total: 5, failed: 0, source: "vitest-json", smuggled: "rider" })).toEqual({
       epoch: "a:b",
       event: { kind: "TestRun", command: "npm test", exit: 0, report: { total: 5, failed: 0, source: "vitest-json" } },
     });

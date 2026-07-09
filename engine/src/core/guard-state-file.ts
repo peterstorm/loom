@@ -1,6 +1,7 @@
 /**
  * Core: Guard state files from direct modification via Bash.
- * Pure function — no stdin parsing.
+ * Harness-agnostic — no stdin parsing. Not pure: guardStateFile reads the
+ * filesystem (existsSync); the decision core (guardStateFileDecision) is pure.
  *
  * The helper whitelist is anchored to an ACTUAL helper invocation, not a
  * substring: the command is split into quote-aware simple-command segments
@@ -18,9 +19,10 @@
  * covers both a co-located forge (`helper && sed -i … active_task_graph.json`)
  * and a variable-indirected one split across segments
  * (`helper && F=active_task_graph.json && sed -i … $F`). Command substitution
- * (`$(…)` / backticks) that co-occurs with a state-file write also blocks: its
- * body executes independently and is opaque to the segment splitter, so it can
- * never be vouched for by the enclosing helper.
+ * (`$(…)` / backticks) and process substitution (`<(…)` / `>(…)`) that
+ * co-occur with a state-file write also block: their bodies execute
+ * independently and are opaque to the segment splitter, so they can never be
+ * vouched for by the enclosing helper.
  */
 
 import { existsSync } from "node:fs";
@@ -96,14 +98,20 @@ function writeInNonHelperSegment(command: string): boolean {
 }
 
 /**
- * Command substitution `$(…)` or backticks embed a command that the shell
- * executes independently; our splitter treats the substitution body (inside
- * quotes) as opaque segment text, so a write it performs is invisible to
+ * Command substitution `$(…)` / backticks and process substitution
+ * `<(…)` / `>(…)` embed a command that the shell executes independently; our
+ * splitter treats the substitution body (inside quotes or a helper-argument
+ * position) as opaque segment text, so a write it performs is invisible to
  * segment scoping. A helper never needs to write state through a substitution,
  * so its presence alongside a state-file write is treated as an escape.
  */
 function hasCommandSubstitution(command: string): boolean {
-  return command.includes("$(") || command.includes("`");
+  return (
+    command.includes("$(") ||
+    command.includes("`") ||
+    command.includes("<(") ||
+    command.includes(">(")
+  );
 }
 
 /**
@@ -124,11 +132,12 @@ export function guardStateFileDecision(command: string): HookResult {
   // Allow whitelisted helper scripts — but the allow is confined to the helper
   // segment. When the line touches a state file AND carries a write, the write
   // is trusted ONLY if it lives inside the single helper segment (a redirect of
-  // helper output). A write in any non-helper segment, or a command
+  // helper output). A write in any non-helper segment, or a command/process
   // substitution smuggling an independent write, escapes that confinement and
   // blocks. (Round 11 closed the SUBAGENT_DIR/MACHINES_DIR variant above;
-  // round 12 the co-located task-graph variant; this closes the substitution
-  // and cross-segment-indirection variants.)
+  // round 12 the co-located task-graph variant; round 13 the command-
+  // substitution and cross-segment-indirection variants; round 14 the
+  // process-substitution variant.)
   if (commandInvokesWhitelistedHelper(command)) {
     const writesStateFile = STATE_FILE_PATTERNS.test(command) && WRITE_PATTERNS.test(command);
     if (writesStateFile && (writeInNonHelperSegment(command) || hasCommandSubstitution(command))) {

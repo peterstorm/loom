@@ -167,6 +167,63 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     }
   });
 
+  it("count/findings mismatch → EVIDENCE_CAPTURE_FAILED (fail closed, mirrors the manual store-spec-check helper)", async () => {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    const { mkdirSync: mkdir } = await import("node:fs");
+    const tmpDir = join(tmpdir(), `spec-check-mismatch-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+    const statePath = join(tmpDir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      current_wave: 1,
+      tasks: [],
+      wave_gates: {},
+    }));
+    // A reported count of 0 alongside a listed CRITICAL finding — storing it
+    // as-is would let wave-gate check 4 pass on critical_count while the
+    // findings say otherwise.
+    const transcriptPath = join(tmpDir, "transcript.jsonl");
+    writeFileSync(transcriptPath, JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "text",
+            text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED\nCRITICAL: smuggled unreconciled finding",
+          },
+        ],
+      },
+    }));
+    const session = `spec-check-mismatch-${process.pid}-${Date.now()}`;
+    mkdir(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(pointer, statePath);
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await handler(JSON.stringify({
+        session_id: session,
+        agent_type: "spec-check-invoker",
+        agent_transcript_path: transcriptPath,
+      }), []);
+      expect(result.kind).toBe("passthrough");
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("marking evidence_capture_failed");
+
+      const state = JSON.parse(readFileSync(statePath, "utf-8"));
+      expect(state.spec_check.verdict).toBe("EVIDENCE_CAPTURE_FAILED");
+      expect(state.spec_check.error).toContain("does not match");
+    } finally {
+      stderrSpy.mockRestore();
+      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(pointer, { force: true });
+    }
+  });
+
   it("empty/unreadable transcript → EVIDENCE_CAPTURE_FAILED recorded, never a silent skip", async () => {
     const { SUBAGENT_DIR } = await import("../../src/config");
     const { mkdirSync: mkdir } = await import("node:fs");

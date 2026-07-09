@@ -115,9 +115,13 @@ export const MACHINES_DIR = machinesDir();
  * The machine-definitions dir is guarded for the same reason: `rm` of a
  * machine file via Bash would make the gate see "no machine" for a BOUND
  * agent (which now fails closed — but deleting definitions must be blocked
- * at the source too). */
+ * at the source too). The state DIRECTORY (dirname of the task-graph path,
+ * derived from taskGraphRelative, not hardcoded) is guarded for the same
+ * dir-guard reason: a glob (`active_task*.json`, `.claude/state/*.json`) or
+ * brace (`active_task_{graph,x}.json`) write names the directory but never
+ * the file literal, so only a dir match can catch the forgery. */
 export const STATE_FILE_PATTERNS = new RegExp(
-  `active_task_graph|review-invocations|${escapeRegex(SUBAGENT_DIR)}|${escapeRegex(MACHINES_DIR)}`
+  `active_task_graph|review-invocations|${escapeRegex(dirname(taskGraphRelative()))}|${escapeRegex(SUBAGENT_DIR)}|${escapeRegex(MACHINES_DIR)}`
 );
 
 /** Dirs whose writes are NEVER whitelisted, even for helper invocations:
@@ -132,8 +136,16 @@ export const PROTECTED_DIR_PATTERNS = new RegExp(
 /** Write patterns to block on state files.
  * Note: `(?:^|\s)>>?(?!&)` avoids matching `2>&1` redirects in read-only commands.
  * `ln`/`truncate`/`install` replace or empty a file just as effectively as
- * `mv`/`cp`/`>` — a symlink swap or `truncate -s0` corrupts/forges the graph. */
-export const WRITE_PATTERNS = /(?:^|\s)>>?(?!&)|(?:^|\s)rm |mv |cp |tee |sed -i|perl -i|(?:^|\s)dd |sponge |chmod |(?:^|\s)ln |truncate |install |python3? .*(open|write)|node .*(writeFile|fs\.)/;
+ * `mv`/`cp`/`>` — a symlink swap or `truncate -s0` corrupts/forges the graph.
+ * `truncate`/`install` are whitespace-anchored like `ln`, and `install`
+ * additionally excludes package-manager invocations via lookbehind (`npm
+ * install` etc. never take a file-path operand) so a dependency install
+ * alongside a state-file READ is not over-blocked. Interpreter eval-writes
+ * are covered for bun — the one interpreter guaranteed present — (`-e`/
+ * `--eval`/`Bun.write`/`fs.`) and for perl/ruby `-e` eval forms
+ * (flag-cluster tolerant: `-we`, `-pi -e`), alongside the existing
+ * python/node forms. */
+export const WRITE_PATTERNS = /(?:^|\s)>>?(?!&)|(?:^|\s)rm |mv |cp |tee |sed -i|perl -i|(?:^|\s)dd |sponge |chmod |(?:^|\s)ln |(?:^|\s)truncate |(?<!npm|pnpm|yarn|bun)(?:^|\s)install |python3? .*(open|write)|node .*(writeFile|fs\.)|bun .*(-e |--eval|write|fs\.)|perl -[a-zA-Z]*e |ruby -[a-zA-Z]*e /;
 
 /** Valid phase transitions: from → allowed targets */
 export const VALID_TRANSITIONS: Record<Phase, Phase[]> = {
@@ -156,10 +168,13 @@ function detectHarness(): "claude" | "pi" {
 /** Which harness is running */
 export const HARNESS = detectHarness();
 
-/** Relative path within a repo root — configurable via env (read at call time) */
+/** Relative path within a repo root — configurable via env (read at call time).
+ * Calls detectHarness() rather than the HARNESS const (identical result) so
+ * it is callable before HARNESS initializes — STATE_FILE_PATTERNS derives
+ * the guarded state dir from this at module init, above HARNESS. */
 function taskGraphRelative(): string {
   return process.env.LOOM_STATE_PATH
-    ?? (HARNESS === "pi"
+    ?? (detectHarness() === "pi"
       ? ".pi/state/active_task_graph.json"
       : ".claude/state/active_task_graph.json");
 }

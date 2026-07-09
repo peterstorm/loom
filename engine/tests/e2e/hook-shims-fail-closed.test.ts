@@ -9,11 +9,15 @@
  * record-evidence.sh (fail-OPEN recorder — must never block):
  *   - existing-but-unreadable SUBAGENT_DIR → exit 0 WITH a stderr note
  *     (dropping evidence silently would be indistinguishable from "nothing ran")
+ *
+ * mark-subagent-active.sh (fail-OPEN binder — must never block spawning):
+ *   - graph present + runtime unavailable → exit 0 WITH a stderr note naming
+ *     the consequence (machine NOT bound, agent runs UNGATED)
  */
 
 import { describe, it, expect, afterAll } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,6 +26,7 @@ const ENFORCE = join(SCRIPTS, "enforce-phase-tools.sh");
 const RECORD = join(SCRIPTS, "record-evidence.sh");
 const GUARD = join(SCRIPTS, "guard-state-file.sh");
 const DISPATCH = join(SCRIPTS, "dispatch.sh");
+const MARK = join(SCRIPTS, "mark-subagent-active.sh");
 
 // chmod 000 does not bar root — these tests are meaningless under uid 0.
 const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
@@ -212,6 +217,44 @@ describe("guard-state-file.sh — runs on binding-without-graph, fails CLOSED on
     });
     expect(stderr).toContain("bun not found");
     expect(status).toBe(2);
+  });
+});
+
+/** A CLAUDE_PROJECT_DIR WITH an active task graph in it. */
+function projectDirWithGraph(): string {
+  const dir = tempDir();
+  mkdirSync(join(dir, ".claude", "state"), { recursive: true });
+  writeFileSync(join(dir, ".claude", "state", "active_task_graph.json"), "{}");
+  return dir;
+}
+
+describe("mark-subagent-active.sh — fails OPEN loudly (machine NOT bound = agent runs UNGATED)", () => {
+  it("no graph → exit 0 fast path, quiet (nothing to bind)", () => {
+    const { status, stderr } = runShim(MARK, {
+      CLAUDE_PROJECT_DIR: graphlessProjectDir(),
+    });
+    expect(stderr).toBe("");
+    expect(status).toBe(0);
+  });
+
+  it("graph present + CLAUDE_PLUGIN_ROOT unset → exit 0 WITH the UNGATED warning (SubagentStart is never blocked)", () => {
+    const { status, stderr } = runShim(MARK, {
+      CLAUDE_PROJECT_DIR: projectDirWithGraph(),
+    });
+    expect(stderr).toContain("machine NOT bound");
+    expect(stderr).toContain("UNGATED");
+    expect(status).toBe(0);
+  });
+
+  it("graph present + bun not found on PATH → exit 0 WITH the UNGATED warning", () => {
+    const { status, stderr } = runShim(MARK, {
+      CLAUDE_PROJECT_DIR: projectDirWithGraph(),
+      CLAUDE_PLUGIN_ROOT: "/tmp/fake-plugin-root",
+      PATH: bunlessPath(),
+    });
+    expect(stderr).toContain("machine NOT bound");
+    expect(stderr).toContain("UNGATED");
+    expect(status).toBe(0);
   });
 });
 

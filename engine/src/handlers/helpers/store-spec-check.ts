@@ -41,10 +41,10 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "error", message: `SPEC_CHECK_VERDICT ${JSON.stringify(verdict[1])} is not a recognized verdict` };
   }
 
-  // Fail closed on a count/findings mismatch, mirroring the auto handler
-  // (store-spec-check-findings): the wave gate reads critical_count, so a
-  // reported 0 alongside listed CRITICAL lines (or vice versa) would forge
-  // a pass or manufacture a block.
+  // Fail closed on a count/findings mismatch (the auto handler,
+  // store-spec-check-findings, enforces the same guard): the wave gate reads
+  // critical_count, so a reported 0 alongside listed CRITICAL lines (or vice
+  // versa) would forge a pass or manufacture a block.
   const reportedCritical = Number(critCount[1]);
   if (reportedCritical !== critical.length) {
     return {

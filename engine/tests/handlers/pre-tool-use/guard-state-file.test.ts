@@ -194,6 +194,85 @@ describe("guard-state-file — edge cases", () => {
     expect(
       guardDecision("bun cli.ts helper set-phase && truncate -s0 active_task_graph.json"),
     ).toBe("block");
+    // Precision (round-14): the anchored/package-manager-excluded tokens no
+    // longer over-block a dependency install co-located with a state-file READ.
+    expect(guardDecision("npm install && jq .tasks active_task_graph.json")).toBe("allow");
+    expect(guardDecision("bun install && cat active_task_graph.json")).toBe("allow");
+  });
+
+  it("a REAL helper invocation cannot vouch for a PROCESS-substitution write (round-14 bypass)", () => {
+    // `<(…)` / `>(…)` execute their body independently, exactly like `$(…)`,
+    // and land inside the helper segment — opaque to segment scoping. The
+    // live-verified probe: set-phase with a smuggled sed -i in `<(…)`.
+    expect(
+      guardDecision(
+        "bun cli.ts helper set-phase execute <(sed -i s/trusted-fail/trusted-pass/ .claude/state/active_task_graph.json)",
+      ),
+    ).toBe("block");
+    expect(
+      guardDecision(
+        "bun cli.ts helper cleanup-state >(tee .claude/state/review-invocations.json)",
+      ),
+    ).toBe("block");
+    // READ-only process substitution stays allowed — the escape only bites
+    // when a state-file write co-occurs (same polarity as the `$(…)` read
+    // row in the round-13 test above).
+    expect(
+      guardDecision("bun cli.ts helper set-phase <(jq .current_wave active_task_graph.json)"),
+    ).toBe("allow");
+    expect(guardDecision("cat <(jq . .claude/state/active_task_graph.json)")).toBe("allow");
+  });
+
+  it("bun / perl / ruby eval-writes on state files → block (round-14 WRITE_PATTERNS gap)", () => {
+    // The live-verified probes: bun is the one interpreter guaranteed present.
+    expect(
+      guardDecision("bun -e \"await Bun.write('.claude/state/active_task_graph.json', '{}')\""),
+    ).toBe("block");
+    expect(
+      guardDecision("bun -e \"require('fs').appendFileSync('active_task_graph.json', 'forged')\""),
+    ).toBe("block");
+    expect(
+      guardDecision("bun --eval \"Bun.write('review-invocations.json', '{}')\""),
+    ).toBe("block");
+    expect(
+      guardDecision("perl -e 'open(F, \">active_task_graph.json\"); print F \"{}\"'"),
+    ).toBe("block");
+    // Flag clusters (`-we`) must not slip past the eval match.
+    expect(
+      guardDecision("perl -we 'open(F, \">.claude/state/active_task_graph.json\")'"),
+    ).toBe("block");
+    expect(
+      guardDecision("ruby -e 'File.write(\"active_task_graph.json\", \"{}\")'"),
+    ).toBe("block");
+    // Precision: helper invocations start with `bun ` and must NOT trip the
+    // bun eval-write pattern, and a plain `bun test` beside a state-file
+    // READ stays allowed (no line-wide false positive).
+    expect(guardDecision("bun cli.ts helper set-phase execute")).toBe("allow");
+    expect(guardDecision("bun test && jq .current_wave active_task_graph.json")).toBe("allow");
+  });
+
+  it("glob / brace state-file paths are caught by the state-DIR guard (round-14 bypass)", () => {
+    // The file literal never appears — only the directory does; the dir
+    // pattern (derived from the task-graph path's dirname, mirroring the
+    // SUBAGENT_DIR/MACHINES_DIR dir guards) must catch the write.
+    expect(guardDecision("sed -i s/x/y/ .claude/state/active_task*.json")).toBe("block");
+    expect(guardDecision("truncate -s0 .claude/state/*.json")).toBe("block");
+    expect(
+      guardDecision("cp /tmp/forged.json .claude/state/active_task_{graph,x}.json"),
+    ).toBe("block");
+    expect(
+      guardDecision("sponge .claude/state/review-invocations*.json < /tmp/forged.json"),
+    ).toBe("block");
+    // Helper-prefixed variant: the glob write lives in a non-helper segment.
+    expect(
+      guardDecision(
+        "bun cli.ts helper set-phase execute && sed -i s/x/y/ .claude/state/active_task*.json",
+      ),
+    ).toBe("block");
+    // Reads through the directory stay allowed.
+    expect(guardDecision("ls .claude/state/")).toBe("allow");
+    expect(guardDecision("jq .tasks .claude/state/*.json")).toBe("allow");
+    expect(guardDecision("cat .claude/state/active_task*.json")).toBe("allow");
   });
 
   it("forged appends to the evidence ledger are blocked regardless of helper-shaped noise", () => {

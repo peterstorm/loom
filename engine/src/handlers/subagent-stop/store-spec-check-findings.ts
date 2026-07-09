@@ -133,6 +133,26 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "passthrough" };
   }
 
+  // Fail closed on a count/findings mismatch, mirroring the manual helper
+  // (store-spec-check): the wave gate reads critical_count, so a reported 0
+  // alongside listed CRITICAL: lines (or a count with no listed findings)
+  // would forge a pass or manufacture an unactionable block.
+  if (findings.criticalCount !== findings.critical.length) {
+    process.stderr.write(
+      `WARNING: SPEC_CHECK_CRITICAL_COUNT is ${findings.criticalCount} but ${findings.critical.length} CRITICAL: line(s) were found — marking evidence_capture_failed\n`,
+    );
+    await mgr.update((s) => ({
+      ...s,
+      spec_check: {
+        wave,
+        run_at: new Date().toISOString(),
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: `SPEC_CHECK_CRITICAL_COUNT (${findings.criticalCount}) does not match CRITICAL: findings (${findings.critical.length}) - re-run /wave-gate`,
+      },
+    }));
+    return { kind: "passthrough" };
+  }
+
   const specCheck: SpecCheck = {
     wave,
     run_at: new Date().toISOString(),
