@@ -19,7 +19,8 @@ import { fsSessionRegistry, parseSessionId, type SessionRegistry } from "../../m
 /**
  * Best-effort call-start stamp: only when the session id parses and the
  * harness supplied a tool_use_id. toolUseId is untrusted text — it is
- * stored as a JSON map key only, never used in a filesystem path.
+ * stored only inside the JSON payload (a recency-ordered `{ id, startMs }`
+ * entry), never used in a filesystem path.
  */
 export async function stampCallStart(
   input: PreToolUseInput,

@@ -340,10 +340,10 @@ If user continues: Proceed to Phase 5 normally.
 
 For each wave:
 
-1. Get pending tasks in current wave (includes `failed` tasks with `retry_count < 2`)
+1. Get pending tasks in the current wave (crashed tasks remain `pending` and are re-spawned)
 2. Spawn ALL wave tasks in parallel (single message, multiple Task calls)
 3. Wait for all to reach "implemented"
-4. If any tasks `failed`: auto-retry up to 2 times (re-spawn with error context)
+4. If any wave task never reached `implemented` (agent crashed): re-spawn it (still `pending`, `executing_tasks` was cleared)
 5. **RUN `/wave-gate` — MANDATORY, via subagents** (see below)
 6. If blocked (critical findings): spawn fix agents with the findings, re-run `/wave-gate`
 7. **Triage advisory findings and fix the RELEVANT ones** before advancing (see [Addressing Advisories](#addressing-advisories)). Advisories do not block the gate, but must not be silently dropped.
@@ -364,11 +364,11 @@ For each wave:
 
 **The `validate-task-execution` hook enforces this:** it blocks next-wave impl agents if `wave_gates[N-1].reviews_complete == false`. Even if you try to skip, the hook will BLOCK.
 
-**Auto-retry logic:** After spawning, check for `failed` tasks:
+**Re-spawn logic:** After spawning, check for pending wave tasks whose agent did not complete (a crashed agent leaves the task `pending` with `executing_tasks` cleared):
 ```bash
-jq -r ".tasks[] | select(.wave == $WAVE and .status == \"failed\" and (.retry_count // 0) < 2) | .id" .claude/state/active_task_graph.json
+jq -r ".tasks[] | select(.wave == $WAVE and .status == \"pending\") | .id" .claude/state/active_task_graph.json
 ```
-Re-spawn each with additional context: `"RETRY (attempt {retry_count+1}): {failure_reason}"`
+Re-spawn each pending wave task whose agent did not reach `implemented`.
 
 **Load template:** Read `{LOOM_DIR}/commands/templates/impl-agent-context.md`
 
@@ -492,7 +492,7 @@ Hooks auto-activate when `active_task_graph.json` exists:
 | `validate-agent-skill.sh` | PreToolUse: Task | Validates agent skill preload |
 | `mark-subagent-active.sh` | SubagentStart | Tracks active subagents + binds the guarded skill machine (epoch) |
 | `record-evidence.sh` | PostToolUse: Read/Edit/Write/MultiEdit/Bash | Appends epoch-stamped facts (FileRead/FileWrite/TestRun) to the evidence ledger |
-| `lint-file.sh` | PostToolUse: Edit/Write/MultiEdit | Runs the programmatic linter on the touched file |
+| `lint-file.sh` | PostToolUse: Edit/Write/MultiEdit | Runs the immediate-tier linter (regex rules only; programmatic rules run at the wave gate) |
 | `cleanup-stale-subagents.sh` | SessionStart | Sweeps stale subagent tracking/binding files |
 | `resume-after-clear.sh` | SessionStart: clear | Restores loom context after /clear |
 | `dispatch.sh` | SubagentStop | Routes to hooks below by agent type |
@@ -511,11 +511,9 @@ Hooks auto-activate when `active_task_graph.json` exists:
 ### Status Transitions
 
 ```
-pending → in_progress    (task spawned to agent)
-in_progress → implemented (agent completes, hook extracts test evidence)
-in_progress → failed      (agent crash: no task ID in output, retry_count incremented)
-failed → in_progress      (auto-retry if retry_count < 2)
-implemented → completed   (wave gate passed: tests + review + no critical findings)
+pending → implemented    (agent completes; SubagentStop hook resolves test evidence)
+pending → pending        (agent crash: no task ID resolvable; executing_tasks cleared, task re-spawned)
+implemented → completed  (wave gate passed: tests + review + no critical findings)
 ```
 
 ### Observability
@@ -535,8 +533,8 @@ jq '.wave_gates' .claude/state/active_task_graph.json
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Task `failed` | Agent crash detected | Auto-retried up to 2x; check `retry_count` |
-| Task stuck `in_progress` | Agent hung (no crash) | Re-spawn same task |
+| Task stuck `pending` after agent ran | Agent crashed (no resolvable task ID) | `executing_tasks` cleared automatically; re-spawn the task |
+| Task stays `pending`, agent still running | Agent live (no crash; tracked via `executing_tasks`, there is no `in_progress` status) | Wait for it, or re-spawn if hung |
 | `test_result` missing or not a pass | No recognizable output | Re-spawn, ensure test markers in output |
 | Wave not advancing | Gate blocked | Check `wave_gates[N].blocked`, run `/wave-gate` |
 | State write blocked | Guard hook active | State writes via hooks only; reads OK |

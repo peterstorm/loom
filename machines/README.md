@@ -33,9 +33,11 @@ add hard gates. See the v2 convergence plan (vault:
   the transcript-regex fallback remains but yields
   `{ verdict: "untrusted", passed, label }` with the label naming exactly
   how weak it is (e.g. `low-trust` / `degraded` / `fallback` /
-  `snapshot-read-failed` / `helper-reported`) — trust
+  `snapshot-read-failed`) — trust
   provenance lives in the data, so an untrusted pass can never masquerade
-  as a trusted one.
+  as a trusted one. (The `helper-reported` label is a separate untrusted
+  source: it is minted only by the `store-test-evidence` helper from agent
+  stdin, not by the transcript fallback.)
 
 A `TestRun` is trusted only when ground truth confirms it: a nonzero exit
 is trustworthy failure on its own; a zero exit is trusted whenever a report
@@ -96,7 +98,7 @@ Known residual limits, on purpose and documented:
   per-epoch SubagentStop audit still applies to whatever the sole-active
   windows recorded.
 - Report freshness is *call-scoped*: the PreToolUse Bash hook stamps the
-  start of every tool call (`<session>.callstart.json`, keyed by the
+  start of every Bash call (`<session>.callstart.json`, keyed by the
   harness `tool_use_id`), and a disk artifact (explicit `--outputFile`
   JSON, JUnit XML in conventional dirs) may vouch only when its mtime is
   at/after that call's start (minus ~2s of filesystem-mtime slack) AND

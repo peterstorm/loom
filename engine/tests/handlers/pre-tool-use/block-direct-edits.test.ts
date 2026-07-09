@@ -9,6 +9,7 @@ import { describe, it, expect, afterAll } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { shouldBlockDirectEdit } from "../../../src/core/block-direct-edits";
+import blockDirectEdits from "../../../src/handlers/pre-tool-use/block-direct-edits";
 import { SUBAGENT_DIR } from "../../../src/config";
 
 const orchestrating = () => true;
@@ -46,5 +47,17 @@ describe("shouldBlockDirectEdit — session-id parse boundary", () => {
 
   it("no task graph → allow regardless of session id", () => {
     expect(shouldBlockDirectEdit("Edit", "../../etc", () => false).kind).toBe("allow");
+  });
+});
+
+describe("block-direct-edits handler — malformed stdin fails CLOSED (round-11)", () => {
+  it("non-JSON stdin → block, never a rethrow or a silent allow", async () => {
+    // A parse crash exits 1 which is NON-blocking for PreToolUse — it would
+    // wave the edit past the direct-edit guard. Fail CLOSED instead.
+    const result = await blockDirectEdits("{not json", []);
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") {
+      expect(result.message).toContain("malformed hook input");
+    }
   });
 });

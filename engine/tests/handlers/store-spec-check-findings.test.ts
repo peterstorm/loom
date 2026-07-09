@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdirSync, writeFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -188,7 +188,6 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
     writeFileSync(pointer, statePath);
 
-    const { vi } = await import("vitest");
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const result = await handler(JSON.stringify({

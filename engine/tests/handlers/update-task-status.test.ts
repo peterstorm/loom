@@ -131,6 +131,24 @@ describe("extractTestEvidence (pure)", () => {
     expect(result.evidence).toBe("");
   });
 
+  // --- Round-12: anchored matchers reject prose the OLD regex accepted ---
+
+  it("pytest prose without the 'in X.XXs' timing suffix is NOT read as passing (round-12 anchor)", () => {
+    // The old unanchored /(\d+) passed/ matched this; the timing anchor now
+    // requires the runner-summary shape, so prose can't mint a passing result.
+    const result = extractTestEvidence("3 passed review");
+    expect(result.passed).toBe(false);
+    expect(result.evidence).toBe("");
+  });
+
+  it("bun-style mid-sentence prose 'all 5 pass rates' is NOT read as passing (round-12 anchor)", () => {
+    // The old /(\d+) pass\b/ matched mid-line; the line-start anchor now
+    // requires the counter to open the line, so prose can't mint a pass.
+    const result = extractTestEvidence("all 5 pass rates");
+    expect(result.passed).toBe(false);
+    expect(result.evidence).toBe("");
+  });
+
   // --- Tests for multiple test runs (T11 fix) ---
 
   it("uses last match for bun: first fails, last passes", () => {

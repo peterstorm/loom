@@ -130,8 +130,10 @@ export const PROTECTED_DIR_PATTERNS = new RegExp(
 );
 
 /** Write patterns to block on state files.
- * Note: `(?:^|\s)>>?(?!&)` avoids matching `2>&1` redirects in read-only commands */
-export const WRITE_PATTERNS = /(?:^|\s)>>?(?!&)|(?:^|\s)rm |mv |cp |tee |sed -i|perl -i|(?:^|\s)dd |sponge |chmod |python3? .*(open|write)|node .*(writeFile|fs\.)/;
+ * Note: `(?:^|\s)>>?(?!&)` avoids matching `2>&1` redirects in read-only commands.
+ * `ln`/`truncate`/`install` replace or empty a file just as effectively as
+ * `mv`/`cp`/`>` — a symlink swap or `truncate -s0` corrupts/forges the graph. */
+export const WRITE_PATTERNS = /(?:^|\s)>>?(?!&)|(?:^|\s)rm |mv |cp |tee |sed -i|perl -i|(?:^|\s)dd |sponge |chmod |(?:^|\s)ln |truncate |install |python3? .*(open|write)|node .*(writeFile|fs\.)/;
 
 /** Valid phase transitions: from → allowed targets */
 export const VALID_TRANSITIONS: Record<Phase, Phase[]> = {

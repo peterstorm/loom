@@ -12,8 +12,15 @@
  * helper allow — even a legitimate helper invocation must not smuggle a
  * forged append to `<session>.evidence.jsonl` or an `rm` of a machine
  * definition on the same command line. The helper allow itself is
- * segment-scoped: a non-helper segment on the same line that writes the
- * task graph or review-invocations blocks too.
+ * confined to the helper segment: a state-file write is vouched for ONLY when
+ * it lives inside the single helper segment (a `helper … > active_task_graph.json`
+ * output redirect). A write pattern in ANY non-helper segment blocks — this
+ * covers both a co-located forge (`helper && sed -i … active_task_graph.json`)
+ * and a variable-indirected one split across segments
+ * (`helper && F=active_task_graph.json && sed -i … $F`). Command substitution
+ * (`$(…)` / backticks) that co-occurs with a state-file write also blocks: its
+ * body executes independently and is opaque to the segment splitter, so it can
+ * never be vouched for by the enclosing helper.
  */
 
 import { existsSync } from "node:fs";
@@ -72,20 +79,31 @@ export function commandInvokesWhitelistedHelper(command: string): boolean {
 }
 
 /**
- * Does any NON-helper segment of the command line carry a state-file write?
- * The helper allow is segment-scoped, not line-wide: a real helper invocation
- * must not vouch for the OTHER segments on its line. Helpers legitimately
- * write the task graph, so a redirect inside the helper segment itself stays
- * allowed — but `bun cli.ts helper set-phase execute && sed -i … active_task_graph.json`
- * blocks, because the forging segment is not a helper invocation.
+ * Does any NON-helper segment of the command line carry a write pattern?
+ * A helper invocation vouches only for its OWN segment: the sole legitimate
+ * state-file write is a redirect of helper output confined to the helper
+ * segment (`bun cli.ts helper set-phase > active_task_graph.json`). A write
+ * in any other segment is untrusted — whether it names the state file itself
+ * (`… && sed -i … active_task_graph.json`) or reaches it through a variable
+ * bound in a sibling segment (`… && F=active_task_graph.json && sed -i … $F`),
+ * where the literal and the write never share a segment. Combined with the
+ * line-wide STATE_FILE check at the call site, both shapes block.
  */
-function nonHelperSegmentWritesStateFile(command: string): boolean {
+function writeInNonHelperSegment(command: string): boolean {
   return splitCommandSegments(command).some(
-    (segment) =>
-      !segmentInvokesHelper(segment) &&
-      STATE_FILE_PATTERNS.test(segment) &&
-      WRITE_PATTERNS.test(segment)
+    (segment) => !segmentInvokesHelper(segment) && WRITE_PATTERNS.test(segment)
   );
+}
+
+/**
+ * Command substitution `$(…)` or backticks embed a command that the shell
+ * executes independently; our splitter treats the substitution body (inside
+ * quotes) as opaque segment text, so a write it performs is invisible to
+ * segment scoping. A helper never needs to write state through a substitution,
+ * so its presence alongside a state-file write is treated as an escape.
+ */
+function hasCommandSubstitution(command: string): boolean {
+  return command.includes("$(") || command.includes("`");
 }
 
 /**
@@ -103,13 +121,19 @@ export function guardStateFileDecision(command: string): HookResult {
     return BLOCK;
   }
 
-  // Allow whitelisted helper scripts — only on an actual invocation segment,
-  // and only for that segment: any other segment on the same line that both
-  // references a guarded state file and matches a write pattern blocks
-  // (round 11 closed the SUBAGENT_DIR/MACHINES_DIR variant above; this closes
-  // the task-graph / review-invocations variant).
+  // Allow whitelisted helper scripts — but the allow is confined to the helper
+  // segment. When the line touches a state file AND carries a write, the write
+  // is trusted ONLY if it lives inside the single helper segment (a redirect of
+  // helper output). A write in any non-helper segment, or a command
+  // substitution smuggling an independent write, escapes that confinement and
+  // blocks. (Round 11 closed the SUBAGENT_DIR/MACHINES_DIR variant above;
+  // round 12 the co-located task-graph variant; this closes the substitution
+  // and cross-segment-indirection variants.)
   if (commandInvokesWhitelistedHelper(command)) {
-    if (nonHelperSegmentWritesStateFile(command)) return BLOCK;
+    const writesStateFile = STATE_FILE_PATTERNS.test(command) && WRITE_PATTERNS.test(command);
+    if (writesStateFile && (writeInNonHelperSegment(command) || hasCommandSubstitution(command))) {
+      return BLOCK;
+    }
     return { kind: "allow" };
   }
 

@@ -144,6 +144,58 @@ describe("guard-state-file — edge cases", () => {
     ).toBe("allow");
   });
 
+  it("a REAL helper invocation cannot vouch for a command-substitution write (round-13 bypass)", () => {
+    // `$(…)` / backticks embed an independently-executed command; the segment
+    // is a legitimate helper invocation, so segment-scoping alone missed the
+    // smuggled write. Both forms, both state files, must block.
+    expect(
+      guardDecision(
+        "bun cli.ts helper set-phase \"$(sed -i s/trusted-fail/trusted-pass/ .claude/state/active_task_graph.json)\"",
+      ),
+    ).toBe("block");
+    expect(
+      guardDecision(
+        "bun cli.ts helper set-phase `sed -i s/a/b/ active_task_graph.json`",
+      ),
+    ).toBe("block");
+    expect(
+      guardDecision(
+        "bun cli.ts helper cleanup-state \"$(sponge review-invocations.json < /tmp/forged.json)\"",
+      ),
+    ).toBe("block");
+    // A READ substitution (no write pattern) stays allowed — the guard only
+    // bites when a write co-occurs with the substitution.
+    expect(
+      guardDecision("bun cli.ts helper set-phase \"$(jq .current_wave active_task_graph.json)\""),
+    ).toBe("allow");
+  });
+
+  it("a REAL helper invocation cannot vouch for a variable-indirected write (round-13 bypass)", () => {
+    // The state-file literal and the write live in DIFFERENT non-helper
+    // segments, so no single segment matches both patterns; the write in a
+    // non-helper segment plus a line-wide state-file reference must block.
+    expect(
+      guardDecision(
+        "bun cli.ts helper set-phase && F=active_task_graph.json && sed -i s/x/y/ .claude/state/$F",
+      ),
+    ).toBe("block");
+    expect(
+      guardDecision(
+        "bun cli.ts helper cleanup-state; G=review-invocations.json; sponge .claude/state/$G < /tmp/forged.json",
+      ),
+    ).toBe("block");
+  });
+
+  it("ln / truncate / install on a state file → block (round-13 WRITE_PATTERNS gap)", () => {
+    expect(guardDecision("truncate -s0 .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision("ln -sf /tmp/forged.json .claude/state/active_task_graph.json")).toBe("block");
+    expect(guardDecision("install -m644 /tmp/forged.json .claude/state/active_task_graph.json")).toBe("block");
+    // The same tokens smuggled behind a helper prefix also block.
+    expect(
+      guardDecision("bun cli.ts helper set-phase && truncate -s0 active_task_graph.json"),
+    ).toBe("block");
+  });
+
   it("forged appends to the evidence ledger are blocked regardless of helper-shaped noise", () => {
     expect(
       guardDecision(
@@ -205,6 +257,18 @@ describe("guard-state-file — edge cases", () => {
     // reads stay allowed
     expect(guardDecision(`cat ${MACHINES_DIR}/code-implementer-agent.machine.json`)).toBe("allow");
     expect(guardDecision(`ls ${MACHINES_DIR}`)).toBe("allow");
+  });
+});
+
+describe("guard-state-file handler — malformed stdin fails CLOSED (round-11)", () => {
+  it("non-JSON stdin → block, never a rethrow or a silent allow", async () => {
+    // A parse crash exits 1 which is NON-blocking for PreToolUse — it would
+    // wave the Bash call past the guard. The handler must fail CLOSED instead.
+    const result = await runGuardStateFile("{not json", inMemorySessionRegistry());
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") {
+      expect(result.message).toContain("malformed hook input");
+    }
   });
 });
 

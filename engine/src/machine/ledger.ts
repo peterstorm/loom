@@ -10,6 +10,7 @@
  *                               line per active machine-gated subagent
  *   <session>.active          — active-subagent roster (attribution)
  *   <session>.cleanup         — cleanup lock marker
+ *   <session>.task_graph      — per-session task-graph binding (sessionScopedPath)
  *   <session>.callstart.json  — recency-ordered call-start stamps
  *                               (recordCallStart / callStartFor)
  *

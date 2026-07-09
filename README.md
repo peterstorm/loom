@@ -492,7 +492,7 @@ interface TaskGraph {
 }
 ```
 
-`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `test_result`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `review_status`, `critical_findings`, `advisory_findings`, `start_sha`, `failure_reason`, `retry_count`.
+`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `test_result`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `file_list`, `review_status`, `review_error`, `critical_findings`, `advisory_findings`, `start_sha`, `failure_reason`, `retry_count`.
 
 ### Protection model
 
@@ -505,8 +505,7 @@ interface TaskGraph {
 
 ```
 pending      ──▶ implemented   (agent completes, test evidence resolved — evidence ledger first, labeled transcript fallback)
-pending      ──▶ failed        (agent crash; retry_count incremented)
-failed       ──▶ pending       (auto-retry, max 2 attempts)
+pending      ──▶ pending       (agent crash; executing_tasks cleared, task re-spawned by the orchestrator)
 implemented  ──▶ completed     (wave gate passed)
 ```
 

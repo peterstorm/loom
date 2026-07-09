@@ -84,9 +84,9 @@ export const CALL_START_SUFFIX = ".callstart.json" as const;
 /**
  * Every per-session file suffix written under SUBAGENT_DIR — the single
  * source of truth for the ledger's path helpers (ledger.ts) and the
- * SessionStart sweep's group detection (cleanup-stale-subagents). Ordered
- * so the multi-dot suffix wins over any accidental shorter match when
- * suffix-matching file names.
+ * SessionStart sweep's group detection (cleanup-stale-subagents). No suffix
+ * here is itself a suffix of another, so suffix-matching a file name is
+ * unambiguous regardless of iteration order.
  */
 export const SESSION_SUFFIXES = [
   ".evidence.jsonl",
@@ -247,14 +247,17 @@ export function isBindingFresh(args: {
 
 // --- Evidence record parsing (parse, don't validate) ---
 
-function isReportSummary(v: unknown): v is TestReportSummary {
-  if (typeof v !== "object" || v === null) return false;
+// Parse (not merely validate) a ledger `report` field: returns the RE-MINTED
+// summary from the smart constructor, never the raw object. Embedding the raw
+// `o.report` would let unknown extra fields ride inside a branded
+// TestReportSummary and back out on re-serialization; the brand must mean
+// "exactly what parseReportSummary built". Impossible counts (fractional/
+// negative total, failed > total) yield null and never vouch.
+function parseReportField(v: unknown): TestReportSummary | null {
+  if (typeof v !== "object" || v === null) return null;
   const o = v as Record<string, unknown>;
-  if (o.source !== "vitest-json" && o.source !== "junit-xml") return false;
-  // Share the artifact parsers' count-sanity gate: a ledger record with
-  // impossible counts (fractional/negative total, failed > total) must not
-  // read back as a valid summary and vouch.
-  return parseReportSummary(o.total, o.failed, o.source) !== null;
+  if (o.source !== "vitest-json" && o.source !== "junit-xml") return null;
+  return parseReportSummary(o.total, o.failed, o.source);
 }
 
 function parseEvent(raw: unknown): Evidence | null {
@@ -277,7 +280,7 @@ function parseEvent(raw: unknown): Evidence | null {
     case "TestRun": {
       if (typeof o.command !== "string") return null;
       const exit = typeof o.exit === "number" ? o.exit : null;
-      const report = isReportSummary(o.report) ? o.report : null;
+      const report = parseReportField(o.report);
       return { kind: "TestRun", command: o.command, exit, report };
     }
     default:
@@ -384,9 +387,10 @@ export interface SessionRegistry {
   readonly readEvidence: (sessionId: SessionId) => readonly EvidenceRecord[];
   /**
    * Persist the call-start stamp for one tool call (PreToolUse). toolUseId
-   * is untrusted harness text — implementations store it as a JSON map key
-   * only, never in a filesystem path. Retention is bounded (CALL_START_CAP
-   * most-recent entries), so a stamp is a short-lived fact, not a ledger.
+   * is untrusted harness text — implementations store it only inside the JSON
+   * payload (a recency-ordered `{ id, startMs }` entry), never in a filesystem
+   * path. Retention is bounded (CALL_START_CAP most-recent entries), so a stamp
+   * is a short-lived fact, not a ledger.
    */
   readonly recordCallStart: (
     sessionId: SessionId,

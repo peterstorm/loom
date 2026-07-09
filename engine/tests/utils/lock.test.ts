@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -111,7 +111,6 @@ describe("stealStaleLock — live-lock restore path (round-10 gap 18)", () => {
     writeFileSync(join(lockDir, "pid"), "999999999"); // dead pid
 
     const { stealStaleLock } = await import("../../src/utils/lock");
-    const { vi } = await import("vitest");
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       expect(stealStaleLock(lockDir)).toBe(true);
