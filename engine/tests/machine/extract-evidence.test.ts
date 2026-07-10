@@ -285,6 +285,18 @@ describe("extractShellWriteTargets — Bash-authored writes are visible to the v
     expect(extractShellWriteTargets("echo hi # > not-a-write.txt")).toEqual([]);
   });
 
+  it("`>&<digit><path>` is a filename redirect, not an fd dup — the target IS minted (round-16 bypass)", () => {
+    // Bash duplicates an fd only when the ENTIRE `>&` word is digits (or
+    // exactly `-`); `2/../report.json` is a filename, and missing it left a
+    // fabricated report invisible to the agent-authored-artifact veto.
+    expect(extractShellWriteTargets("echo X >&2/../report.json")).toEqual(["2/../report.json"]);
+    expect(extractShellWriteTargets("echo X >&2foo")).toEqual(["2foo"]);
+    // Whole-word dups and the fd close form still mint nothing.
+    expect(extractShellWriteTargets("cmd >&2")).toEqual([]);
+    expect(extractShellWriteTargets("cmd 2>&1")).toEqual([]);
+    expect(extractShellWriteTargets("cmd >&-")).toEqual([]);
+  });
+
   it("extractEvidence mints Bash FileWrites BEFORE the TestRun — a test's own redirect never reads as write-after-pass", () => {
     const events = extractEvidence(
       "Bash",

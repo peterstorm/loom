@@ -9,7 +9,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isToolCallEventType, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 
 // Engine core — harness-agnostic, no Claude Code dependency (these do fs I/O)
 import { shouldBlockDirectEdit } from "../engine/src/core/block-direct-edits";
@@ -19,13 +19,11 @@ import { validateTaskExecution } from "../engine/src/core/validate-task-executio
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 
 // Engine parsers (format-aware)
-import { parseTranscript } from "../engine/src/parsers/parse-transcript";
 import { parseFilesModified } from "../engine/src/parsers/parse-files-modified";
 import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-output";
-import { parsePhaseArtifacts } from "../engine/src/parsers/parse-phase-artifacts";
 
 // Engine SubagentStop logic (harness-agnostic functions already exported)
-import { extractTestEvidence, analyzeNewTests, applyUntrustedStopResolution } from "../engine/src/handlers/subagent-stop/update-task-status";
+import { extractTestEvidence, analyzeNewTests, applyUntrustedStopResolution, isWaveComplete } from "../engine/src/handlers/subagent-stop/update-task-status";
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
   isReviewAgent, parseMachineSummary, parseLegacyFindings,
@@ -35,10 +33,10 @@ import { parseSpecCheckOutput } from "../engine/src/handlers/subagent-stop/store
 import type { ReviewStatus, SpecCheck, Phase } from "../engine/src/types";
 import { newWaveGate } from "../engine/src/types";
 
-import { TASK_GRAPH_PATH, SUBAGENT_DIR, HARNESS, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
+import { TASK_GRAPH_PATH, SUBAGENT_DIR, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
-import { fsSessionRegistry, parseSessionId } from "../engine/src/machine";
+import { fsSessionRegistry, parseSessionId, rosterAgentId } from "../engine/src/machine";
 import { buildContextOutput } from "../engine/src/handlers/session-start/resume-after-clear";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
@@ -158,7 +156,16 @@ export default function (pi: ExtensionAPI) {
           } else {
             try {
               mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
-              appendFileSync(`${SUBAGENT_DIR}/${safeSessionId}.active`, `${agent}\n`);
+              // Roster line: the engine contract expects a unique per-spawn
+              // AgentId (SubagentStart's agent_id); pi's tool_call event
+              // carries only the agent TYPE at this seam, so the type is
+              // sanitized through rosterAgentId — the same producer the
+              // engine roster uses, guaranteeing the line parses on read.
+              // LATENT MISMATCH (documented, deferred): with only a type to
+              // write, two parallel same-type pi subagents are
+              // indistinguishable on the roster; a real per-spawn id would
+              // need pi to expose one on the subagent tool_call.
+              appendFileSync(`${SUBAGENT_DIR}/${safeSessionId}.active`, `${rosterAgentId(agent)}\n`);
               if (existsSync(TASK_GRAPH_PATH)) {
                 const taskGraphFile = `${SUBAGENT_DIR}/${safeSessionId}.task_graph`;
                 if (!existsSync(taskGraphFile)) {
@@ -430,6 +437,17 @@ export default function (pi: ExtensionAPI) {
         const bashOutput = parseBashTestOutput(transcriptText);
         const testEvidence = extractTestEvidence(bashOutput);
 
+        // files_modified feeds lint-wave-gate's target collection (it
+        // collects lint targets EXCLUSIVELY from tasks' files_modified) —
+        // parse it from the per-result messages, re-encoded as the pi-format
+        // JSONL parseFilesModified's pi branch reads, so the pi path
+        // persists the same field the engine path does (round-16 fix: the
+        // omission made every wave-gate lint under pi run over an empty set).
+        const piJsonl = resultMessages
+          .map((m) => JSON.stringify({ type: "message", message: m }))
+          .join("\n");
+        const filesModified = parseFilesModified(piJsonl, "pi");
+
         let newTestEvidence = { written: false, evidence: "" };
         if (git.isGitRepo()) {
           // Collect diff: prefer start_sha-based, fall back to untracked test files
@@ -466,38 +484,34 @@ export default function (pi: ExtensionAPI) {
               label: "transcript-regex (fallback)",
             },
             testEvidence: testEvidence.evidence,
+            filesModified,
             newTestsWritten: newTestEvidence.written,
             newTestEvidence: newTestEvidence.evidence,
           });
           skippedExistingVerdict = applied.skipped;
-          return applied.state;
+          if (applied.skipped) return applied.state;
+          // Wave completion is decided INSIDE the same locked update the
+          // resolution landed in (the old post-update load raced concurrent
+          // writers), via the shared pure predicate the engine's
+          // update-task-status also uses.
+          const currentWave = applied.state.current_wave ?? 1;
+          if (!isWaveComplete(applied.state, currentWave)) return applied.state;
+          return {
+            ...applied.state,
+            wave_gates: {
+              ...applied.state.wave_gates,
+              [String(currentWave)]: {
+                ...(applied.state.wave_gates[String(currentWave)] ?? newWaveGate()),
+                impl_complete: true,
+              },
+            },
+          };
         });
 
         if (skippedExistingVerdict) {
           process.stderr.write(
             `loom(pi): ${taskId} is completed or carries a trusted verdict this untrusted resolution cannot supersede — leaving it untouched\n`,
           );
-          continue;
-        }
-
-        // Check wave completion
-        const updated = mgr.load();
-        const currentWave = updated.current_wave ?? 1;
-        const waveComplete = !updated.tasks
-          .filter((t) => t.wave === currentWave)
-          .some((t) => t.status !== "implemented" && t.status !== "completed");
-
-        if (waveComplete) {
-          await mgr.update((s) => ({
-            ...s,
-            wave_gates: {
-              ...s.wave_gates,
-              [String(currentWave)]: {
-                ...(s.wave_gates[String(currentWave)] ?? newWaveGate()),
-                impl_complete: true,
-              },
-            },
-          }));
         }
         continue;
       }

@@ -20,8 +20,17 @@
  *   - a read-only command: head token ∈ READ_ONLY_STATE_COMMANDS (commands
  *     that cannot write a file under any flag) with no output redirect
  *     (quote-aware: any unquoted `>` except an fd-dup — `>&` followed by a
- *     digit or `-` — so `>`, `>>`, `&>`, `3>`, and `>&file` all count;
- *     `2>&1` / `>&2` do not).
+ *     WHOLE word of digits or exactly `-` — so `>`, `>>`, `&>`, `3>`,
+ *     `>&file`, and `>&2/../file` all count; `2>&1` / `>&2` / `>&-` do not).
+ *
+ * Pattern tests (the front gate, chain scoping, protected-dir checks, and
+ * placeholder classification) run against a QUOTE-COLLAPSED view of the
+ * text: bash concatenates adjacent quoted word parts, so
+ * `.cl'aude'/state/active_'task_graph'.json` names the guarded file even
+ * though the raw text never contains the literal contiguously. Collapsing
+ * only errs fail-closed — a quoted argument that MENTIONS a guarded name is
+ * judged, never skipped — and the collapsed view is used for matching only,
+ * never for placeholder substitution output.
  *
  * Everything else blocks — including writers nobody enumerated (`patch`,
  * `rsync`, `shred`, `git checkout --`), wrappers (`xargs`, `env`, `timeout`),
@@ -48,6 +57,7 @@ import {
   SUBAGENT_DIR,
 } from "../config";
 import {
+  classifyFdDupWord,
   splitCommandSegmentsWithOps,
   stripComment,
   stripEnvPrefix,
@@ -96,9 +106,48 @@ function segmentInvokesHelper(segment: string): boolean {
   return WHITELISTED_HELPERS.includes(tokens[3] ?? "");
 }
 
-/** Quote-aware: does ANY segment of the command line invoke a whitelisted helper? */
-export function commandInvokesWhitelistedHelper(command: string): boolean {
-  return splitCommandSegmentsWithOps(command).some((s) => segmentInvokesHelper(s.text));
+/**
+ * Quote-COLLAPSED view of a piece of command text, for pattern matching
+ * only: unescaped `'`/`"` quote characters (actual shell quoting, tracked
+ * with the same quote-scanner semantics as the rest of this file) are
+ * stripped so adjacent quoted word parts concatenate the way bash
+ * concatenates them — `.cl'aude'/state/active_'task_graph'.json` collapses
+ * to the guarded literal. Backslash escapes are preserved as-is (a `\"` is
+ * argument text, not quoting). The collapsed text is NEVER substituted back
+ * into anything executed or placeholdered — it exists only so
+ * stateFilePatterns()/protectedDirPatterns() cannot be laundered by quote
+ * splitting, which errs fail-closed exclusively.
+ */
+function collapseQuotes(text: string): string {
+  let out = "";
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote !== null) {
+      if (quote !== "'" && c === "\\") {
+        out += c + (text[i + 1] ?? "");
+        i++;
+        continue;
+      }
+      if (c === quote) {
+        quote = null;
+        continue;
+      }
+      out += c;
+      continue;
+    }
+    if (c === "\\") {
+      out += c + (text[i + 1] ?? "");
+      i++;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      quote = c;
+      continue;
+    }
+    out += c;
+  }
+  return out;
 }
 
 /**
@@ -119,13 +168,15 @@ function hasReadOnlyHead(segment: string): boolean {
 
 /**
  * Quote-aware output-redirect detection: every unquoted `>` counts as a
- * write channel UNLESS it is an fd dup — `>&` immediately followed by a
- * digit or `-` (`2>&1`, `>&2`, `>&-`). A `>&` followed by anything else is
- * bash's `>&word` form, which redirects stdout+stderr TO THE FILE `word`
- * (the round-15 bypass), so it counts as a write. This catches `>`, `>>`,
- * `&>`, fd-numbered forms (`3>file`), and `>&file` that whitespace-anchored
- * patterns miss, while leaving a `>` inside a quoted argument
- * (`jq 'select(.x > 1)' <state>`) alone.
+ * write channel UNLESS it is an fd dup — `>&` followed by a word that is
+ * ENTIRELY digits or exactly `-` (`2>&1`, `>&2`, `>&-`), classified by the
+ * shared classifyFdDupWord. A `>&` whose word merely starts with a digit
+ * but continues into a path (`>&2/../file` — the round-16 bypass) or is any
+ * other word (`>&file`, the round-15 bypass) is bash's `>&word` form, which
+ * redirects stdout+stderr TO THE FILE `word`, so it counts as a write. This
+ * catches `>`, `>>`, `&>`, fd-numbered forms (`3>file`), and the `>&word`
+ * family that whitespace-anchored patterns miss, while leaving a `>` inside
+ * a quoted argument (`jq 'select(.x > 1)' <state>`) alone.
  */
 function hasOutputRedirect(segment: string): boolean {
   let quote: '"' | "'" | "`" | null = null;
@@ -149,8 +200,9 @@ function hasOutputRedirect(segment: string): boolean {
     }
     if (c === ">") {
       if (segment[i + 1] !== "&") return true;
-      const after = segment[i + 2];
-      if (after === undefined || !/[0-9-]/.test(after)) return true; // >&file
+      const dup = classifyFdDupWord(segment, i + 2);
+      if (!dup.isFdDup) return true; // `>&word` writes the FILE `word`
+      i = dup.end - 1; // skip the dup word (digits/`-`: nothing special inside)
     }
   }
   return false;
@@ -166,10 +218,17 @@ interface FlattenedCommand {
 /** Placeholder for an extracted substitution: preserves the body's guarded-
  *  token class so the ENCLOSING segment is still judged as touching guarded
  *  state (`sed -i … $(printf 'active_task_graph').json` must not launder the
- *  token away). Alphanumeric/slash only — cannot form a redirect/separator. */
+ *  token away). The body is classified on its quote-collapsed view so quote
+ *  splitting inside a substitution cannot launder the class either. The
+ *  load-bearing property of the placeholder text is that it cannot form a
+ *  redirect or separator: the literal parts contain only [A-Za-z_/],
+ *  and the `${SUBAGENT_DIR}` prefix is redirect/separator-free as shipped
+ *  (`/tmp/claude-subagents`) — this is contingent on an operator-set
+ *  LOOM_SUBAGENT_DIR staying free of shell-special characters. */
 function placeholderFor(body: string): string {
-  if (protectedDirPatterns().test(body)) return `${SUBAGENT_DIR}/__subst__`;
-  if (stateFilePatterns().test(body)) return "active_task_graph__subst__";
+  const collapsed = collapseQuotes(body);
+  if (protectedDirPatterns().test(collapsed)) return `${SUBAGENT_DIR}/__subst__`;
+  if (stateFilePatterns().test(collapsed)) return "active_task_graph__subst__";
   return "__subst__";
 }
 
@@ -301,11 +360,13 @@ function decide(command: string, depth: number): HookResult {
   if (!command) return { kind: "allow" };
 
   // Lines that never reference a guarded path are not this guard's business.
-  // (Checked on the RAW line: a token hidden inside a substitution body is
-  // still present in the raw text, so nothing escapes this gate. Patterns
-  // resolve machinesDir() at decision time — a re-pointed LOOM_MACHINES_DIR
-  // is guarded without a module reload.)
-  if (!stateFilePatterns().test(command)) return { kind: "allow" };
+  // (Checked on the quote-COLLAPSED line: a token hidden inside a
+  // substitution body is still present in the raw text, and a token split
+  // across adjacent quoted parts — `.cl'aude'/state/…` — reassembles under
+  // collapse, so neither escapes this gate. Patterns resolve machinesDir()
+  // at decision time — a re-pointed LOOM_MACHINES_DIR is guarded without a
+  // module reload.)
+  if (!stateFilePatterns().test(collapseQuotes(command))) return { kind: "allow" };
 
   if (depth > MAX_SUBSTITUTION_DEPTH) return BLOCK;
 
@@ -318,14 +379,17 @@ function decide(command: string, depth: number): HookResult {
   for (const chain of pipeChains(flat.flattened)) {
     // A chain none of whose segments touch a guarded path is out of scope —
     // `npm install && jq . <state>` must not block on the npm segment.
-    if (!chain.some((segment) => stateFilePatterns().test(segment))) continue;
+    // (Tested quote-collapsed, like every pattern site.)
+    if (!chain.some((segment) => stateFilePatterns().test(collapseQuotes(segment)))) continue;
 
     for (const segment of chain) {
       if (segmentInvokesHelper(segment)) {
         // The helper vouches for its own segment (including a redirect of its
         // output into a state file) — but NEVER for a protected-dir write:
         // ledger and machine-definition forgery stay blocked even here.
-        if (protectedDirPatterns().test(segment) && hasOutputRedirect(segment)) return BLOCK;
+        if (protectedDirPatterns().test(collapseQuotes(segment)) && hasOutputRedirect(segment)) {
+          return BLOCK;
+        }
         continue;
       }
       if (!hasReadOnlyHead(segment)) return BLOCK;

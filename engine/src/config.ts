@@ -157,7 +157,18 @@ export const protectedDirPatterns = (): RegExp => new RegExp(
  * --hostname-bin <cmd> execute an arbitrary program per input file — a
  * pre-staged script receives the guarded path and can rewrite or delete it),
  * `more` (interactive shell escape via `!cmd`/`v`; non-interactive it acts
- * like cat, but membership requires no write capability under ANY use), and
+ * like cat, but membership requires no write capability under ANY use),
+ * `cd` (writes nothing itself, but it RE-SCOPES path resolution:
+ * `cd .claude/state && rm *.json` names the guarded dir only in the cd
+ * segment while the writer names no guarded literal, so its chain is
+ * skipped as out-of-scope — allowlisting cd hands every later segment an
+ * unguarded relative namespace. Excluding it costs only fail-closed reads:
+ * reads never need to cd INTO a guarded dir, and
+ * `cd <unguarded-dir> && jq . <state>` still allows because the cd chain is
+ * simply out of scope. Residual, documented: multi-hop
+ * `cd .claude; cd state; rm *.json` never names a guarded literal anywhere
+ * on the line and stays invisible to any raw-text gate — see
+ * machines/README.md known residual limits), and
  * wrapper/executor commands that run OTHER commands (`env`, `xargs`, `sudo`,
  * `timeout`, `nohup`, `nice`, `command`, shells, interpreters) — a wrapper
  * inherits the write capability of whatever it wraps. Heads match exactly
@@ -169,7 +180,7 @@ export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = new Set([
   "diff", "cmp", "md5sum", "sha1sum", "sha256sum",
   "cut", "tr", "nl", "od", "hexdump", "strings",
   "echo", "printf", "test", "[", "[[", "true", "false",
-  "cd", "pwd", "dirname", "basename", "readlink", "realpath", "du",
+  "pwd", "dirname", "basename", "readlink", "realpath", "du",
 ]);
 
 /** Valid phase transitions: from → allowed targets */

@@ -149,7 +149,7 @@ EOF
 ```
 
 **If GH comment fails** (rate limit, auth, network):
-- Log summary to `.claude/state/wave-{N}-review.md` as fallback
+- Log summary to `.claude/reviews/wave-{N}-review.md` as fallback (NOT under `.claude/state/` — that directory is guarded against every write path)
 - Proceed with gate logic - don't block on comment failure
 - Retry comment post after gate decision
 

@@ -223,7 +223,7 @@ After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance
 | 1 | **State check** | Confirm `current_wave` and `impl_complete == true` |
 | 2 | **Test evidence** | Verify every task has a passing `test_result` (resolved by the `update-task-status` hook — evidence ledger first, transcript fallback) and `new_tests_written == true` — both requirements are waived for tasks declaring `new_tests_required == false` |
 | 3 | **Spec-check + reviews (parallel)** | Spawn `spec-check-invoker` once for the wave; spawn 5 reviewers per task in parallel |
-| 4 | **GitHub comment** | Post a summary to the issue (fallback: write to `.claude/state/wave-{N}-review.md`) |
+| 4 | **GitHub comment** | Post a summary to the issue (fallback: write to `.claude/reviews/wave-{N}-review.md`) |
 | 5 | **Advance** | `complete-wave-gate` helper performs final checks and either advances or blocks |
 
 ### Review agents (per task, in parallel)
@@ -611,14 +611,14 @@ The CLI reads JSON from stdin (provided by the harness), dynamically imports the
 | `CLARIFY_THRESHOLD` | Markers above this trigger mandatory clarify phase (default: 3) |
 | `PHASE_ORDER` | Valid phase sequence |
 | `PHASE_AGENT_MAP` | Maps each phase to the agent that runs it |
-| `PHASE_TRANSITIONS` | Allowed phase-to-phase transitions |
+| `VALID_TRANSITIONS` | Allowed phase-to-phase transitions |
 | `IMPL_AGENTS` | Implementation agents allowed during execute (incl. `code-implementer-agent`, `ts-test-agent`, `frontend-agent`, `security-agent`, `dotfiles-agent`, `adr-writer-agent`, `general-purpose`) |
 | `REVIEW_SUB_AGENTS` | Review agents whose findings feed the wave gate |
 | `REVIEW_AGENTS` | `REVIEW_SUB_AGENTS` + `spec-check-invoker` |
 | `EXECUTE_AGENTS` | `IMPL_AGENTS` + `REVIEW_AGENTS` |
 | `UTILITY_AGENTS` | `Explore`, `Plan`, `haiku` |
 | `WHITELISTED_HELPERS` | Helper scripts allowed to write to the state file |
-| `STATE_FILE_PATTERNS` | Regex matching state file names |
+| `stateFilePatterns()` | Lazily-built regex matching guarded state files AND guarded directories (state dir, subagent dir, machine definitions) |
 | `READ_ONLY_STATE_COMMANDS` | Allowlist of commands that cannot write files (`jq`, `cat`, `grep`, …) — anything else touching guarded state blocks (deny-by-default) |
 | `TEST_COMMAND_PATTERNS` | 30+ patterns for recognizing test runners |
 | `TASK_GRAPH_PATH` | Resolved from cwd or git root (`.claude/state/…` or `.pi/state/…`) |

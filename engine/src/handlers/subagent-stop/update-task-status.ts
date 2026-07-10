@@ -268,6 +268,11 @@ export function capVerdictForMachineCompletion(
 export interface UntrustedStopResolution {
   readonly testResult: Extract<TaskTestResult, { verdict: "untrusted" }>;
   readonly testEvidence: string;
+  /** Files the agent modified (parsed from its transcript) — persisted on
+   *  the task because lint-wave-gate collects its lint targets EXCLUSIVELY
+   *  from `files_modified`; a resolution that omits it makes every wave-gate
+   *  lint run over an empty set and report clean (round-16 pi finding). */
+  readonly filesModified: readonly string[];
   readonly newTestsWritten: boolean;
   readonly newTestEvidence: string;
 }
@@ -312,6 +317,7 @@ export function applyUntrustedStopResolution(
               status: "implemented" as const,
               test_result: resolution.testResult,
               test_evidence: resolution.testEvidence,
+              files_modified: [...resolution.filesModified],
               new_tests_written: resolution.newTestsWritten,
               new_test_evidence: resolution.newTestEvidence,
             }
@@ -320,6 +326,20 @@ export function applyUntrustedStopResolution(
       executing_tasks: clearedExecuting,
     },
   };
+}
+
+/**
+ * Wave completion: no task in the wave is still short of
+ * implemented/completed. Shared by the engine's update-task-status and pi's
+ * Stop mirror so the two harnesses cannot drift; pi calls it INSIDE its
+ * locked update so the impl_complete gate write is decided against the same
+ * state the resolution landed on. Note (long-standing semantics both
+ * callers inlined): a wave with NO tasks counts as complete.
+ */
+export function isWaveComplete(state: TaskGraph, wave: number): boolean {
+  return !state.tasks
+    .filter((t) => t.wave === wave)
+    .some((t) => t.status !== "implemented" && t.status !== "completed");
 }
 
 // --- Pure: determine new test evidence from diff ---
@@ -677,14 +697,12 @@ export const runUpdateTaskStatus = async (
 
   process.stderr.write(`Task ${taskId} implemented.\n`);
 
-  // Check wave completion
+  // Check wave completion (shared pure predicate — pi's Stop mirror uses
+  // the same one, inside its locked update)
   const updated = mgr.load();
   const currentWave = updated.current_wave ?? 1;
-  const waveIncomplete = updated.tasks
-    .filter((t) => t.wave === currentWave)
-    .some((t) => t.status !== "implemented" && t.status !== "completed");
 
-  if (!waveIncomplete) {
+  if (isWaveComplete(updated, currentWave)) {
     await mgr.update((s) => ({
       ...s,
       wave_gates: {

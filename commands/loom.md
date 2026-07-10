@@ -317,11 +317,7 @@ This helper:
 - Initializes `wave_gates`, `executing_tasks`
 - Writes via `StateManager` (chmod 444 protection)
 
-**C. Set state file read-only:**
-```bash
-chmod 444 .claude/state/active_task_graph.json
-```
-State file stays chmod 444 at rest. Only hooks can write via `StateManager` (temporarily toggles to 644).
+**C. Read-only protection (automatic):** The helper leaves the file chmod 444 — do **not** run `chmod` yourself; `chmod` is not an allowlisted read-only command, so the guard-state-file hook blocks it. State file stays chmod 444 at rest. Hooks and whitelisted helpers (`populate-task-graph`, `complete-wave-gate`, `set-phase`, …) write via `StateManager` (temporarily toggles to 644).
 
 ### 4e. Context Checkpoint (Recommended)
 
@@ -436,7 +432,7 @@ bun ${LOOM_DIR}/engine/src/cli.ts init-state \
 }
 -->
 
-**IMPORTANT:** Set `chmod 444` immediately after creation. This activates OS-level write protection — subagent Write tool calls will get EACCES. Only hooks writing via `StateManager` can modify the file.
+**IMPORTANT:** The engine sets `chmod 444` automatically at creation (`cli.ts init-state`) and after every `StateManager` write — do **not** run `chmod` yourself; the guard-state-file hook blocks it. This activates OS-level write protection — subagent Write tool calls will get EACCES. Only hooks and whitelisted helpers writing via `StateManager` can modify the file.
 
 After Phase 4 (Decompose), the task graph is populated with tasks, waves, and GitHub issue info. This is done by passing decompose output through the `validate-task-graph` helper and writing the full state via `populate-task-graph`.
 
@@ -484,7 +480,7 @@ Hooks auto-activate when `active_task_graph.json` exists:
 |------|-------|---------|
 | `block-direct-edits.sh` | PreToolUse: Edit/Write/MultiEdit | Forces Task tool |
 | `enforce-phase-tools.sh` | PreToolUse: Edit/Write/MultiEdit | Guarded-skill-machine gate: denies enforced tools the bound agent's phase doesn't allow (fails closed) |
-| `guard-state-file.sh` | PreToolUse: Bash | Blocks state writes (whitelisted helpers only) — covers task graph + subagent evidence/binding files |
+| `guard-state-file.sh` | PreToolUse: Bash | Deny-by-default on guarded state paths: only read-only commands (`jq`, `cat`, `grep`, …) and whitelisted helpers pass — covers task graph + subagent evidence/binding files + machine definitions |
 | `validate-task-execution.sh` | PreToolUse: Task | Validates wave order |
 | `validate-phase-order.sh` | PreToolUse: Task | Enforces phase sequencing |
 | `validate-template-substitution.sh` | PreToolUse: Task | Blocks unsubstituted `{variable}` patterns |
@@ -495,12 +491,12 @@ Hooks auto-activate when `active_task_graph.json` exists:
 | `lint-file.sh` | PostToolUse: Edit/Write/MultiEdit | Runs the immediate-tier linter (regex rules only; programmatic rules run at the wave gate) |
 | `cleanup-stale-subagents.sh` | SessionStart | Sweeps stale subagent tracking/binding files |
 | `resume-after-clear.sh` | SessionStart: clear | Restores loom context after /clear |
-| `dispatch.sh` | SubagentStop | Routes to hooks below by agent type |
-| ↳ `advance-phase.sh` | via dispatch | Advances phase + captures spec_file/plan_file from transcript |
-| ↳ `update-task-status.sh` | via dispatch | Marks "implemented" + test evidence + new-test verification |
-| ↳ `store-reviewer-findings.sh` | via dispatch | Parses review findings |
-| ↳ `store-spec-check-findings.sh` | via dispatch | Parses spec-check findings |
-| ↳ `cleanup-subagent-flag.sh` | via dispatch | Cleans up subagent tracking + machine bindings (always runs) |
+| `dispatch.sh` | SubagentStop | Routes to the TS handlers below (`engine/src/handlers/subagent-stop/`) by agent type |
+| ↳ `advance-phase.ts` | via dispatch | Advances phase + captures spec_file/plan_file from transcript |
+| ↳ `update-task-status.ts` | via dispatch | Marks "implemented" + test evidence + new-test verification |
+| ↳ `store-reviewer-findings.ts` | via dispatch | Parses review findings |
+| ↳ `store-spec-check-findings.ts` | via dispatch | Parses spec-check findings |
+| ↳ `cleanup-subagent-flag.ts` | via dispatch | Cleans up subagent tracking + machine bindings (always runs) |
 
 **NEVER call helpers yourself.** All helpers (`mark-tests-passed`, `complete-wave-gate`, `StateManager`, `populate-task-graph`, etc. — invoked as `bun cli.ts helper <name>`) run automatically via hooks or `/wave-gate`. Only exception: `populate-task-graph` during Phase 4d.
 

@@ -340,20 +340,47 @@ export function isTestCommand(command: string): boolean {
 // --- Bash-authored file writes (redirects, tee) ---
 
 /**
+ * Bash's `>&word` (and `n>&word`) is an fd DUPLICATION only when the ENTIRE
+ * word is digits (`2>&1`, `>&2`) or exactly `-` (the close form, `>&-`). A
+ * word that merely STARTS with a digit but continues into a path
+ * (`>&2/../r.json`) is a filename redirect — bash writes the FILE. The
+ * round-15 fix checked a single character, misclassifying those writes as
+ * dups in BOTH scanners (the guard's hasOutputRedirect and this module's
+ * readRedirectTarget); both now share this classifier so their verdicts
+ * cannot drift (the full shared-tokenizer refactor stays deferred). Quote
+ * and backslash characters do NOT terminate the word: `>&2"foo"` collapses
+ * to the filename `2foo` in bash, and a word containing them is never pure
+ * digits, so it classifies as a file write (fail-closed).
+ * `start` points just past the `&`; `end` is the index just past the word.
+ */
+export function classifyFdDupWord(
+  text: string,
+  start: number,
+): { readonly isFdDup: boolean; readonly end: number } {
+  let end = start;
+  while (end < text.length && !/[\s><&|;()]/.test(text[end])) end++;
+  const word = text.slice(start, end);
+  return { isFdDup: word === "-" || /^[0-9]+$/.test(word), end };
+}
+
+/**
  * Read one redirect target starting at `start` (just past the `>`s):
  * skip whitespace, then collect the quote-aware, UNQUOTED word. Fd dups
- * (`2>&1`) and process substitution (`>(…)`) yield no file target.
- * Returns the scan position to resume from.
+ * (`2>&1`, `>&-`) and process substitution (`>(…)`) yield no file target;
+ * a `>&word` whose word is NOT a whole fd (`>&2/../r.json`) redirects to
+ * the FILE `word` and IS collected. Returns the scan position to resume from.
  */
 function readRedirectTarget(segment: string, start: number, out: string[]): number {
   let i = start;
   while (i < segment.length && /\s/.test(segment[i])) i++;
   if (i >= segment.length) return i;
   if (segment[i] === "&") {
-    // fd dup (2>&1, >&2): no file is written
+    const dup = classifyFdDupWord(segment, i + 1);
+    // fd dup (2>&1, >&2, >&-): no file is written
+    if (dup.isFdDup) return dup.end;
+    // `>&word` with a non-fd word: bash redirects stdout+stderr TO THE FILE
+    // `word` — fall through and collect it like any other target.
     i++;
-    while (i < segment.length && /[0-9-]/.test(segment[i])) i++;
-    return i;
   }
   if (segment[i] === "(") return i; // process substitution: no static target
   let value = "";

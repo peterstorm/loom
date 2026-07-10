@@ -27,6 +27,7 @@ const RECORD = join(SCRIPTS, "record-evidence.sh");
 const GUARD = join(SCRIPTS, "guard-state-file.sh");
 const DISPATCH = join(SCRIPTS, "dispatch.sh");
 const MARK = join(SCRIPTS, "mark-subagent-active.sh");
+const CLEANUP = join(SCRIPTS, "cleanup-stale-subagents.sh");
 
 // chmod 000 does not bar root — these tests are meaningless under uid 0.
 const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
@@ -254,6 +255,41 @@ describe("mark-subagent-active.sh — fails OPEN loudly (machine NOT bound = age
     });
     expect(stderr).toContain("machine NOT bound");
     expect(stderr).toContain("UNGATED");
+    expect(status).toBe(0);
+  });
+});
+
+describe("cleanup-stale-subagents.sh — fails OPEN loudly (SessionStart must never block)", () => {
+  it("no graph + empty subagent dir → exit 0 fast path, quiet (nothing to sweep)", () => {
+    const { status, stderr } = runShim(CLEANUP, {
+      CLAUDE_PROJECT_DIR: graphlessProjectDir(),
+      LOOM_SUBAGENT_DIR: tempDir(),
+    });
+    expect(stderr).toBe("");
+    expect(status).toBe(0);
+  });
+
+  it("dir has entries + CLAUDE_PLUGIN_ROOT unset → exit 0 WITH a 'stale sweep skipped' note", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "shim-test.machine"), "a-1\tcode-implementer-agent\t1\n");
+    const { status, stderr } = runShim(CLEANUP, {
+      CLAUDE_PROJECT_DIR: graphlessProjectDir(),
+      LOOM_SUBAGENT_DIR: dir,
+    });
+    expect(stderr).toContain("stale sweep skipped");
+    expect(status).toBe(0); // fail-open: SessionStart is never blocked — but never silent
+  });
+
+  it("dir has entries + bun not found on PATH → exit 0 WITH a 'stale sweep skipped' note", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "shim-test.machine"), "a-1\tcode-implementer-agent\t1\n");
+    const { status, stderr } = runShim(CLEANUP, {
+      CLAUDE_PROJECT_DIR: graphlessProjectDir(),
+      LOOM_SUBAGENT_DIR: dir,
+      CLAUDE_PLUGIN_ROOT: "/tmp/fake-plugin-root",
+      PATH: bunlessPath(),
+    });
+    expect(stderr).toContain("stale sweep skipped");
     expect(status).toBe(0);
   });
 });

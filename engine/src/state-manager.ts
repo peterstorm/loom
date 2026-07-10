@@ -1,7 +1,9 @@
 /**
  * Atomic state file manager with chmod-based protection + locking
  *
- * State file stays chmod 444 at rest. Only hooks write via this manager.
+ * State file stays chmod 444 at rest. Hooks and whitelisted helpers
+ * (populate-task-graph, complete-wave-gate, set-phase, …) write via this
+ * manager.
  * Replaces: state-file-write.sh, resolve-task-graph.sh, loom-config.sh
  */
 

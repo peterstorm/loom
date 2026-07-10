@@ -93,6 +93,25 @@ describe("parseFilesModified", () => {
     const result = parseFilesModified(content);
     expect(result).toEqual(["/tmp/auto.ts"]);
   });
+
+  it("parses the exact re-encoding pi/extension.ts produces from per-result messages (round-16 Fix 8)", () => {
+    // The pi Stop mirror maps each PiMessage to `{ type: "message", message }`
+    // JSONL and passes format "pi" — this row pins that shape end to end so
+    // files_modified stops arriving empty at lint-wave-gate under pi.
+    const messages = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "editing" },
+          { type: "toolCall", name: "write", arguments: { path: "/tmp/impl.ts" } },
+          { type: "toolCall", name: "edit", arguments: { path: "/tmp/impl.test.ts" } },
+        ],
+      },
+      { role: "toolResult", content: [{ type: "text", text: "ok" }] },
+    ];
+    const piJsonl = messages.map((m) => JSON.stringify({ type: "message", message: m })).join("\n");
+    expect(parseFilesModified(piJsonl, "pi")).toEqual(["/tmp/impl.test.ts", "/tmp/impl.ts"]);
+  });
 });
 
 describe("parseBashTestOutput", () => {

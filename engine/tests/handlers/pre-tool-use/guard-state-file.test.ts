@@ -363,6 +363,52 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("cat active_task_graph.json 2>&1")).toBe("allow");
   });
 
+  it("`cd` is NOT allowlisted — cwd relocation launders relative writes (round-16 bypass)", () => {
+    // `cd <guarded-dir>` re-scopes path resolution: the follow-on writer
+    // names no guarded literal (relative names after the cwd moved), so its
+    // chain is skipped as out-of-scope. Removing cd from the read-only
+    // allowlist blocks the relocation itself.
+    expect(guardDecision("cd .claude/state && rm *.json")).toBe("block");
+    expect(guardDecision("cd .claude/state && cp /tmp/forged.json active_task*.json")).toBe("block");
+    expect(guardDecision("cd .claude/state; sed -i 's/trusted-fail/trusted-pass/' *.json")).toBe("block");
+    expect(guardDecision(`cd ${SUBAGENT_DIR} && rm -rf .`)).toBe("block");
+    expect(guardDecision("cd .claude/state && n=active_task_; printf FORGED > ${n}graph.json")).toBe("block");
+    expect(guardDecision(`cd ${SUBAGENT_DIR} && printf '{}' > sess.evidence.jsonl`)).toBe("block");
+    // Precision: cd into an UNGUARDED dir beside a guarded READ stays
+    // allowed — the cd chain is out of scope, the read chain is judged
+    // normally (reads never need to cd INTO a guarded dir).
+    expect(guardDecision("cd /repo && jq . .claude/state/active_task_graph.json")).toBe("allow");
+    expect(guardDecision("cd src && grep -r foo .")).toBe("allow");
+  });
+
+  it("quote-split literals collapse before pattern tests — quoting cannot launder a guarded name (round-16 bypass)", () => {
+    // Bash concatenates adjacent quoted word parts, so the raw text never
+    // contains the guarded literal contiguously; pattern tests run against
+    // a quote-collapsed view (matching only — fail-closed by construction).
+    expect(guardDecision("echo FORGED > .cl'aude'/state/active_'task_graph'.json")).toBe("block");
+    expect(guardDecision('rm .cl""aude/state/active_task_gr""aph.json')).toBe("block");
+    expect(guardDecision("sed -i 's/x/y/' .cl'aude'/state/active_'task_graph'.json")).toBe("block");
+    // Precision: a quoted argument MENTIONING a guarded name is judged (not
+    // skipped) and read heads still read.
+    expect(guardDecision("jq '.tasks' active_task_graph.json")).toBe("allow");
+    expect(guardDecision('grep "active_task_graph" README.md')).toBe("allow");
+  });
+
+  it("`>&<digit><path>` is a FILE redirect, not an fd dup — whole-word classification (round-16 bypass)", () => {
+    // Bash treats `>&word` as fd duplication only when the ENTIRE word is
+    // digits (or exactly `-`); a word starting with a digit that continues
+    // into a path is a filename redirect. The round-15 single-char check
+    // waved these forgeries through (live-verified).
+    expect(
+      guardDecision("mkdir 2 && echo FORGED >&2/../.claude/state/active_task_graph.json"),
+    ).toBe("block");
+    expect(guardDecision("echo active_task_graph.json >&2foo")).toBe("block");
+    // Precision: whole-word dups and the fd close form stay allowed.
+    expect(guardDecision("cat active_task_graph.json >&2")).toBe("allow");
+    expect(guardDecision("cat active_task_graph.json 2>&1")).toBe("allow");
+    expect(guardDecision("cat active_task_graph.json >&-")).toBe("allow");
+  });
+
   it("`|&` is ONE pipe op — the chain stays one trust unit (round-15 bypass)", () => {
     // Parsing `|&` as `|` + background `&` emitted a spurious empty segment
     // and started a NEW chain, so the downstream executor escaped the

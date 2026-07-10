@@ -143,6 +143,14 @@ Known residual limits, on purpose and documented:
   graph-removed mode, but the handler allows when the graph is absent), so
   Bash ledger writes are possible in that window; full integrity (HMAC or
   out-of-agent-reach storage) is a follow-up.
+- Multi-hop `cd` laundering: `cd .claude; cd state; rm *.json` never names
+  a guarded literal anywhere on the command line (`.claude` alone matches
+  no guarded pattern), so it is invisible to any raw-text gate by
+  construction — the guard judges command text, it does not track cwd.
+  Removing `cd` from the read-only allowlist (round 16) closed the
+  single-hop variant (`cd .claude/state && rm *.json` now blocks on the cd
+  segment); the multi-hop form remains a documented residual pending
+  cwd-aware judgment.
 - `FileRead` means the Read tool specifically — context gathered only via
   Grep/Glob/Bash does not advance `read-context`.
 
