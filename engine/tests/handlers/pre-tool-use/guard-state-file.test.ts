@@ -394,6 +394,46 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision('grep "active_task_graph" README.md')).toBe("allow");
   });
 
+  it("backslash escapes collapse before pattern tests — `\\x` cannot launder a guarded name (round-17 bypass)", () => {
+    // Bash removes an unquoted backslash before an ordinary char (`\a`→`a`),
+    // so `.cl\aude` executes against the guarded path. The matching view
+    // drops the backslash too (reveal-monotonic, fail-closed).
+    expect(guardDecision("echo x > .claude/st\\ate/active_task_graph.json")).toBe("block");
+    expect(guardDecision("rm .claude/st\\ate/active_task_gr\\aph.json")).toBe("block");
+    expect(guardDecision(`printf '{}' > /tmp/claude-sub\\agents/sess.evidence.jsonl`)).toBe("block");
+    expect(guardDecision("cp /tmp/f.json .claude/st\\ate/active_task_graph.json")).toBe("block");
+  });
+
+  it("ANSI-C `$'…'` and locale `$\"…\"` quoting decode before pattern tests (round-17 bypass)", () => {
+    // Bash decodes `$'\xHH'`/`$'\NNN'` at the shell level, so an escape-encoded
+    // guarded path executes against the real file. The matching view decodes
+    // it too. Hex encoding of `.claude/state/active_task_graph.json`:
+    const hexPath =
+      "$'\\x2e\\x63\\x6c\\x61\\x75\\x64\\x65\\x2f\\x73\\x74\\x61\\x74\\x65\\x2f" +
+      "\\x61\\x63\\x74\\x69\\x76\\x65\\x5f\\x74\\x61\\x73\\x6b\\x5f\\x67\\x72\\x61\\x70\\x68\\x2e\\x6a\\x73\\x6f\\x6e'";
+    expect(guardDecision(`echo FORGED > ${hexPath}`)).toBe("block");
+    // Octal encoding of `/tmp/claude-subagents` (evidence-ledger dir):
+    const octDir =
+      "$'\\57\\164\\155\\160\\57\\143\\154\\141\\165\\144\\145\\55\\163\\165\\142\\141\\147\\145\\156\\164\\163'";
+    expect(guardDecision(`printf '{}' > ${octDir}/sess.evidence.jsonl`)).toBe("block");
+    // Locale-quoted form `$"…"` is `"…"` with the same literal content.
+    expect(guardDecision('echo x > $".claude/state/active_task_graph.json"')).toBe("block");
+    // Precision: plain `$'…'` with no escape sequences still resolves to the
+    // literal and a read head still reads.
+    expect(guardDecision("jq '.tasks' $'active_task_graph.json'")).toBe("allow");
+  });
+
+  it("quote-collapse applies inside substitution bodies AND protected-dir redirects (round-17 pins)", () => {
+    // A2: a substitution body carrying a quote-split guarded token must still
+    // classify the enclosing segment as touching state.
+    expect(guardDecision("rm $(echo .cl'aude'/state/active_'task_graph'.json)")).toBe("block");
+    // A3: a whitelisted helper cannot forge the evidence ledger via a
+    // quote-split protected-dir redirect target.
+    expect(
+      guardDecision(`bun cli.ts helper set-phase execute > /tmp/cl'aude-subagents'/s.evidence.jsonl`),
+    ).toBe("block");
+  });
+
   it("`>&<digit><path>` is a FILE redirect, not an fd dup — whole-word classification (round-16 bypass)", () => {
     // Bash treats `>&word` as fd duplication only when the ENTIRE word is
     // digits (or exactly `-`); a word starting with a digit that continues

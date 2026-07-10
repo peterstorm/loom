@@ -184,6 +184,50 @@ describe("machine terminal requirements gate the persisted verdict (Fix 7)", () 
   }, 30000);
 });
 
+describe("wave-completion gate write (round-17 A1 pin)", () => {
+  const pass = { kind: "TestRun" as const, command: "npm test", exit: 0, report: reportSummary(3, 0) };
+
+  it("resolving the last task of a wave stamps impl_complete=true", async () => {
+    const s = sid("wave-done");
+    const dir = tempDir();
+    const statePath = writeState(dir, [implTask("T1")], ["T1"]);
+    pointSessionAt(s, statePath);
+
+    const snapshot: readonly EvidenceRecord[] = [
+      { epoch: parseEpoch("a-1:code-implementer-agent")!, event: pass },
+    ];
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const result = await runUpdateTaskStatus(stopInput(s), [], { kind: "snapshot", events: snapshot });
+    stderrSpy.mockRestore();
+    expect(result.kind).toBe("passthrough");
+
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.tasks[0].status).toBe("implemented");
+    expect(state.wave_gates["1"].impl_complete).toBe(true);
+  }, 30000);
+
+  it("a still-pending sibling leaves impl_complete=false", async () => {
+    const s = sid("wave-partial");
+    const dir = tempDir();
+    // T1 executing and resolved; T2 still pending in the same wave.
+    const statePath = writeState(dir, [implTask("T1"), implTask("T2")], ["T1"]);
+    pointSessionAt(s, statePath);
+
+    const snapshot: readonly EvidenceRecord[] = [
+      { epoch: parseEpoch("a-1:code-implementer-agent")!, event: pass },
+    ];
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const result = await runUpdateTaskStatus(stopInput(s), [], { kind: "snapshot", events: snapshot });
+    stderrSpy.mockRestore();
+    expect(result.kind).toBe("passthrough");
+
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.tasks.find((t: { id: string }) => t.id === "T1").status).toBe("implemented");
+    expect(state.tasks.find((t: { id: string }) => t.id === "T2").status).toBe("pending");
+    expect(state.wave_gates["1"].impl_complete).toBe(false);
+  }, 30000);
+});
+
 describe("ambiguous multi-task inference branch (gap 17)", () => {
   it("no extractable task ID + several executing tasks → warn, clear executing_tasks, touch no task", async () => {
     const s = sid("ambiguous");

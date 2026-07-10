@@ -38,6 +38,14 @@ export const FAIL_CLOSED_ROUTES: ReadonlySet<string> = new Set([
   "pre-tool-use/enforce-phase-tools",
   "pre-tool-use/guard-state-file",
   "pre-tool-use/block-direct-edits",
+  // Task-spawn gates: a crash outside the handler (corrupt task graph on
+  // mgr.load(), stdin error) would exit 1 — NON-blocking — and let a Task
+  // spawn skip wave-order, dependency, review-gate, phase-order, and
+  // template-substitution enforcement. These gate orchestration, so they
+  // block on crash like the state-file guards.
+  "pre-tool-use/validate-task-execution",
+  "pre-tool-use/validate-phase-order",
+  "pre-tool-use/validate-template-substitution",
 ]);
 
 /** Exit code for a crash outside the handler, derived from the route. */

@@ -106,17 +106,91 @@ function segmentInvokesHelper(segment: string): boolean {
   return WHITELISTED_HELPERS.includes(tokens[3] ?? "");
 }
 
+/** Index of the `'` closing a `$'…'` (ANSI-C) body opened before `start`,
+ *  backslash-escape aware (`\'` and `\\` do not close). -1 when unclosed. */
+function findAnsiCClose(text: string, start: number): number {
+  for (let i = start; i < text.length; i++) {
+    if (text[i] === "\\") {
+      i++;
+      continue;
+    }
+    if (text[i] === "'") return i;
+  }
+  return -1;
+}
+
+/**
+ * Decode a bash ANSI-C (`$'…'`) body to the characters bash produces at
+ * execution: `\xHH` / `\uHHHH` / `\UHHHHHHHH` hex, `\NNN` octal, and the
+ * named escapes (`\n`, `\t`, …). This exists so a guarded path spelled
+ * `$'\x2e\x63\x6c…'` decodes to `.cl…` in the matching view and cannot
+ * launder past the front gate. An unknown escape drops the backslash and
+ * keeps the character (reveal-monotonic — see collapseQuotes).
+ */
+function decodeAnsiC(body: string): string {
+  const NAMED: Readonly<Record<string, string>> = {
+    a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n",
+    r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?",
+  };
+  let out = "";
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] !== "\\") {
+      out += body[i];
+      continue;
+    }
+    const n = body[i + 1];
+    if (n === undefined) {
+      out += "\\";
+      break;
+    }
+    if (n === "x") {
+      const hex = body.slice(i + 2).match(/^[0-9a-fA-F]{1,2}/);
+      if (hex) {
+        out += String.fromCharCode(parseInt(hex[0], 16));
+        i += 1 + hex[0].length;
+        continue;
+      }
+    } else if (n === "u" || n === "U") {
+      const hex = body.slice(i + 2).match(n === "u" ? /^[0-9a-fA-F]{1,4}/ : /^[0-9a-fA-F]{1,8}/);
+      if (hex) {
+        out += String.fromCodePoint(parseInt(hex[0], 16));
+        i += 1 + hex[0].length;
+        continue;
+      }
+    } else if (n >= "0" && n <= "7") {
+      const oct = body.slice(i + 1).match(/^[0-7]{1,3}/)!;
+      out += String.fromCharCode(parseInt(oct[0], 8) & 0xff);
+      i += oct[0].length;
+      continue;
+    } else if (n in NAMED) {
+      out += NAMED[n];
+      i++;
+      continue;
+    }
+    // Unknown escape: bash keeps the char; drop the backslash (reveal-monotonic).
+    out += n;
+    i++;
+  }
+  return out;
+}
+
 /**
  * Quote-COLLAPSED view of a piece of command text, for pattern matching
- * only: unescaped `'`/`"` quote characters (actual shell quoting, tracked
- * with the same quote-scanner semantics as the rest of this file) are
- * stripped so adjacent quoted word parts concatenate the way bash
- * concatenates them — `.cl'aude'/state/active_'task_graph'.json` collapses
- * to the guarded literal. Backslash escapes are preserved as-is (a `\"` is
- * argument text, not quoting). The collapsed text is NEVER substituted back
- * into anything executed or placeholdered — it exists only so
- * stateFilePatterns()/protectedDirPatterns() cannot be laundered by quote
- * splitting, which errs fail-closed exclusively.
+ * only. Reproduces every bash word-normalization that can hide a guarded
+ * literal from a raw-text scan, ALL of which err strictly fail-closed here
+ * (each only ever brings guarded characters together, never removes a
+ * non-backslash character), so the collapsed view can reveal a guarded
+ * token but never conceal one:
+ *   - unescaped `'`/`"` quote chars are stripped, so adjacent quoted word
+ *     parts concatenate as bash concatenates them
+ *     (`.cl'aude'/state/active_'task_graph'.json` → the guarded literal);
+ *   - an unquoted or double-quoted backslash escape drops the backslash and
+ *     keeps the char (`.cl\aude` → `.claude`);
+ *   - `$'…'` ANSI-C bodies are decoded (`$'\x2e\x63…'` → `.c…`);
+ *   - `$"…"` locale-quoted bodies are treated as `"…"` (same literal content).
+ * The collapsed text is NEVER substituted back into anything executed or
+ * placeholdered — it exists only so stateFilePatterns()/protectedDirPatterns()
+ * cannot be laundered by quoting, escaping, or ANSI-C encoding.
  */
 function collapseQuotes(text: string): string {
   let out = "";
@@ -125,7 +199,8 @@ function collapseQuotes(text: string): string {
     const c = text[i];
     if (quote !== null) {
       if (quote !== "'" && c === "\\") {
-        out += c + (text[i + 1] ?? "");
+        // Double-quoted escape: drop the backslash, keep the char.
+        out += text[i + 1] ?? "";
         i++;
         continue;
       }
@@ -136,8 +211,22 @@ function collapseQuotes(text: string): string {
       out += c;
       continue;
     }
+    if (c === "$" && text[i + 1] === "'") {
+      const end = findAnsiCClose(text, i + 2);
+      const bodyEnd = end === -1 ? text.length : end;
+      out += decodeAnsiC(text.slice(i + 2, bodyEnd));
+      i = end === -1 ? text.length : end;
+      continue;
+    }
+    if (c === "$" && text[i + 1] === '"') {
+      // $"…" is "…" with locale translation — identical literal content.
+      quote = '"';
+      i++; // consume the `$`; the `"` becomes the active quote next iteration
+      continue;
+    }
     if (c === "\\") {
-      out += c + (text[i + 1] ?? "");
+      // Unquoted escape: bash removes the backslash (`\a` → `a`).
+      out += text[i + 1] ?? "";
       i++;
       continue;
     }

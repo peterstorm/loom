@@ -23,15 +23,15 @@ Every step below that says "Run:" is a command you MUST execute via Bash/Grep/Re
 SPEC=$(ls -t .claude/specs/*/spec.md | head -1) && echo "$SPEC"
 ```
 
-**Run:**
+**Run** (self-contained jq — the guard blocks `WAVE=$(jq … state)`
+capture-into-variable, and shell vars don't persist across Bash tool calls):
 ```bash
-WAVE=$(jq -r '.current_wave' .claude/state/active_task_graph.json) && echo "Wave: $WAVE"
+jq -r '.current_wave' .claude/state/active_task_graph.json
 ```
 
-**Run:**
+**Run** (wave resolved inside the same jq program):
 ```bash
-WAVE=$(jq -r '.current_wave' .claude/state/active_task_graph.json)
-jq -r ".tasks[] | select(.wave == $WAVE) | {id, description, spec_anchors}" .claude/state/active_task_graph.json
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | {id, description, spec_anchors}' .claude/state/active_task_graph.json
 ```
 
 Save: SPEC path, WAVE number, task list with spec_anchors.
@@ -57,10 +57,10 @@ You MUST have one row for every FR in spec_anchors. Count them. You will emit a 
 git diff --name-only origin/main...HEAD
 ```
 
-Also check per-task files_modified if available:
+Also check per-task files_modified if available (wave resolved inside jq — the
+guard blocks `WAVE=$(jq … state)`):
 ```bash
-WAVE=$(jq -r '.current_wave' .claude/state/active_task_graph.json)
-jq -r ".tasks[] | select(.wave == $WAVE) | {id, files_modified}" .claude/state/active_task_graph.json
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | {id, files_modified}' .claude/state/active_task_graph.json
 ```
 
 ### Step 4: Coverage check — per-FR verdicts

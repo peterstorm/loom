@@ -55,7 +55,7 @@ claude plugin add /path/to/loom
 /loom --skip-clarify "Accept any remaining [NEEDS CLARIFICATION] markers"
 /loom --skip-plan-alignment "Trivial change, no alignment check needed"
 
-# Status / lifecycle
+# Status / lifecycle (planned — not yet implemented; see commands/loom.md)
 /loom --status                # Print current phase + wave + task statuses
 /loom --complete              # Tear down state file after success
 /loom --abort                 # Tear down state file on abandonment
@@ -441,7 +441,7 @@ Loom ships a two-tier linter that runs automatically as part of the hook pipelin
 ### Rule kinds
 
 - **Regex rules** — JSON files under `/lint-rules/` (and project overrides under `.claude/linter/rules/` or `.pi/linter/rules/`). Schema: `kind`, `name`, `description`, `extensions`, `pattern`, `flags`, `fixHint`, `enabled`.
-- **Programmatic rules** — TypeScript under `engine/src/linter/programmatic/`. Shipped: `max-function-lines` (>60), `no-cross-boundary-imports`, `no-io-in-pure-modules`.
+- **Programmatic rules** — TypeScript under `engine/src/linter/programmatic/`. Shipped: `max-function-lines` (default: 50), `no-cross-boundary-imports`, `no-io-in-pure-modules`.
 
 ### Bundled regex rules
 
@@ -662,7 +662,7 @@ loom/
 ├── skills/                     # Reusable knowledge modules preloaded into agents
 ├── engine/                     # TypeScript hook engine
 │   ├── src/                    # Source (cli, config, handlers, parsers, linter, core)
-│   └── tests/                  # Vitest + fast-check test suite (46 files)
+│   └── tests/                  # Vitest + fast-check test suite
 ├── hooks/
 │   ├── hooks.json              # Hook configuration
 │   └── scripts/                # Shell shims → bun CLI
@@ -741,7 +741,7 @@ jq '.spec_check' .claude/state/active_task_graph.json
 
 ```bash
 cd engine
-bun test              # Run all tests (46 test files)
+bun test              # Run all tests
 bun test --watch      # Watch mode
 bunx tsc --noEmit     # Type checking
 ```
@@ -750,8 +750,8 @@ bunx tsc --noEmit     # Type checking
 
 The suite includes:
 
-- **Unit tests** — every handler, parser, and utility (22 handler tests, 6 parser-related, 5 util tests)
-- **Linter tests** — executor, loader, formatter, safety analyzer, each programmatic rule, integration (11 tests)
+- **Unit tests** — every handler, parser, and utility
+- **Linter tests** — executor, loader, formatter, safety analyzer, each programmatic rule, integration
 - **Core tests** — pure functions, state manager, phase initialization
 - **Property-based tests** — git operations, task graph validation, linter safety (fast-check)
 - **E2E** — full hook pipeline sequencing

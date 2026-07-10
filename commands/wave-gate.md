@@ -50,10 +50,14 @@ This prints per-task evidence status. Exit 0 = all tasks have evidence, exit 1 =
 
 Spawn **spec-check AND code reviewers** in a single message with multiple Task calls.
 
-**Get wave info:**
+**Get wave info** (self-contained jq — the guard blocks `WAVE=$(jq … state)`
+capture-into-variable, and shell variables do not persist across Bash tool
+calls anyway, so read the values directly):
 ```bash
-WAVE=$(jq -r '.current_wave' .claude/state/active_task_graph.json)
-TASKS=$(jq -r ".tasks[] | select(.wave == $WAVE) | .id" .claude/state/active_task_graph.json | tr '\n' ',')
+# Current wave number:
+jq -r '.current_wave' .claude/state/active_task_graph.json
+# Task IDs in the current wave (wave resolved inside the same jq program):
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | .id' .claude/state/active_task_graph.json | tr '\n' ','
 ```
 
 **Get wave changes:**
@@ -157,10 +161,10 @@ EOF
 
 Critical findings block the gate (Step 5). Advisory findings do **not** block — but they must not be silently dropped. Before advancing, triage every advisory finding across the wave's tasks.
 
-**Read the advisories:**
+**Read the advisories** (self-contained jq — the wave is resolved inside the
+program; `WAVE=$(jq … state)` is blocked by the guard):
 ```bash
-WAVE=$(jq -r '.current_wave' .claude/state/active_task_graph.json)
-jq -r --argjson w "$WAVE" '.tasks[] | select(.wave == $w) | select((.advisory_findings // []) | length > 0) | {id, advisory_findings}' .claude/state/active_task_graph.json
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | select((.advisory_findings // []) | length > 0) | {id, advisory_findings}' .claude/state/active_task_graph.json
 ```
 
 **Classify each advisory:**
@@ -232,9 +236,8 @@ jq '.spec_check' .claude/state/active_task_graph.json
 # Check per-task review status
 jq '.tasks[] | {id, review_status, test_result}' .claude/state/active_task_graph.json
 
-# Check wave tasks
-WAVE=$(jq -r '.current_wave' .claude/state/active_task_graph.json)
-jq -r ".tasks[] | select(.wave == $WAVE) | .id" .claude/state/active_task_graph.json
+# Check wave tasks (wave resolved inside jq — the guard blocks WAVE=$(jq … state))
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | .id' .claude/state/active_task_graph.json
 ```
 
 ---

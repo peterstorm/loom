@@ -360,9 +360,9 @@ For each wave:
 
 **The `validate-task-execution` hook enforces this:** it blocks next-wave impl agents if `wave_gates[N-1].reviews_complete == false`. Even if you try to skip, the hook will BLOCK.
 
-**Re-spawn logic:** After spawning, check for pending wave tasks whose agent did not complete (a crashed agent leaves the task `pending` with `executing_tasks` cleared):
+**Re-spawn logic:** After spawning, check for pending wave tasks whose agent did not complete (a crashed agent leaves the task `pending` with `executing_tasks` cleared). Resolve the current wave inside the jq program — the guard blocks `WAVE=$(jq … state)` capture-into-variable, and shell vars don't persist across Bash tool calls:
 ```bash
-jq -r ".tasks[] | select(.wave == $WAVE and .status == \"pending\") | .id" .claude/state/active_task_graph.json
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w and .status == "pending") | .id' .claude/state/active_task_graph.json
 ```
 Re-spawn each pending wave task whose agent did not reach `implemented`.
 
