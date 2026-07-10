@@ -1,6 +1,7 @@
 /**
  * Core: Validate wave order, dependencies, and review gates before task execution.
- * Pure function — no stdin parsing.
+ * Harness-agnostic — no stdin parsing. Not pure: reads the filesystem
+ * (existsSync; loads the task graph).
  */
 
 import { existsSync } from "node:fs";

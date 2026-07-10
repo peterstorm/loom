@@ -138,8 +138,11 @@ Known residual limits, on purpose and documented:
   re-sent PostToolUse cannot double-count guard evidence.
 - A consistent forgery of ledger *facts* via Bash is blocked by the
   guard-state-file hook (the ledger and binding paths are guarded state
-  files); full integrity (HMAC or out-of-agent-reach storage) is a
-  follow-up.
+  files) — with a caveat: the engine guard arms only while the task graph
+  exists (the guard-state-file.sh shim runs in the binding-persists /
+  graph-removed mode, but the handler allows when the graph is absent), so
+  Bash ledger writes are possible in that window; full integrity (HMAC or
+  out-of-agent-reach storage) is a follow-up.
 - `FileRead` means the Read tool specifically — context gathered only via
   Grep/Glob/Bash does not advance `read-context`.
 

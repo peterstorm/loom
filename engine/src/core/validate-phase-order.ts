@@ -1,6 +1,7 @@
 /**
  * Core: Enforce phase ordering during loom orchestration.
- * Pure function — no stdin parsing.
+ * Harness-agnostic — no stdin parsing. Not pure: reads the filesystem
+ * (existsSync/readFileSync).
  *
  * Re-exports detectPhase and checkArtifacts from the original handler
  * for backwards compatibility.

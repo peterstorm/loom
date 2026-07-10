@@ -102,6 +102,14 @@ export function splitCommandSegmentsWithOps(command: string): CommandSegment[] {
       if (command[i + 1] === "|") {
         push("||");
         i++;
+      } else if (command[i + 1] === "&") {
+        // `|&` is bash shorthand for `2>&1 |` — ONE pipe operator. Parsing
+        // the `&` separately would emit a spurious empty backgrounded
+        // segment and start a new chain, fragmenting the pipe-chain trust
+        // unit downstream (round-15 guard bypass) and mis-attributing
+        // segments here.
+        push("|");
+        i++;
       } else {
         push("|");
       }

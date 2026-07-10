@@ -11,4 +11,12 @@ if [ ! -f "$GRAPH" ] && [ -z "$(ls -A "${SUBAGENT_DIR}" 2>/dev/null)" ]; then
   exit 0
 fi
 
+# Failure policy: fail OPEN loudly (SessionStart must never block a session)
+# — but a silent skip leaves stale bindings/ledgers unswept, so say so.
+if [ -z "${CLAUDE_PLUGIN_ROOT:-}" ] || ! command -v bun &>/dev/null; then
+  cat > /dev/null 2>/dev/null || true
+  echo "cleanup-stale-subagents: runtime unavailable — stale sweep skipped" >&2
+  exit 0
+fi
+
 exec bun "${CLAUDE_PLUGIN_ROOT}/engine/src/cli.ts" session-start cleanup-stale-subagents

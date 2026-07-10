@@ -19,8 +19,9 @@
  *     definitions) write;
  *   - a read-only command: head token ∈ READ_ONLY_STATE_COMMANDS (commands
  *     that cannot write a file under any flag) with no output redirect
- *     (quote-aware: any unquoted `>` except an fd-dup `>&`, so `>`, `>>`,
- *     `&>`, and `3>` all count; `2>&1` does not).
+ *     (quote-aware: any unquoted `>` except an fd-dup — `>&` followed by a
+ *     digit or `-` — so `>`, `>>`, `&>`, `3>`, and `>&file` all count;
+ *     `2>&1` / `>&2` do not).
  *
  * Everything else blocks — including writers nobody enumerated (`patch`,
  * `rsync`, `shred`, `git checkout --`), wrappers (`xargs`, `env`, `timeout`),
@@ -41,9 +42,9 @@ import type { HookResult } from "../types";
 import {
   TASK_GRAPH_PATH,
   WHITELISTED_HELPERS,
-  STATE_FILE_PATTERNS,
+  stateFilePatterns,
   READ_ONLY_STATE_COMMANDS,
-  PROTECTED_DIR_PATTERNS,
+  protectedDirPatterns,
   SUBAGENT_DIR,
 } from "../config";
 import {
@@ -92,7 +93,7 @@ function segmentInvokesHelper(segment: string): boolean {
   const cli = tokens[1] ?? "";
   if (cli !== "cli.ts" && !cli.endsWith("/cli.ts")) return false;
   if (tokens[2] !== "helper") return false;
-  return (WHITELISTED_HELPERS as readonly string[]).includes(tokens[3] ?? "");
+  return WHITELISTED_HELPERS.includes(tokens[3] ?? "");
 }
 
 /** Quote-aware: does ANY segment of the command line invoke a whitelisted helper? */
@@ -118,10 +119,13 @@ function hasReadOnlyHead(segment: string): boolean {
 
 /**
  * Quote-aware output-redirect detection: every unquoted `>` counts as a
- * write channel UNLESS it is immediately followed by `&` (an fd dup like
- * `2>&1` / `>&2`). This catches `>`, `>>`, `&>`, and fd-numbered forms
- * (`3>file`) that whitespace-anchored patterns miss, while leaving a `>`
- * inside a quoted argument (`jq 'select(.x > 1)' <state>`) alone.
+ * write channel UNLESS it is an fd dup — `>&` immediately followed by a
+ * digit or `-` (`2>&1`, `>&2`, `>&-`). A `>&` followed by anything else is
+ * bash's `>&word` form, which redirects stdout+stderr TO THE FILE `word`
+ * (the round-15 bypass), so it counts as a write. This catches `>`, `>>`,
+ * `&>`, fd-numbered forms (`3>file`), and `>&file` that whitespace-anchored
+ * patterns miss, while leaving a `>` inside a quoted argument
+ * (`jq 'select(.x > 1)' <state>`) alone.
  */
 function hasOutputRedirect(segment: string): boolean {
   let quote: '"' | "'" | "`" | null = null;
@@ -143,7 +147,11 @@ function hasOutputRedirect(segment: string): boolean {
       quote = c;
       continue;
     }
-    if (c === ">" && segment[i + 1] !== "&") return true;
+    if (c === ">") {
+      if (segment[i + 1] !== "&") return true;
+      const after = segment[i + 2];
+      if (after === undefined || !/[0-9-]/.test(after)) return true; // >&file
+    }
   }
   return false;
 }
@@ -160,8 +168,8 @@ interface FlattenedCommand {
  *  state (`sed -i … $(printf 'active_task_graph').json` must not launder the
  *  token away). Alphanumeric/slash only — cannot form a redirect/separator. */
 function placeholderFor(body: string): string {
-  if (PROTECTED_DIR_PATTERNS.test(body)) return `${SUBAGENT_DIR}/__subst__`;
-  if (STATE_FILE_PATTERNS.test(body)) return "active_task_graph__subst__";
+  if (protectedDirPatterns().test(body)) return `${SUBAGENT_DIR}/__subst__`;
+  if (stateFilePatterns().test(body)) return "active_task_graph__subst__";
   return "__subst__";
 }
 
@@ -294,8 +302,10 @@ function decide(command: string, depth: number): HookResult {
 
   // Lines that never reference a guarded path are not this guard's business.
   // (Checked on the RAW line: a token hidden inside a substitution body is
-  // still present in the raw text, so nothing escapes this gate.)
-  if (!STATE_FILE_PATTERNS.test(command)) return { kind: "allow" };
+  // still present in the raw text, so nothing escapes this gate. Patterns
+  // resolve machinesDir() at decision time — a re-pointed LOOM_MACHINES_DIR
+  // is guarded without a module reload.)
+  if (!stateFilePatterns().test(command)) return { kind: "allow" };
 
   if (depth > MAX_SUBSTITUTION_DEPTH) return BLOCK;
 
@@ -308,14 +318,14 @@ function decide(command: string, depth: number): HookResult {
   for (const chain of pipeChains(flat.flattened)) {
     // A chain none of whose segments touch a guarded path is out of scope —
     // `npm install && jq . <state>` must not block on the npm segment.
-    if (!chain.some((segment) => STATE_FILE_PATTERNS.test(segment))) continue;
+    if (!chain.some((segment) => stateFilePatterns().test(segment))) continue;
 
     for (const segment of chain) {
       if (segmentInvokesHelper(segment)) {
         // The helper vouches for its own segment (including a redirect of its
         // output into a state file) — but NEVER for a protected-dir write:
         // ledger and machine-definition forgery stay blocked even here.
-        if (PROTECTED_DIR_PATTERNS.test(segment) && hasOutputRedirect(segment)) return BLOCK;
+        if (protectedDirPatterns().test(segment) && hasOutputRedirect(segment)) return BLOCK;
         continue;
       }
       if (!hasReadOnlyHead(segment)) return BLOCK;

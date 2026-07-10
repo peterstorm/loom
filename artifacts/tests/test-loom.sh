@@ -264,10 +264,12 @@ STORED_SHA=$(jq -r '.tasks[] | select(.id=="T1") | .start_sha // "missing"' "$GI
 rm -rf "$GIT_TEST_DIR"
 
 # ============================================
-# Test 6: guard-state-file.sh write patterns
+# Test 6: guard-state-file.sh deny-by-default allowlist
+# (writes block unless the segment is an allowlisted read-only
+#  command or a whitelisted helper — no write-pattern denylist)
 # ============================================
 echo ""
-echo "--- Test: guard-state-file.sh write patterns ---"
+echo "--- Test: guard-state-file.sh deny-by-default allowlist ---"
 
 cd "$TEST_DIR"
 reset_state

@@ -451,6 +451,23 @@ describe("unquoted & — background compositions (round-10 Fix 3)", () => {
     expect(c.opAfter).toBe("&");
     expect(attributeExit(0, c)).toBeNull();
   });
+
+  it("`|&` is ONE pipe op (bash `2>&1 |`), never a pipe + spurious background segment (round-15)", () => {
+    // A runner downstream of |& classifies with opBefore "|" — previously the
+    // mis-parsed `&` emitted an empty backgrounded segment and the runner's
+    // opBefore read "&".
+    expect(classifyTestCommand("make build |& npm test")).toBe("npm test");
+    const c = classifyTestCommandDetailed("make build |& npm test")!;
+    expect(c.opBefore).toBe("|");
+    expect(c.isLast).toBe(true);
+    // Last segment through a pipe owns exit 0, exactly like a plain `|`.
+    expect(attributeExit(0, c)).toBe(0);
+    // A test BEFORE |& is not the last command and never owns the exit —
+    // and its opAfter is the pipe, not a phantom background `&`.
+    const before = classifyTestCommandDetailed("npm test |& tee log.txt")!;
+    expect(before.opAfter).toBe("|");
+    expect(mintTestRun("npm test |& tee log.txt", 0)!.exit).toBeNull();
+  });
 });
 
 describe("extractShellWriteTargets — backslash-escape property (round-10 gap 19)", () => {

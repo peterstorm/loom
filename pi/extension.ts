@@ -11,7 +11,7 @@ import { existsSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync } from
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
-// Engine core — pure functions, no Claude Code dependency
+// Engine core — harness-agnostic, no Claude Code dependency (these do fs I/O)
 import { shouldBlockDirectEdit } from "../engine/src/core/block-direct-edits";
 import { guardStateFile } from "../engine/src/core/guard-state-file";
 import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
@@ -24,8 +24,8 @@ import { parseFilesModified } from "../engine/src/parsers/parse-files-modified";
 import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-output";
 import { parsePhaseArtifacts } from "../engine/src/parsers/parse-phase-artifacts";
 
-// Engine SubagentStop logic (pure functions already exported)
-import { extractTestEvidence, analyzeNewTests } from "../engine/src/handlers/subagent-stop/update-task-status";
+// Engine SubagentStop logic (harness-agnostic functions already exported)
+import { extractTestEvidence, analyzeNewTests, applyUntrustedStopResolution } from "../engine/src/handlers/subagent-stop/update-task-status";
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
   isReviewAgent, parseMachineSummary, parseLegacyFindings,
@@ -449,48 +449,28 @@ export default function (pi: ExtensionAPI) {
 
         // Atomic state write. The completed/trusted-verdict guards above ran
         // on a PRE-LOCK snapshot that a concurrent writer can outdate before
-        // this write lands (TOCTOU) — so the target is re-found and re-checked
-        // INSIDE the locked update, mirroring the engine's
-        // skippedExistingVerdict pattern (update-task-status Section 3). The
-        // incoming resolution is ALWAYS untrusted here, so an existing
+        // this write lands (TOCTOU) — so the decision runs INSIDE the locked
+        // update via the shared pure applyUntrustedStopResolution (engine's
+        // update-task-status module), which re-finds and re-checks the target.
+        // The incoming resolution is ALWAYS untrusted here, so an existing
         // trusted verdict (or a completed task) always stands.
+        const resolvedTaskId = taskId;
         let skippedExistingVerdict = false;
         await mgr.update((s) => {
-          const target = s.tasks.find((t) => t.id === taskId);
-          const verdict = target?.test_result?.verdict;
-          const existingTrusted = verdict === "trusted-pass" || verdict === "trusted-fail";
-          if (!target || target.status === "completed" || existingTrusted) {
-            skippedExistingVerdict = true;
-            // The verdict stands, but the agent still STOPPED: leaving the
-            // task on executing_tasks would ghost-block duplicate-spawn
-            // checks for the rest of the session.
-            return {
-              ...s,
-              executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
-            };
-          }
-          return {
-            ...s,
-            tasks: s.tasks.map((t) =>
-              t.id === taskId
-                ? {
-                    ...t,
-                    status: "implemented" as const,
-                    // pi has no evidence ledger — transcript regex is the only
-                    // source here, so the verdict is always untrusted+labeled.
-                    test_result: {
-                      verdict: "untrusted" as const,
-                      passed: testEvidence.passed,
-                      label: "transcript-regex (fallback)",
-                    },
-                    test_evidence: testEvidence.evidence,
-                    new_tests_written: newTestEvidence.written,
-                    new_test_evidence: newTestEvidence.evidence,
-                  }
-                : t
-            ),
-            executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
-          };
+          const applied = applyUntrustedStopResolution(s, resolvedTaskId, {
+            // pi has no evidence ledger — transcript regex is the only
+            // source here, so the verdict is always untrusted+labeled.
+            testResult: {
+              verdict: "untrusted" as const,
+              passed: testEvidence.passed,
+              label: "transcript-regex (fallback)",
+            },
+            testEvidence: testEvidence.evidence,
+            newTestsWritten: newTestEvidence.written,
+            newTestEvidence: newTestEvidence.evidence,
+          });
+          skippedExistingVerdict = applied.skipped;
+          return applied.state;
         });
 
         if (skippedExistingVerdict) {

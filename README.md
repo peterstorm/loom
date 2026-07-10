@@ -704,7 +704,7 @@ See `docs/pi-usage.md` and `docs/migration-claude-code-to-pi.md` for details.
 | `test_result` missing or not a pass | Agent didn't run tests via Bash | Re-spawn — agents MUST execute tests |
 | `new_tests_written` false | Agent reused existing tests | Re-spawn — agents must write new tests |
 | Wave not advancing | Gate blocked by critical findings | Fix issues, re-run `/wave-gate` |
-| State write blocked | `guard-state-file` active | All writes go through hooks; reads are fine |
+| State write blocked | `guard-state-file` active | All writes go through hooks; reads via read-only commands (jq, cat, grep, …) are fine |
 | Phase agent blocked | Prerequisite phase incomplete | Check `current_phase`; complete prerequisites |
 | Template variables in prompt | `{variable}` not substituted | Hook blocks this — substitute before spawning |
 | Lint failure on Edit | Linter caught a rule violation | Fix the violation; the hook is fail-closed |

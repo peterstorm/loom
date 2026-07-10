@@ -10,7 +10,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import type { HookHandler, HookResult, SubagentStopInput, TaskTestResult } from "../../types";
+import type { HookHandler, HookResult, SubagentStopInput, TaskGraph, TaskTestResult } from "../../types";
 import { legacyTestsPassedNote, newWaveGate } from "../../types";
 import { IMPL_AGENTS, machinesDir } from "../../config";
 import { StateManager } from "../../state-manager";
@@ -259,6 +259,66 @@ export function capVerdictForMachineCompletion(
   return {
     result: { verdict: "untrusted", passed: true, label },
     evidence: `${label} — ${resolved.evidence}`,
+  };
+}
+
+// --- Pure: untrusted Stop-resolution TOCTOU re-check (shared with pi) ---
+
+/** What an untrusted Stop-handler resolution wants to persist on the task. */
+export interface UntrustedStopResolution {
+  readonly testResult: Extract<TaskTestResult, { verdict: "untrusted" }>;
+  readonly testEvidence: string;
+  readonly newTestsWritten: boolean;
+  readonly newTestEvidence: string;
+}
+
+export interface AppliedStopResolution {
+  readonly state: TaskGraph;
+  /** true → an existing trusted verdict / completed task stood; nothing was overwritten. */
+  readonly skipped: boolean;
+}
+
+/**
+ * The verdict-resolution decision for an UNTRUSTED Stop-handler resolution,
+ * meant to run INSIDE the locked state update (pi/extension.ts's Stop
+ * handler): a pre-lock snapshot can be outdated by a concurrent writer
+ * before the write lands (TOCTOU), so the target is re-found and re-checked
+ * against the CURRENT state here. An untrusted resolution never overwrites
+ * an existing trusted-pass/trusted-fail verdict and never reopens a
+ * completed task — but the agent still STOPPED either way, so the task is
+ * always removed from executing_tasks (leaving it would ghost-block
+ * duplicate-spawn checks for the rest of the session).
+ */
+export function applyUntrustedStopResolution(
+  s: TaskGraph,
+  taskId: string,
+  resolution: UntrustedStopResolution,
+): AppliedStopResolution {
+  const clearedExecuting = (s.executing_tasks ?? []).filter((id) => id !== taskId);
+  const target = s.tasks.find((t) => t.id === taskId);
+  const verdict = target?.test_result?.verdict;
+  const existingTrusted = verdict === "trusted-pass" || verdict === "trusted-fail";
+  if (!target || target.status === "completed" || existingTrusted) {
+    return { state: { ...s, executing_tasks: clearedExecuting }, skipped: true };
+  }
+  return {
+    skipped: false,
+    state: {
+      ...s,
+      tasks: s.tasks.map((t) =>
+        t.id === taskId
+          ? {
+              ...t,
+              status: "implemented" as const,
+              test_result: resolution.testResult,
+              test_evidence: resolution.testEvidence,
+              new_tests_written: resolution.newTestsWritten,
+              new_test_evidence: resolution.newTestEvidence,
+            }
+          : t,
+      ),
+      executing_tasks: clearedExecuting,
+    },
   };
 }
 

@@ -69,7 +69,7 @@ export const EXECUTE_AGENTS = new Set([...IMPL_AGENTS, ...REVIEW_AGENTS]);
 export { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "./core/tool-vocabulary";
 
 /** Whitelisted helper scripts in guard-state-file */
-export const WHITELISTED_HELPERS = [
+export const WHITELISTED_HELPERS: readonly string[] = [
   "complete-wave-gate",
   "mark-tests-passed",
   "store-review-findings",
@@ -106,12 +106,16 @@ export const machinesDir = (): string => process.env.LOOM_MACHINES_DIR ?? DEFAUL
 /** Machines directory — resolved once at import (consumers that never re-point) */
 export const MACHINES_DIR = machinesDir();
 
-/** State file patterns to guard.
+/** State file patterns to guard — built lazily so the machine-definitions
+ * dir resolves machinesDir() at decision time (a re-pointed
+ * LOOM_MACHINES_DIR is guarded without a module reload, mirroring
+ * mark-subagent-active / update-task-status).
  * Includes the guarded-machine subagent dir (derived from SUBAGENT_DIR, not
  * hardcoded): an agent writing the evidence ledger or binding files via Bash
  * would forge trusted test evidence, appending to `.active` would fake
  * attribution, and `rm` of the directory itself would silently disarm the
- * gate — so ANY reference to the dir combined with a write pattern blocks.
+ * gate — so any reference to the dir in a segment that is not an
+ * allowlisted read-only command or whitelisted helper blocks.
  * The machine-definitions dir is guarded for the same reason: `rm` of a
  * machine file via Bash would make the gate see "no machine" for a BOUND
  * agent (which now fails closed — but deleting definitions must be blocked
@@ -120,17 +124,18 @@ export const MACHINES_DIR = machinesDir();
  * dir-guard reason: a glob (`active_task*.json`, `.claude/state/*.json`) or
  * brace (`active_task_{graph,x}.json`) write names the directory but never
  * the file literal, so only a dir match can catch the forgery. */
-export const STATE_FILE_PATTERNS = new RegExp(
-  `active_task_graph|review-invocations|${escapeRegex(dirname(taskGraphRelative()))}|${escapeRegex(SUBAGENT_DIR)}|${escapeRegex(MACHINES_DIR)}`
+export const stateFilePatterns = (): RegExp => new RegExp(
+  `active_task_graph|review-invocations|${escapeRegex(dirname(taskGraphRelative()))}|${escapeRegex(SUBAGENT_DIR)}|${escapeRegex(machinesDir())}`
 );
 
 /** Dirs whose writes are NEVER whitelisted, even for helper invocations:
  * a write into the subagent dir forges trusted evidence (`.evidence.jsonl`),
  * fakes attribution (`.active`), or disarms the gate (`.machine`), and a
  * write into the machine-definitions dir deletes/rewrites the gate's rules.
- * guard-state-file checks these BEFORE the helper allow. */
-export const PROTECTED_DIR_PATTERNS = new RegExp(
-  `${escapeRegex(SUBAGENT_DIR)}|${escapeRegex(MACHINES_DIR)}`
+ * guard-state-file checks these BEFORE the helper allow. Built lazily for
+ * the same machinesDir() re-point reason as stateFilePatterns. */
+export const protectedDirPatterns = (): RegExp => new RegExp(
+  `${escapeRegex(SUBAGENT_DIR)}|${escapeRegex(machinesDir())}`
 );
 
 /** Commands allowed to touch guarded state paths: deny-by-default allowlist.
@@ -148,17 +153,21 @@ export const PROTECTED_DIR_PATTERNS = new RegExp(
  * `xxd` (-r <outfile>), `base64` (macOS -o), `sed`/`awk` (-i / in-script
  * `w`/`print >`), `find` (-delete/-exec), `git` (checkout/restore rewrite the
  * work tree — a `git checkout -- <state>` is a verdict-restore forgery),
- * `touch` (mtime forgery defeats report freshness), and wrapper/executor
- * commands that run OTHER commands (`env`, `xargs`, `sudo`, `timeout`,
- * `nohup`, `nice`, `command`, shells, interpreters) — a wrapper inherits the
- * write capability of whatever it wraps. Heads match exactly (no basename
- * resolution): `./cat` or `/tmp/evil/jq` must not inherit the trust of a
- * PATH-resolved name. */
+ * `touch` (mtime forgery defeats report freshness), `rg` (--pre <cmd> /
+ * --hostname-bin <cmd> execute an arbitrary program per input file — a
+ * pre-staged script receives the guarded path and can rewrite or delete it),
+ * `more` (interactive shell escape via `!cmd`/`v`; non-interactive it acts
+ * like cat, but membership requires no write capability under ANY use), and
+ * wrapper/executor commands that run OTHER commands (`env`, `xargs`, `sudo`,
+ * `timeout`, `nohup`, `nice`, `command`, shells, interpreters) — a wrapper
+ * inherits the write capability of whatever it wraps. Heads match exactly
+ * (no basename resolution): `./cat` or `/tmp/evil/jq` must not inherit the
+ * trust of a PATH-resolved name. */
 export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = new Set([
-  "jq", "cat", "grep", "egrep", "fgrep", "rg",
+  "jq", "cat", "grep", "egrep", "fgrep",
   "head", "tail", "wc", "ls", "stat", "file",
   "diff", "cmp", "md5sum", "sha1sum", "sha256sum",
-  "cut", "tr", "nl", "od", "hexdump", "strings", "more",
+  "cut", "tr", "nl", "od", "hexdump", "strings",
   "echo", "printf", "test", "[", "[[", "true", "false",
   "cd", "pwd", "dirname", "basename", "readlink", "realpath", "du",
 ]);
@@ -186,8 +195,8 @@ export const HARNESS = detectHarness();
 
 /** Relative path within a repo root — configurable via env (read at call time).
  * Calls detectHarness() rather than the HARNESS const (identical result) so
- * it is callable before HARNESS initializes — STATE_FILE_PATTERNS derives
- * the guarded state dir from this at module init, above HARNESS. */
+ * it is callable regardless of module-init order — stateFilePatterns()
+ * derives the guarded state dir from this at call time, above HARNESS. */
 function taskGraphRelative(): string {
   return process.env.LOOM_STATE_PATH
     ?? (detectHarness() === "pi"
