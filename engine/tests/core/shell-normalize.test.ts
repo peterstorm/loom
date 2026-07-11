@@ -37,8 +37,13 @@ describe("normalizeShellSpan — bash word-normalization rules", () => {
     expect(whole("x$'\\x00'y")).toBe("xy");
     expect(whole("x$'\\U00000000'y")).toBe("xy");
     // NUL truncates the REST of its OWN body: `$'a\x00b'` → `a` (bash drops
-    // `\x00b`), then `q` after the close-quote continues → `aq`.
+    // `\x00b`), then `q` after the close-quote continues → `aq`. All THREE
+    // escape families must truncate identically — a drop-and-continue mutant
+    // in any one branch would conceal a guarded literal behind trailing junk.
     expect(whole("p$'a\\x00b'q")).toBe("paq");
+    expect(whole("p$'a\\000b'q")).toBe("paq");
+    expect(whole("p$'a\\u0000b'q")).toBe("paq");
+    expect(whole("p$'a\\U00000000b'q")).toBe("paq");
   });
 
   it("treats locale `$\"…\"` as `\"…\"`", () => {
@@ -49,7 +54,10 @@ describe("normalizeShellSpan — bash word-normalization rules", () => {
     expect(whole(".claude/stat${x}e")).toBe(".claude/state"); // braced
     expect(whole(".claude/stat$xe")).toBe(".claude/stat"); // `$xe` is one name → deleted whole
     expect(whole('".claude/stat${x}e"')).toBe(".claude/state"); // expands inside "…"
-    expect(whole("${x:-y}z")).toBe("z"); // modifier form removed whole
+    expect(whole("${x:+y}z")).toBe("z"); // alternate form yields empty on unset
+    expect(whole("${x:?msg}z")).toBe("z"); // error form yields empty on unset
+    expect(whole("${#x}z")).toBe("z"); // length
+    expect(whole("${x%.json}z")).toBe("z"); // transform
     expect(whole("a${outer${inner}}b")).toBe("ab"); // nested braces balanced
     expect(whole("$1$@$?done")).toBe("done"); // special/positional params
     // Single quotes SUPPRESS expansion — `$x` stays literal.
@@ -57,6 +65,28 @@ describe("normalizeShellSpan — bash word-normalization rules", () => {
     // `$(`/`$'`/`$"` are NOT parameter expansions and are left to their own rules.
     expect(whole("$(cmd)")).toBe("$(cmd)"); // command sub stays literal here
     expect(whole("price$")).toBe("price$"); // lone trailing `$` is literal
+  });
+
+  it("reveals the default word of `${x:-w}`/`${x-w}`/`${x:=w}`/`${x=w}` — bash emits the WORD on unset, not empty", () => {
+    // Round-19 deleted EVERY `${…}` to empty; for the default/assign-default
+    // forms that CONCEALS a guarded literal carried in the word (fail-open —
+    // a live guard ALLOW while bash deleted real state). The word is revealed.
+    expect(whole("${x:-y}z")).toBe("yz");
+    expect(whole("${x-y}z")).toBe("yz");
+    expect(whole("${x:=y}z")).toBe("yz");
+    expect(whole("${x=y}z")).toBe("yz");
+    expect(whole('"${x:-y}z"')).toBe("yz"); // reveals inside "…" too
+    // The word is itself recursively normalized: quotes strip, nested
+    // empty-form expansions delete, nested default words reveal.
+    expect(whole("${x:-'a b'}")).toBe("a b");
+    expect(whole("${x:-gr${y}aph}")).toBe("graph");
+    expect(whole("${x:-gr${y:-a}ph}")).toBe("graph");
+    // A whole guarded path as the default word survives intact.
+    expect(whole("${x:-.claude/state/active_task_graph.json}")).toBe(
+      ".claude/state/active_task_graph.json",
+    );
+    // `#`/`!`-prefixed bodies are length/indirection, never a default word.
+    expect(whole("${!x}z")).toBe("z");
   });
 
   it("redirect-word mode stops at unquoted whitespace/redirect metacharacters", () => {
@@ -92,6 +122,17 @@ describe("guard ⇄ evidence normalization parity (same input, same decoded lite
     ["$\"/tmp/x\"", "/tmp/x"],
     [".claude/stat${x}e", ".claude/state"], // param expansion deleted in both
     ["grap${x}h.json", "graph.json"],
+    // Default/assign-default forms reveal their word in BOTH consumers — all
+    // four operators, as redirect targets too (`cat > grap${x:-h}.json` mints
+    // `graph.json`, the file bash creates when x is unset).
+    ["grap${x:-h}.json", "graph.json"],
+    ["grap${x-h}.json", "graph.json"],
+    ["grap${x:=h}.json", "graph.json"],
+    ["grap${x=h}.json", "graph.json"],
+    // Mid-body NUL truncation, one row per ANSI-C escape family.
+    ["p$'a\\000b'q", "paq"],
+    ["p$'a\\u0000b'q", "paq"],
+    ["p$'a\\U00000000b'q", "paq"],
   ];
 
   for (const [raw, decoded] of battery) {

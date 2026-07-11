@@ -107,9 +107,128 @@ describe("fugue-generated-integrity", () => {
     }
   });
 
+  // TWO regions with structure between them: the shape that kills the
+  // projection mutants a single-region body cannot. Greedy (`[\s\S]*` instead
+  // of lazy `*?`) would collapse from the FIRST start to the LAST end,
+  // swallowing STRUCTURE_BETWEEN; a dropped `g` flag would collapse only the
+  // FIRST region, so implementing the second region's body would break the
+  // hash. Both mutants survived the previous suite (every body had one region).
+  const TWO_REGION_BODY =
+    "const a = defineFetch({\n" +
+    `  ${FUGUE_BODY_START}\n  // Placeholder A\n  fetch: async () => ok({}),\n  ${FUGUE_BODY_END}\n` +
+    "});\n" +
+    "const wiring = connect(a, b); // STRUCTURE BETWEEN the regions\n" +
+    "const b = defineTransform({\n" +
+    `  ${FUGUE_BODY_START}\n  // Placeholder B\n  transform: async () => ok({}),\n  ${FUGUE_BODY_END}\n` +
+    "});\n";
+
+  it("PASSES when the SECOND of two @fugue-body regions is implemented (kills a dropped-g-flag projection mutant)", () => {
+    const stamped = stamp(TWO_REGION_BODY);
+    const regions = [...stamped.matchAll(/\/\/ @fugue-body-start[\s\S]*?\/\/ @fugue-body-end/g)];
+    expect(regions).toHaveLength(2);
+    const second = regions[1];
+    const implemented =
+      stamped.slice(0, second.index) +
+      `${FUGUE_BODY_START}\n  transform: async (i) => ok(reshape(i)),\n  ${FUGUE_BODY_END}` +
+      stamped.slice(second.index + second[0].length);
+    expect(handler(implemented, "dags/team/x/dag.ts")).toEqual([]);
+  });
+
+  it("FLAGS a structural edit BETWEEN two @fugue-body regions (kills a lazy→greedy projection mutant)", () => {
+    const stamped = stamp(TWO_REGION_BODY);
+    const rewired = stamped.replace("connect(a, b)", "connect(a, evil)");
+    expect(handler(rewired, "dags/team/x/dag.ts")).toHaveLength(1);
+  });
+
+  it("FLAGS an injected @fugue-body-start with NO closing end marker — it cannot hide trailing structure (fail-closed)", () => {
+    // An attacker appends a bare start marker and edits/adds structure after
+    // it, hoping the projection excludes everything downstream. The lazy regex
+    // requires a matching END, so an UNMATCHED start stays literal in the
+    // projection: marker + trailing edit both shift the hash → flagged.
+    const stamped = stamp(BODY);
+    const masked = stamped + `${FUGUE_BODY_START}\nregisterNode(evil);\n`;
+    expect(handler(masked, "dags/team/x/dag.ts")).toHaveLength(1);
+    // Even the bare unmatched marker alone flags — the projection is not a
+    // fixed point over marker injection.
+    const markerOnly = stamped + `${FUGUE_BODY_START}\n`;
+    expect(handler(markerOnly, "dags/team/x/dag.ts")).toHaveLength(1);
+    // An injected start BEFORE an existing region pairs with that region's END
+    // and swallows real structure into the collapse — the stamp no longer
+    // matches the widened projection, so this too is tamper-EVIDENT.
+    const widened = stamp(BODY_WITH_PLACEHOLDER).replace(
+      "  inputSchema: InputSchema,",
+      `  ${FUGUE_BODY_START}\n  inputSchema: EvilSchema,`,
+    );
+    expect(handler(widened, "dags/team/x/dag.ts")).toHaveLength(1);
+  });
+
   it("handles a marker at EOF with an empty body (projection of empty string)", () => {
     const emptyHash = createHash("sha256").update("", "utf8").digest("hex");
     const content = `// banner\n// @fugue-integrity sha256:${emptyHash}\n`;
     expect(handler(content, "dags/team/x/dag.ts")).toEqual([]);
+  });
+
+  // ── Cross-repo golden vector ────────────────────────────────────────────
+  // The SAME literal body + digest is pinned in fugue's suite
+  // (packages/framework/src/__tests__/cli/authored.test.ts, GOLDEN_MODULE_BODY /
+  // GOLDEN_DIGEST). fugue stamps, loom verifies, neither imports the other —
+  // so collapse-rule drift between the two structuralProjection copies would
+  // otherwise surface only as a false tamper flag at a wave gate. If either
+  // side changes the projection or the hash recipe, ITS copy of this test
+  // breaks first. Do not update one side without the other.
+  const GOLDEN_MODULE_BODY =
+    'import { z } from "zod";\n' +
+    "\n" +
+    "const FetchRecordSchema = z.object({\n" +
+    "  id: z.string(),\n" +
+    "});\n" +
+    "\n" +
+    "// fetch-record - Load the record\n" +
+    "const fetchRecordNode = fetchNode({\n" +
+    '  id: "fetch-record",\n' +
+    "  outputSchema: FetchRecordSchema,\n" +
+    "  // @fugue-body-start\n" +
+    '  fetch: async () => ok({ id: "todo" }),\n' +
+    "  // @fugue-body-end\n" +
+    "});\n" +
+    "\n" +
+    "const SummarizeSchema = z.object({\n" +
+    "  summary: z.string(),\n" +
+    "});\n" +
+    "\n" +
+    "// summarize - Summarize the record\n" +
+    "const summarizeNode = transformNode({\n" +
+    '  id: "summarize",\n' +
+    "  inputSchema: FetchRecordSchema,\n" +
+    "  outputSchema: SummarizeSchema,\n" +
+    "  // @fugue-body-start\n" +
+    '  transform: (input) => ok({ summary: "todo" }),\n' +
+    "  // @fugue-body-end\n" +
+    "});\n";
+
+  const GOLDEN_DIGEST = "7ae6384572c018a34302af5fbb2b3f2ce1a8f7fd2f6dbc537fae9c33cfff6054";
+
+  it("reproduces fugue's golden digest for the shared two-region vector (cross-repo collapse-rule parity)", () => {
+    expect(
+      createHash("sha256").update(structuralProjection(GOLDEN_MODULE_BODY), "utf8").digest("hex"),
+    ).toBe(GOLDEN_DIGEST);
+  });
+
+  it("PASSES a fugue-stamped artifact built on the golden vector, and flags its structural mutation (drift detector)", () => {
+    const stamped =
+      "// @generated by `fugue new --from` / `fugue compose` — regenerate structure from dag.authored.json;\n" +
+      "// implement only the @fugue-body regions (structure is integrity-hashed)\n" +
+      `// @fugue-integrity sha256:${GOLDEN_DIGEST}\n` +
+      GOLDEN_MODULE_BODY;
+    expect(handler(stamped, "dags/team/golden/dag.ts")).toEqual([]);
+    // Implementing a placeholder body still passes (the projection excludes it)…
+    const implemented = stamped.replace(
+      'fetch: async () => ok({ id: "todo" }),',
+      "fetch: async (i) => ok(await lookup(i)),",
+    );
+    expect(handler(implemented, "dags/team/golden/dag.ts")).toEqual([]);
+    // …while a structural mutation between the regions flags.
+    const rewired = stamped.replace("inputSchema: FetchRecordSchema,", "inputSchema: EvilSchema,");
+    expect(handler(rewired, "dags/team/golden/dag.ts")).toHaveLength(1);
   });
 });

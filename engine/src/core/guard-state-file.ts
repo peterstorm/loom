@@ -112,23 +112,21 @@ function segmentInvokesHelper(segment: string): boolean {
 /**
  * Quote-COLLAPSED view of a piece of command text, for pattern matching only —
  * a thin whole-segment application of the shared normalizeShellSpan
- * ("matching-view" mode: backticks stay LITERAL — not because substitutions
- * were already flattened, they are NOT here; the front gate referencesGuardedState
- * and placeholderFor both run on unflattened text — but because guarded patterns
- * contain no backtick, so keeping the char is reveal-monotonic). It
- * reproduces every bash word-normalization that can hide a guarded literal
- * (quote strip, backslash/line-continuation, ANSI-C decode + NUL drop, locale
- * `$"…"`, and `$name`/`${…}` parameter-expansion deletion). The invariant that
- * makes it fail-closed: it only ever removes or decodes SHELL-SYNTAX and
- * shell-DROPPED spans — quote chars (`'`/`"`), backslashes (`\`), the `$` of an
- * ANSI-C/locale quote, ANSI-C escape bodies, the newline of a `\`-continuation,
- * a decoded NUL, and a parameter expansion (deleted to its unset→empty value,
- * the outcome bash produces). None of these leaves a residue inside a guarded
- * pattern (paths of `[A-Za-z0-9._/-]`); deleting an expansion only JOINS the
- * literal fragments around it, exactly as bash does. So any raw span that a
- * guarded pattern can reassemble under bash still matches after collapse: the
- * view can REVEAL a guarded token but never CONCEAL one. The collapsed text is
- * NEVER substituted back into anything executed or placeholdered — matching only.
+ * ("matching-view" mode). It reproduces the bash word-normalizations that
+ * hide a guarded literal WITHIN a word: quote strip, backslash/line-
+ * continuation, ANSI-C decode (NUL truncates the ANSI-C body), locale `$"…"`,
+ * and `$name`/`${…}` parameter expansion (empty forms deleted, default forms
+ * `${x:-w}` revealing their word). The invariant that makes it fail-closed for
+ * these: it only ever removes or decodes SHELL-SYNTAX and shell-DROPPED spans,
+ * none of which leave a residue inside a guarded pattern (paths of
+ * `[A-Za-z0-9._/-]`); deleting an empty expansion only JOINS the literal
+ * fragments around it, exactly as bash does. Backticks and `$(…)`/`<(…)` are
+ * left LITERAL here (backtickQuotes is off in matching-view), so this single
+ * view does NOT model substitution-to-empty — a guarded literal fragmented
+ * across `$(:)`/`` `:` `` would survive it. referencesPattern therefore also
+ * tests a blankSubstitutions view; do not rely on collapseQuotes alone as the
+ * fail-closed boundary. The collapsed text is NEVER substituted back into
+ * anything executed or placeholdered — matching only.
  */
 function collapseQuotes(text: string): string {
   return normalizeShellSpan(text, 0, { mode: "matching-view" }).value;
@@ -265,28 +263,76 @@ function tokenGlobHitsGuardedDir(token: string, dirs: readonly (readonly string[
 }
 
 /**
+ * A matching view where command/process substitutions and backticks are
+ * collapsed to EMPTY — one output a substitution can produce (`$(:)` → "",
+ * `` `false` `` → ""). bash reassembles a guarded literal fragmented across
+ * such a substitution (`.claude/stat$(:)e` → `.claude/state`), which the
+ * substitutions-LITERAL view conceals; testing BOTH views (see
+ * referencesPattern) closes that fragmentation channel while the literal view
+ * still surfaces a guarded token sitting INSIDE a body, so flattenSubstitutions
+ * + recursive judging still engages for a write hidden in a substitution.
+ * Reveal-monotonic: emptying a span only JOINS the literal fragments around it,
+ * exactly as an empty-output substitution does. Single quotes suppress
+ * substitution (the span stays literal); an unclosed opener blanks to end
+ * (maximal reveal — decide() fails such unbalanced lines closed anyway).
+ */
+function blankSubstitutions(text: string): string {
+  let out = "";
+  let singleQuote = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\\" && !singleQuote) { out += c + (text[i + 1] ?? ""); i++; continue; }
+    if (c === "'") { singleQuote = !singleQuote; out += c; continue; }
+    if (singleQuote) { out += c; continue; }
+    const isCmdSub = c === "$" && text[i + 1] === "(";
+    const isProcSub = (c === "<" || c === ">") && text[i + 1] === "(";
+    if (isCmdSub || isProcSub) {
+      const close = findClosingParen(text, i + 2);
+      i = close === -1 ? text.length : close;
+      continue;
+    }
+    if (c === "`") {
+      const close = findClosingBacktick(text, i + 1);
+      i = close === -1 ? text.length : close;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+/**
  * Does the text reference a guarded path under EVERY bash word-expansion that
- * can reassemble a guarded literal (quote collapse, brace expansion,
- * single-char class reveal) or reach a guarded directory via a residual glob?
- * Reveal-monotonic and fail-closed: an unbounded brace expansion counts as a
- * reference. This is the front gate and chain/segment scope predicate.
+ * can reassemble a guarded literal (quote collapse, substitution-to-empty,
+ * brace expansion, single-char class reveal) or reach a guarded directory via a
+ * residual glob? Reveal-monotonic and fail-closed: an unbounded brace expansion
+ * counts as a reference. This is the front gate and chain/segment scope
+ * predicate. Two base views are tested — substitutions LITERAL (surfaces a
+ * guarded token inside a body) and substitutions EMPTY (surfaces a literal
+ * fragmented across `$(…)`/backticks) — because a substitution that outputs
+ * empty joins the fragments bash-side.
  */
 function referencesPattern(
   text: string,
   pattern: () => RegExp,
   dirs: () => readonly (readonly string[])[],
 ): boolean {
-  const views = expandBraces(collapseQuotes(text));
-  if (views === null) return true;
   const exemplars = dirs();
-  for (const raw of views) {
-    // Bash collapses a run of `/` in a path to one (`/tmp//claude-subagents`
-    // → `/tmp/claude-subagents`); reveal it so a doubled slash can't hide the
-    // guarded dir literal. Reveal-monotonic — only ever joins path parts.
-    const view = collapseSingleCharClass(raw).replace(/\/{2,}/g, "/");
-    if (pattern().test(view)) return true;
-    for (const token of view.split(/\s+/)) {
-      if (tokenGlobHitsGuardedDir(token, exemplars)) return true;
+  const literalBase = collapseQuotes(text);
+  const blankedBase = collapseQuotes(blankSubstitutions(text));
+  const bases = blankedBase === literalBase ? [literalBase] : [literalBase, blankedBase];
+  for (const base of bases) {
+    const views = expandBraces(base);
+    if (views === null) return true;
+    for (const raw of views) {
+      // Bash collapses a run of `/` in a path to one (`/tmp//claude-subagents`
+      // → `/tmp/claude-subagents`); reveal it so a doubled slash can't hide the
+      // guarded dir literal. Reveal-monotonic — only ever joins path parts.
+      const view = collapseSingleCharClass(raw).replace(/\/{2,}/g, "/");
+      if (pattern().test(view)) return true;
+      for (const token of view.split(/\s+/)) {
+        if (tokenGlobHitsGuardedDir(token, exemplars)) return true;
+      }
     }
   }
   return false;
@@ -366,16 +412,22 @@ interface FlattenedCommand {
  *  token class so the ENCLOSING segment is still judged as touching guarded
  *  state (`sed -i … $(printf 'active_task_graph').json` must not launder the
  *  token away). The body is classified on its quote-collapsed view so quote
- *  splitting inside a substitution cannot launder the class either. The
- *  load-bearing property of the placeholder text is that it cannot form a
- *  redirect or separator: the literal parts contain only [A-Za-z_/],
- *  and the `${SUBAGENT_DIR}` prefix is redirect/separator-free as shipped
+ *  splitting inside a substitution cannot launder the class either. A body
+ *  with NO guarded token flattens to EMPTY — the output the blankSubstitutions
+ *  matching view models — so a guarded literal fragmented across an
+ *  empty-output substitution (`rm .claude/stat$(:)e/…`) REJOINS in the
+ *  flattened text exactly as it does bash-side, and the chain/segment scope
+ *  checks see it (a non-empty filler was the round-20 concealment: the
+ *  placeholder itself re-split the literal). The load-bearing property of the
+ *  non-empty placeholder texts is that they cannot form a redirect or
+ *  separator: the literal parts contain only [A-Za-z_/], and the
+ *  `${SUBAGENT_DIR}` prefix is redirect/separator-free as shipped
  *  (`/tmp/claude-subagents`) — this is contingent on an operator-set
  *  LOOM_SUBAGENT_DIR staying free of shell-special characters. */
 function placeholderFor(body: string): string {
   if (referencesProtectedDir(body)) return `${SUBAGENT_DIR}/__subst__`;
   if (referencesGuardedState(body)) return "active_task_graph__subst__";
-  return "__subst__";
+  return "";
 }
 
 /**

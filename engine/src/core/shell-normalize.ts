@@ -1,8 +1,8 @@
 /**
  * The ONE place bash word-normalization lives: quote stripping, backslash
- * escapes, `\`-newline line continuation, ANSI-C `$'…'` decoding (NUL dropped),
- * locale `$"…"` quoting, and unquoted/double-quoted parameter expansion
- * (`$name` / `${…}`) deletion. Both the guard's matching view
+ * escapes, `\`-newline line continuation, ANSI-C `$'…'` decoding (NUL truncates
+ * the ANSI-C body), locale `$"…"` quoting, and unquoted/double-quoted parameter
+ * expansion (`$name` / `${…}`). Both the guard's matching view
  * (core/guard-state-file `collapseQuotes`) and the evidence scanner's
  * redirect-target reader (machine/extract-evidence `readRedirectTarget`) build
  * on this, so a rule taught to one (ANSI-C in round 17, line-continuation + NUL
@@ -12,15 +12,21 @@
  * scanning — segment splitting, fd-dup classification — is already shared via
  * extract-evidence's splitCommandSegmentsWithOps / classifyFdDupWord.)
  *
- * Parameter expansion is modeled as DELETION to the unset→empty value: an
- * unquoted or double-quoted `$x` / `${x}` bash expands to empty when `x` is
- * unset, which is the only bash-accurate view of the span (leaving the literal
- * `$x` is a string bash never produces). Deleting it is reveal-monotonic for
- * the guard — `rm .claude/stat${x}e/…` collapses to `.claude/state/…` and the
- * guarded literal reassembles — and yields the unset-var path for the evidence
- * twin, keeping the two consumers point-wise identical. `$'…'`, `$"…"`, and
- * `$(…)` are NOT parameter expansions and are handled separately (`$(…)` stays
- * literal here — command substitution is flattened upstream of both callers).
+ * Parameter expansion is modeled as the value bash yields when the variable is
+ * UNSET — the conservative reveal for a matching layer that cannot know whether
+ * a var is set. Most forms (`$x`, `${x}`, specials, `${x:+w}` alternate,
+ * transforms, substring) yield EMPTY on unset and are DELETED: reveal-monotonic
+ * for the guard — `rm .claude/stat${x}e/…` collapses to `.claude/state/…` and
+ * the guarded literal reassembles. The default/assign-default forms
+ * (`${x:-w}`/`${x-w}`/`${x:=w}`/`${x=w}`) instead yield the WORD `w`, which can
+ * itself carry a guarded literal (`${x:-.claude/state/…}`); deleting the span
+ * would CONCEAL it (reveal-less — the fail-open direction that ALLOWed a real
+ * state deletion before round 20), so the word is recursively normalized and
+ * revealed. Both consumers stay point-wise identical (the word is revealed in
+ * matching-view for guard and evidence twin alike). `$'…'`, `$"…"`, and `$(…)`
+ * are NOT parameter expansions and are handled separately (`$(…)` stays literal
+ * here — the guard models command-substitution-to-empty in its own front gate,
+ * NOT here; both callers run on UNFLATTENED text).
  */
 
 import { decodeAnsiC, findAnsiCClose } from "./shell-ansi-c";
@@ -40,31 +46,78 @@ const WORD_BOUNDARY = /[\s><&()|;]/;
 const SPECIAL_PARAM = /[0-9@*?$!#-]/;
 
 /**
- * If `text[start] === "$"` begins a parameter expansion (`$name`, `${…}`, or a
- * single special param), return the index of its LAST character; otherwise -1
- * (the `$` is literal — `$(`, `$'`, `$"`, `$ `, `$.`, or a lone trailing `$`).
- * `${…}` consumes to its brace-depth-matched close so nested `${a${b}}` and
- * modifier forms (`${x:-y}`) are removed whole; an unbalanced `${` is left
- * literal (-1) so the span is never over-consumed.
+ * The parse of a `$…` span, discriminating the value bash produces when the
+ * variable is UNSET — the only bash-accurate view for the guard's matching
+ * layer (a rule cannot know whether a var is set, so unset is the conservative
+ * reveal):
+ *
+ *   - `none`  — the `$` is literal (`$(`, `$'`, `$"`, `$ `, `$.`, lone `$`).
+ *   - `empty` — the span expands to the empty string on unset: `$name`,
+ *     `${name}`, special params, and the modifier forms that yield empty when
+ *     unset (`${x:+w}`/`${x+w}` alternate, `${x:?w}`/`${x?}` error, `${#x}`
+ *     length, `${!x}` indirect, `${x#p}`/`${x%p}`/`${x/a/b}`/`${x^^}`/`${x,,}`
+ *     transforms, `${x:off:len}` substring). Deleted from the view.
+ *   - `word`  — a default/assign-default form (`${x:-w}`/`${x-w}`/`${x:=w}`/
+ *     `${x=w}`) whose value on unset is the WORD `w`, not empty. `w` can carry a
+ *     guarded literal (`${x:-.claude/state/…}`), so deleting the whole span
+ *     would CONCEAL it — reveal-less, the fail-open direction. The caller
+ *     recursively normalizes `[wordStart, end)` and reveals its value instead.
+ *
+ * `end` is the index one PAST the span's last char (the char after `}` / after
+ * the name). `${…}` consumes to its brace-depth-matched close so nested
+ * `${a${b}}` is handled; an unbalanced `${` is `none` (left literal) so the span
+ * is never over-consumed.
  */
-function paramExpansionEnd(text: string, start: number): number {
+type ParamExpansion =
+  | { readonly kind: "none" }
+  | { readonly kind: "empty"; readonly end: number }
+  | { readonly kind: "word"; readonly wordStart: number; readonly end: number };
+
+/** Word-emitting default/assign-default operators keyed by their form inside a
+ *  `${name<op>word}` body, longest-first so `:-`/`:=` win over a bare `:`. On
+ *  UNSET each yields the literal `word`; every other operator yields empty. */
+const DEFAULT_WORD_OPS = [":-", ":=", "-", "="] as const;
+
+function classifyBraceBody(text: string, start: number, close: number): ParamExpansion {
+  const end = close + 1;
+  const bodyStart = start + 2;
+  const body = text.slice(bodyStart, close);
+  // `#`/`!`-prefixed bodies (length, indirection, prefix-match) expand empty on
+  // unset — never a default word.
+  if (body[0] === "#" || body[0] === "!") return { kind: "empty", end };
+  // Name: `[A-Za-z_]\w*`, positional digits, or a single special param, plus an
+  // optional `[subscript]`. The operator (if any) starts right after.
+  const nameMatch = body.match(/^([A-Za-z_][A-Za-z0-9_]*|\d+|[@*?$!#0-])(\[[^\]]*\])?/);
+  const nameLen = nameMatch ? nameMatch[0].length : 0;
+  for (const op of DEFAULT_WORD_OPS) {
+    if (body.startsWith(op, nameLen)) {
+      return { kind: "word", wordStart: bodyStart + nameLen + op.length, end };
+    }
+  }
+  return { kind: "empty", end }; // `${name}`, `:+`/`+`, `:?`/`?`, transforms, substring
+}
+
+/**
+ * Parse a `$…` parameter expansion at `text[start] === "$"`. See ParamExpansion.
+ */
+function paramExpansionEnd(text: string, start: number): ParamExpansion {
   const next = text[start + 1];
-  if (next === undefined) return -1;
+  if (next === undefined) return { kind: "none" };
   if (next === "{") {
     let depth = 1;
     for (let j = start + 2; j < text.length; j++) {
       if (text[j] === "{") depth++;
-      else if (text[j] === "}" && --depth === 0) return j;
+      else if (text[j] === "}" && --depth === 0) return classifyBraceBody(text, start, j);
     }
-    return -1; // unbalanced `${` — leave literal, caller fails closed elsewhere
+    return { kind: "none" }; // unbalanced `${` — leave literal, caller fails closed elsewhere
   }
   if (/[A-Za-z_]/.test(next)) {
     let j = start + 2;
     while (j < text.length && /[A-Za-z0-9_]/.test(text[j]!)) j++;
-    return j - 1;
+    return { kind: "empty", end: j };
   }
-  if (SPECIAL_PARAM.test(next)) return start + 1;
-  return -1;
+  if (SPECIAL_PARAM.test(next)) return { kind: "empty", end: start + 2 };
+  return { kind: "none" };
 }
 
 export interface NormalizedSpan {
@@ -118,6 +171,14 @@ function resolveMode(opts: NormalizeOptions): {
  * that over-normalizes — reveal-monotonic for the guard (can only expose a
  * guarded token, never hide one) but over-mints for the evidence twin.
  */
+/** Reveal the default word of a `word`-form expansion (`${x:-w}`) as the value
+ *  bash yields on unset. Always matching-view so the guard and the evidence
+ *  twin reveal an IDENTICAL word regardless of the caller's mode — the word is
+ *  a whole sub-span, not a boundary-terminated fragment. */
+function revealDefaultWord(text: string, wordStart: number, end: number): string {
+  return normalizeShellSpan(text.slice(wordStart, end - 1), 0, { mode: "matching-view" }).value;
+}
+
 export function normalizeShellSpan(
   text: string,
   start: number,
@@ -142,8 +203,9 @@ export function normalizeShellSpan(
       // `quote === "'"` fallthrough below, since paramExpansionEnd is only
       // reached when quote !== "'").
       if (c === "$" && quote === '"') {
-        const pend = paramExpansionEnd(text, i);
-        if (pend !== -1) { i = pend; continue; }
+        const pe = paramExpansionEnd(text, i);
+        if (pe.kind === "word") { value += revealDefaultWord(text, pe.wordStart, pe.end); i = pe.end - 1; continue; }
+        if (pe.kind === "empty") { i = pe.end - 1; continue; }
       }
       value += c;
       continue;
@@ -161,9 +223,11 @@ export function normalizeShellSpan(
       continue;
     }
     if (c === "$") {
-      const pend = paramExpansionEnd(text, i);
-      if (pend !== -1) { i = pend; continue; } // `$name`/`${…}`: delete to unset→empty
-      // else literal `$` (`$(`, `$.`, lone `$`) — fall through
+      const pe = paramExpansionEnd(text, i);
+      // `$name`/`${…}`: delete to unset→empty; default forms (`${x:-w}`) reveal `w`.
+      if (pe.kind === "word") { value += revealDefaultWord(text, pe.wordStart, pe.end); i = pe.end - 1; continue; }
+      if (pe.kind === "empty") { i = pe.end - 1; continue; }
+      // else `none`: literal `$` (`$(`, `$.`, lone `$`) — fall through
     }
     if (c === "\\") {
       if (text[i + 1] === "\n") { i++; continue; } // line continuation: drop both

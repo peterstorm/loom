@@ -445,6 +445,12 @@ describe("guard-state-file — edge cases", () => {
       expect(guardDecision(`echo FORGED > .claude/st$'${nul}'ate/active_task_graph.json`)).toBe("block");
       expect(guardDecision(`printf '{}' > /tmp/claude-subagent$'${nul}'s/sess.evidence.jsonl`)).toBe("block");
     }
+    // NUL TRUNCATES the rest of its OWN body (`$'state\000junk'` → `state`),
+    // so trailing junk cannot de-target a guarded path — one row per escape
+    // family (a drop-and-continue mutant in any branch would keep `junk`).
+    expect(guardDecision("rm $'.claude/state\\000junk'/active_task_graph.json")).toBe("block");
+    expect(guardDecision("echo FORGED > $'.claude/state\\x00junk'/active_task_graph.json")).toBe("block");
+    expect(guardDecision("printf '{}' > $'/tmp/claude-subagents\\u0000junk'/sess.evidence.jsonl")).toBe("block");
     // Precision: a NUL between non-guarded chars still collapses harmlessly.
     expect(guardDecision("echo hi$'\\x00'there")).toBe("allow");
   });
@@ -524,6 +530,56 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("rm $HOME/tmp/foo.txt")).toBe("allow");
     expect(guardDecision("ls src/file${x}.ts")).toBe("allow");
     expect(guardDecision("echo ${PATH} && cat build/${name}.o")).toBe("allow");
+  });
+
+  it("default/assign-default expansion `${x:-w}` reveals its WORD — deleting it concealed a guarded literal (round-20 bypass)", () => {
+    // Round-19 modeled EVERY `${…}` as delete-to-unset-empty. Bash emits the
+    // WORD for `${x:-w}`/`${x-w}`/`${x:=w}`/`${x=w}` when x is unset, so
+    // deleting the span CONCEALED a guarded literal carried in the word
+    // (live-verified: guard ALLOWed while real bash deleted the real state
+    // file). All four operators, both guarded families:
+    expect(guardDecision("rm .claude/stat${x:-e}/active_task_grap${x:-h}.json")).toBe("block");
+    expect(guardDecision("rm .claude/stat${x-e}/active_task_grap${x-h}.json")).toBe("block");
+    expect(guardDecision("rm .claude/stat${x:=e}/active_task_grap${x:=h}.json")).toBe("block");
+    expect(guardDecision("rm .claude/stat${x=e}/active_task_grap${x=h}.json")).toBe("block");
+    // The whole guarded path smuggled AS the default word:
+    expect(guardDecision("rm ${x:-.claude/state/active_task_graph.json}")).toBe("block");
+    // Redirect-target and ledger-forge variants:
+    expect(guardDecision("echo FORGED > .claude/stat${x:-e}/active_task_graph.json")).toBe("block");
+    expect(guardDecision("echo x > /tmp/claude-subagent${x:-s}/sess.evidence.jsonl")).toBe("block");
+    expect(guardDecision("printf '{}' > /tmp/claude-subagent${x:=s}/sess.evidence.jsonl")).toBe("block");
+    // Precision: default words that never complete a guarded literal stay
+    // allowed, and a READ through a default-word-fragmented path is in scope
+    // but read-only → allow.
+    expect(guardDecision("rm ${x:-/tmp/scratch}/foo.txt")).toBe("allow");
+    expect(guardDecision("ls src/file${ext:-.ts}")).toBe("allow");
+    expect(guardDecision("cat .claude/stat${x:-e}/active_task_graph.json")).toBe("allow");
+  });
+
+  it("a substitution that outputs EMPTY rejoins a fragmented guarded literal — `$(:)`/backtick/`<(:)` (round-20 bypass)", () => {
+    // The front gate's collapsed view keeps `$(…)`/backticks LITERAL, so
+    // `.claude/stat$(:)e` matched no guarded pattern and decide() short-
+    // circuited to ALLOW before flattening ever ran — while bash expanded
+    // `$(:)` (no-op builtin → empty output) and deleted the real state file.
+    // referencesPattern now ALSO tests a blank-substitutions view.
+    expect(guardDecision("rm .claude/stat$(:)e/active_task_grap$(:)h.json")).toBe("block");
+    expect(guardDecision("rm .claude/stat`:`e/active_task_grap`:`h.json")).toBe("block");
+    expect(guardDecision("rm .claude/stat<(:)e/active_task_graph.json")).toBe("block");
+    expect(guardDecision("echo FORGED > .claude/stat$(:)e/active_task_graph.json")).toBe("block");
+    // Ledger forge via a substitution-fragmented protected dir:
+    expect(guardDecision("printf '{}' > /tmp/claude-subagent$(:)s/sess.evidence.jsonl")).toBe("block");
+    expect(guardDecision("printf '{}' > /tmp/claude-subagent`:`s/sess.evidence.jsonl")).toBe("block");
+    // Control: the substitutions-LITERAL view still surfaces a guarded token
+    // sitting INSIDE a body, so flattening + recursive judging engages for a
+    // write hidden in a substitution (invisible to the blanked view alone).
+    expect(
+      guardDecision("echo $(sed -i s/trusted-fail/trusted-pass/ .claude/state/active_task_graph.json)"),
+    ).toBe("block");
+    // Precision: a READ through a substitution-fragmented path is in scope but
+    // read-only → allow; single quotes SUPPRESS substitution, so a quoted
+    // `$(:)` string argument never reassembles the literal.
+    expect(guardDecision("cat .claude/stat$(:)e/active_task_graph.json")).toBe("allow");
+    expect(guardDecision("echo '.claude/stat$(:)e' > /tmp/notes.txt")).toBe("allow");
   });
 
   it("quote-collapse applies inside substitution bodies AND protected-dir redirects (round-17 pins)", () => {
