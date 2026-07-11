@@ -103,12 +103,19 @@ export function validateModelBindings(
           errors.push(`Pipeline: AuthoredDag file '${dagFile}' must be a JSON object with a 'nodes' array (deep validation is fugue's job — 'fugue new --from' gates codegen)`);
         } else {
           // Drift guard: every node the plan's Pipeline table names must appear
-          // in the sidecar. Checked as a substring of the raw sidecar text, not
-          // against a schema field, so loom gains NO new knowledge of fugue's
-          // AuthoredDag shape beyond the existing 'has a nodes array'. A plan
-          // node absent from the sidecar is the plan↔sidecar drift that the
-          // unguarded-intermediate leak allowed through to fugue runtime.
-          const missing = models.pipeline.declaredNodes.filter((n) => !content.includes(n));
+          // in the sidecar. Matched as an EXACT QUOTED JSON token (`"name"`)
+          // inside the serialized `nodes` array, not a bare substring of the
+          // raw sidecar text. A substring test false-passes three ways: a
+          // substring collision (declared `fetch` satisfied by a sidecar
+          // `fetch-order`), a non-node occurrence (the name appearing in a
+          // comment/other field), and a degenerate empty name (`includes("")`
+          // is always true). Serializing only the `nodes` array — already
+          // parsed and in scope — keeps loom's "no schema knowledge of fugue's
+          // DAG shape" stance (it assumes only a `nodes` array) while catching
+          // real plan↔sidecar drift that the unguarded-intermediate leak
+          // allowed through to fugue runtime.
+          const nodesJson = JSON.stringify((dag as { nodes: unknown[] }).nodes);
+          const missing = models.pipeline.declaredNodes.filter((n) => !nodesJson.includes(`"${n}"`));
           if (missing.length > 0) {
             errors.push(
               `Pipeline: node(s) named in the plan's table are absent from AuthoredDag file '${dagFile}': ${missing.join(", ")} — plan and sidecar have drifted; re-author the sidecar or fix the table`,

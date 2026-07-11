@@ -159,6 +159,14 @@ describe("validateModelBindings", () => {
       expectError(result, "have drifted");
       expect(errorsOf(result).some((e) => e.includes("review"))).toBe(true);
     });
+
+    it("flags substring-collision drift: declared 'fetch' is NOT satisfied by a sidecar node 'fetch-order'", () => {
+      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "x.json", declaredNodes: ["fetch"] } };
+      const dag = JSON.stringify({ nodes: [{ id: "fetch-order" }] }); // substring, not the same node
+      const result = validateModelBindings(models, [], depsWith({ "x.json": dag }));
+      expectError(result, "have drifted");
+      expect(errorsOf(result).some((e) => e.includes("fetch"))).toBe(true);
+    });
   });
 
   describe("invariants", () => {

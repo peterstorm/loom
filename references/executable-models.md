@@ -192,19 +192,29 @@ The plan declares invariants in an `## Invariants` section, each tiered:
   otherwise it is prompt guidance verified by wave-gate reviewers, not by the
   deterministic core. Mandating auto-generated rules from state lists is
   future work.
-- **Generated-code hand-edit protection is tamper-EVIDENT (integrity hash).**
-  `fugue new --from` stamps each generated `dag.ts` with a two-line banner whose
-  `@fugue-integrity sha256:<hex>` covers the generated body. Loom ships the
-  `fugue-generated-integrity` programmatic lint rule (in the "full"/wave-gate
-  tier and on PostToolUse `lint-file`): it recomputes the body hash and blocks on
-  a mismatch, so a hand-edit during a loom wave is caught at the gate — the same
-  detection-at-gate mechanism as every other lint rule, needing no path-based
-  edit gate (which loom's model does not have). The coupling is one marker-string
-  convention (`@fugue-integrity sha256:`): fugue stamps it, loom verifies it,
-  neither imports the other. Residual (honest): removing the banner outright
-  disables the check for that file — but `--from` regeneration restores it (a
-  fixed point) and fugue's gauntlet re-verifies on the next fugue run; the threat
-  closed is an ACCIDENTAL body edit, not a deliberate banner-strip.
+- **Generated-code STRUCTURE hand-edit protection is tamper-EVIDENT (integrity hash).**
+  `fugue new --from` stamps each generated `dag.ts` with a banner whose
+  `@fugue-integrity sha256:<hex>` covers the STRUCTURAL PROJECTION of the body —
+  the generated body with each `@fugue-body-start … @fugue-body-end` region
+  collapsed. So the machine-owned structure (imports, schemas, node ids, wiring,
+  registration) is hashed, but the placeholder node bodies the scaffold tells you
+  to implement live inside `@fugue-body` regions and are EXCLUDED — implementing
+  them leaves the hash intact (no false positive on the sanctioned workflow).
+  Loom ships the `fugue-generated-integrity` programmatic lint rule, which runs
+  in the "full"/wave-gate tier ONLY (programmatic rules do not run on
+  PostToolUse `lint-file` — that tier is regex-only), recomputes the hash over
+  the same projection, and blocks on a mismatch, so a structural hand-edit during
+  a loom wave is caught at the wave gate — the same detection-at-gate mechanism as
+  every other lint rule, needing no path-based edit gate (which loom's model does
+  not have). The tamper-evidence window is a wave, not a single tool call. The
+  coupling is the marker convention (`@fugue-integrity sha256:` + the two
+  `@fugue-body` strings + the collapse rule): fugue stamps it, loom verifies it,
+  neither imports the other. Residual (honest): the target is an ACCIDENTAL
+  structural edit. Removing the banner outright, or wrapping hand-edited structure
+  in fake `@fugue-body` markers, both disable the check for that file and are
+  equivalent deliberate circumventions — but `--from --force` regeneration
+  overwrites the edit (a fixed point). Fugue itself does not re-verify the stamp;
+  the detection lives in loom's rule.
 - **Wave-gate artifact verification is existence, not semantics.** The machine
   file must exist; that it exports a real reducer is verified by its property
   tests and the trusted test-evidence machinery, not by the gate. An empty

@@ -111,21 +111,27 @@ function segmentInvokesHelper(segment: string): boolean {
 
 /**
  * Quote-COLLAPSED view of a piece of command text, for pattern matching only —
- * a thin whole-segment application of the shared normalizeShellSpan (backticks
- * stay literal here: substitutions are flattened out before this runs). It
+ * a thin whole-segment application of the shared normalizeShellSpan
+ * ("matching-view" mode: backticks stay LITERAL — not because substitutions
+ * were already flattened, they are NOT here; the front gate referencesGuardedState
+ * and placeholderFor both run on unflattened text — but because guarded patterns
+ * contain no backtick, so keeping the char is reveal-monotonic). It
  * reproduces every bash word-normalization that can hide a guarded literal
  * (quote strip, backslash/line-continuation, ANSI-C decode + NUL drop, locale
- * `$"…"`). The invariant that makes it fail-closed: it only ever removes or
- * decodes SHELL-SYNTAX and shell-DROPPED characters — quote chars (`'`/`"`),
- * backslashes (`\`), the `$` of an ANSI-C/locale quote, ANSI-C escape bodies,
- * the newline of a `\`-continuation, and a decoded NUL — NONE of which appear
- * in any guarded pattern (paths of `[A-Za-z0-9._/-]`). So any contiguous raw
- * span that matches a guarded pattern still matches after collapse: the view
- * can REVEAL a guarded token but never CONCEAL one. The collapsed text is NEVER
- * substituted back into anything executed or placeholdered — matching only.
+ * `$"…"`, and `$name`/`${…}` parameter-expansion deletion). The invariant that
+ * makes it fail-closed: it only ever removes or decodes SHELL-SYNTAX and
+ * shell-DROPPED spans — quote chars (`'`/`"`), backslashes (`\`), the `$` of an
+ * ANSI-C/locale quote, ANSI-C escape bodies, the newline of a `\`-continuation,
+ * a decoded NUL, and a parameter expansion (deleted to its unset→empty value,
+ * the outcome bash produces). None of these leaves a residue inside a guarded
+ * pattern (paths of `[A-Za-z0-9._/-]`); deleting an expansion only JOINS the
+ * literal fragments around it, exactly as bash does. So any raw span that a
+ * guarded pattern can reassemble under bash still matches after collapse: the
+ * view can REVEAL a guarded token but never CONCEAL one. The collapsed text is
+ * NEVER substituted back into anything executed or placeholdered — matching only.
  */
 function collapseQuotes(text: string): string {
-  return normalizeShellSpan(text, 0, { stopAtWordBoundary: false }).value;
+  return normalizeShellSpan(text, 0, { mode: "matching-view" }).value;
 }
 
 /** Product of brace-group sizes above which a braced line is deemed

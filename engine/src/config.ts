@@ -106,24 +106,6 @@ export const machinesDir = (): string => process.env.LOOM_MACHINES_DIR ?? DEFAUL
 /** Machines directory — resolved once at import (consumers that never re-point) */
 export const MACHINES_DIR = machinesDir();
 
-/** State file patterns to guard — built lazily so the machine-definitions
- * dir resolves machinesDir() at decision time (a re-pointed
- * LOOM_MACHINES_DIR is guarded without a module reload, mirroring
- * mark-subagent-active / update-task-status).
- * Includes the guarded-machine subagent dir (derived from SUBAGENT_DIR, not
- * hardcoded): an agent writing the evidence ledger or binding files via Bash
- * would forge trusted test evidence, appending to `.active` would fake
- * attribution, and `rm` of the directory itself would silently disarm the
- * gate — so any reference to the dir in a segment that is not an
- * allowlisted read-only command or whitelisted helper blocks.
- * The machine-definitions dir is guarded for the same reason: `rm` of a
- * machine file via Bash would make the gate see "no machine" for a BOUND
- * agent (which now fails closed — but deleting definitions must be blocked
- * at the source too). The state DIRECTORY (dirname of the task-graph path,
- * derived from taskGraphRelative, not hardcoded) is guarded for the same
- * dir-guard reason: a glob (`active_task*.json`, `.claude/state/*.json`) or
- * brace (`active_task_{graph,x}.json`) write names the directory but never
- * the file literal, so only a dir match can catch the forgery. */
 /** Guarded directories, single source of truth, resolved lazily (LOOM_*
  * re-point without a module reload). The state DIR (dirname of the task-graph
  * path) is guarded so a glob/brace write that names the dir but not the file
@@ -153,6 +135,24 @@ export const guardedDirSegments = (): readonly (readonly string[])[] =>
 export const protectedDirSegments = (): readonly (readonly string[])[] =>
   protectedDirs().map(toSegments);
 
+/** State file patterns to guard — built lazily so the machine-definitions
+ * dir resolves machinesDir() at decision time (a re-pointed
+ * LOOM_MACHINES_DIR is guarded without a module reload, mirroring
+ * mark-subagent-active / update-task-status).
+ * Includes the guarded-machine subagent dir (derived from SUBAGENT_DIR, not
+ * hardcoded): an agent writing the evidence ledger or binding files via Bash
+ * would forge trusted test evidence, appending to `.active` would fake
+ * attribution, and `rm` of the directory itself would silently disarm the
+ * gate — so any reference to the dir in a segment that is not an
+ * allowlisted read-only command or whitelisted helper blocks.
+ * The machine-definitions dir is guarded for the same reason: `rm` of a
+ * machine file via Bash would make the gate see "no machine" for a BOUND
+ * agent (which now fails closed — but deleting definitions must be blocked
+ * at the source too). The state DIRECTORY (dirname of the task-graph path,
+ * derived from taskGraphRelative, not hardcoded) is guarded for the same
+ * dir-guard reason: a glob (`active_task*.json`, `.claude/state/*.json`) or
+ * brace (`active_task_{graph,x}.json`) write names the directory but never
+ * the file literal, so only a dir match can catch the forgery. */
 export const stateFilePatterns = (): RegExp => new RegExp(
   ["active_task_graph", "review-invocations", ...guardedDirs()].map(escapeRegex).join("|"),
 );

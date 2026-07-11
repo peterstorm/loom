@@ -305,8 +305,12 @@ describe("extractShellWriteTargets — Bash-authored writes are visible to the v
     expect(
       extractShellWriteTargets("echo X > $'\\x2e\\x63\\x6c\\x61\\x75\\x64\\x65'"),
     ).toEqual([".claude"]);
-    // NUL is dropped, matching bash and the guard: `a\x00b` → `ab`.
+    // A standalone `$'\x00'` body decodes to empty (nothing follows the NUL in
+    // the body), so `a` + `` + `b` rejoin → `ab` (matches bash and the guard).
     expect(extractShellWriteTargets("echo X > a$'\\x00'b")).toEqual(["ab"]);
+    // NUL truncates the REST of its OWN body: `$'a\x00b'` → `a`, then `q` after
+    // the close-quote continues → `aq` (bash-accurate; over-mint fixed).
+    expect(extractShellWriteTargets("echo X > p$'a\\x00b'q")).toEqual(["paq"]);
   });
 
   it("drops a `\\`-newline continuation in a redirect target — twin parity (round-18)", () => {

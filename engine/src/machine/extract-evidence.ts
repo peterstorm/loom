@@ -388,10 +388,7 @@ function readRedirectTarget(segment: string, start: number, out: string[]): numb
   // spelled with ANSI-C / a line continuation mints the SAME path the guard
   // sees (twin parity — one place owns the quote/escape/ANSI-C rules). Backtick
   // quotes here so `` >`cmd` `` does not split mid-substitution.
-  const { value, end } = normalizeShellSpan(segment, i, {
-    stopAtWordBoundary: true,
-    backtickQuotes: true,
-  });
+  const { value, end } = normalizeShellSpan(segment, i, { mode: "redirect-word" });
   if (value !== "") out.push(value);
   return end;
 }

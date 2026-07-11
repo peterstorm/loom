@@ -441,7 +441,7 @@ Loom ships a two-tier linter that runs automatically as part of the hook pipelin
 ### Rule kinds
 
 - **Regex rules** — JSON files under `/lint-rules/` (and project overrides under `.claude/linter/rules/` or `.pi/linter/rules/`). Schema: `kind`, `name`, `description`, `extensions`, `pattern`, `flags`, `fixHint`, `enabled`.
-- **Programmatic rules** — TypeScript under `engine/src/linter/programmatic/`. Shipped: `max-function-lines` (default: 50), `no-cross-boundary-imports`, `no-io-in-pure-modules`.
+- **Programmatic rules** — TypeScript under `engine/src/linter/programmatic/`. Shipped: `max-function-lines` (default: 50), `no-cross-boundary-imports`, `no-io-in-pure-modules`, `fugue-generated-integrity` (wave-gate tier — verifies the structural `@fugue-integrity` hash of `fugue new --from` output). Programmatic rules run in the full/wave-gate tier only, not on PostToolUse.
 
 ### Bundled regex rules
 
@@ -567,7 +567,7 @@ engine/src/
 │   ├── formatter.ts
 │   ├── safety.ts
 │   └── programmatic/   # max-function-lines, no-cross-boundary-imports,
-│                       # no-io-in-pure-modules
+│                       # no-io-in-pure-modules, fugue-generated-integrity
 └── utils/              # git, lock, find-file, read-transcript-with-retry, …
 ```
 

@@ -24,9 +24,14 @@ export function findAnsiCClose(text: string, start: number): number {
 /**
  * Decode a bash ANSI-C (`$'…'`) body to the characters bash produces at
  * execution: `\xHH` / `\uHHHH` / `\UHHHHHHHH` hex, `\NNN` octal, and the
- * named escapes (`\n`, `\t`, …). A decoded NUL is DROPPED, as bash drops it
- * (`$'a\x00b'` → `ab`) — emitting a real NUL between a guarded literal's halves
- * would conceal it. An unknown escape drops the backslash and keeps the char
+ * named escapes (`\n`, `\t`, …). A decoded NUL TRUNCATES the body: bash stops
+ * at the first NUL and drops the NUL and everything after it IN THAT BODY
+ * (`$'a\x00b'` → `a`). Truncating (rather than merely dropping the NUL and
+ * decoding on) matches bash for BOTH consumers: the guard sees the real
+ * executed span, and the evidence twin (readRedirectTarget) mints the real
+ * written path instead of an over-long one. A standalone `$'\x00'` body decodes
+ * to empty, so any literal after the close-quote still rejoins (`x$'\x00'y` →
+ * `xy`). An unknown escape drops the backslash and keeps the char
  * (reveal-monotonic).
  */
 export function decodeAnsiC(body: string): string {
@@ -49,7 +54,8 @@ export function decodeAnsiC(body: string): string {
       const hex = body.slice(i + 2).match(/^[0-9a-fA-F]{1,2}/);
       if (hex) {
         const code = parseInt(hex[0], 16);
-        if (code !== 0) out += String.fromCharCode(code); // bash drops NUL
+        if (code === 0) return out; // bash truncates the body at a NUL
+        out += String.fromCharCode(code);
         i += 1 + hex[0].length;
         continue;
       }
@@ -57,14 +63,16 @@ export function decodeAnsiC(body: string): string {
       const hex = body.slice(i + 2).match(n === "u" ? /^[0-9a-fA-F]{1,4}/ : /^[0-9a-fA-F]{1,8}/);
       if (hex) {
         const code = parseInt(hex[0], 16);
-        if (code !== 0) out += String.fromCodePoint(code); // bash drops NUL
+        if (code === 0) return out; // bash truncates the body at a NUL
+        out += String.fromCodePoint(code);
         i += 1 + hex[0].length;
         continue;
       }
     } else if (n >= "0" && n <= "7") {
       const oct = body.slice(i + 1).match(/^[0-7]{1,3}/)!;
       const code = parseInt(oct[0], 8) & 0xff;
-      if (code !== 0) out += String.fromCharCode(code); // bash drops NUL
+      if (code === 0) return out; // bash truncates the body at a NUL
+      out += String.fromCharCode(code);
       i += oct[0].length;
       continue;
     } else if (n in NAMED) {

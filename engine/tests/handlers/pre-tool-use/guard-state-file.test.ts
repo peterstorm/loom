@@ -470,10 +470,21 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("cp /tmp/f.json .claude/st{a,a}te/active_task_graph.json")).toBe("block");
     expect(guardDecision("rm .claude/st[a]te/active_task_grap[h].json")).toBe("block");
     expect(guardDecision(`rm -rf /tmp/claude-sub{agents,agents}/x.machine`)).toBe("block");
+    // SEQUENCE brace expansion (`{r..s}`, `{d..e}`, `{1..3}`) — the sequenceOptions
+    // branch: bash expands the range, and one variant reveals the guarded dir.
+    // `{r..s}` → …subagentr / …subagentS, the `s` variant IS the subagent dir:
+    expect(guardDecision(`rm -rf /tmp/claude-subagent{r..s}/x.machine`)).toBe("block");
+    // `{d..e}` → …statd/… / …state/…, the `e` variant IS the guarded state dir:
+    expect(guardDecision("echo X > .claude/stat{d..e}/active_task_graph.json")).toBe("block");
+    // Allow-precision: a numeric sequence that never reaches a guarded dir stays allowed.
+    expect(guardDecision("ls src/file{1..3}.ts")).toBe("allow");
     // Residual `*`/`?` glob on the dir token reaches INTO a guarded dir:
     expect(guardDecision("rm .claude/stat*/active_task_graph.json")).toBe("block");
     expect(guardDecision("rm -rf /tmp/claude-sub*/")).toBe("block");
     expect(guardDecision("rm /tmp/*")).toBe("block"); // would delete the subagent dir
+    // `?` glob (segmentGlobMatches `?` branch): the single `?` matches the one
+    // trailing char, so `/tmp/claude-subagent?` reaches the guarded subagent dir.
+    expect(guardDecision("rm -rf /tmp/claude-subagent?")).toBe("block");
     // Redundant slashes collapse (bash treats `//` as `/`) so a doubled slash
     // can't hide the guarded dir literal:
     expect(guardDecision(`rm -rf /tmp//claude-subagents`)).toBe("block");
@@ -487,6 +498,32 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("cat build/*.o")).toBe("allow");
     // A read THROUGH a fragmented guarded dir is in scope but read-only → allow.
     expect(guardDecision("cat .claude/st{a,a}te/active_task_graph.json")).toBe("allow");
+  });
+
+  it("parameter expansion `$x`/`${x}` deletes to its unset→empty value, reassembling a fragmented guarded literal (round-19 bypass)", () => {
+    // normalizeShellSpan modeled quotes/backslash/ANSI-C but passed a bare
+    // `$x`/`${x}` through as a literal `$`/`{`/`}` run, so fragmenting BOTH the
+    // guarded dir and filename with an (unset→empty) expansion produced a view
+    // matching neither `.claude/state` nor `active_task_graph` — the front gate
+    // short-circuited to ALLOW. Live-verified: real bash deleted the real state
+    // file and the hook returned EXIT=0. An unset var expands to empty, so
+    // deletion is the only bash-accurate view (leaving `$x` literal is a string
+    // bash never produces) and it rejoins the split literal.
+    expect(guardDecision("rm .claude/stat${x}e/active_task_grap${x}h.json")).toBe("block");
+    expect(guardDecision("rm .claude/stat$xe/active_task_grap${x}h.json")).toBe("block");
+    expect(guardDecision("echo FORGED > .claude/stat${x}e/active_task_graph.json")).toBe("block");
+    expect(guardDecision("cp evil .claude/state/active_task_grap${x}h.json")).toBe("block");
+    // Ledger forge via a fragmented protected dir:
+    expect(guardDecision("echo x > /tmp/claude-subagent${s}s/s.evidence.jsonl")).toBe("block");
+    expect(guardDecision("printf '{}' > /tmp/claude-subagent${s}s/sess.evidence.jsonl")).toBe("block");
+    // Double-quoted expansion also expands (and deletes); single-quoted does NOT
+    // (bash keeps `$w` literal inside `'…'`, so this jq read stays allowed).
+    expect(guardDecision('cp evil ".claude/stat${x}e/active_task_graph.json"')).toBe("block");
+    expect(guardDecision("jq '.current_wave as $w | .tasks' .claude/state/active_task_graph.json")).toBe("allow");
+    // Legit commands using real variables never synthesize a guarded literal.
+    expect(guardDecision("rm $HOME/tmp/foo.txt")).toBe("allow");
+    expect(guardDecision("ls src/file${x}.ts")).toBe("allow");
+    expect(guardDecision("echo ${PATH} && cat build/${name}.o")).toBe("allow");
   });
 
   it("quote-collapse applies inside substitution bodies AND protected-dir redirects (round-17 pins)", () => {

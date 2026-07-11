@@ -498,7 +498,12 @@ Hooks auto-activate when `active_task_graph.json` exists:
 | ↳ `store-spec-check-findings.ts` | via dispatch | Parses spec-check findings |
 | ↳ `cleanup-subagent-flag.ts` | via dispatch | Cleans up subagent tracking + machine bindings (always runs) |
 
-**Do not call hook-owned state-writing helpers yourself.** The helpers that hooks/`/wave-gate` drive — `mark-tests-passed`, `complete-wave-gate`, `StateManager`, `store-review-findings`/`store-spec-check` (except as a sanctioned override, below) — run automatically; calling them by hand races the hook that owns that write. The guard hook allows a small set of DIRECT helper invocations, used only where this document says to: `populate-task-graph` (Phase 4d), `validate-task-graph` / `validate-lint-rules` (read-only checks), `set-phase` loop-back, and the `store-review-findings` / `store-spec-check` false-positive overrides — each requiring user approval. Everything else is hook-driven.
+**Do not call hook-owned state-writing helpers yourself.** The helpers that hooks/`/wave-gate` drive — `complete-wave-gate`, `StateManager`, `store-review-findings`/`store-spec-check` (except as a sanctioned override, below) — run automatically; calling them by hand races the hook that owns that write. A small set of DIRECT helper invocations IS sanctioned, used only where this document says to; they fall into two distinct classes:
+
+- **Whitelisted in the guard** (`engine/src/config.ts` `WHITELISTED_HELPERS`, so the guard permits them even on a guarded path): `populate-task-graph` (Phase 4d), `set-phase` loop-back, `mark-tests-passed` (read-only evidence status check, run during `/wave-gate` Step 2 — it reads the ledger and does NOT modify state), and the `store-review-findings` / `store-spec-check` false-positive overrides.
+- **Merely out of the guard's scope when invoked as documented** (NOT in `WHITELISTED_HELPERS`): `validate-task-graph` / `validate-lint-rules` — they pass only because their documented invocations name no guarded path, so the guard's front gate never fires. Invoked against a guarded path they would be blocked like anything else.
+
+Each sanctioned direct invocation still requires user approval. Everything else is hook-driven.
 
 ---
 
