@@ -333,7 +333,10 @@ function referencesPattern(
   if (views === null) return true;
   const exemplars = dirs();
   for (const raw of views) {
-    const view = collapseSingleCharClass(raw);
+    // Bash collapses a run of `/` in a path to one (`/tmp//claude-subagents`
+    // → `/tmp/claude-subagents`); reveal it so a doubled slash can't hide the
+    // guarded dir literal. Reveal-monotonic — only ever joins path parts.
+    const view = collapseSingleCharClass(raw).replace(/\/{2,}/g, "/");
     if (pattern().test(view)) return true;
     for (const token of view.split(/\s+/)) {
       if (tokenGlobHitsGuardedDir(token, exemplars)) return true;

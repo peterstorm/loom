@@ -474,6 +474,10 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("rm .claude/stat*/active_task_graph.json")).toBe("block");
     expect(guardDecision("rm -rf /tmp/claude-sub*/")).toBe("block");
     expect(guardDecision("rm /tmp/*")).toBe("block"); // would delete the subagent dir
+    // Redundant slashes collapse (bash treats `//` as `/`) so a doubled slash
+    // can't hide the guarded dir literal:
+    expect(guardDecision(`rm -rf /tmp//claude-subagents`)).toBe("block");
+    expect(guardDecision("rm .claude//state/active_task_graph.json")).toBe("block");
     // Baselines: brace/glob writes whose dir stays literal were already caught,
     // and must stay caught.
     expect(guardDecision("rm .claude/state/active_task_grap{h,h}.json")).toBe("block");
