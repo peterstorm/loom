@@ -124,18 +124,41 @@ export const MACHINES_DIR = machinesDir();
  * dir-guard reason: a glob (`active_task*.json`, `.claude/state/*.json`) or
  * brace (`active_task_{graph,x}.json`) write names the directory but never
  * the file literal, so only a dir match can catch the forgery. */
+/** Guarded directories, single source of truth, resolved lazily (LOOM_*
+ * re-point without a module reload). The state DIR (dirname of the task-graph
+ * path) is guarded so a glob/brace write that names the dir but not the file
+ * literal is still caught; the subagent and machine-definition dirs are
+ * additionally PROTECTED (never helper-writable — see protectedDirs). */
+export const guardedDirs = (): readonly string[] => [
+  dirname(taskGraphRelative()),
+  SUBAGENT_DIR,
+  machinesDir(),
+];
+
+/** The subset of guardedDirs whose writes are NEVER whitelisted, even for a
+ * helper invocation: a write into the subagent dir forges trusted evidence
+ * (`.evidence.jsonl`), fakes attribution (`.active`), or disarms the gate
+ * (`.machine`), and a write into the machine-definitions dir deletes/rewrites
+ * the gate's rules. guard-state-file checks these BEFORE the helper allow. */
+export const protectedDirs = (): readonly string[] => [SUBAGENT_DIR, machinesDir()];
+
+const toSegments = (dir: string): string[] => dir.split("/").filter((s) => s !== "");
+
+/** guardedDirs / protectedDirs as `/`-split segment lists (empty segments
+ * dropped) for the guard's glob-intersection scope test: a glob path reaching
+ * AT or INTO one of these dirs could name a guarded file even when no literal
+ * survives quote-collapse, so it must enter scope. */
+export const guardedDirSegments = (): readonly (readonly string[])[] =>
+  guardedDirs().map(toSegments);
+export const protectedDirSegments = (): readonly (readonly string[])[] =>
+  protectedDirs().map(toSegments);
+
 export const stateFilePatterns = (): RegExp => new RegExp(
-  `active_task_graph|review-invocations|${escapeRegex(dirname(taskGraphRelative()))}|${escapeRegex(SUBAGENT_DIR)}|${escapeRegex(machinesDir())}`
+  ["active_task_graph", "review-invocations", ...guardedDirs()].map(escapeRegex).join("|"),
 );
 
-/** Dirs whose writes are NEVER whitelisted, even for helper invocations:
- * a write into the subagent dir forges trusted evidence (`.evidence.jsonl`),
- * fakes attribution (`.active`), or disarms the gate (`.machine`), and a
- * write into the machine-definitions dir deletes/rewrites the gate's rules.
- * guard-state-file checks these BEFORE the helper allow. Built lazily for
- * the same machinesDir() re-point reason as stateFilePatterns. */
 export const protectedDirPatterns = (): RegExp => new RegExp(
-  `${escapeRegex(SUBAGENT_DIR)}|${escapeRegex(machinesDir())}`
+  protectedDirs().map(escapeRegex).join("|"),
 );
 
 /** Commands allowed to touch guarded state paths: deny-by-default allowlist.

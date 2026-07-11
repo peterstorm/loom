@@ -16,6 +16,7 @@
  */
 
 import { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "../core/tool-vocabulary";
+import { decodeAnsiC, findAnsiCClose } from "../core/shell-ansi-c";
 import type { Evidence, TestReportSummary } from "./types";
 
 const QUOTE_CHARS = ['"', "'", "`"] as const;
@@ -389,6 +390,10 @@ function readRedirectTarget(segment: string, start: number, out: string[]): numb
     const c = segment[i];
     if (quote !== null) {
       if (quote !== "'" && c === "\\") {
+        // Backslash-newline is line continuation (bash drops both), matching
+        // the guard's collapseQuotes — keeping the newline would split the
+        // target and mint a garbage FileWrite path.
+        if (segment[i + 1] === "\n") { i += 2; continue; }
         value += segment[i + 1] ?? "";
         i += 2;
         continue;
@@ -402,7 +407,23 @@ function readRedirectTarget(segment: string, start: number, out: string[]): numb
       i++;
       continue;
     }
+    // ANSI-C `$'…'`: decode to the bytes bash writes, so a target spelled
+    // `> $'\x2e\x63…'` mints the SAME path the guard sees (twin parity).
+    if (c === "$" && segment[i + 1] === "'") {
+      const close = findAnsiCClose(segment, i + 2);
+      const bodyEnd = close === -1 ? segment.length : close;
+      value += decodeAnsiC(segment.slice(i + 2, bodyEnd));
+      i = close === -1 ? segment.length : close + 1;
+      continue;
+    }
+    // Locale-quoted `$"…"` is `"…"` with identical literal content.
+    if (c === "$" && segment[i + 1] === '"') {
+      quote = '"';
+      i += 2;
+      continue;
+    }
     if (c === "\\") {
+      if (segment[i + 1] === "\n") { i += 2; continue; } // line continuation
       value += segment[i + 1] ?? "";
       i += 2;
       continue;

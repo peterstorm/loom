@@ -48,12 +48,15 @@
 
 import { existsSync } from "node:fs";
 import type { HookResult } from "../types";
+import { decodeAnsiC, findAnsiCClose } from "./shell-ansi-c";
 import {
   TASK_GRAPH_PATH,
   WHITELISTED_HELPERS,
   stateFilePatterns,
   READ_ONLY_STATE_COMMANDS,
   protectedDirPatterns,
+  protectedDirSegments,
+  guardedDirSegments,
   SUBAGENT_DIR,
 } from "../config";
 import {
@@ -106,87 +109,25 @@ function segmentInvokesHelper(segment: string): boolean {
   return WHITELISTED_HELPERS.includes(tokens[3] ?? "");
 }
 
-/** Index of the `'` closing a `$'…'` (ANSI-C) body opened before `start`,
- *  backslash-escape aware (`\'` and `\\` do not close). -1 when unclosed. */
-function findAnsiCClose(text: string, start: number): number {
-  for (let i = start; i < text.length; i++) {
-    if (text[i] === "\\") {
-      i++;
-      continue;
-    }
-    if (text[i] === "'") return i;
-  }
-  return -1;
-}
-
-/**
- * Decode a bash ANSI-C (`$'…'`) body to the characters bash produces at
- * execution: `\xHH` / `\uHHHH` / `\UHHHHHHHH` hex, `\NNN` octal, and the
- * named escapes (`\n`, `\t`, …). This exists so a guarded path spelled
- * `$'\x2e\x63\x6c…'` decodes to `.cl…` in the matching view and cannot
- * launder past the front gate. An unknown escape drops the backslash and
- * keeps the character (reveal-monotonic — see collapseQuotes).
- */
-function decodeAnsiC(body: string): string {
-  const NAMED: Readonly<Record<string, string>> = {
-    a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n",
-    r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?",
-  };
-  let out = "";
-  for (let i = 0; i < body.length; i++) {
-    if (body[i] !== "\\") {
-      out += body[i];
-      continue;
-    }
-    const n = body[i + 1];
-    if (n === undefined) {
-      out += "\\";
-      break;
-    }
-    if (n === "x") {
-      const hex = body.slice(i + 2).match(/^[0-9a-fA-F]{1,2}/);
-      if (hex) {
-        out += String.fromCharCode(parseInt(hex[0], 16));
-        i += 1 + hex[0].length;
-        continue;
-      }
-    } else if (n === "u" || n === "U") {
-      const hex = body.slice(i + 2).match(n === "u" ? /^[0-9a-fA-F]{1,4}/ : /^[0-9a-fA-F]{1,8}/);
-      if (hex) {
-        out += String.fromCodePoint(parseInt(hex[0], 16));
-        i += 1 + hex[0].length;
-        continue;
-      }
-    } else if (n >= "0" && n <= "7") {
-      const oct = body.slice(i + 1).match(/^[0-7]{1,3}/)!;
-      out += String.fromCharCode(parseInt(oct[0], 8) & 0xff);
-      i += oct[0].length;
-      continue;
-    } else if (n in NAMED) {
-      out += NAMED[n];
-      i++;
-      continue;
-    }
-    // Unknown escape: bash keeps the char; drop the backslash (reveal-monotonic).
-    out += n;
-    i++;
-  }
-  return out;
-}
-
 /**
  * Quote-COLLAPSED view of a piece of command text, for pattern matching
  * only. Reproduces every bash word-normalization that can hide a guarded
- * literal from a raw-text scan, ALL of which err strictly fail-closed here
- * (each only ever brings guarded characters together, never removes a
- * non-backslash character), so the collapsed view can reveal a guarded
- * token but never conceal one:
+ * literal from a raw-text scan. The invariant that makes it fail-closed: it
+ * only ever removes or decodes SHELL-SYNTAX and shell-DROPPED characters —
+ * quote chars (`'`/`"`), backslashes (`\`), the `$` of an ANSI-C/locale quote,
+ * ANSI-C escape bodies, the newline of a `\`-continuation, and a decoded NUL —
+ * NONE of which appear in any guarded pattern (paths of `[A-Za-z0-9._/-]`). So
+ * any contiguous raw span that matches a guarded pattern still matches after
+ * collapse: the view can REVEAL a guarded token but never CONCEAL one.
  *   - unescaped `'`/`"` quote chars are stripped, so adjacent quoted word
  *     parts concatenate as bash concatenates them
  *     (`.cl'aude'/state/active_'task_graph'.json` → the guarded literal);
  *   - an unquoted or double-quoted backslash escape drops the backslash and
  *     keeps the char (`.cl\aude` → `.claude`);
- *   - `$'…'` ANSI-C bodies are decoded (`$'\x2e\x63…'` → `.c…`);
+ *   - a backslash before a newline is a line continuation: BOTH are dropped,
+ *     rejoining the token (`grap\⏎h` → `graph`);
+ *   - `$'…'` ANSI-C bodies are decoded (`$'\x2e\x63…'` → `.c…`), and a decoded
+ *     NUL is dropped as bash drops it (`.claude/st$'\x00'ate` → `.claude/state`);
  *   - `$"…"` locale-quoted bodies are treated as `"…"` (same literal content).
  * The collapsed text is NEVER substituted back into anything executed or
  * placeholdered — it exists only so stateFilePatterns()/protectedDirPatterns()
@@ -199,6 +140,10 @@ function collapseQuotes(text: string): string {
     const c = text[i];
     if (quote !== null) {
       if (quote !== "'" && c === "\\") {
+        // Backslash-newline is line continuation: bash removes BOTH chars,
+        // rejoining the token (`grap\⏎h` → `graph`). Keeping the newline would
+        // split a guarded literal and hide it — so drop both.
+        if (text[i + 1] === "\n") { i++; continue; }
         // Double-quoted escape: drop the backslash, keep the char.
         out += text[i + 1] ?? "";
         i++;
@@ -225,6 +170,9 @@ function collapseQuotes(text: string): string {
       continue;
     }
     if (c === "\\") {
+      // Backslash-newline is line continuation: bash removes BOTH chars (see
+      // the double-quoted branch above).
+      if (text[i + 1] === "\n") { i++; continue; }
       // Unquoted escape: bash removes the backslash (`\a` → `a`).
       out += text[i + 1] ?? "";
       i++;
@@ -238,6 +186,166 @@ function collapseQuotes(text: string): string {
   }
   return out;
 }
+
+/** Product of brace-group sizes above which a braced line is deemed
+ *  unparseable (fail closed). 8 two-option groups = 256 views. */
+const MAX_BRACE_VIEWS = 256;
+
+/** Options of a `{…}` sequence body (`a..c`, `1..3`, `3..1`), or null when the
+ *  body is not a sequence. Alpha and signed-integer ranges only (the forms bash
+ *  expands); step is inferred from direction. */
+function sequenceOptions(content: string): string[] | null {
+  const alpha = content.match(/^([A-Za-z])\.\.([A-Za-z])$/);
+  if (alpha) {
+    const a = alpha[1].charCodeAt(0), b = alpha[2].charCodeAt(0);
+    const step = a <= b ? 1 : -1;
+    const out: string[] = [];
+    for (let c = a; step > 0 ? c <= b : c >= b; c += step) out.push(String.fromCharCode(c));
+    return out;
+  }
+  const num = content.match(/^(-?\d+)\.\.(-?\d+)$/);
+  if (num) {
+    const a = parseInt(num[1], 10), b = parseInt(num[2], 10);
+    const step = a <= b ? 1 : -1;
+    const out: string[] = [];
+    for (let c = a; step > 0 ? c <= b : c >= b; c += step) {
+      out.push(String(c));
+      if (out.length > MAX_BRACE_VIEWS) return null;
+    }
+    return out;
+  }
+  return null;
+}
+
+interface BraceGroup { readonly start: number; readonly end: number; readonly options: readonly string[]; }
+
+/** First EXPANDABLE `{…}` group in text (has a top-level comma, or is a
+ *  sequence), depth-aware so nested braces don't split early. A brace with no
+ *  matching close, or a `{…}` with neither comma nor sequence, is literal in
+ *  bash and skipped. */
+function firstBraceGroup(text: string): BraceGroup | null {
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "{") continue;
+    let depth = 1, j = i + 1;
+    const commas: number[] = [];
+    for (; j < text.length; j++) {
+      const c = text[j];
+      if (c === "{") depth++;
+      else if (c === "}") { if (--depth === 0) break; }
+      else if (c === "," && depth === 1) commas.push(j);
+    }
+    if (depth !== 0) continue; // unbalanced from here: this `{` is literal
+    const end = j;
+    if (commas.length > 0) {
+      const options: string[] = [];
+      let prev = i + 1;
+      for (const cpos of commas) { options.push(text.slice(prev, cpos)); prev = cpos + 1; }
+      options.push(text.slice(prev, end));
+      return { start: i, end, options };
+    }
+    const seq = sequenceOptions(text.slice(i + 1, end));
+    if (seq) return { start: i, end, options: seq };
+    i = end; // non-expandable group: resume scanning after its close
+  }
+  return null;
+}
+
+/**
+ * Bounded bash brace expansion of a matching view — expands comma groups
+ * (`st{a,a}te` → [`state`]) and sequences (`{a..c}`) into every alternative so
+ * a guarded literal fragmented across brace syntax reassembles in at least one
+ * view. Reveal-monotonic: every produced string is one bash could form.
+ * Returns null when the view count would exceed MAX_BRACE_VIEWS — an unbounded
+ * expansion on a guarded-shaped line is nobody's real command; the caller
+ * fails closed.
+ */
+function expandBraces(text: string): string[] | null {
+  const results: string[] = [];
+  const stack: string[] = [text];
+  while (stack.length > 0) {
+    if (results.length + stack.length > MAX_BRACE_VIEWS) return null;
+    const cur = stack.pop()!;
+    const group = firstBraceGroup(cur);
+    if (group === null) { results.push(cur); continue; }
+    for (const opt of group.options) {
+      stack.push(cur.slice(0, group.start) + opt + cur.slice(group.end + 1));
+    }
+  }
+  return results;
+}
+
+/** `[c]` matches exactly `c`; reveal it in the matching view. Multi-char
+ *  (`[ab]`), negated (`[!a]`), and range (`[a-z]`) classes stay for the
+ *  glob-intersection test. `/` never appears in a bash glob class operand. */
+function collapseSingleCharClass(text: string): string {
+  return text.replace(/\[([^!^/\]])\]/g, "$1");
+}
+
+/** fnmatch one path segment: does the glob segment (bash `*`/`?`/`[…]`, none
+ *  crossing `/`) match the literal segment exactly? A malformed class fails
+ *  closed (matches). */
+function segmentGlobMatches(glob: string, literal: string): boolean {
+  let re = "^";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") re += "[^/]*";
+    else if (c === "?") re += "[^/]";
+    else if (c === "[") {
+      const close = glob.indexOf("]", i + 1);
+      if (close === -1) { re += "\\["; continue; }
+      const body = glob.slice(i + 1, close);
+      re += "[" + (body.startsWith("!") ? "^" + body.slice(1) : body).replace(/\\/g, "\\\\") + "]";
+      i = close;
+    } else {
+      re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  re += "$";
+  try { return new RegExp(re).test(literal); } catch { return true; }
+}
+
+/** Could this token — an unquoted glob (star/question/`[…]`) — expand to a
+ *  path that reaches AT or INTO one of the given guarded dirs? True when the
+ *  dir's segments are a leading fnmatch of the token's, so a globbed state-dir
+ *  prefix or a `rm /tmp/<star>` both enter scope even though no literal
+ *  survives collapse. */
+function tokenGlobHitsGuardedDir(token: string, dirs: readonly (readonly string[])[]): boolean {
+  if (!/[*?[]/.test(token)) return false;
+  const tok = token.split("/").filter((s) => s !== "");
+  return dirs.some(
+    (dir) => tok.length >= dir.length && dir.every((seg, k) => segmentGlobMatches(tok[k], seg)),
+  );
+}
+
+/**
+ * Does the text reference a guarded path under EVERY bash word-expansion that
+ * can reassemble a guarded literal (quote collapse, brace expansion,
+ * single-char class reveal) or reach a guarded directory via a residual glob?
+ * Reveal-monotonic and fail-closed: an unbounded brace expansion counts as a
+ * reference. This is the front gate and chain/segment scope predicate.
+ */
+function referencesPattern(
+  text: string,
+  pattern: () => RegExp,
+  dirs: () => readonly (readonly string[])[],
+): boolean {
+  const views = expandBraces(collapseQuotes(text));
+  if (views === null) return true;
+  const exemplars = dirs();
+  for (const raw of views) {
+    const view = collapseSingleCharClass(raw);
+    if (pattern().test(view)) return true;
+    for (const token of view.split(/\s+/)) {
+      if (tokenGlobHitsGuardedDir(token, exemplars)) return true;
+    }
+  }
+  return false;
+}
+
+const referencesGuardedState = (text: string): boolean =>
+  referencesPattern(text, stateFilePatterns, guardedDirSegments);
+const referencesProtectedDir = (text: string): boolean =>
+  referencesPattern(text, protectedDirPatterns, protectedDirSegments);
 
 /**
  * Is the segment's head token a command that cannot write a file? Exact-token
@@ -315,9 +423,8 @@ interface FlattenedCommand {
  *  (`/tmp/claude-subagents`) — this is contingent on an operator-set
  *  LOOM_SUBAGENT_DIR staying free of shell-special characters. */
 function placeholderFor(body: string): string {
-  const collapsed = collapseQuotes(body);
-  if (protectedDirPatterns().test(collapsed)) return `${SUBAGENT_DIR}/__subst__`;
-  if (stateFilePatterns().test(collapsed)) return "active_task_graph__subst__";
+  if (referencesProtectedDir(body)) return `${SUBAGENT_DIR}/__subst__`;
+  if (referencesGuardedState(body)) return "active_task_graph__subst__";
   return "__subst__";
 }
 
@@ -455,7 +562,7 @@ function decide(command: string, depth: number): HookResult {
   // collapse, so neither escapes this gate. Patterns resolve machinesDir()
   // at decision time — a re-pointed LOOM_MACHINES_DIR is guarded without a
   // module reload.)
-  if (!stateFilePatterns().test(collapseQuotes(command))) return { kind: "allow" };
+  if (!referencesGuardedState(command)) return { kind: "allow" };
 
   if (depth > MAX_SUBSTITUTION_DEPTH) return BLOCK;
 
@@ -469,14 +576,14 @@ function decide(command: string, depth: number): HookResult {
     // A chain none of whose segments touch a guarded path is out of scope —
     // `npm install && jq . <state>` must not block on the npm segment.
     // (Tested quote-collapsed, like every pattern site.)
-    if (!chain.some((segment) => stateFilePatterns().test(collapseQuotes(segment)))) continue;
+    if (!chain.some(referencesGuardedState)) continue;
 
     for (const segment of chain) {
       if (segmentInvokesHelper(segment)) {
         // The helper vouches for its own segment (including a redirect of its
         // output into a state file) — but NEVER for a protected-dir write:
         // ledger and machine-definition forgery stay blocked even here.
-        if (protectedDirPatterns().test(collapseQuotes(segment)) && hasOutputRedirect(segment)) {
+        if (referencesProtectedDir(segment) && hasOutputRedirect(segment)) {
           return BLOCK;
         }
         continue;

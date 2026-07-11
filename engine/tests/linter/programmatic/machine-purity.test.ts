@@ -35,7 +35,10 @@ const MACHINE_PURE_MODULES = [
 ] as const;
 
 /** Pure modules outside machine/ that the core may depend on. */
-const PURE_DEPENDENCIES = ["engine/src/core/tool-vocabulary.ts"] as const;
+const PURE_DEPENDENCIES = [
+  "engine/src/core/tool-vocabulary.ts",
+  "engine/src/core/shell-ansi-c.ts",
+] as const;
 
 /** Side-effect-free package imports the core may use. */
 const PURE_PACKAGE_ALLOW = new Set(["ts-pattern"]);

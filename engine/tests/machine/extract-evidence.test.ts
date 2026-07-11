@@ -297,6 +297,23 @@ describe("extractShellWriteTargets — Bash-authored writes are visible to the v
     expect(extractShellWriteTargets("cmd >&-")).toEqual([]);
   });
 
+  it("decodes an ANSI-C `$'…'` redirect target — twin parity with the guard (round-18)", () => {
+    // Round-17 taught the guard to SEE `> $'\x2e…'`; the evidence scanner must
+    // MINT the same decoded path, or a FileWrite into an escape-encoded target
+    // reads as garbage and escapes the agent-authored-artifact veto.
+    // `$'\x2e\x63\x6c\x61\x75\x64\x65'` → `.claude`:
+    expect(
+      extractShellWriteTargets("echo X > $'\\x2e\\x63\\x6c\\x61\\x75\\x64\\x65'"),
+    ).toEqual([".claude"]);
+    // NUL is dropped, matching bash and the guard: `a\x00b` → `ab`.
+    expect(extractShellWriteTargets("echo X > a$'\\x00'b")).toEqual(["ab"]);
+  });
+
+  it("drops a `\\`-newline continuation in a redirect target — twin parity (round-18)", () => {
+    // Bash rejoins the token; keeping the newline would split the minted path.
+    expect(extractShellWriteTargets("echo X > /tmp/re\\\nport.json")).toEqual(["/tmp/report.json"]);
+  });
+
   it("extractEvidence mints Bash FileWrites BEFORE the TestRun — a test's own redirect never reads as write-after-pass", () => {
     const events = extractEvidence(
       "Bash",

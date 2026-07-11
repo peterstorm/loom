@@ -498,7 +498,7 @@ Hooks auto-activate when `active_task_graph.json` exists:
 | ↳ `store-spec-check-findings.ts` | via dispatch | Parses spec-check findings |
 | ↳ `cleanup-subagent-flag.ts` | via dispatch | Cleans up subagent tracking + machine bindings (always runs) |
 
-**NEVER call helpers yourself.** All helpers (`mark-tests-passed`, `complete-wave-gate`, `StateManager`, `populate-task-graph`, etc. — invoked as `bun cli.ts helper <name>`) run automatically via hooks or `/wave-gate`. Only exception: `populate-task-graph` during Phase 4d.
+**Do not call hook-owned state-writing helpers yourself.** The helpers that hooks/`/wave-gate` drive — `mark-tests-passed`, `complete-wave-gate`, `StateManager`, `store-review-findings`/`store-spec-check` (except as a sanctioned override, below) — run automatically; calling them by hand races the hook that owns that write. The guard hook allows a small set of DIRECT helper invocations, used only where this document says to: `populate-task-graph` (Phase 4d), `validate-task-graph` / `validate-lint-rules` (read-only checks), `set-phase` loop-back, and the `store-review-findings` / `store-spec-check` false-positive overrides — each requiring user approval. Everything else is hook-driven.
 
 ---
 
@@ -553,7 +553,7 @@ When blocked (critical findings), Edit/Write blocked too. To fix:
    echo 'ADVISORY: original finding — reason for downgrade' | bun ${LOOM_DIR}/engine/src/cli.ts helper store-review-findings --task T1
    ```
    Then run `complete-wave-gate` to advance. Use only when findings are genuinely false positives — requires user approval.
-4. **Emergency**: remove state file, fix manually, rebuild from GH issue
+4. **Emergency**: the guard blocks a direct `rm` of the state file — use the whitelisted helper `bun ${LOOM_DIR}/engine/src/cli.ts helper cleanup-state`, then fix manually / rebuild from the GH issue
 
 ### Addressing Advisories
 

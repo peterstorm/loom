@@ -46,6 +46,11 @@ export const FAIL_CLOSED_ROUTES: ReadonlySet<string> = new Set([
   "pre-tool-use/validate-task-execution",
   "pre-tool-use/validate-phase-order",
   "pre-tool-use/validate-template-substitution",
+  // validate-agent-model / validate-agent-skill are enforcing Task-spawn gates
+  // too (they return block): a crash escaping the handler must exit 2
+  // (blocking) or a Task spawns with the wrong model / a missing skill.
+  "pre-tool-use/validate-agent-model",
+  "pre-tool-use/validate-agent-skill",
 ]);
 
 /** Exit code for a crash outside the handler, derived from the route. */

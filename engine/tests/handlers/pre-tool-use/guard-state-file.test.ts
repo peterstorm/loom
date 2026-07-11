@@ -423,6 +423,68 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("jq '.tasks' $'active_task_graph.json'")).toBe("allow");
   });
 
+  it("ANSI-C `\\u`/`\\U` hex decode before pattern tests (round-18 coverage — was untested)", () => {
+    // The `\u`/`\U` branch of decodeAnsiC had zero coverage: deleting it
+    // flipped block→allow with the suite green. Unicode-escaped guarded paths
+    // must decode and block, mirroring the hex/octal rows.
+    const uPath =
+      "$'\\u002e\\u0063\\u006c\\u0061\\u0075\\u0064\\u0065\\u002f\\u0073\\u0074\\u0061\\u0074\\u0065\\u002f" +
+      "\\u0061\\u0063\\u0074\\u0069\\u0076\\u0065\\u005f\\u0074\\u0061\\u0073\\u006b\\u005f\\u0067\\u0072\\u0061\\u0070\\u0068\\u002e\\u006a\\u0073\\u006f\\u006e'";
+    expect(guardDecision(`echo FORGED > ${uPath}`)).toBe("block");
+    const UDir =
+      "$'\\U0000002f\\U00000074\\U0000006d\\U00000070\\U0000002f\\U00000063\\U0000006c\\U00000061\\U00000075\\U00000064\\U00000065\\U0000002d\\U00000073\\U00000075\\U00000062\\U00000061\\U00000067\\U00000065\\U0000006e\\U00000074\\U00000073'";
+    expect(guardDecision(`printf '{}' > ${UDir}/sess.evidence.jsonl`)).toBe("block");
+  });
+
+  it("ANSI-C NUL is dropped, not emitted — `$'\\x00'` cannot split a guarded literal (round-18 bypass)", () => {
+    // Bash truncates NUL out of ANSI-C expansion, so `.claude/st$'\\x00'ate`
+    // executes against `.claude/state`. decodeAnsiC used to emit a real NUL,
+    // inserting a char between the literal's halves and CONCEALING it (live:
+    // ALLOW + real forge). All NUL spellings must decode to nothing.
+    for (const nul of ["\\x00", "\\0", "\\000", "\\u0000", "\\U00000000"]) {
+      expect(guardDecision(`echo FORGED > .claude/st$'${nul}'ate/active_task_graph.json`)).toBe("block");
+      expect(guardDecision(`printf '{}' > /tmp/claude-subagent$'${nul}'s/sess.evidence.jsonl`)).toBe("block");
+    }
+    // Precision: a NUL between non-guarded chars still collapses harmlessly.
+    expect(guardDecision("echo hi$'\\x00'there")).toBe("allow");
+  });
+
+  it("backslash-newline is line continuation — bash rejoins the token (round-18 bypass)", () => {
+    // Bash removes `\`+newline entirely, reassembling a split token. The
+    // matching view used to KEEP the newline, splitting the guarded literal
+    // (live: ALLOW + real forge/delete). Both unquoted and double-quoted.
+    expect(guardDecision("echo FORGED > active_task_grap\\\nh.json")).toBe("block");
+    expect(guardDecision('echo FORGED > "active_task_grap\\\nh.json"')).toBe("block");
+    expect(guardDecision("rm .claude/stat\\\ne/active_task_graph.json")).toBe("block");
+    expect(guardDecision(`cp /tmp/f.json /tmp/claude-subagent\\\ns/sess.evidence.jsonl`)).toBe("block");
+    // A legit multi-line command that never names guarded state stays allowed.
+    expect(guardDecision("echo hello \\\n  world")).toBe("allow");
+  });
+
+  it("brace / single-char-class fragmentation of the guarded DIR launders past the front gate (round-18 bypass)", () => {
+    // collapseQuotes reproduced quote/backslash/ANSI-C normalization but not
+    // brace expansion or globbing. Fragmenting the DIRECTORY token defeats the
+    // dir substring match (fragmenting only the filename was already caught).
+    // Live-verified delete/forge/gate-disarm:
+    expect(guardDecision("rm .claude/st{a,a}te/active_task_grap{h,h}.json")).toBe("block");
+    expect(guardDecision("cp /tmp/f.json .claude/st{a,a}te/active_task_graph.json")).toBe("block");
+    expect(guardDecision("rm .claude/st[a]te/active_task_grap[h].json")).toBe("block");
+    expect(guardDecision(`rm -rf /tmp/claude-sub{agents,agents}/x.machine`)).toBe("block");
+    // Residual `*`/`?` glob on the dir token reaches INTO a guarded dir:
+    expect(guardDecision("rm .claude/stat*/active_task_graph.json")).toBe("block");
+    expect(guardDecision("rm -rf /tmp/claude-sub*/")).toBe("block");
+    expect(guardDecision("rm /tmp/*")).toBe("block"); // would delete the subagent dir
+    // Baselines: brace/glob writes whose dir stays literal were already caught,
+    // and must stay caught.
+    expect(guardDecision("rm .claude/state/active_task_grap{h,h}.json")).toBe("block");
+    // Legit brace/glob commands that never reach a guarded dir stay allowed.
+    expect(guardDecision("ls src/{a,b}.ts")).toBe("allow");
+    expect(guardDecision("rm /tmp/other-{a,b}.txt")).toBe("allow");
+    expect(guardDecision("cat build/*.o")).toBe("allow");
+    // A read THROUGH a fragmented guarded dir is in scope but read-only → allow.
+    expect(guardDecision("cat .claude/st{a,a}te/active_task_graph.json")).toBe("allow");
+  });
+
   it("quote-collapse applies inside substitution bodies AND protected-dir redirects (round-17 pins)", () => {
     // A2: a substitution body carrying a quote-split guarded token must still
     // classify the enclosing segment as touching state.

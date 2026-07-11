@@ -59,6 +59,8 @@ describe("failure polarity is route metadata (handler-routes.ts)", () => {
     expect(failureExitCode("pre-tool-use", "validate-task-execution")).toBe(2);
     expect(failureExitCode("pre-tool-use", "validate-phase-order")).toBe(2);
     expect(failureExitCode("pre-tool-use", "validate-template-substitution")).toBe(2);
+    expect(failureExitCode("pre-tool-use", "validate-agent-model")).toBe(2);
+    expect(failureExitCode("pre-tool-use", "validate-agent-skill")).toBe(2);
     expect(failureExitCode("subagent-stop", "cleanup-subagent-flag")).toBe(1);
     expect(failureExitCode("helper", "complete-wave-gate")).toBe(1);
     expect(failureExitCode(undefined, undefined)).toBe(1);

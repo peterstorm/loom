@@ -68,7 +68,7 @@ git diff --name-only $BASE...HEAD
 
 **Get tasks needing review:**
 ```bash
-jq -r ".tasks[] | select(.wave == $WAVE) | select(.review_status == \"pending\" or .review_status == \"blocked\") | .id" .claude/state/active_task_graph.json
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | select(.review_status == "pending" or .review_status == "blocked") | .id' .claude/state/active_task_graph.json
 ```
 
 **Spawn ALL in parallel (single message, multiple Task calls):**

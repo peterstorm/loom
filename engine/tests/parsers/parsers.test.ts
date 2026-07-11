@@ -76,6 +76,22 @@ describe("parseFilesModified", () => {
     expect(result).toEqual(["/tmp/edit.ts"]);
   });
 
+  it("collects a pi `multi_edit` toolCall path (PI_FILE_TOOLS membership)", () => {
+    // multi_edit is a first-class pi file tool; dropping it from PI_FILE_TOOLS
+    // silently shrinks the wave-gate lint set. Mutation-survivable without this.
+    const content =
+      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"multi_edit","arguments":{"path":"/tmp/multi.ts"}}]}}';
+    expect(parseFilesModified(content, "pi")).toEqual(["/tmp/multi.ts"]);
+  });
+
+  it("case-folds a capitalized pi `Write` toolCall name (extension.ts hedges on casing)", () => {
+    // pi tool blocks appear in both lowercase and capitalized forms; the
+    // `.toLowerCase()` fold is load-bearing — a capitalized `Write` must match.
+    const content =
+      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"Write","arguments":{"path":"/tmp/cap.ts"}}]}}';
+    expect(parseFilesModified(content, "pi")).toEqual(["/tmp/cap.ts"]);
+  });
+
   it("ignores pi toolCalls from non-assistant roles and non-file tools", () => {
     const content = [
       '{"type":"message","message":{"role":"user","content":[{"type":"toolCall","name":"write","arguments":{"path":"/tmp/nope.ts"}}]}}',
