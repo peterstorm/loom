@@ -16,7 +16,7 @@
  */
 
 import { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "../core/tool-vocabulary";
-import { decodeAnsiC, findAnsiCClose } from "../core/shell-ansi-c";
+import { normalizeShellSpan } from "../core/shell-normalize";
 import type { Evidence, TestReportSummary } from "./types";
 
 const QUOTE_CHARS = ['"', "'", "`"] as const;
@@ -384,61 +384,16 @@ function readRedirectTarget(segment: string, start: number, out: string[]): numb
     i++;
   }
   if (segment[i] === "(") return i; // process substitution: no static target
-  let value = "";
-  let quote: QuoteChar | null = null;
-  while (i < segment.length) {
-    const c = segment[i];
-    if (quote !== null) {
-      if (quote !== "'" && c === "\\") {
-        // Backslash-newline is line continuation (bash drops both), matching
-        // the guard's collapseQuotes — keeping the newline would split the
-        // target and mint a garbage FileWrite path.
-        if (segment[i + 1] === "\n") { i += 2; continue; }
-        value += segment[i + 1] ?? "";
-        i += 2;
-        continue;
-      }
-      if (c === quote) {
-        quote = null;
-        i++;
-        continue;
-      }
-      value += c;
-      i++;
-      continue;
-    }
-    // ANSI-C `$'…'`: decode to the bytes bash writes, so a target spelled
-    // `> $'\x2e\x63…'` mints the SAME path the guard sees (twin parity).
-    if (c === "$" && segment[i + 1] === "'") {
-      const close = findAnsiCClose(segment, i + 2);
-      const bodyEnd = close === -1 ? segment.length : close;
-      value += decodeAnsiC(segment.slice(i + 2, bodyEnd));
-      i = close === -1 ? segment.length : close + 1;
-      continue;
-    }
-    // Locale-quoted `$"…"` is `"…"` with identical literal content.
-    if (c === "$" && segment[i + 1] === '"') {
-      quote = '"';
-      i += 2;
-      continue;
-    }
-    if (c === "\\") {
-      if (segment[i + 1] === "\n") { i += 2; continue; } // line continuation
-      value += segment[i + 1] ?? "";
-      i += 2;
-      continue;
-    }
-    if (isQuoteChar(c)) {
-      quote = c;
-      i++;
-      continue;
-    }
-    if (/[\s><&()]/.test(c)) break;
-    value += c;
-    i++;
-  }
+  // The word's literal value comes from the SHARED normalizer, so a target
+  // spelled with ANSI-C / a line continuation mints the SAME path the guard
+  // sees (twin parity — one place owns the quote/escape/ANSI-C rules). Backtick
+  // quotes here so `` >`cmd` `` does not split mid-substitution.
+  const { value, end } = normalizeShellSpan(segment, i, {
+    stopAtWordBoundary: true,
+    backtickQuotes: true,
+  });
   if (value !== "") out.push(value);
-  return i;
+  return end;
 }
 
 /** Collect `>`/`>>`/`&>`/`&>>`/`n>`/`n>>` targets in one segment — quote-aware. */

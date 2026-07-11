@@ -48,7 +48,7 @@
 
 import { existsSync } from "node:fs";
 import type { HookResult } from "../types";
-import { decodeAnsiC, findAnsiCClose } from "./shell-ansi-c";
+import { normalizeShellSpan } from "./shell-normalize";
 import {
   TASK_GRAPH_PATH,
   WHITELISTED_HELPERS,
@@ -110,81 +110,22 @@ function segmentInvokesHelper(segment: string): boolean {
 }
 
 /**
- * Quote-COLLAPSED view of a piece of command text, for pattern matching
- * only. Reproduces every bash word-normalization that can hide a guarded
- * literal from a raw-text scan. The invariant that makes it fail-closed: it
- * only ever removes or decodes SHELL-SYNTAX and shell-DROPPED characters —
- * quote chars (`'`/`"`), backslashes (`\`), the `$` of an ANSI-C/locale quote,
- * ANSI-C escape bodies, the newline of a `\`-continuation, and a decoded NUL —
- * NONE of which appear in any guarded pattern (paths of `[A-Za-z0-9._/-]`). So
- * any contiguous raw span that matches a guarded pattern still matches after
- * collapse: the view can REVEAL a guarded token but never CONCEAL one.
- *   - unescaped `'`/`"` quote chars are stripped, so adjacent quoted word
- *     parts concatenate as bash concatenates them
- *     (`.cl'aude'/state/active_'task_graph'.json` → the guarded literal);
- *   - an unquoted or double-quoted backslash escape drops the backslash and
- *     keeps the char (`.cl\aude` → `.claude`);
- *   - a backslash before a newline is a line continuation: BOTH are dropped,
- *     rejoining the token (`grap\⏎h` → `graph`);
- *   - `$'…'` ANSI-C bodies are decoded (`$'\x2e\x63…'` → `.c…`), and a decoded
- *     NUL is dropped as bash drops it (`.claude/st$'\x00'ate` → `.claude/state`);
- *   - `$"…"` locale-quoted bodies are treated as `"…"` (same literal content).
- * The collapsed text is NEVER substituted back into anything executed or
- * placeholdered — it exists only so stateFilePatterns()/protectedDirPatterns()
- * cannot be laundered by quoting, escaping, or ANSI-C encoding.
+ * Quote-COLLAPSED view of a piece of command text, for pattern matching only —
+ * a thin whole-segment application of the shared normalizeShellSpan (backticks
+ * stay literal here: substitutions are flattened out before this runs). It
+ * reproduces every bash word-normalization that can hide a guarded literal
+ * (quote strip, backslash/line-continuation, ANSI-C decode + NUL drop, locale
+ * `$"…"`). The invariant that makes it fail-closed: it only ever removes or
+ * decodes SHELL-SYNTAX and shell-DROPPED characters — quote chars (`'`/`"`),
+ * backslashes (`\`), the `$` of an ANSI-C/locale quote, ANSI-C escape bodies,
+ * the newline of a `\`-continuation, and a decoded NUL — NONE of which appear
+ * in any guarded pattern (paths of `[A-Za-z0-9._/-]`). So any contiguous raw
+ * span that matches a guarded pattern still matches after collapse: the view
+ * can REVEAL a guarded token but never CONCEAL one. The collapsed text is NEVER
+ * substituted back into anything executed or placeholdered — matching only.
  */
 function collapseQuotes(text: string): string {
-  let out = "";
-  let quote: '"' | "'" | null = null;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (quote !== null) {
-      if (quote !== "'" && c === "\\") {
-        // Backslash-newline is line continuation: bash removes BOTH chars,
-        // rejoining the token (`grap\⏎h` → `graph`). Keeping the newline would
-        // split a guarded literal and hide it — so drop both.
-        if (text[i + 1] === "\n") { i++; continue; }
-        // Double-quoted escape: drop the backslash, keep the char.
-        out += text[i + 1] ?? "";
-        i++;
-        continue;
-      }
-      if (c === quote) {
-        quote = null;
-        continue;
-      }
-      out += c;
-      continue;
-    }
-    if (c === "$" && text[i + 1] === "'") {
-      const end = findAnsiCClose(text, i + 2);
-      const bodyEnd = end === -1 ? text.length : end;
-      out += decodeAnsiC(text.slice(i + 2, bodyEnd));
-      i = end === -1 ? text.length : end;
-      continue;
-    }
-    if (c === "$" && text[i + 1] === '"') {
-      // $"…" is "…" with locale translation — identical literal content.
-      quote = '"';
-      i++; // consume the `$`; the `"` becomes the active quote next iteration
-      continue;
-    }
-    if (c === "\\") {
-      // Backslash-newline is line continuation: bash removes BOTH chars (see
-      // the double-quoted branch above).
-      if (text[i + 1] === "\n") { i++; continue; }
-      // Unquoted escape: bash removes the backslash (`\a` → `a`).
-      out += text[i + 1] ?? "";
-      i++;
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      quote = c;
-      continue;
-    }
-    out += c;
-  }
-  return out;
+  return normalizeShellSpan(text, 0, { stopAtWordBoundary: false }).value;
 }
 
 /** Product of brace-group sizes above which a braced line is deemed
