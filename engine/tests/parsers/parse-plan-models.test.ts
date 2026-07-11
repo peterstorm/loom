@@ -81,7 +81,10 @@ describe("parsePlanModels", () => {
       { id: "LC-1", title: "Order lifecycle", machineFile: "src/domain/order/order-machine.ts" },
       { id: "LC-2", title: "Refund lifecycle", machineFile: "src/domain/refund/refund-machine.ts" },
     ]);
-    expect(models.pipeline).toEqual({ dagFile: ".claude/plans/2026-07-02-orders.dag.authored.json" });
+    expect(models.pipeline).toEqual({
+      dagFile: ".claude/plans/2026-07-02-orders.dag.authored.json",
+      declaredNodes: ["fetch-order"],
+    });
     expect(models.invariants).toEqual([
       { id: "INV-1", title: "No state string literals outside the machine", tier: "checkable", ruleFile: ".claude/linter/rules/inv-1-no-raw-order-states.json" },
       { id: "INV-2", title: "Refunds complete within 30 days", tier: "advisory", ruleFile: null },
@@ -97,7 +100,26 @@ describe("parsePlanModels", () => {
 
   it("represents a Pipeline section without an AuthoredDag line as dagFile null", () => {
     const models = parsePlanModels("## Pipeline\n\nSome prose but no dag.\n");
-    expect(models.pipeline).toEqual({ dagFile: null });
+    expect(models.pipeline).toEqual({ dagFile: null, declaredNodes: [] });
+  });
+
+  it("extracts node names from the Pipeline table's first column (header/separator skipped)", () => {
+    const plan = [
+      "## Pipeline",
+      "",
+      "**AuthoredDag:** `x.dag.authored.json`",
+      "",
+      "| Node | Kind | Purpose |",
+      "|---|---|---|",
+      "| fetch-order | fetch | load order |",
+      "| `enrich` | llm | classify risk |",
+      "| review | human-review | approve |",
+    ].join("\n");
+    const models = parsePlanModels(plan);
+    expect(models.pipeline).toEqual({
+      dagFile: "x.dag.authored.json",
+      declaredNodes: ["fetch-order", "enrich", "review"],
+    });
   });
 
   it("represents an unrecognized tier as null", () => {

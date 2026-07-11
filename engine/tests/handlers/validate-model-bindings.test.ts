@@ -118,17 +118,17 @@ describe("validateModelBindings", () => {
 
   describe("pipeline", () => {
     it("rejects a Pipeline section with no AuthoredDag path", () => {
-      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: null } };
+      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: null, declaredNodes: [] } };
       expectError(validateModelBindings(models, [], NO_FILES), "AuthoredDag");
     });
 
     it("rejects a missing AuthoredDag file", () => {
-      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "plans/x.dag.authored.json" } };
+      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "plans/x.dag.authored.json", declaredNodes: [] } };
       expectError(validateModelBindings(models, [], NO_FILES), "not found or unreadable");
     });
 
     it("rejects invalid JSON and preserves the parse error detail", () => {
-      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "x.json" } };
+      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "x.json", declaredNodes: [] } };
       const result = validateModelBindings(models, [], depsWith({ "x.json": "{nope" }));
       expectError(result, "not valid JSON:");
       // the message carries the underlying SyntaxError text, not just a label
@@ -136,14 +136,28 @@ describe("validateModelBindings", () => {
     });
 
     it("rejects an AuthoredDag without a nodes array", () => {
-      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "x.json" } };
+      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "x.json", declaredNodes: [] } };
       expectError(validateModelBindings(models, [], depsWith({ "x.json": JSON.stringify({ name: "p" }) })), "'nodes' array");
     });
 
     it("accepts a structurally sound AuthoredDag (deep validation is fugue's)", () => {
-      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "x.json" } };
+      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "x.json", declaredNodes: [] } };
       const result = validateModelBindings(models, [], depsWith({ "x.json": JSON.stringify({ name: "p", nodes: [{ id: "a" }] }) }));
       expect(result.ok).toBe(true);
+    });
+
+    it("accepts when every plan-declared node appears in the sidecar", () => {
+      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "x.json", declaredNodes: ["fetch-order", "enrich"] } };
+      const dag = JSON.stringify({ nodes: [{ id: "fetch-order" }, { id: "enrich", kind: "llm" }] });
+      expect(validateModelBindings(models, [], depsWith({ "x.json": dag })).ok).toBe(true);
+    });
+
+    it("rejects when a plan-declared node is absent from the sidecar (drift)", () => {
+      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "x.json", declaredNodes: ["fetch-order", "review"] } };
+      const dag = JSON.stringify({ nodes: [{ id: "fetch-order" }] }); // 'review' dropped
+      const result = validateModelBindings(models, [], depsWith({ "x.json": dag }));
+      expectError(result, "have drifted");
+      expect(errorsOf(result).some((e) => e.includes("review"))).toBe(true);
     });
   });
 
@@ -193,7 +207,7 @@ describe("validateModelBindings", () => {
   it("accumulates errors across all model kinds", () => {
     const models: PlanModels = {
       lifecycles: [{ id: "LC-1", title: "A", machineFile: null }],
-      pipeline: { dagFile: null },
+      pipeline: { dagFile: null, declaredNodes: [] },
       invariants: [{ id: "INV-1", title: "B", tier: "checkable", ruleFile: null }],
       strays: [{ kind: "near-miss-heading", heading: "## Lifecycles:" }],
     };

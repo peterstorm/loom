@@ -97,6 +97,10 @@ export interface PlanLifecycle {
 export interface PlanPipeline {
   /** Path from the `**AuthoredDag:**` line; null when the line is missing */
   readonly dagFile: string | null;
+  /** Node names from the first column of the Pipeline section's node table
+   *  (header/separator rows skipped); empty when the section has no table.
+   *  Cross-checked against the sidecar to catch plan↔sidecar drift. */
+  readonly declaredNodes: readonly string[];
 }
 
 export interface PlanInvariant {
@@ -205,6 +209,25 @@ function fieldValue(block: string, label: string): string | null {
   return value.length > 0 ? value : null;
 }
 
+/** Node names from the first column of a `| Node | Kind | … |` markdown table
+ *  in a section body — header (`Node`) and separator (`---`) rows skipped,
+ *  backticks stripped. Empty when the body has no table. Non-table lines (the
+ *  `**AuthoredDag:**` field, prose) are ignored. */
+function pipelineNodes(body: string): string[] {
+  const nodes: string[] = [];
+  for (const raw of body.split("\n")) {
+    const line = raw.trim();
+    if (!line.startsWith("|")) continue;
+    const cells = line.split("|").slice(1, -1).map((c) => c.trim());
+    const first = cells[0] ?? "";
+    if (cells.every((c) => /^:?-{2,}:?$/.test(c))) continue; // separator row
+    if (first.toLowerCase() === "node") continue; // header row
+    const name = first.replace(/^`(.*)`$/, "$1").trim();
+    if (name.length > 0) nodes.push(name);
+  }
+  return nodes;
+}
+
 function parseTier(raw: string | null): InvariantTier | null {
   if (raw === null) return null;
   const lowered = raw.toLowerCase();
@@ -307,7 +330,10 @@ export function parsePlanModels(markdown: string): PlanModels {
   const pipelineSection = section(text, "Pipeline");
   const pipeline: PlanPipeline | null = pipelineSection === null
     ? null
-    : { dagFile: fieldValue(pipelineSection.body, "AuthoredDag") };
+    : {
+        dagFile: fieldValue(pipelineSection.body, "AuthoredDag"),
+        declaredNodes: pipelineNodes(pipelineSection.body),
+      };
 
   const invariantsSection = section(text, "Invariants");
   const invariants: PlanInvariant[] = invariantsSection === null

@@ -157,10 +157,14 @@ The plan declares invariants in an `## Invariants` section, each tiered:
 
 1. **`validate-task-graph`** (Phase 4a) cross-checks bindings fail-closed:
    every `LC-N` machine file appears in some task's `file_list`; the
-   `AuthoredDag` sidecar exists and is structurally sound; every checkable
-   `INV-N` rule file exists and is rule-shaped; near-miss declarations (typo'd
-   headings/labels) are errors; an unreadable `plan_file` is an error, never a
-   skipped check.
+   `AuthoredDag` sidecar exists, is structurally sound, AND every node named in
+   the plan's `## Pipeline` table appears in the sidecar (a plan node absent
+   from the sidecar is plan↔sidecar drift — the gate blocks it here rather than
+   letting it reach fugue runtime; checked as a substring of the raw sidecar so
+   loom gains no new knowledge of fugue's DAG shape beyond "has a nodes array");
+   every checkable `INV-N` rule file exists and is rule-shaped; near-miss
+   declarations (typo'd headings/labels) are errors; an unreadable `plan_file`
+   is an error, never a skipped check.
 2. **`populate-task-graph`** — the only whitelisted helper that populates
    tasks into `active_task_graph.json` — runs the same binding checks before
    any state write, resolving the plan path from evidence-derived state
@@ -189,9 +193,19 @@ The plan declares invariants in an `## Invariants` section, each tiered:
   deterministic core. Mandating auto-generated rules from state lists is
   future work.
 - **Generated-code hand-edit protection inside loom waves is prompt-level.**
-  Fugue's gauntlet re-verifies whenever fugue runs, but loom does not guard
-  the generated file paths at PostToolUse. If this bites, the codegen task can
-  emit a project lint rule marking the generated paths do-not-edit.
+  Fugue's gauntlet re-verifies whenever fugue runs, but loom does not guard the
+  generated file paths during waves. This is NOT expressible with today's
+  mechanisms: `RegexRule` targets file *extensions*, not paths (there is no
+  include-path selector, only suffix `excludePatterns`), so a rule cannot single
+  out `src/generated/…`; `PostToolUse lint-file` reports after the edit (it does
+  not block); and `block-direct-edits` deliberately allows subagent edits (impl
+  agents must write). Closing it needs a genuinely new mechanism, in order of
+  preference: (a) a generated-content hash banner the codegen emits and a
+  programmatic rule recomputes — real do-not-edit detection, but the banner is a
+  small *fugue*-side cooperation (crosses the bridge); (b) path-targeted lint
+  rules (`includePaths`) plus a subagent path-edit gate — loom-side, but new
+  machinery, not a leak-fix. Until one lands, generated-code protection is
+  prompt guidance re-verified by fugue's gauntlet on the next fugue run.
 - **Wave-gate artifact verification is existence, not semantics.** The machine
   file must exist; that it exports a real reducer is verified by its property
   tests and the trusted test-evidence machinery, not by the gate. An empty

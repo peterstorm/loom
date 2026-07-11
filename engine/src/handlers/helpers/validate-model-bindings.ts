@@ -101,6 +101,19 @@ export function validateModelBindings(
           errors.push(`Pipeline: AuthoredDag file '${dagFile}' is not valid JSON: ${parseError}`);
         } else if (typeof dag !== "object" || dag === null || Array.isArray(dag) || !Array.isArray((dag as Record<string, unknown>).nodes)) {
           errors.push(`Pipeline: AuthoredDag file '${dagFile}' must be a JSON object with a 'nodes' array (deep validation is fugue's job — 'fugue new --from' gates codegen)`);
+        } else {
+          // Drift guard: every node the plan's Pipeline table names must appear
+          // in the sidecar. Checked as a substring of the raw sidecar text, not
+          // against a schema field, so loom gains NO new knowledge of fugue's
+          // AuthoredDag shape beyond the existing 'has a nodes array'. A plan
+          // node absent from the sidecar is the plan↔sidecar drift that the
+          // unguarded-intermediate leak allowed through to fugue runtime.
+          const missing = models.pipeline.declaredNodes.filter((n) => !content.includes(n));
+          if (missing.length > 0) {
+            errors.push(
+              `Pipeline: node(s) named in the plan's table are absent from AuthoredDag file '${dagFile}': ${missing.join(", ")} — plan and sidecar have drifted; re-author the sidecar or fix the table`,
+            );
+          }
         }
       }
     }
