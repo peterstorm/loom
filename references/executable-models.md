@@ -192,20 +192,19 @@ The plan declares invariants in an `## Invariants` section, each tiered:
   otherwise it is prompt guidance verified by wave-gate reviewers, not by the
   deterministic core. Mandating auto-generated rules from state lists is
   future work.
-- **Generated-code hand-edit protection inside loom waves is prompt-level.**
-  Fugue's gauntlet re-verifies whenever fugue runs, but loom does not guard the
-  generated file paths during waves. This is NOT expressible with today's
-  mechanisms: `RegexRule` targets file *extensions*, not paths (there is no
-  include-path selector, only suffix `excludePatterns`), so a rule cannot single
-  out `src/generated/…`; `PostToolUse lint-file` reports after the edit (it does
-  not block); and `block-direct-edits` deliberately allows subagent edits (impl
-  agents must write). Closing it needs a genuinely new mechanism, in order of
-  preference: (a) a generated-content hash banner the codegen emits and a
-  programmatic rule recomputes — real do-not-edit detection, but the banner is a
-  small *fugue*-side cooperation (crosses the bridge); (b) path-targeted lint
-  rules (`includePaths`) plus a subagent path-edit gate — loom-side, but new
-  machinery, not a leak-fix. Until one lands, generated-code protection is
-  prompt guidance re-verified by fugue's gauntlet on the next fugue run.
+- **Generated-code hand-edit protection is tamper-EVIDENT (integrity hash).**
+  `fugue new --from` stamps each generated `dag.ts` with a two-line banner whose
+  `@fugue-integrity sha256:<hex>` covers the generated body. Loom ships the
+  `fugue-generated-integrity` programmatic lint rule (in the "full"/wave-gate
+  tier and on PostToolUse `lint-file`): it recomputes the body hash and blocks on
+  a mismatch, so a hand-edit during a loom wave is caught at the gate — the same
+  detection-at-gate mechanism as every other lint rule, needing no path-based
+  edit gate (which loom's model does not have). The coupling is one marker-string
+  convention (`@fugue-integrity sha256:`): fugue stamps it, loom verifies it,
+  neither imports the other. Residual (honest): removing the banner outright
+  disables the check for that file — but `--from` regeneration restores it (a
+  fixed point) and fugue's gauntlet re-verifies on the next fugue run; the threat
+  closed is an ACCIDENTAL body edit, not a deliberate banner-strip.
 - **Wave-gate artifact verification is existence, not semantics.** The machine
   file must exist; that it exports a real reducer is verified by its property
   tests and the trusted test-evidence machinery, not by the gate. An empty

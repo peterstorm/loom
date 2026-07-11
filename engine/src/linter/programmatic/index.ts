@@ -11,6 +11,7 @@ import type { ProgrammaticRule } from "../types";
 import { handler as crossBoundaryHandler, DEFAULT_BOUNDARIES } from "./no-cross-boundary-imports";
 import { handler as ioInPureHandler, DEFAULT_PURE_MODULES } from "./no-io-in-pure-modules";
 import { handler as maxFunctionLinesHandler, DEFAULT_MAX_LINES, DEFAULT_EXCLUDE_PATTERNS } from "./max-function-lines";
+import { handler as fugueGeneratedIntegrityHandler } from "./fugue-generated-integrity";
 import { type ProgrammaticConfig, EMPTY_CONFIG } from "./config";
 
 /**
@@ -51,6 +52,16 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
       extensions: [".ts", ".tsx", ".java"],
       handler: (content, filePath) => maxFunctionLinesHandler(content, filePath, maxLines, excludePatterns),
       fixHint: "Decompose into smaller functions with single responsibilities",
+      enabled: true,
+      source: "default",
+    },
+    {
+      kind: "programmatic",
+      name: "fugue-generated-integrity",
+      description: "Verify `fugue new --from` generated files against their @fugue-integrity hash — hand-edits are tamper-evident",
+      extensions: [".ts"],
+      handler: (content, filePath) => fugueGeneratedIntegrityHandler(content, filePath),
+      fixHint: "Do not hand-edit generated code — change the AuthoredDag sidecar and run `fugue new --from` to regenerate",
       enabled: true,
       source: "default",
     },
