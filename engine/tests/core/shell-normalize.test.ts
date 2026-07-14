@@ -89,6 +89,22 @@ describe("normalizeShellSpan — bash word-normalization rules", () => {
     expect(whole("${!x}z")).toBe("z");
   });
 
+  it("colonlessDefaultsEmpty collapses `${x-w}`/`${x=w}` to EMPTY but leaves colon forms revealing their word (round-21)", () => {
+    const empty = (t: string) =>
+      normalizeShellSpan(t, 0, { mode: "matching-view", colonlessDefaultsEmpty: true }).value;
+    // Colonless forms have a set-but-empty output the default view can't see:
+    // the word vanishes and the surrounding literals rejoin.
+    expect(empty(".claude/stat${x-X}e")).toBe(".claude/state");
+    expect(empty(".claude/stat${x=X}e")).toBe(".claude/state");
+    // Colon forms substitute on unset AND null — `w` is their ONLY output, so
+    // this base still reveals the word (never expands to empty).
+    expect(empty(".claude/stat${x:-X}e")).toBe(".claude/statXe");
+    expect(empty(".claude/stat${x:=X}e")).toBe(".claude/statXe");
+    // The flag is additive: without it, colonless forms reveal their word like
+    // the default matching view (keeping guard and evidence twin point-wise equal).
+    expect(whole(".claude/stat${x-X}e")).toBe(".claude/statXe");
+  });
+
   it("redirect-word mode stops at unquoted whitespace/redirect metacharacters", () => {
     expect(normalizeShellSpan("file.txt rest", 0, { mode: "redirect-word" }).value).toBe("file.txt");
     expect(normalizeShellSpan("file.txt>x", 0, { mode: "redirect-word" }).value).toBe("file.txt");

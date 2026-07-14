@@ -132,6 +132,16 @@ function collapseQuotes(text: string): string {
   return normalizeShellSpan(text, 0, { mode: "matching-view" }).value;
 }
 
+/** Like collapseQuotes but a colonless default form (`${x-w}`/`${x=w}`)
+ *  collapses to EMPTY — the value bash yields when the var is set-but-empty, the
+ *  SECOND output these spans have (the colon forms `${x:-w}` cannot). This is an
+ *  ADDITIONAL front-gate base: `.claude/stat${x-X}e` conceals `.claude/state` in
+ *  the word-reveal view but reassembles it here. Reveal-monotonic — emptying a
+ *  span only joins the literal fragments around it. */
+function collapseQuotesColonlessEmpty(text: string): string {
+  return normalizeShellSpan(text, 0, { mode: "matching-view", colonlessDefaultsEmpty: true }).value;
+}
+
 /** Product of brace-group sizes above which a braced line is deemed
  *  unparseable (fail closed). 8 two-option groups = 256 views. */
 const MAX_BRACE_VIEWS = 256;
@@ -262,6 +272,75 @@ function tokenGlobHitsGuardedDir(token: string, dirs: readonly (readonly string[
   );
 }
 
+interface SubstitutionScan {
+  /** Substitution bodies, outermost-first (one nesting level). */
+  readonly bodies: readonly string[];
+  /** Text with each substitution replaced by `onBody(body)`. When `unclosed`,
+   *  this holds everything BEFORE the offending opener — the opener onward is
+   *  dropped (blank-to-end), which is maximal reveal for the matching view. */
+  readonly rebuilt: string;
+  /** An opener (`$(`, `<(`/`>(`, backtick) had no matching closer. */
+  readonly unclosed: boolean;
+}
+
+/**
+ * The ONE quote-aware traversal of top-level command/process substitutions,
+ * shared by `blankSubstitutions` (matching view) and `flattenSubstitutions`
+ * (recursive judging) so the two can never diverge on quoting or opener set —
+ * the "twin scanners diverged" class that recurred rounds 15–18. Quote state is
+ * tracked as `'"' | "'" | null`, NOT a lone single-quote flag: a `'` inside
+ * double quotes (`"it's"`) is a literal apostrophe that must NOT open a
+ * single-quoted region (the round-20 regression that disabled the whole
+ * substitution defense after any double-quoted apostrophe). Command
+ * substitution `$(…)` and backticks stay LIVE inside double quotes (bash still
+ * performs them); process substitution `<(…)`/`>(…)` is a substitution only when
+ * UNQUOTED (bash does not perform it inside double quotes), so it is treated
+ * literally there. `onBody` maps each body to its replacement; the caller
+ * decides the unclosed policy from `scan.unclosed`.
+ */
+function scanSubstitutions(text: string, onBody: (body: string) => string): SubstitutionScan {
+  const bodies: string[] = [];
+  let rebuilt = "";
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote === "'") {
+      rebuilt += c;
+      if (c === "'") quote = null; // inside '…': everything literal until the close
+      continue;
+    }
+    if (c === "\\") { rebuilt += c + (text[i + 1] ?? ""); i++; continue; }
+    // A `'` opens a single-quoted region ONLY when unquoted; inside `"…"` it is a
+    // literal apostrophe (`"it's"`) and MUST NOT flip to single-quote mode — doing
+    // so disabled every substitution after it (the round-20 regression). It falls
+    // through to be appended literally while `$(…)`/backticks below stay live.
+    if (c === "'" && quote === null) { quote = "'"; rebuilt += c; continue; }
+    if (c === '"') { quote = quote === '"' ? null : '"'; rebuilt += c; continue; }
+    const isCmdSub = c === "$" && text[i + 1] === "(";
+    const isProcSub = quote === null && (c === "<" || c === ">") && text[i + 1] === "(";
+    if (isCmdSub || isProcSub) {
+      const close = findClosingParen(text, i + 2);
+      if (close === -1) return { bodies, rebuilt, unclosed: true };
+      const body = text.slice(i + 2, close);
+      bodies.push(body);
+      rebuilt += onBody(body);
+      i = close;
+      continue;
+    }
+    if (c === "`") {
+      const close = findClosingBacktick(text, i + 1);
+      if (close === -1) return { bodies, rebuilt, unclosed: true };
+      const body = text.slice(i + 1, close);
+      bodies.push(body);
+      rebuilt += onBody(body);
+      i = close;
+      continue;
+    }
+    rebuilt += c;
+  }
+  return { bodies, rebuilt, unclosed: false };
+}
+
 /**
  * A matching view where command/process substitutions and backticks are
  * collapsed to EMPTY — one output a substitution can produce (`$(:)` → "",
@@ -272,33 +351,13 @@ function tokenGlobHitsGuardedDir(token: string, dirs: readonly (readonly string[
  * still surfaces a guarded token sitting INSIDE a body, so flattenSubstitutions
  * + recursive judging still engages for a write hidden in a substitution.
  * Reveal-monotonic: emptying a span only JOINS the literal fragments around it,
- * exactly as an empty-output substitution does. Single quotes suppress
- * substitution (the span stays literal); an unclosed opener blanks to end
- * (maximal reveal — decide() fails such unbalanced lines closed anyway).
+ * exactly as an empty-output substitution does. Quote-awareness is delegated to
+ * scanSubstitutions (single quotes suppress substitution; a `'` inside double
+ * quotes stays literal); an unclosed opener blanks to end (maximal reveal —
+ * decide() fails such unbalanced lines closed anyway).
  */
 function blankSubstitutions(text: string): string {
-  let out = "";
-  let singleQuote = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === "\\" && !singleQuote) { out += c + (text[i + 1] ?? ""); i++; continue; }
-    if (c === "'") { singleQuote = !singleQuote; out += c; continue; }
-    if (singleQuote) { out += c; continue; }
-    const isCmdSub = c === "$" && text[i + 1] === "(";
-    const isProcSub = (c === "<" || c === ">") && text[i + 1] === "(";
-    if (isCmdSub || isProcSub) {
-      const close = findClosingParen(text, i + 2);
-      i = close === -1 ? text.length : close;
-      continue;
-    }
-    if (c === "`") {
-      const close = findClosingBacktick(text, i + 1);
-      i = close === -1 ? text.length : close;
-      continue;
-    }
-    out += c;
-  }
-  return out;
+  return scanSubstitutions(text, () => "").rebuilt;
 }
 
 /**
@@ -318,9 +377,18 @@ function referencesPattern(
   dirs: () => readonly (readonly string[])[],
 ): boolean {
   const exemplars = dirs();
-  const literalBase = collapseQuotes(text);
-  const blankedBase = collapseQuotes(blankSubstitutions(text));
-  const bases = blankedBase === literalBase ? [literalBase] : [literalBase, blankedBase];
+  const blanked = blankSubstitutions(text);
+  // Four reveal-monotonic bases, deduped: substitutions LITERAL vs EMPTY, each
+  // with colonless default words revealed vs collapsed-empty. The common case
+  // (no substitutions, no colonless defaults) collapses to a single base.
+  const bases = [
+    ...new Set([
+      collapseQuotes(text),
+      collapseQuotes(blanked),
+      collapseQuotesColonlessEmpty(text),
+      collapseQuotesColonlessEmpty(blanked),
+    ]),
+  ];
   for (const base of bases) {
     const views = expandBraces(base);
     if (views === null) return true;
@@ -433,55 +501,17 @@ function placeholderFor(body: string): string {
 /**
  * Extract `$(…)` / `<(…)` / `>(…)` / backtick substitution bodies (one
  * nesting level — recursion re-enters for nested bodies) and replace each
- * with a placeholder. Single quotes suppress substitution (sh semantics);
- * double quotes do not for `$(…)`/backticks, and treating a double-quoted
- * `<(…)` as live too only errs fail-closed. Returns null when an opener has
- * no closer — unbalanced substitution syntax on a guarded line is judged
- * unparseable, and unparseable fails closed at the caller.
+ * with a placeholder. Quote-awareness is delegated to scanSubstitutions: single
+ * quotes suppress substitution (sh semantics), a `'` inside double quotes stays
+ * literal, and `$(…)`/backticks stay live in double quotes while `<(…)`/`>(…)`
+ * do not. Returns null when an opener has no closer — unbalanced substitution
+ * syntax on a guarded line is judged unparseable, and unparseable fails closed
+ * at the caller.
  */
 function flattenSubstitutions(command: string): FlattenedCommand | null {
-  const bodies: string[] = [];
-  let flattened = "";
-  let singleQuote = false;
-  for (let i = 0; i < command.length; i++) {
-    const c = command[i];
-    if (c === "\\" && !singleQuote) {
-      flattened += c + (command[i + 1] ?? "");
-      i++;
-      continue;
-    }
-    if (c === "'") {
-      singleQuote = !singleQuote;
-      flattened += c;
-      continue;
-    }
-    if (singleQuote) {
-      flattened += c;
-      continue;
-    }
-    const isCmdSub = c === "$" && command[i + 1] === "(";
-    const isProcSub = (c === "<" || c === ">") && command[i + 1] === "(";
-    if (isCmdSub || isProcSub) {
-      const close = findClosingParen(command, i + 2);
-      if (close === -1) return null;
-      const body = command.slice(i + 2, close);
-      bodies.push(body);
-      flattened += placeholderFor(body);
-      i = close;
-      continue;
-    }
-    if (c === "`") {
-      const close = findClosingBacktick(command, i + 1);
-      if (close === -1) return null;
-      const body = command.slice(i + 1, close);
-      bodies.push(body);
-      flattened += placeholderFor(body);
-      i = close;
-      continue;
-    }
-    flattened += c;
-  }
-  return { bodies, flattened };
+  const scan = scanSubstitutions(command, placeholderFor);
+  if (scan.unclosed) return null;
+  return { bodies: scan.bodies, flattened: scan.rebuilt };
 }
 
 /** Index of the `)` closing a substitution opened before `start` — paren

@@ -23,7 +23,13 @@
  * would CONCEAL it (reveal-less — the fail-open direction that ALLOWed a real
  * state deletion before round 20), so the word is recursively normalized and
  * revealed. Both consumers stay point-wise identical (the word is revealed in
- * matching-view for guard and evidence twin alike). `$'…'`, `$"…"`, and `$(…)`
+ * matching-view for guard and evidence twin alike). The COLONLESS forms
+ * (`${x-w}`/`${x=w}`) have a SECOND bash output the colon forms don't: when the
+ * var is set-but-empty they expand to EMPTY, and `.claude/stat${x-X}e` then
+ * reassembles to `.claude/state` — a guarded literal the word-reveal view
+ * conceals (the round-20 regression). The guard tests BOTH via the
+ * colonlessDefaultsEmpty base in referencesPattern; colon forms stay reveal-only
+ * (they can never expand to empty). `$'…'`, `$"…"`, and `$(…)`
  * are NOT parameter expansions and are handled separately (`$(…)` stays literal
  * here — the guard models command-substitution-to-empty in its own front gate,
  * NOT here; both callers run on UNFLATTENED text).
@@ -62,6 +68,12 @@ const SPECIAL_PARAM = /[0-9@*?$!#-]/;
  *     guarded literal (`${x:-.claude/state/…}`), so deleting the whole span
  *     would CONCEAL it — reveal-less, the fail-open direction. The caller
  *     recursively normalizes `[wordStart, end)` and reveals its value instead.
+ *     `colonless` distinguishes `${x-w}`/`${x=w}` from `${x:-w}`/`${x:=w}`:
+ *     the colon forms substitute `w` on unset AND null, so `w` is their ONLY
+ *     value; the colonless forms substitute `w` only on unset and expand to
+ *     EMPTY when the var is set-but-empty. So a colonless span has two bash
+ *     outputs (`w` and empty) and the guard must test both — see
+ *     referencesPattern's colonless-empty base.
  *
  * `end` is the index one PAST the span's last char (the char after `}` / after
  * the name). `${…}` consumes to its brace-depth-matched close so nested
@@ -71,11 +83,18 @@ const SPECIAL_PARAM = /[0-9@*?$!#-]/;
 type ParamExpansion =
   | { readonly kind: "none" }
   | { readonly kind: "empty"; readonly end: number }
-  | { readonly kind: "word"; readonly wordStart: number; readonly end: number };
+  | {
+      readonly kind: "word";
+      readonly colonless: boolean;
+      readonly wordStart: number;
+      readonly end: number;
+    };
 
 /** Word-emitting default/assign-default operators keyed by their form inside a
  *  `${name<op>word}` body, longest-first so `:-`/`:=` win over a bare `:`. On
- *  UNSET each yields the literal `word`; every other operator yields empty. */
+ *  UNSET each yields the literal `word`; every other operator yields empty. The
+ *  colon forms also yield `word` on NULL; the colonless forms yield EMPTY on
+ *  null (see ParamExpansion `colonless`). */
 const DEFAULT_WORD_OPS = [":-", ":=", "-", "="] as const;
 
 function classifyBraceBody(text: string, start: number, close: number): ParamExpansion {
@@ -91,7 +110,12 @@ function classifyBraceBody(text: string, start: number, close: number): ParamExp
   const nameLen = nameMatch ? nameMatch[0].length : 0;
   for (const op of DEFAULT_WORD_OPS) {
     if (body.startsWith(op, nameLen)) {
-      return { kind: "word", wordStart: bodyStart + nameLen + op.length, end };
+      return {
+        kind: "word",
+        colonless: op === "-" || op === "=",
+        wordStart: bodyStart + nameLen + op.length,
+        end,
+      };
     }
   }
   return { kind: "empty", end }; // `${name}`, `:+`/`+`, `:?`/`?`, transforms, substring
@@ -145,9 +169,16 @@ export interface NormalizedSpan {
  *
  * `stopAtWordBoundary` and `backtickQuotes` are derived from `mode` internally
  * (see `resolveMode`), so the two flags can never disagree.
+ *
+ * `colonlessDefaultsEmpty` (matching-view only) makes a colonless default form
+ * (`${x-w}`/`${x=w}`) expand to EMPTY instead of revealing `w` — the guard's
+ * SECOND bash output for these spans (the var is set-but-empty). The default
+ * (flag absent/false) reveals `w`, keeping the guard and the evidence twin
+ * point-wise identical for the primary view; the empty view is an ADDITIONAL
+ * guard base (referencesPattern), not a redirect-word behavior.
  */
 export type NormalizeOptions =
-  | { readonly mode: "matching-view" }
+  | { readonly mode: "matching-view"; readonly colonlessDefaultsEmpty?: boolean }
   | { readonly mode: "redirect-word" };
 
 /** Derive the two behavioral flags from the mode — the single place the mode↔
@@ -185,6 +216,7 @@ export function normalizeShellSpan(
   opts: NormalizeOptions,
 ): NormalizedSpan {
   const { stopAtWordBoundary, backtickQuotes } = resolveMode(opts);
+  const colonlessEmpty = opts.mode === "matching-view" && opts.colonlessDefaultsEmpty === true;
   let value = "";
   let quote: '"' | "'" | "`" | null = null;
   let i = start;
@@ -204,7 +236,10 @@ export function normalizeShellSpan(
       // reached when quote !== "'").
       if (c === "$" && quote === '"') {
         const pe = paramExpansionEnd(text, i);
-        if (pe.kind === "word") { value += revealDefaultWord(text, pe.wordStart, pe.end); i = pe.end - 1; continue; }
+        if (pe.kind === "word") {
+          if (!(colonlessEmpty && pe.colonless)) value += revealDefaultWord(text, pe.wordStart, pe.end);
+          i = pe.end - 1; continue;
+        }
         if (pe.kind === "empty") { i = pe.end - 1; continue; }
       }
       value += c;
@@ -224,8 +259,12 @@ export function normalizeShellSpan(
     }
     if (c === "$") {
       const pe = paramExpansionEnd(text, i);
-      // `$name`/`${…}`: delete to unset→empty; default forms (`${x:-w}`) reveal `w`.
-      if (pe.kind === "word") { value += revealDefaultWord(text, pe.wordStart, pe.end); i = pe.end - 1; continue; }
+      // `$name`/`${…}`: delete to unset→empty; default forms (`${x:-w}`) reveal `w`,
+      // except colonless forms under colonlessDefaultsEmpty (their set-empty output).
+      if (pe.kind === "word") {
+        if (!(colonlessEmpty && pe.colonless)) value += revealDefaultWord(text, pe.wordStart, pe.end);
+        i = pe.end - 1; continue;
+      }
       if (pe.kind === "empty") { i = pe.end - 1; continue; }
       // else `none`: literal `$` (`$(`, `$.`, lone `$`) — fall through
     }

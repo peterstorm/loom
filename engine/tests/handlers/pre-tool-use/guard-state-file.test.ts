@@ -582,6 +582,43 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("echo '.claude/stat$(:)e' > /tmp/notes.txt")).toBe("allow");
   });
 
+  it("colonless default `${x-w}`/`${x=w}` ALSO expands to EMPTY on set-but-empty — a decoy word conceals a guarded literal (round-21 bypass)", () => {
+    // Round-20 revealed the default WORD, but `${x-w}`/`${x=w}` (no colon) have a
+    // SECOND bash output the colon forms lack: when x is SET-BUT-EMPTY they expand
+    // to EMPTY, so `.claude/stat${x-X}e` — whose word-reveal view is the harmless
+    // `.claude/statXe` — reassembles to `.claude/state`. The word-reveal base
+    // conceals it; referencesPattern now ALSO tests a colonless-empty base. Decoy
+    // word (`X`) so ONLY the empty view completes the guarded literal.
+    expect(guardDecision("rm .claude/stat${x-X}e/active_task_grap${x-X}h.json")).toBe("block");
+    expect(guardDecision("rm .claude/stat${x=X}e/active_task_grap${x=X}h.json")).toBe("block");
+    // Redirect-target and ledger-forge variants through the empty view:
+    expect(guardDecision("echo FORGED > .claude/stat${x-X}e/active_task_graph.json")).toBe("block");
+    expect(guardDecision("printf '{}' > /tmp/claude-subagent${x-X}s/sess.evidence.jsonl")).toBe("block");
+    // Precision: the COLON forms `${x:-w}`/`${x:=w}` substitute on unset AND null,
+    // so `w` is their ONLY output — a decoy word can never expand to empty and the
+    // guarded literal never reassembles. Stays allowed.
+    expect(guardDecision("rm .claude/stat${x:-X}e/active_task_grap${x:-X}h.json")).toBe("allow");
+    expect(guardDecision("rm .claude/stat${x:=X}e/active_task_grap${x:=X}h.json")).toBe("allow");
+  });
+
+  it("a `'` inside `\"…\"` is a literal apostrophe — it must NOT disable the substitution defense that follows (round-20 regression, round-21 fix)", () => {
+    // The unified scanner tracked quote state as `'\"' | \"'\" | null`. A `'` inside
+    // double quotes (`\"it's\"`) is a literal apostrophe; flipping into single-quote
+    // mode on it made every later `$(…)`/backtick look single-quoted (suppressed),
+    // so the blanked view stopped reassembling and a fragmented guarded write after
+    // any double-quoted apostrophe waved through. Both substitution kinds:
+    expect(guardDecision(`echo "it's fine" && rm .claude/stat$(:)e/active_task_graph.json`)).toBe("block");
+    expect(guardDecision(`echo "don't" && rm .claude/stat\`:\`e/active_task_grap\`:\`h.json`)).toBe("block");
+    // Body-hidden write after a double-quoted apostrophe still engages flattening:
+    expect(
+      guardDecision(`echo "y'all" && echo $(sed -i s/a/b/ .claude/state/active_task_graph.json)`),
+    ).toBe("block");
+    // Precision: a genuine apostrophe with no forged write stays allowed, and a
+    // REAL single-quoted region still suppresses substitution (bash semantics).
+    expect(guardDecision(`echo "it's a lovely day"`)).toBe("allow");
+    expect(guardDecision(`echo '.claude/stat$(:)e/active_task_graph.json'`)).toBe("allow");
+  });
+
   it("quote-collapse applies inside substitution bodies AND protected-dir redirects (round-17 pins)", () => {
     // A2: a substitution body carrying a quote-split guarded token must still
     // classify the enclosing segment as touching state.
