@@ -601,6 +601,22 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("rm .claude/stat${x:=X}e/active_task_grap${x:=X}h.json")).toBe("allow");
   });
 
+  it("a colonless default NESTED inside a colon-form word still reaches its set-empty output (round-22 nested bypass)", () => {
+    // Round-21 emptied a TOP-LEVEL colonless default, but the reveal of a colon
+    // form's word (`${x:-w}`) dropped the colonless-empty flag, so a colonless
+    // default buried inside that word never produced its set-empty output. With x
+    // unset the outer word `${y-X}` is revealed; y set-but-empty → EMPTY, so bash
+    // yields `.claude/stat` + `` + `e` = `.claude/state` — verified against real
+    // bash: `unset x; y=; printf %s ".claude/stat${x:-${y-X}}e"` → `.claude/state`.
+    expect(guardDecision("rm .claude/stat${x:-${y-X}}e/active_task_grap${x:-${y-X}}h.json")).toBe("block");
+    expect(guardDecision("rm .claude/stat${x:=${y=X}}e/active_task_graph.json")).toBe("block");
+    // Arbitrary nesting depth — colonless two colon-reveals deep.
+    expect(guardDecision("echo FORGED > .claude/stat${x:-${y:-${z-X}}}e/active_task_graph.json")).toBe("block");
+    // Precision: a nested COLON form is only-output — decoy word never empties, so
+    // `.claude/statXe` never reassembles the guarded literal. Stays allowed.
+    expect(guardDecision("rm .claude/stat${x:-${y:-X}}e/active_task_grap${x:-${y:-X}}h.json")).toBe("allow");
+  });
+
   it("a `'` inside `\"…\"` is a literal apostrophe — it must NOT disable the substitution defense that follows (round-20 regression, round-21 fix)", () => {
     // The unified scanner tracked quote state as `'\"' | \"'\" | null`. A `'` inside
     // double quotes (`\"it's\"`) is a literal apostrophe; flipping into single-quote

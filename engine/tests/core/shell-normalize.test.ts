@@ -105,6 +105,25 @@ describe("normalizeShellSpan — bash word-normalization rules", () => {
     expect(whole(".claude/stat${x-X}e")).toBe(".claude/statXe");
   });
 
+  it("colonlessDefaultsEmpty threads into NESTED colonless defaults revealed inside a colon-form word (round-22)", () => {
+    const empty = (t: string) =>
+      normalizeShellSpan(t, 0, { mode: "matching-view", colonlessDefaultsEmpty: true }).value;
+    // `${x:-${y-X}}` with x unset reveals the word `${y-X}`; that inner colonless
+    // form is set-but-empty → EMPTY, so bash yields `.claude/state`. The reveal of
+    // the outer word must carry the colonless-empty flag or the nested set-empty
+    // output is concealed (the round-22 fail-open). Verified against real bash:
+    // `unset x; y=; printf %s ".claude/stat${x:-${y-X}}e"` → `.claude/state`.
+    expect(empty(".claude/stat${x:-${y-X}}e")).toBe(".claude/state");
+    expect(empty(".claude/stat${x:=${y=X}}e")).toBe(".claude/state");
+    // Arbitrary nesting depth: colonless buried two colon-reveals deep.
+    expect(empty(".claude/stat${x:-${y:-${z-X}}}e")).toBe(".claude/state");
+    // A nested COLON form inside the revealed word stays revealed (only-output).
+    expect(empty(".claude/stat${x:-${y:-X}}e")).toBe(".claude/statXe");
+    // Without the flag, nested colonless reveals its word like the default view,
+    // keeping guard and evidence twin point-wise identical for the primary base.
+    expect(whole(".claude/stat${x:-${y-X}}e")).toBe(".claude/statXe");
+  });
+
   it("redirect-word mode stops at unquoted whitespace/redirect metacharacters", () => {
     expect(normalizeShellSpan("file.txt rest", 0, { mode: "redirect-word" }).value).toBe("file.txt");
     expect(normalizeShellSpan("file.txt>x", 0, { mode: "redirect-word" }).value).toBe("file.txt");

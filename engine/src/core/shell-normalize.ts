@@ -205,9 +205,21 @@ function resolveMode(opts: NormalizeOptions): {
 /** Reveal the default word of a `word`-form expansion (`${x:-w}`) as the value
  *  bash yields on unset. Always matching-view so the guard and the evidence
  *  twin reveal an IDENTICAL word regardless of the caller's mode — the word is
- *  a whole sub-span, not a boundary-terminated fragment. */
-function revealDefaultWord(text: string, wordStart: number, end: number): string {
-  return normalizeShellSpan(text.slice(wordStart, end - 1), 0, { mode: "matching-view" }).value;
+ *  a whole sub-span, not a boundary-terminated fragment. `colonlessEmpty` is
+ *  threaded from the enclosing span so a colonless default NESTED inside a
+ *  revealed word (`${x:-${y-X}}`) also collapses to empty under the guard's
+ *  colonless-empty base — bash's set-but-empty output `.claude/stat${x:-${y-X}}e`
+ *  → `.claude/state` reassembles at any nesting depth, not just one level. */
+function revealDefaultWord(
+  text: string,
+  wordStart: number,
+  end: number,
+  colonlessEmpty: boolean,
+): string {
+  return normalizeShellSpan(text.slice(wordStart, end - 1), 0, {
+    mode: "matching-view",
+    colonlessDefaultsEmpty: colonlessEmpty,
+  }).value;
 }
 
 export function normalizeShellSpan(
@@ -237,7 +249,7 @@ export function normalizeShellSpan(
       if (c === "$" && quote === '"') {
         const pe = paramExpansionEnd(text, i);
         if (pe.kind === "word") {
-          if (!(colonlessEmpty && pe.colonless)) value += revealDefaultWord(text, pe.wordStart, pe.end);
+          if (!(colonlessEmpty && pe.colonless)) value += revealDefaultWord(text, pe.wordStart, pe.end, colonlessEmpty);
           i = pe.end - 1; continue;
         }
         if (pe.kind === "empty") { i = pe.end - 1; continue; }
@@ -262,7 +274,7 @@ export function normalizeShellSpan(
       // `$name`/`${…}`: delete to unset→empty; default forms (`${x:-w}`) reveal `w`,
       // except colonless forms under colonlessDefaultsEmpty (their set-empty output).
       if (pe.kind === "word") {
-        if (!(colonlessEmpty && pe.colonless)) value += revealDefaultWord(text, pe.wordStart, pe.end);
+        if (!(colonlessEmpty && pe.colonless)) value += revealDefaultWord(text, pe.wordStart, pe.end, colonlessEmpty);
         i = pe.end - 1; continue;
       }
       if (pe.kind === "empty") { i = pe.end - 1; continue; }
