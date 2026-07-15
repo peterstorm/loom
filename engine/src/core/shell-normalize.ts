@@ -222,6 +222,24 @@ function revealDefaultWord(
   }).value;
 }
 
+/**
+ * The value a `word`-form expansion (`${x:-w}`) contributes to the normalized
+ * view: the revealed default word `w`, EXCEPT a colonless default (`${x-w}`/
+ * `${x=w}`) under `colonlessEmpty` (the guard's set-but-empty base), which
+ * contributes nothing. Single source of truth for the two normalizeShellSpan
+ * call sites (unquoted and double-quoted `$`) so they cannot drift on the
+ * colonless-empty rule — the concealment bypass this file has fought for rounds.
+ */
+function revealWordUnlessColonlessEmpty(
+  text: string,
+  pe: Extract<ParamExpansion, { kind: "word" }>,
+  colonlessEmpty: boolean,
+): string {
+  return colonlessEmpty && pe.colonless
+    ? ""
+    : revealDefaultWord(text, pe.wordStart, pe.end, colonlessEmpty);
+}
+
 export function normalizeShellSpan(
   text: string,
   start: number,
@@ -249,7 +267,7 @@ export function normalizeShellSpan(
       if (c === "$" && quote === '"') {
         const pe = paramExpansionEnd(text, i);
         if (pe.kind === "word") {
-          if (!(colonlessEmpty && pe.colonless)) value += revealDefaultWord(text, pe.wordStart, pe.end, colonlessEmpty);
+          value += revealWordUnlessColonlessEmpty(text, pe, colonlessEmpty);
           i = pe.end - 1; continue;
         }
         if (pe.kind === "empty") { i = pe.end - 1; continue; }
@@ -274,7 +292,7 @@ export function normalizeShellSpan(
       // `$name`/`${…}`: delete to unset→empty; default forms (`${x:-w}`) reveal `w`,
       // except colonless forms under colonlessDefaultsEmpty (their set-empty output).
       if (pe.kind === "word") {
-        if (!(colonlessEmpty && pe.colonless)) value += revealDefaultWord(text, pe.wordStart, pe.end, colonlessEmpty);
+        value += revealWordUnlessColonlessEmpty(text, pe, colonlessEmpty);
         i = pe.end - 1; continue;
       }
       if (pe.kind === "empty") { i = pe.end - 1; continue; }
