@@ -14,10 +14,10 @@
  *
  * Parameter expansion is modeled as the value bash yields when the variable is
  * UNSET — the conservative reveal for a matching layer that cannot know whether
- * a var is set. Most forms (`$x`, `${x}`, specials, `${x:+w}` alternate,
- * transforms, substring) yield EMPTY on unset and are DELETED: reveal-monotonic
- * for the guard — `rm .claude/stat${x}e/…` collapses to `.claude/state/…` and
- * the guarded literal reassembles. The default/assign-default forms
+ * a var is set. Most forms (`$x`, `${x}`, specials, `${x:?w}` error, transforms,
+ * substring) yield EMPTY on unset and are DELETED: reveal-monotonic for the
+ * guard — `rm .claude/stat${x}e/…` collapses to `.claude/state/…` and the
+ * guarded literal reassembles. The default/assign-default forms
  * (`${x:-w}`/`${x-w}`/`${x:=w}`/`${x=w}`) instead yield the WORD `w`, which can
  * itself carry a guarded literal (`${x:-.claude/state/…}`); deleting the span
  * would CONCEAL it (reveal-less — the fail-open direction that ALLOWed a real
@@ -29,10 +29,17 @@
  * reassembles to `.claude/state` — a guarded literal the word-reveal view
  * conceals (the round-20 regression). The guard tests BOTH via the
  * colonlessDefaultsEmpty base in referencesPattern; colon forms stay reveal-only
- * (they can never expand to empty). `$'…'`, `$"…"`, and `$(…)`
- * are NOT parameter expansions and are handled separately (`$(…)` stays literal
- * here — the guard models command-substitution-to-empty in its own front gate,
- * NOT here; both callers run on UNFLATTENED text).
+ * (they can never expand to empty). The ALTERNATE forms (`${x:+w}`/`${x+w}`) are
+ * the MIRROR: they yield EMPTY on unset (the primary view deletes them, exactly
+ * as before) but the WORD `w` on set (`:+` set-non-null, `+` set), and `w` can
+ * carry a guarded literal (`${PWD:+.claude/state/…}` — always-set `PWD` makes
+ * bash run the delete). Deleting the span in the unset view is right, but the
+ * set-state output must ALSO be tested or the guard fails OPEN (it ALLOWed a real
+ * state write before round 24); the guard reveals `w` via the alternateFormsReveal
+ * base in referencesPattern. `$'…'`, `$"…"`, and `$(…)` are NOT parameter
+ * expansions and are handled separately (`$(…)` stays literal here — the guard
+ * models command-substitution-to-empty in its own front gate, NOT here; both
+ * callers run on UNFLATTENED text).
  */
 
 import { decodeAnsiC, findAnsiCClose } from "./shell-ansi-c";
@@ -60,20 +67,26 @@ const SPECIAL_PARAM = /[0-9@*?$!#-]/;
  *   - `none`  — the `$` is literal (`$(`, `$'`, `$"`, `$ `, `$.`, lone `$`).
  *   - `empty` — the span expands to the empty string on unset: `$name`,
  *     `${name}`, special params, and the modifier forms that yield empty when
- *     unset (`${x:+w}`/`${x+w}` alternate, `${x:?w}`/`${x?}` error, `${#x}`
- *     length, `${!x}` indirect, `${x#p}`/`${x%p}`/`${x/a/b}`/`${x^^}`/`${x,,}`
- *     transforms, `${x:off:len}` substring). Deleted from the view.
- *   - `word`  — a default/assign-default form (`${x:-w}`/`${x-w}`/`${x:=w}`/
- *     `${x=w}`) whose value on unset is the WORD `w`, not empty. `w` can carry a
- *     guarded literal (`${x:-.claude/state/…}`), so deleting the whole span
- *     would CONCEAL it — reveal-less, the fail-open direction. The caller
- *     recursively normalizes `[wordStart, end)` and reveals its value instead.
- *     `colonless` distinguishes `${x-w}`/`${x=w}` from `${x:-w}`/`${x:=w}`:
- *     the colon forms substitute `w` on unset AND null, so `w` is their ONLY
- *     value; the colonless forms substitute `w` only on unset and expand to
- *     EMPTY when the var is set-but-empty. So a colonless span has two bash
- *     outputs (`w` and empty) and the guard must test both — see
- *     referencesPattern's colonless-empty base.
+ *     unset (`${x:?w}`/`${x?}` error, `${#x}` length, `${!x}` indirect,
+ *     `${x#p}`/`${x%p}`/`${x/a/b}`/`${x^^}`/`${x,,}` transforms, `${x:off:len}`
+ *     substring). Deleted from the view.
+ *   - `word`  — a form whose value under SOME variable state is the WORD `w`;
+ *     `form`/`colonless` say which state, and thus which view reveals it:
+ *       · `form: "default"` (`${x:-w}`/`${x-w}`/`${x:=w}`/`${x=w}`) yields `w`
+ *         on unset — revealed in the PRIMARY view. Deleting it would CONCEAL a
+ *         `w`-carried guarded literal (`${x:-.claude/state/…}`), the fail-open
+ *         direction, so the caller recursively normalizes `[wordStart, end)`.
+ *         `colonless` (`${x-w}`/`${x=w}`) marks the forms with a SECOND output:
+ *         EMPTY when the var is set-but-empty (the colon forms substitute `w` on
+ *         unset AND null, so `w` is their ONLY value). The guard tests the empty
+ *         output too — see referencesPattern's colonless-empty base.
+ *       · `form: "alternate"` (`${x:+w}`/`${x+w}`) is the MIRROR: EMPTY on unset
+ *         (the primary view deletes it) but `w` on set (`:+` set-non-null, `+`
+ *         set). `w` can carry a guarded literal (`${PWD:+.claude/state/…}`), so
+ *         the guard must reveal it in a SECOND view or fail OPEN — see
+ *         referencesPattern's alternate-reveal base. `colonless` is recorded for
+ *         completeness but does not change the matching view (both alternate
+ *         forms output either empty or `w`).
  *
  * `end` is the index one PAST the span's last char (the char after `}` / after
  * the name). `${…}` consumes to its brace-depth-matched close so nested
@@ -85,40 +98,59 @@ type ParamExpansion =
   | { readonly kind: "empty"; readonly end: number }
   | {
       readonly kind: "word";
+      readonly form: "default" | "alternate";
       readonly colonless: boolean;
       readonly wordStart: number;
       readonly end: number;
     };
 
-/** Word-emitting default/assign-default operators keyed by their form inside a
- *  `${name<op>word}` body, longest-first so `:-`/`:=` win over a bare `:`. On
- *  UNSET each yields the literal `word`; every other operator yields empty. The
- *  colon forms also yield `word` on NULL; the colonless forms yield EMPTY on
- *  null (see ParamExpansion `colonless`). */
-const DEFAULT_WORD_OPS = [":-", ":=", "-", "="] as const;
+/** Operators inside a `${name<op>word}` body that make the span contribute the
+ *  literal `word` under SOME variable state — listed longest-first so `:-`/`:=`/
+ *  `:+` win over a bare `:` (colon and single-char ops start with different
+ *  chars, so order across the two lengths is defensive, not load-bearing). Two
+ *  families, by what bash yields:
+ *    - "default" (`:-`/`:=`/`-`/`=`): `word` on UNSET — the matching view's
+ *      primary reveal. Colon forms yield `word` on null too, so `word` is their
+ *      ONLY value; colonless forms yield EMPTY on set-but-empty (their second
+ *      output — see ParamExpansion `colonless`).
+ *    - "alternate" (`:+`/`+`): the MIRROR — EMPTY on unset (the primary view)
+ *      and the literal `word` on set (`:+` set-non-null, `+` set). `word` can
+ *      carry a guarded literal (`${PWD:+.claude/state/…}`), so the guard also
+ *      tests a view that reveals it — see NormalizeOptions `alternateFormsReveal`.
+ *      `:?`/`?` are NOT here: their `word` is a stderr error message, never
+ *      substituted into the value. */
+const WORD_OPS = [
+  { op: ":-", form: "default", colonless: false },
+  { op: ":=", form: "default", colonless: false },
+  { op: ":+", form: "alternate", colonless: false },
+  { op: "-", form: "default", colonless: true },
+  { op: "=", form: "default", colonless: true },
+  { op: "+", form: "alternate", colonless: true },
+] as const;
 
 function classifyBraceBody(text: string, start: number, close: number): ParamExpansion {
   const end = close + 1;
   const bodyStart = start + 2;
   const body = text.slice(bodyStart, close);
   // `#`/`!`-prefixed bodies (length, indirection, prefix-match) expand empty on
-  // unset — never a default word.
+  // unset — never a word form.
   if (body[0] === "#" || body[0] === "!") return { kind: "empty", end };
   // Name: `[A-Za-z_]\w*`, positional digits, or a single special param, plus an
   // optional `[subscript]`. The operator (if any) starts right after.
   const nameMatch = body.match(/^([A-Za-z_][A-Za-z0-9_]*|\d+|[@*?$!#0-])(\[[^\]]*\])?/);
   const nameLen = nameMatch ? nameMatch[0].length : 0;
-  for (const op of DEFAULT_WORD_OPS) {
+  for (const { op, form, colonless } of WORD_OPS) {
     if (body.startsWith(op, nameLen)) {
       return {
         kind: "word",
-        colonless: op === "-" || op === "=",
+        form,
+        colonless,
         wordStart: bodyStart + nameLen + op.length,
         end,
       };
     }
   }
-  return { kind: "empty", end }; // `${name}`, `:+`/`+`, `:?`/`?`, transforms, substring
+  return { kind: "empty", end }; // `${name}`, `:?`/`?` error, transforms, substring
 }
 
 /**
@@ -176,9 +208,21 @@ export interface NormalizedSpan {
  * (flag absent/false) reveals `w`, keeping the guard and the evidence twin
  * point-wise identical for the primary view; the empty view is an ADDITIONAL
  * guard base (referencesPattern), not a redirect-word behavior.
+ *
+ * `alternateFormsReveal` (matching-view only) is the MIRROR for the alternate
+ * forms (`${x:+w}`/`${x+w}`): it REVEALS `w` (recursively normalized) instead of
+ * deleting the span — the guard's set-state output for these spans. The default
+ * (flag absent/false) deletes them (the unset output), identical to the evidence
+ * twin and to the pre-round-24 behavior; the reveal view is an ADDITIONAL guard
+ * base, so a guarded literal carried in `w` (`${PWD:+.claude/state/…}`) cannot
+ * slip past the front gate.
  */
 export type NormalizeOptions =
-  | { readonly mode: "matching-view"; readonly colonlessDefaultsEmpty?: boolean }
+  | {
+      readonly mode: "matching-view";
+      readonly colonlessDefaultsEmpty?: boolean;
+      readonly alternateFormsReveal?: boolean;
+    }
   | { readonly mode: "redirect-word" };
 
 /** Derive the two behavioral flags from the mode — the single place the mode↔
@@ -202,42 +246,52 @@ function resolveMode(opts: NormalizeOptions): {
  * that over-normalizes — reveal-monotonic for the guard (can only expose a
  * guarded token, never hide one) but over-mints for the evidence twin.
  */
-/** Reveal the default word of a `word`-form expansion (`${x:-w}`) as the value
- *  bash yields on unset. Always matching-view so the guard and the evidence
- *  twin reveal an IDENTICAL word regardless of the caller's mode — the word is
- *  a whole sub-span, not a boundary-terminated fragment. `colonlessEmpty` is
- *  threaded from the enclosing span so a colonless default NESTED inside a
- *  revealed word (`${x:-${y-X}}`) also collapses to empty under the guard's
- *  colonless-empty base — bash's set-but-empty output `.claude/stat${x:-${y-X}}e`
- *  → `.claude/state` reassembles at any nesting depth, not just one level. */
-function revealDefaultWord(
+/** Reveal the word of a `word`-form expansion (`${x:-w}` / `${x:+w}`) as the
+ *  value bash substitutes, recursively normalized. Always matching-view so the
+ *  guard and the evidence twin reveal an IDENTICAL word regardless of the
+ *  caller's mode — the word is a whole sub-span, not a boundary-terminated
+ *  fragment. Both set-state flags are threaded from the enclosing span so a
+ *  default/alternate form NESTED inside a revealed word (`${x:-${y-X}}`,
+ *  `${x:-${PWD:+Y}}`) follows the same hypothesis at any depth — bash's output
+ *  reassembles a fragmented guarded literal beyond one nesting level. */
+function revealWord(
   text: string,
   wordStart: number,
   end: number,
   colonlessEmpty: boolean,
+  alternateReveal: boolean,
 ): string {
   return normalizeShellSpan(text.slice(wordStart, end - 1), 0, {
     mode: "matching-view",
     colonlessDefaultsEmpty: colonlessEmpty,
+    alternateFormsReveal: alternateReveal,
   }).value;
 }
 
 /**
- * The value a `word`-form expansion (`${x:-w}`) contributes to the normalized
- * view: the revealed default word `w`, EXCEPT a colonless default (`${x-w}`/
- * `${x=w}`) under `colonlessEmpty` (the guard's set-but-empty base), which
- * contributes nothing. Single source of truth for the two normalizeShellSpan
- * call sites (unquoted and double-quoted `$`) so they cannot drift on the
- * colonless-empty rule — the concealment bypass this file has fought for rounds.
+ * The value a `word`-form expansion contributes to the normalized view, by
+ * family and the active set-state flags — the single source of truth for the
+ * two normalizeShellSpan call sites (unquoted and double-quoted `$`) so they
+ * cannot drift on the reveal rules, the concealment/fail-open bypass this file
+ * has fought for rounds:
+ *   - default (`${x:-w}`): reveal `w` (its unset output), EXCEPT a colonless
+ *     default (`${x-w}`/`${x=w}`) under `colonlessEmpty`, which contributes
+ *     nothing (its set-but-empty output).
+ *   - alternate (`${x:+w}`): contribute nothing (its unset output), EXCEPT under
+ *     `alternateReveal`, which reveals `w` (its set output).
  */
-function revealWordUnlessColonlessEmpty(
+function wordContribution(
   text: string,
   pe: Extract<ParamExpansion, { kind: "word" }>,
   colonlessEmpty: boolean,
+  alternateReveal: boolean,
 ): string {
+  if (pe.form === "alternate") {
+    return alternateReveal ? revealWord(text, pe.wordStart, pe.end, colonlessEmpty, alternateReveal) : "";
+  }
   return colonlessEmpty && pe.colonless
     ? ""
-    : revealDefaultWord(text, pe.wordStart, pe.end, colonlessEmpty);
+    : revealWord(text, pe.wordStart, pe.end, colonlessEmpty, alternateReveal);
 }
 
 export function normalizeShellSpan(
@@ -247,6 +301,7 @@ export function normalizeShellSpan(
 ): NormalizedSpan {
   const { stopAtWordBoundary, backtickQuotes } = resolveMode(opts);
   const colonlessEmpty = opts.mode === "matching-view" && opts.colonlessDefaultsEmpty === true;
+  const alternateReveal = opts.mode === "matching-view" && opts.alternateFormsReveal === true;
   let value = "";
   let quote: '"' | "'" | "`" | null = null;
   let i = start;
@@ -267,7 +322,7 @@ export function normalizeShellSpan(
       if (c === "$" && quote === '"') {
         const pe = paramExpansionEnd(text, i);
         if (pe.kind === "word") {
-          value += revealWordUnlessColonlessEmpty(text, pe, colonlessEmpty);
+          value += wordContribution(text, pe, colonlessEmpty, alternateReveal);
           i = pe.end - 1; continue;
         }
         if (pe.kind === "empty") { i = pe.end - 1; continue; }
@@ -289,10 +344,12 @@ export function normalizeShellSpan(
     }
     if (c === "$") {
       const pe = paramExpansionEnd(text, i);
-      // `$name`/`${…}`: delete to unset→empty; default forms (`${x:-w}`) reveal `w`,
-      // except colonless forms under colonlessDefaultsEmpty (their set-empty output).
+      // `$name`/`${…}`: delete to unset→empty; word forms contribute `w` per
+      // family and the active set-state flags (see wordContribution) — default
+      // forms reveal `w`, alternate forms `${x:+w}` reveal it only under
+      // alternateFormsReveal, colonless defaults collapse under colonlessDefaultsEmpty.
       if (pe.kind === "word") {
-        value += revealWordUnlessColonlessEmpty(text, pe, colonlessEmpty);
+        value += wordContribution(text, pe, colonlessEmpty, alternateReveal);
         i = pe.end - 1; continue;
       }
       if (pe.kind === "empty") { i = pe.end - 1; continue; }

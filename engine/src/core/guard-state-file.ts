@@ -132,14 +132,30 @@ function collapseQuotes(text: string): string {
   return normalizeShellSpan(text, 0, { mode: "matching-view" }).value;
 }
 
-/** Like collapseQuotes but a colonless default form (`${x-w}`/`${x=w}`)
- *  collapses to EMPTY — the value bash yields when the var is set-but-empty, the
- *  SECOND output these spans have (the colon forms `${x:-w}` cannot). This is an
- *  ADDITIONAL front-gate base: `.claude/stat${x-X}e` conceals `.claude/state` in
- *  the word-reveal view but reassembles it here. Reveal-monotonic — emptying a
- *  span only joins the literal fragments around it. */
-function collapseQuotesColonlessEmpty(text: string): string {
-  return normalizeShellSpan(text, 0, { mode: "matching-view", colonlessDefaultsEmpty: true }).value;
+/**
+ * Every reveal-monotonic collapsed view of `text` the matching layer must test:
+ * the cross-product of the two set-state axes a param-expansion span exposes —
+ * a colonless default word (`${x-w}`/`${x=w}`) revealed (unset) vs emptied
+ * (set-but-empty), and an alternate word (`${x:+w}`/`${x+w}`) emptied (unset) vs
+ * revealed (set). Each combination is a real bash output, so a guarded literal
+ * that reassembles under ANY variable state appears contiguously in at least one
+ * view: `.claude/stat${x-X}e` reassembles in the colonless-empty view;
+ * `${PWD:+.claude/state/…}` in the alternate-reveal view. Reveal-monotonic —
+ * emptying or revealing a span only joins/exposes literal fragments, never hides
+ * one. Deduped by the caller; the common case (no default/alternate forms)
+ * yields one identical view.
+ */
+function collapseVariants(text: string): string[] {
+  return [
+    collapseQuotes(text),
+    normalizeShellSpan(text, 0, { mode: "matching-view", colonlessDefaultsEmpty: true }).value,
+    normalizeShellSpan(text, 0, { mode: "matching-view", alternateFormsReveal: true }).value,
+    normalizeShellSpan(text, 0, {
+      mode: "matching-view",
+      colonlessDefaultsEmpty: true,
+      alternateFormsReveal: true,
+    }).value,
+  ];
 }
 
 /** Product of brace-group sizes above which a braced line is deemed
@@ -378,17 +394,11 @@ function referencesPattern(
 ): boolean {
   const exemplars = dirs();
   const blanked = blankSubstitutions(text);
-  // Four reveal-monotonic bases, deduped: substitutions LITERAL vs EMPTY, each
-  // with colonless default words revealed vs collapsed-empty. The common case
-  // (no substitutions, no colonless defaults) collapses to a single base.
-  const bases = [
-    ...new Set([
-      collapseQuotes(text),
-      collapseQuotes(blanked),
-      collapseQuotesColonlessEmpty(text),
-      collapseQuotesColonlessEmpty(blanked),
-    ]),
-  ];
+  // Reveal-monotonic bases, deduped: substitutions LITERAL vs EMPTY, each under
+  // every default/alternate set-state view (collapseVariants — colonless default
+  // revealed vs emptied × alternate emptied vs revealed). The common case (no
+  // substitutions, no default/alternate forms) collapses to a single base.
+  const bases = [...new Set([...collapseVariants(text), ...collapseVariants(blanked)])];
   for (const base of bases) {
     const views = expandBraces(base);
     if (views === null) return true;

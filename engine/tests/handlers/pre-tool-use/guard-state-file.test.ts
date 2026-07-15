@@ -617,6 +617,29 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("rm .claude/stat${x:-${y:-X}}e/active_task_grap${x:-${y:-X}}h.json")).toBe("allow");
   });
 
+  it("alternate expansion `${x:+w}`/`${x+w}` substitutes its WORD on SET — an always-set var carries a guarded literal past the front gate (round-24 fail-open)", () => {
+    // The MIRROR of the round-20/21 default-word bug. `${x:+w}` yields EMPTY on
+    // unset (the only view the guard modeled) but the WORD `w` when x is SET —
+    // and PWD/HOME/USER/$$ are ALWAYS set, so `${PWD:+.claude/state/…}` reassembles
+    // the guarded literal and bash runs the delete/write while the guard, deleting
+    // the whole span, saw `rm -rf ` and ALLOWed. referencesPattern now ALSO tests
+    // an alternate-reveal base. Verified against real bash:
+    // `printf %s "${PWD:+.claude/state/active_task_graph.json}"` → the guarded path.
+    expect(guardDecision("rm -rf ${PWD:+.claude/state/active_task_graph.json}")).toBe("block");
+    expect(guardDecision("rm -rf ${HOME+.claude/state}")).toBe("block");
+    expect(guardDecision("echo FORGED > ${PWD:+.claude/state/active_task_graph.json}")).toBe("block");
+    expect(guardDecision("printf '{}' > ${USER:+/tmp/claude-subagents/sess.evidence.jsonl}")).toBe("block");
+    // Word carrying only a FRAGMENT — reassembles with surrounding literals only in
+    // the alternate-reveal view (the primary view deletes it → `.claude/state`... so
+    // use a decoy that makes ONLY the reveal view complete the literal).
+    expect(guardDecision("rm .claude/sta${x:+te/active_task_graph.json}")).toBe("block");
+    // Colonless `+` (set, even if null) reveals its word too.
+    expect(guardDecision("rm .claude/sta${x+te}/active_task_graph.json")).toBe("block");
+    // Precision: the ERROR form `${x:?w}` never substitutes `w` into the value
+    // (it is a stderr message), so a guarded literal parked there never runs.
+    expect(guardDecision("rm ${x:?.claude/state/active_task_graph.json}")).toBe("allow");
+  });
+
   it("a `'` inside `\"…\"` is a literal apostrophe — it must NOT disable the substitution defense that follows (round-20 regression, round-21 fix)", () => {
     // The unified scanner tracked quote state as `'\"' | \"'\" | null`. A `'` inside
     // double quotes (`\"it's\"`) is a literal apostrophe; flipping into single-quote

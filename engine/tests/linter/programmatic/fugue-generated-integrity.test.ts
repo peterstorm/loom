@@ -168,6 +168,27 @@ describe("fugue-generated-integrity", () => {
     expect(handler(content, "dags/team/x/dag.ts")).toEqual([]);
   });
 
+  it("the TOPMOST integrity banner governs — an integrity-looking comment INSIDE the body cannot shadow it (round-24 first-match pin)", () => {
+    // INTEGRITY_RE is `/m` first-match; correctness relies on the real banner
+    // being the topmost `// @fugue-integrity sha256:<64hex>` line. The prelude
+    // guard enforces "banner is first" only implicitly, so pin it: a body that
+    // legitimately contains such a line (with a DIFFERENT, wrong hash) must still
+    // verify against the top banner, and a structural edit must still flag —
+    // proving the in-body decoy is treated as hashed CONTENT, never as the stamp.
+    const DECOY = "0".repeat(64);
+    const bodyWithDecoyBanner =
+      "export const dag = defineDag({ nodes: [] });\n" +
+      `// note: pinned hash was // @fugue-integrity sha256:${DECOY}\n` +
+      "export const meta = { version: 1 };\n";
+    // Clean file passes — the top banner's real hash governs; the decoy's wrong
+    // hash is inert (it is just projected/hashed structure, not a second stamp).
+    expect(handler(stamp(bodyWithDecoyBanner), "dags/team/x/dag.ts")).toEqual([]);
+    // A structural edit still flags against the TOP banner — the decoy never
+    // shadows it, so "first-match = real banner" holds.
+    const tampered = stamp(bodyWithDecoyBanner).replace("nodes: []", "nodes: [evil]");
+    expect(handler(tampered, "dags/team/x/dag.ts")).toHaveLength(1);
+  });
+
   // ── Cross-repo golden vector ────────────────────────────────────────────
   // The SAME literal body + digest is pinned in fugue's suite
   // (packages/framework/src/__tests__/cli/authored.test.ts, GOLDEN_MODULE_BODY /

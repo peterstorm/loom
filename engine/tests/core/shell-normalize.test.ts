@@ -124,6 +124,55 @@ describe("normalizeShellSpan — bash word-normalization rules", () => {
     expect(whole(".claude/stat${x:-${y-X}}e")).toBe(".claude/statXe");
   });
 
+  it("alternateFormsReveal reveals `${x:+w}`/`${x+w}` to their WORD but leaves default/error forms unchanged (round-24)", () => {
+    const alt = (t: string) =>
+      normalizeShellSpan(t, 0, { mode: "matching-view", alternateFormsReveal: true }).value;
+    // Alternate forms substitute `w` when the var is SET (`:+` set-non-null, `+`
+    // set) — the second bash output the primary (unset→empty) view can't see. An
+    // always-set var (PWD/HOME/$$) carries a guarded literal in `w`, so the guard
+    // must reveal it or fail OPEN (the round-24 bypass). Verified against real
+    // bash: `printf %s "${PWD:+.claude/state}"` → `.claude/state`.
+    expect(alt("${x:+y}z")).toBe("yz");
+    expect(alt("${x+y}z")).toBe("yz");
+    expect(alt('"${x:+y}z"')).toBe("yz"); // reveals inside "…" too
+    expect(alt("${PWD:+.claude/state/active_task_graph.json}")).toBe(
+      ".claude/state/active_task_graph.json",
+    );
+    expect(alt(".claude/stat${x:+X}e")).toBe(".claude/statXe");
+    // The alternate word is recursively normalized like a default word.
+    expect(alt("${x:+gr${y:-a}ph}")).toBe("graph");
+    // The flag does NOT touch default/error forms: default forms reveal their
+    // word in BOTH views (only their unset output), `:?` stays empty.
+    expect(alt("${x:-y}z")).toBe("yz");
+    expect(alt("${x:?msg}z")).toBe("z");
+    // Without the flag (primary view), alternate forms delete to empty — the
+    // pre-round-24 behavior and the evidence-twin's unset model, unchanged.
+    expect(whole("${x:+y}z")).toBe("z");
+    expect(whole(".claude/stat${x:+X}e")).toBe(".claude/state");
+  });
+
+  it("alternateFormsReveal threads into NESTED alternate/default forms at any depth (round-24)", () => {
+    const alt = (t: string) =>
+      normalizeShellSpan(t, 0, { mode: "matching-view", alternateFormsReveal: true }).value;
+    // A colon-default reveal wrapping an alternate form must carry the flag or the
+    // inner set-state word is concealed. `x` unset → reveal `${PWD:+X}`; `PWD` set
+    // → `X`, so bash yields `.claude/state`.
+    expect(alt(".claude/stat${x:-${PWD:+X}}e")).toBe(".claude/statXe");
+    // Alternate nested inside alternate, two deep.
+    expect(alt(".claude/stat${a:+${b:+X}}e")).toBe(".claude/statXe");
+    // Both set-state flags active together: colonless default emptied AND
+    // alternate revealed in the same span — the cross-product the guard tests.
+    const both = (t: string) =>
+      normalizeShellSpan(t, 0, {
+        mode: "matching-view",
+        colonlessDefaultsEmpty: true,
+        alternateFormsReveal: true,
+      }).value;
+    expect(both(".claude/sta${x-Q}te${y:+/active_task_graph.json}")).toBe(
+      ".claude/state/active_task_graph.json",
+    );
+  });
+
   it("redirect-word mode stops at unquoted whitespace/redirect metacharacters", () => {
     expect(normalizeShellSpan("file.txt rest", 0, { mode: "redirect-word" }).value).toBe("file.txt");
     expect(normalizeShellSpan("file.txt>x", 0, { mode: "redirect-word" }).value).toBe("file.txt");
