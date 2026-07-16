@@ -260,4 +260,9 @@ phase, an invariant is checked rather than hoped for, generated structure is
 tamper-evident, and the failure model is proven exhaustive at compile time.
 
 *Verification for phase-c: `engine` typechecks clean and the full suite is 1592
-passing / 0 failing as of the round-26 fix.*
+passing / 0 failing as of the round-26 fix. Beyond the unit suite,
+`artifacts/tests/smoke-deterministic-core.sh` drives the real hook entry points
+end-to-end — it first proves the state-file threat is real (unguarded bash
+deletes `.claude/state`), then confirms the guard blocks it, the linter enforces
+an invariant on edit, the wave/dependency gates fire, and the phase machine
+blocks write-before-read.*
