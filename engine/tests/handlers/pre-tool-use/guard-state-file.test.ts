@@ -661,6 +661,34 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("rm ${!x:?.claude/state/active_task_graph.json}")).toBe("allow");
   });
 
+  it("a substitution whose NONEMPTY output COMPLETES a guarded literal — `.claude/stat$(printf e)` → `.claude/state` (round-26 fail-open)", () => {
+    // The mirror of round-20's empty-output fragmentation. Round-20 modeled a
+    // substitution producing EMPTY (drop it, rejoin fragments); the literal view
+    // keeps `$(…)` verbatim. Neither modeled the THIRD channel: output that ADDS
+    // a completing character. bash resolves `.claude/stat$(printf e)` → the
+    // guarded `.claude/state` dir (verified: `ls -d .claude/stat$(printf e)`), but
+    // the empty view drops the `e` (`.claude/stat`) and the literal view keeps
+    // `$(printf e)` inline — so decide() short-circuited to ALLOW and bash ran the
+    // delete. referencesPattern now ALSO tests a WILDCARD-substitutions base
+    // (`.claude/stat*`), whose glob reaches the guarded dir.
+    expect(guardDecision("rm -rf .claude/stat$(printf e)")).toBe("block");
+    expect(guardDecision("rm -rf .claude/stat`printf e`")).toBe("block"); // backtick
+    expect(guardDecision("echo FORGED > .claude/stat$(printf e)/active_task_graph.json")).toBe("block");
+    // Ledger forge via a completing substitution into the protected subagent dir:
+    expect(guardDecision("printf '{}' > /tmp/claude-subagent$(printf s)/sess.evidence.jsonl")).toBe("block");
+    // Nested inside a default word and an alternate word — the wildcard is left in
+    // the word for collapseVariants to reveal (`${x:-*}` → `*`, `${PWD:+*}` → `*`).
+    expect(guardDecision("rm -rf .claude/stat${x:-$(printf e)}")).toBe("block");
+    expect(guardDecision("rm -rf .claude/stat${PWD:+$(printf e)}")).toBe("block");
+    // Precision: a READ through a completing substitution is in scope but
+    // read-only → allow; single quotes SUPPRESS substitution so a quoted string
+    // never reassembles the literal; and a wildcard whose surrounding literal
+    // shares no guarded prefix (`jq . $(cat foo)` → `jq . *`) never hits.
+    expect(guardDecision("cat .claude/stat$(printf e)/active_task_graph.json")).toBe("allow");
+    expect(guardDecision("echo '.claude/stat$(printf e)' > /tmp/notes.txt")).toBe("allow");
+    expect(guardDecision("jq . $(cat /tmp/list.txt)")).toBe("allow");
+  });
+
   it("a `'` inside `\"…\"` is a literal apostrophe — it must NOT disable the substitution defense that follows (round-20 regression, round-21 fix)", () => {
     // The unified scanner tracked quote state as `'\"' | \"'\" | null`. A `'` inside
     // double quotes (`\"it's\"`) is a literal apostrophe; flipping into single-quote

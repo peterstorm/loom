@@ -377,15 +377,45 @@ function blankSubstitutions(text: string): string {
 }
 
 /**
+ * A matching view where command/process substitutions and backticks are
+ * replaced by a glob WILDCARD (`*`) — modeling the THIRD output channel the
+ * empty and literal views miss: a substitution whose runtime output is a
+ * NONEMPTY fragment that COMPLETES a guarded literal when concatenated with the
+ * literal text around it. `rm -rf .claude/stat$(printf e)` reassembles to
+ * `.claude/state` bash-side (verified against real bash), but the empty view
+ * DROPS the completing `e` (`.claude/stat` → no match) and the literal view
+ * keeps `$(printf e)` inline (no `.claude/state`) — neither models output that
+ * ADDS characters joining two literal fragments into a guarded token. Since a
+ * substitution's output is not statically knowable, `*` is the fail-closed
+ * model: referencesPattern's existing per-segment glob / guarded-dir
+ * intersection test then fires whenever the surrounding literal plus the
+ * wildcard can reach a guarded path (`.claude/stat*` fnmatches the
+ * `.claude/state` dir; `.claude/*` reaches it too). Reveal-monotonic and
+ * strictly ADDITIVE — this base is tested ALONGSIDE the empty and literal bases
+ * (see referencesPattern), never instead of them, so it can only surface MORE
+ * references, never hide one. Quote-awareness and the opener set are delegated
+ * to the shared scanSubstitutions, so the completion view cannot diverge from
+ * the empty view on quoting. Nested forms (`${x:-$(printf e)}` default,
+ * `${PWD:+$(printf e)}` alternate) are covered because the wildcard is left in
+ * the default/alternate word for collapseVariants to reveal (`${x:-*}` → `*`).
+ */
+function wildcardSubstitutions(text: string): string {
+  return scanSubstitutions(text, () => "*").rebuilt;
+}
+
+/**
  * Does the text reference a guarded path under EVERY bash word-expansion that
  * can reassemble a guarded literal (quote collapse, substitution-to-empty,
  * brace expansion, single-char class reveal) or reach a guarded directory via a
  * residual glob? Reveal-monotonic and fail-closed: an unbounded brace expansion
  * counts as a reference. This is the front gate and chain/segment scope
- * predicate. Two base views are tested — substitutions LITERAL (surfaces a
- * guarded token inside a body) and substitutions EMPTY (surfaces a literal
- * fragmented across `$(…)`/backticks) — because a substitution that outputs
- * empty joins the fragments bash-side.
+ * predicate. THREE substitution base views are tested — substitutions LITERAL
+ * (surfaces a guarded token inside a body), substitutions EMPTY (surfaces a
+ * literal fragmented across an empty-output `$(…)`/backtick, which joins the
+ * fragments bash-side), and substitutions WILDCARD (surfaces a literal
+ * COMPLETED by a nonempty substitution output — `.claude/stat$(printf e)` →
+ * `.claude/state`, caught as the glob `.claude/stat*` reaching the guarded
+ * dir). All three are additive: a reference under any one blocks.
  */
 function referencesPattern(
   text: string,
@@ -394,11 +424,19 @@ function referencesPattern(
 ): boolean {
   const exemplars = dirs();
   const blanked = blankSubstitutions(text);
-  // Reveal-monotonic bases, deduped: substitutions LITERAL vs EMPTY, each under
-  // every default/alternate set-state view (collapseVariants — colonless default
-  // revealed vs emptied × alternate emptied vs revealed). The common case (no
-  // substitutions, no default/alternate forms) collapses to a single base.
-  const bases = [...new Set([...collapseVariants(text), ...collapseVariants(blanked)])];
+  const completed = wildcardSubstitutions(text);
+  // Reveal-monotonic bases, deduped: substitutions LITERAL vs EMPTY vs WILDCARD,
+  // each under every default/alternate set-state view (collapseVariants —
+  // colonless default revealed vs emptied × alternate emptied vs revealed). The
+  // common case (no substitutions, no default/alternate forms) collapses to a
+  // single base.
+  const bases = [
+    ...new Set([
+      ...collapseVariants(text),
+      ...collapseVariants(blanked),
+      ...collapseVariants(completed),
+    ]),
+  ];
   for (const base of bases) {
     const views = expandBraces(base);
     if (views === null) return true;
@@ -491,21 +529,28 @@ interface FlattenedCommand {
  *  state (`sed -i … $(printf 'active_task_graph').json` must not launder the
  *  token away). The body is classified on its quote-collapsed view so quote
  *  splitting inside a substitution cannot launder the class either. A body
- *  with NO guarded token flattens to EMPTY — the output the blankSubstitutions
- *  matching view models — so a guarded literal fragmented across an
- *  empty-output substitution (`rm .claude/stat$(:)e/…`) REJOINS in the
- *  flattened text exactly as it does bash-side, and the chain/segment scope
- *  checks see it (a non-empty filler was the round-20 concealment: the
- *  placeholder itself re-split the literal). The load-bearing property of the
+ *  with NO guarded token flattens to the glob WILDCARD `*` — the fail-closed
+ *  model of a substitution's statically-unknowable output. This subsumes BOTH
+ *  output channels the flattened text must reflect: an EMPTY output (`$(:)` →
+ *  "") where a guarded literal fragmented across the substitution rejoins bash-
+ *  side (`.claude/stat$(:)e` → `.claude/state`, matched here as the glob
+ *  `.claude/stat*e` fnmatches the `.claude/state` dir), AND a NONEMPTY output
+ *  that COMPLETES a guarded literal (`.claude/stat$(printf e)` → `.claude/state`,
+ *  the round-26 fail-open — an empty placeholder yielded `.claude/stat`, which
+ *  the chain-scope check then skipped as out-of-scope). `*` is special to the
+ *  matching layer (segmentGlobMatches / tokenGlobHitsGuardedDir expand it), so
+ *  unlike a LITERAL filler — the round-20 concealment, which re-split the
+ *  literal and hid the rejoin — it can never itself break a guarded match; it
+ *  can only surface more references. The load-bearing property of the
  *  non-empty placeholder texts is that they cannot form a redirect or
- *  separator: the literal parts contain only [A-Za-z_/], and the
+ *  separator: `*` and the literal parts contain only [A-Za-z_/*], and the
  *  `${SUBAGENT_DIR}` prefix is redirect/separator-free as shipped
  *  (`/tmp/claude-subagents`) — this is contingent on an operator-set
  *  LOOM_SUBAGENT_DIR staying free of shell-special characters. */
 function placeholderFor(body: string): string {
   if (referencesProtectedDir(body)) return `${SUBAGENT_DIR}/__subst__`;
   if (referencesGuardedState(body)) return "active_task_graph__subst__";
-  return "";
+  return "*";
 }
 
 /**
