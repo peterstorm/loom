@@ -12,6 +12,15 @@ import { dirname } from "node:path";
 import type { HookResult, HookHandler } from "./types";
 import { nonEmptyMessage } from "./types";
 import { resolveInitialState } from "./phase-init";
+import { KNOWN_HANDLERS, failureExitCode } from "./handler-routes";
+
+/**
+ * Failure polarity for the top-level catch, derived from argv BEFORE
+ * anything can throw. The fail-closed routes (any crash must exit 2,
+ * blocking) are route metadata in handler-routes.ts — see
+ * FAIL_CLOSED_ROUTES. Every other route keeps exit 1.
+ */
+const FAILURE_EXIT_CODE = failureExitCode(process.argv[2], process.argv[3]);
 
 // Eagerly buffer stdin before any async work (bun drains piped data during dynamic imports)
 const stdinPromise: Promise<string> = process.stdin.isTTY
@@ -22,29 +31,10 @@ const stdinPromise: Promise<string> = process.stdin.isTTY
       process.stdin.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
       process.stdin.on("error", reject);
     });
-
-/** Known handler routes — validated before dynamic import */
-const KNOWN_HANDLERS: Record<string, Set<string>> = {
-  "pre-tool-use": new Set([
-    "block-direct-edits", "guard-state-file", "validate-phase-order",
-    "validate-task-execution", "validate-template-substitution",
-    "validate-agent-model", "validate-agent-skill",
-  ]),
-  "subagent-stop": new Set([
-    "dispatch", "advance-phase", "update-task-status",
-    "store-reviewer-findings", "store-spec-check-findings",
-    "cleanup-subagent-flag",
-  ]),
-  "post-tool-use": new Set(["lint-file"]),
-  "subagent-start": new Set(["mark-subagent-active"]),
-  "session-start": new Set(["cleanup-stale-subagents", "resume-after-clear"]),
-  "helper": new Set([
-    "complete-wave-gate", "populate-task-graph", "validate-task-graph",
-    "store-review-findings", "store-spec-check", "mark-tests-passed",
-    "suggest-spec-anchors", "extract-task-id", "store-test-evidence",
-    "set-phase", "cleanup-state", "lint-wave-gate",
-  ]),
-};
+// A stdin error may fire before main() awaits the promise (e.g. during the
+// dynamic import) — mark it handled so the crash routes through main's
+// await → the top-level catch, not an unhandled-rejection abort.
+stdinPromise.catch(() => {});
 
 function resultToExit(result: HookResult): never {
   match(result)
@@ -138,5 +128,5 @@ async function main() {
 
 main().catch((err) => {
   process.stderr.write(`Hook error: ${err?.message ?? err}\n`);
-  process.exit(1);
+  process.exit(FAILURE_EXIT_CODE);
 });

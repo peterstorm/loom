@@ -5,7 +5,8 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import type { HookHandler, SubagentStopInput, SpecCheck } from "../../types";
+import type { HookHandler, SubagentStopInput, SpecCheck, SpecCheckVerdict } from "../../types";
+import { parseSpecCheckVerdict, newWaveGate } from "../../types";
 import { StateManager } from "../../state-manager";
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
@@ -17,7 +18,8 @@ interface SpecCheckFindings {
   medium: string[];
   criticalCount: number | null;
   highCount: number | null;
-  verdict: string | null;
+  /** Parsed into the closed union at this boundary — never free text. */
+  verdict: SpecCheckVerdict | null;
   wave: number | null;
 }
 
@@ -63,13 +65,25 @@ export function parseSpecCheckOutput(output: string): SpecCheckFindings {
     medium,
     criticalCount: critCount ? Number(critCount[1]) : null,
     highCount: highCount ? Number(highCount[1]) : null,
-    verdict: verdict?.[1] ?? null,
+    verdict: verdict ? parseSpecCheckVerdict(verdict[1]) : null,
     wave: wave ? Number(wave[1]) : null,
   };
 }
 
 const handler: HookHandler = async (stdin) => {
-  const input: SubagentStopInput = JSON.parse(stdin);
+  // Guard the standalone CLI route: dispatch parses stdin before calling
+  // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
+  // where a bare JSON.parse throw would surface as an uncontextualized
+  // "Hook error" (mirrors cleanup-subagent-flag / update-task-status).
+  let input: SubagentStopInput;
+  try {
+    input = JSON.parse(stdin);
+  } catch (e) {
+    return {
+      kind: "error",
+      message: `store-spec-check-findings: malformed SubagentStop input — spec-check findings NOT stored: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
 
   const agentType = (input.agent_type ?? "").replace(/^[^:]+:/, "");
   if (agentType !== "spec-check-invoker") return { kind: "passthrough" };
@@ -79,7 +93,26 @@ const handler: HookHandler = async (stdin) => {
 
   const rawPath = input.agent_transcript_path ?? "";
   const transcript = await readTranscriptWithRetry(rawPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/);
-  if (!transcript) return { kind: "passthrough" };
+  if (!transcript) {
+    // Fail CLOSED, mirroring the missing-count path below: recording nothing
+    // here would let wave-gate check 4 pass vacuously as "skipped (no
+    // spec-check data)" — an unreadable/empty transcript must read as a
+    // capture failure, never as a clean skip.
+    process.stderr.write(
+      `WARNING: spec-check transcript empty or unreadable (path=${rawPath || "<unset>"}) — marking evidence_capture_failed\n`,
+    );
+    const state = mgr.load();
+    await mgr.update((s) => ({
+      ...s,
+      spec_check: {
+        wave: state.current_wave ?? 1,
+        run_at: new Date().toISOString(),
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: "spec-check agent transcript empty or unreadable - re-run /wave-gate",
+      },
+    }));
+    return { kind: "passthrough" };
+  }
 
   const findings = parseSpecCheckOutput(transcript);
   const state = mgr.load();
@@ -95,6 +128,26 @@ const handler: HookHandler = async (stdin) => {
         run_at: new Date().toISOString(),
         verdict: "EVIDENCE_CAPTURE_FAILED",
         error: "SPEC_CHECK_CRITICAL_COUNT marker not found - re-run /wave-gate",
+      },
+    }));
+    return { kind: "passthrough" };
+  }
+
+  // Fail closed on a count/findings mismatch, mirroring the manual helper
+  // (store-spec-check): the wave gate reads critical_count, so a reported 0
+  // alongside listed CRITICAL: lines (or a count with no listed findings)
+  // would forge a pass or manufacture an unactionable block.
+  if (findings.criticalCount !== findings.critical.length) {
+    process.stderr.write(
+      `WARNING: SPEC_CHECK_CRITICAL_COUNT is ${findings.criticalCount} but ${findings.critical.length} CRITICAL: line(s) were found — marking evidence_capture_failed\n`,
+    );
+    await mgr.update((s) => ({
+      ...s,
+      spec_check: {
+        wave,
+        run_at: new Date().toISOString(),
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: `SPEC_CHECK_CRITICAL_COUNT (${findings.criticalCount}) does not match CRITICAL: findings (${findings.critical.length}) - re-run /wave-gate`,
       },
     }));
     return { kind: "passthrough" };
@@ -118,7 +171,7 @@ const handler: HookHandler = async (stdin) => {
       updated.wave_gates = {
         ...s.wave_gates,
         [waveKey]: {
-          ...(s.wave_gates[waveKey] ?? { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false }),
+          ...(s.wave_gates[waveKey] ?? newWaveGate()),
           blocked: true,
         },
       };

@@ -5,6 +5,7 @@
  */
 
 import type { HookHandler, ReviewStatus, Task } from "../../types";
+import { newWaveGate } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
 import { isNoFindingSentinel } from "../../utils/no-finding-sentinel";
@@ -74,7 +75,7 @@ const handler: HookHandler = async (stdin, args) => {
         wave_gates: {
           ...s.wave_gates,
           [String(task.wave)]: {
-            ...(s.wave_gates[String(task.wave)] ?? { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false }),
+            ...(s.wave_gates[String(task.wave)] ?? newWaveGate()),
             blocked: true,
           },
         },

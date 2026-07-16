@@ -64,7 +64,8 @@ export function loadProjectConfig(configDir: string | null): ProgrammaticConfig 
 }
 
 function parseConfig(obj: Record<string, unknown>, filePath: string): ProgrammaticConfig {
-  const config: Partial<ProgrammaticConfig> = {};
+  // Mutable while assembling; returned as the readonly ProgrammaticConfig
+  const config: { -readonly [K in keyof ProgrammaticConfig]?: ProgrammaticConfig[K] } = {};
 
   if (obj.boundaries !== undefined) {
     if (!Array.isArray(obj.boundaries)) {
@@ -84,8 +85,12 @@ function parseConfig(obj: Record<string, unknown>, filePath: string): Programmat
   }
 
   if (obj.maxFunctionLines !== undefined) {
-    if (typeof obj.maxFunctionLines !== "number" || obj.maxFunctionLines < 1) {
-      throw new Error(`${filePath}: 'maxFunctionLines' must be a positive number`);
+    if (
+      typeof obj.maxFunctionLines !== "number" ||
+      !Number.isInteger(obj.maxFunctionLines) ||
+      obj.maxFunctionLines < 1
+    ) {
+      throw new Error(`${filePath}: 'maxFunctionLines' must be a positive integer`);
     }
     config.maxFunctionLines = obj.maxFunctionLines;
   }
@@ -109,8 +114,8 @@ function parseBoundary(raw: unknown, filePath: string, index: number): BoundaryR
   }
   const b = raw as Record<string, unknown>;
 
-  if (typeof b.module !== "string") {
-    throw new Error(`${filePath}: boundaries[${index}].module must be a string`);
+  if (typeof b.module !== "string" || b.module === "") {
+    throw new Error(`${filePath}: boundaries[${index}].module must be a non-empty string`);
   }
   if (!Array.isArray(b.allow)) {
     throw new Error(`${filePath}: boundaries[${index}].allow must be an array`);

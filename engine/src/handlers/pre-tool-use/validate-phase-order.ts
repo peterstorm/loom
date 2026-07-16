@@ -13,8 +13,12 @@ const handler: HookHandler = async (stdin) => {
   try {
     input = JSON.parse(stdin);
   } catch (e) {
-    process.stderr.write(`validate-phase-order: failed to parse stdin: ${(e as Error).message}\n`);
-    return { kind: "allow" };
+    // Malformed hook input on a spawn-gate route: fail CLOSED. Returning
+    // allow here would exit 0 and let a Task spawn out of phase order.
+    return {
+      kind: "block",
+      message: `validate-phase-order: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
   if (input.tool_name !== "Task" && input.tool_name !== "subagent") return { kind: "allow" };
 

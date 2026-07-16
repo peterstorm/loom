@@ -4,7 +4,7 @@
  */
 
 import { parseJsonl, getContentBlocks, type ContentBlock } from "./types";
-import { TEST_COMMAND_PATTERNS } from "../config";
+import { TEST_COMMAND_PATTERNS } from "../core/tool-vocabulary";
 import { existsSync, readFileSync } from "node:fs";
 
 function isTestCommand(cmd: string): boolean {
@@ -24,8 +24,12 @@ function resolvePersistedOutput(text: string): string {
     if (existsSync(filePath)) {
       try {
         return readFileSync(filePath, "utf-8");
-      } catch {
-        // Fall through to return original text
+      } catch (e) {
+        // Fall back to the truncated preview — but never silently: the full
+        // results (and possibly the pass markers) live in the unread file.
+        process.stderr.write(
+          `parse-bash-test-output: persisted output file '${filePath}' unreadable — falling back to the truncated preview: ${e instanceof Error ? e.message : String(e)}\n`,
+        );
       }
     }
   }

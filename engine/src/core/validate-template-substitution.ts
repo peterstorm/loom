@@ -1,6 +1,7 @@
 /**
  * Core: Validate that task prompts have no unsubstituted template variables.
- * Pure function — no stdin parsing.
+ * Harness-agnostic — no stdin parsing. Not pure: reads the filesystem
+ * (existsSync).
  */
 
 import { existsSync } from "node:fs";

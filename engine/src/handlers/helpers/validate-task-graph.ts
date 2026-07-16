@@ -8,6 +8,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookHandler, Phase, TaskGraph } from "../../types";
 import { PHASE_ORDER, KNOWN_AGENTS } from "../../config";
+import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
 
 export type ValidationResult =
   | { ok: true }
@@ -18,7 +19,7 @@ function fail(errors: string[]): ValidationResult { return { ok: false, errors }
 
 const VALID_PHASES = new Set<string>(PHASE_ORDER);
 
-const NO_TEST_KEYWORDS = /migration|config|schema|rename|bump|version|refactor|cleanup|typo|docs|interface|documentation|changelog|readme|ci|cd|pipeline|deploy|→|->|styling|css|formatting|adr/i;
+const NO_TEST_KEYWORDS = /migration|config|schema|rename|bump|version|refactor|cleanup|typo|docs|interface|documentation|changelog|readme|ci|cd|pipeline|deploy|→|->|styling|css|formatting|adr|codegen|generated/i;
 
 /** Validate minimal phase-tracking graph (no tasks) */
 export function validateMinimal(json: Record<string, unknown>): ValidationResult {
@@ -55,10 +56,13 @@ export function validateFull(json: Record<string, unknown>): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  // Required top-level fields
-  for (const field of ["plan_title", "plan_file", "spec_file", "tasks"]) {
+  // Required top-level fields — path fields must be real strings, not merely
+  // truthy, or a garbage value silently disarms downstream plan-based checks
+  for (const field of ["plan_title", "plan_file", "spec_file"]) {
     if (!json[field]) errors.push(`Missing required field: ${field}`);
+    else if (typeof json[field] !== "string") errors.push(`Field '${field}' must be a string`);
   }
+  if (!json.tasks) errors.push("Missing required field: tasks");
 
   const tasks = json.tasks;
   if (!Array.isArray(tasks)) {
@@ -154,7 +158,7 @@ export function validateFull(json: Record<string, unknown>): ValidationResult {
 
 /** Fix full graph — add missing per-task defaults */
 export function fixFull(json: Record<string, unknown>): string {
-  const tasks = (json.tasks as Record<string, unknown>[]) ?? [];
+  const tasks = Array.isArray(json.tasks) ? (json.tasks as Record<string, unknown>[]) : [];
   const fixed = {
     ...json,
     tasks: tasks.map((t) => ({
@@ -167,6 +171,21 @@ export function fixFull(json: Record<string, unknown>): string {
     })),
   };
   return JSON.stringify(fixed, null, 2);
+}
+
+/** Production filesystem port for model-binding checks — honest null on any read failure */
+const PROD_DEPS: ModelBindingDeps = {
+  readFile: (p) => {
+    try {
+      return readFileSync(p, "utf-8");
+    } catch {
+      return null;
+    }
+  },
+};
+
+function tasksOf(json: Record<string, unknown>): Record<string, unknown>[] {
+  return Array.isArray(json.tasks) ? (json.tasks as Record<string, unknown>[]) : [];
 }
 
 const handler: HookHandler = async (stdin, args) => {
@@ -206,6 +225,16 @@ const handler: HookHandler = async (stdin, args) => {
       process.stderr.write(`Fixed structural defaults; ${result.errors.length} issues remain\n`);
       for (const err of result.errors) process.stderr.write(`  - ${err}\n`);
     }
+    // --fix is a transformation, not a gate — but binding problems are not
+    // structurally fixable, so surface them rather than dropping them.
+    // populate-task-graph enforces bindings fail-closed before any state write.
+    if (!isMinimal) {
+      const bindings = checkPlanModelBindings(json.plan_file, tasksOf(json), PROD_DEPS);
+      if (!bindings.ok) {
+        process.stderr.write(`Executable-model binding issues (not fixable by --fix; populate-task-graph will block):\n`);
+        for (const err of bindings.errors) process.stderr.write(`  - ${err}\n`);
+      }
+    }
     return { kind: "passthrough" };
   }
 
@@ -214,6 +243,23 @@ const handler: HookHandler = async (stdin, args) => {
       kind: "error",
       message: [`Validation FAILED (${result.errors.length} errors):`, ...result.errors.map((e) => `  - ${e}`)].join("\n"),
     };
+  }
+
+  // Executable-models policy: cross-check model bindings declared in the plan.
+  // Fail-closed — an unreadable plan is an error, not a skipped check; plans
+  // without model sections produce zero checks (genuine opt-out).
+  if (!isMinimal) {
+    const bindings = checkPlanModelBindings(json.plan_file, tasksOf(json), PROD_DEPS);
+    if (!bindings.ok) {
+      return {
+        kind: "error",
+        message: [`Executable-model binding validation FAILED (${bindings.errors.length} errors):`, ...bindings.errors.map((e) => `  - ${e}`)].join("\n"),
+      };
+    }
+    const models = bindings.models;
+    if (models && (models.lifecycles.length > 0 || models.pipeline !== null || models.invariants.length > 0)) {
+      process.stderr.write(`Executable-model bindings valid: ${models.lifecycles.length} lifecycles, ${models.pipeline ? 1 : 0} pipeline, ${models.invariants.length} invariants\n`);
+    }
   }
 
   process.stderr.write(isMinimal ? "Minimal graph valid\n" : `Task graph valid: ${(json.tasks as unknown[]).length} tasks\n`);

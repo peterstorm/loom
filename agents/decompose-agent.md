@@ -14,9 +14,10 @@ You decompose a feature into a parallel task graph. Your prompt contains the spe
 ## Process
 
 1. **Read** the spec file (requirements, acceptance criteria, spec anchors like FR-001, SC-001, US1)
-2. **Read** the plan file (architecture decisions, implementation phases, file structure)
-3. **Decompose** into tasks following the rules provided in the prompt
-4. **Output** the JSON task graph to stdout
+2. **Read** the plan file (architecture decisions, implementation phases, file structure — plus any executable-model sections: `## Lifecycles`, `## Pipeline`, `## Invariants`)
+3. **If the plan declares a `## Pipeline`**, read the referenced AuthoredDag JSON file too (node purposes and schemas feed `plan_context`)
+4. **Decompose** into tasks following the rules provided in the prompt — lifecycle machine files MUST land in a task's `file_list` as declared (the validator suffix-matches one-directionally: a task path counts when it equals the declared path or ends with `/<declared path>` after `./` normalization — so any deeper/absolute prefix on the task path is fine, but a bare basename never satisfies a pathed declaration, and a declaration with no directory segment matches only exactly); it fail-closes on unbound models and near-miss declarations
+5. **Output** the JSON task graph to stdout
 
 ## Constraints
 

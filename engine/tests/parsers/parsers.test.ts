@@ -57,6 +57,77 @@ describe("parseFilesModified", () => {
     const result = parseFilesModified(content);
     expect(result).toEqual(["/tmp/test.ts"]);
   });
+
+  // Pi transcripts embed tool calls as { type: "toolCall", name, arguments }
+  // inside assistant messages, keyed by `path` (or `file_path`). This branch
+  // is live production code (pi/extension.ts threads it) and format-shape
+  // regressions here would ship silently.
+  it("extracts pi toolCall write paths via `path` (explicit format)", () => {
+    const content =
+      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"write","arguments":{"path":"/tmp/pi.ts"}}]}}';
+    const result = parseFilesModified(content, "pi");
+    expect(result).toEqual(["/tmp/pi.ts"]);
+  });
+
+  it("extracts pi toolCall edit paths via `file_path` fallback", () => {
+    const content =
+      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"edit","arguments":{"file_path":"/tmp/edit.ts"}}]}}';
+    const result = parseFilesModified(content, "pi");
+    expect(result).toEqual(["/tmp/edit.ts"]);
+  });
+
+  it("collects a pi `multi_edit` toolCall path (PI_FILE_TOOLS membership)", () => {
+    // multi_edit is a first-class pi file tool; dropping it from PI_FILE_TOOLS
+    // silently shrinks the wave-gate lint set. Mutation-survivable without this.
+    const content =
+      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"multi_edit","arguments":{"path":"/tmp/multi.ts"}}]}}';
+    expect(parseFilesModified(content, "pi")).toEqual(["/tmp/multi.ts"]);
+  });
+
+  it("case-folds a capitalized pi `Write` toolCall name (extension.ts hedges on casing)", () => {
+    // pi tool blocks appear in both lowercase and capitalized forms; the
+    // `.toLowerCase()` fold is load-bearing — a capitalized `Write` must match.
+    const content =
+      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"Write","arguments":{"path":"/tmp/cap.ts"}}]}}';
+    expect(parseFilesModified(content, "pi")).toEqual(["/tmp/cap.ts"]);
+  });
+
+  it("ignores pi toolCalls from non-assistant roles and non-file tools", () => {
+    const content = [
+      '{"type":"message","message":{"role":"user","content":[{"type":"toolCall","name":"write","arguments":{"path":"/tmp/nope.ts"}}]}}',
+      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"ls"}}]}}',
+    ].join("\n");
+    const result = parseFilesModified(content, "pi");
+    expect(result).toEqual([]);
+  });
+
+  it("auto-detects pi format from the session header line", () => {
+    const content = [
+      '{"type":"session","version":1}',
+      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"write","arguments":{"path":"/tmp/auto.ts"}}]}}',
+    ].join("\n");
+    const result = parseFilesModified(content);
+    expect(result).toEqual(["/tmp/auto.ts"]);
+  });
+
+  it("parses the exact re-encoding pi/extension.ts produces from per-result messages (round-16 Fix 8)", () => {
+    // The pi Stop mirror maps each PiMessage to `{ type: "message", message }`
+    // JSONL and passes format "pi" — this row pins that shape end to end so
+    // files_modified stops arriving empty at lint-wave-gate under pi.
+    const messages = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "editing" },
+          { type: "toolCall", name: "write", arguments: { path: "/tmp/impl.ts" } },
+          { type: "toolCall", name: "edit", arguments: { path: "/tmp/impl.test.ts" } },
+        ],
+      },
+      { role: "toolResult", content: [{ type: "text", text: "ok" }] },
+    ];
+    const piJsonl = messages.map((m) => JSON.stringify({ type: "message", message: m })).join("\n");
+    expect(parseFilesModified(piJsonl, "pi")).toEqual(["/tmp/impl.test.ts", "/tmp/impl.ts"]);
+  });
 });
 
 describe("parseBashTestOutput", () => {

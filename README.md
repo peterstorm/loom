@@ -2,7 +2,7 @@
 
 A Claude Code plugin for orchestrating complex, multi-phase software features with wave-based parallel task execution — and a toolbox of standalone skills, agents, and a programmatic linter you can use independently.
 
-Loom turns a feature description into shipping code through a structured pipeline: **brainstorm → specify → clarify → architect → plan-alignment → decompose → execute (waves) → wave-gate (test + spec-check + review)**. Each phase is run by a specialized agent. Hooks enforce phase ordering, capture artifacts, extract test evidence from transcripts, and protect the state file. A built-in linter runs on every file edit and again at wave-gate boundaries.
+Loom turns a feature description into shipping code through a structured pipeline: **brainstorm → specify → clarify → architect → plan-alignment → decompose → execute (waves) → wave-gate (test + spec-check + review)**. Each phase is run by a specialized agent. Hooks enforce phase ordering, capture artifacts, resolve test evidence (evidence ledger first, labeled transcript fallback), and protect the state file. A built-in linter runs on every file edit and again at wave-gate boundaries.
 
 Loom also runs on [Pi](https://github.com/earendil-works/pi-coding-agent) — the engine is harness-agnostic and ships a Pi extension.
 
@@ -55,7 +55,7 @@ claude plugin add /path/to/loom
 /loom --skip-clarify "Accept any remaining [NEEDS CLARIFICATION] markers"
 /loom --skip-plan-alignment "Trivial change, no alignment check needed"
 
-# Status / lifecycle
+# Status / lifecycle (planned — not yet implemented; see commands/loom.md)
 /loom --status                # Print current phase + wave + task statuses
 /loom --complete              # Tear down state file after success
 /loom --abort                 # Tear down state file on abandonment
@@ -207,7 +207,7 @@ For each wave, all tasks are spawned as parallel agents in a single message. Eac
 1. Read the plan and its assigned task
 2. Implement following project patterns (FP/DDD, ports at I/O boundaries, Either for errors)
 3. Write new tests
-4. **Run the tests via Bash** — mandatory; hooks extract pass/fail evidence from the transcript
+4. **Run the tests via Bash** — mandatory; pass/fail evidence is resolved by hooks from the evidence ledger first, with transcript extraction as the labeled fallback
 5. Verify all tests pass
 
 After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance.
@@ -221,9 +221,9 @@ After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance
 | Step | What | How |
 |------|------|-----|
 | 1 | **State check** | Confirm `current_wave` and `impl_complete == true` |
-| 2 | **Test evidence** | Verify every task has `tests_passed == true` (auto-extracted by `update-task-status` hook from agent transcripts) and `new_tests_written == true` (or `new_tests_required == false`) |
+| 2 | **Test evidence** | Verify every task has a passing `test_result` (resolved by the `update-task-status` hook — evidence ledger first, transcript fallback) and `new_tests_written == true` — both requirements are waived for tasks declaring `new_tests_required == false` |
 | 3 | **Spec-check + reviews (parallel)** | Spawn `spec-check-invoker` once for the wave; spawn 5 reviewers per task in parallel |
-| 4 | **GitHub comment** | Post a summary to the issue (fallback: write to `.claude/state/wave-{N}-review.md`) |
+| 4 | **GitHub comment** | Post a summary to the issue (fallback: write to `.claude/reviews/wave-{N}-review.md`) |
 | 5 | **Advance** | `complete-wave-gate` helper performs final checks and either advances or blocks |
 
 ### Review agents (per task, in parallel)
@@ -241,13 +241,14 @@ After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance
 - **PASSED** — Tasks marked `completed`, wave advances, GitHub issue checkboxes update.
 - **BLOCKED** — One or more critical findings (in spec-check or code review) or missing evidence. Fix and re-run `/wave-gate`; on re-run only blocked tasks are re-reviewed.
 
-The five mandatory checks performed by the `complete-wave-gate` helper:
+The six mandatory checks performed by the `complete-wave-gate` helper (in evaluation order):
 
-1. Per-task test evidence (`tests_passed == true`)
+1. Per-task test evidence (a passing `test_result`, except tasks declaring `new_tests_required == false`, which are exempt)
 2. New tests written (`new_tests_written == true` OR `new_tests_required == false`)
-3. Spec alignment (`spec_check.critical_count == 0`)
-4. Per-task review status (no `pending`)
+3. Per-task review status (every task's `review_status` is `passed` or `blocked` — `pending`, absent, or `evidence_capture_failed` all fail the check)
+4. Spec alignment (`spec_check.critical_count == 0`)
 5. No critical findings in code review
+6. Lifecycle machine artifacts exist on disk for every lifecycle the plan binds to this wave (a named-but-unreadable plan fails the gate, fail-closed)
 
 ---
 
@@ -359,19 +360,21 @@ Hooks are the enforcement and automation backbone. They fire on Claude Code life
 | `validate-agent-model` | Task | Validates the agent's `model:` field |
 | `validate-agent-skill` | Task | Validates the agent's `skills:` field resolves to real skills |
 | `block-direct-edits` | Edit, Write, MultiEdit | Forces file changes through the Task tool (subagents) during orchestration |
-| `guard-state-file` | Bash | Blocks any bash command that writes to the state file (only whitelisted helpers allowed) |
+| `enforce-phase-tools` | Edit, Write, MultiEdit | Guarded-skill-machine gate: denies enforced tools the bound agent's phase doesn't allow (fails closed) |
+| `guard-state-file` | Bash | Deny-by-default on guarded state paths: only read-only commands (`jq`, `cat`, `grep`, …) and whitelisted helpers pass |
 
-### PostToolUse — linting
+### PostToolUse — linting & evidence
 
 | Hook | Matcher | Purpose |
 |---|---|---|
-| `lint-file` | Edit, Write, MultiEdit | Runs the **immediate-tier** linter (regex + a small set of programmatic rules, ≤50ms/file) on every modified file |
+| `lint-file` | Edit, Write, MultiEdit | Runs the **immediate-tier** linter (regex rules only, ≤50ms/file) on every modified file; programmatic rules run at the full tier (wave gate) |
+| `record-evidence` | Read, Edit, Write, MultiEdit, Bash | Appends epoch-stamped facts (FileRead/FileWrite/TestRun) to the evidence ledger |
 
 ### SubagentStart — lifecycle tracking
 
 | Hook | Matcher | Purpose |
 |---|---|---|
-| `mark-subagent-active` | * | Tracks active subagents in `/tmp/claude-subagents/` |
+| `mark-subagent-active` | * | Tracks active subagents in `/tmp/claude-subagents/` + binds the guarded skill machine (mints the attribution epoch) |
 
 ### SubagentStop — phase advancement & status
 
@@ -380,7 +383,7 @@ All SubagentStop events route through `dispatch`, which inspects agent type and 
 | Handler | Fires for | Purpose |
 |---|---|---|
 | `advance-phase` | Phase agents | Advances `current_phase`, captures artifact paths via the artifact parser |
-| `update-task-status` | Implementation agents | Extracts test pass/fail evidence from transcript, sets `tests_passed`, `new_tests_written`, `files_modified` |
+| `update-task-status` | Implementation agents | Resolves test evidence (evidence ledger first, transcript fallback), sets `test_result` (verdict + trust provenance), `new_tests_written`, `files_modified` |
 | `store-reviewer-findings` | Review agents | Parses findings into per-task `critical_findings` / `advisory_findings` |
 | `store-spec-check-findings` | `spec-check-invoker` | Parses `SPEC_CHECK_*` footer into `spec_check.verdict` |
 | `cleanup-subagent-flag` | All | Cleans up tracking files |
@@ -401,13 +404,16 @@ Agent spawn requested
   PreToolUse: validate-phase-order → validate-task-execution → validate-template-substitution → …
        | (all pass)
        v
-  Agent starts → SubagentStart: mark-subagent-active
+  Agent starts → SubagentStart: mark-subagent-active (binds machine, mints epoch)
        |
        v
   Agent executes…
        |
        | (on every Edit/Write/MultiEdit)
-       +---> PostToolUse: lint-file (immediate tier, ≤50ms)
+       +---> PreToolUse: enforce-phase-tools (machine gate) → PostToolUse: lint-file (immediate tier, ≤50ms)
+       |
+       | (on every Read/Edit/Write/MultiEdit/Bash)
+       +---> PostToolUse: record-evidence (epoch-stamped ledger facts)
        |
        v
   Agent completes → SubagentStop: dispatch
@@ -429,13 +435,13 @@ Loom ships a two-tier linter that runs automatically as part of the hook pipelin
 
 | Tier | When | Rules | Budget |
 |---|---|---|---|
-| **Immediate** | PostToolUse on Edit/Write/MultiEdit | Regex rules + a fast subset of programmatic rules | ≤50ms per file |
+| **Immediate** | PostToolUse on Edit/Write/MultiEdit | Regex rules only (programmatic rules run at the full tier) | ≤50ms per file |
 | **Full** | At wave-gate boundaries (`lint-wave-gate` helper) | All rules including expensive structural analysis | No hard deadline |
 
 ### Rule kinds
 
 - **Regex rules** — JSON files under `/lint-rules/` (and project overrides under `.claude/linter/rules/` or `.pi/linter/rules/`). Schema: `kind`, `name`, `description`, `extensions`, `pattern`, `flags`, `fixHint`, `enabled`.
-- **Programmatic rules** — TypeScript under `engine/src/linter/programmatic/`. Shipped: `max-function-lines` (>60), `no-cross-boundary-imports`, `no-io-in-pure-modules`.
+- **Programmatic rules** — TypeScript under `engine/src/linter/programmatic/`. Shipped: `max-function-lines` (default: 50), `no-cross-boundary-imports`, `no-io-in-pure-modules`, `fugue-generated-integrity` (wave-gate tier — verifies the structural `@fugue-integrity` hash of `fugue new --from` output). Programmatic rules run in the full/wave-gate tier only, not on PostToolUse.
 
 ### Bundled regex rules
 
@@ -486,21 +492,20 @@ interface TaskGraph {
 }
 ```
 
-`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `tests_passed`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `review_status`, `critical_findings`, `advisory_findings`, `start_sha`, `failure_reason`, `retry_count`.
+`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `test_result`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `file_list`, `review_status`, `review_error`, `critical_findings`, `advisory_findings`, `start_sha`, `failure_reason`, `retry_count`.
 
 ### Protection model
 
 1. **File permissions** — `chmod 444` at rest. Only `StateManager` can write by temporarily toggling to 644.
-2. **Hook guard** — `guard-state-file` blocks any bash command writing to the state file unless it's a whitelisted helper.
+2. **Hook guard** — `guard-state-file` is deny-by-default: a bash command referencing guarded state passes only as a read-only command (allowlisted head, no output redirect) or a whitelisted helper; substitution bodies are judged recursively.
 3. **Atomic writes** — File-based mutex + tmp-file-then-rename for crash safety.
 4. **Subagent isolation** — Subagents cannot edit the state file directly; only hooks running in the parent process can.
 
 ### Task status transitions
 
 ```
-pending      ──▶ implemented   (agent completes, evidence extracted from transcript)
-pending      ──▶ failed        (agent crash; retry_count incremented)
-failed       ──▶ pending       (auto-retry, max 2 attempts)
+pending      ──▶ implemented   (agent completes, test evidence resolved — evidence ledger first, labeled transcript fallback)
+pending      ──▶ pending       (agent crash; executing_tasks cleared, task re-spawned by the orchestrator)
 implemented  ──▶ completed     (wave gate passed)
 ```
 
@@ -527,15 +532,22 @@ engine/src/
 ├── types.ts            # TaskGraph, Task, Phase, HookResult, etc.
 ├── state-manager.ts    # Atomic state file read/write with locking + chmod
 ├── phase-init.ts       # Resolve initial TaskGraph from skip flags
-├── core/               # Pure functions (harness-agnostic, reusable in Pi)
+├── core/               # Harness-agnostic functions (reusable in Pi)
 │   ├── block-direct-edits.ts
 │   ├── guard-state-file.ts
+│   ├── tool-vocabulary.ts          # FILE_MODIFYING_TOOLS / TEST_COMMAND_PATTERNS (pure constants — sole import: machine/types)
 │   ├── validate-phase-order.ts
 │   ├── validate-task-execution.ts
 │   └── validate-template-substitution.ts
+├── machine/            # Guarded skill machine (see machines/README.md)
+│   │                   # Pure core — self-linted via no-io-in-pure-modules:
+│   ├── types.ts, advance.ts, parse-machine.ts, extract-evidence.ts,
+│   ├── mermaid.ts, test-report.ts, evidence.ts
+│   │                   # Imperative shell (fs + locks):
+│   └── ledger.ts, report-discovery.ts, session-registry.ts
 ├── handlers/
 │   ├── pre-tool-use/      # validate-phase-order, validate-task-execution, …
-│   ├── post-tool-use/     # lint-file
+│   ├── post-tool-use/     # lint-file, record-evidence
 │   ├── subagent-start/    # mark-subagent-active
 │   ├── subagent-stop/     # dispatch, advance-phase, update-task-status, …
 │   ├── session-start/     # cleanup-stale-subagents, resume-after-clear
@@ -547,14 +559,15 @@ engine/src/
 │   ├── parse-transcript.ts
 │   ├── parse-bash-test-output.ts   # Maven/Gradle/Vitest/Jest/pytest/cargo/go/dotnet/…
 │   ├── parse-files-modified.ts
-│   └── parse-phase-artifacts.ts
+│   ├── parse-phase-artifacts.ts
+│   └── parse-plan-models.ts        # Executable models (lifecycles, pipeline, invariants) from plan markdown
 ├── linter/             # Two-tier programmatic + regex linter
 │   ├── loader.ts
 │   ├── executor.ts
 │   ├── formatter.ts
 │   ├── safety.ts
 │   └── programmatic/   # max-function-lines, no-cross-boundary-imports,
-│                       # no-io-in-pure-modules
+│                       # no-io-in-pure-modules, fugue-generated-integrity
 └── utils/              # git, lock, find-file, read-transcript-with-retry, …
 ```
 
@@ -598,15 +611,15 @@ The CLI reads JSON from stdin (provided by the harness), dynamically imports the
 | `CLARIFY_THRESHOLD` | Markers above this trigger mandatory clarify phase (default: 3) |
 | `PHASE_ORDER` | Valid phase sequence |
 | `PHASE_AGENT_MAP` | Maps each phase to the agent that runs it |
-| `PHASE_TRANSITIONS` | Allowed phase-to-phase transitions |
+| `VALID_TRANSITIONS` | Allowed phase-to-phase transitions |
 | `IMPL_AGENTS` | Implementation agents allowed during execute (incl. `code-implementer-agent`, `ts-test-agent`, `frontend-agent`, `security-agent`, `dotfiles-agent`, `adr-writer-agent`, `general-purpose`) |
 | `REVIEW_SUB_AGENTS` | Review agents whose findings feed the wave gate |
 | `REVIEW_AGENTS` | `REVIEW_SUB_AGENTS` + `spec-check-invoker` |
 | `EXECUTE_AGENTS` | `IMPL_AGENTS` + `REVIEW_AGENTS` |
 | `UTILITY_AGENTS` | `Explore`, `Plan`, `haiku` |
 | `WHITELISTED_HELPERS` | Helper scripts allowed to write to the state file |
-| `STATE_FILE_PATTERNS` | Regex matching state file names |
-| `WRITE_PATTERNS` | Regex matching dangerous bash operations (`>>`, `rm`, `mv`, `cp`, `sed -i`, …) |
+| `stateFilePatterns()` | Lazily-built regex matching guarded state files AND guarded directories (state dir, subagent dir, machine definitions) |
+| `READ_ONLY_STATE_COMMANDS` | Allowlist of commands that cannot write files (`jq`, `cat`, `grep`, …) — anything else touching guarded state blocks (deny-by-default) |
 | `TEST_COMMAND_PATTERNS` | 30+ patterns for recognizing test runners |
 | `TASK_GRAPH_PATH` | Resolved from cwd or git root (`.claude/state/…` or `.pi/state/…`) |
 | `SUBAGENT_DIR` | `/tmp/claude-subagents` |
@@ -649,7 +662,7 @@ loom/
 ├── skills/                     # Reusable knowledge modules preloaded into agents
 ├── engine/                     # TypeScript hook engine
 │   ├── src/                    # Source (cli, config, handlers, parsers, linter, core)
-│   └── tests/                  # Vitest + fast-check test suite (46 files)
+│   └── tests/                  # Vitest + fast-check test suite
 ├── hooks/
 │   ├── hooks.json              # Hook configuration
 │   └── scripts/                # Shell shims → bun CLI
@@ -675,7 +688,7 @@ The `/references/` directory holds templates used by phase agents: `spec-templat
 Loom's engine is harness-agnostic. The `/pi/` directory ships a Pi extension (`extension.ts`) and a bridge (`loom-bridge.ts`) that adapts Pi's `tool_call` / `tool_result` events to the same handlers used under Claude Code.
 
 - The `HARNESS` constant in `config.ts` detects `claude` vs `pi` at runtime.
-- Everything in `engine/src/core/` is pure and has zero harness dependency.
+- Everything in `engine/src/core/` has zero harness dependency.
 - The Pi adapter (`engine/src/handlers/pi-adapter.ts`) maps lint results to Pi's `ToolResultResponse` shape.
 - State paths shift from `.claude/state/…` to `.pi/state/…`.
 
@@ -687,11 +700,11 @@ See `docs/pi-usage.md` and `docs/migration-claude-code-to-pi.md` for details.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Task stuck `in_progress` | Agent hung without crashing | Re-spawn the task |
-| `tests_passed` missing | Agent didn't run tests via Bash | Re-spawn — agents MUST execute tests |
+| Task stays `pending`, agent still running | Agent live (no crash; tracked via `executing_tasks`, there is no `in_progress` status) | Wait for it, or re-spawn if hung |
+| `test_result` missing or not a pass | Agent didn't run tests via Bash | Re-spawn — agents MUST execute tests |
 | `new_tests_written` false | Agent reused existing tests | Re-spawn — agents must write new tests |
 | Wave not advancing | Gate blocked by critical findings | Fix issues, re-run `/wave-gate` |
-| State write blocked | `guard-state-file` active | All writes go through hooks; reads are fine |
+| State write blocked | `guard-state-file` active | All writes go through hooks; reads via read-only commands (jq, cat, grep, …) are fine |
 | Phase agent blocked | Prerequisite phase incomplete | Check `current_phase`; complete prerequisites |
 | Template variables in prompt | `{variable}` not substituted | Hook blocks this — substitute before spawning |
 | Lint failure on Edit | Linter caught a rule violation | Fix the violation; the hook is fail-closed |
@@ -703,7 +716,7 @@ See `docs/pi-usage.md` and `docs/migration-claude-code-to-pi.md` for details.
 jq '.' .claude/state/active_task_graph.json
 
 # Per-task status
-jq '.tasks[] | {id, status, tests_passed, new_tests_written, review_status}' \
+jq '.tasks[] | {id, status, test_result, new_tests_written, review_status}' \
    .claude/state/active_task_graph.json
 
 # Current wave and gate status
@@ -728,7 +741,7 @@ jq '.spec_check' .claude/state/active_task_graph.json
 
 ```bash
 cd engine
-bun test              # Run all tests (46 test files)
+bun test              # Run all tests
 bun test --watch      # Watch mode
 bunx tsc --noEmit     # Type checking
 ```
@@ -737,8 +750,8 @@ bunx tsc --noEmit     # Type checking
 
 The suite includes:
 
-- **Unit tests** — every handler, parser, and utility (22 handler tests, 6 parser-related, 5 util tests)
-- **Linter tests** — executor, loader, formatter, safety analyzer, each programmatic rule, integration (11 tests)
+- **Unit tests** — every handler, parser, and utility
+- **Linter tests** — executor, loader, formatter, safety analyzer, each programmatic rule, integration
 - **Core tests** — pure functions, state manager, phase initialization
 - **Property-based tests** — git operations, task graph validation, linter safety (fast-check)
 - **E2E** — full hook pipeline sequencing

@@ -7,15 +7,13 @@ import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Phase } from "./types";
+import { PHASES, type Phase } from "./types";
 
 /** Markers above this trigger mandatory clarify phase */
 export const CLARIFY_THRESHOLD = 3;
 
-/** Valid phase ordering */
-export const PHASE_ORDER: readonly Phase[] = [
-  "init", "brainstorm", "specify", "clarify", "architecture", "plan-alignment", "decompose", "execute",
-] as const;
+/** Valid phase ordering — re-exported from the single source tuple in types. */
+export const PHASE_ORDER: readonly Phase[] = PHASES;
 
 /** Phase agents → map to their phase */
 export const PHASE_AGENT_MAP: Record<string, Phase> = {
@@ -67,11 +65,11 @@ export const REVIEW_AGENTS = new Set([
 /** All agents that map to execute phase (impl + review) */
 export const EXECUTE_AGENTS = new Set([...IMPL_AGENTS, ...REVIEW_AGENTS]);
 
-/** Tools that modify files */
-export const FILE_MODIFYING_TOOLS = new Set(["Write", "Edit", "MultiEdit"]);
+/** Tools that modify files (defined in core/tool-vocabulary — re-exported here, config stays the documented home) */
+export { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "./core/tool-vocabulary";
 
 /** Whitelisted helper scripts in guard-state-file */
-export const WHITELISTED_HELPERS = [
+export const WHITELISTED_HELPERS: readonly string[] = [
   "complete-wave-gate",
   "mark-tests-passed",
   "store-review-findings",
@@ -82,26 +80,131 @@ export const WHITELISTED_HELPERS = [
   "cleanup-state",
 ];
 
-/** State file patterns to guard */
-export const STATE_FILE_PATTERNS = /active_task_graph|review-invocations/;
+/** Subagent tracking directory */
+export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
 
-/** Write patterns to block on state files.
- * Note: `(?:^|\s)>>?(?!&)` avoids matching `2>&1` redirects in read-only commands */
-export const WRITE_PATTERNS = /(?:^|\s)>>?(?!&)|(?:^|\s)rm |mv |cp |tee |sed -i|perl -i|(?:^|\s)dd |sponge |chmod |python3? .*(open|write)|node .*(writeFile|fs\.)/;
+/**
+ * One TTL for every liveness judgment about subagent tracking files: the
+ * SessionStart sweep deletes files whose mtime is older than this, and the
+ * machine-binding reader treats bindings whose last activity (bind stamp or
+ * binding-file mtime, whichever is later) exceeds it as absent. A single
+ * constant keeps the two mechanisms from drifting apart.
+ */
+export const STALE_SUBAGENT_TTL_MS = 60 * 60_000;
 
-/** Test command patterns (for bash test output parsing) */
-export const TEST_COMMAND_PATTERNS = [
-  "mvn test", "mvn verify", "mvn -pl",
-  "mvnw test", "mvnw verify",
-  "./gradlew test", "./gradlew check",
-  "gradle test", "gradle check",
-  "npm test", "npm run test",
-  "npx vitest", "npx jest",
-  "yarn test", "pnpm test", "bun test",
-  "pytest", "python -m pytest", "python3 -m pytest",
-  "cargo test", "go test", "dotnet test",
-  "mix test", "make test", "make check",
+const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const DEFAULT_MACHINES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "machines");
+
+/**
+ * Guarded-skill-machine definitions directory (shipped with loom, per agent
+ * type), resolved lazily — reads LOOM_MACHINES_DIR at call time so the gate
+ * can be pointed at fixture machines per-test without a module reload.
+ */
+export const machinesDir = (): string => process.env.LOOM_MACHINES_DIR ?? DEFAULT_MACHINES_DIR;
+
+/** Machines directory — resolved once at import (consumers that never re-point) */
+export const MACHINES_DIR = machinesDir();
+
+/** Guarded directories, single source of truth, resolved lazily (LOOM_*
+ * re-point without a module reload). The state DIR (dirname of the task-graph
+ * path) is guarded so a glob/brace write that names the dir but not the file
+ * literal is still caught; the subagent and machine-definition dirs are
+ * additionally PROTECTED (never helper-writable — see protectedDirs). */
+export const guardedDirs = (): readonly string[] => [
+  dirname(taskGraphRelative()),
+  SUBAGENT_DIR,
+  machinesDir(),
 ];
+
+/** The subset of guardedDirs whose writes are NEVER whitelisted, even for a
+ * helper invocation: a write into the subagent dir forges trusted evidence
+ * (`.evidence.jsonl`), fakes attribution (`.active`), or disarms the gate
+ * (`.machine`), and a write into the machine-definitions dir deletes/rewrites
+ * the gate's rules. guard-state-file checks these BEFORE the helper allow. */
+export const protectedDirs = (): readonly string[] => [SUBAGENT_DIR, machinesDir()];
+
+const toSegments = (dir: string): string[] => dir.split("/").filter((s) => s !== "");
+
+/** guardedDirs / protectedDirs as `/`-split segment lists (empty segments
+ * dropped) for the guard's glob-intersection scope test: a glob path reaching
+ * AT or INTO one of these dirs could name a guarded file even when no literal
+ * survives quote-collapse, so it must enter scope. */
+export const guardedDirSegments = (): readonly (readonly string[])[] =>
+  guardedDirs().map(toSegments);
+export const protectedDirSegments = (): readonly (readonly string[])[] =>
+  protectedDirs().map(toSegments);
+
+/** State file patterns to guard — built lazily so the machine-definitions
+ * dir resolves machinesDir() at decision time (a re-pointed
+ * LOOM_MACHINES_DIR is guarded without a module reload, mirroring
+ * mark-subagent-active / update-task-status).
+ * Includes the guarded-machine subagent dir (derived from SUBAGENT_DIR, not
+ * hardcoded): an agent writing the evidence ledger or binding files via Bash
+ * would forge trusted test evidence, appending to `.active` would fake
+ * attribution, and `rm` of the directory itself would silently disarm the
+ * gate — so any reference to the dir in a segment that is not an
+ * allowlisted read-only command or whitelisted helper blocks.
+ * The machine-definitions dir is guarded for the same reason: `rm` of a
+ * machine file via Bash would make the gate see "no machine" for a BOUND
+ * agent (which now fails closed — but deleting definitions must be blocked
+ * at the source too). The state DIRECTORY (dirname of the task-graph path,
+ * derived from taskGraphRelative, not hardcoded) is guarded for the same
+ * dir-guard reason: a glob (`active_task*.json`, `.claude/state/*.json`) or
+ * brace (`active_task_{graph,x}.json`) write names the directory but never
+ * the file literal, so only a dir match can catch the forgery. */
+export const stateFilePatterns = (): RegExp => new RegExp(
+  ["active_task_graph", "review-invocations", ...guardedDirs()].map(escapeRegex).join("|"),
+);
+
+export const protectedDirPatterns = (): RegExp => new RegExp(
+  protectedDirs().map(escapeRegex).join("|"),
+);
+
+/** Commands allowed to touch guarded state paths: deny-by-default allowlist.
+ *
+ * This replaced the WRITE_PATTERNS denylist after rounds 11-14 each shipped
+ * a critical bypass of the same class ("write tool not yet enumerated" —
+ * substitution escapes, `bun -e`, glob paths, `ln`/`truncate`). An allowlist
+ * inverts the residual: instead of enumerating writers (unbounded), it
+ * enumerates readers (small, stable), so an unknown command on a guarded
+ * path blocks instead of slipping through.
+ *
+ * Membership criterion: the command must be unable to write a file under ANY
+ * flag combination. Deliberately excluded, with the flag that disqualifies
+ * them: `sort` (-o), `uniq` (second file operand), `less` (-o/-O),
+ * `xxd` (-r <outfile>), `base64` (macOS -o), `sed`/`awk` (-i / in-script
+ * `w`/`print >`), `find` (-delete/-exec), `git` (checkout/restore rewrite the
+ * work tree — a `git checkout -- <state>` is a verdict-restore forgery),
+ * `touch` (mtime forgery defeats report freshness), `rg` (--pre <cmd> /
+ * --hostname-bin <cmd> execute an arbitrary program per input file — a
+ * pre-staged script receives the guarded path and can rewrite or delete it),
+ * `more` (interactive shell escape via `!cmd`/`v`; non-interactive it acts
+ * like cat, but membership requires no write capability under ANY use),
+ * `cd` (writes nothing itself, but it RE-SCOPES path resolution:
+ * `cd .claude/state && rm *.json` names the guarded dir only in the cd
+ * segment while the writer names no guarded literal, so its chain is
+ * skipped as out-of-scope — allowlisting cd hands every later segment an
+ * unguarded relative namespace. Excluding it costs only fail-closed reads:
+ * reads never need to cd INTO a guarded dir, and
+ * `cd <unguarded-dir> && jq . <state>` still allows because the cd chain is
+ * simply out of scope. Residual, documented: multi-hop
+ * `cd .claude; cd state; rm *.json` never names a guarded literal anywhere
+ * on the line and stays invisible to any raw-text gate — see
+ * machines/README.md known residual limits), and
+ * wrapper/executor commands that run OTHER commands (`env`, `xargs`, `sudo`,
+ * `timeout`, `nohup`, `nice`, `command`, shells, interpreters) — a wrapper
+ * inherits the write capability of whatever it wraps. Heads match exactly
+ * (no basename resolution): `./cat` or `/tmp/evil/jq` must not inherit the
+ * trust of a PATH-resolved name. */
+export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = new Set([
+  "jq", "cat", "grep", "egrep", "fgrep",
+  "head", "tail", "wc", "ls", "stat", "file",
+  "diff", "cmp", "md5sum", "sha1sum", "sha256sum",
+  "cut", "tr", "nl", "od", "hexdump", "strings",
+  "echo", "printf", "test", "[", "[[", "true", "false",
+  "pwd", "dirname", "basename", "readlink", "realpath", "du",
+]);
 
 /** Valid phase transitions: from → allowed targets */
 export const VALID_TRANSITIONS: Record<Phase, Phase[]> = {
@@ -124,33 +227,50 @@ function detectHarness(): "claude" | "pi" {
 /** Which harness is running */
 export const HARNESS = detectHarness();
 
-/** Relative path within a repo root — configurable via env */
-const TASK_GRAPH_RELATIVE = process.env.LOOM_STATE_PATH
-  ?? (HARNESS === "pi"
-    ? ".pi/state/active_task_graph.json"
-    : ".claude/state/active_task_graph.json");
+/** Relative path within a repo root — configurable via env (read at call time).
+ * Calls detectHarness() rather than the HARNESS const (identical result) so
+ * it is callable regardless of module-init order — stateFilePatterns()
+ * derives the guarded state dir from this at call time, above HARNESS. */
+function taskGraphRelative(): string {
+  return process.env.LOOM_STATE_PATH
+    ?? (detectHarness() === "pi"
+      ? ".pi/state/active_task_graph.json"
+      : ".claude/state/active_task_graph.json");
+}
 
 /** Find task graph by walking up from cwd to git root */
 function findTaskGraphPath(): string {
+  const relative = taskGraphRelative();
+
   // Try relative first (works when cwd = repo root)
-  if (existsSync(TASK_GRAPH_RELATIVE)) return TASK_GRAPH_RELATIVE;
+  if (existsSync(relative)) return relative;
 
   // Walk up via git rev-parse
   try {
     const root = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
-    const abs = join(root, TASK_GRAPH_RELATIVE);
+    const abs = join(root, relative);
     if (existsSync(abs)) return abs;
-  } catch {}
+  } catch (e) {
+    // Not a git repo (or git missing): the walk-up is skipped and only the
+    // cwd-relative path can resolve — say so, or a task graph sitting at the
+    // repo root looks mysteriously absent from a subdirectory cwd.
+    process.stderr.write(
+      `loom: git rev-parse walk-up failed while locating ${relative} — falling back to cwd-relative: ${e instanceof Error ? e.message : String(e)}\n`,
+    );
+  }
 
   // Fallback to relative (callers check existsSync anyway)
-  return TASK_GRAPH_RELATIVE;
+  return relative;
 }
 
-/** Task graph path — resolved from cwd or git root */
-export const TASK_GRAPH_PATH = findTaskGraphPath();
+/**
+ * Task graph path, resolved lazily — reads LOOM_STATE_PATH at call time so
+ * handlers observe per-test env changes without a module reload.
+ */
+export const taskGraphPath = (): string => findTaskGraphPath();
 
-/** Subagent tracking directory */
-export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
+/** Task graph path — resolved once at import (consumers that never re-point) */
+export const TASK_GRAPH_PATH = findTaskGraphPath();
 
 // --- Linter Configuration ---
 

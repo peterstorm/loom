@@ -88,7 +88,19 @@ export function promptReferencesSkill(prompt: string, skill: string): boolean {
 const handler: HookHandler = async (stdin) => {
   if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
 
-  const input: PreToolUseInput = JSON.parse(stdin);
+  let input: PreToolUseInput;
+  try {
+    input = JSON.parse(stdin);
+  } catch (e) {
+    // Malformed hook input on a spawn-gate route: fail CLOSED. An uncaught
+    // parse crash exits 1 (NON-blocking for PreToolUse), letting a Task spawn
+    // without its required skill. (Route is in FAIL_CLOSED_ROUTES for crashes
+    // that escape this handler too.)
+    return {
+      kind: "block",
+      message: `validate-agent-skill: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
   if (input.tool_name !== "Task") return { kind: "allow" };
 
   const subagentType = (input.tool_input?.subagent_type as string) ?? "";

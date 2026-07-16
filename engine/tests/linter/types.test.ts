@@ -24,6 +24,7 @@ const regexRule: RegexRule = {
   description: "Disallow console.log",
   extensions: [".ts", ".tsx"],
   pattern: "console\\.log\\(",
+  flags: "",
   fixHint: "Remove console.log or use a logger",
   enabled: true,
   source: "default",

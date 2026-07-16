@@ -15,7 +15,13 @@ import { makeViolation } from "../types";
 // --- Boundary Configuration ---
 
 export interface BoundaryRule {
-  /** Module prefix (relative to repo root, with trailing /) */
+  /**
+   * The prefix, relative to repo root, selecting the files this rule governs.
+   * Directory prefixes carry a trailing `/` (`engine/src/core/`); a bare
+   * file-stem (`engine/src/state-manager`) matches only at a path boundary
+   * (see underPrefix), so it can never swallow a sibling like
+   * `engine/src/state-managerX/`.
+   */
   readonly module: string;
   /** Allowed import prefixes — imports must match at least one (allowlist) */
   readonly allow: readonly string[];
@@ -41,7 +47,21 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
   },
   {
     module: "engine/src/core/",
-    allow: ["./", "engine/src/core/", "node:", "engine/src/types", "engine/src/config", "ts-pattern"],
+    allow: [
+      "./",
+      "engine/src/core/",
+      "node:",
+      "engine/src/types",
+      "engine/src/config",
+      // Pure machine-core modules only: identity brands (parseSessionId in
+      // block-direct-edits) and the gate-wired tool vocabulary source
+      // (tool-vocabulary derives FILE_MODIFYING_TOOLS from GATE_WIRED_TOOLS).
+      // The machine's fs shell (ledger/report-discovery) stays denied by
+      // omission — this allowlist is fail-closed.
+      "engine/src/machine/evidence",
+      "engine/src/machine/types",
+      "ts-pattern",
+    ],
     deny: [
       "engine/src/linter/",
       "engine/src/handlers/",
@@ -140,6 +160,23 @@ export function resolveImportPath(filePath: string, specifier: string): string {
  *   3. Check ALLOW list — import must match at least one allow entry
  *   4. If neither deny nor allow matches — violation (fail-closed allowlist)
  */
+/**
+ * Does `path` fall under `prefix`? Directory prefixes (trailing `/`) and
+ * namespace prefixes (`node:`, `ts-pattern` — no embedded path separator)
+ * match by plain containment. A path-like prefix WITHOUT a trailing slash
+ * (`engine/src/state-manager`) matches only at a path boundary — exactly, a
+ * directory below (`prefix/…`), or a file extension (`prefix.…`) — so it
+ * cannot mid-segment-match a sibling like `engine/src/state-managerX/`.
+ */
+export function underPrefix(path: string, prefix: string): boolean {
+  if (!path.startsWith(prefix)) return false;
+  if (prefix.includes("/") && !prefix.endsWith("/") && path.length > prefix.length) {
+    const next = path[prefix.length];
+    return next === "/" || next === ".";
+  }
+  return true;
+}
+
 export function checkBoundaryViolation(
   filePath: string,
   resolvedImport: string,
@@ -149,20 +186,20 @@ export function checkBoundaryViolation(
   const normalizedFile = filePath.split(sep).join("/");
 
   // Find applicable boundary rule for this file
-  const boundary = boundaries.find((b) => normalizedFile.startsWith(b.module));
+  const boundary = boundaries.find((b) => underPrefix(normalizedFile, b.module));
   if (!boundary) {
     return null; // No boundary rule applies — allow
   }
 
   // Check deny list first (takes priority over allow)
   for (const denied of boundary.deny) {
-    if (resolvedImport.startsWith(denied)) {
+    if (underPrefix(resolvedImport, denied)) {
       return `Module "${boundary.module}" must not import from "${denied}" — violates bounded context boundary`;
     }
   }
 
   // Check allow list — import must match at least one entry
-  const isAllowed = boundary.allow.some((allowed) => resolvedImport.startsWith(allowed));
+  const isAllowed = boundary.allow.some((allowed) => underPrefix(resolvedImport, allowed));
   if (!isAllowed) {
     return `Module "${boundary.module}" may only import from [${boundary.allow.join(", ")}] — "${resolvedImport}" is not allowed`;
   }

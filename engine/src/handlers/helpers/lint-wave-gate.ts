@@ -20,18 +20,8 @@ import type { LintResult, LintOutput } from "../../linter/index";
 
 // --- Pure logic (extracted for testability) ---
 
-/**
- * Parses --wave N from CLI args. Returns null if not provided.
- */
-export function parseWaveArg(args: string[]): number | null {
-  const idx = args.indexOf("--wave");
-  if (idx < 0 || !args[idx + 1]) return null;
-  const n = Number(args[idx + 1]);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
-    throw new Error(`Invalid --wave value: "${args[idx + 1]}" (must be a positive integer)`);
-  }
-  return n;
-}
+export { parseWaveArg } from "./wave-args";
+import { parseWaveArg } from "./wave-args";
 
 /**
  * Collects and deduplicates file paths from tasks' files_modified arrays.

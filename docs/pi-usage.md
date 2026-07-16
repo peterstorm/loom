@@ -127,7 +127,8 @@ Claude Code plugin hooks fire for the MAIN agent in pi via the hooks.json integr
 - `validate-template-substitution` — blocks `{variable}` patterns in subagent tasks
 - `validate-phase-order` — validates phase sequencing
 - `block-direct-edits` — blocks main agent Write/Edit during orchestration
-- `guard-state-file` — blocks bash commands writing to state files
+- `guard-state-file` — deny-by-default guard on bash commands that reference
+  loom-guarded state (only read-only commands and whitelisted helpers pass)
 
 ### Template Variable Escaping
 
@@ -193,17 +194,30 @@ The guard only blocks Edit/Write/MultiEdit tools, not bash file operations
 
 ### guard-state-file blocks your bash command
 
-The guard checks if your bash command contains BOTH:
-1. A state file name pattern (e.g., the task graph filename)
-2. A write operation pattern (>, rm, mv, cp, tee, sed -i, python.*write, etc.)
+The guard is deny-by-default: a command line that names guarded state (the
+task graph, `review-invocations.json`, the state directory, the subagent
+tracking dir, or the machine-definitions dir) is allowed only if EVERY
+segment of a pipe-chain touching a guarded path is either:
 
-If you need to reference the state file in a read-only context (jq, cat),
-that's allowed. If you need to write content that happens to mention the
-state file name (like documentation), use indirection:
+1. A whitelisted helper invocation (`bun <path>/cli.ts helper <name>`), or
+2. An allowlisted read-only command (jq, cat, grep, head, ls, diff, …)
+   with no output redirect.
+
+Everything else blocks — including writers nobody enumerated, wrappers
+(`env`, `xargs`, `timeout`), shells/interpreters executing piped content,
+and variable bindings of a guarded path.
+
+Reading the state file with jq/cat is fine. Writing content that mentions
+the guarded file name is NOT — a guarded token plus any write on one line
+blocks, so there is no single-line indirection workaround. Never name the
+guarded path in a writing command line:
+
 ```bash
-# Write to /tmp first, then move
-echo "content mentioning the file" > /tmp/doc.md
-mv /tmp/doc.md target/path.md
+# BLOCKED: names the guarded file AND redirects on the same line
+echo "content mentioning active_task_graph.json" > /tmp/doc.md
+
+# Allowed: the writing line never names the guarded path
+echo "content describing the task graph state file" > /tmp/doc.md
 ```
 
 ---

@@ -16,8 +16,8 @@ mvn test          # Java/Maven projects
 pytest            # Python projects
 ```
 
-A hook reads your transcript and extracts test evidence ONLY from Bash tool_result blocks.
-If your task DOES require tests and you do not run them via Bash, `tests_passed = false` and the wave gate FAILS.
+Test evidence is resolved ledger-first: a PostToolUse hook records every Bash test run (real exit codes and report artifacts) into an evidence ledger, and the SubagentStop hook judges your task from that ledger — it falls back to transcript scanning whenever the ledger yields no trusted verdict (no ledger evidence at all, an exit-0 run with no report artifact, or a pass invalidated by later file writes), and that fallback is always labeled untrusted.
+Either way, evidence only exists for tests EXECUTED via the Bash tool: if your task DOES require tests and you do not run them via Bash, the task's `test_result` will not show a pass and the wave gate FAILS.
 Writing tests without executing them counts as failure.
 
 **For test-required tasks: do NOT finish without Bash test output showing pass markers (e.g., "X passing", "0 fail", "BUILD SUCCESS").**
@@ -29,6 +29,19 @@ Writing tests without executing them counts as failure.
 The project's architecture and language-pattern rules are inlined below. They are NOT optional and NOT "read later" — they are binding constraints for this codebase. Apply them to every file you write or modify. The wave-gate review agents (code-reviewer, type-design-analyzer) enforce them, and violations block the wave.
 
 {rules_content}
+
+---
+
+## Executable Models — BINDING (when your plan context declares them)
+
+- **Lifecycle (`LC-N` block in your context):**
+  - **If the machine file is in YOUR file list, you are implementing it.** Build the statechart/typed reducer exactly as the declared states and transition table specify, and write property tests proving no undeclared transition is representable or accepted. The wave gate verifies the file exists at the declared path.
+  - **Otherwise you are a consumer.** The machine file is the single source of truth for that lifecycle. Import it. Never re-implement transition logic, duplicate state-name string literals, or store lifecycle state outside the machine's types.
+- **Pipeline node body (context references an AuthoredDag node):** fill ONLY the node body (fetch impl, `buildInput`, prompt). Never hand-write or edit `defineDag`/graph wiring — it is generated code. The node's declared input/output schemas are binding contracts, not suggestions.
+- **Pipeline codegen task:** run the `fugue new --from` command from your plan context. If it fails its validation gauntlet, the authored dag is defective — report the failure verbatim and stop; never hand-patch generated code to make it pass.
+- **Invariants (`INV-N`):** `checkable` invariants are lint rules — the linter blocks your edits fail-closed if you violate them, so design with them, not around them. `advisory` invariants are design guidance, honestly unenforced.
+
+If your plan context declares none of these, this section imposes nothing.
 
 ---
 

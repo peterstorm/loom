@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -94,13 +94,31 @@ describe("programmatic config loader", () => {
     expect(() => loadProjectConfig(dir)).toThrow("boundaries[0].allow must be an array");
   });
 
+  it("throws on an empty boundary module (would match every file, then allowlist-fail all)", () => {
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "config.json"), JSON.stringify({
+      boundaries: [{ module: "", allow: ["./"], deny: [] }]
+    }));
+
+    expect(() => loadProjectConfig(dir)).toThrow("boundaries[0].module must be a non-empty string");
+  });
+
   it("throws on invalid maxFunctionLines", () => {
     const dir = makeTempDir();
     writeFileSync(join(dir, "config.json"), JSON.stringify({
       maxFunctionLines: -1
     }));
 
-    expect(() => loadProjectConfig(dir)).toThrow("must be a positive number");
+    expect(() => loadProjectConfig(dir)).toThrow("must be a positive integer");
+  });
+
+  it("throws on a non-integer maxFunctionLines", () => {
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "config.json"), JSON.stringify({
+      maxFunctionLines: 12.5
+    }));
+
+    expect(() => loadProjectConfig(dir)).toThrow("must be a positive integer");
   });
 
   it("allows empty config object (all optional)", () => {

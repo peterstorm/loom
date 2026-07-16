@@ -21,4 +21,4 @@ You MUST follow this exact sequence for every task:
 
 ## Why This Matters
 
-A SubagentStop hook reads your transcript and extracts test evidence ONLY from Bash tool_result blocks. If you skip step 4, `tests_passed` will be `false` and the entire wave gate will fail. Writing tests is not enough — you must EXECUTE them via Bash.
+Test evidence is resolved ledger-first: a PostToolUse hook records every Bash test run (real exit codes and report artifacts) into an evidence ledger, and the SubagentStop hook judges your task from that ledger. It falls back to scanning your transcript's Bash tool_result blocks whenever the ledger yields no trusted verdict — no ledger evidence at all, an exit-0 run with no report artifact, or a pass invalidated by later file writes — and that fallback is always labeled untrusted. Either way, evidence only exists for tests EXECUTED via the Bash tool: if you skip step 4, the task's `test_result` will not show a pass and the entire wave gate will fail. Writing tests is not enough — you must EXECUTE them via Bash.

@@ -197,6 +197,7 @@ Substitute variables:
 **Wait for agent completion.** Extract:
 - Plan file path
 - Implementation phases
+- Executable models declared, if any (LC-N lifecycles, Pipeline AuthoredDag, INV-N invariants + rule files) — these are validated against the task graph in Phase 4a
 
 ---
 
@@ -255,7 +256,16 @@ Run schema validator on agent output:
 echo "$DECOMPOSE_OUTPUT" | bun ${LOOM_DIR}/engine/src/cli.ts helper validate-task-graph -
 ```
 
-If validation fails → re-spawn decompose-agent with error details.
+The validator also cross-checks executable-model bindings when the plan declares them (`## Lifecycles` / `## Pipeline` / `## Invariants`): every LC-N machine file must appear in a task's `file_list`, the AuthoredDag sidecar must exist and be structurally sound, every checkable INV-N rule file must exist, and near-miss declarations (typo'd headings/labels) are errors. See `references/executable-models.md`. These same checks run fail-closed inside `populate-task-graph` (4d), so they cannot be skipped.
+
+**Routing validation failures — read the error text:**
+- Errors about the *task graph* (unknown agent, wave ordering, or an LC machine file "not in any task's file_list") → **re-spawn decompose-agent** with the error details. Decompose can fix these.
+- Errors about the *plan or its artifacts* (missing `**Machine file:**` / `**Tier:**` / `**Rule file:**` lines, "Model declaration problem" / near-miss headings, AuthoredDag or rule file missing/malformed, plan_file unreadable) → decompose can NEVER fix these; re-spawning it just loops. **Loop back to Phase 3** with the same mechanics as the plan-alignment loop-back:
+  ```bash
+  bun ${LOOM_DIR}/engine/src/cli.ts helper set-phase --phase architecture --clear-artifact plan-alignment
+  rm -f ${spec_dir}/plan-alignment.md
+  ```
+  Re-spawn architecture-agent with the validator errors appended as additional context.
 
 ### 4b. Map Spec Anchors
 
@@ -294,7 +304,7 @@ gh issue create --title "Plan: {title}" --body "$(cat .claude/plans/{slug}.md)"
 
 **B. State File:** Populate `.claude/state/active_task_graph.json` with tasks.
 
-Use the `populate-task-graph.sh` helper (whitelisted in guard-state-file.sh):
+Use the `populate-task-graph` helper (one of the state-writing helpers whitelisted in `engine/src/config.ts` and enforced by the guard-state-file hook). It re-runs the executable-model binding checks fail-closed before writing:
 
 ```bash
 echo "$DECOMPOSE_OUTPUT" | bun ${LOOM_DIR}/engine/src/cli.ts helper populate-task-graph --issue ISSUE_NUMBER --repo OWNER/REPO
@@ -307,11 +317,7 @@ This helper:
 - Initializes `wave_gates`, `executing_tasks`
 - Writes via `StateManager` (chmod 444 protection)
 
-**C. Set state file read-only:**
-```bash
-chmod 444 .claude/state/active_task_graph.json
-```
-State file stays chmod 444 at rest. Only hooks can write via `StateManager` (temporarily toggles to 644).
+**C. Read-only protection (automatic):** The helper leaves the file chmod 444 — do **not** run `chmod` yourself; `chmod` is not an allowlisted read-only command, so the guard-state-file hook blocks it. State file stays chmod 444 at rest. Hooks and whitelisted helpers (`populate-task-graph`, `complete-wave-gate`, `set-phase`, …) write via `StateManager` (temporarily toggles to 644).
 
 ### 4e. Context Checkpoint (Recommended)
 
@@ -330,10 +336,10 @@ If user continues: Proceed to Phase 5 normally.
 
 For each wave:
 
-1. Get pending tasks in current wave (includes `failed` tasks with `retry_count < 2`)
+1. Get pending tasks in the current wave (crashed tasks remain `pending` and are re-spawned)
 2. Spawn ALL wave tasks in parallel (single message, multiple Task calls)
 3. Wait for all to reach "implemented"
-4. If any tasks `failed`: auto-retry up to 2 times (re-spawn with error context)
+4. If any wave task never reached `implemented` (agent crashed): re-spawn it (still `pending`, `executing_tasks` was cleared)
 5. **RUN `/wave-gate` — MANDATORY, via subagents** (see below)
 6. If blocked (critical findings): spawn fix agents with the findings, re-run `/wave-gate`
 7. **Triage advisory findings and fix the RELEVANT ones** before advancing (see [Addressing Advisories](#addressing-advisories)). Advisories do not block the gate, but must not be silently dropped.
@@ -354,11 +360,11 @@ For each wave:
 
 **The `validate-task-execution` hook enforces this:** it blocks next-wave impl agents if `wave_gates[N-1].reviews_complete == false`. Even if you try to skip, the hook will BLOCK.
 
-**Auto-retry logic:** After spawning, check for `failed` tasks:
+**Re-spawn logic:** After spawning, check for pending wave tasks whose agent did not complete (a crashed agent leaves the task `pending` with `executing_tasks` cleared). Resolve the current wave inside the jq program — the guard blocks `WAVE=$(jq … state)` capture-into-variable, and shell vars don't persist across Bash tool calls:
 ```bash
-jq -r ".tasks[] | select(.wave == $WAVE and .status == \"failed\" and (.retry_count // 0) < 2) | .id" .claude/state/active_task_graph.json
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w and .status == "pending") | .id' .claude/state/active_task_graph.json
 ```
-Re-spawn each with additional context: `"RETRY (attempt {retry_count+1}): {failure_reason}"`
+Re-spawn each pending wave task whose agent did not reach `implemented`.
 
 **Load template:** Read `{LOOM_DIR}/commands/templates/impl-agent-context.md`
 
@@ -426,9 +432,9 @@ bun ${LOOM_DIR}/engine/src/cli.ts init-state \
 }
 -->
 
-**IMPORTANT:** Set `chmod 444` immediately after creation. This activates OS-level write protection — subagent Write tool calls will get EACCES. Only hooks writing via `StateManager` can modify the file.
+**IMPORTANT:** The engine sets `chmod 444` automatically at creation (`cli.ts init-state`) and after every `StateManager` write — do **not** run `chmod` yourself; the guard-state-file hook blocks it. This activates OS-level write protection — subagent Write tool calls will get EACCES. Only hooks and whitelisted helpers writing via `StateManager` can modify the file.
 
-After Phase 4 (Decompose), the task graph is populated with tasks, waves, and GitHub issue info. This is done by passing decompose output through `validate-task-graph.sh` and writing the full state.
+After Phase 4 (Decompose), the task graph is populated with tasks, waves, and GitHub issue info. This is done by passing decompose output through the `validate-task-graph` helper and writing the full state via `populate-task-graph`.
 
 **Hook activation timeline:**
 - State file created → all PreToolUse hooks activate (block-direct-edits, guard-state-file, validate-phase-order, validate-task-execution)
@@ -473,18 +479,31 @@ Hooks auto-activate when `active_task_graph.json` exists:
 | Hook | Event | Purpose |
 |------|-------|---------|
 | `block-direct-edits.sh` | PreToolUse: Edit/Write/MultiEdit | Forces Task tool |
-| `guard-state-file.sh` | PreToolUse: Bash | Blocks state writes (whitelisted helpers only) |
+| `enforce-phase-tools.sh` | PreToolUse: Edit/Write/MultiEdit | Guarded-skill-machine gate: denies enforced tools the bound agent's phase doesn't allow (fails closed) |
+| `guard-state-file.sh` | PreToolUse: Bash | Deny-by-default on guarded state paths: only read-only commands (`jq`, `cat`, `grep`, …) and whitelisted helpers pass — covers task graph + subagent evidence/binding files + machine definitions |
 | `validate-task-execution.sh` | PreToolUse: Task | Validates wave order |
 | `validate-phase-order.sh` | PreToolUse: Task | Enforces phase sequencing |
 | `validate-template-substitution.sh` | PreToolUse: Task | Blocks unsubstituted `{variable}` patterns |
-| `dispatch.sh` | SubagentStop | Routes to hooks below by agent type |
-| ↳ `advance-phase.sh` | via dispatch | Advances phase + captures spec_file/plan_file from transcript |
-| ↳ `update-task-status.sh` | via dispatch | Marks "implemented" or "failed" + test evidence + new-test verification |
-| ↳ `store-reviewer-findings.sh` | via dispatch | Parses review findings |
-| ↳ `store-spec-check-findings.sh` | via dispatch | Parses spec-check findings |
-| ↳ `cleanup-subagent-flag.sh` | via dispatch | Cleans up subagent tracking (always runs) |
+| `validate-agent-model.sh` | PreToolUse: Task | Validates agent model assignment |
+| `validate-agent-skill.sh` | PreToolUse: Task | Validates agent skill preload |
+| `mark-subagent-active.sh` | SubagentStart | Tracks active subagents + binds the guarded skill machine (epoch) |
+| `record-evidence.sh` | PostToolUse: Read/Edit/Write/MultiEdit/Bash | Appends epoch-stamped facts (FileRead/FileWrite/TestRun) to the evidence ledger |
+| `lint-file.sh` | PostToolUse: Edit/Write/MultiEdit | Runs the immediate-tier linter (regex rules only; programmatic rules run at the wave gate) |
+| `cleanup-stale-subagents.sh` | SessionStart | Sweeps stale subagent tracking/binding files |
+| `resume-after-clear.sh` | SessionStart: clear | Restores loom context after /clear |
+| `dispatch.sh` | SubagentStop | Routes to the TS handlers below (`engine/src/handlers/subagent-stop/`) by agent type |
+| ↳ `advance-phase.ts` | via dispatch | Advances phase + captures spec_file/plan_file from transcript |
+| ↳ `update-task-status.ts` | via dispatch | Marks "implemented" + test evidence + new-test verification |
+| ↳ `store-reviewer-findings.ts` | via dispatch | Parses review findings |
+| ↳ `store-spec-check-findings.ts` | via dispatch | Parses spec-check findings |
+| ↳ `cleanup-subagent-flag.ts` | via dispatch | Cleans up subagent tracking + machine bindings (always runs) |
 
-**NEVER call helpers yourself.** All helpers (`mark-tests-passed.sh`, `complete-wave-gate.sh`, `StateManager`, `populate-task-graph.sh`, etc.) run automatically via hooks or `/wave-gate`. Only exception: `populate-task-graph.sh` during Phase 4d.
+**Do not call hook-owned state-writing helpers yourself.** The helpers that hooks/`/wave-gate` drive — `complete-wave-gate`, `StateManager`, `store-review-findings`/`store-spec-check` (except as a sanctioned override, below) — run automatically; calling them by hand races the hook that owns that write. A small set of DIRECT helper invocations IS sanctioned, used only where this document says to; they fall into two distinct classes:
+
+- **Whitelisted in the guard** (`engine/src/config.ts` `WHITELISTED_HELPERS`, so the guard permits them even on a guarded path): `populate-task-graph` (Phase 4d), `set-phase` loop-back, `mark-tests-passed` (read-only evidence status check, run during `/wave-gate` Step 2 — it reads the ledger and does NOT modify state), and the `store-review-findings` / `store-spec-check` false-positive overrides.
+- **Merely out of the guard's scope when invoked as documented** (NOT in `WHITELISTED_HELPERS`): `validate-task-graph` / `validate-lint-rules` — they pass only because their documented invocations name no guarded path, so the guard's front gate never fires. Invoked against a guarded path they would be blocked like anything else.
+
+Each sanctioned direct invocation still requires user approval. Everything else is hook-driven.
 
 ---
 
@@ -493,11 +512,9 @@ Hooks auto-activate when `active_task_graph.json` exists:
 ### Status Transitions
 
 ```
-pending → in_progress    (task spawned to agent)
-in_progress → implemented (agent completes, hook extracts test evidence)
-in_progress → failed      (agent crash: no task ID in output, retry_count incremented)
-failed → in_progress      (auto-retry if retry_count < 2)
-implemented → completed   (wave gate passed: tests + review + no critical findings)
+pending → implemented    (agent completes; SubagentStop hook resolves test evidence)
+pending → pending        (agent crash: no task ID resolvable; executing_tasks cleared, task re-spawned)
+implemented → completed  (wave gate passed: tests + review + no critical findings)
 ```
 
 ### Observability
@@ -507,7 +524,7 @@ implemented → completed   (wave gate passed: tests + review + no critical find
 jq '.' .claude/state/active_task_graph.json
 
 # Per-task status
-jq '.tasks[] | {id, status, tests_passed, review_status}' .claude/state/active_task_graph.json
+jq '.tasks[] | {id, status, test_result, review_status}' .claude/state/active_task_graph.json
 
 # Wave gate status
 jq '.wave_gates' .claude/state/active_task_graph.json
@@ -517,9 +534,9 @@ jq '.wave_gates' .claude/state/active_task_graph.json
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Task `failed` | Agent crash detected | Auto-retried up to 2x; check `retry_count` |
-| Task stuck `in_progress` | Agent hung (no crash) | Re-spawn same task |
-| `tests_passed` missing | No recognizable output | Re-spawn, ensure test markers in output |
+| Task stuck `pending` after agent ran | Agent crashed (no resolvable task ID) | `executing_tasks` cleared automatically; re-spawn the task |
+| Task stays `pending`, agent still running | Agent live (no crash; tracked via `executing_tasks`, there is no `in_progress` status) | Wait for it, or re-spawn if hung |
+| `test_result` missing or not a pass | No recognizable output | Re-spawn, ensure test markers in output |
 | Wave not advancing | Gate blocked | Check `wave_gates[N].blocked`, run `/wave-gate` |
 | State write blocked | Guard hook active | State writes via hooks only; reads OK |
 | Test task blocked, impl wrote tests | Separate test task for new code | Don't create separate test tasks; mark superseded or merge |
@@ -541,7 +558,7 @@ When blocked (critical findings), Edit/Write blocked too. To fix:
    echo 'ADVISORY: original finding — reason for downgrade' | bun ${LOOM_DIR}/engine/src/cli.ts helper store-review-findings --task T1
    ```
    Then run `complete-wave-gate` to advance. Use only when findings are genuinely false positives — requires user approval.
-4. **Emergency**: remove state file, fix manually, rebuild from GH issue
+4. **Emergency**: the guard blocks a direct `rm` of the state file — use the whitelisted helper `bun ${LOOM_DIR}/engine/src/cli.ts helper cleanup-state`, then fix manually / rebuild from the GH issue
 
 ### Addressing Advisories
 

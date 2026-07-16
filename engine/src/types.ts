@@ -2,6 +2,8 @@
  * Core types for loom hook handlers
  */
 
+import { match } from "ts-pattern";
+
 // --- Hook Result (discriminated union) ---
 
 export type HookResult =
@@ -32,6 +34,9 @@ export interface PreToolUseInput {
   tool_name: string;
   tool_input: Record<string, unknown>;
   session_id: string;
+  /** Harness id of this tool call — stamped as the call-start key so the
+   *  PostToolUse recorder can scope report artifacts to THIS call. */
+  tool_use_id?: string;
 }
 
 export interface SubagentStopInput {
@@ -49,11 +54,62 @@ export interface SubagentStartInput {
 
 // --- Task Graph state ---
 
-export type Phase = "init" | "brainstorm" | "specify" | "clarify" | "architecture" | "plan-alignment" | "decompose" | "execute";
+/** Phase ordering — the const tuple is the single source of truth so both
+ *  the `Phase` type and config's PHASE_ORDER derive from it (dropping a phase
+ *  can't leave the type wider than what parseTaskGraph proves against). */
+export const PHASES = [
+  "init", "brainstorm", "specify", "clarify", "architecture", "plan-alignment", "decompose", "execute",
+] as const;
+export type Phase = (typeof PHASES)[number];
 
-export type TaskStatus = "pending" | "implemented" | "completed" | "failed";
+/** Task status values — the const tuple is the source of truth so parsers
+ *  (parseTaskGraph) can prove disk values against it. */
+export const TASK_STATUSES = ["pending", "implemented", "completed", "failed"] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
 
-export type ReviewStatus = "pending" | "passed" | "blocked" | "evidence_capture_failed";
+export const REVIEW_STATUSES = ["pending", "passed", "blocked", "evidence_capture_failed"] as const;
+export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
+
+/**
+ * Per-task test outcome with its trust provenance IN the data. Trusted
+ * verdicts come from the evidence ledger (real exit status cross-checked
+ * against a parsed report artifact) and need no qualifier; an untrusted
+ * verdict carries what the low-trust source claimed (`passed`) and a label
+ * naming exactly how weak that source is. An independent boolean pair
+ * would permit the impossible {passed: true, trusted: false → "trusted"?}
+ * drift — this shape does not.
+ */
+export type TaskTestResult =
+  | { readonly verdict: "trusted-pass" }
+  | { readonly verdict: "trusted-fail" }
+  | { readonly verdict: "untrusted"; readonly passed: boolean; readonly label: string };
+
+/** Did the task's test evidence show a pass at ANY trust level? (Gate checks
+ *  that need trust must match on `verdict` instead.) */
+export function testResultPassed(result: TaskTestResult | undefined): boolean {
+  if (result === undefined) return false;
+  return match(result)
+    .with({ verdict: "trusted-pass" }, () => true)
+    .with({ verdict: "trusted-fail" }, () => false)
+    .with({ verdict: "untrusted" }, ({ passed }) => passed)
+    .exhaustive();
+}
+
+/**
+ * Pre-refactor task graphs stored `tests_passed: boolean` on the task; the
+ * field was replaced by `test_result` with NO compat read (the branch never
+ * shipped). Such a task now reads as missing evidence — correct, but
+ * mystifying without a note. Pure: returns the operator-facing explanation
+ * when the raw task object carries the legacy field without its
+ * replacement, null otherwise.
+ */
+export function legacyTestsPassedNote(task: unknown): string | null {
+  if (typeof task !== "object" || task === null) return null;
+  const raw = task as Record<string, unknown>;
+  if (!("tests_passed" in raw) || "test_result" in raw) return null;
+  const id = typeof raw.id === "string" ? raw.id : "<unknown>";
+  return `legacy tests_passed found on task ${id}; re-run task or regenerate graph — field replaced by test_result`;
+}
 
 export interface Task {
   id: string;
@@ -64,7 +120,10 @@ export interface Task {
   depends_on: string[];
   spec_anchors?: string[];
   new_tests_required?: boolean;
-  tests_passed?: boolean;
+  /** Files this task creates/modifies (decompose contract); older graphs may lack it */
+  file_list?: string[];
+  /** Test outcome + trust provenance; absent until an impl agent completes. */
+  test_result?: TaskTestResult;
   test_evidence?: string;
   new_tests_written?: boolean;
   new_test_evidence?: string;
@@ -85,6 +144,26 @@ export interface WaveGate {
   blocked: boolean;
 }
 
+/** The initial (nothing verified yet) wave gate — the one shape every
+ *  writer must start from. A factory instead of a shared literal so adding
+ *  a field to WaveGate updates every construction site at once. */
+export function newWaveGate(): WaveGate {
+  return { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false };
+}
+
+/**
+ * Closed verdict union for spec-check runs, parsed at the store boundaries
+ * (store-spec-check helper, store-spec-check-findings hook) — free-text
+ * verdicts never reach the gate's typed logic.
+ */
+export const SPEC_CHECK_VERDICTS = ["PASSED", "BLOCKED", "EVIDENCE_CAPTURE_FAILED", "UNKNOWN"] as const;
+export type SpecCheckVerdict = (typeof SPEC_CHECK_VERDICTS)[number];
+
+/** Smart constructor: null when the raw text is not a known verdict. */
+export function parseSpecCheckVerdict(raw: string): SpecCheckVerdict | null {
+  return (SPEC_CHECK_VERDICTS as readonly string[]).includes(raw) ? (raw as SpecCheckVerdict) : null;
+}
+
 export interface SpecCheck {
   wave: number;
   run_at: string;
@@ -93,7 +172,7 @@ export interface SpecCheck {
   critical_findings?: string[];
   high_findings?: string[];
   medium_findings?: string[];
-  verdict: string;
+  verdict: SpecCheckVerdict;
   error?: string;
 }
 

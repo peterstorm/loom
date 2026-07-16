@@ -8,9 +8,22 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
-import { TASK_GRAPH_PATH } from "../../config";
+import { newWaveGate } from "../../types";
+import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { validateFull, fixFull } from "./validate-task-graph";
+import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
+
+/** Honest null on any read failure — the binding check reports it in context */
+const BINDING_DEPS: ModelBindingDeps = {
+  readFile: (p) => {
+    try {
+      return readFileSync(p, "utf-8");
+    } catch {
+      return null;
+    }
+  },
+};
 
 interface DecomposeInput {
   plan_title: string;
@@ -35,19 +48,48 @@ function parseArgs(args: string[]): { issue?: number; repo?: string; fix: boolea
   return { issue, repo, fix, force };
 }
 
+/**
+ * Decompose stdin is agent-controlled text: it may DESCRIBE work (id,
+ * description, agent, wave, deps, spec anchors, test requirements, file
+ * list) but must never carry execution state. The decompose-contract fields
+ * are picked explicitly (never spread) so a payload that pre-stamps
+ * `test_result: {verdict: "trusted-pass"}`, `status: "completed"`, or
+ * `review_status: "passed"` cannot reach the persisted graph — trusted
+ * verdicts exist only via the evidence ledger, mirroring the refusal in
+ * store-test-evidence.
+ */
+function sanitizeDecomposedTask(t: Task): Task {
+  return {
+    id: t.id,
+    description: t.description,
+    agent: t.agent,
+    wave: t.wave,
+    status: "pending",
+    depends_on: t.depends_on ?? [],
+    ...(t.spec_anchors !== undefined ? { spec_anchors: t.spec_anchors } : {}),
+    ...(t.new_tests_required !== undefined ? { new_tests_required: t.new_tests_required } : {}),
+    ...(t.file_list !== undefined ? { file_list: t.file_list } : {}),
+    review_status: "pending",
+    critical_findings: [],
+    advisory_findings: [],
+  };
+}
+
 /** Build wave gates for all waves */
 function buildWaveGates(tasks: Task[]): Record<string, WaveGate> {
   const waves = [...new Set(tasks.map((t) => t.wave))].sort((a, b) => a - b);
   const gates: Record<string, WaveGate> = {};
   for (const w of waves) {
-    gates[String(w)] = { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false };
+    gates[String(w)] = newWaveGate();
   }
   return gates;
 }
 
 const handler: HookHandler = async (stdin, args) => {
-  if (!existsSync(TASK_GRAPH_PATH)) {
-    return { kind: "error", message: `No task graph at ${TASK_GRAPH_PATH}` };
+  // Resolved at call time (not import time) so env re-pointing is honored.
+  const statePath = taskGraphPath();
+  if (!existsSync(statePath)) {
+    return { kind: "error", message: `No task graph at ${statePath}` };
   }
 
   const { issue, repo, fix, force } = parseArgs(args);
@@ -68,40 +110,73 @@ const handler: HookHandler = async (stdin, args) => {
   if (!validation.ok) {
     if (fix) {
       decompose = JSON.parse(fixFull(decompose as unknown as Record<string, unknown>)) as DecomposeInput;
+      // fixFull only defaults missing optional fields — structural errors
+      // (unknown agent, wave gaps, self-dependency) are unfixable. Re-validate
+      // so they fail loudly instead of reaching the persisted graph under a
+      // misleading "Auto-fixed" banner.
+      const revalidation = validateFull(decompose as unknown as Record<string, unknown>);
+      if (!revalidation.ok) {
+        return {
+          kind: "error",
+          message: `--fix could not repair all issues:\n${revalidation.errors.map(e => `  - ${e}`).join("\n")}`,
+        };
+      }
       process.stderr.write(`Auto-fixed ${validation.errors.length} issues\n`);
     } else {
       return { kind: "error", message: `Decompose validation failed:\n${validation.errors.map(e => `  - ${e}`).join("\n")}` };
     }
   }
 
-  const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
+  const mgr = StateManager.fromPath(statePath);
   if (!mgr) return { kind: "error", message: "Cannot open task graph" };
 
+  // Executable-models policy: this is the only whitelisted helper that
+  // populates tasks into active_task_graph.json, so bindings are enforced
+  // here fail-closed — validate-task-graph's 4a run is advisory to the
+  // orchestrator, this is the gate. The plan path prefers evidence-derived
+  // state (plan_file set by advance-phase from transcript-parsed Write tool
+  // calls (existence-checked), else the
+  // architecture phase artifact recorded from disk) over the decompose
+  // payload, so a decompose agent cannot re-point plan_file at a model-free
+  // file to disarm the check. The SAME resolved path is persisted below —
+  // persisting the payload's path would disarm the wave-gate lifecycle check.
+  const existingState = mgr.load();
+  const planFile =
+    existingState.plan_file ??
+    existingState.phase_artifacts?.architecture ??
+    decompose.plan_file;
+  const bindings = checkPlanModelBindings(
+    planFile,
+    decompose.tasks as unknown as Record<string, unknown>[],
+    BINDING_DEPS,
+  );
+  if (!bindings.ok) {
+    return {
+      kind: "error",
+      message: [
+        `Executable-model binding validation FAILED (${bindings.errors.length} errors) — task graph not populated:`,
+        ...bindings.errors.map((e) => `  - ${e}`),
+      ].join("\n"),
+    };
+  }
+  // checkPlanModelBindings only passes when planFile is a readable string
+  const validatedPlanFile = planFile as string;
+
   // Guard against overwriting non-pending tasks
-  if (!force) {
-    const existing = mgr.load();
-    if (existing.tasks.some((t) => t.status !== "pending")) {
-      return {
-        kind: "error",
-        message: "Cannot overwrite task graph with non-pending tasks. Use --force to override.",
-      };
-    }
+  if (!force && existingState.tasks.some((t) => t.status !== "pending")) {
+    return {
+      kind: "error",
+      message: "Cannot overwrite task graph with non-pending tasks. Use --force to override.",
+    };
   }
 
   await mgr.update((existing) => {
     const merged: TaskGraph = {
       ...existing,
       plan_title: decompose.plan_title,
-      plan_file: decompose.plan_file ?? existing.plan_file,
-      spec_file: decompose.spec_file ?? existing.spec_file,
-      tasks: decompose.tasks.map(t => ({
-        ...t,
-        status: t.status ?? "pending",
-        review_status: t.review_status ?? "pending",
-        depends_on: t.depends_on ?? [],
-        critical_findings: t.critical_findings ?? [],
-        advisory_findings: t.advisory_findings ?? [],
-      })),
+      plan_file: validatedPlanFile,
+      spec_file: existing.spec_file ?? decompose.spec_file ?? null,
+      tasks: decompose.tasks.map(sanitizeDecomposedTask),
       current_wave: 1,
       executing_tasks: [],
       wave_gates: buildWaveGates(decompose.tasks),

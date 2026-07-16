@@ -31,7 +31,7 @@ Abort if `impl_complete != true`.
 
 ### Step 2: Verify Test Evidence
 
-Test evidence is set **automatically** by the `update-task-status` SubagentStop hook when implementation agents complete. It extracts pass markers (Maven, Node, Vitest, pytest) from agent transcripts and stores per-task `tests_passed` + `test_evidence`.
+Test evidence is set **automatically** by the `update-task-status` SubagentStop hook when implementation agents complete. It resolves each task's `test_result` — a trusted verdict from the evidence ledger (`{"verdict": "trusted-pass"}` / `{"verdict": "trusted-fail"}`) when execution-time ground truth exists, or a labeled `{"verdict": "untrusted", "passed": ..., "label": ...}` when only transcript pass markers (Maven, Node, Vitest, pytest) are available — plus a human-readable `test_evidence` line.
 
 **Check evidence status (read-only):**
 ```bash
@@ -40,9 +40,9 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper mark-tests-passed
 
 This prints per-task evidence status. Exit 0 = all tasks have evidence, exit 1 = missing.
 
-**If evidence missing** → re-spawn the implementation agent for that task. The agent MUST run tests and the SubagentStop hook must see pass markers in the transcript.
+**If evidence missing** → re-spawn the implementation agent for that task. The agent MUST run tests and must produce ledger evidence (a real Bash test run) or transcript pass markers.
 
-**New test verification:** The `update-task-status` SubagentStop hook also checks that agents wrote NEW test methods (not just reran existing). It diffs against the per-task `start_sha` baseline (set by PreToolUse hook) to scope detection to each task's changes. Both `tests_passed` and `new_tests_written` must be true for the wave gate to pass.
+**New test verification:** The `update-task-status` SubagentStop hook also checks that agents wrote NEW test methods (not just reran existing). It diffs against the per-task `start_sha` baseline (set by PreToolUse hook) to scope detection to each task's changes. Both a passing `test_result` and `new_tests_written == true` are required for the wave gate to pass.
 
 **Do NOT manually run tests or set test flags.** The guard hook blocks direct state file writes. Evidence can only come from agent execution → SubagentStop hook extraction.
 
@@ -50,10 +50,14 @@ This prints per-task evidence status. Exit 0 = all tasks have evidence, exit 1 =
 
 Spawn **spec-check AND code reviewers** in a single message with multiple Task calls.
 
-**Get wave info:**
+**Get wave info** (self-contained jq — the guard blocks `WAVE=$(jq … state)`
+capture-into-variable, and shell variables do not persist across Bash tool
+calls anyway, so read the values directly):
 ```bash
-WAVE=$(jq -r '.current_wave' .claude/state/active_task_graph.json)
-TASKS=$(jq -r ".tasks[] | select(.wave == $WAVE) | .id" .claude/state/active_task_graph.json | tr '\n' ',')
+# Current wave number:
+jq -r '.current_wave' .claude/state/active_task_graph.json
+# Task IDs in the current wave (wave resolved inside the same jq program):
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | .id' .claude/state/active_task_graph.json | tr '\n' ','
 ```
 
 **Get wave changes:**
@@ -64,7 +68,7 @@ git diff --name-only $BASE...HEAD
 
 **Get tasks needing review:**
 ```bash
-jq -r ".tasks[] | select(.wave == $WAVE) | select(.review_status == \"pending\" or .review_status == \"blocked\") | .id" .claude/state/active_task_graph.json
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | select(.review_status == "pending" or .review_status == "blocked") | .id' .claude/state/active_task_graph.json
 ```
 
 **Spawn ALL in parallel (single message, multiple Task calls):**
@@ -149,7 +153,7 @@ EOF
 ```
 
 **If GH comment fails** (rate limit, auth, network):
-- Log summary to `.claude/state/wave-{N}-review.md` as fallback
+- Log summary to `.claude/reviews/wave-{N}-review.md` as fallback (NOT under `.claude/state/` — that directory is guarded against every write path)
 - Proceed with gate logic - don't block on comment failure
 - Retry comment post after gate decision
 
@@ -157,10 +161,10 @@ EOF
 
 Critical findings block the gate (Step 5). Advisory findings do **not** block — but they must not be silently dropped. Before advancing, triage every advisory finding across the wave's tasks.
 
-**Read the advisories:**
+**Read the advisories** (self-contained jq — the wave is resolved inside the
+program; `WAVE=$(jq … state)` is blocked by the guard):
 ```bash
-WAVE=$(jq -r '.current_wave' .claude/state/active_task_graph.json)
-jq -r --argjson w "$WAVE" '.tasks[] | select(.wave == $w) | select((.advisory_findings // []) | length > 0) | {id, advisory_findings}' .claude/state/active_task_graph.json
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | select((.advisory_findings // []) | length > 0) | {id, advisory_findings}' .claude/state/active_task_graph.json
 ```
 
 **Classify each advisory:**
@@ -179,12 +183,13 @@ Call `complete-wave-gate` — it handles ALL verification and advancement:
 bun ${LOOM_DIR}/engine/src/cli.ts helper complete-wave-gate
 ```
 
-The helper performs **five checks** before advancing:
-1. **Per-task test evidence** — all wave tasks must have `tests_passed == true`
+The helper performs **six checks** before advancing (in evaluation order):
+1. **Per-task test evidence** — all wave tasks must have a passing `test_result` (`{"verdict": "trusted-pass"}`, or an untrusted result with `passed: true`); tasks declaring `new_tests_required == false` are exempt
 2. **New tests written** — all wave tasks must have `new_tests_written == true` OR `new_tests_required == false`
-3. **Spec alignment** — `spec_check.critical_count == 0`
-4. **Per-task review status** — all wave tasks must have `review_status != "pending"`
+3. **Per-task review status** — every wave task's `review_status` must be `passed` or `blocked` (`pending`, absent, or `evidence_capture_failed` all fail the check)
+4. **Spec alignment** — `spec_check.critical_count == 0`
 5. **No critical findings** — code review `critical_findings` count must be 0
+6. **Lifecycle machine artifacts** — every lifecycle machine file the plan binds to this wave's tasks must exist on disk (at the declared path or a suffix-matched task `file_list` path); no plan in state skips the check, but a plan that is named yet unreadable **fails the gate** (fail-closed)
 
 If any check fails, the helper exits with error and the wave does NOT advance. Fix the issue and re-run `/wave-gate`.
 
@@ -229,11 +234,10 @@ jq '.spec_check' .claude/state/active_task_graph.json
 **Debugging:**
 ```bash
 # Check per-task review status
-jq '.tasks[] | {id, review_status, tests_passed}' .claude/state/active_task_graph.json
+jq '.tasks[] | {id, review_status, test_result}' .claude/state/active_task_graph.json
 
-# Check wave tasks
-WAVE=$(jq -r '.current_wave' .claude/state/active_task_graph.json)
-jq -r ".tasks[] | select(.wave == $WAVE) | .id" .claude/state/active_task_graph.json
+# Check wave tasks (wave resolved inside jq — the guard blocks WAVE=$(jq … state))
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | .id' .claude/state/active_task_graph.json
 ```
 
 ---

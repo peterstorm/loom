@@ -12,15 +12,33 @@ import { makeViolation } from "../types";
 
 // --- Configuration ---
 
-/** Modules classified as pure (functional core). Glob-like matching. */
+/**
+ * Modules classified as pure (functional core). Glob-like matching.
+ *
+ * These are the shipped DEFAULTS: running loom's own linter with them must
+ * not flag loom's own code, so only genuinely-pure modules belong here.
+ * `engine/src/core/` and `engine/src/parsers/` are NOT listed — despite the
+ * "core"/"parser" naming, most of those files are harness-agnostic decision
+ * functions that legitimately peek at the filesystem (existsSync) or write
+ * to stderr, so they are not pure and would self-flag. The machine pure core
+ * below is the only group verified by machine-purity.test.ts.
+ */
 export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/linter/types.ts",
   "engine/src/linter/formatter.ts",
-  "engine/src/core/",
-  "engine/src/parsers/",
+  // Guarded-skill-machine pure core: the reducer and everything it may
+  // transitively import. The fs shell is ledger.ts / report-discovery.ts /
+  // session-registry.ts — deliberately NOT listed here.
+  "engine/src/machine/types.ts",
+  "engine/src/machine/advance.ts",
+  "engine/src/machine/parse-machine.ts",
+  "engine/src/machine/extract-evidence.ts",
+  "engine/src/machine/mermaid.ts",
+  "engine/src/machine/test-report.ts",
+  "engine/src/machine/evidence.ts",
 ];
 
-/** Import specifiers that indicate I/O capability */
+/** Import specifiers that indicate I/O capability or ambient non-determinism */
 export const IO_IMPORTS: readonly string[] = [
   // Node.js / TypeScript
   "node:fs",
@@ -31,6 +49,11 @@ export const IO_IMPORTS: readonly string[] = [
   "node:dgram",
   "node:dns",
   "node:tls",
+  "node:crypto",
+  "node:os",
+  "node:process",
+  "node:worker_threads",
+  "node:readline",
   "fs",
   "net",
   "http",
@@ -47,15 +70,21 @@ export const IO_IMPORTS: readonly string[] = [
   "java.lang.ProcessBuilder",
 ];
 
-/** Global expressions that indicate side effects or non-determinism */
+/** Global expressions that indicate side effects or non-determinism.
+ *  NOTE: these are banned in PURE modules only (the rule fires solely for
+ *  pureModules matches) — shell modules keep using process.stderr etc. */
 export const BANNED_GLOBALS: readonly { pattern: RegExp; description: string }[] = [
   { pattern: /\bprocess\.exit\b/, description: "process.exit (control flow side effect)" },
   { pattern: /\bprocess\.env\b/, description: "process.env (environment I/O)" },
+  { pattern: /\bprocess\.(stdout|stderr)\.write\b/, description: "process.stdout/stderr.write (I/O — pure modules return data; shells own the streams)" },
   { pattern: /\bfetch\s*\(/, description: "fetch() (network I/O)" },
   { pattern: /\bconsole\.(log|error|warn|info|debug)\b/, description: "console output (I/O)" },
   { pattern: /\bMath\.random\s*\(/, description: "Math.random() (non-determinism)" },
   { pattern: /\bnew\s+Date\s*\((?!\s*["'\d])/, description: "new Date() without argument (non-determinism)" },
+  { pattern: /\bDate\.now\s*\(/, description: "Date.now() (non-determinism — inject the clock)" },
   { pattern: /\bperformance\.now\s*\(/, description: "performance.now() (non-determinism)" },
+  { pattern: /\bset(Timeout|Interval)\s*\(/, description: "setTimeout/setInterval (scheduling side effect)" },
+  { pattern: /\bcrypto\.randomUUID\s*\(/, description: "crypto.randomUUID() (non-determinism — inject the id generator)" },
 ];
 
 /** Import specifiers allowed even in pure modules (side-effect free) */
@@ -71,7 +100,11 @@ export const PURE_ALLOW_LIST: readonly string[] = [
 
 /**
  * Checks if a file path matches any of the pure module patterns.
- * Supports exact match and prefix match (trailing /).
+ * Matching is prefix/exact — never a bare substring: a directory pattern
+ * (trailing /) matches paths that START with it or contain it at a path
+ * boundary (`/<pattern>`); a file pattern matches exactly or at a path
+ * boundary. Substring matching would let e.g. "my-engine/src/core/x.ts"
+ * or "core/parse-machine.ts.bak" match unintended patterns.
  */
 export function isPureModule(
   filePath: string,
@@ -80,9 +113,9 @@ export function isPureModule(
   const normalized = filePath.replace(/\\/g, "/");
   return pureModules.some((pattern) => {
     if (pattern.endsWith("/")) {
-      return normalized.includes(pattern);
+      return normalized.startsWith(pattern) || normalized.includes("/" + pattern);
     }
-    return normalized.endsWith(pattern) || normalized.includes(pattern);
+    return normalized === pattern || normalized.endsWith("/" + pattern);
   });
 }
 

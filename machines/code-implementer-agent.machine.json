@@ -1,0 +1,27 @@
+{
+  "agent": "code-implementer-agent",
+  "enforcedTools": ["Edit", "Write", "MultiEdit"],
+  "phases": [
+    {
+      "id": "read-context",
+      "allowedTools": [],
+      "advance": { "event": "FileRead", "min": 1 }
+    },
+    {
+      "id": "implement",
+      "allowedTools": ["Edit", "Write", "MultiEdit"],
+      "advance": { "event": "FileWrite", "min": 1 }
+    },
+    {
+      "id": "verify",
+      "allowedTools": ["Edit", "Write", "MultiEdit"],
+      "advance": { "event": "TestRunPassed", "min": 1 }
+    },
+    {
+      "id": "done",
+      "terminal": true,
+      "allowedTools": ["Edit", "Write", "MultiEdit"],
+      "requires": [{ "event": "TestRunPassed", "min": 1 }]
+    }
+  ]
+}

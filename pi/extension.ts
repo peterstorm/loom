@@ -7,11 +7,11 @@
 
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync, readFileSync, readdirSync, statSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
+import { existsSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isToolCallEventType, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 
-// Engine core — pure functions, no Claude Code dependency
+// Engine core — harness-agnostic, no Claude Code dependency (these do fs I/O)
 import { shouldBlockDirectEdit } from "../engine/src/core/block-direct-edits";
 import { guardStateFile } from "../engine/src/core/guard-state-file";
 import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
@@ -19,13 +19,11 @@ import { validateTaskExecution } from "../engine/src/core/validate-task-executio
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 
 // Engine parsers (format-aware)
-import { parseTranscript } from "../engine/src/parsers/parse-transcript";
 import { parseFilesModified } from "../engine/src/parsers/parse-files-modified";
 import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-output";
-import { parsePhaseArtifacts } from "../engine/src/parsers/parse-phase-artifacts";
 
-// Engine SubagentStop logic (pure functions already exported)
-import { extractTestEvidence, analyzeNewTests } from "../engine/src/handlers/subagent-stop/update-task-status";
+// Engine SubagentStop logic (harness-agnostic functions already exported)
+import { extractTestEvidence, analyzeNewTests, applyUntrustedStopResolution, isWaveComplete } from "../engine/src/handlers/subagent-stop/update-task-status";
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
   isReviewAgent, parseMachineSummary, parseLegacyFindings,
@@ -33,9 +31,12 @@ import {
 } from "../engine/src/handlers/subagent-stop/store-reviewer-findings";
 import { parseSpecCheckOutput } from "../engine/src/handlers/subagent-stop/store-spec-check-findings";
 import type { ReviewStatus, SpecCheck, Phase } from "../engine/src/types";
+import { newWaveGate } from "../engine/src/types";
 
-import { TASK_GRAPH_PATH, SUBAGENT_DIR, HARNESS, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR } from "../engine/src/config";
+import { TASK_GRAPH_PATH, SUBAGENT_DIR, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
+import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
+import { fsSessionRegistry, parseSessionId, rosterAgentId } from "../engine/src/machine";
 import { buildContextOutput } from "../engine/src/handlers/session-start/resume-after-clear";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
@@ -63,89 +64,141 @@ export default function (pi: ExtensionAPI) {
   // ─── PreToolUse Guards (tool_call event) ──────────────────────────────
 
   pi.on("tool_call", async (event, ctx) => {
-    const sessionId = ctx.sessionManager.getSessionId() ?? "unknown";
+    // Fail CLOSED on a crashed guard: an uncaught throw in this chain has
+    // undefined polarity in pi (whether the tool proceeds is the harness's
+    // choice) — a guard that dies must block, loudly naming itself, or a
+    // crash in e.g. guardStateFile silently waves state-file writes through.
+    let currentGuard = "session-id";
+    try {
+      const sessionId = ctx.sessionManager.getSessionId() ?? "unknown";
 
-    // Block direct edits during orchestration
-    if (isToolCallEventType("edit", event) || isToolCallEventType("write", event)) {
-      const result = shouldBlockDirectEdit(event.toolName, sessionId);
-      if (result.kind === "block") {
-        return { block: true, reason: result.message };
+      // Block direct edits during orchestration
+      if (isToolCallEventType("edit", event) || isToolCallEventType("write", event)) {
+        currentGuard = "block-direct-edits";
+        const result = shouldBlockDirectEdit(event.toolName, sessionId);
+        if (result.kind === "block") {
+          return { block: true, reason: result.message };
+        }
       }
-    }
 
-    // Guard state file from bash writes
-    if (isToolCallEventType("bash", event)) {
-      const result = guardStateFile(event.input.command ?? "");
-      if (result.kind === "block") {
-        return { block: true, reason: result.message };
-      }
-    }
-
-    // Subagent tool → phase and task validation
-    if (event.toolName === "subagent") {
-      const agent = (event.input as Record<string, unknown>).agent as string | undefined;
-      const task = (event.input as Record<string, unknown>).task as string | undefined;
-
-      if (agent && task) {
-        // Phase order validation
-        const phaseResult = validatePhaseOrder({
-          agentType: agent,
-          prompt: task,
-        });
-        if (phaseResult.kind === "block") {
-          return { block: true, reason: phaseResult.message };
-        }
-
-        // Template substitution check
-        const templateResult = validateTemplateSubstitution(task);
-        if (templateResult.kind === "block") {
-          return { block: true, reason: templateResult.message };
-        }
-
-        // Task execution validation (wave order, deps, review gates)
-        const taskResult = await validateTaskExecution({
-          prompt: task,
-          description: (event.input as Record<string, unknown>).description as string ?? "",
-        });
-        if (taskResult.kind === "block") {
-          return { block: true, reason: taskResult.message };
-        }
-
-        // Mark subagent active (equivalent of SubagentStart hook)
+      // Guard state file from bash writes
+      if (isToolCallEventType("bash", event)) {
+        currentGuard = "guard-state-file";
+        const result = guardStateFile(event.input.command ?? "");
+        // Call-start stamp (PRODUCER only — pi has no PostToolUse evidence
+        // recorder yet, so nothing on the pi side consumes these stamps;
+        // they exist so the engine's recorder can order artifacts if it
+        // reads the same session): decided FIRST, stamped AFTER, in its own
+        // catch — a thrown stamp write must never change the guard's
+        // polarity (and must not trip the fail-closed outer catch). The
+        // tool-call id is read defensively; absent → no stamp, and the
+        // engine recorder fails closed on artifact-backed reports.
         try {
-          mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
-          appendFileSync(`${SUBAGENT_DIR}/${sessionId}.active`, `${agent}\n`);
-          if (existsSync(TASK_GRAPH_PATH)) {
-            const taskGraphFile = `${SUBAGENT_DIR}/${sessionId}.task_graph`;
-            if (!existsSync(taskGraphFile)) {
-              writeFileSync(taskGraphFile, resolve(TASK_GRAPH_PATH));
-            }
+          const toolUseId = (event as { toolCallId?: unknown }).toolCallId;
+          const safeSessionId = parseSessionId(sessionId);
+          if (safeSessionId !== null && typeof toolUseId === "string" && toolUseId !== "") {
+            await fsSessionRegistry.recordCallStart(safeSessionId, toolUseId, Date.now());
           }
         } catch (err) {
-          process.stderr.write(`loom: subagent tracking write failed: ${(err as Error).message}\n`);
+          process.stderr.write(
+            `loom(pi): call-start stamp failed (guard decision unaffected): ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+        if (result.kind === "block") {
+          return { block: true, reason: result.message };
         }
       }
+
+      // Subagent tool → phase and task validation
+      if (event.toolName === "subagent") {
+        const agent = (event.input as Record<string, unknown>).agent as string | undefined;
+        const task = (event.input as Record<string, unknown>).task as string | undefined;
+
+        if (agent && task) {
+          // Phase order validation
+          currentGuard = "validate-phase-order";
+          const phaseResult = validatePhaseOrder({
+            agentType: agent,
+            prompt: task,
+          });
+          if (phaseResult.kind === "block") {
+            return { block: true, reason: phaseResult.message };
+          }
+
+          // Template substitution check
+          currentGuard = "validate-template-substitution";
+          const templateResult = validateTemplateSubstitution(task);
+          if (templateResult.kind === "block") {
+            return { block: true, reason: templateResult.message };
+          }
+
+          // Task execution validation (wave order, deps, review gates)
+          currentGuard = "validate-task-execution";
+          const taskResult = await validateTaskExecution({
+            prompt: task,
+            description: (event.input as Record<string, unknown>).description as string ?? "",
+          });
+          if (taskResult.kind === "block") {
+            return { block: true, reason: taskResult.message };
+          }
+
+          // Mark subagent active (equivalent of SubagentStart hook).
+          // Parse the session id before interpolating it into SUBAGENT_DIR paths
+          // — a raw id with a separator/`..`/whitespace could address files
+          // outside the subagent dir. Stand down loudly on an unsafe id, mirroring
+          // the engine's record-evidence boundary.
+          currentGuard = "subagent-tracking";
+          const safeSessionId = parseSessionId(sessionId);
+          if (safeSessionId === null) {
+            process.stderr.write(
+              `loom: invalid session id ${JSON.stringify(sessionId)} — subagent tracking skipped\n`,
+            );
+          } else {
+            try {
+              mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+              // Roster line: the engine contract expects a unique per-spawn
+              // AgentId (SubagentStart's agent_id); pi's tool_call event
+              // carries only the agent TYPE at this seam, so the type is
+              // sanitized through rosterAgentId — the same producer the
+              // engine roster uses, guaranteeing the line parses on read.
+              // LATENT MISMATCH (documented, deferred): with only a type to
+              // write, two parallel same-type pi subagents are
+              // indistinguishable on the roster; a real per-spawn id would
+              // need pi to expose one on the subagent tool_call.
+              appendFileSync(`${SUBAGENT_DIR}/${safeSessionId}.active`, `${rosterAgentId(agent)}\n`);
+              if (existsSync(TASK_GRAPH_PATH)) {
+                const taskGraphFile = `${SUBAGENT_DIR}/${safeSessionId}.task_graph`;
+                if (!existsSync(taskGraphFile)) {
+                  writeFileSync(taskGraphFile, resolve(TASK_GRAPH_PATH));
+                }
+              }
+            } catch (err) {
+              process.stderr.write(`loom: subagent tracking write failed: ${(err as Error).message}\n`);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        `loom(pi): tool_call guard '${currentGuard}' crashed — blocking the call (fail-closed): ${message}\n`,
+      );
+      return {
+        block: true,
+        reason: `loom guard '${currentGuard}' crashed (failing closed): ${message}`,
+      };
     }
   });
 
   // ─── Session Lifecycle ────────────────────────────────────────────────
 
-  pi.on("session_start", async (_event, ctx) => {
-    // Cleanup stale subagent tracking files (> 60 min old)
-    if (existsSync(SUBAGENT_DIR)) {
-      const cutoff = Date.now() - 60 * 60_000;
-      try {
-        const { statSync, unlinkSync } = await import("node:fs");
-        for (const entry of readdirSync(SUBAGENT_DIR)) {
-          const path = join(SUBAGENT_DIR, entry);
-          try {
-            if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
-          } catch { /* individual file cleanup is best-effort */ }
-        }
-      } catch (err) {
-        process.stderr.write(`loom: session cleanup failed: ${(err as Error).message}\n`);
-      }
-    }
+  pi.on("session_start", async (_event, _ctx) => {
+    // Cleanup stale subagent tracking files — the ENGINE's sweep, not a
+    // per-file twin: staleness is judged per session GROUP (max mtime across
+    // the session's files), and the TTL is the shared STALE_SUBAGENT_TTL_MS,
+    // so a live session's roster/ledger can't be reaped out from under a
+    // fresh `.machine` anchor.
+    sweepStaleSessions(SUBAGENT_DIR, Date.now() - STALE_SUBAGENT_TTL_MS);
   });
 
   // ─── Resume Context (before_agent_start) ──────────────────────────────
@@ -161,7 +214,10 @@ export default function (pi: ExtensionAPI) {
     let state;
     try {
       state = sm.load();
-    } catch {
+    } catch (err) {
+      process.stderr.write(
+        `loom(pi): resume context skipped — task graph unreadable: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
       return;
     }
 
@@ -228,7 +284,16 @@ export default function (pi: ExtensionAPI) {
     const details = event.details as Record<string, unknown> | undefined;
     if (!details) return;
 
-    const results = (details.results ?? []) as Array<{
+    // Shape guard: a pi version drifting details.results away from an array
+    // must be a LOUD no-op, not a silent one (or a throw mid-dispatch).
+    const rawResults = details.results ?? [];
+    if (!Array.isArray(rawResults)) {
+      process.stderr.write(
+        `loom(pi): subagent tool_result has unrecognized details.results shape (${typeof rawResults}) — no task status updated\n`,
+      );
+      return;
+    }
+    const results = rawResults as Array<{
       agent: string;
       task: string;
       exitCode: number;
@@ -236,15 +301,28 @@ export default function (pi: ExtensionAPI) {
     }>;
 
     for (const result of results) {
+      // Per-result error isolation (mirrors dispatch.ts's safeRun): a throw
+      // while processing result #1 must not abort results #2..N — that
+      // leaves tasks stuck "executing" with zero diagnostics.
+      try {
       const agentType = stripNamespace(result.agent);
       const sessionId = _ctx.sessionManager.getSessionId() ?? "unknown";
 
-      // Cleanup subagent flag
-      try {
-        const activeFile = `${SUBAGENT_DIR}/${sessionId}.active`;
-        if (existsSync(activeFile)) unlinkSync(activeFile);
-      } catch (err) {
-        process.stderr.write(`loom: subagent flag cleanup failed: ${(err as Error).message}\n`);
+      // Cleanup subagent flag. Parse the session id before interpolating it
+      // into the SUBAGENT_DIR path (path-traversal guard); an unsafe id could
+      // never have named a tracking file, so there is nothing to clean up.
+      const safeSessionId = parseSessionId(sessionId);
+      if (safeSessionId === null) {
+        process.stderr.write(
+          `loom: invalid session id ${JSON.stringify(sessionId)} — subagent flag cleanup skipped\n`,
+        );
+      } else {
+        try {
+          const activeFile = `${SUBAGENT_DIR}/${safeSessionId}.active`;
+          if (existsSync(activeFile)) unlinkSync(activeFile);
+        } catch (err) {
+          process.stderr.write(`loom: subagent flag cleanup failed: ${(err as Error).message}\n`);
+        }
       }
 
       const mgr = StateManager.fromSession(sessionId);
@@ -264,7 +342,7 @@ export default function (pi: ExtensionAPI) {
               const filePath = (block.arguments as Record<string, unknown>)?.path as string
                 ?? (block.arguments as Record<string, unknown>)?.file_path as string;
               if (!filePath) continue;
-              if (filePath.includes(".claude/specs/") && filePath.endsWith("/spec.md")) {
+              if (filePath.includes(specDir) && filePath.endsWith("/spec.md")) {
                 await mgr.update((s) => ({ ...s, spec_file: filePath }));
               }
               if (filePath.includes(".claude/plans/") && filePath.endsWith(".md")) {
@@ -306,21 +384,69 @@ export default function (pi: ExtensionAPI) {
 
       // --- Impl agent → update task status ---
       if (IMPL_AGENTS.has(agentType)) {
-        // Get transcript text from subagent result content
-        const transcriptText = event.content
-          .filter((c: { type: string }) => c.type === "text")
-          .map((c: { type: string; text?: string }) => c.text ?? "")
+        // Extract task ID from the original task prompt (works in parallel mode)
+        // Then get transcript from per-result messages for test evidence
+        let taskId = extractTaskId(result.task ?? "") ?? extractTaskId(
+          event.content.filter((c: { type: string }) => c.type === "text").map((c: { type: string; text?: string }) => c.text ?? "").join("\n")
+        );
+        // Build transcript from per-result messages (each parallel result has its own messages)
+        const resultMessages = (result.messages ?? []) as PiMessage[];
+        const transcriptText = resultMessages
+          .filter((m: PiMessage) => m.role === "assistant" || m.role === "toolResult")
+          .flatMap((m: PiMessage) => (m.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? ""))
           .join("\n");
 
-        const taskId = extractTaskId(transcriptText);
-        if (!taskId) continue;
+        // Mirrors the engine's update-task-status: an unextractable task ID
+        // must not vanish silently. Exactly one executing task → infer it;
+        // ambiguous/empty → warn and clear executing_tasks (never mark tasks
+        // failed — that cascades into evidence overwrites downstream).
+        if (!taskId) {
+          const st = mgr.load();
+          const executing = st.executing_tasks ?? [];
+          if (executing.length === 1) {
+            process.stderr.write(
+              `WARNING: ${agentType} task ID extraction failed, inferred task ${executing[0]} from executing_tasks\n`,
+            );
+            taskId = executing[0];
+          } else {
+            if (executing.length > 0) {
+              process.stderr.write(
+                `WARNING: ${agentType} completed without task ID, ${executing.length} tasks executing (ambiguous)\n`,
+              );
+            }
+            await mgr.update((s) => ({ ...s, executing_tasks: [] }));
+            continue;
+          }
+        }
 
+        // Pre-lock snapshot: needed for start_sha / new_tests_required in the
+        // evidence collection below. The skip guards here are only a cheap
+        // fast path — the authoritative re-check runs INSIDE the locked
+        // update (TOCTOU, see below).
         const state = mgr.load();
         const task = state.tasks.find((t) => t.id === taskId);
-        if (!task || task.status === "completed" || task.tests_passed === true) continue;
+        if (!task || task.status === "completed") continue;
+        // Trust-aware skip (mirrors update-task-status): a trusted verdict is
+        // preserved only against an UNTRUSTED incoming resolution — newer
+        // ground truth supersedes older. pi has no evidence ledger, so this
+        // handler's resolution is ALWAYS untrusted (see below): the rule
+        // degenerates to "never overwrite a trusted verdict here".
+        const priorVerdict = task.test_result?.verdict;
+        if (priorVerdict === "trusted-pass" || priorVerdict === "trusted-fail") continue;
 
         const bashOutput = parseBashTestOutput(transcriptText);
         const testEvidence = extractTestEvidence(bashOutput);
+
+        // files_modified feeds lint-wave-gate's target collection (it
+        // collects lint targets EXCLUSIVELY from tasks' files_modified) —
+        // parse it from the per-result messages, re-encoded as the pi-format
+        // JSONL parseFilesModified's pi branch reads, so the pi path
+        // persists the same field the engine path does (round-16 fix: the
+        // omission made every wave-gate lint under pi run over an empty set).
+        const piJsonl = resultMessages
+          .map((m) => JSON.stringify({ type: "message", message: m }))
+          .join("\n");
+        const filesModified = parseFilesModified(piJsonl, "pi");
 
         let newTestEvidence = { written: false, evidence: "" };
         if (git.isGitRepo()) {
@@ -339,54 +465,77 @@ export default function (pi: ExtensionAPI) {
           }
         }
 
-        await mgr.update((s) => ({
-          ...s,
-          tasks: s.tasks.map((t) =>
-            t.id === taskId
-              ? {
-                  ...t,
-                  status: "implemented" as const,
-                  tests_passed: testEvidence.passed,
-                  test_evidence: testEvidence.evidence,
-                  new_tests_written: newTestEvidence.written,
-                  new_test_evidence: newTestEvidence.evidence,
-                }
-              : t
-          ),
-          executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
-        }));
-
-        // Check wave completion
-        const updated = mgr.load();
-        const currentWave = updated.current_wave ?? 1;
-        const waveComplete = !updated.tasks
-          .filter((t) => t.wave === currentWave)
-          .some((t) => t.status !== "implemented" && t.status !== "completed");
-
-        if (waveComplete) {
-          await mgr.update((s) => ({
-            ...s,
+        // Atomic state write. The completed/trusted-verdict guards above ran
+        // on a PRE-LOCK snapshot that a concurrent writer can outdate before
+        // this write lands (TOCTOU) — so the decision runs INSIDE the locked
+        // update via the shared pure applyUntrustedStopResolution (engine's
+        // update-task-status module), which re-finds and re-checks the target.
+        // The incoming resolution is ALWAYS untrusted here, so an existing
+        // trusted verdict (or a completed task) always stands.
+        const resolvedTaskId = taskId;
+        let skippedExistingVerdict = false;
+        await mgr.update((s) => {
+          const applied = applyUntrustedStopResolution(s, resolvedTaskId, {
+            // pi has no evidence ledger — transcript regex is the only
+            // source here, so the verdict is always untrusted+labeled.
+            testResult: {
+              verdict: "untrusted" as const,
+              passed: testEvidence.passed,
+              label: "transcript-regex (fallback)",
+            },
+            testEvidence: testEvidence.evidence,
+            filesModified,
+            newTestsWritten: newTestEvidence.written,
+            newTestEvidence: newTestEvidence.evidence,
+          });
+          skippedExistingVerdict = applied.skipped;
+          if (applied.skipped) return applied.state;
+          // Wave completion is decided INSIDE the same locked update the
+          // resolution landed in (the old post-update load raced concurrent
+          // writers), via the shared pure predicate the engine's
+          // update-task-status also uses.
+          const currentWave = applied.state.current_wave ?? 1;
+          if (!isWaveComplete(applied.state, currentWave)) return applied.state;
+          return {
+            ...applied.state,
             wave_gates: {
-              ...s.wave_gates,
+              ...applied.state.wave_gates,
               [String(currentWave)]: {
-                ...(s.wave_gates[String(currentWave)] ?? { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false }),
+                ...(applied.state.wave_gates[String(currentWave)] ?? newWaveGate()),
                 impl_complete: true,
               },
             },
-          }));
+          };
+        });
+
+        if (skippedExistingVerdict) {
+          process.stderr.write(
+            `loom(pi): ${taskId} is completed or carries a trusted verdict this untrusted resolution cannot supersede — leaving it untouched\n`,
+          );
         }
         continue;
       }
 
       // --- Review agent → store findings ---
       if (isReviewAgent(agentType)) {
-        const transcriptText = event.content
-          .filter((c: { type: string }) => c.type === "text")
-          .map((c: { type: string; text?: string }) => c.text ?? "")
+        const taskId = extractTaskId(result.task ?? "") ?? extractTaskId(
+          event.content.filter((c: { type: string }) => c.type === "text").map((c: { type: string; text?: string }) => c.text ?? "").join("\n")
+        );
+        const resultMessages = (result.messages ?? []) as PiMessage[];
+        const transcriptText = resultMessages
+          .filter((m: PiMessage) => m.role === "assistant" || m.role === "toolResult")
+          .flatMap((m: PiMessage) => (m.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? ""))
           .join("\n");
-
-        const taskId = extractTaskId(transcriptText);
-        if (!taskId) continue;
+        if (!taskId) {
+          // A review whose task ID is unextractable stores nothing — its
+          // findings silently never gate the wave. Say so instead of
+          // vanishing (review agents don't sit in executing_tasks, so there
+          // is no inference to fall back on).
+          process.stderr.write(
+            `WARNING: ${agentType} review completed without an extractable task ID — findings NOT stored\n`,
+          );
+          continue;
+        }
 
         const findings = parseMachineSummary(transcriptText) ?? parseLegacyFindings(transcriptText);
 
@@ -413,9 +562,10 @@ export default function (pi: ExtensionAPI) {
 
       // --- Spec-check invoker → store spec-check findings ---
       if (agentType === "spec-check-invoker") {
-        const transcriptText = event.content
-          .filter((c: { type: string }) => c.type === "text")
-          .map((c: { type: string; text?: string }) => c.text ?? "")
+        const resultMessages = (result.messages ?? []) as PiMessage[];
+        const transcriptText = resultMessages
+          .filter((m: PiMessage) => m.role === "assistant" || m.role === "toolResult")
+          .flatMap((m: PiMessage) => (m.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? ""))
           .join("\n");
 
         const findings = parseSpecCheckOutput(transcriptText);
@@ -453,7 +603,7 @@ export default function (pi: ExtensionAPI) {
             updated.wave_gates = {
               ...s.wave_gates,
               [waveKey]: {
-                ...(s.wave_gates[waveKey] ?? { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false }),
+                ...(s.wave_gates[waveKey] ?? newWaveGate()),
                 blocked: true,
               },
             };
@@ -461,6 +611,19 @@ export default function (pi: ExtensionAPI) {
           return updated;
         });
         continue;
+      }
+      } catch (err) {
+        // Loud + isolated: name the agent, the task (best effort), and the
+        // cause, then continue with the next result.
+        let taskIdForLog = "<unknown>";
+        try {
+          taskIdForLog = extractTaskId(result?.task ?? "") ?? "<unknown>";
+        } catch {
+          /* best-effort only — the log line must never throw */
+        }
+        process.stderr.write(
+          `loom(pi): subagent-stop processing failed for agent ${String(result?.agent ?? "<unknown>")} (task ${taskIdForLog}): ${err instanceof Error ? err.message : String(err)} — continuing with remaining results\n`,
+        );
       }
     }
   });

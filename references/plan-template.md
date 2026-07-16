@@ -80,6 +80,59 @@ path/to/new/file.ts          — {purpose}
 
 ---
 
+## Lifecycles
+
+Only if the design contains a real domain lifecycle. Delete section if not.
+See `references/executable-models.md` — a declared lifecycle MUST bind to a
+machine file that a task implements, or decompose validation fails.
+
+### LC-1: {Lifecycle Name}
+
+**Machine file:** `{path/to/machine.ts}`
+**Kind:** typed-reducer
+**States:** {state, state, state}
+
+(Kind is `typed-reducer` — a pure `transition(state, event)` over closed unions, no new dependency — or `xstate` when the project already uses it. Write one concrete value, never both.)
+
+| Event | From | To |
+|---|---|---|
+| {event} | {state} | {state} |
+
+---
+
+## Pipeline
+
+Only if the feature is a real pipeline AND the project uses fugue AND the
+user opted in at the approach gate. Delete section if not. The AuthoredDag
+sidecar must exist before decompose (architecture phase authors it).
+
+**AuthoredDag:** `{path/to/feature.dag.authored.json}`
+
+| Node | Kind | Purpose |
+|---|---|---|
+| {node-id} | fetch \| llm \| transform \| human-review | {one line} |
+
+---
+
+## Invariants
+
+Only if the design has invariants worth stating. Delete section if not.
+Checkable invariants MUST have a rule file (written during this phase);
+non-checkable ones are honestly tiered advisory.
+
+### INV-1: {Invariant Title}
+
+**Tier:** checkable
+**Rule file:** `.claude/linter/rules/inv-1-{slug}.json`
+**Statement:** {what must always hold}
+
+### INV-2: {Invariant Title}
+
+**Tier:** advisory
+**Statement:** {what should hold, and why it can't be deterministically checked}
+
+---
+
 ## Implementation Phases
 
 Ordered by dependency. Maps directly to decompose waves.
@@ -155,6 +208,25 @@ Per component, not global.
 - Per-component, not one big table
 - Distinguish unit (pure) vs integration (I/O)
 - Note property tests where invariants exist
+
+**Executable Models (Lifecycles / Pipeline / Invariants):**
+- Opt-in sections — most features need none of them. Absent = policy satisfied.
+- A model either executes or it doesn't exist: lifecycle → machine file the
+  implementation imports; pipeline → AuthoredDag that generates the graph;
+  checkable invariant → lint rule enforced fail-closed on every edit.
+- Never describe a lifecycle/pipeline in prose without the executable binding
+  — `validate-task-graph` blocks decompose on unbound models AND on near-miss
+  declarations (typo'd headings/labels are errors, not opt-outs).
+- **Exact grammar** — these sections are regex-parsed: headings
+  `## Lifecycles` / `## Pipeline` (one per plan) / `## Invariants` with no
+  suffix or colon; blocks `### LC-<n>: <title>` / `### INV-<n>: <title>`
+  (uppercase, numeric, colon); labels like `**Machine file:**` at column 0,
+  colon inside the bold, never as bullets. Machine-file paths repo-relative.
+  Close every code fence — an unterminated fence hides everything after it.
+- Rule files go in the project rules dir: `.claude/linter/rules/` (or
+  `.pi/linter/rules/` under the pi harness) — the linter loads only from the
+  harness-appropriate dir.
+- Full policy: `references/executable-models.md`
 
 **What NOT to include:**
 - Implementation code (that's the impl agent's job)
