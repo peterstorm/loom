@@ -85,8 +85,41 @@ describe("normalizeShellSpan — bash word-normalization rules", () => {
     expect(whole("${x:-.claude/state/active_task_graph.json}")).toBe(
       ".claude/state/active_task_graph.json",
     );
-    // `#`/`!`-prefixed bodies are length/indirection, never a default word.
+    // `#`-prefix (length) and PURE indirection (`${!x}`) carry no word — but
+    // indirection COMBINED with an operator does (see the round-25 block below).
     expect(whole("${!x}z")).toBe("z");
+    expect(whole("${#x}z")).toBe("z");
+  });
+
+  it("indirect expansion with a word operator (`${!x:-w}`/`${!x:+w}`/`${!x-w}`) reveals its word — pure indirect/prefix/array forms stay empty (round-25)", () => {
+    const alt = (t: string) =>
+      normalizeShellSpan(t, 0, { mode: "matching-view", alternateFormsReveal: true }).value;
+    // `${!x:-w}` indirects `x` to a varname, then applies `:-w` to THAT var: on
+    // unset/null it substitutes `w`, exactly like the non-indirect `${y:-w}`. The
+    // pre-round-25 `!`-prefix short-circuit deleted the whole span, CONCEALING a
+    // guarded literal in `w` (fail-OPEN). Verified against real bash:
+    // `x=NOPEVAR; printf %s "${!x:-.claude/state}"` → `.claude/state`.
+    expect(whole("${!x:-.claude/state/active_task_graph.json}")).toBe(
+      ".claude/state/active_task_graph.json",
+    );
+    expect(whole(".claude/stat${!x:-X}e")).toBe(".claude/statXe");
+    expect(whole(".claude/stat${!x-X}e")).toBe(".claude/statXe"); // colonless default
+    // The alternate twin (`${!x:+w}`/`${!x+w}`) reveals `w` on SET under the
+    // alternate flag — the guard's set-state base for the indirect form.
+    expect(alt("${!x:+.claude/state/active_task_graph.json}")).toBe(
+      ".claude/state/active_task_graph.json",
+    );
+    expect(alt(".claude/stat${!x+X}e")).toBe(".claude/statXe");
+    // Colonless indirect default is set-but-empty → EMPTY under that flag, same
+    // as its non-indirect twin.
+    const empty = (t: string) =>
+      normalizeShellSpan(t, 0, { mode: "matching-view", colonlessDefaultsEmpty: true }).value;
+    expect(empty(".claude/stat${!x-X}e")).toBe(".claude/state");
+    // Pure indirect, prefix-match and array-key forms carry NO word — still empty.
+    expect(whole("${!x}z")).toBe("z");
+    expect(whole("${!pre@}z")).toBe("z"); // prefix-match: names starting `pre`
+    expect(whole("${!pre*}z")).toBe("z");
+    expect(whole("${!arr[@]}z")).toBe("z"); // array keys
   });
 
   it("colonlessDefaultsEmpty collapses `${x-w}`/`${x=w}` to EMPTY but leaves colon forms revealing their word (round-21)", () => {

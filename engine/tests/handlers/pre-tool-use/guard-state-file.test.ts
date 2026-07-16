@@ -640,6 +640,27 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("rm ${x:?.claude/state/active_task_graph.json}")).toBe("allow");
   });
 
+  it("indirect expansion with a word operator `${!x:-w}`/`${!x:+w}`/`${!x-w}` substitutes its WORD — the `!`-prefix short-circuit concealed a guarded literal (round-25 fail-open)", () => {
+    // The remaining sibling of the round-20/21/22/24 word-operator bugs. `${!x}`
+    // is pure indirection (no word), but `${!x:-w}`/`${!x:+w}`/`${!x-w}` indirect
+    // THEN apply the operator, substituting `w` exactly like the non-indirect
+    // twin. classifyBraceBody blanket-returned `empty` for every `!`-prefix body,
+    // deleting the span and concealing a guarded literal parked in `w`, so the
+    // guard saw `rm ` and ALLOWed while bash ran the delete. Verified against real
+    // bash: `x=NOPEVAR; printf %s "${!x:-.claude/state/active_task_graph.json}"`.
+    expect(guardDecision("rm ${!x:-.claude/state/active_task_graph.json}")).toBe("block");
+    expect(guardDecision("rm ${!x-.claude/state/active_task_graph.json}")).toBe("block"); // colonless
+    expect(guardDecision("rm ${!x:+.claude/state/active_task_graph.json}")).toBe("block"); // alternate (set var)
+    expect(guardDecision("echo FORGED > ${!x:-.claude/state/active_task_graph.json}")).toBe("block");
+    expect(guardDecision("printf '{}' > ${!x:+/tmp/claude-subagents/sess.evidence.jsonl}")).toBe("block");
+    // Fragment carried in the word, reassembled with surrounding literals.
+    expect(guardDecision("rm .claude/sta${!x:-te/active_task_graph.json}")).toBe("block");
+    // Precision: the ERROR form UNDER indirection (`${!x:?w}`) never substitutes
+    // `w` into the value (stderr message), so a guarded literal parked there never
+    // runs — the `!` strip must not turn `:?` into a revealing operator.
+    expect(guardDecision("rm ${!x:?.claude/state/active_task_graph.json}")).toBe("allow");
+  });
+
   it("a `'` inside `\"…\"` is a literal apostrophe — it must NOT disable the substitution defense that follows (round-20 regression, round-21 fix)", () => {
     // The unified scanner tracked quote state as `'\"' | \"'\" | null`. A `'` inside
     // double quotes (`\"it's\"`) is a literal apostrophe; flipping into single-quote
@@ -852,6 +873,40 @@ describe("guard-state-file handler — malformed stdin fails CLOSED (round-11)",
     if (result.kind === "block") {
       expect(result.message).toContain("malformed hook input");
     }
+  });
+
+  it("a present-but-non-string `command` fails CLOSED — never a silent allow (round-25 fail-open)", async () => {
+    // The normalizers iterate `text.length`; for a non-string that is `undefined`,
+    // so every loop no-ops and every match view comes back empty →
+    // referencesGuardedState=false → ALLOW. A crafted or malformed harness payload
+    // that delivers `command` as an object/number/boolean would wave straight past
+    // the guard. The handler must reject the malformed field type, failing closed.
+    for (const command of [{ foo: "rm .claude/state/active_task_graph.json" }, 42, true, ["rm", "x"]]) {
+      const stdin = JSON.stringify({
+        session_id: "s-nonstr",
+        tool_name: "Bash",
+        tool_input: { command },
+        tool_use_id: "toolu_nonstr",
+      });
+      const result = await runGuardStateFile(stdin, inMemorySessionRegistry());
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") {
+        expect(result.message).toContain("non-string Bash command");
+      }
+    }
+  });
+
+  it("an absent `command` (no Bash payload) still allows — only PRESENT non-strings fail closed", async () => {
+    // `tool_input: {}` (or a non-Bash tool) has no command to guard; `undefined`
+    // must stay the empty-command allow, not trip the non-string block.
+    const stdin = JSON.stringify({
+      session_id: "s-nocmd",
+      tool_name: "Read",
+      tool_input: {},
+      tool_use_id: "toolu_nocmd",
+    });
+    const result = await runGuardStateFile(stdin, inMemorySessionRegistry());
+    expect(result.kind).toBe("allow");
   });
 });
 

@@ -130,11 +130,22 @@ const WORD_OPS = [
 
 function classifyBraceBody(text: string, start: number, close: number): ParamExpansion {
   const end = close + 1;
-  const bodyStart = start + 2;
-  const body = text.slice(bodyStart, close);
-  // `#`/`!`-prefixed bodies (length, indirection, prefix-match) expand empty on
-  // unset — never a word form.
-  if (body[0] === "#" || body[0] === "!") return { kind: "empty", end };
+  let bodyStart = start + 2;
+  let body = text.slice(bodyStart, close);
+  // `#`-prefixed bodies (length) are always operator-free — `${#x:-w}` is a bash
+  // syntax error — so a `#` body never carries a substitutable word.
+  if (body[0] === "#") return { kind: "empty", end };
+  // `!`-prefixed bodies are indirection. Pure indirect (`${!x}`), prefix-match
+  // (`${!pre@}`/`${!pre*}`) and array-key (`${!arr[@]}`) forms carry no word, but
+  // indirection COMBINES with a word operator (`${!x:-w}`/`${!x:+w}`/`${!x-w}`),
+  // which substitutes `w` exactly like the non-indirect twin. Strip the `!` and
+  // classify the remainder so that `w` is REVEALED, not concealed — concealing it
+  // is the same fail-open bypass this file has fought across rounds (colonless,
+  // nested, alternate forms).
+  if (body[0] === "!") {
+    bodyStart += 1;
+    body = body.slice(1);
+  }
   // Name: `[A-Za-z_]\w*`, positional digits, or a single special param, plus an
   // optional `[subscript]`. The operator (if any) starts right after.
   const nameMatch = body.match(/^([A-Za-z_][A-Za-z0-9_]*|\d+|[@*?$!#0-])(\[[^\]]*\])?/);
