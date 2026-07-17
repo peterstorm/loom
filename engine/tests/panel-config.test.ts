@@ -96,6 +96,18 @@ describe("panelPhaseOverlap (module-load invariant guard)", () => {
     expect(panelPhaseOverlap(ARCH_PANEL_AGENTS, bad)).toEqual(["arch-designer-agent"]);
   });
 
+  it("detects a DOUBLY-SUFFIXED collision — detectPhase's third probe (agent + \"-agent\")", () => {
+    // phaseLookupKeys returns [bare, name, name + "-agent"]. detectPhase probes
+    // PHASE_AGENT_MAP[agent + "-agent"] too, so a phase agent stored under the
+    // doubly-suffixed key "arch-designer-agent-agent" would capture the suffixed
+    // panel invocation ("arch-designer-agent") via that third probe. The guard
+    // must flag it even though neither the bare form ("arch-designer") nor the
+    // exact stored key ("arch-designer-agent") is present in the map — this closes
+    // the last of the three probed key shapes.
+    const bad = { "arch-designer-agent-agent": "decompose" as const };
+    expect(panelPhaseOverlap(ARCH_PANEL_AGENTS, bad)).toEqual(["arch-designer-agent"]);
+  });
+
   it("assertPanelPhaseDisjoint THROWS on a synthetic overlap — the load-time guard's throw branch, not just the predicate", () => {
     // panelPhaseOverlap returning a non-empty list proves detection; this proves
     // the guard HALTS on it. Without this, a regression that dropped the `throw`

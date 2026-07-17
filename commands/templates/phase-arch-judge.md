@@ -55,3 +55,4 @@ Output ONLY valid JSON to stdout. No markdown, no prose, no code fences:
 - Output ONLY valid JSON — no markdown, no prose, no code fences.
 - Judge on YOUR criterion alone; other judges cover the rest.
 - Do NOT read `.claude/hooks/` or `.claude/state/` — irrelevant to you.
+- In `fatal_flaw` / `strongest_idea` prose, do NOT use the curly-brace characters `{` or `}`. Your verdict is inlined verbatim into another agent's prompt, where a brace-wrapped word reads as an unsubstituted template variable and blocks the downstream spawn. Describe in plain words instead.

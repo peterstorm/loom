@@ -174,9 +174,15 @@ echo "[3] subagent-stop: arch-designer-agent completion is passthrough (stale pl
 printf '# stale plan\n' > "$PLANS_DIR/2026-07-17-stale.md"   # same date prefix as SLUG
 write_state "architecture" "null"
 src="$(run_stop arch-designer-agent)"
-[ "$src" = "0" ] || bad "dispatch crashed (exit $src) — 'phase unchanged' would be a false pass"
-after="$(phase_now)"
-[ "$after" = "architecture" ] && ok "phase unchanged (still architecture)" || bad "phase advanced to '$after' — TRAP FIRED"
+# Gate the phase assertion on a clean dispatch: a crash (exit != 0) leaves the
+# phase at "architecture" for the WRONG reason (it never ran), so asserting
+# "phase unchanged" here would print a spurious green ✓ next to the crash's ✗.
+if [ "$src" != "0" ]; then
+  bad "dispatch crashed (exit $src) — 'phase unchanged' would be a false pass"
+else
+  after="$(phase_now)"
+  [ "$after" = "architecture" ] && ok "phase unchanged (still architecture)" || bad "phase advanced to '$after' — TRAP FIRED"
+fi
 
 # ── 4. finalize architecture-agent ALLOWED ────────────────────────────────────
 echo "[4] validate-phase-order: architecture-agent (finalize) in architecture phase"
@@ -191,9 +197,13 @@ echo "[5] subagent-stop: architecture-agent completion advances architecture →
 printf '# real plan\n' > "$PLANS_DIR/$SLUG.md"
 write_state "architecture" "null"
 src="$(run_stop architecture-agent)"
-[ "$src" = "0" ] || bad "dispatch crashed (exit $src)"
-after="$(phase_now)"
-[ "$after" = "plan-alignment" ] && ok "phase advanced to plan-alignment" || bad "expected plan-alignment, got '$after'"
+# Same crash-gating as step 3: only assert the transition when dispatch ran clean.
+if [ "$src" != "0" ]; then
+  bad "dispatch crashed (exit $src)"
+else
+  after="$(phase_now)"
+  [ "$after" = "plan-alignment" ] && ok "phase advanced to plan-alignment" || bad "expected plan-alignment, got '$after'"
+fi
 
 echo
 echo "──────────────────────────────────────────"

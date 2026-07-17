@@ -254,6 +254,8 @@ Derive K criteria from the interview digest:
 
 **Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-finalize.md`. Substitute `{feature_description}`, `{spec_file_path}`, `{interview_file_path}`, `{candidates_dir}`, `{judge_verdicts}` (the collected JSON, inlined), `{date_slug}`.
 
+> **Sanitize `{judge_verdicts}` before inlining.** The verdict prose (`fatal_flaw`, `strongest_idea`) is judge-LLM output that could contain a literal `{word}` token. Once inlined it would read as an unsubstituted `{placeholder}` to the template-substitution gate, which fail-closed-blocks the `architecture-agent` spawn *after* the N designers and K judges already ran. Strip `{`/`}` characters from the JSON string values (they are prose, never template variables) before substituting them into `{judge_verdicts}`.
+
 **Spawn `architecture-agent`** with this template (the name is load-bearing — its SubagentStop advances the phase). It runs the approach gate over the top-ranked candidates, synthesizes the winner with grafted `strongest_idea`s, writes `.claude/plans/{date_slug}.md` with an `### AD-1: Approach selection (panel)` block, and commits.
 
 **From here, the flow rejoins standard mode** — "Wait for completion, extract plan path" is unchanged; advance-phase transitions to plan-alignment.

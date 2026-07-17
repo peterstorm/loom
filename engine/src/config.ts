@@ -16,35 +16,74 @@ export const CLARIFY_THRESHOLD = 3;
 /** Valid phase ordering — re-exported from the single source tuple in types. */
 export const PHASE_ORDER: readonly Phase[] = PHASES;
 
-/** Phase agents → map to their phase.
- *  Frozen so the panel/phase disjointness invariant (see panelPhaseOverlap and
- *  the module-load guard below) is a complete proof rather than an initial-state
- *  snapshot: post-load mutation that could smuggle a panel agent in here — and
- *  break the "only architecture-agent advances the phase" contract that
- *  advance-phase.ts relies on — is impossible at runtime. */
-export const PHASE_AGENT_MAP: Record<string, Phase> = Object.freeze({
-  "brainstorm-agent": "brainstorm",
-  "specify-agent": "specify",
-  "clarify-agent": "clarify",
-  "architecture-agent": "architecture",
-  "plan-alignment-agent": "plan-alignment",
-  "decompose-agent": "decompose",
-});
+/** Orchestration role of an agent within the architecture phase.
+ *  - `phase`: a normal phase agent — its SubagentStop advances the phase to
+ *    `phase` via PHASE_AGENT_MAP + advance-phase.
+ *  - `panel`: a `/loom --panel` designer/judge/interviewer — recognized as
+ *    architecture-phase work so validate-phase-order ALLOWS it, but INVISIBLE to
+ *    advance-phase so it never advances the phase mid-panel. */
+type AgentRole =
+  | { readonly role: "phase"; readonly phase: Phase }
+  | { readonly role: "panel"; readonly phase: Phase };
 
-/** Architecture-panel agents (`/loom --panel`): recognized by phase
- *  validation as architecture-phase work, but INVISIBLE to advance-phase —
- *  they are deliberately kept OUT of PHASE_AGENT_MAP so that only
- *  architecture-agent's SubagentStop advances the phase. If a designer/judge
- *  mapped to "architecture", its completion would fire resolveTransition and
- *  the date-prefix plan fallback could advance the phase mid-panel. The
- *  emptiness of the invariant is enforced BOTH at module load (the guard below
- *  throws on import) and in the config invariant test — not just a convention.
- *  See panelPhaseOverlap for the exact overlap it forbids. */
-export const ARCH_PANEL_AGENTS: ReadonlySet<string> = new Set([
-  "arch-interviewer-agent",
-  "arch-designer-agent",
-  "arch-judge-agent",
-]);
+/** Single source of truth for every architecture-orchestration agent and its
+ *  role. PHASE_AGENT_MAP and ARCH_PANEL_AGENTS are DERIVED views over this map
+ *  (below), so the panel/phase disjointness invariant is structural for the
+ *  common case: an agent name is one object key with exactly one role, so the
+ *  SAME name can never be listed as both phase and panel. (The runtime guard
+ *  below is still required — it additionally catches suffix-variant collisions,
+ *  e.g. a phase agent `arch-designer` vs a panel `arch-designer-agent`, which are
+ *  distinct keys this structure does not rule out. See phaseLookupKeys.) */
+const ARCHITECTURE_AGENTS = {
+  "brainstorm-agent": { role: "phase", phase: "brainstorm" },
+  "specify-agent": { role: "phase", phase: "specify" },
+  "clarify-agent": { role: "phase", phase: "clarify" },
+  "architecture-agent": { role: "phase", phase: "architecture" },
+  "plan-alignment-agent": { role: "phase", phase: "plan-alignment" },
+  "decompose-agent": { role: "phase", phase: "decompose" },
+  "arch-interviewer-agent": { role: "panel", phase: "architecture" },
+  "arch-designer-agent": { role: "panel", phase: "architecture" },
+  "arch-judge-agent": { role: "panel", phase: "architecture" },
+} as const satisfies Record<string, AgentRole>;
+
+/** Phase agents → their phase. DERIVED from ARCHITECTURE_AGENTS (role `phase`).
+ *  Frozen so post-load mutation that could smuggle a panel agent in here — and
+ *  break the "only architecture-agent advances the phase" contract that
+ *  advance-phase.ts relies on — is impossible at runtime. Typed
+ *  `Readonly<Record<string, Phase>>` (not the mutable `Record`) so the freeze's
+ *  read-only-ness survives into the type: `PHASE_AGENT_MAP[x] = ...` is now a
+ *  compile-time error too, not just a runtime throw. The string index signature
+ *  is kept (unlike `as const`) so detectPhase's computed `PHASE_AGENT_MAP[agent]`
+ *  lookups still type-check. */
+export const PHASE_AGENT_MAP: Readonly<Record<string, Phase>> = Object.freeze(
+  Object.fromEntries(
+    Object.entries(ARCHITECTURE_AGENTS)
+      .filter(([, v]) => v.role === "phase")
+      .map(([name, v]): [string, Phase] => [name, v.phase]),
+  ),
+);
+
+/** Architecture-panel agents (`/loom --panel`): DERIVED from ARCHITECTURE_AGENTS
+ *  (role `panel`). Recognized by phase validation as architecture-phase work, but
+ *  INVISIBLE to advance-phase — never in PHASE_AGENT_MAP so only
+ *  architecture-agent's SubagentStop advances the phase. If a designer/judge were
+ *  a phase agent, its completion would fire resolveTransition and the date-prefix
+ *  plan fallback could advance the phase mid-panel. The disjointness is structural
+ *  for exact names (one key, one role) AND enforced at module load (the guard
+ *  below throws on import) for suffix-variant collisions — belt and suspenders. */
+export const ARCH_PANEL_AGENTS: ReadonlySet<string> = new Set(
+  Object.entries(ARCHITECTURE_AGENTS)
+    .filter(([, v]) => v.role === "panel")
+    .map(([name]) => name),
+);
+
+/** The phase every panel agent is classified as for phase-order validation.
+ *  Derived from the panel agents' shared `phase` in ARCHITECTURE_AGENTS so the
+ *  set and the phase it maps to cannot drift: detectPhase (validate-phase-order.ts)
+ *  routes panel agents here via this constant instead of a bare `"architecture"`
+ *  literal. Must stay a phase panel agents are allowed to run in, and one whose
+ *  SubagentStop does NOT advance (panel agents are absent from PHASE_AGENT_MAP). */
+export const ARCH_PANEL_PHASE: Phase = "architecture";
 
 /** Every PHASE_AGENT_MAP key `detectPhase` (validate-phase-order.ts) could probe
  *  when routing this panel agent, invoked either bare or `-agent`-suffixed.
@@ -52,8 +91,10 @@ export const ARCH_PANEL_AGENTS: ReadonlySet<string> = new Set([
  *  agent reaching it may be the stored suffixed name (`arch-designer-agent`) OR
  *  its bare form (`arch-designer`). The union of keys those probes hit is
  *  {bare, name, name + "-agent"}. The disjointness guard must forbid ALL of
- *  them — checking only the exact stored name would miss a de-suffixed phase
- *  agent (`arch-designer`) that captures the bare panel invocation. */
+ *  them — the single-source ARCHITECTURE_AGENTS map already rules out the exact
+ *  name appearing in both roles, but NOT a de-suffixed phase agent (`arch-designer`)
+ *  or a doubly-suffixed one (`arch-designer-agent-agent`) that captures the panel
+ *  invocation through detectPhase's other two probes. */
 function phaseLookupKeys(panelAgent: string): string[] {
   const bare = panelAgent.endsWith("-agent")
     ? panelAgent.slice(0, -"-agent".length)

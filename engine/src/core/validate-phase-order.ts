@@ -13,6 +13,7 @@ import type { HookResult, Phase } from "../types";
 import {
   TASK_GRAPH_PATH, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
   UTILITY_AGENTS, VALID_TRANSITIONS, CLARIFY_THRESHOLD, ARCH_PANEL_AGENTS,
+  ARCH_PANEL_PHASE,
 } from "../config";
 import { StateManager } from "../state-manager";
 import { stripNamespace } from "../utils/strip-namespace";
@@ -51,7 +52,9 @@ export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   // Architecture-panel agents (--panel) are architecture-phase work. Recognized
   // here so validate-phase-order allows them, but never added to PHASE_AGENT_MAP
   // (advance-phase must ignore them — only architecture-agent advances the phase).
-  if (ARCH_PANEL_AGENTS.has(agent) || ARCH_PANEL_AGENTS.has(agent + "-agent")) return "architecture";
+  // ARCH_PANEL_PHASE (config) is the single source for this classification so it
+  // cannot drift from ARCH_PANEL_AGENTS.
+  if (ARCH_PANEL_AGENTS.has(agent) || ARCH_PANEL_AGENTS.has(agent + "-agent")) return ARCH_PANEL_PHASE;
 
   if (/brainstorm|explore.*intent|refine.*idea/i.test(prompt)) return "brainstorm";
   if (/specify|specification|requirements|spec\.md/i.test(prompt)) return "specify";
