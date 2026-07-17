@@ -12,7 +12,7 @@ import { match } from "ts-pattern";
 import type { HookResult, Phase } from "../types";
 import {
   TASK_GRAPH_PATH, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
-  UTILITY_AGENTS, VALID_TRANSITIONS, CLARIFY_THRESHOLD,
+  UTILITY_AGENTS, VALID_TRANSITIONS, CLARIFY_THRESHOLD, ARCH_PANEL_AGENTS,
 } from "../config";
 import { StateManager } from "../state-manager";
 import { stripNamespace } from "../utils/strip-namespace";
@@ -47,6 +47,10 @@ export interface ValidatePhaseOrderInput {
 export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   if (PHASE_AGENT_MAP[agent]) return PHASE_AGENT_MAP[agent]; if (PHASE_AGENT_MAP[agent + "-agent"]) return PHASE_AGENT_MAP[agent + "-agent"];
   if (IMPL_AGENTS.has(agent) || IMPL_AGENTS.has(agent + "-agent") || REVIEW_AGENTS.has(agent) || REVIEW_AGENTS.has(agent + "-agent")) return "execute";
+  // Architecture-panel agents (--panel) are architecture-phase work. Recognized
+  // here so validate-phase-order allows them, but never added to PHASE_AGENT_MAP
+  // (advance-phase must ignore them — only architecture-agent advances the phase).
+  if (ARCH_PANEL_AGENTS.has(agent) || ARCH_PANEL_AGENTS.has(agent + "-agent")) return "architecture";
 
   if (/brainstorm|explore.*intent|refine.*idea/i.test(prompt)) return "brainstorm";
   if (/specify|specification|requirements|spec\.md/i.test(prompt)) return "specify";

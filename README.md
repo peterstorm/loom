@@ -55,6 +55,10 @@ claude plugin add /path/to/loom
 /loom --skip-clarify "Accept any remaining [NEEDS CLARIFICATION] markers"
 /loom --skip-plan-alignment "Trivial change, no alignment check needed"
 
+# Architecture panel — competing designers + adversarial judges at Phase 3
+/loom --panel "Add a rate limiter to the public API"
+/loom --panel=4 "Redesign the ingestion pipeline"   # 4 designers instead of 3
+
 # Status / lifecycle (planned — not yet implemented; see commands/loom.md)
 /loom --status                # Print current phase + wave + task statuses
 /loom --complete              # Tear down state file after success
@@ -174,6 +178,17 @@ The agent asks structured questions to resolve each ambiguity (mostly multiple c
 2. **Approach gate.** The agent identifies 2–3 viable architectural approaches and presents them side-by-side via `AskUserQuestion` previews (how it works / pros / cons / testability / fit / effort). It states a recommendation, but the user picks.
 
 The plan covers module boundaries, data models, patterns (functional core / imperative shell, DDD, Either-based errors), technology choices, and dependency graphs. The chosen approach is recorded as an `AD-N` (Architectural Decision) block.
+
+#### Panel mode — `/loom --panel`
+
+Opt-in upgrade to the approach gate. Instead of one agent inventing 2–3 approaches from a single perspective, panel mode runs a fan-out **only within Phase 3** (the rest of the pipeline is untouched — it still produces exactly one `plan.md`):
+
+1. **Interview once** — `arch-interviewer-agent` runs the same full questionnaire interactively and writes a structured, regex-labeled digest to `.claude/specs/{slug}/interview.md`.
+2. **N designers in parallel** — `arch-designer-agent`, each assigned a distinct **lens** (`simplicity-first`, `type-driven-fp`, `risk-security-first`, `performance-first`, `codebase-conventionist` — see `references/panel-lenses.md`), each producing one candidate at `.claude/specs/{slug}/candidates/candidate-<lens>.md`. The third lens is chosen from the interview signals (flagged security boundary → security; performance primary axis → performance; brownfield → conventionist).
+3. **K judges in parallel** — `arch-judge-agent`, each scoring **all** candidates adversarially against **one interview-derived criterion** (the user's primary optimization axis, testability bar, and codebase fit + effort). Judges return pure JSON with a `fatal_flaw` and a `strongest_idea` per candidate.
+4. **Finalize** — `architecture-agent` (finalize mode) runs the mandatory approach gate over the top-ranked candidates, synthesizes the winner by grafting compatible `strongest_idea`s from the losers, records an `### AD-1: Approach selection (panel)` block, and writes the plan.
+
+Defaults: **3 designers, 3 judges** (`--panel=N` sets the designer count). The panel's ranking is a recommendation — the user still picks at the gate. Panel mode is opt-in and stays that way until an A/B shows it beats single-agent plans; `--panel` costs roughly `N + K` extra agent runs per feature. Plan-alignment loop-backs never re-panel — they patch the winning design in standard single-agent mode.
 
 ### Phase 3.5 — Plan Alignment
 
@@ -310,6 +325,16 @@ Agents live under `/agents/<name>.md`. Each is a markdown persona with optional 
 | `architecture-agent` | `architecture-tech-lead` | Interview + approach gate + design plan |
 | `plan-alignment-agent` | — | Compare plan vs. spec, gap report |
 | `decompose-agent` | — | Spec + plan → JSON task graph + wave schedule |
+
+### Architecture panel agents (`--panel`, Phase 3 only)
+
+These run only under `/loom --panel`. They are recognized by phase validation as architecture-phase work but never advance the phase — only the final `architecture-agent` does.
+
+| Agent | Preloaded skill | Role |
+|---|---|---|
+| `arch-interviewer-agent` | — | Run the interview once, write the labeled interview digest |
+| `arch-designer-agent` | `architecture-tech-lead` | Produce one candidate through an assigned lens (parallel, headless) |
+| `arch-judge-agent` | — | Score all candidates against one interview-derived criterion, return JSON (parallel, headless) |
 
 ### Implementation agents (parallel per wave)
 
@@ -679,7 +704,7 @@ loom/
 
 The `/rules/` directory holds domain rule files (`architecture.md`, `java-patterns.md`, `typescript-patterns.md`, `rust-patterns.md`, `property-testing.md`) that agents reference during implementation and review. `architecture.md` defines the **Ports at I/O Boundaries** rule (every real I/O collaborator gets a narrow domain-owned port).
 
-The `/references/` directory holds templates used by phase agents: `spec-template.md`, `plan-template.md`, `adr-template.md`, plus a design evaluator.
+The `/references/` directory holds templates used by phase agents: `spec-template.md`, `plan-template.md`, `adr-template.md`, a design evaluator, and `panel-lenses.md` (the five design lenses for `/loom --panel`).
 
 ---
 

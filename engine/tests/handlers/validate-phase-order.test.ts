@@ -86,6 +86,40 @@ describe("detectPhase (pure)", () => {
   it("returns unknown for unrecognized agents", () => {
     expect(detectPhase("random-agent", "do stuff")).toBe("unknown");
   });
+
+  // ── panel agents (--panel) map to architecture ──
+  it("maps arch-panel agents to architecture (recognized, not blocked as unknown)", () => {
+    expect(detectPhase("arch-interviewer-agent", "")).toBe("architecture");
+    expect(detectPhase("arch-designer-agent", "")).toBe("architecture");
+    expect(detectPhase("arch-judge-agent", "")).toBe("architecture");
+  });
+
+  it("maps arch-panel agents via the '-agent' suffix fallback", () => {
+    expect(detectPhase("arch-interviewer", "")).toBe("architecture");
+    expect(detectPhase("arch-designer", "")).toBe("architecture");
+    expect(detectPhase("arch-judge", "")).toBe("architecture");
+  });
+});
+
+// ─── panel agents: transition + artifact gating (design constraint 1) ─────────
+
+describe("panel agents — VALID_TRANSITIONS + artifact gate", () => {
+  it("architecture → architecture is a valid transition (panel re-entry mid-phase)", () => {
+    // Panel agents detect as "architecture" while current_phase is already
+    // "architecture", so the transition they trigger is architecture→architecture.
+    expect(VALID_TRANSITIONS["architecture"]).toContain("architecture");
+  });
+
+  it("panel agents are blocked in execute/decompose (architecture not a valid target)", () => {
+    expect(VALID_TRANSITIONS["execute"]).not.toContain("architecture");
+    expect(VALID_TRANSITIONS["decompose"]).not.toContain("architecture");
+  });
+
+  it("panel agents share architecture's artifact gate — blocked when spec.md missing", () => {
+    // detectPhase(panel) === "architecture", so checkArtifacts("architecture", …)
+    // gates them identically to architecture-agent: no spec.md ⇒ blocked.
+    expect(checkArtifacts("architecture", baseState())).toBe("specify (no spec.md found)");
+  });
 });
 
 // ─── VALID_TRANSITIONS ───────────────────────────────────────────────────────

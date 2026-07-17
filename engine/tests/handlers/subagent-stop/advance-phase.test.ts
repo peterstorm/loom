@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { resolveTransition, countMarkers } from "../../../src/handlers/subagent-stop/advance-phase";
 import { findFile } from "../../../src/utils/find-file";
-import { CLARIFY_THRESHOLD } from "../../../src/config";
+import { CLARIFY_THRESHOLD, PHASE_AGENT_MAP, ARCH_PANEL_AGENTS } from "../../../src/config";
+import { stripNamespace } from "../../../src/utils/strip-namespace";
 import type { TaskGraph } from "../../../src/types";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -326,5 +327,62 @@ describe("resolveTransition", () => {
 
   it("init → null (no transition)", () => {
     expect(resolveTransition("init", mkState())).toBeNull();
+  });
+});
+
+// ── panel agents: advance-phase must ignore them (design constraint 2) ────────
+
+describe("panel agents — advance-phase passthrough (never mutates phase)", () => {
+  let tmpDir: string;
+  let origCwd: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "loom-panel-"));
+    origCwd = process.cwd();
+    process.chdir(tmpDir);
+  });
+
+  afterEach(() => {
+    process.chdir(origCwd);
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("panel agents are not PHASE_AGENT_MAP members — handler short-circuits before resolveTransition", () => {
+    // advance-phase.ts:133 does `PHASE_AGENT_MAP[stripNamespace(agent_type)]`
+    // and returns passthrough on undefined. Panel agents must miss this map, or
+    // their SubagentStop would run resolveTransition and could advance the phase.
+    for (const agent of ARCH_PANEL_AGENTS) {
+      expect(PHASE_AGENT_MAP[stripNamespace(agent)]).toBeUndefined();
+      expect(PHASE_AGENT_MAP[stripNamespace(`loom:${agent}`)]).toBeUndefined();
+    }
+  });
+
+  it("TRAP: a same-date-prefix plan on disk would advance IF a panel agent reached the architecture case — proving the map gate is load-bearing", () => {
+    // Reproduce the exact hazard from design constraint 2: a stale same-day plan
+    // sits in .claude/plans/ while a designer/judge completes mid-panel.
+    const specDir = join(tmpDir, ".claude", "specs", "2026-07-16-feat");
+    mkdirSync(specDir, { recursive: true });
+    mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
+    // A same-date-prefix plan the date-prefix fallback in resolveTransition
+    // ("architecture" case) would happily pick up.
+    writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-stale.md"), "stale plan");
+
+    const state = mkState({
+      current_phase: "architecture",
+      spec_dir: specDir,
+      plan_file: null, // force the date-prefix fallback path
+    });
+
+    // IF the handler ever routed a panel agent into the architecture case, this
+    // is what it would compute — a bogus advance off a stale plan:
+    const wouldAdvance = resolveTransition("architecture", state);
+    expect(wouldAdvance).not.toBeNull();
+    expect(wouldAdvance!.nextPhase).toBe("plan-alignment");
+
+    // The ONLY thing preventing that is panel agents missing from PHASE_AGENT_MAP,
+    // so the handler returns passthrough before resolveTransition is ever called.
+    for (const agent of ARCH_PANEL_AGENTS) {
+      expect(PHASE_AGENT_MAP[stripNamespace(agent)]).toBeUndefined();
+    }
   });
 });

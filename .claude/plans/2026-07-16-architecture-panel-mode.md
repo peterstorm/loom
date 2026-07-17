@@ -1,7 +1,7 @@
 # Architecture Panel Mode (`/loom --panel`)
 
 **Date:** 2026-07-16
-**Status:** Planned, not started
+**Status:** Implemented (2026-07-17) — engine recognition, 3 agents, 4 templates, lenses reference, loom.md wiring, and tests all landed. Evaluation A/B (default-on decision) still pending.
 **Scope:** loom repo only — no engine state-machine changes, no fugue changes
 
 ## Summary

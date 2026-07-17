@@ -25,6 +25,23 @@ export const PHASE_AGENT_MAP: Record<string, Phase> = {
   "decompose-agent": "decompose",
 };
 
+/** Architecture-panel agents (`/loom --panel`): recognized by phase
+ *  validation as architecture-phase work, but INVISIBLE to advance-phase —
+ *  they are deliberately kept OUT of PHASE_AGENT_MAP so that only
+ *  architecture-agent's SubagentStop advances the phase. If a designer/judge
+ *  mapped to "architecture", its completion would fire resolveTransition and
+ *  the date-prefix plan fallback could advance the phase mid-panel. The
+ *  emptiness of ARCH_PANEL_AGENTS ∩ keys(PHASE_AGENT_MAP) is an enforced
+ *  invariant (see config invariant test), not just a convention. */
+export const ARCH_PANEL_AGENTS = new Set([
+  "arch-interviewer-agent",
+  "arch-designer-agent",
+  "arch-judge-agent",
+]);
+
+/** Default number of parallel designer agents spawned in `/loom --panel`. */
+export const PANEL_DESIGNERS_DEFAULT = 3;
+
 /** Impl agents → all map to "execute" phase.
  *  Note: agent identifiers are intentionally `string` (no brand). Bun runs
  *  in transpile-only mode, so a TS brand would not enforce anything at

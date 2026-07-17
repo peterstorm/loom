@@ -41,6 +41,7 @@ Store the printed path. **All subsequent references use it:**
 - `/loom --skip-clarify` - Skip clarify phase (accept markers as-is)
 - `/loom --skip-specify` - Skip brainstorm/specify/clarify (use existing spec)
 - `/loom --skip-plan-alignment` - Skip plan-alignment phase (proceed directly to decompose)
+- `/loom --panel` - Architecture panel mode: N designer agents generate candidates in parallel (each with a lens), adversarial judges rank them against interview-derived criteria, the finalizer synthesizes and presents them at the approach gate. Opt-in; standard mode is untouched. `--panel=N` sets the designer count (default `PANEL_DESIGNERS_DEFAULT` in `engine/src/config.ts`, currently 3). Only affects Phase 3. See [Phase 3 (panel mode)](#phase-3-panel-mode-loom---panel).
 - `/loom --status` - Show current task graph status *(planned — use jq commands in Observability section)*
 - `/loom --complete` - Finalize, clean up state *(planned — manually remove state file for now)*
 - `/loom --abort` - Cancel mid-execution, clean state *(planned — manually remove state file for now)*
@@ -84,6 +85,8 @@ Store the printed path. **All subsequent references use it:**
 │ Phase 3: ARCHITECTURE                                   │
 │   Agent: architecture-agent                             │
 │   Output: .claude/plans/{slug}.md                       │
+│   --panel: interviewer → N designers ∥ → judges ∥ →     │
+│            finalize (architecture-agent)                │
 └─────────────────────────────────────────────────────────┘
         │
         ▼
@@ -199,6 +202,60 @@ Substitute variables:
 - Implementation phases
 - Executable models declared, if any (LC-N lifecycles, Pipeline AuthoredDag, INV-N invariants + rule files) — these are validated against the task graph in Phase 4a
 
+**If `--panel` was passed, use [Phase 3 (panel mode)](#phase-3-panel-mode-loom---panel) below instead of the single-agent spawn above.** Everything downstream (extraction, plan-alignment, decompose) is identical — panel mode still produces exactly one `plan.md` via one architecture-agent completion.
+
+---
+
+## Phase 3 (panel mode): `/loom --panel`
+
+Runs only when `--panel` (or `--panel=N`) is passed. The `current_phase` stays `"architecture"` throughout — the engine recognizes the panel agents (`arch-interviewer-agent`, `arch-designer-agent`, `arch-judge-agent`) as architecture-phase work but never advances the phase on their completion; only the final `architecture-agent` spawn advances to plan-alignment, exactly as standard mode does.
+
+Defaults: **N = 3 designers** (or the `--panel=N` value), **K = 3 judges**. The candidate/interview artifacts live under the spec dir; they are NOT guarded state.
+
+### Step 1 — Interview (once, interactive)
+
+**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-interview.md`. Substitute `{feature_description}`, `{spec_file_path}`, `{interview_file_path}` (= `.claude/specs/{date_slug}/interview.md`).
+
+**Spawn `arch-interviewer-agent`.** Wait for completion. **Verify `interview.md` exists** at the path — if not, re-spawn. Read it: the labeled fields (`**Primary axis:**`, `**Testability bar:**`, `**Sensitive boundaries:**`, `**Codebase maturity:**`, …) drive lens and judge selection below.
+
+### Step 2 — Select lenses
+
+Read the lens fragments from `{LOOM_DIR}/references/panel-lenses.md`. Choose N lenses:
+
+- **Always include** `simplicity-first` and `type-driven-fp`.
+- **Third lens (and any beyond N=3) from interview signals**, in priority order:
+  - `**Sensitive boundaries:**` = `flagged` → `risk-security-first`
+  - `**Primary axis:**` = performance → `performance-first`
+  - `**Codebase maturity:**` = brownfield → `codebase-conventionist`
+  - If none apply (or you need a 4th/5th for larger N), fill from the remaining lenses in the table order.
+
+Take the first N distinct lenses. Each designer gets exactly one.
+
+### Step 3 — Designers (parallel, headless)
+
+**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-design.md`. For each selected lens, substitute `{feature_description}`, `{lens_name}`, `{lens_prompt}` (that lens's section from `panel-lenses.md`), `{spec_file_path}`, `{interview_file_path}`, `{candidate_output_path}` (= `.claude/specs/{date_slug}/candidates/candidate-<lens>.md`).
+
+**Spawn all N `arch-designer-agent`s in ONE message** (parallel Task calls). Wait for all to complete. **Verify each candidate file exists** — re-spawn any designer whose file is missing.
+
+### Step 4 — Judges (parallel, headless)
+
+Derive K criteria from the interview digest:
+- Judge 1 — the user's **Primary axis** (verbatim from the digest).
+- Judge 2 — the user's **Testability bar**.
+- Judge 3 — **codebase fit + effort**.
+
+**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-judge.md`. For each criterion, substitute `{criterion}`, `{candidates_dir}` (= `.claude/specs/{date_slug}/candidates`), `{interview_excerpt}` (the digest lines relevant to that criterion).
+
+**Spawn all K `arch-judge-agent`s in ONE message** (parallel Task calls). Each returns **pure JSON** (criterion + per-candidate rankings with `fatal_flaw` and `strongest_idea`). Collect the JSON verdicts from the agent outputs — do NOT persist them as files.
+
+### Step 5 — Finalize (interactive → writes plan.md)
+
+**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-finalize.md`. Substitute `{feature_description}`, `{spec_file_path}`, `{interview_file_path}`, `{candidates_dir}`, `{judge_verdicts}` (the collected JSON, inlined), `{date_slug}`.
+
+**Spawn `architecture-agent`** with this template (the name is load-bearing — its SubagentStop advances the phase). It runs the approach gate over the top-ranked candidates, synthesizes the winner with grafted `strongest_idea`s, writes `.claude/plans/{date_slug}.md` with an `### AD-1: Approach selection (panel)` block, and commits.
+
+**From here, the flow rejoins standard mode** — "Wait for completion, extract plan path" is unchanged; advance-phase transitions to plan-alignment.
+
 ---
 
 ## Phase 3.5: Plan Alignment
@@ -225,6 +282,8 @@ Substitute variables:
   rm -f ${spec_dir}/plan-alignment.md
   ```
   Re-spawn architecture-agent with gap report appended to prompt as additional context. When architecture completes, advance-phase transitions to plan-alignment again automatically.
+
+  **Panel-mode loop-back:** even if the plan was produced in `--panel` mode, a gap-report re-run uses the **standard single-agent architecture flow** (`phase-architecture.md`) — never re-panel. Mention the candidates dir (`.claude/specs/{date_slug}/candidates/`) in the re-spawn prompt as available context so the agent can revisit the losing designs, but the panel does not run again.
 - **If proceed:** Continue to Phase 4.
 
 **Loop-back warning:** If the user has chosen to re-run architecture 2 or more times, warn: "This is loop-back attempt N. Consider proceeding to decompose or refining the spec directly."
