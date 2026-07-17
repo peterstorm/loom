@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   ARCH_PANEL_AGENTS,
   PANEL_DESIGNERS_DEFAULT,
@@ -6,6 +9,22 @@ import {
   KNOWN_AGENTS,
   panelPhaseOverlap,
 } from "../src/config";
+
+/** Count the lens sections in panel-lenses.md — the single source of truth for
+ *  how many lenses exist (and therefore the cap on parallel designers). Each
+ *  lens has one `## <lens>` heading; the count derives from that file so adding
+ *  or removing a lens automatically re-checks the designer-cap invariant below. */
+function lensCount(): number {
+  const path = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "..",
+    "references",
+    "panel-lenses.md",
+  );
+  const md = readFileSync(path, "utf-8");
+  return (md.match(/^## /gm) ?? []).length;
+}
 
 /**
  * Architecture-panel config invariants (`/loom --panel`).
@@ -62,12 +81,30 @@ describe("panelPhaseOverlap (module-load invariant guard)", () => {
     const bad = { "arch-designer-agent": "architecture" as const };
     expect(panelPhaseOverlap(ARCH_PANEL_AGENTS, bad)).toEqual(["arch-designer-agent"]);
   });
+
+  it("detects a DE-SUFFIXED collision — a phase agent named without the -agent suffix", () => {
+    // detectPhase probes PHASE_AGENT_MAP with the bare form too, so a phase agent
+    // named "arch-designer" (no suffix) would capture the bare panel invocation
+    // via detectPhase's FIRST probe and route it to a non-architecture phase. The
+    // guard must flag it even though the exact stored key "arch-designer-agent"
+    // is absent from the map — this is the case the exact-key check missed.
+    const bad = { "arch-designer": "decompose" as const };
+    expect(panelPhaseOverlap(ARCH_PANEL_AGENTS, bad)).toEqual(["arch-designer-agent"]);
+  });
 });
 
 describe("PANEL_DESIGNERS_DEFAULT", () => {
   it("is a small positive integer", () => {
     expect(Number.isInteger(PANEL_DESIGNERS_DEFAULT)).toBe(true);
     expect(PANEL_DESIGNERS_DEFAULT).toBeGreaterThanOrEqual(2);
-    expect(PANEL_DESIGNERS_DEFAULT).toBeLessThanOrEqual(5);
+  });
+
+  it("does not exceed the number of lenses (each designer takes exactly one)", () => {
+    // The cap is the lens count, not a magic 5. Derived from panel-lenses.md so
+    // adding/removing a lens keeps the default honest — a designer can never be
+    // asked to take a lens that does not exist, and no two share a lens.
+    const lenses = lensCount();
+    expect(lenses).toBeGreaterThan(0);
+    expect(PANEL_DESIGNERS_DEFAULT).toBeLessThanOrEqual(lenses);
   });
 });

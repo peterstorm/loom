@@ -1,6 +1,7 @@
 /**
  * Shared constants for loom hooks.
- * Skills reference these values — update docs if changed.
+ * Skills AND orchestrator docs (commands/loom.md) reference these values —
+ * update the docs if changed.
  */
 
 import { execSync } from "node:child_process";
@@ -15,15 +16,20 @@ export const CLARIFY_THRESHOLD = 3;
 /** Valid phase ordering — re-exported from the single source tuple in types. */
 export const PHASE_ORDER: readonly Phase[] = PHASES;
 
-/** Phase agents → map to their phase */
-export const PHASE_AGENT_MAP: Record<string, Phase> = {
+/** Phase agents → map to their phase.
+ *  Frozen so the panel/phase disjointness invariant (see panelPhaseOverlap and
+ *  the module-load guard below) is a complete proof rather than an initial-state
+ *  snapshot: post-load mutation that could smuggle a panel agent in here — and
+ *  break the "only architecture-agent advances the phase" contract that
+ *  advance-phase.ts relies on — is impossible at runtime. */
+export const PHASE_AGENT_MAP: Record<string, Phase> = Object.freeze({
   "brainstorm-agent": "brainstorm",
   "specify-agent": "specify",
   "clarify-agent": "clarify",
   "architecture-agent": "architecture",
   "plan-alignment-agent": "plan-alignment",
   "decompose-agent": "decompose",
-};
+});
 
 /** Architecture-panel agents (`/loom --panel`): recognized by phase
  *  validation as architecture-phase work, but INVISIBLE to advance-phase —
@@ -31,23 +37,40 @@ export const PHASE_AGENT_MAP: Record<string, Phase> = {
  *  architecture-agent's SubagentStop advances the phase. If a designer/judge
  *  mapped to "architecture", its completion would fire resolveTransition and
  *  the date-prefix plan fallback could advance the phase mid-panel. The
- *  emptiness of ARCH_PANEL_AGENTS ∩ keys(PHASE_AGENT_MAP) is an enforced
- *  invariant (see config invariant test), not just a convention. */
+ *  emptiness of the invariant is enforced BOTH at module load (the guard below
+ *  throws on import) and in the config invariant test — not just a convention.
+ *  See panelPhaseOverlap for the exact overlap it forbids. */
 export const ARCH_PANEL_AGENTS: ReadonlySet<string> = new Set([
   "arch-interviewer-agent",
   "arch-designer-agent",
   "arch-judge-agent",
 ]);
 
+/** Every PHASE_AGENT_MAP key `detectPhase` (validate-phase-order.ts) could probe
+ *  when routing this panel agent, invoked either bare or `-agent`-suffixed.
+ *  detectPhase tries `phaseMap[agent]` AND `phaseMap[agent + "-agent"]`, and the
+ *  agent reaching it may be the stored suffixed name (`arch-designer-agent`) OR
+ *  its bare form (`arch-designer`). The union of keys those probes hit is
+ *  {bare, name, name + "-agent"}. The disjointness guard must forbid ALL of
+ *  them — checking only the exact stored name would miss a de-suffixed phase
+ *  agent (`arch-designer`) that captures the bare panel invocation. */
+function phaseLookupKeys(panelAgent: string): string[] {
+  const bare = panelAgent.endsWith("-agent")
+    ? panelAgent.slice(0, -"-agent".length)
+    : panelAgent;
+  return [bare, panelAgent, panelAgent + "-agent"];
+}
+
 /** The panel/phase disjointness invariant, as a live predicate: the panel
- *  agents that are ALSO phase agents. Must always be empty — see the comment
- *  on ARCH_PANEL_AGENTS for why. Exported so the invariant can be tested with
- *  a synthetic overlap rather than only asserted against the real (empty) sets. */
+ *  agents that are ALSO reachable as phase agents through any key detectPhase
+ *  probes (see phaseLookupKeys). Must always be empty — see the comment on
+ *  ARCH_PANEL_AGENTS for why. Exported so the invariant can be tested with a
+ *  synthetic overlap rather than only asserted against the real (empty) sets. */
 export function panelPhaseOverlap(
   panel: ReadonlySet<string> = ARCH_PANEL_AGENTS,
   phaseMap: Record<string, Phase> = PHASE_AGENT_MAP,
 ): string[] {
-  return [...panel].filter((a) => a in phaseMap);
+  return [...panel].filter((a) => phaseLookupKeys(a).some((k) => k in phaseMap));
 }
 
 // Fail at module load — not just in CI — if a panel agent is ever also a phase

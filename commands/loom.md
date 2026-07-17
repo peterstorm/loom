@@ -210,7 +210,7 @@ Substitute variables:
 
 Runs only when `--panel` (or `--panel=N`) is passed. The `current_phase` stays `"architecture"` throughout — the engine recognizes the panel agents (`arch-interviewer-agent`, `arch-designer-agent`, `arch-judge-agent`) as architecture-phase work but never advances the phase on their completion; only the final `architecture-agent` spawn advances to plan-alignment, exactly as standard mode does.
 
-Defaults: **N = 3 designers** (or the `--panel=N` value), **K = 3 judges**. The candidate/interview artifacts live under the spec dir; they are NOT guarded state.
+Defaults: **N designers** = `PANEL_DESIGNERS_DEFAULT` (`engine/src/config.ts`, currently 3) or the `--panel=N` value, **K = 3 judges**. The candidate/interview artifacts live under the spec dir; they are NOT guarded state.
 
 ### Step 1 — Interview (once, interactive)
 

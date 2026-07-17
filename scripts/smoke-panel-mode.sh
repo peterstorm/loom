@@ -42,6 +42,14 @@ SESSION="smoke-session-1"
 
 mkdir -p "$SPEC_DIR" "$PLANS_DIR" "$TMP/.claude/state" "$LOOM_SUBAGENT_DIR"
 
+# advance-phase resolves the task graph session-FIRST (a `$SESSION.task_graph`
+# pointer under LOOM_SUBAGENT_DIR), falling back to LOOM_STATE_PATH only when no
+# pointer exists. This test relies on that fallback, so assert the pointer is
+# absent — a stray pointer would silently retarget every stop and make the phase
+# assertions below pass/fail for reasons unrelated to panel logic.
+[ ! -e "$LOOM_SUBAGENT_DIR/$SESSION.task_graph" ] \
+  || { echo "FATAL: unexpected session pointer for $SESSION — test would not exercise LOOM_STATE_PATH"; exit 1; }
+
 # Spec with zero NEEDS CLARIFICATION markers → architecture gate is satisfied.
 printf '# Smoke spec\n\nFR-001: do the thing.\n' > "$SPEC_DIR/spec.md"
 
@@ -53,7 +61,10 @@ bad()  { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 # Write the state file at the given phase (chmod dance mirrors StateManager).
 write_state() {
   local phase="$1" plan_file="$2"
-  [ -f "$STATE" ] && chmod u+w "$STATE" 2>/dev/null || true
+  # Explicit if (not `[ -f ] && chmod || true`): a real chmod failure must abort
+  # loudly under set -e, not be swallowed and surface three steps later as a
+  # confusing phase mismatch. When the file is absent there is nothing to unlock.
+  if [ -f "$STATE" ]; then chmod u+w "$STATE"; fi
   cat > "$STATE" <<JSON
 {
   "current_phase": "$phase",
@@ -101,7 +112,17 @@ run_stop() {
 }
 
 # Read the phase via the real JSON reader (jq), not a format-coupled grep/sed.
-phase_now() { chmod u+r "$STATE" 2>/dev/null || true; jq -r '.current_phase' "$STATE"; }
+# chmod failure aborts loudly (no `|| true`) and an empty/absent phase is fatal
+# rather than silently comparing to "" — a swallowed read would otherwise let a
+# phase assertion pass on stale/unreadable state (a false PASS).
+phase_now() {
+  if [ -f "$STATE" ]; then chmod u+r "$STATE"; fi
+  local p
+  p="$(jq -r '.current_phase' "$STATE")"
+  [ -n "$p" ] && [ "$p" != "null" ] \
+    || { echo "FATAL: could not read current_phase from $STATE" >&2; exit 1; }
+  printf '%s' "$p"
+}
 
 echo "Panel-mode smoke test (driving the real hook CLI)"
 echo "state: $STATE"
@@ -126,10 +147,21 @@ rc="$(run_gate arch-designer-agent "design a candidate")"
 # Assert BOTH the exit code AND the block message — a fail-closed crash also
 # exits 2, so the message is what proves it was a real transition block.
 if [ "$rc" = "2" ] && grep -q "Invalid phase transition" "$GATE_ERR"; then
-  ok "BLOCKED with transition message (exit 2)"
+  ok "arch-designer-agent BLOCKED with transition message (exit 2)"
 else
   bad "expected block (exit 2 + 'Invalid phase transition'), got exit $rc / $(tr '\n' ' ' < "$GATE_ERR")"
 fi
+
+# All three panel roles share architecture's gate, so all three must block in
+# execute — not just the designer (guards against a role slipping the gate).
+for a in arch-interviewer-agent arch-judge-agent; do
+  rc="$(run_gate "$a" "panel stage for $a")"
+  if [ "$rc" = "2" ] && grep -q "Invalid phase transition" "$GATE_ERR"; then
+    ok "$a BLOCKED with transition message (exit 2)"
+  else
+    bad "$a expected block (exit 2 + 'Invalid phase transition'), got exit $rc / $(tr '\n' ' ' < "$GATE_ERR")"
+  fi
+done
 
 # ── 3. TRAP: panel agent stop does NOT advance, even with a stale same-date plan ─
 # With cwd = $TMP the date-prefix fallback in resolveTransition genuinely reads

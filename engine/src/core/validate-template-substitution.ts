@@ -16,6 +16,13 @@ const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}"]);
  * the {type}/{id}/{name} false-positive set. Exported so tests and other callers
  * share this exact logic instead of re-implementing (and silently drifting from)
  * the regex.
+ *
+ * Known limitation: the `${...}` strip is non-greedy up to the first `}`, so a
+ * nested shell expansion like `${foo{bar}}` leaves `{bar}` and reports it as a
+ * residual placeholder (a false positive that blocks loudly, never a silent
+ * pass). Templates in this repo do not nest braces; if that changes, widen the
+ * strip rather than trusting the block message, which attributes the residual to
+ * substitution logic.
  */
 export function findResidualPlaceholders(prompt: string): string[] {
   const cleaned = prompt.replace(/\$\{[^}]*\}/g, "");
