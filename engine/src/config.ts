@@ -33,7 +33,7 @@ export const PHASE_AGENT_MAP: Record<string, Phase> = {
  *  the date-prefix plan fallback could advance the phase mid-panel. The
  *  emptiness of ARCH_PANEL_AGENTS ∩ keys(PHASE_AGENT_MAP) is an enforced
  *  invariant (see config invariant test), not just a convention. */
-export const ARCH_PANEL_AGENTS = new Set([
+export const ARCH_PANEL_AGENTS: ReadonlySet<string> = new Set([
   "arch-interviewer-agent",
   "arch-designer-agent",
   "arch-judge-agent",
@@ -64,7 +64,10 @@ export function panelPhaseOverlap(
   }
 }
 
-/** Default number of parallel designer agents spawned in `/loom --panel`. */
+/** Default number of parallel designer agents for `/loom --panel`. The engine
+ *  never spawns these — the orchestrator (commands/loom.md) reads this as the
+ *  default N when the user omits `--panel=N`. Kept here as the single numeric
+ *  source of truth referenced by loom.md and the panel-config test. */
 export const PANEL_DESIGNERS_DEFAULT = 3;
 
 /** Impl agents → all map to "execute" phase.

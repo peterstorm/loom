@@ -239,19 +239,28 @@ describe("checkArtifacts — decompose phase", () => {
     expect(result).toBeNull();
   });
 
-  it("uses .claude/specs as default spec_dir when spec_dir is null", () => {
-    // When spec_dir is null AND no plan-alignment skipped, defaults to .claude/specs.
-    // Use a plan in a non-standard location to avoid finding project files.
-    const isolatedTmp = join(tmp, "isolated");
-    mkdirSync(isolatedTmp, { recursive: true });
-    const plan = writeFile(isolatedTmp, "plan.md");
-    // Mock: override the default spec dir check by setting skipped_phases to include plan-alignment
-    // Instead, test that when plan exists but plan-alignment.md doesn't exist in default .claude/specs,
-    // and .claude/specs happens to have one (project state), the test is environment-dependent.
-    // The real assertion: with spec_dir null, it falls back to .claude/specs — if plan-alignment.md
-    // is found there, it passes; if not, it's blocked.
+  it("blocks decompose when plan-alignment.md is missing in the given spec_dir", () => {
+    // spec_dir points at a directory with no plan-alignment.md → blocked.
+    const plan = writeFile(tmp, "plan.md");
     const result = checkArtifacts("decompose", baseState({ plan_file: plan, spec_dir: "/nonexistent/specs" }));
     expect(result).toBe("plan-alignment (no plan-alignment.md found)");
+  });
+
+  it("falls back to .claude/specs when spec_dir is null", () => {
+    // With spec_dir null, checkArtifacts searches the cwd-relative ".claude/specs"
+    // default. chdir into an isolated dir with no such directory to make the
+    // fallback hermetic (independent of the repo's real .claude/specs).
+    const plan = writeFile(tmp, "plan.md");
+    const isolatedCwd = join(tmp, "cwd");
+    mkdirSync(isolatedCwd, { recursive: true });
+    const originalCwd = process.cwd();
+    try {
+      process.chdir(isolatedCwd);
+      const result = checkArtifacts("decompose", baseState({ plan_file: plan, spec_dir: null }));
+      expect(result).toBe("plan-alignment (no plan-alignment.md found)");
+    } finally {
+      process.chdir(originalCwd);
+    }
   });
 });
 

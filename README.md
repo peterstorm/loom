@@ -188,7 +188,7 @@ Opt-in upgrade to the approach gate. Instead of one agent inventing 2–3 approa
 3. **K judges in parallel** — `arch-judge-agent`, each scoring **all** candidates adversarially against **one interview-derived criterion** (the user's primary optimization axis, testability bar, and codebase fit + effort). Judges return pure JSON with a `fatal_flaw` and a `strongest_idea` per candidate.
 4. **Finalize** — `architecture-agent` (finalize mode) runs the mandatory approach gate over the top-ranked candidates, synthesizes the winner by grafting compatible `strongest_idea`s from the losers, records an `### AD-1: Approach selection (panel)` block, and writes the plan.
 
-Defaults: **3 designers, 3 judges** (`--panel=N` sets the designer count). The panel's ranking is a recommendation — the user still picks at the gate. Panel mode is opt-in and stays that way until an A/B shows it beats single-agent plans; `--panel` costs roughly `N + K` extra agent runs per feature. Plan-alignment loop-backs never re-panel — they patch the winning design in standard single-agent mode.
+Defaults: **3 designers, 3 judges** (`--panel=N` sets the designer count). The panel's ranking is a recommendation — the user still picks at the gate. Panel mode is opt-in and stays that way until an A/B shows it beats single-agent plans; `--panel` costs roughly `N + K + 1` extra agent runs per feature (N designers + K judges + the one interviewer; the finalize run replaces the standard architecture-agent, so it nets zero). Plan-alignment loop-backs never re-panel — they patch the winning design in standard single-agent mode.
 
 ### Phase 3.5 — Plan Alignment
 

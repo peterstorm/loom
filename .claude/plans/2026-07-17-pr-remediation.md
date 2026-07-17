@@ -83,3 +83,73 @@ code-reviewer reported clean. The one critical was flagged independently by two 
 cd engine && bun test 2>&1 | tail -20
 ./scripts/smoke-panel-mode.sh
 ```
+
+---
+
+# Round 2 — post-remediation re-review
+
+**Findings:** 1 critical, 6 advisory fixed (0 deferred)
+
+Six review agents re-ran over the branch (21 files, 1557 insertions). code-reviewer reported
+clean again. The single critical came from silent-failure-hunter and was verified by tracing
+`advance-phase.ts` — a genuine, precise defect in the new smoke test.
+
+## Critical Fixes
+
+### Fix R2-1: Make the panel-mode smoke test hermetic
+- **Source:** silent-failure-hunter (CRITICAL)
+- **File:** scripts/smoke-panel-mode.sh (run_gate/run_stop; steps 3 & 5)
+- **Issue:** The script exported an absolute `LOOM_STATE_PATH` under `$TMP` but never `cd`ed
+  into it. `advance-phase.ts` resolves its plan fallbacks against **cwd-relative** paths
+  (`.claude/plans/${slug}.md`, `readdirSync(".claude/plans")`), so those reads hit the loom
+  repo's real plans dir, not the fixture. Step 3's date-prefix "trap" was therefore inert, and
+  its pass/fail was coupled to how many `2026-07-17-*` files happen to exist in the repo — a
+  false-assurance test guarding the exact transition logic it exists to protect.
+- **Fix:** Run both CLI invocations with cwd = `$TMP` (`( cd "$TMP" && bun … )`) so relative
+  fallbacks resolve inside the fixture. Step 5 now leaves `plan_file` null to genuinely exercise
+  the slug-derive fallback. All 7 assertions still pass, now hermetically.
+
+## Advisory Fixes
+
+### Fix R2-2: Exercise the real placeholder detector in the substitution test
+- **Source:** pr-test-analyzer
+- **File:** engine/tests/handlers/pre-tool-use/validate-template-substitution.test.ts:12
+- **Fix:** Import and delegate to the real `findResidualPlaceholders` instead of an inline
+  copy, realizing the anti-drift goal of the earlier extraction. ~15 property/edge tests now
+  cover the shipped function.
+
+### Fix R2-3: Make the panel/phase disjointness invariant permanent in the type system
+- **Source:** type-design-analyzer
+- **File:** engine/src/config.ts:36
+- **Fix:** Type `ARCH_PANEL_AGENTS` as `ReadonlySet<string>` so a post-import `.add`/`.delete`
+  that could re-break the load-checked invariant no longer typechecks.
+
+### Fix R2-4: Correct the PANEL_DESIGNERS_DEFAULT docstring
+- **Source:** comment-analyzer, architecture-agent (converged)
+- **File:** engine/src/config.ts:67
+- **Fix:** Reword to state the engine never spawns designers — the orchestrator reads the
+  constant as the `--panel=N` default — removing the false implication of engine-side spawning.
+
+### Fix R2-5: Fix the panel cost figure in the README
+- **Source:** comment-analyzer
+- **File:** README.md:191
+- **Fix:** `N + K` → `N + K + 1` (the interviewer run was omitted); note the finalize run
+  replaces the standard architecture-agent and nets zero.
+
+### Fix R2-6: Rename the misleading default-spec_dir test + add a genuine null case
+- **Source:** pr-test-analyzer
+- **File:** engine/tests/handlers/validate-phase-order.test.ts:242
+- **Fix:** The test named "…when spec_dir is null" actually passed `/nonexistent/specs`.
+  Renamed to describe reality, and added a separate hermetic `spec_dir: null` test (chdir into
+  an isolated dir) that exercises the real `?? ".claude/specs"` fallback.
+
+### Fix R2-7: Wire the smoke test into an npm script
+- **Source:** silent-failure-hunter
+- **File:** engine/package.json
+- **Fix:** Added `test:smoke` so the end-to-end guard is discoverable and runnable, not a
+  hand-remembered script.
+
+## Validation (Round 2)
+- Typecheck: ✅ `bunx tsc --noEmit` clean
+- Unit tests: ✅ 1617 pass, 0 fail
+- Smoke test: ✅ 7/7 assertions pass (now hermetic)

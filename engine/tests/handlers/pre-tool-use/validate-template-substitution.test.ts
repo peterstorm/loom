@@ -1,25 +1,19 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
+import { findResidualPlaceholders } from "../../../src/core/validate-template-substitution";
 
 /**
  * Tests for the template substitution validation logic.
- * We test the pure regex/filtering logic extracted from the handler.
+ *
+ * These exercise the REAL exported `findResidualPlaceholders` — the single
+ * source of truth — rather than a re-implemented copy, so the property/edge
+ * assertions below cannot silently drift from the shipped detector.
  */
 
-const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}"]);
-
-/** Simulate the core template validation decision */
+/** The core allow/block decision, driven by the real placeholder detector. */
 function validateTemplate(prompt: string): "allow" | "block" {
   if (!prompt) return "allow";
-
-  // Remove shell ${var} expansions
-  const cleaned = prompt.replace(/\$\{[^}]*\}/g, "");
-
-  // Find {word} patterns
-  const matches = cleaned.match(/\{[a-zA-Z_][a-zA-Z0-9_]*\}/g) ?? [];
-  const realIssues = matches.filter((v) => !FALSE_POSITIVES.has(v));
-
-  return realIssues.length === 0 ? "allow" : "block";
+  return findResidualPlaceholders(prompt).length === 0 ? "allow" : "block";
 }
 
 describe("validate-template-substitution — property tests", () => {

@@ -77,21 +77,26 @@ GATE_ERR="$TMP/last-gate.err"
 # Run a PreToolUse Task gate; echo the exit code (0 = allow, 2 = block).
 # stderr is captured to $GATE_ERR (NOT discarded) so a caller can assert the
 # block MESSAGE, not merely the exit code — a fail-closed crash also exits 2.
+#
+# The CLI is invoked with cwd = $TMP so that advance-phase's cwd-relative plan
+# fallbacks (`.claude/plans`, `.claude/specs`) resolve INSIDE the fixture, not
+# against the loom repo's real plans dir. Without this, step 3's stale-plan trap
+# would silently read the repo and pass/fail on coincidental repo contents.
 run_gate() {
   local agent="$1" prompt="$2" rc=0
   printf '{"tool_name":"Task","tool_input":{"subagent_type":"%s","prompt":"%s"}}' "$agent" "$prompt" \
-    | bun "$CLI" pre-tool-use validate-phase-order >/dev/null 2>"$GATE_ERR" || rc=$?
+    | ( cd "$TMP" && bun "$CLI" pre-tool-use validate-phase-order ) >/dev/null 2>"$GATE_ERR" || rc=$?
   echo "$rc"
 }
 
 # Run a SubagentStop dispatch for a completed agent; echo the exit code.
 # dispatch is NOT a fail-closed route, so a crash exits non-zero — callers assert
 # rc = 0 to tell a genuine passthrough from a crashed no-op that leaves the phase
-# coincidentally unchanged.
+# coincidentally unchanged. Runs with cwd = $TMP (see run_gate).
 run_stop() {
   local agent="$1" rc=0
   printf '{"agent_type":"%s","session_id":"%s","cwd":"%s"}' "$agent" "$SESSION" "$TMP" \
-    | bun "$CLI" subagent-stop dispatch >/dev/null 2>"$GATE_ERR" || rc=$?
+    | ( cd "$TMP" && bun "$CLI" subagent-stop dispatch ) >/dev/null 2>"$GATE_ERR" || rc=$?
   echo "$rc"
 }
 
@@ -127,6 +132,11 @@ else
 fi
 
 # ── 3. TRAP: panel agent stop does NOT advance, even with a stale same-date plan ─
+# With cwd = $TMP the date-prefix fallback in resolveTransition genuinely reads
+# this fixture: the stale plan below is the ONLY 2026-07-17-* file here, so IF a
+# panel agent were ever mapped into PHASE_AGENT_MAP its completion would match
+# (files.length === 1) and advance the phase. The passthrough that keeps the
+# phase pinned is therefore load-bearing, not incidental.
 echo "[3] subagent-stop: arch-designer-agent completion is passthrough (stale plan trap)"
 printf '# stale plan\n' > "$PLANS_DIR/2026-07-17-stale.md"   # same date prefix as SLUG
 write_state "architecture" "null"
@@ -141,9 +151,12 @@ rc="$(run_gate architecture-agent "finalize: approach gate over panel candidates
 [ "$rc" = "0" ] && ok "ALLOWED (exit 0)" || bad "expected allow (exit 0), got exit $rc"
 
 # ── 5. finalize architecture-agent stop ADVANCES to plan-alignment ────────────
+# plan_file is left null so resolveTransition must derive the plan path from the
+# spec_dir slug (`.claude/plans/2026-07-17-smoke-panel.md`, resolved against the
+# $TMP cwd) — exercising the real slug-derive fallback, not a pre-set absolute.
 echo "[5] subagent-stop: architecture-agent completion advances architecture → plan-alignment"
 printf '# real plan\n' > "$PLANS_DIR/$SLUG.md"
-write_state "architecture" "\"$PLANS_DIR/$SLUG.md\""
+write_state "architecture" "null"
 src="$(run_stop architecture-agent)"
 [ "$src" = "0" ] || bad "dispatch crashed (exit $src)"
 after="$(phase_now)"
