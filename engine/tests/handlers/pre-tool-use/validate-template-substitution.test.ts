@@ -53,15 +53,7 @@ describe("validate-template-substitution — edge cases", () => {
     expect(validateTemplate("Use {type} and {id} and {name}")).toBe("allow");
   });
 
-  it("JSON objects in prompt → allow (keys not single-word patterns)", () => {
-    // JSON like {"key": "value"} → cleaned, the {key} pattern doesn't match
-    // because : is after key but the regex only looks for {word}
-    // Actually {"key": "value"} would match {key} if not careful...
-    // Let's test: "key" would match as a false positive? No — {key} is not in FALSE_POSITIVES
-    // But the actual JSON '{"key": "value"}' — the regex matches \{[a-zA-Z_]...\}
-    // However, JSON keys are usually followed by colon, making the match include more than {word}
-    // The regex is /\{[a-zA-Z_][a-zA-Z0-9_]*\}/ — this requires } immediately after the word
-    // In '{"key": "value"}', the pattern is {"key" — no closing } after "key"
+  it("JSON objects in prompt → allow (a quote sits between { and the key, so no {word} match)", () => {
     expect(validateTemplate('{"key": "value"}')).toBe("allow");
   });
 
@@ -80,6 +72,29 @@ describe("validate-template-substitution — edge cases", () => {
   it("nested ${outer_{inner}} → shell var cleaned correctly", () => {
     // The outer ${...} should be removed, leaving the inner content
     expect(validateTemplate("${outer_{inner}}")).toBe("allow");
+  });
+
+  it("nested ${foo{bar}} → allow (strip matches to the first }, leaving a lone } that matches no placeholder)", () => {
+    // Pins the true nesting behavior: the non-greedy ${...} strip consumes
+    // `${foo{bar}` and leaves `}` — NOT `{bar}`. Allowing a genuine nested shell
+    // expansion is correct; this guards against a "fix" that broke it.
+    expect(validateTemplate("${foo{bar}}")).toBe("allow");
+  });
+
+  it("adjacent ${done}{leftover} → block (the strip leaves {leftover}, a genuine residual)", () => {
+    // The one case the ${...} strip DOES leave a residual placeholder — and it
+    // should, because {leftover} is an unsubstituted variable, not part of the
+    // shell expansion.
+    expect(validateTemplate("${done}{leftover}")).toBe("block");
+  });
+
+  it("hyphenated placeholder {spec-dir} → block (identifier class includes '-')", () => {
+    // A narrower [a-zA-Z0-9_] class would silently PASS this unsubstituted var.
+    expect(validateTemplate("Write to {spec-dir}/plan.md")).toBe("block");
+  });
+
+  it("dotted placeholder {plan.file} → block (identifier class includes '.')", () => {
+    expect(validateTemplate("Read {plan.file}")).toBe("block");
   });
 
   it("plain text without any braces → allow", () => {

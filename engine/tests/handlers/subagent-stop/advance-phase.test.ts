@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { resolveTransition, countMarkers } from "../../../src/handlers/subagent-stop/advance-phase";
+import advancePhaseHandler, {
+  resolveTransition,
+  countMarkers,
+} from "../../../src/handlers/subagent-stop/advance-phase";
 import { findFile } from "../../../src/utils/find-file";
 import { CLARIFY_THRESHOLD, PHASE_AGENT_MAP, ARCH_PANEL_AGENTS } from "../../../src/config";
 import { stripNamespace } from "../../../src/utils/strip-namespace";
@@ -383,6 +386,22 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     // so the handler returns passthrough before resolveTransition is ever called.
     for (const agent of ARCH_PANEL_AGENTS) {
       expect(PHASE_AGENT_MAP[stripNamespace(agent)]).toBeUndefined();
+    }
+  });
+
+  it("the REAL handler short-circuits a panel-agent SubagentStop to passthrough before any state access", async () => {
+    // Drive the actual default-export handler, not just the map precondition. A
+    // panel agent misses PHASE_AGENT_MAP, so the handler returns passthrough at
+    // its first branch — before StateManager is ever consulted. It must never
+    // throw and never advance, in both bare and `loom:`-namespaced forms. (The
+    // full advance-vs-no-advance contract with real state on disk is exercised
+    // end-to-end by scripts/smoke-panel-mode.sh, which spawns an isolated CLI
+    // process; a same-process test cannot repoint the import-frozen state path.)
+    for (const agent of ARCH_PANEL_AGENTS) {
+      for (const name of [agent, `loom:${agent}`]) {
+        const stdin = JSON.stringify({ session_id: "smoke", agent_type: name });
+        await expect(advancePhaseHandler(stdin, [])).resolves.toEqual({ kind: "passthrough" });
+      }
     }
   });
 });

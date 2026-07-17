@@ -73,11 +73,15 @@ export function panelPhaseOverlap(
   return [...panel].filter((a) => phaseLookupKeys(a).some((k) => k in phaseMap));
 }
 
-// Fail at module load — not just in CI — if a panel agent is ever also a phase
-// agent. This runs on every handler import, so an invalid state can never
-// execute; it converts a CI-only guard into a load-time impossibility.
-{
-  const overlap = panelPhaseOverlap();
+/** Throw if any panel agent is also reachable as a phase agent — the
+ *  panel/phase disjointness invariant, enforced. Exported so a test can drive
+ *  the throwing branch with a synthetic overlapping map; called unconditionally
+ *  at module scope below so the same check also fails at load time. */
+export function assertPanelPhaseDisjoint(
+  panel: ReadonlySet<string> = ARCH_PANEL_AGENTS,
+  phaseMap: Record<string, Phase> = PHASE_AGENT_MAP,
+): void {
+  const overlap = panelPhaseOverlap(panel, phaseMap);
   if (overlap.length > 0) {
     throw new Error(
       `loom config invariant violated: panel agents must not be phase agents, ` +
@@ -86,6 +90,12 @@ export function panelPhaseOverlap(
     );
   }
 }
+
+// Fail at module load — not just in CI — if a panel agent is ever also a phase
+// agent. Module init runs once per process, at the first import of this config
+// (transitively pulled in by every handler), so an invalid state can never
+// execute; it converts a CI-only guard into a load-time impossibility.
+assertPanelPhaseDisjoint();
 
 /** Default number of parallel designer agents for `/loom --panel`. The engine
  *  never spawns these — the orchestrator (commands/loom.md) reads this as the

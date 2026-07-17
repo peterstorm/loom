@@ -8,12 +8,16 @@ import {
   PHASE_AGENT_MAP,
   KNOWN_AGENTS,
   panelPhaseOverlap,
+  assertPanelPhaseDisjoint,
 } from "../src/config";
 
 /** Count the lens sections in panel-lenses.md — the single source of truth for
  *  how many lenses exist (and therefore the cap on parallel designers). Each
- *  lens has one `## <lens>` heading; the count derives from that file so adding
- *  or removing a lens automatically re-checks the designer-cap invariant below. */
+ *  lens has one `## <lens-slug>` heading (lowercase, hyphenated). Matching the
+ *  slug shape — not every `## ` H2 — keeps a future prose heading like
+ *  `## Notes` or `## Selection` from silently inflating the count and raising
+ *  the designer cap above the real number of lenses. Deriving from the file
+ *  means adding or removing a lens automatically re-checks the cap below. */
 function lensCount(): number {
   const path = join(
     dirname(fileURLToPath(import.meta.url)),
@@ -23,7 +27,7 @@ function lensCount(): number {
     "panel-lenses.md",
   );
   const md = readFileSync(path, "utf-8");
-  return (md.match(/^## /gm) ?? []).length;
+  return (md.match(/^## [a-z][a-z0-9-]*$/gm) ?? []).length;
 }
 
 /**
@@ -90,6 +94,21 @@ describe("panelPhaseOverlap (module-load invariant guard)", () => {
     // is absent from the map — this is the case the exact-key check missed.
     const bad = { "arch-designer": "decompose" as const };
     expect(panelPhaseOverlap(ARCH_PANEL_AGENTS, bad)).toEqual(["arch-designer-agent"]);
+  });
+
+  it("assertPanelPhaseDisjoint THROWS on a synthetic overlap — the load-time guard's throw branch, not just the predicate", () => {
+    // panelPhaseOverlap returning a non-empty list proves detection; this proves
+    // the guard HALTS on it. Without this, a regression that dropped the `throw`
+    // (leaving only the predicate) would keep every test green while letting an
+    // invalid config load and advance the phase mid-panel.
+    const bad = { "arch-designer-agent": "architecture" as const };
+    expect(() => assertPanelPhaseDisjoint(ARCH_PANEL_AGENTS, bad)).toThrow(
+      /panel agents must not be phase agents/,
+    );
+  });
+
+  it("assertPanelPhaseDisjoint does NOT throw for the real config (the module loaded, so this must hold)", () => {
+    expect(() => assertPanelPhaseDisjoint()).not.toThrow();
   });
 });
 

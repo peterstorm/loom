@@ -17,16 +17,22 @@ const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}"]);
  * share this exact logic instead of re-implementing (and silently drifting from)
  * the regex.
  *
- * Known limitation: the `${...}` strip is non-greedy up to the first `}`, so a
- * nested shell expansion like `${foo{bar}}` leaves `{bar}` and reports it as a
- * residual placeholder (a false positive that blocks loudly, never a silent
- * pass). Templates in this repo do not nest braces; if that changes, widen the
- * strip rather than trusting the block message, which attributes the residual to
- * substitution logic.
+ * The identifier class is `[a-zA-Z_][a-zA-Z0-9_.-]*` — deliberately wider than a
+ * strict shell identifier so a placeholder using a hyphen or dot (e.g.
+ * `{spec-dir}`, `{plan.file}`) is still caught. A narrower class would let such a
+ * template variable slip through UNsubstituted as a silent pass — exactly the
+ * failure this guard exists to prevent.
+ *
+ * Nesting note: the `${...}` strip is non-greedy up to the first `}`, so a nested
+ * expansion like `${foo{bar}}` matches `${foo{bar}` and leaves a lone `}`, which
+ * matches no placeholder and is correctly allowed. The strip only leaves a
+ * residual `{word}` for ADJACENT braces (`${done}{leftover}`), where `{leftover}`
+ * is a genuine unsubstituted placeholder that SHOULD block. Both outcomes are
+ * correct — neither is a silent pass.
  */
 export function findResidualPlaceholders(prompt: string): string[] {
   const cleaned = prompt.replace(/\$\{[^}]*\}/g, "");
-  const matches = cleaned.match(/\{[a-zA-Z_][a-zA-Z0-9_]*\}/g) ?? [];
+  const matches = cleaned.match(/\{[a-zA-Z_][a-zA-Z0-9_.-]*\}/g) ?? [];
   return matches.filter((v) => !FALSE_POSITIVES.has(v));
 }
 

@@ -27,6 +27,7 @@ LOOM_DIR="$(dirname "$SCRIPT_DIR")"
 CLI="$LOOM_DIR/engine/src/cli.ts"
 
 command -v bun >/dev/null || { echo "FATAL: bun not found (need it to run the hook CLI)"; exit 1; }
+command -v jq >/dev/null || { echo "FATAL: jq not found (needed by phase_now to read current_phase from state)"; exit 1; }
 
 TMP="$(mktemp -d)"
 trap 'chmod -R u+w "$TMP" 2>/dev/null || true; rm -rf "$TMP"' EXIT
