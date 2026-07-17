@@ -77,13 +77,38 @@ export const ARCH_PANEL_AGENTS: ReadonlySet<string> = new Set(
     .map(([name]) => name),
 );
 
+/** The single phase shared by every `role: "panel"` entry in
+ *  ARCHITECTURE_AGENTS. GENUINELY derived (not a literal): we collect the
+ *  distinct `phase` values of all panel entries and assert exactly one, so
+ *  adding a panel agent with a divergent `phase` throws at load rather than
+ *  silently splitting the panel set across phases. The one-phase invariant is
+ *  what lets ARCH_PANEL_PHASE below be a single constant. Requires >= 1 panel
+ *  agent — panel mode is a shipped feature and its designer/judge/interviewer
+ *  entries are always present; a zero-panel config is unsupported and fails loud. */
+function derivePanelPhase(): Phase {
+  const phases = new Set(
+    Object.values(ARCHITECTURE_AGENTS)
+      .filter((v) => v.role === "panel")
+      .map((v) => v.phase),
+  );
+  if (phases.size !== 1) {
+    throw new Error(
+      `loom config invariant violated: all panel agents must share exactly one ` +
+        `phase, but ARCHITECTURE_AGENTS panel entries declare: ` +
+        `${[...phases].join(", ") || "(none)"}. ARCH_PANEL_PHASE cannot be derived.`,
+    );
+  }
+  return [...phases][0]!;
+}
+
 /** The phase every panel agent is classified as for phase-order validation.
- *  Derived from the panel agents' shared `phase` in ARCHITECTURE_AGENTS so the
- *  set and the phase it maps to cannot drift: detectPhase (validate-phase-order.ts)
- *  routes panel agents here via this constant instead of a bare `"architecture"`
- *  literal. Must stay a phase panel agents are allowed to run in, and one whose
- *  SubagentStop does NOT advance (panel agents are absent from PHASE_AGENT_MAP). */
-export const ARCH_PANEL_PHASE: Phase = "architecture";
+ *  Derived from the panel agents' shared `phase` in ARCHITECTURE_AGENTS (see
+ *  derivePanelPhase) so the set and the phase it maps to cannot drift:
+ *  detectPhase (validate-phase-order.ts) routes panel agents here via this
+ *  constant instead of a bare `"architecture"` literal. Must stay a phase panel
+ *  agents are allowed to run in, and one whose SubagentStop does NOT advance
+ *  (panel agents are absent from PHASE_AGENT_MAP). */
+export const ARCH_PANEL_PHASE: Phase = derivePanelPhase();
 
 /** Every PHASE_AGENT_MAP key `detectPhase` (validate-phase-order.ts) could probe
  *  when routing this panel agent, invoked either bare or `-agent`-suffixed.
@@ -109,7 +134,7 @@ function phaseLookupKeys(panelAgent: string): string[] {
  *  synthetic overlap rather than only asserted against the real (empty) sets. */
 export function panelPhaseOverlap(
   panel: ReadonlySet<string> = ARCH_PANEL_AGENTS,
-  phaseMap: Record<string, Phase> = PHASE_AGENT_MAP,
+  phaseMap: Readonly<Record<string, Phase>> = PHASE_AGENT_MAP,
 ): string[] {
   return [...panel].filter((a) => phaseLookupKeys(a).some((k) => k in phaseMap));
 }
@@ -120,7 +145,7 @@ export function panelPhaseOverlap(
  *  at module scope below so the same check also fails at load time. */
 export function assertPanelPhaseDisjoint(
   panel: ReadonlySet<string> = ARCH_PANEL_AGENTS,
-  phaseMap: Record<string, Phase> = PHASE_AGENT_MAP,
+  phaseMap: Readonly<Record<string, Phase>> = PHASE_AGENT_MAP,
 ): void {
   const overlap = panelPhaseOverlap(panel, phaseMap);
   if (overlap.length > 0) {

@@ -94,9 +94,14 @@ GATE_ERR="$TMP/last-gate.err"
 # fallbacks (`.claude/plans`, `.claude/specs`) resolve INSIDE the fixture, not
 # against the loom repo's real plans dir. Without this, step 3's stale-plan trap
 # would silently read the repo and pass/fail on coincidental repo contents.
+# The payload is built with jq --arg (not printf) so agent/prompt are correctly
+# JSON-escaped: a prompt containing `"` or `\` would otherwise produce malformed
+# JSON that validate-phase-order fail-closes on (exit 2), which an allow-case
+# assertion would misread as a block.
 run_gate() {
   local agent="$1" prompt="$2" rc=0
-  printf '{"tool_name":"Task","tool_input":{"subagent_type":"%s","prompt":"%s"}}' "$agent" "$prompt" \
+  jq -nc --arg a "$agent" --arg p "$prompt" \
+    '{tool_name:"Task",tool_input:{subagent_type:$a,prompt:$p}}' \
     | ( cd "$TMP" && bun "$CLI" pre-tool-use validate-phase-order ) >/dev/null 2>"$GATE_ERR" || rc=$?
   echo "$rc"
 }
@@ -107,7 +112,8 @@ run_gate() {
 # coincidentally unchanged. Runs with cwd = $TMP (see run_gate).
 run_stop() {
   local agent="$1" rc=0
-  printf '{"agent_type":"%s","session_id":"%s","cwd":"%s"}' "$agent" "$SESSION" "$TMP" \
+  jq -nc --arg a "$agent" --arg s "$SESSION" --arg c "$TMP" \
+    '{agent_type:$a,session_id:$s,cwd:$c}' \
     | ( cd "$TMP" && bun "$CLI" subagent-stop dispatch ) >/dev/null 2>"$GATE_ERR" || rc=$?
   echo "$rc"
 }

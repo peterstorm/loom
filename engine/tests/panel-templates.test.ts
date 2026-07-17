@@ -86,3 +86,77 @@ describe("panel-mode template placeholder audit", () => {
     expect(raw).toContain("architecture-tech-lead");
   });
 });
+
+/**
+ * Round-trip: judge verdicts are inlined VERBATIM into the finalize prompt via
+ * {judge_verdicts}, then that prompt passes through validate-template-substitution
+ * at spawn. The judge template forbids `{`/`}` in free-text values precisely
+ * because a brace-word would read as an unsubstituted placeholder and block the
+ * finalize spawn AFTER N designers + K judges already ran. These tests pin both
+ * halves of that contract: well-formed judge JSON survives the gate, and a
+ * rule-violating brace-word is exactly what the gate catches.
+ */
+describe("panel-mode judge-verdict round-trip through the substitution gate", () => {
+  const FINALIZE = "phase-arch-finalize.md";
+  const FINALIZE_VARS = TEMPLATES[FINALIZE]!;
+
+  /** Substitute the finalize template with `{judge_verdicts}` set to `verdicts`
+   *  and every other declared var to a dummy, mirroring the orchestrator. */
+  function finalizeWithVerdicts(verdicts: string): string {
+    const raw = readFileSync(join(TEMPLATES_DIR, FINALIZE), "utf-8");
+    let out = raw;
+    for (const v of FINALIZE_VARS) {
+      const value = v === "judge_verdicts" ? verdicts : `DUMMY_${v}`;
+      out = out.split(`{${v}}`).join(value);
+    }
+    return out;
+  }
+
+  it("well-formed judge JSON (structural braces, brace-free prose) leaves no residual", () => {
+    const verdicts = JSON.stringify(
+      {
+        criterion: "simplicity",
+        rankings: [
+          {
+            candidate: "candidate-testability.md",
+            score: 8,
+            fatal_flaw: "leaks persistence concerns into the functional core",
+            strongest_idea: "a single pure reducer for all state transitions",
+          },
+          {
+            candidate: "candidate-simplicity.md",
+            score: 6,
+            fatal_flaw: null,
+            strongest_idea: "collapse the two adapters into one port",
+          },
+        ],
+      },
+      null,
+      2,
+    );
+    // JSON structural `{` is always followed by whitespace/`"`, never a bare
+    // identifier, so the detector does not mistake it for a placeholder.
+    expect(findResidualPlaceholders(finalizeWithVerdicts(verdicts))).toEqual([]);
+  });
+
+  it("a judge violating the no-brace rule (brace-word in prose) is caught by the gate", () => {
+    const verdicts = JSON.stringify(
+      {
+        criterion: "simplicity",
+        rankings: [
+          {
+            candidate: "candidate-simplicity.md",
+            score: 7,
+            fatal_flaw: null,
+            // Rule violation: a brace-wrapped word in free-text prose.
+            strongest_idea: "prefer the {simplicity} adapter over the layered one",
+          },
+        ],
+      },
+      null,
+      2,
+    );
+    // Documents the failure mode: the finalize spawn would be BLOCKED at runtime.
+    expect(findResidualPlaceholders(finalizeWithVerdicts(verdicts))).toContain("{simplicity}");
+  });
+});

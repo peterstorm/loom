@@ -4,6 +4,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ARCH_PANEL_AGENTS,
+  ARCH_PANEL_PHASE,
   PANEL_DESIGNERS_DEFAULT,
   PHASE_AGENT_MAP,
   KNOWN_AGENTS,
@@ -121,6 +122,26 @@ describe("panelPhaseOverlap (module-load invariant guard)", () => {
 
   it("assertPanelPhaseDisjoint does NOT throw for the real config (the module loaded, so this must hold)", () => {
     expect(() => assertPanelPhaseDisjoint()).not.toThrow();
+  });
+});
+
+describe("ARCH_PANEL_PHASE (derived, not a literal)", () => {
+  it("is the single phase every panel agent is classified as", () => {
+    // Derived from the panel entries' shared `phase` in ARCHITECTURE_AGENTS
+    // (derivePanelPhase), so it cannot drift from the set. The module loading at
+    // all proves the derivation found exactly one shared phase — a divergent
+    // panel-agent phase would throw at import before any test runs.
+    expect(ARCH_PANEL_PHASE).toBe("architecture");
+  });
+
+  it("is a phase panel agents are allowed in but that does NOT advance on their completion", () => {
+    // The classification phase must NOT be one whose key set includes a panel
+    // agent (else advance-phase would fire) — panel agents are absent from
+    // PHASE_AGENT_MAP by construction, and this phase is where detectPhase routes
+    // them for the ALLOW decision only.
+    for (const agent of ARCH_PANEL_AGENTS) {
+      expect(PHASE_AGENT_MAP[agent]).toBeUndefined();
+    }
   });
 });
 
