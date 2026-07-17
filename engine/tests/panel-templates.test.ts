@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { findResidualPlaceholders } from "../src/core/validate-template-substitution";
 
 /**
  * Template placeholder audit for the four panel-mode templates.
@@ -13,8 +14,9 @@ import { fileURLToPath } from "node:url";
  * scheme referenced in prose must use angle brackets (`candidate-<lens>.md`),
  * never braces (`candidate-{lens}.md`).
  *
- * The residual-placeholder check mirrors validate-template-substitution exactly:
- * strip `${shell}` expansions, then match `{identifier}` minus the
+ * The residual-placeholder check imports the real detector
+ * (findResidualPlaceholders) from validate-template-substitution so the two can
+ * never drift: strip `${shell}` expansions, then match `{identifier}` minus the
  * {type}/{id}/{name} false-positive set.
  */
 
@@ -48,8 +50,6 @@ const TEMPLATES: Record<string, string[]> = {
   ],
 };
 
-const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}"]);
-
 /** Substitute every declared variable with a dummy value. */
 function substitute(template: string, vars: string[]): string {
   let out = template;
@@ -59,19 +59,12 @@ function substitute(template: string, vars: string[]): string {
   return out;
 }
 
-/** The exact residual-placeholder detection from validate-template-substitution. */
-function residualPlaceholders(prompt: string): string[] {
-  const cleaned = prompt.replace(/\$\{[^}]*\}/g, "");
-  const matches = cleaned.match(/\{[a-zA-Z_][a-zA-Z0-9_]*\}/g) ?? [];
-  return matches.filter((v) => !FALSE_POSITIVES.has(v));
-}
-
 describe("panel-mode template placeholder audit", () => {
   for (const [file, vars] of Object.entries(TEMPLATES)) {
     it(`${file} — no residual placeholders after substituting declared vars`, () => {
       const raw = readFileSync(join(TEMPLATES_DIR, file), "utf-8");
       const substituted = substitute(raw, vars);
-      const residual = residualPlaceholders(substituted);
+      const residual = findResidualPlaceholders(substituted);
       expect(residual, `residual placeholders: ${residual.join(" ")}`).toEqual([]);
     });
 

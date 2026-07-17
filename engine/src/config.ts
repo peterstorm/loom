@@ -39,6 +39,31 @@ export const ARCH_PANEL_AGENTS = new Set([
   "arch-judge-agent",
 ]);
 
+/** The panel/phase disjointness invariant, as a live predicate: the panel
+ *  agents that are ALSO phase agents. Must always be empty — see the comment
+ *  on ARCH_PANEL_AGENTS for why. Exported so the invariant can be tested with
+ *  a synthetic overlap rather than only asserted against the real (empty) sets. */
+export function panelPhaseOverlap(
+  panel: ReadonlySet<string> = ARCH_PANEL_AGENTS,
+  phaseMap: Record<string, Phase> = PHASE_AGENT_MAP,
+): string[] {
+  return [...panel].filter((a) => a in phaseMap);
+}
+
+// Fail at module load — not just in CI — if a panel agent is ever also a phase
+// agent. This runs on every handler import, so an invalid state can never
+// execute; it converts a CI-only guard into a load-time impossibility.
+{
+  const overlap = panelPhaseOverlap();
+  if (overlap.length > 0) {
+    throw new Error(
+      `loom config invariant violated: panel agents must not be phase agents, ` +
+        `but these are in both ARCH_PANEL_AGENTS and PHASE_AGENT_MAP: ${overlap.join(", ")}. ` +
+        `A panel agent in PHASE_AGENT_MAP would advance the phase mid-panel.`,
+    );
+  }
+}
+
 /** Default number of parallel designer agents spawned in `/loom --panel`. */
 export const PANEL_DESIGNERS_DEFAULT = 3;
 

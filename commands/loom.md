@@ -41,7 +41,7 @@ Store the printed path. **All subsequent references use it:**
 - `/loom --skip-clarify` - Skip clarify phase (accept markers as-is)
 - `/loom --skip-specify` - Skip brainstorm/specify/clarify (use existing spec)
 - `/loom --skip-plan-alignment` - Skip plan-alignment phase (proceed directly to decompose)
-- `/loom --panel` - Architecture panel mode: N designer agents generate candidates in parallel (each with a lens), adversarial judges rank them against interview-derived criteria, the finalizer synthesizes and presents them at the approach gate. Opt-in; standard mode is untouched. `--panel=N` sets the designer count (default `PANEL_DESIGNERS_DEFAULT` in `engine/src/config.ts`, currently 3). Only affects Phase 3. See [Phase 3 (panel mode)](#phase-3-panel-mode-loom---panel).
+- `/loom --panel` - Architecture panel mode: N designer agents generate candidates in parallel (each with a lens), adversarial judges rank them against interview-derived criteria, the finalizer synthesizes and presents them at the approach gate. Opt-in; standard mode is untouched. `--panel=N` sets the designer count (default `PANEL_DESIGNERS_DEFAULT` in `engine/src/config.ts`). N is capped at the number of distinct lenses (5) — each designer takes exactly one lens (see [panel-lenses.md](../references/panel-lenses.md)). Only affects Phase 3. See [Phase 3 (panel mode)](#phase-3-panel-mode-loom---panel).
 - `/loom --status` - Show current task graph status *(planned — use jq commands in Observability section)*
 - `/loom --complete` - Finalize, clean up state *(planned — manually remove state file for now)*
 - `/loom --abort` - Cancel mid-execution, clean state *(planned — manually remove state file for now)*
@@ -229,7 +229,9 @@ Read the lens fragments from `{LOOM_DIR}/references/panel-lenses.md`. Choose N l
   - `**Codebase maturity:**` = brownfield → `codebase-conventionist`
   - If none apply (or you need a 4th/5th for larger N), fill from the remaining lenses in the table order.
 
-Take the first N distinct lenses. Each designer gets exactly one.
+Take the first N distinct lenses. Each designer gets exactly one. Only five
+lenses exist, so **N is capped at 5** — if `--panel=N` requests more, clamp to 5
+(you cannot give two designers the same lens).
 
 ### Step 3 — Designers (parallel, headless)
 

@@ -4,6 +4,7 @@ import {
   PANEL_DESIGNERS_DEFAULT,
   PHASE_AGENT_MAP,
   KNOWN_AGENTS,
+  panelPhaseOverlap,
 } from "../src/config";
 
 /**
@@ -47,6 +48,19 @@ describe("ARCH_PANEL_AGENTS invariants", () => {
     for (const agent of ARCH_PANEL_AGENTS) {
       expect(KNOWN_AGENTS.has(agent)).toBe(false);
     }
+  });
+});
+
+describe("panelPhaseOverlap (module-load invariant guard)", () => {
+  it("reports no overlap for the real config (guard would have thrown at import otherwise)", () => {
+    expect(panelPhaseOverlap()).toEqual([]);
+  });
+
+  it("detects a synthetic overlap — proving the guard is live, not tautological", () => {
+    // If a panel agent were ever added to PHASE_AGENT_MAP, the guard must catch
+    // it. Feed a synthetic phase map that violates the invariant.
+    const bad = { "arch-designer-agent": "architecture" as const };
+    expect(panelPhaseOverlap(ARCH_PANEL_AGENTS, bad)).toEqual(["arch-designer-agent"]);
   });
 });
 

@@ -10,15 +10,24 @@ import { TASK_GRAPH_PATH } from "../config";
 
 const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}"]);
 
+/**
+ * The single source of truth for "unsubstituted template variable" detection:
+ * strip shell `${var}` expansions, then match `{identifier}` placeholders minus
+ * the {type}/{id}/{name} false-positive set. Exported so tests and other callers
+ * share this exact logic instead of re-implementing (and silently drifting from)
+ * the regex.
+ */
+export function findResidualPlaceholders(prompt: string): string[] {
+  const cleaned = prompt.replace(/\$\{[^}]*\}/g, "");
+  const matches = cleaned.match(/\{[a-zA-Z_][a-zA-Z0-9_]*\}/g) ?? [];
+  return matches.filter((v) => !FALSE_POSITIVES.has(v));
+}
+
 export function validateTemplateSubstitution(prompt: string): HookResult {
   if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
   if (!prompt) return { kind: "allow" };
 
-  // Remove shell ${var} expansions to avoid false positives
-  const cleaned = prompt.replace(/\$\{[^}]*\}/g, "");
-
-  const matches = cleaned.match(/\{[a-zA-Z_][a-zA-Z0-9_]*\}/g) ?? [];
-  const realIssues = matches.filter((v) => !FALSE_POSITIVES.has(v));
+  const realIssues = findResidualPlaceholders(prompt);
 
   if (realIssues.length === 0) return { kind: "allow" };
 

@@ -70,7 +70,7 @@ Phase 3 (panel mode)                       current_phase stays "architecture" th
 1. arch-interviewer-agent   interactive   explore + full 13-topic questionnaire
                                           → .claude/specs/{slug}/interview.md
 2. N× arch-designer-agent   parallel,     spec + interview digest + assigned lens
-                            headless      → .claude/specs/{slug}/candidates/candidate-{lens}.md
+                            headless      → .claude/specs/{slug}/candidates/candidate-<lens>.md
 3. K× arch-judge-agent      parallel,     ALL candidates + one criterion (adversarial)
                             headless      → returns JSON verdict to orchestrator
 4. architecture-agent       interactive   candidates + verdicts → approach gate
@@ -101,7 +101,7 @@ as the recommendation, never silently applied.
 .claude/specs/{slug}/
   interview.md                 # structured digest, regex-friendly labeled fields
   candidates/
-    candidate-{lens}.md        # one per designer, fixed format
+    candidate-<lens>.md        # one per designer, fixed format
 .claude/plans/{slug}.md        # unchanged contract; gains AD-N block for panel outcome
 ```
 
@@ -162,7 +162,7 @@ during `init`/`execute`/`decompose`.
   mention the skill for consistency, though the skill gate doesn't validate
   panel agents). Receives spec + interview digest +
   one lens. Produces one candidate at
-  `.claude/specs/{slug}/candidates/candidate-{lens}.md` in a fixed format:
+  `.claude/specs/{slug}/candidates/candidate-<lens>.md` in a fixed format:
   approach summary, component boundaries, data flow, file-structure sketch,
   trade-offs, effort, testability impact. The format deliberately mirrors the
   existing approach-gate preview format so the finalizer can lift previews
@@ -178,7 +178,7 @@ during `init`/`execute`/`decompose`.
   {
     "criterion": "...",
     "rankings": [
-      { "candidate": "candidate-{lens}.md", "score": 0,
+      { "candidate": "candidate-<lens>.md", "score": 0,
         "fatal_flaw": null, "strongest_idea": "..." }
     ]
   }

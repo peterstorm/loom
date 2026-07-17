@@ -10,6 +10,9 @@ Every lens fragment states three things a designer must honor: what it
 failure mode** — so a designer argues the honest strongest case for the lens
 without strawmanning it.
 
+There are **five** lenses, and each designer takes exactly one, so `--panel=N`
+is effectively capped at 5: a larger `N` clamps to the lens count.
+
 | Lens | Optimizes for | Willing to sacrifice |
 |---|---|---|
 | `simplicity-first` | fewest moving parts, shortest path | extensibility |

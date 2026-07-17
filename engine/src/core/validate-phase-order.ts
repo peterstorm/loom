@@ -45,7 +45,8 @@ export interface ValidatePhaseOrderInput {
 }
 
 export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
-  if (PHASE_AGENT_MAP[agent]) return PHASE_AGENT_MAP[agent]; if (PHASE_AGENT_MAP[agent + "-agent"]) return PHASE_AGENT_MAP[agent + "-agent"];
+  if (PHASE_AGENT_MAP[agent]) return PHASE_AGENT_MAP[agent];
+  if (PHASE_AGENT_MAP[agent + "-agent"]) return PHASE_AGENT_MAP[agent + "-agent"];
   if (IMPL_AGENTS.has(agent) || IMPL_AGENTS.has(agent + "-agent") || REVIEW_AGENTS.has(agent) || REVIEW_AGENTS.has(agent + "-agent")) return "execute";
   // Architecture-panel agents (--panel) are architecture-phase work. Recognized
   // here so validate-phase-order allows them, but never added to PHASE_AGENT_MAP

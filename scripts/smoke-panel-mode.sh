@@ -70,22 +70,33 @@ JSON
   chmod 444 "$STATE"
 }
 
+# Captured stderr of the last run_gate / run_stop invocation, so assertions can
+# distinguish a correct BLOCK from a fail-closed CRASH (both exit non-zero).
+GATE_ERR="$TMP/last-gate.err"
+
 # Run a PreToolUse Task gate; echo the exit code (0 = allow, 2 = block).
+# stderr is captured to $GATE_ERR (NOT discarded) so a caller can assert the
+# block MESSAGE, not merely the exit code — a fail-closed crash also exits 2.
 run_gate() {
   local agent="$1" prompt="$2" rc=0
   printf '{"tool_name":"Task","tool_input":{"subagent_type":"%s","prompt":"%s"}}' "$agent" "$prompt" \
-    | bun "$CLI" pre-tool-use validate-phase-order >/dev/null 2>&1 || rc=$?
+    | bun "$CLI" pre-tool-use validate-phase-order >/dev/null 2>"$GATE_ERR" || rc=$?
   echo "$rc"
 }
 
-# Run a SubagentStop dispatch for a completed agent.
+# Run a SubagentStop dispatch for a completed agent; echo the exit code.
+# dispatch is NOT a fail-closed route, so a crash exits non-zero — callers assert
+# rc = 0 to tell a genuine passthrough from a crashed no-op that leaves the phase
+# coincidentally unchanged.
 run_stop() {
-  local agent="$1"
+  local agent="$1" rc=0
   printf '{"agent_type":"%s","session_id":"%s","cwd":"%s"}' "$agent" "$SESSION" "$TMP" \
-    | bun "$CLI" subagent-stop dispatch >/dev/null 2>&1 || true
+    | bun "$CLI" subagent-stop dispatch >/dev/null 2>"$GATE_ERR" || rc=$?
+  echo "$rc"
 }
 
-phase_now() { chmod u+r "$STATE" 2>/dev/null || true; grep -o '"current_phase": *"[^"]*"' "$STATE" | head -1 | sed 's/.*"\([a-z-]*\)"$/\1/'; }
+# Read the phase via the real JSON reader (jq), not a format-coupled grep/sed.
+phase_now() { chmod u+r "$STATE" 2>/dev/null || true; jq -r '.current_phase' "$STATE"; }
 
 echo "Panel-mode smoke test (driving the real hook CLI)"
 echo "state: $STATE"
@@ -107,13 +118,20 @@ done
 echo "[2] validate-phase-order: arch-designer-agent during execute phase"
 write_state "execute" "null"
 rc="$(run_gate arch-designer-agent "design a candidate")"
-[ "$rc" = "2" ] && ok "BLOCKED (exit 2)" || bad "expected block (exit 2), got exit $rc"
+# Assert BOTH the exit code AND the block message — a fail-closed crash also
+# exits 2, so the message is what proves it was a real transition block.
+if [ "$rc" = "2" ] && grep -q "Invalid phase transition" "$GATE_ERR"; then
+  ok "BLOCKED with transition message (exit 2)"
+else
+  bad "expected block (exit 2 + 'Invalid phase transition'), got exit $rc / $(tr '\n' ' ' < "$GATE_ERR")"
+fi
 
 # ── 3. TRAP: panel agent stop does NOT advance, even with a stale same-date plan ─
 echo "[3] subagent-stop: arch-designer-agent completion is passthrough (stale plan trap)"
 printf '# stale plan\n' > "$PLANS_DIR/2026-07-17-stale.md"   # same date prefix as SLUG
 write_state "architecture" "null"
-run_stop arch-designer-agent
+src="$(run_stop arch-designer-agent)"
+[ "$src" = "0" ] || bad "dispatch crashed (exit $src) — 'phase unchanged' would be a false pass"
 after="$(phase_now)"
 [ "$after" = "architecture" ] && ok "phase unchanged (still architecture)" || bad "phase advanced to '$after' — TRAP FIRED"
 
@@ -126,7 +144,8 @@ rc="$(run_gate architecture-agent "finalize: approach gate over panel candidates
 echo "[5] subagent-stop: architecture-agent completion advances architecture → plan-alignment"
 printf '# real plan\n' > "$PLANS_DIR/$SLUG.md"
 write_state "architecture" "\"$PLANS_DIR/$SLUG.md\""
-run_stop architecture-agent
+src="$(run_stop architecture-agent)"
+[ "$src" = "0" ] || bad "dispatch crashed (exit $src)"
 after="$(phase_now)"
 [ "$after" = "plan-alignment" ] && ok "phase advanced to plan-alignment" || bad "expected plan-alignment, got '$after'"
 
