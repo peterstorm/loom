@@ -22,9 +22,13 @@ export const PHASE_ORDER: readonly Phase[] = PHASES;
  *  - `panel`: a `/loom --panel` designer/judge/interviewer — recognized as
  *    architecture-phase work so validate-phase-order ALLOWS it, but INVISIBLE to
  *    advance-phase so it never advances the phase mid-panel. */
-type AgentRole =
-  | { readonly role: "phase"; readonly phase: Phase }
-  | { readonly role: "panel"; readonly phase: Phase };
+//  Both roles carry the same fields, so this is a single object type rather
+//  than a discriminated union: `role` is a runtime discriminant the derived
+//  views filter on, but the variants have no field-level divergence for the
+//  type system to narrow. Kept as one shape to avoid signalling an ADT payoff
+//  that isn't there. (If a role ever gains role-specific fields, split it into
+//  a proper union then.)
+type AgentRole = { readonly role: "phase" | "panel"; readonly phase: Phase };
 
 /** Single source of truth for every architecture-orchestration agent and its
  *  role. PHASE_AGENT_MAP and ARCH_PANEL_AGENTS are DERIVED views over this map
