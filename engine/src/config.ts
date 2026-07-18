@@ -63,6 +63,23 @@ export const PHASE_AGENT_MAP: Readonly<Record<string, Phase>> = Object.freeze(
   ),
 );
 
+/** A Set whose contents are genuinely immutable at runtime. `Object.freeze` alone
+ *  does NOT stop `set.add(...)` — a Set's elements live in an internal slot, not
+ *  own properties, so freeze only locks the object shell. To match the real
+ *  immutability `Object.freeze` gives PHASE_AGENT_MAP (a plain object), we shadow
+ *  the mutators so a runtime `(set as Set).add(...)` throws, then freeze to lock
+ *  the shadowing in place. */
+function frozenSet<T>(values: Iterable<T>): ReadonlySet<T> {
+  const s = new Set(values);
+  const immutable = (): never => {
+    throw new Error("loom config invariant violated: this Set is immutable");
+  };
+  s.add = immutable as typeof s.add;
+  s.delete = immutable as typeof s.delete;
+  s.clear = immutable as typeof s.clear;
+  return Object.freeze(s);
+}
+
 /** Architecture-panel agents (`/loom --panel`): DERIVED from ARCHITECTURE_AGENTS
  *  (role `panel`). Recognized by phase validation as architecture-phase work, but
  *  INVISIBLE to advance-phase — never in PHASE_AGENT_MAP so only
@@ -70,8 +87,10 @@ export const PHASE_AGENT_MAP: Readonly<Record<string, Phase>> = Object.freeze(
  *  a phase agent, its completion would fire resolveTransition and the date-prefix
  *  plan fallback could advance the phase mid-panel. The disjointness is structural
  *  for exact names (one key, one role) AND enforced at module load (the guard
- *  below throws on import) for suffix-variant collisions — belt and suspenders. */
-export const ARCH_PANEL_AGENTS: ReadonlySet<string> = new Set(
+ *  below throws on import) for suffix-variant collisions — belt and suspenders.
+ *  Built via frozenSet so runtime mutation is blocked, symmetric with the frozen
+ *  PHASE_AGENT_MAP. */
+export const ARCH_PANEL_AGENTS: ReadonlySet<string> = frozenSet(
   Object.entries(ARCHITECTURE_AGENTS)
     .filter(([, v]) => v.role === "panel")
     .map(([name]) => name),
@@ -168,6 +187,35 @@ assertPanelPhaseDisjoint();
  *  default N when the user omits `--panel=N`. Kept here as the single numeric
  *  source of truth referenced by loom.md and the panel-config test. */
 export const PANEL_DESIGNERS_DEFAULT = 3;
+
+/** Number of distinct architecture lenses in references/panel-lenses.md — the hard
+ *  cap on parallel designers, since each designer takes exactly one lens and no two
+ *  can share. Kept as a constant (not re-parsed at runtime) so clampPanelDesigners
+ *  stays pure; panel-config.test.ts asserts it still equals the lens-heading count
+ *  in the markdown, so adding/removing a lens without updating this value fails CI.
+ *  Referenced (with its numeric value) by commands/loom.md. */
+export const PANEL_LENS_COUNT = 5;
+
+/** Fixed number of adversarial judge agents for `/loom --panel`. Each judge scores
+ *  every candidate against exactly one criterion (primary axis, testability bar,
+ *  codebase-fit + effort — see commands/loom.md Step 4), so the count is bound to
+ *  those three criteria and is NOT user-configurable. Single numeric source of
+ *  truth referenced by loom.md and the panel-config test. */
+export const PANEL_JUDGES_DEFAULT = 3;
+
+/** Clamp a requested `--panel=N` designer count into the valid range
+ *  [1, PANEL_LENS_COUNT]: at least one designer, never more than the lens count
+ *  (two designers cannot share a lens). Pure — the orchestrator (commands/loom.md)
+ *  applies this when the user passes `--panel=N`. Non-finite input (NaN/Infinity)
+ *  falls back to PANEL_DESIGNERS_DEFAULT; fractional input floors toward zero
+ *  before clamping. */
+export function clampPanelDesigners(n: number): number {
+  if (!Number.isFinite(n)) return PANEL_DESIGNERS_DEFAULT;
+  const floored = Math.floor(n);
+  if (floored < 1) return 1;
+  if (floored > PANEL_LENS_COUNT) return PANEL_LENS_COUNT;
+  return floored;
+}
 
 /** Impl agents → all map to "execute" phase.
  *  Note: agent identifiers are intentionally `string` (no brand). Bun runs

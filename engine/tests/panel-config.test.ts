@@ -2,10 +2,14 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import fc from "fast-check";
 import {
   ARCH_PANEL_AGENTS,
   ARCH_PANEL_PHASE,
   PANEL_DESIGNERS_DEFAULT,
+  PANEL_JUDGES_DEFAULT,
+  PANEL_LENS_COUNT,
+  clampPanelDesigners,
   PHASE_AGENT_MAP,
   KNOWN_AGENTS,
   panelPhaseOverlap,
@@ -109,6 +113,22 @@ describe("panelPhaseOverlap (module-load invariant guard)", () => {
     expect(panelPhaseOverlap(ARCH_PANEL_AGENTS, bad)).toEqual(["arch-designer-agent"]);
   });
 
+  it("handles a panel agent name WITHOUT the -agent suffix (phaseLookupKeys else branch)", () => {
+    // Every REAL panel agent ends in "-agent", so the `bare === panelAgent` else
+    // branch of phaseLookupKeys (config.ts) is never exercised by the real config.
+    // A synthetic bare panel name "arch-designer" probes keys
+    // [arch-designer, arch-designer, arch-designer-agent] — a phase map keyed by
+    // the suffixed form must still be flagged via the third probe, and a disjoint
+    // map must produce no false positive.
+    const panel = new Set(["arch-designer"]);
+    expect(
+      panelPhaseOverlap(panel, { "arch-designer-agent": "decompose" as const }),
+    ).toEqual(["arch-designer"]);
+    expect(
+      panelPhaseOverlap(panel, { "unrelated-agent": "decompose" as const }),
+    ).toEqual([]);
+  });
+
   it("assertPanelPhaseDisjoint THROWS on a synthetic overlap — the load-time guard's throw branch, not just the predicate", () => {
     // panelPhaseOverlap returning a non-empty list proves detection; this proves
     // the guard HALTS on it. Without this, a regression that dropped the `throw`
@@ -158,5 +178,79 @@ describe("PANEL_DESIGNERS_DEFAULT", () => {
     const lenses = lensCount();
     expect(lenses).toBeGreaterThan(0);
     expect(PANEL_DESIGNERS_DEFAULT).toBeLessThanOrEqual(lenses);
+  });
+});
+
+describe("PANEL_JUDGES_DEFAULT", () => {
+  it("is a small positive integer", () => {
+    expect(Number.isInteger(PANEL_JUDGES_DEFAULT)).toBe(true);
+    expect(PANEL_JUDGES_DEFAULT).toBeGreaterThanOrEqual(1);
+  });
+
+  it("is fixed at 3 — one judge per criterion (primary axis, testability, fit+effort)", () => {
+    // K is bound to the three criteria derived in commands/loom.md Step 4, not a
+    // user-tunable knob. Pinning it here fails CI if the count drifts from the
+    // criteria the orchestrator prose relies on.
+    expect(PANEL_JUDGES_DEFAULT).toBe(3);
+  });
+});
+
+describe("PANEL_LENS_COUNT", () => {
+  it("equals the number of lens headings in references/panel-lenses.md", () => {
+    // The constant is the runtime source of truth for the designer cap; this test
+    // is the inverse of the lensCount() derivation — it asserts the constant still
+    // matches the markdown, so adding/removing a lens without updating the constant
+    // (or vice versa) fails CI.
+    expect(PANEL_LENS_COUNT).toBe(lensCount());
+  });
+
+  it("is at least the default designer count (the default must fit under the cap)", () => {
+    expect(PANEL_LENS_COUNT).toBeGreaterThanOrEqual(PANEL_DESIGNERS_DEFAULT);
+  });
+});
+
+describe("clampPanelDesigners", () => {
+  it("passes through in-range integers unchanged", () => {
+    expect(clampPanelDesigners(1)).toBe(1);
+    expect(clampPanelDesigners(3)).toBe(3);
+    expect(clampPanelDesigners(PANEL_LENS_COUNT)).toBe(PANEL_LENS_COUNT);
+  });
+
+  it("clamps below 1 up to 1", () => {
+    expect(clampPanelDesigners(0)).toBe(1);
+    expect(clampPanelDesigners(-4)).toBe(1);
+  });
+
+  it("clamps above the lens count down to the cap", () => {
+    expect(clampPanelDesigners(PANEL_LENS_COUNT + 1)).toBe(PANEL_LENS_COUNT);
+    expect(clampPanelDesigners(99)).toBe(PANEL_LENS_COUNT);
+  });
+
+  it("floors fractional input toward zero before clamping", () => {
+    expect(clampPanelDesigners(2.9)).toBe(2);
+    expect(clampPanelDesigners(0.4)).toBe(1); // floors to 0, then clamps up to 1
+  });
+
+  it("falls back to the default for non-finite input", () => {
+    expect(clampPanelDesigners(Number.NaN)).toBe(PANEL_DESIGNERS_DEFAULT);
+    expect(clampPanelDesigners(Number.POSITIVE_INFINITY)).toBe(PANEL_DESIGNERS_DEFAULT);
+    expect(clampPanelDesigners(Number.NEGATIVE_INFINITY)).toBe(PANEL_DESIGNERS_DEFAULT);
+  });
+
+  it("property: every finite input maps into [1, PANEL_LENS_COUNT]", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: -1000, max: 1000 }), (n) => {
+        const out = clampPanelDesigners(n);
+        return out >= 1 && out <= PANEL_LENS_COUNT && Number.isInteger(out);
+      }),
+    );
+  });
+
+  it("property: values already in range are returned unchanged", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: PANEL_LENS_COUNT }), (n) => {
+        return clampPanelDesigners(n) === n;
+      }),
+    );
   });
 });

@@ -210,7 +210,7 @@ Substitute variables:
 
 Runs only when `--panel` (or `--panel=N`) is passed. The `current_phase` stays `"architecture"` throughout — the engine recognizes the panel agents (`arch-interviewer-agent`, `arch-designer-agent`, `arch-judge-agent`) as architecture-phase work but never advances the phase on their completion; only the final `architecture-agent` spawn advances to plan-alignment, exactly as standard mode does.
 
-Defaults: **N designers** = `PANEL_DESIGNERS_DEFAULT` (`engine/src/config.ts`, currently 3) or the `--panel=N` value, **K = 3 judges**. The candidate/interview artifacts live under the spec dir; they are NOT guarded state.
+Defaults: **N designers** = `PANEL_DESIGNERS_DEFAULT` (`engine/src/config.ts`, currently 3) or the `clampPanelDesigners(--panel=N)` value, **K = `PANEL_JUDGES_DEFAULT` judges** (`engine/src/config.ts`, currently 3 — one per criterion, not user-configurable). The candidate/interview artifacts live under the spec dir; they are NOT guarded state.
 
 ### Step 1 — Interview (once, interactive)
 
@@ -229,9 +229,10 @@ Read the lens fragments from `{LOOM_DIR}/references/panel-lenses.md`. Choose N l
   - `**Codebase maturity:**` = brownfield → `codebase-conventionist`
   - If none apply (or you need a 4th/5th for larger N), fill from the remaining lenses in the table order.
 
-Take the first N distinct lenses. Each designer gets exactly one. Only five
-lenses exist, so **N is capped at 5** — if `--panel=N` requests more, clamp to 5
-(you cannot give two designers the same lens).
+Take the first N distinct lenses. Each designer gets exactly one. Only
+`PANEL_LENS_COUNT` lenses exist (currently 5), so **N is capped at that count** —
+`clampPanelDesigners(N)` (`engine/src/config.ts`) applies the clamp (`[1, PANEL_LENS_COUNT]`)
+to any `--panel=N` value, since you cannot give two designers the same lens.
 
 ### Step 3 — Designers (parallel, headless)
 

@@ -99,9 +99,15 @@ GATE_ERR="$TMP/last-gate.err"
 # JSON that validate-phase-order fail-closes on (exit 2), which an allow-case
 # assertion would misread as a block.
 run_gate() {
-  local agent="$1" prompt="$2" rc=0
-  jq -nc --arg a "$agent" --arg p "$prompt" \
-    '{tool_name:"Task",tool_input:{subagent_type:$a,prompt:$p}}' \
+  local agent="$1" prompt="$2" rc=0 payload
+  # Build the JSON payload FIRST, into a variable, so a jq failure is attributed to
+  # payload construction (fatal below) rather than swallowed. Under `set -o pipefail`
+  # a jq error inside the pipe would surface as the pipeline's exit code, and the
+  # allow/block assertion would misread jq's exit (2/5) as a real CLI block/crash.
+  payload="$(jq -nc --arg a "$agent" --arg p "$prompt" \
+    '{tool_name:"Task",tool_input:{subagent_type:$a,prompt:$p}}')" \
+    || { echo "FATAL: jq failed building the run_gate payload for agent '$agent'" >&2; exit 1; }
+  printf '%s' "$payload" \
     | ( cd "$TMP" && bun "$CLI" pre-tool-use validate-phase-order ) >/dev/null 2>"$GATE_ERR" || rc=$?
   echo "$rc"
 }
@@ -111,9 +117,13 @@ run_gate() {
 # rc = 0 to tell a genuine passthrough from a crashed no-op that leaves the phase
 # coincidentally unchanged. Runs with cwd = $TMP (see run_gate).
 run_stop() {
-  local agent="$1" rc=0
-  jq -nc --arg a "$agent" --arg s "$SESSION" --arg c "$TMP" \
-    '{agent_type:$a,session_id:$s,cwd:$c}' \
+  local agent="$1" rc=0 payload
+  # Same pipefail-attribution guard as run_gate: construct the payload first so a
+  # jq failure is fatal-and-labeled, not misread as a dispatch crash (rc != 0).
+  payload="$(jq -nc --arg a "$agent" --arg s "$SESSION" --arg c "$TMP" \
+    '{agent_type:$a,session_id:$s,cwd:$c}')" \
+    || { echo "FATAL: jq failed building the run_stop payload for agent '$agent'" >&2; exit 1; }
+  printf '%s' "$payload" \
     | ( cd "$TMP" && bun "$CLI" subagent-stop dispatch ) >/dev/null 2>"$GATE_ERR" || rc=$?
   echo "$rc"
 }
