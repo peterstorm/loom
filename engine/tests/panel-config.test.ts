@@ -24,15 +24,18 @@ import {
  *  the designer cap above the real number of lenses. Deriving from the file
  *  means adding or removing a lens automatically re-checks the cap below. */
 function lensCount(): number {
-  const path = join(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "..",
-    "references",
-    "panel-lenses.md",
+  return readRepoFile("references", "panel-lenses.md").match(/^## [a-z][a-z0-9-]*$/gm)
+    ?.length ?? 0;
+}
+
+/** Read a repo file by path segments relative to the repo root (two levels up
+ *  from engine/tests). Shared by the prose-drift tests below so config↔markdown
+ *  contracts are pinned in CI rather than left to silent divergence. */
+function readRepoFile(...segments: string[]): string {
+  return readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "..", ...segments),
+    "utf-8",
   );
-  const md = readFileSync(path, "utf-8");
-  return (md.match(/^## [a-z][a-z0-9-]*$/gm) ?? []).length;
 }
 
 /**
@@ -253,4 +256,73 @@ describe("clampPanelDesigners", () => {
       }),
     );
   });
+});
+
+describe("runtime immutability of derived config", () => {
+  // The doc comments on PHASE_AGENT_MAP and frozenSet promise post-load mutation
+  // is impossible so a panel agent can never be smuggled into the phase map at
+  // runtime. Pin those promises here — a refactor dropping Object.freeze or the
+  // frozenSet mutator-shadowing would otherwise pass every other test.
+  it("PHASE_AGENT_MAP is frozen", () => {
+    expect(Object.isFrozen(PHASE_AGENT_MAP)).toBe(true);
+  });
+
+  it("ARCH_PANEL_AGENTS throws on add/delete/clear (frozenSet mutators shadowed)", () => {
+    // Object.freeze alone does NOT stop set.add — a Set's elements live in an
+    // internal slot. frozenSet shadows the mutators so these throw; without the
+    // shadowing they would silently succeed and mutate the "immutable" set.
+    const mutable = ARCH_PANEL_AGENTS as Set<string>;
+    expect(() => mutable.add("smuggled-phase-agent")).toThrow(/immutable/);
+    expect(() => mutable.delete("arch-designer-agent")).toThrow(/immutable/);
+    expect(() => mutable.clear()).toThrow(/immutable/);
+    // And the set is genuinely unchanged after the failed mutations.
+    expect(ARCH_PANEL_AGENTS.has("smuggled-phase-agent")).toBe(false);
+    expect(ARCH_PANEL_AGENTS.has("arch-designer-agent")).toBe(true);
+  });
+});
+
+describe("commands/loom.md prose literals track the config constants", () => {
+  // loom.md hardcodes the lens cap and judge/designer counts as prose literals so
+  // the orchestrator reads a concrete number. panel-config pins those constants
+  // against panel-lenses.md, but nothing pins the loom.md prose against the
+  // constants — so a count change (or a bumped lens) leaves the prose silently
+  // stale. Each case asserts the regex still matches (fails loud if the prose is
+  // reworded past recognition) AND that the captured literal equals the constant.
+  const loomMd = readRepoFile("commands", "loom.md");
+  const cases: ReadonlyArray<{ label: string; re: RegExp; expected: number }> = [
+    { label: "options: distinct lenses cap", re: /distinct lenses \((\d+)\)/, expected: PANEL_LENS_COUNT },
+    { label: "Step 2: PANEL_LENS_COUNT lenses exist", re: /PANEL_LENS_COUNT` lenses exist \(currently (\d+)\)/, expected: PANEL_LENS_COUNT },
+    { label: "Defaults: designer count", re: /PANEL_DESIGNERS_DEFAULT`[^)]*?currently (\d+)\)/, expected: PANEL_DESIGNERS_DEFAULT },
+    { label: "Defaults: judge count", re: /PANEL_JUDGES_DEFAULT` judges\*\* \([^)]*?currently (\d+)/, expected: PANEL_JUDGES_DEFAULT },
+  ];
+
+  for (const { label, re, expected } of cases) {
+    it(`${label} literal equals ${expected}`, () => {
+      const match = loomMd.match(re);
+      expect(match, `loom.md prose no longer matches ${re} — reworded? re-pin this test`).not.toBeNull();
+      expect(Number(match![1])).toBe(expected);
+    });
+  }
+});
+
+describe("interview digest-label contract (producer ↔ consumer)", () => {
+  // arch-interviewer-agent.md WRITES these labels; loom.md Step 2 regex-READS them
+  // to drive lens/judge selection. There is no shared source — a rename on either
+  // side silently degrades selection to the fallback path with no failure signal.
+  // Pin the exact strings in BOTH files so a rename fails CI.
+  const labels = [
+    "**Primary axis:**",
+    "**Testability bar:**",
+    "**Sensitive boundaries:**",
+    "**Codebase maturity:**",
+  ] as const;
+  const interviewer = readRepoFile("agents", "arch-interviewer-agent.md");
+  const loomMd = readRepoFile("commands", "loom.md");
+
+  for (const label of labels) {
+    it(`${label} appears in both the interviewer (producer) and loom.md (consumer)`, () => {
+      expect(interviewer, `arch-interviewer-agent.md no longer writes ${label}`).toContain(label);
+      expect(loomMd, `loom.md Step 2 no longer reads ${label}`).toContain(label);
+    });
+  }
 });
