@@ -22,12 +22,16 @@ export const PHASE_ORDER: readonly Phase[] = PHASES;
  *  - `panel`: a `/loom --panel` designer/judge/interviewer — recognized as
  *    architecture-phase work so validate-phase-order ALLOWS it, but INVISIBLE to
  *    advance-phase so it never advances the phase mid-panel. */
-//  Both roles carry the same fields, so this is a single object type rather
-//  than a discriminated union: `role` is a runtime discriminant the derived
-//  views filter on, but the variants have no field-level divergence for the
-//  type system to narrow. Kept as one shape to avoid signalling an ADT payoff
-//  that isn't there. (If a role ever gains role-specific fields, split it into
-//  a proper union then.)
+//  Both roles carry the same fields (`role` + `phase`), so this is a single
+//  object type rather than a discriminated union. `phase` is nonetheless
+//  semantically OVERLOADED by role: for a `phase` agent it is the phase its
+//  SubagentStop ADVANCES TO (via PHASE_AGENT_MAP); for a `panel` agent it is the
+//  phase the agent is CLASSIFIED AS for validation and must explicitly NOT
+//  advance to. The two meanings share one field type, so the type system has
+//  nothing to narrow and an ADT would add ceremony without a payoff — but the
+//  semantics do diverge, and only the `role` discriminant tells them apart.
+//  (If a role ever gains a genuinely role-specific field, split it into a
+//  proper discriminated union then.)
 type AgentRole = { readonly role: "phase" | "panel"; readonly phase: Phase };
 
 /** Single source of truth for every architecture-orchestration agent and its
@@ -260,6 +264,48 @@ export const REVIEW_AGENTS = new Set([
 
 /** All agents that map to execute phase (impl + review) */
 export const EXECUTE_AGENTS = new Set([...IMPL_AGENTS, ...REVIEW_AGENTS]);
+
+/** Panel agents that would be MISROUTED away from architecture classification
+ *  by colliding with an execute-phase or utility agent. detectPhase
+ *  (validate-phase-order.ts) classifies IMPL/REVIEW agents as "execute" — and
+ *  short-circuits UTILITY agents to passthrough — BEFORE it reaches the panel
+ *  branch, probing both the bare and `-agent`-suffixed forms. So a panel agent
+ *  whose name (or any phaseLookupKeys variant of it) is also an
+ *  IMPL/REVIEW/UTILITY agent would never be recognized as architecture work, and
+ *  no PHASE_AGENT_MAP entry exists for it — so assertPanelPhaseDisjoint above,
+ *  which only inspects PHASE_AGENT_MAP, cannot catch this class. Must always be
+ *  empty. Exported so the guard can be driven with a synthetic overlap in tests. */
+export function panelExecuteOverlap(
+  panel: ReadonlySet<string> = ARCH_PANEL_AGENTS,
+  reserved: ReadonlySet<string> = new Set([...IMPL_AGENTS, ...REVIEW_AGENTS, ...UTILITY_AGENTS]),
+): string[] {
+  return [...panel].filter((a) => phaseLookupKeys(a).some((k) => reserved.has(k)));
+}
+
+/** Throw if any panel agent also collides with an execute-phase or utility
+ *  agent — the complement of assertPanelPhaseDisjoint, closing detectPhase's
+ *  check-ordering gap (see panelExecuteOverlap). Exported so a test can drive
+ *  the throwing branch with a synthetic overlap; called unconditionally at
+ *  module scope below so the same check fails at load, not just in CI. */
+export function assertPanelExecuteDisjoint(
+  panel: ReadonlySet<string> = ARCH_PANEL_AGENTS,
+  reserved: ReadonlySet<string> = new Set([...IMPL_AGENTS, ...REVIEW_AGENTS, ...UTILITY_AGENTS]),
+): void {
+  const overlap = panelExecuteOverlap(panel, reserved);
+  if (overlap.length > 0) {
+    throw new Error(
+      `loom config invariant violated: panel agents must not also be execute-phase ` +
+        `or utility agents, but these collide: ${overlap.join(", ")}. detectPhase would ` +
+        `classify them as "execute" (or pass them through as utility) before reaching ` +
+        `the panel branch, so they would never be recognized as architecture work.`,
+    );
+  }
+}
+
+// Fail at module load if a panel agent collides with an execute/utility agent —
+// same rationale as assertPanelPhaseDisjoint above, but for the sets detectPhase
+// consults BEFORE the panel branch. Runs once per process at first import.
+assertPanelExecuteDisjoint();
 
 /** Tools that modify files (defined in core/tool-vocabulary — re-exported here, config stays the documented home) */
 export { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "./core/tool-vocabulary";

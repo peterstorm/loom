@@ -14,6 +14,8 @@ import {
   KNOWN_AGENTS,
   panelPhaseOverlap,
   assertPanelPhaseDisjoint,
+  panelExecuteOverlap,
+  assertPanelExecuteDisjoint,
 } from "../src/config";
 
 /** Count the lens sections in panel-lenses.md — the single source of truth for
@@ -145,6 +147,55 @@ describe("panelPhaseOverlap (module-load invariant guard)", () => {
 
   it("assertPanelPhaseDisjoint does NOT throw for the real config (the module loaded, so this must hold)", () => {
     expect(() => assertPanelPhaseDisjoint()).not.toThrow();
+  });
+});
+
+describe("panelExecuteOverlap (module-load guard for detectPhase's check ordering)", () => {
+  // detectPhase (validate-phase-order.ts:51) classifies IMPL/REVIEW agents as
+  // "execute" — and utility agents are passed through elsewhere — BEFORE the
+  // panel branch (line 57). A panel agent colliding with one of those sets would
+  // be misrouted away from architecture classification, and because it is absent
+  // from PHASE_AGENT_MAP, assertPanelPhaseDisjoint (which only inspects the phase
+  // map) cannot catch it. This guard closes that gap.
+  it("reports no overlap for the real config (guard would have thrown at import otherwise)", () => {
+    expect(panelExecuteOverlap()).toEqual([]);
+  });
+
+  it("detects a synthetic IMPL/REVIEW collision — proving the guard is live, not tautological", () => {
+    // A reserved set containing a panel agent's exact name must be flagged: this
+    // is the misroute-to-execute hazard the guard exists to prevent.
+    const reserved = new Set(["arch-designer-agent", "code-implementer-agent"]);
+    expect(panelExecuteOverlap(ARCH_PANEL_AGENTS, reserved)).toEqual(["arch-designer-agent"]);
+  });
+
+  it("detects a DE-SUFFIXED collision — detectPhase probes the bare form too (IMPL_AGENTS.has(agent))", () => {
+    // detectPhase checks IMPL_AGENTS.has(agent) with the bare invocation, so a
+    // reserved agent named "arch-designer" (no suffix) would capture the bare
+    // panel invocation. phaseLookupKeys covers this via its first probe, so the
+    // guard must flag it even though the exact stored key is absent.
+    const reserved = new Set(["arch-designer"]);
+    expect(panelExecuteOverlap(ARCH_PANEL_AGENTS, reserved)).toEqual(["arch-designer-agent"]);
+  });
+
+  it("detects a SUFFIXED collision — detectPhase probes IMPL_AGENTS.has(agent + \"-agent\")", () => {
+    // The suffixed probe means a reserved key "arch-designer-agent-agent" would
+    // capture the suffixed panel invocation. Third phaseLookupKeys probe.
+    const reserved = new Set(["arch-designer-agent-agent"]);
+    expect(panelExecuteOverlap(ARCH_PANEL_AGENTS, reserved)).toEqual(["arch-designer-agent"]);
+  });
+
+  it("assertPanelExecuteDisjoint THROWS on a synthetic overlap — the load-time guard's throw branch", () => {
+    // Predicate detection is not enough; this proves the guard HALTS. A regression
+    // dropping the `throw` (keeping only the predicate) would otherwise stay green
+    // while letting a misroutable config load.
+    const reserved = new Set(["arch-designer-agent"]);
+    expect(() => assertPanelExecuteDisjoint(ARCH_PANEL_AGENTS, reserved)).toThrow(
+      /panel agents must not also be execute-phase or utility agents/,
+    );
+  });
+
+  it("assertPanelExecuteDisjoint does NOT throw for the real config (the module loaded, so this must hold)", () => {
+    expect(() => assertPanelExecuteDisjoint()).not.toThrow();
   });
 });
 

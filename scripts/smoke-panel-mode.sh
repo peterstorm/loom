@@ -148,7 +148,12 @@ echo
 # ── 1. panel agent ALLOWED in architecture phase ──────────────────────────────
 echo "[1] validate-phase-order: arch-designer-agent in architecture phase"
 write_state "architecture" "null"
-rc="$(run_gate arch-designer-agent "design a candidate via the simplicity-first lens")"
+# Deliberately regex-NEUTRAL prompt: "design"/"architecture"/"plan.md" would each
+# match detectPhase's architecture prompt-regex fallback, so a prompt containing
+# them could pass even if ARCH_PANEL_AGENTS recognition were broken — a false
+# green. This prompt matches no detectPhase regex, so the allow proves the panel
+# recognition path (validate-phase-order.ts:57) specifically.
+rc="$(run_gate arch-designer-agent "candidate under the simplicity-first lens")"
 [ "$rc" = "0" ] && ok "ALLOWED (exit 0)" || bad "expected allow (exit 0), got exit $rc"
 
 # also the interviewer and judge
