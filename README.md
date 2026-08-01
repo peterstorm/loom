@@ -669,8 +669,8 @@ loom/
 ├── lint-rules/                 # Bundled JSON regex rules
 ├── rules/                      # Domain rules (architecture, java/ts/rust patterns, property testing)
 ├── references/                 # Spec, plan, ADR templates
-├── pi/                         # Pi harness extension + bridge
-├── scripts/                    # lint-project.ts, sync-pi-agents.sh
+├── pi/                         # Native Pi harness extension
+├── scripts/                    # lint-project.ts
 ├── artifacts/                  # Captured artifacts from runs (specs/tests/reviews)
 ├── docs/                       # ADRs, Pi usage / migration notes
 ├── CONTEXT.md                  # Ubiquitous language + domain model (used by /grill)
@@ -685,12 +685,13 @@ The `/references/` directory holds templates used by phase agents: `spec-templat
 
 ## Pi Harness
 
-Loom's engine is harness-agnostic. The `/pi/` directory ships a Pi extension (`extension.ts`) and a bridge (`loom-bridge.ts`) that adapts Pi's `tool_call` / `tool_result` events to the same handlers used under Claude Code.
+Loom's engine is harness-agnostic. The `/pi/extension.ts` native extension consumes Pi's `tool_call` and `tool_result` events directly; no transcript-converting bridge is used.
 
-- The `HARNESS` constant in `config.ts` detects `claude` vs `pi` at runtime.
 - Everything in `engine/src/core/` has zero harness dependency.
+- The native extension owns Pi guards, post-edit lint, resume context, and subagent completion/state transitions.
 - The Pi adapter (`engine/src/handlers/pi-adapter.ts`) maps lint results to Pi's `ToolResultResponse` shape.
-- State paths shift from `.claude/state/…` to `.pi/state/…`.
+- Loom continues to use the shared `.claude/state/…` task-graph location so Claude Code and Pi can resume the same orchestration.
+- Do not load a legacy `loom-bridge` extension with the native extension: both process `subagent` completion and would duplicate state transitions.
 
 See `docs/pi-usage.md` and `docs/migration-claude-code-to-pi.md` for details.
 
@@ -762,11 +763,6 @@ The suite includes:
 bun scripts/lint-project.ts engine/src
 ```
 
-### Pi agent sync
-
-```bash
-bash scripts/sync-pi-agents.sh
-```
 
 ---
 

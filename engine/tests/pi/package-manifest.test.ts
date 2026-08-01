@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -12,6 +12,7 @@ describe("Pi package manifest", () => {
     expect(pkg.pi.extensions).toEqual(["./pi/extension.ts"]);
     expect(pkg.pi.extensions).not.toContain("./pi");
     expect(pkg.pi.extensions).not.toContain("./pi/loom-bridge.ts");
+    expect(existsSync(resolve(repoRoot, "pi/loom-bridge.ts"))).toBe(false);
   });
 
   it("registers only top-level slash command templates as prompts", () => {

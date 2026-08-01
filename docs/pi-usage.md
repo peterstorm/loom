@@ -1,86 +1,84 @@
 # Using Loom with Pi
 
-Loom is a first-class Pi package. The package exports:
+Loom is a Pi package. Its `package.json` exposes one native extension (`pi/extension.ts`), Loom skills, and top-level command templates. The native extension handles Pi `tool_call` and `tool_result` events directly; **do not install `loom-bridge`** alongside it.
 
-- `pi/extension.ts` — the Pi extension that replaces the old hook/bridge setup.
-- `skills/` plus the Vercel skill directory.
-- top-level command prompt templates in `commands/*.md`.
-- generated Pi-compatible subagent definitions synced into `~/.pi/agent/agents/`.
+## This workstation: dotfiles-managed local package
 
-## Install
-
-```bash
-pi install /home/peterstorm/dev/claude-plugins/loom
-# or for a one-off run:
-pi -e /home/peterstorm/dev/claude-plugins/loom
-```
-
-Reload an existing Pi session with `/reload`.
-
-## Required companion: subagent tool
-
-Pi does not ship subagents by default. Loom expects a `subagent` tool compatible with Pi's example subagent extension (the one that discovers `~/.pi/agent/agents/*.md` and `.pi/agents/*.md`). Install/enable that extension before running `/loom`.
-
-On Pi session start, Loom syncs its bundled agents into `~/.pi/agent/agents/` so the subagent tool can discover them. If you already have a conflicting agent file, Loom leaves it untouched and warns. To overwrite with the bundled Loom version:
+Home Manager installs the Pi binary and links these directories from the dotfiles repository:
 
 ```text
-/loom-sync-agents --force
+~/.pi/agent/agents      -> ~/.dotfiles/pi/agents
+~/.pi/agent/extensions  -> ~/.dotfiles/pi/extensions
+~/.pi/agent/prompts     -> ~/.dotfiles/pi/prompts
 ```
 
-The sync also makes Claude Code-style agent frontmatter Pi-compatible:
+`~/.pi/agent/settings.json` is a mutable copy of `~/.dotfiles/pi/settings.json`. It declares Loom as a live local package:
 
-- YAML `tools:` arrays become Pi's comma-separated tool string.
-- `Glob` maps to Pi's `find` tool.
-- `skills:` are expanded into the agent body because Pi's stock subagent loader ignores skill preloading.
+```json
+{
+  "packages": [
+    "../../dev/claude-plugins/loom",
+    "../../dev/claude-plugins/cortex"
+  ]
+}
+```
 
-## Runtime path resolution
+The Loom path resolves relative to `~/.pi/agent/` as `~/dev/claude-plugins/loom`. Pi therefore loads the currently checked-out Loom worktree; no `pi install` or `pi update` is required for normal development.
 
-The Pi extension sets these environment variables for the main Pi process and spawned subagents:
+After changing or pulling Loom:
 
 ```bash
-CLAUDE_PLUGIN_ROOT=/path/to/loom
-LOOM_PLUGIN_ROOT=/path/to/loom
+cd ~/dev/claude-plugins/loom
+git pull
 ```
 
-Commands, agents, and skills should resolve package files through those variables, not by searching the Claude Code plugin cache.
+Restart Pi or run `/reload`. Run `home-manager switch` only after changing the Home Manager module or dotfiles' default Pi settings.
 
-## What works
+The dotfiles package supplies a generic `subagent` extension. Its agent definitions are symlinks to `~/dev/claude-plugins/loom/agents`, and it resolves each agent's `skills:` from the Loom package manifest. Do not copy or generate another agent set into `~/.pi/agent/agents`.
 
-| Feature | Status | Notes |
+## Native Pi behavior
+
+| Feature | Status | Native owner |
 |---|---:|---|
-| `/loom`, `/wave-gate`, review commands | ✅ | Loaded as Pi prompt templates from `commands/*.md` only. |
-| Skills | ✅ | Loaded from `skills/` and `commands/vercel-react-best-practices`. |
-| Main-agent guards | ✅ | `tool_call` handlers block unsafe direct edits/state writes and validate subagent tasks. |
-| Post-edit lint | ✅ | `tool_result` handler runs immediate lint for write/edit results. |
-| Subagent task updates | ✅ | `tool_result` handler processes Pi `subagent` results directly. The old `loom-bridge.ts` is not loaded. |
-| Phase advancement | ✅ | Phase-agent subagent results update the task graph. |
-| Agent skill preloading | ✅ | Implemented by generated Pi agent files during `/loom-sync-agents`. |
+| `/loom`, `/wave-gate`, review commands | ✅ | Loom prompt templates |
+| Skills | ✅ | Loom package manifest |
+| Main-agent guards | ✅ | `pi/extension.ts` `tool_call` handler |
+| Post-edit lint | ✅ | `pi/extension.ts` `tool_result` handler |
+| Subagent task updates and phase advancement | ✅ | `pi/extension.ts` `tool_result` handler |
+| Agent skill preloading | ✅ | Dotfiles generic `subagent` extension |
+
+`CLAUDE_PLUGIN_ROOT` and `LOOM_PLUGIN_ROOT` are set by the native extension to the installed package root. Loom commands, skills, and subagents use these variables for package-relative files.
+
+## Installing outside this dotfiles setup
+
+For active Loom development, prefer a local path because Pi immediately uses the checked-out source:
+
+```bash
+pi install /absolute/path/to/loom
+```
+
+For a reproducible consumer installation, use a pinned Git ref:
+
+```bash
+pi install git:github.com/peterstorm/loom@<tag-or-commit>
+```
+
+A ref is intentionally pinned. To adopt a newer Loom version, change the ref or reinstall with the desired ref, then `/reload`. Use an unpinned Git source only when you explicitly want `pi update` to follow the repository's default branch.
 
 ## Interactive phase agents in Pi
 
-Some Loom phase templates were originally written for Claude Code's `AskUserQuestion` tool. Pi subagents are non-interactive. Under Pi, those agents must output a machine-visible block such as `QUESTIONS_REQUIRED` or `APPROACH_SELECTION_REQUIRED` and stop; the main session asks the user, then re-runs the agent with the answers.
+Pi subagents are non-interactive. When a Loom phase requires user input, its agent emits `QUESTIONS_REQUIRED` or `APPROACH_SELECTION_REQUIRED`; ask those questions in the main Pi session and rerun the agent with the answers.
 
 ## Troubleshooting
 
 ### `Unknown agent: "code-implementer-agent"`
 
-Run:
-
-```text
-/loom-sync-agents --force
-/reload
-```
-
-Also confirm the subagent extension is enabled.
+Confirm the dotfiles generic `subagent` extension is enabled and that `~/.dotfiles/pi/agents/code-implementer-agent.md` still symlinks to the Loom worktree. Run `/reload` after changing agents.
 
 ### `FATAL: loom package root not found`
 
-The Loom extension is not loaded in the current Pi process. Install the package, start Pi with `-e /path/to/loom`, or run `/reload`.
+Loom's native Pi extension is not loaded. Confirm `pi list` includes the Loom package and restart/reload Pi.
 
-### Tasks do not update after subagents finish
+### Tasks update twice or state transitions behave unexpectedly
 
-Ensure only `pi/extension.ts` is loaded. The legacy `pi/loom-bridge.ts` should not be installed separately anymore.
-
-### Conflicting agent warning
-
-You have a user-owned file in `~/.pi/agent/agents/` with the same name as a Loom agent. Use `/loom-sync-agents --force` to replace it with Loom's generated Pi-compatible copy, or rename your custom agent.
+Remove any legacy `loom-bridge` extension. The native Loom extension is the only state adapter that should process `subagent` results.
