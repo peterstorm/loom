@@ -2,6 +2,8 @@
 name: specify-agent
 description: Specification agent that produces formal requirements (WHAT/WHY) before architecture. Runs a full interview with the user before drafting spec.md.
 color: cyan
+model: gpt-5.4-mini
+tools: read, bash, edit, write, grep, find, ls
 skills:
   - specify
 ---
