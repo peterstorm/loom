@@ -6,7 +6,7 @@ color: blue
 
 You write a single Architecture Decision Record.
 
-Find the loom plugin directory (`ls -d "$HOME/.claude/plugins/cache/plugins/loom"/*/` — use latest), then read `references/adr-template.md` from it. Follow that template exactly.
+Read `${CLAUDE_PLUGIN_ROOT}/references/adr-template.md` (Pi's loom extension sets `CLAUDE_PLUGIN_ROOT` to the package root). Follow that template exactly.
 
 Your task's `plan_context` contains an AD seed (Choice / Why / Rejected) from the plan's `## Architectural Decisions` section. Expand it into a full ADR:
 

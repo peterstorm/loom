@@ -51,7 +51,7 @@ Before writing spec:
 
 ### 3. Write Specification
 
-Load the spec template (resolve loom plugin path: `ls -d "$HOME/.claude/plugins/cache/plugins/loom"/*/`, then read `references/spec-template.md` from it) and populate sections.
+Load the spec template from `${CLAUDE_PLUGIN_ROOT:-$LOOM_PLUGIN_ROOT}/references/spec-template.md` (Pi sets these environment variables via the loom extension; in local development, use the repository root as `LOOM_DIR`). Populate all sections.
 
 **Critical constraint:** Spec describes WHAT users need and WHY. NO implementation details:
 - No tech stack mentions

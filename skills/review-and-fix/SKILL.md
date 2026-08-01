@@ -26,7 +26,7 @@ Automated workflow that chains review → plan → implement → commit → push
 
 ### Phase 1: Review (via sub-agents)
 
-Spawn review agents in parallel using the Task tool. Each agent MUST be spawned as a sub-agent — do NOT perform reviews inline.
+Spawn review agents in parallel using the available Task/subagent tool. Each agent MUST be spawned as a sub-agent — do NOT perform reviews inline.
 
 **Determine scope:**
 ```bash
@@ -35,7 +35,7 @@ git diff --cached --name-only
 git diff main...HEAD --stat | tail -1
 ```
 
-**Launch review agents (parallel via Task tool):**
+**Launch review agents (parallel via Task/subagent tool):**
 
 1. **`loom:code-reviewer`** — CLAUDE.md compliance, bugs, patterns
 2. **`loom:silent-failure-hunter`** — Error handling, Either patterns, silent failures

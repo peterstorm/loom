@@ -18,12 +18,19 @@ command -v bun || echo "FATAL: bun not found. Run: nix develop ./.claude"
 ```
 If `bun` is missing, **STOP and tell the user**. Loom hooks require bun for TypeScript transcript parsing. Dev shell: `nix develop ./.claude`
 
-## Setup: Resolve Plugin Path
+## Setup: Resolve Loom Package Root
 
-**FIRST STEP of every `/loom` invocation** — resolve loom plugin install path:
+**FIRST STEP of every `/loom` invocation** — resolve the loom package root. In Pi, the extension exports this as `CLAUDE_PLUGIN_ROOT`; the fallbacks keep local development and Claude Code plugin installs working:
 ```bash
-LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/ 2>/dev/null | tail -1 | sed 's:/$::')
-[ -z "$LOOM_DIR" ] && echo "FATAL: loom plugin not installed" && exit 1
+LOOM_DIR="${CLAUDE_PLUGIN_ROOT:-${LOOM_PLUGIN_ROOT:-}}"
+if [ -z "$LOOM_DIR" ] || [ ! -f "$LOOM_DIR/engine/src/cli.ts" ]; then
+  if [ -f "./engine/src/cli.ts" ] && [ -d "./commands/templates" ]; then
+    LOOM_DIR="$PWD"
+  else
+    LOOM_DIR=$(find "$HOME/.pi/agent" "$HOME/.claude/plugins/cache" -path '*/engine/src/cli.ts' 2>/dev/null | grep '/loom/' | sed 's:/engine/src/cli.ts$::' | tail -1)
+  fi
+fi
+[ -z "$LOOM_DIR" ] && echo "FATAL: loom package root not found" && exit 1
 echo "LOOM_DIR=$LOOM_DIR"
 ```
 
@@ -173,7 +180,7 @@ Substitute variables:
 
 **Spawn clarify-agent** with the substituted template as prompt.
 
-**IMPORTANT: Do NOT pre-resolve markers in the agent prompt.** The clarify agent MUST ask the user via AskUserQuestion. Pass only the spec path and marker count — let the agent drive the questioning.
+**IMPORTANT: Do NOT pre-resolve markers in the agent prompt.** Pass only the spec path and marker count — let the agent drive the questioning. Under Pi, if the subagent cannot interactively ask questions, have it output the unresolved questions and stop; ask the user in the main session, then re-run the clarify agent with the answers.
 
 **Wait for agent completion.** Verify markers resolved.
 
@@ -337,7 +344,7 @@ If user continues: Proceed to Phase 5 normally.
 For each wave:
 
 1. Get pending tasks in the current wave (crashed tasks remain `pending` and are re-spawned)
-2. Spawn ALL wave tasks in parallel (single message, multiple Task calls)
+2. Spawn ALL wave tasks in parallel (single message, multiple Task/subagent calls)
 3. Wait for all to reach "implemented"
 4. If any wave task never reached `implemented` (agent crashed): re-spawn it (still `pending`, `executing_tasks` was cleared)
 5. **RUN `/wave-gate` — MANDATORY, via subagents** (see below)
@@ -478,14 +485,14 @@ Hooks auto-activate when `active_task_graph.json` exists:
 
 | Hook | Event | Purpose |
 |------|-------|---------|
-| `block-direct-edits.sh` | PreToolUse: Edit/Write/MultiEdit | Forces Task tool |
+| `block-direct-edits.sh` | PreToolUse: Edit/Write/MultiEdit | Forces Task/subagent tool |
 | `enforce-phase-tools.sh` | PreToolUse: Edit/Write/MultiEdit | Guarded-skill-machine gate: denies enforced tools the bound agent's phase doesn't allow (fails closed) |
 | `guard-state-file.sh` | PreToolUse: Bash | Deny-by-default on guarded state paths: only read-only commands (`jq`, `cat`, `grep`, …) and whitelisted helpers pass — covers task graph + subagent evidence/binding files + machine definitions |
-| `validate-task-execution.sh` | PreToolUse: Task | Validates wave order |
-| `validate-phase-order.sh` | PreToolUse: Task | Enforces phase sequencing |
-| `validate-template-substitution.sh` | PreToolUse: Task | Blocks unsubstituted `{variable}` patterns |
-| `validate-agent-model.sh` | PreToolUse: Task | Validates agent model assignment |
-| `validate-agent-skill.sh` | PreToolUse: Task | Validates agent skill preload |
+| `validate-task-execution.sh` | PreToolUse: Task/subagent | Validates wave order |
+| `validate-phase-order.sh` | PreToolUse: Task/subagent | Enforces phase sequencing |
+| `validate-template-substitution.sh` | PreToolUse: Task/subagent | Blocks unsubstituted `{variable}` patterns |
+| `validate-agent-model.sh` | PreToolUse: Task/subagent | Validates agent model assignment |
+| `validate-agent-skill.sh` | PreToolUse: Task/subagent | Validates agent skill preload |
 | `mark-subagent-active.sh` | SubagentStart | Tracks active subagents + binds the guarded skill machine (epoch) |
 | `record-evidence.sh` | PostToolUse: Read/Edit/Write/MultiEdit/Bash | Appends epoch-stamped facts (FileRead/FileWrite/TestRun) to the evidence ledger |
 | `lint-file.sh` | PostToolUse: Edit/Write/MultiEdit | Runs the immediate-tier linter (regex rules only; programmatic rules run at the wave gate) |
@@ -544,7 +551,7 @@ jq '.wave_gates' .claude/state/active_task_graph.json
 ### Fixing Blocked Waves
 
 When blocked (critical findings), Edit/Write blocked too. To fix:
-1. **Re-spawn via Task** — create fix agent with findings context (subagent CAN Edit/Write)
+1. **Re-spawn via Task/subagent** — create fix agent with findings context (subagent CAN Edit/Write)
 2. **Run `/wave-gate`** — re-reviews only blocked tasks
 3. **Override false positives** — pipe corrected findings through whitelisted helpers (guard hook allows these):
    ```bash
@@ -568,7 +575,7 @@ Critical findings **block** the gate. Advisory findings do **not** — but loom 
 - **Relevant** — in scope for the task, actionable, and consistent with project standards (the repo's `CLAUDE.md` / conventions). These get **fixed**.
 - **Not relevant** — out-of-scope refactor, nitpick that contradicts an established project convention, false positive, or work deliberately deferred to a later wave. These are **recorded** with a one-line reason, not fixed.
 
-**Fix relevant advisories** the same way as criticals — spawn a fix subagent via Task (Edit/Write are blocked for the orchestrator), give it the advisory text + file context, and have it make the minimal change. Re-run `/wave-gate` so the fix is re-reviewed.
+**Fix relevant advisories** the same way as criticals — spawn a fix subagent via Task/subagent (Edit/Write are blocked for the orchestrator), give it the advisory text + file context, and have it make the minimal change. Re-run `/wave-gate` so the fix is re-reviewed.
 
 **Best-effort, non-blocking:** if a relevant advisory can't be fixed cleanly (breaks tests, needs an upstream change), defer it with a reason rather than blocking the wave. Never silently drop an advisory — every advisory ends as *fixed*, *deferred (reason)*, or *dismissed (reason)*.
 
@@ -577,7 +584,7 @@ Critical findings **block** the gate. Advisory findings do **not** — but loom 
 ## Constraints
 
 - **ALL phases via agents** - brainstorm, specify, clarify, architecture, plan-alignment, decompose agents
-- **ALL implementation via Task tool** - Edit/Write/MultiEdit blocked
+- **ALL implementation via Task/subagent tool** - Edit/Write/MultiEdit blocked
 - **ALL state writes via hooks** - Bash writes blocked (exception: `start_sha` PreToolUse write)
 - **NEVER skip phases** unless explicit `--skip-X` flag provided
 - **NEVER proceed with >3 unresolved markers** without user acknowledgment or `--skip-clarify`

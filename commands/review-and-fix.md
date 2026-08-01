@@ -33,9 +33,9 @@ git diff main...HEAD --stat | tail -1
 
 Identify: file count, insertion count, languages involved.
 
-### 1c. Launch Review Agents (Parallel via Task)
+### 1c. Launch Review Agents (Parallel via Task/subagent)
 
-Spawn ALL applicable review agents in a **single message with multiple Task calls**:
+Spawn ALL applicable review agents in a **single message with multiple Task/subagent calls**:
 
 1. **`loom:code-reviewer`** — Always
    - Prompt: "Review these files for project guideline compliance and bugs: {file_list}"

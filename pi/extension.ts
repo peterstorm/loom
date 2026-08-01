@@ -45,22 +45,27 @@ import * as git from "../engine/src/utils/git";
 // Linter integration (PostEdit lint via tool_result)
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
 import { lintFile } from "../engine/src/linter/index";
-import type { PiMessage } from "./loom-bridge";
+
+type PiContentBlock = Readonly<{
+  type: string;
+  text?: string;
+  name?: string;
+  arguments?: Record<string, unknown>;
+}>;
+
+type PiMessage = Readonly<{
+  role: string;
+  content?: readonly PiContentBlock[];
+}>;
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const AGENTS_DIR = join(PACKAGE_ROOT, "agents");
-const SKILLS_DIR = join(PACKAGE_ROOT, "skills");
+
+// Make package-relative references work in Pi subprocesses (notably the
+// subagent example extension, which inherits process.env when it spawns `pi`).
+process.env.CLAUDE_PLUGIN_ROOT = PACKAGE_ROOT;
+process.env.LOOM_PLUGIN_ROOT = PACKAGE_ROOT;
 
 export default function (pi: ExtensionAPI) {
-  // ─── Resource Discovery ───────────────────────────────────────────────
-  // Contribute skills from this package that aren't in the pi manifest's
-  // auto-discovery (the manifest covers skills/ and commands/ already,
-  // but we also register agents dir for the subagent tool).
-
-  // Resource paths handled by package.json "pi" manifest.
-  // Only register paths NOT covered there.
-  // pi.on("resources_discover", () => ({ ... }));
-
   // ─── PreToolUse Guards (tool_call event) ──────────────────────────────
 
   pi.on("tool_call", async (event, ctx) => {

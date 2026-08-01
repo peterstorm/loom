@@ -66,9 +66,9 @@ git diff main...HEAD --stat | tail -1
 
 ### 5. Launch Review Agents
 
-**For comprehensive review, launch these agents in parallel using the Task tool.**
+**For comprehensive review, launch these agents in parallel using the Task/subagent tool.**
 
-Each agent MUST be spawned via `Task` with the `subagent_type` shown below. Do NOT perform reviews inline — always dispatch to specialized agents.
+Each agent MUST be spawned via Claude Code `Task` (`subagent_type`) or Pi `subagent` (`agent`) as appropriate. Do NOT perform reviews inline — always dispatch to specialized agents.
 
 1. **`loom:code-reviewer`** - CLAUDE.md compliance, bugs, architecture
    - Will recommend delegation to: security-expert, java-test-engineer, ts-test-engineer, nextjs-frontend-design
