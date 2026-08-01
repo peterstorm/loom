@@ -9,7 +9,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import { syncBundledAgents } from "./agent-sync";
 
 // Engine core — harness-agnostic, no Claude Code dependency (these do fs I/O)
 import { shouldBlockDirectEdit } from "../engine/src/core/block-direct-edits";
@@ -45,21 +46,23 @@ import * as git from "../engine/src/utils/git";
 // Linter integration (PostEdit lint via tool_result)
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
 import { lintFile } from "../engine/src/linter/index";
-import type { PiMessage } from "./loom-bridge";
+import type { PiMessage } from "./pi-types";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const AGENTS_DIR = join(PACKAGE_ROOT, "agents");
-const SKILLS_DIR = join(PACKAGE_ROOT, "skills");
+
+// Make package-relative references work in Pi subprocesses (notably the
+// subagent example extension, which inherits process.env when it spawns `pi`).
+process.env.CLAUDE_PLUGIN_ROOT = PACKAGE_ROOT;
+process.env.LOOM_PLUGIN_ROOT = PACKAGE_ROOT;
 
 export default function (pi: ExtensionAPI) {
-  // ─── Resource Discovery ───────────────────────────────────────────────
-  // Contribute skills from this package that aren't in the pi manifest's
-  // auto-discovery (the manifest covers skills/ and commands/ already,
-  // but we also register agents dir for the subagent tool).
+  // ─── Pi Agent Compatibility ───────────────────────────────────────────
+  // Pi packages do not have a native `agents` resource type. Loom needs its
+  // bundled agents to be visible to the stock subagent extension, which reads
+  // direct `~/.pi/agent/agents/*.md` files. Sync generated Pi-compatible copies:
+  // - YAML array tools are normalized to Pi's comma-string format.
+  // - Claude Code `skills:` frontmatter is expanded into the agent body.
 
-  // Resource paths handled by package.json "pi" manifest.
-  // Only register paths NOT covered there.
-  // pi.on("resources_discover", () => ({ ... }));
 
   // ─── PreToolUse Guards (tool_call event) ──────────────────────────────
 
@@ -192,7 +195,18 @@ export default function (pi: ExtensionAPI) {
 
   // ─── Session Lifecycle ────────────────────────────────────────────────
 
-  pi.on("session_start", async (_event, _ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
+    const sync = syncBundledAgents(getAgentDir(), PACKAGE_ROOT);
+    if (sync.conflicts.length > 0) {
+      ctx.ui.notify(
+        `Loom agents not overwritten because user files already exist: ${sync.conflicts.join(", ")}. Run /loom-sync-agents --force to replace them.`,
+        "warning",
+      );
+    }
+    if (sync.errors.length > 0) {
+      ctx.ui.notify(`Loom agent sync errors: ${sync.errors.join("; ")}`, "error");
+    }
+
     // Cleanup stale subagent tracking files — the ENGINE's sweep, not a
     // per-file twin: staleness is judged per session GROUP (max mtime across
     // the session's files), and the TTL is the shared STALE_SUBAGENT_TTL_MS,
@@ -629,6 +643,25 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ─── Commands ─────────────────────────────────────────────────────────
+
+  pi.registerCommand("loom-sync-agents", {
+    description: "Sync bundled loom agents into ~/.pi/agent/agents for the subagent tool",
+    handler: async (args, ctx) => {
+      const force = args.split(/\s+/).includes("--force");
+      const result = syncBundledAgents(getAgentDir(), PACKAGE_ROOT, { force });
+      const parts = [
+        `${result.written.length} written`,
+        `${result.skipped.length} unchanged`,
+        result.conflicts.length > 0 ? `${result.conflicts.length} conflicts` : "",
+        result.errors.length > 0 ? `${result.errors.length} errors` : "",
+      ].filter(Boolean);
+
+      ctx.ui.notify(
+        `Loom agent sync: ${parts.join(", ")}${result.conflicts.length > 0 ? `. Conflicts: ${result.conflicts.join(", ")}` : ""}`,
+        result.errors.length > 0 || result.conflicts.length > 0 ? "warning" : "info",
+      );
+    },
+  });
 
   pi.registerCommand("loom-status", {
     description: "Show current loom orchestration status",

@@ -27,8 +27,8 @@ You are running inside `/loom`. Your plan feeds into the decompose phase, which 
 You will run THREE stages before writing the plan:
 
 1. **Read the spec + explore the codebase** silently.
-2. **Interview** — ask ALL the questions listed below, batched across multiple `AskUserQuestion` calls (4 per call max).
-3. **Approach gate** — present 2-3 viable approaches with a trade-off table via `AskUserQuestion` (with previews), let the user pick one.
+2. **Interview** — ask ALL the questions listed below, batched in groups of up to 4. In Claude Code, use `AskUserQuestion`; in Pi subagents, output a `QUESTIONS_REQUIRED` block and stop so the main session can ask the user, then resume with answers.
+3. **Approach gate** — present 2-3 viable approaches with a trade-off table; use `AskUserQuestion` when available, otherwise output `APPROACH_SELECTION_REQUIRED` for the main Pi session to ask.
 
 Only THEN write the plan, informed by all three. Skip a specific interview question only if the spec or codebase exploration gives a confident, explicit answer. When in doubt, ask.
 
@@ -52,7 +52,7 @@ Only THEN write the plan, informed by all three. Skip a specific interview quest
 
 ### 3. Interview the User — Ask ALL Questions
 
-Use `AskUserQuestion` with multiple-choice options where possible. Batch across multiple calls (4 per call max). **Cover every topic below** — skip a specific question only if the spec or codebase exploration gives a confident, explicit answer.
+Use multiple-choice options where possible. Batch across multiple calls/blocks (4 questions per batch max). **Cover every topic below** — skip a specific question only if the spec or codebase exploration gives a confident, explicit answer.
 
 **Required interview topics:**
 
@@ -70,7 +70,7 @@ Use `AskUserQuestion` with multiple-choice options where possible. Batch across 
 12. **Out-of-scope architecture concerns** — What does the user explicitly want kept out of this design? (multi-tenancy, i18n, advanced caching, etc.)
 13. **Executable models** (conditional — ask only if exploration surfaced one) — If the feature contains a real domain lifecycle (order, payment, subscription, document workflow): confirm it should be modeled as a statechart/typed reducer the implementation imports. If the feature is a real multi-stage pipeline AND the project already uses fugue: ask whether to model it as an `AuthoredDag` (the loom↔fugue bridge is opt-in per feature — no fugue in the project means no pipeline modeling, don't ask).
 
-Group related topics into single `AskUserQuestion` calls when natural (e.g., testability + error-handling fit together; data model + concurrency fit together).
+Group related topics into a single question batch when natural (e.g., testability + error-handling fit together; data model + concurrency fit together).
 
 ### 4. Approach Gate — Present Trade-offs, Let User Pick
 
@@ -82,7 +82,7 @@ Identify **2-3 viable architectural approaches** for the feature. For each, work
 - Fit with the existing codebase
 - Complexity / effort estimate
 
-Present them via `AskUserQuestion` with a single question and 2-3 options. **Use the `preview` field on each option** to show the full trade-off in monospace — this is what the user will compare side-by-side. Example preview format:
+Present them with a single question and 2-3 options. In Claude Code, **use the `preview` field on each option** to show the full trade-off in monospace; in Pi, include the same previews under `APPROACH_SELECTION_REQUIRED`. Example preview format:
 
 ```
 Approach A: Event-driven queue
@@ -130,7 +130,7 @@ Apply your preloaded architecture knowledge:
 **Executable models — standing policy** (binding). First resolve the loom plugin directory — you need it for the policy doc and the validation command below:
 
 ```bash
-LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/ 2>/dev/null | tail -1 | sed 's:/$::')
+LOOM_DIR="${CLAUDE_PLUGIN_ROOT:-${LOOM_PLUGIN_ROOT:-$PWD}}"
 ```
 
 Then read `references/executable-models.md` from it.

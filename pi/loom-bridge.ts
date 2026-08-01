@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { PiContentBlock, PiMessage } from "./pi-types";
 
 // --- Agent sets (mirrors loom engine/src/config.ts) ---
 
@@ -56,22 +57,6 @@ const TOOL_NAME_MAP: Record<string, string> = {
 };
 
 // --- Types ---
-
-export interface PiContentBlock {
-  type: string;
-  text?: string;
-  id?: string;
-  name?: string;
-  arguments?: Record<string, unknown>;
-}
-
-export interface PiMessage {
-  role: string;
-  content: PiContentBlock[];
-  toolCallId?: string;
-  toolName?: string;
-  isError?: boolean;
-}
 
 interface SingleResult {
   agent: string;

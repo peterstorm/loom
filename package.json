@@ -6,9 +6,9 @@
   "type": "module",
   "author": { "name": "peterstorm" },
   "pi": {
-    "extensions": ["./pi"],
-    "skills": ["./skills", "./commands/nextjs-frontend-design", "./commands/vercel-react-best-practices"],
-    "prompts": ["./commands"]
+    "extensions": ["./pi/extension.ts"],
+    "skills": ["./skills", "./commands/vercel-react-best-practices"],
+    "prompts": ["./commands/*.md"]
   },
   "dependencies": {
     "ts-pattern": "^5.9.0"
