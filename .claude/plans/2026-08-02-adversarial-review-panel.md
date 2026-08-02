@@ -1,9 +1,10 @@
 # Adversarial Review Panel — Kernel Extraction Plan
 
 **Date:** 2026-08-02
-**Branch:** to be cut from `main` after PR #17 merges
-**Status:** Proposed — not started
-**Depends on:** PR #17 (`feat/architecture-panel-mode-plan`) merged
+**Branch:** `feat/architecture-panel-mode-plan` (implemented alongside PR #17,
+not after it — the two ship together)
+**Status:** Implemented — A, B, and C complete
+**Depends on:** the architecture panel (`/loom --panel`), in the same branch
 
 **Standing constraints:** must work on **Pi** as well as Claude Code, and must
 be viable on **subscription auth only** (no per-token API billing). Both shape
@@ -381,3 +382,41 @@ k-of-n correctness depend on having N subs.
 
 A and B are parallelizable; they touch disjoint files. Do **A first if only one
 gets done** — it carries value alone, whereas B alone is churn.
+
+---
+
+## Implementation record
+
+Shipped in this branch as three commits, in plan order.
+
+**Deviations from the plan as written**, all deliberate:
+
+- **`parseVerdictEnvelope` has no `itemIdOf(payload)` accessor.** It reads each
+  item id from the RAW entry instead. Computing coverage over successfully
+  parsed payloads would report both "score out of range" AND "missing item" for
+  one entry — the second is a lie about what the agent submitted.
+- **`tallyRefutations` takes the findings, not just their ids.** It has to
+  return a `FindingOutcome` per finding, and threading the records back through
+  the caller bought nothing.
+- **The review panel's brief and manifest are engine-authored**, where the
+  architecture panel's manifest is orchestrator-written. The asymmetry is the
+  point: designers' candidates do not exist until they run, but findings already
+  live in the task graph, so an orchestrator-built finding manifest could
+  quietly omit an inconvenient critical.
+- **`review-verifier-agent` lives in its own `REVIEW_PANEL_AGENTS` set**, not in
+  `REVIEW_AGENTS`. In `REVIEW_SUB_AGENTS` its transcript would route through
+  `store-reviewer-findings`, find no `CRITICAL_COUNT`, and mark the task
+  `evidence_capture_failed`. Mirrors `ARCH_PANEL_AGENTS`, load-time guard
+  included.
+- **Lens order is `reproduction, intent, blast-radius, security, test-coverage`.**
+  Signals still pull `security`/`test-coverage` up when they fire; this order
+  only decides the fill, and cause/intent/consequence is the better default trio
+  for a finding set with no security or test surface.
+- **The `--panel`-style N-verifiers-per-finding alternative was never built**,
+  as planned. `--lenses N` (2–5) tunes panel width instead.
+
+**Not done, and why:** multi-subscription model diversity (the Cost-model
+note's stronger mitigation) stays unbuilt. The panel is correct on a single
+subscription by construction — lens selection, the tally, and the k-of-n rule
+never consult which model answered — so adding per-verifier model assignment
+later is additive and changes no contract here.
