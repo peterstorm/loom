@@ -88,22 +88,30 @@ export const REVIEW_LAYOUT: RunLayout<"review"> = Object.freeze({
 // The run manifest — the item-set authority, shared by both panels
 // ---------------------------------------------------------------------------
 
-/** One item the manifest names, bound to a run-scoped path. */
-export interface RunManifestEntry {
-  readonly id: string;
+/**
+ * One item the manifest names, bound to a run-scoped path.
+ *
+ * `Id` is the caller's own id type (`PanelLens`, `WaveFindingId`), threaded
+ * through so the membership check below PROVES it. The entry id used to come
+ * back as a bare string, and both consumers re-asserted their type with an `as`
+ * cast justified by a "safe by construction" comment — a fact the compiler
+ * already had and was being asked to forget.
+ */
+export interface RunManifestEntry<Id extends string = string> {
+  readonly id: Id;
   readonly path: string;
   readonly filename: string;
 }
 
-export interface RunManifest {
+export interface RunManifest<Id extends string = string> {
   readonly runId: string;
   readonly contextMd: string;
   readonly contextJson: string;
-  readonly entries: readonly RunManifestEntry[];
+  readonly entries: readonly RunManifestEntry<Id>[];
 }
 
 /** How one panel names its manifest fields and derives its item filenames. */
-export interface RunManifestSpec {
+export interface RunManifestSpec<Id extends string = string> {
   /** What the manifest is called in diagnostics, e.g. "panel manifest". */
   readonly label: string;
   /** The JSON field holding the context markdown path, e.g. "interview_file". */
@@ -117,9 +125,9 @@ export interface RunManifestSpec {
   /** Singular/plural noun for one item, e.g. ["candidate", "candidates"]. */
   readonly itemNoun: readonly [string, string];
   /** The exact ordered item set the manifest must name. */
-  readonly expectedIds: readonly string[];
+  readonly expectedIds: readonly Id[];
   /** Run-scoped artifact filename for one item id. */
-  readonly filenameOf: (id: string) => string;
+  readonly filenameOf: (id: Id) => string;
 }
 
 /**
@@ -136,12 +144,12 @@ export interface RunManifestSpec {
  * Every error is collected, for the same reason parseVerdictEnvelope collects
  * them: a re-run should learn all of its mistakes at once.
  */
-export function parseRunManifest<Panel extends string>(
+export function parseRunManifest<Panel extends string, Id extends string>(
   raw: unknown,
   expectedRunDir: string,
   layout: RunLayout<Panel>,
-  spec: RunManifestSpec,
-): ParseResult<RunManifest> {
+  spec: RunManifestSpec<Id>,
+): ParseResult<RunManifest<Id>> {
   if (!isRecord(raw)) return fail([`${spec.label} must be a JSON object`]);
 
   const [noun, nounPlural] = spec.itemNoun;
@@ -164,7 +172,7 @@ export function parseRunManifest<Panel extends string>(
     errors.push(`manifest.${spec.itemsKey} must contain exactly ${spec.expectedIds.length} ${nounPlural}`);
   }
 
-  const entries: RunManifestEntry[] = [];
+  const entries: RunManifestEntry<Id>[] = [];
   if (Array.isArray(rawItems)) {
     for (const [index, item] of rawItems.entries()) {
       const path = `manifest.${spec.itemsKey}[${index}]`;
@@ -172,11 +180,15 @@ export function parseRunManifest<Panel extends string>(
         errors.push(`${path} must be an object`);
         continue;
       }
-      const id = typeof item[spec.itemIdKey] === "string" ? (item[spec.itemIdKey] as string).trim() : "";
+      const raw = typeof item[spec.itemIdKey] === "string" ? (item[spec.itemIdKey] as string).trim() : "";
       const itemPath = typeof item.path === "string" ? item.path.trim() : "";
       const filename = typeof item.filename === "string" ? item.filename.trim() : "";
-      if (!spec.expectedIds.includes(id)) {
-        errors.push(`${path}.${spec.itemIdKey} is not one of the expected ${nounPlural}: ${id || "<empty>"}`);
+      // Resolve against the expected set rather than testing membership: the
+      // value that flows on is then the caller's own id type, proven, instead
+      // of a string the caller has to re-assert with a cast.
+      const id = spec.expectedIds.find((expected) => expected === raw);
+      if (id === undefined) {
+        errors.push(`${path}.${spec.itemIdKey} is not one of the expected ${nounPlural}: ${raw || "<empty>"}`);
         continue;
       }
       const expectedFilename = spec.filenameOf(id);

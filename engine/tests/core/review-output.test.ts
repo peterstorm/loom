@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import fc from "fast-check";
 import { applyReviewResolution, resolveReviewFindings, reviewResolutionLog } from "../../src/core/review-output";
 import { claimsOfSeverity } from "../../src/core/findings";
 import { parseMachineSummary, parseLegacyFindings, makeParsedFindings, buildEvidenceFailureMessage, reconcileFindings } from "../../src/core/review-output";
@@ -481,11 +482,17 @@ const partialTask: Task = {
 };
 
 describe("the structured block never costs a claim the markers made", () => {
-  const summary = (count: number, criticals: readonly string[], block: string | null) =>
+  const summary = (
+    count: number,
+    criticals: readonly string[],
+    block: string | null,
+    advisories: readonly string[] = [],
+  ) =>
     [
       "### Machine Summary",
       `CRITICAL_COUNT: ${count}`,
       ...criticals.map((claim) => `CRITICAL: ${claim}`),
+      ...advisories.map((claim) => `ADVISORY: ${claim}`),
       ...(block === null ? [] : ["```findings", block, "```"]),
     ].join("\n");
 
@@ -544,6 +551,81 @@ describe("the structured block never costs a claim the markers made", () => {
     expect(reviewResolutionLog("T1", degraded)).toContain("findings block was malformed");
     const clean = resolveReviewFindings(summary(1, ["unchecked cast"], null), "code-reviewer");
     expect(reviewResolutionLog("T1", clean)).toBe("Task T1 review: blocked (1 critical)");
+  });
+
+  // -- the advisory half of the same rule ------------------------------------
+
+  it("keeps every advisory when a criticals-only block would have eaten them", () => {
+    // The bug this pins: the block/marker arbitration counted CRITICALS only. A
+    // block that accounted for every critical but listed no advisories won
+    // outright and deleted all three ADVISORY: lines, with blockStatus still
+    // reporting "used" so no degradation note was printed. /wave-gate Step 4b
+    // must triage every advisory to fixed/deferred/dismissed; it cannot triage
+    // what it never sees. And a criticals-only block is exactly what a reviewer
+    // following the prompt literally emits — the prompt scopes its mandatory
+    // block accounting to criticals.
+    const result = parseMachineSummary(
+      summary(1, ["unchecked cast"], JSON.stringify([entry("unchecked cast")]), [
+        "advisory one",
+        "advisory two",
+        "advisory three",
+      ]),
+    );
+    expect(result?.blockStatus).toBe("superseded");
+    expect(result?.advisory).toEqual(["advisory one", "advisory two", "advisory three"]);
+    expect(result?.critical).toEqual(["unchecked cast"]);
+  });
+
+  it("uses a block that accounts for BOTH severities", () => {
+    const result = parseMachineSummary(
+      summary(1, ["unchecked cast"], JSON.stringify([
+        entry("unchecked cast"),
+        entry("advisory one", "advisory"),
+      ]), ["advisory one"]),
+    );
+    expect(result?.blockStatus).toBe("used");
+    expect(result?.advisory).toEqual(["advisory one"]);
+    expect(result?.drafts.every((d) => d.file === "src/x.ts")).toBe(true);
+  });
+
+  it("tells the operator when an under-reporting block was superseded", () => {
+    // The "superseded" arm of blockStatusNote — its "rejected" sibling was
+    // asserted above and this one was not, so the two strings could be swapped
+    // with nothing failing.
+    const degraded = resolveReviewFindings(
+      summary(1, ["unchecked cast"], JSON.stringify([entry("unchecked cast")]), ["a nit"]),
+      "code-reviewer",
+    );
+    expect(reviewResolutionLog("T1", degraded)).toContain("findings block under-reported findings");
+  });
+
+  it("never loses a claim of EITHER severity, for any block/marker combination", () => {
+    // The property behind all six examples above. The decision table has two
+    // independent dimensions and the example tests only ever varied one, which
+    // is how the advisory case survived.
+    const claim = fc.string({ minLength: 3, maxLength: 12 })
+      .filter((s) => s.trim().length >= 3 && !/[\r\n]/.test(s));
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(claim, { maxLength: 4 }),
+        fc.uniqueArray(claim, { maxLength: 4 }),
+        fc.nat({ max: 4 }),
+        fc.nat({ max: 4 }),
+        (criticals, advisories, blockCrit, blockAdv) => {
+          const blockEntries = [
+            ...criticals.slice(0, blockCrit).map((c) => entry(c)),
+            ...advisories.slice(0, blockAdv).map((c) => entry(c, "advisory")),
+          ];
+          const result = parseMachineSummary(
+            summary(criticals.length, criticals, JSON.stringify(blockEntries), advisories),
+          );
+          expect(result).not.toBeNull();
+          expect(result!.critical.length).toBeGreaterThanOrEqual(criticals.length);
+          expect(result!.advisory.length).toBeGreaterThanOrEqual(advisories.length);
+        },
+      ),
+      { numRuns: 300 },
+    );
   });
 });
 

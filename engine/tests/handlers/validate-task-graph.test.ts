@@ -374,46 +374,88 @@ describe("fixFull repairs findings WITH their derived views", () => {
     claim: "unchecked cast",
   };
 
-  const fix = (task: Record<string, unknown>) =>
-    JSON.parse(fixFull({ current_phase: "execute", phase_artifacts: {}, tasks: [task] })).tasks[0];
+  const graphOf = (task: Record<string, unknown>) => ({
+    current_phase: "execute",
+    phase_artifacts: {},
+    tasks: [task],
+  });
+  const fix = (task: Record<string, unknown>) => JSON.parse(fixFull(graphOf(task)).json).tasks[0];
 
-  it("prunes the views alongside the malformed entries it drops", () => {
-    // Dropping ALONE is not a repair — it is how an un-refutable critical gets
-    // made. A claim left in critical_findings with no counterpart in findings
-    // can never enter a brief, so it can never be refuted, so the task stays
-    // blocked forever with nothing able to adjudicate it.
+  it("recovers a claim the dropped entry would have taken with it", () => {
+    // Dropping ALONE is not a repair, and neither is pruning the view to match.
+    // `complete-wave-gate` counts critical_findings, so deleting "orphan" from
+    // it turns a blocking wave into a passing one — through the very command
+    // the load-boundary diagnostic tells the operator to run. The claim is
+    // given identity instead, which is what makes it refutable.
     const repaired = fix({
       id: "T1",
       findings: [wellFormed, { id: "", agent: "", severity: "critical", claim: "orphan" }],
       critical_findings: ["unchecked cast", "orphan"],
       advisory_findings: [],
     });
-    expect(repaired.findings.map((f: { id: string }) => f.id)).toEqual(["code-reviewer-1"]);
-    expect(repaired.critical_findings).toEqual(["unchecked cast"]);
+    expect(repaired.critical_findings).toEqual(["unchecked cast", "orphan"]);
+    expect(repaired.findings).toHaveLength(2);
+    expect(repaired.findings[1]).toMatchObject({ agent: "recovered-view", claim: "orphan" });
   });
 
-  it("keeps the views in lockstep at every severity", () => {
+  it("keeps the views in lockstep at every severity, conserving every claim", () => {
     const repaired = fix({
       id: "T1",
       findings: [wellFormed, { ...wellFormed, id: "code-reviewer-2", severity: "advisory", claim: "nit" }],
       critical_findings: ["stale"],
       advisory_findings: ["stale too", "and another"],
     });
-    expect(repaired.critical_findings).toEqual(["unchecked cast"]);
-    expect(repaired.advisory_findings).toEqual(["nit"]);
+    expect(repaired.critical_findings).toEqual(["unchecked cast", "stale"]);
+    expect(repaired.advisory_findings).toEqual(["nit", "stale too", "and another"]);
+    expect(repaired.findings).toHaveLength(5);
   });
 
-  it("leaves a pre-identity task's views alone — they are all it has", () => {
+  it("gives a pre-identity task's views identity instead of leaving them orphaned", () => {
     // A graph written before findings had identity carries no `findings` field.
-    // Re-deriving from an absent array would delete its whole review record.
+    // Its claims are real and must survive; they also have to become refutable,
+    // or the task blocks forever with nothing able to adjudicate it.
     const repaired = fix({
       id: "T1",
       critical_findings: ["from before identity"],
       advisory_findings: ["also from before"],
     });
-    expect(repaired.findings).toEqual([]);
     expect(repaired.critical_findings).toEqual(["from before identity"]);
     expect(repaired.advisory_findings).toEqual(["also from before"]);
+    expect(repaired.findings.map((f: { id: string }) => f.id)).toEqual([
+      "recovered-view-1",
+      "recovered-view-2",
+    ]);
+  });
+
+  it("is idempotent — a second --fix changes nothing", () => {
+    // The regression this pins: `derived = t.findings !== undefined` used the
+    // key the repair itself writes as its "has migrated" predicate. Pass 1 wrote
+    // `findings: []` onto a pre-identity task; pass 2 read that as authoritative
+    // and re-derived both views from the empty array, deleting the whole review
+    // record and passing the wave gate.
+    const once = fixFull(graphOf({
+      id: "T1",
+      critical_findings: ["unresolved blocker"],
+      advisory_findings: ["a nit"],
+    })).json;
+    expect(fixFull(JSON.parse(once)).json).toEqual(once);
+    expect(JSON.parse(once).tasks[0].critical_findings).toEqual(["unresolved blocker"]);
+  });
+
+  it("re-mints a duplicated id rather than letting one vote delete two findings", () => {
+    const repaired = fix({
+      id: "T1",
+      findings: [wellFormed, { ...wellFormed, claim: "a different claim" }],
+      critical_findings: ["unchecked cast", "a different claim"],
+    });
+    const ids = repaired.findings.map((f: { id: string }) => f.id);
+    expect(new Set(ids).size).toBe(2);
+    expect(repaired.critical_findings).toEqual(["unchecked cast", "a different claim"]);
+  });
+
+  it("reports what it recovered rather than changing the graph silently", () => {
+    const { notes } = fixFull(graphOf({ id: "T1", critical_findings: ["silent no more"] }));
+    expect(notes).toEqual(['T1: recovered view-only claim into findings — "silent no more"']);
   });
 
   it("drops a refutation record whose pair shape is broken", () => {
@@ -436,6 +478,22 @@ describe("fixFull repairs findings WITH their derived views", () => {
       tasks: [{ id: "T1", wave: 1, status: "pending", findings: [{ nonsense: true }], critical_findings: ["orphan"] }],
     };
     expect(parseTaskGraph(broken).ok).toBe(false);
-    expect(parseTaskGraph(JSON.parse(fixFull(broken))).ok).toBe(true);
+    expect(parseTaskGraph(JSON.parse(fixFull(broken).json)).ok).toBe(true);
+  });
+
+  it("repairs every graph the load boundary rejects for a findings reason", () => {
+    // The pairing that matters: rejection without a working repair dead-ends
+    // the operator. Duplicate ids and view/array drift are both now rejected,
+    // so both must round-trip through --fix.
+    const rejected = [
+      { id: "T1", wave: 1, findings: [wellFormed, wellFormed], critical_findings: ["unchecked cast", "unchecked cast"] },
+      { id: "T1", wave: 1, findings: [wellFormed], critical_findings: [] },
+      { id: "T1", wave: 1, findings: [], critical_findings: ["view only"] },
+    ];
+    for (const task of rejected) {
+      const graph = { current_phase: "execute", phase_artifacts: {}, tasks: [{ status: "pending", ...task }] };
+      expect(parseTaskGraph(graph).ok).toBe(false);
+      expect(parseTaskGraph(JSON.parse(fixFull(graph).json)).ok).toBe(true);
+    }
   });
 });

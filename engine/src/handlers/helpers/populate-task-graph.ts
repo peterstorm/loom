@@ -111,7 +111,9 @@ const handler: HookHandler = async (stdin, args) => {
   const validation = validateFull(decompose as unknown as Record<string, unknown>);
   if (!validation.ok) {
     if (fix) {
-      decompose = JSON.parse(fixFull(decompose as unknown as Record<string, unknown>)) as DecomposeInput;
+      const repair = fixFull(decompose as unknown as Record<string, unknown>);
+      for (const note of repair.notes) process.stderr.write(`  ${note}\n`);
+      decompose = JSON.parse(repair.json) as DecomposeInput;
       // fixFull only defaults missing optional fields — structural errors
       // (unknown agent, wave gaps, self-dependency) are unfixable. Re-validate
       // so they fail loudly instead of reaching the persisted graph under a

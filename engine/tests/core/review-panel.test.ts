@@ -6,6 +6,7 @@ import type { Finding } from "../../src/core/findings";
 import { applyFindingOutcomes, claimsOfSeverity } from "../../src/core/findings";
 import type { VerdictEnvelope } from "../../src/core/panel-kernel";
 import {
+  briefCompletenessErrors,
   briefFindingFilename,
   buildFindingBrief,
   defaultRefutationThreshold,
@@ -185,6 +186,66 @@ describe("buildFindingBrief", () => {
     const result = buildFindingBrief(1, [task({ findings: [finding({ severity: "advisory" })] })]);
     expect(result.findings).toEqual([]);
     expect(renderFindingBriefMarkdown(result)).toContain("nothing to adjudicate");
+  });
+});
+
+describe("briefCompletenessErrors — buildFindingBrief's postcondition", () => {
+  // A short brief makes every later stage succeed vacuously and report
+  // "0 survived, 0 refuted", which is indistinguishable from a panel that
+  // adjudicated the wave and upheld nothing. Now a pure function beside the
+  // builder whose postcondition it is, rather than an unexported helper in the
+  // shell reachable only by spawning the CLI.
+  const withView = (id: string, findings: readonly Finding[], view: readonly string[]) =>
+    task({ id, findings, critical_findings: [...view] });
+
+  const briefFor = (tasks: readonly Task[]) => briefCompletenessErrors(
+    buildFindingBrief(1, tasks),
+    tasks.filter((t) => t.wave === 1),
+    1,
+  );
+
+  it("passes when every counted critical carries identity", () => {
+    expect(briefFor([withView("T1", [finding()], ["unchecked cast"])])).toEqual([]);
+  });
+
+  it("names the wave when it holds no criticals at all", () => {
+    const errors = briefFor([withView("T1", [], [])]);
+    expect(errors[0]).toContain("has no critical findings");
+    expect(errors[0]).toContain("nothing to adjudicate");
+  });
+
+  it("refuses a wave whose --wave flag matches no task", () => {
+    expect(briefCompletenessErrors(buildFindingBrief(9, []), [], 9)[0])
+      .toContain("check --wave against .current_wave");
+  });
+
+  it("catches a task whose view outruns its findings, and names it", () => {
+    const errors = briefFor([withView("T1", [], ["orphaned critical"])]);
+    expect(errors[0]).toContain("T1 has 1 critical_findings but only 0 carry structured identity");
+    expect(errors[0]).toContain("validate-task-graph --fix");
+  });
+
+  it("does NOT let one task's surplus mask another task's orphans", () => {
+    // The wave-wide sum this replaces: T1's two identified findings offset T2's
+    // orphan, the totals matched, the check passed — and T2's critical entered
+    // no brief, could never be refuted, and blocked the wave permanently, with
+    // the only prescribed escape being a --fix that used to delete it.
+    const errors = briefFor([
+      withView("T1", [finding(), finding({ id: "code-reviewer-2", claim: "second" })], ["unchecked cast", "second"]),
+      withView("T2", [], ["invisible to the panel"]),
+    ]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("T2 has 1 critical_findings but only 0");
+    expect(errors[0], "the task that IS complete is not blamed").not.toContain("T1 has");
+  });
+
+  it("names every short task, not just the first", () => {
+    const errors = briefFor([
+      withView("T1", [], ["one orphan"]),
+      withView("T2", [], ["another orphan"]),
+    ]);
+    expect(errors[0]).toContain("T1 has 1");
+    expect(errors[0]).toContain("T2 has 1");
   });
 });
 

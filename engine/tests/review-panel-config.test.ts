@@ -16,7 +16,12 @@ import {
 import { categorize } from "../src/handlers/subagent-stop/dispatch";
 import { VALIDATED_AGENTS } from "../src/handlers/pre-tool-use/validate-agent-skill";
 import { KNOWN_HANDLERS } from "../src/handler-routes";
-import { REVIEW_LENSES, REVIEW_LENSES_DEFAULT, REVIEW_LENSES_MIN } from "../src/core/review-panel";
+import {
+  defaultRefutationThreshold,
+  REVIEW_LENSES,
+  REVIEW_LENSES_DEFAULT,
+  REVIEW_LENSES_MIN,
+} from "../src/core/review-panel";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -116,6 +121,23 @@ describe("wave-gate.md prose tracks the review-panel contract", () => {
 
   it("names the baseline lenses and both signal-driven ones", () => {
     for (const lens of REVIEW_LENSES) expect(runbook).toContain(lens);
+  });
+
+  it("quotes threshold values the formula actually produces", () => {
+    // The one gap in this suite: the prose enumerates concrete pairs while
+    // `defaultRefutationThreshold` computes floor(n/2)+1, and nothing bound the
+    // two. Generated from the function rather than hardcoded, so changing the
+    // formula fails here instead of silently making the runbook lie.
+    for (const lensCount of [2, 3, 5]) {
+      expect(runbook).toContain(`${defaultRefutationThreshold(lensCount)} of ${lensCount}`);
+    }
+  });
+
+  it("states that a strict majority is the FLOOR, not merely the default", () => {
+    // `--threshold` below the majority is now rejected by the handler; a runbook
+    // that only calls it "the default" invites an orchestrator to lower it.
+    expect(runbook).toMatch(/strict majority/);
+    expect(runbook).toContain("--threshold");
   });
 });
 

@@ -13,7 +13,11 @@ import { withLock } from "./utils/lock";
 import { PHASE_ORDER, TASK_GRAPH_PATH } from "./config";
 import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
 import { REVIEW_STATUSES, TASK_STATUSES } from "./types";
-import { findingsUnionError, refutationsUnionError } from "./core/findings";
+import {
+  findingsLockstepError,
+  findingsUnionError,
+  refutationsUnionError,
+} from "./core/findings";
 import type { TaskGraph } from "./types";
 
 /** Resolve task graph path for cross-repo access. The session id comes from
@@ -108,6 +112,17 @@ function taskUnionError(v: unknown, index: number): string | null {
   // `validate-task-graph --fix` is the repair that restores lockstep.
   const findingsError = findingsUnionError(t.findings, `tasks[${index}] ("${id}"): findings`);
   if (findingsError !== null) return findingsError;
+  // Shape alone is not the invariant. `critical_findings`/`advisory_findings`
+  // are DERIVED views, the wave gate counts them, and nothing proved they agree
+  // with the array they summarize — so a critical present in only one of the
+  // two either never blocked the wave or could never be adjudicated.
+  const lockstepError = findingsLockstepError(
+    t.findings,
+    t.critical_findings,
+    t.advisory_findings,
+    `tasks[${index}] ("${id}")`,
+  );
+  if (lockstepError !== null) return lockstepError;
   return refutationsUnionError(
     t.refuted_findings,
     `tasks[${index}] ("${id}"): refuted_findings`,

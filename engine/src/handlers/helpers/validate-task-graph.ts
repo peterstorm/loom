@@ -8,7 +8,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookHandler, Phase, TaskGraph } from "../../types";
 import { PHASE_ORDER, KNOWN_AGENTS } from "../../config";
-import { claimsOfSeverity, parseStoredFindings, parseStoredRefutations } from "../../core/findings";
+import {
+  claimsOfSeverity,
+  deduplicateFindingIds,
+  parseStoredFindings,
+  parseStoredRefutations,
+  recoverViewOnlyClaims,
+} from "../../core/findings";
 import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
 
 export type ValidationResult =
@@ -157,50 +163,106 @@ export function validateFull(json: Record<string, unknown>): ValidationResult {
   return errors.length === 0 ? ok() : fail(errors);
 }
 
+/** What one task's findings repair changed, so the handler can say so. */
+interface FindingsRepair {
+  readonly fields: Record<string, unknown>;
+  /** Claims that existed only in a `string[]` view and were given identity. */
+  readonly recovered: readonly string[];
+  /** Ids that collided and were re-minted. */
+  readonly reminted: number;
+}
+
 /**
  * Repair one task's findings and the two `string[]` views over them.
  *
- * Structured findings are re-parsed rather than passed through: they are the
- * field a refutation panel votes on, so a malformed entry must be dropped here
- * rather than reaching a verifier as an un-refutable item.
+ * Every path here CONSERVES claims. That is the whole rule, and it used not to
+ * hold: a claim in `critical_findings` with no counterpart in `findings` was
+ * deleted, silently, by the repair the load-boundary diagnostic itself tells the
+ * operator to run. `complete-wave-gate` counts that view, so the deletion turned
+ * a blocking wave into a passing one.
  *
- * Dropping ALONE is not a repair — it is how the un-refutable item gets made.
- * A claim left in `critical_findings` with no counterpart in `findings` can
- * never enter a brief, so it can never be refuted, so the task stays blocked
- * forever with nothing able to adjudicate it. Whenever `findings` is present
- * the views are re-derived from what survived, restoring the lockstep the
- * types declare. A task with no `findings` at all predates identity; its views
- * are all there is and are carried through untouched.
+ * Three repairs, in order:
+ *
+ *   1. Malformed `findings` entries are dropped. They are the items a refutation
+ *      panel votes on, and a malformed one reaches a verifier as an un-votable
+ *      item — but their CLAIMS survive step 2 if the views still hold them.
+ *   2. Claims present only in a view are given identity (`recoverViewOnlyClaims`).
+ *      This is what makes a pre-identity task adjudicable, and what makes the
+ *      repair idempotent: after one pass the views hold exactly what `findings`
+ *      holds, so a second pass finds nothing to recover.
+ *   3. Colliding ids are re-minted, because the load boundary now rejects
+ *      duplicates and a rejection with no working repair dead-ends the operator.
+ *
+ * The views are then re-derived from the result, which is the lockstep
+ * `findingsLockstepError` proves at load.
  */
-function fixTaskFindings(t: Record<string, unknown>): Record<string, unknown> {
-  const findings = parseStoredFindings(t.findings);
-  const derived = t.findings !== undefined;
+function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
+  const refuted = parseStoredRefutations(t.refuted_findings);
+  const stored = parseStoredFindings(t.findings);
+  // Order- and length-preserving, so an id that differs at the same index is
+  // exactly one this repair re-minted.
+  const parsed = deduplicateFindingIds(stored, refuted);
+  const reminted = parsed.filter((finding, index) => finding.id !== stored[index]?.id).length;
+
+  const viewClaims = (raw: unknown): string[] =>
+    Array.isArray(raw) ? raw.filter((claim): claim is string => typeof claim === "string") : [];
+  const recoveredFindings = recoverViewOnlyClaims(
+    parsed,
+    refuted,
+    viewClaims(t.critical_findings),
+    viewClaims(t.advisory_findings),
+  );
+  const findings = [...parsed, ...recoveredFindings];
+
   return {
-    findings,
-    critical_findings: derived
-      ? [...claimsOfSeverity(findings, "critical")]
-      : Array.isArray(t.critical_findings) ? t.critical_findings : [],
-    advisory_findings: derived
-      ? [...claimsOfSeverity(findings, "advisory")]
-      : Array.isArray(t.advisory_findings) ? t.advisory_findings : [],
-    refuted_findings: parseStoredRefutations(t.refuted_findings),
+    fields: {
+      findings,
+      critical_findings: [...claimsOfSeverity(findings, "critical")],
+      advisory_findings: [...claimsOfSeverity(findings, "advisory")],
+      refuted_findings: refuted,
+    },
+    recovered: recoveredFindings.map((finding) => finding.claim),
+    reminted,
   };
 }
 
-/** Fix full graph — add missing per-task defaults */
-export function fixFull(json: Record<string, unknown>): string {
+/** What `fixFull` changed beyond structural defaults — reported, never silent. */
+export interface FixReport {
+  readonly json: string;
+  readonly notes: readonly string[];
+}
+
+/**
+ * Fix full graph — add missing per-task defaults and restore findings lockstep.
+ *
+ * Returns the notes rather than writing them: `--fix` is a pure transformation
+ * whose output is piped, and a repair that changed a claim's identity must reach
+ * the operator's stderr rather than only the file.
+ */
+export function fixFull(json: Record<string, unknown>): FixReport {
   const tasks = Array.isArray(json.tasks) ? (json.tasks as Record<string, unknown>[]) : [];
+  const notes: string[] = [];
   const fixed = {
     ...json,
-    tasks: tasks.map((t) => ({
-      ...t,
-      depends_on: Array.isArray(t.depends_on) ? t.depends_on : [],
-      status: t.status ?? "pending",
-      review_status: t.review_status ?? "pending",
-      ...fixTaskFindings(t),
-    })),
+    tasks: tasks.map((t) => {
+      const repair = fixTaskFindings(t);
+      const id = typeof t.id === "string" ? t.id : "<task with no id>";
+      for (const claim of repair.recovered) {
+        notes.push(`${id}: recovered view-only claim into findings — "${claim}"`);
+      }
+      if (repair.reminted > 0) {
+        notes.push(`${id}: re-minted ${repair.reminted} colliding finding id(s)`);
+      }
+      return {
+        ...t,
+        depends_on: Array.isArray(t.depends_on) ? t.depends_on : [],
+        status: t.status ?? "pending",
+        review_status: t.review_status ?? "pending",
+        ...repair.fields,
+      };
+    }),
   };
-  return JSON.stringify(fixed, null, 2);
+  return { json: JSON.stringify(fixed, null, 2), notes };
 }
 
 /** Production filesystem port for model-binding checks — honest null on any read failure */
@@ -249,8 +311,11 @@ const handler: HookHandler = async (stdin, args) => {
   const result = isMinimal ? validateMinimal(json) : validateFull(json);
 
   if (isFix) {
-    const fixed = isMinimal ? fixMinimal(json) : fixFull(json);
-    process.stdout.write(fixed);
+    const repair = isMinimal ? { json: fixMinimal(json), notes: [] } : fixFull(json);
+    process.stdout.write(repair.json);
+    // A repair that gave a claim identity or renamed one changed the data the
+    // panel will vote on. Silent conservation is still a change.
+    for (const note of repair.notes) process.stderr.write(`  ${note}\n`);
     if (!result.ok) {
       process.stderr.write(`Fixed structural defaults; ${result.errors.length} issues remain\n`);
       for (const err of result.errors) process.stderr.write(`  - ${err}\n`);

@@ -8,9 +8,9 @@
  * decides whether a critical reaches the wave gate at all.
  *
  * The rule, in one sentence: **the block wins only when it accounts for every
- * critical the reviewer's own count and marker lines claim.** A short block is
- * a truncated or mislabeled emission, and its locations are not worth the
- * claims it would discard. Whatever wins, `reconcileFindings` backstops the
+ * finding — of either severity — that the reviewer's own count and marker lines
+ * claim.** A short block is a truncated or mislabeled emission, and its
+ * locations are not worth the claims it would discard. Whatever wins, `reconcileFindings` backstops the
  * remaining shortfall against `CRITICAL_COUNT` with a self-describing entry, so
  * a parse that lost findings blocks the gate instead of reading green.
  *
@@ -50,7 +50,7 @@ export type FindingsBlockStatus =
   | "used"
   /** A block was present but malformed. The marker lines were parsed instead. */
   | "rejected"
-  /** The block parsed but under-reported criticals. The marker lines won. */
+  /** The block parsed but under-reported findings. The marker lines won. */
   | "superseded";
 
 /**
@@ -189,10 +189,17 @@ export function parseMachineSummary(output: string): ParsedFindings | null {
  * Decide between the structured block and the scraped marker lines.
  *
  * The block carries file/line the scraper cannot recover, so it is preferred —
- * but only when it accounts for at least as many criticals as BOTH the
- * reviewer's `CRITICAL_COUNT` and its own marker lines. Below that bar the
- * block is discarding claims the reviewer demonstrably made, and no amount of
- * location metadata is worth a lost critical.
+ * but only when it accounts for at least as many findings OF EACH SEVERITY as
+ * the marker lines do (and, for criticals, as the reviewer's own
+ * `CRITICAL_COUNT`). Below that bar the block is discarding claims the reviewer
+ * demonstrably made, and no amount of location metadata is worth a lost finding.
+ *
+ * The advisory half of that bar is not decoration. Gating on criticals alone
+ * let a criticals-only block — a plausible emission, since the reviewer prompt
+ * scopes its mandatory block accounting to criticals — win outright and delete
+ * every `ADVISORY:` marker line, while `blockStatus` still reported `used` so
+ * no degradation note was printed. `/wave-gate` Step 4b must triage every
+ * advisory to fixed/deferred/dismissed; it cannot triage what it never sees.
  *
  * `CRITICAL_COUNT` always comes from the markers: the count is the reviewer's
  * own tally and is what distinguishes "zero findings" from "the parse failed".
@@ -211,8 +218,11 @@ function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
     criticalCount: scraped.criticalCount,
     blockStatus: "used",
   });
-  const claimed = Math.max(scraped.criticalCount ?? 0, scraped.critical.length);
-  return fromBlock.critical.length >= claimed
+  const claimedCritical = Math.max(scraped.criticalCount ?? 0, scraped.critical.length);
+  const accountsForAll =
+    fromBlock.critical.length >= claimedCritical &&
+    fromBlock.advisory.length >= scraped.advisory.length;
+  return accountsForAll
     ? fromBlock
     : makeParsedFindings({
         drafts: scraped.drafts,
@@ -298,7 +308,7 @@ function blockStatusNote(status: FindingsBlockStatus): string {
     .with(
       "superseded",
       () =>
-        " [findings block under-reported criticals — used marker lines instead, findings carry no file/line]",
+        " [findings block under-reported findings — used marker lines instead, findings carry no file/line]",
     )
     .exhaustive();
 }
@@ -311,7 +321,11 @@ export function reviewResolutionLog(taskId: string, resolution: ReviewResolution
       (r) => `WARNING: ${r.message} for ${taskId} — marking evidence_capture_failed`,
     )
     .with({ kind: "findings" }, (r) => {
-      const count = r.findings.criticalCount ?? 0;
+      // The larger of the reviewer's tally and what was actually captured —
+      // the same disjunction `mergeFindings` blocks on. Reporting the tally
+      // alone logged "passed (0 critical)" for a task the very next line
+      // recorded as blocked with a real critical in it.
+      const count = Math.max(r.findings.criticalCount ?? 0, r.findings.critical.length);
       return (
         `Task ${taskId} review: ${count > 0 ? "blocked" : "passed"} (${count} critical)` +
         blockStatusNote(r.findings.blockStatus)

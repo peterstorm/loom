@@ -358,6 +358,67 @@ export function briefIsEmpty(brief: FindingBrief): boolean {
   return brief.findings.length === 0;
 }
 
+/** The repair a graph whose views outrun its findings needs, named in the
+ *  diagnostic itself — the same hint core/findings gives at the load boundary. */
+const BRIEF_REPAIR_HINT =
+  "Re-run the reviewers so every critical is emitted through the findings block, " +
+  "or repair the graph with: helper validate-task-graph --fix";
+
+/**
+ * `buildFindingBrief`'s postcondition: the brief accounts for every finding the
+ * wave gate will count.
+ *
+ * If the brief is short, every later stage still SUCCEEDS — an empty item set
+ * satisfies every length and coverage rule vacuously — and the run reports
+ * "0 survived, 0 refuted", which is indistinguishable from a panel that
+ * adjudicated the wave and upheld nothing. So the brief proves its own
+ * completeness against the view the wave gate actually counts, and refuses to
+ * be built otherwise.
+ *
+ * PER TASK, not summed across the wave. A wave-wide total let one task's surplus
+ * offset another's orphans: the totals matched, the check passed, and the second
+ * task's critical entered no brief, could never be refuted, and blocked the wave
+ * permanently. Offending task ids are named because "the wave is short by one"
+ * does not tell an operator which reviewer to re-run.
+ */
+export function briefCompletenessErrors(
+  brief: FindingBrief,
+  waveTasks: readonly Task[],
+  wave: number,
+): readonly string[] {
+  if (waveTasks.length === 0) {
+    return [`no tasks in wave ${wave} — check --wave against .current_wave`];
+  }
+
+  const briefedPerTask = new Map<string, number>();
+  for (const finding of brief.findings) {
+    briefedPerTask.set(finding.taskId, (briefedPerTask.get(finding.taskId) ?? 0) + 1);
+  }
+
+  const short = waveTasks.flatMap((task) => {
+    const counted = task.critical_findings?.length ?? 0;
+    const briefed = briefedPerTask.get(task.id) ?? 0;
+    return counted > briefed ? [{ id: task.id, counted, briefed }] : [];
+  });
+
+  if (short.length > 0) {
+    return [
+      `wave ${wave}: ${short
+        .map((t) => `${t.id} has ${t.counted} critical_findings but only ${t.briefed} carry structured identity`)
+        .join("; ")} — ` +
+        `the panel cannot adjudicate the remainder, and a partial brief would report the rest as upheld. ` +
+        BRIEF_REPAIR_HINT,
+    ];
+  }
+
+  return briefIsEmpty(brief)
+    ? [
+        `wave ${wave} has no ${brief.severity} findings — ` +
+          `skip the refutation panel, there is nothing to adjudicate`,
+      ]
+    : [];
+}
+
 /** Operator-facing rendering of the brief. Not parsed by anything — the JSON is. */
 export function renderFindingBriefMarkdown(brief: FindingBrief): string {
   const lines = [
@@ -451,7 +512,7 @@ export function parseReviewManifest(
     itemIdKey: "id",
     itemNoun: ["finding", "findings"],
     expectedIds: expectedFindingIds,
-    filenameOf: (id) => briefFindingFilename(id as WaveFindingId),
+    filenameOf: briefFindingFilename,
   });
 
   const errors: string[] = parsed.ok ? [] : [...parsed.errors];
@@ -481,13 +542,7 @@ export function parseReviewManifest(
     briefFile: parsed.value.contextMd,
     briefJson: parsed.value.contextJson,
     lenses,
-    // Safe by construction: every entry id was checked for membership in
-    // `expectedFindingIds`, which is already wave-scoped.
-    findings: parsed.value.entries.map((entry) => ({
-      id: entry.id as WaveFindingId,
-      path: entry.path,
-      filename: entry.filename,
-    })),
+    findings: parsed.value.entries,
   });
 }
 

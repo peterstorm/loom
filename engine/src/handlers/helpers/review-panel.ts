@@ -28,8 +28,8 @@ import { StateManager } from "../../state-manager";
 import type { ParseResult } from "../../core/panel-kernel";
 import { applyFindingOutcomes } from "../../core/findings";
 import {
+  briefCompletenessErrors,
   briefFindingFilename,
-  briefIsEmpty,
   buildFindingBrief,
   defaultRefutationThreshold,
   parseFindingBriefJson,
@@ -131,41 +131,6 @@ function artifactErrors(
     ...check(briefJson, root),
     ...findingPaths.flatMap((path) => check(path, itemDir)),
   ];
-}
-
-/**
- * The brief is the panel's whole idea of what exists. If it is short, every
- * later stage still succeeds — an empty item set satisfies every length and
- * coverage rule vacuously — and the run reports "0 survived, 0 refuted", which
- * is indistinguishable from a panel that adjudicated the wave and upheld
- * nothing. So the brief proves its own completeness against the view the wave
- * gate actually counts, and refuses to be built otherwise.
- */
-function briefCompletenessErrors(brief: FindingBrief, waveTasks: readonly Task[], wave: number): string[] {
-  if (waveTasks.length === 0) {
-    return [`no tasks in wave ${wave} — check --wave against .current_wave`];
-  }
-  const gateCounts = waveTasks.reduce(
-    (total, task) => total + (task.critical_findings?.length ?? 0),
-    0,
-  );
-  if (briefIsEmpty(brief)) {
-    return gateCounts === 0
-      ? [`wave ${wave} has no ${brief.severity} findings — skip the refutation panel, there is nothing to adjudicate`]
-      : [completenessMessage(wave, gateCounts, 0)];
-  }
-  return brief.findings.length < gateCounts
-    ? [completenessMessage(wave, gateCounts, brief.findings.length)]
-    : [];
-}
-
-function completenessMessage(wave: number, gateCounts: number, briefCount: number): string {
-  return (
-    `wave ${wave} has ${gateCounts} critical_findings but only ${briefCount} carry structured identity — ` +
-    `the panel cannot adjudicate the remainder, and a partial brief would report the rest as upheld. ` +
-    `Re-run the reviewers so every critical is emitted through the findings block, ` +
-    `or repair the graph with: helper validate-task-graph --fix`
-  );
 }
 
 /** brief — engine-authored context artifacts for one wave. */
@@ -364,11 +329,22 @@ const handler: HookHandler = async (stdin, args) => {
   if (!resolved.ok) return contractError("review tally", resolved.errors);
   const verdictsDir = join(resolved.value, LAYOUT.verdictDir);
 
+  // A strict majority is the FLOOR, not merely the default. `--threshold 1`
+  // let one lens kill a critical on its own, inverting the documented
+  // "ties favour keeping the finding" rule and promoting blocked → passed when
+  // it was the wave's last critical — with nothing in the runbook gating it.
+  // Raising the bar is always safe; lowering it is a weaker panel wearing the
+  // same name.
+  const floor = defaultRefutationThreshold(manifest.value.lenses.length);
   const rawThreshold = argumentValue(args, "--threshold");
-  const threshold = rawThreshold === null
-    ? defaultRefutationThreshold(manifest.value.lenses.length)
-    : positiveInteger(rawThreshold);
+  const threshold = rawThreshold === null ? floor : positiveInteger(rawThreshold);
   if (threshold === null) return usageError;
+  if (threshold < floor) {
+    return contractError("review tally", [
+      `threshold ${threshold} is below the strict majority of ${manifest.value.lenses.length} ` +
+        `lenses (${floor}) — a weaker panel must not run under the same name`,
+    ]);
+  }
 
   const verdicts = readVerdicts(runDir, LAYOUT, verdictsDir, manifest.value.lenses, (raw, lens) =>
     parseRefutationVerdict(raw, lens, findingIds),

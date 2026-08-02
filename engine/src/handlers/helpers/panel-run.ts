@@ -170,8 +170,15 @@ export function prepareWriteTargets(
       const stat = lstatSync(path);
       if (stat.isSymbolicLink()) errors.push(`write target must not be a symbolic link: ${path}`);
       else if (!stat.isFile()) errors.push(`write target must be a regular file: ${path}`);
-    } catch {
-      // ENOENT — nothing to follow, nothing to check.
+    } catch (error) {
+      // ONLY ENOENT means "nothing to follow, nothing to check". A blanket
+      // catch read EACCES on a parent component and ELOOP as "absent, safe to
+      // write" — which is precisely the state this function exists to refuse.
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        errors.push(
+          `cannot verify write target ${path}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
   return errors.length > 0 ? fail(errors) : ok(undefined);

@@ -33,7 +33,7 @@ describe("parseSkillsFromFrontmatter", () => {
       "",
       "Body text",
     ].join("\n"));
-    expect(parseSkillsFromFrontmatter(path)).toEqual(["brainstorming"]);
+    expect(parseSkillsFromFrontmatter(path)).toEqual({ kind: "skills", names: ["brainstorming"] });
   });
 
   it("parses multiple skills", () => {
@@ -46,26 +46,57 @@ describe("parseSkillsFromFrontmatter", () => {
       "  - architecture-tech-lead",
       "---",
     ].join("\n"));
-    expect(parseSkillsFromFrontmatter(path)).toEqual(["code-implementer", "architecture-tech-lead"]);
+    expect(parseSkillsFromFrontmatter(path)).toEqual({
+      kind: "skills",
+      names: ["code-implementer", "architecture-tech-lead"],
+    });
   });
 
-  it("returns empty for no skills field", () => {
+  it("parses the flow-style skills list too", () => {
+    // `skills: [a, b]` is valid YAML and used to parse as "declares no skills",
+    // which the handler reads as "nothing to enforce" and allows the spawn.
+    const path = writeAgent("test", [
+      "---",
+      "name: test-agent",
+      'skills: [brainstorming, "code-implementer"]',
+      "---",
+    ].join("\n"));
+    expect(parseSkillsFromFrontmatter(path)).toEqual({
+      kind: "skills",
+      names: ["brainstorming", "code-implementer"],
+    });
+  });
+
+  it("parses a CRLF file the same as an LF one", () => {
+    const path = writeAgent("test", [
+      "---",
+      "name: test-agent",
+      "skills:",
+      "  - brainstorming",
+      "---",
+    ].join("\r\n"));
+    expect(parseSkillsFromFrontmatter(path)).toEqual({ kind: "skills", names: ["brainstorming"] });
+  });
+
+  it("reports 'none' for a readable agent that declares no skills", () => {
     const path = writeAgent("test", [
       "---",
       "name: test-agent",
       "model: sonnet",
       "---",
     ].join("\n"));
-    expect(parseSkillsFromFrontmatter(path)).toEqual([]);
+    expect(parseSkillsFromFrontmatter(path)).toEqual({ kind: "none" });
   });
 
-  it("returns empty for no frontmatter", () => {
+  it("reports 'unreadable' — not 'none' — for a file with no frontmatter", () => {
+    // The distinction the union exists for. Both used to be `[]`, and `[]` means
+    // "nothing to enforce, allow the spawn" on a fail-closed route.
     const path = writeAgent("test", "Just a body\nNo frontmatter here");
-    expect(parseSkillsFromFrontmatter(path)).toEqual([]);
+    expect(parseSkillsFromFrontmatter(path).kind).toBe("unreadable");
   });
 
-  it("returns empty for nonexistent file", () => {
-    expect(parseSkillsFromFrontmatter("/tmp/nonexistent-agent-file.md")).toEqual([]);
+  it("reports 'unreadable' for a nonexistent file", () => {
+    expect(parseSkillsFromFrontmatter("/tmp/nonexistent-agent-file.md").kind).toBe("unreadable");
   });
 
   it("handles tools field without skills", () => {
@@ -78,7 +109,7 @@ describe("parseSkillsFromFrontmatter", () => {
       "  - Bash",
       "---",
     ].join("\n"));
-    expect(parseSkillsFromFrontmatter(path)).toEqual([]);
+    expect(parseSkillsFromFrontmatter(path)).toEqual({ kind: "none" });
   });
 
   it("parses skills with trailing whitespace", () => {
@@ -89,7 +120,7 @@ describe("parseSkillsFromFrontmatter", () => {
       "  - brainstorming  ",
       "---",
     ].join("\n"));
-    expect(parseSkillsFromFrontmatter(path)).toEqual(["brainstorming"]);
+    expect(parseSkillsFromFrontmatter(path)).toEqual({ kind: "skills", names: ["brainstorming"] });
   });
 });
 
@@ -188,6 +219,43 @@ describe("validate-agent-skill — integration scenarios", () => {
         },
       }), []);
       expect(result.kind).toBe("allow");
+    } finally {
+      if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;
+      if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
+    }
+  });
+
+  it("BLOCKS a spawn whose agent file cannot be read — fail closed, not open", async () => {
+    // The polarity bug: every parse failure returned `[]`, and `[]` means
+    // "declares no skills, nothing to enforce, allow". On a route that is in
+    // FAIL_CLOSED_ROUTES — in a handler that already blocks on malformed stdin
+    // precisely so a spawn cannot slip through — an unreadable agent file was
+    // the one input that let a Task run without its required skill.
+    // CLAUDE_PLUGIN_ROOT points somewhere with no agents/ directory, so the
+    // resolver finds the repo copy and we shadow it with a broken one.
+    const createdGraph = !existsSync(TASK_GRAPH_PATH);
+    const previousRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    if (createdGraph) {
+      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
+      writeFileSync(TASK_GRAPH_PATH, "{}");
+    }
+    mkdirSync(join(TMP, "agents"), { recursive: true });
+    writeFileSync(join(TMP, "agents", "arch-designer-agent.md"), "no frontmatter at all\n");
+    process.env.CLAUDE_PLUGIN_ROOT = TMP;
+    try {
+      const result = await validateAgentSkill(JSON.stringify({
+        tool_name: "Task",
+        tool_input: {
+          subagent_type: "loom:arch-designer-agent",
+          prompt: "Use the architecture-tech-lead skill to design one panel candidate.",
+        },
+      }), []);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") {
+        expect(result.message).toContain("cannot determine which skills");
+        expect(result.message).toContain("failing closed");
+      }
     } finally {
       if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
       else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;

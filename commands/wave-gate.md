@@ -211,8 +211,10 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper review-panel lenses \
   --manifest "<review-run-dir>/manifest.json"
 ```
 
-`reproduction` and `intent` are always included; findings touching auth/crypto
-paths pull in `security`, findings on test files pull in `test-coverage`, and
+`reproduction` and `intent` are always included; findings whose **path or claim
+text** mentions auth/crypto/injection pull in `security` (the claim is matched
+too, so a finding on an ordinary path that alleges a token leak still gets the
+lens), findings on test **files** pull in `test-coverage`, and
 the table order in [review-lenses.md](../references/review-lenses.md) fills the
 rest — so an unsignalled panel gets `blast-radius` third: cause, intent,
 consequence.
@@ -265,7 +267,10 @@ collected set is exactly the selected lenses with no duplicates or omissions, an
 adjudicates:
 
 - A finding **survives** unless at least `threshold` verifiers refuted it. The
-  default threshold is a strict majority of the panel (2 of 3, 3 of 5, 2 of 2).
+  threshold is a strict majority of the panel (2 of 3, 3 of 5, 2 of 2), and that
+  majority is a **floor, not just a default**: `--threshold` may only RAISE the
+  bar. A value below the majority is rejected — a panel where one lens can kill a
+  critical on its own is a weaker panel wearing the same name.
 - `uncertain` counts toward **neither** side.
 - **Ties favor keeping the finding** — a false positive costs a cycle, a false
   negative ships a bug.

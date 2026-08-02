@@ -19,12 +19,20 @@
  * constructor of `Finding`, so an un-attributed draft cannot be mistaken for an
  * identified one at a type level.
  *
- * This module owns the whole `Task.findings` aggregate: minting identity,
- * reading it back out of an untrusted state file, and BOTH writers that must
- * keep the authoritative array and its two derived `string[]` views in
- * lockstep — `mergeFindings` (a reviewer finished) and `applyFindingOutcomes`
- * (the panel adjudicated). They live together because the invariant is one
- * invariant; splitting them across modules is how it drifted before.
+ * This module owns the `Task.findings` aggregate: minting identity, reading it
+ * back out of an untrusted state file, proving the lockstep invariant at the
+ * load boundary, and the two REVIEW-path writers that must keep the
+ * authoritative array and its two derived `string[]` views in step —
+ * `mergeFindings` (a reviewer finished) and `applyFindingOutcomes` (the panel
+ * adjudicated). They live together because the invariant is one invariant;
+ * splitting them across modules is how it drifted before.
+ *
+ * Two further lockstep writers live in handlers because they are operator
+ * entry points, not review steps: `updateTaskFindings` (the manual override) and
+ * `fixTaskFindings` (`--fix`). Both derive their views through
+ * `claimsOfSeverity` here, and both are held to the same invariant by
+ * `findingsLockstepError` at the load boundary — the enumeration of all five
+ * writers lives on `Task.findings` in types.ts.
  *
  * Pure module: no I/O, no clock, no randomness.
  */
@@ -70,9 +78,11 @@ export interface Finding extends DraftFinding {
  * reading the legacy `string[]` views still rely on. Collapsed rather than
  * rejected: a multi-line claim from the JSON block is still a real finding.
  *
- * This is a no-op for every legacy path — the line scraper splits on `\n`, so
- * a scraped claim can never contain one. That is what keeps A2's parser change
- * from altering any existing `critical_findings` content.
+ * With respect to LINE TERMINATORS this is a no-op on every legacy path — the
+ * line scraper splits on `\n`, so a scraped claim can never contain one. It does
+ * also collapse internal space/tab runs (`"foo    bar"` → `"foo bar"`), which is
+ * safe because every comparison against the derived views goes through claims
+ * normalized here identically — see `removeOnce` and `recoverViewOnlyClaims`.
  */
 function collapseWhitespace(claim: string): string {
   return claim.replace(/\s+/g, " ").trim();
@@ -140,6 +150,25 @@ export function claimsOfSeverity(
   severity: FindingSeverity,
 ): readonly string[] {
   return findings.filter((finding) => finding.severity === severity).map((finding) => finding.claim);
+}
+
+/**
+ * Remove ONE occurrence of each claim, by value — a multiset difference.
+ *
+ * The derived `string[]` views can legitimately hold the same claim twice (two
+ * reviewers, same wording), so a set-difference would delete a finding nobody
+ * refuted, and a set-comparison would reject a graph the writers are allowed to
+ * produce. Used three ways: adjudication (`applyFindingOutcomes` retires only
+ * the claims it removed), the load-boundary lockstep proof, and the repair path
+ * (`fixTaskFindings` recovers exactly the claims no finding accounts for).
+ */
+export function removeOnce(claims: readonly string[], toRemove: readonly string[]): string[] {
+  const remaining = [...claims];
+  for (const claim of toRemove) {
+    const index = remaining.indexOf(claim);
+    if (index >= 0) remaining.splice(index, 1);
+  }
+  return remaining;
 }
 
 /** Id-safe form of an agent name: the id is parsed back apart nowhere, but it
@@ -386,7 +415,58 @@ export function findingsUnionError(raw: unknown, label: string): string | null {
   if (raw === undefined) return null;
   if (!Array.isArray(raw)) return `${label} must be an array when present`;
   const index = raw.findIndex((entry) => parseStoredFinding(entry) === null);
-  return index < 0 ? null : `${label}[${index}] is not a well-formed finding (${REPAIR_HINT})`;
+  if (index >= 0) return `${label}[${index}] is not a well-formed finding (${REPAIR_HINT})`;
+
+  // Ids must be distinct, and this is the only place that can prove it. Two
+  // findings sharing an id make `applyFindingOutcomes`' id filter delete BOTH
+  // where one was adjudicated, and attach the panel's reasoning to the wrong
+  // claim — the exact failure `nextOrdinal` is built to foreclose on the
+  // minting side. Minting is guarded; a hand-edited or drifted file is not.
+  const ids = raw.map((entry) => (entry as Record<string, unknown>).id as string);
+  const duplicate = ids.findIndex((id, at) => ids.indexOf(id) !== at);
+  return duplicate < 0
+    ? null
+    : `${label}[${duplicate}] repeats finding id '${ids[duplicate]}' (${REPAIR_HINT})`;
+}
+
+/**
+ * Load-boundary check that `findings` and its two `string[]` views agree.
+ *
+ * `types.ts` calls the views DERIVED, five writers keep them so, and both the
+ * wave gate and the GH comment read the views rather than the array. Nothing
+ * proved it. Shape validation alone leaves both drift directions open, and the
+ * dangerous one is silent: a critical present in `findings` but missing from
+ * `critical_findings` never blocks the wave, and a claim in the view with no
+ * counterpart in the array can never enter a brief, so no panel can adjudicate
+ * it and the task stays blocked with nothing able to clear it.
+ *
+ * A MULTISET comparison, not a set one: two reviewers can legitimately word the
+ * same claim identically, and collapsing that to one would reject a graph the
+ * writers are allowed to produce.
+ */
+export function findingsLockstepError(
+  raw: unknown,
+  criticalView: unknown,
+  advisoryView: unknown,
+  label: string,
+): string | null {
+  if (raw === undefined) return null;
+  const findings = parseStoredFindings(raw);
+  for (const severity of FINDING_SEVERITIES) {
+    const view = severity === "critical" ? criticalView : advisoryView;
+    const claims = Array.isArray(view) ? view.filter((c): c is string => typeof c === "string") : [];
+    const derived = claimsOfSeverity(findings, severity);
+    const leftover = removeOnce(claims, derived);
+    const missing = removeOnce(derived, claims);
+    if (leftover.length > 0 || missing.length > 0) {
+      return (
+        `${label}: ${severity}_findings is not the derived view of findings — ` +
+        `${leftover.length} claim(s) present only in the view, ` +
+        `${missing.length} present only in findings (${REPAIR_HINT})`
+      );
+    }
+  }
+  return null;
 }
 
 /** Load-boundary check for `Task.refuted_findings`. */
@@ -419,6 +499,70 @@ export interface AdjudicatedFinding {
 }
 
 /**
+ * The agent a claim recovered from a legacy `string[]` view is attributed to.
+ *
+ * Honest attribution: nobody knows which reviewer emitted a pre-identity claim,
+ * and guessing would put a real reviewer's name on a claim it may not have made.
+ * Distinct from OVERRIDE_AGENT because an operator DECIDED that one.
+ */
+export const RECOVERED_AGENT = "recovered-view";
+
+/**
+ * Mint identity for claims the `string[]` views hold that no structured finding
+ * accounts for. Returns only the recovered findings; empty when already in step.
+ *
+ * Recovery, not deletion, is the only safe repair. A claim in the view with no
+ * counterpart in `findings` can never enter a brief, so it can never be refuted,
+ * so the task stays blocked with nothing able to adjudicate it — but DROPPING it
+ * deletes a critical the wave gate counts, which is strictly worse: the gate
+ * then passes a task whose reviewer found a blocker. Minting makes the claim
+ * refutable, which is what both callers actually want.
+ *
+ * Shared by `mergeFindings` (a reviewer finished on a pre-identity task) and
+ * `fixTaskFindings` (`--fix`), so the two cannot disagree about what recovery
+ * means.
+ */
+export function recoverViewOnlyClaims(
+  findings: readonly Finding[],
+  refuted: readonly RefutedFinding[],
+  criticalView: readonly string[] | undefined,
+  advisoryView: readonly string[] | undefined,
+): readonly Finding[] {
+  const orphanCritical = removeOnce(criticalView ?? [], claimsOfSeverity(findings, "critical"));
+  const orphanAdvisory = removeOnce(advisoryView ?? [], claimsOfSeverity(findings, "advisory"));
+  const drafts = draftsFromClaims(orphanCritical, orphanAdvisory);
+  return drafts.length === 0
+    ? []
+    : attributeFindings(drafts, RECOVERED_AGENT, nextOrdinal(findings, refuted, RECOVERED_AGENT));
+}
+
+/**
+ * Re-mint any id that collides with one already seen. The repair counterpart of
+ * `findingsUnionError`'s uniqueness check — rejection needs a repair that can
+ * actually clear it, or the operator is dead-ended on an unloadable graph.
+ *
+ * Re-minted rather than dropped, for the reason recovery exists at all: the
+ * second claim under a duplicated id is a real finding, and the collision is a
+ * naming defect, not a reason to lose it.
+ */
+export function deduplicateFindingIds(
+  findings: readonly Finding[],
+  refuted: readonly RefutedFinding[],
+): readonly Finding[] {
+  const kept: Finding[] = [];
+  for (const finding of findings) {
+    if (!kept.some((seen) => seen.id === finding.id)) {
+      kept.push(finding);
+      continue;
+    }
+    kept.push(
+      ...attributeFindings([finding], finding.agent, nextOrdinal(kept, refuted, finding.agent)),
+    );
+  }
+  return kept;
+}
+
+/**
  * Merge one reviewer's findings into a task, accumulating rather than
  * overwriting. Never demotes review_status from "blocked" to "passed".
  *
@@ -433,53 +577,48 @@ export function mergeFindings(
   findings: { readonly drafts: readonly DraftFinding[]; readonly criticalCount: number | null },
   agent: string,
 ): Task {
-  const newStatus: ReviewStatus = (findings.criticalCount ?? 0) > 0 ? "blocked" : "passed";
+  // Either source may say "blocked": `criticalCount` is the reviewer's own
+  // tally, and the captured criticals are what the gate will actually count.
+  // Trusting the tally alone let `CRITICAL_COUNT: 0` beside a real `CRITICAL:`
+  // line record `passed` — and a task pinned at `passed` is one that
+  // `applyFindingOutcomes`' promotion guard can never adjudicate.
+  const captured = claimsOfSeverity(findings.drafts, "critical").length;
+  const newStatus: ReviewStatus =
+    (findings.criticalCount ?? 0) > 0 || captured > 0 ? "blocked" : "passed";
   const reviewStatus: ReviewStatus = task.review_status === "blocked" ? "blocked" : newStatus;
 
-  const existing = task.findings ?? [];
+  const refuted = task.refuted_findings ?? [];
+  // A pre-identity task's claims live only in the views. Appending beside them
+  // without migrating would leave `findings` holding strictly less than the
+  // views claim — the drift the load boundary now rejects outright.
+  const existing = [
+    ...(task.findings ?? []),
+    ...recoverViewOnlyClaims(
+      task.findings ?? [],
+      refuted,
+      task.critical_findings,
+      task.advisory_findings,
+    ),
+  ];
   const attributed = attributeFindings(
     findings.drafts,
     agent,
-    nextOrdinal(existing, task.refuted_findings ?? [], agent),
+    nextOrdinal(existing, refuted, agent),
   );
+  const merged = [...existing, ...attributed];
 
   return {
     ...task,
     review_status: reviewStatus,
-    findings: [...existing, ...attributed],
-    critical_findings: [
-      ...(task.critical_findings ?? []),
-      ...claimsOfSeverity(findings.drafts, "critical"),
-    ],
-    advisory_findings: [
-      ...(task.advisory_findings ?? []),
-      ...claimsOfSeverity(findings.drafts, "advisory"),
-    ],
+    findings: merged,
+    critical_findings: [...claimsOfSeverity(merged, "critical")],
+    advisory_findings: [...claimsOfSeverity(merged, "advisory")],
   };
 }
 
 /** Strip the wave scoping a brief added, recovering the task-local finding id. */
 function localFindingId(briefId: string, taskId: string): string {
   return briefId.startsWith(`${taskId}:`) ? briefId.slice(taskId.length + 1) : briefId;
-}
-
-/**
- * Remove ONE occurrence of each claim, by value.
- *
- * The derived `string[]` views can legitimately hold the same claim twice (two
- * reviewers, same wording), so a set-difference would delete a finding nobody
- * refuted. A claim that is absent cannot happen for a finding the panel
- * adjudicated: the brief is built from `task.findings`, and both the load
- * boundary (findingsUnionError) and the repair path (fixFull) now guarantee the
- * views hold exactly the claims that array holds.
- */
-function removeOnce(claims: readonly string[], toRemove: readonly string[]): string[] {
-  const remaining = [...claims];
-  for (const claim of toRemove) {
-    const index = remaining.indexOf(claim);
-    if (index >= 0) remaining.splice(index, 1);
-  }
-  return remaining;
 }
 
 /**
@@ -514,9 +653,31 @@ export function applyFindingOutcomes(
   const kept = (task.findings ?? []).filter((finding) => !refutedLocalIds.has(finding.id));
   const removed = (task.findings ?? []).filter((finding) => refutedLocalIds.has(finding.id));
 
-  const refutedRecords: RefutedFinding[] = mine.flatMap((outcome) => {
-    const finding = removed.find((f) => f.id === localFindingId(outcome.finding.id, task.id));
-    return finding ? [{ finding, refutations: outcome.refutations }] : [];
+  const refutedRecords: RefutedFinding[] = mine.map((outcome) => {
+    const localId = localFindingId(outcome.finding.id, task.id);
+    const finding = removed.find((f) => f.id === localId);
+    // Throw rather than skip, for the reason `requireEntry` throws: the brief
+    // is built from `task.findings` and the load boundary proves lockstep, so a
+    // miss here is a broken invariant, not a degraded input. Skipping it wrote
+    // no audit record while `serializeOutcomes` and the operator line both
+    // still reported the finding as refuted — and dropping the last critical
+    // that way promotes `blocked → passed` with nothing to show for it. The
+    // reachable window is a `store-review-findings` override landing between
+    // `brief` and `tally`, which invalidates every brief id for that task.
+    if (finding === undefined) {
+      throw new Error(
+        `findings invariant: ${task.id} has no finding '${localId}' the panel adjudicated — ` +
+          `the task graph changed between brief and tally; re-run the brief`,
+      );
+    }
+    // The reader (`parseStoredRefutation`) rejects an empty refutations list, so
+    // writing one would produce state this module's own load path refuses.
+    if (outcome.refutations.length === 0) {
+      throw new Error(
+        `findings invariant: refuted finding '${localId}' on ${task.id} carries no refutations`,
+      );
+    }
+    return { finding, refutations: outcome.refutations };
   });
 
   // Derived from `kept`, the authority, rather than inferred from the view a

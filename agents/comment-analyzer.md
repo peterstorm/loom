@@ -126,10 +126,15 @@ refutation panel needs to adjudicate it. Rules:
   order) so they are stable and need no trust.
 
 `CRITICAL_COUNT` remains the authority on how many criticals you found, and the
-block must ACCOUNT FOR ALL OF THEM: when it parses, it becomes the sole source
-of findings and the `CRITICAL:` lines are ignored, so every critical in your
-marker lines must also appear in the block with `"severity": "critical"`. A
-block that lists fewer criticals than you counted is discarded in favour of the
-marker lines — no finding is ever lost to it, but the locations are. If the
-block is absent or malformed, the marker lines are parsed instead and your
-findings simply carry no location.
+block must ACCOUNT FOR EVERY FINDING YOU REPORTED — advisories included: when it
+parses, it becomes the sole source of findings and the marker lines are ignored,
+so every `CRITICAL:` line AND every `ADVISORY:` line must also appear in the
+block with the matching `"severity"`. A block that lists fewer findings of
+EITHER severity than your marker lines is discarded in favour of them — no
+finding is ever lost to it, but the locations are. If the block is absent or
+malformed, the marker lines are parsed instead and your findings simply carry no
+location.
+
+The engine compares COUNTS per severity, not claim text: it cannot tell a
+reworded claim from a substituted one, so a block that renames a claim replaces
+it silently. Write the same claim in both places.

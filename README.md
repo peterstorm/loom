@@ -274,9 +274,9 @@ validator (`core/panel-kernel.ts`).
 | `security` | the claimed security consequence does not hold |
 | `test-coverage` | the missing test would not catch a real bug |
 
-`reproduction` and `intent` are always selected; findings on auth/crypto paths
-pull in `security` and findings on test files pull in `test-coverage`. Default
-panel size is 3.
+`reproduction` and `intent` are always selected; findings whose path **or claim
+text** mentions auth/crypto/injection pull in `security`, and findings on test
+files pull in `test-coverage`. Default panel size is 3.
 
 - A finding **survives** unless a strict majority of verifiers refuted it.
   `uncertain` counts toward neither side, and **ties favor keeping the finding**

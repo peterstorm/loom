@@ -346,21 +346,52 @@ describe("parseTaskGraph proves findings, not just the fields that always did", 
     claim: "unchecked cast",
   };
 
-  it("accepts a task with no findings, and one with well-formed findings", () => {
+  it("accepts a task with no findings, and one whose views are in lockstep", () => {
     expect(parseTaskGraph(graph({})).ok).toBe(true);
     expect(parseTaskGraph(graph({ findings: [] })).ok).toBe(true);
-    expect(parseTaskGraph(graph({ findings: [wellFormed] })).ok).toBe(true);
+    expect(parseTaskGraph(graph({
+      findings: [wellFormed],
+      critical_findings: ["unchecked cast"],
+    })).ok).toBe(true);
     expect(parseTaskGraph(graph({
       refuted_findings: [{ finding: wellFormed, refutations: [{ lens: "intent", reason: "deliberate" }] }],
     })).ok).toBe(true);
   });
 
+  it("accepts the same claim twice — two reviewers may word it identically", () => {
+    // A multiset comparison, not a set one. Collapsing duplicates would reject
+    // a graph the sanctioned writers are allowed to produce.
+    expect(parseTaskGraph(graph({
+      findings: [wellFormed, { ...wellFormed, id: "silent-failure-hunter-1", agent: "silent-failure-hunter" }],
+      critical_findings: ["unchecked cast", "unchecked cast"],
+    })).ok).toBe(true);
+  });
+
   it.each([
     ["findings that are not an array", { findings: {} }],
+    ["refuted_findings that are not an array", { refuted_findings: "none" }],
     ["a finding with no id", { findings: [{ ...wellFormed, id: "" }] }],
     ["a finding with no agent", { findings: [{ ...wellFormed, agent: undefined }] }],
     ["a finding with an unknown severity", { findings: [{ ...wellFormed, severity: "blocker" }] }],
     ["a finding with a non-string claim", { findings: [{ ...wellFormed, claim: 7 }] }],
+    // Two findings under one id make applyFindingOutcomes delete BOTH where one
+    // was adjudicated, and attach the panel's reasoning to the wrong claim —
+    // the failure nextOrdinal forecloses when minting, and nothing caught on read.
+    ["two findings sharing an id", {
+      findings: [wellFormed, { ...wellFormed, claim: "a different claim" }],
+      critical_findings: ["unchecked cast", "a different claim"],
+    }],
+    // The dangerous drift direction: the gate counts the view, so a critical
+    // present only in `findings` never blocks the wave.
+    ["a critical present only in findings", { findings: [wellFormed], critical_findings: [] }],
+    // The other direction: a claim no finding accounts for can never enter a
+    // brief, so no panel can ever adjudicate it.
+    ["a claim present only in the view", { findings: [], critical_findings: ["orphan"] }],
+    ["an advisory view that outruns findings", {
+      findings: [wellFormed],
+      critical_findings: ["unchecked cast"],
+      advisory_findings: ["nit"],
+    }],
     ["a refutation with no refuters", { refuted_findings: [{ finding: wellFormed, refutations: [] }] }],
     ["a refutation missing a reason", { refuted_findings: [{ finding: wellFormed, refutations: [{ lens: "intent" }] }] }],
   ])("rejects %s at the load boundary", (_label, task) => {

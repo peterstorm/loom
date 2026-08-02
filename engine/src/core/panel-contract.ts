@@ -263,10 +263,10 @@ export function parsePanelManifest(
   });
   if (!parsed.ok) return fail(parsed.errors);
 
-  // Safe by construction: every entry id was checked for membership in
-  // `expectedLenses`, which is a `readonly PanelLens[]`.
+  // `entry.id` is a proven `PanelLens`, not a cast one: `parseRunManifest`
+  // resolves each raw id against `expectedLenses` and returns that element.
   const candidates: PanelCandidate[] = parsed.value.entries.map((entry) => ({
-    lens: entry.id as PanelLens,
+    lens: entry.id,
     path: entry.path,
     filename: entry.filename,
   }));

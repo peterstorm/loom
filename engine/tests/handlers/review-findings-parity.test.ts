@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Task } from "../../src/types";
-import { claimsOfSeverity } from "../../src/core/findings";
+import { claimsOfSeverity, findingsLockstepError } from "../../src/core/findings";
 import { mergeFindings } from "../../src/core/findings";
 import {
   applyReviewResolution,
@@ -42,6 +42,14 @@ const TRANSCRIPT = [
  * The fix was to collapse the two sequences into one. These tests pin that:
  * Pi must reach the shared decision + transform, and must NOT re-implement the
  * parse → reconcile → merge sequence out of the lower-level parts.
+ *
+ * What the structural assertions can and cannot prove: Pi's review logic lives
+ * inside `export default function (pi: ExtensionAPI)` and needs the Pi runtime
+ * to execute, so these grep the source rather than run it. That catches the
+ * realistic regression — a harness quietly reaching for the lower-level parts
+ * again — but it would not catch a harness that inlined its own copy under
+ * different names. The output-contract test below is the other half: it pins
+ * the exact task shape both shells must write.
  */
 describe("harness parity: one path from transcript to task", () => {
   const CLAUDE_CODE_HOOK = readFileSync(
@@ -84,14 +92,50 @@ describe("harness parity: one path from transcript to task", () => {
     expect(source.slice(discardPoint)).toContain("findings NOT stored");
   });
 
-  it("both harnesses derive the identical task from the identical transcript", () => {
-    // Same call, twice — this is the whole point of the collapse: there is only
-    // one implementation left for the two harnesses to agree or disagree about.
-    const resolution = resolveReviewFindings(TRANSCRIPT, "code-reviewer");
-    const claudeCode = applyReviewResolution(baseTask, resolution);
-    const pi = applyReviewResolution(baseTask, resolveReviewFindings(TRANSCRIPT, "code-reviewer"));
-    expect(pi).toEqual(claudeCode);
-    expect(claudeCode.findings?.map((f) => f.id)).toEqual(["code-reviewer-1", "code-reviewer-2"]);
+  it("pins the exact task shape BOTH harnesses must produce", () => {
+    // This used to assert `f(x) === f(x)` — the same call twice, which proves
+    // determinism of a pure function and nothing about Pi. What is worth
+    // pinning is the OUTPUT CONTRACT: the shape each harness's `mgr.update`
+    // writes. If this changes, both shells change together or the drift the
+    // collapse removed is back.
+    const task = applyReviewResolution(baseTask, resolveReviewFindings(TRANSCRIPT, "code-reviewer"));
+
+    expect(task.review_status).toBe("blocked");
+    expect(task.critical_findings).toEqual(["unchecked cast in the reducer"]);
+    expect(task.advisory_findings).toEqual(["prefer a named constant"]);
+    expect(task.findings).toEqual([
+      {
+        id: "code-reviewer-1",
+        agent: "code-reviewer",
+        severity: "critical",
+        file: null,
+        line: null,
+        claim: "unchecked cast in the reducer",
+      },
+      {
+        id: "code-reviewer-2",
+        agent: "code-reviewer",
+        severity: "advisory",
+        file: null,
+        line: null,
+        claim: "prefer a named constant",
+      },
+    ]);
+    // And the shape is one the load boundary accepts, so whichever harness
+    // wrote it, the other can read it back.
+    expect(findingsLockstepError(task.findings, task.critical_findings, task.advisory_findings, "t"))
+      .toBeNull();
+  });
+
+  it("the evidence-failure transition is identical for both harnesses too", () => {
+    // The other branch of the closed union. A harness that handled only the
+    // findings case would silently pass a wave whose reviewer emitted nothing.
+    const task = applyReviewResolution(
+      baseTask,
+      resolveReviewFindings("### Machine Summary\nCRITICAL: no count marker", "code-reviewer"),
+    );
+    expect(task.review_status).toBe("evidence_capture_failed");
+    expect(task.review_error).toContain("CRITICAL_COUNT marker not found");
   });
 });
 

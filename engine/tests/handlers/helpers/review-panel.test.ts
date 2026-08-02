@@ -165,6 +165,9 @@ describe("review-panel helper CLI", () => {
         { id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", file: "src/render.ts", line: 1, claim: "off-by-one" },
       ];
       plain.tasks[0]!.critical_findings = ["off-by-one"];
+      // The views are derived, and the load boundary now proves it — dropping
+      // the advisory finding without dropping its view is a corrupt graph.
+      plain.tasks[0]!.advisory_findings = [];
       writeFileSync(statePath, JSON.stringify(plain));
       stage();
       expect(JSON.parse(readFileSync(manifestPath, "utf-8")).lenses)
@@ -325,10 +328,29 @@ describe("review-panel helper CLI", () => {
       expect(task.advisory_findings).toEqual(["prefer a named constant"]);
     });
 
-    it("honours an explicit --threshold", () => {
+    it("honours a --threshold that RAISES the bar", () => {
+      // Two of three refute F1, which the default (strict majority of 3 = 2)
+      // would kill. Demanding unanimity keeps it.
+      writeVerdicts([["refuted", "upheld"], ["refuted", "upheld"], ["upheld", "upheld"]]);
+      expect(tally(["--threshold", "3"]).status).toBe(0);
+      expect(stateTask().critical_findings).toEqual([
+        "unchecked cast in the token reducer",
+        "catch block swallows the error",
+      ]);
+    });
+
+    it("refuses a --threshold below the strict-majority floor", () => {
+      // `--threshold 1` let a single lens kill a critical on its own, inverting
+      // the documented "ties favour keeping the finding" rule — and the runbook
+      // never mentions the flag, so nothing gated an orchestrator that improvised
+      // it. Raising the bar is safe; lowering it is a weaker panel under the
+      // same name.
       writeVerdicts([["refuted", "upheld"], ["upheld", "upheld"], ["upheld", "upheld"]]);
-      expect(tally(["--threshold", "1"]).status).toBe(0);
-      expect(stateTask().critical_findings).toEqual(["catch block swallows the error"]);
+      const result = tally(["--threshold", "1"]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("below the strict majority of 3 lenses (2)");
+      // State is untouched — the weaker panel adjudicated nothing.
+      expect(stateTask().critical_findings).toHaveLength(2);
     });
 
     it("fails when a verdict slot is missing", () => {
@@ -404,12 +426,18 @@ describe("review-panel helper CLI", () => {
     });
 
     it("rejects a graph whose findings undercount the view the gate counts", () => {
+      // Caught one step earlier than it used to be: `findingsLockstepError` at
+      // the load boundary refuses the graph outright, so a drifted view never
+      // reaches brief construction at all. The completeness guard remains as
+      // the backstop for the one drift the load boundary cannot see — a
+      // pre-identity task, covered by the test above.
       writeState((graph) => {
         graph.tasks[0]!.findings = graph.tasks[0]!.findings.filter((f) => f.id !== "code-reviewer-1");
       });
       const result = buildBrief();
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain("only 1 carry structured identity");
+      expect(result.stderr).toContain("critical_findings is not the derived view of findings");
+      expect(result.stderr, "the diagnostic names a repair").toContain("validate-task-graph --fix");
     });
   });
 
@@ -454,6 +482,24 @@ describe("review-panel helper CLI", () => {
     expect(result.stderr).toContain("write target must not be a symbolic link");
     expect(readFileSync(escape, "utf-8"), "nothing was written through the link").toBe("");
   });
+
+  it("refuses a write target it cannot stat, rather than assuming it is absent", () => {
+    // The blanket `catch {}` was labelled ENOENT but never inspected the code,
+    // so EACCES on a parent component and ELOOP both read as "target absent,
+    // safe to write" — defeating the symlink check this function exists to
+    // perform. A directory with no execute bit makes lstat fail with EACCES.
+    const sealed = join(runDir, "findings");
+    mkdirSync(sealed, { recursive: true });
+    chmodSync(sealed, 0o000);
+    try {
+      const result = buildBrief();
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("cannot verify write target");
+    } finally {
+      chmodSync(sealed, 0o755);
+    }
+  });
+
   it("rejects an unknown operation", () => {
     expect(run(["adjudicate", "--runs-root", REL_ROOT]).stderr).toContain("Usage: helper review-panel");
   });

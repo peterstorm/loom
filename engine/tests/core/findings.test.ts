@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import type { Task } from "../../src/types";
-import { applyFindingOutcomes, findingsUnionError, mergeFindings, refutationsUnionError, type AdjudicatedFinding } from "../../src/core/findings";
+import {
+  applyFindingOutcomes,
+  deduplicateFindingIds,
+  findingsLockstepError,
+  findingsUnionError,
+  mergeFindings,
+  recoverViewOnlyClaims,
+  refutationsUnionError,
+  type AdjudicatedFinding,
+} from "../../src/core/findings";
 import { makeParsedFindings } from "../../src/core/review-output";
 
 import {
@@ -431,5 +440,206 @@ describe("the load boundary proves what the Task type asserts", () => {
       expect(findingsUnionError(raw, "findings")).not.toBeNull();
       expect(parseStoredFindings(raw)).toEqual([]);
     }
+  });
+});
+
+describe("the load boundary proves the LOCKSTEP, not only the shapes", () => {
+  const wellFormed = { id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", claim: "x" };
+
+  it("rejects two findings sharing an id", () => {
+    // The failure `nextOrdinal` forecloses when MINTING, and nothing caught on
+    // read: `applyFindingOutcomes` filters by an id set, so a duplicate makes
+    // one adjudication delete two findings and record the panel's reasoning
+    // against the wrong claim.
+    const error = findingsUnionError([wellFormed, { ...wellFormed, claim: "y" }], "tasks[0].findings");
+    expect(error).toContain("repeats finding id 'code-reviewer-1'");
+    expect(error).toContain("validate-task-graph --fix");
+  });
+
+  it("accepts distinct ids carrying the same claim", () => {
+    expect(
+      findingsUnionError(
+        [wellFormed, { ...wellFormed, id: "silent-failure-hunter-1", agent: "silent-failure-hunter" }],
+        "f",
+      ),
+    ).toBeNull();
+  });
+
+  it.each([
+    ["a critical present only in findings", [wellFormed], [], []],
+    ["a claim present only in the view", [], ["orphan"], []],
+    ["an advisory view that outruns findings", [wellFormed], ["x"], ["nit"]],
+  ])("rejects %s", (_label, findings, critical, advisory) => {
+    const error = findingsLockstepError(findings, critical, advisory, "tasks[0]");
+    expect(error).toContain("is not the derived view of findings");
+    expect(error).toContain("validate-task-graph --fix");
+  });
+
+  it("compares as a MULTISET — two reviewers may word a claim identically", () => {
+    expect(
+      findingsLockstepError(
+        [wellFormed, { ...wellFormed, id: "silent-failure-hunter-1", agent: "silent-failure-hunter" }],
+        ["x", "x"],
+        [],
+        "t",
+      ),
+    ).toBeNull();
+    // ...but one finding cannot back two identical view entries.
+    expect(findingsLockstepError([wellFormed], ["x", "x"], [], "t")).not.toBeNull();
+  });
+
+  it("says nothing about a pre-identity task — its views are all it has", () => {
+    expect(findingsLockstepError(undefined, ["from before identity"], [], "t")).toBeNull();
+  });
+
+  it("holds for every graph the sanctioned writers produce", () => {
+    // The property that ties the check to the writers: if any of them could
+    // produce a graph this rejects, the load boundary would brick the workflow.
+    fc.assert(
+      fc.property(
+        fc.array(fc.record({ critical: fc.boolean(), claim: fc.string({ minLength: 1, maxLength: 6 }) }), {
+          maxLength: 6,
+        }),
+        (specs) => {
+          const parsed = makeParsedFindings({
+            drafts: specs
+              .map((s) => makeDraftFinding({ severity: s.critical ? "critical" : "advisory", claim: s.claim }))
+              .filter((d): d is DraftFinding => d !== null),
+            criticalCount: specs.filter((s) => s.critical).length,
+          });
+          const merged = mergeFindings(taskFixture({ review_status: "pending" }), parsed, "code-reviewer");
+          expect(
+            findingsLockstepError(
+              merged.findings,
+              merged.critical_findings,
+              merged.advisory_findings,
+              "t",
+            ),
+          ).toBeNull();
+        },
+      ),
+    );
+  });
+});
+
+describe("mergeFindings", () => {
+  it("blocks when the markers carry a critical the reviewer's count denied", () => {
+    // `CRITICAL_COUNT: 0` beside a real CRITICAL: line used to record `passed`,
+    // and a task pinned at `passed` is one applyFindingOutcomes' promotion
+    // guard can never adjudicate.
+    const understated = makeParsedFindings({ critical: ["a real blocker"], criticalCount: 0 });
+    const merged = mergeFindings(taskFixture({ review_status: "pending" }), understated, "code-reviewer");
+    expect(merged.review_status).toBe("blocked");
+    expect(merged.critical_findings).toEqual(["a real blocker"]);
+  });
+
+  it("gives a pre-identity task's view claims identity instead of orphaning them", () => {
+    // Appending beside them without migrating left `findings` holding strictly
+    // less than the views claimed — the drift the load boundary now rejects.
+    const legacy = taskFixture({
+      review_status: "blocked",
+      findings: undefined,
+      critical_findings: ["from before identity"],
+      advisory_findings: ["an old nit"],
+    });
+    const merged = mergeFindings(legacy, makeParsed(["a new one"]), "code-reviewer");
+    expect(merged.critical_findings).toEqual(["from before identity", "a new one"]);
+    expect(merged.advisory_findings).toEqual(["an old nit"]);
+    expect(merged.findings?.map((f) => f.agent)).toEqual([
+      "recovered-view",
+      "recovered-view",
+      "code-reviewer",
+    ]);
+    expect(findingsLockstepError(merged.findings, merged.critical_findings, merged.advisory_findings, "t"))
+      .toBeNull();
+  });
+});
+
+describe("applyFindingOutcomes refuses to adjudicate what it cannot find", () => {
+  const blocked = () =>
+    mergeFindings(taskFixture({ review_status: "pending" }), makeParsed(["a blocker"]), "code-reviewer");
+
+  it("throws on an outcome naming a finding the task no longer holds", () => {
+    // Silently skipping it wrote no audit record while serializeOutcomes and
+    // the operator line both still reported the finding as refuted — and
+    // dropping the wave's last critical that way promotes blocked → passed.
+    // Reachable when a store-review-findings override lands between brief and
+    // tally, which invalidates every brief id for that task.
+    expect(() =>
+      applyFindingOutcomes(blocked(), [{
+        finding: { id: "T1:code-reviewer-99", taskId: "T1" },
+        refutations: [{ lens: "intent", reason: "deliberate" }],
+        survives: false,
+      }]),
+    ).toThrow(/no finding 'code-reviewer-99'/);
+  });
+
+  it("throws rather than writing a record its own reader rejects", () => {
+    // parseStoredRefutation refuses an empty refutations list, so writing one
+    // would make the graph unloadable by the module that wrote it.
+    expect(() =>
+      applyFindingOutcomes(blocked(), [{
+        finding: { id: "T1:code-reviewer-1", taskId: "T1" },
+        refutations: [],
+        survives: false,
+      }]),
+    ).toThrow(/carries no refutations/);
+  });
+
+  it("still ignores an outcome belonging to another task", () => {
+    const task = blocked();
+    expect(applyFindingOutcomes(task, [{
+      finding: { id: "T2:code-reviewer-1", taskId: "T2" },
+      refutations: [{ lens: "intent", reason: "deliberate" }],
+      survives: false,
+    }])).toBe(task);
+  });
+});
+
+describe("deduplicateFindingIds — the repair for what the boundary rejects", () => {
+  const finding = (id: string, claim: string): Finding => ({
+    id, agent: "code-reviewer", severity: "critical", file: null, line: null, claim,
+  });
+
+  it("re-mints the collision rather than dropping the second claim", () => {
+    const deduped = deduplicateFindingIds(
+      [finding("code-reviewer-1", "first"), finding("code-reviewer-1", "second")],
+      [],
+    );
+    expect(deduped.map((f) => f.claim)).toEqual(["first", "second"]);
+    expect(new Set(deduped.map((f) => f.id)).size).toBe(2);
+  });
+
+  it("never remints onto an ordinal a refutation record still holds", () => {
+    const refuted = [{
+      finding: finding("code-reviewer-2", "already refuted"),
+      refutations: [{ lens: "intent", reason: "deliberate" }],
+    }];
+    const deduped = deduplicateFindingIds(
+      [finding("code-reviewer-1", "first"), finding("code-reviewer-1", "second")],
+      refuted,
+    );
+    expect(deduped.map((f) => f.id)).not.toContain("code-reviewer-2");
+  });
+
+  it("is a no-op on an already-distinct set", () => {
+    const distinct = [finding("code-reviewer-1", "a"), finding("code-reviewer-2", "b")];
+    expect(deduplicateFindingIds(distinct, [])).toEqual(distinct);
+  });
+});
+
+describe("recoverViewOnlyClaims", () => {
+  it("mints identity for exactly the claims no finding accounts for", () => {
+    const held: Finding = {
+      id: "code-reviewer-1", agent: "code-reviewer", severity: "critical",
+      file: null, line: null, claim: "already identified",
+    };
+    const recovered = recoverViewOnlyClaims([held], [], ["already identified", "orphan"], ["a nit"]);
+    expect(recovered.map((f) => f.claim)).toEqual(["orphan", "a nit"]);
+    expect(recovered.every((f) => f.agent === "recovered-view")).toBe(true);
+  });
+
+  it("recovers nothing when the views are already in step", () => {
+    expect(recoverViewOnlyClaims([], [], [], [])).toEqual([]);
   });
 });

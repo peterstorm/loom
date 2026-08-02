@@ -12,6 +12,7 @@ import {
   claimsOfSeverity,
   draftsFromClaims,
   nextOrdinal,
+  recoverViewOnlyClaims,
   type Finding,
 } from "../../core/findings";
 import { StateManager } from "../../state-manager";
@@ -67,14 +68,23 @@ export function updateTaskFindings(
 ): Task {
   const reviewStatus: ReviewStatus = critical.length > 0 ? "blocked" : "passed";
 
-  // Advisories the override did not speak to survive with their identity
-  // intact. A pre-identity task has none to keep, so its view is migrated.
+  // A pre-identity task's claims live only in the views; give them identity
+  // through the same primitive `mergeFindings` and `--fix` use, so all four
+  // writers agree on what a legacy task's findings ARE before any of them
+  // decides what to keep.
+  const existing: readonly Finding[] = [
+    ...(task.findings ?? []),
+    ...recoverViewOnlyClaims(
+      task.findings ?? [],
+      task.refuted_findings ?? [],
+      task.critical_findings,
+      task.advisory_findings,
+    ),
+  ];
+
+  // Advisories the override did not speak to survive with their identity intact.
   const keptAdvisory: readonly Finding[] =
-    advisory.length > 0
-      ? []
-      : task.findings
-        ? task.findings.filter((finding) => finding.severity === "advisory")
-        : attributeFindings(draftsFromClaims([], task.advisory_findings ?? []), OVERRIDE_AGENT);
+    advisory.length > 0 ? [] : existing.filter((finding) => finding.severity === "advisory");
 
   const supplied = attributeFindings(
     draftsFromClaims(critical, advisory),
@@ -102,29 +112,42 @@ const handler: HookHandler = async (stdin, args) => {
 
   const { critical, advisory } = parseFindings(stdin);
 
+  // Prove the target exists before writing. `tasks.map` over a non-matching id
+  // is a total no-op, so an unknown --task used to print "Stored findings for
+  // X" and exit 0 with nothing written. The downgrade direction self-corrects
+  // (the gate keeps blocking and the operator retries); the ADD direction is
+  // terminal — a critical the operator deliberately injected never reaches
+  // complete-wave-gate, and nothing anywhere says so.
+  const known = mgr.load().tasks;
+  const target = known.find((t) => t.id === taskId);
+  if (!target) {
+    return {
+      kind: "error",
+      message:
+        `No task '${taskId}' in ${TASK_GRAPH_PATH} — known ids: ` +
+        `${known.map((t) => t.id).join(", ") || "(none)"}`,
+    };
+  }
+
+  // One locked transform, not two. Splitting the findings write from the gate
+  // write released the lock between them, leaving a window where a concurrent
+  // writer sees a stored critical on an unblocked wave.
+  const blocking = critical.length > 0;
   await mgr.update((s) => ({
     ...s,
     tasks: s.tasks.map((t) => (t.id === taskId ? updateTaskFindings(t, critical, advisory) : t)),
+    wave_gates: blocking
+      ? {
+          ...s.wave_gates,
+          [String(target.wave)]: {
+            ...(s.wave_gates[String(target.wave)] ?? newWaveGate()),
+            blocked: true,
+          },
+        }
+      : s.wave_gates,
   }));
 
   process.stderr.write(`Stored findings for ${taskId}: ${critical.length} critical, ${advisory.length} advisory\n`);
-
-  if (critical.length > 0) {
-    const state = mgr.load();
-    const task = state.tasks.find((t) => t.id === taskId);
-    if (task) {
-      await mgr.update((s) => ({
-        ...s,
-        wave_gates: {
-          ...s.wave_gates,
-          [String(task.wave)]: {
-            ...(s.wave_gates[String(task.wave)] ?? newWaveGate()),
-            blocked: true,
-          },
-        },
-      }));
-    }
-  }
 
   return { kind: "passthrough" };
 };

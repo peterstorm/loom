@@ -65,18 +65,60 @@ function resolveAgentPath(agentName: string, fullAgentType: string): string | nu
   return candidates.find((p) => existsSync(p)) ?? null;
 }
 
-/** Parse skills list from YAML frontmatter */
-export function parseSkillsFromFrontmatter(filePath: string): string[] {
+/**
+ * What an agent file says about its skills. A closed union, because "declares
+ * no skills" and "could not be read" must not be the same value.
+ *
+ * They used to be: every failure path returned `[]`, and the handler reads an
+ * empty list as "nothing to enforce, allow the spawn". On a route that is in
+ * FAIL_CLOSED_ROUTES — and in a handler that already blocks on malformed stdin
+ * specifically so a spawn cannot slip through — that polarity was backwards.
+ */
+export type DeclaredSkills =
+  | { readonly kind: "none" }
+  | { readonly kind: "skills"; readonly names: readonly string[] }
+  | { readonly kind: "unreadable"; readonly reason: string };
+
+/**
+ * Parse the skills list from YAML frontmatter.
+ *
+ * Both block style (`skills:` then `  - name`) and flow style
+ * (`skills: [a, b]`) are recognized, and CRLF files parse the same as LF ones.
+ * Each was previously a silent miss that looked exactly like "declares no
+ * skills".
+ */
+export function parseSkillsFromFrontmatter(filePath: string): DeclaredSkills {
+  let content: string;
   try {
-    const content = readFileSync(filePath, "utf-8");
-    const fm = content.match(/^---\n([\s\S]*?)\n---/);
-    if (!fm) return [];
-    const skillsBlock = fm[1].match(/^skills:\s*\n((?:\s+-\s+.+\n?)*)/m);
-    if (!skillsBlock) return [];
-    return [...skillsBlock[1].matchAll(/^\s+-\s+(.+)$/gm)].map((m) => m[1].trim());
-  } catch {
-    return [];
+    content = readFileSync(filePath, "utf-8");
+  } catch (error) {
+    return {
+      kind: "unreadable",
+      reason: `cannot read ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
+
+  const normalized = content.replace(/\r\n/g, "\n");
+  const fm = normalized.match(/^---\n([\s\S]*?)\n---/);
+  if (!fm) {
+    return { kind: "unreadable", reason: `${filePath} has no YAML frontmatter block` };
+  }
+
+  const flow = fm[1].match(/^skills:[ \t]*\[([^\]]*)\][ \t]*$/m);
+  if (flow) {
+    const names = flow[1]
+      .split(",")
+      .map((name) => name.trim().replace(/^["']|["']$/g, ""))
+      .filter((name) => name !== "");
+    return names.length === 0 ? { kind: "none" } : { kind: "skills", names };
+  }
+
+  const block = fm[1].match(/^skills:[ \t]*\n((?:[ \t]+-[ \t]+.+\n?)*)/m);
+  if (!block) return { kind: "none" };
+  const names = [...block[1].matchAll(/^[ \t]+-[ \t]+(.+)$/gm)]
+    .map((m) => m[1].trim())
+    .filter((name) => name !== "");
+  return names.length === 0 ? { kind: "none" } : { kind: "skills", names };
 }
 
 /** Check if prompt references a skill (by name or /name pattern) */
@@ -115,8 +157,21 @@ const handler: HookHandler = async (stdin) => {
   const agentPath = resolveAgentPath(bareAgent, subagentType);
   if (!agentPath) return { kind: "allow" };
 
-  const declaredSkills = parseSkillsFromFrontmatter(agentPath);
-  if (declaredSkills.length === 0) return { kind: "allow" };
+  const declared = parseSkillsFromFrontmatter(agentPath);
+  if (declared.kind === "unreadable") {
+    return {
+      kind: "block",
+      message: [
+        `BLOCKED: cannot determine which skills "${subagentType}" requires — failing closed.`,
+        "",
+        `  ${declared.reason}`,
+        "",
+        "An agent whose frontmatter cannot be read may require a skill this prompt omits.",
+      ].join("\n"),
+    };
+  }
+  if (declared.kind === "none") return { kind: "allow" };
+  const declaredSkills = declared.names;
 
   const prompt = (input.tool_input?.prompt as string) ?? "";
   if (!prompt) {

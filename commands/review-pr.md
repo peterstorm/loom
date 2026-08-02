@@ -162,13 +162,18 @@ ADVISORY: prefer a named constant over the literal
   engine so they are stable and need no trust.
 
 `CRITICAL_COUNT` is still the authority on how many criticals you found, and the
-block must **account for all of them**: when it parses, it becomes the sole
-source of findings and the `CRITICAL:` lines are ignored, so every critical in
-the marker lines must also appear in the block with `"severity": "critical"`. A
-block listing fewer criticals than `CRITICAL_COUNT` is discarded in favour of the
-marker lines — no finding is ever lost to it, but its locations are. If the block
-is absent or malformed, the marker lines are parsed instead and the findings
-simply carry no file/line. Verification quality degrades; nothing breaks.
+block must **account for every finding you reported — advisories included**: when
+it parses, it becomes the sole source of findings and the marker lines are
+ignored, so every `CRITICAL:` line **and** every `ADVISORY:` line must also
+appear in the block with the matching `"severity"`. A block listing fewer
+findings of **either** severity than the marker lines is discarded in favour of
+them — no finding is ever lost to it, but its locations are. If the block is
+absent or malformed, the marker lines are parsed instead and the findings simply
+carry no file/line. Verification quality degrades; nothing breaks.
+
+The engine compares **counts per severity, not claim text**: it cannot tell a
+reworded claim from a substituted one, so a block that renames a claim replaces
+it silently. Write the same claim in both places.
 
 ## Usage Examples
 

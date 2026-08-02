@@ -142,14 +142,16 @@ export interface Task {
    * prints, so no consumer had to migrate when identity arrived; they can
    * migrate opportunistically.
    *
-   * Exactly four writers keep the three in lockstep, and every one of them
-   * writes all three together: `mergeFindings` (a reviewer finished) and
-   * `applyFindingOutcomes` (the panel adjudicated), both in core/findings;
-   * `updateTaskFindings` (the manual operator override) in
-   * handlers/helpers/store-review-findings; and `fixFull` (repair) in
-   * handlers/helpers/validate-task-graph. A fifth writer that touched only the
-   * views would produce a critical no panel can reach and no gate can clear —
-   * which is what `findingsUnionError` refuses to load.
+   * Exactly five writers keep the three in lockstep, and every one of them
+   * writes all three together: `sanitizeDecomposedTask` (the initializer, in
+   * handlers/helpers/populate-task-graph); `mergeFindings` (a reviewer
+   * finished) and `applyFindingOutcomes` (the panel adjudicated), both in
+   * core/findings; `updateTaskFindings` (the manual operator override) in
+   * handlers/helpers/store-review-findings; and `fixTaskFindings` (repair) in
+   * handlers/helpers/validate-task-graph. A writer that touched only the views
+   * would produce a critical no panel can reach and no gate can clear — and one
+   * that touched only the array would produce a critical the gate never counts.
+   * `findingsLockstepError` refuses to load either.
    */
   findings?: readonly Finding[];
   critical_findings?: string[];
