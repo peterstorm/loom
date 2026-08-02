@@ -27,7 +27,7 @@ import { extractTestEvidence, analyzeNewTests, applyUntrustedStopResolution, isW
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
   isReviewAgent, resolveReviewFindings, applyReviewResolution, reviewResolutionLog,
-} from "../engine/src/handlers/subagent-stop/store-reviewer-findings";
+} from "../engine/src/core/review-output";
 import { parseSpecCheckOutput } from "../engine/src/handlers/subagent-stop/store-spec-check-findings";
 import type { ReviewStatus, SpecCheck, Phase } from "../engine/src/types";
 import { newWaveGate } from "../engine/src/types";

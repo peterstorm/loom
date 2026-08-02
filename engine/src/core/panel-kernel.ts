@@ -22,6 +22,8 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
+import { basename, join, normalize } from "node:path";
+
 export type ParseResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly errors: readonly string[] };
@@ -31,6 +33,177 @@ export const fail = <T>(errors: readonly string[]): ParseResult<T> => ({ ok: fal
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// ---------------------------------------------------------------------------
+// Run layout — what one panel calls the files inside its run directory
+// ---------------------------------------------------------------------------
+
+/**
+ * The file and directory names one panel uses inside its run directory.
+ *
+ * Pure data, so it lives with the parsers that give it meaning rather than with
+ * the filesystem primitives that happen to consume it — the manifest parsers
+ * used to hardcode `"interview.md"` / `"candidates"` while the shell declared
+ * them as constants, with nothing comparing the two.
+ *
+ * `Panel` is a phantom tag, not decoration. `RunLayout<"architecture">` and
+ * `RunLayout<"review">` are structurally identical, so without it the compiler
+ * happily accepts `ARCHITECTURE_LAYOUT` where a review layout belongs and the
+ * only thing separating the two panels is that both callers remember to pin a
+ * module-scope constant.
+ */
+export interface RunLayout<Panel extends string = string> {
+  /** Which panel this layout belongs to — the tag that keeps the two apart. */
+  readonly panel: Panel;
+  /** Human-readable context the panel was built from. */
+  readonly contextMd: string;
+  /** Its validated, canonical JSON form — the only version agents consume. */
+  readonly contextJson: string;
+  /** Directory holding the items the panel judges. */
+  readonly itemDir: string;
+  /** Directory holding one verdict file per criterion. */
+  readonly verdictDir: string;
+}
+
+/** `/loom --panel`: an interview digest and one candidate per lens. */
+export const ARCHITECTURE_LAYOUT: RunLayout<"architecture"> = Object.freeze({
+  panel: "architecture",
+  contextMd: "interview.md",
+  contextJson: "interview.json",
+  itemDir: "candidates",
+  verdictDir: "verdicts",
+});
+
+/** The wave gate's refutation panel: a findings brief and the finding set. */
+export const REVIEW_LAYOUT: RunLayout<"review"> = Object.freeze({
+  panel: "review",
+  contextMd: "brief.md",
+  contextJson: "brief.json",
+  itemDir: "findings",
+  verdictDir: "verdicts",
+});
+
+// ---------------------------------------------------------------------------
+// The run manifest — the item-set authority, shared by both panels
+// ---------------------------------------------------------------------------
+
+/** One item the manifest names, bound to a run-scoped path. */
+export interface RunManifestEntry {
+  readonly id: string;
+  readonly path: string;
+  readonly filename: string;
+}
+
+export interface RunManifest {
+  readonly runId: string;
+  readonly contextMd: string;
+  readonly contextJson: string;
+  readonly entries: readonly RunManifestEntry[];
+}
+
+/** How one panel names its manifest fields and derives its item filenames. */
+export interface RunManifestSpec {
+  /** What the manifest is called in diagnostics, e.g. "panel manifest". */
+  readonly label: string;
+  /** The JSON field holding the context markdown path, e.g. "interview_file". */
+  readonly contextMdKey: string;
+  /** The JSON field holding the context JSON path, e.g. "interview_json". */
+  readonly contextJsonKey: string;
+  /** The JSON field holding the item array, e.g. "candidates". */
+  readonly itemsKey: string;
+  /** The JSON field inside an item holding its id, e.g. "lens". */
+  readonly itemIdKey: string;
+  /** Singular/plural noun for one item, e.g. ["candidate", "candidates"]. */
+  readonly itemNoun: readonly [string, string];
+  /** The exact ordered item set the manifest must name. */
+  readonly expectedIds: readonly string[];
+  /** Run-scoped artifact filename for one item id. */
+  readonly filenameOf: (id: string) => string;
+}
+
+/**
+ * Parse the exact item-set handoff and bind every path to one run root.
+ *
+ * The manifest fixes what a panel judges before any agent spawns, so an agent
+ * can neither invent an item nor skip one. Both panels enforce the identical
+ * rule set — run id, context paths, exact length, id membership, derived
+ * filename, run-scoped path, uniqueness, order, and explicit "missing"
+ * diagnostics — and they were maintained as two copies that had already
+ * diverged: only one of them checked that every expected id was PRESENT by
+ * name, which is the rule that makes an omitted item impossible.
+ *
+ * Every error is collected, for the same reason parseVerdictEnvelope collects
+ * them: a re-run should learn all of its mistakes at once.
+ */
+export function parseRunManifest<Panel extends string>(
+  raw: unknown,
+  expectedRunDir: string,
+  layout: RunLayout<Panel>,
+  spec: RunManifestSpec,
+): ParseResult<RunManifest> {
+  if (!isRecord(raw)) return fail([`${spec.label} must be a JSON object`]);
+
+  const [noun, nounPlural] = spec.itemNoun;
+  const errors: string[] = [];
+  const runDir = normalize(expectedRunDir);
+
+  const runId = typeof raw.run_id === "string" ? raw.run_id.trim() : "";
+  const contextMd = typeof raw[spec.contextMdKey] === "string" ? (raw[spec.contextMdKey] as string).trim() : "";
+  const contextJson = typeof raw[spec.contextJsonKey] === "string" ? (raw[spec.contextJsonKey] as string).trim() : "";
+  if (runId !== basename(runDir)) errors.push("manifest.run_id must equal the run directory basename");
+  if (contextMd !== join(runDir, layout.contextMd)) {
+    errors.push(`manifest.${spec.contextMdKey} must exactly equal <run-dir>/${layout.contextMd}`);
+  }
+  if (contextJson !== join(runDir, layout.contextJson)) {
+    errors.push(`manifest.${spec.contextJsonKey} must exactly equal <run-dir>/${layout.contextJson}`);
+  }
+
+  const rawItems = raw[spec.itemsKey];
+  if (!Array.isArray(rawItems) || rawItems.length !== spec.expectedIds.length) {
+    errors.push(`manifest.${spec.itemsKey} must contain exactly ${spec.expectedIds.length} ${nounPlural}`);
+  }
+
+  const entries: RunManifestEntry[] = [];
+  if (Array.isArray(rawItems)) {
+    for (const [index, item] of rawItems.entries()) {
+      const path = `manifest.${spec.itemsKey}[${index}]`;
+      if (!isRecord(item)) {
+        errors.push(`${path} must be an object`);
+        continue;
+      }
+      const id = typeof item[spec.itemIdKey] === "string" ? (item[spec.itemIdKey] as string).trim() : "";
+      const itemPath = typeof item.path === "string" ? item.path.trim() : "";
+      const filename = typeof item.filename === "string" ? item.filename.trim() : "";
+      if (!spec.expectedIds.includes(id)) {
+        errors.push(`${path}.${spec.itemIdKey} is not one of the expected ${nounPlural}: ${id || "<empty>"}`);
+        continue;
+      }
+      const expectedFilename = spec.filenameOf(id);
+      if (filename !== expectedFilename) {
+        errors.push(`${path}.filename must equal ${expectedFilename}`);
+      }
+      if (itemPath !== join(runDir, layout.itemDir, expectedFilename)) {
+        errors.push(`${path}.path must exactly equal its run-scoped ${noun} path`);
+      }
+      entries.push({ id, path: itemPath, filename });
+    }
+  }
+
+  const ids = entries.map((entry) => entry.id);
+  if (new Set(ids).size !== ids.length) errors.push(`manifest ${noun} ids must be unique`);
+  for (const expectedId of spec.expectedIds) {
+    if (!ids.includes(expectedId)) errors.push(`manifest is missing ${noun}: ${expectedId}`);
+  }
+  if (ids.length === spec.expectedIds.length && ids.some((id, index) => id !== spec.expectedIds[index])) {
+    errors.push(`manifest ${nounPlural} must exactly match: ${spec.expectedIds.join(", ")}`);
+  }
+  const filenames = entries.map((entry) => entry.filename);
+  if (new Set(filenames).size !== filenames.length) errors.push(`manifest ${noun} filenames must be unique`);
+  const paths = entries.map((entry) => entry.path);
+  if (new Set(paths).size !== paths.length) errors.push(`manifest ${noun} paths must be unique`);
+
+  return errors.length > 0 ? fail(errors) : ok({ runId, contextMd, contextJson, entries });
 }
 
 /**
@@ -192,4 +365,62 @@ export function parseCriteriaSet(
   }
 
   return errors.length > 0 ? fail(errors) : ok(undefined);
+}
+
+/**
+ * Re-check that each collected verdict covers every item exactly once.
+ *
+ * `parseVerdictEnvelope` already enforced this when it parsed each verdict, so
+ * this is redundant on the happy path and deliberately so: both aggregators are
+ * exported and safe to call standalone, and a coverage rule that only holds
+ * "when you came in through the front door" is the kind that silently stops
+ * holding. Shared rather than duplicated per panel for the reason the criteria
+ * rule is shared — a rule tightened in one copy and not the other is a
+ * divergence nothing detects.
+ */
+export function coverageErrors<Payload>(
+  byCriterion: ReadonlyMap<string, VerdictEnvelope<Payload>>,
+  criteriaInOrder: readonly string[],
+  expectedItemIds: readonly string[],
+  itemIdOf: (entry: Payload) => string,
+  requirement: string,
+): string[] {
+  const expected = new Set(expectedItemIds);
+  const errors: string[] = [];
+  for (const criterion of criteriaInOrder) {
+    const verdict = byCriterion.get(criterion);
+    if (!verdict) continue;
+    const seen = new Set(verdict.entries.map(itemIdOf));
+    const covers =
+      verdict.entries.length === expectedItemIds.length &&
+      seen.size === verdict.entries.length &&
+      [...seen].every((id) => expected.has(id));
+    if (!covers) errors.push(`verdict for '${criterion}' ${requirement}`);
+  }
+  return errors;
+}
+
+/**
+ * The entry one criterion's verdict recorded for one item.
+ *
+ * Throws rather than defaulting when the entry is absent. Every caller runs
+ * `coverageErrors` first, so a miss here is not a degraded input — it is a
+ * broken invariant, and the plausible defaults it replaces (`?? 0` for a score,
+ * "abstain" for a vote) are exactly the values that would change which
+ * architecture wins or whether a finding survives, silently, if that guard were
+ * ever weakened.
+ */
+export function requireEntry<Payload>(
+  byCriterion: ReadonlyMap<string, VerdictEnvelope<Payload>>,
+  criterion: string,
+  itemId: string,
+  itemIdOf: (entry: Payload) => string,
+): Payload {
+  const entry = byCriterion.get(criterion)?.entries.find((e) => itemIdOf(e) === itemId);
+  if (entry === undefined) {
+    throw new Error(
+      `panel kernel invariant: verdict for '${criterion}' has no entry for '${itemId}' after coverage check`,
+    );
+  }
+  return entry;
 }

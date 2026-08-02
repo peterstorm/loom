@@ -14,6 +14,7 @@ import {
   serializeJudgeVerdict,
   serializeRankings,
 } from "../../src/core/panel-contract";
+import { ARCHITECTURE_LAYOUT } from "../../src/core/panel-kernel";
 import { PANEL_JUDGES_DEFAULT } from "../../src/config";
 
 const VALID_DIGEST = [
@@ -165,7 +166,7 @@ describe("parsePanelManifest", () => {
         path: `/tmp/run-1/candidates/${filename}`,
         filename,
       })),
-    }, "/tmp/run-1", ["simplicity-first", "type-driven-fp"]);
+    }, "/tmp/run-1", ARCHITECTURE_LAYOUT, ["simplicity-first", "type-driven-fp"]);
     expect(parsed.ok).toBe(true);
   });
 
@@ -177,7 +178,7 @@ describe("parsePanelManifest", () => {
       candidates: [
         { lens: "simplicity-first", path: "/tmp/old-run/candidates/candidate-simplicity-first.md", filename: "candidate-simplicity-first.md" },
       ],
-    }, "/tmp/new-run", ["simplicity-first", "type-driven-fp"]);
+    }, "/tmp/new-run", ARCHITECTURE_LAYOUT, ["simplicity-first", "type-driven-fp"]);
     expect(parsed.ok).toBe(false);
   });
 
@@ -190,7 +191,7 @@ describe("parsePanelManifest", () => {
         { lens: "simplicity-first", path: "/tmp/run-1/candidates/link/../candidate-simplicity-first.md", filename: "candidate-simplicity-first.md" },
         { lens: "type-driven-fp", path: "/tmp/run-1/candidates/candidate-type-driven-fp.md", filename: "candidate-type-driven-fp.md" },
       ],
-    }, "/tmp/run-1", ["simplicity-first", "type-driven-fp"]);
+    }, "/tmp/run-1", ARCHITECTURE_LAYOUT, ["simplicity-first", "type-driven-fp"]);
     expect(parsed.ok).toBe(false);
   });
 
@@ -203,7 +204,7 @@ describe("parsePanelManifest", () => {
         { lens: "simplicity-first", path: "/tmp/run-1/candidates/candidate-performance-first.md", filename: "candidate-performance-first.md" },
         { lens: "simplicity-first", path: "/tmp/run-1/candidates/candidate-simplicity-first.md", filename: "candidate-simplicity-first.md" },
       ],
-    }, "/tmp/run-1", ["simplicity-first", "type-driven-fp"]);
+    }, "/tmp/run-1", ARCHITECTURE_LAYOUT, ["simplicity-first", "type-driven-fp"]);
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.errors.join("\n")).toMatch(/filename|unique/);
   });
@@ -217,9 +218,15 @@ describe("parsePanelManifest", () => {
         { lens: "risk-security-first", path: "/tmp/run-1/candidates/candidate-risk-security-first.md", filename: "candidate-risk-security-first.md" },
         { lens: "performance-first", path: "/tmp/run-1/candidates/candidate-performance-first.md", filename: "candidate-performance-first.md" },
       ],
-    }, "/tmp/run-1", ["simplicity-first", "type-driven-fp"]);
+    }, "/tmp/run-1", ARCHITECTURE_LAYOUT, ["simplicity-first", "type-driven-fp"]);
     expect(parsed.ok).toBe(false);
-    if (!parsed.ok) expect(parsed.errors.join("\n")).toContain("must exactly match");
+    // Named individually, not just "the set is wrong": the kernel's manifest
+    // parser reports each expected item that is absent, which is the rule the
+    // architecture manifest was missing before it shared one with review.
+    if (!parsed.ok) {
+      expect(parsed.errors.join("\n")).toContain("manifest is missing candidate: simplicity-first");
+      expect(parsed.errors.join("\n")).toContain("manifest is missing candidate: type-driven-fp");
+    }
   });
 });
 

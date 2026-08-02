@@ -7,6 +7,13 @@
 import type { HookHandler, ReviewStatus, Task } from "../../types";
 import { newWaveGate } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
+import {
+  attributeFindings,
+  claimsOfSeverity,
+  draftsFromClaims,
+  nextOrdinal,
+  type Finding,
+} from "../../core/findings";
 import { StateManager } from "../../state-manager";
 import { isNoFindingSentinel } from "../../utils/no-finding-sentinel";
 
@@ -32,7 +39,27 @@ export function parseFindings(stdin: string): { critical: string[]; advisory: st
   return { critical, advisory };
 }
 
-/** Pure: Update task with findings, preserving existing advisories when none provided */
+/**
+ * The agent name a manual override attributes its findings to.
+ *
+ * An override is an operator decision, not a review. Attributing it honestly
+ * keeps `findings` readable — a refutation panel that later kills one of these
+ * records who made the claim, and it cannot be mistaken for `code-reviewer`'s.
+ */
+export const OVERRIDE_AGENT = "manual-override";
+
+/**
+ * Pure: replace a task's review findings, preserving existing advisories when
+ * none are provided.
+ *
+ * This is the sanctioned false-positive downgrade (`commands/loom.md`), and it
+ * REPLACES rather than merges — that is the whole point of an override. It must
+ * therefore rewrite the authoritative `findings` array too, not just the
+ * `critical_findings` view: leaving `findings` alone would put the dismissed
+ * critical back in front of the refutation panel while an added one stayed
+ * invisible to it, and the wave gate's skip predicate (which reads the view)
+ * would disagree with the brief (which reads the array).
+ */
 export function updateTaskFindings(
   task: Task,
   critical: string[],
@@ -40,12 +67,28 @@ export function updateTaskFindings(
 ): Task {
   const reviewStatus: ReviewStatus = critical.length > 0 ? "blocked" : "passed";
 
+  // Advisories the override did not speak to survive with their identity
+  // intact. A pre-identity task has none to keep, so its view is migrated.
+  const keptAdvisory: readonly Finding[] =
+    advisory.length > 0
+      ? []
+      : task.findings
+        ? task.findings.filter((finding) => finding.severity === "advisory")
+        : attributeFindings(draftsFromClaims([], task.advisory_findings ?? []), OVERRIDE_AGENT);
+
+  const supplied = attributeFindings(
+    draftsFromClaims(critical, advisory),
+    OVERRIDE_AGENT,
+    nextOrdinal(keptAdvisory, task.refuted_findings ?? [], OVERRIDE_AGENT),
+  );
+  const findings = [...keptAdvisory, ...supplied];
+
   return {
     ...task,
-    critical_findings: critical,
     review_status: reviewStatus,
-    // Preserve existing advisories when none provided in stdin
-    ...(advisory.length > 0 ? { advisory_findings: advisory } : {}),
+    findings,
+    critical_findings: [...claimsOfSeverity(findings, "critical")],
+    advisory_findings: [...claimsOfSeverity(findings, "advisory")],
   };
 }
 

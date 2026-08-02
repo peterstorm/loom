@@ -13,6 +13,7 @@ import { withLock } from "./utils/lock";
 import { PHASE_ORDER, TASK_GRAPH_PATH } from "./config";
 import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
 import { REVIEW_STATUSES, TASK_STATUSES } from "./types";
+import { findingsUnionError, refutationsUnionError } from "./core/findings";
 import type { TaskGraph } from "./types";
 
 /** Resolve task graph path for cross-repo access. The session id comes from
@@ -98,7 +99,19 @@ function taskUnionError(v: unknown, index: number): string | null {
       return `tasks[${index}] ("${id}"): test_result.verdict ${JSON.stringify(r.verdict)} is not one of trusted-pass, trusted-fail, untrusted`;
     }
   }
-  return null;
+  // `findings` and `refuted_findings` are proven for the same reason every
+  // union above is: the cast at the bottom of parseTaskGraph asserts
+  // `readonly Finding[]`, and a panel helper reading an unproven one surfaces
+  // as an unhandled TypeError from inside a pure function rather than as a
+  // contract diagnostic. Rejected rather than repaired here — dropping a
+  // malformed entry on every read would silently lose a critical, and
+  // `validate-task-graph --fix` is the repair that restores lockstep.
+  const findingsError = findingsUnionError(t.findings, `tasks[${index}] ("${id}"): findings`);
+  if (findingsError !== null) return findingsError;
+  return refutationsUnionError(
+    t.refuted_findings,
+    `tasks[${index}] ("${id}"): refuted_findings`,
+  );
 }
 
 /**

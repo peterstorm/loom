@@ -199,8 +199,8 @@ export const PANEL_LENS_COUNT = 5;
  *  codebase-fit + effort), so the count is bound to those three criteria and is
  *  NOT user-configurable. The criteria themselves are derived IN CODE by
  *  `deriveJudgeCriteria` (core/panel-contract.ts), not by commands/loom.md prose;
- *  this constant must equal that function's arity, which panel-contract.test.ts
- *  asserts. Single numeric source of truth referenced by loom.md and the
+ *  this constant must equal the number of criteria that function RETURNS,
+ *  which panel-contract.test.ts asserts. Single numeric source of truth referenced by loom.md and the
  *  panel-config test. */
 export const PANEL_JUDGES_DEFAULT = 3;
 

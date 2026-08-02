@@ -321,3 +321,61 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
     }
   });
 });
+
+describe("parseTaskGraph proves findings, not just the fields that always did", () => {
+  const validTask = {
+    id: "T1",
+    description: "impl",
+    agent: "code-implementer-agent",
+    wave: 1,
+    status: "implemented",
+    depends_on: [],
+  };
+  const graph = (task: Record<string, unknown>) => ({
+    current_phase: "execute",
+    phase_artifacts: {},
+    tasks: [{ ...validTask, ...task }],
+    wave_gates: {},
+  });
+  const wellFormed = {
+    id: "code-reviewer-1",
+    agent: "code-reviewer",
+    severity: "critical",
+    file: "src/x.ts",
+    line: 4,
+    claim: "unchecked cast",
+  };
+
+  it("accepts a task with no findings, and one with well-formed findings", () => {
+    expect(parseTaskGraph(graph({})).ok).toBe(true);
+    expect(parseTaskGraph(graph({ findings: [] })).ok).toBe(true);
+    expect(parseTaskGraph(graph({ findings: [wellFormed] })).ok).toBe(true);
+    expect(parseTaskGraph(graph({
+      refuted_findings: [{ finding: wellFormed, refutations: [{ lens: "intent", reason: "deliberate" }] }],
+    })).ok).toBe(true);
+  });
+
+  it.each([
+    ["findings that are not an array", { findings: {} }],
+    ["a finding with no id", { findings: [{ ...wellFormed, id: "" }] }],
+    ["a finding with no agent", { findings: [{ ...wellFormed, agent: undefined }] }],
+    ["a finding with an unknown severity", { findings: [{ ...wellFormed, severity: "blocker" }] }],
+    ["a finding with a non-string claim", { findings: [{ ...wellFormed, claim: 7 }] }],
+    ["a refutation with no refuters", { refuted_findings: [{ finding: wellFormed, refutations: [] }] }],
+    ["a refutation missing a reason", { refuted_findings: [{ finding: wellFormed, refutations: [{ lens: "intent" }] }] }],
+  ])("rejects %s at the load boundary", (_label, task) => {
+    // The type says `readonly Finding[]`; before this the cast asserted it from
+    // unvalidated JSON, and a finding missing its `file` key surfaced as an
+    // unhandled TypeError from inside a pure panel function rather than as a
+    // contract diagnostic.
+    const parsed = parseTaskGraph(graph(task));
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain('tasks[0] ("T1")');
+  });
+
+  it("names the repair so a rejected graph is not a dead end", () => {
+    const parsed = parseTaskGraph(graph({ findings: [{}] }));
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("validate-task-graph --fix");
+  });
+});

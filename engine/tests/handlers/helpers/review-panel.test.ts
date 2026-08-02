@@ -299,8 +299,9 @@ describe("review-panel helper CLI", () => {
       expect(task.critical_findings).toEqual(["catch block swallows the error"]);
       expect(task.findings.map((f: { id: string }) => f.id)).toEqual(["code-reviewer-2", "silent-failure-hunter-1"]);
       expect(task.refuted_findings).toHaveLength(1);
-      expect(task.refuted_findings[0].refutedBy).toEqual(["reproduction", "intent"]);
-      expect(task.refuted_findings[0].reasoning).toHaveLength(2);
+      expect(task.refuted_findings[0].refutations.map((r: { lens: string }) => r.lens))
+        .toEqual(["reproduction", "intent"]);
+      expect(task.refuted_findings[0].refutations.every((r: { reason: string }) => r.reason.length > 0)).toBe(true);
       // One critical survives, so the block stands.
       expect(task.review_status).toBe("blocked");
     });
@@ -361,6 +362,98 @@ describe("review-panel helper CLI", () => {
     });
   });
 
+
+  describe("brief refuses to build a set the panel cannot honestly adjudicate", () => {
+    const writeState = (mutate: (graph: ReturnType<typeof taskGraph>) => void) => {
+      const graph = taskGraph();
+      mutate(graph);
+      writeFileSync(statePath, JSON.stringify(graph, null, 2));
+    };
+
+    it("rejects a wave that holds no tasks at all", () => {
+      // A typo'd --wave used to produce a fully green, fully EMPTY panel run:
+      // three verifiers spawned, nothing adjudicated, and a tally printing
+      // "0 survived, 0 refuted" — indistinguishable from a real unanimous panel.
+      const result = run(["brief", "--runs-root", REL_ROOT, "--run-dir", REL_RUN, "--wave", "99"]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("no tasks in wave 99");
+    });
+
+    it("rejects a wave with nothing of the verified severity, naming the skip", () => {
+      writeState((graph) => {
+        graph.tasks[0]!.findings = graph.tasks[0]!.findings.filter((f) => f.severity !== "critical");
+        graph.tasks[0]!.critical_findings = [];
+      });
+      const result = buildBrief();
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("skip the refutation panel");
+    });
+
+    it("rejects a task graph whose criticals never gained structured identity", () => {
+      // Every graph written before findings had identity is in this shape, as
+      // was every graph a pre-fix `--fix` repaired. The wave gate's skip
+      // predicate reads critical_findings while the brief reads findings, so
+      // the panel WOULD be run on exactly these waves.
+      writeState((graph) => {
+        delete (graph.tasks[0] as Record<string, unknown>).findings;
+      });
+      const result = buildBrief();
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("carry structured identity");
+      expect(result.stderr, "the diagnostic names a repair").toContain("validate-task-graph --fix");
+    });
+
+    it("rejects a graph whose findings undercount the view the gate counts", () => {
+      writeState((graph) => {
+        graph.tasks[0]!.findings = graph.tasks[0]!.findings.filter((f) => f.id !== "code-reviewer-1");
+      });
+      const result = buildBrief();
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("only 1 carry structured identity");
+    });
+  });
+
+  describe("the panel size survives the whole run without being re-passed", () => {
+    it("recovers the lens count from the manifest for every later operation", () => {
+      // `--lenses N` used to be consumed by all four manifest-scoped
+      // operations, but only the `manifest` snippet in the runbook carried it —
+      // so the very next step failed with "manifest.lenses must contain exactly
+      // 3 lenses", blaming the manifest for the caller's omission.
+      expect(buildBrief().status).toBe(0);
+      expect(run(["manifest", "--runs-root", REL_ROOT, "--run-dir", REL_RUN, "--lenses", "5"]).status).toBe(0);
+
+      const lenses = run(["lenses", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+      expect(lenses.status, lenses.stderr).toBe(0);
+      expect(JSON.parse(lenses.stdout)).toHaveLength(5);
+    });
+
+    it("still rejects a manifest whose lens set the brief does not reproduce", () => {
+      // Taking the COUNT from the file must not mean trusting the file: the set
+      // is re-derived from the brief's signals and compared name by name.
+      expect(buildBrief().status).toBe(0);
+      expect(buildManifest().status).toBe(0);
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+      manifest.lenses = ["reproduction", "intent", "test-coverage"];
+      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+      const result = run(["lenses", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("must exactly match");
+    });
+  });
+
+  it("refuses to write a brief artifact through a symlink", () => {
+    // The engine is the first panel author to WRITE into a run directory, and
+    // a write follows a symlink as happily as a read does. artifactErrors runs
+    // at the manifest step — by then the bytes have already landed.
+    const escape = join(tmp, "escaped.md");
+    writeFileSync(escape, "");
+    symlinkSync(escape, join(runDir, "brief.md"));
+    const result = buildBrief();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("write target must not be a symbolic link");
+    expect(readFileSync(escape, "utf-8"), "nothing was written through the link").toBe("");
+  });
   it("rejects an unknown operation", () => {
     expect(run(["adjudicate", "--runs-root", REL_ROOT]).stderr).toContain("Usage: helper review-panel");
   });

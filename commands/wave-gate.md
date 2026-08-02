@@ -144,10 +144,16 @@ refuting one saves nothing while the quota it burns is real. Refuted findings
 are **recorded, not deleted** — a wrong refutation must stay auditable.
 
 **Skip this step entirely when the wave has zero critical findings** — the panel
-would have nothing to adjudicate:
+would have nothing to adjudicate. The `// 0` is load-bearing: `add` over an empty
+array yields `null`, which does not compare equal to `0` and would send you into
+a panel run on an empty set:
 ```bash
-jq -r '[.current_wave as $w | .tasks[] | select(.wave == $w) | (.critical_findings // []) | length] | add' .claude/state/active_task_graph.json
+jq -r '[.current_wave as $w | .tasks[] | select(.wave == $w) | (.critical_findings // []) | length] | add // 0' .claude/state/active_task_graph.json
 ```
+
+`brief` (Step 3.5.1) enforces this too and will refuse to build an empty or
+partial finding set, so a mis-read here fails loudly rather than producing a
+green panel that adjudicated nothing.
 
 #### 3.5.0 — Create a run-scoped artifact boundary
 
@@ -176,6 +182,14 @@ The engine reads the wave's critical findings from state and writes `brief.md`,
 **not** assemble this by hand: the findings already exist in the task graph, and
 a hand-built brief could quietly omit an inconvenient critical.
 
+`brief` proves its own completeness and **fails** rather than building a set the
+panel cannot honestly adjudicate — a wave with no tasks (check `--wave` against
+`.current_wave`), a wave with no criticals (skip the step), or a wave whose
+criticals lack structured identity (re-run the reviewers, or repair the graph
+with `helper validate-task-graph --fix`). An empty brief would otherwise satisfy
+every downstream length and coverage rule vacuously and report
+"0 survived, 0 refuted" — indistinguishable from a panel that upheld nothing.
+
 #### 3.5.2 — Fix the finding and lens sets
 
 ```bash
@@ -201,7 +215,13 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper review-panel lenses \
 paths pull in `security`, findings on test files pull in `test-coverage`, and
 the table order in [review-lenses.md](../references/review-lenses.md) fills the
 rest — so an unsignalled panel gets `blast-radius` third: cause, intent,
-consequence. Default panel size is 3. Pass `--lenses N` (2–5) to change it.
+consequence.
+
+Default panel size is 3. Pass `--lenses N` (2–5) to `manifest` to change it —
+**only to `manifest`**. The manifest records the size, and `lenses`, `verdict`,
+and `tally` recover it from the file rather than needing the flag threaded
+through. The lens SET is still re-derived from the brief and compared name by
+name, so a tampered manifest is still rejected.
 
 #### 3.5.3 — Spawn the verifiers (parallel, headless)
 
@@ -239,9 +259,10 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper review-panel tally \
 ```
 
 `tally` re-reads and re-validates **every** verdict file from the run directory
-(it does not trust Step 3.5.3's output), matches each to its lens **by name**,
-verifies the lens set is exactly the selected one with no duplicates or
-omissions, and adjudicates:
+(it does not trust Step 3.5.3's output), reads `verdict-N.json` as **lens N** and
+rejects any file whose `criterion` does not match that slot, then verifies the
+collected set is exactly the selected lenses with no duplicates or omissions, and
+adjudicates:
 
 - A finding **survives** unless at least `threshold` verifiers refuted it. The
   default threshold is a strict majority of the panel (2 of 3, 3 of 5, 2 of 2).
@@ -251,9 +272,11 @@ omissions, and adjudicates:
 
 Refuted findings move out of the task's `critical_findings` into
 `refuted_findings`, carrying the refuting lenses and their reasoning. A task
-whose criticals were **all** refuted moves from `blocked` to `passed` — the one
-place that demotion is legitimate, because adjudicating whether the block stands
-is this panel's entire purpose.
+whose criticals were **all** refuted moves from `blocked` to `passed` — the only
+place that demotion **adjudicates** anything, because deciding whether the block
+stands is this panel's entire purpose. (The manual `store-review-findings`
+override and `complete-wave-gate`'s advancement also write `passed`; neither
+adjudicates a finding.)
 
 Any failure is fatal: stop and report. Only then does Step 5 count criticals.
 

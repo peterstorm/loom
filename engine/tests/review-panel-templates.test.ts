@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findResidualPlaceholders } from "../src/core/validate-template-substitution";
-import { parseRefutationVerdict, serializeRefutationVerdict, REVIEW_LENSES } from "../src/core/review-panel";
+import { parseRefutationVerdict, serializeRefutationVerdict, REVIEW_LENSES, REFUTATION_VERDICTS, type WaveFindingId } from "../src/core/review-panel";
 import { REVIEW_PANEL_AGENTS } from "../src/config";
 import { detectPhase, isReviewPanelAgent } from "../src/core/validate-phase-order";
 
@@ -63,7 +63,10 @@ describe("review-panel template placeholder audit", () => {
   });
 
   it("the template names the verifier's output contract", () => {
-    for (const word of ["refuted", "upheld", "uncertain", "finding_id", "criterion"]) {
+    // Derived from REFUTATION_VERDICTS, not a hand-copied list: a fourth
+    // verdict kind added to the union must reach the prompt that asks for it,
+    // and a hardcoded array here would go on passing while it did not.
+    for (const word of [...REFUTATION_VERDICTS, "finding_id", "criterion"]) {
       expect(template).toContain(word);
     }
   });
@@ -75,7 +78,7 @@ describe("verifier output round-trips through the substitution gate", () => {
       criterion: "intent",
       verdicts: [{ finding_id: "T1:code-reviewer-1", verdict: "refuted", reasoning: "the {never-throw} rule is deliberate" }],
     });
-    const parsed = parseRefutationVerdict(raw, "intent", ["T1:code-reviewer-1"]);
+    const parsed = parseRefutationVerdict(raw, "intent", ["T1:code-reviewer-1"] as unknown as readonly WaveFindingId[]);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     const canonical = serializeRefutationVerdict(parsed.value);

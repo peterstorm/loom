@@ -120,6 +120,8 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
         new_tests_written: true,
         new_test_evidence: "forged",
         critical_findings: ["planted"],
+        findings: [{ id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "planted" }],
+        refuted_findings: [{ finding: { id: "code-reviewer-9", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "planted" }, refutations: [{ lens: "intent", reason: "planted" }] }],
         advisory_findings: ["planted"],
         files_modified: ["everything"],
         start_sha: "deadbeef",
@@ -140,6 +142,11 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     expect(t9.new_test_evidence).toBeUndefined();
     expect(t9.critical_findings).toEqual([]);
     expect(t9.advisory_findings).toEqual([]);
+    // The authoritative array and the refutation audit trail are execution
+    // state too — a decomposer that planted either would seed a wave gate with
+    // findings nobody reviewed, or an audit record of a panel that never ran.
+    expect(t9.findings).toEqual([]);
+    expect(t9.refuted_findings).toEqual([]);
     expect(t9.files_modified).toBeUndefined();
     expect(t9.start_sha).toBeUndefined();
     expect(t9.failure_reason).toBeUndefined();

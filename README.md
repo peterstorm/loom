@@ -231,7 +231,7 @@ After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance
 
 ## Wave Execution & Gates
 
-`/wave-gate` runs a six-step verification sequence after each wave's implementation completes.
+`/wave-gate` runs a seven-step verification sequence after each wave's implementation completes.
 
 | Step | What | How |
 |------|------|-----|
@@ -240,6 +240,7 @@ After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance
 | 3 | **Spec-check + reviews (parallel)** | Spawn `spec-check-invoker` once for the wave; spawn 5 reviewers per task in parallel |
 | 3.5 | **Refutation panel** | Spawn N `review-verifier-agent`s — each with a distinct lens, each covering ALL of the wave's critical findings — and adjudicate them k-of-n |
 | 4 | **GitHub comment** | Post a summary to the issue, including refuted findings (fallback: write to `.claude/reviews/wave-{N}-review.md`) |
+| 4b | **Advisory triage** | Fix or explicitly defer every surviving advisory — a MUST-level constraint, not a suggestion |
 | 5 | **Advance** | `complete-wave-gate` helper performs final checks and either advances or blocks |
 
 ### Review agents (per task, in parallel)
@@ -285,8 +286,10 @@ panel size is 3.
 - Refuted findings move into `refuted_findings` with the lenses that killed them
   and their reasoning — **recorded, not deleted**, so a wrong refutation stays
   auditable. A task whose criticals were all refuted moves `blocked → passed`;
-  that is the one legitimate demotion, because deciding whether the block stands
-  is this panel's entire purpose.
+  that is the only demotion that ADJUDICATES anything, because deciding whether
+  the block stands is this panel's entire purpose. (The manual
+  `store-review-findings` override and `complete-wave-gate`'s advancement also
+  write `passed`; neither adjudicates a finding.)
 
 The brief and manifest are **engine-authored** (`helper review-panel brief` /
 `manifest`) rather than assembled by the orchestrator: the findings already live
@@ -398,6 +401,8 @@ These run only under `/loom --panel`. They are recognized by phase validation as
 | `pr-test-analyzer` | Test coverage quality (1–10 rating, 8–10 = critical gap) |
 | `type-design-analyzer` | Type invariants, encapsulation (1–10 per dimension) |
 | `comment-analyzer` | Comment accuracy and rot |
+| `code-simplifier` | Clarity and FP patterns (post-fix) |
+| `spec-check-invoker` | Runs `/spec-check` once per wave; emits machine-readable footer |
 
 ### Review panel agent (wave gate Step 3.5)
 
@@ -413,8 +418,6 @@ blocked by the agent that was there to unblock it. `REVIEW_PANEL_AGENTS` is its
 own frozen set, recognized by phase validation and invisible to the
 SubagentStop dispatcher, with a load-time guard against collision with any
 other agent set.
-| `code-simplifier` | Clarity and FP patterns (post-fix) |
-| `spec-check-invoker` | Runs `/spec-check` once per wave; emits machine-readable footer |
 
 ### Utility agents
 

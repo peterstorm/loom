@@ -126,6 +126,11 @@ refutation panel needs to adjudicate it. Rules:
 - Never invent an `id`. Ids are derived by the engine from (agent, emission
   order) so they are stable and need no trust.
 
-`CRITICAL_COUNT` remains the authority on how many criticals you found. If the
+`CRITICAL_COUNT` remains the authority on how many criticals you found, and the
+block must ACCOUNT FOR ALL OF THEM: when it parses, it becomes the sole source
+of findings and the `CRITICAL:` lines are ignored, so every critical in your
+marker lines must also appear in the block with `"severity": "critical"`. A
+block that lists fewer criticals than you counted is discarded in favour of the
+marker lines — no finding is ever lost to it, but the locations are. If the
 block is absent or malformed, the marker lines are parsed instead and your
 findings simply carry no location.

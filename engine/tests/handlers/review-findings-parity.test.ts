@@ -4,13 +4,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Task } from "../../src/types";
 import { claimsOfSeverity } from "../../src/core/findings";
+import { mergeFindings } from "../../src/core/findings";
 import {
   applyReviewResolution,
   makeParsedFindings,
-  mergeFindings,
   resolveReviewFindings,
   reviewResolutionLog,
-} from "../../src/handlers/subagent-stop/store-reviewer-findings";
+} from "../../src/core/review-output";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const PI_EXTENSION = readFileSync(join(REPO_ROOT, "pi", "extension.ts"), "utf-8");
@@ -44,31 +44,44 @@ const TRANSCRIPT = [
  * parse → reconcile → merge sequence out of the lower-level parts.
  */
 describe("harness parity: one path from transcript to task", () => {
-  it("Pi calls the shared resolution functions", () => {
+  const CLAUDE_CODE_HOOK = readFileSync(
+    join(REPO_ROOT, "engine", "src", "handlers", "subagent-stop", "store-reviewer-findings.ts"),
+    "utf-8",
+  );
+  const HARNESSES: readonly (readonly [string, string])[] = [
+    ["pi/extension.ts", PI_EXTENSION],
+    ["engine/src/handlers/subagent-stop/store-reviewer-findings.ts", CLAUDE_CODE_HOOK],
+  ];
+
+  it.each(HARNESSES)("%s imports the shared path from core/review-output", (_name, source) => {
+    // The import PATH, not just the function names: both shells must reach the
+    // one pure module. A harness that grew its own copy would still mention the
+    // names, and it is the shared module that makes drift impossible.
+    expect(source).toContain('core/review-output"');
     for (const fn of ["resolveReviewFindings", "applyReviewResolution", "reviewResolutionLog"]) {
-      expect(PI_EXTENSION, `pi/extension.ts must call ${fn}`).toContain(fn);
+      expect(source, `${_name} must call ${fn}`).toContain(fn);
     }
   });
 
-  it("Pi does not re-run the sequence out of the lower-level parts", () => {
+  it.each(HARNESSES)("%s does not re-run the sequence out of the lower-level parts", (_name, source) => {
     for (const fn of ["parseMachineSummary", "parseLegacyFindings", "reconcileFindings", "mergeFindings", "buildEvidenceFailureMessage"]) {
-      expect(PI_EXTENSION, `pi/extension.ts must not call ${fn} directly — use the shared path`)
+      expect(source, `${_name} must not call ${fn} directly — use the shared path`)
         .not.toContain(fn);
     }
   });
 
-  it("Pi no longer hand-writes the evidence_capture_failed transition", () => {
-    expect(PI_EXTENSION).not.toContain('"evidence_capture_failed" as const');
+  it.each(HARNESSES)("%s does not hand-write the evidence_capture_failed transition", (_name, source) => {
+    expect(source).not.toContain('"evidence_capture_failed" as const');
   });
 
-  it("the Claude Code hook routes through the same two functions", () => {
-    const hook = readFileSync(
-      join(REPO_ROOT, "engine", "src", "handlers", "subagent-stop", "store-reviewer-findings.ts"),
-      "utf-8",
-    );
-    const handlerBody = hook.slice(hook.indexOf("const handler: HookHandler"));
-    expect(handlerBody).toContain("resolveReviewFindings(transcript, agentType)");
-    expect(handlerBody).toContain("applyReviewResolution(t, resolution)");
+  it.each(HARNESSES)("%s logs rather than silently discarding an unattributable review", (_name, source) => {
+    // Every early return has to say so. A reviewer whose output is dropped in
+    // silence is indistinguishable from one that found nothing, which is the
+    // confusion evidence_capture_failed exists to prevent — and the Claude Code
+    // hook used to return `passthrough` here with no output at all.
+    const discardPoint = source.indexOf("extractTaskId");
+    expect(discardPoint, `${_name} must extract a task id`).toBeGreaterThan(-1);
+    expect(source.slice(discardPoint)).toContain("findings NOT stored");
   });
 
   it("both harnesses derive the identical task from the identical transcript", () => {

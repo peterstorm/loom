@@ -10,43 +10,19 @@
  * Not pure: lstat/realpath/read/write. Kept out of `core/` for that reason.
  */
 
-import { lstatSync, realpathSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { HookResult } from "../../types";
-import type { ParseResult } from "../../core/panel-kernel";
+import type { ParseResult, RunLayout } from "../../core/panel-kernel";
 import { fail, ok } from "../../core/panel-kernel";
 
-/**
- * The file and directory names one panel uses inside its run directory.
- * The only thing that differs between panels at this layer — the containment
- * and symlink rules below are identical, and deliberately not parameterized.
- */
-export interface RunLayout {
-  /** Human-readable context the panel was built from. */
-  readonly contextMd: string;
-  /** Its validated, canonical JSON form — the only version agents consume. */
-  readonly contextJson: string;
-  /** Directory holding the items the panel judges. */
-  readonly itemDir: string;
-  /** Directory holding one verdict file per criterion. */
-  readonly verdictDir: string;
-}
-
-/** `/loom --panel`: an interview digest and one candidate per lens. */
-export const ARCHITECTURE_LAYOUT: RunLayout = Object.freeze({
-  contextMd: "interview.md",
-  contextJson: "interview.json",
-  itemDir: "candidates",
-  verdictDir: "verdicts",
-});
-
-/** The wave gate's refutation panel: a findings brief and the finding set. */
-export const REVIEW_LAYOUT: RunLayout = Object.freeze({
-  contextMd: "brief.md",
-  contextJson: "brief.json",
-  itemDir: "findings",
-  verdictDir: "verdicts",
-});
+// `RunLayout` and the two layouts are pure data and live in the kernel, beside
+// the manifest parsers that give them meaning — those parsers used to hardcode
+// `"interview.md"` / `"candidates"` while this module declared them as
+// constants, with nothing comparing the two. Re-exported so the shell's own
+// callers need not know where the definition moved.
+export { ARCHITECTURE_LAYOUT, REVIEW_LAYOUT } from "../../core/panel-kernel";
+export type { RunLayout } from "../../core/panel-kernel";
 
 export function argumentValue(args: readonly string[], flag: string): string | null {
   const index = args.indexOf(flag);
@@ -157,6 +133,50 @@ export function artifactError(path: string, expectedParent: string): string | nu
   }
 }
 
+/**
+ * Prepare a run-scoped directory and prove every path the engine is about to
+ * WRITE is safe to write.
+ *
+ * The read side has always been checked (`entryErrors`, `artifactError`); the
+ * review panel is the first panel where the engine authors artifacts, and a
+ * write follows a symlink just as happily as a read does. `mkdirSync` is a
+ * silent no-op on an existing symlinked directory, and `writeFileSync` through
+ * a symlinked `brief.md` lands the JSON wherever it points — outside the run
+ * root the containment checks all compare against. Checked BEFORE the write,
+ * because `artifactErrors` runs at the manifest step, by which time the bytes
+ * have already landed.
+ */
+export function prepareWriteTargets(
+  runDir: string,
+  directories: readonly string[],
+  files: readonly string[],
+): ParseResult<void> {
+  const errors: string[] = [];
+  for (const directory of directories) {
+    const path = join(runDir, directory);
+    try {
+      mkdirSync(path, { recursive: true });
+    } catch (error) {
+      errors.push(`cannot create ${path}: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
+    errors.push(...entryErrors("run subdirectory", path, "directory"));
+  }
+  for (const file of files) {
+    const path = join(runDir, file);
+    try {
+      // Absent is the expected state for a fresh run directory and is fine;
+      // anything that EXISTS must be a plain file we are overwriting in place.
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) errors.push(`write target must not be a symbolic link: ${path}`);
+      else if (!stat.isFile()) errors.push(`write target must be a regular file: ${path}`);
+    } catch {
+      // ENOENT — nothing to follow, nothing to check.
+    }
+  }
+  return errors.length > 0 ? fail(errors) : ok(undefined);
+}
+
 /** Canonical per-criterion verdict path. Positional by index, but the content
  *  is re-validated against `criteria[index]` when read, so a verdict written to
  *  the wrong slot is a hard error rather than a silent mis-adjudication. */
@@ -173,6 +193,49 @@ export function realRunDir(runDir: string): ParseResult<string> {
   } catch (error) {
     return fail([`cannot resolve run directory ${runDir}: ${error instanceof Error ? error.message : String(error)}`]);
   }
+}
+
+/**
+ * Read and re-validate every criterion's verdict from disk.
+ *
+ * Both panels re-read rather than trusting the step that just wrote — the
+ * verdict operation validated ONE agent's output in isolation, and nothing
+ * until now has looked at the collected set. Shared because it is the same
+ * loop: per-criterion path, artifact shape check, read, parse, prefix every
+ * diagnostic with the file that produced it, and collect across all of them so
+ * a re-run learns every bad verdict at once rather than the first.
+ */
+export function readVerdicts<T, Criterion extends string>(
+  runDir: string,
+  layout: RunLayout,
+  verdictsDir: string,
+  criteria: readonly Criterion[],
+  parse: (raw: string, criterion: Criterion) => ParseResult<T>,
+): ParseResult<readonly T[]> {
+  const verdicts: T[] = [];
+  const errors: string[] = [];
+  for (const [index, criterion] of criteria.entries()) {
+    const path = verdictPath(runDir, layout, index);
+    const fileError = artifactError(path, verdictsDir);
+    if (fileError) {
+      errors.push(fileError);
+      continue;
+    }
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf-8");
+    } catch (error) {
+      errors.push(`cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
+    const parsed = parse(raw, criterion);
+    if (!parsed.ok) {
+      errors.push(...parsed.errors.map((error) => `${path}: ${error}`));
+      continue;
+    }
+    verdicts.push(parsed.value);
+  }
+  return errors.length > 0 ? fail(errors) : ok(verdicts);
 }
 
 export function writeCanonicalOutput(output: string): HookResult {

@@ -20,15 +20,16 @@
  * so an orchestrator building this by hand could quietly omit a critical.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { HookHandler, HookResult, Task } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
-import type { ParseResult, VerdictEnvelope } from "../../core/panel-kernel";
+import type { ParseResult } from "../../core/panel-kernel";
+import { applyFindingOutcomes } from "../../core/findings";
 import {
-  applyFindingOutcomes,
   briefFindingFilename,
+  briefIsEmpty,
   buildFindingBrief,
   defaultRefutationThreshold,
   parseFindingBriefJson,
@@ -45,7 +46,7 @@ import {
   tallyRefutations,
   REVIEW_LENSES_DEFAULT,
   type FindingBrief,
-  type RefutationVerdict,
+  type WaveFindingId,
 } from "../../core/review-panel";
 import {
   REVIEW_LAYOUT,
@@ -54,8 +55,9 @@ import {
   contractError,
   parseRunBoundary,
   parseRunDirectory,
+  prepareWriteTargets,
+  readVerdicts,
   realRunDir,
-  verdictPath,
   writeCanonicalOutput,
 } from "./panel-run";
 
@@ -72,6 +74,14 @@ const MANIFEST_SCOPED = new Set(["manifest", "lenses", "verdict", "tally"]);
 
 function positiveInteger(raw: string | null): number | null {
   return raw !== null && /^\d+$/.test(raw) && Number(raw) > 0 ? Number(raw) : null;
+}
+
+/** The panel size a written manifest records. Null when the file says nothing
+ *  usable — `parseReviewManifest` is what rejects it, with a real diagnostic. */
+function manifestLensCount(raw: unknown): number | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const lenses = (raw as Record<string, unknown>).lenses;
+  return Array.isArray(lenses) && lenses.length > 0 ? lenses.length : null;
 }
 
 /** Load the task graph, failing loudly rather than adjudicating an empty set. */
@@ -123,6 +133,41 @@ function artifactErrors(
   ];
 }
 
+/**
+ * The brief is the panel's whole idea of what exists. If it is short, every
+ * later stage still succeeds — an empty item set satisfies every length and
+ * coverage rule vacuously — and the run reports "0 survived, 0 refuted", which
+ * is indistinguishable from a panel that adjudicated the wave and upheld
+ * nothing. So the brief proves its own completeness against the view the wave
+ * gate actually counts, and refuses to be built otherwise.
+ */
+function briefCompletenessErrors(brief: FindingBrief, waveTasks: readonly Task[], wave: number): string[] {
+  if (waveTasks.length === 0) {
+    return [`no tasks in wave ${wave} — check --wave against .current_wave`];
+  }
+  const gateCounts = waveTasks.reduce(
+    (total, task) => total + (task.critical_findings?.length ?? 0),
+    0,
+  );
+  if (briefIsEmpty(brief)) {
+    return gateCounts === 0
+      ? [`wave ${wave} has no ${brief.severity} findings — skip the refutation panel, there is nothing to adjudicate`]
+      : [completenessMessage(wave, gateCounts, 0)];
+  }
+  return brief.findings.length < gateCounts
+    ? [completenessMessage(wave, gateCounts, brief.findings.length)]
+    : [];
+}
+
+function completenessMessage(wave: number, gateCounts: number, briefCount: number): string {
+  return (
+    `wave ${wave} has ${gateCounts} critical_findings but only ${briefCount} carry structured identity — ` +
+    `the panel cannot adjudicate the remainder, and a partial brief would report the rest as upheld. ` +
+    `Re-run the reviewers so every critical is emitted through the findings block, ` +
+    `or repair the graph with: helper validate-task-graph --fix`
+  );
+}
+
 /** brief — engine-authored context artifacts for one wave. */
 function operationBrief(runsRoot: string, runDir: string, wave: number): HookResult {
   const boundary = parseRunDirectory(runsRoot, runDir);
@@ -132,6 +177,13 @@ function operationBrief(runsRoot: string, runDir: string, wave: number): HookRes
   if (!state.ok) return contractError("review brief", state.errors);
 
   const brief = buildFindingBrief(wave, state.value);
+  const completeness = briefCompletenessErrors(
+    brief,
+    state.value.filter((task) => task.wave === wave),
+    wave,
+  );
+  if (completeness.length > 0) return contractError("review brief", completeness);
+
   const briefJson = serializeFindingBrief(brief);
 
   // Re-parse what we are about to write. A brief that cannot survive its own
@@ -140,9 +192,18 @@ function operationBrief(runsRoot: string, runDir: string, wave: number): HookRes
   const reparsed = parseFindingBriefJson(JSON.parse(briefJson));
   if (!reparsed.ok) return contractError("review brief", reparsed.errors);
 
+  const targets = prepareWriteTargets(
+    runDir,
+    [LAYOUT.itemDir, LAYOUT.verdictDir],
+    [
+      LAYOUT.contextMd,
+      LAYOUT.contextJson,
+      ...brief.findings.map((finding) => join(LAYOUT.itemDir, briefFindingFilename(finding.id))),
+    ],
+  );
+  if (!targets.ok) return contractError("review run boundary", targets.errors);
+
   try {
-    mkdirSync(join(runDir, LAYOUT.itemDir), { recursive: true });
-    mkdirSync(join(runDir, LAYOUT.verdictDir), { recursive: true });
     writeFileSync(join(runDir, LAYOUT.contextMd), renderFindingBriefMarkdown(brief));
     writeFileSync(join(runDir, LAYOUT.contextJson), briefJson + "\n");
     for (const finding of brief.findings) {
@@ -176,8 +237,7 @@ const handler: HookHandler = async (stdin, args) => {
   if (!MANIFEST_SCOPED.has(operation)) return usageError;
 
   const rawLensCount = argumentValue(args, "--lenses");
-  const lensCount = rawLensCount === null ? REVIEW_LENSES_DEFAULT : positiveInteger(rawLensCount);
-  if (lensCount === null) return usageError;
+  if (rawLensCount !== null && positiveInteger(rawLensCount) === null) return usageError;
 
   // `manifest` WRITES the file, so it is the one manifest-scoped operation that
   // cannot require it to exist yet; it validates the run directory instead.
@@ -199,6 +259,30 @@ const handler: HookHandler = async (stdin, args) => {
     manifestPath = boundary.value.manifestPath;
   }
 
+  // The manifest is read BEFORE lens selection, not after, because it is what
+  // fixes the panel size for this run. `--lenses` chooses that size once, at
+  // `manifest`; every later operation recovers it from the file rather than
+  // requiring the orchestrator to thread the flag through three more commands.
+  // Threading it was the contract, and forgetting it failed the next step with
+  // "manifest.lenses must contain exactly 3 lenses" — blaming the manifest for
+  // the caller's omission. The lens SET is still re-derived from the brief and
+  // compared, so a tampered manifest is still rejected; only the count is taken
+  // from the file, and a count the brief's signals do not reproduce fails that
+  // comparison anyway.
+  let manifestRaw: unknown = null;
+  if (operation !== "manifest") {
+    try {
+      manifestRaw = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    } catch (error) {
+      return contractError("review manifest", [
+        `cannot read ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
+      ]);
+    }
+  }
+  const lensCount = rawLensCount !== null
+    ? positiveInteger(rawLensCount)!
+    : manifestLensCount(manifestRaw) ?? REVIEW_LENSES_DEFAULT;
+
   const brief = loadBrief(runDir);
   if (!brief.ok) return contractError("review brief", brief.errors);
 
@@ -218,6 +302,8 @@ const handler: HookHandler = async (stdin, args) => {
       lenses.value,
       brief.value.findings,
     );
+    const target = prepareWriteTargets(runDir, [], ["manifest.json"]);
+    if (!target.ok) return contractError("review run boundary", target.errors);
     try {
       writeFileSync(manifestPath, manifestJson + "\n");
     } catch (error) {
@@ -225,15 +311,13 @@ const handler: HookHandler = async (stdin, args) => {
         `cannot write ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
       ]);
     }
-  }
-
-  let manifestRaw: unknown;
-  try {
-    manifestRaw = JSON.parse(readFileSync(manifestPath, "utf-8"));
-  } catch (error) {
-    return contractError("review manifest", [
-      `cannot read ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
-    ]);
+    try {
+      manifestRaw = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    } catch (error) {
+      return contractError("review manifest", [
+        `cannot read ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
+      ]);
+    }
   }
   // Re-read from disk even on the write path — the same discipline `aggregate`
   // applies to verdicts: never trust the step that just ran.
@@ -257,14 +341,17 @@ const handler: HookHandler = async (stdin, args) => {
   }
 
   if (operation === "verdict") {
-    const lens = argumentValue(args, "--lens");
-    if (!lens) return usageError;
-    // Reject a lens outside this run's selected set, so a typo'd or stale
-    // --lens cannot produce a verdict the tally later rejects as "unexpected"
-    // with no way to tell which step lied.
-    if (!(manifest.value.lenses as readonly string[]).includes(lens)) {
+    const rawLens = argumentValue(args, "--lens");
+    if (!rawLens) return usageError;
+    // Resolve the flag against this run's selected set rather than merely
+    // testing membership: a typo'd or stale --lens cannot then produce a
+    // verdict the tally later rejects as "unexpected" with no way to tell which
+    // step lied, and the value that reaches the parser is a narrowed ReviewLens
+    // rather than an arbitrary string that happened to compare equal.
+    const lens = manifest.value.lenses.find((selected) => selected === rawLens);
+    if (lens === undefined) {
       return contractError("refutation verdict", [
-        `lens must be one of the selected lenses: ${manifest.value.lenses.join(", ")}; received: ${lens}`,
+        `lens must be one of the selected lenses: ${manifest.value.lenses.join(", ")}; received: ${rawLens}`,
       ]);
     }
     const verdict = parseRefutationVerdict(stdin, lens, findingIds);
@@ -283,32 +370,12 @@ const handler: HookHandler = async (stdin, args) => {
     : positiveInteger(rawThreshold);
   if (threshold === null) return usageError;
 
-  const verdicts: VerdictEnvelope<RefutationVerdict>[] = [];
-  const verdictErrors: string[] = [];
-  for (const [index, lens] of manifest.value.lenses.entries()) {
-    const path = verdictPath(runDir, LAYOUT, index);
-    const fileError = artifactError(path, verdictsDir);
-    if (fileError) {
-      verdictErrors.push(fileError);
-      continue;
-    }
-    let raw: string;
-    try {
-      raw = readFileSync(path, "utf-8");
-    } catch (error) {
-      verdictErrors.push(`cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`);
-      continue;
-    }
-    const parsed = parseRefutationVerdict(raw, lens, findingIds);
-    if (!parsed.ok) {
-      verdictErrors.push(...parsed.errors.map((error) => `${path}: ${error}`));
-      continue;
-    }
-    verdicts.push(parsed.value);
-  }
-  if (verdictErrors.length > 0) return contractError("review verdicts", verdictErrors);
+  const verdicts = readVerdicts(runDir, LAYOUT, verdictsDir, manifest.value.lenses, (raw, lens) =>
+    parseRefutationVerdict(raw, lens, findingIds),
+  );
+  if (!verdicts.ok) return contractError("review verdicts", verdicts.errors);
 
-  const tallied = tallyRefutations(verdicts, manifest.value.lenses, brief.value.findings, threshold);
+  const tallied = tallyRefutations(verdicts.value, manifest.value.lenses, brief.value.findings, threshold);
   if (!tallied.ok) return contractError("review tally", tallied.errors);
 
   const mgr = StateManager.fromPath(TASK_GRAPH_PATH);

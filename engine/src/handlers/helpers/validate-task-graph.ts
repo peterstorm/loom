@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookHandler, Phase, TaskGraph } from "../../types";
 import { PHASE_ORDER, KNOWN_AGENTS } from "../../config";
-import { parseStoredFindings, parseStoredRefutations } from "../../core/findings";
+import { claimsOfSeverity, parseStoredFindings, parseStoredRefutations } from "../../core/findings";
 import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
 
 export type ValidationResult =
@@ -157,6 +157,36 @@ export function validateFull(json: Record<string, unknown>): ValidationResult {
   return errors.length === 0 ? ok() : fail(errors);
 }
 
+/**
+ * Repair one task's findings and the two `string[]` views over them.
+ *
+ * Structured findings are re-parsed rather than passed through: they are the
+ * field a refutation panel votes on, so a malformed entry must be dropped here
+ * rather than reaching a verifier as an un-refutable item.
+ *
+ * Dropping ALONE is not a repair — it is how the un-refutable item gets made.
+ * A claim left in `critical_findings` with no counterpart in `findings` can
+ * never enter a brief, so it can never be refuted, so the task stays blocked
+ * forever with nothing able to adjudicate it. Whenever `findings` is present
+ * the views are re-derived from what survived, restoring the lockstep the
+ * types declare. A task with no `findings` at all predates identity; its views
+ * are all there is and are carried through untouched.
+ */
+function fixTaskFindings(t: Record<string, unknown>): Record<string, unknown> {
+  const findings = parseStoredFindings(t.findings);
+  const derived = t.findings !== undefined;
+  return {
+    findings,
+    critical_findings: derived
+      ? [...claimsOfSeverity(findings, "critical")]
+      : Array.isArray(t.critical_findings) ? t.critical_findings : [],
+    advisory_findings: derived
+      ? [...claimsOfSeverity(findings, "advisory")]
+      : Array.isArray(t.advisory_findings) ? t.advisory_findings : [],
+    refuted_findings: parseStoredRefutations(t.refuted_findings),
+  };
+}
+
 /** Fix full graph — add missing per-task defaults */
 export function fixFull(json: Record<string, unknown>): string {
   const tasks = Array.isArray(json.tasks) ? (json.tasks as Record<string, unknown>[]) : [];
@@ -167,13 +197,7 @@ export function fixFull(json: Record<string, unknown>): string {
       depends_on: Array.isArray(t.depends_on) ? t.depends_on : [],
       status: t.status ?? "pending",
       review_status: t.review_status ?? "pending",
-      // Structured findings are re-parsed rather than passed through: they are
-      // the field a refutation panel votes on, so a malformed entry must be
-      // dropped here rather than reaching a verifier as an un-refutable item.
-      findings: parseStoredFindings(t.findings),
-      critical_findings: Array.isArray(t.critical_findings) ? t.critical_findings : [],
-      advisory_findings: Array.isArray(t.advisory_findings) ? t.advisory_findings : [],
-      refuted_findings: parseStoredRefutations(t.refuted_findings),
+      ...fixTaskFindings(t),
     })),
   };
   return JSON.stringify(fixed, null, 2);

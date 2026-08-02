@@ -1,12 +1,16 @@
-import { basename, join, normalize } from "node:path";
 import {
+  coverageErrors,
   fail,
   isRecord,
   ok,
   parseCriteriaSet,
+  parseRunManifest,
   parseVerdictEnvelope,
+  requireEntry,
   sanitizeProse,
   type ParseResult,
+  type RunLayout,
+  type VerdictEnvelope,
 } from "./panel-kernel";
 
 // The architecture panel is consumer 1 of the kernel. Everything below is what
@@ -228,70 +232,51 @@ export type PanelManifest = Readonly<{
   candidates: readonly PanelCandidate[];
 }>;
 
-/** Parse the exact candidate-set handoff and bind every path to one run root. */
+/** Run-scoped artifact filename for one lens's candidate. */
+export function candidateFilename(lens: string): string {
+  return `candidate-${lens}.md`;
+}
+
+/**
+ * Parse the exact candidate-set handoff and bind every path to one run root.
+ *
+ * The rules are the kernel's (`parseRunManifest`) — the review panel enforces
+ * the identical set over its finding manifest. Architecture-specific here: the
+ * item vocabulary is the closed, ORDER-SIGNIFICANT lens enum, so the parsed
+ * entries are narrowed back to `PanelLens` on the way out.
+ */
 export function parsePanelManifest(
   raw: unknown,
   expectedRunDir: string,
+  layout: RunLayout<"architecture">,
   expectedLenses: readonly PanelLens[],
 ): ParseResult<PanelManifest> {
-  if (!isRecord(raw)) return fail(["panel manifest must be a JSON object"]);
+  const parsed = parseRunManifest(raw, expectedRunDir, layout, {
+    label: "panel manifest",
+    contextMdKey: "interview_file",
+    contextJsonKey: "interview_json",
+    itemsKey: "candidates",
+    itemIdKey: "lens",
+    itemNoun: ["candidate", "candidates"],
+    expectedIds: expectedLenses,
+    filenameOf: candidateFilename,
+  });
+  if (!parsed.ok) return fail(parsed.errors);
 
-  const errors: string[] = [];
-  const runDir = normalize(expectedRunDir);
-  const runId = typeof raw.run_id === "string" ? raw.run_id.trim() : "";
-  const interviewFile = typeof raw.interview_file === "string" ? raw.interview_file.trim() : "";
-  const interviewJson = typeof raw.interview_json === "string" ? raw.interview_json.trim() : "";
-  if (runId !== basename(runDir)) errors.push("manifest.run_id must equal the run directory basename");
-  if (interviewFile !== join(runDir, "interview.md")) {
-    errors.push("manifest.interview_file must exactly equal <run-dir>/interview.md");
-  }
-  if (interviewJson !== join(runDir, "interview.json")) {
-    errors.push("manifest.interview_json must exactly equal <run-dir>/interview.json");
-  }
+  // Safe by construction: every entry id was checked for membership in
+  // `expectedLenses`, which is a `readonly PanelLens[]`.
+  const candidates: PanelCandidate[] = parsed.value.entries.map((entry) => ({
+    lens: entry.id as PanelLens,
+    path: entry.path,
+    filename: entry.filename,
+  }));
 
-  if (!Array.isArray(raw.candidates) || raw.candidates.length !== expectedLenses.length) {
-    errors.push(`manifest.candidates must contain exactly ${expectedLenses.length} candidates`);
-  }
-
-  const candidates: PanelCandidate[] = [];
-  if (Array.isArray(raw.candidates)) {
-    for (const [index, candidate] of raw.candidates.entries()) {
-      if (!isRecord(candidate)) {
-        errors.push(`manifest.candidates[${index}] must be an object`);
-        continue;
-      }
-      const lens = typeof candidate.lens === "string" ? candidate.lens.trim() : "";
-      const path = typeof candidate.path === "string" ? candidate.path.trim() : "";
-      const filename = typeof candidate.filename === "string" ? candidate.filename.trim() : "";
-      if (!(PANEL_LENSES as readonly string[]).includes(lens)) {
-        errors.push(`manifest.candidates[${index}].lens is unknown: ${lens || "<empty>"}`);
-      }
-      const expectedFilename = `candidate-${lens}.md`;
-      if (filename !== expectedFilename) {
-        errors.push(`manifest.candidates[${index}].filename must equal ${expectedFilename}`);
-      }
-      if (path !== join(runDir, "candidates", expectedFilename)) {
-        errors.push(`manifest.candidates[${index}].path must exactly equal its run-scoped candidate path`);
-      }
-      if ((PANEL_LENSES as readonly string[]).includes(lens)) {
-        candidates.push({ lens: lens as PanelLens, path, filename });
-      }
-    }
-  }
-
-  const lenses = candidates.map((candidate) => candidate.lens);
-  if (new Set(lenses).size !== lenses.length) errors.push("manifest candidate lenses must be unique");
-  if (lenses.length === expectedLenses.length && lenses.some((lens, index) => lens !== expectedLenses[index])) {
-    errors.push(`manifest candidate lenses must exactly match: ${expectedLenses.join(", ")}`);
-  }
-  const filenames = candidates.map((candidate) => candidate.filename);
-  if (new Set(filenames).size !== filenames.length) errors.push("manifest candidate filenames must be unique");
-  const paths = candidates.map((candidate) => candidate.path);
-  if (new Set(paths).size !== paths.length) errors.push("manifest candidate paths must be unique");
-
-  return errors.length > 0
-    ? fail(errors)
-    : ok({ runId, interviewFile, interviewJson, candidates });
+  return ok({
+    runId: parsed.value.runId,
+    interviewFile: parsed.value.contextMd,
+    interviewJson: parsed.value.contextJson,
+    candidates,
+  });
 }
 
 export type JudgeRanking = Readonly<{
@@ -455,36 +440,37 @@ export function aggregateVerdicts(
     errors.push("expected candidates must be distinct");
   }
 
-  const byCriterion = new Map<string, JudgeVerdict>();
+  // `JudgeVerdict` is the kernel's envelope with `entries` renamed to
+  // `rankings` for readability at the agent contract; re-widened here so the
+  // shared coverage rule applies to it verbatim.
+  const envelopes = new Map<string, VerdictEnvelope<JudgeRanking>>();
   for (const verdict of verdicts) {
-    if (!byCriterion.has(verdict.criterion)) byCriterion.set(verdict.criterion, verdict);
-  }
-
-  if (errors.length > 0) return fail(errors);
-
-  // Re-check candidate coverage per verdict so this function is safe to call
-  // standalone, not only downstream of parseJudgeVerdict.
-  const expected = new Set(expectedCandidates);
-  for (const criterion of criteriaInOrder) {
-    const verdict = byCriterion.get(criterion);
-    if (!verdict) continue;
-    const seen = new Set(verdict.rankings.map((ranking) => ranking.candidate));
-    const covers =
-      verdict.rankings.length === expectedCandidates.length &&
-      seen.size === verdict.rankings.length &&
-      [...seen].every((candidate) => expected.has(candidate));
-    if (!covers) {
-      errors.push(`verdict for '${criterion}' must rank each expected candidate exactly once`);
+    if (!envelopes.has(verdict.criterion)) {
+      envelopes.set(verdict.criterion, { criterion: verdict.criterion, entries: verdict.rankings });
     }
   }
 
   if (errors.length > 0) return fail(errors);
 
+  errors.push(
+    ...coverageErrors(
+      envelopes,
+      criteriaInOrder,
+      expectedCandidates,
+      (ranking) => ranking.candidate,
+      "must rank each expected candidate exactly once",
+    ),
+  );
+
+  if (errors.length > 0) return fail(errors);
+
   const ranked = expectedCandidates.map((candidate): CandidateRanking => {
-    const scores = criteriaInOrder.map((criterion) => {
-      const verdict = byCriterion.get(criterion);
-      return verdict?.rankings.find((ranking) => ranking.candidate === candidate)?.score ?? 0;
-    });
+    // No `?? 0`: coverage above proves every (criterion, candidate) pair has a
+    // ranking, and a defaulted zero would silently change which architecture
+    // wins if that proof ever stopped holding.
+    const scores = criteriaInOrder.map(
+      (criterion) => requireEntry(envelopes, criterion, candidate, (r) => r.candidate).score,
+    );
     return {
       candidate,
       totalScore: scores.reduce((sum, score) => sum + score, 0),

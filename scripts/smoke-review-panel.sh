@@ -275,8 +275,8 @@ else
 fi
 
 if [ "$(state_q '.tasks[0].refuted_findings | length')" = "1" ] \
-   && [ "$(state_q '.tasks[0].refuted_findings[0].refutedBy | join(",")')" = "reproduction,intent" ] \
-   && [ "$(state_q '.tasks[0].refuted_findings[0].reasoning | length')" = "2" ]; then
+   && [ "$(state_q '[.tasks[0].refuted_findings[0].refutations[].lens] | join(",")')" = "reproduction,intent" ] \
+   && [ "$(state_q '[.tasks[0].refuted_findings[0].refutations[] | select(.reason != "")] | length')" = "2" ]; then
   ok "refutation RECORDED with its refuting lenses and reasoning, not deleted"
 else
   bad "refuted_findings wrong: $(state_q '.tasks[0].refuted_findings | tojson')"

@@ -1,4 +1,9 @@
 import { describe, expect, it } from "vitest";
+import fc from "fast-check";
+import type { Task } from "../../src/types";
+import { applyFindingOutcomes, findingsUnionError, mergeFindings, refutationsUnionError, type AdjudicatedFinding } from "../../src/core/findings";
+import { makeParsedFindings } from "../../src/core/review-output";
+
 import {
   attributeFindings,
   claimsOfSeverity,
@@ -13,6 +18,10 @@ import {
   type DraftFinding,
   type Finding,
 } from "../../src/core/findings";
+
+/** One reviewer emission of N criticals, shaped the way the parser produces it. */
+const makeParsed = (critical: readonly string[]) =>
+  makeParsedFindings({ critical, criticalCount: critical.length });
 
 const draft = (over: Partial<DraftFinding> = {}): DraftFinding => ({
   severity: "critical",
@@ -116,7 +125,7 @@ describe("attributeFindings — derived, never agent-chosen identity", () => {
     const second = attributeFindings(
       [draft({ claim: "c" })],
       "code-reviewer",
-      nextOrdinal(first, "code-reviewer"),
+      nextOrdinal(first, [], "code-reviewer"),
     );
     expect(second[0]!.id).toBe("code-reviewer-3");
     expect(new Set([...first, ...second].map((f) => f.id)).size).toBe(3);
@@ -127,9 +136,9 @@ describe("attributeFindings — derived, never agent-chosen identity", () => {
       ...attributeFindings([draft()], "code-reviewer"),
       ...attributeFindings([draft(), draft({ claim: "b" })], "comment-analyzer"),
     ];
-    expect(nextOrdinal(existing, "code-reviewer")).toBe(2);
-    expect(nextOrdinal(existing, "comment-analyzer")).toBe(3);
-    expect(nextOrdinal(existing, "type-design-analyzer")).toBe(1);
+    expect(nextOrdinal(existing, [], "code-reviewer")).toBe(2);
+    expect(nextOrdinal(existing, [], "comment-analyzer")).toBe(3);
+    expect(nextOrdinal(existing, [], "type-design-analyzer")).toBe(1);
   });
 });
 
@@ -232,17 +241,195 @@ describe("parseStoredRefutations", () => {
   };
 
   it("keeps a well-formed refutation record", () => {
-    const raw = [{ finding, refutedBy: ["reproduction", "intent"], reasoning: ["cannot trigger", "deliberate"] }];
+    const raw = [{
+      finding,
+      refutations: [
+        { lens: "reproduction", reason: "cannot trigger" },
+        { lens: "intent", reason: "deliberate" },
+      ],
+    }];
     expect(parseStoredRefutations(raw)).toEqual(raw);
   });
 
-  it("drops a record whose reasoning does not align with its refuters", () => {
-    expect(parseStoredRefutations([{ finding, refutedBy: ["reproduction"], reasoning: [] }])).toEqual([]);
-    expect(parseStoredRefutations([{ finding, refutedBy: [], reasoning: [] }])).toEqual([]);
+  it("drops a record with no refuters — a refutation nobody made is not one", () => {
+    expect(parseStoredRefutations([{ finding, refutations: [] }])).toEqual([]);
+    expect(parseStoredRefutations([{ finding }])).toEqual([]);
+  });
+
+  it("drops a record whose pair is missing a lens or a reason", () => {
+    // The pair shape is what makes lens/reason misalignment unrepresentable;
+    // a half-filled pair is the only way it can still arrive from disk.
+    expect(parseStoredRefutations([{ finding, refutations: [{ lens: "reproduction" }] }])).toEqual([]);
+    expect(parseStoredRefutations([{ finding, refutations: [{ reason: "cannot trigger" }] }])).toEqual([]);
+    expect(parseStoredRefutations([{ finding, refutations: [{ lens: " ", reason: "x" }] }])).toEqual([]);
   });
 
   it("drops a record whose finding lost its identity", () => {
-    expect(parseStoredRefutations([{ finding: { ...finding, id: "" }, refutedBy: ["x"], reasoning: ["y"] }]))
+    expect(parseStoredRefutations([{ finding: { ...finding, id: "" }, refutations: [{ lens: "x", reason: "y" }] }]))
       .toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Identity across a refutation — the invariant the panel introduced
+// ---------------------------------------------------------------------------
+
+const taskFixture = (over: Partial<Task> = {}): Task => ({
+  id: "T1",
+  description: "d",
+  agent: "code-implementer-agent",
+  wave: 1,
+  status: "implemented",
+  depends_on: [],
+  ...over,
+});
+
+/** The panel decision `applyFindingOutcomes` consumes, for one stored finding. */
+const kill = (finding: Finding): AdjudicatedFinding => ({
+  finding: { id: `T1:${finding.id}`, taskId: "T1" },
+  refutations: [{ lens: "reproduction", reason: "cannot trigger" }],
+  survives: false,
+});
+
+describe("nextOrdinal across a refutation", () => {
+  it("does not remint an ordinal a refutation record still holds", () => {
+    // The bug this pins: nextOrdinal used to count `task.findings`, which
+    // applyFindingOutcomes REMOVES from. Refute one, re-review, and the new
+    // finding took the refuted one's id — after which the id filter deleted
+    // two findings where one was adjudicated, and the audit trail named the
+    // wrong claim.
+    let task = mergeFindings(
+      taskFixture({ review_status: "pending" }),
+      makeParsed(["c one", "c two"]),
+      "code-reviewer",
+    );
+    expect(task.findings?.map((f) => f.id)).toEqual(["code-reviewer-1", "code-reviewer-2"]);
+
+    task = applyFindingOutcomes(task, [kill(task.findings![1]!)]);
+    expect(task.findings?.map((f) => f.id)).toEqual(["code-reviewer-1"]);
+    expect(task.refuted_findings?.map((r) => r.finding.id)).toEqual(["code-reviewer-2"]);
+
+    task = mergeFindings(task, makeParsed(["c three"]), "code-reviewer");
+    expect(task.findings?.map((f) => f.id)).toEqual(["code-reviewer-1", "code-reviewer-3"]);
+
+    const everyId = [
+      ...(task.findings ?? []).map((f) => f.id),
+      ...(task.refuted_findings ?? []).map((r) => r.finding.id),
+    ];
+    expect(new Set(everyId).size, "every id this task ever minted stays distinct").toBe(everyId.length);
+  });
+
+  it("survives repeated refute-then-re-review cycles", () => {
+    let task: Task = taskFixture({ review_status: "pending" });
+    const seen = new Set<string>();
+    for (let round = 0; round < 6; round++) {
+      task = mergeFindings(task, makeParsed([`round ${round}`]), "code-reviewer");
+      const minted = task.findings![task.findings!.length - 1]!;
+      expect(seen.has(minted.id), `id ${minted.id} was reused in round ${round}`).toBe(false);
+      seen.add(minted.id);
+      task = applyFindingOutcomes(task, [kill(minted)]);
+    }
+    expect(task.refuted_findings).toHaveLength(6);
+  });
+});
+
+describe("applyFindingOutcomes keeps the derived views in lockstep", () => {
+  it("holds for any subset of a mixed finding set", () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.record({ critical: fc.boolean(), claim: fc.string({ minLength: 1, maxLength: 6 }) }), {
+          minLength: 1,
+          maxLength: 8,
+        }),
+        fc.array(fc.boolean(), { minLength: 8, maxLength: 8 }),
+        (specs, killFlags) => {
+          const parsed = makeParsedFindings({
+            drafts: specs
+              .map((spec) =>
+                makeDraftFinding({ severity: spec.critical ? "critical" : "advisory", claim: spec.claim }),
+              )
+              .filter((d): d is DraftFinding => d !== null),
+            criticalCount: specs.filter((s) => s.critical).length,
+          });
+          const start = mergeFindings(taskFixture({ review_status: "pending" }), parsed, "code-reviewer");
+          const outcomes = (start.findings ?? []).map((finding, index): AdjudicatedFinding => ({
+            finding: { id: `T1:${finding.id}`, taskId: "T1" },
+            refutations: [{ lens: "intent", reason: "deliberate" }],
+            survives: !killFlags[index],
+          }));
+          const after = applyFindingOutcomes(start, outcomes);
+
+          // The headline invariant: the two string[] views are exactly the
+          // claims of the authoritative array, at every severity, always.
+          expect(after.critical_findings).toEqual(claimsOfSeverity(after.findings ?? [], "critical"));
+          expect(after.advisory_findings).toEqual(claimsOfSeverity(after.findings ?? [], "advisory"));
+          // Nothing is lost: every finding is either still active or recorded
+          // as refuted. A dropped critical is the failure mode this forbids.
+          expect((after.findings ?? []).length + (after.refuted_findings ?? []).length).toBe(
+            (start.findings ?? []).length,
+          );
+        },
+      ),
+    );
+  });
+
+  it("promotes blocked to passed exactly when no critical remains", () => {
+    fc.assert(
+      fc.property(fc.array(fc.boolean(), { minLength: 1, maxLength: 5 }), (killFlags) => {
+        const parsed = makeParsedFindings({
+          critical: killFlags.map((_, index) => `critical ${index}`),
+          criticalCount: killFlags.length,
+        });
+        const blocked = mergeFindings(taskFixture({ review_status: "pending" }), parsed, "code-reviewer");
+        expect(blocked.review_status).toBe("blocked");
+        const after = applyFindingOutcomes(
+          blocked,
+          (blocked.findings ?? []).map((finding, index): AdjudicatedFinding => ({
+            finding: { id: `T1:${finding.id}`, taskId: "T1" },
+            refutations: [{ lens: "intent", reason: "deliberate" }],
+            survives: !killFlags[index],
+          })),
+        );
+        expect(after.review_status).toBe(killFlags.every(Boolean) ? "passed" : "blocked");
+      }),
+    );
+  });
+});
+
+describe("the load boundary proves what the Task type asserts", () => {
+  const wellFormed = { id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", claim: "x" };
+
+  it("accepts an absent field and a well-formed array", () => {
+    expect(findingsUnionError(undefined, "findings")).toBeNull();
+    expect(findingsUnionError([wellFormed], "findings")).toBeNull();
+    expect(refutationsUnionError(undefined, "refuted_findings")).toBeNull();
+    expect(
+      refutationsUnionError([{ finding: wellFormed, refutations: [{ lens: "intent", reason: "y" }] }], "r"),
+    ).toBeNull();
+  });
+
+  it.each([
+    ["a non-array", {}],
+    ["a non-object entry", ["nope"]],
+    ["an entry with no id", [{ ...wellFormed, id: "" }]],
+    ["an entry with no agent", [{ ...wellFormed, agent: undefined }]],
+    ["an unknown severity", [{ ...wellFormed, severity: "blocker" }]],
+    ["a non-string claim", [{ ...wellFormed, claim: 7 }]],
+  ])("rejects %s, naming the repair", (_label, raw) => {
+    const error = findingsUnionError(raw, "tasks[0].findings");
+    expect(error).not.toBeNull();
+    expect(error).toContain("tasks[0].findings");
+  });
+
+  it("points at the repair command rather than leaving the operator stuck", () => {
+    expect(findingsUnionError([{}], "findings")).toContain("validate-task-graph --fix");
+  });
+
+  it("rejects exactly what the repair path drops — the two must agree", () => {
+    // Otherwise a graph could be simultaneously unloadable and unrepairable.
+    for (const raw of [[{}], [{ ...wellFormed, claim: "none" }], [{ ...wellFormed, id: "  " }]]) {
+      expect(findingsUnionError(raw, "findings")).not.toBeNull();
+      expect(parseStoredFindings(raw)).toEqual([]);
+    }
   });
 });

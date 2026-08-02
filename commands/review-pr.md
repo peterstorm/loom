@@ -161,10 +161,14 @@ ADVISORY: prefer a named constant over the literal
 - Never invent an `id`. Ids are derived from (agent, emission order) by the
   engine so they are stable and need no trust.
 
-`CRITICAL_COUNT` is still the authority on how many criticals you found — the
-block adds location and structure, it does not replace the marker lines. If the
-block is absent or malformed, the marker lines are parsed instead and the
-findings simply carry no file/line. Verification quality degrades; nothing breaks.
+`CRITICAL_COUNT` is still the authority on how many criticals you found, and the
+block must **account for all of them**: when it parses, it becomes the sole
+source of findings and the `CRITICAL:` lines are ignored, so every critical in
+the marker lines must also appear in the block with `"severity": "critical"`. A
+block listing fewer criticals than `CRITICAL_COUNT` is discarded in favour of the
+marker lines — no finding is ever lost to it, but its locations are. If the block
+is absent or malformed, the marker lines are parsed instead and the findings
+simply carry no file/line. Verification quality degrades; nothing breaks.
 
 ## Usage Examples
 

@@ -138,9 +138,18 @@ export interface Task {
    * agree they are discussing, which free text cannot provide.
    *
    * `critical_findings` and `advisory_findings` below are DERIVED VIEWS over
-   * this array, written alongside it by mergeFindings. They remain the fields
-   * the wave gate counts and the GH comment prints, so no consumer had to
-   * migrate when identity arrived; they can migrate opportunistically.
+   * this array. They remain the fields the wave gate counts and the GH comment
+   * prints, so no consumer had to migrate when identity arrived; they can
+   * migrate opportunistically.
+   *
+   * Exactly four writers keep the three in lockstep, and every one of them
+   * writes all three together: `mergeFindings` (a reviewer finished) and
+   * `applyFindingOutcomes` (the panel adjudicated), both in core/findings;
+   * `updateTaskFindings` (the manual operator override) in
+   * handlers/helpers/store-review-findings; and `fixFull` (repair) in
+   * handlers/helpers/validate-task-graph. A fifth writer that touched only the
+   * views would produce a critical no panel can reach and no gate can clear —
+   * which is what `findingsUnionError` refuses to load.
    */
   findings?: readonly Finding[];
   critical_findings?: string[];

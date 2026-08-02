@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { parseMachineSummary, parseLegacyFindings, isReviewAgent, mergeFindings, makeParsedFindings, buildEvidenceFailureMessage, reconcileFindings } from "../../src/handlers/subagent-stop/store-reviewer-findings";
+import { applyReviewResolution, resolveReviewFindings, reviewResolutionLog } from "../../src/core/review-output";
+import { claimsOfSeverity } from "../../src/core/findings";
+import { parseMachineSummary, parseLegacyFindings, makeParsedFindings, buildEvidenceFailureMessage, reconcileFindings } from "../../src/core/review-output";
+import { mergeFindings } from "../../src/core/findings";
+import { isReviewAgent } from "../../src/core/review-output";
 import { REVIEW_SUB_AGENTS } from "../../src/config";
 import type { Task } from "../../src/types";
 
@@ -460,5 +464,119 @@ describe("reconcileFindings (pure)", () => {
   it("returns input unchanged when count is null", () => {
     const input = makeParsedFindings({ critical: [], advisory: [], criticalCount: null });
     expect(reconcileFindings(input)).toBe(input);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Which source wins when the reviewer's three descriptions disagree
+// ---------------------------------------------------------------------------
+
+const partialTask: Task = {
+  id: "T1",
+  description: "d",
+  agent: "code-implementer-agent",
+  wave: 1,
+  status: "implemented",
+  depends_on: [],
+};
+
+describe("the structured block never costs a claim the markers made", () => {
+  const summary = (count: number, criticals: readonly string[], block: string | null) =>
+    [
+      "### Machine Summary",
+      `CRITICAL_COUNT: ${count}`,
+      ...criticals.map((claim) => `CRITICAL: ${claim}`),
+      ...(block === null ? [] : ["```findings", block, "```"]),
+    ].join("\n");
+
+  const entry = (claim: string, severity = "critical") =>
+    ({ severity, file: "src/x.ts", line: 4, claim });
+
+  it("uses the block when it accounts for every critical — locations are the win", () => {
+    const result = parseMachineSummary(
+      summary(2, ["leak in the cache", "unchecked cast"], JSON.stringify([
+        entry("leak in the cache"),
+        entry("unchecked cast"),
+      ])),
+    );
+    expect(result?.blockStatus).toBe("used");
+    expect(result?.critical).toEqual(["leak in the cache", "unchecked cast"]);
+    expect(result?.drafts.every((d) => d.file === "src/x.ts")).toBe(true);
+  });
+
+  it("keeps every claim when the block under-reports the criticals", () => {
+    // The bug this pins: the block used to replace the scraped CRITICAL: lines
+    // outright while criticalCount still came from the markers. A two-entry
+    // block against three marker lines silently dropped one critical, and the
+    // survivors made the gate look like it had seen everything.
+    const result = parseMachineSummary(
+      summary(3, ["leak in the cache", "unchecked cast", "race on the queue"], JSON.stringify([
+        entry("leak in the cache"),
+        entry("unchecked cast"),
+      ])),
+    );
+    expect(result?.blockStatus).toBe("superseded");
+    expect(result?.critical).toEqual(["leak in the cache", "unchecked cast", "race on the queue"]);
+  });
+
+  it("still prefers a block that supplies criticals the marker lines omitted", () => {
+    // The inverse: a reviewer that emitted only the block. Falling back here
+    // would throw away its findings and report a parse failure instead.
+    const result = parseMachineSummary(
+      summary(2, [], JSON.stringify([entry("leak in the cache"), entry("unchecked cast")])),
+    );
+    expect(result?.blockStatus).toBe("used");
+    expect(result?.critical).toEqual(["leak in the cache", "unchecked cast"]);
+  });
+
+  it("reports a malformed block rather than degrading in silence", () => {
+    const result = parseMachineSummary(summary(1, ["unchecked cast"], "[{not json"));
+    expect(result?.blockStatus).toBe("rejected");
+    expect(result?.critical).toEqual(["unchecked cast"]);
+  });
+
+  it("says nothing when no block was offered", () => {
+    expect(parseMachineSummary(summary(1, ["unchecked cast"], null))?.blockStatus).toBe("absent");
+  });
+
+  it("tells the operator when locations were lost", () => {
+    const degraded = resolveReviewFindings(summary(1, ["unchecked cast"], "[{not json"), "code-reviewer");
+    expect(reviewResolutionLog("T1", degraded)).toContain("findings block was malformed");
+    const clean = resolveReviewFindings(summary(1, ["unchecked cast"], null), "code-reviewer");
+    expect(reviewResolutionLog("T1", clean)).toBe("Task T1 review: blocked (1 critical)");
+  });
+});
+
+describe("reconcileFindings backstops a SHORTFALL, not only a total loss", () => {
+  it("marks the gap when fewer criticals were captured than counted", () => {
+    const result = reconcileFindings(makeParsedFindings({ critical: ["one"], criticalCount: 3 }));
+    expect(result.critical).toHaveLength(2);
+    expect(result.critical[0]).toBe("Review output parsing failed - 2 of 3 critical findings not captured");
+    expect(result.critical[1], "the captured claim is kept, not replaced").toBe("one");
+  });
+
+  it("keeps the total-loss wording when nothing was captured", () => {
+    const result = reconcileFindings(makeParsedFindings({ critical: [], criticalCount: 3 }));
+    expect(result.critical).toEqual(["Review output parsing failed - 3 findings not captured"]);
+  });
+
+  it("is a no-op when the capture matches or exceeds the count", () => {
+    for (const [critical, count] of [[["a", "b"], 2], [["a", "b", "c"], 2]] as const) {
+      const input = makeParsedFindings({ critical: [...critical], criticalCount: count });
+      expect(reconcileFindings(input)).toBe(input);
+    }
+  });
+
+  it("a partially-parsed reviewer still blocks the wave", () => {
+    const resolution = resolveReviewFindings(
+      ["### Machine Summary", "CRITICAL_COUNT: 3", "CRITICAL: leak in the cache"].join("\n"),
+      "code-reviewer",
+    );
+    expect(resolution.kind).toBe("findings");
+    if (resolution.kind !== "findings") return;
+    const task = applyReviewResolution(partialTask, resolution);
+    expect(task.review_status).toBe("blocked");
+    expect(task.critical_findings).toHaveLength(2);
+    expect(task.critical_findings).toEqual(claimsOfSeverity(task.findings ?? [], "critical"));
   });
 });

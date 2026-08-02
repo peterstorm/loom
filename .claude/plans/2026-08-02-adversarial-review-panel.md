@@ -391,6 +391,12 @@ Shipped in this branch as three commits, in plan order.
 
 **Deviations from the plan as written**, all deliberate:
 
+- **Ids are derived from (agent, emission order), not (agent, task, emission
+  order).** §A1 above overstates it: `attributeFindings` mints `${agent}-${n}`,
+  which is unique within ONE task. Task scoping is applied later and separately
+  by `waveFindingId`, because it is only the wave-spanning brief that can see two
+  tasks' `code-reviewer-1` at once. The two id spaces are distinct types
+  (`WaveFindingId` is branded) precisely so they cannot be confused.
 - **`parseVerdictEnvelope` has no `itemIdOf(payload)` accessor.** It reads each
   item id from the RAW entry instead. Computing coverage over successfully
   parsed payloads would report both "score out of range" AND "missing item" for

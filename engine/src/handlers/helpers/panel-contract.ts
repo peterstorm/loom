@@ -20,8 +20,8 @@ import {
   artifactError,
   contractError,
   parseRunBoundary,
+  readVerdicts,
   realRunDir,
-  verdictPath,
   writeCanonicalOutput,
 } from "./panel-run";
 
@@ -90,7 +90,7 @@ const handler: HookHandler = async (stdin, args) => {
     const expectedLenses = selectPanelLenses(interview.value, designerCount);
     if (!expectedLenses.ok) return contractError("panel lens selection", expectedLenses.errors);
 
-    const manifest = parsePanelManifest(manifestJson, runDir, expectedLenses.value);
+    const manifest = parsePanelManifest(manifestJson, runDir, LAYOUT, expectedLenses.value);
     if (!manifest.ok) return contractError("panel manifest", manifest.errors);
     const needsCandidates = operation === "verdict" || operation === "aggregate";
     const artifacts = artifactErrors(manifest.value, runDir, needsCandidates);
@@ -127,32 +127,12 @@ const handler: HookHandler = async (stdin, args) => {
     if (!resolved.ok) return contractError("panel aggregate", resolved.errors);
 
     const verdictsDir = join(resolved.value, LAYOUT.verdictDir);
-    const verdicts: JudgeVerdict[] = [];
-    const verdictErrors: string[] = [];
-    for (const [index, expectedCriterion] of criteria.entries()) {
-      const path = verdictPath(runDir, LAYOUT, index);
-      const fileError = artifactError(path, verdictsDir);
-      if (fileError) {
-        verdictErrors.push(fileError);
-        continue;
-      }
-      let raw: string;
-      try {
-        raw = readFileSync(path, "utf-8");
-      } catch (error) {
-        verdictErrors.push(`cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`);
-        continue;
-      }
-      const parsed = parseJudgeVerdict(raw, expectedCriterion, candidateFilenames);
-      if (!parsed.ok) {
-        verdictErrors.push(...parsed.errors.map((error) => `${path}: ${error}`));
-        continue;
-      }
-      verdicts.push(parsed.value);
-    }
-    if (verdictErrors.length > 0) return contractError("panel verdicts", verdictErrors);
+    const verdicts = readVerdicts(runDir, LAYOUT, verdictsDir, criteria, (raw, expectedCriterion) =>
+      parseJudgeVerdict(raw, expectedCriterion, candidateFilenames),
+    );
+    if (!verdicts.ok) return contractError("panel verdicts", verdicts.errors);
 
-    const ranked = aggregateVerdicts(verdicts, criteria, candidateFilenames);
+    const ranked = aggregateVerdicts(verdicts.value, criteria, candidateFilenames);
     if (!ranked.ok) return contractError("panel aggregate", ranked.errors);
 
     return writeCanonicalOutput(serializeRankings(ranked.value, criteria) + "\n");

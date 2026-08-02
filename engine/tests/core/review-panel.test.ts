@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
+import fc from "fast-check";
 import { join } from "node:path";
 import type { Task } from "../../src/types";
 import type { Finding } from "../../src/core/findings";
-import { claimsOfSeverity } from "../../src/core/findings";
+import { applyFindingOutcomes, claimsOfSeverity } from "../../src/core/findings";
 import type { VerdictEnvelope } from "../../src/core/panel-kernel";
 import {
-  applyFindingOutcomes,
   briefFindingFilename,
   buildFindingBrief,
   defaultRefutationThreshold,
@@ -27,8 +27,9 @@ import {
   type BriefFinding,
   type RefutationVerdict,
   type ReviewLens,
+  type WaveFindingId,
 } from "../../src/core/review-panel";
-import { REVIEW_LAYOUT } from "../../src/handlers/helpers/panel-run";
+import { REVIEW_LAYOUT } from "../../src/core/panel-kernel";
 
 const finding = (over: Partial<Finding> = {}): Finding => ({
   id: "code-reviewer-1",
@@ -50,8 +51,13 @@ const task = (over: Partial<Task> = {}): Task => ({
   ...over,
 });
 
+/** Wave-scoped ids are branded; production code mints them through
+ *  `waveFindingId` or proves the `${taskId}:` prefix while parsing. Fixtures
+ *  assert the shape by hand, which is what a test fixture is for. */
+const waveId = (raw: string): WaveFindingId => raw as WaveFindingId;
+
 const brief = (over: Partial<BriefFinding> = {}): BriefFinding => ({
-  id: "T1:code-reviewer-1",
+  id: waveId("T1:code-reviewer-1"),
   taskId: "T1",
   agent: "code-reviewer",
   severity: "critical",
@@ -63,8 +69,8 @@ const brief = (over: Partial<BriefFinding> = {}): BriefFinding => ({
 
 /** A validated envelope, built the way the CLI builds one. */
 function envelope(
-  lens: string,
-  votes: readonly (readonly [string, "refuted" | "upheld" | "uncertain"])[],
+  lens: ReviewLens,
+  votes: readonly (readonly [WaveFindingId, "refuted" | "upheld" | "uncertain"])[],
 ): VerdictEnvelope<RefutationVerdict> {
   const parsed = parseRefutationVerdict(
     JSON.stringify({
@@ -222,7 +228,7 @@ describe("parseFindingBriefJson — re-parse, never trust the writer", () => {
   it("rejects ids that collide once mapped to filenames", () => {
     const raw = validBrief();
     raw.findings.push({ ...raw.findings[0], id: "T1:code/reviewer/1" });
-    expect(briefFindingFilename("T1:code-reviewer-1")).toBe(briefFindingFilename("T1:code/reviewer/1"));
+    expect(briefFindingFilename(waveId("T1:code-reviewer-1"))).toBe(briefFindingFilename(waveId("T1:code/reviewer/1")));
     expect(parseFindingBriefJson(raw).ok).toBe(false);
   });
 });
@@ -230,7 +236,7 @@ describe("parseFindingBriefJson — re-parse, never trust the writer", () => {
 describe("parseReviewManifest", () => {
   const RUN_DIR = join("panel-runs", "run.abc");
   const LENSES: readonly ReviewLens[] = ["reproduction", "intent"];
-  const FINDINGS = [brief(), brief({ id: "T1:silent-failure-hunter-1", agent: "silent-failure-hunter" })];
+  const FINDINGS = [brief(), brief({ id: waveId("T1:silent-failure-hunter-1"), agent: "silent-failure-hunter" })];
   const IDS = FINDINGS.map((f) => f.id);
 
   interface RawManifest {
@@ -267,7 +273,7 @@ describe("parseReviewManifest", () => {
 });
 
 describe("parseRefutationVerdict — the kernel envelope, a different payload", () => {
-  const IDS = ["T1:code-reviewer-1", "T1:silent-failure-hunter-1"];
+  const IDS = [waveId("T1:code-reviewer-1"), waveId("T1:silent-failure-hunter-1")];
   const raw = (over: Record<string, unknown> = {}) => JSON.stringify({
     criterion: "reproduction",
     verdicts: [
@@ -327,9 +333,9 @@ describe("defaultRefutationThreshold", () => {
 
 describe("tallyRefutations", () => {
   const F1 = brief();
-  const F2 = brief({ id: "T1:silent-failure-hunter-1", agent: "silent-failure-hunter", claim: "swallowed error" });
+  const F2 = brief({ id: waveId("T1:silent-failure-hunter-1"), agent: "silent-failure-hunter", claim: "swallowed error" });
   const FINDINGS = [F1, F2];
-  const LENSES = ["reproduction", "intent", "security"];
+  const LENSES: readonly ReviewLens[] = ["reproduction", "intent", "security"];
 
   const tally = (
     votes: Record<string, readonly ["refuted" | "upheld" | "uncertain", "refuted" | "upheld" | "uncertain"]>,
@@ -351,8 +357,8 @@ describe("tallyRefutations", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value[0]!.survives).toBe(false);
-    expect(result.value[0]!.refutedBy).toEqual(LENSES);
-    expect(result.value[0]!.reasoning).toHaveLength(3);
+    expect(result.value[0]!.refutations.map((r) => r.lens)).toEqual(LENSES);
+    expect(result.value[0]!.refutations).toHaveLength(3);
     expect(result.value[1]!.survives).toBe(true);
   });
 
@@ -403,10 +409,10 @@ describe("tallyRefutations", () => {
       security: ["uncertain", "upheld"],
     });
     expect(result.ok && result.value[0]!.survives).toBe(true);
-    expect(result.ok && result.value[0]!.refutedBy).toEqual(["reproduction"]);
+    expect(result.ok && result.value[0]!.refutations.map((r) => r.lens)).toEqual(["reproduction"]);
   });
 
-  it("orders refutedBy and its reasoning by lens order, positionally aligned", () => {
+  it("orders the refutations by lens order, each paired with its own reason", () => {
     const result = tally({
       reproduction: ["upheld", "upheld"],
       intent: ["refuted", "upheld"],
@@ -414,8 +420,8 @@ describe("tallyRefutations", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value[0]!.refutedBy).toEqual(["intent", "security"]);
-    expect(result.value[0]!.reasoning).toEqual(["intent says refuted", "security says refuted"]);
+    expect(result.value[0]!.refutations.map((r) => r.lens)).toEqual(["intent", "security"]);
+    expect(result.value[0]!.refutations.map((r) => r.reason)).toEqual(["intent says refuted", "security says refuted"]);
   });
 
   it("rejects a duplicated or missing verifier", () => {
@@ -426,7 +432,7 @@ describe("tallyRefutations", () => {
 
   it("rejects a verdict that does not cover every finding exactly once", () => {
     const partial = envelope("reproduction", [[F1.id, "refuted"]]);
-    const rest = ["intent", "security"].map((lens) => envelope(lens, [[F1.id, "upheld"], [F2.id, "upheld"]]));
+    const rest = (["intent", "security"] as ReviewLens[]).map((lens) => envelope(lens, [[F1.id, "upheld"], [F2.id, "upheld"]]));
     expect(tallyRefutations([partial, ...rest], LENSES, FINDINGS, 2).ok).toBe(false);
   });
 
@@ -464,10 +470,10 @@ describe("applyFindingOutcomes", () => {
 
   const outcome = (f: Finding, survives: boolean) => ({
     finding: brief({ id: waveFindingId("T1", f), claim: f.claim, agent: f.agent, severity: f.severity }),
-    refutedBy: survives ? [] : ["reproduction", "intent"],
-    upheldBy: survives ? ["reproduction", "intent"] : [],
-    uncertainFrom: [],
-    reasoning: survives ? [] : ["cannot trigger", "deliberate"],
+    refutations: survives ? [] : [{ lens: "reproduction", reason: "cannot trigger" }, { lens: "intent", reason: "deliberate" }],
+    upheldBy: (survives ? ["reproduction", "intent"] : []) as ReviewLens[],
+    uncertainFrom: [] as ReviewLens[],
+
     survives,
   });
 
@@ -482,7 +488,7 @@ describe("applyFindingOutcomes", () => {
     expect(result.critical_findings).toEqual(["swallowed error"]);
     expect(result.advisory_findings).toEqual(["nit"]);
     expect(result.refuted_findings).toEqual([
-      { finding: critical, refutedBy: ["reproduction", "intent"], reasoning: ["cannot trigger", "deliberate"] },
+      { finding: critical, refutations: [{ lens: "reproduction", reason: "cannot trigger" }, { lens: "intent", reason: "deliberate" }] },
     ]);
     expect(result.critical_findings).toEqual(claimsOfSeverity(result.findings ?? [], "critical"));
     expect(result.advisory_findings).toEqual(claimsOfSeverity(result.findings ?? [], "advisory"));
@@ -516,7 +522,140 @@ describe("applyFindingOutcomes", () => {
   });
 
   it("ignores outcomes belonging to another task", () => {
-    const other = { ...outcome(critical, false), finding: brief({ id: "T2:code-reviewer-1", taskId: "T2" }) };
+    const other = { ...outcome(critical, false), finding: brief({ id: waveId("T2:code-reviewer-1"), taskId: "T2" }) };
     expect(applyFindingOutcomes(blocked, [other])).toBe(blocked);
+  });
+});
+
+describe("the brief's severity policy is enforced by its own re-parser", () => {
+  const validCriticalBrief = () => JSON.parse(serializeFindingBrief({
+    wave: 1,
+    severity: "critical",
+    taskIds: ["T1"],
+    findings: [brief()],
+  }));
+
+  it("rejects an entry whose severity disagrees with the brief's", () => {
+    // VERIFIED_SEVERITY is policy: advisories skip the panel because refuting
+    // one saves nothing and the agent quota it burns is real. The brief filters
+    // on it; without this check the re-parse that exists to stop the disk and
+    // the panel diverging would wave through the one divergence that matters,
+    // and a refuted advisory would be stripped from advisory_findings.
+    const raw = validCriticalBrief();
+    raw.findings[0].severity = "advisory";
+    const parsed = parseFindingBriefJson(raw);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.errors.join("\n")).toContain("must equal brief.severity");
+  });
+
+  it("accepts an advisory entry in a brief that declares advisory", () => {
+    const raw = validCriticalBrief();
+    raw.severity = "advisory";
+    raw.findings[0].severity = "advisory";
+    expect(parseFindingBriefJson(raw).ok).toBe(true);
+  });
+});
+
+describe("tallyRefutations invariants", () => {
+  const F1 = brief();
+  const F2 = brief({ id: waveId("T1:silent-failure-hunter-1"), agent: "silent-failure-hunter", claim: "swallowed" });
+  const PANEL: readonly ReviewLens[] = ["reproduction", "intent", "security"];
+  const VOTE = fc.constantFrom<"refuted" | "upheld" | "uncertain">("refuted", "upheld", "uncertain");
+
+  const run = (matrix: readonly (readonly ["refuted" | "upheld" | "uncertain", "refuted" | "upheld" | "uncertain"])[], threshold: number) =>
+    tallyRefutations(
+      PANEL.map((lens, index) => envelope(lens, [[F1.id, matrix[index]![0]], [F2.id, matrix[index]![1]]])),
+      PANEL,
+      [F1, F2],
+      threshold,
+    );
+
+  const matrixArb = fc.array(fc.tuple(VOTE, VOTE), { minLength: 3, maxLength: 3 });
+
+  it("partitions every lens into exactly one bucket per finding", () => {
+    fc.assert(
+      fc.property(matrixArb, fc.integer({ min: 1, max: 3 }), (matrix, threshold) => {
+        const result = run(matrix, threshold);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        for (const outcome of result.value) {
+          expect(
+            outcome.refutations.length + outcome.upheldBy.length + outcome.uncertainFrom.length,
+          ).toBe(PANEL.length);
+          // Every refutation carries its own reason — the pair shape makes the
+          // old parallel-array misalignment unrepresentable, and this proves
+          // the tally never produces a lens with no reason attached.
+          expect(outcome.refutations.every((r) => r.reason.length > 0)).toBe(true);
+        }
+      }),
+    );
+  });
+
+  it("survives exactly when refutations fall short of the threshold", () => {
+    fc.assert(
+      fc.property(matrixArb, fc.integer({ min: 1, max: 3 }), (matrix, threshold) => {
+        const result = run(matrix, threshold);
+        expect(result.ok && result.value.every((o) => o.survives === o.refutations.length < threshold)).toBe(true);
+      }),
+    );
+  });
+
+  it("is monotone: flipping a vote to refuted can never resurrect a dead finding", () => {
+    fc.assert(
+      fc.property(matrixArb, fc.integer({ min: 0, max: 2 }), (matrix, flipAt) => {
+        const before = run(matrix, 2);
+        const harsher = matrix.map((row, index) =>
+          index === flipAt ? (["refuted", row[1]] as const) : row,
+        );
+        const after = run(harsher, 2);
+        expect(before.ok && after.ok).toBe(true);
+        if (!before.ok || !after.ok) return;
+        // A finding dead before must stay dead; nothing about a HARSHER panel
+        // can bring it back.
+        expect(before.value[0]!.survives || !after.value[0]!.survives).toBe(true);
+      }),
+    );
+  });
+});
+
+describe("sanitized claims survive the brief → tally → apply round trip", () => {
+  it("removes a brace-bearing critical by the claim actually stored on the task", () => {
+    // buildFindingBrief sanitizes claims for prompt substitution while
+    // applyFindingOutcomes removes by the STORED claim. Both halves are tested
+    // in isolation; this is the composition, where a mismatch would either drop
+    // the wrong entry or silently keep the refuted one.
+    const stored = finding({ claim: "the {config} value is unchecked" });
+    const blocked = task({
+      review_status: "blocked",
+      findings: [stored],
+      critical_findings: ["the {config} value is unchecked"],
+    });
+    const built = buildFindingBrief(1, [blocked]);
+    expect(built.findings[0]!.claim).toBe("the config value is unchecked");
+
+    const result = applyFindingOutcomes(blocked, [{
+      finding: built.findings[0]!,
+      refutations: [{ lens: "intent", reason: "deliberate" }],
+      survives: false,
+    }]);
+    expect(result.findings).toEqual([]);
+    expect(result.critical_findings).toEqual([]);
+    expect(result.review_status).toBe("passed");
+    expect(result.refuted_findings?.[0]!.finding.claim).toBe("the {config} value is unchecked");
+  });
+
+  it("removes a critical whose claim sanitized to nothing at all", () => {
+    const stored = finding({ claim: "{}" });
+    const blocked = task({ review_status: "blocked", findings: [stored], critical_findings: ["{}"] });
+    const built = buildFindingBrief(1, [blocked]);
+    expect(built.findings[0]!.claim).toContain("unusable after sanitization");
+
+    const result = applyFindingOutcomes(blocked, [{
+      finding: built.findings[0]!,
+      refutations: [{ lens: "intent", reason: "deliberate" }],
+      survives: false,
+    }]);
+    expect(result.critical_findings).toEqual([]);
+    expect(result.refuted_findings).toHaveLength(1);
   });
 });

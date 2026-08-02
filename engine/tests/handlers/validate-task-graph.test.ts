@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { validateMinimal, validateFull } from "../../src/handlers/helpers/validate-task-graph";
+import { validateMinimal, validateFull, fixFull } from "../../src/handlers/helpers/validate-task-graph";
+import { parseTaskGraph } from "../../src/state-manager";
 
 /** Narrowing helper: errors of a failed validation, [] when ok */
 function errorsOf(r: import("../../src/handlers/helpers/validate-task-graph").ValidationResult): readonly string[] {
@@ -360,5 +361,81 @@ describe("handler routes — fixMinimal and the file-arg path (round-10 gap 23)"
       stderrSpy.mockRestore();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("fixFull repairs findings WITH their derived views", () => {
+  const wellFormed = {
+    id: "code-reviewer-1",
+    agent: "code-reviewer",
+    severity: "critical",
+    file: null,
+    line: null,
+    claim: "unchecked cast",
+  };
+
+  const fix = (task: Record<string, unknown>) =>
+    JSON.parse(fixFull({ current_phase: "execute", phase_artifacts: {}, tasks: [task] })).tasks[0];
+
+  it("prunes the views alongside the malformed entries it drops", () => {
+    // Dropping ALONE is not a repair — it is how an un-refutable critical gets
+    // made. A claim left in critical_findings with no counterpart in findings
+    // can never enter a brief, so it can never be refuted, so the task stays
+    // blocked forever with nothing able to adjudicate it.
+    const repaired = fix({
+      id: "T1",
+      findings: [wellFormed, { id: "", agent: "", severity: "critical", claim: "orphan" }],
+      critical_findings: ["unchecked cast", "orphan"],
+      advisory_findings: [],
+    });
+    expect(repaired.findings.map((f: { id: string }) => f.id)).toEqual(["code-reviewer-1"]);
+    expect(repaired.critical_findings).toEqual(["unchecked cast"]);
+  });
+
+  it("keeps the views in lockstep at every severity", () => {
+    const repaired = fix({
+      id: "T1",
+      findings: [wellFormed, { ...wellFormed, id: "code-reviewer-2", severity: "advisory", claim: "nit" }],
+      critical_findings: ["stale"],
+      advisory_findings: ["stale too", "and another"],
+    });
+    expect(repaired.critical_findings).toEqual(["unchecked cast"]);
+    expect(repaired.advisory_findings).toEqual(["nit"]);
+  });
+
+  it("leaves a pre-identity task's views alone — they are all it has", () => {
+    // A graph written before findings had identity carries no `findings` field.
+    // Re-deriving from an absent array would delete its whole review record.
+    const repaired = fix({
+      id: "T1",
+      critical_findings: ["from before identity"],
+      advisory_findings: ["also from before"],
+    });
+    expect(repaired.findings).toEqual([]);
+    expect(repaired.critical_findings).toEqual(["from before identity"]);
+    expect(repaired.advisory_findings).toEqual(["also from before"]);
+  });
+
+  it("drops a refutation record whose pair shape is broken", () => {
+    const repaired = fix({
+      id: "T1",
+      refuted_findings: [
+        { finding: wellFormed, refutations: [{ lens: "intent", reason: "deliberate" }] },
+        { finding: wellFormed, refutations: [{ lens: "intent" }] },
+      ],
+    });
+    expect(repaired.refuted_findings).toHaveLength(1);
+  });
+
+  it("produces a graph the load boundary accepts — repair and rejection agree", () => {
+    // The point of the repair path: a graph parseTaskGraph refuses must become
+    // one it accepts, or the operator is stuck with no way forward.
+    const broken = {
+      current_phase: "execute",
+      phase_artifacts: {},
+      tasks: [{ id: "T1", wave: 1, status: "pending", findings: [{ nonsense: true }], critical_findings: ["orphan"] }],
+    };
+    expect(parseTaskGraph(broken).ok).toBe(false);
+    expect(parseTaskGraph(JSON.parse(fixFull(broken))).ok).toBe(true);
   });
 });
