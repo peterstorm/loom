@@ -231,14 +231,15 @@ After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance
 
 ## Wave Execution & Gates
 
-`/wave-gate` runs a five-step verification sequence after each wave's implementation completes.
+`/wave-gate` runs a six-step verification sequence after each wave's implementation completes.
 
 | Step | What | How |
 |------|------|-----|
 | 1 | **State check** | Confirm `current_wave` and `impl_complete == true` |
 | 2 | **Test evidence** | Verify every task has a passing `test_result` (resolved by the `update-task-status` hook — evidence ledger first, transcript fallback) and `new_tests_written == true` — both requirements are waived for tasks declaring `new_tests_required == false` |
 | 3 | **Spec-check + reviews (parallel)** | Spawn `spec-check-invoker` once for the wave; spawn 5 reviewers per task in parallel |
-| 4 | **GitHub comment** | Post a summary to the issue (fallback: write to `.claude/reviews/wave-{N}-review.md`) |
+| 3.5 | **Refutation panel** | Spawn N `review-verifier-agent`s — each with a distinct lens, each covering ALL of the wave's critical findings — and adjudicate them k-of-n |
+| 4 | **GitHub comment** | Post a summary to the issue, including refuted findings (fallback: write to `.claude/reviews/wave-{N}-review.md`) |
 | 5 | **Advance** | `complete-wave-gate` helper performs final checks and either advances or blocks |
 
 ### Review agents (per task, in parallel)
@@ -250,6 +251,47 @@ After all wave tasks reach `implemented`, run `/wave-gate` to verify and advance
 | `pr-test-analyzer` | Test coverage quality, property tests, gaps |
 | `type-design-analyzer` | Type invariants, encapsulation, sealed types |
 | `comment-analyzer` | Comment accuracy, documentation rot |
+
+### The refutation panel (Step 3.5)
+
+Five reviewers produce findings; without this step nothing adjudicates them, and
+a plausible-but-wrong critical finding costs a real remediation cycle. The panel
+fans N verifiers — each committed to **one lens** — across **all** of the wave's
+critical findings and asks each to *refute* them.
+
+Verifiers cover the whole finding set rather than one finding each: that costs N
+agents instead of N×findings, gives each verifier enough context to spot
+duplicate or contradictory findings, and makes a refutation verdict structurally
+identical to an architecture judge's verdict, so both panels share one envelope
+validator (`core/panel-kernel.ts`).
+
+| Lens | Tries to refute |
+|---|---|
+| `reproduction` | the failure cannot actually be triggered |
+| `intent` | the "flaw" is deliberate architecture (never-throw, fail-closed, ADTs) |
+| `blast-radius` | the claimed consequence does not follow from the cause |
+| `security` | the claimed security consequence does not hold |
+| `test-coverage` | the missing test would not catch a real bug |
+
+`reproduction` and `intent` are always selected; findings on auth/crypto paths
+pull in `security` and findings on test files pull in `test-coverage`. Default
+panel size is 3.
+
+- A finding **survives** unless a strict majority of verifiers refuted it.
+  `uncertain` counts toward neither side, and **ties favor keeping the finding**
+  — a false positive costs a cycle, a false negative ships a bug.
+- **Only critical findings are verified.** Advisories do not block the gate, so
+  refuting one saves nothing while the quota it burns is real.
+- Refuted findings move into `refuted_findings` with the lenses that killed them
+  and their reasoning — **recorded, not deleted**, so a wrong refutation stays
+  auditable. A task whose criticals were all refuted moves `blocked → passed`;
+  that is the one legitimate demotion, because deciding whether the block stands
+  is this panel's entire purpose.
+
+The brief and manifest are **engine-authored** (`helper review-panel brief` /
+`manifest`) rather than assembled by the orchestrator: the findings already live
+in the task graph, and a hand-built manifest could quietly omit an inconvenient
+critical.
 
 ### Gate outcomes
 
@@ -356,6 +398,21 @@ These run only under `/loom --panel`. They are recognized by phase validation as
 | `pr-test-analyzer` | Test coverage quality (1–10 rating, 8–10 = critical gap) |
 | `type-design-analyzer` | Type invariants, encapsulation (1–10 per dimension) |
 | `comment-analyzer` | Comment accuracy and rot |
+
+### Review panel agent (wave gate Step 3.5)
+
+| Agent | Role |
+|---|---|
+| `review-verifier-agent` | Try to refute every critical finding through one assigned lens, return JSON (parallel, headless) |
+
+Deliberately **not** a review sub-agent: a verifier emits pure JSON that the
+`review-panel` helper validates and has no findings of its own to store. Routed
+through `store-reviewer-findings` it would be parsed for a `CRITICAL_COUNT` it
+never emits and would mark the task `evidence_capture_failed` — a passing wave
+blocked by the agent that was there to unblock it. `REVIEW_PANEL_AGENTS` is its
+own frozen set, recognized by phase validation and invisible to the
+SubagentStop dispatcher, with a load-time guard against collision with any
+other agent set.
 | `code-simplifier` | Clarity and FP patterns (post-fix) |
 | `spec-check-invoker` | Runs `/spec-check` once per wave; emits machine-readable footer |
 
@@ -583,7 +640,11 @@ engine/src/
 ├── phase-init.ts       # Resolve initial TaskGraph from skip flags
 ├── core/               # Harness-agnostic functions (reusable in Pi)
 │   ├── block-direct-edits.ts
+│   ├── findings.ts                 # DraftFinding/Finding ADT — derived, never agent-chosen ids
 │   ├── guard-state-file.ts
+│   ├── panel-kernel.ts             # Shared panel primitives: verdict envelope, criteria set
+│   ├── panel-contract.ts           # Architecture panel (/loom --panel) — consumer 1
+│   ├── review-panel.ts             # Refutation panel (wave gate 3.5) — consumer 2
 │   ├── tool-vocabulary.ts          # FILE_MODIFYING_TOOLS / TEST_COMMAND_PATTERNS (pure constants — sole import: machine/types)
 │   ├── validate-phase-order.ts
 │   ├── validate-task-execution.ts
@@ -603,7 +664,9 @@ engine/src/
 │   └── helpers/           # complete-wave-gate, populate-task-graph,
 │                          # validate-task-graph, store-review-findings,
 │                          # store-spec-check, mark-tests-passed,
-│                          # set-phase, cleanup-state, lint-wave-gate, …
+│                          # set-phase, cleanup-state, lint-wave-gate,
+│                          # panel-run (shared run/artifact boundary),
+│                          # panel-contract, review-panel, …
 ├── parsers/            # Extract structured data from transcripts
 │   ├── parse-transcript.ts
 │   ├── parse-bash-test-output.ts   # Maven/Gradle/Vitest/Jest/pytest/cargo/go/dotnet/…

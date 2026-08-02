@@ -12,8 +12,8 @@ import { match } from "ts-pattern";
 import type { HookResult, Phase } from "../types";
 import {
   TASK_GRAPH_PATH, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
-  UTILITY_AGENTS, VALID_TRANSITIONS, CLARIFY_THRESHOLD, ARCH_PANEL_AGENTS,
-  ARCH_PANEL_PHASE,
+  REVIEW_PANEL_AGENTS, UTILITY_AGENTS, VALID_TRANSITIONS, CLARIFY_THRESHOLD,
+  ARCH_PANEL_AGENTS, ARCH_PANEL_PHASE,
 } from "../config";
 import { StateManager } from "../state-manager";
 import { stripNamespace } from "../utils/strip-namespace";
@@ -53,10 +53,19 @@ export function canRunPanelAgent(currentPhase: Phase): boolean {
   return currentPhase === ARCH_PANEL_PHASE;
 }
 
+/** Refutation-panel verifiers run inside the wave gate, so they are
+ *  execute-phase work — recognized here (bare or `-agent`-suffixed, like every
+ *  other set) but absent from REVIEW_SUB_AGENTS so the SubagentStop dispatcher
+ *  never parses them for findings they do not emit. */
+export function isReviewPanelAgent(agent: string): boolean {
+  return REVIEW_PANEL_AGENTS.has(agent) || REVIEW_PANEL_AGENTS.has(agent + "-agent");
+}
+
 export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   if (PHASE_AGENT_MAP[agent]) return PHASE_AGENT_MAP[agent];
   if (PHASE_AGENT_MAP[agent + "-agent"]) return PHASE_AGENT_MAP[agent + "-agent"];
   if (IMPL_AGENTS.has(agent) || IMPL_AGENTS.has(agent + "-agent") || REVIEW_AGENTS.has(agent) || REVIEW_AGENTS.has(agent + "-agent")) return "execute";
+  if (isReviewPanelAgent(agent)) return "execute";
   // Architecture-panel agents (--panel) are architecture-phase work. Recognized
   // here so validate-phase-order allows them, but never added to PHASE_AGENT_MAP
   // (advance-phase must ignore them — only architecture-agent advances the phase).

@@ -132,6 +132,134 @@ findings simply carry no file/line — degraded, not broken.
 3. Fallback (empty `files_modified`): use all wave changes from `git diff`
 4. Pass to review sub-agents: `--files {files_modified}`
 
+### Step 3.5: Refutation Panel (adversarial review)
+
+Five reviewers produce findings; nothing adjudicates them. A plausible-but-wrong
+critical finding costs a real remediation cycle. This step fans N verifiers —
+each with a **distinct lens** — across **all** of the wave's critical findings,
+and kills a finding only when a threshold of them refutes it.
+
+**Only critical findings are verified.** Advisories do not block the gate, so
+refuting one saves nothing while the quota it burns is real. Refuted findings
+are **recorded, not deleted** — a wrong refutation must stay auditable.
+
+**Skip this step entirely when the wave has zero critical findings** — the panel
+would have nothing to adjudicate:
+```bash
+jq -r '[.current_wave as $w | .tasks[] | select(.wave == $w) | (.critical_findings // []) | length] | add' .claude/state/active_task_graph.json
+```
+
+#### 3.5.0 — Create a run-scoped artifact boundary
+
+```bash
+REVIEW_RUNS_DIR=".claude/reviews/panel-runs"
+mkdir -p "$REVIEW_RUNS_DIR" || exit 1
+REVIEW_RUN_DIR="$(mktemp -d "$REVIEW_RUNS_DIR/run.XXXXXXXXXX")" || exit 1
+printf '%s\n' "$REVIEW_RUN_DIR"
+```
+
+Retain the printed path and substitute its concrete value in later calls; shell
+variables do not persist across Bash tool calls. Never reuse an existing run
+directory — old runs remain as audit data but are never read implicitly.
+
+#### 3.5.1 — Build the brief (engine-authored)
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper review-panel brief \
+  --runs-root ".claude/reviews/panel-runs" \
+  --run-dir "<review-run-dir>" \
+  --wave "<N>"
+```
+
+The engine reads the wave's critical findings from state and writes `brief.md`,
+`brief.json`, and one `findings/finding-<id>.json` artifact per finding. You do
+**not** assemble this by hand: the findings already exist in the task graph, and
+a hand-built brief could quietly omit an inconvenient critical.
+
+#### 3.5.2 — Fix the finding and lens sets
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper review-panel manifest \
+  --runs-root ".claude/reviews/panel-runs" \
+  --run-dir "<review-run-dir>"
+```
+
+Writes and immediately re-validates `manifest.json`, binding the run id, the
+brief paths, the exact lens list, and every finding's run-scoped path. This
+manifest is the sole finding-set authority for all later stages — a verifier can
+neither invent a finding nor skip one. Stop on failure.
+
+Read back the selected lenses (derived from the brief's signals, never chosen by
+hand):
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper review-panel lenses \
+  --runs-root ".claude/reviews/panel-runs" \
+  --manifest "<review-run-dir>/manifest.json"
+```
+
+`reproduction` and `intent` are always included; findings touching auth/crypto
+paths pull in `security`, findings on test files pull in `test-coverage`, and
+the table order in [review-lenses.md](../references/review-lenses.md) fills the
+rest — so an unsignalled panel gets `blast-radius` third: cause, intent,
+consequence. Default panel size is 3. Pass `--lenses N` (2–5) to change it.
+
+#### 3.5.3 — Spawn the verifiers (parallel, headless)
+
+**Load template:** Read `{LOOM_DIR}/commands/templates/review-verify.md`. For
+each selected lens, substitute `{lens_name}`, `{lens_prompt}` (that lens's
+section from `{LOOM_DIR}/references/review-lenses.md`),
+`{finding_manifest_path}`, and `{brief_file_path}`.
+
+**Spawn all N `review-verifier-agent`s in ONE message** (parallel Task calls).
+Validate each raw output before it reaches the tally — **`verdict-N.json` must
+hold lens N**, in the manifest's lens order:
+
+```bash
+printf '%s' "$RAW_VERIFIER_OUTPUT" | bun ${LOOM_DIR}/engine/src/cli.ts helper review-panel verdict \
+  --lens "$EXACT_LENS" \
+  --runs-root ".claude/reviews/panel-runs" \
+  --manifest "<review-run-dir>/manifest.json" \
+  > "<review-run-dir>/verdicts/verdict-1.json"
+```
+
+Perform each validation in the same Bash call that defines the shown shell
+variables. The helper requires valid JSON, a lens drawn from the selected set,
+exact lens identity, every manifest finding exactly once, no foreign or
+duplicate findings, a verdict of `refuted`/`upheld`/`uncertain`, and non-empty
+reasoning; it strips curly braces from validated prose and emits canonical JSON.
+Re-spawn only an invalid verifier with diagnostics, once; if still invalid, stop.
+
+#### 3.5.4 — Tally (deterministic, no agent)
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper review-panel tally \
+  --runs-root ".claude/reviews/panel-runs" \
+  --manifest "<review-run-dir>/manifest.json" \
+  > "<review-run-dir>/outcomes.json"
+```
+
+`tally` re-reads and re-validates **every** verdict file from the run directory
+(it does not trust Step 3.5.3's output), matches each to its lens **by name**,
+verifies the lens set is exactly the selected one with no duplicates or
+omissions, and adjudicates:
+
+- A finding **survives** unless at least `threshold` verifiers refuted it. The
+  default threshold is a strict majority of the panel (2 of 3, 3 of 5, 2 of 2).
+- `uncertain` counts toward **neither** side.
+- **Ties favor keeping the finding** — a false positive costs a cycle, a false
+  negative ships a bug.
+
+Refuted findings move out of the task's `critical_findings` into
+`refuted_findings`, carrying the refuting lenses and their reasoning. A task
+whose criticals were **all** refuted moves from `blocked` to `passed` — the one
+place that demotion is legitimate, because adjudicating whether the block stands
+is this panel's entire purpose.
+
+Any failure is fatal: stop and report. Only then does Step 5 count criticals.
+
+**Include the outcome in the GH comment** (Step 4): list refuted findings with
+the lenses that killed them and why. A refutation nobody can see is a deletion.
+
 ### Step 4: Post GH Comment
 
 After all verification agents complete, read status and post summary:
@@ -149,7 +277,9 @@ gh issue comment {ISSUE} --body "$(cat <<'EOF'
 #### T1: {description}
 **Status:** PASSED | BLOCKED - {N} critical, {N} advisory
 **Critical:**
-- {critical findings list, if any}
+- {surviving critical findings list, if any}
+**Refuted by the panel:**
+- {refuted finding} — refuted by {lenses}: {reasoning}
 **Advisory:**
 - {ALL advisory findings — always include, even for PASSED tasks}
 
@@ -198,7 +328,7 @@ The helper performs **six checks** before advancing (in evaluation order):
 2. **New tests written** — all wave tasks must have `new_tests_written == true` OR `new_tests_required == false`
 3. **Per-task review status** — every wave task's `review_status` must be `passed` or `blocked` (`pending`, absent, or `evidence_capture_failed` all fail the check)
 4. **Spec alignment** — `spec_check.critical_count == 0`
-5. **No critical findings** — code review `critical_findings` count must be 0
+5. **No critical findings** — code review `critical_findings` count must be 0 (findings the Step 3.5 panel refuted have already moved to `refuted_findings` and no longer count)
 6. **Lifecycle machine artifacts** — every lifecycle machine file the plan binds to this wave's tasks must exist on disk (at the declared path or a suffix-matched task `file_list` path); no plan in state skips the check, but a plan that is named yet unreadable **fails the gate** (fail-closed)
 
 If any check fails, the helper exits with error and the wave does NOT advance. Fix the issue and re-run `/wave-gate`.
@@ -257,6 +387,9 @@ jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | .id' .claude/state
 - MUST spawn spec-check AND review agents in parallel (single message)
 - MUST use `spec-check-invoker` agent for spec alignment
 - MUST spawn review sub-agents directly (`code-reviewer`, `silent-failure-hunter`, etc.) per task
+- MUST run the refutation panel (Step 3.5) whenever the wave has critical findings, and MUST spawn all verifiers in a single message
+- MUST report refuted findings in the GH comment — a refutation nobody can see is a deletion
+- NEVER hand-build the finding brief or manifest; the engine authors both from state
 - MUST post GH comment before advancing
 - MUST triage advisory findings and fix the relevant ones before advancing — advisories don't block, but must not be silently dropped
 - NEVER advance if spec-check has critical findings

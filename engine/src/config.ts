@@ -253,6 +253,52 @@ export const REVIEW_AGENTS = new Set([
   "spec-check-invoker",
 ]);
 
+/** Refutation-panel verifiers (wave gate Step 3.5): execute-phase work like
+ *  every other reviewer, but deliberately NOT in REVIEW_SUB_AGENTS and NOT in
+ *  REVIEW_AGENTS.
+ *
+ *  A verifier emits pure JSON that the `review-panel` helper validates; it has
+ *  no findings of its own to store. In REVIEW_SUB_AGENTS its transcript would
+ *  route through store-reviewer-findings, which would find no CRITICAL_COUNT
+ *  and mark the task `evidence_capture_failed` — a passing wave blocked by the
+ *  agent that was there to unblock it. Kept as its own set for the same reason
+ *  ARCH_PANEL_AGENTS is: recognized by phase validation, invisible to the
+ *  SubagentStop dispatcher. Frozen, symmetric with ARCH_PANEL_AGENTS. */
+export const REVIEW_PANEL_AGENTS: ReadonlySet<string> = frozenSet(["review-verifier-agent"]);
+
+/** Review-panel agents that would be MISROUTED by colliding with a phase,
+ *  impl, review, or utility agent — detectPhase probes bare and `-agent`-
+ *  suffixed forms and reaches those sets first. Must always be empty. Exported
+ *  so the guard can be driven with a synthetic overlap in tests. */
+export function reviewPanelOverlap(
+  panel: ReadonlySet<string> = REVIEW_PANEL_AGENTS,
+  reserved: ReadonlySet<string> = new Set([
+    ...Object.keys(PHASE_AGENT_MAP), ...ARCH_PANEL_AGENTS,
+    ...IMPL_AGENTS, ...REVIEW_AGENTS, ...UTILITY_AGENTS,
+  ]),
+): string[] {
+  return [...panel].filter((a) => phaseLookupKeys(a).some((k) => reserved.has(k)));
+}
+
+/** Throw if a review-panel verifier collides with any other agent set. Called
+ *  at module scope below, so an invalid config fails at load, not in CI. */
+export function assertReviewPanelDisjoint(
+  panel: ReadonlySet<string> = REVIEW_PANEL_AGENTS,
+  reserved?: ReadonlySet<string>,
+): void {
+  const overlap = reserved ? reviewPanelOverlap(panel, reserved) : reviewPanelOverlap(panel);
+  if (overlap.length > 0) {
+    throw new Error(
+      `loom config invariant violated: review-panel verifiers must not also be phase, ` +
+        `architecture-panel, impl, review, or utility agents, but these collide: ${overlap.join(", ")}. ` +
+        `A verifier reached through another set would be mis-dispatched — in REVIEW_SUB_AGENTS it ` +
+        `would be parsed for findings it never emits and fail the task's evidence check.`,
+    );
+  }
+}
+
+assertReviewPanelDisjoint();
+
 /** All agents that map to execute phase (impl + review) */
 export const EXECUTE_AGENTS = new Set([...IMPL_AGENTS, ...REVIEW_AGENTS]);
 

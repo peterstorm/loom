@@ -6,7 +6,7 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:smoke": "bash ../scripts/smoke-panel-mode.sh",
+    "test:smoke": "bash ../scripts/smoke-panel-mode.sh && bash ../scripts/smoke-review-panel.sh",
     "typecheck": "bunx tsc --noEmit"
   },
   "devDependencies": {

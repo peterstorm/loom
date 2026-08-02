@@ -62,51 +62,78 @@ export function contractError(context: string, errors: readonly string[]) {
 
 export type RunBoundary = Readonly<{ runDir: string; manifestPath: string }>;
 
+/** The runs-root must sit inside the cwd, reached without traversing a symlink.
+ *  Every hop is checked, not just the leaf: a symlinked ancestor is enough to
+ *  point the whole run somewhere the containment checks never see. */
+function runsRootErrors(cwd: string, fromCwd: string): string[] {
+  const errors: string[] = [];
+  if (isAbsolute(fromCwd) || fromCwd === ".." || fromCwd.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) {
+    errors.push("panel-runs root must be inside the current working directory");
+    return errors;
+  }
+  let cursor = cwd;
+  for (const segment of fromCwd.split(/[\\/]/).filter(Boolean)) {
+    cursor = join(cursor, segment);
+    try {
+      if (lstatSync(cursor).isSymbolicLink()) errors.push(`path component must not be a symbolic link: ${cursor}`);
+    } catch (error) {
+      errors.push(`cannot inspect path component ${cursor}: ${error instanceof Error ? error.message : String(error)}`);
+      break;
+    }
+  }
+  return errors;
+}
+
+/** One run-scoped path's shape check: exists, right kind, not a symlink. */
+function entryErrors(label: string, path: string, kind: "directory" | "file"): string[] {
+  const errors: string[] = [];
+  try {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) errors.push(`${label} must not be a symbolic link: ${path}`);
+    if (kind === "directory" && !stat.isDirectory()) errors.push(`${label} must be a directory: ${path}`);
+    if (kind === "file" && (!stat.isFile() || stat.size === 0)) errors.push(`${label} must be a non-empty regular file: ${path}`);
+  } catch (error) {
+    errors.push(`cannot inspect ${label} ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return errors;
+}
+
+/**
+ * Bind a run DIRECTORY to an explicit panel-runs root, for the operations that
+ * run before a manifest exists (the review panel writes its brief and manifest
+ * from the engine). Same containment and symlink rules as parseRunBoundary,
+ * minus the manifest itself.
+ */
+export function parseRunDirectory(runsRoot: string, runDir: string): ParseResult<string> {
+  const cwd = realpathSync(process.cwd());
+  const absoluteRoot = resolve(runsRoot);
+  const absoluteRunDir = resolve(runDir);
+
+  const errors = runsRootErrors(cwd, relative(cwd, absoluteRoot));
+  if (dirname(absoluteRunDir) !== absoluteRoot) {
+    errors.push("run directory must be directly inside --runs-root");
+  }
+  errors.push(...entryErrors("run directory", absoluteRunDir, "directory"));
+
+  return errors.length > 0 ? fail(errors) : ok(runDir);
+}
+
 /** Bind the run to an explicit panel-runs root and reject every symlinked hop. */
 export function parseRunBoundary(runsRoot: string, manifestPath: string): ParseResult<RunBoundary> {
-  const errors: string[] = [];
   const cwd = realpathSync(process.cwd());
   const absoluteRoot = resolve(runsRoot);
   const absoluteManifest = resolve(manifestPath);
   const absoluteRunDir = dirname(absoluteManifest);
-  const fromCwd = relative(cwd, absoluteRoot);
 
-  if (isAbsolute(fromCwd) || fromCwd === ".." || fromCwd.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) {
-    errors.push("panel-runs root must be inside the current working directory");
-  }
+  const errors = runsRootErrors(cwd, relative(cwd, absoluteRoot));
   if (dirname(absoluteRunDir) !== absoluteRoot) {
     errors.push("manifest must be directly inside one run directory under --runs-root");
   }
   if (absoluteManifest !== join(absoluteRunDir, "manifest.json")) {
     errors.push("manifest filename must be exactly manifest.json");
   }
-
-  if (errors.length === 0) {
-    let cursor = cwd;
-    for (const segment of fromCwd.split(/[\\/]/).filter(Boolean)) {
-      cursor = join(cursor, segment);
-      try {
-        if (lstatSync(cursor).isSymbolicLink()) errors.push(`path component must not be a symbolic link: ${cursor}`);
-      } catch (error) {
-        errors.push(`cannot inspect path component ${cursor}: ${error instanceof Error ? error.message : String(error)}`);
-        break;
-      }
-    }
-  }
-
-  for (const [label, path, kind] of [
-    ["run directory", absoluteRunDir, "directory"],
-    ["manifest", absoluteManifest, "file"],
-  ] as const) {
-    try {
-      const stat = lstatSync(path);
-      if (stat.isSymbolicLink()) errors.push(`${label} must not be a symbolic link: ${path}`);
-      if (kind === "directory" && !stat.isDirectory()) errors.push(`${label} must be a directory: ${path}`);
-      if (kind === "file" && (!stat.isFile() || stat.size === 0)) errors.push(`${label} must be a non-empty regular file: ${path}`);
-    } catch (error) {
-      errors.push(`cannot inspect ${label} ${path}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
+  errors.push(...entryErrors("run directory", absoluteRunDir, "directory"));
+  errors.push(...entryErrors("manifest", absoluteManifest, "file"));
 
   if (errors.length > 0) return fail(errors);
   return ok({ runDir: dirname(manifestPath), manifestPath });
