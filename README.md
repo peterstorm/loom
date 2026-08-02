@@ -409,7 +409,7 @@ All SubagentStop events route through `dispatch`, which inspects agent type and 
 |---|---|---|
 | `advance-phase` | Phase agents | Advances `current_phase`, captures artifact paths via the artifact parser |
 | `update-task-status` | Implementation agents | Resolves test evidence (evidence ledger first, transcript fallback), sets `test_result` (verdict + trust provenance), `new_tests_written`, `files_modified` |
-| `store-reviewer-findings` | Review agents | Parses findings into per-task `critical_findings` / `advisory_findings` |
+| `store-reviewer-findings` | Review agents | Parses findings into per-task `findings` (authoritative, identified) plus its `critical_findings` / `advisory_findings` derived views |
 | `store-spec-check-findings` | `spec-check-invoker` | Parses `SPEC_CHECK_*` footer into `spec_check.verdict` |
 | `cleanup-subagent-flag` | All | Cleans up tracking files |
 
@@ -517,7 +517,31 @@ interface TaskGraph {
 }
 ```
 
-`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `test_result`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `file_list`, `review_status`, `review_error`, `critical_findings`, `advisory_findings`, `start_sha`, `failure_reason`, `retry_count`.
+`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `test_result`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `file_list`, `review_status`, `review_error`, `findings`, `critical_findings`, `advisory_findings`, `refuted_findings`, `start_sha`, `failure_reason`, `retry_count`.
+
+#### Finding identity
+
+`findings` is the authoritative review record: each entry carries a **derived**
+id (`${agent}-${ordinal}`, never agent-chosen), the emitting agent, the claim,
+and — when the reviewer supplied one — a `file`/`line`.
+
+```ts
+{ id: "code-reviewer-1", agent: "code-reviewer", severity: "critical",
+  file: "src/reducer.ts", line: 88, claim: "unchecked cast in the reducer" }
+```
+
+`critical_findings` and `advisory_findings` are **derived views** over it,
+written alongside it, so the ~10 consumers that count and print them needed no
+migration. Identity is what makes a finding adjudicable: a k-of-n refutation
+vote needs items two verifiers can agree they are discussing.
+
+Reviewers supply findings through the optional fenced ` ```findings ` JSON block
+in their Machine Summary; without it the `CRITICAL:` / `ADVISORY:` marker lines
+are scraped as before and the findings simply carry no location.
+
+`refuted_findings` holds findings the wave gate's refutation panel killed,
+together with the refuting lenses and their reasoning — recorded, never deleted,
+so a wrong refutation stays auditable.
 
 ### Protection model
 

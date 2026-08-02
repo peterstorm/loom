@@ -5,6 +5,10 @@
 **Status:** Proposed — not started
 **Depends on:** PR #17 (`feat/architecture-panel-mode-plan`) merged
 
+**Standing constraints:** must work on **Pi** as well as Claude Code, and must
+be viable on **subscription auth only** (no per-token API billing). Both shape
+the design below — see *Harness compatibility* and *Cost model* .
+
 ## Why
 
 Loom's wave gate spawns five reviewers per task. Each produces findings; nothing
@@ -100,6 +104,32 @@ not break.
 
 Update: `commands/review-pr.md` (the format spec), `commands/wave-gate.md` (the
 per-reviewer prompt), and the five reviewer agent definitions.
+
+### A2b. Pi and Claude Code must change in lockstep
+
+**`pi/extension.ts:28-31` imports six pure functions from
+`store-reviewer-findings`:**
+
+```ts
+isReviewAgent, parseMachineSummary, parseLegacyFindings,
+reconcileFindings, mergeFindings, buildEvidenceFailureMessage
+```
+
+and re-runs the same sequence at `pi/extension.ts:520-558` — a **parallel
+implementation** of the Claude Code hook (Claude Code fires `SubagentStop`
+automatically on `Task` completion; Pi has no such event, so
+`pi/loom-bridge.ts` intercepts `subagent` tool results and dispatches through
+the CLI).
+
+Phase A changes all six functions. Left as-is, Pi would silently keep writing
+the old `string[]` shape while Claude Code writes `Finding[]` — findings would
+have identity on one harness and not the other, and the review panel would
+work on one harness only.
+
+**Do not just update both call sites — collapse them.** Extract the shared
+sequence (parse → reconcile → merge → write) into one pure function that both
+harnesses call with a transcript and a task id. The duplication is pre-existing
+and is exactly the kind of drift Phase A would otherwise double down on.
 
 ### A3. Store findings without breaking ten consumers
 
@@ -264,26 +294,82 @@ Only then does `complete-wave-gate` count criticals.
 
 ---
 
+## Harness compatibility
+
+Loom's engine is already harness-agnostic: pure logic in `engine/src/core/`,
+dispatched through a `bun engine/src/cli.ts` CLI. Claude Code reaches it via
+hooks; Pi reaches it via `pi/extension.ts` (direct imports of the pure
+functions) and `pi/loom-bridge.ts` (subagent-tool interception → CLI dispatch).
+
+Two rules for everything in this plan:
+
+1. **All validation goes in the engine, reachable from the CLI.** The
+   `review-panel` helper (C2) follows `panel-contract`'s shape exactly, so both
+   harnesses get identical enforcement for free.
+2. **Only agent *spawning* is harness-specific.** Claude Code spawns via `Task`
+   in one message; Pi spawns via its `subagent` tool. The wave-gate step (C3)
+   must describe *what* to spawn, not *how* — same split panel mode already
+   uses.
+
+Anything that imports from `store-reviewer-findings` needs the A2b treatment.
+
+## Cost model — subscription auth only
+
+**Design for subscription auth; do not build API-key-billing paths.** This
+changes the reasoning behind two things:
+
+- **The token-cost risk is quota, not dollars.** There is no per-token bill —
+  the ceiling is the rate limit and the usage window. "N extra agents per wave"
+  matters because it burns a 5-hour window, not because it costs $N.
+- **Per-wave *spend* reporting is the wrong metric** (revises L5 in the spike
+  note). A dollar figure is meaningless here. What's worth surfacing at the
+  gate is usage-window headroom — and only if the harness exposes it.
+
+**Pi can call many different subscriptions, and that is a design lever.** It
+raises the effective fan-out ceiling (verifiers spread across subs rather than
+serializing against one rate limit) and enables something stronger than the
+lens diversity in C1:
+
+> **Model diversity beats prompt diversity for decorrelating error.** The known
+> weakness of LLM-judging-LLM is correlated failure — the verifier shares the
+> reviewer's blind spots. Different *lenses* on one model help; different
+> *models* help more. Where Pi has several subs backing different models,
+> assign verifiers across them.
+
+Treat this as a **capability-gated enhancement, not a requirement**: the panel
+must work correctly on a single subscription (Claude Code's case), with
+multi-sub model diversity as an upgrade when the harness offers it. Do not make
+k-of-n correctness depend on having N subs.
+
 ## Risks and non-goals
 
-- **Token cost.** N extra agents per wave. Mitigate by verifying **critical
-  findings only** by default; advisories skip the panel. Revisit once the
-  false-positive rate is measured.
+- **Quota burn.** N extra agents per wave against a subscription window.
+  Mitigate by verifying **critical findings only** by default; advisories skip
+  the panel. Revisit once the false-positive rate is measured.
 - **The verifier is itself an LLM.** k-of-n with diverse lenses reduces
-  correlated error; it does not eliminate it. Refuted findings stay recorded.
+  correlated error; it does not eliminate it — see the model-diversity note
+  above for the stronger mitigation. Refuted findings stay recorded either way.
 - **Non-goal: verifying spec-check findings.** Different shape, different
   evidence. Later, if ever.
 - **Non-goal: changing loom's phase spine.** This adds a stage inside the wave
   gate. Nothing about phase ordering changes.
+- **Non-goal: API-key billing support.** Subscription only, per the standing
+  constraint.
 
 ## Test strategy
 
 - Phase A: parser tests for the JSON block + fallback scraper; id-derivation
   determinism; a migration test asserting derived string arrays match `findings`.
+  **Plus a harness-parity test**: the extracted shared function (A2b) is the
+  only path, asserted from both the hook and the Pi call site.
 - Phase B: **no new tests, no test edits** — the existing suite is the contract.
 - Phase C: `tallyRefutations` table (unanimous refute, unanimous uphold, exactly
   at threshold, one below, all-uncertain, tie-favors-keeping); envelope rejection
   cases inherited from B1; a CLI test mirroring the panel-contract handler tests.
+  **Single-subscription case is the baseline test**; multi-sub model diversity
+  is tested as an enhancement, never as a correctness precondition.
+- `scripts/smoke-panel-mode.sh` is the model for an end-to-end check driving the
+  real hook CLI — add a review-panel equivalent.
 
 ## Sequencing
 

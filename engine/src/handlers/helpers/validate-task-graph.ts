@@ -8,6 +8,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookHandler, Phase, TaskGraph } from "../../types";
 import { PHASE_ORDER, KNOWN_AGENTS } from "../../config";
+import { parseStoredFindings, parseStoredRefutations } from "../../core/findings";
 import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
 
 export type ValidationResult =
@@ -166,8 +167,13 @@ export function fixFull(json: Record<string, unknown>): string {
       depends_on: Array.isArray(t.depends_on) ? t.depends_on : [],
       status: t.status ?? "pending",
       review_status: t.review_status ?? "pending",
+      // Structured findings are re-parsed rather than passed through: they are
+      // the field a refutation panel votes on, so a malformed entry must be
+      // dropped here rather than reaching a verifier as an un-refutable item.
+      findings: parseStoredFindings(t.findings),
       critical_findings: Array.isArray(t.critical_findings) ? t.critical_findings : [],
       advisory_findings: Array.isArray(t.advisory_findings) ? t.advisory_findings : [],
+      refuted_findings: parseStoredRefutations(t.refuted_findings),
     })),
   };
   return JSON.stringify(fixed, null, 2);

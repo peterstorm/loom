@@ -76,3 +76,41 @@ If delegation is warranted, note which skill should be invoked and why.
 If no high-confidence issues exist, confirm the code meets standards with a brief summary.
 
 Be thorough but filter aggressively - quality over quantity. Focus on issues that truly matter.
+
+## Machine Summary (MANDATORY)
+
+End every review with this block, verbatim in shape, even when your counts are
+zero. Loom's `store-reviewer-findings` hook parses it; omitting it marks the
+task `evidence_capture_failed` and blocks the wave.
+
+````
+### Machine Summary
+CRITICAL_COUNT: {number of critical findings}
+ADVISORY_COUNT: {number of advisory findings}
+CRITICAL: {one critical finding per line}
+ADVISORY: {one advisory finding per line}
+
+```findings
+[
+  { "severity": "critical", "file": "src/x.ts", "line": 42, "claim": "the single assertion to refute" },
+  { "severity": "advisory", "file": null, "line": null, "claim": "..." }
+]
+```
+````
+
+The fenced `findings` block is optional but strongly preferred — it is what
+gives each finding a stable identity and a location, which the wave gate's
+refutation panel needs to adjudicate it. Rules:
+
+- `severity` is exactly `"critical"` or `"advisory"`; entries must appear in the
+  same order as your `CRITICAL:` / `ADVISORY:` lines.
+- `claim` is ONE assertion — the thing a skeptic would try to refute. Do not
+  bundle two problems into one entry.
+- Use `null` for `file`/`line` when you cannot locate the issue. Never guess: a
+  wrong location gets your finding refuted on sight.
+- Never invent an `id`. Ids are derived by the engine from (agent, emission
+  order) so they are stable and need no trust.
+
+`CRITICAL_COUNT` remains the authority on how many criticals you found. If the
+block is absent or malformed, the marker lines are parsed instead and your
+findings simply carry no location.

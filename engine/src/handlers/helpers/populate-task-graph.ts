@@ -70,8 +70,10 @@ function sanitizeDecomposedTask(t: Task): Task {
     ...(t.new_tests_required !== undefined ? { new_tests_required: t.new_tests_required } : {}),
     ...(t.file_list !== undefined ? { file_list: t.file_list } : {}),
     review_status: "pending",
+    findings: [],
     critical_findings: [],
     advisory_findings: [],
+    refuted_findings: [],
   };
 }
 

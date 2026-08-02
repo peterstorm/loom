@@ -3,6 +3,7 @@
  */
 
 import { match } from "ts-pattern";
+import type { Finding, RefutedFinding } from "./core/findings";
 
 // --- Hook Result (discriminated union) ---
 
@@ -130,8 +131,26 @@ export interface Task {
   files_modified?: string[];
   review_status?: ReviewStatus;
   review_error?: string;
+  /**
+   * Authoritative review findings: each with a derived id, its emitting agent,
+   * and (when the reviewer supplied one) a file/line. This is the field the
+   * refutation panel votes on — a k-of-n vote needs items two verifiers can
+   * agree they are discussing, which free text cannot provide.
+   *
+   * `critical_findings` and `advisory_findings` below are DERIVED VIEWS over
+   * this array, written alongside it by mergeFindings. They remain the fields
+   * the wave gate counts and the GH comment prints, so no consumer had to
+   * migrate when identity arrived; they can migrate opportunistically.
+   */
+  findings?: readonly Finding[];
   critical_findings?: string[];
   advisory_findings?: string[];
+  /**
+   * Findings a refutation panel killed, kept with the verifiers' reasoning
+   * instead of deleted. A wrong refutation must stay auditable — a silently
+   * dropped critical is indistinguishable from one that was never found.
+   */
+  refuted_findings?: readonly RefutedFinding[];
   start_sha?: string;
   failure_reason?: string;
   retry_count?: number;

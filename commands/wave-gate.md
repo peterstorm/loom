@@ -95,7 +95,7 @@ Output format required:
    - `loom:comment-analyzer` — comment accuracy and completeness
 
 Each review agent gets the same prompt:
-```markdown
+````markdown
 ## Task: {task_id}
 **Description:** {task description}
 
@@ -103,7 +103,17 @@ Files: {comma-separated files relevant to this task}
 Task: {task_id}
 
 Review these files and produce a Machine Summary with CRITICAL_COUNT, CRITICAL, and ADVISORY lines.
-```
+
+Also emit a fenced ```findings JSON block inside the Machine Summary: one entry
+per finding as {"severity": "critical"|"advisory", "file": path|null,
+"line": number|null, "claim": "the single assertion to refute"}, in the same
+order as your CRITICAL/ADVISORY lines. Never invent an id. If you cannot locate
+a finding, use null rather than guessing — a wrong location is worse than none.
+````
+
+The block is what gives each finding a stable identity, which the refutation
+panel in Step 3.5 needs. Without it the marker lines are parsed instead and the
+findings simply carry no file/line — degraded, not broken.
 
 **What happens automatically on completion:**
 

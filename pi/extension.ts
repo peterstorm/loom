@@ -26,8 +26,7 @@ import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-outpu
 import { extractTestEvidence, analyzeNewTests, applyUntrustedStopResolution, isWaveComplete } from "../engine/src/handlers/subagent-stop/update-task-status";
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
-  isReviewAgent, parseMachineSummary, parseLegacyFindings,
-  reconcileFindings, mergeFindings, buildEvidenceFailureMessage,
+  isReviewAgent, resolveReviewFindings, applyReviewResolution, reviewResolutionLog,
 } from "../engine/src/handlers/subagent-stop/store-reviewer-findings";
 import { parseSpecCheckOutput } from "../engine/src/handlers/subagent-stop/store-spec-check-findings";
 import type { ReviewStatus, SpecCheck, Phase } from "../engine/src/types";
@@ -537,26 +536,15 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
 
-        const findings = parseMachineSummary(transcriptText) ?? parseLegacyFindings(transcriptText);
-
-        if (findings.criticalCount === null) {
-          const errorMsg = buildEvidenceFailureMessage(findings);
-          await mgr.update((s) => ({
-            ...s,
-            tasks: s.tasks.map((t) =>
-              t.id === taskId
-                ? { ...t, review_status: "evidence_capture_failed" as const, review_error: errorMsg }
-                : t
-            ),
-          }));
-          continue;
-        }
-
-        const reconciled = reconcileFindings(findings);
+        // Identical decision + transform as the Claude Code SubagentStop hook —
+        // one shared implementation, so findings cannot have identity on one
+        // harness and not the other.
+        const resolution = resolveReviewFindings(transcriptText, agentType);
         await mgr.update((s) => ({
           ...s,
-          tasks: s.tasks.map((t) => t.id === taskId ? mergeFindings(t, reconciled) : t),
+          tasks: s.tasks.map((t) => (t.id === taskId ? applyReviewResolution(t, resolution) : t)),
         }));
+        process.stderr.write(reviewResolutionLog(taskId, resolution) + "\n");
         continue;
       }
 

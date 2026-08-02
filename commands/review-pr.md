@@ -132,6 +132,40 @@ ADVISORY: {each non-critical finding on its own line}
 
 **IMPORTANT:** The `### Machine Summary` block is MANDATORY. It MUST appear at the end of every review output, even if counts are zero. This block is parsed by automated hooks — do NOT omit it.
 
+### Structured findings block (optional, strongly preferred)
+
+Immediately after the marker lines, inside the same `### Machine Summary`
+section, emit a fenced ` ```findings ` block holding a JSON array — one entry
+per finding, in the same order as the `CRITICAL:` / `ADVISORY:` lines:
+
+````
+### Machine Summary
+CRITICAL_COUNT: 1
+ADVISORY_COUNT: 1
+CRITICAL: unchecked cast in the reducer
+ADVISORY: prefer a named constant over the literal
+
+```findings
+[
+  { "severity": "critical", "file": "src/reducer.ts", "line": 88, "claim": "unchecked cast in the reducer" },
+  { "severity": "advisory", "file": "src/reducer.ts", "line": 12, "claim": "prefer a named constant over the literal" }
+]
+```
+````
+
+- `severity` — exactly `"critical"` or `"advisory"`. No other value is accepted.
+- `file` / `line` — omit or use `null` when you genuinely cannot locate the issue.
+  Do not guess: a wrong location is worse than none.
+- `claim` — the **single assertion a reviewer of your review would try to
+  refute**. One claim per entry; no bundling.
+- Never invent an `id`. Ids are derived from (agent, emission order) by the
+  engine so they are stable and need no trust.
+
+`CRITICAL_COUNT` is still the authority on how many criticals you found — the
+block adds location and structure, it does not replace the marker lines. If the
+block is absent or malformed, the marker lines are parsed instead and the
+findings simply carry no file/line. Verification quality degrades; nothing breaks.
+
 ## Usage Examples
 
 **Full review (default):**

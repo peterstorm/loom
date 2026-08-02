@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseMachineSummary, parseLegacyFindings, isReviewAgent, mergeFindings, buildEvidenceFailureMessage, reconcileFindings } from "../../src/handlers/subagent-stop/store-reviewer-findings";
+import { parseMachineSummary, parseLegacyFindings, isReviewAgent, mergeFindings, makeParsedFindings, buildEvidenceFailureMessage, reconcileFindings } from "../../src/handlers/subagent-stop/store-reviewer-findings";
 import { REVIEW_SUB_AGENTS } from "../../src/config";
 import type { Task } from "../../src/types";
 
@@ -325,11 +325,11 @@ describe("mergeFindings (pure)", () => {
   };
 
   it("sets review_status to passed when no criticals", () => {
-    const result = mergeFindings(baseTask, {
+    const result = mergeFindings(baseTask, makeParsedFindings({
       critical: [],
       advisory: ["Consider refactor"],
       criticalCount: 0,
-    });
+    }), "code-reviewer");
 
     expect(result.review_status).toBe("passed");
     expect(result.critical_findings).toEqual([]);
@@ -337,28 +337,28 @@ describe("mergeFindings (pure)", () => {
   });
 
   it("sets review_status to blocked when criticals present", () => {
-    const result = mergeFindings(baseTask, {
+    const result = mergeFindings(baseTask, makeParsedFindings({
       critical: ["SQL injection"],
       advisory: [],
       criticalCount: 1,
-    });
+    }), "code-reviewer");
 
     expect(result.review_status).toBe("blocked");
     expect(result.critical_findings).toEqual(["SQL injection"]);
   });
 
   it("accumulates findings from multiple agents", () => {
-    const afterFirst = mergeFindings(baseTask, {
+    const afterFirst = mergeFindings(baseTask, makeParsedFindings({
       critical: ["Issue from code-reviewer"],
       advisory: ["Advice from code-reviewer"],
       criticalCount: 1,
-    });
+    }), "code-reviewer");
 
-    const afterSecond = mergeFindings(afterFirst, {
+    const afterSecond = mergeFindings(afterFirst, makeParsedFindings({
       critical: [],
       advisory: ["Advice from silent-failure-hunter"],
       criticalCount: 0,
-    });
+    }), "silent-failure-hunter");
 
     expect(afterSecond.critical_findings).toEqual(["Issue from code-reviewer"]);
     expect(afterSecond.advisory_findings).toEqual([
@@ -375,11 +375,11 @@ describe("mergeFindings (pure)", () => {
       advisory_findings: [],
     };
 
-    const result = mergeFindings(blockedTask, {
+    const result = mergeFindings(blockedTask, makeParsedFindings({
       critical: [],
       advisory: ["All good from me"],
       criticalCount: 0,
-    });
+    }), "code-reviewer");
 
     expect(result.review_status).toBe("blocked");
     expect(result.critical_findings).toEqual(["Existing critical"]);
@@ -389,22 +389,22 @@ describe("mergeFindings (pure)", () => {
   it("escalates pending to blocked when criticals found", () => {
     const pendingTask: Task = { ...baseTask, review_status: "pending" };
 
-    const result = mergeFindings(pendingTask, {
+    const result = mergeFindings(pendingTask, makeParsedFindings({
       critical: ["New critical"],
       advisory: [],
       criticalCount: 1,
-    });
+    }), "code-reviewer");
 
     expect(result.review_status).toBe("blocked");
   });
 
   it("handles task with no prior findings (undefined arrays)", () => {
     // baseTask has no critical_findings or advisory_findings
-    const result = mergeFindings(baseTask, {
+    const result = mergeFindings(baseTask, makeParsedFindings({
       critical: ["First finding"],
       advisory: ["First advice"],
       criticalCount: 1,
-    });
+    }), "code-reviewer");
 
     expect(result.critical_findings).toEqual(["First finding"]);
     expect(result.advisory_findings).toEqual(["First advice"]);
@@ -412,9 +412,9 @@ describe("mergeFindings (pure)", () => {
 
   it("accumulates across three agents", () => {
     let task = baseTask;
-    task = mergeFindings(task, { critical: ["C1"], advisory: ["A1"], criticalCount: 1 });
-    task = mergeFindings(task, { critical: [], advisory: ["A2"], criticalCount: 0 });
-    task = mergeFindings(task, { critical: ["C2"], advisory: ["A3"], criticalCount: 1 });
+    task = mergeFindings(task, makeParsedFindings({ critical: ["C1"], advisory: ["A1"], criticalCount: 1 }), "code-reviewer");
+    task = mergeFindings(task, makeParsedFindings({ critical: [], advisory: ["A2"], criticalCount: 0 }), "silent-failure-hunter");
+    task = mergeFindings(task, makeParsedFindings({ critical: ["C2"], advisory: ["A3"], criticalCount: 1 }), "pr-test-analyzer");
 
     expect(task.critical_findings).toEqual(["C1", "C2"]);
     expect(task.advisory_findings).toEqual(["A1", "A2", "A3"]);
@@ -424,16 +424,16 @@ describe("mergeFindings (pure)", () => {
 
 describe("buildEvidenceFailureMessage (pure)", () => {
   it("returns generic message when no partial findings", () => {
-    const msg = buildEvidenceFailureMessage({ critical: [], advisory: [], criticalCount: null });
+    const msg = buildEvidenceFailureMessage(makeParsedFindings({ critical: [], advisory: [], criticalCount: null }));
     expect(msg).toBe("CRITICAL_COUNT marker not found in agent output");
   });
 
   it("surfaces partial counts when section parsing extracted findings", () => {
-    const msg = buildEvidenceFailureMessage({
+    const msg = buildEvidenceFailureMessage(makeParsedFindings({
       critical: ["XSS in template", "SQL injection"],
       advisory: ["Refactor advised"],
       criticalCount: null,
-    });
+    }));
     expect(msg).toContain("partial findings extracted");
     expect(msg).toContain("2 critical");
     expect(msg).toContain("1 advisory");
@@ -442,23 +442,23 @@ describe("buildEvidenceFailureMessage (pure)", () => {
 
 describe("reconcileFindings (pure)", () => {
   it("synthesizes placeholder when count > 0 but no critical findings parsed", () => {
-    const result = reconcileFindings({ critical: [], advisory: [], criticalCount: 3 });
+    const result = reconcileFindings(makeParsedFindings({ critical: [], advisory: [], criticalCount: 3 }));
     expect(result.critical).toHaveLength(1);
     expect(result.critical[0]).toContain("3 findings not captured");
   });
 
   it("returns input unchanged when count and findings agree", () => {
-    const input = { critical: ["x"], advisory: [], criticalCount: 1 };
+    const input = makeParsedFindings({ critical: ["x"], advisory: [], criticalCount: 1 });
     expect(reconcileFindings(input)).toBe(input);
   });
 
   it("returns input unchanged when count is 0", () => {
-    const input = { critical: [], advisory: ["a"], criticalCount: 0 };
+    const input = makeParsedFindings({ critical: [], advisory: ["a"], criticalCount: 0 });
     expect(reconcileFindings(input)).toBe(input);
   });
 
   it("returns input unchanged when count is null", () => {
-    const input = { critical: [], advisory: [], criticalCount: null };
+    const input = makeParsedFindings({ critical: [], advisory: [], criticalCount: null });
     expect(reconcileFindings(input)).toBe(input);
   });
 });
