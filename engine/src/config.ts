@@ -359,8 +359,8 @@ export function assertPanelExecuteDisjoint(
 // consults BEFORE the panel branch. Runs once per process at first import.
 assertPanelExecuteDisjoint();
 
-/** Tools that modify files (defined in core/tool-vocabulary — re-exported here, config stays the documented home) */
-export { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "./core/tool-vocabulary";
+/** Tool vocabulary (defined in core/tool-vocabulary — re-exported here, config stays the documented home) */
+export { FILE_MODIFYING_TOOLS, SUBAGENT_SPAWN_TOOLS, TEST_COMMAND_PATTERNS } from "./core/tool-vocabulary";
 
 /** Whitelisted helper scripts in guard-state-file */
 export const WHITELISTED_HELPERS: readonly string[] = [

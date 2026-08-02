@@ -10,7 +10,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { GATE_WIRED_TOOLS } from "../../src/machine/types";
-import { FILE_MODIFYING_TOOLS } from "../../src/core/tool-vocabulary";
+import { FILE_MODIFYING_TOOLS, SUBAGENT_SPAWN_TOOLS } from "../../src/core/tool-vocabulary";
 import { KNOWN_HANDLERS } from "../../src/handler-routes";
 
 interface HookEntry {
@@ -66,6 +66,53 @@ describe("GATE_WIRED_TOOLS ↔ hooks.json (PreToolUse gate wiring)", () => {
         ).toBe(true);
       }
     }
+  });
+});
+
+/**
+ * The drift this pins actually happened: the harness renamed its spawning tool
+ * from `Task` to `Agent`, hooks.json kept matching `Task`, and all five spawn
+ * gates — including wave-order enforcement — went dead without a single error.
+ * Nothing in the system noticed, because a matcher that matches nothing looks
+ * exactly like a run with nothing to gate.
+ *
+ * Equality, not coverage, in both directions: a name in the constant but not
+ * the matcher is a gate that never fires, and a name in the matcher but not
+ * the constant is a hook that fires and then early-returns `allow`. Both are
+ * silent, so neither is allowed.
+ */
+describe("SUBAGENT_SPAWN_TOOLS ↔ hooks.json (PreToolUse spawn-gate wiring)", () => {
+  /** The five handlers that gate a subagent spawn — all wired on one matcher. */
+  const SPAWN_GATE_SCRIPTS = [
+    "validate-phase-order.sh",
+    "validate-task-execution.sh",
+    "validate-template-substitution.sh",
+    "validate-agent-model.sh",
+    "validate-agent-skill.sh",
+  ] as const;
+
+  it("the spawn-gate matcher names exactly SUBAGENT_SPAWN_TOOLS", () => {
+    for (const script of SPAWN_GATE_SCRIPTS) {
+      const entries = entriesWiring("PreToolUse", script);
+      expect(entries.length, `${script} is not wired for PreToolUse at all`).toBeGreaterThan(0);
+      const covered = entries.flatMap((e) => matcherTools(e.matcher ?? "*"));
+      expect(
+        [...new Set(covered)].sort(),
+        `hooks.json's PreToolUse matcher for ${script} does not name exactly SUBAGENT_SPAWN_TOOLS — ` +
+          `a spawn-gate wired for a name the handlers ignore never fires, and a name the handlers ` +
+          `accept but the matcher omits never reaches them`,
+      ).toEqual([...SUBAGENT_SPAWN_TOOLS].sort());
+    }
+  });
+
+  it("all five spawn gates ride the SAME matcher entry — one rename, one edit", () => {
+    const entries = SPAWN_GATE_SCRIPTS.map((s) => entriesWiring("PreToolUse", s));
+    const matchers = new Set(entries.flat().map((e) => e.matcher ?? "*"));
+    expect(
+      matchers.size,
+      `the spawn gates are spread across ${matchers.size} matcher entries (${[...matchers].join(", ")}) — ` +
+        "splitting them lets a future rename fix some gates and leave others dead",
+    ).toBe(1);
   });
 });
 

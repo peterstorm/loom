@@ -268,79 +268,32 @@ TypeScript extension. See `docs/migration-claude-code-to-pi.md` section
 
 ---
 
-## Pi Compatibility Patches (Required)
+## Harness Field Names (no patching required)
 
-The installed loom plugin (`~/.claude/plugins/cache/plugins/loom/`) needs three
-handler patches. Without these, wave-gate enforcement and phase validation
-are silently bypassed because handlers read Claude Code field names that
-pi doesn't send.
+Each harness names the subagent-spawning tool and its fields differently. Loom
+ships with all of them wired, so there is nothing to patch — this section
+records what the differences ARE, because they are the reason a spawn gate can
+go quiet without failing.
 
-### What to patch
-
-All three PreToolUse handlers:
-- `engine/src/handlers/pre-tool-use/validate-task-execution.ts`
-- `engine/src/handlers/pre-tool-use/validate-template-substitution.ts`
-- `engine/src/handlers/pre-tool-use/validate-phase-order.ts`
-
-### Changes needed
-
-**1. Accept both tool names:**
-```typescript
-// Before (Claude Code only):
-if (input.tool_name !== "Task") return { kind: "allow" };
-
-// After (Claude Code + pi):
-if (input.tool_name !== "Task" && input.tool_name !== "subagent") return { kind: "allow" };
-```
-
-**2. Read both prompt field names:**
-```typescript
-// Before (Claude Code only):
-const prompt = (input.tool_input?.prompt as string) ?? "";
-
-// After (Claude Code + pi):
-const prompt = (input.tool_input?.prompt as string) ?? (input.tool_input?.task as string) ?? "";
-```
-
-**3. Read both agent type field names** (validate-phase-order only):
-```typescript
-// Before:
-agentType: stripNamespace((input.tool_input?.subagent_type as string) ?? "")
-
-// After:
-agentType: stripNamespace((input.tool_input?.subagent_type as string) ?? (input.tool_input?.agent as string) ?? "")
-```
-
-### One-liner patch script
-
-```bash
-INSTALLED=~/.claude/plugins/cache/plugins/loom/*/
-
-perl -i -pe 's/if \(input\.tool_name !== "Task"\) return \{ kind: "allow" \};/if (input.tool_name !== "Task" \&\& input.tool_name !== "subagent") return { kind: "allow" };/' \
-  $INSTALLED/engine/src/handlers/pre-tool-use/validate-task-execution.ts \
-  $INSTALLED/engine/src/handlers/pre-tool-use/validate-template-substitution.ts \
-  $INSTALLED/engine/src/handlers/pre-tool-use/validate-phase-order.ts
-
-perl -i -pe 's/const prompt = \(input\.tool_input\?\.prompt as string\) \?\? "";/const prompt = (input.tool_input?.prompt as string) ?? (input.tool_input?.task as string) ?? "";/' \
-  $INSTALLED/engine/src/handlers/pre-tool-use/validate-task-execution.ts \
-  $INSTALLED/engine/src/handlers/pre-tool-use/validate-template-substitution.ts \
-  $INSTALLED/engine/src/handlers/pre-tool-use/validate-phase-order.ts
-
-perl -i -pe 's/stripNamespace\(\(input\.tool_input\?\.subagent_type as string\)/stripNamespace((input.tool_input?.subagent_type as string) ?? (input.tool_input?.agent as string)/' \
-  $INSTALLED/engine/src/handlers/pre-tool-use/validate-phase-order.ts
-```
-
-### Why this happens
-
-Pi's `subagent` tool sends different field names than Claude Code's `Task` tool:
-
-| Field | Claude Code (`Task`) | Pi (`subagent`) |
+| Field | Claude Code | Pi |
 |-------|---------------------|-----------------|
-| Tool name | `"Task"` | `"subagent"` |
+| Tool name | `"Agent"` (was `"Task"`) | `"subagent"` |
 | Task text | `tool_input.prompt` | `tool_input.task` |
 | Agent name | `tool_input.subagent_type` | `tool_input.agent` |
 
-The handlers check `tool_name !== "Task"` as an early exit (only validate Task
-tool calls, not Bash/Edit/etc). Without the patch, pi's subagent calls pass
-this guard and then fail to extract the task ID (because `prompt` is undefined),
-causing the handler to return `allow` at the "not a planned task" fallback.
+Every spawn gate reads both field spellings, and every gate tests `tool_name`
+against **one shared constant**, `SUBAGENT_SPAWN_TOOLS` in
+`engine/src/core/tool-vocabulary.ts`:
+
+```typescript
+if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
+```
+
+The name has to be known in TWO places to enforce anything: `hooks/hooks.json`
+decides whether the PreToolUse hook fires at all, and the handler re-checks
+`tool_name` before doing work. A name known to one and not the other is a gate
+that reports healthy and enforces nothing — which is exactly what happened when
+Claude Code renamed `Task` to `Agent`. `engine/tests/machine/hooks-sync.test.ts`
+now pins the hooks.json matcher to `SUBAGENT_SPAWN_TOOLS` in both directions, so
+supporting a new harness means editing one constant and one matcher, and the
+suite fails until both agree.

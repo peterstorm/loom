@@ -13,6 +13,7 @@ import { StateManager } from "../../state-manager";
 import { parsePhaseArtifacts } from "../../parsers/parse-phase-artifacts";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { findFile } from "../../utils/find-file";
+import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 
 /** Count NEEDS CLARIFICATION markers in a file */
 export function countMarkers(filePath: string): number {
@@ -145,13 +146,17 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "passthrough" };
   }
 
-  // Extract artifacts from transcript before checking transition
-  if (input.agent_transcript_path && existsSync(input.agent_transcript_path)) {
+  // Extract artifacts from transcript before checking transition. Resolved,
+  // not read off the payload: without the derived fallback a harness that
+  // sends no `agent_transcript_path` records no spec_file/plan_file here and
+  // leans entirely on the filesystem sweep further down.
+  const transcriptPath = resolveAgentTranscriptPath(input);
+  if (transcriptPath) {
     let transcriptContent: string;
     try {
-      transcriptContent = readFileSync(input.agent_transcript_path, "utf-8");
+      transcriptContent = readFileSync(transcriptPath, "utf-8");
     } catch (e) {
-      process.stderr.write(`advance-phase: failed to read transcript at ${input.agent_transcript_path}: ${(e as Error).message}\n`);
+      process.stderr.write(`advance-phase: failed to read transcript at ${transcriptPath}: ${(e as Error).message}\n`);
       return { kind: "passthrough" };
     }
     const artifacts = parsePhaseArtifacts(transcriptContent, currentState.spec_dir);

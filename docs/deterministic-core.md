@@ -81,9 +81,12 @@ phase itself writes the JSON regex rule into the linter's rules directory
 
 The guarded skill machine (`engine/src/machine/`) records facts-only events to a
 per-session `*.evidence.jsonl` ledger: `FileRead`, `FileWrite`, `TestRun`. A
-`TestRun` is trusted only when the process exit code **and** a machine-readable
-report artifact (vitest JSON, JUnit XML) cross-check. Transcript text is never
-evidence.
+`TestRun` is trusted only when a machine-readable report artifact (vitest JSON,
+JUnit XML) vouches for it: the report decides pass/fail, and a nonzero exit code
+overrules a green report. An exit code the harness never reported does **not**
+sink the run — some harnesses report none at all, and requiring one gated trust
+on harness capability rather than on evidence quality. No report, no trust.
+Transcript text is never evidence.
 
 - **Enforced by:** `record-evidence` (PostToolUse) appends epoch-stamped events;
   `update-task-status` (SubagentStop) folds the ledger into a verdict. A trusted
@@ -248,7 +251,7 @@ silently.
 | State machine | Re-implemented in a second file, drifts | One bound machine file; `validate-task-graph` fails closed without it |
 | Graph structure | Hand-editable, undetectable | Integrity-hashed; wave gate blocks structural edits |
 | Invariants | Prose, caught by reviewer attention | Executable regex rules enforced on every edit, forever |
-| Test results | "PASS" text trusted as-is | Exit code + report artifact cross-checked; `trusted-pass` vs `untrusted` |
+| Test results | "PASS" text trusted as-is | Report artifact required, nonzero exit overrules it; `trusted-pass` vs `untrusted` |
 | Phase order | Suggested by skill text | `enforce-phase-tools` denies out-of-phase tools |
 | State/ledger writes | Reachable via Bash | Fail-closed guard, hardened over 26 rounds against bash reassembly |
 | Retry / budget | Hand-maintained; new kinds default retriable | `retriabilityOf` exhaustive; a new kind is a compile error until classified |

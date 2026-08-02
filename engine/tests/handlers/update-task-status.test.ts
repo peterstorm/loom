@@ -1,4 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import updateTaskStatus, { extractTestEvidence, analyzeNewTests, isMachineBound, resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
 import { legacyTestsPassedNote } from "../../src/types";
 
@@ -395,5 +398,129 @@ describe("analyzeNewTests (pure)", () => {
     const result = analyzeNewTests(diff, undefined);
     expect(result.written).toBe(false);
     expect(result.evidence).toBe("");
+  });
+});
+
+/**
+ * Harness compatibility: SubagentStop without `agent_transcript_path`.
+ *
+ * This handler is the ONLY writer of task status, and it resolves the task id
+ * from the transcript (falling back to a single-entry `executing_tasks`). A
+ * harness that sends no transcript path therefore recorded NOTHING — tasks
+ * stayed `pending`, `test_result` stayed null, and not one line reached stderr
+ * saying so, while the transcript sat on disk the whole time.
+ */
+describe("update-task-status — transcript path resolution", () => {
+  const cleanup: Array<() => void> = [];
+
+  afterEach(() => {
+    for (const undo of cleanup.splice(0)) undo();
+  });
+
+  /**
+   * A session with a task graph, a bound state pointer, and — when asked — a
+   * transcript planted exactly where the harness writes one.
+   */
+  async function makeSession(opts: { plantTranscript: boolean }): Promise<{
+    session: string;
+    agentId: string;
+    read: () => { tasks: Array<{ id: string; status: string }> };
+  }> {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    const { projectSlug } = await import("../../src/utils/agent-transcript-path");
+    const stamp = `${process.pid}${Date.now()}${Math.random().toString(36).slice(2)}`;
+    const session = `uts-${stamp}`;
+    const agentId = `a${stamp}`;
+
+    const tmpDir = join(tmpdir(), `uts-${stamp}`);
+    const configDir = join(tmpDir, "config");
+    const projectDir = join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+
+    const statePath = join(tmpDir, "graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      current_wave: 1,
+      executing_tasks: [],
+      tasks: [
+        { id: "T1", description: "a task", agent: "code-implementer-agent", status: "pending", wave: 1, depends_on: [] },
+      ],
+      wave_gates: {},
+    }));
+
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(pointer, statePath);
+
+    if (opts.plantTranscript) {
+      const dir = join(configDir, "projects", projectSlug(projectDir), session, "subagents");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `agent-${agentId}.jsonl`),
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "**Task ID:** T1\n\nImplemented the thing." }] },
+        }) + "\n",
+      );
+    }
+
+    const prevConfig = process.env.CLAUDE_CONFIG_DIR;
+    const prevProject = process.env.CLAUDE_PROJECT_DIR;
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    process.env.CLAUDE_PROJECT_DIR = projectDir;
+
+    cleanup.push(() => {
+      if (prevConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = prevConfig;
+      if (prevProject === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = prevProject;
+      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(pointer, { force: true });
+    });
+
+    return { session, agentId, read: () => JSON.parse(readFileSync(statePath, "utf-8")) };
+  }
+
+  it("resolves the task from the DERIVED transcript when the payload names none", async () => {
+    const s = await makeSession({ plantTranscript: true });
+
+    const result = await updateTaskStatus(JSON.stringify({
+      session_id: s.session,
+      agent_id: s.agentId,
+      agent_type: "code-implementer-agent",
+      // No agent_transcript_path — exactly what the harness sends.
+    }), []);
+
+    expect(result.kind).toBe("passthrough");
+    const task = s.read().tasks.find((t) => t.id === "T1");
+    expect(task?.status, "T1 stayed pending — the transcript was on disk and went unread").toBe("implemented");
+  });
+
+  it("says out loud that nothing was recorded when there is no transcript and nothing executing", async () => {
+    const s = await makeSession({ plantTranscript: false });
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    let text = "";
+    try {
+      const result = await updateTaskStatus(JSON.stringify({
+        session_id: s.session,
+        agent_id: s.agentId,
+        agent_type: "code-implementer-agent",
+      }), []);
+      expect(result.kind).toBe("passthrough");
+      text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    expect(text, "a no-op this consequential must never be silent").toContain("code-implementer-agent");
+    expect(text).toContain("task status was NOT recorded");
+    expect(text).toContain("no transcript found");
+    expect(text).toContain("executing_tasks is empty");
+    expect(s.read().tasks.find((t) => t.id === "T1")?.status).toBe("pending");
   });
 });

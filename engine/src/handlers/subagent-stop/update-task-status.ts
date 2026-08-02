@@ -16,6 +16,7 @@ import { IMPL_AGENTS, machinesDir } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { extractTaskId } from "../../utils/extract-task-id";
+import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
@@ -509,12 +510,25 @@ export const runUpdateTaskStatus = async (
   const mgr = StateManager.fromSession(input.session_id);
   if (!mgr) return { kind: "passthrough" };
 
-  // Parse transcript (read file content, then parse)
-  // Expand ~ in transcript path (Claude Code may send tilde-prefixed paths)
-  const transcriptPath = input.agent_transcript_path?.replace(/^~/, process.env.HOME ?? "~") ?? "";
-  const transcriptContent = transcriptPath && existsSync(transcriptPath)
-    ? readFileSync(transcriptPath, "utf-8")
-    : "";
+  // Parse transcript (read file content, then parse). The path is RESOLVED,
+  // not read off the payload: a supplied `agent_transcript_path` wins, and a
+  // harness that sends none falls back to the derived on-disk location. This
+  // handler is the only writer of task status, so an unlocatable transcript
+  // costs the whole record — see utils/agent-transcript-path.
+  const transcriptPath = resolveAgentTranscriptPath(input);
+  let transcriptContent = "";
+  if (transcriptPath) {
+    try {
+      transcriptContent = readFileSync(transcriptPath, "utf-8");
+    } catch (e) {
+      // The path existed a moment ago (the resolver proved it), so this is a
+      // permission or I/O fault, not a miss. Say so and fall through to the
+      // executing_tasks inference rather than throwing out of the hook.
+      process.stderr.write(
+        `[loom] update-task-status: cannot read transcript at ${transcriptPath}: ${e instanceof Error ? e.message : String(e)}\n`,
+      );
+    }
+  }
   const transcript = parseTranscript(transcriptContent);
   const filesModified = parseFilesModified(transcriptContent);
   const bashTestOutput = parseBashTestOutput(transcriptContent);
@@ -535,8 +549,21 @@ export const runUpdateTaskStatus = async (
       // Ambiguous or empty — just clear executing_tasks, don't mark tasks as failed.
       // Marking all executing tasks as "failed" causes a cascade where subsequent hooks
       // bypass the guard and overwrite valid test evidence.
+      //
+      // Both arms MUST speak. The empty arm used to return here in total
+      // silence, which is how a harness that recorded no `executing_tasks` and
+      // sent no transcript path looked exactly like a run with nothing to do:
+      // every task stayed `pending`, no test_result was ever written, and
+      // nothing on stderr said why. An unrecorded task is a wave gate reading
+      // green on no evidence — it has to be loud.
       if (executing.length > 0) {
         process.stderr.write(`WARNING: ${agentType} completed without task ID, ${executing.length} tasks executing (ambiguous)\n`);
+      } else {
+        process.stderr.write(
+          `WARNING: ${agentType} completed but task status was NOT recorded — no task ID in the transcript ` +
+            `(${transcriptPath ? `read ${transcriptPath}` : "no transcript found: the payload named none and none was derivable from session/agent id"}) ` +
+            `and executing_tasks is empty, so there is nothing to attribute the run to\n`,
+        );
       }
       await mgr.update((s) => ({
         ...s,

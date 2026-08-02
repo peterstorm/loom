@@ -1,6 +1,6 @@
 /**
  * Enforce agent model matches frontmatter declaration.
- * Blocks Task calls where model is missing or mismatches the agent's declared model.
+ * Blocks subagent spawns where model is missing or mismatches the agent's declared model.
  * Only active during loom orchestration (task graph exists).
  */
 
@@ -12,6 +12,7 @@ import {
   TASK_GRAPH_PATH, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
   UTILITY_AGENTS,
 } from "../../config";
+import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { stripNamespace, extractNamespace } from "../../utils/strip-namespace";
 
 /** All agents whose model we validate */
@@ -75,7 +76,7 @@ const handler: HookHandler = async (stdin) => {
       message: `validate-agent-model: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
-  if (input.tool_name !== "Task") return { kind: "allow" };
+  if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
   const subagentType = (input.tool_input?.subagent_type as string) ?? "";
   const bareAgent = stripNamespace(subagentType);

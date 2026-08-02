@@ -1,6 +1,6 @@
 /**
  * Enforce agent prompt references the correct preloaded skill.
- * Reads `skills:` from agent frontmatter and checks the Task prompt
+ * Reads `skills:` from agent frontmatter and checks the spawn prompt
  * mentions the skill name. Only active during loom orchestration.
  */
 
@@ -12,6 +12,7 @@ import {
   TASK_GRAPH_PATH, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
   REVIEW_PANEL_AGENTS, UTILITY_AGENTS, ARCH_PANEL_AGENTS,
 } from "../../config";
+import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { stripNamespace, extractNamespace } from "../../utils/strip-namespace";
 
 /** All agents whose skill we validate */
@@ -145,7 +146,7 @@ const handler: HookHandler = async (stdin) => {
       message: `validate-agent-skill: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
-  if (input.tool_name !== "Task") return { kind: "allow" };
+  if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
   const subagentType = (input.tool_input?.subagent_type as string) ?? "";
   const bareAgent = stripNamespace(subagentType);

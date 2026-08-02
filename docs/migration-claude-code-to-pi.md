@@ -322,7 +322,8 @@ PreToolUse + matcher "Bash"     →   pi.on("tool_call", ...) + isToolCallEventT
 PreToolUse + matcher "Edit"     →   pi.on("tool_call", ...) + isToolCallEventType("edit", event)
 PreToolUse + matcher "Write"    →   pi.on("tool_call", ...) + isToolCallEventType("write", event)
 PreToolUse + matcher "Read"     →   pi.on("tool_call", ...) + isToolCallEventType("read", event)
-PreToolUse + matcher "Task"     →   No built-in Task tool; build custom tool via pi.registerTool()
+PreToolUse + matcher "Agent"    →   No built-in spawn tool; build custom tool via pi.registerTool()
+  (Claude Code renamed this tool "Task" → "Agent"; loom's matcher covers both.)
 PostToolUse                     →   pi.on("tool_result", ...)
 SessionStart                    →   pi.on("session_start", ...)
 SessionEnd                      →   pi.on("session_shutdown", ...)
@@ -1505,7 +1506,7 @@ The same pattern applies to all handlers. The input fields map like this:
 
 | Claude Code (`PreToolUseInput`) | Pi (`tool_call` event) |
 |---|---|
-| `input.tool_name` ("Task", "Edit", "Bash") | `event.toolName` ("subagent", "edit", "bash") |
+| `input.tool_name` ("Agent", "Edit", "Bash") | `event.toolName` ("subagent", "edit", "bash") |
 | `input.tool_input.prompt` | `event.input.task` |
 | `input.tool_input.subagent_type` | `event.input.agent` |
 | `input.session_id` | `ctx.sessionManager.getSessionId()` |
@@ -1593,7 +1594,7 @@ import { VALID_TRANSITIONS, UTILITY_AGENTS } from "../config";
 import { stripNamespace } from "../utils/strip-namespace";
 
 export interface ValidatePhaseOrderInput {
-  toolName: string;       // "Task" (Claude) or "subagent" (pi)
+  toolName: string;       // "Agent" (Claude) or "subagent" (pi) — see SUBAGENT_SPAWN_TOOLS
   agentType: string;      // bare agent name
   prompt: string;         // task prompt
 }
@@ -1614,7 +1615,7 @@ The Claude Code handler stays as a thin wrapper:
 import { validatePhaseOrder } from "../../core/validate-phase-order";
 const handler: HookHandler = async (stdin) => {
   const input: PreToolUseInput = JSON.parse(stdin);
-  if (input.tool_name !== "Task") return { kind: "allow" };
+  if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
   return validatePhaseOrder({
     toolName: input.tool_name,
     agentType: (input.tool_input?.subagent_type as string) ?? "",

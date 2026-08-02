@@ -4,12 +4,11 @@
  * Blocks wave if CRITICAL_COUNT > 0.
  */
 
-import { existsSync, readFileSync } from "node:fs";
 import type { HookHandler, SubagentStopInput, SpecCheck, SpecCheckVerdict } from "../../types";
 import { parseSpecCheckVerdict, newWaveGate } from "../../types";
 import { StateManager } from "../../state-manager";
-import { parseTranscript } from "../../parsers/parse-transcript";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
+import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import { isNoFindingSentinel } from "../../utils/no-finding-sentinel";
 
 interface SpecCheckFindings {
@@ -91,7 +90,11 @@ const handler: HookHandler = async (stdin) => {
   const mgr = StateManager.fromSession(input.session_id);
   if (!mgr) return { kind: "passthrough" };
 
-  const rawPath = input.agent_transcript_path ?? "";
+  // Resolved, not read off the payload: on a harness that sends no
+  // `agent_transcript_path` every spec-check would otherwise land in the
+  // evidence_capture_failed arm below, blocking every wave gate on a
+  // capture failure rather than on the spec.
+  const rawPath = resolveAgentTranscriptPath(input) ?? input.agent_transcript_path ?? "";
   const transcript = await readTranscriptWithRetry(rawPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/);
   if (!transcript) {
     // Fail CLOSED, mirroring the missing-count path below: recording nothing

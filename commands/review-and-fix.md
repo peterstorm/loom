@@ -1,7 +1,7 @@
 ---
 description: "Review PR, plan fixes, implement, commit and push — end-to-end"
 argument-hint: "[code|errors|tests|types|comments|architecture|all] [--files f1,f2] [--no-push] [--dry-run] [--commit-msg '...']"
-allowed-tools: ["Bash", "Glob", "Grep", "Read", "Write", "Edit", "Task"]
+allowed-tools: ["Bash", "Glob", "Grep", "Read", "Write", "Edit", "Task", "Agent"]
 ---
 
 # Review and Fix — End-to-End PR Remediation

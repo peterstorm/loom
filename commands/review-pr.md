@@ -1,7 +1,7 @@
 ---
 description: "Comprehensive PR review using specialized agents"
 argument-hint: "[code|errors|tests|types|comments|architecture|simplify|all] [--files file1,file2] [--task T1]"
-allowed-tools: ["Bash", "Glob", "Grep", "Read", "Task"]
+allowed-tools: ["Bash", "Glob", "Grep", "Read", "Task", "Agent"]
 ---
 
 # Comprehensive PR Review

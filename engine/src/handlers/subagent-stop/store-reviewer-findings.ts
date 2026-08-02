@@ -21,6 +21,7 @@ import {
 import { StateManager } from "../../state-manager";
 import { extractTaskId } from "../../utils/extract-task-id";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
+import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 
 const warn = (message: string): void => {
   process.stderr.write(`[loom] store-reviewer-findings: ${message}\n`);
@@ -48,7 +49,10 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "passthrough" };
   }
 
-  const rawPath = input.agent_transcript_path ?? "";
+  // Resolved, not read off the payload: a harness that sends no
+  // `agent_transcript_path` would otherwise lose every reviewer's findings —
+  // the wave gate would then read a clean review that never happened.
+  const rawPath = resolveAgentTranscriptPath(input) ?? input.agent_transcript_path ?? "";
   const transcript = await readTranscriptWithRetry(rawPath, /\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*\d+/);
   if (!transcript) {
     warn(`empty transcript for ${agentType} (path=${rawPath || "<unset>"}) — findings NOT stored`);
