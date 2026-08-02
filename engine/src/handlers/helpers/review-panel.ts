@@ -63,14 +63,30 @@ import {
 
 const LAYOUT = REVIEW_LAYOUT;
 
+/**
+ * Every operation this helper implements, in the order one run performs them.
+ *
+ * Exported because it is a CONTRACT, not an implementation detail: the wave-gate
+ * runbook has to document all of them and drive them in this order, and
+ * `tests/runbook-contract.test.ts` binds the prose to this list in both
+ * directions. An operation added here without a runbook step fails that test,
+ * which is the drift nothing used to catch.
+ */
+export const REVIEW_PANEL_OPERATIONS = ["brief", "manifest", "lenses", "verdict", "tally"] as const;
+export type ReviewPanelOperation = (typeof REVIEW_PANEL_OPERATIONS)[number];
+
 const USAGE =
-  "Usage: helper review-panel <brief|manifest|lenses|verdict|tally> --runs-root <dir> " +
+  `Usage: helper review-panel <${REVIEW_PANEL_OPERATIONS.join("|")}> --runs-root <dir> ` +
   "(--run-dir <dir> | --manifest <file>) [--wave N] [--lenses N] [--lens <name>] [--threshold N]";
 
 const usageError: HookResult = { kind: "error", message: USAGE };
 
-/** Operations that consult an already-written manifest.json. */
-const MANIFEST_SCOPED = new Set(["manifest", "lenses", "verdict", "tally"]);
+/** Operations that consult an already-written manifest.json — every one but the
+ *  `brief` that creates the run. Derived, so adding an operation cannot leave
+ *  this set silently stale. */
+const MANIFEST_SCOPED: ReadonlySet<string> = new Set(
+  REVIEW_PANEL_OPERATIONS.filter((operation) => operation !== "brief"),
+);
 
 function positiveInteger(raw: string | null): number | null {
   return raw !== null && /^\d+$/.test(raw) && Number(raw) > 0 ? Number(raw) : null;

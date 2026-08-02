@@ -45,10 +45,30 @@ function artifactErrors(manifest: PanelManifest, runDir: string, includeCandidat
   });
 }
 
-const USAGE = "Usage: helper panel-contract <interview|manifest|criteria|verdict|aggregate> [--runs-root <dir> --manifest <file> --designers <N> --criterion <text>]";
+/**
+ * Every operation this helper implements, in the order one run performs them.
+ *
+ * Exported for the same reason as REVIEW_PANEL_OPERATIONS: the `/loom --panel`
+ * runbook must document all of them and drive them in this order, and
+ * `tests/runbook-contract.test.ts` binds the prose to this list both ways.
+ */
+export const PANEL_CONTRACT_OPERATIONS = [
+  "interview",
+  "manifest",
+  "criteria",
+  "verdict",
+  "aggregate",
+] as const;
+export type PanelContractOperation = (typeof PANEL_CONTRACT_OPERATIONS)[number];
 
-/** Operations that share the run-boundary → manifest → interview prelude. */
-const RUN_SCOPED = new Set(["manifest", "criteria", "verdict", "aggregate"]);
+const USAGE = `Usage: helper panel-contract <${PANEL_CONTRACT_OPERATIONS.join("|")}> [--runs-root <dir> --manifest <file> --designers <N> --criterion <text>]`;
+
+/** Operations that share the run-boundary → manifest → interview prelude —
+ *  every one but the `interview` that produces the digest they all read.
+ *  Derived, so a new operation cannot leave this set silently stale. */
+const RUN_SCOPED: ReadonlySet<string> = new Set(
+  PANEL_CONTRACT_OPERATIONS.filter((operation) => operation !== "interview"),
+);
 
 /** Validate untrusted panel handoffs at the imperative filesystem boundary. */
 const handler: HookHandler = async (stdin, args) => {
