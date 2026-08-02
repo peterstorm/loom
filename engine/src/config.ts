@@ -9,6 +9,10 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PHASES, type Phase } from "./types";
+// Panel SIZE policy is derived from the lens tables that enforce it, not
+// restated. core/panel-contract depends only on core/panel-kernel, which
+// depends on nothing in src — so this import adds no cycle.
+import { PANEL_BASELINE_LENSES, PANEL_LENSES } from "./core/panel-contract";
 
 /** Markers above this trigger mandatory clarify phase */
 export const CLARIFY_THRESHOLD = 3;
@@ -16,12 +20,25 @@ export const CLARIFY_THRESHOLD = 3;
 /** Valid phase ordering — re-exported from the single source tuple in types. */
 export const PHASE_ORDER: readonly Phase[] = PHASES;
 
-/** Orchestration role of an agent.
- *  `phase` identifies the phase the agent performs/completes; it is not the
- *  transition target. Normal phase-agent completion is handed to
- *  resolveTransition, while panel-agent completion is intentionally ignored by
- *  advance-phase so the architecture phase cannot advance mid-panel. */
-type AgentRole = { readonly role: "phase" | "panel"; readonly phase: Phase };
+/**
+ * Orchestration role of an agent.
+ *
+ * A UNION, not a record with a `role` beside a `phase` both branches carry.
+ * `phase` identifies the phase a phase agent performs/completes; it is not the
+ * transition target. Panel agents have no per-agent phase to declare — they all
+ * run in ARCH_PANEL_PHASE by construction — and while the product form let them
+ * declare one, `{ role: "panel", phase: "decompose" }` was representable and
+ * ruled out only by a load-time throw that collected the distinct values and
+ * asserted there was exactly one. The union deletes both the impossible state
+ * and the throw that policed it.
+ *
+ * Normal phase-agent completion is handed to resolveTransition, while
+ * panel-agent completion is intentionally ignored by advance-phase so the
+ * architecture phase cannot advance mid-panel.
+ */
+type AgentRole =
+  | { readonly role: "phase"; readonly phase: Phase }
+  | { readonly role: "panel" };
 
 /** Single source of truth for every architecture-orchestration agent and its
  *  role. PHASE_AGENT_MAP and ARCH_PANEL_AGENTS are DERIVED views over this map
@@ -38,9 +55,9 @@ const ARCHITECTURE_AGENTS = {
   "architecture-agent": { role: "phase", phase: "architecture" },
   "plan-alignment-agent": { role: "phase", phase: "plan-alignment" },
   "decompose-agent": { role: "phase", phase: "decompose" },
-  "arch-interviewer-agent": { role: "panel", phase: "architecture" },
-  "arch-designer-agent": { role: "panel", phase: "architecture" },
-  "arch-judge-agent": { role: "panel", phase: "architecture" },
+  "arch-interviewer-agent": { role: "panel" },
+  "arch-designer-agent": { role: "panel" },
+  "arch-judge-agent": { role: "panel" },
 } as const satisfies Record<string, AgentRole>;
 
 /** Phase agents → their phase. DERIVED from ARCHITECTURE_AGENTS (role `phase`).
@@ -68,9 +85,13 @@ export const PHASE_AGENT_MAP: Readonly<Record<string, Phase | undefined>> = Obje
   Object.assign(
     Object.create(null) as Record<string, Phase>,
     Object.fromEntries(
-      Object.entries(ARCHITECTURE_AGENTS)
-        .filter(([, v]) => v.role === "phase")
-        .map(([name, v]): [string, Phase] => [name, v.phase]),
+      // `flatMap` rather than `filter().map()`: the role union narrows inside
+      // the callback that reads `phase`, so only the branch that HAS a phase can
+      // contribute one. `filter` leaves the value widened, which is what made
+      // the panel branch's absent `phase` a compile error rather than a proof.
+      Object.entries(ARCHITECTURE_AGENTS).flatMap(([name, v]): [string, Phase][] =>
+        v.role === "phase" ? [[name, v.phase]] : [],
+      ),
     ),
   ),
 );
@@ -107,38 +128,23 @@ export const ARCH_PANEL_AGENTS: ReadonlySet<string> = frozenSet(
     .map(([name]) => name),
 );
 
-/** The single phase shared by every `role: "panel"` entry in
- *  ARCHITECTURE_AGENTS. GENUINELY derived (not a literal): we collect the
- *  distinct `phase` values of all panel entries and assert exactly one, so
- *  adding a panel agent with a divergent `phase` throws at load rather than
- *  silently splitting the panel set across phases. The one-phase invariant is
- *  what lets ARCH_PANEL_PHASE below be a single constant. Requires >= 1 panel
- *  agent — panel mode is a shipped feature and its designer/judge/interviewer
- *  entries are always present; a zero-panel config is unsupported and fails loud. */
-function derivePanelPhase(): Phase {
-  const phases = new Set(
-    Object.values(ARCHITECTURE_AGENTS)
-      .filter((v) => v.role === "panel")
-      .map((v) => v.phase),
-  );
-  if (phases.size !== 1) {
-    throw new Error(
-      `loom config invariant violated: all panel agents must share exactly one ` +
-        `phase, but ARCHITECTURE_AGENTS panel entries declare: ` +
-        `${[...phases].join(", ") || "(none)"}. ARCH_PANEL_PHASE cannot be derived.`,
-    );
-  }
-  return [...phases][0]!;
-}
-
-/** The phase every panel agent is classified as for phase-order validation.
- *  Derived from the panel agents' shared `phase` in ARCHITECTURE_AGENTS (see
- *  derivePanelPhase) so the set and the phase it maps to cannot drift:
- *  detectPhase (validate-phase-order.ts) routes panel agents here via this
- *  constant instead of a bare `"architecture"` literal. Must stay a phase panel
- *  agents are allowed to run in, and one whose SubagentStop does NOT advance
- *  (panel agents are absent from PHASE_AGENT_MAP). */
-export const ARCH_PANEL_PHASE: Phase = derivePanelPhase();
+/**
+ * The phase every panel agent is classified as for phase-order validation.
+ *
+ * ONE constant rather than a per-agent field, because the panel is a stage
+ * WITHIN a phase: an interviewer, N designers and K judges all run inside
+ * `architecture` and none of them may advance out of it. `AgentRole`'s panel
+ * branch therefore carries no `phase` to disagree with this, which is what
+ * retired `derivePanelPhase` — a function that collected the distinct declared
+ * phases and threw unless there was exactly one, policing at load time a state
+ * the type now cannot express.
+ *
+ * detectPhase (validate-phase-order.ts) routes panel agents here via this
+ * constant instead of a bare `"architecture"` literal. Must stay a phase panel
+ * agents are allowed to run in, and one whose SubagentStop does NOT advance
+ * (panel agents are absent from PHASE_AGENT_MAP).
+ */
+export const ARCH_PANEL_PHASE: Phase = "architecture";
 
 /** Every PHASE_AGENT_MAP key `detectPhase` (validate-phase-order.ts) could probe
  *  when routing this panel agent, invoked either bare or `-agent`-suffixed.
@@ -198,16 +204,22 @@ assertPanelPhaseDisjoint();
  *  concrete prose literal drifts from this executable policy constant. */
 export const PANEL_DESIGNERS_DEFAULT = 3;
 
-/** Minimum viable panel size: the mandatory approach gate needs two options. */
-export const PANEL_DESIGNERS_MIN = 2;
+/** Minimum viable panel size: the mandatory approach gate needs two options.
+ *
+ *  DERIVED from the baseline lens set that `selectPanelLenses` always includes,
+ *  mirroring the review panel's `REVIEW_LENSES_MIN = BASELINE_LENSES.length`.
+ *  While it was a literal `2`, adding a third architecture baseline lens left
+ *  this clamping to 2 while `selectLenses` demanded 3 — the two numbers were
+ *  bound only by prose and a bare `expect(...).toBe(2)`. */
+export const PANEL_DESIGNERS_MIN = PANEL_BASELINE_LENSES.length;
 
-/** Number of distinct architecture lenses in references/panel-lenses.md — the hard
- *  cap on parallel designers, since each designer takes exactly one lens and no two
- *  can share. Kept as a constant (not re-parsed at runtime) so clampPanelDesigners
- *  stays pure; panel-config.test.ts asserts it still equals the lens-heading count
- *  in the markdown, so adding/removing a lens without updating this value fails CI.
+/** Number of distinct architecture lenses — the hard cap on parallel designers,
+ *  since each designer takes exactly one lens and no two can share. Derived from
+ *  the lens table itself for the reason above; panel-config.test.ts additionally
+ *  asserts it equals the lens-heading count in references/panel-lenses.md, so a
+ *  lens added to the markdown and not the table (or the reverse) fails CI.
  *  Referenced (with its numeric value) by commands/loom.md. */
-export const PANEL_LENS_COUNT = 5;
+export const PANEL_LENS_COUNT = PANEL_LENSES.length;
 
 /** Fixed number of adversarial judge agents for `/loom --panel`. Each judge scores
  *  every candidate against exactly one criterion (primary axis, testability bar,
@@ -219,17 +231,14 @@ export const PANEL_LENS_COUNT = 5;
  *  panel-config test. */
 export const PANEL_JUDGES_DEFAULT = 3;
 
-/** Clamp a numeric designer count into the viable range
- *  [PANEL_DESIGNERS_MIN, PANEL_LENS_COUNT]. The markdown shell rejects malformed
- *  and fractional raw flag values before applying the equivalent bounds.
- *  Non-finite programmatic input falls back to PANEL_DESIGNERS_DEFAULT. */
-export function clampPanelDesigners(n: number): number {
-  if (!Number.isFinite(n)) return PANEL_DESIGNERS_DEFAULT;
-  const floored = Math.floor(n);
-  if (floored < PANEL_DESIGNERS_MIN) return PANEL_DESIGNERS_MIN;
-  if (floored > PANEL_LENS_COUNT) return PANEL_LENS_COUNT;
-  return floored;
-}
+// There is deliberately no `clampPanelDesigners` here. It existed as an
+// exported, tested function that no engine code path ever called: the real
+// enforcement is `selectLenses`' range check, which REJECTS an out-of-range
+// designer count rather than clamping it, and `commands/loom.md` rejects
+// malformed raw flag values before that. A second set of bounds that nothing
+// consults is a specification wearing a function's clothes — it can drift from
+// the enforced rule with no runtime consequence and no failing test. The two
+// constants above are the shared policy; `selectLenses` is the enforcement.
 
 /** Impl agents → all map to "execute" phase.
  *  Note: agent identifiers are intentionally `string` (no brand). Bun runs
@@ -261,6 +270,21 @@ export const REVIEW_SUB_AGENTS = new Set([
   "comment-analyzer",
   "code-simplifier",
 ]);
+
+/**
+ * Is this agent type one whose output carries review findings?
+ *
+ * Lives HERE, beside the set it queries, rather than in core/review-output.
+ * That module declares itself pure — "no I/O, no clock, no randomness" — and
+ * importing this file to answer a one-line membership question made the claim
+ * false: `config` resolves TASK_GRAPH_PATH at import, which spawns
+ * `git rev-parse --show-toplevel`, and drags in four throwing load-time
+ * assertions besides. Agent-name classification is a harness concern, and both
+ * callers already hold the agent type before they reach the parser.
+ */
+export function isReviewAgent(agentType: string): boolean {
+  return REVIEW_SUB_AGENTS.has(agentType);
+}
 
 /** All review-related agents (sub-agents + spec-check invoker) */
 export const REVIEW_AGENTS = new Set([

@@ -3,12 +3,23 @@
  */
 
 import { match } from "ts-pattern";
-import type { Finding, RefutedFinding } from "./core/findings";
 
 // --- Hook Result (discriminated union) ---
 
 export type HookResult =
-  | { kind: "allow" }
+  /**
+   * The tool call proceeds. `systemMessage` is for the case where it proceeds
+   * but the operator needs to know something anyway — a gate reporting that it
+   * could NOT run, most of all.
+   *
+   * It exists because stderr does not reach anyone on a successful hook: an
+   * exit-0 PreToolUse hook's stderr is not surfaced outside `--debug`, so
+   * `validate-agent-skill` announcing "skill enforcement SKIPPED for this spawn"
+   * was as silent as the `allow` it replaced. The harness DOES surface a
+   * `systemMessage` from a hook's JSON stdout, which is the only channel that
+   * actually reaches the operator on this path.
+   */
+  | { kind: "allow"; systemMessage?: string }
   | { kind: "block"; message: string }
   | { kind: "error"; message: string }
   | { kind: "passthrough" };
@@ -21,6 +32,11 @@ export function nonEmptyMessage(s: string | undefined | null): string {
 
 /** Smart constructors — preferred over object literals so callers funnel through nonEmptyMessage. */
 export const allowResult = (): HookResult => ({ kind: "allow" });
+/** Allow the call, but tell the operator something. See `HookResult.allow`. */
+export const allowWithNotice = (systemMessage: string): HookResult => ({
+  kind: "allow",
+  systemMessage: nonEmptyMessage(systemMessage),
+});
 export const passthroughResult = (): HookResult => ({ kind: "passthrough" });
 export const errorResult = (message: string): HookResult => ({ kind: "error", message: nonEmptyMessage(message) });
 export const blockResult = (message: string): HookResult => ({ kind: "block", message: nonEmptyMessage(message) });
@@ -112,13 +128,78 @@ export function legacyTestsPassedNote(task: unknown): string | null {
   return `legacy tests_passed found on task ${id}; re-run task or regenerate graph — field replaced by test_result`;
 }
 
+// --- Review findings ---
+//
+// The finding SHAPES live here, with `Task`, because this module is the schema
+// root: every other module may depend on it and it depends on none of them.
+// They used to be declared in core/findings and imported back, which made
+// types.ts and core/findings mutually dependent — harmless only for as long as
+// both directions stayed `import type`. core/findings still OWNS the finding
+// aggregate (minting identity, proving lockstep, the two review-path writers)
+// and re-exports these so no import site had to move.
+
+/** Severity tuple — the source of truth `parseFindingSeverity` proves against. */
+export const FINDING_SEVERITIES = ["critical", "advisory"] as const;
+export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
+
+/**
+ * A finding exactly as a reviewer emitted it: a claim, a severity, and an
+ * optional location. Deliberately carries NO identity — see core/findings.
+ */
+export interface DraftFinding {
+  readonly severity: FindingSeverity;
+  /** Repo-relative path the claim concerns, or null when the reviewer gave none. */
+  readonly file: string | null;
+  /** 1-based line, or null. */
+  readonly line: number | null;
+  /** The single assertion a verifier will try to refute. */
+  readonly claim: string;
+}
+
+/** A draft plus derived identity. Only `attributeFindings` produces these. */
+export interface Finding extends DraftFinding {
+  /** `${agent}-${ordinal}`, derived — never agent-chosen. */
+  readonly id: string;
+  /** The review agent that emitted the claim (namespace already stripped). */
+  readonly agent: string;
+}
+
+/**
+ * One verifier's refutation: the lens that voted to kill a finding, and why.
+ *
+ * A pair, not two positionally-aligned arrays. The parallel-array form let a
+ * lens list and a reason list disagree in length, which no reader could detect
+ * and only a runtime check in the parser could reject; here the misalignment is
+ * unrepresentable.
+ *
+ * `lens` is the open string form on purpose: a refutation record OUTLIVES the
+ * lens table that produced it, and a stored audit trail must not become
+ * unreadable because a lens was later renamed or retired.
+ */
+export interface Refutation {
+  readonly lens: string;
+  readonly reason: string;
+}
+
+/**
+ * A finding a refutation panel killed, together with why.
+ *
+ * Recorded, never deleted: a wrong refutation is a shipped bug, and a silently
+ * dropped critical finding is indistinguishable from one that was never found.
+ */
+export interface RefutedFinding {
+  readonly finding: Finding;
+  /** The lenses that refuted it, with their reasoning, in lens order. Never empty. */
+  readonly refutations: readonly Refutation[];
+}
+
 export interface Task {
   id: string;
   description: string;
   agent: string;
   wave: number;
   status: TaskStatus;
-  depends_on: string[];
+  depends_on: readonly string[];
   spec_anchors?: string[];
   new_tests_required?: boolean;
   /** Files this task creates/modifies (decompose contract); older graphs may lack it */
@@ -138,6 +219,27 @@ export interface Task {
    * "CRITICAL_COUNT marker not found…" from a run two reviewers ago.
    */
   review_error?: string;
+  /**
+   * The reviewers whose transcript could not be parsed, still outstanding.
+   *
+   * `review_status` is per-TASK but evidence capture fails per-AGENT, and that
+   * mismatch was a silent data-loss bug: `/wave-gate` spawns every reviewer in
+   * one message, so a later reviewer emitting `CRITICAL_COUNT: 0` overwrote an
+   * earlier one's `evidence_capture_failed` with `passed` — the same transcripts
+   * producing a different gate outcome depending on completion order, and
+   * `checkReviews` advancing the wave. Naming the agents makes the failure
+   * SURVIVE a sibling's clean pass and, just as importantly, CLEARABLE: the
+   * reviewer that failed re-runs, drops out of this set, and the status leaves
+   * `evidence_capture_failed` only once the set is empty. A single sticky
+   * boolean would have fixed the loss and dead-ended the operator.
+   *
+   * Biconditional with the status, proven at the load boundary
+   * (`evidenceFailureError`): `review_status === "evidence_capture_failed"` iff
+   * this array is present and non-empty. `--fix` repairs a violation by clearing
+   * the whole review record — unreviewed also blocks the gate, so the repair
+   * fails closed rather than guessing which reviewer broke.
+   */
+  review_evidence_failures?: readonly string[];
   /**
    * Authoritative review findings: each with a derived id, its emitting agent,
    * and (when the reviewer supplied one) a file/line. This is the field the
@@ -213,9 +315,12 @@ export interface SpecCheck {
   run_at: string;
   critical_count?: number;
   high_count?: number;
-  critical_findings?: string[];
-  high_findings?: string[];
-  medium_findings?: string[];
+  /** `readonly` for the reason `Task.critical_findings` is: a holder that can
+   *  `push` into a findings view mutates gate input in place, with no compile
+   *  error at the site that did it. */
+  critical_findings?: readonly string[];
+  high_findings?: readonly string[];
+  medium_findings?: readonly string[];
   verdict: SpecCheckVerdict;
   error?: string;
 }
@@ -228,9 +333,12 @@ export interface TaskGraph {
   spec_file: string | null;
   plan_file: string | null;
   plan_title?: string;
-  tasks: Task[];
+  /** `readonly` for the same reason `Task.findings` is: every producer already
+   *  returns a fresh array, and an in-place `push`/`sort` on the task list is a
+   *  state mutation that bypasses `StateManager.update`'s locked transform. */
+  tasks: readonly Task[];
   current_wave?: number;
-  executing_tasks?: string[];
+  executing_tasks?: readonly string[];
   wave_gates: Record<string, WaveGate>;
   github_issue?: number;
   github_repo?: string;

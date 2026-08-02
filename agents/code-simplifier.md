@@ -93,3 +93,54 @@ For each simplification:
 Only refine code that has been recently modified or touched in the current session, unless explicitly instructed to review a broader scope.
 
 Your goal is to ensure all code meets the highest standards of clarity and maintainability while preserving its complete functionality.
+
+## Machine Summary (MANDATORY)
+
+End every run with this block, verbatim in shape, even when your counts are
+zero. You are in loom's `REVIEW_SUB_AGENTS`, so `store-reviewer-findings` parses
+your transcript exactly like every other reviewer's: omitting this block marks
+the task `evidence_capture_failed` and blocks the wave — which is what happened
+while this section was missing.
+
+Simplification findings are almost always **advisory**. Reserve `CRITICAL` for a
+simplification you found because the current code is WRONG — a duplicated branch
+that has already diverged, a condition that cannot be reached, an abstraction
+whose two callers disagree about its contract. "This could be tidier" is
+advisory, always.
+
+````
+### Machine Summary
+CRITICAL_COUNT: {number of critical findings}
+ADVISORY_COUNT: {number of advisory findings}
+CRITICAL: {one critical finding per line}
+ADVISORY: {one advisory finding per line}
+
+```findings
+[
+  { "severity": "advisory", "file": "src/x.ts", "line": 42, "claim": "the single assertion to refute" }
+]
+```
+````
+
+The fenced `findings` block is optional but strongly preferred — it is what
+gives each finding a stable identity and a location, which the wave gate's
+refutation panel needs to adjudicate it. Rules:
+
+- `severity` is exactly `"critical"` or `"advisory"`; entries must appear in the
+  same order as your `CRITICAL:` / `ADVISORY:` lines.
+- `claim` is ONE assertion — the thing a skeptic would try to refute. Do not
+  bundle two problems into one entry.
+- Use `null` for `file`/`line` when you cannot locate the issue. Never guess: a
+  wrong location gets your finding refuted on sight.
+- Never invent an `id`. Ids are derived by the engine from (agent, emission
+  order) so they are stable and need no trust.
+
+`CRITICAL_COUNT` and `ADVISORY_COUNT` are the authority on how many findings you
+made, and the block must ACCOUNT FOR EVERY FINDING YOU REPORTED — advisories
+included: when it parses and is long enough, it becomes the source of findings,
+so every `CRITICAL:` line AND every `ADVISORY:` line must also appear in the
+block with the matching `"severity"`. A block that lists fewer findings of
+EITHER severity than your marker lines loses to them; the claims survive, the
+locations do not. Write the same claim text in both places — the engine
+reconciles by value, and a reworded claim arrives twice and burns a verifier
+vote on a duplicate.

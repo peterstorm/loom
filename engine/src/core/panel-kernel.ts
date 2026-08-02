@@ -22,7 +22,15 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
-import { basename, join, normalize } from "node:path";
+// `posix`, not the platform default. Manifest fields are compared for EXACT
+// string equality against paths this module builds, and the JSON a panel writes
+// is read back by the next step — so a separator that varies with
+// `process.platform` makes "the same path" a machine-dependent question inside a
+// module that declares itself pure. Loom's run directories are posix paths in
+// every runbook, template and smoke test.
+import { posix } from "node:path";
+
+const { basename, join, normalize } = posix;
 
 export type ParseResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -202,20 +210,56 @@ export function parseRunManifest<Panel extends string, Id extends string>(
     }
   }
 
-  const ids = entries.map((entry) => entry.id);
-  if (new Set(ids).size !== ids.length) errors.push(`manifest ${noun} ids must be unique`);
-  for (const expectedId of spec.expectedIds) {
-    if (!ids.includes(expectedId)) errors.push(`manifest is missing ${noun}: ${expectedId}`);
-  }
-  if (ids.length === spec.expectedIds.length && ids.some((id, index) => id !== spec.expectedIds[index])) {
-    errors.push(`manifest ${nounPlural} must exactly match: ${spec.expectedIds.join(", ")}`);
-  }
+  errors.push(
+    ...exactOrderedSetErrors(
+      entries.map((entry) => entry.id),
+      spec.expectedIds,
+      { subject: `manifest ${noun} ids`, missing: `manifest is missing ${noun}`, ordered: `manifest ${nounPlural}` },
+    ),
+  );
   const filenames = entries.map((entry) => entry.filename);
   if (new Set(filenames).size !== filenames.length) errors.push(`manifest ${noun} filenames must be unique`);
   const paths = entries.map((entry) => entry.path);
   if (new Set(paths).size !== paths.length) errors.push(`manifest ${noun} paths must be unique`);
 
   return errors.length > 0 ? fail(errors) : ok({ runId, contextMd, contextJson, entries });
+}
+
+/** How an exact-ordered-set diagnostic names the three things it can report. */
+export interface OrderedSetLabels {
+  /** The collection, for the uniqueness error: "manifest finding ids". */
+  readonly subject: string;
+  /** The lead-in for an absent member: "manifest is missing finding". */
+  readonly missing: string;
+  /** The collection, for the order error: "manifest findings". */
+  readonly ordered: string;
+}
+
+/**
+ * The four rules that make one array EXACTLY another: unique, no member absent,
+ * same length, same order.
+ *
+ * Extracted because `parseRunManifest` implemented them for its item array and
+ * `parseReviewManifest` hand-rolled the same four for its `lenses` array twenty
+ * lines from the call that could not carry them — `RunManifestSpec` had no slot
+ * for a second validated id array. Two copies of one rule set is precisely what
+ * `parseRunManifest`'s own note records as having ALREADY produced a silent
+ * divergence between the two panels.
+ */
+export function exactOrderedSetErrors<Id extends string>(
+  actual: readonly Id[],
+  expected: readonly Id[],
+  labels: OrderedSetLabels,
+): string[] {
+  const errors: string[] = [];
+  if (new Set(actual).size !== actual.length) errors.push(`${labels.subject} must be unique`);
+  for (const expectedId of expected) {
+    if (!actual.includes(expectedId)) errors.push(`${labels.missing}: ${expectedId}`);
+  }
+  if (actual.length === expected.length && actual.some((id, index) => id !== expected[index])) {
+    errors.push(`${labels.ordered} must exactly match: ${expected.join(", ")}`);
+  }
+  return errors;
 }
 
 /** How one panel picks the exact ordered lens set it runs. */
@@ -460,7 +504,18 @@ export function coverageErrors<Payload>(
   const errors: string[] = [];
   for (const criterion of criteriaInOrder) {
     const verdict = byCriterion.get(criterion);
-    if (!verdict) continue;
+    if (!verdict) {
+      // Reported, not skipped. This function exists to be redundant for
+      // standalone callers — "a coverage rule that only holds when you came in
+      // through the front door is the kind that silently stops holding" — and a
+      // `continue` here left a hole at exactly the failure it is redundant
+      // against. An absent criterion contributed no error, so an aggregate
+      // computed over a missing verdict passed the net that was meant to catch
+      // it. Unreachable through either aggregator today (both run
+      // `parseCriteriaSet` first); a latent hole is still a hole.
+      errors.push(`verdict for '${criterion}' is missing entirely`);
+      continue;
+    }
     const seen = new Set(verdict.entries.map(itemIdOf));
     const covers =
       verdict.entries.length === expectedItemIds.length &&

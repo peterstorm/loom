@@ -14,8 +14,11 @@ import { PHASE_ORDER, TASK_GRAPH_PATH } from "./config";
 import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
 import { REVIEW_STATUSES, TASK_STATUSES } from "./types";
 import {
+  findingIdCollisionError,
   findingsLockstepError,
   findingsUnionError,
+  findingsViewError,
+  evidenceFailureError,
   refutationsUnionError,
 } from "./core/findings";
 import type { TaskGraph } from "./types";
@@ -112,6 +115,19 @@ function taskUnionError(v: unknown, index: number): string | null {
   // `validate-task-graph --fix` is the repair that restores lockstep.
   const findingsError = findingsUnionError(t.findings, `tasks[${index}] ("${id}"): findings`);
   if (findingsError !== null) return findingsError;
+  // The two derived views earn their `readonly string[]` type independently of
+  // `findings`, because a task can carry a view with no array beside it (every
+  // pre-identity graph does) and the lockstep check below returns early on
+  // `findings === undefined`. Without this, a `critical_findings: ["real", 42]`
+  // on such a task loaded clean and `checkCriticalFindings` threw
+  // `f.trim is not a function` out of the wave gate.
+  for (const severity of ["critical", "advisory"] as const) {
+    const viewError = findingsViewError(
+      t[`${severity}_findings`],
+      `tasks[${index}] ("${id}"): ${severity}_findings`,
+    );
+    if (viewError !== null) return viewError;
+  }
   // Shape alone is not the invariant. `critical_findings`/`advisory_findings`
   // are DERIVED views, the wave gate counts them, and nothing proved they agree
   // with the array they summarize — so a critical present in only one of the
@@ -123,10 +139,18 @@ function taskUnionError(v: unknown, index: number): string | null {
     `tasks[${index}] ("${id}")`,
   );
   if (lockstepError !== null) return lockstepError;
-  return refutationsUnionError(
+  const refutationsError = refutationsUnionError(
     t.refuted_findings,
     `tasks[${index}] ("${id}"): refuted_findings`,
   );
+  if (refutationsError !== null) return refutationsError;
+  const collisionError = findingIdCollisionError(
+    t.findings,
+    t.refuted_findings,
+    `tasks[${index}] ("${id}")`,
+  );
+  if (collisionError !== null) return collisionError;
+  return evidenceFailureError(t, `tasks[${index}] ("${id}")`);
 }
 
 /**

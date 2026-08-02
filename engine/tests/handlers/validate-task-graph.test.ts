@@ -565,3 +565,117 @@ describe("fixFull repairs findings WITH their derived views", () => {
     }
   });
 });
+
+/**
+ * Round-14: the operator's validator and the loader must agree on "valid".
+ *
+ * `validateFull` ran no findings, lockstep, or duplicate-id checks, so
+ * `helper validate-task-graph` reported `{ok: true}` on a graph
+ * `StateManager.load()` refuses to open — two validators, two rule sets, and the
+ * one the load-boundary diagnostic tells the operator to run was the weaker one.
+ */
+describe("validateFull agrees with the load boundary about the findings aggregate", () => {
+  const base = {
+    plan_title: "t",
+    plan_file: "p.md",
+    spec_file: "s.md",
+  };
+  const task = (fields: Record<string, unknown>) => ({
+    id: "T1",
+    description: "impl the thing",
+    agent: "code-implementer-agent",
+    wave: 1,
+    status: "pending",
+    depends_on: [],
+    ...fields,
+  });
+  const graph = (fields: Record<string, unknown>) => ({
+    ...base,
+    current_phase: "execute",
+    phase_artifacts: {},
+    wave_gates: {},
+    tasks: [task(fields)],
+  });
+
+  const CASES: readonly (readonly [string, Record<string, unknown>])[] = [
+    ["a view claim no finding accounts for", { findings: [], critical_findings: ["orphan"], advisory_findings: [] }],
+    [
+      "a finding no view accounts for",
+      {
+        findings: [{ id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "real" }],
+        critical_findings: [],
+        advisory_findings: [],
+      },
+    ],
+    ["a non-string in a derived view", { critical_findings: ["real", 42] }],
+    [
+      "a duplicated finding id",
+      {
+        findings: [
+          { id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "a" },
+          { id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "b" },
+        ],
+        critical_findings: ["a", "b"],
+        advisory_findings: [],
+      },
+    ],
+    ["a malformed findings entry", { findings: [{ severity: "critical", claim: "no id" }] }],
+    ["a malformed refutation record", { refuted_findings: [{ finding: null, refutations: [] }] }],
+  ];
+
+  it.each(CASES)("both reject %s", (_label, fields) => {
+    expect(validateFull(graph(fields)).ok, "validateFull must reject it").toBe(false);
+    expect(parseTaskGraph(graph(fields)).ok, "the load boundary must reject it").toBe(false);
+  });
+
+  it.each(CASES)("--fix repairs %s so BOTH then accept it", (_label, fields) => {
+    const repaired = JSON.parse(fixFull(graph(fields)).json);
+    expect(validateFull(repaired).ok).toBe(true);
+    expect(parseTaskGraph(repaired).ok).toBe(true);
+  });
+
+  it("accepts a graph whose findings are in step", () => {
+    const inStep = graph({
+      findings: [{ id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "real" }],
+      critical_findings: ["real"],
+      advisory_findings: [],
+      review_status: "blocked",
+    });
+    expect(validateFull(inStep).ok).toBe(true);
+    expect(parseTaskGraph(inStep).ok).toBe(true);
+  });
+
+  it("does NOT apply the findings rules to the agent-controlled decompose payload", () => {
+    // populate-task-graph validates the payload BEFORE sanitizeDecomposedTask
+    // strips the execution state a planner must never mint. Holding it to the
+    // findings invariants would reject exactly the forged input that
+    // sanitization exists to clean, turning a successful strip into a hard fail.
+    const forged = graph({ findings: [], critical_findings: ["planted"], advisory_findings: [] });
+    expect(validateFull(forged, "decompose-payload").ok).toBe(true);
+    expect(validateFull(forged, "state-file").ok).toBe(false);
+  });
+
+  it("--fix clears a review record whose evidence-failure pairing is broken", () => {
+    // No honest reconstruction exists — nothing on disk says WHICH reviewer's
+    // transcript could not be parsed — so the repair clears the record. That is
+    // the fail-closed direction: checkReviews counts an unreviewed task as a
+    // gate failure, while inventing an agent name would leave a permanent block.
+    const broken = graph({ review_status: "evidence_capture_failed" });
+    expect(parseTaskGraph(broken).ok).toBe(false);
+    const repaired = JSON.parse(fixFull(broken).json);
+    expect(repaired.tasks[0].review_status).toBe("pending");
+    expect(repaired.tasks[0].review_evidence_failures).toBeUndefined();
+    expect(parseTaskGraph(repaired).ok).toBe(true);
+  });
+
+  it("--fix preserves a well-formed evidence-failure record", () => {
+    const valid = graph({
+      review_status: "evidence_capture_failed",
+      review_evidence_failures: ["code-reviewer"],
+    });
+    expect(parseTaskGraph(valid).ok).toBe(true);
+    const repaired = JSON.parse(fixFull(valid).json);
+    expect(repaired.tasks[0].review_status).toBe("evidence_capture_failed");
+    expect(repaired.tasks[0].review_evidence_failures).toEqual(["code-reviewer"]);
+  });
+});

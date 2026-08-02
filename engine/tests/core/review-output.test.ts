@@ -4,7 +4,7 @@ import { applyReviewResolution, resolveReviewFindings, reviewResolutionLog } fro
 import { claimsOfSeverity, removeOnce } from "../../src/core/findings";
 import { parseMachineSummary, parseLegacyFindings, makeParsedFindings, buildEvidenceFailureMessage, reconcileFindings } from "../../src/core/review-output";
 import { mergeFindings } from "../../src/core/findings";
-import { isReviewAgent } from "../../src/core/review-output";
+import { isReviewAgent } from "../../src/config";
 import { REVIEW_SUB_AGENTS } from "../../src/config";
 import type { Task } from "../../src/types";
 
@@ -449,7 +449,7 @@ describe("reconcileFindings (pure)", () => {
   it("synthesizes placeholder when count > 0 but no critical findings parsed", () => {
     const result = reconcileFindings(makeParsedFindings({ critical: [], advisory: [], criticalCount: 3 }));
     expect(result.critical).toHaveLength(1);
-    expect(result.critical[0]).toContain("3 findings not captured");
+    expect(result.critical[0]).toContain("3 critical findings not captured");
   });
 
   it("returns input unchanged when count and findings agree", () => {
@@ -736,7 +736,7 @@ describe("reconcileFindings backstops a SHORTFALL, not only a total loss", () =>
 
   it("keeps the total-loss wording when nothing was captured", () => {
     const result = reconcileFindings(makeParsedFindings({ critical: [], criticalCount: 3 }));
-    expect(result.critical).toEqual(["Review output parsing failed - 3 findings not captured"]);
+    expect(result.critical).toEqual(["Review output parsing failed - 3 critical findings not captured"]);
   });
 
   it("is a no-op when the capture matches or exceeds the count", () => {

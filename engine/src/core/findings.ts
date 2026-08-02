@@ -16,8 +16,11 @@
  * Ids are never agent-chosen. Agents renumber between runs, collide with each
  * other, and reuse ids for different claims; a derived id needs no trust and is
  * stable for the life of the array it lives in. `attributeFindings` is the only
- * constructor of `Finding`, so an un-attributed draft cannot be mistaken for an
- * identified one at a type level.
+ * place identity is MINTED, so an un-attributed draft cannot be mistaken for an
+ * identified one at a type level. (`parseStoredFinding` also produces a
+ * `Finding`, but it reads back identity already on disk rather than deriving a
+ * new one — which is exactly why `findingsUnionError` has to re-prove
+ * uniqueness for a file the minting path never touched.)
  *
  * This module owns the `Task.findings` aggregate: minting identity, reading it
  * back out of an untrusted state file, proving the lockstep invariant at the
@@ -37,39 +40,27 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
-import type { ReviewStatus, Task } from "../types";
+import { FINDING_SEVERITIES, type ReviewStatus, type Task } from "../types";
+import type {
+  DraftFinding,
+  Finding,
+  FindingSeverity,
+  Refutation,
+  RefutedFinding,
+} from "../types";
 import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
 
-export const FINDING_SEVERITIES = ["critical", "advisory"] as const;
-export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
+// The shapes live in types.ts (the schema root, with `Task`); this module owns
+// their BEHAVIOUR. Re-exported so every existing import site keeps working and
+// so "where findings come from" stays one answer.
+export { FINDING_SEVERITIES };
+export type { DraftFinding, Finding, FindingSeverity, Refutation, RefutedFinding };
 
 /** Smart constructor: null when `raw` is not a known severity. */
 export function parseFindingSeverity(raw: unknown): FindingSeverity | null {
   return typeof raw === "string" && (FINDING_SEVERITIES as readonly string[]).includes(raw)
     ? (raw as FindingSeverity)
     : null;
-}
-
-/**
- * A finding exactly as a reviewer emitted it: a claim, a severity, and an
- * optional location. Deliberately carries NO identity — see the module note.
- */
-export interface DraftFinding {
-  readonly severity: FindingSeverity;
-  /** Repo-relative path the claim concerns, or null when the reviewer gave none. */
-  readonly file: string | null;
-  /** 1-based line, or null. */
-  readonly line: number | null;
-  /** The single assertion a verifier will try to refute. */
-  readonly claim: string;
-}
-
-/** A draft plus derived identity. Only `attributeFindings` produces these. */
-export interface Finding extends DraftFinding {
-  /** `${agent}-${ordinal}`, derived — never agent-chosen. */
-  readonly id: string;
-  /** The review agent that emitted the claim (namespace already stripped). */
-  readonly agent: string;
 }
 
 /**
@@ -301,35 +292,6 @@ export function hasFindingsBlock(output: string): boolean {
 // Adjudicated findings
 // ---------------------------------------------------------------------------
 
-/**
- * One verifier's refutation: the lens that voted to kill a finding, and why.
- *
- * A pair, not two positionally-aligned arrays. The parallel-array form let a
- * lens list and a reason list disagree in length, which no reader could detect
- * and only a runtime check in the parser could reject; here the misalignment is
- * unrepresentable.
- *
- * `lens` is the open string form on purpose: a refutation record OUTLIVES the
- * lens table that produced it, and a stored audit trail must not become
- * unreadable because a lens was later renamed or retired.
- */
-export interface Refutation {
-  readonly lens: string;
-  readonly reason: string;
-}
-
-/**
- * A finding a refutation panel killed, together with why.
- *
- * Recorded, never deleted: a wrong refutation is a shipped bug, and a silently
- * dropped critical finding is indistinguishable from one that was never found.
- */
-export interface RefutedFinding {
-  readonly finding: Finding;
-  /** The lenses that refuted it, with their reasoning, in lens order. Never empty. */
-  readonly refutations: readonly Refutation[];
-}
-
 // ---------------------------------------------------------------------------
 // Reading findings back out of the (untrusted) state file
 // ---------------------------------------------------------------------------
@@ -466,6 +428,26 @@ export function findingsUnionError(raw: unknown, label: string): string | null {
 }
 
 /**
+ * Load-boundary check that a derived view is what its type claims: absent, or
+ * an array of strings.
+ *
+ * Split out because the lockstep comparison below used to FILTER non-strings
+ * out before comparing, which reported a malformed view as in step. The graph
+ * then loaded, `types.ts`' `readonly string[]` was a lie, and
+ * `complete-wave-gate`'s `checkCriticalFindings` threw `f.trim is not a
+ * function` from inside the gate — an unhandled TypeError, which is the precise
+ * failure mode the load boundary exists to convert into a diagnostic.
+ */
+export function findingsViewError(raw: unknown, label: string): string | null {
+  if (raw === undefined) return null;
+  if (!Array.isArray(raw)) return `${label} must be an array of strings when present`;
+  const index = raw.findIndex((claim) => typeof claim !== "string");
+  return index < 0
+    ? null
+    : `${label}[${index}] must be a string, got ${JSON.stringify(raw[index])} (${REPAIR_HINT})`;
+}
+
+/**
  * Load-boundary check that `findings` and its two `string[]` views agree.
  *
  * `types.ts` calls the views DERIVED, five writers keep them so, and both the
@@ -490,7 +472,13 @@ export function findingsLockstepError(
   const findings = parseStoredFindings(raw);
   for (const severity of FINDING_SEVERITIES) {
     const view = severity === "critical" ? criticalView : advisoryView;
-    const claims = Array.isArray(view) ? view.filter((c): c is string => typeof c === "string") : [];
+    // Shape FIRST, and as an error rather than a filter: a non-string in the
+    // view is not something to quietly skip past on the way to a multiset
+    // comparison — it is the defect. Checked here rather than only in
+    // `taskUnionError` so both entry points are covered by one rule.
+    const shapeError = findingsViewError(view, `${label}: ${severity}_findings`);
+    if (shapeError !== null) return shapeError;
+    const claims = (view ?? []) as readonly string[];
     const derived = claimsOfSeverity(findings, severity);
     const leftover = removeOnce(claims, derived);
     const missing = removeOnce(derived, claims);
@@ -510,9 +498,97 @@ export function refutationsUnionError(raw: unknown, label: string): string | nul
   if (raw === undefined) return null;
   if (!Array.isArray(raw)) return `${label} must be an array when present`;
   const index = raw.findIndex((entry) => parseStoredRefutation(entry) === null);
-  return index < 0
+  if (index >= 0) {
+    return `${label}[${index}] is not a well-formed refutation record (${REPAIR_HINT})`;
+  }
+  // Within `refuted_findings`, for the reason `findingsUnionError` proves it
+  // within `findings`: two records under one id attach two different verdicts
+  // to the same claim, and the audit trail can no longer say which was applied.
+  const ids = raw.map((entry) => parseStoredRefutation(entry)!.finding.id);
+  const duplicate = ids.findIndex((id, at) => ids.indexOf(id) !== at);
+  return duplicate < 0
     ? null
-    : `${label}[${index}] is not a well-formed refutation record (${REPAIR_HINT})`;
+    : `${label}[${duplicate}] repeats refuted finding id '${ids[duplicate]}' (${REPAIR_HINT})`;
+}
+
+/**
+ * Load-boundary proof of the review record's biconditional:
+ * `review_status === "evidence_capture_failed"` iff `review_evidence_failures`
+ * names at least one reviewer.
+ *
+ * Both directions matter and both are silent when broken. A status with no named
+ * agent is UNCLEARABLE — `mergeFindings` drops the merging agent from the set
+ * and only leaves the failed status once the set empties, so an empty set beside
+ * the status would either stick forever or be read as "no outstanding failures"
+ * and demote the task to `passed`, which is the data loss the field was added to
+ * close. Named agents under any OTHER status is the same defect wearing a
+ * passing record: a reviewer whose transcript nobody could parse, on a task the
+ * gate is about to advance.
+ *
+ * Lives here, with the other aggregate rules, so `taskUnionError` and
+ * `validate-task-graph` enforce it from one definition.
+ */
+export function evidenceFailureError(t: Record<string, unknown>, label: string): string | null {
+  const raw = t.review_evidence_failures;
+  if (raw !== undefined) {
+    if (!Array.isArray(raw) || raw.some((agent) => typeof agent !== "string" || agent.trim() === "")) {
+      return `${label}: review_evidence_failures must be an array of non-empty strings when present`;
+    }
+    const duplicate = raw.findIndex((agent, at) => raw.indexOf(agent) !== at);
+    if (duplicate >= 0) return `${label}: review_evidence_failures repeats '${raw[duplicate]}'`;
+  }
+  const outstanding = Array.isArray(raw) ? raw.length : 0;
+  const failed = t.review_status === "evidence_capture_failed";
+  if (failed && outstanding === 0) {
+    return (
+      `${label}: review_status is evidence_capture_failed but review_evidence_failures names ` +
+      `no reviewer — nothing can clear it (${REPAIR_HINT})`
+    );
+  }
+  if (!failed && outstanding > 0) {
+    return (
+      `${label}: review_evidence_failures names ${outstanding} reviewer(s) whose evidence was never ` +
+      `captured, but review_status is ${JSON.stringify(t.review_status ?? null)} (${REPAIR_HINT})`
+    );
+  }
+  return null;
+}
+
+/**
+ * Load-boundary check that no id is live and refuted at the same time.
+ *
+ * `findingsUnionError` proves uniqueness within `findings` and
+ * `refutationsUnionError` within `refuted_findings`; neither can see the other
+ * array, and the ACROSS case is the one with a terminal consequence. The tally's
+ * replay guard builds `alreadyRefuted` from `refuted_findings` and refuses to
+ * adjudicate any brief item whose id is in it — so a live finding sharing an id
+ * with a refuted one can never be voted on, and the guard's own advice ("start a
+ * new run directory") can never clear it. `nextOrdinal` forecloses this on the
+ * minting side; a hand-edited or drifted file is not minted.
+ */
+export function findingIdCollisionError(
+  rawFindings: unknown,
+  rawRefuted: unknown,
+  label: string,
+): string | null {
+  if (rawFindings === undefined || rawRefuted === undefined) return null;
+  if (!Array.isArray(rawFindings) || !Array.isArray(rawRefuted)) return null;
+  const refutedIds = new Set(
+    rawRefuted.flatMap((entry) => {
+      const record = parseStoredRefutation(entry);
+      return record === null ? [] : [record.finding.id];
+    }),
+  );
+  const index = rawFindings.findIndex((entry) => {
+    const finding = parseStoredFinding(entry);
+    return finding !== null && refutedIds.has(finding.id);
+  });
+  if (index < 0) return null;
+  const id = parseStoredFinding(rawFindings[index])!.id;
+  return (
+    `${label}: findings[${index}] uses id '${id}', which refuted_findings already holds — ` +
+    `the refutation panel's replay guard would refuse to adjudicate it (${REPAIR_HINT})`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -583,8 +659,20 @@ export function recoverViewOnlyClaims(
   criticalView: readonly string[] | undefined,
   advisoryView: readonly string[] | undefined,
 ): readonly Finding[] {
-  const orphanCritical = removeOnce(criticalView ?? [], claimsOfSeverity(findings, "critical"));
-  const orphanAdvisory = removeOnce(advisoryView ?? [], claimsOfSeverity(findings, "advisory"));
+  // Normalized before comparison, because the view is RAW disk text while every
+  // claim in `findings` went through `makeDraftFinding`. Without this a view
+  // claim differing only by an internal whitespace run read as an orphan, and
+  // `--fix` minted a SECOND finding for a claim that was already identified —
+  // turning one critical the panel must refute into two. `collapseWhitespace` is
+  // idempotent, so a view that is already normalized is unaffected.
+  const orphanCritical = removeOnce(
+    (criticalView ?? []).map(collapseWhitespace),
+    claimsOfSeverity(findings, "critical"),
+  );
+  const orphanAdvisory = removeOnce(
+    (advisoryView ?? []).map(collapseWhitespace),
+    claimsOfSeverity(findings, "advisory"),
+  );
   const drafts = draftsFromClaims(orphanCritical, orphanAdvisory);
   return drafts.length === 0
     ? []
@@ -604,9 +692,15 @@ export function deduplicateFindingIds(
   findings: readonly Finding[],
   refuted: readonly RefutedFinding[],
 ): readonly Finding[] {
+  // Seeded with the refuted ids, not just the ones seen so far in this array:
+  // `findingIdCollisionError` rejects a live finding that shares an id with a
+  // refuted one, and a rejection with no repair dead-ends the operator on an
+  // unloadable graph. Same rule, both sides.
+  const taken = new Set(refuted.map((record) => record.finding.id));
   const kept: Finding[] = [];
   for (const finding of findings) {
-    if (!kept.some((seen) => seen.id === finding.id)) {
+    if (!taken.has(finding.id)) {
+      taken.add(finding.id);
       kept.push(finding);
       continue;
     }
@@ -632,16 +726,6 @@ export function mergeFindings(
   findings: { readonly drafts: readonly DraftFinding[]; readonly criticalCount: number | null },
   agent: string,
 ): Task {
-  // Either source may say "blocked": `criticalCount` is the reviewer's own
-  // tally, and the captured criticals are what the gate will actually count.
-  // Trusting the tally alone let `CRITICAL_COUNT: 0` beside a real `CRITICAL:`
-  // line record `passed` — and a task pinned at `passed` is one that
-  // `applyFindingOutcomes`' promotion guard can never adjudicate.
-  const captured = claimsOfSeverity(findings.drafts, "critical").length;
-  const newStatus: ReviewStatus =
-    (findings.criticalCount ?? 0) > 0 || captured > 0 ? "blocked" : "passed";
-  const reviewStatus: ReviewStatus = task.review_status === "blocked" ? "blocked" : newStatus;
-
   const refuted = task.refuted_findings ?? [];
   // A pre-identity task's claims live only in the views. Appending beside them
   // without migrating would leave `findings` holding strictly less than the
@@ -662,13 +746,44 @@ export function mergeFindings(
   );
   const merged = [...existing, ...attributed];
 
+  // THIS reviewer's evidence landed, so it is no longer outstanding. Any other
+  // reviewer's still is: `evidence_capture_failed` records a transcript nobody
+  // could parse, and a sibling's clean pass is not evidence about it. Erasing
+  // the status here — which is what happened while it was a bare per-task
+  // value — made the gate outcome depend on which reviewer finished last.
+  const outstanding = (task.review_evidence_failures ?? []).filter((failed) => failed !== agent);
+
+  // Either source may say "blocked": `criticalCount` is the reviewer's own
+  // tally, and the captured criticals are what the gate will actually count.
+  // Trusting the tally alone let `CRITICAL_COUNT: 0` beside a real `CRITICAL:`
+  // line record `passed` — and a task pinned at `passed` is one that
+  // `applyFindingOutcomes`' promotion guard can never adjudicate.
+  //
+  // Counted over the MERGED set rather than this reviewer's drafts alone. While
+  // the count came from the incoming drafts, clearing the last outstanding
+  // evidence failure with a clean re-run demoted a task straight to `passed`
+  // over criticals a different reviewer had already recorded — the status had
+  // been masked by `evidence_capture_failed`, so the `blocked` branch below
+  // could not see them.
+  const hasCritical =
+    (findings.criticalCount ?? 0) > 0 || merged.some((finding) => finding.severity === "critical");
+  const reviewStatus: ReviewStatus =
+    outstanding.length > 0
+      ? "evidence_capture_failed"
+      : task.review_status === "blocked" || hasCritical
+        ? "blocked"
+        : "passed";
+
   return {
     ...task,
     review_status: reviewStatus,
     // `review_error` describes an evidence-capture failure and nothing else.
-    // A reviewer that DID emit its evidence supersedes that record; leaving it
-    // in place left `passed` tasks carrying a stale parse-failure message.
-    review_error: undefined,
+    // A reviewer that DID emit its evidence supersedes that record — but only
+    // once NO reviewer's evidence is outstanding, or the surviving failure
+    // would sit at `evidence_capture_failed` with nothing saying why.
+    ...(outstanding.length > 0
+      ? { review_evidence_failures: outstanding }
+      : { review_error: undefined, review_evidence_failures: undefined }),
     findings: merged,
     critical_findings: [...claimsOfSeverity(merged, "critical")],
     advisory_findings: [...claimsOfSeverity(merged, "advisory")],

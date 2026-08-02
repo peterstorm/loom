@@ -10,7 +10,6 @@ import {
   PANEL_DESIGNERS_MIN,
   PANEL_JUDGES_DEFAULT,
   PANEL_LENS_COUNT,
-  clampPanelDesigners,
   PHASE_AGENT_MAP,
   KNOWN_AGENTS,
   panelPhaseOverlap,
@@ -18,7 +17,31 @@ import {
   panelExecuteOverlap,
   assertPanelExecuteDisjoint,
 } from "../src/config";
-import { PANEL_LENSES } from "../src/core/panel-contract";
+import {
+  PANEL_BASELINE_LENSES,
+  PANEL_LENSES,
+  parseInterviewDigest,
+  selectPanelLenses,
+} from "../src/core/panel-contract";
+
+/** A digest that fires no lens signal, so the designer count alone decides the
+ *  selected set — the variable under test here. */
+const PANEL_DIGEST = [
+  "**Primary axis:** simplicity",
+  "**Testability bar:** pure functional core",
+  "**Sensitive boundaries:** none",
+  "**Codebase maturity:** greenfield",
+  "**Codebase constraints:** none",
+  "**Error-handling philosophy:** Either/Result end-to-end",
+  "**Concurrency & state:** stateless and synchronous",
+  "**Data & persistence:** reuse existing files",
+  "**Tech preferences:** TypeScript",
+  "**Observability:** structured errors",
+  "**Backwards compatibility:** preserve current commands",
+  "**Deployment:** no change",
+  "**Out-of-scope:** nothing",
+  "**Executable-model signal:** none",
+].join("\n");
 
 /** Count the lens sections in panel-lenses.md — the single source of truth for
  *  how many lenses exist (and therefore the cap on parallel designers). Each
@@ -274,51 +297,61 @@ describe("PANEL_LENS_COUNT", () => {
   });
 });
 
-describe("clampPanelDesigners", () => {
-  it("passes through viable in-range integers unchanged", () => {
-    expect(clampPanelDesigners(PANEL_DESIGNERS_MIN)).toBe(PANEL_DESIGNERS_MIN);
-    expect(clampPanelDesigners(3)).toBe(3);
-    expect(clampPanelDesigners(PANEL_LENS_COUNT)).toBe(PANEL_LENS_COUNT);
+// The designer bounds used to be pinned against `clampPanelDesigners`, an
+// exported function no engine code path called. These pin the rule that is
+// actually enforced — `selectLenses`' range check inside `selectPanelLenses`,
+// which REJECTS rather than clamps — so the constants above cannot drift from
+// the behaviour they describe.
+describe("designer-count bounds (the enforced rule, not a parallel clamp)", () => {
+  const digest = parseInterviewDigest(PANEL_DIGEST);
+  if (!digest.ok) throw new Error(`fixture digest must parse: ${digest.errors.join("; ")}`);
+
+  it("accepts every count from the approach-gate minimum to the lens cap", () => {
+    for (let n = PANEL_DESIGNERS_MIN; n <= PANEL_LENS_COUNT; n++) {
+      const selected = selectPanelLenses(digest.value, n);
+      expect(selected.ok).toBe(true);
+      if (selected.ok) expect(selected.value).toHaveLength(n);
+    }
   });
 
-  it("clamps below the approach-gate minimum up to two", () => {
-    expect(PANEL_DESIGNERS_MIN).toBe(2);
-    expect(clampPanelDesigners(1)).toBe(PANEL_DESIGNERS_MIN);
-    expect(clampPanelDesigners(0)).toBe(PANEL_DESIGNERS_MIN);
-    expect(clampPanelDesigners(-4)).toBe(PANEL_DESIGNERS_MIN);
+  it("REJECTS a count below the approach-gate minimum — a one-designer panel has nothing to choose between", () => {
+    for (const n of [1, 0, -4]) {
+      const selected = selectPanelLenses(digest.value, n);
+      expect(selected.ok).toBe(false);
+      if (!selected.ok) {
+        expect(selected.errors.join(" ")).toContain(
+          `designer count must be an integer from ${PANEL_DESIGNERS_MIN} to ${PANEL_LENS_COUNT}`,
+        );
+      }
+    }
   });
 
-  it("clamps above the lens count down to the cap", () => {
-    expect(clampPanelDesigners(PANEL_LENS_COUNT + 1)).toBe(PANEL_LENS_COUNT);
-    expect(clampPanelDesigners(99)).toBe(PANEL_LENS_COUNT);
+  it("REJECTS a count above the lens cap — two designers cannot share one lens", () => {
+    for (const n of [PANEL_LENS_COUNT + 1, 99]) {
+      expect(selectPanelLenses(digest.value, n).ok).toBe(false);
+    }
   });
 
-  it("floors fractional programmatic input before clamping", () => {
-    expect(clampPanelDesigners(2.9)).toBe(2);
-    expect(clampPanelDesigners(0.4)).toBe(PANEL_DESIGNERS_MIN);
+  it("REJECTS fractional and non-finite counts rather than flooring them", () => {
+    for (const n of [2.9, 0.4, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(selectPanelLenses(digest.value, n).ok).toBe(false);
+    }
   });
 
-  it("falls back to the default for non-finite input", () => {
-    expect(clampPanelDesigners(Number.NaN)).toBe(PANEL_DESIGNERS_DEFAULT);
-    expect(clampPanelDesigners(Number.POSITIVE_INFINITY)).toBe(PANEL_DESIGNERS_DEFAULT);
-    expect(clampPanelDesigners(Number.NEGATIVE_INFINITY)).toBe(PANEL_DESIGNERS_DEFAULT);
-  });
-
-  it("property: every finite input maps into [PANEL_DESIGNERS_MIN, PANEL_LENS_COUNT]", () => {
+  it("property: exactly the integers in [MIN, CAP] are accepted, and each yields that many lenses", () => {
     fc.assert(
       fc.property(fc.integer({ min: -1000, max: 1000 }), (n) => {
-        const out = clampPanelDesigners(n);
-        return out >= PANEL_DESIGNERS_MIN && out <= PANEL_LENS_COUNT && Number.isInteger(out);
+        const viable = n >= PANEL_DESIGNERS_MIN && n <= PANEL_LENS_COUNT;
+        const selected = selectPanelLenses(digest.value, n);
+        if (selected.ok !== viable) return false;
+        return !selected.ok || selected.value.length === n;
       }),
     );
   });
 
-  it("property: viable values are returned unchanged", () => {
-    fc.assert(
-      fc.property(fc.integer({ min: PANEL_DESIGNERS_MIN, max: PANEL_LENS_COUNT }), (n) => {
-        return clampPanelDesigners(n) === n;
-      }),
-    );
+  it("derives the bounds from the lens tables rather than restating them", () => {
+    expect(PANEL_DESIGNERS_MIN).toBe(PANEL_BASELINE_LENSES.length);
+    expect(PANEL_LENS_COUNT).toBe(PANEL_LENSES.length);
   });
 });
 

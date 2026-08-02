@@ -211,13 +211,15 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper review-panel lenses \
   --manifest "<review-run-dir>/manifest.json"
 ```
 
-`reproduction` and `intent` are always included; findings whose **path or claim
-text** mentions auth/crypto/injection pull in `security` (the claim is matched
-too, so a finding on an ordinary path that alleges a token leak still gets the
-lens), findings on test **files** pull in `test-coverage`, and
-the table order in [review-lenses.md](../references/review-lenses.md) fills the
-rest — so an unsignalled panel gets `blast-radius` third: cause, intent,
-consequence.
+`reproduction` and `intent` are always included. Both signals then match a
+finding's **path or claim text**, symmetrically: auth/crypto/injection pulls in
+`security`, and a test path or a claim about tests pulls in `test-coverage`. The
+claim is matched for both because `file` is `null` on every finding the line
+scraper produced — while `test-coverage` keyed off the path alone, a wave whose
+findings were entirely test-coverage claims could never pull in the lens that
+judges them. The table order in
+[review-lenses.md](../references/review-lenses.md) fills the rest, so an
+unsignalled panel gets `blast-radius` third: cause, intent, consequence.
 
 Default panel size is 3. Pass `--lenses N` (2–5) to `manifest` to change it —
 **only to `manifest`**. The manifest records the size, and every later operation

@@ -289,6 +289,48 @@ describe("panel-contract helper CLI", () => {
     expect(JSON.parse(result.stdout).rankings[0].strongest_idea).toBe("one pure core");
   });
 
+  describe("surplus candidates on disk", () => {
+    it("refuses to aggregate when the candidates directory holds a file the manifest does not name", () => {
+      // The architecture panel had no analogue of `surplusVerdictErrors`, so a
+      // run with five DESIGNED candidates and a two-candidate manifest declared
+      // a winner from two of five at exit 0, with nothing on stderr. A surplus
+      // file is positive evidence that the panel which ran was larger than the
+      // manifest claims.
+      writeFileSync(join(runDir, "candidates", "candidate-performance-first.md"), "# extra\n");
+      writeVerdicts([[[A, 9], [B, 8]], [[A, 7], [B, 6]], [[A, 5], [B, 4]]]);
+
+      const result = run(tmp, ["aggregate", ...RUN_ARGS()]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("candidate-performance-first.md");
+      expect(result.stderr).toContain("the manifest does not name");
+    });
+
+    it("catches it at the verdict step too, before a judge is ever spawned", () => {
+      writeFileSync(join(runDir, "candidates", "candidate-performance-first.md"), "# extra\n");
+      const verdict = JSON.stringify({
+        criterion: "simplicity",
+        rankings: [
+          { candidate: A, score: 9, fatal_flaw: null, strongest_idea: "x" },
+          { candidate: B, score: 8, fatal_flaw: null, strongest_idea: "y" },
+        ],
+      });
+      const result = run(tmp, ["verdict", "--criterion", "simplicity", ...RUN_ARGS()], verdict);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("the manifest does not name");
+    });
+
+    it("still passes when the directory holds exactly the manifest's candidates", () => {
+      writeVerdicts([[[A, 9], [B, 8]], [[A, 7], [B, 6]], [[A, 5], [B, 4]]]);
+      expect(run(tmp, ["aggregate", ...RUN_ARGS()]).status).toBe(0);
+    });
+
+    it("does not fire at the manifest step, which runs before any candidate exists", () => {
+      // `manifest` validates the handoff BEFORE the designers write anything, so
+      // an empty candidates directory is the expected state there.
+      expect(run(tmp, ["manifest", ...RUN_ARGS()]).status).toBe(0);
+    });
+  });
+
   it("returns failure when canonical stdout cannot be written", () => {
     const full = openSync("/dev/full", "w");
     try {

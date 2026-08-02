@@ -222,11 +222,8 @@ describe("briefCompletenessErrors — buildFindingBrief's postcondition", () => 
   const withView = (id: string, findings: readonly Finding[], view: readonly string[]) =>
     task({ id, findings, critical_findings: [...view] });
 
-  const briefFor = (tasks: readonly Task[]) => briefCompletenessErrors(
-    buildFindingBrief(1, tasks),
-    tasks.filter((t) => t.wave === 1),
-    1,
-  );
+  const briefFor = (tasks: readonly Task[]) =>
+    briefCompletenessErrors(buildFindingBrief(1, tasks), tasks);
 
   it("passes when every counted critical carries identity", () => {
     expect(briefFor([withView("T1", [finding()], ["unchecked cast"])])).toEqual([]);
@@ -239,7 +236,7 @@ describe("briefCompletenessErrors — buildFindingBrief's postcondition", () => 
   });
 
   it("refuses a wave whose --wave flag matches no task", () => {
-    expect(briefCompletenessErrors(buildFindingBrief(9, []), [], 9)[0])
+    expect(briefCompletenessErrors(buildFindingBrief(9, []), [])[0])
       .toContain("check --wave against .current_wave");
   });
 
@@ -263,14 +260,14 @@ describe("briefCompletenessErrors — buildFindingBrief's postcondition", () => 
       critical_findings: ["unchecked cast", "second"],
       advisory_findings: ["a nit"],
     });
-    expect(briefCompletenessErrors(buildFindingBrief(1, [t1], "advisory"), [t1], 1)).toEqual([]);
+    expect(briefCompletenessErrors(buildFindingBrief(1, [t1], "advisory"), [t1])).toEqual([]);
   });
 
   it("catches a SHORT advisory brief, and says advisory", () => {
     // The other direction: a task with no criticals and an orphaned advisory
     // used to pass, because 0 criticals never outran anything.
     const t1 = task({ id: "T1", findings: [], critical_findings: [], advisory_findings: ["orphaned nit"] });
-    const errors = briefCompletenessErrors(buildFindingBrief(1, [t1], "advisory"), [t1], 1);
+    const errors = briefCompletenessErrors(buildFindingBrief(1, [t1], "advisory"), [t1]);
     expect(errors[0]).toContain("T1 has 1 advisory_findings but only 0 carry structured identity");
   });
 

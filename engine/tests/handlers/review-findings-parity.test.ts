@@ -208,8 +208,8 @@ describe("resolveReviewFindings (pure)", () => {
     ].join("\n");
     const task = applyReviewResolution(baseTask, resolveReviewFindings(transcript, "code-reviewer"));
     expect(task.review_status).toBe("blocked");
-    expect(task.critical_findings).toEqual(["Review output parsing failed - 2 findings not captured"]);
-    expect(task.findings?.[0]!.claim).toContain("2 findings not captured");
+    expect(task.critical_findings).toEqual(["Review output parsing failed - 2 critical findings not captured"]);
+    expect(task.findings?.[0]!.claim).toContain("2 critical findings not captured");
   });
 
   it("logs the same operator line for both harnesses", () => {

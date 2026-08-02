@@ -392,10 +392,24 @@ describe("review-panel helper CLI", () => {
       writeFileSync(statePath, JSON.stringify(graph, null, 2));
     };
 
-    it("rejects a wave that holds no tasks at all", () => {
+    it("rejects a --wave that is not the graph's current wave", () => {
       // A typo'd --wave used to produce a fully green, fully EMPTY panel run:
       // three verifiers spawned, nothing adjudicated, and a tally printing
       // "0 survived, 0 refuted" — indistinguishable from a real unanimous panel.
+      // The runbook asked the operator to compare --wave against .current_wave
+      // with jq; the engine holds the graph and now proves it.
+      const result = run(["brief", "--runs-root", REL_ROOT, "--run-dir", REL_RUN, "--wave", "99"]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("is not the graph's current wave (1)");
+    });
+
+    it("rejects the current wave when it holds no tasks at all", () => {
+      // The completeness postcondition, reached with the wave check satisfied:
+      // a graph whose current_wave names a wave no task belongs to.
+      writeState((graph) => {
+        graph.current_wave = 99;
+        graph.tasks[0]!.wave = 1;
+      });
       const result = run(["brief", "--runs-root", REL_ROOT, "--run-dir", REL_RUN, "--wave", "99"]);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("no tasks in wave 99");

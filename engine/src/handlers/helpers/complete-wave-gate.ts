@@ -367,7 +367,7 @@ function updateGitHubIssue(state: TaskGraph, taskIds: string[]): void {
 }
 
 /** Compute next wave from actual wave numbers (handles non-contiguous waves) */
-export function computeNextWave(tasks: Task[], currentWave: number): number | null {
+export function computeNextWave(tasks: readonly Task[], currentWave: number): number | null {
   const allWaves = [...new Set(tasks.map((t) => t.wave))].sort((a, b) => a - b);
   return allWaves.find((w) => w > currentWave) ?? null;
 }

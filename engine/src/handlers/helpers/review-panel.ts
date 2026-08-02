@@ -22,7 +22,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import type { HookHandler, HookResult, Task } from "../../types";
+import type { HookHandler, HookResult, TaskGraph } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
 import type { ParseResult } from "../../core/panel-kernel";
@@ -32,7 +32,13 @@ import {
   briefFindingFilename,
   buildFindingBrief,
   defaultRefutationThreshold,
+  manifestLensCount,
+  panelSizeConflict,
   parseFindingBriefJson,
+  refutedIdsOf,
+  replayError,
+  replayedOutcomes,
+  thresholdError,
   parseRefutationVerdict,
   parseReviewManifest,
   renderFindingBriefMarkdown,
@@ -46,6 +52,7 @@ import {
   tallyRefutations,
   REVIEW_LENSES_DEFAULT,
   type FindingBrief,
+  type FindingOutcome,
   type WaveFindingId,
 } from "../../core/review-panel";
 import {
@@ -92,20 +99,14 @@ function positiveInteger(raw: string | null): number | null {
   return raw !== null && /^\d+$/.test(raw) && Number(raw) > 0 ? Number(raw) : null;
 }
 
-/** The panel size a written manifest records. Null when the file says nothing
- *  usable — `parseReviewManifest` is what rejects it, with a real diagnostic. */
-function manifestLensCount(raw: unknown): number | null {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
-  const lenses = (raw as Record<string, unknown>).lenses;
-  return Array.isArray(lenses) && lenses.length > 0 ? lenses.length : null;
-}
-
-/** Load the task graph, failing loudly rather than adjudicating an empty set. */
-function loadTasks(): ParseResult<readonly Task[]> {
+/** Load the task graph, failing loudly rather than adjudicating an empty set.
+ *  Returns the whole graph, not just `tasks`: `brief` proves its `--wave`
+ *  against `current_wave`, which is a sibling field. */
+function loadGraph(): ParseResult<TaskGraph> {
   const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
   if (!mgr) return { ok: false, errors: [`no task graph at ${TASK_GRAPH_PATH}`] };
   try {
-    return { ok: true, value: mgr.load().tasks };
+    return { ok: true, value: mgr.load() };
   } catch (error) {
     return {
       ok: false,
@@ -132,15 +133,26 @@ function operationBrief(runsRoot: string, runDir: string, wave: number): HookRes
   const boundary = parseRunDirectory(runsRoot, runDir);
   if (!boundary.ok) return contractError("review run boundary", boundary.errors);
 
-  const state = loadTasks();
+  const state = loadGraph();
   if (!state.ok) return contractError("review brief", state.errors);
 
-  const brief = buildFindingBrief(wave, state.value);
-  const completeness = briefCompletenessErrors(
-    brief,
-    state.value.filter((task) => task.wave === wave),
-    wave,
-  );
+  // The wave is proven against the graph, not taken on trust. `wave-gate.md`
+  // asked the operator to check this with `jq` — but the engine loads the graph
+  // two lines up and has everything it needs, and a stale `--wave` produces a
+  // fully adjudicable brief whose `tally` then writes `refuted_findings` and can
+  // promote a PAST wave's tasks blocked → passed. `checkCriticalFindings` is
+  // wave-scoped, so the blast radius is a corrupted audit record rather than an
+  // opened gate; that is still not a thing to leave to a prose reminder.
+  const current = state.value.current_wave;
+  if (current !== undefined && current !== wave) {
+    return contractError("review brief", [
+      `--wave ${wave} is not the graph's current wave (${current}) — a brief for a closed wave ` +
+        `re-adjudicates decisions that are already recorded`,
+    ]);
+  }
+
+  const brief = buildFindingBrief(wave, state.value.tasks);
+  const completeness = briefCompletenessErrors(brief, state.value.tasks);
   if (completeness.length > 0) return contractError("review brief", completeness);
 
   const briefJson = serializeFindingBrief(brief);
@@ -250,24 +262,13 @@ const handler: HookHandler = async (stdin, args) => {
     }
   }
 
-  // The panel size is fixed for the LIFE of the run, not per invocation. A
-  // `--lenses` that disagrees with the recorded count is a re-sized panel
-  // running under a name whose verdicts were cast by a different one — the same
-  // failure `--threshold` below the strict-majority floor is refused for, and
-  // the reason a re-run of `manifest` must not silently reset the size.
+  // The panel size is fixed for the LIFE of the run, not per invocation. The
+  // rule itself is `panelSizeConflict` in the core, beside the threshold floor
+  // it is the sibling of; this is just where the two integers are read.
   const recordedLensCount = manifestLensCount(manifestRaw);
   const requestedLensCount = rawLensCount === null ? null : positiveInteger(rawLensCount)!;
-  if (
-    requestedLensCount !== null &&
-    recordedLensCount !== null &&
-    requestedLensCount !== recordedLensCount
-  ) {
-    return contractError("review manifest", [
-      `this run's panel size is already fixed at ${recordedLensCount} lens(es); ` +
-        `--lenses ${requestedLensCount} would re-size a panel whose verdicts were cast by the ` +
-        `recorded one — start a new run directory instead`,
-    ]);
-  }
+  const sizeConflict = panelSizeConflict(requestedLensCount, recordedLensCount);
+  if (sizeConflict !== null) return contractError("review manifest", [sizeConflict]);
   const lensCount = requestedLensCount ?? recordedLensCount ?? REVIEW_LENSES_DEFAULT;
 
   const brief = loadBrief(runDir);
@@ -351,59 +352,36 @@ const handler: HookHandler = async (stdin, args) => {
   if (!resolved.ok) return contractError("review tally", resolved.errors);
   const verdictsDir = join(resolved.value, LAYOUT.verdictDir);
 
-  // A strict majority is the FLOOR, not merely the default. `--threshold 1`
-  // let one lens kill a critical on its own, inverting the documented
-  // "ties favour keeping the finding" rule and promoting blocked → passed when
-  // it was the wave's last critical — with nothing in the runbook gating it.
-  // Raising the bar is always safe; lowering it is a weaker panel wearing the
-  // same name.
-  const floor = defaultRefutationThreshold(manifest.value.lenses.length);
+  const lensesRun = manifest.value.lenses.length;
   const rawThreshold = argumentValue(args, "--threshold");
-  const threshold = rawThreshold === null ? floor : positiveInteger(rawThreshold);
+  const threshold = rawThreshold === null ? defaultRefutationThreshold(lensesRun) : positiveInteger(rawThreshold);
   if (threshold === null) return usageError;
-  if (threshold < floor) {
-    return contractError("review tally", [
-      `threshold ${threshold} is below the strict majority of ${manifest.value.lenses.length} ` +
-        `lenses (${floor}) — a weaker panel must not run under the same name`,
-    ]);
-  }
+  const belowFloor = thresholdError(threshold, lensesRun);
+  if (belowFloor !== null) return contractError("review tally", [belowFloor]);
 
   const verdicts = readVerdicts(runDir, LAYOUT, verdictsDir, manifest.value.lenses, (raw, lens) =>
     parseRefutationVerdict(raw, lens, findingIds),
   );
   if (!verdicts.ok) return contractError("review verdicts", verdicts.errors);
 
-  const tallied = tallyRefutations(verdicts.value, manifest.value.lenses, brief.value.findings, threshold);
+  // `tallyRefutations` reaches `requireEntry`, which THROWS on a broken coverage
+  // invariant rather than defaulting a vote. `panel-run` states the rule this
+  // helper follows — "errors are returned, never thrown; a panel helper's
+  // failure must reach the operator as a contract diagnostic" — and the throw is
+  // unreachable only for as long as the coverage guard inside `tallyRefutations`
+  // holds. If it is ever weakened the operator gets a stack trace out of a hook.
+  let tallied: ParseResult<readonly FindingOutcome[]>;
+  try {
+    tallied = tallyRefutations(verdicts.value, manifest.value.lenses, brief.value.findings, threshold);
+  } catch (error) {
+    return contractError("review tally", [error instanceof Error ? error.message : String(error)]);
+  }
   if (!tallied.ok) return contractError("review tally", tallied.errors);
 
-  // A tally already applied to this graph would send `applyFindingOutcomes`
-  // looking for findings it has itself moved into `refuted_findings`, where the
-  // invariant throw blames "the task graph changed between brief and tally" —
-  // true of a `store-review-findings` override landing mid-run, and wrong about
-  // the far likelier cause: the operator re-ran `tally`. (A broken pipe on the
-  // canonical output AFTER the state write lands is enough to invite that.)
-  // Named here, before the write, so the diagnostic matches what happened.
-  const current = loadTasks();
+  const current = loadGraph();
   if (!current.ok) return contractError("review tally", current.errors);
-  // Wave-scoped, matching the brief's id space: `applyFindingOutcomes` strips
-  // the `${taskId}:` prefix back off when it applies an outcome, so the
-  // recorded refutation carries the task-local id and has to be re-scoped to
-  // compare against the tally's ids.
-  const alreadyRefuted = new Set<string>(
-    current.value.flatMap((task) =>
-      (task.refuted_findings ?? []).map((record) => `${task.id}:${record.finding.id}`),
-    ),
-  );
-  const replays = tallied.value
-    .filter((outcome) => !outcome.survives && alreadyRefuted.has(outcome.finding.id))
-    .map((outcome) => outcome.finding.id);
-  if (replays.length > 0) {
-    return contractError("review tally", [
-      `this run has already been tallied — ${replays.length} finding(s) are already recorded as ` +
-        `refuted on their task (${replays.join(", ")}). Re-tallying would re-adjudicate a closed ` +
-        `decision; start a new run directory to re-verify these findings.`,
-    ]);
-  }
+  const replays = replayedOutcomes(tallied.value, refutedIdsOf(current.value.tasks));
+  if (replays.length > 0) return contractError("review tally", [replayError(replays)]);
 
   const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
   if (!mgr) return contractError("review tally", [`no task graph at ${TASK_GRAPH_PATH}`]);

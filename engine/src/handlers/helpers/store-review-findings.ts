@@ -14,6 +14,7 @@ import {
   nextOrdinal,
   recoverViewOnlyClaims,
   type Finding,
+  type RefutedFinding,
 } from "../../core/findings";
 import { StateManager } from "../../state-manager";
 import { isNoFindingSentinel } from "../../utils/no-finding-sentinel";
@@ -48,6 +49,11 @@ export function parseFindings(stdin: string): { critical: string[]; advisory: st
  * records who made the claim, and it cannot be mistaken for `code-reviewer`'s.
  */
 export const OVERRIDE_AGENT = "manual-override";
+
+/** Why a replaced finding left the active set. Stored in the audit trail so a
+ *  dismissal reads as a decision someone made, not as a finding that vanished. */
+export const OVERRIDE_DISMISSAL_REASON =
+  "replaced by a manual operator override (helper store-review-findings)";
 
 /**
  * Pure: replace a task's review findings, preserving existing advisories when
@@ -87,22 +93,49 @@ export function updateTaskFindings(
   const keptAdvisory: readonly Finding[] =
     advisory.length > 0 ? [] : existing.filter((finding) => finding.severity === "advisory");
 
+  // What the override REPLACES is recorded, not deleted — the same rule
+  // `applyFindingOutcomes` follows when the panel kills a finding, for the same
+  // reason: "a wrong dismissal is a shipped bug, and a silently dropped critical
+  // is indistinguishable from one that was never found." An override IS a
+  // refutation; the refuter happens to be a person rather than a lens, which is
+  // why `Refutation.lens` is an open string.
+  //
+  // It also closes the id-rewind hole for good. Seeding `nextOrdinal` from
+  // `existing` fixes the two-override case, but an override that empties the
+  // findings array left NO record of the ordinals it had issued, so the next one
+  // restarted at 1 and re-minted `manual-override-1` for a different claim —
+  // which an in-flight refutation brief still named, defeating
+  // `applyFindingOutcomes`' absence guard exactly as before. `nextOrdinal`
+  // counts `refuted_findings`, so a conserved dismissal is a high-water mark
+  // that removal cannot rewind.
+  const kept = new Set(keptAdvisory.map((finding) => finding.id));
+  const dismissed: readonly RefutedFinding[] = existing
+    .filter((finding) => !kept.has(finding.id))
+    .map((finding) => ({
+      finding,
+      refutations: [{ lens: OVERRIDE_AGENT, reason: OVERRIDE_DISMISSAL_REASON }],
+    }));
+  const refuted = [...(task.refuted_findings ?? []), ...dismissed];
+
   const supplied = attributeFindings(
     draftsFromClaims(critical, advisory),
     OVERRIDE_AGENT,
-    nextOrdinal(keptAdvisory, task.refuted_findings ?? [], OVERRIDE_AGENT),
+    nextOrdinal(existing, refuted, OVERRIDE_AGENT),
   );
   const findings = [...keptAdvisory, ...supplied];
 
   return {
     ...task,
     review_status: reviewStatus,
-    // An override replaces the review record outright, and `review_error` is
-    // part of that record — it is meaningful only for evidence_capture_failed.
+    // An override replaces the review record outright, and `review_error` plus
+    // the outstanding evidence failures are part of that record — both are
+    // meaningful only for evidence_capture_failed, which this write leaves.
     review_error: undefined,
+    review_evidence_failures: undefined,
     findings,
     critical_findings: [...claimsOfSeverity(findings, "critical")],
     advisory_findings: [...claimsOfSeverity(findings, "advisory")],
+    refuted_findings: refuted,
   };
 }
 

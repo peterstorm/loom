@@ -11,7 +11,7 @@
  */
 
 import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { HookResult } from "../../types";
 import type { ParseResult, RunLayout } from "../../core/panel-kernel";
 import { fail, ok } from "../../core/panel-kernel";
@@ -167,7 +167,46 @@ export function runArtifactErrors(
   return [
     ...contextPaths.flatMap((path) => check(path, root)),
     ...itemPaths.flatMap((path) => check(path, itemDir)),
+    ...(itemPaths.length === 0 ? [] : surplusItemErrors(itemDir, itemPaths, layout)),
   ];
+}
+
+/**
+ * Item files on disk that the manifest does not name.
+ *
+ * The exact-set rules prove the manifest names every EXPECTED item; nothing
+ * looked at what is actually in the item directory. A surplus
+ * `candidate-performance-first.md` is not junk to ignore — it is positive
+ * evidence that the panel which RAN was larger than the manifest claims, the
+ * same reasoning `surplusVerdictErrors` applies to the verdict directory. The
+ * architecture panel had no analogue, so a run with five designed candidates and
+ * a two-candidate manifest declared a winner from two of five at exit 0, with
+ * nothing on stderr.
+ *
+ * A missing item directory is NOT an error here: `artifactError` above already
+ * reports every named item that does not resolve, and reporting the absence
+ * twice tells the operator nothing new.
+ */
+function surplusItemErrors(
+  itemDir: string,
+  itemPaths: readonly string[],
+  layout: RunLayout,
+): string[] {
+  let names: readonly string[];
+  try {
+    names = readdirSync(itemDir);
+  } catch {
+    return [];
+  }
+  const named = new Set(itemPaths.map((path) => basename(path)));
+  const surplus = names.filter((name) => !named.has(name)).sort();
+  return surplus.length === 0
+    ? []
+    : [
+        `${layout.itemDir} directory holds ${surplus.length} file(s) the manifest does not name ` +
+          `(${surplus.join(", ")}) — the panel that produced them was larger than the manifest ` +
+          `declares, so this run would decide on a subset of the work done`,
+      ];
 }
 
 /**

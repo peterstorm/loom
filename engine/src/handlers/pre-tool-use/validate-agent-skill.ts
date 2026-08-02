@@ -7,6 +7,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
+import { allowWithNotice } from "../../types";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import {
   TASK_GRAPH_PATH, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
@@ -168,12 +169,18 @@ const handler: HookHandler = async (stdin) => {
     // nothing on stderr, so a panel designer spawning without its preloaded
     // `architecture-tech-lead` skill looked exactly like one that passed the
     // check. The gate says out loud that it did not run.
-    process.stderr.write(
+    //
+    // Through `systemMessage`, NOT stderr. An exit-0 PreToolUse hook's stderr is
+    // not surfaced outside `--debug`, so the announcement this branch exists to
+    // make was still, in practice, silent — the skipped gate looked exactly like
+    // a passed one to the operator it was written for. Kept on stderr as well
+    // for the log.
+    const notice =
       `[loom] validate-agent-skill: no agent file found for "${subagentType}" — ` +
-        `skill enforcement SKIPPED for this spawn (searched CLAUDE_PLUGIN_ROOT, ` +
-        `<git-root>/.claude/agents, ~/.claude/agents, and the plugin cache)\n`,
-    );
-    return { kind: "allow" };
+      `skill enforcement SKIPPED for this spawn (searched CLAUDE_PLUGIN_ROOT, ` +
+      `<git-root>/.claude/agents, ~/.claude/agents, and the plugin cache)`;
+    process.stderr.write(notice + "\n");
+    return allowWithNotice(notice);
   }
 
   const declared = parseSkillsFromFrontmatter(agentPath);

@@ -5,6 +5,7 @@ import {
   PRIMARY_AXES,
   TESTABILITY_BARS,
   aggregateVerdicts,
+  candidateFilename,
   deriveJudgeCriteria,
   parseInterviewDigest,
   parseInterviewDigestJson,
@@ -37,7 +38,7 @@ const VALID_DIGEST = [
   "Keep the panel opt-in.",
 ].join("\n");
 
-const CANDIDATES = ["candidate-simplicity-first.md", "candidate-type-driven-fp.md"] as const;
+const CANDIDATES = [candidateFilename("simplicity-first"), candidateFilename("type-driven-fp")] as const;
 
 function verdict(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -235,8 +236,8 @@ describe("parseJudgeVerdict", () => {
     const parsed = parseJudgeVerdict(verdict(), "simplicity", CANDIDATES);
     expect(parsed.ok).toBe(true);
     if (parsed.ok) {
-      expect(parsed.value.rankings[0]!.strongestIdea).toBe("one pure boundary");
-      expect(parsed.value.rankings[1]!.fatalFlaw).toBe("too much ceremony");
+      expect(parsed.value.entries[0]!.strongestIdea).toBe("one pure boundary");
+      expect(parsed.value.entries[1]!.fatalFlaw).toBe("too much ceremony");
       expect(serializeJudgeVerdict(parsed.value)).not.toContain("{pure}");
     }
   });
@@ -272,7 +273,7 @@ function verdictFor(criterion: string, scores: readonly (readonly [string, numbe
       })),
     }),
     criterion,
-    ordered.map(([candidate]) => candidate),
+    ordered.map(([candidate]) => candidateFilename(candidate.replace(/^candidate-/, "").replace(/\.md$/, ""))),
   );
   if (!parsed.ok) throw new Error(`fixture invalid: ${parsed.errors.join("; ")}`);
   return parsed.value;
@@ -370,7 +371,7 @@ describe("parseJudgeVerdict rankings never contain NaN", () => {
           });
           const parsed = parseJudgeVerdict(raw, "simplicity", CANDIDATES);
           if (!parsed.ok) return true;
-          return parsed.value.rankings.every((r) => Number.isInteger(r.score));
+          return parsed.value.entries.every((r) => Number.isInteger(r.score));
         },
       ),
     );
@@ -496,7 +497,7 @@ describe("aggregateVerdicts", () => {
     ["non-distinct candidates", ["a"], ["x.md", "x.md"]],
     ["empty candidates", ["a"], []],
   ])("rejects %s", (_label, criteria, candidates) => {
-    expect(aggregateVerdicts([], criteria as string[], candidates as string[]).ok).toBe(false);
+    expect(aggregateVerdicts([], criteria as string[], candidates as unknown as readonly ReturnType<typeof candidateFilename>[]).ok).toBe(false);
   });
 
   it("property: ranking is a total order — deterministic under input permutation", () => {

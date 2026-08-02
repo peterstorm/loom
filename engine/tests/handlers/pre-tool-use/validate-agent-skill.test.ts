@@ -303,6 +303,14 @@ describe("validate-agent-skill — integration scenarios", () => {
       expect(note).toContain("no agent file found");
       expect(note).toContain("skill enforcement SKIPPED");
       expect(note).toContain("loom:dotfiles-agent");
+
+      // And on a channel the operator can actually see. An exit-0 PreToolUse
+      // hook's stderr is not surfaced outside --debug, so asserting only on
+      // stderr proved the code ran, not that anyone was told: the skipped gate
+      // still looked exactly like a passed one. `systemMessage` is the JSON
+      // stdout field the harness does surface.
+      expect(result.kind === "allow" && result.systemMessage, "the notice must reach the operator")
+        .toContain("skill enforcement SKIPPED");
     } finally {
       spy.mockRestore();
       if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;

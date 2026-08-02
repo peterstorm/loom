@@ -200,8 +200,11 @@ export function deriveJudgeCriteria(digest: InterviewDigest): readonly string[] 
 }
 
 /** Always designed, whatever the interview said. Also the minimum panel size —
- *  the mandatory approach gate needs at least two options to choose between. */
-const BASELINE_LENSES: readonly PanelLens[] = ["simplicity-first", "type-driven-fp"];
+ *  the mandatory approach gate needs at least two options to choose between.
+ *  EXPORTED because `config.PANEL_DESIGNERS_MIN` derives its value from this
+ *  array's length rather than restating it, mirroring the review panel's
+ *  `REVIEW_LENSES_MIN`. Adding a baseline lens must move the minimum with it. */
+export const PANEL_BASELINE_LENSES: readonly PanelLens[] = ["simplicity-first", "type-driven-fp"];
 
 /**
  * Derive the exact ordered lens set from validated interview signals and N. The
@@ -213,7 +216,7 @@ export function selectPanelLenses(
   designerCount: number,
 ): ParseResult<readonly PanelLens[]> {
   return selectLenses<PanelLens>({
-    baseline: BASELINE_LENSES,
+    baseline: PANEL_BASELINE_LENSES,
     signalled: [
       digest.sensitiveBoundaries.startsWith("flagged") ? "risk-security-first" : null,
       digest.primaryAxis === "performance" ? "performance-first" : null,
@@ -225,10 +228,26 @@ export function selectPanelLenses(
   });
 }
 
+declare const CANDIDATE_FILENAME: unique symbol;
+
+/**
+ * A candidate's run-scoped artifact filename — the architecture panel's item id.
+ *
+ * Branded for the reason `WaveFindingId` is. Every id the panel threads through
+ * `parseJudgeVerdict` / `aggregateVerdicts` was a bare `string`, so a lens name
+ * and a candidate filename were interchangeable at every call site: the handler
+ * passing `candidates.map(c => c.lens)` where `candidates.map(c => c.filename)`
+ * belonged type-checked, and the two differ by exactly the `candidate-` prefix
+ * and `.md` suffix that make the id unique per run. The kernel's `Id extends
+ * string` parameter was built to carry a brand and the architecture consumer
+ * had not taken it. `candidateFilename` is the only constructor.
+ */
+export type CandidateFilename = string & { readonly [CANDIDATE_FILENAME]: true };
+
 export type PanelCandidate = Readonly<{
   lens: PanelLens;
   path: string;
-  filename: string;
+  filename: CandidateFilename;
 }>;
 
 export type PanelManifest = Readonly<{
@@ -238,9 +257,11 @@ export type PanelManifest = Readonly<{
   candidates: readonly PanelCandidate[];
 }>;
 
-/** Run-scoped artifact filename for one lens's candidate. */
-export function candidateFilename(lens: string): string {
-  return `candidate-${lens}.md`;
+/** Run-scoped artifact filename for one lens's candidate. The ONLY constructor
+ *  of `CandidateFilename` — mint here or the compiler will not accept it as a
+ *  candidate id, which is what keeps a lens name out of that position. */
+export function candidateFilename(lens: string): CandidateFilename {
+  return `candidate-${lens}.md` as CandidateFilename;
 }
 
 /**
@@ -271,10 +292,16 @@ export function parsePanelManifest(
 
   // `entry.id` is a proven `PanelLens`, not a cast one: `parseRunManifest`
   // resolves each raw id against `expectedLenses` and returns that element.
+  //
+  // The filename is re-MINTED through `candidateFilename` rather than branded by
+  // assertion. `parseRunManifest` has just proved `entry.filename` equals
+  // `spec.filenameOf(entry.id)`, so the two are the same string — and going
+  // through the constructor means the brand is never claimed for a value the
+  // constructor did not produce.
   const candidates: PanelCandidate[] = parsed.value.entries.map((entry) => ({
     lens: entry.id,
     path: entry.path,
-    filename: entry.filename,
+    filename: candidateFilename(entry.id),
   }));
 
   return ok({
@@ -286,16 +313,26 @@ export function parsePanelManifest(
 }
 
 export type JudgeRanking = Readonly<{
-  candidate: string;
+  candidate: CandidateFilename;
   score: number;
   fatalFlaw: string | null;
   strongestIdea: string;
 }>;
 
-export type JudgeVerdict = Readonly<{
-  criterion: string;
-  rankings: readonly JudgeRanking[];
-}>;
+/**
+ * One judge's verdict IS the kernel's envelope — there is no architecture-
+ * specific shape here.
+ *
+ * It used to be a distinct `{ criterion, rankings }` record that
+ * `aggregateVerdicts` immediately un-renamed back into
+ * `VerdictEnvelope<JudgeRanking>` so the shared coverage rule could apply. A
+ * type whose only consumer reverses it is a rename layer, not an abstraction;
+ * its review-panel sibling `parseRefutationVerdict` returns the envelope
+ * directly and needs none. The external `rankings` field name is owned by
+ * `serializeJudgeVerdict` and the envelope spec's `entriesKey`, which is where
+ * the agent contract actually lives.
+ */
+export type JudgeVerdict = VerdictEnvelope<JudgeRanking>;
 
 /** Payload parser for one ranking — the only architecture-specific part of the
  *  judge envelope. The candidate id, coverage, and duplicate rules all live in
@@ -303,7 +340,7 @@ export type JudgeVerdict = Readonly<{
 function parseJudgeRanking(
   raw: Record<string, unknown>,
   path: string,
-  candidate: string,
+  candidate: CandidateFilename,
 ): ParseResult<JudgeRanking> {
   const errors: string[] = [];
 
@@ -352,26 +389,28 @@ function requireNonIncreasingScores(rankings: readonly JudgeRanking[]): readonly
 export function parseJudgeVerdict(
   rawJson: string,
   expectedCriterion: string,
-  expectedCandidates: readonly string[],
+  expectedCandidates: readonly CandidateFilename[],
 ): ParseResult<JudgeVerdict> {
-  const envelope = parseVerdictEnvelope<JudgeRanking>(rawJson, expectedCriterion, expectedCandidates, {
-    label: "judge verdict",
-    entriesKey: "rankings",
-    itemIdKey: "candidate",
-    itemNoun: ["candidate", "candidates"],
-    parseEntry: parseJudgeRanking,
-    crossCheck: requireNonIncreasingScores,
-  });
-  return envelope.ok
-    ? ok({ criterion: envelope.value.criterion, rankings: envelope.value.entries })
-    : fail(envelope.errors);
+  return parseVerdictEnvelope<JudgeRanking, CandidateFilename>(
+    rawJson,
+    expectedCriterion,
+    expectedCandidates,
+    {
+      label: "judge verdict",
+      entriesKey: "rankings",
+      itemIdKey: "candidate",
+      itemNoun: ["candidate", "candidates"],
+      parseEntry: parseJudgeRanking,
+      crossCheck: requireNonIncreasingScores,
+    },
+  );
 }
 
 /** Serialize a validated verdict using the external snake_case contract. */
 export function serializeJudgeVerdict(verdict: JudgeVerdict): string {
   return JSON.stringify({
     criterion: verdict.criterion,
-    rankings: verdict.rankings.map((ranking) => ({
+    rankings: verdict.entries.map((ranking) => ({
       candidate: ranking.candidate,
       score: ranking.score,
       fatal_flaw: ranking.fatalFlaw,
@@ -393,21 +432,28 @@ export function serializeJudgeVerdict(verdict: JudgeVerdict): string {
 export type CriterionScore = Readonly<{ criterion: string; score: number }>;
 
 export type CandidateRanking = Readonly<{
-  candidate: string;
+  candidate: CandidateFilename;
   totalScore: number;
   /** Per-criterion score, in the criteria order aggregation was given. */
   scores: readonly CriterionScore[];
 }>;
+
+/** The score domain one ranking may carry. Judges score 0–10 per criterion. */
+const SCORE_MIN = 0;
+const SCORE_MAX = 10;
 
 /**
  * Total order over candidates: highest total, then each criterion in order,
  * then lexicographically smallest filename.
  *
  * With the total tied, walking the criteria in order reproduces the documented
- * primary-axis-then-testability tie-break exactly: if the total and every
- * earlier criterion tie, the remaining criterion is forced to tie too (the
- * total is their sum), so no later criterion can ever change the outcome. The
- * generalized form has no positional special cases and works for any K.
+ * primary-axis-then-testability tie-break exactly. At K=3 the last criterion is
+ * forced (the total is their sum), but the loop is written for any K and every
+ * position is load-bearing: it is what makes the CRITERIA ORDER the tie-break
+ * order, so `aggregateVerdicts` and its caller must agree on that order or a
+ * different architecture ships on a tie. Pinned by a property test over ≥3
+ * criteria — while only index 0 was asserted, capping the loop at one criterion
+ * left the whole suite green.
  *
  * Lexicographic comparison is done with `<` / `>` rather than localeCompare —
  * localeCompare's ordering is locale-dependent, and this must produce the same
@@ -445,7 +491,7 @@ function compareRankings(a: CandidateRanking, b: CandidateRanking): number {
 export function aggregateVerdicts(
   verdicts: readonly JudgeVerdict[],
   criteriaInOrder: readonly string[],
-  expectedCandidates: readonly string[],
+  expectedCandidates: readonly CandidateFilename[],
 ): ParseResult<readonly CandidateRanking[]> {
   const errors: string[] = [];
 
@@ -459,14 +505,31 @@ export function aggregateVerdicts(
     errors.push("expected candidates must be distinct");
   }
 
-  // `JudgeVerdict` is the kernel's envelope with `entries` renamed to
-  // `rankings` for readability at the agent contract; re-widened here so the
-  // shared coverage rule applies to it verbatim.
+  // The score domain, re-proven here rather than assumed from parseJudgeRanking.
+  // `panel-kernel` documents both aggregators as "exported and safe to call
+  // standalone" — that is the stated reason `coverageErrors` is deliberately
+  // redundant — and standalone this accepted anything: a NaN score made the
+  // comparator return NaN, which `Array.prototype.sort` treats as 0, so the
+  // candidate came out RANK 1 with a `total_score` of null in the artifact that
+  // decides which architecture ships.
+  for (const verdict of verdicts) {
+    for (const ranking of verdict.entries) {
+      if (
+        !Number.isInteger(ranking.score) ||
+        ranking.score < SCORE_MIN ||
+        ranking.score > SCORE_MAX
+      ) {
+        errors.push(
+          `verdict for '${verdict.criterion}': score for ${ranking.candidate} must be an integer ` +
+            `from ${SCORE_MIN} to ${SCORE_MAX}, got ${JSON.stringify(ranking.score)}`,
+        );
+      }
+    }
+  }
+
   const envelopes = new Map<string, VerdictEnvelope<JudgeRanking>>();
   for (const verdict of verdicts) {
-    if (!envelopes.has(verdict.criterion)) {
-      envelopes.set(verdict.criterion, { criterion: verdict.criterion, entries: verdict.rankings });
-    }
+    if (!envelopes.has(verdict.criterion)) envelopes.set(verdict.criterion, verdict);
   }
 
   if (errors.length > 0) return fail(errors);

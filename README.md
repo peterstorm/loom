@@ -274,9 +274,9 @@ validator (`core/panel-kernel.ts`).
 | `security` | the claimed security consequence does not hold |
 | `test-coverage` | the missing test would not catch a real bug |
 
-`reproduction` and `intent` are always selected; findings whose path **or claim
-text** mentions auth/crypto/injection pull in `security`, and findings on test
-files pull in `test-coverage`. Default panel size is 3.
+`reproduction` and `intent` are always selected. Both signals match a finding's
+path **or claim text**: auth/crypto/injection pulls in `security`, and a test
+path or a claim about tests pulls in `test-coverage`. Default panel size is 3.
 
 - A finding **survives** unless a strict majority of verifiers refuted it.
   `uncertain` counts toward neither side, and **ties favor keeping the finding**
@@ -577,7 +577,7 @@ interface TaskGraph {
 }
 ```
 
-`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `test_result`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `file_list`, `review_status`, `review_error`, `findings`, `critical_findings`, `advisory_findings`, `refuted_findings`, `start_sha`, `failure_reason`, `retry_count`.
+`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `test_result`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `file_list`, `review_status`, `review_error`, `review_evidence_failures`, `findings`, `critical_findings`, `advisory_findings`, `refuted_findings`, `start_sha`, `failure_reason`, `retry_count`.
 
 #### Finding identity
 
@@ -601,7 +601,19 @@ are scraped as before and the findings simply carry no location.
 
 `refuted_findings` holds findings the wave gate's refutation panel killed,
 together with the refuting lenses and their reasoning — recorded, never deleted,
-so a wrong refutation stays auditable.
+so a wrong refutation stays auditable. A manual override
+(`helper store-review-findings`) files what it replaces here too, under the
+`manual-override` lens: an operator dismissing a false positive is making the
+same kind of decision a verifier makes, and it should be as auditable.
+
+`review_evidence_failures` names the reviewers whose transcript could not be
+parsed. `review_status` is per-task but evidence capture fails per-agent, and
+`/wave-gate` spawns every reviewer at once — so without the names, whichever
+reviewer finished last decided the status, and a clean pass silently overwrote a
+sibling's `evidence_capture_failed`. The status is
+`evidence_capture_failed` exactly when this list is non-empty (proven at the load
+boundary), and it clears when the reviewers named in it come back with parseable
+output.
 
 ### Protection model
 

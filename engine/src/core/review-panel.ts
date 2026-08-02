@@ -27,6 +27,7 @@
  */
 
 import { join } from "node:path";
+import { parseFindingSeverity } from "./findings";
 import type {
   AdjudicatedFinding,
   Finding,
@@ -34,9 +35,9 @@ import type {
   NonEmptyRefutations,
   Refutation,
 } from "./findings";
-import type { Task } from "../types";
 import {
   coverageErrors,
+  exactOrderedSetErrors,
   fail,
   isRecord,
   ok,
@@ -56,13 +57,18 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * Order matters twice: signal-selected lenses come first (see
- * selectReviewLenses), then this order fills the remaining slots. The first
- * three are therefore the default unsignalled panel — cause, intent,
+ * Order matters twice. `selectLenses` fills a panel with the BASELINES first,
+ * then the lenses this run's signals pulled up, then this table order for
+ * whatever slots remain — so this array decides the unsignalled panel and the
+ * tail of every signalled one. (Baselines before signals, not the reverse: the
+ * kernel flags that as the arguable call, because a minimum-size panel drops a
+ * signalled lens even when its signal fired.)
+ *
+ * The first three are therefore the default unsignalled panel — cause, intent,
  * consequence — which is the smallest set that covers the three ways a finding
  * is wrong on its own terms. `security` and `test-coverage` sit below them
  * because an unsignalled finding set has no security or test surface for them
- * to judge; when it does, the signals pull them up regardless of this order.
+ * to judge; when it does, the signals pull them up ahead of this order.
  */
 export const REVIEW_LENSES = [
   /** Can the failure actually be triggered? */
@@ -229,10 +235,35 @@ export interface FindingBrief {
   readonly findings: readonly BriefFinding[];
 }
 
-/** Collect the wave's verifiable findings from the task graph. Pure. */
+/**
+ * The five task fields this panel reads.
+ *
+ * Declared structurally rather than importing the whole `Task` aggregate, the
+ * same narrowing `AdjudicatedFinding` already uses in the other direction. The
+ * panel core does not need — and should not be able to see — `test_result`,
+ * `wave_gates`, `spec_anchors` or the rest of the schema to decide which
+ * findings a wave puts up for refutation, and a `Task` parameter says otherwise
+ * to every reader. `Task` satisfies this structurally, so callers pass one
+ * unchanged.
+ */
+export interface BriefSourceTask {
+  readonly id: string;
+  readonly wave: number;
+  readonly findings?: readonly Finding[];
+  readonly critical_findings?: readonly string[];
+  readonly advisory_findings?: readonly string[];
+}
+
+/** Collect the wave's verifiable findings from the task graph. Pure.
+ *
+ *  `severity` is a real parameter, not dead configurability: the brief round-
+ *  trips through `parseFindingBriefJson`, which accepts an advisory brief from
+ *  disk, so every downstream proof has to follow `brief.severity` rather than
+ *  assume the default. It is also the seam `VERIFIED_SEVERITY`'s own "revisit
+ *  once the false-positive rate is measured" note anticipates. */
 export function buildFindingBrief(
   wave: number,
-  tasks: readonly Task[],
+  tasks: readonly BriefSourceTask[],
   severity: FindingSeverity = VERIFIED_SEVERITY,
 ): FindingBrief {
   const waveTasks = tasks.filter((task) => task.wave === wave);
@@ -298,7 +329,7 @@ function parseBriefFindingEntry(
   const taskId = typeof entry.task_id === "string" ? entry.task_id.trim() : "";
   const agent = typeof entry.agent === "string" ? entry.agent.trim() : "";
   const claim = typeof entry.claim === "string" ? sanitizeProse(entry.claim) : "";
-  const severity = entry.severity === "critical" || entry.severity === "advisory" ? entry.severity : null;
+  const severity = parseFindingSeverity(entry.severity);
 
   if (id === "") errors.push(`${path}.id must be a non-empty string`);
   if (taskId === "") errors.push(`${path}.task_id must be a non-empty string`);
@@ -346,7 +377,7 @@ export function parseFindingBriefJson(raw: unknown): ParseResult<FindingBrief> {
   const wave = raw.wave;
   if (!Number.isInteger(wave) || (wave as number) < 1) errors.push("brief.wave must be a positive integer");
 
-  const severity = raw.severity === "critical" || raw.severity === "advisory" ? raw.severity : null;
+  const severity = parseFindingSeverity(raw.severity);
   if (severity === null) {
     errors.push("brief.severity must be 'critical' or 'advisory'");
   }
@@ -409,9 +440,17 @@ const BRIEF_REPAIR_HINT =
  */
 export function briefCompletenessErrors(
   brief: FindingBrief,
-  waveTasks: readonly Task[],
-  wave: number,
+  tasks: readonly BriefSourceTask[],
 ): readonly string[] {
+  // The wave is taken from the BRIEF and the filter is applied HERE, rather than
+  // trusting the caller to re-derive both. This function is documented as
+  // `buildFindingBrief`'s postcondition, and the shell was re-running
+  // `tasks.filter(t => t.wave === wave)` — the same predicate, written a second
+  // time, against a `wave` passed separately. Two copies of the subject a proof
+  // is about can drift, and if they do the proof holds over a different task set
+  // than the one the brief was built from, which proves nothing.
+  const wave = brief.wave;
+  const waveTasks = tasks.filter((task) => task.wave === wave);
   if (waveTasks.length === 0) {
     return [`no tasks in wave ${wave} — check --wave against .current_wave`];
   }
@@ -428,7 +467,7 @@ export function briefCompletenessErrors(
   // interpolated `brief.severity` and read as though it had checked that view
   // all along. `buildFindingBrief` takes the severity as a parameter, so the
   // proof of its postcondition has to follow it.
-  const viewOf = (task: Task): readonly string[] =>
+  const viewOf = (task: BriefSourceTask): readonly string[] =>
     (brief.severity === "critical" ? task.critical_findings : task.advisory_findings) ?? [];
 
   const short = waveTasks.flatMap((task) => {
@@ -497,11 +536,17 @@ export interface ReviewManifest {
  * The manifest fixes the finding set before verifiers spawn, so a verifier can
  * neither invent a finding nor skip one.
  *
- * Unlike the architecture panel's manifest — which the orchestrator writes,
- * because the designers' candidates do not exist until they run — this one is
- * ENGINE-authored: the findings already exist in the task graph, and the engine
- * is their only honest source. An orchestrator-built finding manifest could
- * quietly omit an inconvenient critical.
+ * ENGINE-authored, unlike the architecture panel's manifest, which the
+ * orchestrator writes because the designers' candidates do not exist until they
+ * run. The asymmetry is about WHEN the item set is knowable, not about how much
+ * either orchestrator is trusted: `parsePanelManifest` validates the candidate
+ * manifest against `expectedLenses`, derived in-engine from the validated
+ * digest, under exact length / membership / order / uniqueness rules — so an
+ * orchestrator there can no more omit a candidate than one here could omit a
+ * critical. (`runArtifactErrors`' surplus check closes the remaining gap: files
+ * on disk the manifest does not name.) Here the findings already exist in the
+ * task graph when the manifest is written, so there is no reason to route them
+ * through the model at all.
  */
 export function serializeReviewManifest(
   runId: string,
@@ -565,10 +610,18 @@ export function parseReviewManifest(
       }
       lenses.push(lens);
     }
-    if (new Set(lenses).size !== lenses.length) errors.push("manifest lenses must be unique");
-    if (lenses.length === expectedLenses.length && lenses.some((lens, index) => lens !== expectedLenses[index])) {
-      errors.push(`manifest lenses must exactly match: ${expectedLenses.join(", ")}`);
-    }
+    // The same four rules `parseRunManifest` applies to the finding array, from
+    // the same function. They were hand-rolled here — twenty lines from the call
+    // that could not carry them, because `RunManifestSpec` has no slot for a
+    // second validated id array — which is exactly the two-copies-of-one-rule
+    // setup the kernel exists to end.
+    errors.push(
+      ...exactOrderedSetErrors(lenses, expectedLenses, {
+        subject: "manifest lenses",
+        missing: "manifest is missing lens",
+        ordered: "manifest lenses",
+      }),
+    );
   }
 
   if (errors.length > 0 || !parsed.ok) return fail(errors);
@@ -700,6 +753,111 @@ void _outcomeIsAdjudicated;
  */
 export function defaultRefutationThreshold(lensCount: number): number {
   return Math.floor(lensCount / 2) + 1;
+}
+
+// ---------------------------------------------------------------------------
+// Run policy — three rules that decide whether a tally may proceed
+// ---------------------------------------------------------------------------
+//
+// These lived in `handlers/helpers/review-panel.ts`, inline in the I/O
+// function. Each one is a pure comparison over already-parsed values — two
+// integers, two integers, a set difference — and each carries a long comment
+// naming a real bug it prevents: a shrunken panel adjudicating under a lower
+// absolute bar, one lens killing a critical alone, a re-tally re-adjudicating a
+// closed decision. Rules that consequential deserve direct unit tests, and
+// inside the shell the only way to reach them was to spawn the CLI against a
+// temp filesystem. The equivalents that were already in the core
+// (`selectLenses`' bounds, `tallyRefutations`' threshold range) each have one.
+
+/**
+ * The panel size is fixed for the LIFE of a run, not per invocation.
+ *
+ * A `--lenses` that disagrees with the size the manifest recorded is a re-sized
+ * panel running under a name whose verdicts were cast by a different one.
+ * Re-running `manifest` without `--lenses` used to rewrite a recorded 5-lens
+ * panel to the 3-lens default; `readVerdicts` then iterated only the shrunken
+ * list, verdict-4 and verdict-5 were silently ignored, the absolute refutation
+ * bar fell from 3 to 2, and a finding the full panel had UPHELD came out refuted
+ * — promoting the task blocked → passed at exit 0 with nothing on stderr.
+ * Re-deriving the lens SET does not catch it: `selectReviewLenses` returns
+ * nested prefixes, so a truncated list reproduces its own derivation exactly.
+ */
+export function panelSizeConflict(requested: number | null, recorded: number | null): string | null {
+  if (requested === null || recorded === null || requested === recorded) return null;
+  return (
+    `this run's panel size is already fixed at ${recorded} lens(es); ` +
+    `--lenses ${requested} would re-size a panel whose verdicts were cast by the ` +
+    `recorded one — start a new run directory instead`
+  );
+}
+
+/**
+ * A strict majority is the FLOOR, not merely the default.
+ *
+ * `--threshold 1` let one lens kill a critical on its own, inverting the
+ * documented "ties favour keeping the finding" rule and promoting
+ * blocked → passed when it was the wave's last critical, with nothing in the
+ * runbook gating it. Raising the bar is always safe; lowering it is a weaker
+ * panel wearing the same name.
+ */
+export function thresholdError(threshold: number, lensCount: number): string | null {
+  const floor = defaultRefutationThreshold(lensCount);
+  return threshold >= floor
+    ? null
+    : `threshold ${threshold} is below the strict majority of ${lensCount} lenses (${floor}) — ` +
+      `a weaker panel must not run under the same name`;
+}
+
+/**
+ * Outcomes this run would re-adjudicate, given what the graph already records.
+ *
+ * A tally already applied would send `applyFindingOutcomes` looking for findings
+ * it has itself moved into `refuted_findings`, where the invariant throw blames
+ * "the task graph changed between brief and tally" — true of a
+ * `store-review-findings` override landing mid-run, and wrong about the far
+ * likelier cause: the operator re-ran `tally`. (A broken pipe on the canonical
+ * output AFTER the state write lands is enough to invite that.) Named before the
+ * write, so the diagnostic matches what happened.
+ *
+ * `alreadyRefuted` is wave-scoped to match the brief's id space, since
+ * `applyFindingOutcomes` strips the `${taskId}:` prefix back off when it applies
+ * an outcome.
+ */
+export function replayedOutcomes(
+  outcomes: readonly FindingOutcome[],
+  alreadyRefuted: ReadonlySet<string>,
+): readonly WaveFindingId[] {
+  return outcomes
+    .filter((outcome) => !outcome.survives && alreadyRefuted.has(outcome.finding.id))
+    .map((outcome) => outcome.finding.id);
+}
+
+/** The wave-scoped ids a graph already holds as refuted. */
+export function refutedIdsOf(
+  tasks: readonly { readonly id: string; readonly refuted_findings?: readonly { readonly finding: { readonly id: string } }[] }[],
+): ReadonlySet<string> {
+  return new Set(
+    tasks.flatMap((task) =>
+      (task.refuted_findings ?? []).map((record) => `${task.id}:${record.finding.id}`),
+    ),
+  );
+}
+
+/** The operator-facing diagnostic for a replayed tally. */
+export function replayError(replays: readonly WaveFindingId[]): string {
+  return (
+    `this run has already been tallied — ${replays.length} finding(s) are already recorded as ` +
+    `refuted on their task (${replays.join(", ")}). Re-tallying would re-adjudicate a closed ` +
+    `decision; start a new run directory to re-verify these findings.`
+  );
+}
+
+/** The panel size a written manifest records. Null when the file says nothing
+ *  usable — `parseReviewManifest` is what rejects it, with a real diagnostic. */
+export function manifestLensCount(raw: unknown): number | null {
+  if (!isRecord(raw)) return null;
+  const lenses = raw.lenses;
+  return Array.isArray(lenses) && lenses.length > 0 ? lenses.length : null;
 }
 
 /**

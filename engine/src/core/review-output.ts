@@ -30,8 +30,7 @@
  */
 
 import { match } from "ts-pattern";
-import type { ReviewStatus, Task } from "../types";
-import { REVIEW_SUB_AGENTS } from "../config";
+import { FINDING_SEVERITIES, type FindingSeverity, type ReviewStatus, type Task } from "../types";
 import {
   claimsOfSeverity,
   draftsFromClaims,
@@ -73,7 +72,24 @@ export interface ParsedFindings {
   readonly critical: readonly string[];
   readonly advisory: readonly string[];
   readonly criticalCount: number | null;
+  /**
+   * The reviewer's own advisory tally, or null when it emitted none.
+   *
+   * Parsed for the same reason `criticalCount` is. `ADVISORY_COUNT` is required
+   * by every reviewer agent contract and was read by nothing, so a reviewer that
+   * declared four advisories whose `ADVISORY:` lines failed to scrape — wrapped,
+   * re-indented, reformatted — recorded zero with nothing reporting the
+   * shortfall, and `/wave-gate` Step 4b (a MUST-level constraint) had nothing to
+   * triage. Unlike `criticalCount`, a missing value is NOT an evidence failure:
+   * the contract has always made `CRITICAL_COUNT` the one marker whose absence
+   * means "the parse failed".
+   */
+  readonly advisoryCount: number | null;
   readonly blockStatus: FindingsBlockStatus;
+  /** How many marker claims the winning block did not name and were carried over
+   *  beside it. Non-zero only for `partial`; reported so the operator can see the
+   *  duplication that arbitration deliberately prefers over a lost finding. */
+  readonly carriedOver: number;
 }
 
 /**
@@ -87,7 +103,9 @@ export function makeParsedFindings(input: {
   advisory?: readonly string[];
   drafts?: readonly DraftFinding[];
   criticalCount?: number | null;
+  advisoryCount?: number | null;
   blockStatus?: FindingsBlockStatus;
+  carriedOver?: number;
 }): ParsedFindings {
   const drafts = input.drafts ?? draftsFromClaims(input.critical ?? [], input.advisory ?? []);
   return Object.freeze({
@@ -95,16 +113,13 @@ export function makeParsedFindings(input: {
     critical: Object.freeze([...claimsOfSeverity(drafts, "critical")]),
     advisory: Object.freeze([...claimsOfSeverity(drafts, "advisory")]),
     criticalCount: input.criticalCount ?? null,
+    advisoryCount: input.advisoryCount ?? null,
     blockStatus: input.blockStatus ?? "absent",
+    carriedOver: input.carriedOver ?? 0,
   });
 }
 
 export const EMPTY_FINDINGS: ParsedFindings = makeParsedFindings({});
-
-/** Pure: is this agent type one whose output carries review findings? */
-export function isReviewAgent(agentType: string): boolean {
-  return REVIEW_SUB_AGENTS.has(agentType);
-}
 
 /** Pure: Build evidence_capture_failed error message, surfacing partial findings if any. */
 export function buildEvidenceFailureMessage(findings: ParsedFindings): string {
@@ -115,40 +130,54 @@ export function buildEvidenceFailureMessage(findings: ParsedFindings): string {
 }
 
 /** The self-describing claim a broken parse leaves behind. */
-function parseFailureClaim(missing: number, total: number): string {
+function parseFailureClaim(severity: FindingSeverity, missing: number, total: number): string {
   return missing === total
-    ? `Review output parsing failed - ${total} findings not captured`
-    : `Review output parsing failed - ${missing} of ${total} critical findings not captured`;
+    ? `Review output parsing failed - ${total} ${severity} findings not captured`
+    : `Review output parsing failed - ${missing} of ${total} ${severity} findings not captured`;
 }
 
 /**
- * Pure: reconcile a `CRITICAL_COUNT` the captured criticals fall short of into a
+ * Pure: reconcile a declared count the captured claims fall short of into a
  * self-describing entry, so a broken parse cannot pass the wave gate silently.
  *
- * The shortfall case, not just the total-loss case: `CRITICAL_COUNT` is the
- * reviewer's own tally and the contract names it the authority, so capturing 1
- * of 3 is the same class of failure as capturing 0 of 3 — and strictly more
- * dangerous, because the survivor makes the gate look like it saw everything.
+ * The shortfall case, not just the total-loss case: the count is the reviewer's
+ * own tally and the contract names it the authority, so capturing 1 of 3 is the
+ * same class of failure as capturing 0 of 3 — and strictly more dangerous,
+ * because the survivor makes the gate look like it saw everything.
+ *
+ * BOTH severities. `ADVISORY_COUNT` is mandated by every reviewer agent file and
+ * used to be parsed by nothing, so advisory marker lines that failed to scrape
+ * vanished with no backstop — the mirror image of the critical loss this
+ * function was written for, on the severity `/wave-gate` Step 4b must triage
+ * item by item. The synthetic entry keeps its own severity, so a lost advisory
+ * does not fabricate a blocker.
  */
 export function reconcileFindings(findings: ParsedFindings): ParsedFindings {
-  const count = findings.criticalCount;
-  if (count === null || count <= 0 || findings.critical.length >= count) {
-    return findings;
-  }
-  // An authored claim, not agent output — a plain literal rather than
-  // makeDraftFinding, whose sentinel/empty filter exists to reject UNTRUSTED
-  // text and must never be able to silently drop this reconciliation.
-  const synthetic: DraftFinding = {
-    severity: "critical",
-    file: null,
-    line: null,
-    claim: parseFailureClaim(count - findings.critical.length, count),
-  };
-  return makeParsedFindings({
-    drafts: [synthetic, ...findings.drafts],
-    criticalCount: count,
-    blockStatus: findings.blockStatus,
+  const shortfalls = FINDING_SEVERITIES.flatMap((severity) => {
+    const count = severity === "critical" ? findings.criticalCount : findings.advisoryCount;
+    const captured = severity === "critical" ? findings.critical : findings.advisory;
+    if (count === null || count <= 0 || captured.length >= count) return [];
+    // An authored claim, not agent output — a plain literal rather than
+    // makeDraftFinding, whose sentinel/empty filter exists to reject UNTRUSTED
+    // text and must never be able to silently drop this reconciliation.
+    const synthetic: DraftFinding = {
+      severity,
+      file: null,
+      line: null,
+      claim: parseFailureClaim(severity, count - captured.length, count),
+    };
+    return [synthetic];
   });
+
+  return shortfalls.length === 0
+    ? findings
+    : makeParsedFindings({
+        drafts: [...shortfalls, ...findings.drafts],
+        criticalCount: findings.criticalCount,
+        advisoryCount: findings.advisoryCount,
+        blockStatus: findings.blockStatus,
+        carriedOver: findings.carriedOver,
+      });
 }
 
 /** Extract CRITICAL/ADVISORY lines and CRITICAL_COUNT from a text block.
@@ -166,10 +195,21 @@ function extractFindings(block: string): ParsedFindings {
     if (advMatch) advisory.push(advMatch[1].trim());
   }
 
-  const countMatch = cleaned.match(/^\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*(\d+)/m);
-  const criticalCount = countMatch ? Number(countMatch[1]) : null;
+  return makeParsedFindings({
+    critical,
+    advisory,
+    criticalCount: declaredCount(cleaned, "CRITICAL"),
+    advisoryCount: declaredCount(cleaned, "ADVISORY"),
+  });
+}
 
-  return makeParsedFindings({ critical, advisory, criticalCount });
+/** The `<SEVERITY>_COUNT` marker a reviewer declared, or null when absent.
+ *  Tolerates the same list-marker and bold decoration the claim scraper does. */
+function declaredCount(text: string, severity: "CRITICAL" | "ADVISORY"): number | null {
+  const match = text.match(
+    new RegExp(String.raw`^[ \t\-*]*\*{0,2}${severity}_COUNT:?\*{0,2}\s*(\d+)`, "m"),
+  );
+  return match ? Number(match[1]) : null;
 }
 
 /** Parse Machine Summary block for structured findings.
@@ -208,10 +248,11 @@ export function parseMachineSummary(output: string): ParsedFindings | null {
  * let a criticals-only block win outright and delete every `ADVISORY:` marker
  * line, while `blockStatus` still reported `used` so no degradation note was
  * printed. `/wave-gate` Step 4b must triage every advisory to
- * fixed/deferred/dismissed; it cannot triage what it never sees. (Every
- * reviewer agent file now requires the block to account for advisories too —
- * see agents/code-reviewer.md — but the arbitration must hold for output that
- * does not honour its prompt, which is the only output worth arbitrating.)
+ * fixed/deferred/dismissed; it cannot triage what it never sees. (Every agent
+ * file in `REVIEW_SUB_AGENTS` requires the block to account for advisories too
+ * — `tests/review-agent-contract.test.ts` proves that claim rather than
+ * asserting it — but the arbitration must hold for output that does not honour
+ * its prompt, which is the only output worth arbitrating.)
  *
  * Counting is necessary and NOT sufficient. Arbitration stays cardinal on
  * purpose — demanding that the block reproduce marker text verbatim would
@@ -230,52 +271,93 @@ export function parseMachineSummary(output: string): ParsedFindings | null {
  * own tally and is what distinguishes "zero findings" from "the parse failed".
  */
 function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
+  const counts = { criticalCount: scraped.criticalCount, advisoryCount: scraped.advisoryCount };
   const structured = parseFindingsBlock(block);
   if (structured === null) {
     return makeParsedFindings({
       drafts: scraped.drafts,
-      criticalCount: scraped.criticalCount,
+      ...counts,
       blockStatus: hasFindingsBlock(block) ? "rejected" : "absent",
     });
   }
-  const fromBlock = makeParsedFindings({
-    drafts: structured,
-    criticalCount: scraped.criticalCount,
-    blockStatus: "used",
-  });
+  const fromBlock = makeParsedFindings({ drafts: structured, ...counts, blockStatus: "used" });
   const claimedCritical = Math.max(scraped.criticalCount ?? 0, scraped.critical.length);
   const accountsForAll =
     fromBlock.critical.length >= claimedCritical &&
     fromBlock.advisory.length >= scraped.advisory.length;
-  if (!accountsForAll) {
-    return makeParsedFindings({
-      drafts: scraped.drafts,
-      criticalCount: scraped.criticalCount,
-      blockStatus: "superseded",
-    });
-  }
+
   // Multiset, not set: two reviewers can legitimately word a claim identically,
   // and a block naming it once when the markers named it twice has dropped one.
   // Both sides are `collapseWhitespace`-normalized (every claim reaching either
   // view is built by makeDraftFinding), so comparison by value is exact.
-  const unnamed = draftsFromClaims(
+  const unnamedByBlock = draftsFromClaims(
     removeOnce(scraped.critical, fromBlock.critical),
     removeOnce(scraped.advisory, fromBlock.advisory),
   );
-  return unnamed.length === 0
+
+  if (!accountsForAll) {
+    // The block LOST, and losing must not mean being deleted. Returning the
+    // scraped drafts alone threw away every claim the block named that the
+    // marker lines did not — and a reviewer that emits `CRITICAL_COUNT` plus a
+    // block but no `CRITICAL:` lines has an empty scraped set, so the whole
+    // finding text vanished and `reconcileFindings` replaced real, located
+    // claims with a synthetic "N findings not captured" no verifier can
+    // adjudicate. The union is the same rule the winning side already applies,
+    // in the other direction: the markers lead (they set the count the block
+    // failed to meet), and the block's unnamed entries follow with their
+    // file/line intact.
+    // Consumed multiset-wise, like `removeOnce`: a block naming a claim twice
+    // against markers naming it once contributes exactly one carry-over.
+    const unclaimed = new Map(
+      FINDING_SEVERITIES.map((severity) => [
+        severity,
+        [...(severity === "critical" ? scraped.critical : scraped.advisory)],
+      ]),
+    );
+    const recovered = structured.filter((draft) => {
+      const pool = unclaimed.get(draft.severity)!;
+      const at = pool.indexOf(draft.claim);
+      if (at < 0) return true;
+      pool.splice(at, 1);
+      return false;
+    });
+    return makeParsedFindings({
+      drafts: [...scraped.drafts, ...recovered],
+      ...counts,
+      blockStatus: "superseded",
+      carriedOver: recovered.length,
+    });
+  }
+
+  return unnamedByBlock.length === 0
     ? fromBlock
     : makeParsedFindings({
         // The block's entries first, so its file/line-bearing findings keep
         // their order; the recovered marker claims follow, location-less.
-        drafts: [...structured, ...unnamed],
-        criticalCount: scraped.criticalCount,
+        drafts: [...structured, ...unnamedByBlock],
+        ...counts,
         blockStatus: "partial",
+        carriedOver: unnamedByBlock.length,
       });
 }
 
-/** Legacy fallback: section-headed Critical/Advisory blocks first;
- *  fall back to whole-output line scan if no sections matched. */
+/**
+ * Legacy fallback: section-headed Critical/Advisory blocks first; fall back to
+ * whole-output line scan if no sections matched.
+ *
+ * Arbitrated through `chooseSource` exactly like the Machine Summary path. It
+ * used to return the scraped claims directly, so a reviewer that emitted a
+ * perfectly good ```findings block under a heading `parseMachineSummary` does
+ * not match (`**Machine Summary**`, bold with no hashes) had its file/line
+ * silently discarded AND was reported as `blockStatus: "absent"` — the one value
+ * documented to mean "the reviewer emitted no block", so `blockStatusNote`
+ * printed nothing about a real degradation.
+ */
 export function parseLegacyFindings(output: string): ParsedFindings {
+  return chooseSource(scrapeLegacyFindings(output), output);
+}
+
+function scrapeLegacyFindings(output: string): ParsedFindings {
   const critical: string[] = [];
   const advisory: string[] = [];
 
@@ -297,10 +379,12 @@ export function parseLegacyFindings(output: string): ParsedFindings {
     return extractFindings(output);
   }
 
-  const countMatch = output.match(/\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*(\d+)/);
-  const criticalCount = countMatch ? Number(countMatch[1]) : null;
-
-  return makeParsedFindings({ critical, advisory, criticalCount });
+  return makeParsedFindings({
+    critical,
+    advisory,
+    criticalCount: declaredCount(output, "CRITICAL"),
+    advisoryCount: declaredCount(output, "ADVISORY"),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -332,14 +416,34 @@ export function applyReviewResolution(task: Task, resolution: ReviewResolution):
       ...task,
       review_status: "evidence_capture_failed" as ReviewStatus,
       review_error: r.message,
+      // Named, not just counted. The status is per-task and the failure is
+      // per-agent, so recording WHICH reviewer could not be parsed is what lets
+      // `mergeFindings` keep the block alive across a sibling's clean pass and
+      // still clear it when that reviewer itself re-runs successfully.
+      review_evidence_failures: [
+        ...(task.review_evidence_failures ?? []).filter((failed) => failed !== r.agent),
+        r.agent,
+      ],
     }))
     .with({ kind: "findings" }, (r): Task => mergeFindings(task, r.findings, r.agent))
     .exhaustive();
 }
 
-/** The operator-facing note a degraded structured block earns. Empty when the
- *  block was used or never offered — only a LOSS is worth a line of output. */
-function blockStatusNote(status: FindingsBlockStatus): string {
+/**
+ * The operator-facing note a degraded structured block earns. Empty when the
+ * block was used or never offered — only a LOSS is worth a line of output.
+ *
+ * `carriedOver` is reported because arbitration deliberately prefers a
+ * DUPLICATED finding to a lost one: a block that rewords the marker claims
+ * clears the cardinal bar and then names none of them, so every marker claim
+ * comes across beside it and the same defect is adjudicated twice. That is the
+ * right trade — the alternative, capping the carry-over, deletes real claims
+ * whenever the block names different ones — but it costs a verifier vote per
+ * duplicate, and an operator who cannot see the count cannot tell an inflated
+ * finding set from a genuinely large one.
+ */
+function blockStatusNote(status: FindingsBlockStatus, carriedOver: number): string {
+  const carried = `${carriedOver} claim(s) carried over`;
   return match(status)
     .with("absent", () => "")
     .with("used", () => "")
@@ -350,12 +454,14 @@ function blockStatusNote(status: FindingsBlockStatus): string {
     .with(
       "superseded",
       () =>
-        " [findings block under-reported findings — used marker lines instead, findings carry no file/line]",
+        ` [findings block under-reported findings — used marker lines, ${carried} from the block; ` +
+        `the rest carry no file/line]`,
     )
     .with(
       "partial",
       () =>
-        " [findings block did not name every marker claim — the unnamed claims were carried over without file/line]",
+        ` [findings block did not name every marker claim — ${carried} without file/line, ` +
+        `so a reworded claim is adjudicated twice]`,
     )
     .exhaustive();
 }
@@ -375,7 +481,7 @@ export function reviewResolutionLog(taskId: string, resolution: ReviewResolution
       const count = Math.max(r.findings.criticalCount ?? 0, r.findings.critical.length);
       return (
         `Task ${taskId} review: ${count > 0 ? "blocked" : "passed"} (${count} critical)` +
-        blockStatusNote(r.findings.blockStatus)
+        blockStatusNote(r.findings.blockStatus, r.findings.carriedOver)
       );
     })
     .exhaustive();

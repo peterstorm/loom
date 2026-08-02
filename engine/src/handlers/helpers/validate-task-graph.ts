@@ -12,7 +12,13 @@ import {
   attributeFindings,
   claimsOfSeverity,
   deduplicateFindingIds,
+  findingIdCollisionError,
+  findingsLockstepError,
+  findingsUnionError,
+  findingsViewError,
+  evidenceFailureError,
   nextOrdinal,
+  refutationsUnionError,
   parseStoredFindings,
   parseStoredRefutations,
   recoverViewOnlyClaims,
@@ -62,8 +68,49 @@ function fixMinimal(json: Record<string, unknown>): string {
   }, null, 2);
 }
 
+/**
+ * Every findings-aggregate rule the load boundary applies to one task.
+ *
+ * Exported shape of the agreement: `taskUnionError` (state-manager) runs exactly
+ * these, in this order, and `--fix` repairs exactly what they reject. A rule
+ * added to one and not the other is the drift that let the operator's validator
+ * disagree with the loader.
+ */
+function findingsErrorsOf(task: Record<string, unknown>, label: string): string[] {
+  const errors: string[] = [];
+  const push = (error: string | null): void => {
+    if (error !== null) errors.push(error);
+  };
+  push(findingsUnionError(task.findings, `${label}: findings`));
+  for (const severity of ["critical", "advisory"] as const) {
+    push(findingsViewError(task[`${severity}_findings`], `${label}: ${severity}_findings`));
+  }
+  push(findingsLockstepError(task.findings, task.critical_findings, task.advisory_findings, label));
+  push(refutationsUnionError(task.refuted_findings, `${label}: refuted_findings`));
+  push(findingIdCollisionError(task.findings, task.refuted_findings, label));
+  push(evidenceFailureError(task, label));
+  return errors;
+}
+
+/**
+ * What is being validated, which decides whether the findings aggregate is in
+ * scope.
+ *
+ * `state-file` is a graph that `StateManager.load()` must be able to open, so it
+ * is held to every load-boundary rule. `decompose-payload` is the
+ * AGENT-CONTROLLED stdin the decompose step emits, validated BEFORE
+ * `sanitizeDecomposedTask` strips the execution state a planner must never mint
+ * — findings, review status, test verdicts. Holding that payload to the findings
+ * invariants would reject forged state the pipeline exists to clean, turning a
+ * successful sanitization into a hard failure.
+ */
+export type ValidationScope = "state-file" | "decompose-payload";
+
 /** Validate full decompose task graph */
-export function validateFull(json: Record<string, unknown>): ValidationResult {
+export function validateFull(
+  json: Record<string, unknown>,
+  scope: ValidationScope = "state-file",
+): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
 
@@ -115,6 +162,15 @@ export function validateFull(json: Record<string, unknown>): ValidationResult {
           errors.push(`Task ${tid} (wave ${wave}): depends on '${dep}' (wave ${(depTask as Record<string, unknown>).wave}) — deps must be in earlier wave`);
         }
       }
+    }
+
+    // The findings aggregate, checked with the SAME functions the load boundary
+    // uses. This validator ran none of them, so `helper validate-task-graph`
+    // reported `{ok: true}` on a graph `StateManager.load()` refuses to open —
+    // two validators, two rule sets, and the one the operator is told to run was
+    // the weaker one. Sharing the functions is what keeps "valid" one answer.
+    if (scope === "state-file") {
+      for (const check of findingsErrorsOf(task, `Task ${tid}`)) errors.push(check);
     }
 
     // Optional field type checks
@@ -182,6 +238,9 @@ interface FindingsRepair {
   readonly dropped: number;
   /** Malformed `refuted_findings` records — audit trail, unrecoverable. */
   readonly droppedRefutations: number;
+  /** The review record was cleared because its evidence-failure biconditional
+   *  was broken and no honest reconstruction exists. */
+  readonly clearedReviewRecord: boolean;
 }
 
 /**
@@ -243,18 +302,65 @@ function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
   );
   const findings = [...identified, ...recoveredFindings];
 
+  const review = repairReviewRecord(t);
+
   return {
     fields: {
       findings,
       critical_findings: [...claimsOfSeverity(findings, "critical")],
       advisory_findings: [...claimsOfSeverity(findings, "advisory")],
       refuted_findings: refuted,
+      ...review.fields,
     },
     recovered: recoveredFindings.map((finding) => finding.claim),
     salvaged: salvagedFindings.map((finding) => finding.claim),
     reminted,
     dropped: rawFindingCount - parsed.length - salvagedFindings.length,
     droppedRefutations: rawRefutedCount - refuted.length,
+    clearedReviewRecord: review.cleared,
+  };
+}
+
+/**
+ * Repair the review record's evidence-failure biconditional
+ * (`evidenceFailureError` at the load boundary): the status is
+ * `evidence_capture_failed` exactly when `review_evidence_failures` names at
+ * least one reviewer.
+ *
+ * There is no honest reconstruction of a broken pairing — nothing on disk says
+ * WHICH reviewer's transcript could not be parsed — so the repair clears the
+ * whole review record rather than guessing. That is the fail-closed direction:
+ * `checkReviews` counts a task with no review_status as unreviewed and fails the
+ * gate, whereas inventing an agent name would leave a block nothing can clear,
+ * and dropping the status alone would advance a wave over a reviewer whose
+ * findings were never captured.
+ */
+function repairReviewRecord(t: Record<string, unknown>): {
+  readonly fields: Record<string, unknown>;
+  readonly cleared: boolean;
+} {
+  const raw = t.review_evidence_failures;
+  const agents = Array.isArray(raw)
+    ? [...new Set(raw.filter((a): a is string => typeof a === "string" && a.trim() !== ""))]
+    : [];
+  const failed = t.review_status === "evidence_capture_failed";
+  const wellFormed = failed === agents.length > 0 && (raw === undefined || Array.isArray(raw));
+
+  if (wellFormed) {
+    // Still normalize: a duplicate or blank entry loads as an error but carries
+    // no information a repair could lose.
+    return {
+      fields: agents.length > 0 ? { review_evidence_failures: agents } : {},
+      cleared: false,
+    };
+  }
+  return {
+    fields: {
+      review_status: "pending",
+      review_error: undefined,
+      review_evidence_failures: undefined,
+    },
+    cleared: true,
   };
 }
 
@@ -365,9 +471,17 @@ const handler: HookHandler = async (stdin, args) => {
     // A repair that gave a claim identity or renamed one changed the data the
     // panel will vote on. Silent conservation is still a change.
     for (const note of repair.notes) process.stderr.write(`  ${note}\n`);
-    if (!result.ok) {
-      process.stderr.write(`Fixed structural defaults; ${result.errors.length} issues remain\n`);
-      for (const err of result.errors) process.stderr.write(`  - ${err}\n`);
+    // Re-validate the REPAIRED graph, not the input. Reporting the input's
+    // errors as "remaining" told the operator the repair had failed on exactly
+    // the runs where it succeeded — and named issues they would then go looking
+    // for in a file that no longer has them. A repair that cannot clear an error
+    // is worth saying; one that did is worth not saying.
+    const after = isMinimal
+      ? validateMinimal(JSON.parse(repair.json))
+      : validateFull(JSON.parse(repair.json));
+    if (!after.ok) {
+      process.stderr.write(`Fixed structural defaults; ${after.errors.length} issues remain\n`);
+      for (const err of after.errors) process.stderr.write(`  - ${err}\n`);
     }
     // --fix is a transformation, not a gate — but binding problems are not
     // structurally fixable, so surface them rather than dropping them.

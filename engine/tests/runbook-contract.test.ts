@@ -42,14 +42,26 @@ function flagsRead(handlerPath: string): readonly string[] {
   return [...new Set(flags)].sort();
 }
 
-/** Line-ordered operation names as the runbook actually presents them. */
+/** Line-ordered operation names as the runbook actually presents them.
+ *
+ *  `[a-z][a-z0-9-]*`, not `[a-z]+`: a hyphenated operation like `re-tally` used
+ *  to capture as `re`, and the "invokes unknown operations: re" that produced
+ *  points at a name nobody wrote. The pattern must be able to express every name
+ *  the operation lists can hold — which the assertion below proves it does. */
 function operationOrder(prose: string, helper: string): readonly string[] {
-  const pattern = new RegExp(`helper ${helper} ([a-z]+)`, "g");
+  const pattern = new RegExp(`helper ${helper} ([a-z][a-z0-9-]*)`, "g");
   const seen: string[] = [];
   for (const match of prose.matchAll(pattern)) {
     if (!seen.includes(match[1]!)) seen.push(match[1]!);
   }
   return seen;
+}
+
+/** Does the prose mention this flag AS a flag, rather than as a prefix of a
+ *  longer one? `prose.includes("--lens")` is satisfied by any `--lenses`, so the
+ *  flag check could pass for a flag the runbook never documents. */
+function mentionsFlag(prose: string, flag: string): boolean {
+  return new RegExp(`${flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z0-9-])`).test(prose);
 }
 
 const PANELS = [
@@ -98,7 +110,7 @@ describe.each(PANELS)("$label runbook ↔ $helper handler", ({ helper, runbook, 
     // The `--threshold` gap, generalized. A flag the handler accepts but the
     // runbook never mentions is a knob only someone reading the source knows
     // exists — and in --threshold's case, one that could weaken the panel.
-    const undocumented = flagsRead(helper).filter((flag) => !prose.includes(flag));
+    const undocumented = flagsRead(helper).filter((flag) => !mentionsFlag(prose, flag));
     expect(undocumented, `${runbook} never mentions: ${undocumented.join(", ")}`).toEqual([]);
   });
 
@@ -107,6 +119,25 @@ describe.each(PANELS)("$label runbook ↔ $helper handler", ({ helper, runbook, 
     // assertion above pass for every possible runbook.
     expect(flagsRead(helper).length).toBeGreaterThanOrEqual(4);
     expect(flagsRead(helper)).toContain("--runs-root");
+  });
+
+  it("the operation pattern can express every name the handler declares", () => {
+    // The regex is the instrument, and an instrument that cannot represent the
+    // thing it measures reports a clean result on a broken input. A hyphenated
+    // or digit-bearing operation added to the handler must be MATCHABLE here,
+    // whether or not the runbook currently has one.
+    for (const operation of operations) {
+      expect(
+        operationOrder(`helper ${helper} ${operation} --runs-root x`, helper),
+        `operationOrder cannot capture '${operation}'`,
+      ).toEqual([operation]);
+    }
+  });
+
+  it("the flag check is not satisfied by a longer flag that merely starts the same", () => {
+    // `--lens` vs `--lenses`: substring matching made one document the other.
+    expect(mentionsFlag("pass --lenses 3", "--lens")).toBe(false);
+    expect(mentionsFlag("pass --lens intent", "--lens")).toBe(true);
   });
 });
 

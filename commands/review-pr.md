@@ -161,19 +161,26 @@ ADVISORY: prefer a named constant over the literal
 - Never invent an `id`. Ids are derived from (agent, emission order) by the
   engine so they are stable and need no trust.
 
-`CRITICAL_COUNT` is still the authority on how many criticals you found, and the
-block must **account for every finding you reported — advisories included**: when
-it parses, it becomes the sole source of findings and the marker lines are
-ignored, so every `CRITICAL:` line **and** every `ADVISORY:` line must also
-appear in the block with the matching `"severity"`. A block listing fewer
-findings of **either** severity than the marker lines is discarded in favour of
-them — no finding is ever lost to it, but its locations are. If the block is
-absent or malformed, the marker lines are parsed instead and the findings simply
-carry no file/line. Verification quality degrades; nothing breaks.
+`CRITICAL_COUNT` and `ADVISORY_COUNT` are the authority on how many findings you
+made, and the block must **account for every finding you reported — advisories
+included**: when it parses and is long enough, it becomes the source of findings,
+so every `CRITICAL:` line **and** every `ADVISORY:` line must also appear in the
+block with the matching `"severity"`. A block listing fewer findings of
+**either** severity than the marker lines loses to them. If the block is absent
+or malformed, the marker lines are parsed instead. Either way the claims survive
+and only the locations are at risk: verification quality degrades, nothing
+breaks.
 
-The engine compares **counts per severity, not claim text**: it cannot tell a
-reworded claim from a substituted one, so a block that renames a claim replaces
-it silently. Write the same claim in both places.
+The engine arbitrates on **counts per severity, not claim text** — it cannot tell
+a reworded claim from a substituted one — and then reconciles the winner **by
+value**. Neither side is ever deleted for losing: any marker claim the winning
+block does not name is carried over beside it without a location, and any block
+claim the marker lines do not name survives a losing block the same way. The
+operator is told how many claims were carried over.
+
+So a renamed claim is not lost — but it does arrive **twice**, once from each
+side, and a verifier then spends a vote on the duplicate. Write the same claim
+text in both places.
 
 ## Usage Examples
 

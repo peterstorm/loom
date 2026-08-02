@@ -14,10 +14,10 @@
 import type { HookHandler, SubagentStopInput } from "../../types";
 import {
   applyReviewResolution,
-  isReviewAgent,
   resolveReviewFindings,
   reviewResolutionLog,
 } from "../../core/review-output";
+import { isReviewAgent } from "../../config";
 import { StateManager } from "../../state-manager";
 import { extractTaskId } from "../../utils/extract-task-id";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";

@@ -107,8 +107,11 @@ const handler: HookHandler = async (stdin, args) => {
     return { kind: "error", message: "No tasks in decompose JSON" };
   }
 
-  // Validate decompose output before merging
-  const validation = validateFull(decompose as unknown as Record<string, unknown>);
+  // Validate decompose output before merging. Scoped to the PAYLOAD: the
+  // findings aggregate is agent-forgeable here and `sanitizeDecomposedTask`
+  // strips it below, so holding this to the load-boundary findings rules would
+  // reject exactly the input that sanitization exists to clean.
+  const validation = validateFull(decompose as unknown as Record<string, unknown>, "decompose-payload");
   if (!validation.ok) {
     if (fix) {
       const repair = fixFull(decompose as unknown as Record<string, unknown>);
@@ -118,7 +121,7 @@ const handler: HookHandler = async (stdin, args) => {
       // (unknown agent, wave gaps, self-dependency) are unfixable. Re-validate
       // so they fail loudly instead of reaching the persisted graph under a
       // misleading "Auto-fixed" banner.
-      const revalidation = validateFull(decompose as unknown as Record<string, unknown>);
+      const revalidation = validateFull(decompose as unknown as Record<string, unknown>, "decompose-payload");
       if (!revalidation.ok) {
         return {
           kind: "error",
