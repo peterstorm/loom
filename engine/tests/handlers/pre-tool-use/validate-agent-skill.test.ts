@@ -1,9 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { parseSkillsFromFrontmatter, promptReferencesSkill } from "../../../src/handlers/pre-tool-use/validate-agent-skill";
+import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import validateAgentSkill, {
+  parseSkillsFromFrontmatter,
+  promptReferencesSkill,
+  VALIDATED_AGENTS,
+} from "../../../src/handlers/pre-tool-use/validate-agent-skill";
+import { TASK_GRAPH_PATH } from "../../../src/config";
 
 const TMP = "/tmp/loom-skill-test-" + process.pid;
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
 
 beforeEach(() => mkdirSync(TMP, { recursive: true }));
 afterEach(() => rmSync(TMP, { recursive: true, force: true }));
@@ -136,6 +143,58 @@ describe("promptReferencesSkill", () => {
 });
 
 describe("validate-agent-skill — integration scenarios", () => {
+  it("enforces skill policy for the panel designer", () => {
+    expect(VALIDATED_AGENTS.has("arch-designer-agent")).toBe(true);
+    expect(promptReferencesSkill("Use the architecture-tech-lead skill.", "architecture-tech-lead")).toBe(true);
+    expect(promptReferencesSkill("Design a panel candidate.", "architecture-tech-lead")).toBe(false);
+  });
+
+  it("blocks a namespaced panel designer spawn that omits architecture-tech-lead", async () => {
+    const createdGraph = !existsSync(TASK_GRAPH_PATH);
+    const previousRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    if (createdGraph) {
+      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
+      writeFileSync(TASK_GRAPH_PATH, "{}");
+    }
+    process.env.CLAUDE_PLUGIN_ROOT = REPO_ROOT;
+    try {
+      const result = await validateAgentSkill(JSON.stringify({
+        tool_name: "Task",
+        tool_input: { subagent_type: "loom:arch-designer-agent", prompt: "Design one panel candidate." },
+      }), []);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") expect(result.message).toContain("architecture-tech-lead");
+    } finally {
+      if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;
+      if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
+    }
+  });
+
+  it("allows a namespaced panel designer spawn with its declared skill", async () => {
+    const createdGraph = !existsSync(TASK_GRAPH_PATH);
+    const previousRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    if (createdGraph) {
+      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
+      writeFileSync(TASK_GRAPH_PATH, "{}");
+    }
+    process.env.CLAUDE_PLUGIN_ROOT = REPO_ROOT;
+    try {
+      const result = await validateAgentSkill(JSON.stringify({
+        tool_name: "Task",
+        tool_input: {
+          subagent_type: "loom:arch-designer-agent",
+          prompt: "Use the architecture-tech-lead skill to design one panel candidate.",
+        },
+      }), []);
+      expect(result.kind).toBe("allow");
+    } finally {
+      if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;
+      if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
+    }
+  });
+
   it("brainstorm-agent prompt with brainstorming → pass", () => {
     const prompt = "You are an exploration specialist. Follow the process from the preloaded brainstorming skill.";
     expect(promptReferencesSkill(prompt, "brainstorming")).toBe(true);

@@ -41,7 +41,7 @@ Store the printed path. **All subsequent references use it:**
 - `/loom --skip-clarify` - Skip clarify phase (accept markers as-is)
 - `/loom --skip-specify` - Skip brainstorm/specify/clarify (use existing spec)
 - `/loom --skip-plan-alignment` - Skip plan-alignment phase (proceed directly to decompose)
-- `/loom --panel` - Architecture panel mode: N designer agents generate candidates in parallel (each with a lens), adversarial judges rank them against interview-derived criteria, the finalizer synthesizes and presents them at the approach gate. Opt-in; standard mode is untouched. `--panel=N` sets the designer count (default `PANEL_DESIGNERS_DEFAULT` in `engine/src/config.ts`). N is capped at the number of distinct lenses (5) — each designer takes exactly one lens (see [panel-lenses.md](../references/panel-lenses.md)). Only affects Phase 3. See [Phase 3 (panel mode)](#phase-3-panel-mode-loom---panel).
+- `/loom --panel` - Architecture panel mode: N designer agents generate candidates in parallel (each with a lens), adversarial judges rank them against interview-derived criteria, and the finalizer presents the ranked approaches. `--panel=N` requires a decimal integer of at least `PANEL_DESIGNERS_MIN` (currently 2); malformed, fractional, duplicate, or smaller values are rejected. Values above the number of distinct lenses (5) are capped. Bare `--panel` uses `PANEL_DESIGNERS_DEFAULT` (currently 3). Opt-in; only Phase 3 changes. See [panel-lenses.md](../references/panel-lenses.md) and [Phase 3 (panel mode)](#phase-3-panel-mode-loom---panel).
 - `/loom --status` - Show current task graph status *(planned — use jq commands in Observability section)*
 - `/loom --complete` - Finalize, clean up state *(planned — manually remove state file for now)*
 - `/loom --abort` - Cancel mid-execution, clean state *(planned — manually remove state file for now)*
@@ -208,58 +208,98 @@ Substitute variables:
 
 ## Phase 3 (panel mode): `/loom --panel`
 
-Runs only when `--panel` (or `--panel=N`) is passed. The `current_phase` stays `"architecture"` throughout — the engine recognizes the panel agents (`arch-interviewer-agent`, `arch-designer-agent`, `arch-judge-agent`) as architecture-phase work but never advances the phase on their completion; only the final `architecture-agent` spawn advances to plan-alignment, exactly as standard mode does.
+Runs only when `--panel` (or `--panel=N`) is passed. Reject multiple panel flags. Bare `--panel` uses `PANEL_DESIGNERS_DEFAULT`; for `--panel=N`, require `N` to match `^[0-9]+$` and be at least `PANEL_DESIGNERS_MIN`, then cap it at `PANEL_LENS_COUNT`. This is the markdown shell's executable contract mirroring `engine/src/config.ts`; never silently reinterpret malformed/fractional input.
 
-Defaults: **N designers** = `PANEL_DESIGNERS_DEFAULT` (`engine/src/config.ts`, currently 3) or the `clampPanelDesigners(--panel=N)` value, **K = `PANEL_JUDGES_DEFAULT` judges** (`engine/src/config.ts`, currently 3 — one per criterion, not user-configurable). The candidate/interview artifacts live under the spec dir; they are NOT guarded state.
+The `current_phase` stays `"architecture"` throughout. Panel agents are accepted only while that current phase is active and never advance it; the final `architecture-agent` advances to plan-alignment, or directly to decompose when `--skip-plan-alignment` is set.
+
+Defaults: **N designers** = `PANEL_DESIGNERS_DEFAULT` (currently 3), minimum `PANEL_DESIGNERS_MIN` (currently 2), maximum `PANEL_LENS_COUNT` (currently 5); **K = `PANEL_JUDGES_DEFAULT` judges** (currently 3, fixed at one per criterion).
+
+### Step 0 — Create a run-scoped artifact boundary
+
+Create a unique directory under the spec dir before spawning any panel agent:
+
+```bash
+PANEL_RUNS_DIR=".claude/specs/{date_slug}/panel-runs"
+mkdir -p "$PANEL_RUNS_DIR" || exit 1
+PANEL_RUN_DIR="$(mktemp -d "$PANEL_RUNS_DIR/run.XXXXXXXXXX")" || exit 1
+mkdir "$PANEL_RUN_DIR/candidates" "$PANEL_RUN_DIR/verdicts" || exit 1
+PANEL_RUN_ID="${PANEL_RUN_DIR##*/}"
+printf '%s\n' "$PANEL_RUN_DIR"
+```
+
+Retain the printed path in orchestration context and substitute its concrete value in later calls; do not assume shell variables persist across Bash tool calls. Never reuse an existing run directory. All interview, candidate, manifest, and verdict artifacts for this invocation live under this directory. Old runs may remain as audit data but are never discovered or read implicitly.
 
 ### Step 1 — Interview (once, interactive)
 
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-interview.md`. Substitute `{feature_description}`, `{spec_file_path}`, `{interview_file_path}` (= `.claude/specs/{date_slug}/interview.md`).
+**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-interview.md`. Substitute `{feature_description}`, `{spec_file_path}`, `{interview_file_path}` (= `<panel-run-dir>/interview.md`), and `{loom_dir}` (= the already resolved `LOOM_DIR`).
 
-**Spawn `arch-interviewer-agent`.** Wait for completion. **Verify `interview.md` exists** at the path — if not, re-spawn. Read it: the labeled fields (`**Primary axis:**`, `**Testability bar:**`, `**Sensitive boundaries:**`, `**Codebase maturity:**`, …) drive lens and judge selection below.
+**Spawn `arch-interviewer-agent`.** Wait for completion. Require the exact new file to be non-empty (`test -s`); because the run directory is unique, a prior run cannot satisfy this check. Validate and canonicalize the digest before fan-out:
+
+```bash
+bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-contract interview \
+  < "<panel-run-dir>/interview.md" \
+  > "<panel-run-dir>/interview.json"
+```
+
+On any contract error (missing/duplicate/empty label or invalid enum), delete this run's invalid digest/JSON and re-spawn the interviewer with the field-level diagnostics. Retry once; if it is still invalid, stop panel mode and report the error. Lens and judge selection consume only the validated JSON.
 
 ### Step 2 — Select lenses
 
-Read the lens fragments from `{LOOM_DIR}/references/panel-lenses.md`. Choose N lenses:
+Read the lens fragments from `{LOOM_DIR}/references/panel-lenses.md`. Choose N lenses from `<panel-run-dir>/interview.json`:
 
-- **Always include** `simplicity-first` and `type-driven-fp`.
-- **Third lens (and any beyond N=3) from interview signals**, in priority order:
-  - `**Sensitive boundaries:**` = `flagged` → `risk-security-first`
-  - `**Primary axis:**` = performance → `performance-first`
-  - `**Codebase maturity:**` = brownfield → `codebase-conventionist`
-  - If none apply (or you need a 4th/5th for larger N), fill from the remaining lenses in the table order.
+- **Always include** `simplicity-first` and `type-driven-fp` (which is why N cannot be below 2).
+- **Third lens (and any beyond N=3) from validated interview signals**, in priority order:
+  - `sensitiveBoundaries` begins `flagged` → `risk-security-first`
+  - `primaryAxis` = `performance` → `performance-first`
+  - `codebaseMaturity` = `brownfield` → `codebase-conventionist`
+  - Fill remaining slots from the lens table order.
 
-Take the first N distinct lenses. Each designer gets exactly one. Only
-`PANEL_LENS_COUNT` lenses exist (currently 5), so **N is capped at that count** —
-`clampPanelDesigners(N)` (`engine/src/config.ts`) applies the clamp (`[1, PANEL_LENS_COUNT]`)
-to any `--panel=N` value, since you cannot give two designers the same lens.
+Take exactly N distinct lenses. Before designers spawn, write `<panel-run-dir>/manifest.json` with `run_id`, `interview_file`, `interview_json`, and an exact `candidates` array. Every candidate entry contains `lens`, `path` (`<panel-run-dir>/candidates/candidate-<lens>.md`), and bare `filename`. Build JSON with `jq -n`/`--arg` rather than string concatenation, then validate it immediately:
+
+```bash
+bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-contract manifest \
+  --runs-root ".claude/specs/{date_slug}/panel-runs" \
+  --manifest "<panel-run-dir>/manifest.json" \
+  --designers "<N>"
+```
+
+Stop on failure. The helper binds run id, interview paths, allowed unique lenses, filenames, and candidate paths to this manifest's run directory. This manifest is the sole candidate-set authority for all later stages.
 
 ### Step 3 — Designers (parallel, headless)
 
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-design.md`. For each selected lens, substitute `{feature_description}`, `{lens_name}`, `{lens_prompt}` (that lens's section from `panel-lenses.md`), `{spec_file_path}`, `{interview_file_path}`, `{candidate_output_path}` (= `.claude/specs/{date_slug}/candidates/candidate-<lens>.md`).
+**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-design.md`. For each manifest entry, substitute `{feature_description}`, `{lens_name}`, `{lens_prompt}`, `{spec_file_path}`, `{interview_file_path}` (= the manifest interview file), and `{candidate_output_path}` (= that exact entry's path).
 
-**Spawn all N `arch-designer-agent`s in ONE message** (parallel Task calls). Wait for all to complete. **Verify each candidate file exists** — re-spawn any designer whose file is missing.
+**Spawn all N `arch-designer-agent`s in ONE message** (parallel Task calls). Wait for all to complete. For every manifest path, require a non-empty regular file that is not a symbolic link. For a failed entry, delete that run's empty/invalid artifact, re-spawn only that designer once, then repeat the same regular/non-empty/non-symlink check; stop if the retry still fails. Compare the candidate directory's bare filenames with `manifest.candidates[].filename` in both directions and stop on any missing or extra file. Judges and finalizer still read only manifest paths, never the directory.
 
 ### Step 4 — Judges (parallel, headless)
 
-Derive K criteria from the interview digest:
-- Judge 1 — the user's **Primary axis** (verbatim from the digest).
-- Judge 2 — the user's **Testability bar**.
-- Judge 3 — **codebase fit + effort**.
+Derive exactly K criteria from validated interview JSON, in this order:
+1. `primaryAxis` (verbatim value);
+2. `testabilityBar` (verbatim value);
+3. `codebase fit + effort`.
 
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-judge.md`. For each criterion, substitute `{criterion}`, `{candidates_dir}` (= `.claude/specs/{date_slug}/candidates`), `{interview_excerpt}` (the digest lines relevant to that criterion).
+**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-judge.md`. For each criterion, substitute `{criterion}`, `{candidate_manifest_path}`, and `{interview_json_path}`.
 
-**Spawn all K `arch-judge-agent`s in ONE message** (parallel Task calls). Each returns **pure JSON** (criterion + per-candidate rankings with `fatal_flaw` and `strongest_idea`). Collect the JSON verdicts from the agent outputs — do NOT persist them as files.
+**Spawn all K `arch-judge-agent`s in ONE message** (parallel Task calls). Validate each raw output before it reaches finalization:
+
+```bash
+printf '%s' "$RAW_JUDGE_OUTPUT" | bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-contract verdict \
+  --criterion "$EXACT_CRITERION" \
+  --runs-root ".claude/specs/{date_slug}/panel-runs" \
+  --manifest "<panel-run-dir>/manifest.json" \
+  --designers "<N>" \
+  > "<panel-run-dir>/verdicts/verdict-1.json"
+```
+
+Perform each validation in the same Bash call that defines the shown shell variables; repeat with `verdict-2.json` and `verdict-3.json` for criteria 2 and 3. The helper requires valid JSON, exact criterion identity, every manifest candidate exactly once, no foreign/duplicate candidates, integer scores 0–10 in non-increasing order, `fatal_flaw: string | null`, and non-empty `strongest_idea`; it strips curly braces from validated prose and emits canonical JSON. Re-spawn only an invalid judge with diagnostics, once; if still invalid, stop. Require all three verdict files to be non-empty, then combine those exact paths in criterion order with `jq -s`, not a directory glob.
 
 ### Step 5 — Finalize (interactive → writes plan.md)
 
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-finalize.md`. Substitute `{feature_description}`, `{spec_file_path}`, `{interview_file_path}`, `{candidates_dir}`, `{judge_verdicts}` (the collected JSON, inlined), `{date_slug}`.
+**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-finalize.md`. Substitute `{feature_description}`, `{spec_file_path}`, `{interview_file_path}`, `{candidate_manifest_path}`, `{judge_verdicts}` (the canonical three-verdict JSON array, inlined), `{date_slug}`, and `{loom_dir}`.
 
-> **Sanitize `{judge_verdicts}` before inlining.** The verdict prose (`fatal_flaw`, `strongest_idea`) is judge-LLM output that could contain a literal `{word}` token. Once inlined it would read as an unsubstituted `{placeholder}` to the template-substitution gate, which fail-closed-blocks the `architecture-agent` spawn *after* the N designers and K judges already ran. Strip `{`/`}` characters from the JSON string values (they are prose, never template variables) before substituting them into `{judge_verdicts}`.
+**Spawn `architecture-agent`** with this template. It deterministically ranks candidates by total score, then primary-axis score, then testability score, then lexical filename; presents the top 2–3 with summary/trade-offs/testability/codebase-fit/effort; synthesizes the user's choice; writes `.claude/plans/{date_slug}.md` with `### AD-1: Approach selection (panel)`; and commits.
 
-**Spawn `architecture-agent`** with this template (the name is load-bearing — its SubagentStop advances the phase). It runs the approach gate over the top-ranked candidates, synthesizes the winner with grafted `strongest_idea`s, writes `.claude/plans/{date_slug}.md` with an `### AD-1: Approach selection (panel)` block, and commits.
-
-**From here, the flow rejoins standard mode** — "Wait for completion, extract plan path" is unchanged; advance-phase transitions to plan-alignment.
+**From here, the flow rejoins standard mode.** Its SubagentStop advances to plan-alignment, or directly to decompose when plan-alignment was skipped.
 
 ---
 
@@ -288,7 +328,7 @@ Substitute variables:
   ```
   Re-spawn architecture-agent with gap report appended to prompt as additional context. When architecture completes, advance-phase transitions to plan-alignment again automatically.
 
-  **Panel-mode loop-back:** even if the plan was produced in `--panel` mode, a gap-report re-run uses the **standard single-agent architecture flow** (`phase-architecture.md`) — never re-panel. Mention the candidates dir (`.claude/specs/{date_slug}/candidates/`) in the re-spawn prompt as available context so the agent can revisit the losing designs, but the panel does not run again.
+  **Panel-mode loop-back:** even if the plan was produced in `--panel` mode, a gap-report re-run uses the **standard single-agent architecture flow** (`phase-architecture.md`) — never re-panel. Retain the exact panel-run manifest path recorded in AD-1 and mention that manifest in the re-spawn prompt; require the agent to read only its `candidates[].path` entries if it revisits losing designs. Never scan a shared or run directory.
 - **If proceed:** Continue to Phase 4.
 
 **Loop-back warning:** If the user has chosen to re-run architecture 2 or more times, warn: "This is loop-back attempt N. Consider proceeding to decompose or refining the spec directly."

@@ -7,6 +7,7 @@ import {
   ARCH_PANEL_AGENTS,
   ARCH_PANEL_PHASE,
   PANEL_DESIGNERS_DEFAULT,
+  PANEL_DESIGNERS_MIN,
   PANEL_JUDGES_DEFAULT,
   PANEL_LENS_COUNT,
   clampPanelDesigners,
@@ -17,6 +18,7 @@ import {
   panelExecuteOverlap,
   assertPanelExecuteDisjoint,
 } from "../src/config";
+import { PANEL_LENSES } from "../src/core/panel-contract";
 
 /** Count the lens sections in panel-lenses.md — the single source of truth for
  *  how many lenses exist (and therefore the cap on parallel designers). Each
@@ -25,9 +27,14 @@ import {
  *  `## Notes` or `## Selection` from silently inflating the count and raising
  *  the designer cap above the real number of lenses. Deriving from the file
  *  means adding or removing a lens automatically re-checks the cap below. */
+function lensNames(): string[] {
+  return readRepoFile("references", "panel-lenses.md")
+    .match(/^## ([a-z][a-z0-9-]*)$/gm)
+    ?.map((heading) => heading.slice("## ".length)) ?? [];
+}
+
 function lensCount(): number {
-  return readRepoFile("references", "panel-lenses.md").match(/^## [a-z][a-z0-9-]*$/gm)
-    ?.length ?? 0;
+  return lensNames().length;
 }
 
 /** Read a repo file by path segments relative to the repo root (two levels up
@@ -250,6 +257,10 @@ describe("PANEL_JUDGES_DEFAULT", () => {
 });
 
 describe("PANEL_LENS_COUNT", () => {
+  it("keeps the typed manifest lens vocabulary aligned with panel-lenses.md", () => {
+    expect([...PANEL_LENSES]).toEqual(lensNames());
+  });
+
   it("equals the number of lens headings in references/panel-lenses.md", () => {
     // The constant is the runtime source of truth for the designer cap; this test
     // is the inverse of the lensCount() derivation — it asserts the constant still
@@ -264,15 +275,17 @@ describe("PANEL_LENS_COUNT", () => {
 });
 
 describe("clampPanelDesigners", () => {
-  it("passes through in-range integers unchanged", () => {
-    expect(clampPanelDesigners(1)).toBe(1);
+  it("passes through viable in-range integers unchanged", () => {
+    expect(clampPanelDesigners(PANEL_DESIGNERS_MIN)).toBe(PANEL_DESIGNERS_MIN);
     expect(clampPanelDesigners(3)).toBe(3);
     expect(clampPanelDesigners(PANEL_LENS_COUNT)).toBe(PANEL_LENS_COUNT);
   });
 
-  it("clamps below 1 up to 1", () => {
-    expect(clampPanelDesigners(0)).toBe(1);
-    expect(clampPanelDesigners(-4)).toBe(1);
+  it("clamps below the approach-gate minimum up to two", () => {
+    expect(PANEL_DESIGNERS_MIN).toBe(2);
+    expect(clampPanelDesigners(1)).toBe(PANEL_DESIGNERS_MIN);
+    expect(clampPanelDesigners(0)).toBe(PANEL_DESIGNERS_MIN);
+    expect(clampPanelDesigners(-4)).toBe(PANEL_DESIGNERS_MIN);
   });
 
   it("clamps above the lens count down to the cap", () => {
@@ -280,9 +293,9 @@ describe("clampPanelDesigners", () => {
     expect(clampPanelDesigners(99)).toBe(PANEL_LENS_COUNT);
   });
 
-  it("floors fractional input toward zero before clamping", () => {
+  it("floors fractional programmatic input before clamping", () => {
     expect(clampPanelDesigners(2.9)).toBe(2);
-    expect(clampPanelDesigners(0.4)).toBe(1); // floors to 0, then clamps up to 1
+    expect(clampPanelDesigners(0.4)).toBe(PANEL_DESIGNERS_MIN);
   });
 
   it("falls back to the default for non-finite input", () => {
@@ -291,18 +304,18 @@ describe("clampPanelDesigners", () => {
     expect(clampPanelDesigners(Number.NEGATIVE_INFINITY)).toBe(PANEL_DESIGNERS_DEFAULT);
   });
 
-  it("property: every finite input maps into [1, PANEL_LENS_COUNT]", () => {
+  it("property: every finite input maps into [PANEL_DESIGNERS_MIN, PANEL_LENS_COUNT]", () => {
     fc.assert(
       fc.property(fc.integer({ min: -1000, max: 1000 }), (n) => {
         const out = clampPanelDesigners(n);
-        return out >= 1 && out <= PANEL_LENS_COUNT && Number.isInteger(out);
+        return out >= PANEL_DESIGNERS_MIN && out <= PANEL_LENS_COUNT && Number.isInteger(out);
       }),
     );
   });
 
-  it("property: values already in range are returned unchanged", () => {
+  it("property: viable values are returned unchanged", () => {
     fc.assert(
-      fc.property(fc.integer({ min: 1, max: PANEL_LENS_COUNT }), (n) => {
+      fc.property(fc.integer({ min: PANEL_DESIGNERS_MIN, max: PANEL_LENS_COUNT }), (n) => {
         return clampPanelDesigners(n) === n;
       }),
     );
@@ -342,9 +355,10 @@ describe("commands/loom.md prose literals track the config constants", () => {
   const loomMd = readRepoFile("commands", "loom.md");
   const cases: ReadonlyArray<{ label: string; re: RegExp; expected: number }> = [
     { label: "options: distinct lenses cap", re: /distinct lenses \((\d+)\)/, expected: PANEL_LENS_COUNT },
-    { label: "Step 2: PANEL_LENS_COUNT lenses exist", re: /PANEL_LENS_COUNT` lenses exist \(currently (\d+)\)/, expected: PANEL_LENS_COUNT },
-    { label: "Defaults: designer count", re: /PANEL_DESIGNERS_DEFAULT`[^)]*?currently (\d+)\)/, expected: PANEL_DESIGNERS_DEFAULT },
-    { label: "Defaults: judge count", re: /PANEL_JUDGES_DEFAULT` judges\*\* \([^)]*?currently (\d+)/, expected: PANEL_JUDGES_DEFAULT },
+    { label: "Defaults: minimum count", re: /PANEL_DESIGNERS_MIN` \(currently (\d+)\)/, expected: PANEL_DESIGNERS_MIN },
+    { label: "Defaults: maximum lens count", re: /PANEL_LENS_COUNT` \(currently (\d+)\)/, expected: PANEL_LENS_COUNT },
+    { label: "Defaults: designer count", re: /PANEL_DESIGNERS_DEFAULT` \(currently (\d+)\)/, expected: PANEL_DESIGNERS_DEFAULT },
+    { label: "Defaults: judge count", re: /PANEL_JUDGES_DEFAULT` judges\*\* \(currently (\d+)/, expected: PANEL_JUDGES_DEFAULT },
   ];
 
   for (const { label, re, expected } of cases) {
@@ -356,24 +370,35 @@ describe("commands/loom.md prose literals track the config constants", () => {
   }
 });
 
-describe("interview digest-label contract (producer ↔ consumer)", () => {
-  // arch-interviewer-agent.md WRITES these labels; loom.md Step 2 regex-READS them
-  // to drive lens/judge selection. There is no shared source — a rename on either
-  // side silently degrades selection to the fallback path with no failure signal.
-  // Pin the exact strings in BOTH files so a rename fails CI.
+describe("interview digest-label contract (producer ↔ runbook)", () => {
+  // arch-interviewer-agent.md writes these labels and the typed panel-contract
+  // parser validates them before loom.md selects lenses. Pin their documentation
+  // in both producer and runbook; parser behavior has direct unit coverage.
   const labels = [
     "**Primary axis:**",
     "**Testability bar:**",
     "**Sensitive boundaries:**",
     "**Codebase maturity:**",
+    "**Codebase constraints:**",
+    "**Error-handling philosophy:**",
+    "**Concurrency & state:**",
+    "**Data & persistence:**",
+    "**Tech preferences:**",
+    "**Observability:**",
+    "**Backwards compatibility:**",
+    "**Deployment:**",
+    "**Out-of-scope:**",
+    "**Executable-model signal:**",
   ] as const;
   const interviewer = readRepoFile("agents", "arch-interviewer-agent.md");
-  const loomMd = readRepoFile("commands", "loom.md");
+  const interviewTemplate = readRepoFile("commands", "templates", "phase-arch-interview.md");
+  const parser = readRepoFile("engine", "src", "core", "panel-contract.ts");
 
   for (const label of labels) {
-    it(`${label} appears in both the interviewer (producer) and loom.md (consumer)`, () => {
+    it(`${label} appears in agent, template, and typed parser`, () => {
       expect(interviewer, `arch-interviewer-agent.md no longer writes ${label}`).toContain(label);
-      expect(loomMd, `loom.md Step 2 no longer reads ${label}`).toContain(label);
+      expect(interviewTemplate, `phase-arch-interview.md no longer requests ${label}`).toContain(label);
+      expect(parser, `panel-contract.ts no longer parses ${label}`).toContain(label);
     });
   }
 });

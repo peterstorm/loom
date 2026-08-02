@@ -26,7 +26,7 @@ You are a subagent — Write/Edit is allowed. Do NOT read `.claude/hooks/` or `.
 
 ## Process
 
-1. **Read the interview digest** at {interview_file_path} — the user's forced priorities (primary axis, testability bar, sensitive boundaries, codebase constraints). These are hard constraints; honor them even while pushing your lens.
+1. **Read the interview digest** at {interview_file_path}. Scope, sensitive boundaries, and explicit codebase restrictions are hard constraints. The primary axis and testability bar are evaluation preferences: optimize for them, but state honestly where your assigned lens trades against them.
 2. **Read the spec** at {spec_file_path} — design only for what's in scope.
 3. **Explore the codebase** enough to ground reuse and file-structure decisions.
 4. **Design one candidate through your lens.** Let the lens drive every trade-off. State honestly what your lens sacrifices and its characteristic failure mode — never strawman your own approach.
@@ -62,6 +62,9 @@ Cons:
 
 ## Testability impact
 <How testable, given the interview's testability bar.>
+
+## Codebase fit
+<How this conforms to, extends, or intentionally diverges from the existing codebase.>
 
 ## Effort
 <Rough estimate.>

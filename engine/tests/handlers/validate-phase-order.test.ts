@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { detectPhase, checkArtifacts } from "../../src/handlers/pre-tool-use/validate-phase-order";
+import { detectPhase, checkArtifacts, canRunPanelAgent } from "../../src/handlers/pre-tool-use/validate-phase-order";
 import type { ArtifactState } from "../../src/handlers/pre-tool-use/validate-phase-order";
 import { VALID_TRANSITIONS } from "../../src/config";
 
@@ -121,20 +121,17 @@ describe("panel agents — VALID_TRANSITIONS + artifact gate", () => {
     expect(checkArtifacts("architecture", baseState())).toBe("specify (no spec.md found)");
   });
 
-  it("panel agents are transition-ALLOWED from plan-alignment (loop-back into architecture)", () => {
-    // VALID_TRANSITIONS["plan-alignment"] includes "architecture" (the loop-back
-    // allowance), so a panel agent detected as architecture is NOT transition-blocked
-    // when current_phase is plan-alignment. Pinning this documents the behavior
-    // either way — a future tightening of the loop-back would surface here.
+  it("panel agents are blocked from plan-alignment even though standard architecture loop-back remains valid", () => {
     expect(VALID_TRANSITIONS["plan-alignment"]).toContain("architecture");
+    expect(canRunPanelAgent("plan-alignment")).toBe(false);
+    expect(canRunPanelAgent("architecture")).toBe(true);
   });
 
-  it("panel agents from init are transition-allowed but still artifact-gated (need spec.md)", () => {
-    // init → architecture is valid (--skip-specify), so a panel agent is not blocked
-    // on the transition from init; the architecture artifact gate still requires
-    // spec.md, so without it the block comes from checkArtifacts, not the transition.
+  it("panel agents require the explicit architecture current phase", () => {
     expect(VALID_TRANSITIONS["init"]).toContain("architecture");
-    expect(checkArtifacts("architecture", baseState())).toBe("specify (no spec.md found)");
+    expect(canRunPanelAgent("init")).toBe(false);
+    expect(canRunPanelAgent("specify")).toBe(false);
+    expect(canRunPanelAgent("architecture")).toBe(true);
   });
 });
 

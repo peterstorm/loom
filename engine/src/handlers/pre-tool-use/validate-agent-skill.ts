@@ -10,13 +10,14 @@ import { join } from "node:path";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import {
   TASK_GRAPH_PATH, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
-  UTILITY_AGENTS,
+  UTILITY_AGENTS, ARCH_PANEL_AGENTS,
 } from "../../config";
 import { stripNamespace, extractNamespace } from "../../utils/strip-namespace";
 
 /** All agents whose skill we validate */
-const VALIDATED_AGENTS = new Set([
+export const VALIDATED_AGENTS: ReadonlySet<string> = new Set([
   ...Object.keys(PHASE_AGENT_MAP),
+  ...ARCH_PANEL_AGENTS,
   ...IMPL_AGENTS,
   ...REVIEW_AGENTS,
 ]);

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findResidualPlaceholders } from "../src/core/validate-template-substitution";
+import { parseJudgeVerdict, serializeJudgeVerdict } from "../src/core/panel-contract";
 
 /**
  * Template placeholder audit for the four panel-mode templates.
@@ -30,7 +31,7 @@ const TEMPLATES_DIR = join(
 
 // Declared variables per template — the exact set the orchestrator substitutes.
 const TEMPLATES: Record<string, string[]> = {
-  "phase-arch-interview.md": ["feature_description", "spec_file_path", "interview_file_path"],
+  "phase-arch-interview.md": ["feature_description", "spec_file_path", "interview_file_path", "loom_dir"],
   "phase-arch-design.md": [
     "feature_description",
     "lens_name",
@@ -39,14 +40,15 @@ const TEMPLATES: Record<string, string[]> = {
     "interview_file_path",
     "candidate_output_path",
   ],
-  "phase-arch-judge.md": ["criterion", "candidates_dir", "interview_excerpt"],
+  "phase-arch-judge.md": ["criterion", "candidate_manifest_path", "interview_json_path"],
   "phase-arch-finalize.md": [
     "feature_description",
     "spec_file_path",
     "interview_file_path",
-    "candidates_dir",
+    "candidate_manifest_path",
     "judge_verdicts",
     "date_slug",
+    "loom_dir",
   ],
 };
 
@@ -60,6 +62,8 @@ function substitute(template: string, vars: string[]): string {
 }
 
 describe("panel-mode template placeholder audit", () => {
+  const loomRunbook = readFileSync(join(TEMPLATES_DIR, "..", "loom.md"), "utf-8");
+
   for (const [file, vars] of Object.entries(TEMPLATES)) {
     it(`${file} — no residual placeholders after substituting declared vars`, () => {
       const raw = readFileSync(join(TEMPLATES_DIR, file), "utf-8");
@@ -68,10 +72,11 @@ describe("panel-mode template placeholder audit", () => {
       expect(residual, `residual placeholders: ${residual.join(" ")}`).toEqual([]);
     });
 
-    it(`${file} — every declared variable actually appears in the template`, () => {
+    it(`${file} — every declared variable appears in template and runbook substitution contract`, () => {
       const raw = readFileSync(join(TEMPLATES_DIR, file), "utf-8");
       for (const v of vars) {
-        expect(raw.includes(`{${v}}`), `declared but unused: {${v}}`).toBe(true);
+        expect(raw.includes(`{${v}}`), `declared but unused in template: {${v}}`).toBe(true);
+        expect(loomRunbook.includes(`{${v}}`), `runbook never substitutes: {${v}}`).toBe(true);
       }
     });
   }
@@ -88,13 +93,8 @@ describe("panel-mode template placeholder audit", () => {
 });
 
 /**
- * Round-trip: judge verdicts are inlined VERBATIM into the finalize prompt via
- * {judge_verdicts}, then that prompt passes through validate-template-substitution
- * at spawn. The judge template forbids `{`/`}` in free-text values precisely
- * because a brace-word would read as an unsubstituted placeholder and block the
- * finalize spawn AFTER N designers + K judges already ran. These tests pin both
- * halves of that contract: well-formed judge JSON survives the gate, and a
- * rule-violating brace-word is exactly what the gate catches.
+ * Round-trip: untrusted judge output is parsed, schema-checked, and sanitized
+ * before its canonical JSON is substituted into the finalize prompt.
  */
 describe("panel-mode judge-verdict round-trip through the substitution gate", () => {
   const FINALIZE = "phase-arch-finalize.md";
@@ -139,24 +139,23 @@ describe("panel-mode judge-verdict round-trip through the substitution gate", ()
     expect(findResidualPlaceholders(finalizeWithVerdicts(verdicts))).toEqual([]);
   });
 
-  it("a judge violating the no-brace rule (brace-word in prose) is caught by the gate", () => {
-    const verdicts = JSON.stringify(
-      {
-        criterion: "simplicity",
-        rankings: [
-          {
-            candidate: "candidate-simplicity.md",
-            score: 7,
-            fatal_flaw: null,
-            // Rule violation: a brace-wrapped word in free-text prose.
-            strongest_idea: "prefer the {simplicity} adapter over the layered one",
-          },
-        ],
-      },
-      null,
-      2,
-    );
-    // Documents the failure mode: the finalize spawn would be BLOCKED at runtime.
-    expect(findResidualPlaceholders(finalizeWithVerdicts(verdicts))).toContain("{simplicity}");
+  it("brace-bearing judge prose is sanitized before final-template substitution", () => {
+    const raw = JSON.stringify({
+      criterion: "simplicity",
+      rankings: [
+        {
+          candidate: "candidate-simplicity.md",
+          score: 7,
+          fatal_flaw: null,
+          strongest_idea: "prefer the {simplicity} adapter over the layered one",
+        },
+      ],
+    });
+    const parsed = parseJudgeVerdict(raw, "simplicity", ["candidate-simplicity.md"]);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const canonical = serializeJudgeVerdict(parsed.value);
+    expect(canonical).not.toContain("{simplicity}");
+    expect(findResidualPlaceholders(finalizeWithVerdicts(canonical))).toEqual([]);
   });
 });

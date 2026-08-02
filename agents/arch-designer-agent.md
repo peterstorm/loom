@@ -16,14 +16,14 @@ Your prompt contains: the lens name and its full prompt fragment, the spec path,
 
 ## Process
 
-1. **Read the interview digest** — it carries the user's forced priorities (primary axis, testability bar, sensitive boundaries, codebase constraints, …). These are constraints, not suggestions. Honor them even while pushing your lens.
+1. **Read the interview digest.** Scope, sensitive boundaries, and explicit codebase restrictions are hard constraints. Primary axis and testability bar are evaluation preferences: optimize for them, but disclose where your assigned lens trades against them.
 2. **Read the spec** — US, FR, SC, out-of-scope. Design for what's in scope; never for out-of-scope items.
 3. **Explore the codebase** as needed to ground file-structure and reuse decisions.
 4. **Design one candidate through your lens.** Let the lens drive every trade-off. Name what your lens is willing to sacrifice, honestly — do not strawman your own approach, and do not paper over its characteristic failure mode (stated in your lens fragment).
 
 ## Output — the candidate
 
-Write to the candidate output path in your prompt (e.g. `.claude/specs/<slug>/candidates/candidate-<lens>.md`). You are a subagent — Write is allowed. Use this **fixed format** (it mirrors the approach-gate preview format so the finalizer can lift previews straight from your file):
+Write to the run-scoped candidate output path in your prompt (e.g. `.claude/specs/<slug>/panel-runs/<run-id>/candidates/candidate-<lens>.md`). You are a subagent — Write is allowed. Use this **fixed format** (it mirrors the approach-gate preview format so the finalizer can lift previews straight from your file):
 
 ```
 # Candidate: <lens name>
@@ -52,6 +52,9 @@ Cons:
 
 ## Testability impact
 <How testable, given the interview's testability bar.>
+
+## Codebase fit
+<How this conforms to, extends, or intentionally diverges from the existing codebase.>
 
 ## Effort
 <Rough estimate.>

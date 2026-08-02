@@ -2,7 +2,7 @@
 
 Template for spawning **arch-interviewer-agent** in `/loom --panel`. All template variables must be substituted before use.
 
-Variables: `{feature_description}`, `{spec_file_path}`, `{interview_file_path}`.
+Variables: `{feature_description}`, `{spec_file_path}`, `{interview_file_path}`, `{loom_dir}`.
 
 ---
 
@@ -20,17 +20,11 @@ You are a subagent — the block-direct-edits hook allows your Write/Edit. Do NO
 
 1. **Read the spec** at {spec_file_path} — US, FR, SC, out-of-scope, `[NEEDS CLARIFICATION]` markers.
 2. **Explore the codebase silently** — patterns, conventions, structure, tech stack, constraints.
-3. **Interview the user — full questionnaire.** Resolve the loom plugin dir, then run the canonical 13-topic questionnaire so panel mode and standard mode ask the same questions:
-
-   ```bash
-   LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/ 2>/dev/null | tail -1 | sed 's:/$::')
-   ```
-
-   Read `$LOOM_DIR/commands/templates/phase-architecture.md` and run the questionnaire in its **§3 "Interview the User — Ask ALL Questions"** (all 13 required topics). Use `AskUserQuestion`, batched across multiple calls (4 per call max), multiple-choice where possible. Skip a topic only if the spec or codebase gave a confident, explicit answer.
+3. **Interview the user — full questionnaire.** Read `{loom_dir}/commands/templates/phase-architecture.md` and run its **§3 "Interview the User — Ask ALL Questions"** (all 13 required topics), so panel mode and standard mode ask the same questions. `{loom_dir}` was resolved and verified by the parent orchestrator; do not re-scan the plugin cache. Use `AskUserQuestion`, batched across multiple calls (4 per call max), multiple-choice where possible. Skip a topic only if the spec or codebase gave a confident, explicit answer.
 
 ## Output — the interview digest
 
-Write the digest to **{interview_file_path}** with these labeled fields at column 0 (exact spelling — the orchestrator regex-reads them to pick lenses and judge criteria):
+Write the digest to **{interview_file_path}** with these labeled fields at column 0 (exact spelling — the orchestrator parses and validates them before fan-out):
 
 - `**Primary axis:**` — simplicity / performance / extensibility / shipping speed / operational cost (single forced axis)
 - `**Testability bar:**` — pure functional core / pragmatic mix / integration-first

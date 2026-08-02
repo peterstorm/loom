@@ -45,6 +45,14 @@ export interface ValidatePhaseOrderInput {
   prompt: string;      // task prompt
 }
 
+export function isPanelAgent(agent: string): boolean {
+  return ARCH_PANEL_AGENTS.has(agent) || ARCH_PANEL_AGENTS.has(agent + "-agent");
+}
+
+export function canRunPanelAgent(currentPhase: Phase): boolean {
+  return currentPhase === ARCH_PANEL_PHASE;
+}
+
 export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   if (PHASE_AGENT_MAP[agent]) return PHASE_AGENT_MAP[agent];
   if (PHASE_AGENT_MAP[agent + "-agent"]) return PHASE_AGENT_MAP[agent + "-agent"];
@@ -54,7 +62,7 @@ export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   // (advance-phase must ignore them — only architecture-agent advances the phase).
   // ARCH_PANEL_PHASE (config) is the single source for this classification so it
   // cannot drift from ARCH_PANEL_AGENTS.
-  if (ARCH_PANEL_AGENTS.has(agent) || ARCH_PANEL_AGENTS.has(agent + "-agent")) return ARCH_PANEL_PHASE;
+  if (isPanelAgent(agent)) return ARCH_PANEL_PHASE;
 
   if (/brainstorm|explore.*intent|refine.*idea/i.test(prompt)) return "brainstorm";
   if (/specify|specification|requirements|spec\.md/i.test(prompt)) return "specify";
@@ -167,6 +175,22 @@ export function validatePhaseOrder(input: ValidatePhaseOrderInput): HookResult {
   if (!mgr) return { kind: "allow" };
   const state = mgr.load();
   const currentPhase: Phase = state.current_phase ?? "init";
+
+  // Panel mode is an architecture-only fan-out. Generic transition rules allow
+  // plan-alignment → architecture for the standard single-agent loop-back, but
+  // that must never reopen the expensive panel workflow.
+  if (isPanelAgent(bareAgent) && !canRunPanelAgent(currentPhase)) {
+    return {
+      kind: "block",
+      message: [
+        "BLOCKED: Architecture panel agents may run only during the architecture phase.",
+        "",
+        `Agent: ${input.agentType}`,
+        `Current phase: ${currentPhase}`,
+        "Plan-alignment loop-backs must use architecture-agent (single-agent mode).",
+      ].join("\n"),
+    };
+  }
 
   // Validate transition
   const allowed = VALID_TRANSITIONS[currentPhase] ?? [];

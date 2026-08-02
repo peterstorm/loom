@@ -9,11 +9,11 @@
 #      while current_phase = architecture with spec.md present.
 #   2. validate-phase-order BLOCKS the same panel agent during execute phase
 #      (architecture is not a valid target from execute).
-#   3. subagent-stop dispatch for a panel agent is a PASSTHROUGH — it does NOT
-#      advance the phase, even with a stale same-date-prefix plan on disk
-#      (the design-constraint-2 trap).
-#   4. validate-phase-order ALLOWS the finalize architecture-agent spawn.
-#   5. subagent-stop dispatch for architecture-agent DOES advance the phase
+#   3. validate-phase-order BLOCKS panel agents during plan-alignment loop-back.
+#   4. subagent-stop dispatch for a panel agent is a PASSTHROUGH — it does NOT
+#      advance the phase, even with a stale same-date-prefix plan on disk.
+#   5. validate-phase-order ALLOWS the finalize architecture-agent spawn.
+#   6. subagent-stop dispatch for architecture-agent DOES advance the phase
 #      architecture → plan-alignment (panel produces exactly one plan.md, same
 #      contract as standard mode).
 #
@@ -30,7 +30,23 @@ command -v bun >/dev/null || { echo "FATAL: bun not found (need it to run the ho
 command -v jq >/dev/null || { echo "FATAL: jq not found (needed by phase_now to read current_phase from state)"; exit 1; }
 
 TMP="$(mktemp -d)"
-trap 'chmod -R u+w "$TMP" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+cleanup() {
+  local rc=$? cleanup_failed=0
+  trap - EXIT
+  if ! chmod -R u+w "$TMP"; then
+    echo "FATAL: could not make smoke fixture writable for cleanup: $TMP" >&2
+    cleanup_failed=1
+  fi
+  if ! rm -rf "$TMP"; then
+    echo "FATAL: could not remove smoke fixture: $TMP" >&2
+    cleanup_failed=1
+  fi
+  # Preserve the primary failure code; cleanup only turns an otherwise green
+  # run into a failure.
+  if [ "$rc" -eq 0 ] && [ "$cleanup_failed" -ne 0 ]; then rc=1; fi
+  exit "$rc"
+}
+trap cleanup EXIT
 
 SLUG="2026-07-17-smoke-panel"
 SPEC_DIR="$TMP/.claude/specs/$SLUG"
@@ -166,32 +182,41 @@ done
 echo "[2] validate-phase-order: arch-designer-agent during execute phase"
 write_state "execute" "null"
 rc="$(run_gate arch-designer-agent "design a candidate")"
-# Assert BOTH the exit code AND the block message — a fail-closed crash also
-# exits 2, so the message is what proves it was a real transition block.
-if [ "$rc" = "2" ] && grep -q "Invalid phase transition" "$GATE_ERR"; then
-  ok "arch-designer-agent BLOCKED with transition message (exit 2)"
+# Assert BOTH the exit code AND panel-phase block message — a fail-closed crash
+# also exits 2, so the message proves the explicit panel current-phase gate ran.
+if [ "$rc" = "2" ] && grep -q "panel agents may run only during the architecture phase" "$GATE_ERR"; then
+  ok "arch-designer-agent BLOCKED with panel-phase message (exit 2)"
 else
-  bad "expected block (exit 2 + 'Invalid phase transition'), got exit $rc / $(tr '\n' ' ' < "$GATE_ERR")"
+  bad "expected panel-phase block (exit 2), got exit $rc / $(tr '\n' ' ' < "$GATE_ERR")"
 fi
 
-# All three panel roles share architecture's gate, so all three must block in
-# execute — not just the designer (guards against a role slipping the gate).
+# All three panel roles share the gate, so all must block in execute.
 for a in arch-interviewer-agent arch-judge-agent; do
   rc="$(run_gate "$a" "panel stage for $a")"
-  if [ "$rc" = "2" ] && grep -q "Invalid phase transition" "$GATE_ERR"; then
-    ok "$a BLOCKED with transition message (exit 2)"
+  if [ "$rc" = "2" ] && grep -q "panel agents may run only during the architecture phase" "$GATE_ERR"; then
+    ok "$a BLOCKED with panel-phase message (exit 2)"
   else
-    bad "$a expected block (exit 2 + 'Invalid phase transition'), got exit $rc / $(tr '\n' ' ' < "$GATE_ERR")"
+    bad "$a expected panel-phase block (exit 2), got exit $rc / $(tr '\n' ' ' < "$GATE_ERR")"
   fi
 done
 
-# ── 3. TRAP: panel agent stop does NOT advance, even with a stale same-date plan ─
+# ── 3. panel agents BLOCKED during standard plan-alignment loop-back ──────────
+echo "[3] validate-phase-order: panel agent during plan-alignment loop-back"
+write_state "plan-alignment" "null"
+rc="$(run_gate arch-designer-agent "candidate under the simplicity-first lens")"
+if [ "$rc" = "2" ] && grep -q "panel agents may run only during the architecture phase" "$GATE_ERR"; then
+  ok "arch-designer-agent BLOCKED from re-panel loop-back (exit 2)"
+else
+  bad "expected panel-only phase block, got exit $rc / $(tr '\n' ' ' < "$GATE_ERR")"
+fi
+
+# ── 4. TRAP: panel agent stop does NOT advance, even with a stale same-date plan ─
 # With cwd = $TMP the date-prefix fallback in resolveTransition genuinely reads
 # this fixture: the stale plan below is the ONLY 2026-07-17-* file here, so IF a
 # panel agent were ever mapped into PHASE_AGENT_MAP its completion would match
 # (files.length === 1) and advance the phase. The passthrough that keeps the
 # phase pinned is therefore load-bearing, not incidental.
-echo "[3] subagent-stop: arch-designer-agent completion is passthrough (stale plan trap)"
+echo "[4] subagent-stop: arch-designer-agent completion is passthrough (stale plan trap)"
 printf '# stale plan\n' > "$PLANS_DIR/2026-07-17-stale.md"   # same date prefix as SLUG
 write_state "architecture" "null"
 src="$(run_stop arch-designer-agent)"
@@ -205,16 +230,16 @@ else
   [ "$after" = "architecture" ] && ok "phase unchanged (still architecture)" || bad "phase advanced to '$after' — TRAP FIRED"
 fi
 
-# ── 4. finalize architecture-agent ALLOWED ────────────────────────────────────
-echo "[4] validate-phase-order: architecture-agent (finalize) in architecture phase"
+# ── 5. finalize architecture-agent ALLOWED ────────────────────────────────────
+echo "[5] validate-phase-order: architecture-agent (finalize) in architecture phase"
 rc="$(run_gate architecture-agent "finalize: approach gate over panel candidates")"
 [ "$rc" = "0" ] && ok "ALLOWED (exit 0)" || bad "expected allow (exit 0), got exit $rc"
 
-# ── 5. finalize architecture-agent stop ADVANCES to plan-alignment ────────────
+# ── 6. finalize architecture-agent stop ADVANCES to plan-alignment ────────────
 # plan_file is left null so resolveTransition must derive the plan path from the
 # spec_dir slug (`.claude/plans/2026-07-17-smoke-panel.md`, resolved against the
 # $TMP cwd) — exercising the real slug-derive fallback, not a pre-set absolute.
-echo "[5] subagent-stop: architecture-agent completion advances architecture → plan-alignment"
+echo "[6] subagent-stop: architecture-agent completion advances architecture → plan-alignment"
 printf '# real plan\n' > "$PLANS_DIR/$SLUG.md"
 write_state "architecture" "null"
 src="$(run_stop architecture-agent)"

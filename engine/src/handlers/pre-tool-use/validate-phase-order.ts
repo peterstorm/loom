@@ -31,5 +31,5 @@ const handler: HookHandler = async (stdin) => {
 export default handler;
 
 // Re-export for tests that import from handler path
-export { detectPhase, checkArtifacts } from "../../core/validate-phase-order";
+export { detectPhase, checkArtifacts, isPanelAgent, canRunPanelAgent } from "../../core/validate-phase-order";
 export type { ArtifactState } from "../../core/validate-phase-order";

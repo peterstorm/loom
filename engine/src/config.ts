@@ -16,22 +16,11 @@ export const CLARIFY_THRESHOLD = 3;
 /** Valid phase ordering — re-exported from the single source tuple in types. */
 export const PHASE_ORDER: readonly Phase[] = PHASES;
 
-/** Orchestration role of an agent within the architecture phase.
- *  - `phase`: a normal phase agent — its SubagentStop advances the phase to
- *    `phase` via PHASE_AGENT_MAP + advance-phase.
- *  - `panel`: a `/loom --panel` designer/judge/interviewer — recognized as
- *    architecture-phase work so validate-phase-order ALLOWS it, but INVISIBLE to
- *    advance-phase so it never advances the phase mid-panel. */
-//  Both roles carry the same fields (`role` + `phase`), so this is a single
-//  object type rather than a discriminated union. `phase` is nonetheless
-//  semantically OVERLOADED by role: for a `phase` agent it is the phase its
-//  SubagentStop ADVANCES TO (via PHASE_AGENT_MAP); for a `panel` agent it is the
-//  phase the agent is CLASSIFIED AS for validation and must explicitly NOT
-//  advance to. The two meanings share one field type, so the type system has
-//  nothing to narrow and an ADT would add ceremony without a payoff — but the
-//  semantics do diverge, and only the `role` discriminant tells them apart.
-//  (If a role ever gains a genuinely role-specific field, split it into a
-//  proper discriminated union then.)
+/** Orchestration role of an agent.
+ *  `phase` identifies the phase the agent performs/completes; it is not the
+ *  transition target. Normal phase-agent completion is handed to
+ *  resolveTransition, while panel-agent completion is intentionally ignored by
+ *  advance-phase so the architecture phase cannot advance mid-panel. */
 type AgentRole = { readonly role: "phase" | "panel"; readonly phase: Phase };
 
 /** Single source of truth for every architecture-orchestration agent and its
@@ -71,12 +60,11 @@ export const PHASE_AGENT_MAP: Readonly<Record<string, Phase>> = Object.freeze(
   ),
 );
 
-/** A Set whose contents are genuinely immutable at runtime. `Object.freeze` alone
- *  does NOT stop `set.add(...)` — a Set's elements live in an internal slot, not
- *  own properties, so freeze only locks the object shell. To match the real
- *  immutability `Object.freeze` gives PHASE_AGENT_MAP (a plain object), we shadow
- *  the mutators so a runtime `(set as Set).add(...)` throws, then freeze to lock
- *  the shadowing in place. */
+/** A read-only Set that blocks ordinary runtime mutator calls. `Object.freeze`
+ *  alone does NOT stop `set.add(...)`, so the instance's `add`/`delete`/`clear`
+ *  methods are shadowed with throwing functions before the object shell is
+ *  frozen. This protects normal consumers; it does not claim to defeat exotic
+ *  prototype calls such as `Set.prototype.add.call(set, value)`. */
 function frozenSet<T>(values: Iterable<T>): ReadonlySet<T> {
   const s = new Set(values);
   const immutable = (): never => {
@@ -190,11 +178,13 @@ export function assertPanelPhaseDisjoint(
 // execute; it converts a CI-only guard into a load-time impossibility.
 assertPanelPhaseDisjoint();
 
-/** Default number of parallel designer agents for `/loom --panel`. The engine
- *  never spawns these — the orchestrator (commands/loom.md) reads this as the
- *  default N when the user omits `--panel=N`. Kept here as the single numeric
- *  source of truth referenced by loom.md and the panel-config test. */
+/** Default number of parallel designer agents for `/loom --panel`. The markdown
+ *  orchestration runbook mirrors this value; panel-config tests fail if its
+ *  concrete prose literal drifts from this executable policy constant. */
 export const PANEL_DESIGNERS_DEFAULT = 3;
+
+/** Minimum viable panel size: the mandatory approach gate needs two options. */
+export const PANEL_DESIGNERS_MIN = 2;
 
 /** Number of distinct architecture lenses in references/panel-lenses.md — the hard
  *  cap on parallel designers, since each designer takes exactly one lens and no two
@@ -211,16 +201,14 @@ export const PANEL_LENS_COUNT = 5;
  *  truth referenced by loom.md and the panel-config test. */
 export const PANEL_JUDGES_DEFAULT = 3;
 
-/** Clamp a requested `--panel=N` designer count into the valid range
- *  [1, PANEL_LENS_COUNT]: at least one designer, never more than the lens count
- *  (two designers cannot share a lens). Pure — the orchestrator (commands/loom.md)
- *  applies this when the user passes `--panel=N`. Non-finite input (NaN/Infinity)
- *  falls back to PANEL_DESIGNERS_DEFAULT; fractional input floors toward zero
- *  before clamping. */
+/** Clamp a numeric designer count into the viable range
+ *  [PANEL_DESIGNERS_MIN, PANEL_LENS_COUNT]. The markdown shell rejects malformed
+ *  and fractional raw flag values before applying the equivalent bounds.
+ *  Non-finite programmatic input falls back to PANEL_DESIGNERS_DEFAULT. */
 export function clampPanelDesigners(n: number): number {
   if (!Number.isFinite(n)) return PANEL_DESIGNERS_DEFAULT;
   const floored = Math.floor(n);
-  if (floored < 1) return 1;
+  if (floored < PANEL_DESIGNERS_MIN) return PANEL_DESIGNERS_MIN;
   if (floored > PANEL_LENS_COUNT) return PANEL_LENS_COUNT;
   return floored;
 }

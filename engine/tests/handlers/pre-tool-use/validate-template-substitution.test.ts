@@ -88,13 +88,16 @@ describe("validate-template-substitution — edge cases", () => {
     expect(validateTemplate("${done}{leftover}")).toBe("block");
   });
 
-  it("hyphenated placeholder {spec-dir} → block (identifier class includes '-')", () => {
-    // A narrower [a-zA-Z0-9_] class would silently PASS this unsubstituted var.
-    expect(validateTemplate("Write to {spec-dir}/plan.md")).toBe("block");
+  it("JSX/member expression {props.title} → allow", () => {
+    expect(validateTemplate("return <h1>{props.title}</h1>")).toBe("allow");
   });
 
-  it("dotted placeholder {plan.file} → block (identifier class includes '.')", () => {
-    expect(validateTemplate("Read {plan.file}")).toBe("block");
+  it("arithmetic expression {width-height} → allow", () => {
+    expect(validateTemplate("const gap = {width-height}")).toBe("allow");
+  });
+
+  it("underscore template names remain blocked", () => {
+    expect(validateTemplate("Read {plan_file}")).toBe("block");
   });
 
   it("plain text without any braces → allow", () => {

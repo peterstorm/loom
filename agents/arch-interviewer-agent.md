@@ -18,9 +18,9 @@ Your prompt contains the spec path, the interview output path, and a reference t
 
 ## Output — the interview digest
 
-Write the digest to the path your prompt provides (`.claude/specs/<slug>/interview.md`). You ARE a subagent — the block-direct-edits hook allows your Write. Just write it.
+Write the digest to the run-scoped path your prompt provides (`.claude/specs/<slug>/panel-runs/<run-id>/interview.md`). You ARE a subagent — the block-direct-edits hook allows your Write. Just write it.
 
-The digest MUST include these **labeled fields at column 0** (exact spelling — the orchestrator regex-reads them to derive lenses and judge criteria; do not bulletize or rename them):
+The digest MUST include these **labeled fields at column 0** (exact spelling — the orchestrator parses and validates them before deriving lenses and judge criteria; do not bulletize or rename them):
 
 - `**Primary axis:**` — the single NFR optimization axis the user forced (simplicity / performance / extensibility / shipping speed / operational cost).
 - `**Testability bar:**` — pure functional core / pragmatic mix / integration-first.

@@ -58,7 +58,7 @@ writes (designers/interviewer write freely); `enforce-phase-tools` only gates
 agents with machine definitions in `machines/` (only code-implementer-agent
 has one — panel agents bind no machine, gate passes through);
 `guard-state-file` guards `.claude/state/` + subagent/machine dirs —
-`.claude/specs/{slug}/candidates/` is not guarded. `mark-subagent-active`
+`.claude/specs/{slug}/panel-runs/` is not guarded. `mark-subagent-active`
 (SubagentStart) binds machines by agent type — no machine files for panel
 agents, no binding. No changes needed to any of these.
 
@@ -68,14 +68,14 @@ agents, no binding. No changes needed to any of these.
 Phase 3 (panel mode)                       current_phase stays "architecture" throughout
 ──────────────────────────────────────────────────────────────────────────────
 1. arch-interviewer-agent   interactive   explore + full 13-topic questionnaire
-                                          → .claude/specs/{slug}/interview.md
+                                          → panel-runs/<run-id>/interview.md + validated JSON
 2. N× arch-designer-agent   parallel,     spec + interview digest + assigned lens
-                            headless      → .claude/specs/{slug}/candidates/candidate-<lens>.md
-3. K× arch-judge-agent      parallel,     ALL candidates + one criterion (adversarial)
-                            headless      → returns JSON verdict to orchestrator
-4. architecture-agent       interactive   candidates + verdicts → approach gate
+                            headless      → manifest-listed candidate paths
+3. K× arch-judge-agent      parallel,     exact manifest candidates + one criterion
+                            headless      → validated canonical verdict files
+4. architecture-agent       interactive   manifest + verdicts → approach gate
    (finalize mode)                        (AskUserQuestion, previews) → writes plan.md
-                                          → SubagentStop advances to plan-alignment ✓
+                                          → plan-alignment or decompose when skipped ✓
 ```
 
 Defaults: N = 3 designers, K = 3 judges.
@@ -90,28 +90,37 @@ the user's priorities; those answers become the criteria:
 Each judge is framed adversarially ("find the reason each candidate fails this
 criterion"), ranks all candidates comparatively, and returns pure JSON.
 
-**Synthesis.** The finalizer takes the top-ranked candidate as the base and
+**Synthesis.** The finalizer presents the deterministic top-ranked candidate as
+the recommendation, then takes the user's selected candidate as the base and
 grafts each judge's `strongest_idea` from losing candidates where compatible.
-The user still picks at the approach gate — the panel's ranking is presented
-as the recommendation, never silently applied.
+The recommendation is never silently applied.
 
 ## Artifacts
 
 ```
-.claude/specs/{slug}/
-  interview.md                 # structured digest, regex-friendly labeled fields
+.claude/specs/{slug}/panel-runs/<run-id>/
+  interview.md                 # raw structured digest
+  interview.json               # validated canonical digest
+  manifest.json                # exact candidate-set authority
   candidates/
-    candidate-<lens>.md        # one per designer, fixed format
-.claude/plans/{slug}.md        # unchanged contract; gains AD-N block for panel outcome
+    candidate-<lens>.md        # one per selected designer
+  verdicts/
+    verdict-<1|2|3>.json       # validated canonical judge outputs
+.claude/plans/{slug}.md        # unchanged output contract; gains panel AD block
 ```
 
-Judge verdicts are NOT persisted as files — they return as JSON to the
-orchestrator and are inlined into the finalizer prompt. The durable audit
-trail lives in `plan.md` as a mandatory `### AD-N: Approach selection (panel)`
-block (lenses run, verdict summary, what was grafted). Candidates stay on disk
-because they are large and useful context for plan-alignment loop-backs.
+Run-scoped artifacts prevent stale retries from contaminating a new panel.
+The durable plan-level audit trail remains the mandatory approach-selection AD
+block; canonical verdicts additionally remain with their run for diagnostics.
 
 ## Changes by file
+
+> **Implementation note (2026-08-02):** The code snippets and variable lists in
+> the numbered sections below are original proposal snapshots, not current API
+> documentation. The shipped implementation derives/freeze-protects registries,
+> validates run-scoped manifests and handoffs, and uses the variable contracts in
+> `commands/templates/phase-arch-*.md`. Consult those source files and
+> `commands/loom.md` for current behavior.
 
 ### 1. `engine/src/config.ts` — register panel agents
 

@@ -17,11 +17,11 @@ const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}"]);
  * share this exact logic instead of re-implementing (and silently drifting from)
  * the regex.
  *
- * The identifier class is `[a-zA-Z_][a-zA-Z0-9_.-]*` — deliberately wider than a
- * strict shell identifier so a placeholder using a hyphen or dot (e.g.
- * `{spec-dir}`, `{plan.file}`) is still caught. A narrower class would let such a
- * template variable slip through UNsubstituted as a silent pass — exactly the
- * failure this guard exists to prevent.
+ * The identifier class is the template system's declared underscore grammar:
+ * `[a-zA-Z_][a-zA-Z0-9_]*`. Dots and hyphens are deliberately excluded because
+ * arbitrary Task prompts commonly contain JSX/member and arithmetic expressions
+ * such as `{props.title}` and `{width-height}`; treating those as template names
+ * blocks valid code-bearing prompts.
  *
  * Nesting note: the `${...}` strip is non-greedy up to the first `}`, so a nested
  * expansion like `${foo{bar}}` matches `${foo{bar}` and leaves a lone `}`, which
@@ -32,7 +32,7 @@ const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}"]);
  */
 export function findResidualPlaceholders(prompt: string): string[] {
   const cleaned = prompt.replace(/\$\{[^}]*\}/g, "");
-  const matches = cleaned.match(/\{[a-zA-Z_][a-zA-Z0-9_.-]*\}/g) ?? [];
+  const matches = cleaned.match(/\{[a-zA-Z_][a-zA-Z0-9_]*\}/g) ?? [];
   return matches.filter((v) => !FALSE_POSITIVES.has(v));
 }
 
