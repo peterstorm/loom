@@ -218,6 +218,49 @@ export function parseRunManifest<Panel extends string, Id extends string>(
   return errors.length > 0 ? fail(errors) : ok({ runId, contextMd, contextJson, entries });
 }
 
+/** How one panel picks the exact ordered lens set it runs. */
+export interface LensSelectionSpec<Lens extends string> {
+  /** Always included, in this order. Also the minimum viable panel size. */
+  readonly baseline: readonly Lens[];
+  /** Lenses this run's signals pulled up, in priority order. `null` is an
+   *  unfired signal, kept positional so the priority order is visible at the
+   *  call site rather than encoded in a filter. */
+  readonly signalled: readonly (Lens | null)[];
+  /** The full lens table, whose order fills whatever slots remain. */
+  readonly table: readonly Lens[];
+  /** How many lenses this run wants. */
+  readonly count: number;
+  /** How the count is named in the diagnostic, e.g. "designer count". */
+  readonly countLabel: string;
+}
+
+/**
+ * Derive the exact ordered lens set: baselines first, then the lenses this
+ * run's signals pulled up, then the table order fills the rest.
+ *
+ * Shared because both panels carried it verbatim — the same ten lines differing
+ * only in vocabulary and one error string. That is exactly the setup
+ * `parseRunManifest` above records as having ALREADY produced a silent
+ * divergence between two copies, and this one encodes a real decision that
+ * invites editing: baselines come before signalled lenses, so a minimum-size
+ * panel drops the signalled lens even when its signal fired. Whether that is
+ * right is arguable; that a maintainer would change it in one copy and not the
+ * other is not.
+ */
+export function selectLenses<Lens extends string>(
+  spec: LensSelectionSpec<Lens>,
+): ParseResult<readonly Lens[]> {
+  const { baseline, signalled, table, count, countLabel } = spec;
+  if (!Number.isInteger(count) || count < baseline.length || count > table.length) {
+    return fail([`${countLabel} must be an integer from ${baseline.length} to ${table.length}`]);
+  }
+  const selected: Lens[] = [...baseline];
+  for (const lens of [...signalled, ...table]) {
+    if (lens && !selected.includes(lens)) selected.push(lens);
+  }
+  return ok(selected.slice(0, count));
+}
+
 /**
  * Validated prose is substituted into agent prompt templates, where a surviving
  * `{identifier}` would be read as an unsubstituted placeholder and block the
@@ -243,7 +286,7 @@ export interface VerdictEnvelope<Payload> {
  * "score out of range" AND "missing item" for the same item — two errors, one
  * of them a lie about what the agent submitted.
  */
-export interface VerdictEnvelopeSpec<Payload> {
+export interface VerdictEnvelopeSpec<Payload, Id extends string = string> {
   /** What the envelope is called in diagnostics, e.g. "judge verdict". */
   readonly label: string;
   /** The JSON field holding the per-item entries, e.g. "rankings". */
@@ -252,8 +295,14 @@ export interface VerdictEnvelopeSpec<Payload> {
   readonly itemIdKey: string;
   /** Singular/plural noun for one item, e.g. ["candidate", "candidates"]. */
   readonly itemNoun: readonly [string, string];
-  /** Parse the payload-specific fields. `path` is the entry's error prefix. */
-  readonly parseEntry: (raw: Record<string, unknown>, path: string) => ParseResult<Payload>;
+  /** Parse the payload-specific fields. `path` is the entry's error prefix, and
+   *  `itemId` is the id RESOLVED against the expected set — take it from here
+   *  rather than re-reading the raw field, which widens it back to `string`. */
+  readonly parseEntry: (
+    raw: Record<string, unknown>,
+    path: string,
+    itemId: Id,
+  ) => ParseResult<Payload>;
   /** Rules over the entry SET (ordering, mutual consistency). Optional: the
    *  architecture panel requires non-increasing scores; review requires nothing. */
   readonly crossCheck?: (entries: readonly Payload[]) => readonly string[];
@@ -270,11 +319,11 @@ export interface VerdictEnvelopeSpec<Payload> {
  * Every error is collected, not thrown at the first one: an agent re-spawned
  * with diagnostics should learn about all of its mistakes at once.
  */
-export function parseVerdictEnvelope<Payload>(
+export function parseVerdictEnvelope<Payload, Id extends string = string>(
   rawJson: string,
   expectedCriterion: string,
-  expectedItemIds: readonly string[],
-  spec: VerdictEnvelopeSpec<Payload>,
+  expectedItemIds: readonly Id[],
+  spec: VerdictEnvelopeSpec<Payload, Id>,
 ): ParseResult<VerdictEnvelope<Payload>> {
   const [noun, nounPlural] = spec.itemNoun;
 
@@ -299,7 +348,6 @@ export function parseVerdictEnvelope<Payload>(
     errors.push(`${spec.entriesKey} must contain exactly ${expectedItemIds.length} ${nounPlural}`);
   }
 
-  const expected = new Set(expectedItemIds);
   const seen = new Set<string>();
   const entries: Payload[] = [];
 
@@ -310,14 +358,25 @@ export function parseVerdictEnvelope<Payload>(
       continue;
     }
 
-    const itemId = typeof rawEntry[spec.itemIdKey] === "string" ? (rawEntry[spec.itemIdKey] as string) : "";
-    const known = expected.has(itemId);
-    const duplicate = seen.has(itemId);
-    if (!known) errors.push(`${path} has unknown ${noun}: ${itemId || "<empty>"}`);
-    if (duplicate) errors.push(`${spec.entriesKey} contains duplicate ${noun}: ${itemId}`);
-    seen.add(itemId);
+    const rawItemId = typeof rawEntry[spec.itemIdKey] === "string" ? (rawEntry[spec.itemIdKey] as string) : "";
+    // RESOLVE against the expected set rather than testing membership, exactly
+    // as parseRunManifest does. Testing handed each payload parser the raw
+    // string back to re-read, which widened a proven `WaveFindingId` to
+    // `string` — so a task-local `code-reviewer-1` type-checked everywhere a
+    // wave-scoped `T1:code-reviewer-1` belonged, which is the collision the
+    // brand exists to make impossible.
+    const itemId = expectedItemIds.find((expected) => expected === rawItemId);
+    const duplicate = seen.has(rawItemId);
+    if (itemId === undefined) errors.push(`${path} has unknown ${noun}: ${rawItemId || "<empty>"}`);
+    if (duplicate) errors.push(`${spec.entriesKey} contains duplicate ${noun}: ${rawItemId}`);
+    seen.add(rawItemId);
 
-    const payload = spec.parseEntry(rawEntry, path);
+    // An entry naming no known item has no id to hand `parseEntry`, and it is
+    // discarded whatever its payload says — stacking its payload rules on top
+    // of "unknown candidate" gives an agent nothing it can act on separately.
+    if (itemId === undefined) continue;
+
+    const payload = spec.parseEntry(rawEntry, path, itemId);
     if (!payload.ok) errors.push(...payload.errors);
 
     // Only fully-valid entries enter `entries`. A partially-valid entry would
@@ -325,7 +384,7 @@ export function parseVerdictEnvelope<Payload>(
     // exactly what `crossCheck` would then silently compare against — an
     // out-of-range score becoming NaN made every `<` comparison false, so the
     // ordering check passed on the data it was there to reject.
-    if (known && !duplicate && payload.ok) entries.push(payload.value);
+    if (!duplicate && payload.ok) entries.push(payload.value);
   }
 
   for (const itemId of expectedItemIds) {

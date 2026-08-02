@@ -574,16 +574,29 @@ describe("applyFindingOutcomes refuses to adjudicate what it cannot find", () =>
     ).toThrow(/no finding 'code-reviewer-99'/);
   });
 
-  it("throws rather than writing a record its own reader rejects", () => {
+  it("cannot be handed a refuted finding with no refutations", () => {
     // parseStoredRefutation refuses an empty refutations list, so writing one
-    // would make the graph unloadable by the module that wrote it.
-    expect(() =>
-      applyFindingOutcomes(blocked(), [{
-        finding: { id: "T1:code-reviewer-1", taskId: "T1" },
-        refutations: [],
-        survives: false,
-      }]),
-    ).toThrow(/carries no refutations/);
+    // would make the graph unloadable by the module that wrote it. This used to
+    // be a runtime throw at the consumer; AdjudicatedFinding is now a union
+    // whose `survives: false` arm requires a non-empty tuple, so the state is
+    // unrepresentable and the check is a COMPILE-time one. `ts-expect-error`
+    // fails the typecheck if the constraint is ever loosened back.
+    // @ts-expect-error refutations must be non-empty when survives is false
+    const illegal: AdjudicatedFinding = {
+      finding: { id: "T1:code-reviewer-1", taskId: "T1" },
+      refutations: [],
+      survives: false,
+    };
+    void illegal;
+
+    // And the surviving arm — where an empty list IS legal — still adjudicates
+    // nothing, so the union did not merely move the failure somewhere quieter.
+    const task = blocked();
+    expect(applyFindingOutcomes(task, [{
+      finding: { id: "T1:code-reviewer-1", taskId: "T1" },
+      refutations: [],
+      survives: true,
+    }])).toBe(task);
   });
 
   it("still ignores an outcome belonging to another task", () => {

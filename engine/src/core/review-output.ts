@@ -9,10 +9,13 @@
  *
  * The rule, in one sentence: **the block wins only when it accounts for every
  * finding — of either severity — that the reviewer's own count and marker lines
- * claim.** A short block is a truncated or mislabeled emission, and its
- * locations are not worth the claims it would discard. Whatever wins, `reconcileFindings` backstops the
- * remaining shortfall against `CRITICAL_COUNT` with a self-describing entry, so
- * a parse that lost findings blocks the gate instead of reading green.
+ * claim, and any marker claim it does not NAME is carried over beside it.** A
+ * short block is a truncated or mislabeled emission, and its locations are not
+ * worth the claims it would discard; a block that is long enough but names
+ * different claims is the same loss wearing a passing count. Whatever wins,
+ * `reconcileFindings` backstops the remaining shortfall against
+ * `CRITICAL_COUNT` with a self-describing entry, so a parse that lost findings
+ * blocks the gate instead of reading green.
  *
  * `resolveReviewFindings` + `applyReviewResolution` are the SINGLE path from a
  * review transcript to a task update. Claude Code reaches them through the
@@ -35,6 +38,7 @@ import {
   hasFindingsBlock,
   mergeFindings,
   parseFindingsBlock,
+  removeOnce,
   type DraftFinding,
 } from "./findings";
 
@@ -46,12 +50,18 @@ import {
 export type FindingsBlockStatus =
   /** The reviewer emitted no block. The marker lines are the whole contract. */
   | "absent"
-  /** The block parsed and accounted for every critical. It is the source. */
+  /** The block parsed and named every claim the markers made. It is the source. */
   | "used"
   /** A block was present but malformed. The marker lines were parsed instead. */
   | "rejected"
   /** The block parsed but under-reported findings. The marker lines won. */
-  | "superseded";
+  | "superseded"
+  /**
+   * The block was long enough to win but did not NAME every marker claim. It
+   * is the source, with the unnamed marker claims carried over beside it —
+   * so the block's file/line survives and no claim is lost.
+   */
+  | "partial";
 
 /**
  * One reviewer's output, parsed. `drafts` is authoritative; `critical` and
@@ -195,11 +205,26 @@ export function parseMachineSummary(output: string): ParsedFindings | null {
  * demonstrably made, and no amount of location metadata is worth a lost finding.
  *
  * The advisory half of that bar is not decoration. Gating on criticals alone
- * let a criticals-only block — a plausible emission, since the reviewer prompt
- * scopes its mandatory block accounting to criticals — win outright and delete
- * every `ADVISORY:` marker line, while `blockStatus` still reported `used` so
- * no degradation note was printed. `/wave-gate` Step 4b must triage every
- * advisory to fixed/deferred/dismissed; it cannot triage what it never sees.
+ * let a criticals-only block win outright and delete every `ADVISORY:` marker
+ * line, while `blockStatus` still reported `used` so no degradation note was
+ * printed. `/wave-gate` Step 4b must triage every advisory to
+ * fixed/deferred/dismissed; it cannot triage what it never sees. (Every
+ * reviewer agent file now requires the block to account for advisories too —
+ * see agents/code-reviewer.md — but the arbitration must hold for output that
+ * does not honour its prompt, which is the only output worth arbitrating.)
+ *
+ * Counting is necessary and NOT sufficient. Arbitration stays cardinal on
+ * purpose — demanding that the block reproduce marker text verbatim would
+ * reject every reworded block and permanently cost the file/line the block
+ * exists to carry — so a block that names two claims can clear a bar of two
+ * while naming neither of the reviewer's actual claims. That is the one path
+ * here that DESTROYED a finding rather than degrading it: the count matched, so
+ * `reconcileFindings` stayed quiet; `blockStatus` said `used`, so no note was
+ * printed; and the views were internally consistent, so the lockstep check
+ * passed. The winner is therefore reconciled by VALUE as well: any marker claim
+ * the block does not name is carried over beside it as a location-less draft,
+ * and the operator is told through `partial`. Nothing is lost, and nothing the
+ * reviewer did not say is invented.
  *
  * `CRITICAL_COUNT` always comes from the markers: the count is the reviewer's
  * own tally and is what distinguishes "zero findings" from "the parse failed".
@@ -222,12 +247,29 @@ function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
   const accountsForAll =
     fromBlock.critical.length >= claimedCritical &&
     fromBlock.advisory.length >= scraped.advisory.length;
-  return accountsForAll
+  if (!accountsForAll) {
+    return makeParsedFindings({
+      drafts: scraped.drafts,
+      criticalCount: scraped.criticalCount,
+      blockStatus: "superseded",
+    });
+  }
+  // Multiset, not set: two reviewers can legitimately word a claim identically,
+  // and a block naming it once when the markers named it twice has dropped one.
+  // Both sides are `collapseWhitespace`-normalized (every claim reaching either
+  // view is built by makeDraftFinding), so comparison by value is exact.
+  const unnamed = draftsFromClaims(
+    removeOnce(scraped.critical, fromBlock.critical),
+    removeOnce(scraped.advisory, fromBlock.advisory),
+  );
+  return unnamed.length === 0
     ? fromBlock
     : makeParsedFindings({
-        drafts: scraped.drafts,
+        // The block's entries first, so its file/line-bearing findings keep
+        // their order; the recovered marker claims follow, location-less.
+        drafts: [...structured, ...unnamed],
         criticalCount: scraped.criticalCount,
-        blockStatus: "superseded",
+        blockStatus: "partial",
       });
 }
 
@@ -309,6 +351,11 @@ function blockStatusNote(status: FindingsBlockStatus): string {
       "superseded",
       () =>
         " [findings block under-reported findings — used marker lines instead, findings carry no file/line]",
+    )
+    .with(
+      "partial",
+      () =>
+        " [findings block did not name every marker claim — the unnamed claims were carried over without file/line]",
     )
     .exhaustive();
 }

@@ -476,11 +476,12 @@ For each wave:
 - Skip the wave-gate and proceed to the next wave
 - Manually set `reviews_complete: true` in state
 
-**The wave-gate spawns these agents (see `commands/wave-gate.md` for full protocol):**
+**The wave-gate spawns these agents (see `commands/wave-gate.md` for full protocol — it is authoritative, this list is a summary):**
 1. `spec-check-invoker` — verifies implementation satisfies spec anchors (1 per wave)
 2. Per task: `code-reviewer`, `silent-failure-hunter`, `pr-test-analyzer`, `type-design-analyzer`, `comment-analyzer`
+3. `review-verifier-agent` — the **refutation panel** (wave-gate Step 3.5), N verifiers per wave, one per lens. MANDATORY whenever the wave has critical findings: an unadjudicated plausible-but-wrong critical costs a full remediation cycle. Driven by the `review-panel` helper (`brief` → `manifest` → `lenses` → `verdict` → `tally`); a majority refutation moves a finding into `refuted_findings` with its reasoning, never deletes it. **Skip only when the wave has zero criticals.**
 
-**All spawned in parallel via Task/subagent tool.** SubagentStop hooks automatically update state. Then `complete-wave-gate` helper advances the wave.
+**Steps 1 and 2 are spawned in parallel via Task/subagent tool.** Step 3 runs AFTER them — it adjudicates the findings they produced, so it cannot share their message. SubagentStop hooks automatically update state. Then `complete-wave-gate` helper advances the wave.
 
 **The `validate-task-execution` hook enforces this:** it blocks next-wave impl agents if `wave_gates[N-1].reviews_complete == false`. Even if you try to skip, the hook will BLOCK.
 
@@ -625,7 +626,9 @@ Hooks auto-activate when `active_task_graph.json` exists:
 **Do not call hook-owned state-writing helpers yourself.** The helpers that hooks/`/wave-gate` drive — `complete-wave-gate`, `StateManager`, `store-review-findings`/`store-spec-check` (except as a sanctioned override, below) — run automatically; calling them by hand races the hook that owns that write. A small set of DIRECT helper invocations IS sanctioned, used only where this document says to; they fall into two distinct classes:
 
 - **Whitelisted in the guard** (`engine/src/config.ts` `WHITELISTED_HELPERS`, so the guard permits them even on a guarded path): `populate-task-graph` (Phase 4d), `set-phase` loop-back, `mark-tests-passed` (read-only evidence status check, run during `/wave-gate` Step 2 — it reads the ledger and does NOT modify state), and the `store-review-findings` / `store-spec-check` false-positive overrides.
-- **Merely out of the guard's scope when invoked as documented** (NOT in `WHITELISTED_HELPERS`): `validate-task-graph` / `validate-lint-rules` — they pass only because their documented invocations name no guarded path, so the guard's front gate never fires. Invoked against a guarded path they would be blocked like anything else.
+- **Merely out of the guard's scope when invoked as documented** (NOT in `WHITELISTED_HELPERS`): `validate-task-graph` / `validate-lint-rules`, and the two panel contract helpers `panel-contract` (this document, Phase 3 panel mode) and `review-panel` (`commands/wave-gate.md` Step 3.5) — they pass only because their documented invocations name no guarded path, writing instead into a run directory under `.claude/panel-runs/` or `.claude/reviews/panel-runs/`. Invoked against a guarded path they would be blocked like anything else.
+
+  **One exception inside that class:** `review-panel tally` DOES write the task graph through `StateManager` — it moves refuted findings into `refuted_findings` and can demote `review_status` from `blocked` to `passed`. It is out of the guard's scope only because its arguments name the run directory rather than the state file. It is nonetheless the wave gate's own adjudication step, run exactly once per run directory at the point `wave-gate.md` says to, and it refuses a second tally on a run it has already adjudicated. Do not invoke it to "re-check" a wave.
 
 Each sanctioned direct invocation still requires user approval. Everything else is hook-driven.
 

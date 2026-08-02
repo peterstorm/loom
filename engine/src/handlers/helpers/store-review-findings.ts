@@ -69,9 +69,10 @@ export function updateTaskFindings(
   const reviewStatus: ReviewStatus = critical.length > 0 ? "blocked" : "passed";
 
   // A pre-identity task's claims live only in the views; give them identity
-  // through the same primitive `mergeFindings` and `--fix` use, so all four
-  // writers agree on what a legacy task's findings ARE before any of them
-  // decides what to keep.
+  // through `recoverViewOnlyClaims` — the same primitive `mergeFindings` and
+  // `--fix` reach for, making this its third caller — so all five lockstep
+  // writers (enumerated on `Task.findings` in types.ts) agree on what a legacy
+  // task's findings ARE before any of them decides what to keep.
   const existing: readonly Finding[] = [
     ...(task.findings ?? []),
     ...recoverViewOnlyClaims(
@@ -96,6 +97,9 @@ export function updateTaskFindings(
   return {
     ...task,
     review_status: reviewStatus,
+    // An override replaces the review record outright, and `review_error` is
+    // part of that record — it is meaningful only for evidence_capture_failed.
+    review_error: undefined,
     findings,
     critical_findings: [...claimsOfSeverity(findings, "critical")],
     advisory_findings: [...claimsOfSeverity(findings, "advisory")],

@@ -470,6 +470,88 @@ describe("review-panel helper CLI", () => {
     });
   });
 
+  describe("the panel size is fixed for the life of the run", () => {
+    const buildManifestSized = (n: number) =>
+      run(["manifest", "--runs-root", REL_ROOT, "--run-dir", REL_RUN, "--lenses", String(n)]);
+    const lensesOf = () =>
+      JSON.parse(readFileSync(manifestPath, "utf-8")).lenses as string[];
+
+    it("does not shrink a recorded panel when manifest is re-run without --lenses", () => {
+      // The bug this pins, verified end to end at exit 0 with nothing on
+      // stderr: `manifest` was the one manifest-scoped operation that skipped
+      // reading the existing file, so its count recovery never ran. A retry of
+      // step 3.5.2 — or any re-run — silently rewrote a 5-lens panel to the
+      // 3-lens default. readVerdicts then iterated only 3 lenses, verdict-4 and
+      // verdict-5 (the two that UPHELD) were ignored, the absolute refutation
+      // bar fell from 3 to 2, and the finding came out refuted. Re-deriving the
+      // lens SET does not catch it: selectReviewLenses returns nested prefixes,
+      // so a truncated list reproduces its own derivation exactly.
+      expect(buildBrief().status).toBe(0);
+      expect(buildManifestSized(5).status).toBe(0);
+      expect(lensesOf()).toHaveLength(5);
+
+      const rerun = buildManifest();
+      expect(rerun.status, rerun.stderr).toBe(0);
+      expect(lensesOf(), "the recorded panel size survives a re-run").toHaveLength(5);
+    });
+
+    it("refuses a --lenses that disagrees with the recorded size", () => {
+      expect(buildBrief().status).toBe(0);
+      expect(buildManifestSized(5).status).toBe(0);
+      const conflict = buildManifestSized(3);
+      expect(conflict.status).toBe(1);
+      expect(conflict.stderr).toContain("already fixed at 5 lens(es)");
+      expect(lensesOf(), "the refused re-size wrote nothing").toHaveLength(5);
+    });
+
+    it("accepts a --lenses that restates the recorded size", () => {
+      expect(buildBrief().status).toBe(0);
+      expect(buildManifestSized(4).status).toBe(0);
+      expect(buildManifestSized(4).status, "idempotent, not merely rejected").toBe(0);
+      expect(lensesOf()).toHaveLength(4);
+    });
+
+    it("rejects a tally whose verdict directory holds more votes than the panel", () => {
+      // The other half of the same failure. A surplus verdict-N.json is
+      // positive evidence that the panel which actually RAN was larger than the
+      // manifest now claims — which is what a hand-truncated `manifest.lenses`
+      // leaves behind. Ignoring the extra files is what let a 5-lens run be
+      // adjudicated as a 3-lens one under a lower absolute bar.
+      stage();
+      writeVerdicts([["upheld", "upheld"], ["upheld", "upheld"], ["upheld", "upheld"]]);
+      writeFileSync(join(runDir, "verdicts", "verdict-4.json"), verdictJson("security", "upheld", "upheld"));
+
+      const result = run(["tally", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("verdict-4.json");
+      expect(result.stderr).toContain("larger than the criteria set names");
+    });
+  });
+
+  it("refuses to re-tally a run it has already adjudicated", () => {
+    // A second tally sent applyFindingOutcomes looking for findings the first
+    // one had already moved into refuted_findings, where the invariant throw
+    // blamed "the task graph changed between brief and tally" — true of an
+    // override landing mid-run, and wrong about the likelier cause. It also
+    // escaped mgr.update uncaught rather than returning a contract error. A
+    // broken pipe on the canonical output, after the state write has landed, is
+    // enough to invite the re-run.
+    stage();
+    writeVerdicts([["refuted", "upheld"], ["refuted", "upheld"], ["refuted", "upheld"]]);
+    const first = run(["tally", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+    expect(first.status, first.stderr).toBe(0);
+
+    const second = run(["tally", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+    expect(second.status).toBe(1);
+    expect(second.stderr).toContain("already been tallied");
+    expect(second.stderr).toContain(F1);
+    expect(second.stderr).not.toContain("changed between brief and tally");
+
+    // And the first tally's decision is intact — the refusal wrote nothing.
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.tasks[0].refuted_findings).toHaveLength(1);
+  });
+
   it("refuses to write a brief artifact through a symlink", () => {
     // The engine is the first panel author to WRITE into a run directory, and
     // a write follows a symlink as happily as a read does. artifactErrors runs

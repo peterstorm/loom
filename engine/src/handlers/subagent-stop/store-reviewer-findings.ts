@@ -61,6 +61,28 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "passthrough" };
   }
 
+  // `tasks.map` over an id no task holds is a total no-op, and the log line
+  // below asserts the findings were stored regardless. `extractTaskId` falls
+  // back to any standalone `T\d+` in the transcript, so a reviewer quoting an
+  // unrelated task id resolves to a task the graph does not have — and that
+  // reviewer's criticals were discarded while stderr reported them recorded.
+  // The sibling helper (helpers/store-review-findings.ts) guards exactly this;
+  // the SubagentStop path did not.
+  let known: boolean;
+  try {
+    known = mgr.load().tasks.some((t) => t.id === taskId);
+  } catch (error) {
+    // `mgr.update` below loads too, so an unloadable graph fails either way —
+    // but it fails as an unhandled throw from inside the hook rather than as a
+    // line naming the reviewer whose findings were lost.
+    warn(`cannot load task graph for ${agentType} (${error instanceof Error ? error.message : String(error)}) — findings NOT stored`);
+    return { kind: "passthrough" };
+  }
+  if (!known) {
+    warn(`${agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored`);
+    return { kind: "passthrough" };
+  }
+
   const resolution = resolveReviewFindings(transcript, agentType);
 
   await mgr.update((s) => ({

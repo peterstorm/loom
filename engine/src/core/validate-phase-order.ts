@@ -62,8 +62,14 @@ export function isReviewPanelAgent(agent: string): boolean {
 }
 
 export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
-  if (PHASE_AGENT_MAP[agent]) return PHASE_AGENT_MAP[agent];
-  if (PHASE_AGENT_MAP[agent + "-agent"]) return PHASE_AGENT_MAP[agent + "-agent"];
+  // Bound to a local rather than re-indexed: the map's value type is now
+  // honestly `Phase | undefined`, so the guard and the returned value are the
+  // same narrowed binding instead of two lookups the compiler must trust to
+  // agree.
+  const direct = PHASE_AGENT_MAP[agent];
+  if (direct) return direct;
+  const suffixed = PHASE_AGENT_MAP[agent + "-agent"];
+  if (suffixed) return suffixed;
   if (IMPL_AGENTS.has(agent) || IMPL_AGENTS.has(agent + "-agent") || REVIEW_AGENTS.has(agent) || REVIEW_AGENTS.has(agent + "-agent")) return "execute";
   if (isReviewPanelAgent(agent)) return "execute";
   // Architecture-panel agents (--panel) are architecture-phase work. Recognized

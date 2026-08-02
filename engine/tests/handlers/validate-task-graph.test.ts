@@ -458,6 +458,74 @@ describe("fixFull repairs findings WITH their derived views", () => {
     expect(notes).toEqual(['T1: recovered view-only claim into findings — "silent no more"']);
   });
 
+  it("salvages a critical carried ONLY by a malformed entry", () => {
+    // The bug this pins, verified against the real CLI. Conservation used to
+    // rest entirely on step 2 recovering the dropped entry's claim from the
+    // `string[]` view. When the view did NOT hold it — the exact state the load
+    // boundary rejects with "repair with: validate-task-graph --fix" — nothing
+    // recovered it and nothing reported it: FindingsRepair had no channel for a
+    // drop. The critical was deleted by the one command the engine tells the
+    // operator to run, and complete-wave-gate's check 5 then counted zero.
+    const { json, notes } = fixFull(graphOf({
+      id: "T1",
+      findings: [{ severity: "critical", claim: "unchecked cast in the token reducer" }],
+      critical_findings: [],
+      advisory_findings: [],
+      review_status: "blocked",
+    }));
+    const repaired = JSON.parse(json).tasks[0];
+    expect(repaired.critical_findings).toEqual(["unchecked cast in the token reducer"]);
+    expect(repaired.findings).toHaveLength(1);
+    expect(repaired.findings[0]).toMatchObject({
+      agent: "recovered-view",
+      id: "recovered-view-1",
+      claim: "unchecked cast in the token reducer",
+    });
+    expect(notes).toEqual([
+      'T1: re-minted identity for a malformed findings entry — "unchecked cast in the token reducer"',
+    ]);
+  });
+
+  it("salvages without double-minting a claim the view also holds", () => {
+    // Step 1 runs before step 2 precisely so the salvaged claim is already in
+    // `findings` when recoverViewOnlyClaims looks for orphans. Reversed, the
+    // claim would be minted twice and the wave gate would count two criticals
+    // where the reviewer made one.
+    const repaired = fix({
+      id: "T1",
+      findings: [{ severity: "critical", claim: "unchecked cast" }],
+      critical_findings: ["unchecked cast"],
+    });
+    expect(repaired.findings).toHaveLength(1);
+    expect(repaired.critical_findings).toEqual(["unchecked cast"]);
+  });
+
+  it("names the data it could not save instead of dropping it in silence", () => {
+    // An entry with no usable severity or claim carries nothing to salvage, so
+    // it IS lost — which is exactly why it has to be said out loud. A dropped
+    // critical is indistinguishable from one that was never found.
+    const { notes } = fixFull(graphOf({
+      id: "T1",
+      findings: [{ severity: "not-a-severity", claim: "" }, { nothing: true }],
+      refuted_findings: [{ finding: { bogus: true }, refutations: [] }],
+    }));
+    expect(notes).toEqual([
+      "T1: DROPPED 2 findings entr(y/ies) carrying no usable claim — data lost; check the reviewer output for this task",
+      "T1: DROPPED 1 malformed refutation record(s) — audit trail lost, the findings themselves are unaffected",
+    ]);
+  });
+
+  it("stays idempotent once a malformed entry has been salvaged", () => {
+    const once = fixFull(graphOf({
+      id: "T1",
+      findings: [{ severity: "critical", claim: "salvage me" }],
+      critical_findings: [],
+    })).json;
+    const twice = fixFull(JSON.parse(once));
+    expect(twice.json).toEqual(once);
+    expect(twice.notes, "a repaired graph reports nothing further").toEqual([]);
+  });
+
   it("drops a refutation record whose pair shape is broken", () => {
     const repaired = fix({
       id: "T1",

@@ -220,10 +220,18 @@ rest — so an unsignalled panel gets `blast-radius` third: cause, intent,
 consequence.
 
 Default panel size is 3. Pass `--lenses N` (2–5) to `manifest` to change it —
-**only to `manifest`**. The manifest records the size, and `lenses`, `verdict`,
-and `tally` recover it from the file rather than needing the flag threaded
-through. The lens SET is still re-derived from the brief and compared name by
-name, so a tampered manifest is still rejected.
+**only to `manifest`**. The manifest records the size, and every later operation
+recovers it from the file rather than needing the flag threaded through.
+
+**The size is fixed for the life of the run.** Once `manifest.json` records a
+lens count, re-running `manifest` without `--lenses` keeps it, and a `--lenses`
+that disagrees is a hard error — start a new run directory instead. Re-deriving
+the lens SET does not protect the size on its own: `selectReviewLenses` returns
+nested prefixes, so a shorter lens list reproduces its own derivation exactly
+and passes the name-by-name comparison. A shrunken panel would be adjudicated
+under a lower absolute refutation bar, with the surplus verdicts ignored. The
+`tally` also rejects a verdicts directory holding more `verdict-N.json` files
+than the panel has lenses, for the same reason.
 
 #### 3.5.3 — Spawn the verifiers (parallel, headless)
 

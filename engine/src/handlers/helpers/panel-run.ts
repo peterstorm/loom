@@ -10,7 +10,7 @@
  * Not pure: lstat/realpath/read/write. Kept out of `core/` for that reason.
  */
 
-import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { HookResult } from "../../types";
 import type { ParseResult, RunLayout } from "../../core/panel-kernel";
@@ -134,6 +134,43 @@ export function artifactError(path: string, expectedParent: string): string | nu
 }
 
 /**
+ * Every artifact one run names, each checked against the directory it must
+ * resolve into.
+ *
+ * Two TIERS, taken as separate arguments: context files (the interview digest,
+ * the findings brief) sit at the run root, item files (candidates, findings) in
+ * the run's item directory. Both panels ran this loop; the architecture copy
+ * discriminated the tiers after the fact by comparing each path against
+ * `manifest.interviewFile` by VALUE, which is safe only because
+ * `parsePanelManifest` guarantees candidate paths live under `candidates/` — a
+ * guarantee held two modules away with nothing linking them. Change
+ * `candidateFilename` or the layout so a candidate path could equal a context
+ * path, and that copy would check the candidate against the run root instead of
+ * the item directory: a containment check passing on a path it should reject.
+ * Which list a path came from is the fact that decides the tier, so it is the
+ * fact the signature carries.
+ */
+export function runArtifactErrors(
+  runDir: string,
+  layout: RunLayout,
+  contextPaths: readonly string[],
+  itemPaths: readonly string[],
+): string[] {
+  const resolved = realRunDir(runDir);
+  if (!resolved.ok) return [...resolved.errors];
+  const root = resolved.value;
+  const itemDir = join(root, layout.itemDir);
+  const check = (path: string, parent: string): string[] => {
+    const error = artifactError(path, parent);
+    return error ? [error] : [];
+  };
+  return [
+    ...contextPaths.flatMap((path) => check(path, root)),
+    ...itemPaths.flatMap((path) => check(path, itemDir)),
+  ];
+}
+
+/**
  * Prepare a run-scoped directory and prove every path the engine is about to
  * WRITE is safe to write.
  *
@@ -203,6 +240,44 @@ export function realRunDir(runDir: string): ParseResult<string> {
 }
 
 /**
+ * Verdict files numbered past the criteria set, which the read loop below would
+ * otherwise never open.
+ *
+ * A surplus `verdict-4.json` is not junk to ignore — it is positive evidence
+ * that the panel which actually RAN was larger than the criteria set now
+ * claims. That is exactly the shape a shrunken panel leaves behind (see the
+ * panel-size note in helpers/review-panel.ts), and ignoring it is what let a
+ * 5-lens run be adjudicated as a 3-lens one with a lower absolute refutation
+ * bar. Reported, never silently skipped.
+ */
+function surplusVerdictErrors(verdictsDir: string, expected: number): string[] {
+  let names: readonly string[];
+  try {
+    names = readdirSync(verdictsDir);
+  } catch (error) {
+    return [
+      `cannot list verdict directory ${verdictsDir}: ${error instanceof Error ? error.message : String(error)}`,
+    ];
+  }
+  const surplus = names
+    .flatMap((name) => {
+      const match = /^verdict-(\d+)\.json$/.exec(name);
+      const index = match ? Number(match[1]) : 0;
+      return match && index > expected ? [{ name, index }] : [];
+    })
+    .sort((a, b) => a.index - b.index)
+    .map((entry) => entry.name);
+
+  return surplus.length === 0
+    ? []
+    : [
+        `verdict directory holds ${surplus.length} verdict file(s) beyond the ${expected} this run ` +
+          `expects (${surplus.join(", ")}) — the panel that produced them was larger than the ` +
+          `criteria set names, so this tally would adjudicate on a subset of the votes cast`,
+      ];
+}
+
+/**
  * Read and re-validate every criterion's verdict from disk.
  *
  * Both panels re-read rather than trusting the step that just wrote — the
@@ -220,7 +295,7 @@ export function readVerdicts<T, Criterion extends string>(
   parse: (raw: string, criterion: Criterion) => ParseResult<T>,
 ): ParseResult<readonly T[]> {
   const verdicts: T[] = [];
-  const errors: string[] = [];
+  const errors: string[] = surplusVerdictErrors(verdictsDir, criteria.length);
   for (const [index, criterion] of criteria.entries()) {
     const path = verdictPath(runDir, layout, index);
     const fileError = artifactError(path, verdictsDir);

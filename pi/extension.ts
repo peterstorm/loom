@@ -536,6 +536,19 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
 
+        // `tasks.map` over an id no task holds is a total no-op, and the log
+        // below asserts the findings were stored regardless. `extractTaskId`
+        // falls back to any standalone `T\d+` in the transcript, so a reviewer
+        // quoting an unrelated id resolves to a task the graph does not have —
+        // and that reviewer's criticals were discarded while stderr reported
+        // them recorded. Both harnesses guard it, or they drift.
+        if (!mgr.load().tasks.some((t: { id: string }) => t.id === taskId)) {
+          process.stderr.write(
+            `WARNING: ${agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored\n`,
+          );
+          continue;
+        }
+
         // Identical decision + transform as the Claude Code SubagentStop hook —
         // one shared implementation, so findings cannot have identity on one
         // harness and not the other.

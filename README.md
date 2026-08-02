@@ -794,7 +794,7 @@ loom/
 
 The `/rules/` directory holds domain rule files (`architecture.md`, `java-patterns.md`, `typescript-patterns.md`, `rust-patterns.md`, `property-testing.md`) that agents reference during implementation and review. `architecture.md` defines the **Ports at I/O Boundaries** rule (every real I/O collaborator gets a narrow domain-owned port).
 
-The `/references/` directory holds templates used by phase agents: `spec-template.md`, `plan-template.md`, `adr-template.md`, a design evaluator, and `panel-lenses.md` (the five design lenses for `/loom --panel`).
+The `/references/` directory holds templates used by phase agents: `spec-template.md`, `plan-template.md`, `adr-template.md`, a design evaluator, `panel-lenses.md` (the five design lenses for `/loom --panel`), and `review-lenses.md` (the five refutation lenses the wave gate's Step 3.5 panel judges findings through).
 
 ---
 

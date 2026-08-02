@@ -82,6 +82,22 @@ describe("harness parity: one path from transcript to task", () => {
     expect(source).not.toContain('"evidence_capture_failed" as const');
   });
 
+  it.each(HARNESSES)("%s proves the task exists before claiming it stored the findings", (_name, source) => {
+    // Both shells write with `tasks.map((t) => t.id === taskId ? … : t)`, which
+    // is a total NO-OP for an id the graph does not hold — and then log
+    // "review: blocked (N critical)" unconditionally. extractTaskId falls back
+    // to any standalone `T\d+` in the transcript, so a reviewer quoting an
+    // unrelated task id discarded its own criticals while stderr reported them
+    // recorded. The sibling helper store-review-findings.ts guards exactly this;
+    // neither review shell did.
+    // lastIndexOf, not indexOf: the first occurrence is the import.
+    const writePoint = source.lastIndexOf("applyReviewResolution");
+    expect(writePoint, `${_name} must apply a resolution`).toBeGreaterThan(-1);
+    const before = source.slice(0, writePoint);
+    expect(before, `${_name} must check the task id against the graph before writing`)
+      .toContain("is not in the task graph");
+  });
+
   it.each(HARNESSES)("%s logs rather than silently discarding an unattributable review", (_name, source) => {
     // Every early return has to say so. A reviewer whose output is dropped in
     // silence is indistinguishable from one that found nothing, which is the

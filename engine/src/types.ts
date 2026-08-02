@@ -130,6 +130,13 @@ export interface Task {
   new_test_evidence?: string;
   files_modified?: string[];
   review_status?: ReviewStatus;
+  /**
+   * Why evidence capture failed. Meaningful ONLY alongside
+   * `review_status: "evidence_capture_failed"` — every writer that moves the
+   * status off that value clears this field in the same update. It used to
+   * survive the transition, so a task could sit at `passed` carrying
+   * "CRITICAL_COUNT marker not found…" from a run two reviewers ago.
+   */
   review_error?: string;
   /**
    * Authoritative review findings: each with a derived id, its emitting agent,
@@ -152,10 +159,17 @@ export interface Task {
    * would produce a critical no panel can reach and no gate can clear — and one
    * that touched only the array would produce a critical the gate never counts.
    * `findingsLockstepError` refuses to load either.
+   *
+   * `readonly` for the same reason `findings` is. The DERIVED fields were the
+   * mutable ones, which is exactly backwards: a holder of a `Task` could
+   * `push` a claim into a view and break, in place and with no compile error,
+   * the invariant a load-boundary check, five coordinated writers and a `--fix`
+   * repair path all exist to protect. Every producer already returns a fresh
+   * array, so nothing had to change but the type.
    */
   findings?: readonly Finding[];
-  critical_findings?: string[];
-  advisory_findings?: string[];
+  critical_findings?: readonly string[];
+  advisory_findings?: readonly string[];
   /**
    * Findings a refutation panel killed, kept with the verifiers' reasoning
    * instead of deleted. A wrong refutation must stay auditable — a silently

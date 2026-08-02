@@ -9,11 +9,15 @@ import { match } from "ts-pattern";
 import type { HookHandler, Phase, TaskGraph } from "../../types";
 import { PHASE_ORDER, KNOWN_AGENTS } from "../../config";
 import {
+  attributeFindings,
   claimsOfSeverity,
   deduplicateFindingIds,
+  nextOrdinal,
   parseStoredFindings,
   parseStoredRefutations,
   recoverViewOnlyClaims,
+  salvageMalformedFindings,
+  RECOVERED_AGENT,
 } from "../../core/findings";
 import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
 
@@ -168,51 +172,76 @@ interface FindingsRepair {
   readonly fields: Record<string, unknown>;
   /** Claims that existed only in a `string[]` view and were given identity. */
   readonly recovered: readonly string[];
+  /** Claims rescued from a `findings` entry too malformed to parse. */
+  readonly salvaged: readonly string[];
   /** Ids that collided and were re-minted. */
   readonly reminted: number;
+  /** Malformed `findings` entries carrying nothing salvageable. The one path in
+   *  this file that loses data, so it is counted and reported rather than
+   *  vanishing between the raw array and the parsed one. */
+  readonly dropped: number;
+  /** Malformed `refuted_findings` records — audit trail, unrecoverable. */
+  readonly droppedRefutations: number;
 }
 
 /**
  * Repair one task's findings and the two `string[]` views over them.
  *
- * Every path here CONSERVES claims. That is the whole rule, and it used not to
- * hold: a claim in `critical_findings` with no counterpart in `findings` was
- * deleted, silently, by the repair the load-boundary diagnostic itself tells the
- * operator to run. `complete-wave-gate` counts that view, so the deletion turned
- * a blocking wave into a passing one.
+ * Every path here CONSERVES claims, or SAYS that it could not. That is the
+ * whole rule, and it used not to hold in two ways. A claim in
+ * `critical_findings` with no counterpart in `findings` was deleted, silently,
+ * by the repair the load-boundary diagnostic itself tells the operator to run —
+ * and `complete-wave-gate` counts that view, so the deletion turned a blocking
+ * wave into a passing one. A claim carried ONLY by a malformed `findings` entry
+ * was deleted the same way, because conservation rested entirely on the views
+ * still holding it and nothing reported the difference when they did not.
  *
- * Three repairs, in order:
+ * Four repairs, in order:
  *
- *   1. Malformed `findings` entries are dropped. They are the items a refutation
- *      panel votes on, and a malformed one reaches a verifier as an un-votable
- *      item — but their CLAIMS survive step 2 if the views still hold them.
+ *   1. Malformed `findings` entries lose their IDENTITY, not their claim. They
+ *      are the items a refutation panel votes on, and a malformed one reaches a
+ *      verifier as an un-votable item, so it cannot stay as it is — but
+ *      `salvageMalformedFindings` re-mints whatever claim it still carries under
+ *      RECOVERED_AGENT. Only an entry with no usable severity or claim is truly
+ *      dropped, and that is COUNTED and reported, never silent.
  *   2. Claims present only in a view are given identity (`recoverViewOnlyClaims`).
  *      This is what makes a pre-identity task adjudicable, and what makes the
  *      repair idempotent: after one pass the views hold exactly what `findings`
- *      holds, so a second pass finds nothing to recover.
+ *      holds, so a second pass finds nothing to recover. Running it AFTER step 1
+ *      is what stops a salvaged claim being minted twice.
  *   3. Colliding ids are re-minted, because the load boundary now rejects
  *      duplicates and a rejection with no working repair dead-ends the operator.
+ *   4. Malformed refutation records are dropped — they are audit trail with no
+ *      derived view to rebuild them from — and counted, for the same reason.
  *
  * The views are then re-derived from the result, which is the lockstep
  * `findingsLockstepError` proves at load.
  */
 function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
   const refuted = parseStoredRefutations(t.refuted_findings);
+  const rawRefutedCount = Array.isArray(t.refuted_findings) ? t.refuted_findings.length : 0;
   const stored = parseStoredFindings(t.findings);
+  const rawFindingCount = Array.isArray(t.findings) ? t.findings.length : 0;
   // Order- and length-preserving, so an id that differs at the same index is
   // exactly one this repair re-minted.
   const parsed = deduplicateFindingIds(stored, refuted);
   const reminted = parsed.filter((finding, index) => finding.id !== stored[index]?.id).length;
 
+  const salvagedDrafts = salvageMalformedFindings(t.findings);
+  const salvagedFindings = salvagedDrafts.length === 0
+    ? []
+    : attributeFindings(salvagedDrafts, RECOVERED_AGENT, nextOrdinal(parsed, refuted, RECOVERED_AGENT));
+  const identified = [...parsed, ...salvagedFindings];
+
   const viewClaims = (raw: unknown): string[] =>
     Array.isArray(raw) ? raw.filter((claim): claim is string => typeof claim === "string") : [];
   const recoveredFindings = recoverViewOnlyClaims(
-    parsed,
+    identified,
     refuted,
     viewClaims(t.critical_findings),
     viewClaims(t.advisory_findings),
   );
-  const findings = [...parsed, ...recoveredFindings];
+  const findings = [...identified, ...recoveredFindings];
 
   return {
     fields: {
@@ -222,7 +251,10 @@ function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
       refuted_findings: refuted,
     },
     recovered: recoveredFindings.map((finding) => finding.claim),
+    salvaged: salvagedFindings.map((finding) => finding.claim),
     reminted,
+    dropped: rawFindingCount - parsed.length - salvagedFindings.length,
+    droppedRefutations: rawRefutedCount - refuted.length,
   };
 }
 
@@ -250,8 +282,25 @@ export function fixFull(json: Record<string, unknown>): FixReport {
       for (const claim of repair.recovered) {
         notes.push(`${id}: recovered view-only claim into findings — "${claim}"`);
       }
+      for (const claim of repair.salvaged) {
+        notes.push(`${id}: re-minted identity for a malformed findings entry — "${claim}"`);
+      }
       if (repair.reminted > 0) {
         notes.push(`${id}: re-minted ${repair.reminted} colliding finding id(s)`);
+      }
+      // The only lossy paths in this repair. Loud, and named as data loss —
+      // a dropped critical is indistinguishable from one that was never found.
+      if (repair.dropped > 0) {
+        notes.push(
+          `${id}: DROPPED ${repair.dropped} findings entr(y/ies) carrying no usable claim — ` +
+            `data lost; check the reviewer output for this task`,
+        );
+      }
+      if (repair.droppedRefutations > 0) {
+        notes.push(
+          `${id}: DROPPED ${repair.droppedRefutations} malformed refutation record(s) — ` +
+            `audit trail lost, the findings themselves are unaffected`,
+        );
       }
       return {
         ...t,

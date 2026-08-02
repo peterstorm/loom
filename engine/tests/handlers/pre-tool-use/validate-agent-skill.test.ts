@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import validateAgentSkill, {
@@ -259,6 +260,56 @@ describe("validate-agent-skill — integration scenarios", () => {
     } finally {
       if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
       else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;
+      if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
+    }
+  });
+
+  it("SAYS SO when it cannot find the agent file at all, instead of allowing in silence", async () => {
+    // The sibling of the branch above, with the opposite polarity and the same
+    // uncertainty: `resolveAgentPath` returning null means we cannot determine
+    // which skills the agent requires either. Blocking would break installs
+    // that legitimately define agents outside the four searched paths, so this
+    // one allows — but it used to allow with NOTHING on stderr, so a panel
+    // designer spawning without its preloaded architecture-tech-lead skill was
+    // indistinguishable from one that passed the check. This branch widened
+    // when the PR added ARCH_PANEL_AGENTS and REVIEW_PANEL_AGENTS to
+    // VALIDATED_AGENTS.
+    const createdGraph = !existsSync(TASK_GRAPH_PATH);
+    const previousRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    const previousHome = process.env.HOME;
+    if (createdGraph) {
+      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
+      writeFileSync(TASK_GRAPH_PATH, "{}");
+    }
+    // A plugin root and a HOME that both hold no agents/ directory, so every
+    // candidate path misses. (The git-root candidate resolves to this repo,
+    // which has agents/ — so use a name no agent file exists for, but which IS
+    // in VALIDATED_AGENTS.)
+    const empty = mkdtempSync(join(tmpdir(), "loom-no-agents-"));
+    process.env.CLAUDE_PLUGIN_ROOT = empty;
+    process.env.HOME = empty;
+    const written: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+    try {
+      const result = await validateAgentSkill(JSON.stringify({
+        tool_name: "Task",
+        tool_input: { subagent_type: "loom:dotfiles-agent", prompt: "do the thing" },
+      }), []);
+      expect(result.kind, "allowing is correct; silence was not").toBe("allow");
+      const note = written.join("");
+      expect(note).toContain("no agent file found");
+      expect(note).toContain("skill enforcement SKIPPED");
+      expect(note).toContain("loom:dotfiles-agent");
+    } finally {
+      spy.mockRestore();
+      if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      rmSync(empty, { recursive: true, force: true });
       if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
     }
   });

@@ -29,8 +29,36 @@ An event-driven handler that fires on tool use (PreToolUse) or agent completion 
 _Avoid_: Trigger, callback, listener
 
 **Wave Gate**:
-A quality checkpoint between waves. Requires test evidence, spec alignment, and code review before advancing.
+A quality checkpoint between waves. Requires test evidence, spec alignment, code review, and — whenever the wave holds critical **Findings** — the adjudication of a **Refutation Panel** before advancing.
 _Avoid_: Gate, barrier, checkpoint (alone — always qualify as "wave gate")
+
+**Finding**:
+One assertion a review agent made about the code, carrying a severity (critical or advisory), an optional file/line, and a derived id. The unit a **Refutation Panel** votes on. Ids are derived from (agent, ordinal), never agent-chosen — an agent-chosen id collides across runs and reviewers, and a k-of-n vote needs an item two verifiers can agree they are discussing. A finding a reviewer merely emitted is a *draft finding*; it becomes a finding when attribution gives it identity.
+_Avoid_: Issue, comment, violation, remark
+
+**Refutation Panel**:
+The wave gate's adjudication step. N verifiers, each committed to one **Lens**, each covering ALL of the wave's critical **Findings**, try to REFUTE them. A finding survives unless a strict majority refutes it — ties favour keeping it, because a false positive costs a cycle while a false negative ships a bug.
+_Avoid_: Review panel (ambiguous with the reviewers themselves), jury, second opinion
+
+**Refuted Finding**:
+A finding a **Refutation Panel** killed, recorded with the lenses and reasoning that killed it. Moved out of the active set, never deleted — a wrong refutation is a shipped bug, and a silently dropped critical is indistinguishable from one that was never found.
+_Avoid_: Dismissed finding, false positive, resolved
+
+**Lens**:
+A single committed perspective an agent argues from, assigned rather than chosen, so a panel's diversity is structural instead of hoped for. Deliberately two disjoint vocabularies — see Flagged Ambiguities.
+_Avoid_: Angle, viewpoint, role, persona
+
+**Candidate**:
+One architectural design produced by one designer through one **Lens** during `/loom --panel`. Judged against derived criteria; the winner becomes the **Plan**.
+_Avoid_: Option, proposal, variant
+
+**Verdict**:
+One agent's complete judgment on one criterion or lens, covering every item exactly once. The unit both panels validate at the boundary; a verdict that skips or invents an item is rejected outright rather than counted as a weaker vote.
+_Avoid_: Score, vote (alone), opinion
+
+**Run Directory**:
+A uniquely-named directory under a panel's runs-root holding one panel run's artifacts: its context document, its item set, its manifest, and one verdict file per criterion. Bound to the working directory and rejected if any path component is a symlink.
+_Avoid_: Workspace, scratch dir, output dir
 
 **State File**:
 The single source of truth for orchestration progress (`active_task_graph.json`). Write-protected; only hooks mutate it.
@@ -141,3 +169,5 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - "gate" was used alone to mean both the wave gate concept and the approach gate in the architecture interview — resolved: "wave gate" for quality checkpoints, "approach gate" for the architecture phase's option-selection step.
 - "template" was used for both prompt templates (commands/templates/) and project scaffolding — resolved: always "prompt template" for the former; loom does not do project scaffolding.
 - "plan" was used to mean both the architecture plan document and the overall orchestration plan — resolved: "plan" always means the Phase 3 architecture document; the overall orchestration is "the loom flow" or "orchestration."
+- "lens" names two disjoint closed vocabularies with nothing in common but the idea of a committed single perspective: the five DESIGN lenses of `/loom --panel` (`simplicity-first`, `type-driven-fp`, `risk-security-first`, `performance-first`, `codebase-conventionist` — `PANEL_LENSES`, `references/panel-lenses.md`) and the five REFUTATION lenses of the wave gate's panel (`reproduction`, `intent`, `blast-radius`, `security`, `test-coverage` — `REVIEW_LENSES`, `references/review-lenses.md`). Resolved: say "design lens" or "refutation lens" wherever both panels are in scope; bare "lens" is fine inside one panel's own documentation, where only one vocabulary exists. They are deliberately NOT unified — a designer's lens shapes what it builds, a verifier's shapes what it tries to disprove.
+- "panel" alone is ambiguous between the two — resolved: "architecture panel" (`/loom --panel`) and "refutation panel" (wave gate Step 3.5). The shared machinery they both instantiate is "the panel kernel."

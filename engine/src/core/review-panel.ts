@@ -27,7 +27,13 @@
  */
 
 import { join } from "node:path";
-import type { AdjudicatedFinding, Finding, FindingSeverity, Refutation } from "./findings";
+import type {
+  AdjudicatedFinding,
+  Finding,
+  FindingSeverity,
+  NonEmptyRefutations,
+  Refutation,
+} from "./findings";
 import type { Task } from "../types";
 import {
   coverageErrors,
@@ -39,6 +45,7 @@ import {
   parseVerdictEnvelope,
   requireEntry,
   sanitizeProse,
+  selectLenses,
   type ParseResult,
   type RunLayout,
   type VerdictEnvelope,
@@ -105,7 +112,24 @@ export const VERIFIED_SEVERITY: FindingSeverity = "critical";
 
 const SENSITIVE_PATH =
   /auth|crypt|secret|token|password|credential|jwt|oauth|session|security|sanitiz|escap|injection/i;
-const TEST_PATH = /(^|\/)(tests?|__tests__|spec|specs)\/|\.(test|spec)\.[cm]?[jt]sx?$|Test\.(java|kt)$|_test\.(go|py|rs)$/i;
+/**
+ * Reads a bare path AND a sentence that quotes one, because both signals below
+ * are matched against `claim` as well as `file` — and `file` is NULL for every
+ * finding the line scraper produced, which is every finding on a review whose
+ * block was absent, rejected, or superseded, all first-class states. With the
+ * extension alternatives anchored at `$` and the directory alternative anchored
+ * at `/`, `touchesTests` was unconditionally false on exactly those reviews, so
+ * a wave whose findings were entirely test-coverage claims could never pull in
+ * the `test-coverage` lens to judge them.
+ *
+ * So the trailing `$`s became `\b`, and the leading `/` became a boundary class
+ * that also admits whitespace and the quoting characters a claim wraps a path
+ * in. Neither loosening costs anything on the file side: a path has no leading
+ * whitespace, and `foo.test.ts.bak` matching is the right answer for a lens
+ * SIGNAL — a heuristic that decides which perspective judges a finding, not a
+ * gate that decides whether one survives.
+ */
+const TEST_PATH = /(^|[\s"'`([/])(tests?|__tests__|spec|specs)\/|\.(test|spec)\.[cm]?[jt]sx?\b|Test\.(java|kt)\b|_test\.(go|py|rs)\b/i;
 
 /** Signals a finding set carries, mirroring the architecture panel's
  *  interview-driven lens selection — derived from data, never chosen by hand. */
@@ -115,35 +139,37 @@ export interface ReviewSignals {
 }
 
 export function reviewSignals(findings: readonly BriefFinding[]): ReviewSignals {
+  // Both signals read file AND claim. The asymmetry that used to exist here —
+  // sensitive boundaries from either, tests from the path alone — silently
+  // disabled the test-coverage lens for every scraper-sourced finding set, where
+  // `file` is always null. See the note on TEST_PATH.
   return {
     touchesSensitiveBoundary: findings.some(
       (f) => SENSITIVE_PATH.test(f.file ?? "") || SENSITIVE_PATH.test(f.claim),
     ),
-    touchesTests: findings.some((f) => TEST_PATH.test(f.file ?? "")),
+    touchesTests: findings.some((f) => TEST_PATH.test(f.file ?? "") || TEST_PATH.test(f.claim)),
   };
 }
 
 /**
- * Derive the exact ordered lens set from the finding set and N. Same shape as
- * the architecture panel's selectPanelLenses: baselines first, then
- * signal-driven lenses in priority order, then the table order fills the rest.
+ * Derive the exact ordered lens set from the finding set and N. The selection
+ * ALGORITHM is the kernel's (`selectLenses`), shared with the architecture
+ * panel; only the vocabulary and the signal mapping are review-specific.
  */
 export function selectReviewLenses(
   signals: ReviewSignals,
   lensCount: number,
 ): ParseResult<readonly ReviewLens[]> {
-  if (!Number.isInteger(lensCount) || lensCount < REVIEW_LENSES_MIN || lensCount > REVIEW_LENSES.length) {
-    return fail([`lens count must be an integer from ${REVIEW_LENSES_MIN} to ${REVIEW_LENSES.length}`]);
-  }
-  const selected: ReviewLens[] = [...BASELINE_LENSES];
-  const signalLenses: readonly (ReviewLens | null)[] = [
-    signals.touchesSensitiveBoundary ? "security" : null,
-    signals.touchesTests ? "test-coverage" : null,
-  ];
-  for (const lens of [...signalLenses, ...REVIEW_LENSES]) {
-    if (lens && !selected.includes(lens)) selected.push(lens);
-  }
-  return ok(selected.slice(0, lensCount));
+  return selectLenses<ReviewLens>({
+    baseline: BASELINE_LENSES,
+    signalled: [
+      signals.touchesSensitiveBoundary ? "security" : null,
+      signals.touchesTests ? "test-coverage" : null,
+    ],
+    table: REVIEW_LENSES,
+    count: lensCount,
+    countLabel: "lens count",
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -395,8 +421,18 @@ export function briefCompletenessErrors(
     briefedPerTask.set(finding.taskId, (briefedPerTask.get(finding.taskId) ?? 0) + 1);
   }
 
+  // The view that corresponds to THIS brief's severity. Hardcoding the critical
+  // view made the check wrong in both directions for any other severity: it
+  // rejected a complete advisory brief whenever the task also held criticals,
+  // and passed a short one whenever it held none — while the diagnostic below
+  // interpolated `brief.severity` and read as though it had checked that view
+  // all along. `buildFindingBrief` takes the severity as a parameter, so the
+  // proof of its postcondition has to follow it.
+  const viewOf = (task: Task): readonly string[] =>
+    (brief.severity === "critical" ? task.critical_findings : task.advisory_findings) ?? [];
+
   const short = waveTasks.flatMap((task) => {
-    const counted = task.critical_findings?.length ?? 0;
+    const counted = viewOf(task).length;
     const briefed = briefedPerTask.get(task.id) ?? 0;
     return counted > briefed ? [{ id: task.id, counted, briefed }] : [];
   });
@@ -404,7 +440,7 @@ export function briefCompletenessErrors(
   if (short.length > 0) {
     return [
       `wave ${wave}: ${short
-        .map((t) => `${t.id} has ${t.counted} critical_findings but only ${t.briefed} carry structured identity`)
+        .map((t) => `${t.id} has ${t.counted} ${brief.severity}_findings but only ${t.briefed} carry structured identity`)
         .join("; ")} — ` +
         `the panel cannot adjudicate the remainder, and a partial brief would report the rest as upheld. ` +
         BRIEF_REPAIR_HINT,
@@ -554,13 +590,20 @@ export const REFUTATION_VERDICTS = ["refuted", "upheld", "uncertain"] as const;
 export type RefutationKind = (typeof REFUTATION_VERDICTS)[number];
 
 export interface RefutationVerdict {
-  readonly findingId: string;
+  /** Wave-scoped, because the envelope RESOLVED it against the brief's finding
+   *  set rather than re-reading the raw string. A task-local `code-reviewer-1`
+   *  no longer type-checks here. */
+  readonly findingId: WaveFindingId;
   readonly verdict: RefutationKind;
   /** Sanitized — it is substituted into the gate summary and stored in state. */
   readonly reasoning: string;
 }
 
-function parseRefutationEntry(raw: Record<string, unknown>, path: string): ParseResult<RefutationVerdict> {
+function parseRefutationEntry(
+  raw: Record<string, unknown>,
+  path: string,
+  findingId: WaveFindingId,
+): ParseResult<RefutationVerdict> {
   const errors: string[] = [];
 
   const verdict = typeof raw.verdict === "string" && (REFUTATION_VERDICTS as readonly string[]).includes(raw.verdict)
@@ -575,11 +618,7 @@ function parseRefutationEntry(raw: Record<string, unknown>, path: string): Parse
 
   return errors.length > 0
     ? fail(errors)
-    : ok({
-        findingId: typeof raw.finding_id === "string" ? raw.finding_id : "",
-        verdict: verdict as RefutationKind,
-        reasoning,
-      });
+    : ok({ findingId, verdict: verdict as RefutationKind, reasoning });
 }
 
 /**
@@ -592,7 +631,7 @@ export function parseRefutationVerdict(
   expectedLens: ReviewLens,
   expectedFindingIds: readonly WaveFindingId[],
 ): ParseResult<VerdictEnvelope<RefutationVerdict>> {
-  return parseVerdictEnvelope<RefutationVerdict>(rawJson, expectedLens, expectedFindingIds, {
+  return parseVerdictEnvelope<RefutationVerdict, WaveFindingId>(rawJson, expectedLens, expectedFindingIds, {
     label: "refutation verdict",
     entriesKey: "verdicts",
     itemIdKey: "finding_id",
@@ -617,20 +656,35 @@ export function serializeRefutationVerdict(envelope: VerdictEnvelope<RefutationV
 // The tally — the deterministic k-of-n decision
 // ---------------------------------------------------------------------------
 
-/**
- * One finding's adjudication. Structurally satisfies `AdjudicatedFinding`
- * (core/findings), which is what `applyFindingOutcomes` consumes.
- */
-export interface FindingOutcome {
+/** The part of an adjudication that does not depend on which way it went. */
+interface FindingOutcomeVotes {
   readonly finding: BriefFinding;
-  /** Lenses that refuted, with their reasoning, in lens order. */
-  readonly refutations: readonly Refutation[];
   /** Lenses that upheld, in lens order. */
   readonly upheldBy: readonly ReviewLens[];
   /** Lenses that could not decide. Counts toward neither side. */
   readonly uncertainFrom: readonly ReviewLens[];
-  readonly survives: boolean;
 }
+
+/**
+ * One finding's adjudication. Structurally satisfies `AdjudicatedFinding`
+ * (core/findings), which is what `applyFindingOutcomes` consumes.
+ *
+ * A union for the same reason `AdjudicatedFinding` is one: a killed finding
+ * always carries the reasoning that killed it, and that is a fact about the
+ * data, not a rule a downstream reader has to remember to check.
+ */
+export type FindingOutcome =
+  | (FindingOutcomeVotes & {
+      readonly survives: true;
+      /** Lenses that refuted, with their reasoning, in lens order. Fewer than
+       *  the threshold, so possibly none. */
+      readonly refutations: readonly Refutation[];
+    })
+  | (FindingOutcomeVotes & {
+      readonly survives: false;
+      /** The lenses that killed it, with their reasoning, in lens order. */
+      readonly refutations: NonEmptyRefutations;
+    });
 
 /** Compile-time proof that `applyFindingOutcomes` (core/findings) can consume a
  *  `FindingOutcome`. Without it the structural match is a coincidence the two
@@ -710,13 +764,16 @@ export function tallyRefutations(
       }
     }
 
-    return {
-      finding,
-      refutations,
-      upheldBy,
-      uncertainFrom,
-      survives: refutations.length < threshold,
-    };
+    // `head !== undefined` is redundant with `length >= threshold` — the
+    // threshold is validated to be >= 1 above, so a finding that met the bar
+    // has at least one refutation. It is written out anyway because that is
+    // what PROVES the non-empty tuple to the compiler, turning the invariant
+    // `applyFindingOutcomes` used to assert at runtime into one established
+    // here, once, where the votes are actually counted.
+    const [head, ...tail] = refutations;
+    return head !== undefined && refutations.length >= threshold
+      ? { finding, upheldBy, uncertainFrom, survives: false, refutations: [head, ...tail] }
+      : { finding, upheldBy, uncertainFrom, survives: true, refutations };
   });
 
   return ok(outcomes);

@@ -51,13 +51,13 @@ import {
 import {
   REVIEW_LAYOUT,
   argumentValue,
-  artifactError,
   contractError,
   parseRunBoundary,
   parseRunDirectory,
   prepareWriteTargets,
   readVerdicts,
   realRunDir,
+  runArtifactErrors,
   writeCanonicalOutput,
 } from "./panel-run";
 
@@ -125,28 +125,6 @@ function loadBrief(runDir: string): ParseResult<FindingBrief> {
       errors: [`cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`],
     };
   }
-}
-
-/** Every run-scoped artifact the manifest names must be a real, contained file. */
-function artifactErrors(
-  runDir: string,
-  briefFile: string,
-  briefJson: string,
-  findingPaths: readonly string[],
-): string[] {
-  const resolved = realRunDir(runDir);
-  if (!resolved.ok) return [...resolved.errors];
-  const root = resolved.value;
-  const itemDir = join(root, LAYOUT.itemDir);
-  const check = (path: string, parent: string): string[] => {
-    const error = artifactError(path, parent);
-    return error ? [error] : [];
-  };
-  return [
-    ...check(briefFile, root),
-    ...check(briefJson, root),
-    ...findingPaths.flatMap((path) => check(path, itemDir)),
-  ];
 }
 
 /** brief — engine-authored context artifacts for one wave. */
@@ -246,23 +224,51 @@ const handler: HookHandler = async (stdin, args) => {
   // requiring the orchestrator to thread the flag through three more commands.
   // Threading it was the contract, and forgetting it failed the next step with
   // "manifest.lenses must contain exactly 3 lenses" — blaming the manifest for
-  // the caller's omission. The lens SET is still re-derived from the brief and
-  // compared, so a tampered manifest is still rejected; only the count is taken
-  // from the file, and a count the brief's signals do not reproduce fails that
-  // comparison anyway.
+  // the caller's omission.
+  //
+  // `manifest` reads the existing file too, and that is load-bearing rather
+  // than symmetry. It used to skip the read, so re-running it without
+  // `--lenses` rewrote a recorded 5-lens panel to the 3-lens default;
+  // `readVerdicts` then iterated only the shrunken lens list, verdict-4 and
+  // verdict-5 were silently ignored, the absolute refutation bar fell from 3 to
+  // 2, and a finding the full panel had UPHELD came out refuted — promoting the
+  // task blocked → passed at exit 0 with nothing on stderr. Re-deriving the
+  // lens SET does not catch it: `selectReviewLenses` returns nested prefixes, so
+  // a truncated lens list reproduces its own derivation exactly.
+  //
+  // ENOENT is tolerated only for `manifest`, the operation that CREATES the
+  // file; every other operation requires it.
   let manifestRaw: unknown = null;
-  if (operation !== "manifest") {
-    try {
-      manifestRaw = JSON.parse(readFileSync(manifestPath, "utf-8"));
-    } catch (error) {
+  try {
+    manifestRaw = JSON.parse(readFileSync(manifestPath, "utf-8"));
+  } catch (error) {
+    const absent = (error as NodeJS.ErrnoException)?.code === "ENOENT";
+    if (operation !== "manifest" || !absent) {
       return contractError("review manifest", [
         `cannot read ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
       ]);
     }
   }
-  const lensCount = rawLensCount !== null
-    ? positiveInteger(rawLensCount)!
-    : manifestLensCount(manifestRaw) ?? REVIEW_LENSES_DEFAULT;
+
+  // The panel size is fixed for the LIFE of the run, not per invocation. A
+  // `--lenses` that disagrees with the recorded count is a re-sized panel
+  // running under a name whose verdicts were cast by a different one — the same
+  // failure `--threshold` below the strict-majority floor is refused for, and
+  // the reason a re-run of `manifest` must not silently reset the size.
+  const recordedLensCount = manifestLensCount(manifestRaw);
+  const requestedLensCount = rawLensCount === null ? null : positiveInteger(rawLensCount)!;
+  if (
+    requestedLensCount !== null &&
+    recordedLensCount !== null &&
+    requestedLensCount !== recordedLensCount
+  ) {
+    return contractError("review manifest", [
+      `this run's panel size is already fixed at ${recordedLensCount} lens(es); ` +
+        `--lenses ${requestedLensCount} would re-size a panel whose verdicts were cast by the ` +
+        `recorded one — start a new run directory instead`,
+    ]);
+  }
+  const lensCount = requestedLensCount ?? recordedLensCount ?? REVIEW_LENSES_DEFAULT;
 
   const brief = loadBrief(runDir);
   if (!brief.ok) return contractError("review brief", brief.errors);
@@ -305,10 +311,10 @@ const handler: HookHandler = async (stdin, args) => {
   const manifest = parseReviewManifest(manifestRaw, runDir, LAYOUT, lenses.value, findingIds);
   if (!manifest.ok) return contractError("review manifest", manifest.errors);
 
-  const artifacts = artifactErrors(
+  const artifacts = runArtifactErrors(
     runDir,
-    manifest.value.briefFile,
-    manifest.value.briefJson,
+    LAYOUT,
+    [manifest.value.briefFile, manifest.value.briefJson],
     manifest.value.findings.map((finding) => finding.path),
   );
   if (artifacts.length > 0) return contractError("review artifacts", artifacts);
@@ -370,12 +376,48 @@ const handler: HookHandler = async (stdin, args) => {
   const tallied = tallyRefutations(verdicts.value, manifest.value.lenses, brief.value.findings, threshold);
   if (!tallied.ok) return contractError("review tally", tallied.errors);
 
+  // A tally already applied to this graph would send `applyFindingOutcomes`
+  // looking for findings it has itself moved into `refuted_findings`, where the
+  // invariant throw blames "the task graph changed between brief and tally" —
+  // true of a `store-review-findings` override landing mid-run, and wrong about
+  // the far likelier cause: the operator re-ran `tally`. (A broken pipe on the
+  // canonical output AFTER the state write lands is enough to invite that.)
+  // Named here, before the write, so the diagnostic matches what happened.
+  const current = loadTasks();
+  if (!current.ok) return contractError("review tally", current.errors);
+  // Wave-scoped, matching the brief's id space: `applyFindingOutcomes` strips
+  // the `${taskId}:` prefix back off when it applies an outcome, so the
+  // recorded refutation carries the task-local id and has to be re-scoped to
+  // compare against the tally's ids.
+  const alreadyRefuted = new Set<string>(
+    current.value.flatMap((task) =>
+      (task.refuted_findings ?? []).map((record) => `${task.id}:${record.finding.id}`),
+    ),
+  );
+  const replays = tallied.value
+    .filter((outcome) => !outcome.survives && alreadyRefuted.has(outcome.finding.id))
+    .map((outcome) => outcome.finding.id);
+  if (replays.length > 0) {
+    return contractError("review tally", [
+      `this run has already been tallied — ${replays.length} finding(s) are already recorded as ` +
+        `refuted on their task (${replays.join(", ")}). Re-tallying would re-adjudicate a closed ` +
+        `decision; start a new run directory to re-verify these findings.`,
+    ]);
+  }
+
   const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
   if (!mgr) return contractError("review tally", [`no task graph at ${TASK_GRAPH_PATH}`]);
-  await mgr.update((s) => ({
-    ...s,
-    tasks: s.tasks.map((task) => applyFindingOutcomes(task, tallied.value)),
-  }));
+  try {
+    await mgr.update((s) => ({
+      ...s,
+      tasks: s.tasks.map((task) => applyFindingOutcomes(task, tallied.value)),
+    }));
+  } catch (error) {
+    // `applyFindingOutcomes` throws on a broken findings invariant. Reaching the
+    // operator as a contract diagnostic, like every other failure in this
+    // helper, beats an unhandled stack trace out of a hook.
+    return contractError("review tally", [error instanceof Error ? error.message : String(error)]);
+  }
 
   const refuted = tallied.value.filter((outcome) => !outcome.survives).length;
   process.stderr.write(

@@ -26,6 +26,7 @@ import {
   REVIEW_LENSES_DEFAULT,
   REVIEW_LENSES_MIN,
   type BriefFinding,
+  type FindingOutcome,
   type RefutationVerdict,
   type ReviewLens,
   type WaveFindingId,
@@ -145,6 +146,29 @@ describe("reviewSignals", () => {
     }
     expect(reviewSignals([brief({ file: "src/testimonials.ts" })]).touchesTests).toBe(false);
   });
+
+  it("reads the CLAIM for a test signal too, not only the path", () => {
+    // The asymmetry this pins: touchesSensitiveBoundary consulted file AND
+    // claim while touchesTests consulted only file. `file` is null for every
+    // finding the line scraper produced — which is every finding on a review
+    // whose block was absent, rejected, or superseded, all first-class states —
+    // so touchesTests was unconditionally false on exactly those reviews and
+    // the test-coverage lens could never be signal-selected to judge them.
+    expect(reviewSignals([brief({ file: null, claim: "no coverage for tests/auth.test.ts" })]).touchesTests)
+      .toBe(true);
+    expect(reviewSignals([brief({ file: null, claim: "the spec/ suite never exercises this" })]).touchesTests)
+      .toBe(true);
+    expect(reviewSignals([brief({ file: null, claim: "an ordinary claim about a reducer" })]).touchesTests)
+      .toBe(false);
+  });
+
+  it("pulls the test-coverage lens into a panel judging scraper-sourced findings", () => {
+    // The consequence, end to end: the signal has to reach lens selection, not
+    // merely flip a boolean.
+    const signals = reviewSignals([brief({ file: null, claim: "src/x.test.ts asserts nothing" })]);
+    const lenses = selectReviewLenses(signals, 3);
+    expect(lenses.ok && lenses.value).toContain("test-coverage");
+  });
 });
 
 describe("buildFindingBrief", () => {
@@ -223,6 +247,31 @@ describe("briefCompletenessErrors — buildFindingBrief's postcondition", () => 
     const errors = briefFor([withView("T1", [], ["orphaned critical"])]);
     expect(errors[0]).toContain("T1 has 1 critical_findings but only 0 carry structured identity");
     expect(errors[0]).toContain("validate-task-graph --fix");
+  });
+
+  it("counts the view that matches the brief's severity, not always the critical one", () => {
+    // buildFindingBrief takes the severity as a parameter and the diagnostic
+    // interpolates brief.severity, but the arithmetic read critical_findings
+    // unconditionally — so the proof was wrong in BOTH directions for any other
+    // severity. Here: one advisory, fully identified, beside two criticals. The
+    // advisory brief is complete, and the check used to reject it by comparing
+    // its one entry against the two criticals it does not cover.
+    const advisory = finding({ id: "code-reviewer-9", severity: "advisory", claim: "a nit" });
+    const t1 = task({
+      id: "T1",
+      findings: [finding(), finding({ id: "code-reviewer-2", claim: "second" }), advisory],
+      critical_findings: ["unchecked cast", "second"],
+      advisory_findings: ["a nit"],
+    });
+    expect(briefCompletenessErrors(buildFindingBrief(1, [t1], "advisory"), [t1], 1)).toEqual([]);
+  });
+
+  it("catches a SHORT advisory brief, and says advisory", () => {
+    // The other direction: a task with no criticals and an orphaned advisory
+    // used to pass, because 0 criticals never outran anything.
+    const t1 = task({ id: "T1", findings: [], critical_findings: [], advisory_findings: ["orphaned nit"] });
+    const errors = briefCompletenessErrors(buildFindingBrief(1, [t1], "advisory"), [t1], 1);
+    expect(errors[0]).toContain("T1 has 1 advisory_findings but only 0 carry structured identity");
   });
 
   it("does NOT let one task's surplus mask another task's orphans", () => {
@@ -529,14 +578,24 @@ describe("applyFindingOutcomes", () => {
     advisory_findings: ["nit"],
   });
 
-  const outcome = (f: Finding, survives: boolean) => ({
-    finding: brief({ id: waveFindingId("T1", f), claim: f.claim, agent: f.agent, severity: f.severity }),
-    refutations: survives ? [] : [{ lens: "reproduction", reason: "cannot trigger" }, { lens: "intent", reason: "deliberate" }],
-    upheldBy: (survives ? ["reproduction", "intent"] : []) as ReviewLens[],
-    uncertainFrom: [] as ReviewLens[],
-
-    survives,
-  });
+  // Returns the union arm that matches `survives`, because FindingOutcome is a
+  // union: a refuted outcome carries a NON-EMPTY refutations tuple by type, so
+  // a helper producing `survives: boolean` beside a possibly-empty array no
+  // longer type-checks — which is the whole point of the change.
+  const outcome = (f: Finding, survives: boolean): FindingOutcome => {
+    const votes = {
+      finding: brief({ id: waveFindingId("T1", f), claim: f.claim, agent: f.agent, severity: f.severity }),
+      uncertainFrom: [] as ReviewLens[],
+    };
+    return survives
+      ? { ...votes, survives: true, refutations: [], upheldBy: ["reproduction", "intent"] as ReviewLens[] }
+      : {
+          ...votes,
+          survives: false,
+          refutations: [{ lens: "reproduction", reason: "cannot trigger" }, { lens: "intent", reason: "deliberate" }],
+          upheldBy: [] as ReviewLens[],
+        };
+  };
 
   it("is a no-op when nothing was refuted", () => {
     const result = applyFindingOutcomes(blocked, [outcome(critical, true), outcome(survivor, true)]);

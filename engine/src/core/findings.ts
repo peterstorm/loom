@@ -391,6 +391,42 @@ export function parseStoredFindings(raw: unknown): Finding[] {
   return raw.map(parseStoredFinding).filter((finding): finding is Finding => finding !== null);
 }
 
+/**
+ * The claims a malformed `findings` entry still carries, as drafts.
+ *
+ * `parseStoredFindings` drops what it cannot fully parse — a missing `id`, a
+ * blank `agent`, anything the load boundary rejects. The repair then leaned on
+ * `recoverViewOnlyClaims` to restore those claims from the `string[]` views,
+ * which works only while the views still hold them. When they do not, the claim
+ * was DELETED by the very command the load-boundary diagnostic tells the
+ * operator to run, and `complete-wave-gate` then counted zero criticals on a
+ * task whose reviewer found a blocker.
+ *
+ * So identity is re-minted rather than the claim discarded, for the same reason
+ * `recoverViewOnlyClaims` mints rather than deletes: a defective id is a naming
+ * defect, and a claim nobody can adjudicate is strictly better than a claim
+ * nobody can see. Only entries that survive `makeDraftFinding` come back — an
+ * entry with no usable severity or an empty/sentinel claim carries nothing to
+ * salvage, and the caller reports those as dropped.
+ */
+export function salvageMalformedFindings(raw: unknown): readonly DraftFinding[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    if (parseStoredFinding(entry) !== null) return [];
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
+    const record = entry as Record<string, unknown>;
+    const severity = parseFindingSeverity(record.severity);
+    if (severity === null || typeof record.claim !== "string") return [];
+    const draft = makeDraftFinding({
+      severity,
+      claim: record.claim,
+      file: record.file,
+      line: record.line,
+    });
+    return draft === null ? [] : [draft];
+  });
+}
+
 /** Repair-path parse of `Task.refuted_findings`. Same rationale as above. */
 export function parseStoredRefutations(raw: unknown): RefutedFinding[] {
   if (!Array.isArray(raw)) return [];
@@ -483,8 +519,19 @@ export function refutationsUnionError(raw: unknown, label: string): string | nul
 // The two writers that must keep `findings` and its derived views in lockstep
 // ---------------------------------------------------------------------------
 
+/** One or more refutations. A refuted finding always has at least one — the
+ *  reader (`parseStoredRefutation`) rejects an empty list, so writing one
+ *  produces state this module's own load path refuses. */
+export type NonEmptyRefutations = readonly [Refutation, ...Refutation[]];
+
 /**
  * What applying a panel decision needs to know about one finding.
+ *
+ * A UNION rather than a record with a `boolean` beside an independently-sized
+ * array: `survives: false` with no refutations was representable, and the
+ * coupling was enforced by a throw in `applyFindingOutcomes` — at the consumer,
+ * after the decision had already been made upstream. The panel knows which
+ * branch it is building at the moment it counts the votes, so it says so.
  *
  * `FindingOutcome` (core/review-panel) satisfies this structurally. Declaring
  * the narrow shape here rather than importing the wide one is what lets the two
@@ -492,11 +539,17 @@ export function refutationsUnionError(raw: unknown, label: string): string | nul
  * that owns the invariant: review-panel imports findings, so findings cannot
  * import review-panel back.
  */
-export interface AdjudicatedFinding {
-  readonly finding: { readonly id: string; readonly taskId: string };
-  readonly refutations: readonly Refutation[];
-  readonly survives: boolean;
-}
+export type AdjudicatedFinding =
+  | {
+      readonly finding: { readonly id: string; readonly taskId: string };
+      readonly refutations: readonly Refutation[];
+      readonly survives: true;
+    }
+  | {
+      readonly finding: { readonly id: string; readonly taskId: string };
+      readonly refutations: NonEmptyRefutations;
+      readonly survives: false;
+    };
 
 /**
  * The agent a claim recovered from a legacy `string[]` view is attributed to.
@@ -518,9 +571,11 @@ export const RECOVERED_AGENT = "recovered-view";
  * then passes a task whose reviewer found a blocker. Minting makes the claim
  * refutable, which is what both callers actually want.
  *
- * Shared by `mergeFindings` (a reviewer finished on a pre-identity task) and
- * `fixTaskFindings` (`--fix`), so the two cannot disagree about what recovery
- * means.
+ * Shared by all THREE writers that can meet a pre-identity task —
+ * `mergeFindings` (a reviewer finished), `fixTaskFindings` (`--fix`), and
+ * `updateTaskFindings` (the manual override, in
+ * handlers/helpers/store-review-findings) — so none of them can disagree about
+ * what recovery means. Changing the semantics here changes all three.
  */
 export function recoverViewOnlyClaims(
   findings: readonly Finding[],
@@ -610,6 +665,10 @@ export function mergeFindings(
   return {
     ...task,
     review_status: reviewStatus,
+    // `review_error` describes an evidence-capture failure and nothing else.
+    // A reviewer that DID emit its evidence supersedes that record; leaving it
+    // in place left `passed` tasks carrying a stale parse-failure message.
+    review_error: undefined,
     findings: merged,
     critical_findings: [...claimsOfSeverity(merged, "critical")],
     advisory_findings: [...claimsOfSeverity(merged, "advisory")],
@@ -670,13 +729,9 @@ export function applyFindingOutcomes(
           `the task graph changed between brief and tally; re-run the brief`,
       );
     }
-    // The reader (`parseStoredRefutation`) rejects an empty refutations list, so
-    // writing one would produce state this module's own load path refuses.
-    if (outcome.refutations.length === 0) {
-      throw new Error(
-        `findings invariant: refuted finding '${localId}' on ${task.id} carries no refutations`,
-      );
-    }
+    // No emptiness check: `mine` is filtered on `!survives`, which narrows
+    // `outcome.refutations` to NonEmptyRefutations. The runtime throw this
+    // replaces guarded a state the type now cannot express.
     return { finding, refutations: outcome.refutations };
   });
 

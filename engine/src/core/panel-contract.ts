@@ -8,6 +8,7 @@ import {
   parseVerdictEnvelope,
   requireEntry,
   sanitizeProse,
+  selectLenses,
   type ParseResult,
   type RunLayout,
   type VerdictEnvelope,
@@ -198,25 +199,30 @@ export function deriveJudgeCriteria(digest: InterviewDigest): readonly string[] 
   return [digest.primaryAxis, digest.testabilityBar, CODEBASE_FIT_CRITERION];
 }
 
-/** Derive the exact ordered lens set from validated interview signals and N. */
+/** Always designed, whatever the interview said. Also the minimum panel size —
+ *  the mandatory approach gate needs at least two options to choose between. */
+const BASELINE_LENSES: readonly PanelLens[] = ["simplicity-first", "type-driven-fp"];
+
+/**
+ * Derive the exact ordered lens set from validated interview signals and N. The
+ * selection ALGORITHM is the kernel's (`selectLenses`), shared with the review
+ * panel; only the vocabulary and the signal mapping are architecture-specific.
+ */
 export function selectPanelLenses(
   digest: InterviewDigest,
   designerCount: number,
 ): ParseResult<readonly PanelLens[]> {
-  if (!Number.isInteger(designerCount) || designerCount < 2 || designerCount > PANEL_LENSES.length) {
-    return fail([`designer count must be an integer from 2 to ${PANEL_LENSES.length}`]);
-  }
-
-  const selected: PanelLens[] = ["simplicity-first", "type-driven-fp"];
-  const signalLenses: readonly (PanelLens | null)[] = [
-    digest.sensitiveBoundaries.startsWith("flagged") ? "risk-security-first" : null,
-    digest.primaryAxis === "performance" ? "performance-first" : null,
-    digest.codebaseMaturity === "brownfield" ? "codebase-conventionist" : null,
-  ];
-  for (const lens of [...signalLenses, ...PANEL_LENSES]) {
-    if (lens && !selected.includes(lens)) selected.push(lens);
-  }
-  return ok(selected.slice(0, designerCount));
+  return selectLenses<PanelLens>({
+    baseline: BASELINE_LENSES,
+    signalled: [
+      digest.sensitiveBoundaries.startsWith("flagged") ? "risk-security-first" : null,
+      digest.primaryAxis === "performance" ? "performance-first" : null,
+      digest.codebaseMaturity === "brownfield" ? "codebase-conventionist" : null,
+    ],
+    table: PANEL_LENSES,
+    count: designerCount,
+    countLabel: "designer count",
+  });
 }
 
 export type PanelCandidate = Readonly<{
@@ -297,6 +303,7 @@ export type JudgeVerdict = Readonly<{
 function parseJudgeRanking(
   raw: Record<string, unknown>,
   path: string,
+  candidate: string,
 ): ParseResult<JudgeRanking> {
   const errors: string[] = [];
 
@@ -318,7 +325,11 @@ function parseJudgeRanking(
   return errors.length > 0
     ? fail(errors)
     : ok({
-        candidate: typeof raw.candidate === "string" ? raw.candidate : "",
+        // The envelope resolved this against the expected candidate set; taking
+        // it from there rather than re-reading `raw.candidate` is what stops the
+        // proven value being replaced by an unproven one that merely compares
+        // equal.
+        candidate,
         score: score as number,
         fatalFlaw: sanitizedFatalFlaw,
         strongestIdea,
@@ -373,11 +384,19 @@ export function serializeJudgeVerdict(verdict: JudgeVerdict): string {
 // Aggregation — the deterministic cross-verdict ranking
 // ---------------------------------------------------------------------------
 
+/** One criterion's score for one candidate. A PAIR, not a positional slot in a
+ *  `number[]` aligned to the criteria order by comment: `serializeRankings`
+ *  re-zips the scores against a criteria array it takes as a SEPARATE
+ *  parameter, so a caller passing the criteria in a different order than the
+ *  one aggregation used would silently mislabel every score in the artifact
+ *  that decides which architecture ships. Same reason `Refutation` is a pair. */
+export type CriterionScore = Readonly<{ criterion: string; score: number }>;
+
 export type CandidateRanking = Readonly<{
   candidate: string;
   totalScore: number;
-  /** Per-criterion score, positionally aligned with the criteria order. */
-  scores: readonly number[];
+  /** Per-criterion score, in the criteria order aggregation was given. */
+  scores: readonly CriterionScore[];
 }>;
 
 /**
@@ -397,7 +416,7 @@ export type CandidateRanking = Readonly<{
 function compareRankings(a: CandidateRanking, b: CandidateRanking): number {
   if (a.totalScore !== b.totalScore) return b.totalScore - a.totalScore;
   for (let index = 0; index < a.scores.length; index++) {
-    const delta = (b.scores[index] ?? 0) - (a.scores[index] ?? 0);
+    const delta = (b.scores[index]?.score ?? 0) - (a.scores[index]?.score ?? 0);
     if (delta !== 0) return delta;
   }
   return a.candidate < b.candidate ? -1 : a.candidate > b.candidate ? 1 : 0;
@@ -468,12 +487,13 @@ export function aggregateVerdicts(
     // No `?? 0`: coverage above proves every (criterion, candidate) pair has a
     // ranking, and a defaulted zero would silently change which architecture
     // wins if that proof ever stopped holding.
-    const scores = criteriaInOrder.map(
-      (criterion) => requireEntry(envelopes, criterion, candidate, (r) => r.candidate).score,
-    );
+    const scores = criteriaInOrder.map((criterion): CriterionScore => ({
+      criterion,
+      score: requireEntry(envelopes, criterion, candidate, (r) => r.candidate).score,
+    }));
     return {
       candidate,
-      totalScore: scores.reduce((sum, score) => sum + score, 0),
+      totalScore: scores.reduce((sum, entry) => sum + entry.score, 0),
       scores,
     };
   });
@@ -481,7 +501,14 @@ export function aggregateVerdicts(
   return ok([...ranked].sort(compareRankings));
 }
 
-/** Serialize the aggregate ranking for substitution into the finalize prompt. */
+/**
+ * Serialize the aggregate ranking for substitution into the finalize prompt.
+ *
+ * `criteriaInOrder` names the criteria SET for the reader; it no longer re-zips
+ * the scores, which now carry their own criterion. Re-zipping meant this
+ * function and `aggregateVerdicts` had to be handed the same array in the same
+ * order or every score in the output was silently mislabeled.
+ */
 export function serializeRankings(
   rankings: readonly CandidateRanking[],
   criteriaInOrder: readonly string[],
@@ -494,10 +521,7 @@ export function serializeRankings(
       total_score: entry.totalScore,
       // An array, not an object keyed by criterion: criteria are free text and
       // would become untrusted object keys.
-      scores: criteriaInOrder.map((criterion, position) => ({
-        criterion,
-        score: entry.scores[position] ?? 0,
-      })),
+      scores: entry.scores.map((score) => ({ criterion: score.criterion, score: score.score })),
     })),
   }, null, 2);
 }

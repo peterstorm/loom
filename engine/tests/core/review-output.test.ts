@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { applyReviewResolution, resolveReviewFindings, reviewResolutionLog } from "../../src/core/review-output";
-import { claimsOfSeverity } from "../../src/core/findings";
+import { claimsOfSeverity, removeOnce } from "../../src/core/findings";
 import { parseMachineSummary, parseLegacyFindings, makeParsedFindings, buildEvidenceFailureMessage, reconcileFindings } from "../../src/core/review-output";
 import { mergeFindings } from "../../src/core/findings";
 import { isReviewAgent } from "../../src/core/review-output";
@@ -599,29 +599,126 @@ describe("the structured block never costs a claim the markers made", () => {
     expect(reviewResolutionLog("T1", degraded)).toContain("findings block under-reported findings");
   });
 
+  // -- counting is necessary, and NOT sufficient -----------------------------
+
+  it("carries over a marker claim the winning block never named", () => {
+    // The bug this pins: arbitration compared only CARDINALITIES. A block with
+    // as many entries as the markers claimed won outright even when its entries
+    // named entirely different claims — and because it won, blockStatus said
+    // "used", so blockStatusNote printed nothing, reconcileFindings saw a
+    // matching count and stayed quiet, and findingsLockstepError passed because
+    // the views were derived from the substituted set. Every backstop declined
+    // to fire and the reviewer's actual critical was simply gone.
+    const result = parseMachineSummary(
+      summary(1, ["race on the queue"], JSON.stringify([
+        entry("totally unrelated claim"),
+        entry("another nit", "advisory"),
+      ]), ["naming nit"]),
+    );
+    expect(result?.blockStatus).toBe("partial");
+    // The block's claims survive WITH their locations; the markers' claims
+    // survive without. Neither side is discarded.
+    expect(result?.critical).toEqual(["totally unrelated claim", "race on the queue"]);
+    expect(result?.advisory).toEqual(["another nit", "naming nit"]);
+    expect(result?.drafts.find((d) => d.claim === "totally unrelated claim")?.file).toBe("src/x.ts");
+    expect(result?.drafts.find((d) => d.claim === "race on the queue")?.file).toBeNull();
+  });
+
+  it("treats a block that names one claim twice as naming it once", () => {
+    // The multiset half. Two marker criticals, a two-entry block repeating one
+    // of them: the count cleared the bar while only one distinct claim was
+    // actually accounted for.
+    const result = parseMachineSummary(
+      summary(2, ["leak in the cache", "race on the queue"], JSON.stringify([
+        entry("leak in the cache"),
+        entry("leak in the cache"),
+      ])),
+    );
+    expect(result?.blockStatus).toBe("partial");
+    expect(result?.critical).toEqual([
+      "leak in the cache",
+      "leak in the cache",
+      "race on the queue",
+    ]);
+  });
+
+  it("keeps a claim two reviewers worded identically", () => {
+    // The reason the difference is a MULTISET and not a set. Two reviewers
+    // worded a claim the same way; the block names it once and adds an unrelated
+    // one, so the COUNT clears the bar and only a by-value multiset difference
+    // can see that one of the two repeats was dropped. A set difference would
+    // find nothing missing and lose it.
+    const result = parseMachineSummary(
+      summary(2, ["same wording", "same wording"], JSON.stringify([
+        entry("same wording"),
+        entry("something else"),
+      ])),
+    );
+    expect(result?.blockStatus).toBe("partial");
+    expect(result?.critical).toEqual(["same wording", "something else", "same wording"]);
+  });
+
+  it("still supersedes a block that is simply too short", () => {
+    // The count rule runs first and is unchanged: a block with fewer entries
+    // than the markers claim is a truncated emission, so the markers win
+    // wholesale rather than the block winning with a carry-over.
+    const result = parseMachineSummary(
+      summary(2, ["same wording", "same wording"], JSON.stringify([entry("same wording")])),
+    );
+    expect(result?.blockStatus).toBe("superseded");
+    expect(result?.critical).toEqual(["same wording", "same wording"]);
+  });
+
+  it("tells the operator when the block did not name every marker claim", () => {
+    const degraded = resolveReviewFindings(
+      summary(1, ["race on the queue"], JSON.stringify([entry("something else")])),
+      "code-reviewer",
+    );
+    expect(reviewResolutionLog("T1", degraded)).toContain("did not name every marker claim");
+  });
+
   it("never loses a claim of EITHER severity, for any block/marker combination", () => {
-    // The property behind all six examples above. The decision table has two
-    // independent dimensions and the example tests only ever varied one, which
-    // is how the advisory case survived.
-    const claim = fc.string({ minLength: 3, maxLength: 12 })
-      .filter((s) => s.trim().length >= 3 && !/[\r\n]/.test(s));
+    // The property behind every example above. Its predecessor built the block
+    // entries as a PREFIX SUBSET of the generated marker claims and asserted
+    // only on lengths — two choices that together made it structurally incapable
+    // of telling count-coverage from claim-coverage, which is how a block naming
+    // disjoint claims passed it. Block claims now come from a DISJOINT alphabet,
+    // and the assertion is multiset containment by value.
+    // Collapse-stable by construction: `makeDraftFinding` normalizes internal
+    // whitespace runs, so a generated `"a  b"` comes back as `"a b"` and the
+    // by-value assertions below would be measuring normalization rather than
+    // arbitration. Normalization has its own tests; this property is about
+    // which side wins and what survives.
+    const claim = (prefix: string) => fc.string({ minLength: 3, maxLength: 12 })
+      .filter((s) => s.trim().length >= 3 && !/[\r\n]/.test(s))
+      .map((s) => `${prefix} ${s.trim().replace(/\s+/g, " ")}`);
+    const markerClaim = claim("m");
+    const blockClaim = claim("b");
     fc.assert(
       fc.property(
-        fc.uniqueArray(claim, { maxLength: 4 }),
-        fc.uniqueArray(claim, { maxLength: 4 }),
-        fc.nat({ max: 4 }),
-        fc.nat({ max: 4 }),
+        fc.uniqueArray(markerClaim, { maxLength: 4 }),
+        fc.uniqueArray(markerClaim, { maxLength: 4 }),
+        fc.array(blockClaim, { maxLength: 4 }),
+        fc.array(blockClaim, { maxLength: 4 }),
         (criticals, advisories, blockCrit, blockAdv) => {
           const blockEntries = [
-            ...criticals.slice(0, blockCrit).map((c) => entry(c)),
-            ...advisories.slice(0, blockAdv).map((c) => entry(c, "advisory")),
+            ...blockCrit.map((c) => entry(c)),
+            ...blockAdv.map((c) => entry(c, "advisory")),
           ];
           const result = parseMachineSummary(
             summary(criticals.length, criticals, JSON.stringify(blockEntries), advisories),
           );
           expect(result).not.toBeNull();
-          expect(result!.critical.length).toBeGreaterThanOrEqual(criticals.length);
-          expect(result!.advisory.length).toBeGreaterThanOrEqual(advisories.length);
+          // Every marker claim survives BY VALUE, at its own severity, however
+          // the arbitration went. `removeOnce` returning empty is the multiset
+          // containment statement.
+          expect(removeOnce(criticals, result!.critical)).toEqual([]);
+          expect(removeOnce(advisories, result!.advisory)).toEqual([]);
+          // And nothing is invented: every surviving claim came from one side.
+          const offered = [...criticals, ...advisories, ...blockCrit, ...blockAdv];
+          for (const claim of [...result!.critical, ...result!.advisory]) {
+            expect(offered).toContain(claim);
+          }
         },
       ),
       { numRuns: 300 },

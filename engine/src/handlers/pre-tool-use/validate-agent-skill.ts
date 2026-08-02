@@ -155,7 +155,25 @@ const handler: HookHandler = async (stdin) => {
   if (SKILL_EXEMPT_AGENTS.has(bareAgent)) return { kind: "allow" };
 
   const agentPath = resolveAgentPath(bareAgent, subagentType);
-  if (!agentPath) return { kind: "allow" };
+  if (!agentPath) {
+    // The same uncertainty the `unreadable` branch below BLOCKS on — we cannot
+    // determine which skills this agent requires — but reached by a different
+    // route: no CLAUDE_PLUGIN_ROOT, a cwd outside a git repo, an agent defined
+    // somewhere the four candidate paths do not cover. Users legitimately
+    // define agents outside those paths, so blocking every such spawn would
+    // break working installs to enforce a rule we cannot even read.
+    //
+    // What is NOT acceptable is the silence: this used to return `allow` with
+    // nothing on stderr, so a panel designer spawning without its preloaded
+    // `architecture-tech-lead` skill looked exactly like one that passed the
+    // check. The gate says out loud that it did not run.
+    process.stderr.write(
+      `[loom] validate-agent-skill: no agent file found for "${subagentType}" — ` +
+        `skill enforcement SKIPPED for this spawn (searched CLAUDE_PLUGIN_ROOT, ` +
+        `<git-root>/.claude/agents, ~/.claude/agents, and the plugin cache)\n`,
+    );
+    return { kind: "allow" };
+  }
 
   const declared = parseSkillsFromFrontmatter(agentPath);
   if (declared.kind === "unreadable") {

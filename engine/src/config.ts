@@ -47,16 +47,31 @@ const ARCHITECTURE_AGENTS = {
  *  Frozen so post-load mutation that could smuggle a panel agent in here — and
  *  break the "only architecture-agent advances the phase" contract that
  *  advance-phase.ts relies on — is impossible at runtime. Typed
- *  `Readonly<Record<string, Phase>>` (not the mutable `Record`) so the freeze's
- *  read-only-ness survives into the type: `PHASE_AGENT_MAP[x] = ...` is now a
- *  compile-time error too, not just a runtime throw. The string index signature
- *  is kept (unlike `as const`) so detectPhase's computed `PHASE_AGENT_MAP[agent]`
- *  lookups still type-check. */
-export const PHASE_AGENT_MAP: Readonly<Record<string, Phase>> = Object.freeze(
-  Object.fromEntries(
-    Object.entries(ARCHITECTURE_AGENTS)
-      .filter(([, v]) => v.role === "phase")
-      .map(([name, v]): [string, Phase] => [name, v.phase]),
+ *  `Readonly<Record<string, Phase | undefined>>` (not the mutable `Record`) so
+ *  the freeze's read-only-ness survives into the type: `PHASE_AGENT_MAP[x] = ...`
+ *  is a compile-time error too, not just a runtime throw. The string index
+ *  signature is kept (unlike `as const`) so detectPhase's computed
+ *  `PHASE_AGENT_MAP[agent]` lookups still type-check.
+ *
+ *  `Phase | undefined`, not `Phase`, because the lookup key is AGENT-CONTROLLED
+ *  (`tool_input.subagent_type`) and most agents are not in this map. Declaring a
+ *  total lookup made every consumer's existence guard look like defensive
+ *  clutter the compiler said was unnecessary.
+ *
+ *  Null-prototype, because `Object.fromEntries` alone returns an object that
+ *  inherits `Object.prototype`: `PHASE_AGENT_MAP["constructor"]` returned the
+ *  `Object` constructor typed as a `Phase`, and `"toString" in phaseMap` was
+ *  true — which `panelPhaseOverlap` below tests with `in`. Every guard downstream
+ *  failed closed or loud on the resulting value, but they were catching a hazard
+ *  the data structure should never have offered. */
+export const PHASE_AGENT_MAP: Readonly<Record<string, Phase | undefined>> = Object.freeze(
+  Object.assign(
+    Object.create(null) as Record<string, Phase>,
+    Object.fromEntries(
+      Object.entries(ARCHITECTURE_AGENTS)
+        .filter(([, v]) => v.role === "phase")
+        .map(([name, v]): [string, Phase] => [name, v.phase]),
+    ),
   ),
 );
 
@@ -149,7 +164,7 @@ function phaseLookupKeys(panelAgent: string): string[] {
  *  synthetic overlap rather than only asserted against the real (empty) sets. */
 export function panelPhaseOverlap(
   panel: ReadonlySet<string> = ARCH_PANEL_AGENTS,
-  phaseMap: Readonly<Record<string, Phase>> = PHASE_AGENT_MAP,
+  phaseMap: Readonly<Record<string, Phase | undefined>> = PHASE_AGENT_MAP,
 ): string[] {
   return [...panel].filter((a) => phaseLookupKeys(a).some((k) => k in phaseMap));
 }
@@ -160,7 +175,7 @@ export function panelPhaseOverlap(
  *  at module scope below so the same check also fails at load time. */
 export function assertPanelPhaseDisjoint(
   panel: ReadonlySet<string> = ARCH_PANEL_AGENTS,
-  phaseMap: Readonly<Record<string, Phase>> = PHASE_AGENT_MAP,
+  phaseMap: Readonly<Record<string, Phase | undefined>> = PHASE_AGENT_MAP,
 ): void {
   const overlap = panelPhaseOverlap(panel, phaseMap);
   if (overlap.length > 0) {

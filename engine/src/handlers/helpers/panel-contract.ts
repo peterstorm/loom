@@ -17,32 +17,25 @@ import {
 import {
   ARCHITECTURE_LAYOUT,
   argumentValue,
-  artifactError,
   contractError,
   parseRunBoundary,
   readVerdicts,
   realRunDir,
+  runArtifactErrors,
   writeCanonicalOutput,
 } from "./panel-run";
 
 const LAYOUT = ARCHITECTURE_LAYOUT;
 
+/** The interview digest always; the candidates only once they should exist —
+ *  `manifest` runs before any designer has written one. */
 function artifactErrors(manifest: PanelManifest, runDir: string, includeCandidates: boolean): string[] {
-  const resolved = realRunDir(runDir);
-  if (!resolved.ok) return [...resolved.errors];
-  const root = resolved.value;
-
-  const paths = includeCandidates
-    ? [manifest.interviewFile, manifest.interviewJson, ...manifest.candidates.map((candidate) => candidate.path)]
-    : [manifest.interviewFile, manifest.interviewJson];
-
-  return paths.flatMap((path) => {
-    const expectedParent = path === manifest.interviewFile || path === manifest.interviewJson
-      ? root
-      : join(root, LAYOUT.itemDir);
-    const error = artifactError(path, expectedParent);
-    return error ? [error] : [];
-  });
+  return runArtifactErrors(
+    runDir,
+    LAYOUT,
+    [manifest.interviewFile, manifest.interviewJson],
+    includeCandidates ? manifest.candidates.map((candidate) => candidate.path) : [],
+  );
 }
 
 /**
