@@ -1,11 +1,19 @@
 import { basename, join, normalize } from "node:path";
+import {
+  fail,
+  isRecord,
+  ok,
+  parseCriteriaSet,
+  parseVerdictEnvelope,
+  sanitizeProse,
+  type ParseResult,
+} from "./panel-kernel";
 
-export type ParseResult<T> =
-  | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly errors: readonly string[] };
-
-const ok = <T>(value: T): ParseResult<T> => ({ ok: true, value });
-const fail = <T>(errors: readonly string[]): ParseResult<T> => ({ ok: false, errors });
+// The architecture panel is consumer 1 of the kernel. Everything below is what
+// is genuinely architecture-specific: the interview digest, lens selection, the
+// candidate manifest, the criteria derivation, and the total-order aggregate.
+// Re-exported so existing importers of this module need not know the split.
+export type { ParseResult };
 
 export const PRIMARY_AXES = [
   "simplicity",
@@ -220,10 +228,6 @@ export type PanelManifest = Readonly<{
   candidates: readonly PanelCandidate[];
 }>;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /** Parse the exact candidate-set handoff and bind every path to one run root. */
 export function parsePanelManifest(
   raw: unknown,
@@ -302,7 +306,51 @@ export type JudgeVerdict = Readonly<{
   rankings: readonly JudgeRanking[];
 }>;
 
-const sanitizeProse = (value: string): string => value.replace(/[{}]/g, "").trim();
+/** Payload parser for one ranking — the only architecture-specific part of the
+ *  judge envelope. The candidate id, coverage, and duplicate rules all live in
+ *  the kernel; this handles score/fatal_flaw/strongest_idea and nothing else. */
+function parseJudgeRanking(
+  raw: Record<string, unknown>,
+  path: string,
+): ParseResult<JudgeRanking> {
+  const errors: string[] = [];
+
+  const score = raw.score;
+  const scoreValid = Number.isInteger(score) && (score as number) >= 0 && (score as number) <= 10;
+  if (!scoreValid) errors.push(`${path}.score must be an integer from 0 to 10`);
+
+  const fatalFlaw = raw.fatal_flaw;
+  const fatalFlawTyped = fatalFlaw === null || typeof fatalFlaw === "string";
+  if (!fatalFlawTyped) errors.push(`${path}.fatal_flaw must be a string or null`);
+  const sanitizedFatalFlaw = typeof fatalFlaw === "string" ? sanitizeProse(fatalFlaw) : null;
+  if (typeof fatalFlaw === "string" && !sanitizedFatalFlaw) {
+    errors.push(`${path}.fatal_flaw must be non-empty after sanitization or null`);
+  }
+
+  const strongestIdea = typeof raw.strongest_idea === "string" ? sanitizeProse(raw.strongest_idea) : "";
+  if (!strongestIdea) errors.push(`${path}.strongest_idea must be non-empty`);
+
+  return errors.length > 0
+    ? fail(errors)
+    : ok({
+        candidate: typeof raw.candidate === "string" ? raw.candidate : "",
+        score: score as number,
+        fatalFlaw: sanitizedFatalFlaw,
+        strongestIdea,
+      });
+}
+
+/** The architecture panel's cross-entry rule: a judge ranks best-to-worst, so
+ *  scores must not increase down the list. The review panel passes no
+ *  crossCheck — its findings have no meaningful order. */
+function requireNonIncreasingScores(rankings: readonly JudgeRanking[]): readonly string[] {
+  for (let index = 1; index < rankings.length; index++) {
+    if (rankings[index - 1]!.score < rankings[index]!.score) {
+      return ["rankings must be ordered by non-increasing score"];
+    }
+  }
+  return [];
+}
 
 /** Parse untrusted judge output and return canonical, substitution-safe data. */
 export function parseJudgeVerdict(
@@ -310,93 +358,17 @@ export function parseJudgeVerdict(
   expectedCriterion: string,
   expectedCandidates: readonly string[],
 ): ParseResult<JudgeVerdict> {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(rawJson);
-  } catch (error) {
-    return fail([`judge verdict is not valid JSON: ${error instanceof Error ? error.message : String(error)}`]);
-  }
-  if (!isRecord(raw)) return fail(["judge verdict must be a JSON object"]);
-
-  const errors: string[] = [];
-  if (raw.criterion !== expectedCriterion) {
-    errors.push(`criterion must equal ${JSON.stringify(expectedCriterion)}`);
-  }
-  if (!Array.isArray(raw.rankings)) {
-    return fail([...errors, "rankings must be an array"]);
-  }
-  if (raw.rankings.length !== expectedCandidates.length) {
-    errors.push(`rankings must contain exactly ${expectedCandidates.length} candidates`);
-  }
-
-  const expected = new Set(expectedCandidates);
-  const seen = new Set<string>();
-  const rankings: JudgeRanking[] = [];
-
-  for (const [index, ranking] of raw.rankings.entries()) {
-    if (!isRecord(ranking)) {
-      errors.push(`rankings[${index}] must be an object`);
-      continue;
-    }
-    const candidate = typeof ranking.candidate === "string" ? ranking.candidate : "";
-    const candidateValid = expected.has(candidate) && !seen.has(candidate);
-    if (!expected.has(candidate)) errors.push(`rankings[${index}] has unknown candidate: ${candidate || "<empty>"}`);
-    if (seen.has(candidate)) errors.push(`rankings contains duplicate candidate: ${candidate}`);
-    seen.add(candidate);
-
-    const score = ranking.score;
-    const scoreValid =
-      Number.isInteger(score) && (score as number) >= 0 && (score as number) <= 10;
-    if (!scoreValid) {
-      errors.push(`rankings[${index}].score must be an integer from 0 to 10`);
-    }
-
-    const fatalFlaw = ranking.fatal_flaw;
-    const fatalFlawTyped = fatalFlaw === null || typeof fatalFlaw === "string";
-    if (!fatalFlawTyped) {
-      errors.push(`rankings[${index}].fatal_flaw must be a string or null`);
-    }
-    const sanitizedFatalFlaw = typeof fatalFlaw === "string" ? sanitizeProse(fatalFlaw) : null;
-    const fatalFlawValid =
-      fatalFlawTyped && !(typeof fatalFlaw === "string" && !sanitizedFatalFlaw);
-    if (typeof fatalFlaw === "string" && !sanitizedFatalFlaw) {
-      errors.push(`rankings[${index}].fatal_flaw must be non-empty after sanitization or null`);
-    }
-    const strongestIdea = typeof ranking.strongest_idea === "string"
-      ? sanitizeProse(ranking.strongest_idea)
-      : "";
-    if (!strongestIdea) errors.push(`rankings[${index}].strongest_idea must be non-empty`);
-
-    // Only fully-valid entries enter `rankings`. Previously every entry was
-    // pushed, with an invalid score becoming Number.NaN purely to satisfy the
-    // type — unreachable on the ok path (errors is non-empty, so we return
-    // fail), but it left a NaN in a `score: number` field, and the ordering
-    // scan below compares with `<`, which is ALWAYS false against NaN. Any
-    // future reuse of this loop without the error guard would silently skip
-    // the ordering check. Keeping the array free of NaN removes that trap.
-    if (candidateValid && scoreValid && fatalFlawValid && strongestIdea) {
-      rankings.push({
-        candidate,
-        score: score as number,
-        fatalFlaw: sanitizedFatalFlaw,
-        strongestIdea,
-      });
-    }
-  }
-
-  for (const candidate of expectedCandidates) {
-    if (!seen.has(candidate)) errors.push(`rankings is missing candidate: ${candidate}`);
-  }
-  for (let index = 1; index < rankings.length; index++) {
-    if (rankings[index - 1]!.score < rankings[index]!.score) {
-      errors.push("rankings must be ordered by non-increasing score");
-      break;
-    }
-  }
-
-  return errors.length > 0
-    ? fail(errors)
-    : ok({ criterion: expectedCriterion, rankings });
+  const envelope = parseVerdictEnvelope<JudgeRanking>(rawJson, expectedCriterion, expectedCandidates, {
+    label: "judge verdict",
+    entriesKey: "rankings",
+    itemIdKey: "candidate",
+    itemNoun: ["candidate", "candidates"],
+    parseEntry: parseJudgeRanking,
+    crossCheck: requireNonIncreasingScores,
+  });
+  return envelope.ok
+    ? ok({ criterion: envelope.value.criterion, rankings: envelope.value.entries })
+    : fail(envelope.errors);
 }
 
 /** Serialize a validated verdict using the external snake_case contract. */
@@ -473,32 +445,19 @@ export function aggregateVerdicts(
 ): ParseResult<readonly CandidateRanking[]> {
   const errors: string[] = [];
 
-  if (criteriaInOrder.length === 0) errors.push("criteria must be non-empty");
-  if (new Set(criteriaInOrder).size !== criteriaInOrder.length) {
-    errors.push("criteria must be distinct");
-  }
+  // The criteria-set rule is the kernel's (parseCriteriaSet) — the review panel
+  // enforces the identical rule over its own verdicts.
+  const criteriaSet = parseCriteriaSet(verdicts.map((verdict) => verdict.criterion), criteriaInOrder);
+  if (!criteriaSet.ok) errors.push(...criteriaSet.errors);
+
   if (expectedCandidates.length === 0) errors.push("expected candidates must be non-empty");
   if (new Set(expectedCandidates).size !== expectedCandidates.length) {
     errors.push("expected candidates must be distinct");
   }
-  if (verdicts.length !== criteriaInOrder.length) {
-    errors.push(`expected exactly ${criteriaInOrder.length} verdict(s); received ${verdicts.length}`);
-  }
 
   const byCriterion = new Map<string, JudgeVerdict>();
   for (const verdict of verdicts) {
-    if (byCriterion.has(verdict.criterion)) {
-      errors.push(`duplicate verdict for criterion: ${verdict.criterion}`);
-      continue;
-    }
-    if (!criteriaInOrder.includes(verdict.criterion)) {
-      errors.push(`unexpected verdict criterion: ${verdict.criterion}`);
-      continue;
-    }
-    byCriterion.set(verdict.criterion, verdict);
-  }
-  for (const criterion of criteriaInOrder) {
-    if (!byCriterion.has(criterion)) errors.push(`missing verdict for criterion: ${criterion}`);
+    if (!byCriterion.has(verdict.criterion)) byCriterion.set(verdict.criterion, verdict);
   }
 
   if (errors.length > 0) return fail(errors);

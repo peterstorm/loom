@@ -1,5 +1,5 @@
-import { lstatSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { HookHandler } from "../../types";
 import {
   aggregateVerdicts,
@@ -14,98 +14,23 @@ import {
   type JudgeVerdict,
   type PanelManifest,
 } from "../../core/panel-contract";
+import {
+  ARCHITECTURE_LAYOUT,
+  argumentValue,
+  artifactError,
+  contractError,
+  parseRunBoundary,
+  realRunDir,
+  verdictPath,
+  writeCanonicalOutput,
+} from "./panel-run";
 
-function argumentValue(args: readonly string[], flag: string): string | null {
-  const index = args.indexOf(flag);
-  return index >= 0 && args[index + 1] ? args[index + 1]! : null;
-}
-
-function contractError(context: string, errors: readonly string[]) {
-  return {
-    kind: "error" as const,
-    message: [`${context} contract failed:`, ...errors.map((error) => `- ${error}`)].join("\n"),
-  };
-}
-
-type RunBoundary = Readonly<{ runDir: string; manifestPath: string }>;
-
-/** Bind the run to an explicit panel-runs root and reject every symlinked hop. */
-function parseRunBoundary(runsRoot: string, manifestPath: string):
-  | { readonly ok: true; readonly value: RunBoundary }
-  | { readonly ok: false; readonly errors: readonly string[] } {
-  const errors: string[] = [];
-  const cwd = realpathSync(process.cwd());
-  const absoluteRoot = resolve(runsRoot);
-  const absoluteManifest = resolve(manifestPath);
-  const absoluteRunDir = dirname(absoluteManifest);
-  const fromCwd = relative(cwd, absoluteRoot);
-
-  if (isAbsolute(fromCwd) || fromCwd === ".." || fromCwd.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) {
-    errors.push("panel-runs root must be inside the current working directory");
-  }
-  if (dirname(absoluteRunDir) !== absoluteRoot) {
-    errors.push("manifest must be directly inside one run directory under --runs-root");
-  }
-  if (absoluteManifest !== join(absoluteRunDir, "manifest.json")) {
-    errors.push("manifest filename must be exactly manifest.json");
-  }
-
-  if (errors.length === 0) {
-    let cursor = cwd;
-    for (const segment of fromCwd.split(/[\\/]/).filter(Boolean)) {
-      cursor = join(cursor, segment);
-      try {
-        if (lstatSync(cursor).isSymbolicLink()) errors.push(`path component must not be a symbolic link: ${cursor}`);
-      } catch (error) {
-        errors.push(`cannot inspect path component ${cursor}: ${error instanceof Error ? error.message : String(error)}`);
-        break;
-      }
-    }
-  }
-
-  for (const [label, path, kind] of [
-    ["run directory", absoluteRunDir, "directory"],
-    ["manifest", absoluteManifest, "file"],
-  ] as const) {
-    try {
-      const stat = lstatSync(path);
-      if (stat.isSymbolicLink()) errors.push(`${label} must not be a symbolic link: ${path}`);
-      if (kind === "directory" && !stat.isDirectory()) errors.push(`${label} must be a directory: ${path}`);
-      if (kind === "file" && (!stat.isFile() || stat.size === 0)) errors.push(`${label} must be a non-empty regular file: ${path}`);
-    } catch (error) {
-      errors.push(`cannot inspect ${label} ${path}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, value: { runDir: dirname(manifestPath), manifestPath } };
-}
-
-/** One artifact's existence/shape/containment check. Returns null when the file
- *  is a non-empty regular file resolving directly inside `expectedParent`. */
-function artifactError(path: string, expectedParent: string): string | null {
-  try {
-    const stat = lstatSync(path);
-    if (stat.isSymbolicLink()) return `artifact must not be a symbolic link: ${path}`;
-    if (!stat.isFile() || stat.size === 0) {
-      return `artifact must be a non-empty regular file: ${path}`;
-    }
-    if (dirname(realpathSync(path)) !== expectedParent) {
-      return `artifact resolves outside its run-scoped directory: ${path}`;
-    }
-    return null;
-  } catch (error) {
-    return `cannot verify artifact ${path}: ${error instanceof Error ? error.message : String(error)}`;
-  }
-}
+const LAYOUT = ARCHITECTURE_LAYOUT;
 
 function artifactErrors(manifest: PanelManifest, runDir: string, includeCandidates: boolean): string[] {
-  let realRunDir: string;
-  try {
-    realRunDir = realpathSync(runDir);
-  } catch (error) {
-    return [`cannot resolve run directory ${runDir}: ${error instanceof Error ? error.message : String(error)}`];
-  }
+  const resolved = realRunDir(runDir);
+  if (!resolved.ok) return [...resolved.errors];
+  const root = resolved.value;
 
   const paths = includeCandidates
     ? [manifest.interviewFile, manifest.interviewJson, ...manifest.candidates.map((candidate) => candidate.path)]
@@ -113,29 +38,11 @@ function artifactErrors(manifest: PanelManifest, runDir: string, includeCandidat
 
   return paths.flatMap((path) => {
     const expectedParent = path === manifest.interviewFile || path === manifest.interviewJson
-      ? realRunDir
-      : join(realRunDir, "candidates");
+      ? root
+      : join(root, LAYOUT.itemDir);
     const error = artifactError(path, expectedParent);
     return error ? [error] : [];
   });
-}
-
-/** Canonical per-criterion verdict path. Positional by index, but the content
- *  is re-validated against `criteria[index]` when read, so a verdict written to
- *  the wrong slot is a hard error rather than a silent mis-ranking. */
-function verdictPath(runDir: string, index: number): string {
-  return join(runDir, "verdicts", `verdict-${index + 1}.json`);
-}
-
-function writeCanonicalOutput(output: string) {
-  try {
-    writeFileSync(process.stdout.fd, output);
-    return { kind: "allow" as const };
-  } catch (error) {
-    return contractError("canonical output", [
-      `stdout write failed: ${error instanceof Error ? error.message : String(error)}`,
-    ]);
-  }
 }
 
 const USAGE = "Usage: helper panel-contract <interview|manifest|criteria|verdict|aggregate> [--runs-root <dir> --manifest <file> --designers <N> --criterion <text>]";
@@ -171,7 +78,7 @@ const handler: HookHandler = async (stdin, args) => {
     let interviewJson: unknown;
     try {
       manifestJson = JSON.parse(readFileSync(manifestPath, "utf-8"));
-      interviewJson = JSON.parse(readFileSync(join(runDir, "interview.json"), "utf-8"));
+      interviewJson = JSON.parse(readFileSync(join(runDir, LAYOUT.contextJson), "utf-8"));
     } catch (error) {
       return contractError("panel JSON", [
         `cannot read manifest/interview JSON: ${error instanceof Error ? error.message : String(error)}`,
@@ -216,20 +123,14 @@ const handler: HookHandler = async (stdin, args) => {
     }
 
     // aggregate — re-read and re-validate every verdict from disk, then rank.
-    let realRunDir: string;
-    try {
-      realRunDir = realpathSync(runDir);
-    } catch (error) {
-      return contractError("panel aggregate", [
-        `cannot resolve run directory ${runDir}: ${error instanceof Error ? error.message : String(error)}`,
-      ]);
-    }
+    const resolved = realRunDir(runDir);
+    if (!resolved.ok) return contractError("panel aggregate", resolved.errors);
 
-    const verdictsDir = join(realRunDir, "verdicts");
+    const verdictsDir = join(resolved.value, LAYOUT.verdictDir);
     const verdicts: JudgeVerdict[] = [];
     const verdictErrors: string[] = [];
     for (const [index, expectedCriterion] of criteria.entries()) {
-      const path = verdictPath(runDir, index);
+      const path = verdictPath(runDir, LAYOUT, index);
       const fileError = artifactError(path, verdictsDir);
       if (fileError) {
         verdictErrors.push(fileError);
