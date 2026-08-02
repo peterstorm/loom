@@ -112,23 +112,78 @@ export function parseInterviewDigest(markdown: string): ParseResult<InterviewDig
 
   if (errors.length > 0) return fail(errors);
 
+  // Every local below is guaranteed present on this path: a missing, empty, or
+  // invalid field pushed an error above and we would already have returned.
+  // The compiler cannot see that, so an explicit guard carries the invariant
+  // instead of a non-null assertion — an unreachable Err beats a silent cast.
+  if (
+    primaryAxis === undefined ||
+    testabilityBar === undefined ||
+    codebaseMaturity === undefined ||
+    sensitiveBoundaries === undefined ||
+    sensitiveStatus === undefined
+  ) {
+    return fail(["interview digest failed its internal completeness check"]);
+  }
+
   return ok({
     ...(values as InterviewValues),
     primaryAxis: primaryAxis as PrimaryAxis,
     testabilityBar: testabilityBar as TestabilityBar,
     codebaseMaturity: codebaseMaturity as CodebaseMaturity,
-    sensitiveBoundaries: sensitiveBoundaries!.replace(/^(flagged|none)/i, sensitiveStatus!),
+    sensitiveBoundaries: sensitiveBoundaries.replace(/^(flagged|none)/i, sensitiveStatus),
   });
 }
 
-/** Re-parse the canonical JSON artifact instead of trusting prior validation. */
+/** Any JS line terminator. A digest VALUE can never contain one when it came
+ *  through parseInterviewDigest (which splits the markdown on newlines), so a
+ *  value carrying one in the JSON artifact means the file was edited outside
+ *  the contract. Rejected explicitly: without this check the reconstruction
+ *  below would splice the value into line position and surface as a confusing
+ *  "must appear exactly once" / "must have a non-empty value" error about some
+ *  OTHER field. Still fail-closed either way — this only makes the diagnostic
+ *  name the real culprit. */
+const LINE_TERMINATOR = /[\r\n\u2028\u2029]/;
+
+/** Re-parse the canonical JSON artifact instead of trusting prior validation.
+ *  Reconstructs the labeled markdown and routes it back through
+ *  parseInterviewDigest so the JSON and markdown directions can never diverge
+ *  on what a valid digest is — there is exactly one set of field rules. */
 export function parseInterviewDigestJson(raw: unknown): ParseResult<InterviewDigest> {
   if (!isRecord(raw)) return fail(["canonical interview digest must be a JSON object"]);
+
+  const newlineErrors = INTERVIEW_FIELDS.flatMap(([key, label]) => {
+    const value = raw[key];
+    return typeof value === "string" && LINE_TERMINATOR.test(value)
+      ? [`${label} must not contain a line terminator`]
+      : [];
+  });
+  if (newlineErrors.length > 0) return fail(newlineErrors);
+
   const markdown = INTERVIEW_FIELDS.map(([key, label]) => {
     const value = raw[key];
     return `${label} ${typeof value === "string" ? value : ""}`;
   }).join("\n");
   return parseInterviewDigest(markdown);
+}
+
+/** The third judge criterion — a fixed literal, unlike criteria 1 and 2 which
+ *  are verbatim interview values. */
+export const CODEBASE_FIT_CRITERION = "codebase fit + effort";
+
+/**
+ * The exact ordered judge criteria for a run, derived from the validated
+ * digest. Previously this derivation lived only in commands/loom.md prose, so
+ * the orchestrator's criteria and the finalizer's positional tie-break had to
+ * agree by convention. Deriving it here makes the criteria set data that both
+ * the verdict and aggregate operations validate against.
+ *
+ * Always distinct: PRIMARY_AXES, TESTABILITY_BARS, and CODEBASE_FIT_CRITERION
+ * are pairwise disjoint vocabularies (asserted in panel-contract.test.ts), so
+ * aggregateVerdicts' distinctness precondition holds for every valid digest.
+ */
+export function deriveJudgeCriteria(digest: InterviewDigest): readonly string[] {
+  return [digest.primaryAxis, digest.testabilityBar, CODEBASE_FIT_CRITERION];
 }
 
 /** Derive the exact ordered lens set from validated interview signals and N. */
@@ -284,20 +339,26 @@ export function parseJudgeVerdict(
       continue;
     }
     const candidate = typeof ranking.candidate === "string" ? ranking.candidate : "";
+    const candidateValid = expected.has(candidate) && !seen.has(candidate);
     if (!expected.has(candidate)) errors.push(`rankings[${index}] has unknown candidate: ${candidate || "<empty>"}`);
     if (seen.has(candidate)) errors.push(`rankings contains duplicate candidate: ${candidate}`);
     seen.add(candidate);
 
     const score = ranking.score;
-    if (!Number.isInteger(score) || (score as number) < 0 || (score as number) > 10) {
+    const scoreValid =
+      Number.isInteger(score) && (score as number) >= 0 && (score as number) <= 10;
+    if (!scoreValid) {
       errors.push(`rankings[${index}].score must be an integer from 0 to 10`);
     }
 
     const fatalFlaw = ranking.fatal_flaw;
-    if (fatalFlaw !== null && typeof fatalFlaw !== "string") {
+    const fatalFlawTyped = fatalFlaw === null || typeof fatalFlaw === "string";
+    if (!fatalFlawTyped) {
       errors.push(`rankings[${index}].fatal_flaw must be a string or null`);
     }
     const sanitizedFatalFlaw = typeof fatalFlaw === "string" ? sanitizeProse(fatalFlaw) : null;
+    const fatalFlawValid =
+      fatalFlawTyped && !(typeof fatalFlaw === "string" && !sanitizedFatalFlaw);
     if (typeof fatalFlaw === "string" && !sanitizedFatalFlaw) {
       errors.push(`rankings[${index}].fatal_flaw must be non-empty after sanitization or null`);
     }
@@ -306,12 +367,21 @@ export function parseJudgeVerdict(
       : "";
     if (!strongestIdea) errors.push(`rankings[${index}].strongest_idea must be non-empty`);
 
-    rankings.push({
-      candidate,
-      score: typeof score === "number" ? score : Number.NaN,
-      fatalFlaw: sanitizedFatalFlaw,
-      strongestIdea,
-    });
+    // Only fully-valid entries enter `rankings`. Previously every entry was
+    // pushed, with an invalid score becoming Number.NaN purely to satisfy the
+    // type — unreachable on the ok path (errors is non-empty, so we return
+    // fail), but it left a NaN in a `score: number` field, and the ordering
+    // scan below compares with `<`, which is ALWAYS false against NaN. Any
+    // future reuse of this loop without the error guard would silently skip
+    // the ordering check. Keeping the array free of NaN removes that trap.
+    if (candidateValid && scoreValid && fatalFlawValid && strongestIdea) {
+      rankings.push({
+        candidate,
+        score: score as number,
+        fatalFlaw: sanitizedFatalFlaw,
+        strongestIdea,
+      });
+    }
   }
 
   for (const candidate of expectedCandidates) {
@@ -338,6 +408,151 @@ export function serializeJudgeVerdict(verdict: JudgeVerdict): string {
       score: ranking.score,
       fatal_flaw: ranking.fatalFlaw,
       strongest_idea: ranking.strongestIdea,
+    })),
+  }, null, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Aggregation — the deterministic cross-verdict ranking
+// ---------------------------------------------------------------------------
+
+export type CandidateRanking = Readonly<{
+  candidate: string;
+  totalScore: number;
+  /** Per-criterion score, positionally aligned with the criteria order. */
+  scores: readonly number[];
+}>;
+
+/**
+ * Total order over candidates: highest total, then each criterion in order,
+ * then lexicographically smallest filename.
+ *
+ * With the total tied, walking the criteria in order reproduces the documented
+ * primary-axis-then-testability tie-break exactly: if the total and every
+ * earlier criterion tie, the remaining criterion is forced to tie too (the
+ * total is their sum), so no later criterion can ever change the outcome. The
+ * generalized form has no positional special cases and works for any K.
+ *
+ * Lexicographic comparison is done with `<` / `>` rather than localeCompare —
+ * localeCompare's ordering is locale-dependent, and this must produce the same
+ * ranking on every machine.
+ */
+function compareRankings(a: CandidateRanking, b: CandidateRanking): number {
+  if (a.totalScore !== b.totalScore) return b.totalScore - a.totalScore;
+  for (let index = 0; index < a.scores.length; index++) {
+    const delta = (b.scores[index] ?? 0) - (a.scores[index] ?? 0);
+    if (delta !== 0) return delta;
+  }
+  return a.candidate < b.candidate ? -1 : a.candidate > b.candidate ? 1 : 0;
+}
+
+/**
+ * Rank candidates across all judge verdicts, deterministically.
+ *
+ * This computation used to live only as prose in phase-arch-finalize.md, which
+ * meant the step that decides WHICH CANDIDATE WINS was the one step in the
+ * panel pipeline an LLM performed by hand — every input to it was schema
+ * validated, but the arithmetic and tie-break were not. Two specific hazards
+ * came with that:
+ *
+ *   - the tie-break referred to verdicts POSITIONALLY ("the first verdict",
+ *     "the second verdict"), coupling the finalize template to the criteria
+ *     order in commands/loom.md with nothing enforcing the two agreed; and
+ *   - nothing validated the verdict SET — the same per-item coverage rule
+ *     parseJudgeVerdict enforces inside one verdict (every candidate exactly
+ *     once, no foreign, no duplicates) had no analogue one level up, so two
+ *     verdicts sharing a criterion would silently produce a wrong tie-break.
+ *
+ * Verdicts are matched to criteria BY NAME here, so their argument order is
+ * irrelevant and a duplicated or missing criterion is a hard error.
+ */
+export function aggregateVerdicts(
+  verdicts: readonly JudgeVerdict[],
+  criteriaInOrder: readonly string[],
+  expectedCandidates: readonly string[],
+): ParseResult<readonly CandidateRanking[]> {
+  const errors: string[] = [];
+
+  if (criteriaInOrder.length === 0) errors.push("criteria must be non-empty");
+  if (new Set(criteriaInOrder).size !== criteriaInOrder.length) {
+    errors.push("criteria must be distinct");
+  }
+  if (expectedCandidates.length === 0) errors.push("expected candidates must be non-empty");
+  if (new Set(expectedCandidates).size !== expectedCandidates.length) {
+    errors.push("expected candidates must be distinct");
+  }
+  if (verdicts.length !== criteriaInOrder.length) {
+    errors.push(`expected exactly ${criteriaInOrder.length} verdict(s); received ${verdicts.length}`);
+  }
+
+  const byCriterion = new Map<string, JudgeVerdict>();
+  for (const verdict of verdicts) {
+    if (byCriterion.has(verdict.criterion)) {
+      errors.push(`duplicate verdict for criterion: ${verdict.criterion}`);
+      continue;
+    }
+    if (!criteriaInOrder.includes(verdict.criterion)) {
+      errors.push(`unexpected verdict criterion: ${verdict.criterion}`);
+      continue;
+    }
+    byCriterion.set(verdict.criterion, verdict);
+  }
+  for (const criterion of criteriaInOrder) {
+    if (!byCriterion.has(criterion)) errors.push(`missing verdict for criterion: ${criterion}`);
+  }
+
+  if (errors.length > 0) return fail(errors);
+
+  // Re-check candidate coverage per verdict so this function is safe to call
+  // standalone, not only downstream of parseJudgeVerdict.
+  const expected = new Set(expectedCandidates);
+  for (const criterion of criteriaInOrder) {
+    const verdict = byCriterion.get(criterion);
+    if (!verdict) continue;
+    const seen = new Set(verdict.rankings.map((ranking) => ranking.candidate));
+    const covers =
+      verdict.rankings.length === expectedCandidates.length &&
+      seen.size === verdict.rankings.length &&
+      [...seen].every((candidate) => expected.has(candidate));
+    if (!covers) {
+      errors.push(`verdict for '${criterion}' must rank each expected candidate exactly once`);
+    }
+  }
+
+  if (errors.length > 0) return fail(errors);
+
+  const ranked = expectedCandidates.map((candidate): CandidateRanking => {
+    const scores = criteriaInOrder.map((criterion) => {
+      const verdict = byCriterion.get(criterion);
+      return verdict?.rankings.find((ranking) => ranking.candidate === candidate)?.score ?? 0;
+    });
+    return {
+      candidate,
+      totalScore: scores.reduce((sum, score) => sum + score, 0),
+      scores,
+    };
+  });
+
+  return ok([...ranked].sort(compareRankings));
+}
+
+/** Serialize the aggregate ranking for substitution into the finalize prompt. */
+export function serializeRankings(
+  rankings: readonly CandidateRanking[],
+  criteriaInOrder: readonly string[],
+): string {
+  return JSON.stringify({
+    criteria: criteriaInOrder,
+    ranking: rankings.map((entry, index) => ({
+      rank: index + 1,
+      candidate: entry.candidate,
+      total_score: entry.totalScore,
+      // An array, not an object keyed by criterion: criteria are free text and
+      // would become untrusted object keys.
+      scores: criteriaInOrder.map((criterion, position) => ({
+        criterion,
+        score: entry.scores[position] ?? 0,
+      })),
     })),
   }, null, 2);
 }

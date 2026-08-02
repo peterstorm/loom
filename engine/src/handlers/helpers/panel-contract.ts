@@ -2,12 +2,16 @@ import { lstatSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { HookHandler } from "../../types";
 import {
+  aggregateVerdicts,
+  deriveJudgeCriteria,
   parseInterviewDigest,
   parseInterviewDigestJson,
   parseJudgeVerdict,
   parsePanelManifest,
   selectPanelLenses,
   serializeJudgeVerdict,
+  serializeRankings,
+  type JudgeVerdict,
   type PanelManifest,
 } from "../../core/panel-contract";
 
@@ -77,8 +81,25 @@ function parseRunBoundary(runsRoot: string, manifestPath: string):
   return { ok: true, value: { runDir: dirname(manifestPath), manifestPath } };
 }
 
+/** One artifact's existence/shape/containment check. Returns null when the file
+ *  is a non-empty regular file resolving directly inside `expectedParent`. */
+function artifactError(path: string, expectedParent: string): string | null {
+  try {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) return `artifact must not be a symbolic link: ${path}`;
+    if (!stat.isFile() || stat.size === 0) {
+      return `artifact must be a non-empty regular file: ${path}`;
+    }
+    if (dirname(realpathSync(path)) !== expectedParent) {
+      return `artifact resolves outside its run-scoped directory: ${path}`;
+    }
+    return null;
+  } catch (error) {
+    return `cannot verify artifact ${path}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
 function artifactErrors(manifest: PanelManifest, runDir: string, includeCandidates: boolean): string[] {
-  const errors: string[] = [];
   let realRunDir: string;
   try {
     realRunDir = realpathSync(runDir);
@@ -90,28 +111,20 @@ function artifactErrors(manifest: PanelManifest, runDir: string, includeCandidat
     ? [manifest.interviewFile, manifest.interviewJson, ...manifest.candidates.map((candidate) => candidate.path)]
     : [manifest.interviewFile, manifest.interviewJson];
 
-  for (const path of paths) {
-    try {
-      const stat = lstatSync(path);
-      if (stat.isSymbolicLink()) {
-        errors.push(`artifact must not be a symbolic link: ${path}`);
-        continue;
-      }
-      if (!stat.isFile() || stat.size === 0) {
-        errors.push(`artifact must be a non-empty regular file: ${path}`);
-        continue;
-      }
-      const expectedParent = path === manifest.interviewFile || path === manifest.interviewJson
-        ? realRunDir
-        : join(realRunDir, "candidates");
-      if (dirname(realpathSync(path)) !== expectedParent) {
-        errors.push(`artifact resolves outside its run-scoped directory: ${path}`);
-      }
-    } catch (error) {
-      errors.push(`cannot verify artifact ${path}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return errors;
+  return paths.flatMap((path) => {
+    const expectedParent = path === manifest.interviewFile || path === manifest.interviewJson
+      ? realRunDir
+      : join(realRunDir, "candidates");
+    const error = artifactError(path, expectedParent);
+    return error ? [error] : [];
+  });
+}
+
+/** Canonical per-criterion verdict path. Positional by index, but the content
+ *  is re-validated against `criteria[index]` when read, so a verdict written to
+ *  the wrong slot is a hard error rather than a silent mis-ranking. */
+function verdictPath(runDir: string, index: number): string {
+  return join(runDir, "verdicts", `verdict-${index + 1}.json`);
 }
 
 function writeCanonicalOutput(output: string) {
@@ -125,7 +138,10 @@ function writeCanonicalOutput(output: string) {
   }
 }
 
-const USAGE = "Usage: helper panel-contract <interview|manifest|verdict> [--runs-root <dir> --manifest <file> --designers <N> --criterion <text>]";
+const USAGE = "Usage: helper panel-contract <interview|manifest|criteria|verdict|aggregate> [--runs-root <dir> --manifest <file> --designers <N> --criterion <text>]";
+
+/** Operations that share the run-boundary → manifest → interview prelude. */
+const RUN_SCOPED = new Set(["manifest", "criteria", "verdict", "aggregate"]);
 
 /** Validate untrusted panel handoffs at the imperative filesystem boundary. */
 const handler: HookHandler = async (stdin, args) => {
@@ -137,7 +153,7 @@ const handler: HookHandler = async (stdin, args) => {
     return writeCanonicalOutput(JSON.stringify(parsed.value, null, 2) + "\n");
   }
 
-  if (operation === "manifest" || operation === "verdict") {
+  if (operation && RUN_SCOPED.has(operation)) {
     const criterion = argumentValue(args, "--criterion");
     const manifestPath = argumentValue(args, "--manifest");
     const runsRoot = argumentValue(args, "--runs-root");
@@ -169,19 +185,76 @@ const handler: HookHandler = async (stdin, args) => {
 
     const manifest = parsePanelManifest(manifestJson, runDir, expectedLenses.value);
     if (!manifest.ok) return contractError("panel manifest", manifest.errors);
-    const artifacts = artifactErrors(manifest.value, runDir, operation === "verdict");
+    const needsCandidates = operation === "verdict" || operation === "aggregate";
+    const artifacts = artifactErrors(manifest.value, runDir, needsCandidates);
     if (artifacts.length > 0) return contractError("panel artifacts", artifacts);
     if (operation === "manifest") return { kind: "allow" };
-    if (criterion === null) return contractError("judge verdict", ["criterion is required"]);
 
-    const verdict = parseJudgeVerdict(
-      stdin,
-      criterion,
-      manifest.value.candidates.map((candidate) => candidate.filename),
-    );
-    if (!verdict.ok) return contractError("judge verdict", verdict.errors);
+    // The criteria set is DERIVED from the validated digest, not supplied by
+    // the caller — the orchestrator and the finalizer can no longer disagree
+    // about what the criteria are or what order they are in.
+    const criteria = deriveJudgeCriteria(interview.value);
+    const candidateFilenames = manifest.value.candidates.map((candidate) => candidate.filename);
 
-    return writeCanonicalOutput(serializeJudgeVerdict(verdict.value) + "\n");
+    if (operation === "criteria") {
+      return writeCanonicalOutput(JSON.stringify(criteria, null, 2) + "\n");
+    }
+
+    if (operation === "verdict") {
+      if (criterion === null) return contractError("judge verdict", ["criterion is required"]);
+      // Reject a criterion that is not one this run's digest derives, so a
+      // typo'd or stale --criterion cannot produce a verdict that aggregation
+      // will later reject as "unexpected" with no way to tell which step lied.
+      if (!criteria.includes(criterion)) {
+        return contractError("judge verdict", [
+          `criterion must be one of the derived criteria: ${criteria.join(", ")}; received: ${criterion}`,
+        ]);
+      }
+      const verdict = parseJudgeVerdict(stdin, criterion, candidateFilenames);
+      if (!verdict.ok) return contractError("judge verdict", verdict.errors);
+      return writeCanonicalOutput(serializeJudgeVerdict(verdict.value) + "\n");
+    }
+
+    // aggregate — re-read and re-validate every verdict from disk, then rank.
+    let realRunDir: string;
+    try {
+      realRunDir = realpathSync(runDir);
+    } catch (error) {
+      return contractError("panel aggregate", [
+        `cannot resolve run directory ${runDir}: ${error instanceof Error ? error.message : String(error)}`,
+      ]);
+    }
+
+    const verdictsDir = join(realRunDir, "verdicts");
+    const verdicts: JudgeVerdict[] = [];
+    const verdictErrors: string[] = [];
+    for (const [index, expectedCriterion] of criteria.entries()) {
+      const path = verdictPath(runDir, index);
+      const fileError = artifactError(path, verdictsDir);
+      if (fileError) {
+        verdictErrors.push(fileError);
+        continue;
+      }
+      let raw: string;
+      try {
+        raw = readFileSync(path, "utf-8");
+      } catch (error) {
+        verdictErrors.push(`cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
+      const parsed = parseJudgeVerdict(raw, expectedCriterion, candidateFilenames);
+      if (!parsed.ok) {
+        verdictErrors.push(...parsed.errors.map((error) => `${path}: ${error}`));
+        continue;
+      }
+      verdicts.push(parsed.value);
+    }
+    if (verdictErrors.length > 0) return contractError("panel verdicts", verdictErrors);
+
+    const ranked = aggregateVerdicts(verdicts, criteria, candidateFilenames);
+    if (!ranked.ok) return contractError("panel aggregate", ranked.errors);
+
+    return writeCanonicalOutput(serializeRankings(ranked.value, criteria) + "\n");
   }
 
   return { kind: "error", message: USAGE };

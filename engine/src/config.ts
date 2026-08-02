@@ -196,9 +196,12 @@ export const PANEL_LENS_COUNT = 5;
 
 /** Fixed number of adversarial judge agents for `/loom --panel`. Each judge scores
  *  every candidate against exactly one criterion (primary axis, testability bar,
- *  codebase-fit + effort — see commands/loom.md Step 4), so the count is bound to
- *  those three criteria and is NOT user-configurable. Single numeric source of
- *  truth referenced by loom.md and the panel-config test. */
+ *  codebase-fit + effort), so the count is bound to those three criteria and is
+ *  NOT user-configurable. The criteria themselves are derived IN CODE by
+ *  `deriveJudgeCriteria` (core/panel-contract.ts), not by commands/loom.md prose;
+ *  this constant must equal that function's arity, which panel-contract.test.ts
+ *  asserts. Single numeric source of truth referenced by loom.md and the
+ *  panel-config test. */
 export const PANEL_JUDGES_DEFAULT = 3;
 
 /** Clamp a numeric designer count into the viable range

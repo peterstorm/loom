@@ -1,13 +1,20 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
+  CODEBASE_FIT_CRITERION,
+  PRIMARY_AXES,
+  TESTABILITY_BARS,
+  aggregateVerdicts,
+  deriveJudgeCriteria,
   parseInterviewDigest,
   parseInterviewDigestJson,
   parseJudgeVerdict,
   parsePanelManifest,
   selectPanelLenses,
   serializeJudgeVerdict,
+  serializeRankings,
 } from "../../src/core/panel-contract";
+import { PANEL_JUDGES_DEFAULT } from "../../src/config";
 
 const VALID_DIGEST = [
   "**Primary axis:** simplicity",
@@ -241,5 +248,303 @@ describe("parseJudgeVerdict", () => {
     ["ascending score order", verdict({ rankings: [{ ...JSON.parse(verdict()).rankings[0], score: 2 }, { ...JSON.parse(verdict()).rankings[1], score: 8 }] })],
   ])("rejects %s", (_label, raw) => {
     expect(parseJudgeVerdict(raw, "simplicity", CANDIDATES).ok).toBe(false);
+  });
+});
+
+/** Build a validated JudgeVerdict for `criterion` from candidate→score pairs. */
+function verdictFor(criterion: string, scores: readonly (readonly [string, number])[]) {
+  const ordered = [...scores].sort((a, b) => b[1] - a[1]);
+  const parsed = parseJudgeVerdict(
+    JSON.stringify({
+      criterion,
+      rankings: ordered.map(([candidate, score]) => ({
+        candidate,
+        score,
+        fatal_flaw: null,
+        strongest_idea: "an idea",
+      })),
+    }),
+    criterion,
+    ordered.map(([candidate]) => candidate),
+  );
+  if (!parsed.ok) throw new Error(`fixture invalid: ${parsed.errors.join("; ")}`);
+  return parsed.value;
+}
+
+describe("deriveJudgeCriteria", () => {
+  it("derives primary axis, testability bar, then the fixed codebase-fit criterion", () => {
+    const digest = parseInterviewDigest(VALID_DIGEST);
+    expect(digest.ok).toBe(true);
+    if (!digest.ok) return;
+    expect(deriveJudgeCriteria(digest.value)).toEqual([
+      "simplicity",
+      "pure functional core",
+      CODEBASE_FIT_CRITERION,
+    ]);
+  });
+
+  it("derives exactly PANEL_JUDGES_DEFAULT criteria", () => {
+    const digest = parseInterviewDigest(VALID_DIGEST);
+    if (!digest.ok) throw new Error("fixture invalid");
+    expect(deriveJudgeCriteria(digest.value)).toHaveLength(PANEL_JUDGES_DEFAULT);
+  });
+
+  it("yields distinct criteria for every axis/bar combination", () => {
+    // aggregateVerdicts requires distinct criteria; that holds because the
+    // three source vocabularies are pairwise disjoint. Assert it exhaustively
+    // so adding a colliding enum value fails here rather than at runtime.
+    for (const primaryAxis of PRIMARY_AXES) {
+      for (const testabilityBar of TESTABILITY_BARS) {
+        const digest = parseInterviewDigest(
+          VALID_DIGEST
+            .replace("**Primary axis:** simplicity", `**Primary axis:** ${primaryAxis}`)
+            .replace(
+              "**Testability bar:** pure functional core",
+              `**Testability bar:** ${testabilityBar}`,
+            ),
+        );
+        if (!digest.ok) throw new Error(`fixture invalid for ${primaryAxis}/${testabilityBar}`);
+        const criteria = deriveJudgeCriteria(digest.value);
+        expect(new Set(criteria).size, `${primaryAxis}/${testabilityBar}`).toBe(criteria.length);
+      }
+    }
+  });
+});
+
+describe("parseInterviewDigestJson line terminators", () => {
+  it.each(["\n", "\r", "\u2028", "\u2029"])(
+    "rejects a value containing %j instead of mis-blaming another field",
+    (terminator) => {
+      const digest = parseInterviewDigest(VALID_DIGEST);
+      if (!digest.ok) throw new Error("fixture invalid");
+      const parsed = parseInterviewDigestJson({
+        ...digest.value,
+        techPreferences: `TypeScript${terminator}**Observability:** injected`,
+      });
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) {
+        expect(parsed.errors.join(" ")).toContain("Tech preferences");
+        expect(parsed.errors.join(" ")).toContain("line terminator");
+      }
+    },
+  );
+
+  it("still round-trips a valid digest", () => {
+    const digest = parseInterviewDigest(VALID_DIGEST);
+    if (!digest.ok) throw new Error("fixture invalid");
+    const round = parseInterviewDigestJson(digest.value);
+    expect(round.ok).toBe(true);
+    if (round.ok) expect(round.value).toEqual(digest.value);
+  });
+});
+
+describe("parseJudgeVerdict rankings never contain NaN", () => {
+  it("omits an entry whose score is not an integer 0-10", () => {
+    const raw = verdict({
+      rankings: [
+        { ...JSON.parse(verdict()).rankings[0], score: 8.5 },
+        JSON.parse(verdict()).rankings[1],
+      ],
+    });
+    const parsed = parseJudgeVerdict(raw, "simplicity", CANDIDATES);
+    expect(parsed.ok).toBe(false);
+  });
+
+  it("property: a rejected verdict never yields a value, and an accepted one is NaN-free", () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(fc.integer(), fc.double(), fc.constant("x"), fc.constant(null)),
+        (score) => {
+          const raw = verdict({
+            rankings: [
+              { ...JSON.parse(verdict()).rankings[0], score },
+              JSON.parse(verdict()).rankings[1],
+            ],
+          });
+          const parsed = parseJudgeVerdict(raw, "simplicity", CANDIDATES);
+          if (!parsed.ok) return true;
+          return parsed.value.rankings.every((r) => Number.isInteger(r.score));
+        },
+      ),
+    );
+  });
+});
+
+describe("aggregateVerdicts", () => {
+  const CRITERIA = ["simplicity", "pure functional core", CODEBASE_FIT_CRITERION] as const;
+  const A = CANDIDATES[0];
+  const B = CANDIDATES[1];
+
+  it("ranks by total score across all verdicts", () => {
+    const ranked = aggregateVerdicts(
+      [
+        verdictFor(CRITERIA[0], [[A, 3], [B, 9]]),
+        verdictFor(CRITERIA[1], [[A, 4], [B, 8]]),
+        verdictFor(CRITERIA[2], [[A, 5], [B, 1]]),
+      ],
+      CRITERIA,
+      CANDIDATES,
+    );
+    expect(ranked.ok).toBe(true);
+    if (!ranked.ok) return;
+    expect(ranked.value.map((r) => r.candidate)).toEqual([B, A]);
+    expect(ranked.value[0]!.totalScore).toBe(18);
+    expect(ranked.value[1]!.totalScore).toBe(12);
+  });
+
+  it("matches verdicts by criterion NAME, not argument order", () => {
+    const inOrder = aggregateVerdicts(
+      [
+        verdictFor(CRITERIA[0], [[A, 9], [B, 1]]),
+        verdictFor(CRITERIA[1], [[A, 2], [B, 8]]),
+        verdictFor(CRITERIA[2], [[A, 5], [B, 5]]),
+      ],
+      CRITERIA,
+      CANDIDATES,
+    );
+    const shuffled = aggregateVerdicts(
+      [
+        verdictFor(CRITERIA[2], [[A, 5], [B, 5]]),
+        verdictFor(CRITERIA[0], [[A, 9], [B, 1]]),
+        verdictFor(CRITERIA[1], [[A, 2], [B, 8]]),
+      ],
+      CRITERIA,
+      CANDIDATES,
+    );
+    expect(inOrder.ok && shuffled.ok).toBe(true);
+    if (!inOrder.ok || !shuffled.ok) return;
+    expect(shuffled.value).toEqual(inOrder.value);
+  });
+
+  it("breaks a total tie on the first criterion, reproducing the documented rule", () => {
+    // Totals tie at 12. A wins the primary axis (9 > 3), so A ranks first even
+    // though B wins the testability criterion.
+    const ranked = aggregateVerdicts(
+      [
+        verdictFor(CRITERIA[0], [[A, 9], [B, 3]]),
+        verdictFor(CRITERIA[1], [[A, 2], [B, 8]]),
+        verdictFor(CRITERIA[2], [[A, 1], [B, 1]]),
+      ],
+      CRITERIA,
+      CANDIDATES,
+    );
+    expect(ranked.ok).toBe(true);
+    if (ranked.ok) expect(ranked.value.map((r) => r.candidate)).toEqual([A, B]);
+  });
+
+  it("falls back to the lexicographically smallest filename on a full tie", () => {
+    const ranked = aggregateVerdicts(
+      CRITERIA.map((criterion) => verdictFor(criterion, [[A, 5], [B, 5]])),
+      CRITERIA,
+      CANDIDATES,
+    );
+    expect(ranked.ok).toBe(true);
+    if (!ranked.ok) return;
+    const sorted = [...CANDIDATES].sort();
+    expect(ranked.value.map((r) => r.candidate)).toEqual(sorted);
+  });
+
+  it.each([
+    [
+      "a duplicated criterion",
+      () => [
+        verdictFor(CRITERIA[0], [[A, 5], [B, 5]]),
+        verdictFor(CRITERIA[0], [[A, 5], [B, 5]]),
+        verdictFor(CRITERIA[2], [[A, 5], [B, 5]]),
+      ],
+    ],
+    [
+      "a missing criterion",
+      () => [
+        verdictFor(CRITERIA[0], [[A, 5], [B, 5]]),
+        verdictFor(CRITERIA[1], [[A, 5], [B, 5]]),
+      ],
+    ],
+    [
+      "an unexpected criterion",
+      () => [
+        verdictFor(CRITERIA[0], [[A, 5], [B, 5]]),
+        verdictFor(CRITERIA[1], [[A, 5], [B, 5]]),
+        verdictFor("performance", [[A, 5], [B, 5]]),
+      ],
+    ],
+  ])("rejects %s", (_label, build) => {
+    expect(aggregateVerdicts(build(), CRITERIA, CANDIDATES).ok).toBe(false);
+  });
+
+  it("rejects a verdict that does not cover every expected candidate", () => {
+    const partial = verdictFor(CRITERIA[0], [[A, 5]]);
+    const ranked = aggregateVerdicts(
+      [partial, verdictFor(CRITERIA[1], [[A, 5], [B, 5]]), verdictFor(CRITERIA[2], [[A, 5], [B, 5]])],
+      CRITERIA,
+      CANDIDATES,
+    );
+    expect(ranked.ok).toBe(false);
+    if (!ranked.ok) expect(ranked.errors.join(" ")).toContain("exactly once");
+  });
+
+  it.each([
+    ["non-distinct criteria", ["a", "a"], ["x.md", "y.md"]],
+    ["empty criteria", [], ["x.md"]],
+    ["non-distinct candidates", ["a"], ["x.md", "x.md"]],
+    ["empty candidates", ["a"], []],
+  ])("rejects %s", (_label, criteria, candidates) => {
+    expect(aggregateVerdicts([], criteria as string[], candidates as string[]).ok).toBe(false);
+  });
+
+  it("property: ranking is a total order — deterministic under input permutation", () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.integer({ min: 0, max: 10 }), { minLength: 3, maxLength: 3 }),
+        fc.array(fc.integer({ min: 0, max: 10 }), { minLength: 3, maxLength: 3 }),
+        (scoresA, scoresB) => {
+          const build = (order: readonly number[]) =>
+            aggregateVerdicts(
+              order.map((i) => verdictFor(CRITERIA[i]!, [[A, scoresA[i]!], [B, scoresB[i]!]])),
+              CRITERIA,
+              CANDIDATES,
+            );
+          const forward = build([0, 1, 2]);
+          const reverse = build([2, 1, 0]);
+          if (!forward.ok || !reverse.ok) return false;
+          return JSON.stringify(forward.value) === JSON.stringify(reverse.value);
+        },
+      ),
+    );
+  });
+});
+
+describe("serializeRankings", () => {
+  it("emits rank, total, and per-criterion scores as an array of pairs", () => {
+    const CRITERIA = ["simplicity", "pure functional core", CODEBASE_FIT_CRITERION];
+    const ranked = aggregateVerdicts(
+      [
+        verdictFor(CRITERIA[0]!, [[CANDIDATES[0], 9], [CANDIDATES[1], 1]]),
+        verdictFor(CRITERIA[1]!, [[CANDIDATES[0], 9], [CANDIDATES[1], 1]]),
+        verdictFor(CRITERIA[2]!, [[CANDIDATES[0], 9], [CANDIDATES[1], 1]]),
+      ],
+      CRITERIA,
+      CANDIDATES,
+    );
+    if (!ranked.ok) throw new Error("fixture invalid");
+    const parsed = JSON.parse(serializeRankings(ranked.value, CRITERIA));
+    expect(parsed.criteria).toEqual(CRITERIA);
+    expect(parsed.ranking[0]).toEqual({
+      rank: 1,
+      candidate: CANDIDATES[0],
+      total_score: 27,
+      scores: CRITERIA.map((criterion) => ({ criterion, score: 9 })),
+    });
+  });
+
+  it("survives the finalize-template substitution gate (no residual placeholders)", () => {
+    const CRITERIA = ["simplicity", "pure functional core", CODEBASE_FIT_CRITERION];
+    const ranked = aggregateVerdicts(
+      CRITERIA.map((c) => verdictFor(c, [[CANDIDATES[0], 5], [CANDIDATES[1], 5]])),
+      CRITERIA,
+      CANDIDATES,
+    );
+    if (!ranked.ok) throw new Error("fixture invalid");
+    expect(serializeRankings(ranked.value, CRITERIA)).not.toMatch(/\{[A-Za-z_][A-Za-z0-9_]*\}/);
   });
 });

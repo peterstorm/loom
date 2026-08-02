@@ -85,6 +85,126 @@ describe("panel-contract helper CLI", () => {
 
   afterEach(() => rmSync(tmp, { recursive: true, force: true }));
 
+  /** Write verdict-N.json for each criterion with the given candidate scores. */
+  function writeVerdicts(
+    scoresByCriterion: readonly (readonly (readonly [string, number])[])[],
+    criteria: readonly string[] = ["simplicity", "pure functional core", "codebase fit + effort"],
+  ) {
+    mkdirSync(join(runDir, "verdicts"), { recursive: true });
+    criteria.forEach((criterion, index) => {
+      const ordered = [...(scoresByCriterion[index] ?? [])].sort((a, b) => b[1] - a[1]);
+      writeFileSync(
+        join(runDir, "verdicts", `verdict-${index + 1}.json`),
+        JSON.stringify({
+          criterion,
+          rankings: ordered.map(([candidate, score]) => ({
+            candidate,
+            score,
+            fatal_flaw: null,
+            strongest_idea: "an idea",
+          })),
+        }),
+      );
+    });
+  }
+
+  const A = "candidate-simplicity-first.md";
+  const B = "candidate-type-driven-fp.md";
+  const RUN_ARGS = () => ["--runs-root", runsRoot, "--manifest", manifestPath, "--designers", "2"];
+
+  it("derives the judge criteria from the validated digest", () => {
+    const result = run(tmp, ["criteria", ...RUN_ARGS()]);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual([
+      "simplicity",
+      "pure functional core",
+      "codebase fit + effort",
+    ]);
+  });
+
+  it("rejects a --criterion that the digest does not derive", () => {
+    const verdict = JSON.stringify({
+      criterion: "performance",
+      rankings: [
+        { candidate: A, score: 9, fatal_flaw: null, strongest_idea: "x" },
+        { candidate: B, score: 8, fatal_flaw: null, strongest_idea: "y" },
+      ],
+    });
+    const result = run(
+      tmp,
+      ["verdict", "--criterion", "performance", ...RUN_ARGS()],
+      verdict,
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("must be one of the derived criteria");
+  });
+
+  it("aggregates verdicts from disk into a deterministic ranking", () => {
+    writeVerdicts([
+      [[A, 3], [B, 9]],
+      [[A, 4], [B, 8]],
+      [[A, 5], [B, 1]],
+    ]);
+    const result = run(tmp, ["aggregate", ...RUN_ARGS()]);
+    expect(result.status).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.ranking.map((entry: { candidate: string }) => entry.candidate)).toEqual([B, A]);
+    expect(parsed.ranking[0].rank).toBe(1);
+    expect(parsed.ranking[0].total_score).toBe(18);
+    expect(parsed.ranking[1].total_score).toBe(12);
+  });
+
+  it("rejects a verdict file written into the wrong criterion slot", () => {
+    // verdict-1.json must carry criterion 1. Swapping slots 1 and 2 is exactly
+    // the positional mistake the old prose contract could not detect.
+    writeVerdicts([
+      [[A, 5], [B, 5]],
+      [[A, 5], [B, 5]],
+      [[A, 5], [B, 5]],
+    ], ["pure functional core", "simplicity", "codebase fit + effort"]);
+    const result = run(tmp, ["aggregate", ...RUN_ARGS()]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("criterion must equal");
+  });
+
+  it("refuses to aggregate when a verdict file is missing or empty", () => {
+    writeVerdicts([
+      [[A, 5], [B, 5]],
+      [[A, 5], [B, 5]],
+      [[A, 5], [B, 5]],
+    ]);
+    rmSync(join(runDir, "verdicts", "verdict-3.json"));
+    const missing = run(tmp, ["aggregate", ...RUN_ARGS()]);
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain("panel verdicts contract failed");
+
+    writeFileSync(join(runDir, "verdicts", "verdict-3.json"), "");
+    const empty = run(tmp, ["aggregate", ...RUN_ARGS()]);
+    expect(empty.status).toBe(1);
+    expect(empty.stderr).toContain("non-empty regular file");
+  });
+
+  it("rejects a symlinked verdict file", () => {
+    writeVerdicts([
+      [[A, 5], [B, 5]],
+      [[A, 5], [B, 5]],
+      [[A, 5], [B, 5]],
+    ]);
+    const outside = join(tmp, "outside-verdict.json");
+    writeFileSync(outside, readFileSync(join(runDir, "verdicts", "verdict-3.json"), "utf-8"));
+    rmSync(join(runDir, "verdicts", "verdict-3.json"));
+    symlinkSync(outside, join(runDir, "verdicts", "verdict-3.json"));
+    const result = run(tmp, ["aggregate", ...RUN_ARGS()]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("symbolic link");
+  });
+
+  it("rejects an unknown operation with usage", () => {
+    const result = run(tmp, ["rank", ...RUN_ARGS()]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Usage: helper panel-contract");
+  });
+
   it("canonicalizes a valid interview and fails malformed input with diagnostics", () => {
     const valid = run(tmp, ["interview"], DIGEST);
     expect(valid.status).toBe(0);

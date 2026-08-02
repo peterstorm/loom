@@ -273,10 +273,16 @@ Stop on failure. The helper binds run id, interview paths, allowed unique lenses
 
 ### Step 4 — Judges (parallel, headless)
 
-Derive exactly K criteria from validated interview JSON, in this order:
-1. `primaryAxis` (verbatim value);
-2. `testabilityBar` (verbatim value);
-3. `codebase fit + effort`.
+**Get the exact ordered criteria from the helper** — do not derive them by hand:
+
+```bash
+bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-contract criteria \
+  --runs-root ".claude/specs/{date_slug}/panel-runs" \
+  --manifest "<panel-run-dir>/manifest.json" \
+  --designers "<N>"
+```
+
+It emits a JSON array of exactly K criteria derived from the validated digest: `primaryAxis` (verbatim), `testabilityBar` (verbatim), then the fixed `codebase fit + effort`. This is the single source of truth for both the criteria and their order — the `verdict` operation rejects any `--criterion` outside this set, and `aggregate` re-derives the same list, so the judge stage and the finalizer can no longer disagree.
 
 **Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-judge.md`. For each criterion, substitute `{criterion}`, `{candidate_manifest_path}`, and `{interview_json_path}`.
 
@@ -291,13 +297,27 @@ printf '%s' "$RAW_JUDGE_OUTPUT" | bun "{LOOM_DIR}/engine/src/cli.ts" helper pane
   > "<panel-run-dir>/verdicts/verdict-1.json"
 ```
 
-Perform each validation in the same Bash call that defines the shown shell variables; repeat with `verdict-2.json` and `verdict-3.json` for criteria 2 and 3. The helper requires valid JSON, exact criterion identity, every manifest candidate exactly once, no foreign/duplicate candidates, integer scores 0–10 in non-increasing order, `fatal_flaw: string | null`, and non-empty `strongest_idea`; it strips curly braces from validated prose and emits canonical JSON. Re-spawn only an invalid judge with diagnostics, once; if still invalid, stop. Require all three verdict files to be non-empty, then combine those exact paths in criterion order with `jq -s`, not a directory glob.
+Perform each validation in the same Bash call that defines the shown shell variables; repeat with `verdict-2.json` and `verdict-3.json` for criteria 2 and 3 — **`verdict-N.json` must hold criterion N**, and the helper enforces that when aggregating, so a swapped slot is a hard error rather than a silent mis-ranking. The helper requires valid JSON, a criterion drawn from the derived set, exact criterion identity, every manifest candidate exactly once, no foreign/duplicate candidates, integer scores 0–10 in non-increasing order, `fatal_flaw: string | null`, and non-empty `strongest_idea`; it strips curly braces from validated prose and emits canonical JSON. Re-spawn only an invalid judge with diagnostics, once; if still invalid, stop. Then combine those exact paths in criterion order with `jq -s`, not a directory glob.
+
+### Step 4.5 — Aggregate (deterministic, no agent)
+
+Compute the ranking in code, not in the finalizer's head:
+
+```bash
+bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-contract aggregate \
+  --runs-root ".claude/specs/{date_slug}/panel-runs" \
+  --manifest "<panel-run-dir>/manifest.json" \
+  --designers "<N>" \
+  > "<panel-run-dir>/ranking.json"
+```
+
+`aggregate` re-reads and re-validates **every** verdict file from the run directory (it does not trust Step 4's output), matches each verdict to its criterion **by name**, verifies the criteria set is exactly the derived K with no duplicates or omissions, and emits the ranking sorted by total score → each criterion in order → lexical filename. Any failure is fatal: stop and report. Require `ranking.json` to be non-empty before continuing.
 
 ### Step 5 — Finalize (interactive → writes plan.md)
 
-**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-finalize.md`. Substitute `{feature_description}`, `{spec_file_path}`, `{interview_file_path}`, `{candidate_manifest_path}`, `{judge_verdicts}` (the canonical three-verdict JSON array, inlined), `{date_slug}`, and `{loom_dir}`.
+**Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-finalize.md`. Substitute `{feature_description}`, `{spec_file_path}`, `{interview_file_path}`, `{candidate_manifest_path}`, `{judge_verdicts}` (the canonical three-verdict JSON array, inlined), `{panel_ranking}` (the contents of `ranking.json`, inlined), `{date_slug}`, and `{loom_dir}`.
 
-**Spawn `architecture-agent`** with this template. It deterministically ranks candidates by total score, then primary-axis score, then testability score, then lexical filename; presents the top 2–3 with summary/trade-offs/testability/codebase-fit/effort; synthesizes the user's choice; writes `.claude/plans/{date_slug}.md` with `### AD-1: Approach selection (panel)`; and commits.
+**Spawn `architecture-agent`** with this template. It reads the already-computed ranking (it does not rank candidates itself); presents the top 2–3 with summary/trade-offs/testability/codebase-fit/effort; synthesizes the user's choice; writes `.claude/plans/{date_slug}.md` with `### AD-1: Approach selection (panel)`; and commits.
 
 **From here, the flow rejoins standard mode.** Its SubagentStop advances to plan-alignment, or directly to decompose when plan-alignment was skipped.
 

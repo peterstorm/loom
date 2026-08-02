@@ -2,7 +2,7 @@
 
 Template for spawning **architecture-agent** (finalize mode) in `/loom --panel`. The agent name is load-bearing: only architecture-agent's SubagentStop advances the phase. All template variables must be substituted before use.
 
-Variables: `{feature_description}`, `{spec_file_path}`, `{interview_file_path}`, `{candidate_manifest_path}`, `{judge_verdicts}`, `{date_slug}`, `{loom_dir}`.
+Variables: `{feature_description}`, `{spec_file_path}`, `{interview_file_path}`, `{candidate_manifest_path}`, `{judge_verdicts}`, `{panel_ranking}`, `{date_slug}`, `{loom_dir}`.
 
 Uses the design knowledge from the preloaded `architecture-tech-lead` skill (FP, DDD, testability, stack-specific patterns).
 
@@ -30,6 +30,12 @@ You are a subagent — Write/Edit is allowed. Do NOT read `.claude/hooks/` or `.
 
 These verdicts were schema-validated against the exact manifest candidate set and sanitized before inlining.
 
+## Computed panel ranking
+
+{panel_ranking}
+
+This ranking was computed by `helper panel-contract aggregate`, which re-read and re-validated every verdict from the run directory, matched each to its criterion **by name**, and applied the tie-break below deterministically. It is authoritative — do not recompute it.
+
 ## Process
 
 ### 1. Read exact inputs
@@ -38,16 +44,13 @@ These verdicts were schema-validated against the exact manifest candidate set an
 - Read the manifest at {candidate_manifest_path}, then read exactly its `candidates[].path` files. Never discover candidates by scanning a directory.
 - Cross-reference the validated verdicts above.
 
-### 2. Aggregate deterministically
+### 2. Read the computed ranking — do NOT recompute it
 
-Compute each candidate's total score across all three verdicts. Rank by:
+The **Computed panel ranking** above is already sorted best → worst, with `rank`, `total_score`, and per-criterion `scores`. Its `ranking[0]` is the panel recommendation. Use it as given.
 
-1. highest total score;
-2. on a tie, highest score from the primary-axis verdict (the first verdict);
-3. then highest testability score (the second verdict);
-4. then lexicographically smallest candidate filename.
+For reference, the rule the helper applied is: highest total score; on a tie, each criterion in order (the first being the primary axis, the second the testability bar); then lexicographically smallest candidate filename. Do not invent another weighting rule, and do not re-derive the ranking by hand — hand arithmetic over the verdicts is exactly what this step replaced.
 
-This ordering defines "top-ranked" and the panel recommendation. Do not invent another weighting rule.
+If the ranking is missing, empty, or lists candidates absent from the manifest, **stop and report the error** rather than falling back to computing it yourself.
 
 ### 3. Approach gate — MANDATORY
 
@@ -65,7 +68,7 @@ Read `{loom_dir}/commands/templates/phase-architecture.md` (§5–6), `{loom_dir
 
 ### 6. Record the panel outcome — MANDATORY AD block
 
-In `## Architectural Decisions`, add `### AD-1: Approach selection (panel)` with: the exact candidate manifest path; run id and lenses from the manifest; one-line verdict summary per criterion; aggregate ranking and tie-break (if used); the user's choice; the panel recommendation if different; and grafted `strongest_idea`s. Canonical verdict files remain in the run directory, while AD-1 is the durable plan-level summary.
+In `## Architectural Decisions`, add `### AD-1: Approach selection (panel)` with: the exact candidate manifest path; run id and lenses from the manifest; one-line verdict summary per criterion; the computed ranking verbatim (candidate, rank, total score); the user's choice; the panel recommendation if different; and grafted `strongest_idea`s. Canonical verdict files and the aggregate ranking remain in the run directory, while AD-1 is the durable plan-level summary.
 
 Commit per standard §6.
 

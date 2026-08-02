@@ -47,6 +47,7 @@ const TEMPLATES: Record<string, string[]> = {
     "interview_file_path",
     "candidate_manifest_path",
     "judge_verdicts",
+    "panel_ranking",
     "date_slug",
     "loom_dir",
   ],

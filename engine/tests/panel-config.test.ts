@@ -249,9 +249,9 @@ describe("PANEL_JUDGES_DEFAULT", () => {
   });
 
   it("is fixed at 3 — one judge per criterion (primary axis, testability, fit+effort)", () => {
-    // K is bound to the three criteria derived in commands/loom.md Step 4, not a
-    // user-tunable knob. Pinning it here fails CI if the count drifts from the
-    // criteria the orchestrator prose relies on.
+    // K is bound to the three criteria `deriveJudgeCriteria` returns, not a
+    // user-tunable knob. Pinning it here fails CI if the count drifts; the
+    // arity is asserted directly against the function in panel-contract.test.ts.
     expect(PANEL_JUDGES_DEFAULT).toBe(3);
   });
 });
