@@ -51,7 +51,7 @@ import * as git from "../engine/src/utils/git";
 // Linter integration (PostEdit lint via tool_result)
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
 import { lintFile } from "../engine/src/linter/index";
-import type { PiMessage } from "./loom-bridge";
+import { messagesToClaudeJsonl, type PiMessage } from "./transcript-adapter";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const AGENTS_DIR = join(PACKAGE_ROOT, "agents");
@@ -440,7 +440,10 @@ export default function (pi: ExtensionAPI) {
         const priorVerdict = task.test_result?.verdict;
         if (priorVerdict === "trusted-pass" || priorVerdict === "trusted-fail") continue;
 
-        const bashOutput = parseBashTestOutput(transcriptText);
+        // parseBashTestOutput deliberately accepts only paired Bash tool calls
+        // and results in Claude-compatible JSONL. Passing flattened prose here
+        // silently discards every Pi test run as spoofable free text.
+        const bashOutput = parseBashTestOutput(messagesToClaudeJsonl(resultMessages));
         const testEvidence = extractTestEvidence(bashOutput);
 
         // files_modified feeds lint-wave-gate's target collection (it

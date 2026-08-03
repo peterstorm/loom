@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { messagesToClaudeJsonl, type PiMessage } from "./transcript-adapter";
 
 // --- Agent sets (mirrors loom engine/src/config.ts) ---
 
@@ -43,35 +44,7 @@ const PHASE_AGENTS = new Set([
 
 const LOOM_AGENTS = new Set([...IMPL_AGENTS, ...PHASE_AGENTS]);
 
-// --- Tool name mapping: pi (lowercase) -> Claude Code (title-case) ---
-
-const TOOL_NAME_MAP: Record<string, string> = {
-  bash: "Bash",
-  write: "Write",
-  edit: "Edit",
-  read: "Read",
-  find: "Find",
-  grep: "Grep",
-  ls: "Ls",
-};
-
 // --- Types ---
-
-export interface PiContentBlock {
-  type: string;
-  text?: string;
-  id?: string;
-  name?: string;
-  arguments?: Record<string, unknown>;
-}
-
-export interface PiMessage {
-  role: string;
-  content: PiContentBlock[];
-  toolCallId?: string;
-  toolName?: string;
-  isError?: boolean;
-}
 
 interface SingleResult {
   agent: string;
@@ -85,59 +58,6 @@ interface SingleResult {
 interface SubagentDetails {
   mode: "single" | "parallel" | "chain";
   results: SingleResult[];
-}
-
-// --- Transcript conversion ---
-
-function messagesToJsonl(messages: PiMessage[]): string {
-  const lines: string[] = [];
-
-  for (const msg of messages) {
-    if (msg.role === "assistant") {
-      const content = (msg.content || []).map((block) => {
-        if (block.type === "toolCall") {
-          return {
-            type: "tool_use",
-            name: TOOL_NAME_MAP[block.name ?? ""] ?? block.name ?? "",
-            id: block.id ?? "",
-            input: block.arguments ?? {},
-          };
-        }
-        if (block.type === "text") {
-          return { type: "text", text: block.text ?? "" };
-        }
-        return block;
-      });
-      lines.push(JSON.stringify({ message: { role: "assistant", content } }));
-    } else if (msg.role === "toolResult") {
-      const resultContent = (msg.content || []).map((block) => {
-        if (block.type === "text") return { type: "text", text: block.text ?? "" };
-        return block;
-      });
-      lines.push(
-        JSON.stringify({
-          message: {
-            role: "user",
-            content: [
-              {
-                type: "tool_result",
-                tool_use_id: msg.toolCallId ?? "",
-                content: resultContent,
-              },
-            ],
-          },
-        }),
-      );
-    } else if (msg.role === "user") {
-      const content = (msg.content || []).map((block) => {
-        if (block.type === "text") return { type: "text", text: block.text ?? "" };
-        return block;
-      });
-      lines.push(JSON.stringify({ message: { role: "user", content } }));
-    }
-  }
-
-  return lines.join("\n") + "\n";
 }
 
 // --- Loom directory discovery ---
@@ -197,7 +117,7 @@ export default function (pi: ExtensionAPI) {
       let tmpDir: string | null = null;
 
       try {
-        const jsonl = messagesToJsonl(result.messages);
+        const jsonl = messagesToClaudeJsonl(result.messages);
         tmpDir = mkdtempSync(join(tmpdir(), "loom-bridge-"));
         const transcriptPath = join(tmpDir, "transcript.jsonl");
         writeFileSync(transcriptPath, jsonl, { mode: 0o600 });
