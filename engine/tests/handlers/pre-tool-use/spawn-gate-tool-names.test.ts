@@ -77,7 +77,7 @@ const GATES: ReadonlyArray<{
     name: "validate-agent-model",
     handler: validateAgentModel,
     toolInput: { subagent_type: "loom:code-implementer-agent", prompt: "Implement T9" },
-    expect: "missing `model` parameter",
+    expect: "inheritance is forbidden",
   },
   {
     name: "validate-agent-skill",
@@ -106,7 +106,7 @@ describe("spawn gates honour every SUBAGENT_SPAWN_TOOLS name", () => {
     mkdirSync(join(fakeHome, ".claude/agents"), { recursive: true });
     writeFileSync(
       join(fakeHome, ".claude/agents", "code-implementer-agent.md"),
-      "---\nname: code-implementer-agent\nmodel: sonnet\n---\n",
+      "---\nname: code-implementer-agent\nmodel-profile: implementation\nmodel: opus\n---\n",
     );
     process.env.HOME = fakeHome;
 

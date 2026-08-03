@@ -3,6 +3,7 @@
  */
 
 import { match } from "ts-pattern";
+import type { TaskProof } from "./core/proof-obligations";
 
 // --- Hook Result (discriminated union) ---
 
@@ -216,6 +217,10 @@ export interface Task {
   depends_on: readonly string[];
   spec_anchors?: string[];
   new_tests_required?: boolean;
+  /** Exact architecture context selected for this Task by decompose. */
+  plan_context?: string;
+  /** Engine-authored proof aggregate. New graphs always carry it. */
+  proof?: TaskProof;
   /** Files this task creates/modifies (decompose contract); older graphs may lack it */
   file_list?: string[];
   /** Test outcome + trust provenance; absent until an impl agent completes. */

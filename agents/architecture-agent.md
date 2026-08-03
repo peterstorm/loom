@@ -1,5 +1,7 @@
 ---
 name: architecture-agent
+model-profile: architecture-finalize
+model: opus
 description: Use as a subagent for architectural design tasks. Runs a full interview, then an approach gate, then writes the plan. In `/loom --panel` finalize mode the interview is already done and is skipped. Preloads architecture-tech-lead skill for domain knowledge. Produces design output, not code.
 color: purple
 skills:

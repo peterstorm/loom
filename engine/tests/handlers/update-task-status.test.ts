@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import updateTaskStatus, { extractTestEvidence, analyzeNewTests, isMachineBound, resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
 import { legacyTestsPassedNote } from "../../src/types";
+import type { TaskGraph } from "../../src/types";
 
 describe("update-task-status — malformed stdin guard (directly-registered route)", () => {
   it("returns a contextual error naming that status/evidence was NOT updated, not a bare throw", async () => {
@@ -424,7 +425,7 @@ describe("update-task-status — transcript path resolution", () => {
   async function makeSession(opts: { plantTranscript: boolean }): Promise<{
     session: string;
     agentId: string;
-    read: () => { tasks: Array<{ id: string; status: string }> };
+    read: () => TaskGraph;
   }> {
     const { SUBAGENT_DIR } = await import("../../src/config");
     const { projectSlug } = await import("../../src/utils/agent-transcript-path");
@@ -482,7 +483,7 @@ describe("update-task-status — transcript path resolution", () => {
       rmSync(pointer, { force: true });
     });
 
-    return { session, agentId, read: () => JSON.parse(readFileSync(statePath, "utf-8")) };
+    return { session, agentId, read: (): TaskGraph => JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph };
   }
 
   it("resolves the task from the DERIVED transcript when the payload names none", async () => {
@@ -497,7 +498,8 @@ describe("update-task-status — transcript path resolution", () => {
 
     expect(result.kind).toBe("passthrough");
     const task = s.read().tasks.find((t) => t.id === "T1");
-    expect(task?.status, "T1 stayed pending — the transcript was on disk and went unread").toBe("implemented");
+    expect(task?.status, "untrusted transcript evidence must not claim implementation").toBe("pending");
+    expect(task?.proof?.state).toBe("failed");
   });
 
   it("says out loud that nothing was recorded when there is no transcript and nothing executing", async () => {

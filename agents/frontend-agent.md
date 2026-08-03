@@ -1,5 +1,7 @@
 ---
 name: frontend-agent
+model-profile: implementation
+model: opus
 description: Next.js frontend agent for App Router, React Server Components, distinctive UI design
 color: pink
 skills:

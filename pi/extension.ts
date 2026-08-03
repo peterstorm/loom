@@ -7,7 +7,7 @@
 
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
+import { existsSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 
@@ -17,6 +17,8 @@ import { guardStateFile } from "../engine/src/core/guard-state-file";
 import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
 import { validateTaskExecution } from "../engine/src/core/validate-task-execution";
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
+import { expectedSpawnModel, parsePiSpawnItems } from "../engine/src/core/model-profiles";
+import { TEST_COMMAND_PATTERNS } from "../engine/src/core/tool-vocabulary";
 
 // Engine parsers (format-aware)
 import { parseFilesModified } from "../engine/src/parsers/parse-files-modified";
@@ -56,6 +58,53 @@ import { messagesToClaudeJsonl, type PiMessage } from "./transcript-adapter";
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const AGENTS_DIR = join(PACKAGE_ROOT, "agents");
 const SKILLS_DIR = join(PACKAGE_ROOT, "skills");
+
+function piAgentModel(agent: string): string | null {
+  const agentRoot = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
+  const candidates = [
+    join(process.cwd(), ".pi", "agents", `${agent}.md`),
+    join(agentRoot, "agents", `${agent}.md`),
+  ];
+  for (const path of candidates) {
+    if (!existsSync(path)) continue;
+    try {
+      const match = readFileSync(path, "utf-8").match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      const model = match?.[1]?.match(/^model:\s*(\S+)\s*$/m)?.[1];
+      if (model) return model;
+    } catch {
+      // Try the next definition; the guard below fails closed if none parse.
+    }
+  }
+  return null;
+}
+
+/** Structured Pi tool results are weaker than Loom's evidence ledger but
+ * stronger than flattened prose: the model cannot fabricate a toolResult
+ * message or its `isError` bit. Pair only real test-command calls/results. */
+function piStructuredTestResult(messages: readonly PiMessage[]): { passed: boolean; evidence: string } | null {
+  const testCalls = new Set<string>();
+  let latest: { passed: boolean; evidence: string } | null = null;
+  for (const message of messages) {
+    if (message.role === "assistant") {
+      for (const block of message.content ?? []) {
+        if (block.type !== "toolCall" || block.name?.toLowerCase() !== "bash" || !block.id) continue;
+        const command = typeof block.arguments?.command === "string" ? block.arguments.command : "";
+        if (TEST_COMMAND_PATTERNS.some((pattern) => command.toLowerCase().includes(pattern))) {
+          testCalls.add(block.id);
+        }
+      }
+      continue;
+    }
+    if (message.role !== "toolResult" || !message.toolCallId || !testCalls.has(message.toolCallId)) continue;
+    const text = (message.content ?? [])
+      .filter((block) => block.type === "text")
+      .map((block) => block.text ?? "")
+      .join("\n");
+    const parsed = extractTestEvidence(text);
+    latest = { passed: message.isError !== true && parsed.passed, evidence: parsed.evidence };
+  }
+  return latest;
+}
 
 export default function (pi: ExtensionAPI) {
   // ─── Resource Discovery ───────────────────────────────────────────────
@@ -115,39 +164,44 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // Subagent tool → phase and task validation
+      // Subagent tool → parse and preflight EVERY single/parallel/chain item
+      // before any tracking mutation. A malformed sibling blocks the whole
+      // batch; otherwise one parallel item could bypass the gates that the
+      // top-level `agent`/`task` fields never represented.
       if (event.toolName === "subagent") {
-        const agent = (event.input as Record<string, unknown>).agent as string | undefined;
-        const task = (event.input as Record<string, unknown>).task as string | undefined;
+        currentGuard = "parse-pi-subagent-batch";
+        const parsedItems = parsePiSpawnItems(event.input);
+        if (!parsedItems.ok) return { block: true, reason: parsedItems.error.message };
 
-        if (agent && task) {
-          // Phase order validation
+        for (const item of parsedItems.value) {
+          const expected = expectedSpawnModel(item.agent, "pi");
+          const actual = piAgentModel(item.agent);
+          if (!expected.ok || actual !== expected.value) {
+            return {
+              block: true,
+              reason: expected.ok
+                ? `Pi agent '${item.agent}' must use explicit model '${expected.value}', got ${JSON.stringify(actual)}. Run scripts/sync-pi-agents.sh; parent-model inheritance is forbidden.`
+                : expected.error.message,
+            };
+          }
+
           currentGuard = "validate-phase-order";
-          const phaseResult = validatePhaseOrder({
-            agentType: agent,
-            prompt: task,
-          });
-          if (phaseResult.kind === "block") {
-            return { block: true, reason: phaseResult.message };
-          }
+          const phaseResult = validatePhaseOrder({ agentType: item.agent, prompt: item.task });
+          if (phaseResult.kind === "block") return { block: true, reason: phaseResult.message };
 
-          // Template substitution check
           currentGuard = "validate-template-substitution";
-          const templateResult = validateTemplateSubstitution(task);
-          if (templateResult.kind === "block") {
-            return { block: true, reason: templateResult.message };
-          }
+          const templateResult = validateTemplateSubstitution(item.task);
+          if (templateResult.kind === "block") return { block: true, reason: templateResult.message };
 
-          // Task execution validation (wave order, deps, review gates)
           currentGuard = "validate-task-execution";
-          const taskResult = await validateTaskExecution({
-            prompt: task,
-            description: (event.input as Record<string, unknown>).description as string ?? "",
-          });
-          if (taskResult.kind === "block") {
-            return { block: true, reason: taskResult.message };
-          }
+          const taskResult = await validateTaskExecution({ prompt: item.task, description: "" });
+          if (taskResult.kind === "block") return { block: true, reason: taskResult.message };
+        }
 
+        // Mark subagent active (equivalent of SubagentStart hook) only after
+        // the complete batch has passed. Pi currently exposes no per-spawn id,
+        // so retain one roster entry per requested agent type.
+        for (const { agent } of parsedItems.value) {
           // Mark subagent active (equivalent of SubagentStart hook).
           // Parse the session id before interpolating it into SUBAGENT_DIR paths
           // — a raw id with a separator/`..`/whitespace could address files
@@ -444,7 +498,9 @@ export default function (pi: ExtensionAPI) {
         // and results in Claude-compatible JSONL. Passing flattened prose here
         // silently discards every Pi test run as spoofable free text.
         const bashOutput = parseBashTestOutput(messagesToClaudeJsonl(resultMessages));
-        const testEvidence = extractTestEvidence(bashOutput);
+        const transcriptEvidence = extractTestEvidence(bashOutput);
+        const structuredEvidence = piStructuredTestResult(resultMessages);
+        const testEvidence = structuredEvidence ?? transcriptEvidence;
 
         // files_modified feeds lint-wave-gate's target collection (it
         // collects lint targets EXCLUSIVELY from tasks' files_modified) —
@@ -485,12 +541,15 @@ export default function (pi: ExtensionAPI) {
         let skippedExistingVerdict = false;
         await mgr.update((s) => {
           const applied = applyUntrustedStopResolution(s, resolvedTaskId, {
-            // pi has no evidence ledger — transcript regex is the only
-            // source here, so the verdict is always untrusted+labeled.
+            // Pi has no Loom evidence ledger. Preserve the real provenance:
+            // paired tool-result evidence may discharge Pi's structured proof
+            // policy; flattened transcript output may not.
             testResult: {
               verdict: "untrusted" as const,
               passed: testEvidence.passed,
-              label: "transcript-regex (fallback)",
+              label: structuredEvidence
+                ? `pi-structured: ${structuredEvidence.evidence || "test tool result"}`
+                : "transcript-regex (fallback)",
             },
             testEvidence: testEvidence.evidence,
             filesModified,

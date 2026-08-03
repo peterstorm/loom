@@ -36,8 +36,8 @@ const graph = (tasks: Task[], executing: string[]): TaskGraph => ({
 });
 
 const untrustedPass: UntrustedStopResolution = {
-  testResult: { verdict: "untrusted", passed: true, label: "transcript-regex (fallback)" },
-  testEvidence: "transcript-regex (fallback): bun: 5 pass",
+  testResult: { verdict: "untrusted", passed: true, label: "pi-structured: bun: 5 pass" },
+  testEvidence: "pi-structured: bun: 5 pass",
   filesModified: ["src/a.ts", "tests/a.test.ts"],
   newTestsWritten: true,
   newTestEvidence: "2 new test methods, 4 assertions",

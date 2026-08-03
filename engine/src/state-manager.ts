@@ -22,6 +22,7 @@ import {
   refutationsUnionError,
 } from "./core/findings";
 import type { TaskGraph } from "./types";
+import { parseTaskProof } from "./core/proof-obligations";
 
 /** Resolve task graph path for cross-repo access. The session id comes from
  *  hook input, so it is PARSED before naming a file under SUBAGENT_DIR — an
@@ -145,11 +146,27 @@ function taskUnionError(v: unknown, index: number): string | null {
   ) {
     return `tasks[${index}] ("${id}"): file_list must be an array of strings when present`;
   }
+  if (t.plan_context !== undefined && typeof t.plan_context !== "string") {
+    return `tasks[${index}] ("${id}"): plan_context must be a string when present`;
+  }
   if (!(TASK_STATUSES as readonly string[]).includes(t.status as string)) {
     return `tasks[${index}] ("${id}"): status ${JSON.stringify(t.status)} is not one of ${TASK_STATUSES.join(", ")}`;
   }
   if (t.review_status !== undefined && !(REVIEW_STATUSES as readonly string[]).includes(t.review_status as string)) {
     return `tasks[${index}] ("${id}"): review_status ${JSON.stringify(t.review_status)} is not one of ${REVIEW_STATUSES.join(", ")}`;
+  }
+  if (t.proof !== undefined) {
+    const proof = parseTaskProof(t.proof);
+    if (!proof.ok) {
+      return `tasks[${index}] ("${id}"): invalid proof: ${proof.errors.join("; ")}`;
+    }
+    const statusClaimsImplementation = t.status === "implemented" || t.status === "completed";
+    if (statusClaimsImplementation !== (proof.value.state === "satisfied")) {
+      return (
+        `tasks[${index}] ("${id}"): status/proof lockstep violated — ` +
+        `implemented/completed iff proof.state is satisfied`
+      );
+    }
   }
   if (t.test_result !== undefined) {
     if (typeof t.test_result !== "object" || t.test_result === null) {

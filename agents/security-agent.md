@@ -1,5 +1,7 @@
 ---
 name: security-agent
+model-profile: focused-review
+model: sonnet
 description: Security agent for auth, JWT, OAuth, OWASP, vulnerability assessment
 color: red
 skills:

@@ -10,6 +10,12 @@ Executes the gate sequence after all wave tasks reach "implemented". Verifies te
 
 **Run this after SubagentStop hook outputs "Wave N implementation complete".**
 
+**Explicit model policy:** before every Agent spawn, run
+`bun ${LOOM_DIR}/engine/src/cli.ts helper model-profiles agent --agent <name>`.
+Claude Code passes `claudeCode.model` explicitly; Pi uses the generated agent
+definition with the exact `pi` binding. Missing/mismatched models block — never
+inherit the orchestrator's current model.
+
 **Resolve plugin path first** (if not already set from `/loom`):
 ```bash
 LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/ 2>/dev/null | tail -1 | sed 's:/$::')
@@ -46,7 +52,30 @@ This prints per-task evidence status. Exit 0 = all tasks have evidence, exit 1 =
 
 **Do NOT manually run tests or set test flags.** The guard hook blocks direct state file writes. Evidence can only come from agent execution → SubagentStop hook extraction.
 
-### Step 3: Spawn Verification (Parallel)
+### Step 3: Build Review Packets and Spawn Verification (Parallel)
+
+Before any reviewer starts, create one immutable Review Packet per Task. The
+packet binds the Task, proof obligations, base/head revisions, exact diff and
+postimages, declared/modified paths, and plan context. Reviewers MUST read only
+the packet's manifest-listed scope; never fall back to all wave changes or scan
+the live worktree.
+
+```bash
+mkdir -p ".claude/reviews/packets"
+REVIEW_PACKET_DIR="$(mktemp -d ".claude/reviews/packets/run.XXXXXXXXXX")"
+bun ${LOOM_DIR}/engine/src/cli.ts helper review-packet create \
+  --task "<TASK_ID>" \
+  --output "$REVIEW_PACKET_DIR/<TASK_ID>.json"
+```
+
+Run `create` once for each Task needing review. It fails on an empty/unsafe
+scope and refuses to overwrite a packet. Retain each concrete packet path;
+shell variables do not persist across Bash calls. Verify before spawning:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper review-packet verify \
+  --packet ".claude/reviews/packets/<RUN>/<TASK_ID>.json"
+```
 
 Spawn **spec-check AND code reviewers** in a single message with multiple Agent calls.
 
@@ -99,10 +128,12 @@ Each review agent gets the same prompt:
 ## Task: {task_id}
 **Description:** {task description}
 
-Files: {comma-separated files relevant to this task}
+Review Packet: {review_packet_path}
 Task: {task_id}
 
-Review these files and produce a Machine Summary with CRITICAL_COUNT, CRITICAL, and ADVISORY lines.
+Read and verify the Review Packet, then review exactly its scoped artifacts.
+Do not discover a broader live-worktree scope. Produce a Machine Summary with
+CRITICAL_COUNT, CRITICAL, and ADVISORY lines.
 
 Also emit a fenced ```findings JSON block inside the Machine Summary: one entry
 per finding as {"severity": "critical"|"advisory", "file": path|null,
@@ -126,11 +157,11 @@ findings simply carry no file/line — degraded, not broken.
 | type-design-analyzer | `store-reviewer-findings` | Merges findings into task `review_status` |
 | comment-analyzer | `store-reviewer-findings` | Merges findings into task `review_status` |
 
-**File-to-task mapping algorithm (for reviewers):**
-1. Read `task.files_modified` from state (set by `update-task-status` hook via transcript parsing)
-2. If `files_modified` is non-empty: use those files directly
-3. Fallback (empty `files_modified`): use all wave changes from `git diff`
-4. Pass to review sub-agents: `--files {files_modified}`
+**Task-to-review mapping algorithm:**
+1. Read `task.file_list` and `task.files_modified` through `helper review-packet create`.
+2. The helper canonicalizes their union and snapshots every scoped path.
+3. Empty scope is an error that must be repaired in decomposition; there is NO broad fallback.
+4. Pass only `{review_packet_path}` to each review agent.
 
 ### Step 3.5: Refutation Panel (adversarial review)
 
@@ -237,12 +268,37 @@ than the panel has lenses, for the same reason.
 
 #### 3.5.3 — Spawn the verifiers (parallel, headless)
 
+The executable Panel Program owns verifier count/order, one-retry policy, and
+LLM Profile assignment. Build a program document from the exact manifest ids
+and ordered lenses:
+
+```json
+{
+  "input": {
+    "criticalFindingIds": ["<finding id 1>", "<finding id N>"],
+    "lenses": ["<lens 1>", "<lens N>"]
+  },
+  "events": []
+}
+```
+
+Pipe it to:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper panel-program refutation
+```
+
+Execute only the returned action. After each verifier result, append its
+canonical `spawn-outcome` event and replay the whole document. The program emits
+`tally` only after every exact slot succeeds; a failed second attempt emits
+`blocked`. Completion order cannot change the next action.
+
 **Load template:** Read `{LOOM_DIR}/commands/templates/review-verify.md`. For
 each selected lens, substitute `{lens_name}`, `{lens_prompt}` (that lens's
 section from `{LOOM_DIR}/references/review-lenses.md`),
 `{finding_manifest_path}`, and `{brief_file_path}`.
 
-**Spawn all N `review-verifier-agent`s in ONE message** (parallel Agent calls).
+**Spawn the exact `review-verifier-agent` batch returned by the Panel Program in ONE message** (parallel Agent calls), using each request's resolved `modelProfile`.
 Validate each raw output before it reaches the tally — **`verdict-N.json` must
 hold lens N**, in the manifest's lens order:
 

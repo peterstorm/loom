@@ -32,6 +32,24 @@ Store the printed path. **All subsequent references use it:**
 - Engine CLI: `bun {LOOM_DIR}/engine/src/cli.ts`
 - References: `{LOOM_DIR}/references/<name>.md`
 
+### Explicit LLM Profile contract
+
+Every Loom-owned Agent has one semantic LLM Profile with complete Claude Code
+and Pi bindings. Before each spawn, resolve it:
+
+```bash
+bun {LOOM_DIR}/engine/src/cli.ts helper model-profiles agent --agent "<AGENT_NAME>"
+```
+
+- **Claude Code:** pass the emitted `claudeCode.model` explicitly in the
+  `Agent`/`Task` call. It must match the agent's `model:` frontmatter.
+- **Pi:** the selected agent definition must contain the emitted exact
+  `pi.provider/pi.model:pi.thinking` model pattern. Run
+  `{LOOM_DIR}/scripts/sync-pi-agents.sh` after install/update.
+
+Missing or mismatched bindings BLOCK. Never omit a model and never inherit the
+parent orchestrator's current model.
+
 ---
 
 ## Arguments
@@ -267,9 +285,35 @@ Stop on failure. The helper binds run id, interview paths, allowed unique lenses
 
 ### Step 3 — Designers (parallel, headless)
 
+The executable Panel Program, not this prose, owns dispatch order, retry limits,
+and LLM Profiles. Before spawning, obtain the criteria early with the Step 4
+`criteria` helper (it does not require candidate files), then build:
+
+```json
+{
+  "input": {
+    "candidateLenses": ["<manifest lens 1>", "<manifest lens N>"],
+    "judgeCriteria": ["<derived criterion 1>", "<derived criterion 3>"]
+  },
+  "events": []
+}
+```
+
+Pipe it to:
+
+```bash
+bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-program architecture
+```
+
+The returned first action MUST be the exact designer `spawn-batch`. After every
+spawn or engine operation, append its canonical `spawn-outcome` or
+`engine-outcome` event and replay the document; execute only the newly returned
+action. This event-sourced replay makes completion order irrelevant and permits
+one retry per failed slot. Stop on `blocked`; do not hand-advance a stage.
+
 **Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-design.md`. For each manifest entry, substitute `{feature_description}`, `{lens_name}`, `{lens_prompt}`, `{spec_file_path}`, `{interview_file_path}` (= the manifest interview file), and `{candidate_output_path}` (= that exact entry's path).
 
-**Spawn all N `arch-designer-agent`s in ONE message** (parallel Agent calls). Wait for all to complete. For every manifest path, require a non-empty regular file that is not a symbolic link. For a failed entry, delete that run's empty/invalid artifact, re-spawn only that designer once, then repeat the same regular/non-empty/non-symlink check; stop if the retry still fails. Compare the candidate directory's bare filenames with `manifest.candidates[].filename` in both directions and stop on any missing or extra file. Judges and finalizer still read only manifest paths, never the directory.
+**Spawn the exact `arch-designer-agent` batch returned by the Panel Program in ONE message** (parallel Agent calls), using each request's resolved `modelProfile`. Wait for all to complete. For every manifest path, require a non-empty regular file that is not a symbolic link. For a failed entry, delete that run's empty/invalid artifact, re-spawn only that designer once, then repeat the same regular/non-empty/non-symlink check; stop if the retry still fails. Compare the candidate directory's bare filenames with `manifest.candidates[].filename` in both directions and stop on any missing or extra file. Judges and finalizer still read only manifest paths, never the directory.
 
 ### Step 4 — Judges (parallel, headless)
 
@@ -286,7 +330,7 @@ It emits a JSON array of exactly K criteria derived from the validated digest: `
 
 **Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-judge.md`. For each criterion, substitute `{criterion}`, `{candidate_manifest_path}`, and `{interview_json_path}`.
 
-**Spawn all K `arch-judge-agent`s in ONE message** (parallel Agent calls). Validate each raw output before it reaches finalization:
+**Spawn the exact `arch-judge-agent` batch returned by the Panel Program in ONE message** (parallel Agent calls), using each request's resolved `modelProfile`. Validate each raw output before it reaches finalization:
 
 ```bash
 printf '%s' "$RAW_JUDGE_OUTPUT" | bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-contract verdict \

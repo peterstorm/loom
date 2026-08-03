@@ -34,6 +34,12 @@ import {
   readEvidence,
 } from "../../machine";
 import type { Evidence, EvidenceRecord, LoadedMachine, Requirement, TrustedTestVerdict } from "../../machine";
+import {
+  evaluateTaskProof,
+  PI_STRUCTURED_EVIDENCE_POLICY,
+  TRUSTED_LEDGER_ONLY_POLICY,
+  type ProofEvaluationPolicy,
+} from "../../core/proof-obligations";
 
 /**
  * Is the agent's machine BOUND for evidence purposes? "invalid" counts as
@@ -299,6 +305,7 @@ export function applyUntrustedStopResolution(
   s: TaskGraph,
   taskId: string,
   resolution: UntrustedStopResolution,
+  proofPolicy: ProofEvaluationPolicy = PI_STRUCTURED_EVIDENCE_POLICY,
 ): AppliedStopResolution {
   const clearedExecuting = (s.executing_tasks ?? []).filter((id) => id !== taskId);
   const target = s.tasks.find((t) => t.id === taskId);
@@ -307,6 +314,20 @@ export function applyUntrustedStopResolution(
   if (!target || target.status === "completed" || existingTrusted) {
     return { state: { ...s, executing_tasks: clearedExecuting }, skipped: true };
   }
+  const proof = evaluateTaskProof(
+    {
+      newTestsRequired: target.new_tests_required !== false,
+      declaredArtifacts: target.file_list ?? [],
+    },
+    {
+      taskCompleted: true,
+      testResult: resolution.testResult,
+      filesModified: resolution.filesModified,
+      newTestsWritten: resolution.newTestsWritten,
+      newTestEvidence: resolution.newTestEvidence,
+    },
+    proofPolicy,
+  );
   return {
     skipped: false,
     state: {
@@ -315,7 +336,8 @@ export function applyUntrustedStopResolution(
         t.id === taskId
           ? {
               ...t,
-              status: "implemented" as const,
+              status: proof.state === "satisfied" ? "implemented" as const : "pending" as const,
+              proof,
               test_result: resolution.testResult,
               test_evidence: resolution.testEvidence,
               files_modified: [...resolution.filesModified],
@@ -694,11 +716,26 @@ export const runUpdateTaskStatus = async (
       };
     }
 
+    const proof = evaluateTaskProof(
+      {
+        newTestsRequired: target.new_tests_required !== false,
+        declaredArtifacts: target.file_list ?? [],
+      },
+      {
+        taskCompleted: true,
+        testResult: testEvidence.result,
+        filesModified,
+        newTestsWritten: newTestEvidence.written,
+        newTestEvidence: newTestEvidence.evidence,
+      },
+      TRUSTED_LEDGER_ONLY_POLICY,
+    );
     const updatedTasks = s.tasks.map((t) =>
       t.id === taskId
         ? {
             ...t,
-            status: "implemented" as const,
+            status: proof.state === "satisfied" ? "implemented" as const : "pending" as const,
+            proof,
             test_result: testEvidence.result,
             test_evidence: testEvidence.evidence,
             files_modified: filesModified,
@@ -722,7 +759,15 @@ export const runUpdateTaskStatus = async (
     return { kind: "passthrough" };
   }
 
-  process.stderr.write(`Task ${taskId} implemented.\n`);
+  const persistedTask = mgr.load().tasks.find((candidate) => candidate.id === taskId);
+  if (persistedTask?.proof?.state === "satisfied") {
+    process.stderr.write(`Task ${taskId} implemented with all proof obligations satisfied.\n`);
+  } else {
+    const failures = persistedTask?.proof?.state === "failed"
+      ? persistedTask.proof.failures.map((failure) => failure.kind).join(", ")
+      : "proof unavailable";
+    process.stderr.write(`Task ${taskId} remains pending — proof obligations failed: ${failures}.\n`);
+  }
 
   // Check wave completion (shared pure predicate — pi's Stop mirror uses
   // the same one, inside its locked update)

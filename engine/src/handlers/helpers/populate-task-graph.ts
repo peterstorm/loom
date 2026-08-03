@@ -13,6 +13,7 @@ import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { validateFull, fixFull } from "./validate-task-graph";
 import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
+import { derivePendingTaskProof } from "../../core/proof-obligations";
 
 /** Honest null on any read failure — the binding check reports it in context */
 const BINDING_DEPS: ModelBindingDeps = {
@@ -68,7 +69,12 @@ function sanitizeDecomposedTask(t: Task): Task {
     depends_on: t.depends_on ?? [],
     ...(t.spec_anchors !== undefined ? { spec_anchors: t.spec_anchors } : {}),
     ...(t.new_tests_required !== undefined ? { new_tests_required: t.new_tests_required } : {}),
+    ...(t.plan_context !== undefined ? { plan_context: t.plan_context } : {}),
     ...(t.file_list !== undefined ? { file_list: t.file_list } : {}),
+    proof: derivePendingTaskProof({
+      newTestsRequired: t.new_tests_required !== false,
+      declaredArtifacts: t.file_list ?? [],
+    }),
     review_status: "pending",
     findings: [],
     critical_findings: [],

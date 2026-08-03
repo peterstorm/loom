@@ -1,60 +1,76 @@
 /**
- * Enforce agent model matches frontmatter declaration.
- * Blocks subagent spawns where model is missing or mismatches the agent's declared model.
- * Only active during loom orchestration (task graph exists).
+ * Fail-closed LLM-profile enforcement for every Loom-owned agent.
+ *
+ * Claude Code supplies the requested model on the Agent/Task call. Pi's
+ * generic subagent tool obtains it from the selected agent definition, so the
+ * Pi path reads that frontmatter instead. Neither path may inherit the parent
+ * session's current model.
  */
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import type { HookHandler, PreToolUseInput } from "../../types";
-import {
-  TASK_GRAPH_PATH, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
-  UTILITY_AGENTS,
-} from "../../config";
+import { TASK_GRAPH_PATH } from "../../config";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
-import { stripNamespace, extractNamespace } from "../../utils/strip-namespace";
+import {
+  parseAgentName,
+  validateExplicitSpawnModel,
+  validateAgentPolicyFrontmatter,
+} from "../../core/model-profiles";
+import { extractNamespace, stripNamespace } from "../../utils/strip-namespace";
 
-/** All agents whose model we validate */
-const VALIDATED_AGENTS = new Set([
-  ...Object.keys(PHASE_AGENT_MAP),
-  ...IMPL_AGENTS,
-  ...REVIEW_AGENTS,
-]);
-
-/** Resolve agent .md path — checks git root, home dir, and plugin cache */
-function resolveAgentPath(agentName: string, fullAgentType: string): string | null {
+function claudeAgentPath(agentName: string, fullAgentType: string): string | null {
   const candidates: string[] = [];
-
-  try {
-    const root = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
-    candidates.push(join(root, ".claude/agents", `${agentName}.md`));
-  } catch {}
-
-  candidates.push(join(process.env.HOME ?? "", ".claude/agents", `${agentName}.md`));
-
-  // Check plugin cache for namespaced agents (e.g. "loom:brainstorm-agent")
   const namespace = extractNamespace(fullAgentType);
   if (namespace) {
+    // A namespaced spawn names the plugin definition, not a same-named global
+    // or project agent. Prefer Claude Code's exact package root, then caches.
+    if (process.env.CLAUDE_PLUGIN_ROOT) {
+      candidates.push(join(process.env.CLAUDE_PLUGIN_ROOT, "agents", `${agentName}.md`));
+    }
     const pluginBase = join(process.env.HOME ?? "", ".claude/plugins/cache/plugins", namespace);
     try {
-      for (const version of readdirSync(pluginBase)) {
+      for (const version of readdirSync(pluginBase).sort().reverse()) {
         candidates.push(join(pluginBase, version, "agents", `${agentName}.md`));
       }
     } catch {}
+  } else {
+    try {
+      const root = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
+      candidates.push(join(root, ".claude/agents", `${agentName}.md`));
+    } catch {}
+    candidates.push(join(process.env.HOME ?? "", ".claude/agents", `${agentName}.md`));
   }
-
-  return candidates.find((p) => existsSync(p)) ?? null;
+  // Development checkout: the policy and the agent definition ship together.
+  candidates.push(join(process.cwd(), "agents", `${agentName}.md`));
+  return candidates.find(existsSync) ?? null;
 }
 
-/** Parse model field from YAML frontmatter */
-function parseModelFromFrontmatter(filePath: string): string | null {
+function piAgentPath(agentName: string): string | null {
+  const home = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
+  const candidates = [
+    join(process.cwd(), ".pi", "agents", `${agentName}.md`),
+    join(home, "agents", `${agentName}.md`),
+  ];
+  return candidates.find(existsSync) ?? null;
+}
+
+function modelFrontmatter(path: string): { name: string; model?: string; "model-profile"?: string } | null {
   try {
-    const content = readFileSync(filePath, "utf-8");
-    const fm = content.match(/^---\n([\s\S]*?)\n---/);
-    if (!fm) return null;
-    const modelLine = fm[1].match(/^model:\s*(.+)$/m);
-    return modelLine ? modelLine[1].trim() : null;
+    const content = readFileSync(path, "utf-8");
+    const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    if (!match) return null;
+    const fields: Record<string, string> = {};
+    for (const line of match[1]!.split(/\r?\n/)) {
+      const field = line.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.*?)\s*$/);
+      if (field && field[2] !== "") fields[field[1]!] = field[2]!;
+    }
+    return {
+      name: fields.name ?? "",
+      ...(fields.model ? { model: fields.model } : {}),
+      ...(fields["model-profile"] ? { "model-profile": fields["model-profile"] } : {}),
+    };
   } catch {
     return null;
   }
@@ -66,70 +82,61 @@ const handler: HookHandler = async (stdin) => {
   let input: PreToolUseInput;
   try {
     input = JSON.parse(stdin);
-  } catch (e) {
-    // Malformed hook input on a spawn-gate route: fail CLOSED. An uncaught
-    // parse crash exits 1 (NON-blocking for PreToolUse), letting a Task spawn
-    // with the wrong model. (Route is in FAIL_CLOSED_ROUTES for crashes that
-    // escape this handler too.)
+  } catch (error) {
     return {
       kind: "block",
-      message: `validate-agent-model: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
+      message: `validate-agent-model: malformed hook input — failing closed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
-  const subagentType = (input.tool_input?.subagent_type as string) ?? "";
-  const bareAgent = stripNamespace(subagentType);
+  const rawAgent = (input.tool_input?.subagent_type as string | undefined)
+    ?? (input.tool_input?.agent as string | undefined)
+    ?? "";
+  const parsedAgent = parseAgentName(rawAgent);
+  // Non-Loom utility agents remain outside Loom model policy.
+  if (!parsedAgent.ok) return { kind: "allow" };
+  const agent = stripNamespace(parsedAgent.value);
 
-  // Only validate known loom agents, skip utility agents
-  if (!VALIDATED_AGENTS.has(bareAgent)) return { kind: "allow" };
-  if (UTILITY_AGENTS.has(bareAgent)) return { kind: "allow" };
-
-  const agentPath = resolveAgentPath(bareAgent, subagentType);
-  if (!agentPath) return { kind: "allow" };
-
-  const declaredModel = parseModelFromFrontmatter(agentPath);
-
-  if (!declaredModel) {
-    return {
-      kind: "block",
-      message: [
-        `BLOCKED: Agent "${subagentType}" has no model in frontmatter.`,
-        "",
-        `Add \`model: sonnet\` (or opus) to: ${agentPath}`,
-      ].join("\n"),
-    };
+  if (input.tool_name === "subagent") {
+    const path = piAgentPath(agent);
+    if (!path) {
+      return {
+        kind: "block",
+        message: `BLOCKED: Pi agent '${agent}' has no generated definition. Run scripts/sync-pi-agents.sh; current-model inheritance is forbidden.`,
+      };
+    }
+    const fields = modelFrontmatter(path);
+    const validation = validateExplicitSpawnModel(agent, "pi", fields?.model);
+    if (!validation.ok) {
+      return {
+        kind: "block",
+        message: `BLOCKED: Pi model policy failed for '${agent}' (${path}):\n${validation.errors.map((e) => `  - ${e}`).join("\n")}`,
+      };
+    }
+    return { kind: "allow" };
   }
 
-  const requestedModel = (input.tool_input?.model as string) ?? null;
-
-  if (!requestedModel) {
+  const path = claudeAgentPath(agent, rawAgent);
+  if (!path) {
     return {
       kind: "block",
-      message: [
-        `BLOCKED: Task call for "${subagentType}" missing \`model\` parameter.`,
-        "",
-        `Frontmatter declares: model: ${declaredModel}`,
-        `Add \`model: "${declaredModel}"\` to the Task tool call.`,
-      ].join("\n"),
+      message: `BLOCKED: cannot locate agent definition for '${rawAgent}'; model policy cannot be proven.`,
     };
   }
-
-  if (requestedModel !== declaredModel) {
-    return {
-      kind: "block",
-      message: [
-        `BLOCKED: Model mismatch for "${subagentType}".`,
-        "",
-        `  Task call:   model: ${requestedModel}`,
-        `  Frontmatter: model: ${declaredModel}`,
-        "",
-        `Use model: "${declaredModel}" or update agent frontmatter.`,
-      ].join("\n"),
-    };
-  }
-
-  return { kind: "allow" };
+  const fields = modelFrontmatter(path);
+  const frontmatter = validateAgentPolicyFrontmatter(fields);
+  const requested = validateExplicitSpawnModel(agent, "claude-code", input.tool_input?.model);
+  const errors = [
+    ...(frontmatter.ok ? [] : frontmatter.errors),
+    ...(requested.ok ? [] : requested.errors),
+  ];
+  return errors.length === 0
+    ? { kind: "allow" }
+    : {
+        kind: "block",
+        message: `BLOCKED: Claude Code model policy failed for '${rawAgent}' (${path}):\n${errors.map((e) => `  - ${e}`).join("\n")}`,
+      };
 };
 
 export default handler;

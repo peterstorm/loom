@@ -1,5 +1,7 @@
 ---
 name: code-simplifier
+model-profile: focused-review
+model: sonnet
 description: Use this agent when code has been written or modified and needs to be simplified for clarity, consistency, and maintainability while preserving all functionality. Focuses on recently modified code unless instructed otherwise.
 color: blue
 ---

@@ -1,5 +1,7 @@
 ---
 name: specify-agent
+model-profile: panel-design
+model: sonnet
 description: Specification agent that produces formal requirements (WHAT/WHY) before architecture. Runs a full interview with the user before drafting spec.md.
 color: cyan
 skills:

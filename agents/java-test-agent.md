@@ -1,5 +1,7 @@
 ---
 name: java-test-agent
+model-profile: implementation
+model: opus
 description: Java testing agent for JUnit 5, jqwik property tests, AssertJ, Testcontainers, Spring Boot test slices
 color: green
 skills:

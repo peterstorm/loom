@@ -1,5 +1,7 @@
 ---
 name: deepen-agent
+model-profile: panel-design
+model: sonnet
 description: Proactive architecture improver that finds shallow modules and proposes deepening refactors. Explores friction, presents candidates, walks the design tree, updates CONTEXT.md inline.
 color: purple
 skills:

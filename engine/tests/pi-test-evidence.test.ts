@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { messagesToClaudeJsonl, type PiMessage } from "../../pi/transcript-adapter";
 import { parseBashTestOutput } from "../src/parsers/parse-bash-test-output";
 import { extractTestEvidence } from "../src/handlers/subagent-stop/update-task-status";

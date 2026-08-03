@@ -111,7 +111,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
       plan_file: plan,
       tasks: [{
         id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1,
-        depends_on: [], spec_anchors: [], new_tests_required: true, file_list: ["src/other.ts"],
+        depends_on: [], spec_anchors: [], new_tests_required: true, plan_context: "", file_list: ["src/other.ts"],
         // Forged execution state — must never reach the persisted graph.
         status: "completed",
         review_status: "passed",
@@ -153,7 +153,15 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     expect(t9.retry_count).toBeUndefined();
     // Decompose-contract fields survive.
     expect(t9.new_tests_required).toBe(true);
+    expect(t9.plan_context).toBe("");
     expect(t9.file_list).toEqual(["src/other.ts"]);
+    expect(t9.proof?.state).toBe("pending");
+    expect(t9.proof?.obligations).toEqual([
+      { kind: "task-completed" },
+      { kind: "regression-test-pass" },
+      { kind: "new-tests" },
+      { kind: "declared-artifact-changed", artifact: "src/other.ts" },
+    ]);
     expect(t9.spec_anchors).toEqual([]);
   });
 

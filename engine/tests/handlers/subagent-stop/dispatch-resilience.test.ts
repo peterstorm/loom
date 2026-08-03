@@ -95,7 +95,7 @@ describe("malformed hook input is caught, not crashed on (Advisory 4)", () => {
 });
 
 describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)", () => {
-  it("held cleanup lock crashes cleanup; T1 is still marked implemented", async () => {
+  it("held cleanup lock crashes cleanup; T1 evidence is still recorded but untrusted proof stays pending", async () => {
     const s = sid("cleanup-crash");
     const dir = tempDir();
     const statePath = writeState(dir);
@@ -127,7 +127,8 @@ describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)
     }
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.tasks[0].status).toBe("implemented");
+    expect(state.tasks[0].status).toBe("pending");
+    expect(state.tasks[0].proof.state).toBe("failed");
     expect(state.executing_tasks).toEqual([]);
   }, 30000);
 });
@@ -276,7 +277,8 @@ describe("a FAILED evidence snapshot is never laundered into 'genuinely empty' (
     expect(text).toContain("labeled snapshot-read-failed");
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.tasks[0].status).toBe("implemented");
+    expect(state.tasks[0].status).toBe("pending");
+    expect(state.tasks[0].proof.state).toBe("failed");
     // No transcript in this run → the fallback found no pass markers; the
     // labeled untrusted verdict carries exactly that.
     expect(state.tasks[0].test_result).toEqual({

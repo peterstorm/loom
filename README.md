@@ -359,7 +359,7 @@ Two additional bundled skills live alongside the commands rather than in `/skill
 
 ## Agents
 
-Agents live under `/agents/<name>.md`. Each is a markdown persona with optional `skills:` preloads. All agents inherit the orchestrator's model unless explicitly overridden.
+Agents live under `/agents/<name>.md`. Each is a markdown persona with optional `skills:` preloads and a mandatory semantic `model-profile`. Every profile maps to an explicit Claude Code model and an exact Pi `openai-codex` provider/model/thinking target. Parent-model inheritance is forbidden. `helper model-profiles validate` proves the source definitions; `scripts/sync-pi-agents.sh` renders Pi-specific definitions.
 
 ### Phase agents (sequential)
 
@@ -583,7 +583,15 @@ interface TaskGraph {
 }
 ```
 
-`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `test_result`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `file_list`, `review_status`, `review_error`, `review_evidence_failures`, `findings`, `critical_findings`, `advisory_findings`, `refuted_findings`, `start_sha`, `failure_reason`, `retry_count`.
+`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `plan_context`, `proof`, `test_result`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `file_list`, `review_status`, `review_error`, `review_evidence_failures`, `findings`, `critical_findings`, `advisory_findings`, `refuted_findings`, `start_sha`, `failure_reason`, `retry_count`.
+
+`proof` is the engine-authored completion authority. It contains one result per
+obligation: task completion, regression-test pass and new tests when tests are
+required, plus every declared artifact changing. A Task is
+`implemented`/`completed` iff its proof is `satisfied`; missing, failed,
+untrusted, stale, or incomplete evidence keeps it pending. Pi's paired
+structured tool-result evidence remains labeled `pi-structured` rather than
+being laundered into ledger trust.
 
 #### Finding identity
 
@@ -631,7 +639,7 @@ output.
 ### Task status transitions
 
 ```
-pending      ──▶ implemented   (agent completes, test evidence resolved — evidence ledger first, labeled transcript fallback)
+pending      ──▶ implemented   (agent completes AND every proof obligation is satisfied)
 pending      ──▶ pending       (agent crash; executing_tasks cleared, task re-spawned by the orchestrator)
 implemented  ──▶ completed     (wave gate passed)
 ```
@@ -666,6 +674,11 @@ engine/src/
 │   ├── panel-kernel.ts             # Shared panel primitives: verdict envelope, criteria set
 │   ├── panel-contract.ts           # Architecture panel (/loom --panel) — consumer 1
 │   ├── review-panel.ts             # Refutation panel (wave gate 3.5) — consumer 2
+│   ├── model-profiles.ts            # Cross-harness explicit LLM Profile policy
+│   ├── proof-obligations.ts         # Task proof derivation/evaluation/parsing
+│   ├── review-packet.ts             # Deterministic scoped review snapshots
+│   ├── model-calibration.ts         # Historical finding matching/scoring
+│   ├── panel-program.ts             # Executable architecture/refutation dispatch reducers
 │   ├── tool-vocabulary.ts          # FILE_MODIFYING_TOOLS / TEST_COMMAND_PATTERNS (pure constants — sole import: machine/types)
 │   ├── validate-phase-order.ts
 │   ├── validate-task-execution.ts
@@ -687,7 +700,8 @@ engine/src/
 │                          # store-spec-check, mark-tests-passed,
 │                          # set-phase, cleanup-state, lint-wave-gate,
 │                          # panel-run (shared run/artifact boundary),
-│                          # panel-contract, review-panel, …
+│                          # panel-contract, review-panel, model-profiles,
+│                          # review-packet, model-calibration, panel-program, …
 ├── parsers/            # Extract structured data from transcripts
 │   ├── parse-transcript.ts
 │   ├── parse-bash-test-output.ts   # Maven/Gradle/Vitest/Jest/pytest/cargo/go/dotnet/…

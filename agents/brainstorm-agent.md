@@ -1,5 +1,7 @@
 ---
 name: brainstorm-agent
+model-profile: panel-design
+model: sonnet
 description: Exploration agent for understanding intent, refining ideas, and proposing approaches before specification. Use when feature scope is unclear or multiple approaches possible.
 color: yellow
 skills:

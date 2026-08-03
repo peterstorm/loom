@@ -124,6 +124,22 @@ _Avoid_: DTO (DTOs carry no invariants), data class (too implementation-specific
 A sum type representing success (`Right`) or failure (`Left`). Used for error handling in the functional core — never throw.
 _Avoid_: Result (acceptable in Rust), Optional (different semantics)
 
+**LLM Profile**:
+A semantic policy assigning one Agent role to complete harness-specific model bindings: a Claude Code model and an exact Pi provider/model/thinking tuple. Missing bindings fail closed; an Agent never inherits the orchestrator's current model.
+_Avoid_: Model alias, Sonnet equivalent, current model, model fallback
+
+**Proof Obligation**:
+An engine-authored requirement a Task must discharge before its status can become implemented: completion, required regression tests, required new tests, and declared artifacts changed. Evidence keeps its provenance; Pi structured evidence is never relabeled as ledger-trusted.
+_Avoid_: Checklist item, self-report, completion claim
+
+**Review Packet**:
+A canonical immutable snapshot binding one Task to its base/head revisions, exact declared/modified path scope, diffs, postimages, plan context, and Proof Obligations. The sole review scope; empty scope fails rather than broadening to the wave.
+_Avoid_: File list, live diff, review context, fallback scope
+
+**Panel Program**:
+The executable event-sourced dispatch policy for an architecture panel or Refutation Panel. Emits exact spawn batches, LLM Profiles, retry actions, engine operations, and terminal outcomes; Markdown explains execution but does not own ordering.
+_Avoid_: Runbook sequence, workflow DSL, panel prompt
+
 **Executable Model**:
 A model the system imports, runs, or enforces — a lifecycle machine, an AuthoredDag, or a lint rule. The only kind of model loom permits: a model either executes or it doesn't exist (`references/executable-models.md`).
 _Avoid_: Behavioral model, descriptive model, structural diff (these name the forbidden alternative)
@@ -143,6 +159,10 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - A **Wave Gate** validates all **Tasks** in a **Wave** before the next **Wave** begins
 - A **Tier** determines which lint rules execute: "immediate" runs regex-only at PostEdit, "full" runs all rules at wave-gate boundaries
 - An **Agent** executes exactly one **Task** or one **Phase**
+- Every Loom-owned **Agent** resolves one explicit **LLM Profile** before spawn
+- A **Task** becomes implemented only after all of its **Proof Obligations** are satisfied
+- Review Agents consume one immutable **Review Packet** per Task
+- A **Panel Program** emits the exact Agent batches and engine operations for each panel
 - A **Skill** is loaded into an **Agent** to provide domain expertise
 - **Hooks** enforce invariants on the **State File** — no other actor writes to it
 - A **Spec** contains **Clarification Markers** resolved by the clarify **Phase**

@@ -8,6 +8,7 @@
     "test:unit": "vitest run",
     "test:watch": "vitest",
     "test:smoke": "bash ../scripts/smoke-panel-mode.sh && bash ../scripts/smoke-review-panel.sh",
+    "calibrate:models": "LOOM_RUN_MODEL_CALIBRATION=1 bun ../scripts/run-model-calibration.ts",
     "typecheck": "bunx tsc --noEmit"
   },
   "devDependencies": {

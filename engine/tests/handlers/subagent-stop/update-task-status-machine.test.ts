@@ -152,7 +152,8 @@ describe("machine terminal requirements gate the persisted verdict (Fix 7)", () 
     expect(text).toContain("unmet terminal requirements");
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.tasks[0].status).toBe("implemented");
+    expect(state.tasks[0].status).toBe("pending");
+    expect(state.tasks[0].proof.state).toBe("failed");
     expect(state.tasks[0].test_result).toEqual({
       verdict: "untrusted",
       passed: true,

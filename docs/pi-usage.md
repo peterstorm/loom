@@ -48,13 +48,30 @@ cp ~/dev/claude-plugins/loom/pi/loom-bridge.ts \
 ls ~/.claude/plugins/cache/plugins/loom/*/engine/src/cli.ts
 ```
 
-### 3. Reload pi
+### 3. Render Loom agents with explicit Pi models
+
+Loom agent source files carry Claude Code model aliases plus a semantic
+`model-profile`. Pi has only the configured OpenAI subscription here, so byte
+copying those files or omitting `model` would either fail or inherit the
+orchestrator's expensive current model. Render exact Pi definitions:
+
+```bash
+cd ~/dev/claude-plugins/loom
+bash scripts/sync-pi-agents.sh
+```
+
+The renderer maps profiles to explicit patterns such as
+`openai-codex/gpt-5.5:high` and validates every Loom-owned agent first. A Pi
+spawn with a missing or stale generated definition is blocked rather than
+falling back.
+
+### 4. Reload pi
 
 ```
 /reload
 ```
 
-### 4. Verify
+### 5. Verify
 
 After a subagent completes during a loom session, stderr shows:
 ```

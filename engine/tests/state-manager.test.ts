@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { StateManager, parseTaskGraph, resolveTaskGraph } from "../src/state-manager";
 import { SUBAGENT_DIR } from "../src/config";
 import type { TaskGraph } from "../src/types";
+import { derivePendingTaskProof, evaluateTaskProof } from "../src/core/proof-obligations";
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `loom-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -197,6 +198,35 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
       expect((parsed.value.tasks[0] as unknown as Record<string, unknown>).tests_passed).toBe(true);
       expect(parsed.value.updated_at).toBe("2026-01-01");
     }
+  });
+
+  it("enforces status/proof lockstep for proof-bearing graphs", () => {
+    const pendingProof = derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] });
+    const impossible = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, status: "implemented", proof: pendingProof }],
+    });
+    expect(impossible.ok).toBe(false);
+    if (!impossible.ok) expect(impossible.error).toContain("status/proof lockstep");
+
+    const satisfied = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: [] },
+      {
+        taskCompleted: true,
+        testResult: { verdict: "trusted-pass" },
+        filesModified: [],
+        newTestsWritten: true,
+      },
+    );
+    expect(satisfied.state).toBe("satisfied");
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, status: "implemented", proof: satisfied }],
+    }).ok).toBe(true);
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, status: "pending", proof: satisfied }],
+    }).ok).toBe(false);
   });
 
   it("rejects an out-of-union current_phase loudly, naming the value", () => {
