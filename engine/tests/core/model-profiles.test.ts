@@ -39,12 +39,12 @@ const EXPECTED_PROFILES = {
     pi: { provider: "openai-codex", model: "gpt-5.5", thinking: "high" },
   },
   "panel-design": {
-    claudeCode: { model: "sonnet" },
-    pi: { provider: "openai-codex", model: "gpt-5.5", thinking: "high" },
+    claudeCode: { model: "opus" },
+    pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
   },
   "panel-judge": {
-    claudeCode: { model: "sonnet" },
-    pi: { provider: "openai-codex", model: "gpt-5.5", thinking: "high" },
+    claudeCode: { model: "opus" },
+    pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
   },
   refutation: {
     claudeCode: { model: "opus" },
@@ -73,6 +73,15 @@ describe("semantic model profiles", () => {
       new Set(["gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini"]),
     );
     expect(LLM_PROFILES.every(({ pi }) => pi.model.length > 0 && pi.thinking.length > 0)).toBe(true);
+  });
+
+  it("keeps all architecture/discovery panel work on the strongest available harness models", () => {
+    for (const id of ["panel-design", "panel-judge"] as const) {
+      expect(LLM_PROFILES.find((profile) => profile.id === id)).toMatchObject({
+        claudeCode: { model: "opus" },
+        pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+      });
+    }
   });
 
   it("deep-freezes the exported policy data", () => {

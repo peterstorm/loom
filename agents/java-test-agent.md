@@ -1,7 +1,7 @@
 ---
 name: java-test-agent
 model-profile: implementation
-model: opus
+model: openai-codex/gpt-5.6-sol:high
 description: Java testing agent for JUnit 5, jqwik property tests, AssertJ, Testcontainers, Spring Boot test slices
 color: green
 skills:

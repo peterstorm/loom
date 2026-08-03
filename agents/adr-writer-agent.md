@@ -1,7 +1,7 @@
 ---
 name: adr-writer-agent
 model-profile: implementation
-model: opus
+model: openai-codex/gpt-5.6-sol:high
 description: Use as a subagent for writing a single Architecture Decision Record. One ADR per task. Produces document, not code.
 color: blue
 ---

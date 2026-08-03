@@ -1,7 +1,7 @@
 ---
 name: grill-agent
 model-profile: panel-design
-model: sonnet
+model: openai-codex/gpt-5.6-sol:high
 description: Domain-aware design challenger that stress-tests plans against the project's ubiquitous language, DDD model, and documented decisions. Updates CONTEXT.md inline.
 color: red
 skills:

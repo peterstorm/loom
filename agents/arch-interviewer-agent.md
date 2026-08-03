@@ -1,7 +1,7 @@
 ---
 name: arch-interviewer-agent
 model-profile: panel-design
-model: sonnet
+model: opus
 description: Panel-mode (--panel) architecture interviewer. Runs the full architecture questionnaire once, then writes a structured interview digest for the designer/judge fan-out. Does NOT design or write plans.
 color: purple
 ---

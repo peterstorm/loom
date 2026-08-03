@@ -1,7 +1,7 @@
 ---
 name: code-implementer-agent
 model-profile: implementation
-model: opus
+model: openai-codex/gpt-5.6-sol:high
 description: Implementation agent for Java/Spring Boot or TypeScript/Next.js following FP, DDD, testability patterns
 color: blue
 skills:

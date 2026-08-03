@@ -1,7 +1,7 @@
 ---
 name: decompose-agent
 model-profile: focused-review
-model: sonnet
+model: openai-codex/gpt-5.5:high
 description: Decomposes feature spec + architecture plan into parallel task graph with wave scheduling. Outputs pure JSON — no markdown, no prose. Use when loom reaches Phase 4.
 tools:
   - Read

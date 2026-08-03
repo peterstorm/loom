@@ -95,8 +95,8 @@ export const LLM_PROFILES: readonly LlmProfile[] = Object.freeze([
   profile("architecture-finalize", "opus", "gpt-5.6-sol", "high"),
   profile("general-review", "sonnet", "gpt-5.6-sol", "high"),
   profile("focused-review", "sonnet", "gpt-5.5", "high"),
-  profile("panel-design", "sonnet", "gpt-5.5", "high"),
-  profile("panel-judge", "sonnet", "gpt-5.5", "high"),
+  profile("panel-design", "opus", "gpt-5.6-sol", "high"),
+  profile("panel-judge", "opus", "gpt-5.6-sol", "high"),
   profile("refutation", "opus", "gpt-5.6-sol", "high"),
   profile("mechanical", "haiku", "gpt-5.4-mini", "medium"),
 ]);

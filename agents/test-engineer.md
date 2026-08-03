@@ -1,7 +1,7 @@
 ---
 name: test-engineer
 model-profile: implementation
-model: opus
+model: openai-codex/gpt-5.6-sol:high
 description: "Write, execute, or fix tests. Supports unit tests (Mocha), E2E tests (Playwright), debugging failures, and improving coverage."
 ---
 

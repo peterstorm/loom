@@ -1,7 +1,7 @@
 ---
 name: arch-judge-agent
 model-profile: panel-judge
-model: sonnet
+model: opus
 description: Panel-mode (--panel) architecture judge. Scores ALL candidates against ONE criterion adversarially and returns pure JSON. Headless — no user interaction, no files written.
 color: purple
 tools:

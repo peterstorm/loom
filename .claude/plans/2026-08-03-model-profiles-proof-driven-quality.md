@@ -18,8 +18,9 @@ a typed executable program and give reviewers an immutable, scoped packet.
 to a Claude Code model and an exact Pi provider/model/thinking tuple. Missing or
 mismatched bindings fail closed; current-model inheritance is never a fallback.
 2. **The initial Pi mappings are conservative hypotheses.** Implementation,
-general review, and refutation use `openai-codex/gpt-5.6-sol`; focused review and
-panel design/judging use `openai-codex/gpt-5.5`; mechanical work uses
+general review, architecture/discovery panel design and judging, and refutation
+use `openai-codex/gpt-5.6-sol`; focused review uses `openai-codex/gpt-5.5`;
+mechanical work uses
 `openai-codex/gpt-5.4-mini`. The calibration corpus is the authority for future
 changes.
 3. **A Task owns proof obligations.** The engine derives them from decomposition,

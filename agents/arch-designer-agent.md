@@ -1,7 +1,7 @@
 ---
 name: arch-designer-agent
 model-profile: panel-design
-model: sonnet
+model: opus
 description: Panel-mode (--panel) architecture designer. Produces ONE architectural candidate through a single assigned lens, headless (no user interaction). Preloads architecture-tech-lead for design knowledge.
 color: purple
 skills:

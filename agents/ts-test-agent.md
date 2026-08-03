@@ -1,7 +1,7 @@
 ---
 name: ts-test-agent
 model-profile: implementation
-model: opus
+model: openai-codex/gpt-5.6-sol:high
 description: TypeScript testing agent for Vitest, React Testing Library, Playwright, fast-check
 color: green
 skills:

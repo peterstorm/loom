@@ -1,7 +1,7 @@
 ---
 name: comment-analyzer
 model-profile: mechanical
-model: haiku
+model: openai-codex/gpt-5.4-mini:medium
 description: Use this agent when you need to analyze code comments for accuracy, completeness, and long-term maintainability. Use after generating documentation, before finalizing PRs with comment changes, or when reviewing existing comments for technical debt.
 color: green
 ---

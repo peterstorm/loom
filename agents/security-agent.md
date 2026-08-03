@@ -1,7 +1,7 @@
 ---
 name: security-agent
 model-profile: focused-review
-model: sonnet
+model: openai-codex/gpt-5.5:high
 description: Security agent for auth, JWT, OAuth, OWASP, vulnerability assessment
 color: red
 skills:
