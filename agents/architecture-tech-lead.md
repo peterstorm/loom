@@ -1,7 +1,7 @@
 ---
 name: architecture-tech-lead
 model-profile: focused-review
-model: openai-codex/gpt-5.5:high
+model: sonnet
 description: Use this agent for architectural review of large PRs or features. Evaluates Functional Core/Imperative Shell adherence, coupling, testability, state management, and concurrency patterns. Auto-triggered by /review-pr for PRs with >500 additions or >10 files.
 color: blue
 ---

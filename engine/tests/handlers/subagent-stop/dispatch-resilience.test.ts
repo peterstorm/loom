@@ -137,7 +137,8 @@ describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7
   it("a trusted TestRun in the snapshot decides the verdict even with no ledger on disk", async () => {
     const s = sid("snapshot");
     const dir = tempDir();
-    const statePath = writeState(dir);
+    // New-test detection is independent of this snapshot-attribution test.
+    const statePath = writeState(dir, { new_tests_required: false });
     pointSessionAt(s, statePath);
 
     // No <session>.evidence.jsonl exists — the snapshot is the only source,

@@ -1,7 +1,7 @@
 ---
 name: review-verifier-agent
 model-profile: refutation
-model: openai-codex/gpt-5.6-sol:high
+model: opus
 description: Wave-gate refutation panel verifier. Tries to REFUTE every finding in one wave's brief through ONE assigned lens and returns pure JSON. Headless — no user interaction, no files written.
 color: orange
 tools:

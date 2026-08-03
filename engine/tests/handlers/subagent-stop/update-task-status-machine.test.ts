@@ -65,9 +65,9 @@ function writeState(
   return statePath;
 }
 
-const implTask = (id: string): Record<string, unknown> => ({
+const implTask = (id: string, newTestsRequired = true): Record<string, unknown> => ({
   id, description: "impl", agent: "code-implementer-agent",
-  wave: 1, status: "pending", depends_on: [], new_tests_required: true,
+  wave: 1, status: "pending", depends_on: [], new_tests_required: newTestsRequired,
 });
 
 function pointSessionAt(session: string, statePath: string): void {
@@ -191,7 +191,7 @@ describe("wave-completion gate write (round-17 A1 pin)", () => {
   it("resolving the last task of a wave stamps impl_complete=true", async () => {
     const s = sid("wave-done");
     const dir = tempDir();
-    const statePath = writeState(dir, [implTask("T1")], ["T1"]);
+    const statePath = writeState(dir, [implTask("T1", false)], ["T1"]);
     pointSessionAt(s, statePath);
 
     const snapshot: readonly EvidenceRecord[] = [
@@ -211,7 +211,7 @@ describe("wave-completion gate write (round-17 A1 pin)", () => {
     const s = sid("wave-partial");
     const dir = tempDir();
     // T1 executing and resolved; T2 still pending in the same wave.
-    const statePath = writeState(dir, [implTask("T1"), implTask("T2")], ["T1"]);
+    const statePath = writeState(dir, [implTask("T1", false), implTask("T2")], ["T1"]);
     pointSessionAt(s, statePath);
 
     const snapshot: readonly EvidenceRecord[] = [

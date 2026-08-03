@@ -1,5 +1,12 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,8 +33,16 @@ describe("quality-program helper boundaries", () => {
       .toContain("Validated 28");
     const output = mkdtempSync(join(tmpdir(), "loom-pi-agents-"));
     cleanup.push(output);
+    const symlinkTarget = join(output, "source-agent.md");
+    const reviewerOutput = join(output, "code-reviewer.md");
+    writeFileSync(symlinkTarget, "source must remain unchanged\n");
+    symlinkSync(symlinkTarget, reviewerOutput);
+
     cli(["helper", "model-profiles", "render-pi", "--agents-dir", "agents", "--output", output]);
-    expect(readFileSync(join(output, "code-reviewer.md"), "utf-8"))
+
+    expect(readFileSync(symlinkTarget, "utf-8")).toBe("source must remain unchanged\n");
+    expect(lstatSync(reviewerOutput).isSymbolicLink()).toBe(false);
+    expect(readFileSync(reviewerOutput, "utf-8"))
       .toContain("model: openai-codex/gpt-5.6-sol:high");
     expect(readFileSync(join(output, "comment-analyzer.md"), "utf-8"))
       .toContain("model: openai-codex/gpt-5.4-mini:medium");

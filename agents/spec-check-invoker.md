@@ -1,7 +1,7 @@
 ---
 name: spec-check-invoker
 model-profile: general-review
-model: openai-codex/gpt-5.6-sol:high
+model: sonnet
 description: Invokes /spec-check skill for wave-gate spec alignment verification
 tools:
   - Bash

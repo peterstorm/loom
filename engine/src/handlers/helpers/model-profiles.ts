@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, join } from "node:path";
 import type { HookHandler } from "../../types";
 import {
@@ -45,6 +53,17 @@ function renderPiAgent(content: string, agent: string): string {
   const modelLine = /^model:\s*.*$/m;
   if (!modelLine.test(content)) throw new Error(`agent '${agent}' has no explicit Claude model line`);
   return content.replace(modelLine, `model: ${exactModel}`);
+}
+
+/** Replace the directory entry atomically so a pre-existing symlink is never followed. */
+function writePiAgent(path: string, content: string): void {
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(temporary, content, { flag: "wx", mode: 0o600 });
+    renameSync(temporary, path);
+  } finally {
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
 }
 
 const handler: HookHandler = async (_stdin, args) => {
@@ -100,7 +119,7 @@ const handler: HookHandler = async (_stdin, args) => {
   for (const file of files) {
     const agent = basename(file, ".md");
     const content = readFileSync(join(agentsDir, file), "utf-8");
-    writeFileSync(join(output, file), renderPiAgent(content, agent));
+    writePiAgent(join(output, file), renderPiAgent(content, agent));
   }
   process.stdout.write(`Rendered ${files.length} Pi agent definitions to ${output}.\n`);
   return { kind: "passthrough" };

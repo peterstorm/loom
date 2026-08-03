@@ -1,7 +1,7 @@
 ---
 name: brainstorm-agent
 model-profile: panel-design
-model: openai-codex/gpt-5.6-sol:high
+model: opus
 description: Exploration agent for understanding intent, refining ideas, and proposing approaches before specification. Use when feature scope is unclear or multiple approaches possible.
 color: yellow
 skills:

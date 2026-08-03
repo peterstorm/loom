@@ -1,7 +1,7 @@
 ---
 name: type-design-analyzer
 model-profile: focused-review
-model: openai-codex/gpt-5.5:high
+model: sonnet
 description: Use this agent when you need expert analysis of type design in your codebase. Specifically use it when introducing new types, during PR creation to review types being added, or when refactoring existing types. Provides quantitative ratings on encapsulation, invariant expression, usefulness, and enforcement.
 color: pink
 ---

@@ -1,7 +1,7 @@
 ---
 name: frontend-agent
 model-profile: implementation
-model: openai-codex/gpt-5.6-sol:high
+model: opus
 description: Next.js frontend agent for App Router, React Server Components, distinctive UI design
 color: pink
 skills:

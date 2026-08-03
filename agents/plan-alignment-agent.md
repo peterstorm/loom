@@ -1,7 +1,7 @@
 ---
 name: plan-alignment-agent
 model-profile: focused-review
-model: openai-codex/gpt-5.5:high
+model: sonnet
 description: Compares architecture plan against spec requirements, produces gap report. Use when loom reaches plan-alignment phase.
 color: cyan
 tools:
