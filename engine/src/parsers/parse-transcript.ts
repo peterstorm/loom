@@ -74,3 +74,25 @@ export function parseTranscript(content: string, format?: TranscriptFormat): str
   const fmt = format ?? detectFormat(content);
   return fmt === "pi" ? parsePiTranscript(content) : parseClaudeTranscript(content);
 }
+
+/** The first user-authored prompt only. Lifecycle context must never be inferred
+ * from assistant output, which an agent can emit itself. */
+export function parseFirstUserPrompt(content: string, format?: TranscriptFormat): string {
+  const fmt = format ?? detectFormat(content);
+  if (fmt === "pi") {
+    for (const entry of parsePiJsonl(content)) {
+      if (entry.type !== "message" || entry.message?.role !== "user") continue;
+      const body = entry.message.content;
+      if (typeof body === "string") return body;
+      return body.filter((block) => block.type === "text" && block.text).map((block) => block.text).join("\n");
+    }
+    return "";
+  }
+  for (const line of parseJsonl(content)) {
+    if (line.message?.role !== "user") continue;
+    const body = line.message.content;
+    if (typeof body === "string") return body;
+    return (body ?? []).filter((block) => block.type === "text" && block.text).map((block) => block.text).join("\n");
+  }
+  return "";
+}

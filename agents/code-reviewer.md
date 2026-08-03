@@ -60,7 +60,7 @@ When detecting these patterns, recommend invoking specialized skills:
 - **TypeScript/React (Vite/Next.js) test quality** -> `ts-test-engineer`
 - **React components, styling, a11y** -> `nextjs-frontend-design`
 
-Note: Architecture review is handled directly by `architecture-agent` (auto-launched by `/review-pr` for large PRs). Do NOT recommend delegation to architecture-tech-lead.
+Note: Architecture review is handled directly by `architecture-tech-lead` (auto-launched by `/review-pr` for large PRs). Do not delegate review work to the interactive `architecture-agent`, which designs plans.
 
 ## Output Format
 

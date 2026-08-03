@@ -1,8 +1,8 @@
 /**
  * The adversarial review panel — consumer 2 of the panel kernel.
  *
- * The wave gate spawns five reviewers per task. Each produces findings; nothing
- * adjudicates them. A plausible-but-wrong finding costs a real remediation
+ * Wave-gate and standalone review runs spawn specialized reviewers. Each
+ * produces findings; nothing adjudicates them. A plausible-but-wrong finding costs a real remediation
  * cycle, and loom has been working around that with prompt patches — the
  * delta-review strategy for multi-pass PRs, the architectural-intent briefing
  * that tells agents never-throw / fail-closed / ADT patterns are deliberate.
@@ -60,6 +60,7 @@ import {
   type RunLayout,
   type VerdictEnvelope,
 } from "./panel-kernel";
+import { STANDALONE_REVIEW_SUBJECT } from "./standalone-review";
 
 // ---------------------------------------------------------------------------
 // Lenses
@@ -237,12 +238,20 @@ export function briefFindingFilename(id: WaveFindingId): string {
   return `finding-${id.replace(/[^A-Za-z0-9_.-]+/g, "-")}.json`;
 }
 
-export interface FindingBrief {
+interface FindingBriefBase {
   readonly wave: number;
   readonly severity: FindingSeverity;
   readonly taskIds: readonly string[];
   readonly findings: readonly BriefFinding[];
 }
+
+export type FindingBrief =
+  | Readonly<FindingBriefBase & { readonly source?: never }>
+  | Readonly<FindingBriefBase & {
+      readonly source: "standalone";
+      readonly wave: 1;
+      readonly taskIds: readonly [typeof STANDALONE_REVIEW_SUBJECT];
+    }>;
 
 /**
  * The five task fields this panel reads.
@@ -292,10 +301,35 @@ export function buildFindingBrief(
   return { wave, severity, taskIds: waveTasks.map((task) => task.id), findings };
 }
 
+/** Adapt an identified standalone finding set to the panel's scoped item model.
+ *  The subject id is run-local and never becomes an orchestration Task. */
+export function buildStandaloneFindingBrief(source: {
+  readonly subjectId: string;
+  readonly findings: readonly Finding[];
+}): FindingBrief {
+  const task = {
+    id: source.subjectId,
+    wave: 1,
+    findings: source.findings,
+    critical_findings: source.findings
+      .filter((finding) => finding.severity === VERIFIED_SEVERITY)
+      .map((finding) => finding.claim),
+  };
+  const built = buildFindingBrief(1, [task]);
+  return {
+    wave: 1,
+    severity: built.severity,
+    taskIds: [STANDALONE_REVIEW_SUBJECT],
+    findings: built.findings,
+    source: "standalone",
+  };
+}
+
 /** The external snake_case contract for the brief. */
 export function serializeFindingBrief(brief: FindingBrief): string {
   return JSON.stringify({
     wave: brief.wave,
+    ...(brief.source === "standalone" ? { source_kind: "standalone" } : {}),
     severity: brief.severity,
     task_ids: brief.taskIds,
     findings: brief.findings.map((finding) => ({
@@ -390,6 +424,10 @@ export function parseFindingBriefJson(raw: unknown): ParseResult<FindingBrief> {
   if (severity === null) {
     errors.push("brief.severity must be 'critical' or 'advisory'");
   }
+  const source = raw.source_kind === undefined || raw.source_kind === "wave"
+    ? undefined
+    : raw.source_kind === "standalone" ? "standalone" as const : null;
+  if (source === null) errors.push("brief.source_kind must be 'wave' or 'standalone' when present");
 
   const taskIds = Array.isArray(raw.task_ids) && raw.task_ids.every((id) => typeof id === "string" && id.trim() !== "")
     ? (raw.task_ids as string[]).map((id) => id.trim())
@@ -407,6 +445,13 @@ export function parseFindingBriefJson(raw: unknown): ParseResult<FindingBrief> {
     if (parsed.finding) findings.push(parsed.finding);
   }
 
+  if (source === "standalone") {
+    if (wave !== 1) errors.push("standalone brief.wave must be 1");
+    if (taskIds === null || taskIds.length !== 1 || taskIds[0] !== STANDALONE_REVIEW_SUBJECT) {
+      errors.push(`standalone brief.task_ids must be exactly ['${STANDALONE_REVIEW_SUBJECT}']`);
+    }
+  }
+
   const ids = findings.map((finding) => finding.id);
   if (new Set(ids).size !== ids.length) errors.push("brief finding ids must be unique");
   const filenames = ids.map(briefFindingFilename);
@@ -414,9 +459,21 @@ export function parseFindingBriefJson(raw: unknown): ParseResult<FindingBrief> {
     errors.push("brief finding ids must remain unique once mapped to filenames");
   }
 
-  return errors.length > 0
-    ? fail(errors)
-    : ok({ wave: wave as number, severity: severity as FindingSeverity, taskIds: taskIds ?? [], findings });
+  if (errors.length > 0) return fail(errors);
+  return source === "standalone"
+    ? ok({
+        wave: 1,
+        severity: severity as FindingSeverity,
+        taskIds: [STANDALONE_REVIEW_SUBJECT],
+        findings,
+        source,
+      })
+    : ok({
+        wave: wave as number,
+        severity: severity as FindingSeverity,
+        taskIds: taskIds ?? [],
+        findings,
+      });
 }
 
 /** Does this brief hold anything the panel can adjudicate? */
@@ -506,9 +563,13 @@ export function briefCompletenessErrors(
 /** Operator-facing rendering of the brief. Not parsed by anything — the JSON is. */
 export function renderFindingBriefMarkdown(brief: FindingBrief): string {
   const lines = [
-    `# Wave ${brief.wave} — ${brief.severity} findings up for refutation`,
+    brief.source === "standalone"
+      ? `# Standalone review — ${brief.severity} findings up for refutation`
+      : `# Wave ${brief.wave} — ${brief.severity} findings up for refutation`,
     "",
-    `**Tasks:** ${brief.taskIds.join(", ") || "(none)"}`,
+    brief.source === "standalone"
+      ? `**Review subject:** ${brief.taskIds.join(", ") || "(none)"}`
+      : `**Tasks:** ${brief.taskIds.join(", ") || "(none)"}`,
     `**Findings:** ${brief.findings.length}`,
     "",
   ];

@@ -1126,7 +1126,8 @@ Preloaded skill content (inline the skill content since pi agents don't auto-loa
 |---|---|---|
 | `/loom` | Main orchestration entry | **Skill** (`~/.pi/agent/skills/loom/SKILL.md`) |
 | `/wave-gate` | Wave completion gate | **Prompt template** or **skill** |
-| `/review-pr` | PR review workflow | **Prompt template** |
+| `/review-pr` | PR review workflow; standalone runs use the refutation panel | **Prompt template** |
+| `/review-and-fix` | Adjudicated review → remediation → commit/push | **Skill** |
 | `/clarify` | Clarification phase | **Prompt template** |
 | `/brainstorming` | Brainstorm phase | **Prompt template** |
 | `/specify` | Specification phase | **Prompt template** |
@@ -1160,7 +1161,7 @@ Used internally by the loom orchestration flow, referenced from `loom.md`:
 
 #### Skills (repo-level, 6 + 2 in commands/)
 
-The repo contains 6 skills in `skills/` that agents preload via their `skills:` frontmatter:
+The repo skills include the following agent knowledge and orchestration workflows:
 
 | Skill | Purpose | Used by |
 |---|---|---|
@@ -1170,6 +1171,7 @@ The repo contains 6 skills in `skills/` that agents preload via their `skills:` 
 | `ts-test-engineer` | TypeScript testing (Vitest, RTL, Playwright) | `ts-test-agent` |
 | `security-expert` | Security analysis patterns | `security-agent` |
 | `nextjs-frontend-design` | Next.js/React design patterns | `frontend-agent` |
+| `review-and-fix` | Standalone review aggregation, refutation, remediation, and commit workflow | user-invoked workflow |
 
 Plus 2 embedded skills in `commands/`:
 

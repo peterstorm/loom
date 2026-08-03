@@ -209,7 +209,10 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper review-panel brief \
 ```
 
 The engine reads the wave's critical findings from state and writes `brief.md`,
-`brief.json`, and one `findings/finding-<id>.json` artifact per finding. You do
+`brief.json`, and one `findings/finding-<id>.json` artifact per finding. The
+same operation also accepts `--standalone <aggregate.json>` for the standalone
+`/review-pr` and `/review-and-fix` adapter; the wave gate MUST use `--wave` and
+must never pass both source flags. You do
 **not** assemble this by hand: the findings already exist in the task graph, and
 a hand-built brief could quietly omit an inconvenient critical.
 

@@ -293,9 +293,14 @@ path or a claim about tests pulls in `test-coverage`. Default panel size is 3.
   write `passed`; neither adjudicates a finding.)
 
 The brief and manifest are **engine-authored** (`helper review-panel brief` /
-`manifest`) rather than assembled by the orchestrator: the findings already live
-in the task graph, and a hand-built manifest could quietly omit an inconvenient
-critical.
+`manifest`) rather than assembled by the orchestrator. In the wave gate the
+findings already live in the task graph; in a standalone `/review-pr` or
+`/review-and-fix` run, `helper standalone-review init` freezes the exact scope
+and reviewer batch before spawn, then `aggregate` parses the complete transcript
+set into immutable `aggregate.json`. Standalone
+`tally` writes only run-scoped `outcomes.json` and never touches orchestration
+state. In either source mode, a hand-built finding manifest cannot quietly omit
+an inconvenient critical.
 
 ### Gate outcomes
 
@@ -322,7 +327,7 @@ User-invokable commands defined under `/commands/`.
 | `/loom` | `/loom "description" [--skip-…]` | Full orchestration entry point |
 | `/wave-gate` | `/wave-gate` | Test + spec + review gate after a wave finishes |
 | `/review-pr` | `/review-pr [aspects] [--files …] [--task …] [--dry-run]` | Standalone multi-agent PR review |
-| `/review-and-fix` | `/review-and-fix [aspects] [--no-push] [--dry-run] [--commit-msg …]` | Review → plan → implement → commit → push |
+| `/review-and-fix` | `/review-and-fix [aspects] [--no-push] [--dry-run] [--commit-msg …]` | Review → refutation panel → plan → implement → commit → push |
 | `/spec-check` | `/spec-check` | Standalone drift audit against the active spec |
 | `/specify` | `/specify "description" [--update] [--status]` | Write/update a formal spec (no plan, no code) |
 | `/clarify` | `/clarify [spec-path]` | Resolve `[NEEDS CLARIFICATION]` markers |

@@ -6,22 +6,23 @@
  * harnesses get identical enforcement for free — Claude Code and Pi differ only
  * in how they SPAWN the verifiers, never in what is validated.
  *
- *   brief    — read the wave's critical findings from state; write brief.md,
- *              brief.json, and one artifact per finding into the run directory.
+ *   brief    — read critical findings from wave state or a canonical standalone
+ *              aggregate; write brief.md, brief.json, and one artifact per finding.
  *   manifest — write and validate manifest.json, fixing the finding set and the
  *              lens set before any verifier spawns.
  *   lenses   — emit the selected lenses, derived from the validated brief.
  *   verdict  — validate one verifier's raw output; emit canonical JSON.
- *   tally    — re-read every verdict from disk, adjudicate, write the outcome
- *              back into the task graph, and emit the tally.
+ *   tally    — re-read every verdict from disk and adjudicate; wave runs update
+ *              task state, standalone runs write only run-scoped outcomes.json.
  *
  * `brief` and `manifest` are ENGINE-authored, unlike the architecture panel's
- * orchestrator-written manifest: the findings already exist in the task graph,
- * so an orchestrator building this by hand could quietly omit a critical.
+ * orchestrator-written manifest: findings already exist in wave state or the
+ * standalone aggregate, so an orchestrator building this by hand could quietly
+ * omit a critical.
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
 import type { HookHandler, HookResult, TaskGraph } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
@@ -31,6 +32,7 @@ import {
   briefCompletenessErrors,
   briefFindingFilename,
   buildFindingBrief,
+  buildStandaloneFindingBrief,
   defaultRefutationThreshold,
   manifestLensCount,
   panelSizeConflict,
@@ -57,8 +59,15 @@ import {
   type WaveFindingId,
 } from "../../core/review-panel";
 import {
+  finalizeStandaloneReview,
+  parseStandaloneAggregate,
+  parseStandalonePanelOutcomes,
+  serializeAdjudicatedStandaloneReview,
+} from "../../core/standalone-review";
+import {
   REVIEW_LAYOUT,
   argumentValue,
+  artifactError,
   contractError,
   parseRunBoundary,
   parseRunDirectory,
@@ -86,7 +95,8 @@ export type ReviewPanelOperation = (typeof REVIEW_PANEL_OPERATIONS)[number];
 
 const USAGE =
   `Usage: helper review-panel <${REVIEW_PANEL_OPERATIONS.join("|")}> --runs-root <dir> ` +
-  "(--run-dir <dir> | --manifest <file>) [--wave N] [--lenses N] [--lens <name>] [--threshold N]";
+  "(--run-dir <dir> | --manifest <file>) [--wave N | --standalone <aggregate.json>] " +
+  "[--lenses N] [--lens <name>] [--threshold N]";
 
 const usageError: HookResult = { kind: "error", message: USAGE };
 
@@ -130,23 +140,46 @@ function loadBrief(runDir: string): ParseResult<FindingBrief> {
   }
 }
 
-/** brief — engine-authored context artifacts for one wave. */
-function operationBrief(runsRoot: string, runDir: string, wave: number): HookResult {
+/** brief — engine-authored context artifacts for a wave or standalone run. */
+function operationBrief(
+  runsRoot: string,
+  runDir: string,
+  source: { readonly kind: "wave"; readonly wave: number } | { readonly kind: "standalone"; readonly path: string },
+): HookResult {
   const boundary = parseRunDirectory(runsRoot, runDir);
   if (!boundary.ok) return contractError("review run boundary", boundary.errors);
 
-  const state = loadGraph();
-  if (!state.ok) return contractError("review brief", state.errors);
-
-  // The wave is proven against the graph, not taken on trust. The rule itself
-  // is `staleWaveError` in the core, beside the three run-policy rules it is
-  // the sibling of; this is just where the two values are read.
-  const stale = staleWaveError(wave, state.value.current_wave);
-  if (stale !== null) return contractError("review brief", [stale]);
-
-  const brief = buildFindingBrief(wave, state.value.tasks);
-  const completeness = briefCompletenessErrors(brief, state.value.tasks);
-  if (completeness.length > 0) return contractError("review brief", completeness);
+  let brief: FindingBrief;
+  if (source.kind === "wave") {
+    const state = loadGraph();
+    if (!state.ok) return contractError("review brief", state.errors);
+    const stale = staleWaveError(source.wave, state.value.current_wave);
+    if (stale !== null) return contractError("review brief", [stale]);
+    brief = buildFindingBrief(source.wave, state.value.tasks);
+    const completeness = briefCompletenessErrors(brief, state.value.tasks);
+    if (completeness.length > 0) return contractError("review brief", completeness);
+  } else {
+    const expected = resolve(join(runDir, "aggregate.json"));
+    if (resolve(source.path) !== expected) {
+      return contractError("review brief", [`--standalone must be ${join(runDir, "aggregate.json")}`]);
+    }
+    const aggregateArtifactError = artifactError(source.path, resolve(runDir));
+    if (aggregateArtifactError !== null) return contractError("review brief", [aggregateArtifactError]);
+    let raw: unknown;
+    try { raw = JSON.parse(readFileSync(source.path, "utf-8")); }
+    catch (error) {
+      return contractError("review brief", [`cannot read standalone aggregate: ${error instanceof Error ? error.message : String(error)}`]);
+    }
+    const aggregate = parseStandaloneAggregate(raw);
+    if (!aggregate.ok) return contractError("review brief", aggregate.errors);
+    if (aggregate.value.runId !== basename(runDir)) {
+      return contractError("review brief", [`aggregate.run_id must equal run directory '${basename(runDir)}'`]);
+    }
+    brief = buildStandaloneFindingBrief(aggregate.value);
+    if (brief.findings.length === 0) {
+      return contractError("review brief", ["standalone review has no critical findings — skip the refutation panel"]);
+    }
+  }
 
   const briefJson = serializeFindingBrief(brief);
 
@@ -202,9 +235,15 @@ const handler: HookHandler = async (stdin, args) => {
 
   if (operation === "brief") {
     const runDir = argumentValue(args, "--run-dir");
-    const wave = positiveInteger(argumentValue(args, "--wave"));
-    if (!runDir || wave === null) return usageError;
-    return operationBrief(runsRoot, runDir, wave);
+    const rawWave = argumentValue(args, "--wave");
+    const standalone = argumentValue(args, "--standalone");
+    const wave = positiveInteger(rawWave);
+    if (!runDir || (rawWave === null) === (standalone === null) || (rawWave !== null && wave === null)) return usageError;
+    return operationBrief(
+      runsRoot,
+      runDir,
+      standalone !== null ? { kind: "standalone", path: standalone } : { kind: "wave", wave: wave! },
+    );
   }
 
   if (!MANIFEST_SCOPED.has(operation)) return usageError;
@@ -380,34 +419,76 @@ const handler: HookHandler = async (stdin, args) => {
   }
   if (!tallied.ok) return contractError("review tally", tallied.errors);
 
-  const current = loadGraph();
-  if (!current.ok) return contractError("review tally", current.errors);
-  // Checked EARLY for the diagnostic — a replay caught here costs nothing and
-  // names itself — and again inside the transform below, which is the check
-  // that actually holds. This read is unlocked, so two concurrent tallies both
-  // pass it; the one that loses the race would then reach
-  // `applyFindingOutcomes` and throw "the task graph changed between brief and
-  // tally", blaming a mid-run override for what is plainly a re-tally. That is
-  // the exact misattribution `replayedOutcomes` exists to prevent.
-  const replays = replayedOutcomes(tallied.value, refutedIdsOf(current.value.tasks));
-  if (replays.length > 0) return contractError("review tally", [replayError(replays)]);
+  const outcomesJson = serializeOutcomes(tallied.value, manifest.value.lenses, threshold) + "\n";
 
-  const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
-  if (!mgr) return contractError("review tally", [`no task graph at ${TASK_GRAPH_PATH}`]);
-  try {
-    await mgr.update((s) => {
-      // Re-checked against the graph `update` loaded under the lock, so the
-      // decision is made on the same state the write lands on.
-      const raced = replayedOutcomes(tallied.value, refutedIdsOf(s.tasks));
-      if (raced.length > 0) throw new Error(replayError(raced));
-      return { ...s, tasks: s.tasks.map((task) => applyFindingOutcomes(task, tallied.value)) };
-    });
-  } catch (error) {
-    // `applyFindingOutcomes` throws on a broken findings invariant, and the
-    // replay re-check throws its own diagnostic. Reaching the operator as a
-    // contract diagnostic, like every other failure in this helper, beats an
-    // unhandled stack trace out of a hook.
-    return contractError("review tally", [error instanceof Error ? error.message : String(error)]);
+  if (brief.value.source === "standalone") {
+    const outcomesPath = join(runDir, "outcomes.json");
+    const resultPath = join(runDir, "result.json");
+    const pendingResultPath = join(runDir, ".result.pending.json");
+    if (existsSync(outcomesPath) || existsSync(resultPath) || existsSync(pendingResultPath)) {
+      return contractError("review tally", [
+        "this standalone run has already been tallied or has an incomplete prior tally — start a new run directory",
+      ]);
+    }
+
+    const aggregatePath = join(runDir, "aggregate.json");
+    const aggregateError = artifactError(aggregatePath, resolve(runDir));
+    if (aggregateError !== null) return contractError("review tally", [aggregateError]);
+    let aggregateRaw: unknown;
+    try { aggregateRaw = JSON.parse(readFileSync(aggregatePath, "utf-8")); }
+    catch (error) {
+      return contractError("review tally", [`cannot re-read standalone aggregate: ${error instanceof Error ? error.message : String(error)}`]);
+    }
+    const aggregate = parseStandaloneAggregate(aggregateRaw);
+    if (!aggregate.ok) return contractError("review tally", aggregate.errors);
+    if (aggregate.value.runId !== basename(runDir)) {
+      return contractError("review tally", [`aggregate.run_id must equal run directory '${basename(runDir)}'`]);
+    }
+    const criticals = aggregate.value.findings.filter((finding) => finding.severity === "critical");
+    const panel = parseStandalonePanelOutcomes(
+      JSON.parse(outcomesJson),
+      criticals,
+      manifest.value.lenses,
+    );
+    if (!panel.ok) return contractError("review tally", panel.errors);
+    const finalized = finalizeStandaloneReview(aggregate.value, panel.value);
+    if (!finalized.ok) return contractError("review tally", finalized.errors);
+    const resultJson = serializeAdjudicatedStandaloneReview(finalized.value) + "\n";
+
+    const target = prepareWriteTargets(runDir, [], ["outcomes.json", "result.json", ".result.pending.json"]);
+    if (!target.ok) return contractError("review run boundary", target.errors);
+    try {
+      // Stage the result first, claim the replay marker second, and publish the
+      // result last. A crash can dead-end the run, never expose a fabricated or
+      // partial remediation input as finalized.
+      writeFileSync(pendingResultPath, resultJson, { flag: "wx" });
+      writeFileSync(outcomesPath, outcomesJson, { flag: "wx" });
+      renameSync(pendingResultPath, resultPath);
+    } catch (error) {
+      try { if (existsSync(pendingResultPath)) unlinkSync(pendingResultPath); } catch { /* preserve original diagnostic */ }
+      return contractError("review tally", [
+        `cannot publish standalone tally (the run may already be closed): ${error instanceof Error ? error.message : String(error)}`,
+      ]);
+    }
+  } else {
+    const current = loadGraph();
+    if (!current.ok) return contractError("review tally", current.errors);
+    // Checked EARLY for the diagnostic — a replay caught here costs nothing and
+    // named again under the StateManager lock before the write lands.
+    const replays = replayedOutcomes(tallied.value, refutedIdsOf(current.value.tasks));
+    if (replays.length > 0) return contractError("review tally", [replayError(replays)]);
+
+    const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
+    if (!mgr) return contractError("review tally", [`no task graph at ${TASK_GRAPH_PATH}`]);
+    try {
+      await mgr.update((s) => {
+        const raced = replayedOutcomes(tallied.value, refutedIdsOf(s.tasks));
+        if (raced.length > 0) throw new Error(replayError(raced));
+        return { ...s, tasks: s.tasks.map((task) => applyFindingOutcomes(task, tallied.value)) };
+      });
+    } catch (error) {
+      return contractError("review tally", [error instanceof Error ? error.message : String(error)]);
+    }
   }
 
   const refuted = tallied.value.filter((outcome) => !outcome.survives).length;
@@ -415,7 +496,7 @@ const handler: HookHandler = async (stdin, args) => {
     `Refutation panel: ${tallied.value.length - refuted} finding(s) survived, ${refuted} refuted ` +
       `(${manifest.value.lenses.length} lenses, threshold ${threshold})\n`,
   );
-  return writeCanonicalOutput(serializeOutcomes(tallied.value, manifest.value.lenses, threshold) + "\n");
+  return writeCanonicalOutput(outcomesJson);
 };
 
 export default handler;

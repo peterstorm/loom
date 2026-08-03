@@ -14,9 +14,11 @@
  * findings for it to lose.
  */
 
+import { readFileSync } from "node:fs";
 import type { HookHandler, SubagentStopInput } from "../../types";
 import {
   applyReviewResolution,
+  hasStandaloneReviewContext,
   resolveReviewFindings,
   reviewResolutionLog,
 } from "../../core/review-output";
@@ -25,6 +27,7 @@ import { StateManager } from "../../state-manager";
 import { extractTaskId } from "../../utils/extract-task-id";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
+import { parseFirstUserPrompt } from "../../parsers/parse-transcript";
 
 const warn = (message: string): void => {
   process.stderr.write(`[loom] store-reviewer-findings: ${message}\n`);
@@ -59,6 +62,18 @@ const handler: HookHandler = async (stdin) => {
   const transcript = await readTranscriptWithRetry(rawPath, /\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*\d+/);
   if (!transcript) {
     warn(`empty transcript for ${agentType} (path=${rawPath || "<unset>"}) — findings NOT stored`);
+    return { kind: "passthrough" };
+  }
+  let trustedPrompt: string;
+  try {
+    const path = rawPath.replace(/^~/, process.env.HOME ?? "~");
+    trustedPrompt = parseFirstUserPrompt(readFileSync(path, "utf-8"));
+  } catch (error) {
+    warn(`cannot read trusted reviewer prompt (${error instanceof Error ? error.message : String(error)}) — findings NOT stored`);
+    return { kind: "passthrough" };
+  }
+  if (hasStandaloneReviewContext(trustedPrompt)) {
+    process.stderr.write(`[loom] store-reviewer-findings: ${agentType} belongs to a standalone review run — task state untouched\n`);
     return { kind: "passthrough" };
   }
 

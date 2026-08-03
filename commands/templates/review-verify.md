@@ -1,13 +1,14 @@
 # Review Panel — Verifier Stage Context
 
-Template for spawning **review-verifier-agent** in the wave gate's refutation
-panel. All template variables must be substituted before use.
+Template for spawning **review-verifier-agent** in a refutation panel, whether
+it came from the wave gate or a standalone review run. All template variables
+must be substituted before use.
 
 Variables: `{lens_name}`, `{lens_prompt}`, `{finding_manifest_path}`, `{brief_file_path}`.
 
 ---
 
-## Refutation (wave-gate review panel)
+## Refutation panel
 
 **Your lens:** {lens_name}
 **Finding manifest:** {finding_manifest_path}
@@ -23,9 +24,10 @@ You write no files and never talk to the user.
 
 ## Process
 
-1. Read the manifest at {finding_manifest_path}. Read exactly the files in its
-   `findings[].path` entries — never discover findings by scanning a directory.
-   The brief at {brief_file_path} is the same set in one document.
+1. Read the manifest at {finding_manifest_path}. Read exactly the finding
+   artifacts in its `findings[].path` entries — never discover findings by
+   scanning a directory. The brief at {brief_file_path} is the same set in one
+   document.
 2. Read the code each finding concerns. A finding carrying a `file`/`line`
    points you at it; one without still names a claim you must locate. Read
    enough surrounding context to judge the claim, not just the flagged line.

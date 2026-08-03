@@ -269,6 +269,7 @@ export const REVIEW_SUB_AGENTS = new Set([
   "type-design-analyzer",
   "comment-analyzer",
   "code-simplifier",
+  "architecture-tech-lead",
 ]);
 
 /**

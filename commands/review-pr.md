@@ -60,7 +60,7 @@ Based on changes:
 - **If test files changed or new logic added**: pr-test-analyzer
 - **If types added/modified**: type-design-analyzer
 - **If comments/docs added**: comment-analyzer
-- **If large PR (>500 additions OR >10 files) OR new services/packages/migrations**: architecture-agent (FC/IS, coupling, testability)
+- **If large PR (>500 additions OR >10 files) OR new services/packages/migrations**: architecture-tech-lead (FC/IS, coupling, testability)
 - **After other reviews pass**: code-simplifier (polish)
 
 **To determine PR size, run:**
@@ -71,6 +71,13 @@ git diff main...HEAD --stat | tail -1
 ```
 
 ### 5. Launch Review Agents
+
+Before spawning, decide the lifecycle context from the already-parsed arguments.
+When `--task` is absent, create and initialize the Standalone Review Run now
+(per the canonical skill protocol) and prepend the exact
+`LOOM_REVIEW_CONTEXT: standalone` marker to every reviewer prompt. Do not wait
+until aggregation—the completion hook runs as each reviewer exits. When
+`--task` is present, do not add the marker.
 
 **For comprehensive review, launch these agents in parallel using the Task tool.**
 
@@ -88,7 +95,7 @@ Each agent MUST be spawned via `Task` with the `subagent_type` shown below. Do N
 
 5. **`loom:comment-analyzer`** - Comment accuracy, rot, documentation
 
-6. **`loom:architecture-agent`** *(auto-triggered for large PRs)* - FC/IS adherence, coupling, testability, service layer design, brand duplication, I/O boundary placement
+6. **`loom:architecture-tech-lead`** *(auto-triggered for large PRs)* - FC/IS adherence, coupling, testability, service design, boundary placement
    - **Auto-trigger:** >500 additions OR >10 files changed OR new services/packages/DB migrations
    - **Always included** when `all` or `architecture` aspect requested
    - Prompt must include: file list, diff stats, architecture principles from CLAUDE.md
@@ -97,9 +104,32 @@ Each agent MUST be spawned via `Task` with the `subagent_type` shown below. Do N
 **After fixes applied:**
 7. **`loom:code-simplifier`** - Clarity, FP patterns, maintainability
 
-### 6. Aggregate Results
+### 6. Aggregate and adjudicate results
 
-After agents complete, summarize:
+**When `--task` is present:** this invocation is feeding the wave gate. Do not
+run a per-task panel; SubagentStop stores each raw finding and `/wave-gate`
+performs one wave-wide Refutation Panel after all task reviewers finish.
+
+**When `--task` is absent:** this is a standalone review. Before presenting any
+result, read the `Phase 1 — Review and adjudicate` protocol in
+`${LOOM_DIR}/skills/review-and-fix/SKILL.md` and execute it over this command's
+already-selected reviewer batch:
+
+1. Persist every raw transcript in a fresh Standalone Review Run.
+2. Run `helper standalone-review aggregate`.
+3. If canonical criticals exist, run `review-panel brief --standalone`,
+   `manifest`, `lenses`, the exact Panel Program verifier batch, `verdict`, and
+   `tally`.
+4. For zero criticals run `helper standalone-review finalize`; for critical-bearing
+   runs, `review-panel tally` atomically publishes `result.json` itself.
+5. Build the summary only from `result.json`: surviving criticals remain
+   critical, advisories remain advisory, and refuted criticals are listed in a
+   separate audit section with lenses and reasoning.
+
+Any missing evidence or panel failure aborts the review; never report an
+unadjudicated result. Do not text-deduplicate before the panel.
+
+After adjudication, summarize:
 
 ```markdown
 # PR Review Summary
@@ -222,7 +252,7 @@ text in both places.
 - **Re-run after fixes**: Verify issues are resolved
 - **Use delegation**: When agents recommend specialized skills, invoke them
 - **Simplify last**: Run code-simplifier after other issues are fixed
-- **Architecture auto-triggers**: For PRs with >500 additions or >10 files, architecture-agent launches automatically with `all`
+- **Architecture auto-triggers**: For PRs with >500 additions or >10 files, architecture-tech-lead launches automatically with `all`
 
 ## Workflow Integration
 

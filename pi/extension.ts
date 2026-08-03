@@ -28,7 +28,7 @@ import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-outpu
 import { extractTestEvidence, analyzeNewTests, applyUntrustedStopResolution, isWaveComplete } from "../engine/src/handlers/subagent-stop/update-task-status";
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
-  resolveReviewFindings, applyReviewResolution, reviewResolutionLog,
+  hasStandaloneReviewContext, resolveReviewFindings, applyReviewResolution, reviewResolutionLog,
 } from "../engine/src/core/review-output";
 import { parseSpecCheckOutput } from "../engine/src/handlers/subagent-stop/store-spec-check-findings";
 import type { ReviewStatus, SpecCheck, Phase } from "../engine/src/types";
@@ -586,6 +586,10 @@ export default function (pi: ExtensionAPI) {
 
       // --- Review agent → store findings ---
       if (isReviewAgent(agentType)) {
+        if (hasStandaloneReviewContext(result.task ?? "")) {
+          process.stderr.write(`loom(pi): ${agentType} belongs to a standalone review run — task state untouched\n`);
+          continue;
+        }
         const taskId = extractTaskId(result.task ?? "") ?? extractTaskId(
           event.content.filter((c: { type: string }) => c.type === "text").map((c: { type: string; text?: string }) => c.text ?? "").join("\n")
         );

@@ -60,6 +60,10 @@ _Avoid_: Score, vote (alone), opinion
 A uniquely-named directory under a panel's runs-root holding one panel run's artifacts: its context document, its item set, its manifest, and one verdict file per criterion. Bound to the working directory and rejected if any path component is a symlink.
 _Avoid_: Workspace, scratch dir, output dir
 
+**Standalone Review Run**:
+An immutable review-and-adjudication record outside the wave lifecycle. It binds an exact file scope to the complete expected reviewer transcript set, identified Findings, optional Refutation Panel outcomes, and one finalized remediation input. It never reads or writes the State File.
+_Avoid_: Synthetic Task, fake Wave, ad-hoc review output
+
 **State File**:
 The single source of truth for orchestration progress (`active_task_graph.json`). Write-protected; only hooks mutate it.
 _Avoid_: Config, manifest, plan file
@@ -163,6 +167,7 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - A **Task** becomes implemented only after all of its **Proof Obligations** are satisfied
 - Review Agents consume one immutable **Review Packet** per Task
 - A **Panel Program** emits the exact Agent batches and engine operations for each panel
+- A **Standalone Review Run** feeds identified critical Findings through the same **Refutation Panel** without creating a Task or mutating the State File
 - A **Skill** is loaded into an **Agent** to provide domain expertise
 - **Hooks** enforce invariants on the **State File** — no other actor writes to it
 - A **Spec** contains **Clarification Markers** resolved by the clarify **Phase**

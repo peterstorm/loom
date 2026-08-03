@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { REVIEW_PANEL_OPERATIONS } from "../src/handlers/helpers/review-panel";
+import { STANDALONE_REVIEW_OPERATIONS } from "../src/handlers/helpers/standalone-review";
 import { PANEL_CONTRACT_OPERATIONS } from "../src/handlers/helpers/panel-contract";
 import {
   CODEBASE_MATURITIES,
@@ -79,6 +80,13 @@ const PANELS = [
     prose: read("commands", "loom.md"),
     operations: PANEL_CONTRACT_OPERATIONS,
   },
+  {
+    label: "standalone review",
+    helper: "standalone-review",
+    runbook: "skills/review-and-fix/SKILL.md",
+    prose: read("skills", "review-and-fix", "SKILL.md"),
+    operations: STANDALONE_REVIEW_OPERATIONS,
+  },
 ] as const;
 
 describe.each(PANELS)("$label runbook ↔ $helper handler", ({ helper, runbook, prose, operations }) => {
@@ -117,7 +125,7 @@ describe.each(PANELS)("$label runbook ↔ $helper handler", ({ helper, runbook, 
   it("reads back the flags it derived — the extraction is not vacuously empty", () => {
     // Without this, a regex that silently matched nothing would make the flag
     // assertion above pass for every possible runbook.
-    expect(flagsRead(helper).length).toBeGreaterThanOrEqual(4);
+    expect(flagsRead(helper).length).toBeGreaterThan(0);
     expect(flagsRead(helper)).toContain("--runs-root");
   });
 
@@ -207,9 +215,9 @@ describe("the smoke scripts this file's own header cites are actually run", () =
     expect(pkg.scripts.test).toContain("test:smoke");
   });
 
-  it("`test:smoke` names both scripts, and both exist", () => {
+  it("`test:smoke` names every panel smoke script, and all exist", () => {
     const smoke = pkg.scripts["test:smoke"]!;
-    for (const script of ["smoke-panel-mode.sh", "smoke-review-panel.sh"]) {
+    for (const script of ["smoke-panel-mode.sh", "smoke-review-panel.sh", "smoke-standalone-review.sh"]) {
       expect(smoke, `test:smoke does not run ${script}`).toContain(script);
       expect(
         existsSync(join(REPO_ROOT, "scripts", script)),

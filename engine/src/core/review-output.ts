@@ -44,6 +44,14 @@ import {
   type DraftFinding,
 } from "./findings";
 
+/** Marker placed in standalone reviewer prompts so harness lifecycle hooks know
+ * the transcript belongs to a run artifact, not to an orchestration Task. */
+export const STANDALONE_REVIEW_CONTEXT_MARKER = "LOOM_REVIEW_CONTEXT: standalone";
+
+export function hasStandaloneReviewContext(text: string): boolean {
+  return text.split(/\r?\n/).some((line) => line.trim() === STANDALONE_REVIEW_CONTEXT_MARKER);
+}
+
 /**
  * What became of the optional structured block. Reported to the operator,
  * because every arm but `used` means the findings carry no file/line and

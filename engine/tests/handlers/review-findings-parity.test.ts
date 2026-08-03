@@ -7,6 +7,7 @@ import { claimsOfSeverity, findingsLockstepError } from "../../src/core/findings
 import { mergeFindings } from "../../src/core/findings";
 import {
   applyReviewResolution,
+  hasStandaloneReviewContext,
   makeParsedFindings,
   resolveReviewFindings,
   reviewResolutionLog,
@@ -69,6 +70,12 @@ describe("harness parity: one path from transcript to task", () => {
     for (const fn of ["resolveReviewFindings", "applyReviewResolution", "reviewResolutionLog"]) {
       expect(source, `${_name} must call ${fn}`).toContain(fn);
     }
+  });
+
+  it.each(HARNESSES)("%s explicitly bypasses task-state writes for standalone review context", (_name, source) => {
+    expect(source).toContain("hasStandaloneReviewContext");
+    expect(source).toContain("standalone review run");
+    expect(source).toContain("task state untouched");
   });
 
   it.each(HARNESSES)("%s does not re-run the sequence out of the lower-level parts", (_name, source) => {
@@ -156,6 +163,12 @@ describe("harness parity: one path from transcript to task", () => {
 });
 
 describe("resolveReviewFindings (pure)", () => {
+  it("recognizes only the exact standalone lifecycle marker line", () => {
+    expect(hasStandaloneReviewContext("prompt\nLOOM_REVIEW_CONTEXT: standalone\nrest")).toBe(true);
+    expect(hasStandaloneReviewContext("LOOM_REVIEW_CONTEXT: wave")).toBe(false);
+    expect(hasStandaloneReviewContext("prefix LOOM_REVIEW_CONTEXT: standalone")).toBe(false);
+  });
+
   it("resolves a missing CRITICAL_COUNT to evidence-failed", () => {
     const resolution = resolveReviewFindings("### Machine Summary\nCRITICAL: something", "code-reviewer");
     expect(resolution.kind).toBe("evidence-failed");

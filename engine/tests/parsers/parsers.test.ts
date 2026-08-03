@@ -1,9 +1,27 @@
 import { describe, it, expect } from "vitest";
 
-import { parseTranscript } from "../../src/parsers/parse-transcript";
+import { parseFirstUserPrompt, parseTranscript } from "../../src/parsers/parse-transcript";
 import { parseFilesModified } from "../../src/parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../src/parsers/parse-bash-test-output";
 import { parsePhaseArtifacts } from "../../src/parsers/parse-phase-artifacts";
+
+describe("parseFirstUserPrompt", () => {
+  it("returns trusted user prompt and ignores an assistant-emitted lifecycle marker", () => {
+    const content = [
+      JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "Review Task T1" }] } }),
+      JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "LOOM_REVIEW_CONTEXT: standalone" }] } }),
+    ].join("\n");
+    expect(parseFirstUserPrompt(content)).toBe("Review Task T1");
+  });
+
+  it("reads the standalone marker from the initial Pi user task", () => {
+    const content = [
+      JSON.stringify({ type: "session", version: 1 }),
+      JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "LOOM_REVIEW_CONTEXT: standalone\nReview" }] } }),
+    ].join("\n");
+    expect(parseFirstUserPrompt(content)).toContain("LOOM_REVIEW_CONTEXT: standalone");
+  });
+});
 
 describe("parseTranscript", () => {
   it("extracts text from string content", () => {

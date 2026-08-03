@@ -59,7 +59,12 @@ const task = (id: string) => ({
 });
 
 /** A tmp state file, a session pointer to it, and a planted transcript. */
-function fixture(name: string, transcript: string | null, tasks: unknown[] = [task("T1")]) {
+function fixture(
+  name: string,
+  transcript: string | null,
+  tasks: unknown[] = [task("T1")],
+  userPrompt?: string,
+) {
   const dir = join(tmpdir(), `store-reviewer-${name}-${process.pid}-${Date.now()}`);
   mkdirSync(dir, { recursive: true });
   const statePath = join(dir, "active_task_graph.json");
@@ -67,10 +72,11 @@ function fixture(name: string, transcript: string | null, tasks: unknown[] = [ta
 
   const transcriptPath = join(dir, "transcript.jsonl");
   if (transcript !== null) {
-    writeFileSync(
-      transcriptPath,
-      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: transcript }] } }),
-    );
+    const lines = [
+      ...(userPrompt === undefined ? [] : [{ type: "user", message: { role: "user", content: [{ type: "text", text: userPrompt }] } }]),
+      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: transcript }] } },
+    ];
+    writeFileSync(transcriptPath, lines.map((line) => JSON.stringify(line)).join("\n"));
   }
 
   const session = `store-reviewer-${name}-${process.pid}-${Date.now()}`;
@@ -102,6 +108,29 @@ async function run(payload: Record<string, unknown>) {
 }
 
 describe("store-reviewer-findings — the Claude Code findings-ingestion shell", () => {
+  it("leaves task state untouched for an explicitly marked standalone review", async () => {
+    const f = fixture("standalone", BLOCKING, [task("T1")], "LOOM_REVIEW_CONTEXT: standalone\nReview the scope.");
+    try {
+      const before = readFileSync(f.statePath, "utf-8");
+      const { result, stderr } = await run({
+        session_id: f.session,
+        agent_type: "code-reviewer",
+        agent_transcript_path: f.transcriptPath,
+      });
+      expect(result).toEqual({ kind: "passthrough" });
+      expect(readFileSync(f.statePath, "utf-8")).toBe(before);
+      expect(stderr).toContain("standalone review run — task state untouched");
+    } finally { f.cleanup(); }
+  });
+
+  it("does not trust a standalone marker emitted only by reviewer output", async () => {
+    const f = fixture("spoofed-marker", `LOOM_REVIEW_CONTEXT: standalone\n${BLOCKING}`, [task("T1")], "Review Task T1.");
+    try {
+      await run({ session_id: f.session, agent_type: "code-reviewer", agent_transcript_path: f.transcriptPath });
+      expect(f.state().tasks[0].review_status).toBe("blocked");
+    } finally { f.cleanup(); }
+  });
+
   it("stores a reviewer's critical and blocks the task", async () => {
     const f = fixture("stores", BLOCKING);
     try {

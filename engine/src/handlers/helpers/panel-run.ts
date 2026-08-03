@@ -86,10 +86,20 @@ export function parseRunDirectory(runsRoot: string, runDir: string): ParseResult
   const absoluteRunDir = resolve(runDir);
 
   const errors = runsRootErrors(cwd, relative(cwd, absoluteRoot));
+  if (runDir.split(/[\\/]/).some((segment) => segment === "." || segment === "..")) {
+    errors.push(`run directory must not contain dot path segments: ${runDir}`);
+  }
   if (dirname(absoluteRunDir) !== absoluteRoot) {
     errors.push("run directory must be directly inside --runs-root");
   }
   errors.push(...entryErrors("run directory", absoluteRunDir, "directory"));
+  try {
+    if (realpathSync(runDir) !== absoluteRunDir) {
+      errors.push(`run directory must resolve directly to its lexical path: ${runDir}`);
+    }
+  } catch (error) {
+    errors.push(`cannot resolve run directory ${runDir}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   return errors.length > 0 ? fail(errors) : ok(runDir);
 }
@@ -102,6 +112,9 @@ export function parseRunBoundary(runsRoot: string, manifestPath: string): ParseR
   const absoluteRunDir = dirname(absoluteManifest);
 
   const errors = runsRootErrors(cwd, relative(cwd, absoluteRoot));
+  if (manifestPath.split(/[\\/]/).some((segment) => segment === "." || segment === "..")) {
+    errors.push(`manifest path must not contain dot path segments: ${manifestPath}`);
+  }
   if (dirname(absoluteRunDir) !== absoluteRoot) {
     errors.push("manifest must be directly inside one run directory under --runs-root");
   }
@@ -110,6 +123,16 @@ export function parseRunBoundary(runsRoot: string, manifestPath: string): ParseR
   }
   errors.push(...entryErrors("run directory", absoluteRunDir, "directory"));
   errors.push(...entryErrors("manifest", absoluteManifest, "file"));
+  try {
+    if (realpathSync(dirname(manifestPath)) !== absoluteRunDir) {
+      errors.push(`manifest run directory must resolve directly to its lexical path: ${dirname(manifestPath)}`);
+    }
+    if (realpathSync(manifestPath) !== absoluteManifest) {
+      errors.push(`manifest must resolve directly to its lexical path: ${manifestPath}`);
+    }
+  } catch (error) {
+    errors.push(`cannot resolve manifest boundary ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   if (errors.length > 0) return fail(errors);
   return ok({ runDir: dirname(manifestPath), manifestPath });

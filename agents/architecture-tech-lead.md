@@ -117,4 +117,29 @@ Group by severity:
 
 If no high-confidence issues exist, confirm the architecture meets standards with justification.
 
+## Machine Summary (MANDATORY)
+
+End every review with this exact machine-readable section. Emit one `CRITICAL:`
+or `ADVISORY:` line per finding and account for every line in the JSON block.
+Never invent an id; the engine derives identity from your agent name and order.
+
+````
+### Machine Summary
+CRITICAL_COUNT: {number of critical findings}
+ADVISORY_COUNT: {number of advisory findings}
+CRITICAL: {one critical claim per line; omit when zero}
+ADVISORY: {one advisory claim per line; omit when zero}
+
+```findings
+[
+  { "severity": "critical", "file": "path/or/null", "line": 1, "claim": "one assertion to refute" },
+  { "severity": "advisory", "file": null, "line": null, "claim": "one assertion to triage" }
+]
+```
+````
+
+Use exactly `critical` or `advisory`. Use `null` rather than guessing a location.
+The claim text in the block must exactly match its marker line. Standalone and
+wave-gate refutation panels both consume this same contract.
+
 Be thorough but pragmatic - balance ideal architecture with practical effort. Focus on changes that significantly improve testability and maintainability.
