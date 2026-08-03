@@ -24,7 +24,8 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PI_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../../pi");
+const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const PI_DIR = join(PACKAGE_ROOT, "pi");
 
 /** One `import ... from "<engine module>"` statement, decomposed. */
 interface EngineImport {
@@ -77,6 +78,14 @@ function engineImports(file: string): readonly EngineImport[] {
 
 const PI_FILES = ["extension.ts", "loom-bridge.ts"];
 const IMPORTS = PI_FILES.flatMap(engineImports);
+
+describe("pi package manifest", () => {
+  it("loads only the extension entry point, not helper modules", () => {
+    const manifest = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf-8"));
+
+    expect(manifest.pi?.extensions).toEqual(["./pi/extension.ts"]);
+  });
+});
 
 /** Resolve a `../engine/...` specifier to a file on disk. */
 function modulePath(specifier: string): string {

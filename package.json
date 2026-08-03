@@ -6,7 +6,7 @@
   "type": "module",
   "author": { "name": "peterstorm" },
   "pi": {
-    "extensions": ["./pi"],
+    "extensions": ["./pi/extension.ts"],
     "skills": ["./skills", "./commands/nextjs-frontend-design", "./commands/vercel-react-best-practices"],
     "prompts": ["./commands"]
   },
