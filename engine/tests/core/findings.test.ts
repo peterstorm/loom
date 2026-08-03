@@ -26,6 +26,7 @@ import {
   parseStoredRefutations,
   type DraftFinding,
   type Finding,
+  type RefutedFinding,
 } from "../../src/core/findings";
 
 /** One reviewer emission of N criticals, shaped the way the parser produces it. */
@@ -624,7 +625,7 @@ describe("deduplicateFindingIds — the repair for what the boundary rejects", (
   });
 
   it("never remints onto an ordinal a refutation record still holds", () => {
-    const refuted = [{
+    const refuted: RefutedFinding[] = [{
       finding: finding("code-reviewer-2", "already refuted"),
       refutations: [{ lens: "intent", reason: "deliberate" }],
     }];

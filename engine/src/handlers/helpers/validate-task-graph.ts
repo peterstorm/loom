@@ -22,6 +22,7 @@ import {
   parseStoredFindings,
   parseStoredRefutations,
   recoverViewOnlyClaims,
+  unrecoverableViewClaims,
   salvageMalformedFindings,
   RECOVERED_AGENT,
 } from "../../core/findings";
@@ -230,6 +231,11 @@ interface FindingsRepair {
   readonly recovered: readonly string[];
   /** Claims rescued from a `findings` entry too malformed to parse. */
   readonly salvaged: readonly string[];
+  /** View-only claims that could not be given identity — an empty string or a
+   *  no-findings sentinel. Removed, correctly, but the removal flips a task
+   *  from gate-blocking to gate-passing, so it is reported like every other
+   *  lossy path rather than being inferred from a count that never saw it. */
+  readonly unrecoverableViewClaims: readonly string[];
   /** Ids that collided and were re-minted. */
   readonly reminted: number;
   /** Malformed `findings` entries carrying nothing salvageable. The one path in
@@ -301,6 +307,11 @@ function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
     viewClaims(t.advisory_findings),
   );
   const findings = [...identified, ...recoveredFindings];
+  const unrecoverable = unrecoverableViewClaims(
+    identified,
+    viewClaims(t.critical_findings),
+    viewClaims(t.advisory_findings),
+  );
 
   const review = repairReviewRecord(t);
 
@@ -314,6 +325,7 @@ function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
     },
     recovered: recoveredFindings.map((finding) => finding.claim),
     salvaged: salvagedFindings.map((finding) => finding.claim),
+    unrecoverableViewClaims: unrecoverable,
     reminted,
     dropped: rawFindingCount - parsed.length - salvagedFindings.length,
     droppedRefutations: rawRefutedCount - refuted.length,
@@ -408,6 +420,13 @@ export function fixFull(json: Record<string, unknown>): FixReport {
             `audit trail lost, the findings themselves are unaffected`,
         );
       }
+      for (const claim of repair.unrecoverableViewClaims) {
+        notes.push(
+          `${id}: DROPPED view-only claim carrying no finding — "${claim}". ` +
+            `The wave gate counts that view and does not filter sentinels, so this task ` +
+            `blocked the gate before this repair and no longer does`,
+        );
+      }
       return {
         ...t,
         depends_on: Array.isArray(t.depends_on) ? t.depends_on : [],
@@ -463,9 +482,12 @@ const handler: HookHandler = async (stdin, args) => {
     return { kind: "error", message: "Invalid JSON" };
   }
 
-  const result = isMinimal ? validateMinimal(json) : validateFull(json);
-
   if (isFix) {
+    // Validation of the INPUT is deliberately not run here. `validateFull`
+    // writes `new_tests_required=false` warnings to stderr as a side effect,
+    // and this path discards its result and re-validates the REPAIRED graph
+    // below — so evaluating it eagerly printed every such warning twice, once
+    // for a verdict nothing reads.
     const repair = isMinimal ? { json: fixMinimal(json), notes: [] } : fixFull(json);
     process.stdout.write(repair.json);
     // A repair that gave a claim identity or renamed one changed the data the
@@ -495,6 +517,8 @@ const handler: HookHandler = async (stdin, args) => {
     }
     return { kind: "passthrough" };
   }
+
+  const result = isMinimal ? validateMinimal(json) : validateFull(json);
 
   if (!result.ok) {
     return {

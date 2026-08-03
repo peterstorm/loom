@@ -197,7 +197,11 @@ else
   bad "brief finding ids wrong: $(jq -c '[.findings[].id]' "$RUN_DIR/brief.json")"
 fi
 
-if grep -q "prefer a named constant" "$RUN_DIR/brief.json"; then
+# Guarded on the file FIRST: grep exits 2 on a missing path, which the bare
+# negative branch read as "the advisory is absent" and reported as a pass.
+if [ ! -s "$RUN_DIR/brief.json" ]; then
+  bad "brief.json missing or empty — cannot prove the advisory was excluded"
+elif grep -q "prefer a named constant" "$RUN_DIR/brief.json"; then
   bad "advisory leaked into the brief — advisories must skip the panel"
 else
   ok "advisory excluded from the brief"
@@ -238,10 +242,23 @@ cp "$TMP/manifest.bak" "$RUN_DIR/manifest.json"
 echo "[3] review-panel verdict"
 SKIPPED="$(jq -nc --arg f1 "$F1" '{criterion:"intent",verdicts:[{finding_id:$f1,verdict:"refuted",reasoning:"x"}]}')"
 rc="$(REVIEW_STDIN="$SKIPPED" helper verdict --lens intent --runs-root "$RUNS_ROOT_REL" --manifest "$RUN_REL/manifest.json")"
-if [ "$rc" != "0" ] && grep -q "is missing finding" "$ERR"; then
+# "verdicts is missing finding", not "is missing finding": the shorter string is
+# also a substring of the MANIFEST diagnostic ("manifest is missing finding:"),
+# so a tampered manifest surviving into this step passed the assertion while the
+# real failure was two steps upstream.
+if [ "$rc" != "0" ] && grep -q "verdicts is missing finding" "$ERR"; then
   ok "verifier that skipped a finding REJECTED"
 else
   bad "expected a missing-finding rejection, got exit $rc / $(tr '\n' ' ' < "$ERR")"
+fi
+
+INVENTED="$(jq -nc --arg f1 "$F1" --arg f2 "$F2" \
+  '{criterion:"intent",verdicts:[{finding_id:$f1,verdict:"refuted",reasoning:"x"},{finding_id:$f2,verdict:"refuted",reasoning:"y"},{finding_id:"T9:code-reviewer-7",verdict:"refuted",reasoning:"z"}]}')"
+rc="$(REVIEW_STDIN="$INVENTED" helper verdict --lens intent --runs-root "$RUNS_ROOT_REL" --manifest "$RUN_REL/manifest.json")"
+if [ "$rc" != "0" ] && grep -q "has unknown finding" "$ERR"; then
+  ok "verifier that INVENTED a finding REJECTED"
+else
+  bad "expected an unknown-finding rejection, got exit $rc / $(tr '\n' ' ' < "$ERR")"
 fi
 
 STRAY="$(jq -nc --arg l "blast-radius" --arg f1 "$F1" --arg f2 "$F2" \

@@ -12,7 +12,7 @@ import { dirname } from "node:path";
 import { withLock } from "./utils/lock";
 import { PHASE_ORDER, TASK_GRAPH_PATH } from "./config";
 import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
-import { REVIEW_STATUSES, TASK_STATUSES } from "./types";
+import { REVIEW_STATUSES, SPEC_CHECK_VERDICTS, TASK_STATUSES, parseSpecCheckVerdict } from "./types";
 import {
   findingIdCollisionError,
   findingsLockstepError,
@@ -63,6 +63,64 @@ export function resolveTaskGraph(sessionId?: string): string | null {
 
 /** Pure: the union-typed fields of one raw task, proven or precisely refused.
  *  Returns an error string, or null when the task's unions all parse. */
+/**
+ * Prove one wave gate's shape, for the reason every `Task` union field is proven.
+ *
+ * The cast in `parseTaskGraph` asserts `Record<string, WaveGate>` and used to
+ * prove nothing beyond "the container is an object". Four booleans read by gate
+ * logic as booleans: `validate-task-execution` blocks on `!gate.reviews_complete`,
+ * so `{ reviews_complete: "no" }` loaded clean and read as TRUTHY — the
+ * previous-wave review gate silently stopped blocking, which is the failure this
+ * boundary exists to make impossible. `tests_passed` is the one tri-state, and
+ * `null` there means "not yet judged", not "absent".
+ */
+function waveGateError(v: unknown, wave: string): string | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    return `wave_gates["${wave}"] must be an object`;
+  }
+  const gate = v as Record<string, unknown>;
+  for (const field of ["impl_complete", "reviews_complete", "blocked"] as const) {
+    if (gate[field] !== undefined && typeof gate[field] !== "boolean") {
+      return `wave_gates["${wave}"]: ${field} must be a boolean, got ${JSON.stringify(gate[field])}`;
+    }
+  }
+  if (
+    gate.tests_passed !== undefined &&
+    gate.tests_passed !== null &&
+    typeof gate.tests_passed !== "boolean"
+  ) {
+    return (
+      `wave_gates["${wave}"]: tests_passed must be a boolean or null, ` +
+      `got ${JSON.stringify(gate.tests_passed)}`
+    );
+  }
+  return null;
+}
+
+/**
+ * Prove the spec-check record, routed through the smart constructor that exists
+ * for it. `parseSpecCheckVerdict` was written to keep free text out of the
+ * gate's typed logic and the load path never called it, so a drifted `verdict`
+ * reached `complete-wave-gate` unchallenged.
+ */
+function specCheckError(v: unknown): string | null {
+  if (v === undefined) return null;
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    return "spec_check must be an object when present";
+  }
+  const spec = v as Record<string, unknown>;
+  if (typeof spec.verdict !== "string" || parseSpecCheckVerdict(spec.verdict) === null) {
+    return (
+      `spec_check.verdict ${JSON.stringify(spec.verdict)} is not one of ` +
+      `${SPEC_CHECK_VERDICTS.join(", ")}`
+    );
+  }
+  if (spec.wave !== undefined && (typeof spec.wave !== "number" || !Number.isFinite(spec.wave))) {
+    return `spec_check.wave must be a finite number, got ${JSON.stringify(spec.wave)}`;
+  }
+  return null;
+}
+
 function taskUnionError(v: unknown, index: number): string | null {
   if (typeof v !== "object" || v === null || Array.isArray(v)) {
     return `tasks[${index}] must be an object`;
@@ -185,6 +243,12 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
   if (typeof waveGates !== "object" || waveGates === null || Array.isArray(waveGates)) {
     return parseErr("wave_gates must be an object");
   }
+  for (const [wave, gate] of Object.entries(waveGates as Record<string, unknown>)) {
+    const err = waveGateError(gate, wave);
+    if (err !== null) return parseErr(err);
+  }
+  const specErr = specCheckError(obj.spec_check);
+  if (specErr !== null) return parseErr(specErr);
   // The single blessed cast: every union field above is proven in place.
   return parseOk({ ...obj, tasks, wave_gates: waveGates } as unknown as TaskGraph);
 }

@@ -48,7 +48,7 @@ This prints per-task evidence status. Exit 0 = all tasks have evidence, exit 1 =
 
 ### Step 3: Spawn Verification (Parallel)
 
-Spawn **spec-check AND code reviewers** in a single message with multiple Task calls.
+Spawn **spec-check AND code reviewers** in a single message with multiple Agent calls.
 
 **Get wave info** (self-contained jq — the guard blocks `WAVE=$(jq … state)`
 capture-into-variable, and shell variables do not persist across Bash tool
@@ -71,7 +71,7 @@ git diff --name-only $BASE...HEAD
 jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | select(.review_status == "pending" or .review_status == "blocked") | .id' .claude/state/active_task_graph.json
 ```
 
-**Spawn ALL in parallel (single message, multiple Task calls):**
+**Spawn ALL in parallel (single message, multiple Agent calls):**
 
 1. **Spec-check invoker** (always, once per wave):
 ```markdown
@@ -242,7 +242,7 @@ each selected lens, substitute `{lens_name}`, `{lens_prompt}` (that lens's
 section from `{LOOM_DIR}/references/review-lenses.md`),
 `{finding_manifest_path}`, and `{brief_file_path}`.
 
-**Spawn all N `review-verifier-agent`s in ONE message** (parallel Task calls).
+**Spawn all N `review-verifier-agent`s in ONE message** (parallel Agent calls).
 Validate each raw output before it reaches the tally — **`verdict-N.json` must
 hold lens N**, in the manifest's lens order:
 
@@ -349,7 +349,7 @@ jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | select((.advisory_
 - **Relevant** — in scope for the task, actionable, and consistent with project standards (the repo's `CLAUDE.md` / conventions) → **fix it**.
 - **Not relevant** — out-of-scope refactor, nitpick that contradicts an established project convention, false positive, or work deliberately deferred to a later wave → record a one-line reason, leave it.
 
-**Fix relevant advisories** by spawning a fix subagent via Task (the orchestrator's Edit/Write are blocked by `block-direct-edits`). Give it the advisory text + file context and have it make the **minimal** change, then re-run `/wave-gate` so the fix is re-reviewed.
+**Fix relevant advisories** by spawning a fix subagent (the orchestrator's Edit/Write are blocked by `block-direct-edits`). Give it the advisory text + file context and have it make the **minimal** change, then re-run `/wave-gate` so the fix is re-reviewed.
 
 **Non-blocking:** if a relevant advisory can't be fixed cleanly (breaks tests, needs an upstream change), defer it with a reason rather than holding the wave. Every advisory must end as *fixed*, *deferred (reason)*, or *dismissed (reason)* — never silently ignored.
 

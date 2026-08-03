@@ -6,9 +6,12 @@
  * transcript, find the task, write, log. `pi/extension.ts` is the same shell
  * over the same core, which is what keeps the two harnesses from drifting.
  *
- * Every early return logs. A reviewer whose output is discarded silently is
- * indistinguishable from one that found nothing — the exact confusion the
- * `evidence_capture_failed` status exists to prevent.
+ * Every early return that DISCARDS a reviewer's output logs. A reviewer whose
+ * findings vanish silently is indistinguishable from one that found nothing —
+ * the exact confusion the `evidence_capture_failed` status exists to prevent.
+ * The one silent return is the `!isReviewAgent` passthrough, which discards
+ * nothing: this handler fires on every SubagentStop, and a non-reviewer has no
+ * findings for it to lose.
  */
 
 import type { HookHandler, SubagentStopInput } from "../../types";

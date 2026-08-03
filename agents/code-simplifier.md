@@ -140,7 +140,9 @@ made, and the block must ACCOUNT FOR EVERY FINDING YOU REPORTED — advisories
 included: when it parses and is long enough, it becomes the source of findings,
 so every `CRITICAL:` line AND every `ADVISORY:` line must also appear in the
 block with the matching `"severity"`. A block that lists fewer findings of
-EITHER severity than your marker lines loses to them; the claims survive, the
-locations do not. Write the same claim text in both places — the engine
+EITHER severity than your marker lines loses to them; every claim survives, and
+the only locations lost are those of the claims the marker lines named — a block
+entry the markers did not name is carried over with its file and line intact.
+Write the same claim text in both places — the engine
 reconciles by value, and a reworded claim arrives twice and burns a verifier
 vote on a duplicate.

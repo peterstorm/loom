@@ -149,6 +149,25 @@ const handler: HookHandler = async (stdin, args) => {
 
   const { critical, advisory } = parseFindings(stdin);
 
+  // Empty input is refused, not obeyed. `updateTaskFindings` writes the state
+  // it is given, so parsing nothing out of stdin moved EVERY existing finding
+  // into `refuted_findings` under `manual-override`, emptied `critical_findings`
+  // and set `review_status: "passed"` — an unblocked wave gate — while logging
+  // "0 critical, 0 advisory", which is exactly what a legitimate all-clear
+  // override logs. An operator pipeline whose upstream command produced nothing
+  // (a failed grep, a truncated file, a typo'd path) therefore unblocked the
+  // gate silently. Dismissing findings is a real operation, but it is one the
+  // operator has to say out loud.
+  if (critical.length === 0 && advisory.length === 0 && !args.includes("--dismiss-all")) {
+    return {
+      kind: "error",
+      message:
+        `No findings parsed from stdin for '${taskId}'. Storing nothing would dismiss every ` +
+        `finding this task holds and pass its review — if that is the intent, pass ` +
+        `--dismiss-all; otherwise check the input that produced this.`,
+    };
+  }
+
   // Prove the target exists before writing. `tasks.map` over a non-matching id
   // is a total no-op, so an unknown --task used to print "Stored findings for
   // X" and exit 0 with nothing written. The downgrade direction self-corrects
@@ -184,7 +203,13 @@ const handler: HookHandler = async (stdin, args) => {
       : s.wave_gates,
   }));
 
-  process.stderr.write(`Stored findings for ${taskId}: ${critical.length} critical, ${advisory.length} advisory\n`);
+  // A dismissal and a two-finding override used to print the same shape of
+  // line, differing only in a zero. Named, because this one passed a review.
+  process.stderr.write(
+    critical.length === 0 && advisory.length === 0
+      ? `DISMISSED every finding on ${taskId} (--dismiss-all): review_status is now passed\n`
+      : `Stored findings for ${taskId}: ${critical.length} critical, ${advisory.length} advisory\n`,
+  );
 
   return { kind: "passthrough" };
 };

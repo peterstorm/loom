@@ -10,7 +10,7 @@
  * Not pure: lstat/realpath/read/write. Kept out of `core/` for that reason.
  */
 
-import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { HookResult } from "../../types";
 import type { ParseResult, RunLayout } from "../../core/panel-kernel";
@@ -258,6 +258,68 @@ export function prepareWriteTargets(
     }
   }
   return errors.length > 0 ? fail(errors) : ok(undefined);
+}
+
+/**
+ * Delete the artifacts in an item directory that the caller is not about to
+ * write, and report what went.
+ *
+ * Only the engine-authored side needs this, and only because a re-brief is a
+ * legitimate operation: after a finding is refuted or overridden, the next
+ * brief names fewer findings, and the file for the departed one stayed behind.
+ * The surplus was then caught two steps later by `runArtifactErrors` — with the
+ * diagnostic "the panel that produced them was larger than the manifest
+ * declares", which describes the opposite of what happened and sends the
+ * operator looking for a resized panel that does not exist.
+ *
+ * Refuses rather than deletes anything that is not a plain file it recognizes:
+ * this runs `rm` inside a directory derived from an argument, so a symlink or a
+ * nested directory is a reason to stop, not something to clean up. Unknown
+ * plain files ARE removed — a stale `finding-code-reviewer-9.json` is exactly
+ * the surplus this exists to clear.
+ */
+export function pruneSurplusItems(
+  runDir: string,
+  itemDir: string,
+  expected: readonly string[],
+): ParseResult<readonly string[]> {
+  const directory = join(runDir, itemDir);
+  const keep = new Set(expected);
+  let entries: readonly string[];
+  try {
+    entries = readdirSync(directory);
+  } catch (error) {
+    // A run directory that has never held items is the normal first-brief case.
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return ok([]);
+    return fail([
+      `cannot list ${directory}: ${error instanceof Error ? error.message : String(error)}`,
+    ]);
+  }
+
+  const removed: string[] = [];
+  const errors: string[] = [];
+  for (const entry of entries) {
+    if (keep.has(entry)) continue;
+    const path = join(directory, entry);
+    try {
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) {
+        errors.push(`stale run artifact must not be a symbolic link: ${path}`);
+        continue;
+      }
+      if (!stat.isFile()) {
+        errors.push(`stale run artifact must be a regular file: ${path}`);
+        continue;
+      }
+      unlinkSync(path);
+      removed.push(entry);
+    } catch (error) {
+      errors.push(
+        `cannot clear stale run artifact ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return errors.length > 0 ? fail(errors) : ok(removed);
 }
 
 /** Canonical per-criterion verdict path. Positional by index, but the content

@@ -506,7 +506,7 @@ describe("the structured block never costs a claim the markers made", () => {
         entry("unchecked cast"),
       ])),
     );
-    expect(result?.blockStatus).toBe("used");
+    expect(result?.blockStatus.kind).toBe("used");
     expect(result?.critical).toEqual(["leak in the cache", "unchecked cast"]);
     expect(result?.drafts.every((d) => d.file === "src/x.ts")).toBe(true);
   });
@@ -522,7 +522,7 @@ describe("the structured block never costs a claim the markers made", () => {
         entry("unchecked cast"),
       ])),
     );
-    expect(result?.blockStatus).toBe("superseded");
+    expect(result?.blockStatus.kind).toBe("superseded");
     expect(result?.critical).toEqual(["leak in the cache", "unchecked cast", "race on the queue"]);
   });
 
@@ -532,18 +532,18 @@ describe("the structured block never costs a claim the markers made", () => {
     const result = parseMachineSummary(
       summary(2, [], JSON.stringify([entry("leak in the cache"), entry("unchecked cast")])),
     );
-    expect(result?.blockStatus).toBe("used");
+    expect(result?.blockStatus.kind).toBe("used");
     expect(result?.critical).toEqual(["leak in the cache", "unchecked cast"]);
   });
 
   it("reports a malformed block rather than degrading in silence", () => {
     const result = parseMachineSummary(summary(1, ["unchecked cast"], "[{not json"));
-    expect(result?.blockStatus).toBe("rejected");
+    expect(result?.blockStatus.kind).toBe("rejected");
     expect(result?.critical).toEqual(["unchecked cast"]);
   });
 
   it("says nothing when no block was offered", () => {
-    expect(parseMachineSummary(summary(1, ["unchecked cast"], null))?.blockStatus).toBe("absent");
+    expect(parseMachineSummary(summary(1, ["unchecked cast"], null))?.blockStatus.kind).toBe("absent");
   });
 
   it("tells the operator when locations were lost", () => {
@@ -571,7 +571,7 @@ describe("the structured block never costs a claim the markers made", () => {
         "advisory three",
       ]),
     );
-    expect(result?.blockStatus).toBe("superseded");
+    expect(result?.blockStatus.kind).toBe("superseded");
     expect(result?.advisory).toEqual(["advisory one", "advisory two", "advisory three"]);
     expect(result?.critical).toEqual(["unchecked cast"]);
   });
@@ -583,7 +583,7 @@ describe("the structured block never costs a claim the markers made", () => {
         entry("advisory one", "advisory"),
       ]), ["advisory one"]),
     );
-    expect(result?.blockStatus).toBe("used");
+    expect(result?.blockStatus.kind).toBe("used");
     expect(result?.advisory).toEqual(["advisory one"]);
     expect(result?.drafts.every((d) => d.file === "src/x.ts")).toBe(true);
   });
@@ -615,7 +615,7 @@ describe("the structured block never costs a claim the markers made", () => {
         entry("another nit", "advisory"),
       ]), ["naming nit"]),
     );
-    expect(result?.blockStatus).toBe("partial");
+    expect(result?.blockStatus.kind).toBe("partial");
     // The block's claims survive WITH their locations; the markers' claims
     // survive without. Neither side is discarded.
     expect(result?.critical).toEqual(["totally unrelated claim", "race on the queue"]);
@@ -634,7 +634,7 @@ describe("the structured block never costs a claim the markers made", () => {
         entry("leak in the cache"),
       ])),
     );
-    expect(result?.blockStatus).toBe("partial");
+    expect(result?.blockStatus.kind).toBe("partial");
     expect(result?.critical).toEqual([
       "leak in the cache",
       "leak in the cache",
@@ -654,7 +654,7 @@ describe("the structured block never costs a claim the markers made", () => {
         entry("something else"),
       ])),
     );
-    expect(result?.blockStatus).toBe("partial");
+    expect(result?.blockStatus.kind).toBe("partial");
     expect(result?.critical).toEqual(["same wording", "something else", "same wording"]);
   });
 
@@ -665,7 +665,7 @@ describe("the structured block never costs a claim the markers made", () => {
     const result = parseMachineSummary(
       summary(2, ["same wording", "same wording"], JSON.stringify([entry("same wording")])),
     );
-    expect(result?.blockStatus).toBe("superseded");
+    expect(result?.blockStatus.kind).toBe("superseded");
     expect(result?.critical).toEqual(["same wording", "same wording"]);
   });
 

@@ -492,8 +492,10 @@ payload="$(jq -nc --arg c "${CRITERIA[0]:-simplicity}" --arg a "candidate-${LENS
 rc="$(PANEL_STDIN="$payload" contract verdict --criterion "${CRITERIA[0]:-simplicity}" "${CONTRACT_ARGS[@]}")"
 if [ "$rc" = "0" ]; then
   bad "verdict ACCEPTED a judge that skipped two candidates"
-else
+elif grep -q "judge verdict contract failed" "$CONTRACT_ERR"; then
   ok "judge that skipped candidates REJECTED"
+else
+  bad "judge that skipped candidates failed, but not as a contract rejection: $(tr '\n' ' ' < "$CONTRACT_ERR")"
 fi
 
 # ── 11. aggregate: re-read from disk and rank ─────────────────────────────────
@@ -523,8 +525,10 @@ else
   rc="$(contract aggregate "${CONTRACT_ARGS[@]}")"
   if [ "$rc" = "0" ]; then
     bad "aggregate ACCEPTED a verdict written into the wrong slot"
-  else
+  elif grep -q "panel verdicts contract failed" "$CONTRACT_ERR"; then
     ok "verdict in the wrong criterion slot REJECTED"
+  else
+    bad "wrong-slot verdict failed, but not as a verdicts contract rejection: $(tr '\n' ' ' < "$CONTRACT_ERR")"
   fi
   cp "$TMP/held.json" "$RUN_DIR/verdicts/verdict-1.json"
 
@@ -535,8 +539,10 @@ else
   rc="$(contract aggregate "${CONTRACT_ARGS[@]}")"
   if [ "$rc" = "0" ]; then
     bad "aggregate ACCEPTED a panel with a missing verdict"
-  else
+  elif grep -q "panel verdicts contract failed" "$CONTRACT_ERR"; then
     ok "missing verdict REJECTED — a partial panel ranks nothing"
+  else
+    bad "missing verdict failed, but not as a verdicts contract rejection: $(tr '\n' ' ' < "$CONTRACT_ERR")"
   fi
 fi
 

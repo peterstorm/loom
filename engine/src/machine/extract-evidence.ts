@@ -624,11 +624,25 @@ export function extractEvidence(
       // composition proves ownership (attributeExit) — `false && npx vitest
       // …; true` exits 0 without vitest running, and must not classify as a
       // passing run.
+      //
+      // A BACKGROUNDED test segment (`mvn test &`) drops its report too, not
+      // just its exit. `judgeTestRun` treats an unknown exit beside a green
+      // report as trustworthy — deliberately, because some harnesses report no
+      // exit code at all — but that reasoning assumes the report describes a
+      // FINISHED run. The shell returns from `&` immediately, so the runner is
+      // still writing: surefire has per-class XML for the suites that happen to
+      // have completed, every mtime postdates the call, and the merged summary
+      // reads `total > 0, failed = 0`. That minted `trusted-pass` on a suite
+      // still running, and `applyUntrustedStopResolution` then refused to let
+      // any later evidence correct it. `findReport`'s guards bound STALENESS;
+      // nothing bounds completeness, so the only honest answer here is no
+      // evidence at all.
+      const backgrounded = classified.opAfter === "&";
       events.push({
         kind: "TestRun",
         command,
         exit: attributeExit(outcome.exit, classified),
-        report,
+        report: backgrounded ? null : report,
       });
     }
     return events;

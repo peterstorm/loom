@@ -49,6 +49,7 @@ import {
   serializeOutcomes,
   serializeRefutationVerdict,
   serializeReviewManifest,
+  staleWaveError,
   tallyRefutations,
   REVIEW_LENSES_DEFAULT,
   type FindingBrief,
@@ -62,6 +63,7 @@ import {
   parseRunBoundary,
   parseRunDirectory,
   prepareWriteTargets,
+  pruneSurplusItems,
   readVerdicts,
   realRunDir,
   runArtifactErrors,
@@ -136,20 +138,11 @@ function operationBrief(runsRoot: string, runDir: string, wave: number): HookRes
   const state = loadGraph();
   if (!state.ok) return contractError("review brief", state.errors);
 
-  // The wave is proven against the graph, not taken on trust. `wave-gate.md`
-  // asked the operator to check this with `jq` — but the engine loads the graph
-  // two lines up and has everything it needs, and a stale `--wave` produces a
-  // fully adjudicable brief whose `tally` then writes `refuted_findings` and can
-  // promote a PAST wave's tasks blocked → passed. `checkCriticalFindings` is
-  // wave-scoped, so the blast radius is a corrupted audit record rather than an
-  // opened gate; that is still not a thing to leave to a prose reminder.
-  const current = state.value.current_wave;
-  if (current !== undefined && current !== wave) {
-    return contractError("review brief", [
-      `--wave ${wave} is not the graph's current wave (${current}) — a brief for a closed wave ` +
-        `re-adjudicates decisions that are already recorded`,
-    ]);
-  }
+  // The wave is proven against the graph, not taken on trust. The rule itself
+  // is `staleWaveError` in the core, beside the three run-policy rules it is
+  // the sibling of; this is just where the two values are read.
+  const stale = staleWaveError(wave, state.value.current_wave);
+  if (stale !== null) return contractError("review brief", [stale]);
 
   const brief = buildFindingBrief(wave, state.value.tasks);
   const completeness = briefCompletenessErrors(brief, state.value.tasks);
@@ -163,16 +156,25 @@ function operationBrief(runsRoot: string, runDir: string, wave: number): HookRes
   const reparsed = parseFindingBriefJson(JSON.parse(briefJson));
   if (!reparsed.ok) return contractError("review brief", reparsed.errors);
 
+  const itemFilenames = brief.findings.map((finding) => briefFindingFilename(finding.id));
   const targets = prepareWriteTargets(
     runDir,
     [LAYOUT.itemDir, LAYOUT.verdictDir],
     [
       LAYOUT.contextMd,
       LAYOUT.contextJson,
-      ...brief.findings.map((finding) => join(LAYOUT.itemDir, briefFindingFilename(finding.id))),
+      ...itemFilenames.map((filename) => join(LAYOUT.itemDir, filename)),
     ],
   );
   if (!targets.ok) return contractError("review run boundary", targets.errors);
+
+  // A re-brief after a refutation names FEWER findings than the last one, and
+  // the file for the departed finding used to stay behind — surfacing two steps
+  // later as `manifest` failing with "the panel that produced them was larger
+  // than the manifest declares", a diagnostic about a resized panel that never
+  // happened. The brief owns this directory; it is written whole each time.
+  const pruned = pruneSurplusItems(runDir, LAYOUT.itemDir, itemFilenames);
+  if (!pruned.ok) return contractError("review run boundary", pruned.errors);
 
   try {
     writeFileSync(join(runDir, LAYOUT.contextMd), renderFindingBriefMarkdown(brief));
@@ -380,20 +382,31 @@ const handler: HookHandler = async (stdin, args) => {
 
   const current = loadGraph();
   if (!current.ok) return contractError("review tally", current.errors);
+  // Checked EARLY for the diagnostic — a replay caught here costs nothing and
+  // names itself — and again inside the transform below, which is the check
+  // that actually holds. This read is unlocked, so two concurrent tallies both
+  // pass it; the one that loses the race would then reach
+  // `applyFindingOutcomes` and throw "the task graph changed between brief and
+  // tally", blaming a mid-run override for what is plainly a re-tally. That is
+  // the exact misattribution `replayedOutcomes` exists to prevent.
   const replays = replayedOutcomes(tallied.value, refutedIdsOf(current.value.tasks));
   if (replays.length > 0) return contractError("review tally", [replayError(replays)]);
 
   const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
   if (!mgr) return contractError("review tally", [`no task graph at ${TASK_GRAPH_PATH}`]);
   try {
-    await mgr.update((s) => ({
-      ...s,
-      tasks: s.tasks.map((task) => applyFindingOutcomes(task, tallied.value)),
-    }));
+    await mgr.update((s) => {
+      // Re-checked against the graph `update` loaded under the lock, so the
+      // decision is made on the same state the write lands on.
+      const raced = replayedOutcomes(tallied.value, refutedIdsOf(s.tasks));
+      if (raced.length > 0) throw new Error(replayError(raced));
+      return { ...s, tasks: s.tasks.map((task) => applyFindingOutcomes(task, tallied.value)) };
+    });
   } catch (error) {
-    // `applyFindingOutcomes` throws on a broken findings invariant. Reaching the
-    // operator as a contract diagnostic, like every other failure in this
-    // helper, beats an unhandled stack trace out of a hook.
+    // `applyFindingOutcomes` throws on a broken findings invariant, and the
+    // replay re-check throws its own diagnostic. Reaching the operator as a
+    // contract diagnostic, like every other failure in this helper, beats an
+    // unhandled stack trace out of a hook.
     return contractError("review tally", [error instanceof Error ? error.message : String(error)]);
   }
 

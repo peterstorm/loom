@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
+  carriedOverCount,
   parseLegacyFindings,
   parseMachineSummary,
   reconcileFindings,
@@ -42,9 +43,9 @@ describe("a block that loses arbitration still contributes its claims", () => {
 
     const parsed = parseMachineSummary(transcript);
     expect(parsed).not.toBeNull();
-    expect(parsed!.blockStatus).toBe("superseded");
+    expect(parsed!.blockStatus.kind).toBe("superseded");
     expect(parsed!.critical).toContain("real blocker A");
-    expect(parsed!.carriedOver).toBe(1);
+    expect(carriedOverCount(parsed!.blockStatus)).toBe(1);
   });
 
   it("the surviving claim keeps its file and line", () => {
@@ -67,9 +68,9 @@ describe("a block that loses arbitration still contributes its claims", () => {
       block([{ severity: "critical", file: null, line: null, claim: "shared claim" }]),
     ].join("\n");
     const parsed = parseMachineSummary(transcript)!;
-    expect(parsed.blockStatus).toBe("superseded");
+    expect(parsed.blockStatus.kind).toBe("superseded");
     expect(parsed.critical.filter((c) => c === "shared claim")).toHaveLength(1);
-    expect(parsed.carriedOver).toBe(0);
+    expect(carriedOverCount(parsed.blockStatus)).toBe(0);
   });
 
   it("reconciliation counts what actually survived, not what the markers held", () => {
@@ -137,7 +138,7 @@ describe("a block under an unrecognized heading is not reported as absent", () =
     // blockStatus reported "absent" — the one value documented to mean "the
     // reviewer emitted no block" — so no degradation note printed either.
     const parsed = parseLegacyFindings(BOLD_HEADING);
-    expect(parsed.blockStatus).toBe("used");
+    expect(parsed.blockStatus.kind).toBe("used");
     const finding = parsed.drafts.find((d) => d.claim === "null deref in parser")!;
     expect(finding.file).toBe("src/p.ts");
     expect(finding.line).toBe(9);
@@ -145,11 +146,11 @@ describe("a block under an unrecognized heading is not reported as absent", () =
 
   it("a malformed block on the legacy path is reported as rejected, not absent", () => {
     const malformed = ["**Machine Summary**", "CRITICAL_COUNT: 1", "CRITICAL: x", "```findings", "{not json", "```"].join("\n");
-    expect(parseLegacyFindings(malformed).blockStatus).toBe("rejected");
+    expect(parseLegacyFindings(malformed).blockStatus.kind).toBe("rejected");
   });
 
   it("genuinely blockless output is still 'absent'", () => {
-    expect(parseLegacyFindings("CRITICAL_COUNT: 0").blockStatus).toBe("absent");
+    expect(parseLegacyFindings("CRITICAL_COUNT: 0").blockStatus.kind).toBe("absent");
   });
 });
 
@@ -242,9 +243,9 @@ describe("the operator is told how many claims were carried over", () => {
     ].join("\n");
 
     const parsed = parseMachineSummary(transcript)!;
-    expect(parsed.blockStatus).toBe("partial");
+    expect(parsed.blockStatus.kind).toBe("partial");
     expect(parsed.critical).toHaveLength(4);
-    expect(parsed.carriedOver).toBe(2);
+    expect(carriedOverCount(parsed.blockStatus)).toBe(2);
 
     const log = reviewResolutionLog("T1", { kind: "findings", agent: "code-reviewer", findings: parsed });
     expect(log).toContain("2 claim(s) carried over");
@@ -259,7 +260,7 @@ describe("the operator is told how many claims were carried over", () => {
       block([{ severity: "critical", file: "src/a.ts", line: 1, claim: "same claim" }]),
     ].join("\n");
     const parsed = parseMachineSummary(transcript)!;
-    expect(parsed.blockStatus).toBe("used");
+    expect(parsed.blockStatus.kind).toBe("used");
     expect(reviewResolutionLog("T1", { kind: "findings", agent: "code-reviewer", findings: parsed }))
       .toBe("Task T1 review: blocked (1 critical)");
   });

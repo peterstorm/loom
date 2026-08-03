@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { REVIEW_SUB_AGENTS, isReviewAgent } from "../src/config";
-import { resolveReviewFindings } from "../src/core/review-output";
+import { carriedOverCount, resolveReviewFindings } from "../src/core/review-output";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const agentFile = (name: string): string =>
@@ -77,8 +77,8 @@ describe("every REVIEW_SUB_AGENT declares the Machine Summary contract", () => {
     if (resolved.kind !== "findings") return;
     expect(resolved.findings.critical).toEqual(["a real blocker"]);
     expect(resolved.findings.advisory).toEqual(["a nit"]);
-    expect(resolved.findings.blockStatus).toBe("used");
+    expect(resolved.findings.blockStatus.kind).toBe("used");
     // The block won cleanly, so nothing was carried over and nothing duplicated.
-    expect(resolved.findings.carriedOver).toBe(0);
+    expect(carriedOverCount(resolved.findings.blockStatus)).toBe(0);
   });
 });

@@ -186,7 +186,8 @@ Opt-in upgrade to the approach gate. Instead of one agent inventing 2–3 approa
 1. **Run boundary + interview once** — Loom creates `.claude/specs/{slug}/panel-runs/<run-id>/`; `arch-interviewer-agent` runs the full questionnaire and writes a digest there. A typed helper rejects missing, duplicate, empty, or invalid labeled fields before fan-out.
 2. **N designers in parallel** — `arch-designer-agent`, each assigned a distinct **lens** (`simplicity-first`, `type-driven-fp`, `risk-security-first`, `performance-first`, `codebase-conventionist`), writes one candidate under the run directory. An exact manifest—not directory discovery—defines the candidate set.
 3. **K judges in parallel** — each `arch-judge-agent` scores every manifest candidate against one interview-derived criterion. Judge JSON is schema-checked for criterion identity, exact candidate coverage, score bounds/order, and required prose; canonical sanitized verdicts stay in the run directory.
-4. **Finalize** — `architecture-agent` aggregates by total score with deterministic primary-axis/testability/filename tie-breaks, runs the mandatory 2–3 option approach gate, synthesizes the user's choice, records `### AD-1: Approach selection (panel)`, and writes the plan.
+4. **Aggregate — engine, no agent.** `helper panel-contract aggregate` ranks the candidates by total score with deterministic primary-axis/testability/filename tie-breaks and writes `ranking.json`. This step is mandatory and is not an agent's judgement call: the finalizer receives the ranking as authoritative and must not recompute it.
+5. **Finalize** — `architecture-agent` reads the engine's ranking, runs the mandatory 2–3 option approach gate, synthesizes the user's choice, records `### AD-1: Approach selection (panel)`, and writes the plan.
 
 Defaults: **3 designers, 3 judges**. `--panel=N` requires an integer from 2 upward; values above the five available lenses are capped at 5. The panel's ranking is a recommendation—the user still picks. Panel mode stays opt-in until an A/B shows it beats single-agent plans. Plan-alignment loop-backs never re-panel; the phase gate enforces standard single-agent mode.
 
@@ -401,7 +402,12 @@ These run only under `/loom --panel`. They are recognized by phase validation as
 | `pr-test-analyzer` | Test coverage quality (1–10 rating, 8–10 = critical gap) |
 | `type-design-analyzer` | Type invariants, encapsulation (1–10 per dimension) |
 | `comment-analyzer` | Comment accuracy and rot |
-| `code-simplifier` | Clarity and FP patterns (post-fix) |
+
+### Wave-gate agents that are not per-task
+
+| Agent | Role |
+|---|---|
+| `code-simplifier` | Clarity and FP patterns; runs after the fixes, not per task |
 | `spec-check-invoker` | Runs `/spec-check` once per wave; emits machine-readable footer |
 
 ### Review panel agent (wave gate Step 3.5)

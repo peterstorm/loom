@@ -145,7 +145,22 @@ const handler: HookHandler = async (stdin, args) => {
     );
     if (!verdicts.ok) return contractError("panel verdicts", verdicts.errors);
 
-    const ranked = aggregateVerdicts(verdicts.value, criteria, candidateFilenames);
+    // Wrapped for the same reason `tallyRefutations` is on the review side:
+    // `aggregateVerdicts` reaches `requireEntry`, which THROWS on a broken
+    // coverage invariant rather than defaulting a vote, and `panel-run` states
+    // the rule this helper follows — "errors are returned, never thrown; a
+    // panel helper's failure must reach the operator as a contract
+    // diagnostic". The throw is unreachable only while the coverage guard
+    // holds; if it is ever weakened the operator gets a stack trace out of a
+    // hook. This was the one asymmetry between the two mirrored helpers.
+    let ranked: ReturnType<typeof aggregateVerdicts>;
+    try {
+      ranked = aggregateVerdicts(verdicts.value, criteria, candidateFilenames);
+    } catch (error) {
+      return contractError("panel aggregate", [
+        error instanceof Error ? error.message : String(error),
+      ]);
+    }
     if (!ranked.ok) return contractError("panel aggregate", ranked.errors);
 
     return writeCanonicalOutput(serializeRankings(ranked.value, criteria) + "\n");

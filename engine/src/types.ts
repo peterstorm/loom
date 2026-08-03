@@ -182,6 +182,20 @@ export interface Refutation {
 }
 
 /**
+ * One or more refutations.
+ *
+ * A refuted finding always has at least one — `tallyRefutations` destructures
+ * `[head, ...tail]` at the vote site specifically to establish it, and
+ * `parseStoredRefutation` rejects an empty list on the way back in. The
+ * invariant was proven on write and on read and then forgotten by the type in
+ * between, so `RefutedFinding` documented in a comment what `AdjudicatedFinding`
+ * and `FindingOutcome` already express. It lives here rather than in
+ * `core/findings` because the stored shape is what needs it: `types.ts` cannot
+ * import `core/findings`, which imports `types.ts`.
+ */
+export type NonEmptyRefutations = readonly [Refutation, ...Refutation[]];
+
+/**
  * A finding a refutation panel killed, together with why.
  *
  * Recorded, never deleted: a wrong refutation is a shipped bug, and a silently
@@ -189,8 +203,8 @@ export interface Refutation {
  */
 export interface RefutedFinding {
   readonly finding: Finding;
-  /** The lenses that refuted it, with their reasoning, in lens order. Never empty. */
-  readonly refutations: readonly Refutation[];
+  /** The lenses that refuted it, with their reasoning, in lens order. */
+  readonly refutations: NonEmptyRefutations;
 }
 
 export interface Task {

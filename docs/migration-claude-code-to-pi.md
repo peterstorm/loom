@@ -1053,7 +1053,7 @@ Loom is the most complex plugin to migrate. This section inventories every compo
 
 ### Full Component Inventory
 
-#### Agents (21 agent definitions)
+#### Agents (28 agent definitions)
 
 Claude Code agent definitions in `agents/*.md` — these are markdown files with YAML frontmatter (`name`, `description`, `model`, `color`, `skills`) and a system prompt body.
 
@@ -1062,6 +1062,9 @@ Claude Code agent definitions in `agents/*.md` — these are markdown files with
 | `architecture-agent` | Architectural design | opus | Pi subagent agent definition |
 | `adr-writer-agent` | Write Architecture Decision Records | (default) | Pi subagent agent definition |
 | `architecture-tech-lead` | Architectural review | (default) | Pi subagent agent definition |
+| `arch-interviewer-agent` | Panel mode: run the interview once | (default) | Pi subagent agent definition |
+| `arch-designer-agent` | Panel mode: one candidate per lens | (default) | Pi subagent agent definition |
+| `arch-judge-agent` | Panel mode: score candidates on one criterion | (default) | Pi subagent agent definition |
 | `brainstorm-agent` | Exploration/ideation | (default) | Pi subagent agent definition |
 | `clarify-agent` | Resolve ambiguity | (default) | Pi subagent agent definition |
 | `code-implementer-agent` | Implementation (Java/TS) | sonnet | Pi subagent agent definition |
@@ -1069,9 +1072,13 @@ Claude Code agent definitions in `agents/*.md` — these are markdown files with
 | `code-simplifier` | Code simplification | (default) | Pi subagent agent definition |
 | `comment-analyzer` | Comment quality | (default) | Pi subagent agent definition |
 | `decompose-agent` | Task decomposition | (default) | Pi subagent agent definition |
+| `deepen-agent` | Proactive architecture deepening | (default) | Pi subagent agent definition |
+| `grill-agent` | Domain-aware design challenge | (default) | Pi subagent agent definition |
+| `java-test-agent` | Java testing | (default) | Pi subagent agent definition |
 | `frontend-agent` | Next.js frontend | (default) | Pi subagent agent definition |
 | `plan-alignment-agent` | Plan vs spec gaps | (default) | Pi subagent agent definition |
 | `pr-test-analyzer` | PR test coverage | (default) | Pi subagent agent definition |
+| `review-verifier-agent` | Review panel: refute findings through one lens | (default) | Pi subagent agent definition |
 | `security-agent` | Security analysis | (default) | Pi subagent agent definition |
 | `silent-failure-hunter` | Error handling gaps | (default) | Pi subagent agent definition |
 | `skill-content-reviewer` | Skill quality review | (default) | Pi subagent agent definition |
@@ -1453,7 +1460,7 @@ Most of loom is **pure business logic** that doesn't care which harness runs it.
 - `engine/src/utils/` — All utilities (git, lock, find-file, extract-task-id, strip-namespace)
 - `engine/src/parsers/parse-bash-test-output.ts` — Test output detection
 - `engine/src/parsers/parse-phase-artifacts.ts` — Phase artifact extraction
-- `engine/src/handlers/helpers/` — All 11 helper handlers (pure business logic)
+- `engine/src/handlers/helpers/` — All 15 helper handlers (pure business logic)
 - `engine/tests/` — All tests
 
 **What's Claude Code only (keep as-is):**

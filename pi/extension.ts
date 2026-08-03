@@ -26,13 +26,20 @@ import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-outpu
 import { extractTestEvidence, analyzeNewTests, applyUntrustedStopResolution, isWaveComplete } from "../engine/src/handlers/subagent-stop/update-task-status";
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
-  isReviewAgent, resolveReviewFindings, applyReviewResolution, reviewResolutionLog,
+  resolveReviewFindings, applyReviewResolution, reviewResolutionLog,
 } from "../engine/src/core/review-output";
 import { parseSpecCheckOutput } from "../engine/src/handlers/subagent-stop/store-spec-check-findings";
 import type { ReviewStatus, SpecCheck, Phase } from "../engine/src/types";
 import { newWaveGate } from "../engine/src/types";
 
-import { TASK_GRAPH_PATH, SUBAGENT_DIR, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
+// `isReviewAgent` lives in `config`, NOT in `core/review-output` beside the three
+// functions above it: it reads the review-agent roster, and `core/review-output`
+// declares itself free of config so its parse/merge rules stay pure. Importing it
+// from the wrong module is a LINK-time ESM failure that takes the whole extension
+// with it — every hook below, not just review capture. `tests/pi-imports.test.ts`
+// resolves every engine import in this file against the real exports so the next
+// move of a shared symbol fails a test instead of silently disarming Pi.
+import { isReviewAgent, TASK_GRAPH_PATH, SUBAGENT_DIR, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { fsSessionRegistry, parseSessionId, rosterAgentId } from "../engine/src/machine";

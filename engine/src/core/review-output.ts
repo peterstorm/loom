@@ -7,9 +7,13 @@
  * (the same claims with file/line). They can disagree, and which one wins
  * decides whether a critical reaches the wave gate at all.
  *
- * The rule, in one sentence: **the block wins only when it accounts for every
- * finding — of either severity — that the reviewer's own count and marker lines
- * claim, and any marker claim it does not NAME is carried over beside it.** A
+ * The rule, in one sentence: **the block wins only when it accounts for at
+ * least as many findings of each severity as the marker lines name — and, for
+ * criticals only, as the reviewer's own `CRITICAL_COUNT` — and any marker claim
+ * it does not NAME is carried over beside it.** The asymmetry is deliberate and
+ * `chooseSource` states why: `advisoryCount` is not part of the bar, because an
+ * advisory shortfall against a self-reported tally degrades triage while a
+ * critical shortfall opens a gate. A
  * short block is a truncated or mislabeled emission, and its locations are not
  * worth the claims it would discard; a block that is long enough but names
  * different claims is the same loss wearing a passing count. Whatever wins,
@@ -37,30 +41,44 @@ import {
   hasFindingsBlock,
   mergeFindings,
   parseFindingsBlock,
-  removeOnce,
   type DraftFinding,
 } from "./findings";
 
 /**
  * What became of the optional structured block. Reported to the operator,
- * because every value but `used` means the findings carry no file/line and
+ * because every arm but `used` means the findings carry no file/line and
  * verification quality is degraded — a difference that was previously invisible.
+ *
+ * A discriminated union, not a string beside an independent `carriedOver`
+ * count. The count is meaningful for exactly the two arms that carry claims
+ * across, and the flat pair made `{ blockStatus: "absent", carriedOver: 5 }`
+ * representable — a state whose own doc comment ("non-zero only for `partial`")
+ * was already contradicted by the `superseded` arm that sets it. Attaching the
+ * number to the arms that own it removes both the illegal state and the
+ * question of which comment to believe.
  */
 export type FindingsBlockStatus =
   /** The reviewer emitted no block. The marker lines are the whole contract. */
-  | "absent"
+  | { readonly kind: "absent" }
   /** The block parsed and named every claim the markers made. It is the source. */
-  | "used"
+  | { readonly kind: "used" }
   /** A block was present but malformed. The marker lines were parsed instead. */
-  | "rejected"
-  /** The block parsed but under-reported findings. The marker lines won. */
-  | "superseded"
+  | { readonly kind: "rejected" }
+  /** The block parsed but under-reported findings. The marker lines won, and the
+   *  block's unnamed entries came across beside them with file/line intact. */
+  | { readonly kind: "superseded"; readonly carriedOver: number }
   /**
    * The block was long enough to win but did not NAME every marker claim. It
    * is the source, with the unnamed marker claims carried over beside it —
    * so the block's file/line survives and no claim is lost.
    */
-  | "partial";
+  | { readonly kind: "partial"; readonly carriedOver: number };
+
+/** How many claims an arbitration carried across. Zero for the arms that carry
+ *  none, which is now a fact about the union rather than a convention. */
+export function carriedOverCount(status: FindingsBlockStatus): number {
+  return status.kind === "superseded" || status.kind === "partial" ? status.carriedOver : 0;
+}
 
 /**
  * One reviewer's output, parsed. `drafts` is authoritative; `critical` and
@@ -85,11 +103,10 @@ export interface ParsedFindings {
    * means "the parse failed".
    */
   readonly advisoryCount: number | null;
+  /** What became of the block, and — on the two arms that carry claims across —
+   *  how many. Reported so the operator can see the duplication that arbitration
+   *  deliberately prefers over a lost finding. */
   readonly blockStatus: FindingsBlockStatus;
-  /** How many marker claims the winning block did not name and were carried over
-   *  beside it. Non-zero only for `partial`; reported so the operator can see the
-   *  duplication that arbitration deliberately prefers over a lost finding. */
-  readonly carriedOver: number;
 }
 
 /**
@@ -105,18 +122,17 @@ export function makeParsedFindings(input: {
   criticalCount?: number | null;
   advisoryCount?: number | null;
   blockStatus?: FindingsBlockStatus;
-  carriedOver?: number;
 }): ParsedFindings {
   const drafts = input.drafts ?? draftsFromClaims(input.critical ?? [], input.advisory ?? []);
-  return Object.freeze({
+  const parsed: ParsedFindings = {
     drafts: Object.freeze([...drafts]),
     critical: Object.freeze([...claimsOfSeverity(drafts, "critical")]),
     advisory: Object.freeze([...claimsOfSeverity(drafts, "advisory")]),
     criticalCount: input.criticalCount ?? null,
     advisoryCount: input.advisoryCount ?? null,
-    blockStatus: input.blockStatus ?? "absent",
-    carriedOver: input.carriedOver ?? 0,
-  });
+    blockStatus: input.blockStatus ?? { kind: "absent" },
+  };
+  return Object.freeze(parsed);
 }
 
 export const EMPTY_FINDINGS: ParsedFindings = makeParsedFindings({});
@@ -176,7 +192,6 @@ export function reconcileFindings(findings: ParsedFindings): ParsedFindings {
         criticalCount: findings.criticalCount,
         advisoryCount: findings.advisoryCount,
         blockStatus: findings.blockStatus,
-        carriedOver: findings.carriedOver,
       });
 }
 
@@ -270,6 +285,24 @@ export function parseMachineSummary(output: string): ParsedFindings | null {
  * `CRITICAL_COUNT` always comes from the markers: the count is the reviewer's
  * own tally and is what distinguishes "zero findings" from "the parse failed".
  */
+/**
+ * Take one occurrence of `claim` out of `pool`, reporting whether it was there.
+ * Mutates, because the pool is a multiset being drawn down across a whole
+ * arbitration: a claim the block names twice must consume two marker slots, not
+ * match the same one twice.
+ */
+function consumeClaim(pool: string[], claim: string): boolean {
+  const at = pool.indexOf(claim);
+  if (at < 0) return false;
+  pool.splice(at, 1);
+  return true;
+}
+
+/** The claims `pool` does not account for, drawing `pool` down as it goes. */
+function unconsumedClaims(claims: readonly string[], pool: string[]): readonly string[] {
+  return claims.filter((claim) => !consumeClaim(pool, claim));
+}
+
 function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
   const counts = { criticalCount: scraped.criticalCount, advisoryCount: scraped.advisoryCount };
   const structured = parseFindingsBlock(block);
@@ -277,10 +310,10 @@ function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
     return makeParsedFindings({
       drafts: scraped.drafts,
       ...counts,
-      blockStatus: hasFindingsBlock(block) ? "rejected" : "absent",
+      blockStatus: hasFindingsBlock(block) ? { kind: "rejected" } : { kind: "absent" },
     });
   }
-  const fromBlock = makeParsedFindings({ drafts: structured, ...counts, blockStatus: "used" });
+  const fromBlock = makeParsedFindings({ drafts: structured, ...counts, blockStatus: { kind: "used" } });
   const claimedCritical = Math.max(scraped.criticalCount ?? 0, scraped.critical.length);
   const accountsForAll =
     fromBlock.critical.length >= claimedCritical &&
@@ -290,9 +323,19 @@ function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
   // and a block naming it once when the markers named it twice has dropped one.
   // Both sides are `collapseWhitespace`-normalized (every claim reaching either
   // view is built by makeDraftFinding), so comparison by value is exact.
+  //
+  // Severity-BLIND, from one shared pool. Matching per-severity meant a block
+  // entry whose severity disagreed with its own marker line matched nothing:
+  // `CRITICAL: the claim` beside a block calling that same claim advisory
+  // recorded it TWICE, once at each severity. One defect then occupies two
+  // slots in the brief, and the panel can dismiss the advisory copy while the
+  // critical copy still blocks the gate — with no note, because from each
+  // severity's side the arithmetic looked right. Identity is the claim text;
+  // whichever side wins arbitration also settles the severity.
+  const blockPool = structured.map((draft) => draft.claim);
   const unnamedByBlock = draftsFromClaims(
-    removeOnce(scraped.critical, fromBlock.critical),
-    removeOnce(scraped.advisory, fromBlock.advisory),
+    unconsumedClaims(scraped.critical, blockPool),
+    unconsumedClaims(scraped.advisory, blockPool),
   );
 
   if (!accountsForAll) {
@@ -307,25 +350,17 @@ function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
     // failed to meet), and the block's unnamed entries follow with their
     // file/line intact.
     // Consumed multiset-wise, like `removeOnce`: a block naming a claim twice
-    // against markers naming it once contributes exactly one carry-over.
-    const unclaimed = new Map(
-      FINDING_SEVERITIES.map((severity) => [
-        severity,
-        [...(severity === "critical" ? scraped.critical : scraped.advisory)],
-      ]),
-    );
-    const recovered = structured.filter((draft) => {
-      const pool = unclaimed.get(draft.severity)!;
-      const at = pool.indexOf(draft.claim);
-      if (at < 0) return true;
-      pool.splice(at, 1);
-      return false;
-    });
+    // against markers naming it once contributes exactly one carry-over. One
+    // pool across both severities, for the reason `blockPool` is severity-blind
+    // above — the markers won here, so the marker line's severity is the
+    // answer, and a block entry that merely disagreed about severity is a
+    // duplicate to drop, not a claim to carry over.
+    const markerPool = [...scraped.critical, ...scraped.advisory];
+    const recovered = structured.filter((draft) => !consumeClaim(markerPool, draft.claim));
     return makeParsedFindings({
       drafts: [...scraped.drafts, ...recovered],
       ...counts,
-      blockStatus: "superseded",
-      carriedOver: recovered.length,
+      blockStatus: { kind: "superseded", carriedOver: recovered.length },
     });
   }
 
@@ -336,8 +371,7 @@ function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
         // their order; the recovered marker claims follow, location-less.
         drafts: [...structured, ...unnamedByBlock],
         ...counts,
-        blockStatus: "partial",
-        carriedOver: unnamedByBlock.length,
+        blockStatus: { kind: "partial", carriedOver: unnamedByBlock.length },
       });
 }
 
@@ -442,26 +476,26 @@ export function applyReviewResolution(task: Task, resolution: ReviewResolution):
  * duplicate, and an operator who cannot see the count cannot tell an inflated
  * finding set from a genuinely large one.
  */
-function blockStatusNote(status: FindingsBlockStatus, carriedOver: number): string {
-  const carried = `${carriedOver} claim(s) carried over`;
+function blockStatusNote(status: FindingsBlockStatus): string {
+  const carried = (count: number) => `${count} claim(s) carried over`;
   return match(status)
-    .with("absent", () => "")
-    .with("used", () => "")
+    .with({ kind: "absent" }, () => "")
+    .with({ kind: "used" }, () => "")
     .with(
-      "rejected",
+      { kind: "rejected" },
       () => " [findings block was malformed — fell back to marker lines, findings carry no file/line]",
     )
     .with(
-      "superseded",
-      () =>
-        ` [findings block under-reported findings — used marker lines, ${carried} from the block; ` +
-        `the rest carry no file/line]`,
+      { kind: "superseded" },
+      (s) =>
+        ` [findings block under-reported findings — used marker lines, ${carried(s.carriedOver)} ` +
+        `from the block; the rest carry no file/line]`,
     )
     .with(
-      "partial",
-      () =>
-        ` [findings block did not name every marker claim — ${carried} without file/line, ` +
-        `so a reworded claim is adjudicated twice]`,
+      { kind: "partial" },
+      (s) =>
+        ` [findings block did not name every marker claim — ${carried(s.carriedOver)} without ` +
+        `file/line, so a reworded claim is adjudicated twice]`,
     )
     .exhaustive();
 }
@@ -481,7 +515,7 @@ export function reviewResolutionLog(taskId: string, resolution: ReviewResolution
       const count = Math.max(r.findings.criticalCount ?? 0, r.findings.critical.length);
       return (
         `Task ${taskId} review: ${count > 0 ? "blocked" : "passed"} (${count} critical)` +
-        blockStatusNote(r.findings.blockStatus, r.findings.carriedOver)
+        blockStatusNote(r.findings.blockStatus)
       );
     })
     .exhaustive();

@@ -255,10 +255,10 @@ describe("updateTaskFindings mints ids that removal cannot rewind", () => {
               if (finding.agent !== "manual-override") continue;
               // An id may PERSIST across rounds (advisories are kept), but a
               // retired one must never come back attached to a new claim.
-              seen.add(`${finding.id} ${finding.claim}`);
+              seen.add(`${finding.id}\0${finding.claim}`);
             }
           }
-          const ids = [...seen].map((entry) => entry.split(" ")[0]!);
+          const ids = [...seen].map((entry) => entry.split("\0")[0]!);
           return new Set(ids).size === ids.length;
         },
       ),
@@ -280,7 +280,7 @@ describe("updateTaskFindings mints ids that removal cannot rewind", () => {
 
 describe("finding ids are unique ACROSS findings and refuted_findings", () => {
   const live = { id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "live claim" };
-  const refuted = {
+  const refuted: RefutedFinding = {
     finding: { id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "dead claim" },
     refutations: [{ lens: "intent", reason: "deliberate" }],
   };

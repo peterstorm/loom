@@ -139,9 +139,11 @@ block must ACCOUNT FOR EVERY FINDING YOU REPORTED — advisories included: when 
 parses and is long enough, it becomes the source of findings, so every
 `CRITICAL:` line AND every `ADVISORY:` line must also appear in the block with
 the matching `"severity"`. A block that lists fewer findings of EITHER severity
-than your marker lines is discarded in favour of them — no finding is ever lost
-to it, but the locations are. If the block is absent or malformed, the marker
-lines are parsed instead and your findings simply carry no location.
+than your marker lines LOSES to them — the marker lines become the source, and
+every block entry the marker lines did not name is carried over beside them with
+its file and line intact. No finding is lost either way; only the locations of
+the claims the markers DID name are. If the block is absent or malformed, the
+marker lines are parsed instead and your findings simply carry no location.
 
 The engine arbitrates on COUNTS per severity — it cannot tell a reworded claim
 from a substituted one — and then reconciles the winner by VALUE: any marker

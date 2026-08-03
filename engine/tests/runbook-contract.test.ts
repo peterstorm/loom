@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { REVIEW_PANEL_OPERATIONS } from "../src/handlers/helpers/review-panel";
@@ -187,6 +187,34 @@ describe("interview digest vocabulary ↔ parseInterviewDigest", () => {
     const [, template] = SOURCES[1];
     for (const label of LABELS) {
       expect(agent.includes(label)).toBe(template.includes(label));
+    }
+  });
+});
+
+describe("the smoke scripts this file's own header cites are actually run", () => {
+  const pkg = JSON.parse(read("engine", "package.json")) as {
+    scripts: Record<string, string>;
+  };
+
+  it("`npm test` invokes the smoke suite, not just vitest", () => {
+    // The header above claims the helper chain is "proven … by the two smoke
+    // scripts". It was not: `test` ran vitest alone, `test:smoke` was invoked by
+    // nothing, and the repo has no CI — so 878 lines of end-to-end harness
+    // gated nothing while the prose said otherwise. Both scripts finish in
+    // ~1.3s combined, so there is no reason for them to sit outside the default
+    // command. Asserted here, beside the claim, so the claim cannot go stale
+    // again without a red test.
+    expect(pkg.scripts.test).toContain("test:smoke");
+  });
+
+  it("`test:smoke` names both scripts, and both exist", () => {
+    const smoke = pkg.scripts["test:smoke"]!;
+    for (const script of ["smoke-panel-mode.sh", "smoke-review-panel.sh"]) {
+      expect(smoke, `test:smoke does not run ${script}`).toContain(script);
+      expect(
+        existsSync(join(REPO_ROOT, "scripts", script)),
+        `${script} is named by test:smoke but not on disk`,
+      ).toBe(true);
     }
   });
 });

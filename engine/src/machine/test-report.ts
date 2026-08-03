@@ -123,6 +123,15 @@ export type TrustedTestVerdict = Extract<TestVerdict, { verdict: "trusted-pass" 
  * tool response carries no exit code at all, and on those every run was
  * untrusted and the whole trust doctrine was inert.
  *
+ * That reasoning holds only because the report is assumed to describe a
+ * FINISHED run, and `attributeExit` nulls the exit for four reasons besides
+ * "the harness reported none". Three of them still leave the test provably
+ * finished (a later segment owns the exit; an `||` guard that a fresh report
+ * disproves; a nonzero exit, which loses to `trusted-fail` above anyway). The
+ * fourth — a BACKGROUNDED segment — does not, so `extract-evidence` records no
+ * report for it at all rather than letting a mid-write report reach this rule.
+ * The completeness precondition is enforced where completeness is knowable.
+ *
  * A nonzero exit still overrules a green report: a runner that exits nonzero
  * after writing a passing report failed at something the report does not
  * describe, and the failure is the ground truth.

@@ -269,7 +269,7 @@ Stop on failure. The helper binds run id, interview paths, allowed unique lenses
 
 **Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-design.md`. For each manifest entry, substitute `{feature_description}`, `{lens_name}`, `{lens_prompt}`, `{spec_file_path}`, `{interview_file_path}` (= the manifest interview file), and `{candidate_output_path}` (= that exact entry's path).
 
-**Spawn all N `arch-designer-agent`s in ONE message** (parallel Task calls). Wait for all to complete. For every manifest path, require a non-empty regular file that is not a symbolic link. For a failed entry, delete that run's empty/invalid artifact, re-spawn only that designer once, then repeat the same regular/non-empty/non-symlink check; stop if the retry still fails. Compare the candidate directory's bare filenames with `manifest.candidates[].filename` in both directions and stop on any missing or extra file. Judges and finalizer still read only manifest paths, never the directory.
+**Spawn all N `arch-designer-agent`s in ONE message** (parallel Agent calls). Wait for all to complete. For every manifest path, require a non-empty regular file that is not a symbolic link. For a failed entry, delete that run's empty/invalid artifact, re-spawn only that designer once, then repeat the same regular/non-empty/non-symlink check; stop if the retry still fails. Compare the candidate directory's bare filenames with `manifest.candidates[].filename` in both directions and stop on any missing or extra file. Judges and finalizer still read only manifest paths, never the directory.
 
 ### Step 4 — Judges (parallel, headless)
 
@@ -286,7 +286,7 @@ It emits a JSON array of exactly K criteria derived from the validated digest: `
 
 **Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-judge.md`. For each criterion, substitute `{criterion}`, `{candidate_manifest_path}`, and `{interview_json_path}`.
 
-**Spawn all K `arch-judge-agent`s in ONE message** (parallel Task calls). Validate each raw output before it reaches finalization:
+**Spawn all K `arch-judge-agent`s in ONE message** (parallel Agent calls). Validate each raw output before it reaches finalization:
 
 ```bash
 printf '%s' "$RAW_JUDGE_OUTPUT" | bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-contract verdict \
@@ -461,7 +461,7 @@ If user continues: Proceed to Phase 5 normally.
 For each wave:
 
 1. Get pending tasks in the current wave (crashed tasks remain `pending` and are re-spawned)
-2. Spawn ALL wave tasks in parallel (single message, multiple Task calls)
+2. Spawn ALL wave tasks in parallel (single message, multiple Agent calls)
 3. Wait for all to reach "implemented"
 4. If any wave task never reached `implemented` (agent crashed): re-spawn it (still `pending`, `executing_tasks` was cleared)
 5. **RUN `/wave-gate` — MANDATORY, via subagents** (see below)
@@ -481,7 +481,7 @@ For each wave:
 2. Per task: `code-reviewer`, `silent-failure-hunter`, `pr-test-analyzer`, `type-design-analyzer`, `comment-analyzer`
 3. `review-verifier-agent` — the **refutation panel** (wave-gate Step 3.5), N verifiers per wave, one per lens. MANDATORY whenever the wave has critical findings: an unadjudicated plausible-but-wrong critical costs a full remediation cycle. Driven by the `review-panel` helper (`brief` → `manifest` → `lenses` → `verdict` → `tally`); a majority refutation moves a finding into `refuted_findings` with its reasoning, never deletes it. **Skip only when the wave has zero criticals.**
 
-**Steps 1 and 2 are spawned in parallel via Task/subagent tool.** Step 3 runs AFTER them — it adjudicates the findings they produced, so it cannot share their message. SubagentStop hooks automatically update state. Then `complete-wave-gate` helper advances the wave.
+**Steps 1 and 2 are spawned in parallel via the subagent-spawn tool (`Agent`, named `Task` in older harnesses).** Step 3 runs AFTER them — it adjudicates the findings they produced, so it cannot share their message. SubagentStop hooks automatically update state. Then `complete-wave-gate` helper advances the wave.
 
 **The `validate-task-execution` hook enforces this:** it blocks next-wave impl agents if `wave_gates[N-1].reviews_complete == false`. Even if you try to skip, the hook will BLOCK.
 
@@ -603,14 +603,14 @@ Hooks auto-activate when `active_task_graph.json` exists:
 
 | Hook | Event | Purpose |
 |------|-------|---------|
-| `block-direct-edits.sh` | PreToolUse: Edit/Write/MultiEdit | Forces Task tool |
+| `block-direct-edits.sh` | PreToolUse: Edit/Write/MultiEdit | Forces the subagent-spawn tool |
 | `enforce-phase-tools.sh` | PreToolUse: Edit/Write/MultiEdit | Guarded-skill-machine gate: denies enforced tools the bound agent's phase doesn't allow (fails closed) |
 | `guard-state-file.sh` | PreToolUse: Bash | Deny-by-default on guarded state paths: only read-only commands (`jq`, `cat`, `grep`, …) and whitelisted helpers pass — covers task graph + subagent evidence/binding files + machine definitions |
-| `validate-task-execution.sh` | PreToolUse: Task | Validates wave order |
-| `validate-phase-order.sh` | PreToolUse: Task | Enforces phase sequencing |
-| `validate-template-substitution.sh` | PreToolUse: Task | Blocks unsubstituted `{variable}` patterns |
-| `validate-agent-model.sh` | PreToolUse: Task | Validates agent model assignment |
-| `validate-agent-skill.sh` | PreToolUse: Task | Validates agent skill preload |
+| `validate-task-execution.sh` | PreToolUse: Agent/Task/subagent | Validates wave order |
+| `validate-phase-order.sh` | PreToolUse: Agent/Task/subagent | Enforces phase sequencing |
+| `validate-template-substitution.sh` | PreToolUse: Agent/Task/subagent | Blocks unsubstituted `{variable}` patterns |
+| `validate-agent-model.sh` | PreToolUse: Agent/Task/subagent | Validates agent model assignment |
+| `validate-agent-skill.sh` | PreToolUse: Agent/Task/subagent | Validates agent skill preload |
 | `mark-subagent-active.sh` | SubagentStart | Tracks active subagents + binds the guarded skill machine (epoch) |
 | `record-evidence.sh` | PostToolUse: Read/Edit/Write/MultiEdit/Bash | Appends epoch-stamped facts (FileRead/FileWrite/TestRun) to the evidence ledger |
 | `lint-file.sh` | PostToolUse: Edit/Write/MultiEdit | Runs the immediate-tier linter (regex rules only; programmatic rules run at the wave gate) |
@@ -671,7 +671,7 @@ jq '.wave_gates' .claude/state/active_task_graph.json
 ### Fixing Blocked Waves
 
 When blocked (critical findings), Edit/Write blocked too. To fix:
-1. **Re-spawn via Task** — create fix agent with findings context (subagent CAN Edit/Write)
+1. **Re-spawn a subagent** — create fix agent with findings context (subagent CAN Edit/Write)
 2. **Run `/wave-gate`** — re-reviews only blocked tasks
 3. **Override false positives** — pipe corrected findings through whitelisted helpers (guard hook allows these):
    ```bash
@@ -695,7 +695,7 @@ Critical findings **block** the gate. Advisory findings do **not** — but loom 
 - **Relevant** — in scope for the task, actionable, and consistent with project standards (the repo's `CLAUDE.md` / conventions). These get **fixed**.
 - **Not relevant** — out-of-scope refactor, nitpick that contradicts an established project convention, false positive, or work deliberately deferred to a later wave. These are **recorded** with a one-line reason, not fixed.
 
-**Fix relevant advisories** the same way as criticals — spawn a fix subagent via Task (Edit/Write are blocked for the orchestrator), give it the advisory text + file context, and have it make the minimal change. Re-run `/wave-gate` so the fix is re-reviewed.
+**Fix relevant advisories** the same way as criticals — spawn a fix subagent (Edit/Write are blocked for the orchestrator), give it the advisory text + file context, and have it make the minimal change. Re-run `/wave-gate` so the fix is re-reviewed.
 
 **Best-effort, non-blocking:** if a relevant advisory can't be fixed cleanly (breaks tests, needs an upstream change), defer it with a reason rather than blocking the wave. Never silently drop an advisory — every advisory ends as *fixed*, *deferred (reason)*, or *dismissed (reason)*.
 
@@ -704,7 +704,7 @@ Critical findings **block** the gate. Advisory findings do **not** — but loom 
 ## Constraints
 
 - **ALL phases via agents** - brainstorm, specify, clarify, architecture, plan-alignment, decompose agents
-- **ALL implementation via Task tool** - Edit/Write/MultiEdit blocked
+- **ALL implementation via the subagent-spawn tool** - Edit/Write/MultiEdit blocked
 - **ALL state writes via hooks** - Bash writes blocked (exception: `start_sha` PreToolUse write)
 - **NEVER skip phases** unless explicit `--skip-X` flag provided
 - **NEVER proceed with >3 unresolved markers** without user acknowledgment or `--skip-clarify`

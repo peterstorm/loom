@@ -30,10 +30,11 @@
  * adjudicated). They live together because the invariant is one invariant;
  * splitting them across modules is how it drifted before.
  *
- * Two further lockstep writers live in handlers because they are operator
- * entry points, not review steps: `updateTaskFindings` (the manual override) and
- * `fixTaskFindings` (`--fix`). Both derive their views through
- * `claimsOfSeverity` here, and both are held to the same invariant by
+ * Three further lockstep writers live in handlers because none of them is a
+ * review step: `updateTaskFindings` (the manual operator override),
+ * `fixTaskFindings` (`--fix`), and `sanitizeDecomposedTask` (the decomposition
+ * that first admits a task to the graph). All three derive their views through
+ * `claimsOfSeverity` here, and all three are held to the same invariant by
  * `findingsLockstepError` at the load boundary — the enumeration of all five
  * writers lives on `Task.findings` in types.ts.
  *
@@ -45,6 +46,7 @@ import type {
   DraftFinding,
   Finding,
   FindingSeverity,
+  NonEmptyRefutations,
   Refutation,
   RefutedFinding,
 } from "../types";
@@ -54,7 +56,7 @@ import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
 // their BEHAVIOUR. Re-exported so every existing import site keeps working and
 // so "where findings come from" stays one answer.
 export { FINDING_SEVERITIES };
-export type { DraftFinding, Finding, FindingSeverity, Refutation, RefutedFinding };
+export type { DraftFinding, Finding, FindingSeverity, NonEmptyRefutations, Refutation, RefutedFinding };
 
 /** Smart constructor: null when `raw` is not a known severity. */
 export function parseFindingSeverity(raw: unknown): FindingSeverity | null {
@@ -336,7 +338,13 @@ function parseStoredRefutation(raw: unknown): RefutedFinding | null {
     if (lens === "" || reason === "") return null;
     refutations.push({ lens, reason });
   }
-  return { finding, refutations };
+  // Destructured rather than cast: this is the READ boundary, and the check
+  // above is what makes the non-emptiness true. Narrowing it here is how the
+  // proof reaches the type instead of being re-asserted by every caller.
+  const [head, ...tail] = refutations;
+  if (head === undefined) return null;
+  const nonEmpty: NonEmptyRefutations = [head, ...tail];
+  return { finding, refutations: nonEmpty };
 }
 
 /**
@@ -595,10 +603,10 @@ export function findingIdCollisionError(
 // The two writers that must keep `findings` and its derived views in lockstep
 // ---------------------------------------------------------------------------
 
-/** One or more refutations. A refuted finding always has at least one — the
- *  reader (`parseStoredRefutation`) rejects an empty list, so writing one
- *  produces state this module's own load path refuses. */
-export type NonEmptyRefutations = readonly [Refutation, ...Refutation[]];
+// `NonEmptyRefutations` is defined in `types` and re-exported at the top of
+// this module with the other shapes: the STORED shape (`RefutedFinding`) uses
+// it too, so the in-flight and at-rest forms cannot disagree about whether a
+// refuted finding may have zero refutations.
 
 /**
  * What applying a panel decision needs to know about one finding.
@@ -659,24 +667,60 @@ export function recoverViewOnlyClaims(
   criticalView: readonly string[] | undefined,
   advisoryView: readonly string[] | undefined,
 ): readonly Finding[] {
+  const { critical, advisory } = viewOnlyClaims(findings, criticalView, advisoryView);
+  const drafts = draftsFromClaims(critical, advisory);
+  return drafts.length === 0
+    ? []
+    : attributeFindings(drafts, RECOVERED_AGENT, nextOrdinal(findings, refuted, RECOVERED_AGENT));
+}
+
+/** The view claims no structured finding accounts for, by severity. */
+function viewOnlyClaims(
+  findings: readonly Finding[],
+  criticalView: readonly string[] | undefined,
+  advisoryView: readonly string[] | undefined,
+): { readonly critical: readonly string[]; readonly advisory: readonly string[] } {
   // Normalized before comparison, because the view is RAW disk text while every
   // claim in `findings` went through `makeDraftFinding`. Without this a view
   // claim differing only by an internal whitespace run read as an orphan, and
   // `--fix` minted a SECOND finding for a claim that was already identified —
   // turning one critical the panel must refute into two. `collapseWhitespace` is
   // idempotent, so a view that is already normalized is unaffected.
-  const orphanCritical = removeOnce(
-    (criticalView ?? []).map(collapseWhitespace),
-    claimsOfSeverity(findings, "critical"),
+  return {
+    critical: removeOnce(
+      (criticalView ?? []).map(collapseWhitespace),
+      claimsOfSeverity(findings, "critical"),
+    ),
+    advisory: removeOnce(
+      (advisoryView ?? []).map(collapseWhitespace),
+      claimsOfSeverity(findings, "advisory"),
+    ),
+  };
+}
+
+/**
+ * The view-only claims `recoverViewOnlyClaims` cannot mint identity for.
+ *
+ * `makeDraftFinding` returns null for an empty claim and for a no-findings
+ * sentinel ("none", "n/a", …), so those orphans are dropped rather than
+ * recovered — and `fixTaskFindings` computed its `dropped` count purely from
+ * the `findings` array, so it stayed 0 and nothing was said. That silence
+ * mattered: `checkCriticalFindings` filters only on non-empty text, NOT on
+ * sentinels, so a pre-identity task holding `critical_findings: ["none"]`
+ * BLOCKS the wave gate before `--fix` and PASSES it after, with nothing on
+ * stdout or stderr connecting the two. The removal is right; the silence was
+ * the defect. Counted here so the repair can report it like every other lossy
+ * path it owns.
+ */
+export function unrecoverableViewClaims(
+  findings: readonly Finding[],
+  criticalView: readonly string[] | undefined,
+  advisoryView: readonly string[] | undefined,
+): readonly string[] {
+  const { critical, advisory } = viewOnlyClaims(findings, criticalView, advisoryView);
+  return [...critical, ...advisory].filter(
+    (claim) => makeDraftFinding({ severity: "critical", claim }) === null,
   );
-  const orphanAdvisory = removeOnce(
-    (advisoryView ?? []).map(collapseWhitespace),
-    claimsOfSeverity(findings, "advisory"),
-  );
-  const drafts = draftsFromClaims(orphanCritical, orphanAdvisory);
-  return drafts.length === 0
-    ? []
-    : attributeFindings(drafts, RECOVERED_AGENT, nextOrdinal(findings, refuted, RECOVERED_AGENT));
 }
 
 /**
@@ -704,9 +748,20 @@ export function deduplicateFindingIds(
       kept.push(finding);
       continue;
     }
-    kept.push(
-      ...attributeFindings([finding], finding.agent, nextOrdinal(kept, refuted, finding.agent)),
-    );
+    // `nextOrdinal` reads only `kept` and `refuted`, so on its own it can hand
+    // back an ordinal a LATER, still-unprocessed finding already holds:
+    // ["x-1","x-1","x-2"] re-minted the second x-1 as x-2 and produced a graph
+    // `findingsUnionError` still rejects — pointing the operator at THIS repair.
+    // Advancing past every id already taken is what makes the repair actually
+    // clear the rejection, in one pass, for any input.
+    let ordinal = nextOrdinal(kept, refuted, finding.agent);
+    let reminted = attributeFindings([finding], finding.agent, ordinal)[0]!;
+    while (taken.has(reminted.id)) {
+      ordinal += 1;
+      reminted = attributeFindings([finding], finding.agent, ordinal)[0]!;
+    }
+    taken.add(reminted.id);
+    kept.push(reminted);
   }
   return kept;
 }
@@ -816,9 +871,18 @@ export function applyFindingOutcomes(
   task: Task,
   outcomes: readonly AdjudicatedFinding[],
 ): Task {
-  const mine = outcomes.filter(
-    (outcome) => outcome.finding.taskId === task.id && !outcome.survives,
-  );
+  // A type PREDICATE, not a bare boolean filter: `AdjudicatedFinding` is a
+  // union whose `survives: false` arm carries `NonEmptyRefutations`, and only a
+  // predicate carries that narrowing through to the records built below. With a
+  // plain filter the compiler kept the widened `readonly Refutation[]` and the
+  // stored record's non-emptiness had to be re-asserted by hand — which is how
+  // the invariant went missing from `RefutedFinding` in the first place.
+  const refutedHere = (
+    outcome: AdjudicatedFinding,
+  ): outcome is Extract<AdjudicatedFinding, { survives: false }> =>
+    outcome.finding.taskId === task.id && !outcome.survives;
+
+  const mine = outcomes.filter(refutedHere);
   if (mine.length === 0) return task;
 
   const refutedLocalIds = new Set(
@@ -861,14 +925,43 @@ export function applyFindingOutcomes(
     ...task,
     ...(reviewStatus ? { review_status: reviewStatus } : {}),
     findings: kept,
-    critical_findings: removeOnce(
-      task.critical_findings ?? [],
-      claimsOfSeverity(removed, "critical"),
-    ),
-    advisory_findings: removeOnce(
-      task.advisory_findings ?? [],
-      claimsOfSeverity(removed, "advisory"),
-    ),
+    critical_findings: viewAfterRemoval(task.critical_findings, kept, removed, "critical"),
+    advisory_findings: viewAfterRemoval(task.advisory_findings, kept, removed, "advisory"),
     refuted_findings: [...(task.refuted_findings ?? []), ...refutedRecords],
   };
+}
+
+/**
+ * The derived view after a refutation: `kept`'s claims, plus anything the old
+ * view held that no live finding accounts for.
+ *
+ * Not `removeOnce(oldView, removedClaims)`. That conserved the right COUNT and
+ * silently reordered: `removeOnce` deletes the FIRST occurrence of a claim while
+ * `kept` deletes the one at the refuted index, so two findings wording a claim
+ * identically — which the multiset comparison exists precisely because reviewers
+ * do — left the view in a different order than the array it summarizes. Given
+ * findings `[!, B, !, B]` and a refutation of the SECOND `B`, the array became
+ * `[!, B, !]` and the view `[!, !, B]`.
+ *
+ * `findingsLockstepError` compares as a multiset, so the load boundary accepted
+ * it and nothing failed — but `--fix` re-derives the views from `findings`, so
+ * the next repair rewrote the file to no purpose, and any reader pairing the two
+ * by position reads one finding's claim against another's identity.
+ *
+ * Deriving from `kept` makes the order right by construction. The leftover term
+ * is what `removeOnce` was really buying: a pre-identity task can hold view
+ * claims no structured finding accounts for, and dropping those would delete a
+ * critical the wave gate counts. They are conserved, after the derived claims,
+ * exactly as `recoverViewOnlyClaims` would later find them.
+ */
+function viewAfterRemoval(
+  oldView: readonly string[] | undefined,
+  kept: readonly Finding[],
+  removed: readonly Finding[],
+  severity: FindingSeverity,
+): readonly string[] {
+  const derived = claimsOfSeverity(kept, severity);
+  const survivingView = removeOnce(oldView ?? [], claimsOfSeverity(removed, severity));
+  const orphans = removeOnce(survivingView, derived);
+  return orphans.length === 0 ? derived : [...derived, ...orphans];
 }

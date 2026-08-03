@@ -137,8 +137,30 @@ describe("replayedOutcomes — a closed decision is not re-adjudicated", () => {
     expect(replayError(replays)).toContain("already been tallied");
   });
 
-  it("ignores a SURVIVING outcome with the same id — nothing is re-decided", () => {
-    expect(replayedOutcomes([outcome("T1:code-reviewer-1", true)], refutedIdsOf(graph))).toEqual([]);
+  it("flags a SURVIVING outcome the graph already holds refuted — the brief is stale", () => {
+    // This used to assert the opposite, and that was the hole. A brief is built
+    // from `task.findings`, which excludes refuted findings, so a FRESH brief
+    // can never name an id the graph holds refuted. Seeing one means this brief
+    // predates an adjudication, whichever way the new verdicts fell — and the
+    // second run's own answer for this finding ("it survives") cannot be
+    // applied, because `applyFindingOutcomes` only ever moves findings OUT.
+    const replays = replayedOutcomes([outcome("T1:code-reviewer-1", true)], refutedIdsOf(graph));
+    expect(replays).toEqual(["T1:code-reviewer-1"]);
+  });
+
+  it("flags a stale brief even when THIS run refutes a different finding", () => {
+    // The exact walk-past the `!survives` filter allowed: tally 1 refuted
+    // code-reviewer-1 and upheld code-reviewer-2; the operator rewrote the
+    // verdicts and re-ran, flipping both. The two refutation sets are disjoint,
+    // so the old guard saw nothing — and the tally refuted code-reviewer-2 off
+    // a stale item set, promoting blocked → passed if it was the last live
+    // critical while reporting code-reviewer-1 as surviving.
+    const replays = replayedOutcomes(
+      [outcome("T1:code-reviewer-1", true), outcome("T1:code-reviewer-2", false)],
+      refutedIdsOf(graph),
+    );
+    expect(replays).toEqual(["T1:code-reviewer-1"]);
+    expect(replayError(replays)).toContain("already been tallied");
   });
 
   it("does not confuse the same local id on a different task", () => {

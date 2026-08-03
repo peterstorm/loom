@@ -26,8 +26,17 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
-import { join } from "node:path";
+// `posix.join`, not the platform default — the same rule, and the same reason,
+// as `panel-kernel.ts`. The paths this module SERIALIZES into `manifest.json`
+// are the ones `parseRunManifest` compares for exact string equality after
+// building its own with `posix.join`. Using the platform separator here meant
+// the engine wrote, on win32, a manifest its own validator rejects: one half of
+// a round trip disagreeing with the other about what "the same path" is, inside
+// a module that declares itself pure.
+import { posix } from "node:path";
 import { parseFindingSeverity } from "./findings";
+
+const { join } = posix;
 import type {
   AdjudicatedFinding,
   Finding,
@@ -756,7 +765,7 @@ export function defaultRefutationThreshold(lensCount: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// Run policy — three rules that decide whether a tally may proceed
+// Run policy — the rules that decide whether a brief or a tally may proceed
 // ---------------------------------------------------------------------------
 //
 // These lived in `handlers/helpers/review-panel.ts`, inline in the I/O
@@ -764,10 +773,40 @@ export function defaultRefutationThreshold(lensCount: number): number {
 // integers, two integers, a set difference — and each carries a long comment
 // naming a real bug it prevents: a shrunken panel adjudicating under a lower
 // absolute bar, one lens killing a critical alone, a re-tally re-adjudicating a
-// closed decision. Rules that consequential deserve direct unit tests, and
-// inside the shell the only way to reach them was to spawn the CLI against a
-// temp filesystem. The equivalents that were already in the core
-// (`selectLenses`' bounds, `tallyRefutations`' threshold range) each have one.
+// closed decision, a brief for a wave the graph has closed. Rules that
+// consequential deserve direct unit tests, and inside the shell the only way to
+// reach them was to spawn the CLI against a temp filesystem. The equivalents
+// that were already in the core (`selectLenses`' bounds, `tallyRefutations`'
+// threshold range) each have one.
+
+/**
+ * A brief may only be built for the wave the graph is actually on.
+ *
+ * `wave-gate.md` asked the operator to check this with `jq`, but the engine has
+ * the graph in hand: a stale `--wave` produces a fully adjudicable brief whose
+ * `tally` then writes `refuted_findings` and can promote a PAST wave's tasks
+ * blocked → passed. `checkCriticalFindings` is wave-scoped, so the blast radius
+ * is a corrupted audit record rather than an opened gate — still not a thing to
+ * leave to a prose reminder.
+ *
+ * Fails CLOSED on a graph with no `current_wave`. The guard used to skip
+ * entirely in that case, which is the state a graph is in before
+ * `populate-task-graph` has run and exactly when "which wave is this?" has no
+ * answer — so every `--wave` was accepted and the rule above did not apply at
+ * all. An unknown current wave is not a licence to adjudicate an arbitrary one.
+ */
+export function staleWaveError(requested: number, current: number | undefined): string | null {
+  if (current === undefined) {
+    return (
+      `the task graph records no current wave, so --wave ${requested} cannot be proven against ` +
+      `it — run the wave through /loom before briefing a review panel for it`
+    );
+  }
+  return current === requested
+    ? null
+    : `--wave ${requested} is not the graph's current wave (${current}) — a brief for a closed ` +
+      `wave re-adjudicates decisions that are already recorded`;
+}
 
 /**
  * The panel size is fixed for the LIFE of a run, not per invocation.
@@ -822,13 +861,26 @@ export function thresholdError(threshold: number, lensCount: number): string | n
  * `alreadyRefuted` is wave-scoped to match the brief's id space, since
  * `applyFindingOutcomes` strips the `${taskId}:` prefix back off when it applies
  * an outcome.
+ *
+ * The test is overlap with the brief, NOT "refuted twice". Filtering on
+ * `!survives` too made this a partial guard that a second tally could walk
+ * straight past: tally 1 refutes F1 and upholds F2; the operator rewrites
+ * `verdicts/` and re-runs; now F1 is upheld and F2 refuted, the two sets are
+ * disjoint, nothing fires. The tally then ran against a brief the graph had
+ * already moved on from — refuting F2 off a stale item set, promoting
+ * `blocked → passed` if F2 was the last live critical, and serializing F1 as
+ * `surviving` while the graph holds it refuted. Overlap alone is the honest
+ * test and admits no false positive: a fresh brief is built from
+ * `task.findings`, which excludes refuted findings, and `nextOrdinal` reads the
+ * refuted set as a high-water mark so a new finding can never reuse a retired
+ * id. Any overlap therefore means this brief predates an adjudication.
  */
 export function replayedOutcomes(
   outcomes: readonly FindingOutcome[],
   alreadyRefuted: ReadonlySet<string>,
 ): readonly WaveFindingId[] {
   return outcomes
-    .filter((outcome) => !outcome.survives && alreadyRefuted.has(outcome.finding.id))
+    .filter((outcome) => alreadyRefuted.has(outcome.finding.id))
     .map((outcome) => outcome.finding.id);
 }
 

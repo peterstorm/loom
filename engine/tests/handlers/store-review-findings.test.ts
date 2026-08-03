@@ -266,6 +266,46 @@ describe("store-review-findings CLI — an override must land or say why not", (
     expect(state().tasks[0].review_status).toBe("passed");
   });
 
+  it("REFUSES empty input instead of reading it as \"dismiss everything\"", () => {
+    // `updateTaskFindings` writes the state it is given, so parsing nothing out
+    // of stdin moved EVERY finding into refuted_findings under manual-override,
+    // emptied critical_findings and set review_status "passed" — an unblocked
+    // gate — while logging "0 critical, 0 advisory", which is exactly what a
+    // legitimate all-clear override logs. An operator pipeline whose upstream
+    // command produced nothing (a failed grep, a truncated file, a typo'd path)
+    // therefore unblocked the wave silently.
+    run(["--task", "T1"], "CRITICAL: a real blocker\n");
+    expect(state().tasks[0].review_status).toBe("blocked");
+
+    const result = run(["--task", "T1"], "");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("No findings parsed from stdin");
+    expect(result.stderr, "the diagnostic names the way to say it on purpose").toContain("--dismiss-all");
+    expect(state().tasks[0].review_status, "nothing was written").toBe("blocked");
+    expect(state().tasks[0].critical_findings).toEqual(["a real blocker"]);
+  });
+
+  it("refuses unparseable input for the same reason — it parsed to nothing", () => {
+    run(["--task", "T1"], "CRITICAL: a real blocker\n");
+    const result = run(["--task", "T1"], "this is prose, not a findings marker\n");
+    expect(result.status).toBe(1);
+    expect(state().tasks[0].critical_findings).toEqual(["a real blocker"]);
+  });
+
+  it("--dismiss-all performs the dismissal, and SAYS it passed the review", () => {
+    // Dismissing every finding is a real operation; it just has to be asked for.
+    // The log line is distinct because this one opens a gate.
+    run(["--task", "T1"], "CRITICAL: a real blocker\n");
+    const result = run(["--task", "T1", "--dismiss-all"], "");
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toContain("DISMISSED every finding");
+    expect(state().tasks[0].review_status).toBe("passed");
+    expect(state().tasks[0].critical_findings).toEqual([]);
+    // Recorded, never deleted — the audit trail outlives the finding.
+    expect(state().tasks[0].refuted_findings).toHaveLength(1);
+    expect(parseTaskGraph(state()).ok).toBe(true);
+  });
+
   it("writes a graph the load boundary accepts", () => {
     // The override is a lockstep writer; findingsLockstepError now proves it.
     run(["--task", "T1"], "CRITICAL: a blocker\nADVISORY: a nit\n");

@@ -4,7 +4,8 @@
   "description": "Loom orchestration hooks for Claude Code",
   "type": "module",
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run && npm run test:smoke",
+    "test:unit": "vitest run",
     "test:watch": "vitest",
     "test:smoke": "bash ../scripts/smoke-panel-mode.sh && bash ../scripts/smoke-review-panel.sh",
     "typecheck": "bunx tsc --noEmit"
