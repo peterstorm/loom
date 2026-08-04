@@ -16,6 +16,7 @@ import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { parsePlanModels, type PlanModels } from "../../parsers/parse-plan-models";
 import { pathsMatch } from "./validate-model-bindings";
+import type { ProofFailure } from "../../core/proof-obligations";
 
 /** Resolve the plan's executable models from state — effectful shell helper */
 export function loadPlanModelsSource(planFile: string | null | undefined): PlanModelsSource {
@@ -44,6 +45,22 @@ export function gateCheckMessage(c: GateCheck): string {
   return c.passed ? c.summary : c.reason;
 }
 
+function proofFailureMessage(failure: ProofFailure): string {
+  switch (failure.kind) {
+    case "declared-artifact-not-changed": return `${failure.kind}:${failure.artifact}`;
+    case "untrusted-regression-tests-failed":
+    case "untrusted-regression-pass": return `${failure.kind}:${failure.label}`;
+    default: return failure.kind;
+  }
+}
+
+function unreadyTaskMessage(task: Task): string {
+  const failures = task.proof?.state === "failed"
+    ? `, failures=[${task.proof.failures.map(proofFailureMessage).join(", ")}]`
+    : "";
+  return `${task.id} (status=${task.status}, proof=${task.proof?.state ?? "missing"}${failures})`;
+}
+
 /** Check 1: every task reached an implementation-bearing status through a
  * satisfied proof. Completing any other state would violate TaskGraph's
  * status/proof lockstep at the next load. */
@@ -55,7 +72,7 @@ export function checkImplementationProof(tasks: Task[]): GateCheck {
     ? pass(`1. Implementation proof verified (${tasks.length}/${tasks.length} tasks).`)
     : fail(
         "FAILED: Not all tasks have satisfied implementation proof.\n" +
-        `  Unready: ${unready.map((task) => `${task.id} (status=${task.status}, proof=${task.proof?.state ?? "missing"})`).join(", ")}`,
+        `  Unready: ${unready.map(unreadyTaskMessage).join(", ")}`,
       );
 }
 

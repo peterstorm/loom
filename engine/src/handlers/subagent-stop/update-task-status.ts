@@ -334,25 +334,36 @@ export function applyUntrustedStopResolution(
     },
     proofPolicy,
   );
+  const resolved: TaskGraph = {
+    ...s,
+    tasks: s.tasks.map((t) =>
+      t.id === taskId
+        ? {
+            ...t,
+            status: proof.state === "satisfied" ? "implemented" as const : "pending" as const,
+            proof,
+            test_result: resolution.testResult,
+            test_evidence: resolution.testEvidence,
+            files_modified: [...resolution.filesModified],
+            new_tests_written: resolution.newTestsWritten,
+            new_test_evidence: resolution.newTestEvidence,
+          }
+        : t,
+    ),
+    executing_tasks: clearedExecuting,
+  };
+  const wave = target.wave;
   return {
     skipped: false,
     state: {
-      ...s,
-      tasks: s.tasks.map((t) =>
-        t.id === taskId
-          ? {
-              ...t,
-              status: proof.state === "satisfied" ? "implemented" as const : "pending" as const,
-              proof,
-              test_result: resolution.testResult,
-              test_evidence: resolution.testEvidence,
-              files_modified: [...resolution.filesModified],
-              new_tests_written: resolution.newTestsWritten,
-              new_test_evidence: resolution.newTestEvidence,
-            }
-          : t,
-      ),
-      executing_tasks: clearedExecuting,
+      ...resolved,
+      wave_gates: {
+        ...resolved.wave_gates,
+        [String(wave)]: {
+          ...(resolved.wave_gates[String(wave)] ?? newWaveGate()),
+          impl_complete: isWaveComplete(resolved, wave),
+        },
+      },
     },
   };
 }
@@ -373,9 +384,9 @@ export function isWaveComplete(state: TaskGraph, wave: number): boolean {
 
 // --- Pure: determine new test evidence from diff ---
 
-interface NewTestEvidence {
-  written: boolean;
-  evidence: string;
+export interface NewTestEvidence {
+  readonly written: boolean;
+  readonly evidence: string;
 }
 
 export function analyzeNewTests(
@@ -442,7 +453,7 @@ const REAL_DIFF_DEPS: DiffDeps = {
 };
 
 export function collectDiff(
-  filesModified: string[],
+  filesModified: readonly string[],
   startSha: string | undefined,
   deps: DiffDeps = REAL_DIFF_DEPS,
 ): string {
@@ -491,6 +502,18 @@ export function collectDiff(
   }
 
   return parts.join("\n");
+}
+
+/** Shared shell operation for both Claude and Pi completion paths. Keeping
+ * worktree, index, committed, and untracked-test collection here prevents one
+ * harness from proving fewer test changes than the other. */
+export function collectNewTestEvidence(
+  filesModified: readonly string[],
+  startSha: string | undefined,
+  newTestsRequired: boolean | undefined,
+  deps: DiffDeps = REAL_DIFF_DEPS,
+): NewTestEvidence {
+  return analyzeNewTests(collectDiff(filesModified, startSha, deps), newTestsRequired);
 }
 
 /**
@@ -734,8 +757,7 @@ export const runUpdateTaskStatus = async (
   // Section 2: New test verification via git diff
   let newTestEvidence: NewTestEvidence = { written: false, evidence: "" };
   if (git.isGitRepo()) {
-    const fullDiff = collectDiff(filesModified, task.start_sha);
-    newTestEvidence = analyzeNewTests(fullDiff, task.new_tests_required);
+    newTestEvidence = collectNewTestEvidence(filesModified, task.start_sha, task.new_tests_required);
   }
 
   // Section 3: Atomic state write. The preserve-evidence guards run INSIDE
@@ -800,10 +822,21 @@ export const runUpdateTaskStatus = async (
         : t
     );
 
-    return {
+    const resolved: TaskGraph = {
       ...s,
       tasks: updatedTasks,
       executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
+    };
+    const wave = target.wave;
+    return {
+      ...resolved,
+      wave_gates: {
+        ...resolved.wave_gates,
+        [String(wave)]: {
+          ...(resolved.wave_gates[String(wave)] ?? newWaveGate()),
+          impl_complete: isWaveComplete(resolved, wave),
+        },
+      },
     };
   });
 
@@ -824,22 +857,11 @@ export const runUpdateTaskStatus = async (
     process.stderr.write(`Task ${taskId} remains pending — proof obligations failed: ${failures}.\n`);
   }
 
-  // Check wave completion (shared pure predicate — pi's Stop mirror uses
-  // the same one, inside its locked update)
+  // The same locked update that landed the resolution reconciled the wave's
+  // implementation bit in both directions. Report completion from that state.
   const updated = mgr.load();
   const currentWave = updated.current_wave ?? 1;
-
   if (isWaveComplete(updated, currentWave)) {
-    await mgr.update((s) => ({
-      ...s,
-      wave_gates: {
-        ...s.wave_gates,
-        [String(currentWave)]: {
-          ...(s.wave_gates[String(currentWave)] ?? newWaveGate()),
-          impl_complete: true,
-        },
-      },
-    }));
     process.stderr.write(`\nWave ${currentWave} implementation complete. Run: /wave-gate\n`);
   }
 

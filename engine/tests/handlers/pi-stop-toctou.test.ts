@@ -108,8 +108,28 @@ describe("applyUntrustedStopResolution — untrusted resolutions never supersede
     expect(t1.new_tests_written).toBe(true);
     expect(t1.new_test_evidence).toBe(untrustedPass.newTestEvidence);
     expect(applied.state.executing_tasks).toEqual(["T3"]);
+    expect(applied.state.wave_gates["1"].impl_complete).toBe(true);
     // Other tasks untouched.
     expect(applied.state.tasks.find((t) => t.id === "T2")).toEqual(s.tasks[1]);
+  });
+
+  it("a failed re-resolution clears a stale impl_complete bit atomically", () => {
+    const stale = graph([task({ id: "T1", status: "implemented" })], ["T1"]);
+    stale.wave_gates["1"] = {
+      impl_complete: true, tests_passed: true, reviews_complete: false, blocked: false,
+    };
+    const failedResolution: UntrustedStopResolution = {
+      ...untrustedPass,
+      newTestsWritten: false,
+      newTestEvidence: "",
+    };
+
+    const applied = applyUntrustedStopResolution(stale, "T1", failedResolution);
+
+    expect(applied.skipped).toBe(false);
+    expect(applied.state.tasks[0]!.status).toBe("pending");
+    expect(applied.state.tasks[0]!.proof?.state).toBe("failed");
+    expect(applied.state.wave_gates["1"].impl_complete).toBe(false);
   });
 
   it("an existing UNTRUSTED verdict is superseded (only trusted verdicts stand)", () => {

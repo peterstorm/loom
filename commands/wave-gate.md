@@ -52,6 +52,18 @@ This prints per-task evidence status. Exit 0 = all tasks have evidence, exit 1 =
 
 **If evidence missing** → re-spawn the implementation agent for that task. The agent MUST run tests and must produce ledger evidence (a real Bash test run) or transcript pass markers.
 
+If evidence is present but a task still carries a failed proof from an older Pi
+completion path, reconcile the aggregate from its persisted completion/test/write
+evidence and current artifact bytes before re-running implementation:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper reconcile-implementation-proof --wave "<WAVE>"
+```
+
+The helper does not manufacture evidence: a task remains pending and prints its
+exact failed obligations when completion, test provenance, new tests, or an
+attributed declared-artifact byte change is still missing.
+
 **New test verification:** The `update-task-status` SubagentStop hook also checks that agents wrote NEW test methods (not just reran existing). It diffs against the per-task `start_sha` baseline (set by PreToolUse hook) to scope detection to each task's changes. Both a passing `test_result` and `new_tests_written == true` are required for the wave gate to pass.
 
 **Do NOT manually run tests or set test flags.** The guard hook blocks direct state file writes. Evidence can only come from agent execution → SubagentStop hook extraction.

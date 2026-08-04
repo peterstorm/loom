@@ -28,7 +28,7 @@ import { parseFilesModified } from "../engine/src/parsers/parse-files-modified";
 import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-output";
 
 // Engine SubagentStop logic (harness-agnostic functions already exported)
-import { extractTestEvidence, analyzeNewTests, applyUntrustedStopResolution, isWaveComplete } from "../engine/src/handlers/subagent-stop/update-task-status";
+import { extractTestEvidence, collectNewTestEvidence, applyUntrustedStopResolution } from "../engine/src/handlers/subagent-stop/update-task-status";
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
   applyReviewResolution,
@@ -681,22 +681,9 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
 
-        let newTestEvidence = { written: false, evidence: "" };
-        if (git.isGitRepo()) {
-          // Collect diff: prefer start_sha-based, fall back to untracked test files
-          let diff = "";
-          if (task.start_sha) {
-            diff = git.diff(task.start_sha, "HEAD");
-          }
-          // Also include untracked test files (agents create new files without committing)
-          const untrackedTests = git.listUntrackedTestFiles();
-          for (const f of untrackedTests) {
-            diff += "\n" + git.diffUntracked(f);
-          }
-          if (diff.trim()) {
-            newTestEvidence = analyzeNewTests(diff, task.new_tests_required);
-          }
-        }
+        const newTestEvidence = git.isGitRepo()
+          ? collectNewTestEvidence(filesModified, task.start_sha, task.new_tests_required)
+          : { written: false, evidence: "" };
 
         // Atomic state write. The completed/trusted-verdict guards above ran
         // on a PRE-LOCK snapshot that a concurrent writer can outdate before
@@ -726,23 +713,9 @@ export default function (pi: ExtensionAPI) {
             newTestEvidence: newTestEvidence.evidence,
           });
           skippedExistingVerdict = applied.skipped;
-          if (applied.skipped) return applied.state;
-          // Wave completion is decided INSIDE the same locked update the
-          // resolution landed in (the old post-update load raced concurrent
-          // writers), via the shared pure predicate the engine's
-          // update-task-status also uses.
-          const currentWave = applied.state.current_wave ?? 1;
-          if (!isWaveComplete(applied.state, currentWave)) return applied.state;
-          return {
-            ...applied.state,
-            wave_gates: {
-              ...applied.state.wave_gates,
-              [String(currentWave)]: {
-                ...(applied.state.wave_gates[String(currentWave)] ?? newWaveGate()),
-                impl_complete: true,
-              },
-            },
-          };
+          // applyUntrustedStopResolution reconciles impl_complete in both
+          // directions in the same locked state transition as the proof.
+          return applied.state;
         });
 
         if (skippedExistingVerdict) {

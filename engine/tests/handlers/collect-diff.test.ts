@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { collectDiff, type DiffDeps } from "../../src/handlers/subagent-stop/update-task-status";
+import {
+  collectDiff,
+  collectNewTestEvidence,
+  type DiffDeps,
+} from "../../src/handlers/subagent-stop/update-task-status";
 
 /**
  * collectDiff takes its I/O seam (DiffDeps) as a parameter, so tests pass
@@ -80,5 +84,28 @@ describe("collectDiff", () => {
     expect(result).toContain("src/main.ts");
     // No test file content since there are none
     expect(result).not.toContain("engine/tests/new.test.ts");
+  });
+
+  it("proves new tests from tracked unstaged worktree changes for every harness", () => {
+    const evidence = collectNewTestEvidence(
+      ["engine/tests/existing.test.ts"],
+      "start-sha",
+      true,
+      fakeDeps({
+        diffFiles: () => [
+          "diff --git a/engine/tests/existing.test.ts b/engine/tests/existing.test.ts",
+          "+  it(\"covers the fix\", () => {",
+          "+    expect(result).toBe(true);",
+          "+  });",
+        ].join("\n"),
+        diffFilesStaged: () => "",
+        listUntrackedTestFiles: () => [],
+      }),
+    );
+
+    expect(evidence).toEqual({
+      written: true,
+      evidence: "1 new test methods, 1 assertions (ts: 1 it/test/describe)",
+    });
   });
 });

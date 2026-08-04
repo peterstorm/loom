@@ -606,6 +606,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
     const decision = evaluateWaveGate(state, null, countingDeps().deps);
     expect(decision.verdict.kind).toBe("fail");
     expect(gateCheckMessage(decision.checks[0]!)).toContain("proof=failed");
+    expect(gateCheckMessage(decision.checks[0]!)).toContain("declared-artifact-not-changed:missing.ts");
     expect(applyGateDecision(state, decision)).toBe(state);
   });
 
