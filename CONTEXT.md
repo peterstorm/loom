@@ -137,7 +137,7 @@ An engine-authored requirement a Task must discharge before its status can becom
 _Avoid_: Checklist item, self-report, completion claim
 
 **Review Packet**:
-A canonical immutable snapshot binding one Task to its base/head revisions, exact declared/modified path scope, diffs, postimages, plan context, and Proof Obligations. The sole review scope; empty scope fails rather than broadening to the wave.
+A canonical immutable snapshot binding one Task to its base/head revisions, exact declared/modified path scope, diffs, byte-preserving postimages, plan context, and Proof Obligations. Postimages use `utf8` when lossless and `base64` otherwise; their digest identifies the original bytes. The sole review scope; empty scope fails rather than broadening to the wave.
 _Avoid_: File list, live diff, review context, fallback scope
 
 **Panel Program**:

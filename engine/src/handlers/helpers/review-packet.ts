@@ -72,7 +72,7 @@ function artifact(root: string, baseSha: string, path: string): ReviewPacketArti
   return {
     path,
     diff,
-    postimage: present ? readFileSync(absolute, "utf-8") : null,
+    postimage: present ? readFileSync(absolute) : null,
   };
 }
 

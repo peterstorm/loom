@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   lstatSync,
@@ -10,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -151,6 +152,40 @@ describe("quality-program helper boundaries", () => {
     expect(written.modifiedPaths).toEqual(["engine/src/core/model-profiles.ts"]);
     expect(written.artifacts.map((artifact: { path: string }) => artifact.path))
       .toEqual(["engine/src/core/model-profiles.ts"]);
+    expect(cli(["helper", "review-packet", "verify", "--packet", packet]).trim()).toBe(id);
+  });
+
+  it("preserves and byte-hashes a binary postimage through the real CLI", () => {
+    const dir = mkdtempSync(join(ROOT, ".tmp-review-packet-binary-test-"));
+    cleanup.push(dir);
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim();
+    const state = join(dir, "state.json");
+    const packet = join(dir, "packet.json");
+    const image = join(dir, "icon.png");
+    const imagePath = relative(ROOT, image);
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0x80]);
+    writeFileSync(image, png);
+    writeFileSync(state, JSON.stringify({
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
+      tasks: [{
+        id: "T1", description: "binary packet", agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [], start_sha: head,
+        file_list: [imagePath], files_modified: [imagePath],
+      }],
+    }));
+
+    const id = cli(
+      ["helper", "review-packet", "create", "--task", "T1", "--output", packet],
+      "",
+      { LOOM_STATE_PATH: state },
+    ).trim();
+    const written = JSON.parse(readFileSync(packet, "utf-8"));
+    const postimage = written.artifacts[0].postimage;
+    expect(written.schemaVersion).toBe(2);
+    expect(postimage.encoding).toBe("base64");
+    expect(Buffer.from(postimage.content, "base64")).toEqual(png);
+    expect(postimage.sha256).toBe(createHash("sha256").update(png).digest("hex"));
     expect(cli(["helper", "review-packet", "verify", "--packet", packet]).trim()).toBe(id);
   });
 

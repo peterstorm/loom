@@ -433,7 +433,7 @@ export const MACHINES_DIR = machinesDir();
  * literal is still caught; the subagent and machine-definition dirs are
  * additionally PROTECTED (never helper-writable — see protectedDirs). */
 export const guardedDirs = (): readonly string[] => [
-  dirname(taskGraphRelative()),
+  ...new Set(taskGraphRelatives().map((path) => dirname(path))),
   SUBAGENT_DIR,
   machinesDir(),
 ];
@@ -551,40 +551,50 @@ function detectHarness(): "claude" | "pi" {
 /** Which harness is running */
 export const HARNESS = detectHarness();
 
-/** Relative path within a repo root — configurable via env (read at call time).
- * Calls detectHarness() rather than the HARNESS const (identical result) so
- * it is callable regardless of module-init order — stateFilePatterns()
- * derives the guarded state dir from this at call time, above HARNESS. */
-function taskGraphRelative(): string {
-  return process.env.LOOM_STATE_PATH
-    ?? (detectHarness() === "pi"
-      ? ".pi/state/active_task_graph.json"
-      : ".claude/state/active_task_graph.json");
+const PI_TASK_GRAPH_PATH = ".pi/state/active_task_graph.json";
+const CLAUDE_TASK_GRAPH_PATH = ".claude/state/active_task_graph.json";
+
+/** Ordered task-graph locations. An explicit override is authoritative. Pi
+ * otherwise prefers its native state directory but can resume Loom sessions
+ * created before the Pi state split from the legacy Claude-compatible path. */
+function taskGraphRelatives(): readonly string[] {
+  if (process.env.LOOM_STATE_PATH) return [process.env.LOOM_STATE_PATH];
+  return detectHarness() === "pi"
+    ? [PI_TASK_GRAPH_PATH, CLAUDE_TASK_GRAPH_PATH]
+    : [CLAUDE_TASK_GRAPH_PATH];
 }
 
-/** Find task graph by walking up from cwd to git root */
+/** Primary relative path used when no existing graph can be found. */
+function taskGraphRelative(): string {
+  return taskGraphRelatives()[0]!;
+}
+
+/** Find task graph by walking up from cwd to git root. */
 function findTaskGraphPath(): string {
-  const relative = taskGraphRelative();
+  const relatives = taskGraphRelatives();
 
-  // Try relative first (works when cwd = repo root)
-  if (existsSync(relative)) return relative;
+  // Try cwd-relative candidates first (works when cwd = repo root).
+  for (const relative of relatives) {
+    if (existsSync(relative)) return relative;
+  }
 
-  // Walk up via git rev-parse
+  // Walk up via git rev-parse and preserve candidate priority at the root.
   try {
     const root = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
-    const abs = join(root, relative);
-    if (existsSync(abs)) return abs;
+    for (const relative of relatives) {
+      const absolute = join(root, relative);
+      if (existsSync(absolute)) return absolute;
+    }
   } catch (e) {
     // Not a git repo (or git missing): the walk-up is skipped and only the
-    // cwd-relative path can resolve — say so, or a task graph sitting at the
-    // repo root looks mysteriously absent from a subdirectory cwd.
+    // cwd-relative candidates can resolve.
     process.stderr.write(
-      `loom: git rev-parse walk-up failed while locating ${relative} — falling back to cwd-relative: ${e instanceof Error ? e.message : String(e)}\n`,
+      `loom: git rev-parse walk-up failed while locating ${relatives.join(" or ")} — falling back to cwd-relative: ${e instanceof Error ? e.message : String(e)}\n`,
     );
   }
 
-  // Fallback to relative (callers check existsSync anyway)
-  return relative;
+  // No graph exists yet: retain the harness-native creation path.
+  return taskGraphRelative();
 }
 
 /**

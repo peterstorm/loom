@@ -12,15 +12,17 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[];
 export type JsonObject = Readonly<{ [key: string]: JsonValue }>;
 
-export const REVIEW_PACKET_SCHEMA_VERSION = 1 as const;
+export const REVIEW_PACKET_SCHEMA_VERSION = 2 as const;
 export const REVIEW_ARTIFACT_KINDS = ["diff", "postimage"] as const;
 export type ReviewArtifactKind = (typeof REVIEW_ARTIFACT_KINDS)[number];
+export const REVIEW_POSTIMAGE_ENCODINGS = ["utf8", "base64"] as const;
+export type ReviewPostimageEncoding = (typeof REVIEW_POSTIMAGE_ENCODINGS)[number];
 
 export interface ReviewPacketArtifactInput {
   readonly path: string;
   readonly diff: string;
-  /** Null means the path was deleted at the packet's head revision. */
-  readonly postimage: string | null;
+  /** Original file bytes. Null means deletion at the packet's head revision. */
+  readonly postimage: Uint8Array | null;
 }
 
 export interface ReviewPacketInput {
@@ -39,10 +41,16 @@ export interface HashedReviewArtifactContent {
   readonly content: string;
 }
 
+export interface HashedReviewPostimage {
+  readonly sha256: string;
+  readonly encoding: ReviewPostimageEncoding;
+  readonly content: string;
+}
+
 export interface ReviewPacketArtifact {
   readonly path: string;
   readonly diff: HashedReviewArtifactContent;
-  readonly postimage: HashedReviewArtifactContent | null;
+  readonly postimage: HashedReviewPostimage | null;
 }
 
 export interface ReviewPacket {
@@ -63,6 +71,7 @@ type PacketBody = Omit<ReviewPacket, "packetId">;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const GIT_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const WINDOWS_ABSOLUTE = /^(?:[A-Za-z]:[\\/]|\\\\)/;
+const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -165,11 +174,15 @@ function hashedContentJson(content: HashedReviewArtifactContent): JsonObject {
   return { sha256: content.sha256, content: content.content };
 }
 
+function hashedPostimageJson(postimage: HashedReviewPostimage): JsonObject {
+  return { sha256: postimage.sha256, encoding: postimage.encoding, content: postimage.content };
+}
+
 function packetBodyJson(body: PacketBody): JsonObject {
   const artifacts: readonly JsonValue[] = body.artifacts.map((artifact): JsonObject => ({
     path: artifact.path,
     diff: hashedContentJson(artifact.diff),
-    postimage: artifact.postimage === null ? null : hashedContentJson(artifact.postimage),
+    postimage: artifact.postimage === null ? null : hashedPostimageJson(artifact.postimage),
   }));
   return {
     schemaVersion: body.schemaVersion,
@@ -202,9 +215,14 @@ export function canonicalJson(value: JsonValue): string {
     .join(",")}}`;
 }
 
+/** Deterministic SHA-256 over bytes, without an intervening text decode. */
+export function sha256Bytes(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
 /** Deterministic SHA-256 over UTF-8 text. */
 export function sha256Hex(text: string): string {
-  return createHash("sha256").update(text, "utf-8").digest("hex");
+  return sha256Bytes(Buffer.from(text, "utf-8"));
 }
 
 function freezeJson<T>(value: T): T {
@@ -216,6 +234,42 @@ function freezeJson<T>(value: T): T {
 }
 
 type ParsedArtifacts = { readonly artifacts: ReviewPacketArtifact[]; readonly paths: Set<string>; readonly errors: string[] };
+
+/** Encode bytes as readable UTF-8 exactly when that representation is lossless. */
+function encodePostimage(bytes: Uint8Array): HashedReviewPostimage {
+  const original = Buffer.from(bytes);
+  const utf8 = original.toString("utf-8");
+  const losslessUtf8 = Buffer.from(utf8, "utf-8").equals(original);
+  return {
+    sha256: sha256Bytes(original),
+    encoding: losslessUtf8 ? "utf8" : "base64",
+    content: losslessUtf8 ? utf8 : original.toString("base64"),
+  };
+}
+
+function decodePostimage(
+  encoding: unknown,
+  content: unknown,
+  label: string,
+): ParseResult<Uint8Array> {
+  if (!(REVIEW_POSTIMAGE_ENCODINGS as readonly unknown[]).includes(encoding)) {
+    return fail([`${label}.encoding must be 'utf8' or 'base64'`]);
+  }
+  if (typeof content !== "string") return fail([`${label}.content must be a string`]);
+
+  if (encoding === "base64" && (!CANONICAL_BASE64.test(content) || Buffer.from(content, "base64").toString("base64") !== content)) {
+    return fail([`${label}.content must be canonical base64`]);
+  }
+
+  const bytes = Buffer.from(content, encoding === "utf8" ? "utf-8" : "base64");
+  if (encoding === "utf8" && bytes.toString("utf-8") !== content) {
+    return fail([`${label}.content must be canonical UTF-8 text`]);
+  }
+  if (encodePostimage(bytes).encoding !== encoding) {
+    return fail([`${label}.encoding must be utf8 whenever the original bytes are valid UTF-8`]);
+  }
+  return ok(bytes);
+}
 
 function parseArtifactInputs(raw: unknown): ParsedArtifacts {
   const artifacts: ReviewPacketArtifact[] = [];
@@ -232,16 +286,14 @@ function parseArtifactInputs(raw: unknown): ParsedArtifacts {
     if (paths.has(path.value)) errors.push(`artifacts repeats path '${path.value}'`);
     paths.add(path.value);
     if (typeof artifact.diff !== "string") errors.push(`artifacts[${index}].diff must be a string`);
-    if (artifact.postimage !== null && typeof artifact.postimage !== "string") {
-      errors.push(`artifacts[${index}].postimage must be a string or null`);
+    if (artifact.postimage !== null && !(artifact.postimage instanceof Uint8Array)) {
+      errors.push(`artifacts[${index}].postimage must be a Uint8Array or null`);
     }
-    if (typeof artifact.diff === "string" && (artifact.postimage === null || typeof artifact.postimage === "string")) {
+    if (typeof artifact.diff === "string" && (artifact.postimage === null || artifact.postimage instanceof Uint8Array)) {
       artifacts.push({
         path: path.value,
         diff: { content: artifact.diff, sha256: sha256Hex(artifact.diff) },
-        postimage: artifact.postimage === null
-          ? null
-          : { content: artifact.postimage, sha256: sha256Hex(artifact.postimage) },
+        postimage: artifact.postimage === null ? null : encodePostimage(artifact.postimage),
       });
     }
   });
@@ -312,13 +364,24 @@ function parseHashedArtifact(entry: unknown, index: number): ParseResult<ReviewP
   if (typeof entry.diff.sha256 !== "string" || !SHA256_HEX.test(entry.diff.sha256)) {
     errors.push(`artifacts[${index}].diff.sha256 must be a lowercase SHA-256 digest`);
   } else if (entry.diff.sha256 !== sha256Hex(entry.diff.content)) errors.push(`artifacts[${index}].diff.sha256 does not match its content`);
+
+  let postimageBytes: Uint8Array | null = null;
   if (postimage !== null) {
-    if (typeof postimage.content !== "string" || typeof postimage.sha256 !== "string" || !SHA256_HEX.test(postimage.sha256)) {
-      errors.push(`artifacts[${index}].postimage must contain content and a lowercase SHA-256 digest`);
-    } else if (postimage.sha256 !== sha256Hex(postimage.content)) errors.push(`artifacts[${index}].postimage.sha256 does not match its content`);
+    if (typeof postimage.sha256 !== "string" || !SHA256_HEX.test(postimage.sha256)) {
+      errors.push(`artifacts[${index}].postimage.sha256 must be a lowercase SHA-256 digest`);
+    }
+    const decoded = decodePostimage(postimage.encoding, postimage.content, `artifacts[${index}].postimage`);
+    if (!decoded.ok) errors.push(...decoded.errors);
+    else {
+      postimageBytes = decoded.value;
+      if (typeof postimage.sha256 === "string" && SHA256_HEX.test(postimage.sha256) &&
+          postimage.sha256 !== sha256Bytes(decoded.value)) {
+        errors.push(`artifacts[${index}].postimage.sha256 does not match its decoded bytes`);
+      }
+    }
   }
   if (errors.length > 0) return fail(errors);
-  return ok({ path: entry.path, diff: entry.diff.content, postimage: postimage === null ? null : postimage.content as string });
+  return ok({ path: entry.path, diff: entry.diff.content, postimage: postimageBytes });
 }
 
 function parseHashedArtifacts(raw: unknown): ParseResult<ReviewPacketArtifactInput[]> {

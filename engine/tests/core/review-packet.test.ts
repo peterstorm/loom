@@ -1,14 +1,17 @@
 import { describe, expect, it } from "vitest";
+import fc from "fast-check";
 import {
   createReviewPacket,
   parseReviewPacket,
   serializeReviewPacket,
+  sha256Bytes,
   sha256Hex,
   type ReviewPacketInput,
 } from "../../src/core/review-packet";
 
 const BASE_SHA = "a".repeat(40);
 const HEAD_SHA = "b".repeat(40);
+const bytes = (text: string): Uint8Array => Buffer.from(text, "utf-8");
 
 function input(overrides: Partial<ReviewPacketInput> = {}): ReviewPacketInput {
   return {
@@ -18,8 +21,8 @@ function input(overrides: Partial<ReviewPacketInput> = {}): ReviewPacketInput {
     declaredPaths: ["engine/src/core/z.ts", "engine/src/core/a.ts"],
     modifiedPaths: ["engine/src/core/z.ts", "engine/src/core/a.ts"],
     artifacts: [
-      { path: "engine/src/core/z.ts", diff: "+z\n", postimage: "export const z = 1;\n" },
-      { path: "engine/src/core/a.ts", diff: "+a\n", postimage: "export const a = 1;\n" },
+      { path: "engine/src/core/z.ts", diff: "+z\n", postimage: bytes("export const z = 1;\n") },
+      { path: "engine/src/core/a.ts", diff: "+a\n", postimage: bytes("export const a = 1;\n") },
     ],
     planContext: { section: "Phase 3", goals: ["deterministic", "scoped"] },
     proofObligations: [{ kind: "tests", command: "vitest run" }, { kind: "artifacts" }],
@@ -72,10 +75,12 @@ describe("Review Packet", () => {
       input({ headSha: "d".repeat(40) }),
       input({
         declaredPaths: [...input().declaredPaths, "README.md"],
-        artifacts: [...input().artifacts, { path: "README.md", diff: "readme diff", postimage: "readme" }],
+        artifacts: [...input().artifacts, { path: "README.md", diff: "readme diff", postimage: bytes("readme") }],
       }),
       input({ artifacts: input().artifacts.map((artifact, index) => index === 0 ? { ...artifact, diff: `${artifact.diff}x` } : artifact) }),
-      input({ artifacts: input().artifacts.map((artifact, index) => index === 0 ? { ...artifact, postimage: `${artifact.postimage}x` } : artifact) }),
+      input({ artifacts: input().artifacts.map((artifact, index) => index === 0
+        ? { ...artifact, postimage: artifact.postimage === null ? null : Buffer.concat([artifact.postimage, bytes("x")]) }
+        : artifact) }),
       input({ planContext: { section: "changed" } }),
       input({ proofObligations: [{ kind: "different" }] }),
     ];
@@ -104,8 +109,8 @@ describe("Review Packet", () => {
       modifiedPaths: ["a.ts"],
       declaredPaths: ["a.ts"],
       artifacts: [
-        { path: "a.ts", diff: "a", postimage: "a" },
-        { path: "a.ts", diff: "b", postimage: "b" },
+        { path: "a.ts", diff: "a", postimage: bytes("a") },
+        { path: "a.ts", diff: "b", postimage: bytes("b") },
       ],
     })), /artifacts repeats path/);
     expectError(createReviewPacket(input({ declaredPaths: [], modifiedPaths: [], artifacts: [] })), /scope must be non-empty/);
@@ -113,7 +118,7 @@ describe("Review Packet", () => {
     expectError(createReviewPacket(input({
       modifiedPaths: ["a.ts"],
       declaredPaths: ["a.ts"],
-      artifacts: [{ path: "outside.ts", diff: "x", postimage: "x" }],
+      artifacts: [{ path: "outside.ts", diff: "x", postimage: bytes("x") }],
     })), /outside the.*scope/);
   });
 
@@ -128,6 +133,43 @@ describe("Review Packet", () => {
     expect(serializeReviewPacket(parsed.value)).toBe(serialized);
   });
 
+  it("round-trips arbitrary postimage bytes without replacement-character loss", () => {
+    fc.assert(fc.property(fc.uint8Array({ maxLength: 1024 }), (postimage) => {
+      const created = createReviewPacket(input({
+        declaredPaths: ["asset.bin"],
+        modifiedPaths: ["asset.bin"],
+        artifacts: [{ path: "asset.bin", diff: "binary diff", postimage }],
+      }));
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+
+      const encoded = created.value.artifacts[0]!.postimage;
+      expect(encoded).not.toBeNull();
+      if (encoded === null) return;
+      const decoded = Buffer.from(encoded.content, encoded.encoding === "utf8" ? "utf-8" : "base64");
+      expect(decoded).toEqual(Buffer.from(postimage));
+      expect(encoded.sha256).toBe(sha256Bytes(postimage));
+      expect(parseReviewPacket(serializeReviewPacket(created.value)).ok).toBe(true);
+    }));
+  });
+
+  it("uses base64 and hashes original bytes for a PNG-like binary postimage", () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0x80]);
+    const created = createReviewPacket(input({
+      declaredPaths: ["icon.png"], modifiedPaths: ["icon.png"],
+      artifacts: [{ path: "icon.png", diff: "binary", postimage: png }],
+    }));
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const postimage = created.value.artifacts[0]!.postimage;
+    expect(postimage).toEqual({
+      encoding: "base64",
+      content: png.toString("base64"),
+      sha256: sha256Bytes(png),
+    });
+    expect(postimage?.content).not.toContain("�");
+  });
+
   it("rejects malformed JSON, artifact tampering, hash tampering, and packet-id tampering", () => {
     expect(parseReviewPacket("{").ok).toBe(false);
     const created = createReviewPacket(input());
@@ -135,10 +177,16 @@ describe("Review Packet", () => {
     if (!created.ok) return;
     type SerializedArtifact = {
       diff: { content: string; sha256: string };
-      postimage: { content: string; sha256: string } | null;
+      postimage: { encoding: "utf8" | "base64"; content: string; sha256: string } | null;
     };
     type SerializedPacket = Record<string, unknown> & { artifacts: SerializedArtifact[]; packetId: string };
     const raw = JSON.parse(serializeReviewPacket(created.value)) as SerializedPacket;
+
+    const legacySchema = structuredClone(raw);
+    legacySchema.schemaVersion = 1;
+    const legacyResult = parseReviewPacket(legacySchema);
+    expect(legacyResult.ok).toBe(false);
+    if (!legacyResult.ok) expect(legacyResult.errors.join("\n")).toMatch(/schemaVersion must equal 2/);
 
     const contentTampered = structuredClone(raw);
     contentTampered.artifacts[0]!.diff.content += "tampered";
@@ -150,6 +198,17 @@ describe("Review Packet", () => {
     if (digestTampered.artifacts[0]!.postimage === null) throw new Error("fixture postimage missing");
     digestTampered.artifacts[0]!.postimage.sha256 = "0".repeat(64);
     expect(parseReviewPacket(digestTampered).ok).toBe(false);
+
+    const encodingTampered = structuredClone(raw);
+    if (encodingTampered.artifacts[0]!.postimage === null) throw new Error("fixture postimage missing");
+    encodingTampered.artifacts[0]!.postimage.encoding = "base64";
+    expect(parseReviewPacket(encodingTampered).ok).toBe(false);
+
+    const malformedBase64 = structuredClone(raw);
+    if (malformedBase64.artifacts[0]!.postimage === null) throw new Error("fixture postimage missing");
+    malformedBase64.artifacts[0]!.postimage.encoding = "base64";
+    malformedBase64.artifacts[0]!.postimage.content = "not base64!";
+    expect(parseReviewPacket(malformedBase64).ok).toBe(false);
 
     const idTampered = structuredClone(raw);
     idTampered.packetId = "0".repeat(64);

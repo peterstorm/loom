@@ -60,7 +60,9 @@ This prints per-task evidence status. Exit 0 = all tasks have evidence, exit 1 =
 
 Before any reviewer starts, create one immutable Review Packet per Task. The
 packet binds the Task, proof obligations, base/head revisions, exact diff and
-postimages, declared/modified paths, and plan context. Reviewers MUST read only
+postimages, declared/modified paths, and plan context. Postimages preserve their
+original bytes: valid text is stored as `utf8`, while binary content is `base64`;
+the digest always hashes the decoded/original bytes. Reviewers MUST read only
 the packet's manifest-listed scope; never fall back to all wave changes or scan
 the live worktree.
 
