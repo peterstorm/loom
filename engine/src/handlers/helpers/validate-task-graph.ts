@@ -471,7 +471,7 @@ export interface FixReport {
  * the operator's stderr rather than only the file.
  */
 export function fixFull(json: Record<string, unknown>): FixReport {
-  const tasks = Array.isArray(json.tasks) ? (json.tasks as Record<string, unknown>[]) : [];
+  const tasks: readonly unknown[] = Array.isArray(json.tasks) ? json.tasks : [];
   const notes: string[] = [];
   const dataLoss: string[] = [];
   const currentWaveValid =
@@ -482,7 +482,14 @@ export function fixFull(json: Record<string, unknown>): FixReport {
   const fixed = {
     ...json,
     ...(json.current_wave === undefined ? {} : { current_wave: currentWaveValid ? json.current_wave : 1 }),
-    tasks: tasks.map((t) => {
+    tasks: tasks.map((rawTask, taskIndex) => {
+      if (!isRecord(rawTask)) {
+        notes.push(
+          `tasks[${taskIndex}]: cannot repair non-object task entry ${JSON.stringify(rawTask)}; refusing unchanged input`,
+        );
+        return rawTask;
+      }
+      const t = rawTask;
       const repair = fixTaskFindings(t);
       const id = typeof t.id === "string" ? t.id : "<task with no id>";
       for (const claim of repair.recovered) {

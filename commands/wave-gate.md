@@ -437,7 +437,7 @@ EOF
 
 ### Step 4b: Triage & Fix Relevant Advisories
 
-Critical findings block the gate (Step 5). Advisory findings do **not** block — but they must not be silently dropped. Classifying and reporting every advisory is a mandatory workflow step before advancement; it is not an additional deterministic gate condition, and `complete-wave-gate` blocks only on unresolved critical findings.
+Critical findings block the gate (Step 5). Advisory findings do **not** block. The orchestrator must always report them; classification and optional remediation are operator-facing follow-up, not an engine-enforced prerequisite to advancement. `complete-wave-gate` blocks only on unresolved critical findings.
 
 **Read the advisories** (self-contained jq — the wave is resolved inside the
 program; `WAVE=$(jq … state)` is blocked by the guard):
@@ -530,7 +530,7 @@ jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | .id' .claude/state
 - MUST report refuted findings in the GH comment — a refutation nobody can see is a deletion
 - NEVER hand-build the finding brief or manifest; the engine authors both from state
 - MUST post GH comment before advancing
-- MUST classify and report advisory findings before advancing — this workflow obligation is not a `complete-wave-gate` condition; advisories remain non-blocking and may be fixed, deferred, or dismissed with a reason
+- MUST report advisory findings before advancing; classification/remediation is non-blocking operator follow-up and is not a `complete-wave-gate` condition
 - NEVER advance if spec-check has critical findings
 - NEVER advance if code review has critical findings
 - NEVER manually write to state file (guard hook blocks it)

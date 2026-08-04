@@ -24,5 +24,7 @@ In particular:
   use the tally-authored result, and plan/fix only
   `result.json.surviving_critical_findings` plus accepted advisories;
 - retain and report every `refuted_critical_findings` entry with its evidence;
+- when the adjudicated result contains advisories but no surviving criticals,
+  ask the user which advisories to accept before planning or editing;
 - stop before editing on any evidence or panel failure;
 - for `--dry-run`, stop after adjudication and the remediation plan.

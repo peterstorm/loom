@@ -22,7 +22,7 @@ import {
   refutationsUnionError,
 } from "./core/findings";
 import type { TaskGraph } from "./types";
-import { parseTaskProof } from "./core/proof-obligations";
+import { deriveProofObligations, parseTaskProof } from "./core/proof-obligations";
 import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
 import { parseStoredSpecCheck } from "./core/spec-check";
 import { parseReviewPath } from "./core/review-packet";
@@ -168,6 +168,21 @@ export function taskUnionError(v: unknown, index: number): string | null {
     );
     if (!baseline.ok) return baseline.errors.join("; ");
   }
+  if (t.attempt_artifact_baseline !== undefined) {
+    const baseline = parseDeclaredArtifactBaseline(
+      t.attempt_artifact_baseline,
+      `tasks[${index}] ("${id}"): attempt_artifact_baseline`,
+    );
+    if (!baseline.ok) return baseline.errors.join("; ");
+    const declaredArtifacts = Array.isArray(t.file_list) ? t.file_list : [];
+    const actualArtifacts = baseline.value.map(({ artifact }) => artifact);
+    if (
+      actualArtifacts.length < declaredArtifacts.length ||
+      declaredArtifacts.some((artifact, artifactIndex) => artifact !== actualArtifacts[artifactIndex])
+    ) {
+      return `tasks[${index}] ("${id}"): attempt_artifact_baseline must cover file_list first and in order`;
+    }
+  }
   if (
     t.artifact_baseline_recovered_from !== undefined &&
     (typeof t.artifact_baseline_recovered_from !== "string" ||
@@ -224,12 +239,26 @@ export function taskUnionError(v: unknown, index: number): string | null {
   if (t.review_status !== undefined && !(REVIEW_STATUSES as readonly string[]).includes(t.review_status as string)) {
     return `tasks[${index}] ("${id}"): review_status ${JSON.stringify(t.review_status)} is not one of ${REVIEW_STATUSES.join(", ")}`;
   }
+  const statusClaimsImplementation = t.status === "implemented" || t.status === "completed";
   if (t.proof !== undefined) {
     const proof = parseTaskProof(t.proof);
     if (!proof.ok) {
       return `tasks[${index}] ("${id}"): invalid proof: ${proof.errors.join("; ")}`;
     }
-    const statusClaimsImplementation = t.status === "implemented" || t.status === "completed";
+    const expectedObligations = deriveProofObligations({
+      newTestsRequired: t.new_tests_required !== false,
+      declaredArtifacts: Array.isArray(t.file_list) ? t.file_list : [],
+    });
+    const obligationsMatch = proof.value.obligations.length === expectedObligations.length &&
+      proof.value.obligations.every((actual, obligationIndex) => {
+        const expected = expectedObligations[obligationIndex];
+        return expected !== undefined && actual.kind === expected.kind &&
+          (actual.kind !== "declared-artifact-changed" ||
+            (expected.kind === "declared-artifact-changed" && actual.artifact === expected.artifact));
+      });
+    if (!obligationsMatch) {
+      return `tasks[${index}] ("${id}"): proof obligations do not exactly match new_tests_required and file_list`;
+    }
     if (statusClaimsImplementation !== (proof.value.state === "satisfied")) {
       return (
         `tasks[${index}] ("${id}"): status/proof lockstep violated — ` +

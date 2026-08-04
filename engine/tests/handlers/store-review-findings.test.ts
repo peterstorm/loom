@@ -91,6 +91,19 @@ describe("updateTaskFindings (pure)", () => {
     expect(updated.review_status).toBe("passed");
   });
 
+  it("dismisses omitted advisories when preservation is explicitly disabled", () => {
+    const taskWithAdvisories: Task = {
+      ...baseTask,
+      advisory_findings: ["Old advisory"],
+    };
+
+    const updated = updateTaskFindings(taskWithAdvisories, [], [], false);
+
+    expect(updated.advisory_findings).toEqual([]);
+    expect(updated.refuted_findings).toHaveLength(1);
+    expect(updated.refuted_findings?.[0]?.finding.claim).toBe("Old advisory");
+  });
+
   it("overwrites advisories when new ones provided", () => {
     const taskWithAdvisories: Task = {
       ...baseTask,
@@ -206,7 +219,7 @@ describe("store-review-findings CLI — an override must land or say why not", (
       description: "d",
       agent: "code-implementer-agent",
       wave: 1,
-      status: "implemented",
+      status: "pending",
       depends_on: [],
       review_status: "passed",
       findings: [],
@@ -295,14 +308,15 @@ describe("store-review-findings CLI — an override must land or say why not", (
   it("--dismiss-all performs the dismissal, and SAYS it passed the review", () => {
     // Dismissing every finding is a real operation; it just has to be asked for.
     // The log line is distinct because this one opens a gate.
-    run(["--task", "T1"], "CRITICAL: a real blocker\n");
+    run(["--task", "T1"], "CRITICAL: a real blocker\nADVISORY: a real advisory\n");
     const result = run(["--task", "T1", "--dismiss-all"], "");
     expect(result.status, result.stderr).toBe(0);
     expect(result.stderr).toContain("DISMISSED every finding");
     expect(state().tasks[0].review_status).toBe("passed");
     expect(state().tasks[0].critical_findings).toEqual([]);
-    // Recorded, never deleted — the audit trail outlives the finding.
-    expect(state().tasks[0].refuted_findings).toHaveLength(1);
+    expect(state().tasks[0].advisory_findings).toEqual([]);
+    // Recorded, never deleted — the audit trail outlives both findings.
+    expect(state().tasks[0].refuted_findings).toHaveLength(2);
     expect(parseTaskGraph(state()).ok).toBe(true);
   });
 

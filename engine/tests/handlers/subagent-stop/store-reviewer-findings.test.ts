@@ -54,7 +54,7 @@ const task = (id: string) => ({
   description: "d",
   agent: "code-implementer-agent",
   wave: 1,
-  status: "implemented",
+  status: "pending",
   depends_on: [],
   review_status: "pending",
 });
@@ -278,12 +278,30 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
   it("fails loudly when a missing transcript cannot supply a trusted task binding", async () => {
     const f = fixture("missing", null);
     try {
-      const { result } = await run({
+      const { result, stderr } = await run({
         session_id: f.session,
         agent_type: "code-reviewer",
         agent_transcript_path: f.transcriptPath,
       });
       expect(result.kind).toBe("error");
+      expect(stderr).toContain("review evidence cannot be attributed");
+      expect(f.state().tasks[0].review_status).toBe("pending");
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("surfaces a trusted prompt that carries no task identity", async () => {
+    const f = fixture("missing-task-binding", BLOCKING, [task("T1")], "Review this implementation.");
+    try {
+      const { result, stderr } = await run({
+        session_id: f.session,
+        agent_type: "code-reviewer",
+        agent_transcript_path: f.transcriptPath,
+      });
+      expect(result.kind).toBe("error");
+      expect(stderr).toContain("no extractable task ID");
+      expect(stderr).toContain("review evidence cannot be attributed");
       expect(f.state().tasks[0].review_status).toBe("pending");
     } finally {
       f.cleanup();

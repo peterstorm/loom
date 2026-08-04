@@ -140,7 +140,7 @@ describe("validate-task-execution — exclusive ownership", () => {
 });
 
 describe("validate-task-execution — retry baselines", () => {
-  it("never moves an existing execution boundary forward on retry", () => {
+  it("preserves the first proof boundary and refreshes the attempt boundary on retry", () => {
     const originalBaseline = [{
       artifact: "src/a.ts",
       snapshot: { kind: "sha256" as const, digest: "a".repeat(64) },
@@ -153,10 +153,20 @@ describe("validate-task-execution — retry baselines", () => {
       id: "T1", wave: 1, start_sha: "1".repeat(40), artifact_baseline: originalBaseline,
     });
 
-    const registered = registerTaskExecutionBaseline(existing, "2".repeat(40), retryBaseline);
+    const retryAttemptBaseline = [
+      ...retryBaseline,
+      { artifact: "tests/a.test.ts", snapshot: { kind: "missing" as const } },
+    ];
+    const registered = registerTaskExecutionBaseline(
+      existing,
+      "2".repeat(40),
+      retryBaseline,
+      retryAttemptBaseline,
+    );
 
     expect(registered.start_sha).toBe("1".repeat(40));
     expect(registered.artifact_baseline).toBe(originalBaseline);
+    expect(registered.attempt_artifact_baseline).toBe(retryAttemptBaseline);
   });
 
   it("fills a missing execution boundary on first spawn", () => {
@@ -169,6 +179,7 @@ describe("validate-task-execution — retry baselines", () => {
 
     expect(registered.start_sha).toBe("1".repeat(40));
     expect(registered.artifact_baseline).toBe(captured);
+    expect(registered.attempt_artifact_baseline).toBe(captured);
   });
 });
 

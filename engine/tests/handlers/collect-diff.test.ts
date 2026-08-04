@@ -17,24 +17,17 @@ function fakeDeps(overrides: Partial<DiffDeps> = {}): DiffDeps {
     diffFiles: (files) => (files.length ? `diff --tracked\n${files.map((f) => `+modified ${f}`).join("\n")}` : ""),
     diffFilesStaged: () => "",
     diffUntracked: (f) => `diff --untracked ${f}\n+new content in ${f}`,
-    listUntrackedTestFiles: () => ["engine/tests/new.test.ts", "apps/web/tests/login.spec.ts"],
-    diff: () => "",
-    diffStaged: () => "",
-    defaultBranch: () => "main",
-    mergeBase: () => "abc123",
     fileExists: () => true,
     ...overrides,
   };
 }
 
 describe("collectDiff", () => {
-  it("includes untracked test files even when filesModified produces output", () => {
-    const result = collectDiff(["src/main.ts"], undefined, fakeDeps());
-    // Should contain the tracked diff
+  it("includes only paths attributed to the current task", () => {
+    const result = collectDiff(["src/main.ts"], fakeDeps());
     expect(result).toContain("src/main.ts");
-    // Should also contain untracked test files from listUntrackedTestFiles
-    expect(result).toContain("engine/tests/new.test.ts");
-    expect(result).toContain("apps/web/tests/login.spec.ts");
+    expect(result).not.toContain("engine/tests/new.test.ts");
+    expect(result).not.toContain("apps/web/tests/login.spec.ts");
   });
 
   it("does not duplicate test files already in filesModified", () => {
@@ -48,15 +41,14 @@ describe("collectDiff", () => {
       isTracked: (f) => f === "src/main.ts",
     });
 
-    collectDiff(["src/main.ts", "engine/tests/new.test.ts"], undefined, deps);
+    collectDiff(["src/main.ts", "engine/tests/new.test.ts"], deps);
 
-    // engine/tests/new.test.ts should be diffed exactly once
-    // (from filesModified untracked processing, NOT duplicated from listUntrackedTestFiles)
+    // engine/tests/new.test.ts is attributed and therefore diffed exactly once.
     const testFileCount = diffedFiles.filter((f) => f === "engine/tests/new.test.ts").length;
     expect(testFileCount).toBe(1);
   });
 
-  it("includes test files from listUntrackedTestFiles not in filesModified", () => {
+  it("excludes foreign untracked tests that are not in filesModified", () => {
     const diffedFiles: string[] = [];
     const deps = fakeDeps({
       diffUntracked: (f) => {
@@ -65,31 +57,26 @@ describe("collectDiff", () => {
       },
     });
 
-    collectDiff(["src/main.ts"], undefined, deps);
+    collectDiff(["src/main.ts"], deps);
 
-    expect(diffedFiles).toContain("engine/tests/new.test.ts");
-    expect(diffedFiles).toContain("apps/web/tests/login.spec.ts");
+    expect(diffedFiles).toEqual([]);
   });
 
-  it("falls back to SHA-based diff when filesModified is empty and includes test files", () => {
-    const result = collectDiff([], "abc123", fakeDeps());
-    // Fallback path should still include untracked test files
+  it("fails closed when no path is attributable to the task", () => {
+    expect(collectDiff([], fakeDeps())).toBe("");
+  });
+
+  it("collects an attributed untracked test", () => {
+    const result = collectDiff(
+      ["engine/tests/new.test.ts"],
+      fakeDeps({ isTracked: () => false }),
+    );
     expect(result).toContain("engine/tests/new.test.ts");
-    expect(result).toContain("apps/web/tests/login.spec.ts");
-  });
-
-  it("handles empty listUntrackedTestFiles gracefully", () => {
-    const result = collectDiff(["src/main.ts"], undefined, fakeDeps({ listUntrackedTestFiles: () => [] }));
-    // Should still have the tracked diff
-    expect(result).toContain("src/main.ts");
-    // No test file content since there are none
-    expect(result).not.toContain("engine/tests/new.test.ts");
   });
 
   it("proves new tests from tracked unstaged worktree changes for every harness", () => {
     const evidence = collectNewTestEvidence(
       ["engine/tests/existing.test.ts"],
-      "start-sha",
       true,
       fakeDeps({
         diffFiles: () => [
@@ -99,7 +86,6 @@ describe("collectDiff", () => {
           "+  });",
         ].join("\n"),
         diffFilesStaged: () => "",
-        listUntrackedTestFiles: () => [],
       }),
     );
 

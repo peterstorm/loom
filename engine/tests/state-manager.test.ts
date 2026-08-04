@@ -162,7 +162,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     description: "impl",
     agent: "code-implementer-agent",
     wave: 1,
-    status: "implemented",
+    status: "pending",
     depends_on: [],
   };
   const validGraph = {
@@ -256,6 +256,48 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
       ...validGraph,
       tasks: [{ ...validTask, status: "pending", proof: satisfied }],
     }).ok).toBe(false);
+  });
+
+  it("binds persisted proof obligations exactly to new_tests_required and file_list", () => {
+    const exact = derivePendingTaskProof({
+      newTestsRequired: true,
+      declaredArtifacts: ["src/a.ts"],
+    });
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        new_tests_required: true,
+        file_list: ["src/a.ts"],
+        proof: exact,
+      }],
+    }).ok).toBe(true);
+
+    const omittedArtifact = derivePendingTaskProof({
+      newTestsRequired: true,
+      declaredArtifacts: [],
+    });
+    const omitted = parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        new_tests_required: true,
+        file_list: ["src/a.ts"],
+        proof: omittedArtifact,
+      }],
+    });
+    expect(omitted.ok).toBe(false);
+    if (!omitted.ok) expect(omitted.error).toContain("proof obligations do not exactly match");
+
+    const foreignTests = derivePendingTaskProof({
+      newTestsRequired: true,
+      declaredArtifacts: [],
+    });
+    const waived = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, new_tests_required: false, proof: foreignTests }],
+    });
+    expect(waived.ok).toBe(false);
   });
 
   it("rejects an out-of-union current_phase loudly, naming the value", () => {
@@ -377,6 +419,31 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     expect(parseTaskGraph({
       ...validGraph,
       tasks: [{ ...validTask, artifact_baseline: valid }],
+    }).ok).toBe(true);
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        file_list: ["src/a.ts", "src/new.ts"],
+        attempt_artifact_baseline: valid,
+      }],
+    }).ok).toBe(true);
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        file_list: ["src/new.ts", "src/a.ts"],
+        attempt_artifact_baseline: valid,
+      }],
+    }).ok).toBe(false);
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        file_list: ["src/a.ts"],
+        files_modified: ["src/new.ts"],
+        attempt_artifact_baseline: valid,
+      }],
     }).ok).toBe(true);
 
     for (const artifact_baseline of [
@@ -540,7 +607,7 @@ describe("parseTaskGraph proves findings, not just the fields that always did", 
     description: "impl",
     agent: "code-implementer-agent",
     wave: 1,
-    status: "implemented",
+    status: "pending",
     depends_on: [],
   };
   const graph = (task: Record<string, unknown>) => ({

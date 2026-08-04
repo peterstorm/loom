@@ -67,10 +67,9 @@ const handler: HookHandler = async (stdin) => {
     const path = rawPath.replace(/^~/, process.env.HOME ?? "~");
     trustedPrompt = parseFirstUserPrompt(readFileSync(path, "utf-8"));
   } catch (error) {
-    return {
-      kind: "error",
-      message: `[loom] store-reviewer-findings: cannot read trusted ${agentType} prompt (${error instanceof Error ? error.message : String(error)}) — review evidence cannot be attributed`,
-    };
+    const message = `cannot read trusted ${agentType} prompt (${error instanceof Error ? error.message : String(error)}) — review evidence cannot be attributed`;
+    warn(message);
+    return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
   }
   if (hasStandaloneReviewContext(trustedPrompt)) {
     process.stderr.write(`[loom] store-reviewer-findings: ${agentType} belongs to a standalone review run — task state untouched\n`);
@@ -79,10 +78,9 @@ const handler: HookHandler = async (stdin) => {
 
   const taskId = extractTaskId(trustedPrompt);
   if (!taskId) {
-    return {
-      kind: "error",
-      message: `[loom] store-reviewer-findings: trusted ${agentType} prompt has no extractable task ID — review evidence cannot be attributed`,
-    };
+    const message = `trusted ${agentType} prompt has no extractable task ID — review evidence cannot be attributed`;
+    warn(message);
+    return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
   }
 
   // `tasks.map` over an id no task holds is a total no-op, and the log line

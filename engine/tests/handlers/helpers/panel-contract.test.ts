@@ -122,6 +122,18 @@ describe("panel-contract helper CLI", () => {
     ]);
   });
 
+  it("rejects drift between the Markdown consumed by designers and the JSON consumed by judges", () => {
+    writeFileSync(join(runDir, "interview.md"), DIGEST.replace(
+      "**Primary axis:** simplicity",
+      "**Primary axis:** performance",
+    ));
+
+    const result = run(tmp, ["criteria", ...RUN_ARGS()]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("interview.md and interview.json describe different validated constraints");
+  });
+
   it("rejects a --criterion that the digest does not derive", () => {
     const verdict = JSON.stringify({
       criterion: "performance",

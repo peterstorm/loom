@@ -284,9 +284,13 @@ export interface UntrustedStopResolution {
    *  from `files_modified`; a resolution that omits it makes every wave-gate
    *  lint run over an empty set and report clean (round-16 pi finding). */
   readonly filesModified: readonly string[];
-  /** Declared artifacts whose current bytes differ from the pre-spawn
+  /** Declared artifacts whose current bytes differ from the first task
    *  baseline. This, not attempted tool calls, discharges artifact proof. */
   readonly changedDeclaredArtifacts: readonly string[];
+  /** Whether declared bytes differ from the baseline captured for this exact
+   * attempt. This invalidates older test/review evidence independently of
+   * transcript tool attribution. */
+  readonly bytesChangedSinceAttempt: boolean;
   readonly newTestsWritten: boolean;
   readonly newTestEvidence: string;
 }
@@ -328,7 +332,7 @@ export function applyUntrustedStopResolution(
   if (!target || target.status === "completed") {
     return { state: { ...s, executing_tasks: clearedExecuting }, skipped: true };
   }
-  const codeChanged = resolution.filesModified.length > 0;
+  const codeChanged = resolution.bytesChangedSinceAttempt;
   const preserveExistingTrusted = target.test_result?.verdict === "trusted-fail" ||
     (target.test_result?.verdict === "trusted-pass" && !codeChanged);
   const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, resolution.filesModified);
@@ -369,9 +373,7 @@ export function applyUntrustedStopResolution(
         new_tests_written: currentNewTests.written,
         new_test_evidence: currentNewTests.evidence,
       };
-      return resolution.filesModified.length > 0
-        ? invalidateTaskReview(updated)
-        : updated;
+      return codeChanged ? invalidateTaskReview(updated) : updated;
     }),
     executing_tasks: clearedExecuting,
   };
@@ -456,11 +458,6 @@ export interface DiffDeps {
   readonly diffFiles: (files: string[]) => string;
   readonly diffFilesStaged: (files: string[]) => string;
   readonly diffUntracked: (file: string) => string;
-  readonly listUntrackedTestFiles: () => string[];
-  readonly diff: (from?: string, to?: string) => string;
-  readonly diffStaged: () => string;
-  readonly defaultBranch: () => string;
-  readonly mergeBase: (branch: string) => string | null;
   readonly fileExists: (path: string) => boolean;
 }
 
@@ -469,64 +466,25 @@ const REAL_DIFF_DEPS: DiffDeps = {
   diffFiles: git.diffFiles,
   diffFilesStaged: git.diffFilesStaged,
   diffUntracked: git.diffUntracked,
-  listUntrackedTestFiles: git.listUntrackedTestFiles,
-  diff: git.diff,
-  diffStaged: git.diffStaged,
-  defaultBranch: git.defaultBranch,
-  mergeBase: git.mergeBase,
   fileExists: existsSync,
 };
 
 export function collectDiff(
   filesModified: readonly string[],
-  startSha: string | undefined,
   deps: DiffDeps = REAL_DIFF_DEPS,
 ): string {
-  if (filesModified.length > 0) {
-    const tracked = filesModified.filter((f) => deps.isTracked(f));
-    const untracked = filesModified.filter((f) => deps.fileExists(f) && !deps.isTracked(f));
+  // New-test proof is task-scoped evidence. A branch-wide fallback or a scan of
+  // every untracked test lets a sibling task's test satisfy this task. Missing
+  // attribution therefore fails closed instead of broadening the evidence set.
+  if (filesModified.length === 0) return "";
 
-    const parts = [
-      deps.diffFiles(tracked),
-      deps.diffFilesStaged(tracked),
-      ...untracked.map((f) => deps.diffUntracked(f)),
-    ];
-
-    // Also include untracked test files NOT already in filesModified.
-    // parseFilesModified often misses test files due to transcript parsing gaps
-    // (e.g. tool name casing, truncated transcripts, partial captures).
-    const alreadyIncluded = new Set(filesModified);
-    const untrackedTests = deps.listUntrackedTestFiles();
-    for (const f of untrackedTests) {
-      if (!alreadyIncluded.has(f)) {
-        parts.push(deps.diffUntracked(f));
-      }
-    }
-
-    const combined = parts.join("\n");
-    if (combined.trim()) return combined;
-  }
-
-  // Fallback: SHA-based or branch-based diff + untracked test files
-  const parts: string[] = [];
-
-  if (startSha) {
-    parts.push(deps.diff(startSha, "HEAD"), deps.diff(), deps.diffStaged());
-  } else {
-    const branch = deps.defaultBranch();
-    const base = deps.mergeBase(branch);
-    parts.push(base ? deps.diff(base, "HEAD") : deps.diff("HEAD~1", "HEAD"));
-    parts.push(deps.diff(), deps.diffStaged());
-  }
-
-  // Also include untracked test files (common when agent creates new test files
-  // without committing — e.g. pi subagents working on unstaged branches)
-  const untrackedTests = deps.listUntrackedTestFiles();
-  for (const f of untrackedTests) {
-    parts.push(deps.diffUntracked(f));
-  }
-
-  return parts.join("\n");
+  const tracked = filesModified.filter((file) => deps.isTracked(file));
+  const untracked = filesModified.filter((file) => deps.fileExists(file) && !deps.isTracked(file));
+  return [
+    deps.diffFiles(tracked),
+    deps.diffFilesStaged(tracked),
+    ...untracked.map((file) => deps.diffUntracked(file)),
+  ].join("\n");
 }
 
 /** Shared shell operation for both Claude and Pi completion paths. Keeping
@@ -534,11 +492,10 @@ export function collectDiff(
  * harness from proving fewer test changes than the other. */
 export function collectNewTestEvidence(
   filesModified: readonly string[],
-  startSha: string | undefined,
   newTestsRequired: boolean | undefined,
   deps: DiffDeps = REAL_DIFF_DEPS,
 ): NewTestEvidence {
-  return analyzeNewTests(collectDiff(filesModified, startSha, deps), newTestsRequired);
+  return analyzeNewTests(collectDiff(filesModified, deps), newTestsRequired);
 }
 
 /**
@@ -683,11 +640,18 @@ export const runUpdateTaskStatus = async (
   }
 
   let changedDeclaredArtifacts: readonly string[];
+  let bytesChangedSinceAttempt: boolean;
   try {
-    changedDeclaredArtifacts = changedDeclaredArtifactsSince(
-      git.repositoryRoot() ?? process.cwd(),
-      task.artifact_baseline,
+    const root = git.repositoryRoot() ?? process.cwd();
+    changedDeclaredArtifacts = changedDeclaredArtifactsSince(root, task.artifact_baseline);
+    // A pre-field graph cannot prove that this retry changed no bytes. Treat it
+    // as changed so historical evidence is invalidated rather than trusted.
+    const attemptBaselinePaths = new Set(
+      task.attempt_artifact_baseline?.map(({ artifact }) => artifact) ?? [],
     );
+    bytesChangedSinceAttempt = task.attempt_artifact_baseline === undefined ||
+      changedDeclaredArtifactsSince(root, task.attempt_artifact_baseline).length > 0 ||
+      filesModified.some((path) => !attemptBaselinePaths.has(path));
   } catch (error) {
     await mgr.update((s) => ({
       ...s,
@@ -810,7 +774,7 @@ export const runUpdateTaskStatus = async (
       };
     }
 
-    const codeChanged = filesModified.length > 0;
+    const codeChanged = bytesChangedSinceAttempt;
     const preserveExistingTrusted = !incomingTrusted && (
       verdict === "trusted-fail" || (verdict === "trusted-pass" && !codeChanged)
     );
@@ -819,7 +783,7 @@ export const runUpdateTaskStatus = async (
     const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, filesModified);
     const proofArtifactsChanged = attributedChangedArtifacts(changedDeclaredArtifacts, cumulativeFiles);
     const currentNewTestEvidence = git.isGitRepo()
-      ? collectNewTestEvidence(cumulativeFiles, target.start_sha, target.new_tests_required)
+      ? collectNewTestEvidence(cumulativeFiles, target.new_tests_required)
       : { written: false, evidence: "" };
     const proof = evaluateTaskProof(
       {
@@ -847,9 +811,7 @@ export const runUpdateTaskStatus = async (
         new_tests_written: currentNewTestEvidence.written,
         new_test_evidence: currentNewTestEvidence.evidence,
       };
-      return filesModified.length > 0
-        ? invalidateTaskReview(updated)
-        : updated;
+      return codeChanged ? invalidateTaskReview(updated) : updated;
     });
 
     const resolved: TaskGraph = {

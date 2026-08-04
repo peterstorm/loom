@@ -325,7 +325,6 @@ const handler: HookHandler = async (_stdin, args) => {
         const proofArtifactsChanged = attributedChangedArtifacts(byteChanges, sourceTask.files_modified ?? []);
         const collectedNewTests = collectNewTestEvidence(
           sourceTask.files_modified ?? [],
-          sourceTask.start_sha,
           sourceTask.new_tests_required,
         );
         return reconcileTaskFromStoredEvidence(sourceTask, proofArtifactsChanged, collectedNewTests);

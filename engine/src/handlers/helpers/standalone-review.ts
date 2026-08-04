@@ -21,6 +21,7 @@ import {
   type StandaloneReviewAggregate,
   type StandaloneReviewTranscript,
 } from "../../core/standalone-review";
+import { resolveReviewFindings, reviewResolutionLog } from "../../core/review-output";
 import { argumentValue, contractError, parseRunDirectory, prepareWriteTargets, writeCanonicalOutput } from "./panel-run";
 
 export const STANDALONE_REVIEW_OPERATIONS = ["init", "aggregate", "finalize"] as const;
@@ -244,10 +245,23 @@ function aggregate(runDir: string, inputPath: string): HookResult {
     if (!staged.ok) throw new Error(`staged aggregate failed validation: ${staged.errors.join("; ")}`);
     renameSync(pendingPath, aggregatePath);
   } catch (error) {
-    try { if (existsSync(pendingPath)) unlinkSync(pendingPath); } catch { /* preserve original diagnostic */ }
+    let cleanupError: string | null = null;
+    try { if (existsSync(pendingPath)) unlinkSync(pendingPath); }
+    catch (cleanup) { cleanupError = cleanup instanceof Error ? cleanup.message : String(cleanup); }
     return contractError("standalone review", [
       `cannot atomically publish aggregate: ${error instanceof Error ? error.message : String(error)}`,
+      ...(cleanupError === null ? [] : [`also failed to remove pending aggregate: ${cleanupError}`]),
     ]);
+  }
+  for (const transcript of loaded.value) {
+    const resolution = resolveReviewFindings(transcript.output, transcript.agent);
+    if (
+      resolution.kind === "findings" &&
+      resolution.findings.blockStatus.kind !== "absent" &&
+      resolution.findings.blockStatus.kind !== "used"
+    ) {
+      process.stderr.write(reviewResolutionLog(`standalone:${transcript.agent}`, resolution) + "\n");
+    }
   }
   process.stderr.write(result.value.kind === "clean"
     ? `Standalone review: 0 critical, ${result.value.aggregate.findings.filter((f) => f.severity === "advisory").length} advisory; skip refutation panel\n`
@@ -308,6 +322,12 @@ export function loadEvidenceBoundAggregate(runDir: string): Parse<StandaloneRevi
 
 function finalize(runDir: string): HookResult {
   const resultPath = join(runDir, "result.json");
+  const pendingResultPath = join(runDir, ".result.pending.json");
+  if (existsSync(pendingResultPath)) {
+    return contractError("standalone review", [
+      "this run has an incomplete prior finalization — start a new run directory",
+    ]);
+  }
   if (existsSync(resultPath)) return contractError("standalone review", ["this run has already been finalized"]);
   const aggregate = loadEvidenceBoundAggregate(runDir);
   if (!aggregate.ok) return contractError("standalone review", aggregate.errors);
@@ -318,10 +338,23 @@ function finalize(runDir: string): HookResult {
   const finalized = finalizeStandaloneReview(aggregate.value, null);
   if (!finalized.ok) return contractError("standalone review", finalized.errors);
   const json = serializeAdjudicatedStandaloneReview(finalized.value) + "\n";
-  const target = prepareWriteTargets(runDir, [], ["result.json"]);
+  const target = prepareWriteTargets(runDir, [], ["result.json", ".result.pending.json"]);
   if (!target.ok) return contractError("standalone review boundary", target.errors);
-  try { writeFileSync(resultPath, json, { flag: "wx" }); }
-  catch (error) { return contractError("standalone review", [`cannot write result: ${error instanceof Error ? error.message : String(error)}`]); }
+  try {
+    writeFileSync(pendingResultPath, json, { flag: "wx" });
+    const staged = readFileSync(pendingResultPath, "utf-8");
+    JSON.parse(staged);
+    if (staged !== json) throw new Error("staged result bytes differ from the engine-authored result");
+    renameSync(pendingResultPath, resultPath);
+  } catch (error) {
+    let cleanupError: string | null = null;
+    try { if (existsSync(pendingResultPath)) unlinkSync(pendingResultPath); }
+    catch (cleanup) { cleanupError = cleanup instanceof Error ? cleanup.message : String(cleanup); }
+    return contractError("standalone review", [
+      `cannot atomically publish result: ${error instanceof Error ? error.message : String(error)}`,
+      ...(cleanupError === null ? [] : [`also failed to remove pending result: ${cleanupError}`]),
+    ]);
+  }
   return writeCanonicalOutput(json);
 }
 

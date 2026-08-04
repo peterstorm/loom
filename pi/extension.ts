@@ -157,6 +157,15 @@ export function piSubagentResultFailed(result: {
 
 export default function (pi: ExtensionAPI) {
   const issuedWriteGrants = new Map<string, string[]>();
+  const spawnReservations = new Map<string, Readonly<{
+    sessionId: NonNullable<ReturnType<typeof parseSessionId>>;
+    items: readonly Readonly<{
+      agentType: string;
+      rosterId: AgentId;
+      taskId: string | null;
+      implementation: boolean;
+    }>[];
+  }>>();
   const activeChildWriteGrants = new Map<string, { agentId: AgentId; pointerCreated: boolean }>();
   const rejectedChildWriteGrantSessions = new Set<string>();
 
@@ -328,10 +337,10 @@ export default function (pi: ExtensionAPI) {
         const implementationIndexes = taskExecutionSpawns.flatMap((spawn, index) =>
           spawn.kind === "implementation" ? [index] : []
         );
-        if (implementationIndexes.length > 0 && (typeof toolCallId !== "string" || toolCallId === "")) {
+        if (typeof toolCallId !== "string" || toolCallId === "") {
           return {
             block: true,
-            reason: "Cannot issue per-child Pi write grants without a subagent toolCallId; refusing implementation spawn.",
+            reason: "Cannot bind Loom subagent lifecycle cleanup without a subagent toolCallId; refusing spawn.",
           };
         }
         const rosterIds = parsedItems.map((item, index) =>
@@ -431,9 +440,18 @@ export default function (pi: ExtensionAPI) {
           await rollbackLifecycle();
           return { block: true, reason: taskResult.message };
         }
-        if (typeof toolCallId === "string" && writeGrants.length > 0) {
+        if (writeGrants.length > 0) {
           issuedWriteGrants.set(toolCallId, writeGrants.map((grant) => grant.token));
         }
+        spawnReservations.set(toolCallId, {
+          sessionId: safeSessionId,
+          items: parsedItems.map((item, index) => ({
+            agentType: item.agent,
+            rosterId: rosterIds[index]!,
+            taskId: extractTaskId(item.task),
+            implementation: taskExecutionSpawns[index]?.kind === "implementation",
+          })),
+        });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -509,6 +527,18 @@ export default function (pi: ExtensionAPI) {
       for (const token of tokens) revokePiWriteGrant(token);
     }
     issuedWriteGrants.clear();
+    for (const reservation of spawnReservations.values()) {
+      for (const item of reservation.items) {
+        try {
+          await fsSessionRegistry.removeActive(reservation.sessionId, item.rosterId);
+        } catch (error) {
+          process.stderr.write(
+            `loom(pi): shutdown cleanup failed for ${item.agentType}: ${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        }
+      }
+    }
+    spawnReservations.clear();
   });
 
   // ─── Resume Context (before_agent_start) ──────────────────────────────
@@ -592,9 +622,44 @@ export default function (pi: ExtensionAPI) {
     if (event.toolName !== "subagent") return;
 
     const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
+    const reservation = typeof toolCallId === "string" ? spawnReservations.get(toolCallId) : undefined;
     if (typeof toolCallId === "string") {
       for (const token of issuedWriteGrants.get(toolCallId) ?? []) revokePiWriteGrant(token);
       issuedWriteGrants.delete(toolCallId);
+      spawnReservations.delete(toolCallId);
+    }
+
+    // Release from pre-spawn authority before trusting any result-envelope
+    // field. A malformed/truncated envelope still represents a completed tool
+    // call and must not leak roster or executing-task state.
+    if (reservation) {
+      for (const item of reservation.items) {
+        try {
+          await fsSessionRegistry.removeActive(reservation.sessionId, item.rosterId);
+        } catch (error) {
+          process.stderr.write(
+            `loom(pi): reserved subagent cleanup failed for ${item.agentType}: ${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        }
+      }
+      const implementationTasks = reservation.items.flatMap((item) =>
+        item.implementation && item.taskId !== null ? [item.taskId] : []
+      );
+      if (implementationTasks.length > 0) {
+        const reservedManager = StateManager.fromSession(reservation.sessionId);
+        if (reservedManager) {
+          try {
+            await reservedManager.update((state) => ({
+              ...state,
+              executing_tasks: (state.executing_tasks ?? []).filter((id) => !implementationTasks.includes(id)),
+            }));
+          } catch (error) {
+            process.stderr.write(
+              `loom(pi): reserved implementation cleanup failed: ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+          }
+        }
+      }
     }
 
     const details = event.details as Record<string, unknown> | undefined;
@@ -629,6 +694,13 @@ export default function (pi: ExtensionAPI) {
       try {
       const agentType = stripNamespace(result.agent);
       const sessionId = _ctx.sessionManager.getSessionId() ?? "unknown";
+      const reservedItem = reservation?.items[resultIndex];
+      if (reservedItem && agentType !== reservedItem.agentType) {
+        process.stderr.write(
+          `loom(pi): result ${resultIndex + 1} agent ${JSON.stringify(agentType)} does not match reserved ${JSON.stringify(reservedItem.agentType)} — evidence ignored\n`,
+        );
+        continue;
+      }
 
       // Cleanup subagent flag. Parse the session id before interpolating it
       // into the SUBAGENT_DIR path (path-traversal guard); an unsafe id could
@@ -638,9 +710,10 @@ export default function (pi: ExtensionAPI) {
         process.stderr.write(
           `loom: invalid session id ${JSON.stringify(sessionId)} — subagent flag cleanup skipped\n`,
         );
-      } else {
+      } else if (!reservedItem) {
+        // Compatibility for a result emitted by an older Pi call that predates
+        // reservation capture. New calls always release above from authority.
         try {
-          const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
           const rosterId = piSpawnRosterId(toolCallId, resultIndex, agentType);
           await fsSessionRegistry.removeActive(safeSessionId, rosterId);
         } catch (err) {
@@ -709,7 +782,7 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
         if (IMPL_AGENTS.has(agentType)) {
-          const failedTaskId = extractTaskId(result.task ?? "");
+          const failedTaskId = reservedItem?.taskId ?? extractTaskId(result.task ?? "");
           if (failedTaskId !== null) {
             await mgr.update((s) => ({
               ...s,
@@ -779,7 +852,7 @@ export default function (pi: ExtensionAPI) {
       if (IMPL_AGENTS.has(agentType)) {
         // Extract task ID from the original task prompt (works in parallel mode)
         // Then get transcript from per-result messages for test evidence
-        let taskId = extractTaskId(result.task ?? "") ?? extractTaskId(
+        let taskId = reservedItem?.taskId ?? extractTaskId(result.task ?? "") ?? extractTaskId(
           event.content.filter((c: { type: string }) => c.type === "text").map((c: { type: string; text?: string }) => c.text ?? "").join("\n")
         );
         // Build transcript from per-result messages (each parallel result has its own messages)
@@ -873,11 +946,16 @@ export default function (pi: ExtensionAPI) {
         }
 
         let changedArtifacts: readonly string[];
+        let bytesChangedSinceAttempt: boolean;
         try {
-          changedArtifacts = changedDeclaredArtifactsSince(
-            git.repositoryRoot() ?? process.cwd(),
-            task.artifact_baseline,
+          const root = git.repositoryRoot() ?? process.cwd();
+          changedArtifacts = changedDeclaredArtifactsSince(root, task.artifact_baseline);
+          const attemptBaselinePaths = new Set(
+            task.attempt_artifact_baseline?.map(({ artifact }) => artifact) ?? [],
           );
+          bytesChangedSinceAttempt = task.attempt_artifact_baseline === undefined ||
+            changedDeclaredArtifactsSince(root, task.attempt_artifact_baseline).length > 0 ||
+            filesModified.some((path) => !attemptBaselinePaths.has(path));
         } catch (error) {
           await mgr.update((s) => ({
             ...s,
@@ -904,7 +982,6 @@ export default function (pi: ExtensionAPI) {
           const newTestEvidence = git.isGitRepo()
             ? collectNewTestEvidence(
                 cumulativeFiles,
-                currentTarget?.start_sha,
                 currentTarget?.new_tests_required,
               )
             : { written: false, evidence: "" };
@@ -922,6 +999,7 @@ export default function (pi: ExtensionAPI) {
             testEvidence: testEvidence.evidence,
             filesModified,
             changedDeclaredArtifacts: changedArtifacts,
+            bytesChangedSinceAttempt,
             newTestsWritten: newTestEvidence.written,
             newTestEvidence: newTestEvidence.evidence,
           });

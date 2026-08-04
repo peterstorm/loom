@@ -113,8 +113,8 @@ claude plugin add /path/to/loom
                                                  v
                                        +-------------------+
                                        | WAVE GATE         |
-                                       | tests + spec-     |
-                                       | check + 5 reviews |
+                                       | test/spec/reviews |
+                                       | + refute criticals|
                                        +-------------------+
                                                  |
                                                  v
@@ -336,7 +336,7 @@ User-invokable commands defined under `/commands/`.
 
 `/review-pr` aspect keywords: `code`, `errors`, `tests`, `types`, `comments`, `architecture`, `simplify`, `all`. The `architecture-tech-lead` agent is selected for explicit `architecture`/`all` reviews and auto-triggers for >500 additions, >10 changed files, or a new service, package, or migration.
 
-Prompt templates for phase agents live in `/commands/templates/` (`phase-brainstorm.md`, `phase-specify.md`, `phase-clarify.md`, `phase-architecture.md`, `phase-plan-alignment.md`, `phase-decompose.md`, `impl-agent-context.md`). Variables like `{feature_description}`, `{spec_file_path}`, `{date_slug}` are substituted before spawning; the `validate-template-substitution` hook blocks any unresolved `{variable}` placeholder.
+Prompt templates for phase agents live in `/commands/templates/` (`phase-brainstorm.md`, `phase-specify.md`, `phase-clarify.md`, `phase-architecture.md`, `phase-arch-interview.md`, `phase-arch-design.md`, `phase-arch-judge.md`, `phase-arch-finalize.md`, `phase-plan-alignment.md`, `phase-decompose.md`, `impl-agent-context.md`, and `review-verify.md`). Variables like `{feature_description}`, `{spec_file_path}`, `{date_slug}` are substituted before spawning; the `validate-template-substitution` hook blocks any unresolved `{variable}` placeholder.
 
 ---
 

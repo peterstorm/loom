@@ -89,17 +89,26 @@ const handler: HookHandler = async (stdin, args) => {
 
     let manifestJson: unknown;
     let interviewJson: unknown;
+    let interviewMarkdown: string;
     try {
       manifestJson = JSON.parse(readFileSync(manifestPath, "utf-8"));
       interviewJson = JSON.parse(readFileSync(join(runDir, LAYOUT.contextJson), "utf-8"));
+      interviewMarkdown = readFileSync(join(runDir, LAYOUT.contextMd), "utf-8");
     } catch (error) {
       return contractError("panel JSON", [
-        `cannot read manifest/interview JSON: ${error instanceof Error ? error.message : String(error)}`,
+        `cannot read manifest/interview artifacts: ${error instanceof Error ? error.message : String(error)}`,
       ]);
     }
 
     const interview = parseInterviewDigestJson(interviewJson);
     if (!interview.ok) return contractError("canonical interview digest", interview.errors);
+    const markdownInterview = parseInterviewDigest(interviewMarkdown);
+    if (!markdownInterview.ok) return contractError("interview Markdown digest", markdownInterview.errors);
+    if (JSON.stringify(markdownInterview.value) !== JSON.stringify(interview.value)) {
+      return contractError("interview authority", [
+        "interview.md and interview.json describe different validated constraints",
+      ]);
+    }
     const expectedLenses = selectPanelLenses(interview.value, designerCount);
     if (!expectedLenses.ok) return contractError("panel lens selection", expectedLenses.errors);
 

@@ -40,6 +40,7 @@ const untrustedPass: UntrustedStopResolution = {
   testEvidence: "pi-structured: bun: 5 pass",
   filesModified: ["src/a.ts", "tests/a.test.ts"],
   changedDeclaredArtifacts: ["src/a.ts", "tests/a.test.ts"],
+  bytesChangedSinceAttempt: true,
   newTestsWritten: true,
   newTestEvidence: "2 new test methods, 4 assertions",
 };
@@ -85,7 +86,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     expect(applied.state.wave_gates["1"].impl_complete).toBe(false);
   });
 
-  it("retains a trusted pass when a stop reports no changed code", () => {
+  it("retains a trusted pass only when the attempt byte baseline proves no change", () => {
     const s = graph([task({
       id: "T1", status: "implemented", test_result: { verdict: "trusted-pass" },
       new_tests_required: false,
@@ -96,6 +97,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
       testEvidence: "",
       filesModified: [],
       changedDeclaredArtifacts: [],
+      bytesChangedSinceAttempt: false,
       newTestsWritten: false,
       newTestEvidence: "",
     };
@@ -105,6 +107,43 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     expect(applied.state.tasks[0]).toMatchObject({
       status: "implemented",
       test_result: { verdict: "trusted-pass" },
+    });
+  });
+
+  it("invalidates older evidence when bytes changed despite empty transcript attribution", () => {
+    const s = graph([task({
+      id: "T1",
+      status: "implemented",
+      test_result: { verdict: "trusted-pass" },
+      new_tests_required: false,
+      review_status: "passed",
+    })], ["T1"]);
+    s.spec_check = {
+      wave: 1, run_at: "now", verdict: "PASSED", critical_count: 0, high_count: 0,
+      critical_findings: [], high_findings: [], medium_findings: [],
+    };
+    const unobservedChange: UntrustedStopResolution = {
+      ...untrustedPass,
+      testResult: { verdict: "untrusted", passed: false, label: "no test run" },
+      testEvidence: "",
+      filesModified: [],
+      changedDeclaredArtifacts: [],
+      bytesChangedSinceAttempt: true,
+      newTestsWritten: false,
+      newTestEvidence: "",
+    };
+
+    const applied = applyUntrustedStopResolution(s, "T1", unobservedChange);
+
+    expect(applied.state.tasks[0]).toMatchObject({
+      status: "implemented",
+      review_status: "pending",
+      test_result: unobservedChange.testResult,
+    });
+    expect(applied.state.spec_check).toBeUndefined();
+    expect(applied.state.wave_gates["1"]).toMatchObject({
+      tests_passed: null,
+      reviews_complete: false,
     });
   });
 

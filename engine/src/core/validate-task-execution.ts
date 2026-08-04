@@ -167,18 +167,20 @@ export function parseImplementationTaskBindings(
   return { ok: true, taskIds };
 }
 
-/** Preserve the first execution boundary across retries. A retry may add
- * missing baseline fields, but must never move an existing baseline forward
- * over bytes already produced by an earlier attempt. */
+/** Preserve the first proof boundary across retries while refreshing the
+ * current-attempt boundary. Proof must keep seeing all bytes produced by the
+ * task; evidence invalidation must see only bytes produced after this spawn. */
 export function registerTaskExecutionBaseline(
   task: Task,
   sha: string,
-  captured: readonly DeclaredArtifactBaseline[],
+  proofBaseline: readonly DeclaredArtifactBaseline[],
+  attemptBaseline: readonly DeclaredArtifactBaseline[] = proofBaseline,
 ): Task {
   return {
     ...task,
     start_sha: task.start_sha ?? sha,
-    artifact_baseline: task.artifact_baseline ?? captured,
+    artifact_baseline: task.artifact_baseline ?? proofBaseline,
+    attempt_artifact_baseline: attemptBaseline,
   };
 }
 
@@ -216,12 +218,20 @@ export async function validateTaskExecutionBatch(
   const root = git.repositoryRoot();
   if (!sha || !root) return { kind: "allow" };
 
-  const baselines = new Map<string, ReturnType<typeof captureDeclaredArtifactBaseline>>();
+  const baselines = new Map<string, Readonly<{
+    proof: ReturnType<typeof captureDeclaredArtifactBaseline>;
+    attempt: ReturnType<typeof captureDeclaredArtifactBaseline>;
+  }>>();
   for (const taskId of taskIds) {
     const task = state.tasks.find((candidate) => candidate.id === taskId);
     if (!task) continue;
     try {
-      baselines.set(taskId, captureDeclaredArtifactBaseline(root, task.file_list ?? []));
+      const declared = task.file_list ?? [];
+      const attemptScope = [...new Set([...declared, ...(task.files_modified ?? [])])];
+      baselines.set(taskId, {
+        proof: captureDeclaredArtifactBaseline(root, declared),
+        attempt: captureDeclaredArtifactBaseline(root, attemptScope),
+      });
     } catch (error) {
       return {
         kind: "block",
@@ -239,10 +249,10 @@ export async function validateTaskExecutionBatch(
       ...current,
       executing_tasks: [...new Set([...(current.executing_tasks ?? []), ...baselines.keys()])],
       tasks: current.tasks.map((task) => {
-        const artifactBaseline = baselines.get(task.id);
-        return artifactBaseline === undefined
+        const artifactBaselines = baselines.get(task.id);
+        return artifactBaselines === undefined
           ? task
-          : registerTaskExecutionBaseline(task, sha, artifactBaseline);
+          : registerTaskExecutionBaseline(task, sha, artifactBaselines.proof, artifactBaselines.attempt);
       }),
     };
   });

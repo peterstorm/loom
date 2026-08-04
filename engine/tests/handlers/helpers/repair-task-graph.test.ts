@@ -95,6 +95,17 @@ describe("prepareTaskGraphRepair", () => {
     expect(twice).toEqual({ ok: true, state: once.state, notes: [] });
   });
 
+  it.each([null, 42, "task", [], true])(
+    "returns a typed refusal instead of throwing for malformed task entry %j",
+    (entry) => {
+      const malformed = { ...graph(), tasks: [entry] };
+      expect(() => prepareTaskGraphRepair(malformed)).not.toThrow();
+      const prepared = prepareTaskGraphRepair(malformed);
+      expect(prepared.ok).toBe(false);
+      if (!prepared.ok) expect(prepared.errors.join("\n")).toContain("tasks[0] must be an object");
+    },
+  );
+
   it("refuses a fixFull repair that would discard finding data", () => {
     const prepared = prepareTaskGraphRepair(graph({
       findings: [{ severity: "critical" }],
@@ -121,6 +132,17 @@ describe("repair-task-graph CLI", () => {
     expect(repaired?.tasks[0]?.review_error).toBeUndefined();
     expect(repaired?.tasks[0]?.review_evidence_failures).toBeUndefined();
     expect(statSync(statePath).mode & 0o777).toBe(0o444);
+  });
+
+  it("leaves malformed non-object task entries untouched and reports a typed refusal", () => {
+    const raw = JSON.stringify({ ...graph(), tasks: [null] }, null, 2);
+    const { root, statePath } = fixtureState(raw);
+
+    const result = runRepair(root, statePath);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("tasks[0] must be an object");
+    expect(readFileSync(statePath, "utf-8")).toBe(raw);
   });
 
   it("leaves the original bytes untouched when repair would lose evidence", () => {

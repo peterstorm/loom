@@ -53,7 +53,7 @@ const initialGraph = () => ({
     description: "capture Pi review",
     agent: "code-implementer-agent",
     wave: 1,
-    status: "implemented",
+    status: "pending",
     depends_on: [],
     review_status: "pending",
     file_list: ["pi/extension.ts"],
@@ -78,6 +78,17 @@ afterAll(() => {
   else process.env.LOOM_SUBAGENT_DIR = previousSubagentDir;
   rmSync(temp, { recursive: true, force: true });
 });
+
+const completedWithoutTestsProof = {
+  state: "satisfied",
+  obligations: [{ kind: "task-completed" }],
+  results: [{
+    state: "satisfied",
+    obligation: { kind: "task-completed" },
+    evidence: { kind: "task-completed" },
+  }],
+  evidence: [{ kind: "task-completed" }],
+};
 
 const reviewResult = (
   task: string,
@@ -254,6 +265,7 @@ describe("Pi extension review tool_result integration", () => {
     try {
       const results = await pi.emit("tool_call", {
         toolName: "subagent",
+        toolCallId: "call-valid-standalone-verifier",
         input: {
           agent: "review-verifier-agent",
           task: "LOOM_REVIEW_CONTEXT: standalone\nAdjudicate the supplied manifest",
@@ -282,6 +294,7 @@ describe("Pi extension review tool_result integration", () => {
     try {
       const results = await pi.emit("tool_call", {
         toolName: "subagent",
+        toolCallId: "call-lifecycle-directory-failure",
         input: {
           agent: "review-verifier-agent",
           task: "LOOM_REVIEW_CONTEXT: standalone\nAdjudicate the supplied manifest",
@@ -595,6 +608,44 @@ describe("Pi extension review tool_result integration", () => {
     expect(JSON.parse(readFileSync(statePath, "utf-8")).executing_tasks).toEqual([]);
   });
 
+  it("releases reserved roster and execution state even when details.results is missing", async () => {
+    const planPath = join(temp, "malformed-result-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [{
+        id: "T1", description: "implementation", agent: "code-implementer-agent",
+        wave: 1, status: "pending", depends_on: [], file_list: ["pi/extension.ts"],
+      }],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad42a";
+    const toolCallId = "call-malformed-result-cleanup";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agent: "code-implementer-agent",
+        task: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+        agentScope: "user",
+      },
+    }, context);
+    expect(call).toEqual([undefined]);
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).executing_tasks).toEqual(["T1"]);
+    expect(readFileSync(join(subagentDir, `${session}.active`), "utf-8").trim()).not.toBe("");
+
+    await pi.emit("tool_result", {
+      toolName: "subagent", toolCallId, content: [], details: {},
+    }, context);
+
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).executing_tasks).toEqual([]);
+    expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
+  });
+
   it("reports missing result evidence instead of treating it as an empty success", async () => {
     const pi = await extension();
     const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
@@ -615,8 +666,16 @@ describe("Pi extension review tool_result integration", () => {
 
   it.each([
     ["missing", [], ["T1"]],
-    ["completed", [{ id: "T1", description: "done", agent: "code-implementer-agent", wave: 1, status: "completed", depends_on: [] }], ["T1"]],
-    ["trusted", [{ id: "T1", description: "trusted", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], test_result: { verdict: "trusted-pass" } }], ["T1"]],
+    ["completed", [{
+      id: "T1", description: "done", agent: "code-implementer-agent", wave: 1,
+      status: "completed", depends_on: [], new_tests_required: false,
+      proof: completedWithoutTestsProof,
+    }], ["T1"]],
+    ["trusted", [{
+      id: "T1", description: "trusted", agent: "code-implementer-agent", wave: 1,
+      status: "pending", depends_on: [], test_result: { verdict: "trusted-pass" },
+      new_tests_required: false, artifact_baseline: [], attempt_artifact_baseline: [],
+    }], ["T1"]],
   ])("clears executing_tasks for a stopped %s task without overwriting state", async (_label, tasks, executing) => {
     writeState({ ...initialGraph(), tasks, executing_tasks: executing });
     const pi = await extension();

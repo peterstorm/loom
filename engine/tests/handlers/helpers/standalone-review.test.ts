@@ -122,6 +122,25 @@ describe("standalone review helper and refutation adapter", () => {
   });
 
   it.each([
+    ["duplicate", ["code-reviewer", "code-reviewer"], "must be distinct"],
+    ["non-review", ["code-reviewer", "code-implementer-agent"], "non-Machine-Summary reviewer"],
+  ])("rejects a %s expected_agents roster before publishing session authority", (_label, expected_agents, diagnostic) => {
+    writeFileSync(
+      join(tmp, runDir, "review-plan.json"),
+      JSON.stringify({ scope: ["src/x.ts"], expected_agents }),
+    );
+
+    const run = cli("standalone-review", [
+      "init", "--runs-root", runsRoot, "--run-dir", runDir,
+      "--input", join(runDir, "review-plan.json"),
+    ]);
+
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain(diagnostic);
+    expect(() => readFileSync(join(tmp, runDir, "session.json"), "utf-8")).toThrow();
+  });
+
+  it.each([
     ["absolute", ["/tmp/outside.ts"]],
     ["traversal", ["src/../../outside.ts"]],
     ["newline", ["src/bad\npath.ts"]],
@@ -236,6 +255,28 @@ describe("standalone review helper and refutation adapter", () => {
     expect(() => readFileSync(join(tmp, runDir, "aggregate.json"), "utf-8")).toThrow();
   });
 
+  it("reports degraded findings-block evidence during aggregation", () => {
+    initialize();
+    writeFileSync(join(tmp, runDir, "reviewers/1-code-reviewer.md"), [
+      "### Machine Summary",
+      "CRITICAL_COUNT: 0",
+      "ADVISORY_COUNT: 1",
+      "ADVISORY: location was lost",
+      "```findings",
+      "{not-json",
+      "```",
+    ].join("\n"));
+
+    const run = cli("standalone-review", [
+      "aggregate", "--runs-root", runsRoot, "--run-dir", runDir,
+      "--input", join(runDir, "review-input.json"),
+    ]);
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stderr).toContain("findings block was malformed");
+    expect(run.stderr).toContain("standalone:code-reviewer");
+  });
+
   it("finalizes a zero-critical run and rejects unexpected panel outcomes", () => {
     initialize();
     writeFileSync(join(tmp, runDir, "reviewers/1-code-reviewer.md"), cleanReviewOutput);
@@ -256,6 +297,20 @@ describe("standalone review helper and refutation adapter", () => {
     expect(result.refuted_critical_findings).toEqual([]);
     expect(result.advisory_findings).toHaveLength(1);
     expect(result.panel).toBeNull();
+  });
+
+  it("refuses to mistake an incomplete staged result for a finalized run", () => {
+    initialize();
+    writeFileSync(join(tmp, runDir, "reviewers/1-code-reviewer.md"), cleanReviewOutput);
+    let run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
+    expect(run.status, run.stderr).toBe(0);
+    writeFileSync(join(tmp, runDir, ".result.pending.json"), "{\"partial\":");
+
+    run = cli("standalone-review", ["finalize", "--runs-root", runsRoot, "--run-dir", runDir]);
+
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("incomplete prior finalization");
+    expect(() => readFileSync(join(tmp, runDir, "result.json"), "utf-8")).toThrow();
   });
 
   it("refuses to finalize a schema-valid aggregate after its reviewer evidence is removed", () => {

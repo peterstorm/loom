@@ -118,6 +118,31 @@ describe("quality-program helper boundaries", () => {
     expect(partial.state.stage).toBe("verifiers");
   });
 
+  it("event-sources the architecture candidate batch and waits for every slot", () => {
+    const input = {
+      input: {
+        candidateLenses: ["simplicity-first", "type-driven-fp"],
+        judgeCriteria: ["simplicity", "testability"],
+      },
+      events: [],
+    };
+    const first = JSON.parse(cli(["helper", "panel-program", "architecture"], JSON.stringify(input)));
+    expect(first.action.type).toBe("spawn-batch");
+    expect(first.action.requests).toHaveLength(2);
+    expect(first.action.requests.map((request: { modelProfile: string }) => request.modelProfile))
+      .toEqual(["panel-design", "panel-design"]);
+
+    input.events.push({
+      type: "spawn-outcome",
+      requestId: "architecture:candidate:1",
+      attempt: 1,
+      outcome: "succeeded",
+    } as never);
+    const partial = JSON.parse(cli(["helper", "panel-program", "architecture"], JSON.stringify(input)));
+    expect(partial.action).toBeNull();
+    expect(partial.state.stage).toBe("candidates");
+  });
+
   it("creates and verifies a task-scoped review packet through the real CLI", () => {
     const dir = mkdtempSync(join(ROOT, ".tmp-review-packet-test-"));
     cleanup.push(dir);

@@ -70,7 +70,8 @@ export const OVERRIDE_DISMISSAL_REASON =
 export function updateTaskFindings(
   task: Task,
   critical: string[],
-  advisory: string[]
+  advisory: string[],
+  preserveUnmentionedAdvisories = true,
 ): Task {
   const reviewStatus: ReviewStatus = critical.length > 0 ? "blocked" : "passed";
 
@@ -91,7 +92,9 @@ export function updateTaskFindings(
 
   // Advisories the override did not speak to survive with their identity intact.
   const keptAdvisory: readonly Finding[] =
-    advisory.length > 0 ? [] : existing.filter((finding) => finding.severity === "advisory");
+    advisory.length > 0 || !preserveUnmentionedAdvisories
+      ? []
+      : existing.filter((finding) => finding.severity === "advisory");
 
   // What the override REPLACES is recorded, not deleted — the same rule
   // `applyFindingOutcomes` follows when the panel kills a finding, for the same
@@ -189,9 +192,12 @@ const handler: HookHandler = async (stdin, args) => {
   // write released the lock between them, leaving a window where a concurrent
   // writer sees a stored critical on an unblocked wave.
   const blocking = critical.length > 0;
+  const dismissAll = args.includes("--dismiss-all");
   await mgr.update((s) => ({
     ...s,
-    tasks: s.tasks.map((t) => (t.id === taskId ? updateTaskFindings(t, critical, advisory) : t)),
+    tasks: s.tasks.map((t) => (
+      t.id === taskId ? updateTaskFindings(t, critical, advisory, !dismissAll) : t
+    )),
     wave_gates: blocking
       ? {
           ...s.wave_gates,
