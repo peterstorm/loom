@@ -201,7 +201,7 @@ describe("trust-aware skip guard — decided INSIDE the locked update", () => {
     expect(state.tasks[0].test_evidence).toContain("ledger: exit 1");
   }, 30000);
 
-  it("a trusted verdict is preserved while retry structural evidence resolves inside the lock", async () => {
+  it("a trusted verdict is preserved while task cleanup resolves inside the lock", async () => {
     const s = sid("trusted-kept");
     const dir = tempDir();
     const statePath = writeState(dir, {
@@ -214,8 +214,10 @@ describe("trust-aware skip guard — decided INSIDE the locked update", () => {
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     // Empty snapshot + no transcript: the handler produces an untrusted
-    // failure, but the existing trusted verdict must survive while cumulative
-    // structural evidence and execution cleanup still land.
+    // failure, but the existing trusted verdict must survive while execution
+    // cleanup lands. New-test evidence is deliberately not asserted here: it is
+    // recomputed from the repository diff and belongs to dedicated tests with
+    // injected DiffDeps.
     const result = await runUpdateTaskStatus(stopInput(s), [], { kind: "snapshot", events: [] });
     const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
     stderrSpy.mockRestore();
@@ -225,7 +227,6 @@ describe("trust-aware skip guard — decided INSIDE the locked update", () => {
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
     expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-fail" });
     expect(state.tasks[0].test_evidence).toBe("ledger: exit 1 (npm test)");
-    expect(state.tasks[0].new_tests_written).toBe(true);
     // The VERDICT stands down, but the agent still STOPPED: the task must
     // leave executing_tasks or the duplicate-spawn check ghost-blocks re-runs.
     expect(state.executing_tasks).toEqual([]);
