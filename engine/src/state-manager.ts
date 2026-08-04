@@ -25,6 +25,7 @@ import type { TaskGraph } from "./types";
 import { parseTaskProof } from "./core/proof-obligations";
 import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
 import { parseStoredSpecCheck } from "./core/spec-check";
+import { parseReviewPath } from "./core/review-packet";
 
 /** Resolve task graph path for cross-repo access. The session id comes from
  *  hook input, so it is PARSED before naming a file under SUBAGENT_DIR — an
@@ -167,6 +168,46 @@ export function taskUnionError(v: unknown, index: number): string | null {
       !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(t.artifact_baseline_recovered_from))
   ) {
     return `tasks[${index}] ("${id}"): artifact_baseline_recovered_from must be a lowercase 40- or 64-character Git SHA`;
+  }
+  if (t.recovered_artifact_writes !== undefined) {
+    if (t.artifact_baseline_recovered_from === undefined) {
+      return `tasks[${index}] ("${id}"): recovered_artifact_writes requires artifact_baseline_recovered_from`;
+    }
+    if (!Array.isArray(t.recovered_artifact_writes)) {
+      return `tasks[${index}] ("${id}"): recovered_artifact_writes must be an array`;
+    }
+    const packetIds = new Set<string>();
+    for (const [recoveryIndex, raw] of t.recovered_artifact_writes.entries()) {
+      const label = `tasks[${index}] ("${id}"): recovered_artifact_writes[${recoveryIndex}]`;
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return `${label} must be an object`;
+      const recovery = raw as Record<string, unknown>;
+      if (typeof recovery.baseline_sha !== "string" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(recovery.baseline_sha)) {
+        return `${label}.baseline_sha must be an exact Git SHA`;
+      }
+      if (t.artifact_baseline_recovered_from !== undefined && recovery.baseline_sha !== t.artifact_baseline_recovered_from) {
+        return `${label}.baseline_sha must equal artifact_baseline_recovered_from`;
+      }
+      if (typeof recovery.packet_id !== "string" || !/^[0-9a-f]{64}$/.test(recovery.packet_id)) {
+        return `${label}.packet_id must be a lowercase SHA-256 digest`;
+      }
+      if (packetIds.has(recovery.packet_id)) return `${label}.packet_id duplicates an earlier recovery`;
+      packetIds.add(recovery.packet_id);
+      const packetPath = parseReviewPath(recovery.packet_path, `${label}.packet_path`);
+      if (!packetPath.ok) return packetPath.errors.join("; ");
+      if (!Array.isArray(recovery.modified_paths) || recovery.modified_paths.length === 0) {
+        return `${label}.modified_paths must be a non-empty array`;
+      }
+      const seenPaths = new Set<string>();
+      for (const [pathIndex, path] of recovery.modified_paths.entries()) {
+        const parsed = parseReviewPath(path, `${label}.modified_paths[${pathIndex}]`);
+        if (!parsed.ok) return parsed.errors.join("; ");
+        if (seenPaths.has(parsed.value)) return `${label}.modified_paths duplicates ${JSON.stringify(parsed.value)}`;
+        if (Array.isArray(t.file_list) && !t.file_list.includes(parsed.value)) {
+          return `${label}.modified_paths includes ${JSON.stringify(parsed.value)} outside file_list`;
+        }
+        seenPaths.add(parsed.value);
+      }
+    }
   }
   if (t.plan_context !== undefined && typeof t.plan_context !== "string") {
     return `tasks[${index}] ("${id}"): plan_context must be a string when present`;

@@ -8,7 +8,7 @@
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, unlinkSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Engine core — harness-agnostic, no Claude Code dependency (these do fs I/O)
@@ -28,7 +28,12 @@ import { parseFilesModified } from "../engine/src/parsers/parse-files-modified";
 import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-output";
 
 // Engine SubagentStop logic (harness-agnostic functions already exported)
-import { extractTestEvidence, collectNewTestEvidence, applyUntrustedStopResolution } from "../engine/src/handlers/subagent-stop/update-task-status";
+import {
+  extractTestEvidence,
+  collectNewTestEvidence,
+  cumulativeModifiedPaths,
+  applyUntrustedStopResolution,
+} from "../engine/src/handlers/subagent-stop/update-task-status";
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
   applyReviewResolution,
@@ -48,10 +53,11 @@ import { newWaveGate } from "../engine/src/types";
 // with it — every hook below, not just review capture. `tests/pi-imports.test.ts`
 // resolves every engine import in this file against the real exports so the next
 // move of a shared symbol fails a test instead of silently disarming Pi.
-import { isReviewAgent, TASK_GRAPH_PATH, SUBAGENT_DIR, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
+import { isReviewAgent, taskGraphPath, TASK_GRAPH_PATH, SUBAGENT_DIR, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
-import { fsSessionRegistry, parseSessionId, rosterAgentId } from "../engine/src/machine";
+import { fsSessionRegistry, parseAgentId, parseSessionId, rosterAgentId } from "../engine/src/machine";
+import type { AgentId } from "../engine/src/machine/evidence";
 import { buildContextOutput } from "../engine/src/handlers/session-start/resume-after-clear";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
@@ -66,7 +72,13 @@ import { checkAgentSkillPrompt } from "../engine/src/core/agent-skills";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
 import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
 import { changedDeclaredArtifactsSince } from "../engine/src/utils/artifact-baseline";
-import { attributedChangedArtifacts } from "../engine/src/core/artifact-baseline";
+import {
+  consumePiWriteGrant,
+  injectPiWriteGrant,
+  issuePiWriteGrant,
+  revokePiWriteGrant,
+  sweepExpiredPiWriteGrants,
+} from "./write-grant";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
@@ -78,9 +90,70 @@ const isLoomOwnedResultAgent = (agentType: string): boolean =>
   isReviewAgent(agentType) ||
   agentType === "spec-check-invoker";
 
+const PI_AGENT_ID_MARKER = /<!-- LOOM_PI_AGENT_ID:([a-z0-9-]+) -->/g;
+const PI_WRITE_GRANT_MARKER = /<!-- LOOM_PI_WRITE_GRANT:[0-9a-f]{64} -->/;
+
+export function piSystemAgentIdentity(systemPrompt: string): string {
+  PI_AGENT_ID_MARKER.lastIndex = 0;
+  const matches = [...systemPrompt.matchAll(PI_AGENT_ID_MARKER)];
+  if (matches.length !== 1) throw new Error("child system prompt must contain exactly one Loom Pi agent identity");
+  return matches[0]![1]!;
+}
+
 /** Stable per-spawn roster identity shared by tool_call and tool_result.
  * Task text is deliberately excluded: Pi substitutes `{previous}` in chain
  * results, so it is not stable across the lifecycle. */
+function piSpawnItem(raw: Record<string, unknown>, index: number): Record<string, unknown> {
+  const entries = Array.isArray(raw.tasks)
+    ? raw.tasks
+    : Array.isArray(raw.chain)
+      ? raw.chain
+      : [raw];
+  const entry = entries[index];
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    throw new Error(`missing Pi spawn item ${index}`);
+  }
+  return entry as Record<string, unknown>;
+}
+
+export function piSpawnCwd(raw: unknown, index: number, defaultCwd: string): string {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("Pi subagent input must be an object before cwd resolution");
+  }
+  const input = raw as Record<string, unknown>;
+  const entry = piSpawnItem(input, index);
+  const cwd = typeof entry.cwd === "string"
+    ? entry.cwd
+    : typeof input.cwd === "string"
+      ? input.cwd
+      : defaultCwd;
+  return resolve(defaultCwd, cwd);
+}
+
+export function piWriteGrantTtlMs(raw: unknown, index: number): number {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("Pi subagent input must be an object before write-grant expiry calculation");
+  }
+  const input = raw as Record<string, unknown>;
+  const timeoutSeconds = typeof input.timeoutSeconds === "number" &&
+    Number.isFinite(input.timeoutSeconds) && input.timeoutSeconds > 0
+    ? input.timeoutSeconds
+    : 600;
+  // Pi chains are sequential; parallel batches run at most four children.
+  // Keep queued grants valid through their latest expected start, while the
+  // parent tool_result/session-shutdown still revokes them immediately.
+  const stages = Array.isArray(input.chain) ? index + 1 : Math.floor(index / 4) + 1;
+  return Math.ceil((stages * timeoutSeconds + 300) * 1000);
+}
+
+export function replacePiSpawnTask(raw: unknown, index: number, task: string): void {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("Pi subagent input must be an object before write-grant injection");
+  }
+  const input = raw as Record<string, unknown>;
+  piSpawnItem(input, index).task = task;
+}
+
 export const piSpawnRosterId = (
   toolCallId: unknown,
   index: number,
@@ -100,6 +173,10 @@ export function piSubagentResultFailed(result: {
 }
 
 export default function (pi: ExtensionAPI) {
+  const issuedWriteGrants = new Map<string, string[]>();
+  const activeChildWriteGrants = new Map<string, { agentId: AgentId; pointerCreated: boolean }>();
+  const rejectedChildWriteGrantSessions = new Set<string>();
+
   // ─── Resource Discovery ───────────────────────────────────────────────
   // Contribute skills from this package that aren't in the pi manifest's
   // auto-discovery (the manifest covers skills/ and commands/ already,
@@ -129,9 +206,14 @@ export default function (pi: ExtensionAPI) {
       const sessionId = ctx.sessionManager.getSessionId() ?? "unknown";
 
       // Block direct edits during orchestration
-      if (event.toolName === "edit" || event.toolName === "write") {
+      if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "multi_edit") {
         currentGuard = "block-direct-edits";
-        const result = shouldBlockDirectEdit(event.toolName, sessionId);
+        const safeSessionId = parseSessionId(sessionId);
+        const result = shouldBlockDirectEdit(event.toolName, sessionId, () =>
+          existsSync(TASK_GRAPH_PATH) ||
+          rejectedChildWriteGrantSessions.has(sessionId) ||
+          (safeSessionId !== null && existsSync(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`))
+        );
         if (result.kind === "block") {
           return { block: true, reason: result.message };
         }
@@ -260,15 +342,57 @@ export default function (pi: ExtensionAPI) {
           };
         }
         const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
+        const implementationIndexes = taskExecutionSpawns.flatMap((spawn, index) =>
+          spawn.kind === "implementation" ? [index] : []
+        );
+        if (Array.isArray((event.input as { tasks?: unknown }).tasks) && implementationIndexes.length > 1) {
+          const current = StateManager.fromPath(TASK_GRAPH_PATH)?.load();
+          if (current) {
+            const ownerByPath = new Map<string, string>();
+            for (const index of implementationIndexes) {
+              const taskId = extractTaskId(parsedItems[index]!.task);
+              const task = current.tasks.find((candidate) => candidate.id === taskId);
+              for (const path of task?.file_list ?? []) {
+                const priorOwner = ownerByPath.get(path);
+                if (priorOwner && priorOwner !== taskId) {
+                  return {
+                    block: true,
+                    reason: `Parallel implementation tasks ${priorOwner} and ${taskId} both declare ${path}; use a chain or disjoint scopes to prevent lost writes.`,
+                  };
+                }
+                if (taskId) ownerByPath.set(path, taskId);
+              }
+            }
+          }
+        }
+        if (implementationIndexes.length > 0 && (typeof toolCallId !== "string" || toolCallId === "")) {
+          return {
+            block: true,
+            reason: "Cannot issue per-child Pi write grants without a subagent toolCallId; refusing implementation spawn.",
+          };
+        }
         const rosterIds = parsedItems.map((item, index) =>
           piSpawnRosterId(toolCallId, index, item.agent),
         );
         const reserved: Array<(typeof rosterIds)[number]> = [];
+        const writeGrants: Array<{ index: number; token: string; task: string; originalTask: string; injected: boolean }> = [];
         let taskGraphPointerCreated = false;
         const rollbackLifecycle = async (): Promise<void> => {
           for (const agentId of [...reserved].reverse()) {
             await fsSessionRegistry.removeActive(safeSessionId, agentId);
           }
+          for (const grant of writeGrants) {
+            revokePiWriteGrant(grant.token);
+            if (grant.injected) {
+              try { replacePiSpawnTask(event.input, grant.index, grant.originalTask); }
+              catch (error) {
+                process.stderr.write(
+                  `loom(pi): lifecycle rollback could not restore child prompt: ${error instanceof Error ? error.message : String(error)}\n`,
+                );
+              }
+            }
+          }
+          if (typeof toolCallId === "string") issuedWriteGrants.delete(toolCallId);
           if (taskGraphPointerCreated) {
             try { unlinkSync(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`); }
             catch (error) {
@@ -291,6 +415,37 @@ export default function (pi: ExtensionAPI) {
               taskGraphPointerCreated = true;
             }
           }
+          for (const index of implementationIndexes) {
+            const item = parsedItems[index]!;
+            const taskId = extractTaskId(item.task);
+            if (!taskId) throw new Error(`implementation item ${index + 1} has no Task ID for write-grant binding`);
+            const grant = issuePiWriteGrant({
+              agent: item.agent,
+              taskId,
+              cwd: piSpawnCwd(event.input, index, ctx.cwd),
+              taskGraphPath: taskGraphPath(),
+              ttlMs: piWriteGrantTtlMs(event.input, index),
+            });
+            try {
+              writeGrants.push({
+                index,
+                token: grant.token,
+                task: injectPiWriteGrant(item.task, grant),
+                originalTask: item.task,
+                injected: false,
+              });
+            } catch (error) {
+              revokePiWriteGrant(grant.token);
+              throw error;
+            }
+          }
+          // Mutate before task-state validation. Rollback restores prompts and
+          // revokes grants, leaving no post-validation operation that can fail
+          // after executing_tasks/baselines have committed.
+          for (const grant of writeGrants) {
+            replacePiSpawnTask(event.input, grant.index, grant.task);
+            grant.injected = true;
+          }
         } catch (error) {
           await rollbackLifecycle();
           return {
@@ -310,6 +465,9 @@ export default function (pi: ExtensionAPI) {
         if (taskResult.kind === "block") {
           await rollbackLifecycle();
           return { block: true, reason: taskResult.message };
+        }
+        if (typeof toolCallId === "string" && writeGrants.length > 0) {
+          issuedWriteGrants.set(toolCallId, writeGrants.map((grant) => grant.token));
         }
       }
     } catch (err) {
@@ -333,6 +491,59 @@ export default function (pi: ExtensionAPI) {
     // so a live session's roster/ledger can't be reaped out from under a
     // fresh `.machine` anchor.
     sweepStaleSessions(SUBAGENT_DIR, Date.now() - STALE_SUBAGENT_TTL_MS);
+    sweepExpiredPiWriteGrants();
+  });
+
+  // Each Pi subagent is a separate `pi --no-session` process. Parent-session
+  // roster entries therefore cannot authorize child Edit/Write calls. Consume
+  // the one-time capability injected into THIS child's task and bind its own
+  // session before the first model turn.
+  pi.on("before_agent_start", async (event, ctx) => {
+    let partialBinding: { sessionId: NonNullable<ReturnType<typeof parseSessionId>>; agentId: AgentId } | null = null;
+    try {
+      if (!PI_WRITE_GRANT_MARKER.test(event.prompt)) return;
+      const childAgent = piSystemAgentIdentity(event.systemPrompt);
+      const grant = consumePiWriteGrant(event.prompt, ctx.cwd, childAgent);
+      if (!grant) return;
+      const sessionId = parseSessionId(ctx.sessionManager.getSessionId() ?? "");
+      const agentId = parseAgentId(grant.agentId);
+      if (!sessionId || !agentId) throw new Error("child session or grant agent identity is invalid");
+      await fsSessionRegistry.markActive(sessionId, agentId);
+      partialBinding = { sessionId, agentId };
+      const pointer = `${SUBAGENT_DIR}/${sessionId}.task_graph`;
+      const pointerCreated = !existsSync(pointer);
+      if (pointerCreated) writeFileSync(pointer, grant.taskGraphPath, { mode: 0o600 });
+      activeChildWriteGrants.set(sessionId, { agentId, pointerCreated });
+      partialBinding = null;
+      process.stderr.write(`loom(pi): activated child write grant for ${grant.taskId}/${sessionId}\n`);
+    } catch (error) {
+      const rejectedSession = ctx.sessionManager.getSessionId() ?? "";
+      if (parseSessionId(rejectedSession)) rejectedChildWriteGrantSessions.add(rejectedSession);
+      if (partialBinding) {
+        await fsSessionRegistry.removeActive(partialBinding.sessionId, partialBinding.agentId);
+      }
+      const message = `loom(pi): child write grant rejected — edits remain blocked: ${error instanceof Error ? error.message : String(error)}`;
+      process.stderr.write(message + "\n");
+      return {
+        message: { customType: "loom-write-grant-error", content: message, display: false },
+      };
+    }
+  });
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    const rawSessionId = ctx.sessionManager.getSessionId() ?? "";
+    const sessionId = parseSessionId(rawSessionId);
+    const binding = activeChildWriteGrants.get(rawSessionId);
+    if (sessionId && binding) {
+      await fsSessionRegistry.removeActive(sessionId, binding.agentId);
+      activeChildWriteGrants.delete(rawSessionId);
+      if (binding.pointerCreated) rmSync(`${SUBAGENT_DIR}/${sessionId}.task_graph`, { force: true });
+    }
+    rejectedChildWriteGrantSessions.delete(rawSessionId);
+    for (const tokens of issuedWriteGrants.values()) {
+      for (const token of tokens) revokePiWriteGrant(token);
+    }
+    issuedWriteGrants.clear();
   });
 
   // ─── Resume Context (before_agent_start) ──────────────────────────────
@@ -414,6 +625,12 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_result", async (event, _ctx) => {
     if (event.toolName !== "subagent") return;
+
+    const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
+    if (typeof toolCallId === "string") {
+      for (const token of issuedWriteGrants.get(toolCallId) ?? []) revokePiWriteGrant(token);
+      issuedWriteGrants.delete(toolCallId);
+    }
 
     const details = event.details as Record<string, unknown> | undefined;
     if (!details || !("results" in details)) {
@@ -610,17 +827,13 @@ export default function (pi: ExtensionAPI) {
         // Evidence collection below needs a live unresolved task. A stopped
         // missing/completed/trusted task still needs locked execution cleanup;
         // skipping it outright leaves a ghost marker forever.
-        const priorVerdict = task?.test_result?.verdict;
-        if (
-          !task || task.status === "completed" ||
-          priorVerdict === "trusted-pass" || priorVerdict === "trusted-fail"
-        ) {
+        if (!task || task.status === "completed") {
           await mgr.update((s) => ({
             ...s,
             executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
           }));
           process.stderr.write(
-            `loom(pi): ${taskId} stopped; preserved existing state and cleared executing_tasks\n`,
+            `loom(pi): ${taskId} stopped; preserved completed/missing state and cleared executing_tasks\n`,
           );
           continue;
         }
@@ -661,14 +874,11 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
 
-        let proofArtifactsChanged: readonly string[];
+        let changedArtifacts: readonly string[];
         try {
-          proofArtifactsChanged = attributedChangedArtifacts(
-            changedDeclaredArtifactsSince(
-              git.repositoryRoot() ?? process.cwd(),
-              task.artifact_baseline,
-            ),
-            filesModified,
+          changedArtifacts = changedDeclaredArtifactsSince(
+            git.repositoryRoot() ?? process.cwd(),
+            task.artifact_baseline,
           );
         } catch (error) {
           await mgr.update((s) => ({
@@ -681,10 +891,6 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
 
-        const newTestEvidence = git.isGitRepo()
-          ? collectNewTestEvidence(filesModified, task.start_sha, task.new_tests_required)
-          : { written: false, evidence: "" };
-
         // Atomic state write. The completed/trusted-verdict guards above ran
         // on a PRE-LOCK snapshot that a concurrent writer can outdate before
         // this write lands (TOCTOU) — so the decision runs INSIDE the locked
@@ -695,6 +901,15 @@ export default function (pi: ExtensionAPI) {
         const resolvedTaskId = taskId;
         let skippedExistingVerdict = false;
         await mgr.update((s) => {
+          const currentTarget = s.tasks.find((candidate) => candidate.id === resolvedTaskId);
+          const cumulativeFiles = cumulativeModifiedPaths(currentTarget?.files_modified, filesModified);
+          const newTestEvidence = git.isGitRepo()
+            ? collectNewTestEvidence(
+                cumulativeFiles,
+                currentTarget?.start_sha,
+                currentTarget?.new_tests_required,
+              )
+            : { written: false, evidence: "" };
           const applied = applyUntrustedStopResolution(s, resolvedTaskId, {
             // Pi has no Loom evidence ledger. Preserve the real provenance:
             // paired tool-result evidence may discharge Pi's structured proof
@@ -708,7 +923,7 @@ export default function (pi: ExtensionAPI) {
             },
             testEvidence: testEvidence.evidence,
             filesModified,
-            proofArtifactsChanged,
+            changedDeclaredArtifacts: changedArtifacts,
             newTestsWritten: newTestEvidence.written,
             newTestEvidence: newTestEvidence.evidence,
           });

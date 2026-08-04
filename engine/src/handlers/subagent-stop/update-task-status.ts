@@ -10,7 +10,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import type { HookHandler, HookResult, SubagentStopInput, TaskGraph, TaskTestResult } from "../../types";
+import type { HookHandler, HookResult, SubagentStopInput, Task, TaskGraph, TaskTestResult } from "../../types";
 import { legacyTestsPassedNote, newWaveGate } from "../../types";
 import { IMPL_AGENTS, machinesDir } from "../../config";
 import { StateManager } from "../../state-manager";
@@ -285,9 +285,26 @@ export interface UntrustedStopResolution {
   readonly filesModified: readonly string[];
   /** Declared artifacts whose current bytes differ from the pre-spawn
    *  baseline. This, not attempted tool calls, discharges artifact proof. */
-  readonly proofArtifactsChanged: readonly string[];
+  readonly changedDeclaredArtifacts: readonly string[];
   readonly newTestsWritten: boolean;
   readonly newTestEvidence: string;
+}
+
+export function cumulativeModifiedPaths(
+  previous: readonly string[] | undefined,
+  current: readonly string[],
+): string[] {
+  return [...new Set([...(previous ?? []), ...current])].sort();
+}
+
+function cumulativeNewTestEvidence(
+  task: Task,
+  current: NewTestEvidence,
+): NewTestEvidence {
+  if (task.new_tests_written === true) {
+    return { written: true, evidence: task.new_test_evidence?.trim() || current.evidence };
+  }
+  return current;
 }
 
 export interface AppliedStopResolution {
@@ -315,11 +332,21 @@ export function applyUntrustedStopResolution(
 ): AppliedStopResolution {
   const clearedExecuting = (s.executing_tasks ?? []).filter((id) => id !== taskId);
   const target = s.tasks.find((t) => t.id === taskId);
-  const verdict = target?.test_result?.verdict;
-  const existingTrusted = verdict === "trusted-pass" || verdict === "trusted-fail";
-  if (!target || target.status === "completed" || existingTrusted) {
+  if (!target || target.status === "completed") {
     return { state: { ...s, executing_tasks: clearedExecuting }, skipped: true };
   }
+  const existingTrusted = target.test_result?.verdict === "trusted-pass" ||
+    target.test_result?.verdict === "trusted-fail";
+  const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, resolution.filesModified);
+  const cumulativeNewTests = cumulativeNewTestEvidence(target, {
+    written: resolution.newTestsWritten,
+    evidence: resolution.newTestEvidence,
+  });
+  const proofTestResult = existingTrusted ? target.test_result : resolution.testResult;
+  const proofArtifactsChanged = attributedChangedArtifacts(
+    resolution.changedDeclaredArtifacts,
+    cumulativeFiles,
+  );
   const proof = evaluateTaskProof(
     {
       newTestsRequired: target.new_tests_required !== false,
@@ -327,10 +354,10 @@ export function applyUntrustedStopResolution(
     },
     {
       taskCompleted: true,
-      testResult: resolution.testResult,
-      filesModified: resolution.proofArtifactsChanged,
-      newTestsWritten: resolution.newTestsWritten,
-      newTestEvidence: resolution.newTestEvidence,
+      testResult: proofTestResult,
+      filesModified: proofArtifactsChanged,
+      newTestsWritten: cumulativeNewTests.written,
+      newTestEvidence: cumulativeNewTests.evidence,
     },
     proofPolicy,
   );
@@ -342,26 +369,30 @@ export function applyUntrustedStopResolution(
             ...t,
             status: proof.state === "satisfied" ? "implemented" as const : "pending" as const,
             proof,
-            test_result: resolution.testResult,
-            test_evidence: resolution.testEvidence,
-            files_modified: [...resolution.filesModified],
-            new_tests_written: resolution.newTestsWritten,
-            new_test_evidence: resolution.newTestEvidence,
+            test_result: proofTestResult,
+            test_evidence: existingTrusted ? t.test_evidence : resolution.testEvidence,
+            files_modified: cumulativeFiles,
+            new_tests_written: cumulativeNewTests.written,
+            new_test_evidence: cumulativeNewTests.evidence,
+            ...(resolution.filesModified.length > 0 ? { review_status: "pending" as const } : {}),
           }
         : t,
     ),
     executing_tasks: clearedExecuting,
   };
   const wave = target.wave;
+  const codeChanged = resolution.filesModified.length > 0;
   return {
     skipped: false,
     state: {
       ...resolved,
+      ...(codeChanged && resolved.spec_check?.wave === wave ? { spec_check: undefined } : {}),
       wave_gates: {
         ...resolved.wave_gates,
         [String(wave)]: {
           ...(resolved.wave_gates[String(wave)] ?? newWaveGate()),
           impl_complete: isWaveComplete(resolved, wave),
+          ...(codeChanged ? { tests_passed: null, reviews_complete: false } : {}),
         },
       },
     },
@@ -657,14 +688,11 @@ export const runUpdateTaskStatus = async (
     };
   }
 
-  let proofArtifactsChanged: readonly string[];
+  let changedDeclaredArtifacts: readonly string[];
   try {
-    proofArtifactsChanged = attributedChangedArtifacts(
-      changedDeclaredArtifactsSince(
-        git.repositoryRoot() ?? process.cwd(),
-        task.artifact_baseline,
-      ),
-      filesModified,
+    changedDeclaredArtifacts = changedDeclaredArtifactsSince(
+      git.repositoryRoot() ?? process.cwd(),
+      task.artifact_baseline,
     );
   } catch (error) {
     await mgr.update((s) => ({
@@ -754,11 +782,9 @@ export const runUpdateTaskStatus = async (
     }
   }
 
-  // Section 2: New test verification via git diff
-  let newTestEvidence: NewTestEvidence = { written: false, evidence: "" };
-  if (git.isGitRepo()) {
-    newTestEvidence = collectNewTestEvidence(filesModified, task.start_sha, task.new_tests_required);
-  }
+  // Section 2/3: Atomic state write. Cumulative attribution and new-test
+  // evidence are derived from the locked Task snapshot below, not the stale
+  // pre-lock task read.
 
   // Section 3: Atomic state write. The preserve-evidence guards run INSIDE
   // the locked update (a pre-lock read can be outdated by a concurrent
@@ -778,11 +804,7 @@ export const runUpdateTaskStatus = async (
     const verdict = target?.test_result?.verdict;
     const existingTrusted = verdict === "trusted-pass" || verdict === "trusted-fail";
     const incomingTrusted = testEvidence.result.verdict !== "untrusted";
-    if (
-      !target ||
-      target.status === "completed" ||
-      (existingTrusted && !incomingTrusted)
-    ) {
+    if (!target || target.status === "completed") {
       skippedExistingVerdict = true;
       // The verdict stands down, but the agent still STOPPED: leaving the
       // task on executing_tasks would ghost-block validate-task-execution's
@@ -793,6 +815,15 @@ export const runUpdateTaskStatus = async (
       };
     }
 
+    const preserveExistingTrusted = existingTrusted && !incomingTrusted;
+    const resolvedTestResult = preserveExistingTrusted ? target.test_result : testEvidence.result;
+    const resolvedTestEvidence = preserveExistingTrusted ? target.test_evidence : testEvidence.evidence;
+    const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, filesModified);
+    const proofArtifactsChanged = attributedChangedArtifacts(changedDeclaredArtifacts, cumulativeFiles);
+    const currentNewTestEvidence = git.isGitRepo()
+      ? collectNewTestEvidence(cumulativeFiles, target.start_sha, target.new_tests_required)
+      : { written: false, evidence: "" };
+    const cumulativeNewTests = cumulativeNewTestEvidence(target, currentNewTestEvidence);
     const proof = evaluateTaskProof(
       {
         newTestsRequired: target.new_tests_required !== false,
@@ -800,10 +831,10 @@ export const runUpdateTaskStatus = async (
       },
       {
         taskCompleted: true,
-        testResult: testEvidence.result,
+        testResult: resolvedTestResult,
         filesModified: proofArtifactsChanged,
-        newTestsWritten: newTestEvidence.written,
-        newTestEvidence: newTestEvidence.evidence,
+        newTestsWritten: cumulativeNewTests.written,
+        newTestEvidence: cumulativeNewTests.evidence,
       },
       TRUSTED_LEDGER_ONLY_POLICY,
     );
@@ -813,11 +844,12 @@ export const runUpdateTaskStatus = async (
             ...t,
             status: proof.state === "satisfied" ? "implemented" as const : "pending" as const,
             proof,
-            test_result: testEvidence.result,
-            test_evidence: testEvidence.evidence,
-            files_modified: filesModified,
-            new_tests_written: newTestEvidence.written,
-            new_test_evidence: newTestEvidence.evidence,
+            test_result: resolvedTestResult,
+            test_evidence: resolvedTestEvidence,
+            files_modified: cumulativeFiles,
+            new_tests_written: cumulativeNewTests.written,
+            new_test_evidence: cumulativeNewTests.evidence,
+            ...(filesModified.length > 0 ? { review_status: "pending" as const } : {}),
           }
         : t
     );
@@ -828,13 +860,16 @@ export const runUpdateTaskStatus = async (
       executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
     };
     const wave = target.wave;
+    const codeChanged = filesModified.length > 0;
     return {
       ...resolved,
+      ...(codeChanged && resolved.spec_check?.wave === wave ? { spec_check: undefined } : {}),
       wave_gates: {
         ...resolved.wave_gates,
         [String(wave)]: {
           ...(resolved.wave_gates[String(wave)] ?? newWaveGate()),
           impl_complete: isWaveComplete(resolved, wave),
+          ...(codeChanged ? { tests_passed: null, reviews_complete: false } : {}),
         },
       },
     };
@@ -842,7 +877,7 @@ export const runUpdateTaskStatus = async (
 
   if (skippedExistingVerdict) {
     process.stderr.write(
-      `update-task-status: ${taskId} is completed or carries a trusted verdict this untrusted resolution cannot supersede — leaving it untouched\n`,
+      `update-task-status: ${taskId} is completed or missing — leaving task evidence untouched\n`,
     );
     return { kind: "passthrough" };
   }

@@ -68,6 +68,24 @@ export interface ReviewPacket {
 
 type PacketBody = Omit<ReviewPacket, "packetId">;
 
+/** Minimal, byte-hash-aware packet projection accepted by the explicit
+ * historical write-evidence recovery boundary. Schema v1 remains readable
+ * only here: its UTF-8 postimage hashes can recover text paths, while lossy
+ * binary postimages naturally fail the current-byte hash comparison. */
+export interface VerifiedReviewPacketRecovery {
+  readonly schemaVersion: 1 | typeof REVIEW_PACKET_SCHEMA_VERSION;
+  readonly packetId: string;
+  readonly taskId: string;
+  readonly baseSha: string;
+  readonly headSha: string;
+  readonly declaredPaths: readonly string[];
+  readonly modifiedPaths: readonly string[];
+  readonly artifacts: readonly Readonly<{
+    path: string;
+    postimageSha256: string | null;
+  }>[];
+}
+
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const GIT_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const WINDOWS_ABSOLUTE = /^(?:[A-Za-z]:[\\/]|\\\\)/;
@@ -412,6 +430,133 @@ export function parseReviewPacket(raw: unknown): ParseResult<ReviewPacket> {
   if (!rebuilt.ok) return rebuilt;
   if (typeof value.packetId !== "string" || !SHA256_HEX.test(value.packetId)) return fail(["packetId must be a lowercase SHA-256 digest"]);
   return value.packetId === rebuilt.value.packetId ? rebuilt : fail(["packetId does not match canonical packet content"]);
+}
+
+function recoveryProjection(packet: ReviewPacket): VerifiedReviewPacketRecovery {
+  return freezeJson({
+    schemaVersion: packet.schemaVersion,
+    packetId: packet.packetId,
+    taskId: packet.task.id as string,
+    baseSha: packet.baseSha,
+    headSha: packet.headSha,
+    declaredPaths: packet.declaredPaths,
+    modifiedPaths: packet.modifiedPaths,
+    artifacts: packet.artifacts.map((artifact) => ({
+      path: artifact.path,
+      postimageSha256: artifact.postimage?.sha256 ?? null,
+    })),
+  });
+}
+
+function parseLegacyRecoveryPacket(value: Record<string, unknown>): ParseResult<VerifiedReviewPacketRecovery> {
+  const task = parseJsonObject(value.task, "task");
+  const planContext = parseJsonValue(value.planContext, "planContext");
+  const proofObligations = parseJsonValue(value.proofObligations, "proofObligations");
+  const baseSha = parseGitSha(value.baseSha, "baseSha");
+  const headSha = parseGitSha(value.headSha, "headSha");
+  const declaredPaths = parsePathSet(value.declaredPaths, "declaredPaths");
+  const modifiedPaths = parsePathSet(value.modifiedPaths, "modifiedPaths");
+  const errors = [task, planContext, proofObligations, baseSha, headSha, declaredPaths, modifiedPaths]
+    .flatMap((result) => result.ok ? [] : result.errors);
+  if (task.ok && (typeof task.value.id !== "string" || task.value.id.trim() === "")) {
+    errors.push("task.id must be a non-empty string");
+  }
+  if (proofObligations.ok && !Array.isArray(proofObligations.value)) {
+    errors.push("proofObligations must be an array");
+  }
+
+  const artifacts: Array<{
+    path: string;
+    diff: HashedReviewArtifactContent;
+    postimage: HashedReviewArtifactContent | null;
+  }> = [];
+  const artifactPaths = new Set<string>();
+  if (!Array.isArray(value.artifacts)) errors.push("artifacts must be an array");
+  else value.artifacts.forEach((raw, index) => {
+    if (!isRecord(raw) || !isRecord(raw.diff)) {
+      errors.push(`artifacts[${index}] must contain a hashed diff object`);
+      return;
+    }
+    const path = parseReviewPath(raw.path, `artifacts[${index}].path`);
+    if (!path.ok) { errors.push(...path.errors); return; }
+    if (artifactPaths.has(path.value)) errors.push(`artifacts repeats path '${path.value}'`);
+    artifactPaths.add(path.value);
+    if (typeof raw.diff.content !== "string" || typeof raw.diff.sha256 !== "string" ||
+        !SHA256_HEX.test(raw.diff.sha256) || raw.diff.sha256 !== sha256Hex(raw.diff.content)) {
+      errors.push(`artifacts[${index}].diff must contain UTF-8 content and its lowercase SHA-256 digest`);
+      return;
+    }
+    let postimage: HashedReviewArtifactContent | null = null;
+    if (raw.postimage !== null) {
+      if (!isRecord(raw.postimage) || typeof raw.postimage.content !== "string" ||
+          typeof raw.postimage.sha256 !== "string" || !SHA256_HEX.test(raw.postimage.sha256) ||
+          raw.postimage.sha256 !== sha256Hex(raw.postimage.content)) {
+        errors.push(`artifacts[${index}].postimage must contain UTF-8 content and its lowercase SHA-256 digest`);
+        return;
+      }
+      postimage = { content: raw.postimage.content, sha256: raw.postimage.sha256 };
+    }
+    artifacts.push({
+      path: path.value,
+      diff: { content: raw.diff.content, sha256: raw.diff.sha256 },
+      postimage,
+    });
+  });
+
+  if (declaredPaths.ok && modifiedPaths.ok) {
+    errors.push(...scopeErrors(declaredPaths.value, modifiedPaths.value, artifactPaths));
+  }
+  if (errors.length > 0 || !task.ok || !planContext.ok || !proofObligations.ok ||
+      !baseSha.ok || !headSha.ok || !declaredPaths.ok || !modifiedPaths.ok ||
+      !Array.isArray(proofObligations.value)) return fail(errors);
+
+  const sortedArtifacts = [...artifacts].sort((left, right) => compareStrings(left.path, right.path));
+  const body: JsonObject = {
+    schemaVersion: 1,
+    task: task.value,
+    baseSha: baseSha.value,
+    headSha: headSha.value,
+    declaredPaths: declaredPaths.value,
+    modifiedPaths: modifiedPaths.value,
+    artifacts: sortedArtifacts.map((artifact): JsonObject => ({
+      path: artifact.path,
+      diff: hashedContentJson(artifact.diff),
+      postimage: artifact.postimage === null ? null : hashedContentJson(artifact.postimage),
+    })),
+    planContext: planContext.value,
+    proofObligations: proofObligations.value,
+  };
+  if (typeof value.packetId !== "string" || !SHA256_HEX.test(value.packetId)) {
+    return fail(["packetId must be a lowercase SHA-256 digest"]);
+  }
+  if (value.packetId !== sha256Hex(canonicalJson(body))) {
+    return fail(["packetId does not match canonical packet content"]);
+  }
+  return ok(freezeJson({
+    schemaVersion: 1 as const,
+    packetId: value.packetId,
+    taskId: task.value.id as string,
+    baseSha: baseSha.value,
+    headSha: headSha.value,
+    declaredPaths: declaredPaths.value,
+    modifiedPaths: modifiedPaths.value,
+    artifacts: sortedArtifacts.map((artifact) => ({
+      path: artifact.path,
+      postimageSha256: artifact.postimage?.sha256 ?? null,
+    })),
+  }));
+}
+
+/** Verify current packets and legacy v1 text metadata for explicit recovery. */
+export function parseReviewPacketRecovery(raw: unknown): ParseResult<VerifiedReviewPacketRecovery> {
+  const object = rawPacketObject(raw);
+  if (!object.ok) return object;
+  if (object.value.schemaVersion === REVIEW_PACKET_SCHEMA_VERSION) {
+    const packet = parseReviewPacket(object.value);
+    return packet.ok ? ok(recoveryProjection(packet.value)) : packet;
+  }
+  if (object.value.schemaVersion === 1) return parseLegacyRecoveryPacket(object.value);
+  return fail([`schemaVersion must equal 1 or ${REVIEW_PACKET_SCHEMA_VERSION}`]);
 }
 
 export const verifyReviewPacket = parseReviewPacket;

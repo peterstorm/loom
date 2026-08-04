@@ -209,6 +209,13 @@ export interface RefutedFinding {
   readonly refutations: NonEmptyRefutations;
 }
 
+export interface RecoveredArtifactWriteEvidence {
+  readonly baseline_sha: string;
+  readonly packet_id: string;
+  readonly packet_path: string;
+  readonly modified_paths: readonly string[];
+}
+
 export interface Task {
   id: string;
   description: string;
@@ -306,6 +313,9 @@ export interface Task {
    * after a legacy retry overwrote the original baseline. Persisted so the
    * exceptional evidence source remains auditable. */
   artifact_baseline_recovered_from?: string;
+  /** Audited immutable Review Packets used to recover cumulative write
+   * attribution after a legacy retry replaced files_modified. */
+  recovered_artifact_writes?: readonly RecoveredArtifactWriteEvidence[];
   start_sha?: string;
   failure_reason?: string;
   retry_count?: number;

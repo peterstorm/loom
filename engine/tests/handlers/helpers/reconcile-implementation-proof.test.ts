@@ -6,8 +6,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { evaluateTaskProof, PI_STRUCTURED_EVIDENCE_POLICY } from "../../../src/core/proof-obligations";
+import { createReviewPacket, serializeReviewPacket } from "../../../src/core/review-packet";
 import {
   parseRecoveredBaselineSha,
+  parseRecoveryPacketBindings,
   reconcileTaskFromStoredEvidence,
 } from "../../../src/handlers/helpers/reconcile-implementation-proof";
 import type { Task } from "../../../src/types";
@@ -55,7 +57,21 @@ function failedTask(taskCompleted = true): Task {
   };
 }
 
-describe("parseRecoveredBaselineSha", () => {
+describe("recovery arguments", () => {
+  it("parses repeated task-bound packet arguments and rejects malformed mappings", () => {
+    expect(parseRecoveryPacketBindings([
+      "--packet", "T5=.claude/reviews/one.json",
+      "--packet", "T5=.claude/reviews/two.json",
+      "--packet", "T6=.claude/reviews/six.json",
+    ])).toEqual([
+      { taskId: "T5", packetPath: ".claude/reviews/one.json" },
+      { taskId: "T5", packetPath: ".claude/reviews/two.json" },
+      { taskId: "T6", packetPath: ".claude/reviews/six.json" },
+    ]);
+    expect(() => parseRecoveryPacketBindings(["--packet", "missing-separator"]))
+      .toThrow(/TASK_ID=/);
+  });
+
   it("accepts one exact Git SHA and rejects malformed or repeated overrides", () => {
     const sha = "a".repeat(40);
     expect(parseRecoveredBaselineSha(["--wave", "2", "--baseline-sha", sha])).toBe(sha);
@@ -87,18 +103,38 @@ describe("historical baseline recovery CLI", () => {
       { newTestsRequired: false, declaredArtifacts: ["src/a.ts"] },
       { taskCompleted: true, filesModified: [] },
     );
+    const packet = createReviewPacket({
+      task: { id: "T5", description: "implementation" },
+      baseSha: historical,
+      headSha: poisonedStart,
+      declaredPaths: ["src/a.ts"],
+      modifiedPaths: ["src/a.ts"],
+      artifacts: [{ path: "src/a.ts", diff: "+implemented\n", postimage: Buffer.from(implemented) }],
+      planContext: "",
+      proofObligations: [],
+    });
+    if (!packet.ok) throw new Error(packet.errors.join("; "));
+    const packetRelative = ".claude/reviews/T5.json";
+    mkdirSync(join(root, ".claude", "reviews"), { recursive: true });
+    writeFileSync(join(root, packetRelative), serializeReviewPacket(packet.value));
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     mkdirSync(join(root, ".claude", "state"), { recursive: true });
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, current_wave: 2, executing_tasks: [],
+      spec_check: {
+        wave: 2, run_at: "before recovery", verdict: "PASSED",
+        critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
       wave_gates: {
-        "2": { impl_complete: true, tests_passed: true, reviews_complete: false, blocked: false },
+        "2": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
       },
       tasks: [{
         id: "T5", description: "implementation", agent: "code-implementer-agent",
         wave: 2, status: "pending", depends_on: [], new_tests_required: false,
-        file_list: ["src/a.ts"], files_modified: ["src/a.ts"], proof,
+        review_status: "passed",
+        file_list: ["src/a.ts"], files_modified: ["latest-only.ts"], proof,
         start_sha: poisonedStart,
         artifact_baseline: [{
           artifact: "src/a.ts",
@@ -115,9 +151,48 @@ describe("historical baseline recovery CLI", () => {
     });
     expect(withoutOverride.status).not.toBe(0);
 
+    const invalidPacketRelative = ".claude/reviews/T6-bound-as-T5.json";
+    const wrongTaskPacket = createReviewPacket({
+      task: { id: "T6", description: "wrong task" },
+      baseSha: historical,
+      headSha: poisonedStart,
+      declaredPaths: ["src/a.ts"],
+      modifiedPaths: ["src/a.ts"],
+      artifacts: [{ path: "src/a.ts", diff: "+implemented\n", postimage: Buffer.from(implemented) }],
+      planContext: "",
+      proofObligations: [],
+    });
+    if (!wrongTaskPacket.ok) throw new Error(wrongTaskPacket.errors.join("; "));
+    writeFileSync(join(root, invalidPacketRelative), serializeReviewPacket(wrongTaskPacket.value));
+    const beforeAtomicFailure = readFileSync(statePath, "utf-8");
+    const atomicFailure = spawnSync("bun", [
+      CLI, "helper", "reconcile-implementation-proof", "--wave", "2",
+      "--baseline-sha", historical,
+      "--packet", `T5=${packetRelative}`,
+      "--packet", `T5=${invalidPacketRelative}`,
+    ], {
+      cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
+    });
+    expect(atomicFailure.status).not.toBe(0);
+    expect(readFileSync(statePath, "utf-8")).toBe(beforeAtomicFailure);
+
+    writeFileSync(join(root, "src", "a.ts"), "export const drifted = true;\n");
+    const byteMismatch = spawnSync("bun", [
+      CLI, "helper", "reconcile-implementation-proof", "--wave", "2",
+      "--baseline-sha", historical,
+      "--packet", `T5=${packetRelative}`,
+    ], {
+      cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
+    });
+    expect(byteMismatch.status).not.toBe(0);
+    expect(byteMismatch.stderr).toContain("does not match current bytes");
+    expect(readFileSync(statePath, "utf-8")).toBe(beforeAtomicFailure);
+    writeFileSync(join(root, "src", "a.ts"), implemented);
+
     const recovered = spawnSync("bun", [
       CLI, "helper", "reconcile-implementation-proof", "--wave", "2",
       "--baseline-sha", historical,
+      "--packet", `T5=${packetRelative}`,
     ], {
       cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
     });
@@ -128,9 +203,20 @@ describe("historical baseline recovery CLI", () => {
       start_sha: historical,
       artifact_baseline_recovered_from: historical,
       proof: { state: "satisfied" },
+      files_modified: ["latest-only.ts", "src/a.ts"],
       artifact_baseline: [{ artifact: "src/a.ts", snapshot: { kind: "missing" } }],
+      recovered_artifact_writes: [{
+        baseline_sha: historical,
+        packet_id: packet.value.packetId,
+        packet_path: packetRelative,
+        modified_paths: ["src/a.ts"],
+      }],
     });
-    expect(state.wave_gates["2"].impl_complete).toBe(true);
+    expect(state.tasks[0].review_status).toBe("pending");
+    expect(state.spec_check).toBeUndefined();
+    expect(state.wave_gates["2"]).toMatchObject({
+      impl_complete: true, tests_passed: null, reviews_complete: false,
+    });
   });
 });
 

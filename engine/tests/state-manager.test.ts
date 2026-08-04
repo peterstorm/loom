@@ -395,6 +395,44 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it("parses recovered write provenance and rejects drift or duplicate packet ids", () => {
+    const sha = "a".repeat(40);
+    const packet = "b".repeat(64);
+    const evidence = [{
+      baseline_sha: sha,
+      packet_id: packet,
+      packet_path: ".claude/reviews/T1.json",
+      modified_paths: ["src/a.ts"],
+    }];
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        file_list: ["src/a.ts"],
+        artifact_baseline_recovered_from: sha,
+        recovered_artifact_writes: evidence,
+      }],
+    }).ok).toBe(true);
+    for (const recovered_artifact_writes of [
+      [{ ...evidence[0], baseline_sha: "c".repeat(40) }],
+      [...evidence, { ...evidence[0] }],
+      [{ ...evidence[0], packet_path: "../outside.json" }],
+      [{ ...evidence[0], modified_paths: ["src/a.ts", "src/a.ts"] }],
+      [{ ...evidence[0], modified_paths: [] }],
+      [{ ...evidence[0], modified_paths: ["src/outside.ts"] }],
+    ]) {
+      expect(parseTaskGraph({
+        ...validGraph,
+        tasks: [{
+          ...validTask,
+          file_list: ["src/a.ts"],
+          artifact_baseline_recovered_from: sha,
+          recovered_artifact_writes,
+        }],
+      }).ok).toBe(false);
+    }
+  });
+
   it("rejects non-array tasks and non-object wave_gates", () => {
     expect(parseTaskGraph({ ...validGraph, tasks: "none" }).ok).toBe(false);
     expect(parseTaskGraph({ ...validGraph, wave_gates: [] }).ok).toBe(false);

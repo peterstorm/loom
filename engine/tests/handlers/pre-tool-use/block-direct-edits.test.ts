@@ -24,9 +24,10 @@ describe("shouldBlockDirectEdit — session-id parse boundary", () => {
     expect(shouldBlockDirectEdit("Bash", s, orchestrating).kind).toBe("allow");
   });
 
-  it("no active subagent → block (orchestration in progress)", () => {
-    const result = shouldBlockDirectEdit("Edit", s, orchestrating);
-    expect(result.kind).toBe("block");
+  it("no active subagent → block every supported file mutation tool", () => {
+    for (const tool of ["Edit", "Write", "MultiEdit", "edit", "write", "multi_edit"]) {
+      expect(shouldBlockDirectEdit(tool, s, orchestrating).kind).toBe("block");
+    }
   });
 
   it("active subagent → allow", () => {

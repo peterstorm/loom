@@ -201,7 +201,7 @@ describe("trust-aware skip guard — decided INSIDE the locked update", () => {
     expect(state.tasks[0].test_evidence).toContain("ledger: exit 1");
   }, 30000);
 
-  it("a trusted verdict on the task IS preserved (skip fires inside the lock)", async () => {
+  it("a trusted verdict is preserved while retry structural evidence resolves inside the lock", async () => {
     const s = sid("trusted-kept");
     const dir = tempDir();
     const statePath = writeState(dir, {
@@ -213,13 +213,14 @@ describe("trust-aware skip guard — decided INSIDE the locked update", () => {
     pointSessionAt(s, statePath);
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    // Empty snapshot + no transcript: the handler would write an untrusted
-    // failure — the existing trusted verdict must survive it.
+    // Empty snapshot + no transcript: the handler produces an untrusted
+    // failure, but the existing trusted verdict must survive while cumulative
+    // structural evidence and execution cleanup still land.
     const result = await runUpdateTaskStatus(stopInput(s), [], { kind: "snapshot", events: [] });
     const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
     stderrSpy.mockRestore();
     expect(result.kind).toBe("passthrough");
-    expect(text).toContain("leaving it untouched");
+    expect(text).not.toContain("leaving it untouched");
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
     expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-fail" });

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   createReviewPacket,
+  canonicalJson,
   parseReviewPacket,
+  parseReviewPacketRecovery,
   serializeReviewPacket,
   sha256Bytes,
   sha256Hex,
@@ -168,6 +170,39 @@ describe("Review Packet", () => {
       sha256: sha256Bytes(png),
     });
     expect(postimage?.content).not.toContain("�");
+  });
+
+  it("verifies legacy v1 packet metadata only at the explicit recovery boundary", () => {
+    const diff = { content: "+legacy\n", sha256: sha256Hex("+legacy\n") };
+    const postimage = { content: "legacy text\n", sha256: sha256Hex("legacy text\n") };
+    const body = {
+      schemaVersion: 1,
+      task: { id: "T1", description: "legacy" },
+      baseSha: BASE_SHA,
+      headSha: HEAD_SHA,
+      declaredPaths: ["legacy.ts"],
+      modifiedPaths: ["legacy.ts"],
+      artifacts: [{ path: "legacy.ts", diff, postimage }],
+      planContext: "",
+      proofObligations: [],
+    };
+    const raw = { ...body, packetId: sha256Hex(canonicalJson(body)) };
+
+    expect(parseReviewPacket(raw).ok).toBe(false);
+    const recovered = parseReviewPacketRecovery(raw);
+    expect(recovered.ok).toBe(true);
+    if (recovered.ok) {
+      expect(recovered.value).toMatchObject({
+        schemaVersion: 1,
+        taskId: "T1",
+        modifiedPaths: ["legacy.ts"],
+        artifacts: [{ path: "legacy.ts", postimageSha256: postimage.sha256 }],
+      });
+    }
+
+    const tampered = structuredClone(raw);
+    tampered.modifiedPaths = ["invented.ts"];
+    expect(parseReviewPacketRecovery(tampered).ok).toBe(false);
   });
 
   it("rejects malformed JSON, artifact tampering, hash tampering, and packet-id tampering", () => {

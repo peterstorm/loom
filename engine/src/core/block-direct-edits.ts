@@ -9,7 +9,7 @@ import type { HookResult } from "../types";
 import { TASK_GRAPH_PATH, SUBAGENT_DIR } from "../config";
 import { parseSessionId } from "../machine/evidence";
 
-const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "edit", "write"]);
+const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "edit", "write", "multi_edit"]);
 
 export function shouldBlockDirectEdit(
   toolName: string,

@@ -39,26 +39,26 @@ const untrustedPass: UntrustedStopResolution = {
   testResult: { verdict: "untrusted", passed: true, label: "pi-structured: bun: 5 pass" },
   testEvidence: "pi-structured: bun: 5 pass",
   filesModified: ["src/a.ts", "tests/a.test.ts"],
-  proofArtifactsChanged: ["src/a.ts", "tests/a.test.ts"],
+  changedDeclaredArtifacts: ["src/a.ts", "tests/a.test.ts"],
   newTestsWritten: true,
   newTestEvidence: "2 new test methods, 4 assertions",
 };
 
 describe("applyUntrustedStopResolution — untrusted resolutions never supersede ground truth (TOCTOU re-check)", () => {
-  it.each<[string, TaskTestResult]>([
-    ["trusted-pass", { verdict: "trusted-pass" }],
-    ["trusted-fail", { verdict: "trusted-fail" }],
-  ])("a concurrent %s verdict stands; executing_tasks is still cleared", (_name, verdict) => {
+  it.each<[string, TaskTestResult, "implemented" | "pending"]>([
+    ["trusted-pass", { verdict: "trusted-pass" }, "implemented"],
+    ["trusted-fail", { verdict: "trusted-fail" }, "pending"],
+  ])("a concurrent %s verdict stands while cumulative structural evidence lands", (_name, verdict, status) => {
     const s = graph([task({ id: "T1", status: "implemented", test_result: verdict })], ["T1", "T2"]);
 
     const applied = applyUntrustedStopResolution(s, "T1", untrustedPass);
 
-    expect(applied.skipped).toBe(true);
+    expect(applied.skipped).toBe(false);
     const t1 = applied.state.tasks.find((t) => t.id === "T1")!;
     expect(t1.test_result).toEqual(verdict);
-    expect(t1.status).toBe("implemented");
+    expect(t1.status).toBe(status);
     expect(t1.test_evidence).toBeUndefined();
-    expect(t1.files_modified).toBeUndefined();
+    expect(t1.files_modified).toEqual(["src/a.ts", "tests/a.test.ts"]);
     // The agent still STOPPED — the task must leave executing_tasks, or it
     // ghost-blocks duplicate-spawn checks for the rest of the session.
     expect(applied.state.executing_tasks).toEqual(["T2"]);
@@ -111,6 +111,42 @@ describe("applyUntrustedStopResolution — untrusted resolutions never supersede
     expect(applied.state.wave_gates["1"].impl_complete).toBe(true);
     // Other tasks untouched.
     expect(applied.state.tasks.find((t) => t.id === "T2")).toEqual(s.tasks[1]);
+  });
+
+  it("unions retry writes/new-test evidence and invalidates stale review/spec gates", () => {
+    const s = graph([task({
+      id: "T1",
+      files_modified: ["src/old.ts"],
+      new_tests_written: true,
+      new_test_evidence: "earlier test evidence",
+      review_status: "passed",
+    })], ["T1"]);
+    s.spec_check = {
+      wave: 1, run_at: "now", verdict: "PASSED", critical_count: 0, high_count: 0,
+      critical_findings: [], high_findings: [], medium_findings: [],
+    };
+    s.wave_gates["1"] = {
+      impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false,
+    };
+    const retry: UntrustedStopResolution = {
+      ...untrustedPass,
+      filesModified: ["src/new.ts"],
+      changedDeclaredArtifacts: [],
+      newTestsWritten: false,
+      newTestEvidence: "",
+    };
+
+    const applied = applyUntrustedStopResolution(s, "T1", retry);
+    const resolved = applied.state.tasks[0]!;
+
+    expect(resolved.files_modified).toEqual(["src/new.ts", "src/old.ts"]);
+    expect(resolved.new_tests_written).toBe(true);
+    expect(resolved.new_test_evidence).toBe("earlier test evidence");
+    expect(resolved.review_status).toBe("pending");
+    expect(applied.state.spec_check).toBeUndefined();
+    expect(applied.state.wave_gates["1"]).toMatchObject({
+      tests_passed: null, reviews_complete: false,
+    });
   });
 
   it("a failed re-resolution clears a stale impl_complete bit atomically", () => {

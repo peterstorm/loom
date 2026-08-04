@@ -14,6 +14,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 describe("exact Pi agent rendering", () => {
   it("preloads file-backed and command-backed declared skills", () => {
     const implementer = expectedPiAgentDefinition("code-implementer-agent", ROOT);
+    expect(implementer).toContain("<!-- LOOM_PI_AGENT_ID:code-implementer-agent -->");
     expect(implementer).toContain("## Preloaded Loom Skill: code-implementer");
     expect(implementer).toContain(`${ROOT}/rules/architecture.md`);
 

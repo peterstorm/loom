@@ -33,12 +33,16 @@ export function renderPiAgentDefinition(
   if (!profile.ok) throw new Error(profile.error.message);
   const target = lowerModelProfile(profile.value, "pi");
   const exactModel = `${target.provider}/${target.model}:${target.thinking}`;
-  return renderPiAgentResource(
+  const rendered = renderPiAgentResource(
     sourceAgent,
     exactModel,
     packageRoot,
     preloadedSkills(sourceAgent, packageRoot),
   );
+  const frontmatterEnd = rendered.indexOf("\n---\n", 4);
+  if (frontmatterEnd < 0) throw new Error(`rendered Pi agent '${agent}' has no frontmatter boundary`);
+  const bodyStart = frontmatterEnd + "\n---\n".length;
+  return `${rendered.slice(0, bodyStart)}<!-- LOOM_PI_AGENT_ID:${agent} -->\n${rendered.slice(bodyStart)}`;
 }
 
 export function expectedPiAgentDefinition(agent: string, packageRoot: string): string {

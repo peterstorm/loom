@@ -321,6 +321,77 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("injects and consumes a distinct write grant for every parallel implementation child", async () => {
+    const planPath = join(temp, "parallel-write-grants-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [
+        { id: "T1", description: "one", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], file_list: ["pi/extension.ts"] },
+        { id: "T2", description: "two", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], file_list: ["README.md"] },
+      ],
+    });
+    const pi = await extension();
+    const parentSession = "019fca39-f989-7510-8e62-50dadbcad420";
+    const input = {
+      agentScope: "user",
+      tasks: [
+        { agent: "code-implementer-agent", task: "Task ID: T1\nUse the code-implementer skill. Implement and test." },
+        { agent: "code-implementer-agent", task: "Task ID: T2\nUse the code-implementer skill. Implement and test." },
+      ],
+    };
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-parallel-write-grants",
+      input,
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => parentSession } });
+    expect(call).toEqual([undefined]);
+    const prompts = input.tasks.map((item) => item.task);
+    expect(prompts.every((prompt) => /LOOM_PI_WRITE_GRANT:[0-9a-f]{64}/.test(prompt))).toBe(true);
+    expect(new Set(prompts.map((prompt) => prompt.match(/LOOM_PI_WRITE_GRANT:([0-9a-f]{64})/)?.[1])).size).toBe(2);
+
+    const childSessions = [
+      "019fca39-f989-7510-8e62-50dadbcad421",
+      "019fca39-f989-7510-8e62-50dadbcad422",
+    ];
+    for (const [index, childSession] of childSessions.entries()) {
+      await pi.emit("before_agent_start", {
+        prompt: `Task: ${prompts[index]}`,
+        systemPrompt: "<!-- LOOM_PI_AGENT_ID:code-implementer-agent -->",
+      }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+      expect(readFileSync(join(subagentDir, `${childSession}.active`), "utf-8").trim())
+        .toMatch(/^pi-grant-[0-9a-f]{16}$/);
+      const edit = await pi.emit("tool_call", {
+        toolName: "edit", input: { path: "README.md", edits: [] },
+      }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+      expect(edit).toEqual([undefined]);
+    }
+
+    const replaySession = "019fca39-f989-7510-8e62-50dadbcad424";
+    await pi.emit("before_agent_start", {
+      prompt: `Task: ${prompts[0]}`,
+      systemPrompt: "<!-- LOOM_PI_AGENT_ID:code-implementer-agent -->",
+    }, {
+      cwd: ROOT, sessionManager: { getSessionId: () => replaySession },
+    });
+    expect(() => readFileSync(join(subagentDir, `${replaySession}.active`), "utf-8")).toThrow();
+
+    const ungranted = await pi.emit("tool_call", {
+      toolName: "edit", input: { path: "README.md", edits: [] },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad423" } });
+    expect(ungranted).toContainEqual(expect.objectContaining({ block: true }));
+
+    for (const childSession of childSessions) {
+      await pi.emit("session_shutdown", {}, {
+        cwd: ROOT, sessionManager: { getSessionId: () => childSession },
+      });
+      expect(() => readFileSync(join(subagentDir, `${childSession}.active`), "utf-8")).toThrow();
+    }
+  });
+
   it("gives repeated agent types distinct roster entries and removes each exact spawn", async () => {
     const pi = await extension();
     const session = "019fca39-f989-7510-8e62-50dadbcad40f";

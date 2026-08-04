@@ -1,5 +1,11 @@
 import { execFileSync } from "node:child_process";
-import type { HookHandler, Task, TaskGraph } from "../../types";
+import { readFileSync } from "node:fs";
+import type {
+  HookHandler,
+  RecoveredArtifactWriteEvidence,
+  Task,
+  TaskGraph,
+} from "../../types";
 import { newWaveGate } from "../../types";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
@@ -9,11 +15,17 @@ import {
 } from "../../core/proof-obligations";
 import { attributedChangedArtifacts } from "../../core/artifact-baseline";
 import {
+  parseReviewPacketRecovery,
+  sha256Bytes,
+  type VerifiedReviewPacketRecovery,
+} from "../../core/review-packet";
+import {
   captureDeclaredArtifactBaselineAtRevision,
   changedDeclaredArtifactsSince,
   changedDeclaredArtifactsSinceRevision,
 } from "../../utils/artifact-baseline";
 import * as git from "../../utils/git";
+import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 import {
   collectNewTestEvidence,
   isWaveComplete,
@@ -22,6 +34,34 @@ import {
 import { parseWaveArg } from "./wave-args";
 
 const GIT_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
+export interface RecoveryPacketBinding {
+  readonly taskId: string;
+  readonly packetPath: string;
+}
+
+export function parseRecoveryPacketBindings(args: readonly string[]): readonly RecoveryPacketBinding[] {
+  const bindings: RecoveryPacketBinding[] = [];
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] !== "--packet") continue;
+    const value = args[index + 1];
+    const separator = value?.indexOf("=") ?? -1;
+    if (!value || separator <= 0 || separator === value.length - 1) {
+      throw new Error("--packet must use TASK_ID=REPOSITORY_RELATIVE_PACKET_PATH");
+    }
+    bindings.push(Object.freeze({
+      taskId: value.slice(0, separator),
+      packetPath: value.slice(separator + 1),
+    }));
+  }
+  const duplicate = bindings.find((binding, index) =>
+    bindings.slice(0, index).some((prior) =>
+      prior.taskId === binding.taskId && prior.packetPath === binding.packetPath
+    )
+  );
+  if (duplicate) throw new Error(`duplicate --packet binding ${duplicate.taskId}=${duplicate.packetPath}`);
+  return Object.freeze(bindings);
+}
 
 export function parseRecoveredBaselineSha(args: readonly string[]): string | null {
   const indexes = args.flatMap((arg, index) => arg === "--baseline-sha" ? [index] : []);
@@ -32,6 +72,115 @@ export function parseRecoveredBaselineSha(args: readonly string[]): string | nul
     throw new Error("--baseline-sha must be a lowercase 40- or 64-character Git SHA");
   }
   return value;
+}
+
+interface RecoveredPacketEvidence {
+  readonly modifiedPathsByTask: ReadonlyMap<string, readonly string[]>;
+  readonly auditByTask: ReadonlyMap<string, readonly RecoveredArtifactWriteEvidence[]>;
+}
+
+function samePathSet(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((path, index) => path === right[index]);
+}
+
+function verifyPacketCommitRange(root: string, packet: VerifiedReviewPacketRecovery): void {
+  execFileSync("git", ["cat-file", "-e", `${packet.headSha}^{commit}`], {
+    cwd: root, stdio: ["ignore", "ignore", "pipe"],
+  });
+  execFileSync("git", ["merge-base", "--is-ancestor", packet.baseSha, packet.headSha], {
+    cwd: root, stdio: ["ignore", "ignore", "pipe"],
+  });
+  execFileSync("git", ["merge-base", "--is-ancestor", packet.headSha, "HEAD"], {
+    cwd: root, stdio: ["ignore", "ignore", "pipe"],
+  });
+}
+
+function recoverPacketEvidence(
+  root: string,
+  state: TaskGraph,
+  wave: number,
+  baselineSha: string,
+  bindings: readonly RecoveryPacketBinding[],
+): RecoveredPacketEvidence {
+  const pathsByTask = new Map<string, string[]>();
+  const auditByTask = new Map<string, RecoveredArtifactWriteEvidence[]>();
+  const seenPacketIds = new Set<string>();
+
+  for (const binding of bindings) {
+    const task = state.tasks.find((candidate) => candidate.id === binding.taskId && candidate.wave === wave);
+    if (!task) throw new Error(`packet binding names no Task ${binding.taskId} in wave ${wave}`);
+    if (task.status === "completed" || task.proof?.state === "satisfied") {
+      throw new Error(`packet binding names ${binding.taskId}, which already has satisfied implementation proof`);
+    }
+    const inspectedPacket = inspectRepositoryPath(
+      root,
+      binding.packetPath,
+      `recovery packet for ${binding.taskId}`,
+      { mustExist: true, mustBeFile: true },
+    );
+    const parsed = parseReviewPacketRecovery(readFileSync(inspectedPacket.absolute, "utf-8"));
+    if (!parsed.ok) throw new Error(`invalid recovery packet ${inspectedPacket.relative}: ${parsed.errors.join("; ")}`);
+    const packet = parsed.value;
+    if (seenPacketIds.has(packet.packetId)) throw new Error(`recovery packet id ${packet.packetId} is repeated`);
+    seenPacketIds.add(packet.packetId);
+    if (packet.taskId !== task.id) {
+      throw new Error(`recovery packet ${inspectedPacket.relative} belongs to ${packet.taskId}, not ${task.id}`);
+    }
+    if (packet.baseSha !== baselineSha) {
+      throw new Error(`recovery packet ${inspectedPacket.relative} base ${packet.baseSha} does not equal ${baselineSha}`);
+    }
+    verifyPacketCommitRange(root, packet);
+
+    const declared = [...canonicalRepositoryPaths(root, task.file_list ?? [], `${task.id}.file_list`)].sort();
+    if (!samePathSet(declared, packet.declaredPaths)) {
+      throw new Error(`recovery packet ${inspectedPacket.relative} declaredPaths do not equal ${task.id}.file_list`);
+    }
+    const declaredSet = new Set(declared);
+    const artifactByPath = new Map(packet.artifacts.map((artifact) => [artifact.path, artifact]));
+    const recoveredPaths: string[] = [];
+    for (const path of packet.modifiedPaths.filter((candidate) => declaredSet.has(candidate))) {
+      const artifact = artifactByPath.get(path);
+      if (!artifact) throw new Error(`recovery packet ${inspectedPacket.relative} has no artifact for ${path}`);
+      const current = inspectRepositoryPath(root, path, `recovered artifact ${path}`);
+      if (artifact.postimageSha256 === null) {
+        if (current.exists) throw new Error(`recovery packet ${inspectedPacket.relative} records ${path} deleted but it currently exists`);
+      } else {
+        if (!current.exists) throw new Error(`recovery packet ${inspectedPacket.relative} records ${path} present but it is currently missing`);
+        const currentSha = sha256Bytes(readFileSync(current.absolute));
+        if (currentSha !== artifact.postimageSha256) {
+          throw new Error(
+            `recovery packet ${inspectedPacket.relative} postimage for ${path} does not match current bytes` +
+            `${packet.schemaVersion === 1 ? " (legacy v1 binary postimages cannot recover lossy content)" : ""}`,
+          );
+        }
+      }
+      recoveredPaths.push(path);
+    }
+    if (recoveredPaths.length === 0) {
+      throw new Error(`recovery packet ${inspectedPacket.relative} contributes no modified declared paths for ${task.id}`);
+    }
+    pathsByTask.set(task.id, [
+      ...(pathsByTask.get(task.id) ?? []),
+      ...recoveredPaths,
+    ]);
+    auditByTask.set(task.id, [
+      ...(auditByTask.get(task.id) ?? []),
+      Object.freeze({
+        baseline_sha: baselineSha,
+        packet_id: packet.packetId,
+        packet_path: inspectedPacket.relative,
+        modified_paths: Object.freeze([...new Set(recoveredPaths)].sort()),
+      }),
+    ]);
+  }
+
+  return {
+    modifiedPathsByTask: new Map([...pathsByTask].map(([taskId, paths]) => [
+      taskId,
+      Object.freeze([...new Set(paths)].sort()),
+    ])),
+    auditByTask,
+  };
 }
 
 function taskCompletionWasObserved(task: Task): boolean {
@@ -87,9 +236,14 @@ function failureSummary(task: Task): string {
 const handler: HookHandler = async (_stdin, args) => {
   let requestedWave: number | null;
   let recoveredBaselineSha: string | null;
+  let packetBindings: readonly RecoveryPacketBinding[];
   try {
     requestedWave = parseWaveArg(args);
     recoveredBaselineSha = parseRecoveredBaselineSha(args);
+    packetBindings = parseRecoveryPacketBindings(args);
+    if (packetBindings.length > 0 && recoveredBaselineSha === null) {
+      throw new Error("--packet recovery requires --baseline-sha");
+    }
   } catch (error) {
     return { kind: "error", message: `reconcile-implementation-proof: ${(error as Error).message}` };
   }
@@ -125,20 +279,42 @@ const handler: HookHandler = async (_stdin, args) => {
       if (!state.tasks.some((task) => task.wave === wave)) {
         throw new Error(`Wave ${wave} has no tasks`);
       }
+      const recoveredPackets = recoveredBaselineSha !== null && packetBindings.length > 0
+        ? recoverPacketEvidence(root, state, wave, recoveredBaselineSha, packetBindings)
+        : { modifiedPathsByTask: new Map(), auditByTask: new Map() };
+      const packetMode = packetBindings.length > 0;
+      let recoveredWritesApplied = false;
       const tasks = state.tasks.map((task) => {
         if (task.wave !== wave || task.status === "completed" || task.proof?.state === "satisfied") return task;
-        const sourceTask: Task = recoveredBaselineSha === null
-          ? task
-          : {
-              ...task,
-              start_sha: recoveredBaselineSha,
-              artifact_baseline: captureDeclaredArtifactBaselineAtRevision(
-                root,
-                recoveredBaselineSha,
-                task.file_list ?? [],
-              ),
-              artifact_baseline_recovered_from: recoveredBaselineSha,
-            };
+        const recoveredPaths = recoveredPackets.modifiedPathsByTask.get(task.id) ?? [];
+        // Explicit packet mode may only alter Tasks carrying verified packet
+        // evidence. `--baseline-sha` without packets remains the intentional
+        // blanket legacy baseline-recovery operation.
+        if (packetMode && recoveredPaths.length === 0) return task;
+        if (recoveredPaths.length > 0) recoveredWritesApplied = true;
+        const recoveredAudit = recoveredPackets.auditByTask.get(task.id) ?? [];
+        const priorAudit = task.recovered_artifact_writes ?? [];
+        const auditByPacket = new Map(priorAudit.map((entry) => [entry.packet_id, entry]));
+        for (const entry of recoveredAudit) auditByPacket.set(entry.packet_id, entry);
+        const sourceTask: Task = {
+          ...task,
+          files_modified: [...new Set([...(task.files_modified ?? []), ...recoveredPaths])].sort(),
+          ...(recoveredBaselineSha === null
+            ? {}
+            : {
+                start_sha: recoveredBaselineSha,
+                artifact_baseline: captureDeclaredArtifactBaselineAtRevision(
+                  root,
+                  recoveredBaselineSha,
+                  task.file_list ?? [],
+                ),
+                artifact_baseline_recovered_from: recoveredBaselineSha,
+              }),
+          ...(auditByPacket.size > 0
+            ? { recovered_artifact_writes: [...auditByPacket.values()] }
+            : {}),
+          ...(recoveredPaths.length > 0 ? { review_status: "pending" as const } : {}),
+        };
         const snapshotChanges = changedDeclaredArtifactsSince(root, sourceTask.artifact_baseline);
         const revisionChanges = sourceTask.start_sha
           ? changedDeclaredArtifactsSinceRevision(root, sourceTask.start_sha, sourceTask.file_list ?? [])
@@ -152,7 +328,11 @@ const handler: HookHandler = async (_stdin, args) => {
         );
         return reconcileTaskFromStoredEvidence(sourceTask, proofArtifactsChanged, collectedNewTests);
       });
-      const resolved: TaskGraph = { ...state, tasks };
+      const resolved: TaskGraph = {
+        ...state,
+        tasks,
+        ...(recoveredWritesApplied && state.spec_check?.wave === wave ? { spec_check: undefined } : {}),
+      };
       reconciled = {
         ...resolved,
         wave_gates: {
@@ -160,6 +340,7 @@ const handler: HookHandler = async (_stdin, args) => {
           [String(wave)]: {
             ...(resolved.wave_gates[String(wave)] ?? newWaveGate()),
             impl_complete: isWaveComplete(resolved, wave),
+            ...(recoveredWritesApplied ? { tests_passed: null, reviews_complete: false } : {}),
           },
         },
       };
