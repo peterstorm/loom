@@ -70,8 +70,9 @@ type PacketBody = Omit<ReviewPacket, "packetId">;
 
 /** Minimal, byte-hash-aware packet projection accepted by the explicit
  * historical write-evidence recovery boundary. Schema v1 remains readable
- * only here: its UTF-8 postimage hashes can recover text paths, while lossy
- * binary postimages naturally fail the current-byte hash comparison. */
+ * only here. Packet parsing verifies each internal postimage digest; recovery
+ * separately verifies that current bytes differ from the trusted Git baseline,
+ * allowing legitimate edits made after the packet was captured. */
 export interface VerifiedReviewPacketRecovery {
   readonly schemaVersion: 1 | typeof REVIEW_PACKET_SCHEMA_VERSION;
   readonly packetId: string;

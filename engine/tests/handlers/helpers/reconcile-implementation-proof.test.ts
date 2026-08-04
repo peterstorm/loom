@@ -176,19 +176,25 @@ describe("historical baseline recovery CLI", () => {
     expect(atomicFailure.status).not.toBe(0);
     expect(readFileSync(statePath, "utf-8")).toBe(beforeAtomicFailure);
 
-    writeFileSync(join(root, "src", "a.ts"), "export const drifted = true;\n");
-    const byteMismatch = spawnSync("bun", [
+    // The trusted baseline did not contain this path. Returning to that exact
+    // state cannot discharge a declared-artifact change, even with a packet.
+    rmSync(join(root, "src", "a.ts"));
+    const unchangedFromBaseline = spawnSync("bun", [
       CLI, "helper", "reconcile-implementation-proof", "--wave", "2",
       "--baseline-sha", historical,
       "--packet", `T5=${packetRelative}`,
     ], {
       cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
     });
-    expect(byteMismatch.status).not.toBe(0);
-    expect(byteMismatch.stderr).toContain("does not match current bytes");
+    expect(unchangedFromBaseline.status).not.toBe(0);
+    expect(unchangedFromBaseline.stderr).toContain("current bytes do not differ from recovered baseline");
     expect(readFileSync(statePath, "utf-8")).toBe(beforeAtomicFailure);
-    writeFileSync(join(root, "src", "a.ts"), implemented);
 
+    // A later legitimate edit no longer equals the packet postimage, but it
+    // still differs from the trusted baseline and retains T5's packet-proven
+    // cumulative write attribution.
+    const laterBytes = "export const driftedLater = true;\n";
+    writeFileSync(join(root, "src", "a.ts"), laterBytes);
     const recovered = spawnSync("bun", [
       CLI, "helper", "reconcile-implementation-proof", "--wave", "2",
       "--baseline-sha", historical,
@@ -197,6 +203,7 @@ describe("historical baseline recovery CLI", () => {
       cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
     });
     expect(recovered.status, recovered.stderr).toBe(0);
+    expect(readFileSync(join(root, "src", "a.ts"), "utf-8")).toBe(laterBytes);
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
     expect(state.tasks[0]).toMatchObject({
       status: "implemented",

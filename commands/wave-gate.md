@@ -72,15 +72,16 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper reconcile-implementation-proof \
 
 Repeat `--packet` to union immutable packets for one Task or cover multiple
 Tasks. The override must be one exact commit SHA that is an ancestor of `HEAD`.
-Every packet is canonical-ID verified (including legacy schema-v1 text packets),
-bound to its embedded Task and the same baseline, constrained to that Task's
-declared paths, and required to match current postimage bytes. Declared paths
-are repository-validated, historical bytes are snapshotted, and packet ids,
-recovered paths, and the recovery SHA are persisted before one atomic state
-write. Legacy v1 binary postimages cannot recover write evidence because their
-old UTF-8 serialization was lossy. The helper does not manufacture completion
-or test evidence: a task remains pending and prints its exact failed obligations
-when evidence is still missing.
+Every packet is canonical-ID and internal-content-digest verified (including
+legacy schema-v1 packets), bound to its embedded Task and the same baseline,
+and constrained to that Task's declared paths. Recovery then verifies that each
+attributed path's current bytes differ from the trusted Git baseline. It does
+not require current bytes to equal the packet's historical postimage, because
+later legitimate edits are cumulative. Declared paths are repository-validated,
+historical bytes are snapshotted, and packet ids, recovered paths, and the
+recovery SHA are persisted before one atomic state write. The helper does not
+manufacture completion or test evidence: a task remains pending and prints its
+exact failed obligations when evidence is still missing.
 
 **New test verification:** The `update-task-status` SubagentStop hook also checks that agents wrote NEW test methods (not just reran existing). It diffs against the per-task `start_sha` baseline (set by PreToolUse hook) to scope detection to each task's changes. Both a passing `test_result` and `new_tests_written == true` are required for the wave gate to pass.
 

@@ -16,7 +16,6 @@ import {
 import { attributedChangedArtifacts } from "../../core/artifact-baseline";
 import {
   parseReviewPacketRecovery,
-  sha256Bytes,
   type VerifiedReviewPacketRecovery,
 } from "../../core/review-packet";
 import {
@@ -136,23 +135,23 @@ function recoverPacketEvidence(
       throw new Error(`recovery packet ${inspectedPacket.relative} declaredPaths do not equal ${task.id}.file_list`);
     }
     const declaredSet = new Set(declared);
-    const artifactByPath = new Map(packet.artifacts.map((artifact) => [artifact.path, artifact]));
+    const artifactPaths = new Set(packet.artifacts.map((artifact) => artifact.path));
+    const currentChangesFromBaseline = new Set(
+      changedDeclaredArtifactsSinceRevision(root, baselineSha, declared),
+    );
     const recoveredPaths: string[] = [];
     for (const path of packet.modifiedPaths.filter((candidate) => declaredSet.has(candidate))) {
-      const artifact = artifactByPath.get(path);
-      if (!artifact) throw new Error(`recovery packet ${inspectedPacket.relative} has no artifact for ${path}`);
-      const current = inspectRepositoryPath(root, path, `recovered artifact ${path}`);
-      if (artifact.postimageSha256 === null) {
-        if (current.exists) throw new Error(`recovery packet ${inspectedPacket.relative} records ${path} deleted but it currently exists`);
-      } else {
-        if (!current.exists) throw new Error(`recovery packet ${inspectedPacket.relative} records ${path} present but it is currently missing`);
-        const currentSha = sha256Bytes(readFileSync(current.absolute));
-        if (currentSha !== artifact.postimageSha256) {
-          throw new Error(
-            `recovery packet ${inspectedPacket.relative} postimage for ${path} does not match current bytes` +
-            `${packet.schemaVersion === 1 ? " (legacy v1 binary postimages cannot recover lossy content)" : ""}`,
-          );
-        }
+      if (!artifactPaths.has(path)) {
+        throw new Error(`recovery packet ${inspectedPacket.relative} has no artifact for ${path}`);
+      }
+      // A packet proves that this Task historically wrote the path. Current
+      // bytes may legitimately contain later cumulative edits, so bind the
+      // recovered attribution to the trusted Git baseline—not to the packet's
+      // historical postimage.
+      if (!currentChangesFromBaseline.has(path)) {
+        throw new Error(
+          `recovery packet ${inspectedPacket.relative} names ${path}, but current bytes do not differ from recovered baseline ${baselineSha}`,
+        );
       }
       recoveredPaths.push(path);
     }
