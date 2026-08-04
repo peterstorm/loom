@@ -14,6 +14,7 @@ import {
   selectPanelLenses,
   serializeJudgeVerdict,
   serializeRankings,
+  type CandidateFilename,
 } from "../../src/core/panel-contract";
 import { ARCHITECTURE_LAYOUT } from "../../src/core/panel-kernel";
 import { PANEL_JUDGES_DEFAULT } from "../../src/config";
@@ -260,7 +261,7 @@ describe("parseJudgeVerdict", () => {
 });
 
 /** Build a validated JudgeVerdict for `criterion` from candidate→score pairs. */
-function verdictFor(criterion: string, scores: readonly (readonly [string, number])[]) {
+function verdictFor(criterion: string, scores: readonly (readonly [CandidateFilename, number])[]) {
   const ordered = [...scores].sort((a, b) => b[1] - a[1]);
   const parsed = parseJudgeVerdict(
     JSON.stringify({
@@ -273,7 +274,7 @@ function verdictFor(criterion: string, scores: readonly (readonly [string, numbe
       })),
     }),
     criterion,
-    ordered.map(([candidate]) => candidateFilename(candidate.replace(/^candidate-/, "").replace(/\.md$/, ""))),
+    ordered.map(([candidate]) => candidate),
   );
   if (!parsed.ok) throw new Error(`fixture invalid: ${parsed.errors.join("; ")}`);
   return parsed.value;

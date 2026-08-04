@@ -260,7 +260,7 @@ export type PanelManifest = Readonly<{
 /** Run-scoped artifact filename for one lens's candidate. The ONLY constructor
  *  of `CandidateFilename` — mint here or the compiler will not accept it as a
  *  candidate id, which is what keeps a lens name out of that position. */
-export function candidateFilename(lens: string): CandidateFilename {
+export function candidateFilename(lens: PanelLens): CandidateFilename {
   return `candidate-${lens}.md` as CandidateFilename;
 }
 

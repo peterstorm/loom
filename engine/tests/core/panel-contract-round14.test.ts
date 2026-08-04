@@ -198,7 +198,7 @@ describe("aggregateVerdicts validates the score domain when called standalone", 
 
 describe("serializeRankings numbers every row, not just the first", () => {
   it("emits 1..N with no duplicates", () => {
-    const candidates = ["simplicity-first", "type-driven-fp", "risk-security-first"].map(candidateFilename);
+    const candidates = (["simplicity-first", "type-driven-fp", "risk-security-first"] as const).map(candidateFilename);
     const ranked = aggregateVerdicts(
       [verdictOf("c0", [[candidates[0]!, 9], [candidates[1]!, 7], [candidates[2]!, 5]])],
       ["c0"],

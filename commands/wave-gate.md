@@ -428,12 +428,13 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper complete-wave-gate
 ```
 
 The helper performs **six checks** before advancing (in evaluation order):
-1. **Per-task test evidence** — all wave tasks must have a passing `test_result` (`{"verdict": "trusted-pass"}`, or an untrusted result with `passed: true`); tasks declaring `new_tests_required == false` are exempt
-2. **New tests written** — all wave tasks must have `new_tests_written == true` OR `new_tests_required == false`
-3. **Per-task review status** — every wave task's `review_status` must be `passed` or `blocked` (`pending`, absent, or `evidence_capture_failed` all fail the check)
-4. **Spec alignment** — `spec_check.critical_count == 0`
-5. **No critical findings** — code review `critical_findings` count must be 0 (findings the Step 3.5 panel refuted have already moved to `refuted_findings` and no longer count)
-6. **Lifecycle machine artifacts** — every lifecycle machine file the plan binds to this wave's tasks must exist on disk (at the declared path or a suffix-matched task `file_list` path); no plan in state skips the check, but a plan that is named yet unreadable **fails the gate** (fail-closed)
+1. **Implementation proof** — every wave task must have status `implemented`/`completed` and `proof.state == "satisfied"`; the gate never manufactures completion from pending or failed proof
+2. **Per-task test evidence** — all wave tasks must have a passing `test_result` (`{"verdict": "trusted-pass"}`, or an untrusted result with `passed: true`); tasks declaring `new_tests_required == false` are exempt
+3. **New tests written** — all wave tasks must have `new_tests_written == true` OR `new_tests_required == false`
+4. **Per-task review status** — every wave task's `review_status` must be `passed` or `blocked` (`pending`, absent, or `evidence_capture_failed` all fail the check)
+5. **Spec alignment** — `spec_check.critical_count == 0`
+6. **No critical findings** — code review `critical_findings` count must be 0 (findings the Step 3.5 panel refuted have already moved to `refuted_findings` and no longer count)
+7. **Lifecycle machine artifacts** — every lifecycle machine file the plan binds to this wave's tasks must exist on disk (at the declared path or a suffix-matched task `file_list` path); no plan in state skips the check, but a plan that is named yet unreadable **fails the gate** (fail-closed)
 
 If any check fails, the helper exits with error and the wave does NOT advance. Fix the issue and re-run `/wave-gate`.
 

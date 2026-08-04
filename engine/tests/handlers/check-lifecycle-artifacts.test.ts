@@ -9,6 +9,7 @@ import gateHandler, {
 } from "../../src/handlers/helpers/complete-wave-gate";
 import type { Task } from "../../src/types";
 import type { PlanModels } from "../../src/parsers/parse-plan-models";
+import { evaluateTaskProof } from "../../src/core/proof-obligations";
 
 function waveTask(fileList: string[]): Task {
   return {
@@ -110,7 +111,7 @@ describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {
   });
 });
 
-describe("complete-wave-gate handler wiring (check 5 is actually in the gate)", () => {
+describe("complete-wave-gate handler wiring (check 7 is actually in the gate)", () => {
   let dirs: string[] = [];
 
   function tempDir(): string {
@@ -135,6 +136,16 @@ describe("complete-wave-gate handler wiring (check 5 is actually in the gate)", 
 
   function writeGateState(dir: string, planFile: string, machineFile: string): string {
     const statePath = join(dir, "active_task_graph.json");
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: [machineFile] },
+      {
+        taskCompleted: true,
+        testResult: { verdict: "trusted-pass" },
+        filesModified: [machineFile],
+        newTestsWritten: true,
+      },
+    );
+    if (proof.state !== "satisfied") throw new Error("gate fixture proof must be satisfied");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute",
       phase_artifacts: {},
@@ -145,7 +156,7 @@ describe("complete-wave-gate handler wiring (check 5 is actually in the gate)", 
       executing_tasks: [],
       tasks: [{
         id: "T1", description: "implement machine", agent: "code-implementer-agent",
-        wave: 1, status: "implemented", depends_on: [],
+        wave: 1, status: "implemented", proof, depends_on: [],
         new_tests_required: true, test_result: { verdict: "trusted-pass" }, new_tests_written: true,
         review_status: "passed", critical_findings: [], advisory_findings: [],
         file_list: [machineFile],

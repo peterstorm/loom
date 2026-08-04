@@ -360,15 +360,20 @@ function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
   // Both sides are `collapseWhitespace`-normalized (every claim reaching either
   // view is built by makeDraftFinding), so comparison by value is exact.
   //
-  // Claim identity is severity-blind, but severity authority is not. Matching
-  // by (claim, severity) duplicated a claim when the block mislabeled its own
-  // marker; allowing the winning block to settle severity instead let that same
-  // mismatch demote a blocker. `alignStructuredSeverity` keeps one record with
-  // the block's location and the marker's severity before this pool is built.
-  const blockPool = structured.map((draft) => draft.claim);
+  // After alignment, severity is authoritative identity too. Separate pools
+  // prevent a structured advisory from consuming a same-text CRITICAL marker
+  // merely because critical carry-over is evaluated first. A block entry that
+  // mislabeled its only marker was already moved to that marker's severity by
+  // alignStructuredSeverity, so separate pools do not reintroduce duplicates.
+  const criticalBlockPool = structured
+    .filter((draft) => draft.severity === "critical")
+    .map((draft) => draft.claim);
+  const advisoryBlockPool = structured
+    .filter((draft) => draft.severity === "advisory")
+    .map((draft) => draft.claim);
   const unnamedByBlock = draftsFromClaims(
-    unconsumedClaims(scraped.critical, blockPool),
-    unconsumedClaims(scraped.advisory, blockPool),
+    unconsumedClaims(scraped.critical, criticalBlockPool),
+    unconsumedClaims(scraped.advisory, advisoryBlockPool),
   );
 
   if (!accountsForAll) {
@@ -384,12 +389,15 @@ function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
     // file/line intact.
     // Consumed multiset-wise, like `removeOnce`: a block naming a claim twice
     // against markers naming it once contributes exactly one carry-over. One
-    // pool across both severities, for the reason `blockPool` is severity-blind
-    // above — the markers won here, so the marker line's severity is the
-    // answer, and a block entry that merely disagreed about severity is a
-    // duplicate to drop, not a claim to carry over.
-    const markerPool = [...scraped.critical, ...scraped.advisory];
-    const recovered = structured.filter((draft) => !consumeClaim(markerPool, draft.claim));
+    // pool per severity for the same reason as the winning side. Alignment has
+    // already moved a mislabeled block entry onto its marker's severity, while
+    // genuinely separate same-text critical/advisory markers retain two slots.
+    const criticalMarkerPool = [...scraped.critical];
+    const advisoryMarkerPool = [...scraped.advisory];
+    const recovered = structured.filter((draft) => !consumeClaim(
+      draft.severity === "critical" ? criticalMarkerPool : advisoryMarkerPool,
+      draft.claim,
+    ));
     return makeParsedFindings({
       drafts: [...scraped.drafts, ...recovered],
       ...counts,

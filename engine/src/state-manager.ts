@@ -23,6 +23,7 @@ import {
 } from "./core/findings";
 import type { TaskGraph } from "./types";
 import { parseTaskProof } from "./core/proof-obligations";
+import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
 
 /** Resolve task graph path for cross-repo access. The session id comes from
  *  hook input, so it is PARSED before naming a file under SUBAGENT_DIR — an
@@ -151,6 +152,13 @@ function taskUnionError(v: unknown, index: number): string | null {
     (!Array.isArray(t.files_modified) || t.files_modified.some((f) => typeof f !== "string"))
   ) {
     return `tasks[${index}] ("${id}"): files_modified must be an array of strings when present`;
+  }
+  if (t.artifact_baseline !== undefined) {
+    const baseline = parseDeclaredArtifactBaseline(
+      t.artifact_baseline,
+      `tasks[${index}] ("${id}"): artifact_baseline`,
+    );
+    if (!baseline.ok) return baseline.errors.join("; ");
   }
   if (t.plan_context !== undefined && typeof t.plan_context !== "string") {
     return `tasks[${index}] ("${id}"): plan_context must be a string when present`;

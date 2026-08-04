@@ -11,8 +11,8 @@ failure mode** — so a designer argues the honest strongest case for the lens
 without strawmanning it.
 
 There are **five** lenses, and each designer takes exactly one. `--panel=N`
-requires at least 2 (the mandatory approach gate needs two options) and is capped
-at 5; a larger value clamps to the lens count.
+requires at least 2 (the mandatory approach gate needs two options) and at most
+5; values outside that range are rejected.
 
 | Lens | Optimizes for | Willing to sacrifice |
 |---|---|---|

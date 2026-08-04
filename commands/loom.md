@@ -62,7 +62,7 @@ parent orchestrator's current model.
 - `/loom --skip-clarify` - Skip clarify phase (accept markers as-is)
 - `/loom --skip-specify` - Skip brainstorm/specify/clarify (use existing spec)
 - `/loom --skip-plan-alignment` - Skip plan-alignment phase (proceed directly to decompose)
-- `/loom --panel` - Architecture panel mode: N designer agents generate candidates in parallel (each with a lens), adversarial judges rank them against interview-derived criteria, and the finalizer presents the ranked approaches. `--panel=N` requires a decimal integer of at least `PANEL_DESIGNERS_MIN` (currently 2); malformed, fractional, duplicate, or smaller values are rejected. Values above the number of distinct lenses (5) are capped. Bare `--panel` uses `PANEL_DESIGNERS_DEFAULT` (currently 3). Opt-in; only Phase 3 changes. See [panel-lenses.md](../references/panel-lenses.md) and [Phase 3 (panel mode)](#phase-3-panel-mode-loom---panel).
+- `/loom --panel` - Architecture panel mode: N designer agents generate candidates in parallel (each with a lens), adversarial judges rank them against interview-derived criteria, and the finalizer presents the ranked approaches. `--panel=N` requires a decimal integer of at least `PANEL_DESIGNERS_MIN` (currently 2); malformed, fractional, duplicate, or smaller values are rejected. Values above the number of distinct lenses (5) are rejected. Bare `--panel` uses `PANEL_DESIGNERS_DEFAULT` (currently 3). Opt-in; only Phase 3 changes. See [panel-lenses.md](../references/panel-lenses.md) and [Phase 3 (panel mode)](#phase-3-panel-mode-loom---panel).
 - `/loom --status` - Show current task graph status *(planned — use jq commands in Observability section)*
 - `/loom --complete` - Finalize, clean up state *(planned — manually remove state file for now)*
 - `/loom --abort` - Cancel mid-execution, clean state *(planned — manually remove state file for now)*
@@ -230,7 +230,7 @@ Substitute variables:
 
 ## Phase 3 (panel mode): `/loom --panel`
 
-Runs only when `--panel` (or `--panel=N`) is passed. Reject multiple panel flags. Bare `--panel` uses `PANEL_DESIGNERS_DEFAULT`; for `--panel=N`, require `N` to match `^[0-9]+$` and be at least `PANEL_DESIGNERS_MIN`, then cap it at `PANEL_LENS_COUNT`. This is the markdown shell's executable contract mirroring `engine/src/config.ts`; never silently reinterpret malformed/fractional input.
+Runs only when `--panel` (or `--panel=N`) is passed. Reject multiple panel flags. Bare `--panel` uses `PANEL_DESIGNERS_DEFAULT`; for `--panel=N`, require `N` to match `^[0-9]+$` and be at least `PANEL_DESIGNERS_MIN`, then require it to be at most `PANEL_LENS_COUNT`. This is the markdown shell's executable contract mirroring `engine/src/config.ts`; never silently reinterpret malformed/fractional input.
 
 The `current_phase` stays `"architecture"` throughout. Panel agents are accepted only while that current phase is active and never advance it; the final `architecture-agent` advances to plan-alignment, or directly to decompose when `--skip-plan-alignment` is set.
 

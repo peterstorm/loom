@@ -145,14 +145,14 @@ describe("panel-mode judge-verdict round-trip through the substitution gate", ()
       criterion: "simplicity",
       rankings: [
         {
-          candidate: "candidate-simplicity.md",
+          candidate: "candidate-simplicity-first.md",
           score: 7,
           fatal_flaw: null,
           strongest_idea: "prefer the {simplicity} adapter over the layered one",
         },
       ],
     });
-    const parsed = parseJudgeVerdict(raw, "simplicity", [candidateFilename("simplicity")]);
+    const parsed = parseJudgeVerdict(raw, "simplicity", [candidateFilename("simplicity-first")]);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     const canonical = serializeJudgeVerdict(parsed.value);

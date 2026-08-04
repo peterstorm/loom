@@ -10,6 +10,7 @@ import { TASK_GRAPH_PATH } from "../config";
 import { extractTaskId } from "../utils/extract-task-id";
 import { StateManager } from "../state-manager";
 import * as git from "../utils/git";
+import { captureDeclaredArtifactBaseline } from "../utils/artifact-baseline";
 
 export interface ValidateTaskExecutionInput {
   prompt: string;
@@ -79,15 +80,27 @@ export async function validateTaskExecution(input: ValidateTaskExecutionInput): 
     }
   }
 
-  // Store baseline SHA + add to executing_tasks atomically
+  // Capture the exact declared-artifact state BEFORE the agent starts. A
+  // transcript records attempted tool calls; only this byte-level baseline can
+  // prove that a declared artifact actually changed during the task.
   if (taskId && git.isGitRepo()) {
     const sha = git.headSha();
-    if (sha) {
+    const root = git.repositoryRoot();
+    if (sha && root) {
+      let artifactBaseline: ReturnType<typeof captureDeclaredArtifactBaseline>;
+      try {
+        artifactBaseline = captureDeclaredArtifactBaseline(root, task.file_list ?? []);
+      } catch (error) {
+        return {
+          kind: "block",
+          message: `BLOCKED: Cannot snapshot declared artifacts for ${taskId}: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
       await mgr.update((s) => ({
         ...s,
         executing_tasks: [...new Set([...(s.executing_tasks ?? []), taskId])],
         tasks: s.tasks.map((t) =>
-          t.id === taskId ? { ...t, start_sha: sha } : t
+          t.id === taskId ? { ...t, start_sha: sha, artifact_baseline: artifactBaseline } : t
         ),
       }));
     }

@@ -57,6 +57,22 @@ describe("standalone review aggregate", () => {
     expect(!result.ok && result.errors.join("\n")).toContain("CRITICAL_COUNT marker not found");
   });
 
+  it.each([
+    ["absolute", "/tmp/outside.ts", "repo-relative"],
+    ["drive-absolute", "C:/outside.ts", "repo-relative"],
+    ["traversal", "src/../../outside.ts", "must not escape"],
+    ["newline", "src/bad\npath.ts", "single line without NUL"],
+    ["NUL", "src/bad\0path.ts", "single line without NUL"],
+  ])("rejects malformed %s scope paths", (_label, scopePath, message) => {
+    const result = aggregateStandaloneReview({
+      runId: "run.abc",
+      scope: [scopePath],
+      transcripts: [{ agent: "code-reviewer", output: transcript() }],
+    });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.errors.join("\n")).toContain(message);
+  });
+
   it("rejects a transcript finding outside the frozen scope", () => {
     const result = aggregateStandaloneReview({
       runId: "run.abc",

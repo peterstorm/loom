@@ -294,6 +294,34 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }).ok).toBe(true);
   });
 
+  it("parses artifact baselines as an exact discriminated union", () => {
+    const valid = [{
+      artifact: "src/a.ts",
+      snapshot: { kind: "sha256", digest: "a".repeat(64) },
+    }, {
+      artifact: "src/new.ts",
+      snapshot: { kind: "missing" },
+    }];
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, artifact_baseline: valid }],
+    }).ok).toBe(true);
+
+    for (const artifact_baseline of [
+      "not-an-array",
+      [{ artifact: "src/a.ts", snapshot: { kind: "sha256", digest: "bad" } }],
+      [{ artifact: "src/a.ts", snapshot: { kind: "unknown" } }],
+      [valid[0], valid[0]],
+    ]) {
+      const parsed = parseTaskGraph({
+        ...validGraph,
+        tasks: [{ ...validTask, artifact_baseline }],
+      });
+      expect(parsed.ok, JSON.stringify(artifact_baseline)).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toContain("artifact_baseline");
+    }
+  });
+
   it("rejects non-array tasks and non-object wave_gates", () => {
     expect(parseTaskGraph({ ...validGraph, tasks: "none" }).ok).toBe(false);
     expect(parseTaskGraph({ ...validGraph, wave_gates: [] }).ok).toBe(false);

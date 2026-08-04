@@ -18,7 +18,7 @@ import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
 import { validateTaskExecution } from "../engine/src/core/validate-task-execution";
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { expectedSpawnModel, parsePiSpawnItems } from "../engine/src/core/model-profiles";
-import { TEST_COMMAND_PATTERNS } from "../engine/src/core/tool-vocabulary";
+
 
 // Engine parsers (format-aware)
 import { parseFilesModified } from "../engine/src/parsers/parse-files-modified";
@@ -53,43 +53,16 @@ import * as git from "../engine/src/utils/git";
 // Linter integration (PostEdit lint via tool_result)
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
 import { lintFile } from "../engine/src/linter/index";
-import { messagesToClaudeJsonl, type PiMessage } from "./transcript-adapter";
+import { messagesToClaudeJsonl, piStructuredTestResult, type PiMessage } from "./transcript-adapter";
 import { materializePiResources } from "./resources";
 import { checkAgentSkillPrompt } from "../engine/src/core/agent-skills";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
 import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
+import { changedDeclaredArtifactsSince } from "../engine/src/utils/artifact-baseline";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const PI_RESOURCE_CACHE = join(PI_AGENT_DIR, "cache", "loom-resources");
-
-/** Structured Pi tool results are weaker than Loom's evidence ledger but
- * stronger than flattened prose: the model cannot fabricate a toolResult
- * message or its `isError` bit. Pair only real test-command calls/results. */
-function piStructuredTestResult(messages: readonly PiMessage[]): { passed: boolean; evidence: string } | null {
-  const testCalls = new Set<string>();
-  let latest: { passed: boolean; evidence: string } | null = null;
-  for (const message of messages) {
-    if (message.role === "assistant") {
-      for (const block of message.content ?? []) {
-        if (block.type !== "toolCall" || block.name?.toLowerCase() !== "bash" || !block.id) continue;
-        const command = typeof block.arguments?.command === "string" ? block.arguments.command : "";
-        if (TEST_COMMAND_PATTERNS.some((pattern) => command.toLowerCase().includes(pattern))) {
-          testCalls.add(block.id);
-        }
-      }
-      continue;
-    }
-    if (message.role !== "toolResult" || !message.toolCallId || !testCalls.has(message.toolCallId)) continue;
-    const text = (message.content ?? [])
-      .filter((block) => block.type === "text")
-      .map((block) => block.text ?? "")
-      .join("\n");
-    const parsed = extractTestEvidence(text);
-    latest = { passed: message.isError !== true && parsed.passed, evidence: parsed.evidence };
-  }
-  return latest;
-}
 
 export default function (pi: ExtensionAPI) {
   // ─── Resource Discovery ───────────────────────────────────────────────
@@ -555,6 +528,23 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
 
+        let proofArtifactsChanged: readonly string[];
+        try {
+          proofArtifactsChanged = changedDeclaredArtifactsSince(
+            git.repositoryRoot() ?? process.cwd(),
+            task.artifact_baseline,
+          );
+        } catch (error) {
+          await mgr.update((s) => ({
+            ...s,
+            executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
+          }));
+          process.stderr.write(
+            `loom(pi): cannot compare declared-artifact baseline for ${taskId}: ${error instanceof Error ? error.message : String(error)} — task left pending\n`,
+          );
+          continue;
+        }
+
         let newTestEvidence = { written: false, evidence: "" };
         if (git.isGitRepo()) {
           // Collect diff: prefer start_sha-based, fall back to untracked test files
@@ -595,6 +585,7 @@ export default function (pi: ExtensionAPI) {
             },
             testEvidence: testEvidence.evidence,
             filesModified,
+            proofArtifactsChanged,
             newTestsWritten: newTestEvidence.written,
             newTestEvidence: newTestEvidence.evidence,
           });

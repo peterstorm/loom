@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { messagesToClaudeJsonl, type PiMessage } from "../../pi/transcript-adapter";
+import { messagesToClaudeJsonl, piStructuredTestResult, type PiMessage } from "../../pi/transcript-adapter";
 import { parseBashTestOutput } from "../src/parsers/parse-bash-test-output";
 import { extractTestEvidence } from "../src/handlers/subagent-stop/update-task-status";
 
-const testRun = (output: string): PiMessage[] => [
+const testRun = (output: string, command = "bun test src/domain/calendar.test.ts"): PiMessage[] => [
   {
     role: "assistant",
     content: [{
       type: "toolCall",
       id: "call-test-1",
       name: "bash",
-      arguments: { command: "bun test src/domain/calendar.test.ts" },
+      arguments: { command },
     }],
   },
   {
@@ -48,5 +48,25 @@ describe("Pi test-evidence transcript adapter", () => {
     messages[1] = { ...messages[1], toolCallId: "different-call" };
 
     expect(parseBashTestOutput(messagesToClaudeJsonl(messages))).toBe("");
+  });
+
+  it("rejects print-only commands that mention a test runner in data or comments", () => {
+    for (const command of [
+      "printf 'bun test\\n654 pass\\n'",
+      "printf '654 pass\\n' # bun test",
+      "echo \"npm test: 5 passing\"",
+    ]) {
+      expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", command))).toBeNull();
+    }
+  });
+
+  it("requires the classified test segment to own the Bash result", () => {
+    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "bun test || true"))).toBeNull();
+    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "bun test | tee out.log"))).toBeNull();
+    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "bun test &"))).toBeNull();
+    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test"))).toEqual({
+      passed: true,
+      evidence: "bun: 654 pass",
+    });
   });
 });

@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { materializePiResources } from "../../pi/resources";
 
 const execFileAsync = promisify(execFile);
@@ -113,7 +114,7 @@ describe("Pi resource materialization", () => {
         const seeded = materializePiResources(packageRoot, cacheRoot);
         writeFileSync(join(seeded.root, "commands", "demo.md"), "corrupt\n");
       }
-      const modulePath = join(process.cwd(), "../pi/resources.ts");
+      const modulePath = fileURLToPath(new URL("../../pi/resources.ts", import.meta.url));
       const program = [
         `import { materializePiResources } from ${JSON.stringify(modulePath)};`,
         `process.stdout.write(materializePiResources(process.env.PACKAGE_ROOT!, process.env.CACHE_ROOT!).root);`,

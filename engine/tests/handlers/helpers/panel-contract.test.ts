@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { closeSync, mkdtempSync, mkdirSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, mkdtempSync, mkdirSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -317,6 +317,24 @@ describe("panel-contract helper CLI", () => {
       const result = run(tmp, ["verdict", "--criterion", "simplicity", ...RUN_ARGS()], verdict);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("the manifest does not name");
+    });
+
+    it("fails closed when named candidates are traversable but the directory cannot be listed", () => {
+      const candidates = join(runDir, "candidates");
+      chmodSync(candidates, 0o111);
+      try {
+        const result = run(tmp, ["verdict", "--criterion", "simplicity", ...RUN_ARGS()], JSON.stringify({
+          criterion: "simplicity",
+          rankings: [
+            { candidate: A, score: 9, fatal_flaw: null, strongest_idea: "x" },
+            { candidate: B, score: 8, fatal_flaw: null, strongest_idea: "y" },
+          ],
+        }));
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("cannot list candidates directory");
+      } finally {
+        chmodSync(candidates, 0o755);
+      }
     });
 
     it("still passes when the directory holds exactly the manifest's candidates", () => {

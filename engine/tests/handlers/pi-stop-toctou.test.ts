@@ -39,6 +39,7 @@ const untrustedPass: UntrustedStopResolution = {
   testResult: { verdict: "untrusted", passed: true, label: "pi-structured: bun: 5 pass" },
   testEvidence: "pi-structured: bun: 5 pass",
   filesModified: ["src/a.ts", "tests/a.test.ts"],
+  proofArtifactsChanged: ["src/a.ts", "tests/a.test.ts"],
   newTestsWritten: true,
   newTestEvidence: "2 new test methods, 4 assertions",
 };

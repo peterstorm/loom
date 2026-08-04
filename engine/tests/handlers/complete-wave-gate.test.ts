@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   applyGateDecision,
+  checkImplementationProof,
   checkTestEvidence,
   checkNewTests,
   checkReviews,
@@ -16,6 +17,18 @@ import {
   type GateIO,
 } from "../../src/handlers/helpers/complete-wave-gate";
 import type { Task, TaskGraph } from "../../src/types";
+import { evaluateTaskProof } from "../../src/core/proof-obligations";
+
+const satisfiedProof = evaluateTaskProof(
+  { newTestsRequired: true, declaredArtifacts: [] },
+  {
+    taskCompleted: true,
+    testResult: { verdict: "trusted-pass" },
+    filesModified: [],
+    newTestsWritten: true,
+  },
+);
+if (satisfiedProof.state !== "satisfied") throw new Error("test fixture proof must be satisfied");
 
 const baseTask: Task = {
   id: "T1",
@@ -23,6 +36,7 @@ const baseTask: Task = {
   agent: "code-implementer-agent",
   wave: 1,
   status: "implemented",
+  proof: satisfiedProof,
   depends_on: [],
   test_result: { verdict: "trusted-pass" },
   test_evidence: "vitest: Tests 5 passed",
@@ -32,6 +46,25 @@ const baseTask: Task = {
   critical_findings: [],
   advisory_findings: [],
 };
+
+describe("checkImplementationProof (pure)", () => {
+  it("requires both an implementation-bearing status and satisfied proof", () => {
+    const failedProof = evaluateTaskProof(
+      { newTestsRequired: false, declaredArtifacts: ["missing.ts"] },
+      { taskCompleted: true, filesModified: [] },
+    );
+    expect(checkImplementationProof([baseTask]).passed).toBe(true);
+    for (const task of [
+      { ...baseTask, status: "pending" as const },
+      { ...baseTask, status: "pending" as const, proof: failedProof },
+      { ...baseTask, proof: undefined },
+    ]) {
+      const result = checkImplementationProof([task]);
+      expect(result.passed).toBe(false);
+      expect(gateCheckMessage(result)).toContain("T1");
+    }
+  });
+});
 
 describe("checkTestEvidence (pure)", () => {
   it("passes when all tasks have test evidence", () => {
@@ -506,10 +539,24 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
     expect(applyGateDecision(locked, decision)).toBe(locked); // no-op, nothing stamped
   });
 
+  it("a failed proof can never be force-completed into an unloadable graph", () => {
+    const failedProof = evaluateTaskProof(
+      { newTestsRequired: false, declaredArtifacts: ["missing.ts"] },
+      { taskCompleted: true, filesModified: [] },
+    );
+    const state = mkGraph({
+      tasks: [{ ...baseTask, status: "pending", proof: failedProof, new_tests_required: false }],
+    });
+    const decision = evaluateWaveGate(state, null, countingDeps().deps);
+    expect(decision.verdict.kind).toBe("fail");
+    expect(gateCheckMessage(decision.checks[0]!)).toContain("proof=failed");
+    expect(applyGateDecision(state, decision)).toBe(state);
+  });
+
   it("a passing decision carries the wave's task ids and the next wave", () => {
     const decision = evaluateWaveGate(mkGraph(), null, countingDeps().deps);
     expect(decision.wave).toBe(1);
-    expect(decision.checks).toHaveLength(6);
+    expect(decision.checks).toHaveLength(7);
     expect(decision.verdict).toEqual({ kind: "pass", taskIds: ["T1"], nextWave: 2 });
   });
 

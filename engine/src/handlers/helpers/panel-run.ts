@@ -218,8 +218,13 @@ function surplusItemErrors(
   let names: readonly string[];
   try {
     names = readdirSync(itemDir);
-  } catch {
-    return [];
+  } catch (error) {
+    // Missing is already diagnosed once per named artifact by artifactError.
+    // Every other failure leaves the on-disk item set unknown and must block.
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    return [
+      `cannot list ${layout.itemDir} directory ${itemDir}: ${error instanceof Error ? error.message : String(error)}`,
+    ];
   }
   const named = new Set(itemPaths.map((path) => basename(path)));
   const surplus = names.filter((name) => !named.has(name)).sort();

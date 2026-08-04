@@ -18,6 +18,7 @@ import { stripNamespace } from "../../utils/strip-namespace";
 import { extractTaskId } from "../../utils/extract-task-id";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import { canonicalRepositoryPaths } from "../../utils/repository-path";
+import { changedDeclaredArtifactsSince } from "../../utils/artifact-baseline";
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
@@ -281,6 +282,9 @@ export interface UntrustedStopResolution {
    *  from `files_modified`; a resolution that omits it makes every wave-gate
    *  lint run over an empty set and report clean (round-16 pi finding). */
   readonly filesModified: readonly string[];
+  /** Declared artifacts whose current bytes differ from the pre-spawn
+   *  baseline. This, not attempted tool calls, discharges artifact proof. */
+  readonly proofArtifactsChanged: readonly string[];
   readonly newTestsWritten: boolean;
   readonly newTestEvidence: string;
 }
@@ -323,7 +327,7 @@ export function applyUntrustedStopResolution(
     {
       taskCompleted: true,
       testResult: resolution.testResult,
-      filesModified: resolution.filesModified,
+      filesModified: resolution.proofArtifactsChanged,
       newTestsWritten: resolution.newTestsWritten,
       newTestEvidence: resolution.newTestEvidence,
     },
@@ -621,6 +625,23 @@ export const runUpdateTaskStatus = async (
     };
   }
 
+  let proofArtifactsChanged: readonly string[];
+  try {
+    proofArtifactsChanged = changedDeclaredArtifactsSince(
+      git.repositoryRoot() ?? process.cwd(),
+      task.artifact_baseline,
+    );
+  } catch (error) {
+    await mgr.update((s) => ({
+      ...s,
+      executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
+    }));
+    return {
+      kind: "error",
+      message: `update-task-status: cannot compare declared-artifact baseline for ${taskId}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+
   // Pre-refactor graphs carried `tests_passed` on the task (replaced by
   // `test_result`, no compat read — unshipped branch). Explain the
   // otherwise-mystifying "missing evidence" once, where we touch the task.
@@ -746,7 +767,7 @@ export const runUpdateTaskStatus = async (
       {
         taskCompleted: true,
         testResult: testEvidence.result,
-        filesModified,
+        filesModified: proofArtifactsChanged,
         newTestsWritten: newTestEvidence.written,
         newTestEvidence: newTestEvidence.evidence,
       },

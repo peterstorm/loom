@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -14,8 +14,10 @@ class FakePi {
 
   registerCommand(): void {}
 
-  async emit(event: string, payload: Record<string, unknown>, context: Record<string, unknown>): Promise<void> {
-    for (const handler of this.handlers.get(event) ?? []) await handler(payload, context);
+  async emit(event: string, payload: Record<string, unknown>, context: Record<string, unknown>): Promise<unknown[]> {
+    const results: unknown[] = [];
+    for (const handler of this.handlers.get(event) ?? []) results.push(await handler(payload, context));
+    return results;
   }
 }
 
@@ -84,9 +86,11 @@ const reviewResult = (task: string, claim: string) => ({
 });
 
 describe("Pi extension review tool_result integration", () => {
-  it("stores wave findings and leaves standalone review state untouched", async () => {
-    vi.resetModules();
-    const module = await vi.importActual("../../pi/extension") as {
+  it("stores wave findings, leaves standalone review state untouched, and enforces Pi agent scope", async () => {
+    // A runtime-resolved ESM import avoids Vitest-only module APIs and keeps
+    // this real extension boundary executable under both Vitest and Bun.
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       default: (pi: unknown) => void;
     };
     const pi = new FakePi();
@@ -96,6 +100,19 @@ describe("Pi extension review tool_result integration", () => {
     const context = {
       sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" },
     };
+    const scopeResults = await pi.emit("tool_call", {
+      toolName: "subagent",
+      input: {
+        agent: "code-reviewer",
+        task: "LOOM_REVIEW_CONTEXT: standalone\nReview the diff",
+        agentScope: "both",
+      },
+    }, context);
+    expect(scopeResults).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("agentScope='user'"),
+    }));
+
     await pi.emit("tool_result", reviewResult("Task: T1", "Pi event shape drops findings"), context);
 
     const captured = JSON.parse(readFileSync(statePath, "utf-8"));

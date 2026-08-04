@@ -4,6 +4,7 @@
 
 import { match } from "ts-pattern";
 import type { TaskProof } from "./core/proof-obligations";
+import type { DeclaredArtifactBaseline } from "./core/artifact-baseline";
 
 // --- Hook Result (discriminated union) ---
 
@@ -297,6 +298,10 @@ export interface Task {
    * dropped critical is indistinguishable from one that was never found.
    */
   refuted_findings?: readonly RefutedFinding[];
+  /** Exact declared-artifact state captured before the implementation agent
+   *  starts. Proof compares current bytes to this baseline; transcript tool
+   *  calls remain lint targets and cannot vouch that a change occurred. */
+  artifact_baseline?: readonly DeclaredArtifactBaseline[];
   start_sha?: string;
   failure_reason?: string;
   retry_count?: number;

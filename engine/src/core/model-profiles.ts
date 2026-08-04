@@ -119,7 +119,7 @@ const agentPolicy = <Agent extends string>(
  * Keep this catalog exhaustive; validateAgentPolicyCatalog is the pure drift
  * check used by a shell or test after it discovers the actual filenames.
  */
-export const AGENT_POLICIES: readonly AgentPolicy[] = Object.freeze([
+export const AGENT_POLICIES = Object.freeze([
   agentPolicy("adr-writer-agent", "implementation"),
   agentPolicy("arch-designer-agent", "panel-design"),
   agentPolicy("arch-interviewer-agent", "panel-design"),
@@ -148,7 +148,7 @@ export const AGENT_POLICIES: readonly AgentPolicy[] = Object.freeze([
   agentPolicy("test-engineer", "implementation"),
   agentPolicy("ts-test-agent", "implementation"),
   agentPolicy("type-design-analyzer", "focused-review"),
-]);
+] as const satisfies readonly AgentPolicy[]);
 
 export type LoomAgentName = (typeof AGENT_POLICIES)[number]["agent"];
 

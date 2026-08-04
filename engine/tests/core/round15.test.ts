@@ -379,6 +379,26 @@ describe("chooseSource keeps claim identity and marker severity in lockstep", ()
     });
   });
 
+  it("does not let a same-text advisory consume and erase a critical marker", () => {
+    const shared = "same text, different severity";
+    const parsed = parseMachineSummary([
+      "### Machine Summary",
+      "CRITICAL_COUNT: 1",
+      "ADVISORY_COUNT: 1",
+      `CRITICAL: ${shared}`,
+      `ADVISORY: ${shared}`,
+      block([
+        { severity: "advisory", file: "src/advisory.ts", line: 1, claim: shared },
+        { severity: "critical", file: "src/other.ts", line: 2, claim: "another blocker" },
+      ]),
+    ].join("\n"))!;
+
+    expect(parsed.critical).toEqual(["another blocker", shared]);
+    expect(parsed.advisory).toEqual([shared]);
+    expect(parsed.drafts.filter((draft) => draft.claim === shared).map((draft) => draft.severity))
+      .toEqual(["advisory", "critical"]);
+  });
+
   it("a CRITICAL_COUNT that understates its own marker lines still sets the bar", () => {
     // The `scraped.critical.length` term of `claimedCritical`. With only
     // `criticalCount` the bar here would be 0, a one-entry block would clear it,
@@ -589,7 +609,7 @@ describe("kernel rules that were deletable with the suite green", () => {
 
 describe("aggregateVerdicts ranks by a total order", () => {
   const CRITERIA = ["simplicity", "testability", "fit"];
-  const LENSES = ["simplicity-first", "type-driven-fp", "risk-security-first"];
+  const LENSES = ["simplicity-first", "type-driven-fp", "risk-security-first"] as const;
   const candidates = LENSES.map(candidateFilename);
 
   const verdictsFor = (scores: Record<string, readonly number[]>): readonly JudgeVerdict[] =>

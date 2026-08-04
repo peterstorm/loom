@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import updateTaskStatus, { extractTestEvidence, analyzeNewTests, isMachineBound, resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
 import { legacyTestsPassedNote } from "../../src/types";
 import type { TaskGraph } from "../../src/types";
+import { captureDeclaredArtifactBaseline } from "../../src/utils/artifact-baseline";
 
 describe("update-task-status — malformed stdin guard (directly-registered route)", () => {
   it("returns a contextual error naming that status/evidence was NOT updated, not a bare throw", async () => {
@@ -440,6 +441,10 @@ describe("update-task-status — transcript path resolution", () => {
     mkdirSync(projectDir, { recursive: true });
 
     const statePath = join(tmpDir, "graph.json");
+    const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
+    const artifactBaseline = opts.modifiedPath
+      ? captureDeclaredArtifactBaseline(repoRoot, ["engine/src/types.ts"])
+      : undefined;
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute",
       phase_artifacts: {},
@@ -451,7 +456,10 @@ describe("update-task-status — transcript path resolution", () => {
       tasks: [
         {
           id: "T1", description: "a task", agent: "code-implementer-agent", status: "pending", wave: 1, depends_on: [],
-          ...(opts.modifiedPath ? { file_list: ["engine/src/types.ts"] } : {}),
+          ...(opts.modifiedPath ? {
+            file_list: ["engine/src/types.ts"],
+            artifact_baseline: artifactBaseline,
+          } : {}),
         },
       ],
       wave_gates: {},
@@ -511,7 +519,7 @@ describe("update-task-status — transcript path resolution", () => {
     expect(task?.proof?.state).toBe("failed");
   });
 
-  it("canonicalizes an absolute in-repo transcript path before proof/state persistence", async () => {
+  it("canonicalizes transcript paths but does not treat an attempted no-op Write as artifact proof", async () => {
     const s = await makeSession({
       plantTranscript: true,
       modifiedPath: join(dirname(fileURLToPath(import.meta.url)), "../../src/types.ts"),
@@ -531,8 +539,8 @@ describe("update-task-status — transcript path resolution", () => {
       artifact: "engine/src/types.ts",
     });
     expect(task?.proof?.results).toContainEqual(expect.objectContaining({
-      state: "satisfied",
-      evidence: { kind: "declared-artifact-changed", artifact: "engine/src/types.ts" },
+      state: "failed",
+      failure: { kind: "declared-artifact-not-changed", artifact: "engine/src/types.ts" },
     }));
   });
 
