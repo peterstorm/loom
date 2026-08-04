@@ -58,30 +58,31 @@ const handler: HookHandler = async (stdin) => {
 
   // Resolved, not read off the payload: a harness that sends no
   // `agent_transcript_path` would otherwise lose every reviewer's findings —
-  // the wave gate would then read a clean review that never happened.
+  // the wave gate would then read a clean review that never happened. Read the
+  // trusted first-user prompt BEFORE requiring reviewer output: it carries the
+  // task binding even when the assistant transcript is empty or malformed.
   const rawPath = resolveAgentTranscriptPath(input) ?? input.agent_transcript_path ?? "";
-  const transcript = await readTranscriptWithRetry(rawPath, /\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*\d+/);
-  if (!transcript) {
-    warn(`empty transcript for ${agentType} (path=${rawPath || "<unset>"}) — findings NOT stored`);
-    return { kind: "passthrough" };
-  }
   let trustedPrompt: string;
   try {
     const path = rawPath.replace(/^~/, process.env.HOME ?? "~");
     trustedPrompt = parseFirstUserPrompt(readFileSync(path, "utf-8"));
   } catch (error) {
-    warn(`cannot read trusted reviewer prompt (${error instanceof Error ? error.message : String(error)}) — findings NOT stored`);
-    return { kind: "passthrough" };
+    return {
+      kind: "error",
+      message: `[loom] store-reviewer-findings: cannot read trusted ${agentType} prompt (${error instanceof Error ? error.message : String(error)}) — review evidence cannot be attributed`,
+    };
   }
   if (hasStandaloneReviewContext(trustedPrompt)) {
     process.stderr.write(`[loom] store-reviewer-findings: ${agentType} belongs to a standalone review run — task state untouched\n`);
     return { kind: "passthrough" };
   }
 
-  const taskId = extractTaskId(transcript);
+  const taskId = extractTaskId(trustedPrompt);
   if (!taskId) {
-    warn(`${agentType} review completed without an extractable task ID — findings NOT stored`);
-    return { kind: "passthrough" };
+    return {
+      kind: "error",
+      message: `[loom] store-reviewer-findings: trusted ${agentType} prompt has no extractable task ID — review evidence cannot be attributed`,
+    };
   }
 
   // `tasks.map` over an id no task holds is a total no-op, and the log line
@@ -106,10 +107,17 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "passthrough" };
   }
 
-  const resolution = constrainReviewResolutionToScope(
-    resolveReviewFindings(transcript, agentType),
-    [...(targetTask.file_list ?? []), ...(targetTask.files_modified ?? [])],
-  );
+  const transcript = await readTranscriptWithRetry(rawPath, /\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*\d+/);
+  const resolution = transcript
+    ? constrainReviewResolutionToScope(
+        resolveReviewFindings(transcript, agentType),
+        [...(targetTask.file_list ?? []), ...(targetTask.files_modified ?? [])],
+      )
+    : {
+        kind: "evidence-failed" as const,
+        agent: agentType,
+        message: `review transcript empty or unreadable at ${rawPath || "<unset>"}`,
+      };
 
   await mgr.update((s) => ({
     ...s,

@@ -15,6 +15,7 @@ import {
   aggregateStandaloneReview,
   finalizeStandaloneReview,
   parseStandaloneAggregate,
+  parseStandaloneReviewScope,
   serializeAdjudicatedStandaloneReview,
   serializeStandaloneAggregate,
   type StandaloneReviewAggregate,
@@ -67,14 +68,12 @@ function parseReviewPlan(raw: unknown, runId: string): Parse<ReviewSession> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ok: false, errors: ["review plan must be an object"] };
   const record = raw as Record<string, unknown>;
   const errors: string[] = [];
-  const scope = Array.isArray(record.scope) && record.scope.every((path) => typeof path === "string" && path.trim() !== "")
-    ? record.scope.map((path) => (path as string).trim()) : [];
-  if (scope.length === 0) errors.push("review plan.scope must be a non-empty string array");
-  if (new Set(scope).size !== scope.length) errors.push("review plan.scope must be distinct");
+  const parsedScope = parseStandaloneReviewScope(record.scope, "review plan.scope");
+  if (!parsedScope.ok) errors.push(...parsedScope.errors);
   const expectedAgents = parseAgents(record.expected_agents, "review plan.expected_agents", errors);
-  return errors.length > 0
+  return errors.length > 0 || !parsedScope.ok
     ? { ok: false, errors }
-    : { ok: true, value: { runId, scope, expectedAgents } };
+    : { ok: true, value: { runId, scope: parsedScope.value, expectedAgents } };
 }
 
 function serializeSession(session: ReviewSession): string {

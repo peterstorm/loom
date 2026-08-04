@@ -230,7 +230,7 @@ export interface Task {
   /** Engine-authored proof aggregate. New graphs always carry it. */
   proof?: TaskProof;
   /** Files this task creates/modifies (decompose contract); older graphs may lack it */
-  file_list?: string[];
+  file_list?: readonly string[];
   /** Test outcome + trust provenance; absent until an impl agent completes. */
   test_result?: TaskTestResult;
   test_evidence?: string;

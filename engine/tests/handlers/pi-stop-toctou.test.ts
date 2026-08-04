@@ -44,11 +44,9 @@ const untrustedPass: UntrustedStopResolution = {
   newTestEvidence: "2 new test methods, 4 assertions",
 };
 
-describe("applyUntrustedStopResolution — untrusted resolutions never supersede ground truth (TOCTOU re-check)", () => {
-  it.each<[string, TaskTestResult, "implemented" | "pending"]>([
-    ["trusted-pass", { verdict: "trusted-pass" }, "implemented"],
-    ["trusted-fail", { verdict: "trusted-fail" }, "pending"],
-  ])("a concurrent %s verdict stands while cumulative structural evidence lands", (_name, verdict, status) => {
+describe("applyUntrustedStopResolution — trust and freshness are re-checked atomically", () => {
+  it("preserves a trusted failure while cumulative structural evidence lands", () => {
+    const verdict: TaskTestResult = { verdict: "trusted-fail" };
     const s = graph([task({ id: "T1", status: "implemented", test_result: verdict })], ["T1", "T2"]);
 
     const applied = applyUntrustedStopResolution(s, "T1", untrustedPass);
@@ -56,12 +54,58 @@ describe("applyUntrustedStopResolution — untrusted resolutions never supersede
     expect(applied.skipped).toBe(false);
     const t1 = applied.state.tasks.find((t) => t.id === "T1")!;
     expect(t1.test_result).toEqual(verdict);
-    expect(t1.status).toBe(status);
+    expect(t1.status).toBe("pending");
     expect(t1.test_evidence).toBeUndefined();
     expect(t1.files_modified).toEqual(["src/a.ts", "tests/a.test.ts"]);
-    // The agent still STOPPED — the task must leave executing_tasks, or it
-    // ghost-blocks duplicate-spawn checks for the rest of the session.
     expect(applied.state.executing_tasks).toEqual(["T2"]);
+  });
+
+  it("invalidates a trusted pass when the retry changes code and the latest run fails", () => {
+    const s = graph([task({
+      id: "T1", status: "implemented", test_result: { verdict: "trusted-pass" },
+      new_tests_required: true,
+    })], ["T1"]);
+    const latestFailure: UntrustedStopResolution = {
+      ...untrustedPass,
+      testResult: { verdict: "untrusted", passed: false, label: "pi-structured: bun: 1 fail" },
+      testEvidence: "pi-structured: bun: 1 fail",
+      newTestsWritten: false,
+      newTestEvidence: "",
+    };
+
+    const applied = applyUntrustedStopResolution(s, "T1", latestFailure);
+
+    expect(applied.skipped).toBe(false);
+    expect(applied.state.tasks[0]).toMatchObject({
+      status: "pending",
+      test_result: latestFailure.testResult,
+      test_evidence: latestFailure.testEvidence,
+    });
+    expect(applied.state.tasks[0]!.proof?.state).toBe("failed");
+    expect(applied.state.wave_gates["1"].impl_complete).toBe(false);
+  });
+
+  it("retains a trusted pass when a stop reports no changed code", () => {
+    const s = graph([task({
+      id: "T1", status: "implemented", test_result: { verdict: "trusted-pass" },
+      new_tests_required: false,
+    })], ["T1"]);
+    const noWriteFailure: UntrustedStopResolution = {
+      ...untrustedPass,
+      testResult: { verdict: "untrusted", passed: false, label: "no new run" },
+      testEvidence: "",
+      filesModified: [],
+      changedDeclaredArtifacts: [],
+      newTestsWritten: false,
+      newTestEvidence: "",
+    };
+
+    const applied = applyUntrustedStopResolution(s, "T1", noWriteFailure);
+
+    expect(applied.state.tasks[0]).toMatchObject({
+      status: "implemented",
+      test_result: { verdict: "trusted-pass" },
+    });
   });
 
   it("a completed task is never reopened; executing_tasks is still cleared", () => {
@@ -113,7 +157,7 @@ describe("applyUntrustedStopResolution — untrusted resolutions never supersede
     expect(applied.state.tasks.find((t) => t.id === "T2")).toEqual(s.tasks[1]);
   });
 
-  it("unions retry writes/new-test evidence and invalidates stale review/spec gates", () => {
+  it("unions retry writes, recomputes new-test evidence, and invalidates stale review/spec gates", () => {
     const s = graph([task({
       id: "T1",
       files_modified: ["src/old.ts"],
@@ -140,8 +184,8 @@ describe("applyUntrustedStopResolution — untrusted resolutions never supersede
     const resolved = applied.state.tasks[0]!;
 
     expect(resolved.files_modified).toEqual(["src/new.ts", "src/old.ts"]);
-    expect(resolved.new_tests_written).toBe(true);
-    expect(resolved.new_test_evidence).toBe("earlier test evidence");
+    expect(resolved.new_tests_written).toBe(false);
+    expect(resolved.new_test_evidence).toBe("");
     expect(resolved.review_status).toBe("pending");
     expect(applied.state.spec_check).toBeUndefined();
     expect(applied.state.wave_gates["1"]).toMatchObject({

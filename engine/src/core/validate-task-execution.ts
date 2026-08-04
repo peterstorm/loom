@@ -96,6 +96,55 @@ export type ImplementationTaskBindings =
   | Readonly<{ ok: true; taskIds: readonly string[] }>
   | Readonly<{ ok: false; error: string }>;
 
+export type ExecutionBatchMode = "parallel" | "sequential";
+
+/**
+ * Pure ownership invariant for one execution reservation. Active tasks own
+ * their declared paths until stop cleanup. A sequential chain may intentionally
+ * hand one path from one requested task to the next; parallel siblings may not.
+ */
+export function taskExecutionOwnershipError(
+  state: TaskGraph,
+  taskIds: readonly string[],
+  mode: ExecutionBatchMode,
+): string | null {
+  const requested = new Set(taskIds);
+  const active = new Set(state.executing_tasks ?? []);
+  for (const taskId of taskIds) {
+    if (active.has(taskId)) return `Task ${taskId} is already executing.`;
+  }
+
+  const requestedTasks = taskIds.flatMap((taskId) => {
+    const task = state.tasks.find((candidate) => candidate.id === taskId);
+    return task === undefined ? [] : [task];
+  });
+  const activeTasks = state.tasks.filter((task) => active.has(task.id) && !requested.has(task.id));
+  for (const incoming of requestedTasks) {
+    for (const owner of activeTasks) {
+      if (incoming.wave !== owner.wave) continue;
+      const overlap = (incoming.file_list ?? []).find((path) => owner.file_list?.includes(path));
+      if (overlap !== undefined) {
+        return `Task ${incoming.id} cannot execute while ${owner.id} owns declared path ${overlap}.`;
+      }
+    }
+  }
+
+  if (mode === "parallel") {
+    for (let leftIndex = 0; leftIndex < requestedTasks.length; leftIndex++) {
+      const left = requestedTasks[leftIndex]!;
+      for (let rightIndex = leftIndex + 1; rightIndex < requestedTasks.length; rightIndex++) {
+        const right = requestedTasks[rightIndex]!;
+        if (left.wave !== right.wave) continue;
+        const overlap = (left.file_list ?? []).find((path) => right.file_list?.includes(path));
+        if (overlap !== undefined) {
+          return `Parallel implementation tasks ${left.id} and ${right.id} both declare ${overlap}; use a sequential chain or disjoint scopes.`;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 /** Pure smart constructor for the task identities carried by one spawn batch. */
 export function parseImplementationTaskBindings(
   state: TaskGraph,
@@ -140,6 +189,7 @@ export function registerTaskExecutionBaseline(
  */
 export async function validateTaskExecutionBatch(
   spawns: readonly TaskExecutionSpawn[],
+  mode: ExecutionBatchMode = "parallel",
 ): Promise<HookResult> {
   const inputs = spawns.filter(
     (spawn): spawn is Extract<TaskExecutionSpawn, { kind: "implementation" }> =>
@@ -153,6 +203,8 @@ export async function validateTaskExecutionBatch(
   const bindings = parseImplementationTaskBindings(state, inputs);
   if (!bindings.ok) return { kind: "block", message: `BLOCKED: ${bindings.error}` };
   const taskIds = bindings.taskIds;
+  const ownershipError = taskExecutionOwnershipError(state, taskIds, mode);
+  if (ownershipError !== null) return { kind: "block", message: `BLOCKED: ${ownershipError}` };
 
   for (const taskId of taskIds) {
     const decision = taskExecutionDecision(state, taskId);
@@ -179,17 +231,24 @@ export async function validateTaskExecutionBatch(
   }
   if (baselines.size === 0) return { kind: "allow" };
 
-  await mgr.update((current) => ({
-    ...current,
-    executing_tasks: [...new Set([...(current.executing_tasks ?? []), ...baselines.keys()])],
-    tasks: current.tasks.map((task) => {
-      const artifactBaseline = baselines.get(task.id);
-      return artifactBaseline === undefined
-        ? task
-        : registerTaskExecutionBaseline(task, sha, artifactBaseline);
-    }),
-  }));
-  return { kind: "allow" };
+  let lockedOwnershipError: string | null = null;
+  await mgr.update((current) => {
+    lockedOwnershipError = taskExecutionOwnershipError(current, taskIds, mode);
+    if (lockedOwnershipError !== null) return current;
+    return {
+      ...current,
+      executing_tasks: [...new Set([...(current.executing_tasks ?? []), ...baselines.keys()])],
+      tasks: current.tasks.map((task) => {
+        const artifactBaseline = baselines.get(task.id);
+        return artifactBaseline === undefined
+          ? task
+          : registerTaskExecutionBaseline(task, sha, artifactBaseline);
+      }),
+    };
+  });
+  return lockedOwnershipError === null
+    ? { kind: "allow" }
+    : { kind: "block", message: `BLOCKED: ${lockedOwnershipError}` };
 }
 
 export async function validateTaskExecution(input: ValidateTaskExecutionInput): Promise<HookResult> {

@@ -29,6 +29,7 @@ import {
 } from "../../core/findings";
 import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
 import { taskUnionError } from "../../state-manager";
+import { parseReviewPath } from "../../core/review-packet";
 
 export type ValidationResult =
   | { ok: true }
@@ -195,12 +196,18 @@ export function validateFull(
       }
     }
 
-    if (
-      scope === "decompose-payload" &&
-      task.file_list !== undefined &&
-      (!Array.isArray(task.file_list) || task.file_list.some((file) => typeof file !== "string" || file.trim() === ""))
-    ) {
-      errors.push(`Task ${tid}: 'file_list' must be an array of non-empty strings if present`);
+    if (scope === "decompose-payload" && task.file_list !== undefined) {
+      if (!Array.isArray(task.file_list) || task.file_list.some((file) => typeof file !== "string" || file.trim() === "")) {
+        errors.push(`Task ${tid}: 'file_list' must be an array of non-empty strings if present`);
+      } else {
+        const seen = new Set<string>();
+        for (const [pathIndex, file] of task.file_list.entries()) {
+          const parsed = parseReviewPath(file, `Task ${tid}: file_list[${pathIndex}]`);
+          if (!parsed.ok) errors.push(...parsed.errors);
+          else if (seen.has(parsed.value)) errors.push(`Task ${tid}: file_list repeats '${parsed.value}'`);
+          else seen.add(parsed.value);
+        }
+      }
     }
 
     // The findings aggregate, checked with the SAME functions the load boundary

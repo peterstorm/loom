@@ -10,7 +10,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { HookHandler, PreToolUseInput } from "../../types";
-import { TASK_GRAPH_PATH } from "../../config";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import {
   parseAgentName,
@@ -49,8 +48,6 @@ function modelFrontmatter(path: string): { name: string; model?: string; "model-
 }
 
 const handler: HookHandler = async (stdin) => {
-  if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
-
   let input: PreToolUseInput;
   try {
     input = JSON.parse(stdin);

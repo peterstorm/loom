@@ -121,6 +121,27 @@ describe("standalone review helper and refutation adapter", () => {
     expect(run.stderr).toContain("already been finalized");
   });
 
+  it.each([
+    ["absolute", ["/tmp/outside.ts"]],
+    ["traversal", ["src/../../outside.ts"]],
+    ["newline", ["src/bad\npath.ts"]],
+    ["NUL", ["src/bad\0path.ts"]],
+    ["normalized duplicate", ["./src/x.ts", "src/x.ts"]],
+  ])("rejects %s scope before freezing session authority", (_label, scope) => {
+    writeFileSync(
+      join(tmp, runDir, "review-plan.json"),
+      JSON.stringify({ scope, expected_agents: ["code-reviewer"] }),
+    );
+
+    const run = cli("standalone-review", [
+      "init", "--runs-root", runsRoot, "--run-dir", runDir,
+      "--input", join(runDir, "review-plan.json"),
+    ]);
+
+    expect(run.status).toBe(1);
+    expect(() => readFileSync(join(tmp, runDir, "session.json"), "utf-8")).toThrow();
+  });
+
   it("rejects session authority that drifts from the frozen review plan", () => {
     initialize();
     const sessionPath = join(tmp, runDir, "session.json");
@@ -195,6 +216,24 @@ describe("standalone review helper and refutation adapter", () => {
     run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
     expect(run.status).toBe(1);
     expect(run.stderr).toContain("assigned to more than one reviewer");
+  });
+
+  it("rejects a symlinked reviewer transcript before publishing an aggregate", () => {
+    initialize();
+    const slot = join(tmp, runDir, "reviewers/1-code-reviewer.md");
+    const outside = join(tmp, "outside-review.md");
+    writeFileSync(outside, reviewOutput);
+    rmSync(slot);
+    symlinkSync(outside, slot);
+
+    const run = cli("standalone-review", [
+      "aggregate", "--runs-root", runsRoot, "--run-dir", runDir,
+      "--input", join(runDir, "review-input.json"),
+    ]);
+
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("non-empty regular non-symlink file");
+    expect(() => readFileSync(join(tmp, runDir, "aggregate.json"), "utf-8")).toThrow();
   });
 
   it("finalizes a zero-critical run and rejects unexpected panel outcomes", () => {

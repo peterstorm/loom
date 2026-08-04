@@ -43,7 +43,6 @@ import {
   reviewResolutionLog,
 } from "../engine/src/core/review-output";
 import { parseSpecCheckOutput, reconcileSpecCheck } from "../engine/src/core/spec-check";
-import type { ReviewStatus, Phase } from "../engine/src/types";
 import { newWaveGate } from "../engine/src/types";
 
 // `isReviewAgent` lives in `config`, NOT in `core/review-output` beside the three
@@ -128,22 +127,6 @@ export function piSpawnCwd(raw: unknown, index: number, defaultCwd: string): str
       ? input.cwd
       : defaultCwd;
   return resolve(defaultCwd, cwd);
-}
-
-export function piWriteGrantTtlMs(raw: unknown, index: number): number {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new Error("Pi subagent input must be an object before write-grant expiry calculation");
-  }
-  const input = raw as Record<string, unknown>;
-  const timeoutSeconds = typeof input.timeoutSeconds === "number" &&
-    Number.isFinite(input.timeoutSeconds) && input.timeoutSeconds > 0
-    ? input.timeoutSeconds
-    : 600;
-  // Pi chains are sequential; parallel batches run at most four children.
-  // Keep queued grants valid through their latest expected start, while the
-  // parent tool_result/session-shutdown still revokes them immediately.
-  const stages = Array.isArray(input.chain) ? index + 1 : Math.floor(index / 4) + 1;
-  return Math.ceil((stages * timeoutSeconds + 300) * 1000);
 }
 
 export function replacePiSpawnTask(raw: unknown, index: number, task: string): void {
@@ -345,26 +328,6 @@ export default function (pi: ExtensionAPI) {
         const implementationIndexes = taskExecutionSpawns.flatMap((spawn, index) =>
           spawn.kind === "implementation" ? [index] : []
         );
-        if (Array.isArray((event.input as { tasks?: unknown }).tasks) && implementationIndexes.length > 1) {
-          const current = StateManager.fromPath(TASK_GRAPH_PATH)?.load();
-          if (current) {
-            const ownerByPath = new Map<string, string>();
-            for (const index of implementationIndexes) {
-              const taskId = extractTaskId(parsedItems[index]!.task);
-              const task = current.tasks.find((candidate) => candidate.id === taskId);
-              for (const path of task?.file_list ?? []) {
-                const priorOwner = ownerByPath.get(path);
-                if (priorOwner && priorOwner !== taskId) {
-                  return {
-                    block: true,
-                    reason: `Parallel implementation tasks ${priorOwner} and ${taskId} both declare ${path}; use a chain or disjoint scopes to prevent lost writes.`,
-                  };
-                }
-                if (taskId) ownerByPath.set(path, taskId);
-              }
-            }
-          }
-        }
         if (implementationIndexes.length > 0 && (typeof toolCallId !== "string" || toolCallId === "")) {
           return {
             block: true,
@@ -424,7 +387,6 @@ export default function (pi: ExtensionAPI) {
               taskId,
               cwd: piSpawnCwd(event.input, index, ctx.cwd),
               taskGraphPath: taskGraphPath(),
-              ttlMs: piWriteGrantTtlMs(event.input, index),
             });
             try {
               writeGrants.push({
@@ -457,7 +419,10 @@ export default function (pi: ExtensionAPI) {
         currentGuard = "validate-task-execution";
         let taskResult;
         try {
-          taskResult = await validateTaskExecutionBatch(taskExecutionSpawns);
+          const executionMode = Array.isArray((event.input as { chain?: unknown }).chain)
+            ? "sequential" as const
+            : "parallel" as const;
+          taskResult = await validateTaskExecutionBatch(taskExecutionSpawns, executionMode);
         } catch (error) {
           await rollbackLifecycle();
           throw error;
@@ -705,9 +670,44 @@ export default function (pi: ExtensionAPI) {
         continue;
       }
 
-      // A failed process may retain valid-looking assistant text. Never let
-      // that stale text advance a phase or become review/spec evidence.
+      // A failed process may retain valid-looking assistant text. Never parse
+      // that text as completion/review/spec evidence, but do persist the
+      // failed CAPTURE for gate-owned agents so a healthy sibling or stale pass
+      // cannot make the missing evidence disappear.
       if (piSubagentResultFailed(result)) {
+        const failure = `${agentType} failed before evidence capture completed (exitCode=${String(result.exitCode)}, stopReason=${String(result.stopReason ?? "unset")})`;
+        if (isReviewAgent(agentType)) {
+          const failedTaskId = extractTaskId(result.task ?? "");
+          if (failedTaskId === null || !mgr.load().tasks.some((task) => task.id === failedTaskId)) {
+            process.stderr.write(
+              `loom(pi): ${failure}; trusted task binding is missing or unknown — review evidence NOT stored\n`,
+            );
+            continue;
+          }
+          const resolution = { kind: "evidence-failed" as const, agent: agentType, message: failure };
+          await mgr.update((s) => ({
+            ...s,
+            tasks: s.tasks.map((task) =>
+              task.id === failedTaskId ? applyReviewResolution(task, resolution) : task
+            ),
+          }));
+          process.stderr.write(reviewResolutionLog(failedTaskId, resolution) + "\n");
+          continue;
+        }
+        if (agentType === "spec-check-invoker") {
+          const runAt = new Date().toISOString();
+          await mgr.update((s) => ({
+            ...s,
+            spec_check: {
+              wave: s.current_wave ?? 1,
+              run_at: runAt,
+              verdict: "EVIDENCE_CAPTURE_FAILED" as const,
+              error: failure,
+            },
+          }));
+          process.stderr.write(`loom(pi): ${failure} — marking spec-check evidence_capture_failed\n`);
+          continue;
+        }
         if (IMPL_AGENTS.has(agentType)) {
           const failedTaskId = extractTaskId(result.task ?? "");
           if (failedTaskId !== null) {
@@ -717,9 +717,7 @@ export default function (pi: ExtensionAPI) {
             }));
           }
         }
-        process.stderr.write(
-          `loom(pi): ${agentType} result failed (exitCode=${String(result.exitCode)}, stopReason=${String(result.stopReason ?? "unset")}) — completion evidence ignored\n`,
-        );
+        process.stderr.write(`loom(pi): ${failure} — completion evidence ignored\n`);
         continue;
       }
 

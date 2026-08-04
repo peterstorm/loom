@@ -4,6 +4,7 @@ import {
   parseImplementationTaskBindings,
   registerTaskExecutionBaseline,
   taskExecutionDecision,
+  taskExecutionOwnershipError,
 } from "../../../src/core/validate-task-execution";
 import type { TaskGraph, Task, WaveGate } from "../../../src/types";
 
@@ -96,6 +97,45 @@ describe("validate-task-execution — spawn lifecycle parsing", () => {
       .toEqual({ ok: false, error: expect.stringContaining("unknown task T99") });
     expect(parseImplementationTaskBindings(state, [implementation("Task ID: T1"), implementation("Task ID: T1")]))
       .toEqual({ ok: false, error: expect.stringContaining("more than once") });
+  });
+});
+
+describe("validate-task-execution — exclusive ownership", () => {
+  const scoped = (id: string, path: string) => mkTask({ id, wave: 1, file_list: [path] });
+
+  it("rejects an already-executing task", () => {
+    const state = mkState([scoped("T1", "src/a.ts")], { executing_tasks: ["T1"] });
+    expect(taskExecutionOwnershipError(state, ["T1"], "parallel")).toContain("already executing");
+  });
+
+  it("rejects parallel siblings with overlapping declared paths", () => {
+    const state = mkState([scoped("T1", "src/a.ts"), scoped("T2", "src/a.ts")]);
+    expect(taskExecutionOwnershipError(state, ["T1", "T2"], "parallel"))
+      .toContain("both declare src/a.ts");
+  });
+
+  it("rejects overlap with an active same-wave owner", () => {
+    const state = mkState(
+      [scoped("T1", "src/a.ts"), scoped("T2", "src/a.ts")],
+      { executing_tasks: ["T1"] },
+    );
+    expect(taskExecutionOwnershipError(state, ["T2"], "parallel"))
+      .toContain("T1 owns declared path src/a.ts");
+  });
+
+  it("allows an explicitly sequential chain to hand off the same path", () => {
+    const state = mkState([scoped("T1", "src/a.ts"), scoped("T2", "src/a.ts")]);
+    expect(taskExecutionOwnershipError(state, ["T1", "T2"], "sequential")).toBeNull();
+  });
+
+  it("re-evaluating against a newer locked snapshot catches stale preflight ownership", () => {
+    const tasks = [scoped("T1", "src/a.ts"), scoped("T2", "src/a.ts")];
+    expect(taskExecutionOwnershipError(mkState(tasks), ["T2"], "parallel")).toBeNull();
+    expect(taskExecutionOwnershipError(
+      mkState(tasks, { executing_tasks: ["T1"] }),
+      ["T2"],
+      "parallel",
+    )).toContain("T1 owns declared path");
   });
 });
 

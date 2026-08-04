@@ -297,19 +297,9 @@ export function cumulativeModifiedPaths(
   return [...new Set([...(previous ?? []), ...current])].sort();
 }
 
-function cumulativeNewTestEvidence(
-  task: Task,
-  current: NewTestEvidence,
-): NewTestEvidence {
-  if (task.new_tests_written === true) {
-    return { written: true, evidence: task.new_test_evidence?.trim() || current.evidence };
-  }
-  return current;
-}
-
 export interface AppliedStopResolution {
   readonly state: TaskGraph;
-  /** true → an existing trusted verdict / completed task stood; nothing was overwritten. */
+  /** true → the target was missing/completed; task evidence was not updated. */
   readonly skipped: boolean;
 }
 
@@ -319,8 +309,10 @@ export interface AppliedStopResolution {
  * handler): a pre-lock snapshot can be outdated by a concurrent writer
  * before the write lands (TOCTOU), so the target is re-found and re-checked
  * against the CURRENT state here. An untrusted resolution never overwrites
- * an existing trusted-pass/trusted-fail verdict and never reopens a
- * completed task — but the agent still STOPPED either way, so the task is
+ * a trusted failure, and preserves a trusted pass only while no newer code
+ * bytes were attributed to this retry; historical green evidence cannot prove
+ * changed bytes. A completed task is never reopened — but the agent still
+ * STOPPED either way, so the task is
  * always removed from executing_tasks (leaving it would ghost-block
  * duplicate-spawn checks for the rest of the session).
  */
@@ -335,14 +327,15 @@ export function applyUntrustedStopResolution(
   if (!target || target.status === "completed") {
     return { state: { ...s, executing_tasks: clearedExecuting }, skipped: true };
   }
-  const existingTrusted = target.test_result?.verdict === "trusted-pass" ||
-    target.test_result?.verdict === "trusted-fail";
+  const codeChanged = resolution.filesModified.length > 0;
+  const preserveExistingTrusted = target.test_result?.verdict === "trusted-fail" ||
+    (target.test_result?.verdict === "trusted-pass" && !codeChanged);
   const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, resolution.filesModified);
-  const cumulativeNewTests = cumulativeNewTestEvidence(target, {
+  const currentNewTests: NewTestEvidence = {
     written: resolution.newTestsWritten,
     evidence: resolution.newTestEvidence,
-  });
-  const proofTestResult = existingTrusted ? target.test_result : resolution.testResult;
+  };
+  const proofTestResult = preserveExistingTrusted ? target.test_result : resolution.testResult;
   const proofArtifactsChanged = attributedChangedArtifacts(
     resolution.changedDeclaredArtifacts,
     cumulativeFiles,
@@ -356,8 +349,8 @@ export function applyUntrustedStopResolution(
       taskCompleted: true,
       testResult: proofTestResult,
       filesModified: proofArtifactsChanged,
-      newTestsWritten: cumulativeNewTests.written,
-      newTestEvidence: cumulativeNewTests.evidence,
+      newTestsWritten: currentNewTests.written,
+      newTestEvidence: currentNewTests.evidence,
     },
     proofPolicy,
   );
@@ -370,10 +363,10 @@ export function applyUntrustedStopResolution(
             status: proof.state === "satisfied" ? "implemented" as const : "pending" as const,
             proof,
             test_result: proofTestResult,
-            test_evidence: existingTrusted ? t.test_evidence : resolution.testEvidence,
+            test_evidence: preserveExistingTrusted ? t.test_evidence : resolution.testEvidence,
             files_modified: cumulativeFiles,
-            new_tests_written: cumulativeNewTests.written,
-            new_test_evidence: cumulativeNewTests.evidence,
+            new_tests_written: currentNewTests.written,
+            new_test_evidence: currentNewTests.evidence,
             ...(resolution.filesModified.length > 0 ? { review_status: "pending" as const } : {}),
           }
         : t,
@@ -381,7 +374,6 @@ export function applyUntrustedStopResolution(
     executing_tasks: clearedExecuting,
   };
   const wave = target.wave;
-  const codeChanged = resolution.filesModified.length > 0;
   return {
     skipped: false,
     state: {
@@ -789,11 +781,13 @@ export const runUpdateTaskStatus = async (
   // Section 3: Atomic state write. The preserve-evidence guards run INSIDE
   // the locked update (a pre-lock read can be outdated by a concurrent
   // writer before this write lands — TOCTOU) and are TRUST-aware ON BOTH
-  // SIDES: an existing ledger-trusted verdict is preserved only against an
-  // UNTRUSTED incoming resolution. An untrusted result — e.g. a
-  // helper-reported "pass" from agent-controlled stdin — must never preempt
-  // ground truth (mirrors store-test-evidence's skippedTrustedVerdict
-  // pattern), but NEWER ground truth supersedes older: a re-spawned agent's
+  // SIDES: an existing trusted failure is preserved against an UNTRUSTED
+  // incoming resolution, while a trusted pass is preserved only if this retry
+  // changed no code. Historical green evidence cannot prove newer bytes. An
+  // untrusted result — e.g. a helper-reported "pass" from agent-controlled
+  // stdin — otherwise cannot preempt ground truth (mirrors
+  // store-test-evidence's skippedTrustedVerdict pattern), but NEWER ground
+  // truth supersedes older: a re-spawned agent's
   // fresh epoch yielding trusted-pass/trusted-fail must land, or the first
   // real red run would wedge the task forever (the gate treats trusted-fail
   // as missing evidence and store-test-evidence also refuses trusted).
@@ -802,7 +796,6 @@ export const runUpdateTaskStatus = async (
   await mgr.update((s) => {
     const target = s.tasks.find((t) => t.id === taskId);
     const verdict = target?.test_result?.verdict;
-    const existingTrusted = verdict === "trusted-pass" || verdict === "trusted-fail";
     const incomingTrusted = testEvidence.result.verdict !== "untrusted";
     if (!target || target.status === "completed") {
       skippedExistingVerdict = true;
@@ -815,7 +808,10 @@ export const runUpdateTaskStatus = async (
       };
     }
 
-    const preserveExistingTrusted = existingTrusted && !incomingTrusted;
+    const codeChanged = filesModified.length > 0;
+    const preserveExistingTrusted = !incomingTrusted && (
+      verdict === "trusted-fail" || (verdict === "trusted-pass" && !codeChanged)
+    );
     const resolvedTestResult = preserveExistingTrusted ? target.test_result : testEvidence.result;
     const resolvedTestEvidence = preserveExistingTrusted ? target.test_evidence : testEvidence.evidence;
     const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, filesModified);
@@ -823,7 +819,6 @@ export const runUpdateTaskStatus = async (
     const currentNewTestEvidence = git.isGitRepo()
       ? collectNewTestEvidence(cumulativeFiles, target.start_sha, target.new_tests_required)
       : { written: false, evidence: "" };
-    const cumulativeNewTests = cumulativeNewTestEvidence(target, currentNewTestEvidence);
     const proof = evaluateTaskProof(
       {
         newTestsRequired: target.new_tests_required !== false,
@@ -833,8 +828,8 @@ export const runUpdateTaskStatus = async (
         taskCompleted: true,
         testResult: resolvedTestResult,
         filesModified: proofArtifactsChanged,
-        newTestsWritten: cumulativeNewTests.written,
-        newTestEvidence: cumulativeNewTests.evidence,
+        newTestsWritten: currentNewTestEvidence.written,
+        newTestEvidence: currentNewTestEvidence.evidence,
       },
       TRUSTED_LEDGER_ONLY_POLICY,
     );
@@ -847,8 +842,8 @@ export const runUpdateTaskStatus = async (
             test_result: resolvedTestResult,
             test_evidence: resolvedTestEvidence,
             files_modified: cumulativeFiles,
-            new_tests_written: cumulativeNewTests.written,
-            new_test_evidence: cumulativeNewTests.evidence,
+            new_tests_written: currentNewTestEvidence.written,
+            new_test_evidence: currentNewTestEvidence.evidence,
             ...(filesModified.length > 0 ? { review_status: "pending" as const } : {}),
           }
         : t
@@ -860,7 +855,6 @@ export const runUpdateTaskStatus = async (
       executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
     };
     const wave = target.wave;
-    const codeChanged = filesModified.length > 0;
     return {
       ...resolved,
       ...(codeChanged && resolved.spec_check?.wave === wave ? { spec_check: undefined } : {}),

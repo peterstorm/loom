@@ -24,6 +24,25 @@ const transcript = (critical: string[] = [], advisory: string[] = []) => [
   "```",
 ].join("\n");
 
+interface MutablePanelOutcome {
+  finding_id: string;
+  task_id: string;
+  claim: string;
+  survives: boolean;
+  refuted_by: string[];
+  reasoning: string[];
+  upheld_by: string[];
+  uncertain_from: string[];
+}
+
+interface MutablePanelOutcomes {
+  lenses: string[];
+  threshold: number;
+  surviving: number;
+  refuted: number;
+  outcomes: MutablePanelOutcome[];
+}
+
 function required() {
   const result = aggregateStandaloneReview({
     runId: "run.abc",
@@ -210,6 +229,42 @@ describe("standalone review adjudication", () => {
     expect(parsed.ok).toBe(false);
     expect(!parsed.ok && parsed.errors.join("\n")).toContain("must meet threshold");
     expect(!parsed.ok && parsed.errors.join("\n")).toContain("missing critical finding");
+  });
+
+  it.each([
+    ["canonical claim", (raw: MutablePanelOutcomes) => { raw.outcomes[0]!.claim = "forged claim"; }],
+    ["vote partition", (raw: MutablePanelOutcomes) => { raw.outcomes[0]!.upheld_by.push("reproduction"); }],
+    ["refutation reasoning", (raw: MutablePanelOutcomes) => { raw.outcomes[1]!.reasoning.pop(); }],
+    ["derived counts", (raw: MutablePanelOutcomes) => { raw.surviving = 2; raw.refuted = 0; }],
+  ])("rejects a %s mismatch in canonical panel outcomes", (_label, corrupt) => {
+    const state = required();
+    const panelFindings = buildStandaloneFindingBrief(state.aggregate).findings;
+    const raw: MutablePanelOutcomes = {
+      lenses: ["reproduction", "intent", "blast-radius"],
+      threshold: 2,
+      surviving: 1,
+      refuted: 1,
+      outcomes: state.criticals.map((finding, index) => ({
+        finding_id: `${STANDALONE_REVIEW_SUBJECT}:${finding.id}`,
+        task_id: STANDALONE_REVIEW_SUBJECT,
+        claim: finding.claim,
+        survives: index === 0,
+        refuted_by: index === 0 ? [] : ["reproduction", "intent"],
+        reasoning: index === 0 ? [] : ["cannot trigger", "deliberate"],
+        upheld_by: index === 0 ? ["reproduction", "intent"] : ["blast-radius"],
+        uncertain_from: index === 0 ? ["blast-radius"] : [],
+      })),
+    };
+    corrupt(raw);
+
+    const parsed = parseStandalonePanelOutcomes(
+      raw,
+      state.criticals,
+      panelFindings,
+      ["reproduction", "intent", "blast-radius"],
+    );
+
+    expect(parsed.ok).toBe(false);
   });
 
   it("accepts sanitized panel claims while retaining the original aggregate claim", () => {

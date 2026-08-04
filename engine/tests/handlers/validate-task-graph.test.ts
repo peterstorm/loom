@@ -153,6 +153,20 @@ describe("validateFull (pure)", () => {
     }
   });
 
+  it.each([
+    ["absolute", ["/tmp/outside.ts"]],
+    ["traversal", ["src/../outside.ts"]],
+    ["backslash", ["src\\outside.ts"]],
+    ["alias", ["./src/x.ts"]],
+    ["duplicate", ["src/x.ts", "src/x.ts"]],
+  ])("rejects %s decompose file_list paths", (_label, file_list) => {
+    const result = validateFull({
+      plan_title: "x", plan_file: "x", spec_file: "x",
+      tasks: [{ ...validTask, status: undefined, file_list }],
+    }, "decompose-payload");
+    expect(result.ok).toBe(false);
+  });
+
   it("rejects a non-array spec_anchors when present", () => {
     const result = validateFull({
       plan_title: "x", plan_file: "x", spec_file: "x",

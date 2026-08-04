@@ -15,7 +15,15 @@ import { SUBAGENT_DIR } from "../engine/src/config";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 
 const GRANT_VERSION = 1 as const;
-export const PI_WRITE_GRANT_TTL_MS = 15 * 60_000;
+/**
+ * Maximum child-start window for a capability issued by a live parent
+ * subagent call. Pi exposes no per-child timeout and a queued chain item may
+ * start arbitrarily later than its siblings, so this is deliberately not an
+ * estimate of execution stages. Normal lifetime is the parent call/session:
+ * tool_result, rollback, and session_shutdown revoke every unconsumed token.
+ * The fixed ceiling only bounds abandoned capabilities after a parent crash.
+ */
+export const PI_WRITE_GRANT_START_WINDOW_MS = 24 * 60 * 60_000;
 const TOKEN = /^[0-9a-f]{64}$/;
 const MARKER = /<!-- LOOM_PI_WRITE_GRANT:([0-9a-f]{64}) -->/g;
 const grantDirectory = (): string => join(process.env.LOOM_SUBAGENT_DIR ?? SUBAGENT_DIR, "pi-write-grants");
@@ -89,7 +97,7 @@ export function issuePiWriteGrant(input: {
   readonly ttlMs?: number;
 }): IssuedWriteGrant {
   const token = randomBytes(32).toString("hex");
-  const ttlMs = input.ttlMs ?? PI_WRITE_GRANT_TTL_MS;
+  const ttlMs = input.ttlMs ?? PI_WRITE_GRANT_START_WINDOW_MS;
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) throw new Error("Pi write grant TTL must be a positive integer");
   const unsigned: Omit<StoredWriteGrant, "bindingMac"> = {
     version: GRANT_VERSION,

@@ -6,6 +6,7 @@ import {
   consumePiWriteGrant,
   injectPiWriteGrant,
   issuePiWriteGrant,
+  PI_WRITE_GRANT_START_WINDOW_MS,
   revokePiWriteGrant,
   sweepExpiredPiWriteGrants,
 } from "../../pi/write-grant";
@@ -48,6 +49,21 @@ describe("Pi child write grants", () => {
       agent: "code-implementer-agent", taskId: "T1", taskGraphPath: graph,
     });
     expect(() => consumePiWriteGrant(prompt, cwd, "code-implementer-agent")).toThrow();
+  });
+
+  it("keeps queued children valid for the fixed parent-session start window", () => {
+    const { cwd, graph } = fixture();
+    const issued = issuePiWriteGrant({
+      agent: "code-implementer-agent", taskId: "T1", cwd, taskGraphPath: graph, now: 100,
+    });
+    const prompt = injectPiWriteGrant("Task ID: T1", issued);
+
+    expect(consumePiWriteGrant(
+      prompt,
+      cwd,
+      "code-implementer-agent",
+      100 + PI_WRITE_GRANT_START_WINDOW_MS,
+    )).toMatchObject({ taskId: "T1" });
   });
 
   it("burns mismatched, expired, and explicitly revoked grants fail-closed", () => {

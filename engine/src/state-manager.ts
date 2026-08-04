@@ -143,11 +143,17 @@ export function taskUnionError(v: unknown, index: number): string | null {
   if (!Array.isArray(t.depends_on) || t.depends_on.some((d) => typeof d !== "string")) {
     return `tasks[${index}] ("${id}"): depends_on must be an array of strings`;
   }
-  if (
-    t.file_list !== undefined &&
-    (!Array.isArray(t.file_list) || t.file_list.some((f) => typeof f !== "string"))
-  ) {
-    return `tasks[${index}] ("${id}"): file_list must be an array of strings when present`;
+  if (t.file_list !== undefined) {
+    if (!Array.isArray(t.file_list)) {
+      return `tasks[${index}] ("${id}"): file_list must be an array of canonical repository-relative paths when present`;
+    }
+    const seen = new Set<string>();
+    for (const [pathIndex, rawPath] of t.file_list.entries()) {
+      const path = parseReviewPath(rawPath, `tasks[${index}] ("${id}"): file_list[${pathIndex}]`);
+      if (!path.ok) return path.errors.join("; ");
+      if (seen.has(path.value)) return `tasks[${index}] ("${id}"): file_list repeats '${path.value}'`;
+      seen.add(path.value);
+    }
   }
   if (
     t.files_modified !== undefined &&

@@ -197,9 +197,9 @@ export function reconcileTaskFromStoredEvidence(
   proofArtifactsChanged: readonly string[],
   collectedNewTests: NewTestEvidence,
 ): Task {
-  if (task.status === "completed" || task.proof?.state === "satisfied") return task;
-  const newTestsWritten = task.new_tests_written === true || collectedNewTests.written;
-  const newTestEvidence = task.new_test_evidence?.trim() || collectedNewTests.evidence;
+  if (task.status === "completed") return task;
+  const newTestsWritten = collectedNewTests.written;
+  const newTestEvidence = collectedNewTests.evidence;
   const proof = evaluateTaskProof(
     {
       newTestsRequired: task.new_tests_required !== false,

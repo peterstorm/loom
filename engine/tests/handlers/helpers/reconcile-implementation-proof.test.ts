@@ -228,24 +228,47 @@ describe("historical baseline recovery CLI", () => {
 });
 
 describe("reconcileTaskFromStoredEvidence", () => {
-  it("repairs stale failed proof from persisted Pi evidence and byte-attributed artifacts", () => {
+  it("revokes stale new-test credit when the current cumulative diff contains no tests", () => {
     const reconciled = reconcileTaskFromStoredEvidence(
       failedTask(),
       ["src/a.ts"],
       { written: false, evidence: "" },
     );
 
-    expect(reconciled.status).toBe("implemented");
-    expect(reconciled.proof?.state).toBe("satisfied");
-    expect(reconciled.new_tests_written).toBe(true);
-    if (reconciled.proof?.state === "satisfied") {
-      expect(reconciled.proof.evidence.map((evidence) => evidence.kind)).toEqual([
-        "task-completed",
-        "regression-test-pass",
-        "new-tests",
-        "declared-artifact-changed",
-      ]);
+    expect(reconciled.status).toBe("pending");
+    expect(reconciled.proof?.state).toBe("failed");
+    expect(reconciled.new_tests_written).toBe(false);
+    expect(reconciled.new_test_evidence).toBe("");
+    if (reconciled.proof?.state === "failed") {
+      expect(reconciled.proof.failures.map((failure) => failure.kind)).toEqual(["new-tests-not-observed"]);
     }
+  });
+
+  it("reopens an implemented task when deleted tests invalidate a previously satisfied proof", () => {
+    const stale = failedTask();
+    stale.status = "implemented";
+    stale.proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
+      {
+        taskCompleted: true,
+        testResult,
+        filesModified: ["src/a.ts"],
+        newTestsWritten: true,
+        newTestEvidence: "1 new test method, 2 assertions",
+      },
+      PI_STRUCTURED_EVIDENCE_POLICY,
+    );
+    expect(stale.proof.state).toBe("satisfied");
+
+    const reconciled = reconcileTaskFromStoredEvidence(
+      stale,
+      ["src/a.ts"],
+      { written: false, evidence: "" },
+    );
+
+    expect(reconciled.status).toBe("pending");
+    expect(reconciled.proof?.state).toBe("failed");
+    expect(reconciled.new_tests_written).toBe(false);
   });
 
   it("never invents completion when the prior proof did not observe it", () => {

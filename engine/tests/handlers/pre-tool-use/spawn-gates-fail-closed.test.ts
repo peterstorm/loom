@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import validateTaskExecution from "../../../src/handlers/pre-tool-use/validate-task-execution";
 import validatePhaseOrder from "../../../src/handlers/pre-tool-use/validate-phase-order";
 import validateTemplateSubstitution from "../../../src/handlers/pre-tool-use/validate-template-substitution";
@@ -37,10 +38,39 @@ describe("spawn-gate handlers — malformed stdin fails CLOSED", () => {
     });
   }
 
-  // validate-agent-model / validate-agent-skill only gate DURING orchestration
-  // (task graph exists), so their parse-catch is reached only then.
+  it("validate-agent-model fails closed before task-graph creation", async () => {
+    const result = await validateAgentModel("{not json", []);
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") expect(result.message).toContain("malformed hook input");
+  });
+
+  it("validate-agent-model rejects graphless Loom model inheritance", async () => {
+    if (existsSync(TASK_GRAPH_PATH)) return;
+    const priorHome = process.env.HOME;
+    const home = join(tmpdir(), `graphless-model-policy-${process.pid}-${Date.now()}`);
+    mkdirSync(join(home, ".claude", "agents"), { recursive: true });
+    writeFileSync(
+      join(home, ".claude", "agents", "code-reviewer.md"),
+      "---\nname: code-reviewer\nmodel-profile: general-review\nmodel: sonnet\n---\n",
+    );
+    process.env.HOME = home;
+    try {
+      const result = await validateAgentModel(JSON.stringify({
+        tool_name: "Agent",
+        tool_input: { subagent_type: "loom:code-reviewer", prompt: "LOOM_REVIEW_CONTEXT: standalone" },
+      }), []);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") expect(result.message).toContain("inheritance is forbidden");
+    } finally {
+      if (priorHome === undefined) delete process.env.HOME;
+      else process.env.HOME = priorHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // Skill policy remains orchestration-gated; model policy above protects
+  // pre-graph panel and standalone Loom spawns too.
   const orchestrationGated: ReadonlyArray<[string, HookHandler]> = [
-    ["validate-agent-model", validateAgentModel],
     ["validate-agent-skill", validateAgentSkill],
   ];
 

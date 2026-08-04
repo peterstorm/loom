@@ -98,13 +98,17 @@ contains absolute package resource paths, so it does not depend on the parent
 process's CWD or on Claude-specific environment variables.
 
 For execute-phase implementation spawns, the parent adapter also issues one
-short-lived, one-time write grant per child item (single, parallel, or chain).
-The grant is bound to agent, Task ID, repository CWD, and task graph; its raw
-token is injected only into that child's prompt and is stored on disk only as a
-SHA-256 digest. The child consumes it before its first model turn and creates a
-session-local guarded-write binding. Mismatch, expiry, replay, failed spawn, or
-session shutdown fail closed and revoke/clean up the capability. This avoids
-incorrectly treating all parallel children as one shared active agent.
+one-time write grant per child item (single, parallel, or chain). The grant is
+bound to agent, Task ID, repository CWD, and task graph; its raw token is
+injected only into that child's prompt and is stored on disk only as a SHA-256
+digest. The child consumes it before its first model turn and creates a
+session-local guarded-write binding. Pi exposes no per-child timeout, so queued
+grants use one fixed parent-session start window rather than estimating chain
+stages from unsupported input fields. Normal revocation is immediate on parent
+tool completion, rollback, or session shutdown; the 24-hour ceiling only bounds
+an abandoned capability after a parent crash. Mismatch, expiry, replay, failed
+spawn, or shutdown fails closed. This avoids incorrectly treating all parallel
+children as one shared active agent.
 
 ## Development workflow
 

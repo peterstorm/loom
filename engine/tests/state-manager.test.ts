@@ -215,6 +215,20 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     if (!parsed.ok) expect(parsed.error).toContain(message);
   });
 
+  it.each([
+    ["absolute", ["/tmp/outside.ts"]],
+    ["traversal", ["src/../outside.ts"]],
+    ["backslash", ["src\\outside.ts"]],
+    ["alias", ["./src/x.ts"]],
+    ["duplicate", ["src/x.ts", "src/x.ts"]],
+  ])("rejects %s task file_list at the typed load boundary", (_label, file_list) => {
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, file_list }],
+    });
+    expect(parsed.ok).toBe(false);
+  });
+
   it("enforces status/proof lockstep for proof-bearing graphs", () => {
     const pendingProof = derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] });
     const impossible = parseTaskGraph({

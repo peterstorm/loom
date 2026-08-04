@@ -171,6 +171,24 @@ describe("Pi extension review tool_result integration", () => {
     expect(JSON.parse(readFileSync(statePath, "utf-8"))).toEqual(captured);
   });
 
+  it("fails review evidence when a located Pi finding is outside the packet scope", async () => {
+    const pi = await extension();
+    const context = {
+      sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" },
+    };
+    const result = reviewResult("Task: T1", "finding escaped the packet");
+    const message = result.details.results[0]!.messages[0]!.content[0]!;
+    message.text = message.text.replace('"file":"pi/extension.ts"', '"file":"README.md"');
+
+    await pi.emit("tool_result", result, context);
+
+    const taskState = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+    expect(taskState.review_status).toBe("evidence_capture_failed");
+    expect(taskState.findings).toBeUndefined();
+    expect(taskState.critical_findings).toBeUndefined();
+    expect(taskState.review_error).toContain("README.md");
+  });
+
   it("keeps standalone spawn and completion isolated from an active task graph", async () => {
     const pi = await extension();
     const session = "019fca39-f989-7510-8e62-50dadbcad410";
@@ -523,6 +541,60 @@ describe("Pi extension review tool_result integration", () => {
     expect(JSON.parse(readFileSync(statePath, "utf-8"))).toEqual(before);
   });
 
+  it("blocks duplicate and overlapping parallel implementation ownership through the shared core", async () => {
+    const planPath = join(temp, "ownership-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    const tasks = [
+      { id: "T1", description: "one", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], file_list: ["pi/extension.ts"] },
+      { id: "T2", description: "two", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], file_list: ["pi/extension.ts"] },
+    ];
+    const base = {
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks,
+    };
+    const pi = await extension();
+    const context = {
+      cwd: ROOT,
+      sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad425" },
+    };
+
+    writeState({ ...base, executing_tasks: ["T1"] });
+    let result = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-duplicate-owner",
+      input: {
+        agent: "code-implementer-agent",
+        task: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+        agentScope: "user",
+      },
+    }, context);
+    expect(result).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("already executing"),
+    }));
+
+    writeState({ ...base, executing_tasks: [] });
+    result = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-overlapping-owners",
+      input: {
+        agentScope: "user",
+        tasks: tasks.map((task) => ({
+          agent: "code-implementer-agent",
+          task: `Task ID: ${task.id}\nUse the code-implementer skill. Implement and test.`,
+        })),
+      },
+    }, context);
+    expect(result).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("both declare pi/extension.ts"),
+    }));
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).executing_tasks).toEqual([]);
+  });
+
   it("reports missing result evidence instead of treating it as an empty success", async () => {
     const pi = await extension();
     const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
@@ -586,11 +658,12 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
-  it("ignores failed review evidence while continuing with a healthy sibling", async () => {
+  it("records failed review capture while continuing with a healthy sibling", async () => {
     const pi = await extension();
     const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
     const failed = reviewResult("Task: T1", "failed result must not gate", { exitCode: 1 }).details.results[0];
     const healthy = reviewResult("Task: T1", "healthy sibling stored").details.results[0];
+    healthy.agent = "silent-failure-hunter";
     await pi.emit("tool_result", {
       toolName: "subagent",
       content: [],
@@ -600,6 +673,9 @@ describe("Pi extension review tool_result integration", () => {
     const taskState = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
     expect(taskState.critical_findings).toEqual(["healthy sibling stored"]);
     expect(taskState.critical_findings).not.toContain("failed result must not gate");
+    expect(taskState.review_status).toBe("evidence_capture_failed");
+    expect(taskState.review_evidence_failures).toEqual(["code-reviewer"]);
+    expect(taskState.review_error).toContain("failed before evidence capture completed");
   });
 
   it("does not advance a failed phase agent even when its messages contain a valid artifact", async () => {
@@ -627,8 +703,16 @@ describe("Pi extension review tool_result integration", () => {
     expect(readFileSync(statePath, "utf-8")).toBe(before);
   });
 
-  it("ignores aborted spec evidence and clears failed implementation execution without completing it", async () => {
-    writeState({ ...initialGraph(), executing_tasks: ["T1"], tasks: [{ ...initialGraph().tasks[0], status: "pending" }] });
+  it("replaces stale spec evidence after an abort and clears failed implementation execution", async () => {
+    writeState({
+      ...initialGraph(),
+      executing_tasks: ["T1"],
+      tasks: [{ ...initialGraph().tasks[0], status: "pending" }],
+      spec_check: {
+        wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+    });
     const pi = await extension();
     const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
     await pi.emit("tool_result", {
@@ -656,7 +740,11 @@ describe("Pi extension review tool_result integration", () => {
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
     expect(state.executing_tasks).toEqual([]);
     expect(state.tasks[0].status).toBe("pending");
-    expect(state.spec_check).toBeUndefined();
+    expect(state.spec_check).toMatchObject({
+      wave: 1,
+      verdict: "EVIDENCE_CAPTURE_FAILED",
+      error: expect.stringContaining("spec-check-invoker failed before evidence capture completed"),
+    });
   });
 
   it("continues processing later Pi results when the first result throws", async () => {

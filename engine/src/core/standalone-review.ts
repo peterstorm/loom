@@ -55,9 +55,6 @@ export interface AdjudicatedStandaloneReview {
   readonly panel: ParsedPanelOutcomes | null;
 }
 
-const nonEmptyStrings = (raw: unknown): raw is string[] =>
-  Array.isArray(raw) && raw.length > 0 && raw.every((entry) => typeof entry === "string" && entry.trim() !== "");
-
 function normalizeRepoRelativePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
 }
@@ -76,6 +73,27 @@ function uniqueNonEmpty(values: readonly string[], label: string): readonly stri
   if (values.some((value) => value.trim() === "")) errors.push(`${label} must not contain empty values`);
   if (new Set(values).size !== values.length) errors.push(`${label} must be distinct`);
   return errors;
+}
+
+/** Parse and freeze the exact repository-relative scope before it becomes authority. */
+export function parseStandaloneReviewScope(
+  raw: unknown,
+  label = "review scope",
+): ParseResult<readonly string[]> {
+  if (!Array.isArray(raw)) return fail([`${label} must be a non-empty string array`]);
+  const errors: string[] = [];
+  const scope = raw.flatMap((entry, index): string[] => {
+    if (typeof entry !== "string" || entry.trim() === "") {
+      errors.push(`${label}[${index}] must be a non-empty string`);
+      return [];
+    }
+    const normalized = normalizeRepoRelativePath(entry.trim());
+    const pathError = repoRelativePathError(normalized);
+    if (pathError !== null) errors.push(pathError.replace(/^review scope path/, `${label}[${index}]`));
+    return [normalized];
+  });
+  errors.push(...uniqueNonEmpty(scope, label));
+  return errors.length > 0 ? fail(errors) : ok(Object.freeze(scope));
 }
 
 function findingScopeErrors(
@@ -101,18 +119,15 @@ export function aggregateStandaloneReview(input: {
   readonly transcripts: readonly StandaloneReviewTranscript[];
 }): ParseResult<StandaloneReviewState> {
   const runId = input.runId.trim();
-  const scope = input.scope.map((path) => normalizeRepoRelativePath(path.trim()));
+  const parsedScope = parseStandaloneReviewScope(input.scope);
+  const scope = parsedScope.ok ? parsedScope.value : [];
   const transcripts = input.transcripts.map((transcript) => ({
     agent: transcript.agent.trim(),
     output: transcript.output,
   }));
   const errors = [
     ...(runId === "" ? ["run id must be non-empty"] : []),
-    ...uniqueNonEmpty(scope, "review scope"),
-    ...scope.flatMap((path) => {
-      const error = repoRelativePathError(path);
-      return error === null ? [] : [error];
-    }),
+    ...(parsedScope.ok ? [] : parsedScope.errors),
     ...uniqueNonEmpty(transcripts.map(({ agent }) => agent), "review agents"),
   ];
   if (transcripts.length === 0) errors.push("review transcripts must be non-empty");
@@ -174,15 +189,9 @@ export function parseStandaloneAggregate(raw: unknown): ParseResult<StandaloneRe
   const runId = typeof raw.run_id === "string" ? raw.run_id.trim() : "";
   if (runId === "") errors.push("aggregate.run_id must be non-empty");
   if (raw.subject_id !== STANDALONE_REVIEW_SUBJECT) errors.push(`aggregate.subject_id must be '${STANDALONE_REVIEW_SUBJECT}'`);
-  const scope = nonEmptyStrings(raw.scope)
-    ? raw.scope.map((path) => normalizeRepoRelativePath(path.trim()))
-    : [];
-  if (scope.length === 0) errors.push("aggregate.scope must be a non-empty string array");
-  if (new Set(scope).size !== scope.length) errors.push("aggregate.scope must be distinct");
-  for (const path of scope) {
-    const error = repoRelativePathError(path);
-    if (error !== null) errors.push(error);
-  }
+  const parsedScope = parseStandaloneReviewScope(raw.scope, "aggregate.scope");
+  const scope = parsedScope.ok ? parsedScope.value : [];
+  if (!parsedScope.ok) errors.push(...parsedScope.errors);
   if (!Array.isArray(raw.findings)) errors.push("aggregate.findings must be an array");
   const findingError = findingsUnionError(raw.findings, "aggregate.findings");
   if (findingError !== null) errors.push(findingError);

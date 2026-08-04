@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import gateHandler, {
   checkLifecycleArtifacts,
   loadPlanModelsSource,
@@ -115,7 +115,7 @@ describe("complete-wave-gate handler wiring (check 7 is actually in the gate)", 
   let dirs: string[] = [];
 
   function tempDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), "loom-gate-handler-"));
+    const dir = mkdtempSync(join(process.cwd(), ".tmp-loom-gate-handler-"));
     dirs.push(dir);
     return dir;
   }
@@ -173,7 +173,7 @@ describe("complete-wave-gate handler wiring (check 7 is actually in the gate)", 
   it("BLOCKS the gate when the bound machine file was never created", async () => {
     const dir = tempDir();
     const planFile = join(dir, "plan.md");
-    const machineFile = join(dir, "src", "order-machine.ts"); // never written
+    const machineFile = relative(process.cwd(), join(dir, "src", "order-machine.ts")); // never written
     writeFileSync(planFile, `# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** ${machineFile}\n`);
     const statePath = writeGateState(dir, planFile, machineFile);
     const gate = loadGateWithState(statePath);
@@ -188,9 +188,10 @@ describe("complete-wave-gate handler wiring (check 7 is actually in the gate)", 
   it("passes the gate when the machine file exists on disk", async () => {
     const dir = tempDir();
     const planFile = join(dir, "plan.md");
-    const machineFile = join(dir, "order-machine.ts");
+    const machineAbsolute = join(dir, "order-machine.ts");
+    const machineFile = relative(process.cwd(), machineAbsolute);
     writeFileSync(planFile, `# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** ${machineFile}\n`);
-    writeFileSync(machineFile, "export const machine = 1;\n");
+    writeFileSync(machineAbsolute, "export const machine = 1;\n");
     const statePath = writeGateState(dir, planFile, machineFile);
     const gate = loadGateWithState(statePath);
     const result = await gate("", ["--wave", "1"]);
@@ -200,7 +201,7 @@ describe("complete-wave-gate handler wiring (check 7 is actually in the gate)", 
   it("falls back to the architecture phase artifact when plan_file is null", async () => {
     const dir = tempDir();
     const planFile = join(dir, "plan.md");
-    const machineFile = join(dir, "order-machine.ts"); // never written
+    const machineFile = relative(process.cwd(), join(dir, "order-machine.ts")); // never written
     writeFileSync(planFile, `# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** ${machineFile}\n`);
     const statePath = writeGateState(dir, planFile, machineFile);
     const state = JSON.parse(readFileSync(statePath, "utf-8"));

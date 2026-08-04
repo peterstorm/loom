@@ -73,8 +73,10 @@ function fixture(
 
   const transcriptPath = join(dir, "transcript.jsonl");
   if (transcript !== null) {
+    const inferredTask = transcript.match(/\bT\d+\b/)?.[0] ?? "T1";
+    const trustedPrompt = userPrompt ?? `Review Task ${inferredTask}.`;
     const lines = [
-      ...(userPrompt === undefined ? [] : [{ type: "user", message: { role: "user", content: [{ type: "text", text: userPrompt }] } }]),
+      { type: "user", message: { role: "user", content: [{ type: "text", text: trustedPrompt }] } },
       { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: transcript }] } },
     ];
     writeFileSync(transcriptPath, lines.map((line) => JSON.stringify(line)).join("\n"));
@@ -253,8 +255,8 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
     }
   });
 
-  it("says so when the transcript is empty or missing", async () => {
-    const f = fixture("empty", null);
+  it("marks an attributable empty reviewer transcript as evidence capture failed", async () => {
+    const f = fixture("empty", "review stopped before Machine Summary", [{ ...task("T1"), review_status: "passed" }]);
     try {
       const { result, stderr } = await run({
         session_id: f.session,
@@ -262,9 +264,26 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
         agent_transcript_path: f.transcriptPath,
       });
       expect(result.kind).toBe("passthrough");
-      expect(stderr).toContain("findings NOT stored");
-      // Left `pending`, which `checkReviews` fails the gate on — the fail-closed
-      // direction. A silent `passed` here is the whole failure class.
+      expect(stderr).toContain("marking evidence_capture_failed");
+      expect(f.state().tasks[0]).toMatchObject({
+        review_status: "evidence_capture_failed",
+        review_evidence_failures: ["code-reviewer"],
+      });
+      expect(f.state().tasks[0].review_error).toContain("CRITICAL_COUNT marker not found");
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("fails loudly when a missing transcript cannot supply a trusted task binding", async () => {
+    const f = fixture("missing", null);
+    try {
+      const { result } = await run({
+        session_id: f.session,
+        agent_type: "code-reviewer",
+        agent_transcript_path: f.transcriptPath,
+      });
+      expect(result.kind).toBe("error");
       expect(f.state().tasks[0].review_status).toBe("pending");
     } finally {
       f.cleanup();
@@ -349,23 +368,29 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
       });
       writeFileSync(
         f.transcriptPath,
-        JSON.stringify({
-          type: "assistant",
-          message: {
-            content: [
-              {
-                type: "text",
-                text: [
-                  "Task T1 review.",
-                  "### Machine Summary",
-                  "CRITICAL_COUNT: 1",
-                  "ADVISORY_COUNT: 0",
-                  "CRITICAL: the retry loop never terminates",
-                ].join("\n"),
-              },
-            ],
-          },
-        }),
+        [
+          JSON.stringify({
+            type: "user",
+            message: { role: "user", content: [{ type: "text", text: "Review Task T1." }] },
+          }),
+          JSON.stringify({
+            type: "assistant",
+            message: {
+              content: [
+                {
+                  type: "text",
+                  text: [
+                    "Task T1 review.",
+                    "### Machine Summary",
+                    "CRITICAL_COUNT: 1",
+                    "ADVISORY_COUNT: 0",
+                    "CRITICAL: the retry loop never terminates",
+                  ].join("\n"),
+                },
+              ],
+            },
+          }),
+        ].join("\n"),
       );
       await run({
         session_id: f.session,
