@@ -12,7 +12,7 @@ import { dirname } from "node:path";
 import { withLock } from "./utils/lock";
 import { PHASE_ORDER, TASK_GRAPH_PATH } from "./config";
 import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
-import { REVIEW_STATUSES, SPEC_CHECK_VERDICTS, TASK_STATUSES, parseSpecCheckVerdict } from "./types";
+import { REVIEW_STATUSES, TASK_STATUSES } from "./types";
 import {
   findingIdCollisionError,
   findingsLockstepError,
@@ -24,6 +24,7 @@ import {
 import type { TaskGraph } from "./types";
 import { parseTaskProof } from "./core/proof-obligations";
 import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
+import { parseStoredSpecCheck } from "./core/spec-check";
 
 /** Resolve task graph path for cross-repo access. The session id comes from
  *  hook input, so it is PARSED before naming a file under SUBAGENT_DIR — an
@@ -113,20 +114,8 @@ function waveGateError(v: unknown, wave: string): string | null {
  */
 function specCheckError(v: unknown): string | null {
   if (v === undefined) return null;
-  if (typeof v !== "object" || v === null || Array.isArray(v)) {
-    return "spec_check must be an object when present";
-  }
-  const spec = v as Record<string, unknown>;
-  if (typeof spec.verdict !== "string" || parseSpecCheckVerdict(spec.verdict) === null) {
-    return (
-      `spec_check.verdict ${JSON.stringify(spec.verdict)} is not one of ` +
-      `${SPEC_CHECK_VERDICTS.join(", ")}`
-    );
-  }
-  if (spec.wave !== undefined && (typeof spec.wave !== "number" || !Number.isFinite(spec.wave))) {
-    return `spec_check.wave must be a finite number, got ${JSON.stringify(spec.wave)}`;
-  }
-  return null;
+  const parsed = parseStoredSpecCheck(v);
+  return parsed.ok ? null : parsed.errors.join("; ");
 }
 
 export function taskUnionError(v: unknown, index: number): string | null {
@@ -275,6 +264,12 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
     return parseErr(
       `current_phase ${JSON.stringify(obj.current_phase)} is not one of ${PHASE_ORDER.join(", ")}`,
     );
+  }
+  if (
+    obj.current_wave !== undefined &&
+    (typeof obj.current_wave !== "number" || !Number.isInteger(obj.current_wave) || obj.current_wave < 1)
+  ) {
+    return parseErr(`current_wave must be an integer >= 1 when present, got ${JSON.stringify(obj.current_wave)}`);
   }
   const tasks = obj.tasks ?? [];
   if (!Array.isArray(tasks)) return parseErr("tasks must be an array");

@@ -182,8 +182,9 @@ describe("Pi extension review tool_result integration", () => {
       }, context);
 
       expect(results).toEqual([undefined]);
-      expect(readFileSync(join(subagentDir, `${session}.active`), "utf-8"))
-        .toContain("review-verifier-agent");
+      const roster = readFileSync(join(subagentDir, `${session}.active`), "utf-8")
+        .split("\n").filter(Boolean);
+      expect(roster).toHaveLength(1);
     } finally {
       rmSync(join(subagentDir, `${session}.active`), { force: true });
       renameSync(backup, statePath);
@@ -216,6 +217,85 @@ describe("Pi extension review tool_result integration", () => {
       rmSync(subagentDir, { force: true });
       mkdirSync(subagentDir, { recursive: true });
       renameSync(stateBackup, statePath);
+    }
+  });
+
+  it("does not mutate task state when lifecycle reservation fails", async () => {
+    const planPath = join(temp, "transactional-start-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [{
+        id: "T1", description: "implementation", agent: "code-implementer-agent",
+        wave: 1, status: "pending", depends_on: [],
+      }],
+    });
+    const before = readFileSync(statePath, "utf-8");
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad40e";
+    const activePath = join(subagentDir, `${session}.active`);
+    mkdirSync(activePath, { recursive: true });
+    try {
+      const results = await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId: "call-lifecycle-failure",
+        input: {
+          agent: "code-implementer-agent",
+          task: "Task ID: T1\nUse the code-implementer skill. Implement the assigned plan, write tests, and run bun test.",
+          agentScope: "user",
+        },
+      }, { sessionManager: { getSessionId: () => session } });
+
+      expect(results).toContainEqual(expect.objectContaining({
+        block: true,
+        reason: expect.stringContaining("Cannot record Loom subagent lifecycle evidence"),
+      }));
+      expect(readFileSync(statePath, "utf-8")).toBe(before);
+    } finally {
+      rmSync(activePath, { recursive: true, force: true });
+    }
+  });
+
+  it("gives repeated agent types distinct roster entries and removes each exact spawn", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad40f";
+    const context = { sessionManager: { getSessionId: () => session } };
+    const backup = `${statePath}.same-type-backup`;
+    renameSync(statePath, backup);
+    const toolCallId = "call-same-type";
+    const tasks = ["Judge manifest through lens one", "Judge manifest through lens two"];
+    try {
+      const call = await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: {
+          agentScope: "user",
+          tasks: tasks.map((task) => ({ agent: "review-verifier-agent", task })),
+        },
+      }, context);
+      expect(call).toEqual([undefined]);
+      const activePath = join(subagentDir, `${session}.active`);
+      const roster = readFileSync(activePath, "utf-8").split("\n").filter(Boolean);
+      expect(roster).toHaveLength(2);
+      expect(new Set(roster).size).toBe(2);
+
+      await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId,
+        content: [],
+        details: {
+          results: tasks.map((task) => ({
+            agent: "review-verifier-agent", task, exitCode: 0, messages: [],
+          })),
+        },
+      }, context);
+      expect(() => readFileSync(activePath, "utf-8")).toThrow();
+    } finally {
+      rmSync(join(subagentDir, `${session}.active`), { force: true });
+      renameSync(backup, statePath);
     }
   });
 
@@ -300,6 +380,81 @@ describe("Pi extension review tool_result integration", () => {
     } finally {
       stderr.mockRestore();
       renameSync(backup, statePath);
+    }
+  });
+
+  it("continues processing later Pi results when the first result throws", async () => {
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const second = reviewResult("Task: T1", "second result still stored").details.results[0];
+      await pi.emit("tool_result", {
+        toolName: "subagent",
+        content: [],
+        details: {
+          results: [
+            { agent: null, task: "bad first result", exitCode: 0, messages: [] },
+            second,
+          ],
+        },
+      }, context);
+
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toContain("subagent-stop processing failed");
+      expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings)
+        .toEqual(["second result still stored"]);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("marks a Pi spec-check count/findings mismatch as evidence capture failed", async () => {
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      content: [],
+      details: {
+        results: [{
+          agent: "spec-check-invoker",
+          task: "spec check",
+          exitCode: 0,
+          messages: [{
+            role: "assistant",
+            content: [{
+              type: "text",
+              text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED\nCRITICAL: hidden drift",
+            }],
+          }],
+        }],
+      },
+    }, context);
+
+    const specCheck = JSON.parse(readFileSync(statePath, "utf-8")).spec_check;
+    expect(specCheck.verdict).toBe("EVIDENCE_CAPTURE_FAILED");
+    expect(specCheck.error).toContain("does not match");
+    expect(specCheck.critical_count).toBeUndefined();
+  });
+
+  it("warns when an implementation result has neither task id nor executing task", async () => {
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await pi.emit("tool_result", {
+        toolName: "subagent",
+        content: [],
+        details: {
+          results: [{
+            agent: "code-implementer-agent", task: "no task identifier", exitCode: 0, messages: [],
+          }],
+        },
+      }, context);
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toContain("executing_tasks is empty — task status was NOT recorded");
+    } finally {
+      stderr.mockRestore();
     }
   });
 

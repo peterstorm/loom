@@ -1,5 +1,20 @@
-import { describe, it, expect } from "vitest";
-import { countNewTests, countAssertions } from "../../src/utils/git";
+import { describe, it, expect, vi } from "vitest";
+import { countNewTests, countAssertions, mergeBase } from "../../src/utils/git";
+
+describe("git command diagnostics", () => {
+  it("reports array-argument git failures instead of returning empty silently", () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(mergeBase("definitely-missing-loom-test-ref")).toBeNull();
+      const output = stderr.mock.calls.map(([text]) => String(text)).join("");
+      expect(output).toContain("git warning: git");
+      expect(output).toContain("merge-base");
+      expect(output).toContain("definitely-missing-loom-test-ref");
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+});
 
 describe("countNewTests (pure)", () => {
   it("counts Java @Test annotations", () => {

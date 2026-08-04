@@ -541,7 +541,10 @@ export const VALID_TRANSITIONS: Record<Phase, Phase[]> = {
 
 /** Detect which harness is running */
 function detectHarness(): "claude" | "pi" {
-  if (process.env.PI_CODING_AGENT_DIR) return "pi";
+  // PI_CODING_AGENT is Pi's process identity. PI_CODING_AGENT_DIR is only an
+  // optional resource-directory override, retained as a compatibility signal
+  // for older launchers and isolated tests.
+  if (process.env.PI_CODING_AGENT || process.env.PI_CODING_AGENT_DIR) return "pi";
   return "claude";
 }
 

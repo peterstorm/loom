@@ -71,6 +71,19 @@ describe("validateFull (pure)", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("rejects a coercible string current_wave just like the state loader", () => {
+    const graph = {
+      plan_title: "Test plan",
+      plan_file: ".claude/plans/plan.md",
+      spec_file: ".claude/specs/spec.md",
+      current_wave: "2",
+      tasks: [validTask],
+    };
+    expect(errorsOf(validateFull(graph))).toContain(
+      'current_wave must be an integer >= 1 when present, got "2"',
+    );
+  });
+
   it("rejects missing required top-level fields", () => {
     const result = validateFull({ tasks: [validTask] });
     expect(result.ok).toBe(false);
@@ -514,6 +527,22 @@ describe("fixFull repairs findings WITH their derived views", () => {
     ]);
   });
 
+  it("salvages a singleton findings object instead of treating it as zero entries", () => {
+    const { json, notes } = fixFull(graphOf({
+      id: "T1",
+      findings: { severity: "critical", claim: "singleton blocker" },
+      critical_findings: [],
+      advisory_findings: [],
+      review_status: "blocked",
+    }));
+    const repaired = JSON.parse(json).tasks[0];
+    expect(repaired.critical_findings).toEqual(["singleton blocker"]);
+    expect(repaired.findings).toHaveLength(1);
+    expect(notes).toEqual([
+      'T1: re-minted identity for a malformed findings entry — "singleton blocker"',
+    ]);
+  });
+
   it("salvages without double-minting a claim the view also holds", () => {
     // Step 1 runs before step 2 precisely so the salvaged claim is already in
     // `findings` when recoverViewOnlyClaims looks for orphans. Reversed, the
@@ -563,6 +592,14 @@ describe("fixFull repairs findings WITH their derived views", () => {
       ],
     });
     expect(repaired.refuted_findings).toHaveLength(1);
+  });
+
+  it("normalizes an invalid current_wave and reports the repair", () => {
+    const input: Record<string, unknown> = graphOf({ id: "T1" });
+    input.current_wave = "2";
+    const repaired = fixFull(input);
+    expect(JSON.parse(repaired.json).current_wave).toBe(1);
+    expect(repaired.notes).toContain('normalized invalid current_wave "2" to 1');
   });
 
   it("produces a graph the load boundary accepts — repair and rejection agree", () => {

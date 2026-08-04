@@ -1604,8 +1604,9 @@ The only path that differs is the state file location:
 ```typescript
 // engine/src/config.ts
 function detectHarness(): "claude" | "pi" {
-  // Pi sets this, Claude Code doesn't
-  if (process.env.PI_CODING_AGENT_DIR) return "pi";
+  // PI_CODING_AGENT is the process marker; PI_CODING_AGENT_DIR is only an
+  // optional resource-directory override retained for older launchers.
+  if (process.env.PI_CODING_AGENT || process.env.PI_CODING_AGENT_DIR) return "pi";
   return "claude";
 }
 

@@ -4,70 +4,13 @@
  * Blocks wave if CRITICAL_COUNT > 0.
  */
 
-import type { HookHandler, SubagentStopInput, SpecCheck, SpecCheckVerdict } from "../../types";
-import { parseSpecCheckVerdict, newWaveGate } from "../../types";
+import type { HookHandler, SubagentStopInput } from "../../types";
+import { newWaveGate } from "../../types";
+import { parseSpecCheckOutput, reconcileSpecCheck } from "../../core/spec-check";
+export { parseSpecCheckOutput } from "../../core/spec-check";
 import { StateManager } from "../../state-manager";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
-import { isNoFindingSentinel } from "../../utils/no-finding-sentinel";
-
-interface SpecCheckFindings {
-  critical: string[];
-  high: string[];
-  medium: string[];
-  criticalCount: number | null;
-  highCount: number | null;
-  /** Parsed into the closed union at this boundary — never free text. */
-  verdict: SpecCheckVerdict | null;
-  wave: number | null;
-}
-
-/** Parse spec-check output for findings */
-export function parseSpecCheckOutput(output: string): SpecCheckFindings {
-  // Find the actual output block (last occurrence of CRITICAL_COUNT, not template)
-  // Template has "SPEC_CHECK_CRITICAL_COUNT: N" where N is not a digit
-  // Real output has "SPEC_CHECK_CRITICAL_COUNT: 0" (or other digit)
-  const lastCritCountIdx = output.lastIndexOf("SPEC_CHECK_CRITICAL_COUNT:");
-
-  // Search backwards from lastCritCountIdx to find the start of this output block
-  // Look for previous SPEC_CHECK_WAVE or start of string
-  let blockStart = 0;
-  if (lastCritCountIdx >= 0) {
-    const beforeCount = output.slice(0, lastCritCountIdx);
-    const lastWaveIdx = beforeCount.lastIndexOf("SPEC_CHECK_WAVE:");
-    blockStart = lastWaveIdx >= 0 ? lastWaveIdx : 0;
-  }
-
-  const searchBlock = lastCritCountIdx >= 0 ? output.slice(blockStart) : output;
-
-  const critical: string[] = [];
-  const high: string[] = [];
-  const medium: string[] = [];
-
-  for (const line of searchBlock.split("\n")) {
-    const critMatch = line.match(/^CRITICAL:\s*(.*)/);
-    if (critMatch) { const t = critMatch[1].trim(); if (t !== '' && !isNoFindingSentinel(t)) critical.push(t); continue; }
-    const highMatch = line.match(/^HIGH:\s*(.*)/);
-    if (highMatch) { const t = highMatch[1].trim(); if (t !== '' && !isNoFindingSentinel(t)) high.push(t); continue; }
-    const medMatch = line.match(/^MEDIUM:\s*(.*)/);
-    if (medMatch) { const t = medMatch[1].trim(); if (t !== '' && !isNoFindingSentinel(t)) medium.push(t); }
-  }
-
-  const critCount = searchBlock.match(/SPEC_CHECK_CRITICAL_COUNT:\s*(\d+)/);
-  const highCount = searchBlock.match(/SPEC_CHECK_HIGH_COUNT:\s*(\d+)/);
-  const verdict = searchBlock.match(/SPEC_CHECK_VERDICT:\s*(PASSED|BLOCKED)/);
-  const wave = searchBlock.match(/SPEC_CHECK_WAVE:\s*(\d+)/);
-
-  return {
-    critical,
-    high,
-    medium,
-    criticalCount: critCount ? Number(critCount[1]) : null,
-    highCount: highCount ? Number(highCount[1]) : null,
-    verdict: verdict ? parseSpecCheckVerdict(verdict[1]) : null,
-    wave: wave ? Number(wave[1]) : null,
-  };
-}
 
 const handler: HookHandler = async (stdin) => {
   // Guard the standalone CLI route: dispatch parses stdin before calling
@@ -121,55 +64,16 @@ const handler: HookHandler = async (stdin) => {
   const state = mgr.load();
   const wave = findings.wave ?? state.current_wave ?? 1;
 
-  // Safety: no CRITICAL_COUNT → evidence_capture_failed
-  if (findings.criticalCount === null) {
-    process.stderr.write("WARNING: No SPEC_CHECK_CRITICAL_COUNT — marking evidence_capture_failed\n");
-    await mgr.update((s) => ({
-      ...s,
-      spec_check: {
-        wave,
-        run_at: new Date().toISOString(),
-        verdict: "EVIDENCE_CAPTURE_FAILED",
-        error: "SPEC_CHECK_CRITICAL_COUNT marker not found - re-run /wave-gate",
-      },
-    }));
+  const resolution = reconcileSpecCheck(findings, wave, new Date().toISOString());
+  if (resolution.kind === "evidence-failed") {
+    process.stderr.write(`WARNING: ${resolution.specCheck.error} — marking evidence_capture_failed\n`);
+    await mgr.update((s) => ({ ...s, spec_check: resolution.specCheck }));
     return { kind: "passthrough" };
   }
-
-  // Fail closed on a count/findings mismatch, mirroring the manual helper
-  // (store-spec-check): the wave gate reads critical_count, so a reported 0
-  // alongside listed CRITICAL: lines (or a count with no listed findings)
-  // would forge a pass or manufacture an unactionable block.
-  if (findings.criticalCount !== findings.critical.length) {
-    process.stderr.write(
-      `WARNING: SPEC_CHECK_CRITICAL_COUNT is ${findings.criticalCount} but ${findings.critical.length} CRITICAL: line(s) were found — marking evidence_capture_failed\n`,
-    );
-    await mgr.update((s) => ({
-      ...s,
-      spec_check: {
-        wave,
-        run_at: new Date().toISOString(),
-        verdict: "EVIDENCE_CAPTURE_FAILED",
-        error: `SPEC_CHECK_CRITICAL_COUNT (${findings.criticalCount}) does not match CRITICAL: findings (${findings.critical.length}) - re-run /wave-gate`,
-      },
-    }));
-    return { kind: "passthrough" };
-  }
-
-  const specCheck: SpecCheck = {
-    wave,
-    run_at: new Date().toISOString(),
-    critical_count: findings.criticalCount,
-    high_count: findings.highCount ?? 0,
-    critical_findings: findings.critical,
-    high_findings: findings.high,
-    medium_findings: findings.medium,
-    verdict: findings.verdict ?? "UNKNOWN",
-  };
 
   await mgr.update((s) => {
-    const updated = { ...s, spec_check: specCheck };
-    if (findings.criticalCount! > 0) {
+    const updated = { ...s, spec_check: resolution.specCheck };
+    if (resolution.specCheck.critical_count > 0) {
       const waveKey = String(wave);
       updated.wave_gates = {
         ...s.wave_gates,
@@ -182,7 +86,9 @@ const handler: HookHandler = async (stdin) => {
     return updated;
   });
 
-  process.stderr.write(`Spec-check: ${findings.criticalCount} critical, ${findings.highCount ?? 0} high\n`);
+  process.stderr.write(
+    `Spec-check: ${resolution.specCheck.critical_count} critical, ${resolution.specCheck.high_count} high\n`,
+  );
   return { kind: "passthrough" };
 };
 

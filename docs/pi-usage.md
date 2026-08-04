@@ -28,6 +28,9 @@ pi install npm:@peterstorm/loom@<version>
 After install or update, run `scripts/sync-pi-agents.sh` from that installed
 package root, then `/reload`. Loom agents require explicit Pi model bindings and
 are generated into `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/agents`.
+`PI_CODING_AGENT` is Pi's process marker and is what Loom uses to select Pi
+state/rule paths; `PI_CODING_AGENT_DIR` remains only an optional agent-resource
+directory override.
 
 ## Package-root contract
 

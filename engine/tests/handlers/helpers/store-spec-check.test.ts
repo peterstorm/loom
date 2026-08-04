@@ -47,6 +47,7 @@ describe("store-spec-check helper", () => {
       cwd: tmpDir,
       encoding: "utf-8",
       input: stdin,
+      env: { ...process.env, LOOM_STATE_PATH: statePath },
     });
     return { exitCode: result.status ?? -1, stderr: result.stderr ?? "" };
   }

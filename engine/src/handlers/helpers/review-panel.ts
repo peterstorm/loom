@@ -60,10 +60,10 @@ import {
 } from "../../core/review-panel";
 import {
   finalizeStandaloneReview,
-  parseStandaloneAggregate,
   parseStandalonePanelOutcomes,
   serializeAdjudicatedStandaloneReview,
 } from "../../core/standalone-review";
+import { loadEvidenceBoundAggregate } from "./standalone-review";
 import {
   REVIEW_LAYOUT,
   argumentValue,
@@ -166,16 +166,8 @@ function operationBrief(
     }
     const aggregateArtifactError = artifactError(source.path, resolve(runDir));
     if (aggregateArtifactError !== null) return contractError("review brief", [aggregateArtifactError]);
-    let raw: unknown;
-    try { raw = JSON.parse(readFileSync(source.path, "utf-8")); }
-    catch (error) {
-      return contractError("review brief", [`cannot read standalone aggregate: ${error instanceof Error ? error.message : String(error)}`]);
-    }
-    const aggregate = parseStandaloneAggregate(raw);
+    const aggregate = loadEvidenceBoundAggregate(runDir);
     if (!aggregate.ok) return contractError("review brief", aggregate.errors);
-    if (aggregate.value.runId !== basename(runDir)) {
-      return contractError("review brief", [`aggregate.run_id must equal run directory '${basename(runDir)}'`]);
-    }
     brief = buildStandaloneFindingBrief(aggregate.value);
     if (brief.findings.length === 0) {
       return contractError("review brief", ["standalone review has no critical findings — skip the refutation panel"]);
@@ -226,6 +218,23 @@ function operationBrief(
   }
 
   return writeCanonicalOutput(briefJson + "\n");
+}
+
+/** Narrow state-update port: tests can present a state that changes after preflight. */
+export interface ReviewTallyStateUpdater {
+  readonly update: (transform: (state: TaskGraph) => TaskGraph) => Promise<void>;
+}
+
+/** Apply wave outcomes under the state manager's lock, rechecking replay there. */
+export async function applyWaveTallyState(
+  updater: ReviewTallyStateUpdater,
+  outcomes: readonly FindingOutcome[],
+): Promise<void> {
+  await updater.update((state) => {
+    const raced = replayedOutcomes(outcomes, refutedIdsOf(state.tasks));
+    if (raced.length > 0) throw new Error(replayError(raced));
+    return { ...state, tasks: state.tasks.map((task) => applyFindingOutcomes(task, outcomes)) };
+  });
 }
 
 /** Validate untrusted refutation-panel handoffs at the filesystem boundary. */
@@ -435,16 +444,8 @@ const handler: HookHandler = async (stdin, args) => {
     const aggregatePath = join(runDir, "aggregate.json");
     const aggregateError = artifactError(aggregatePath, resolve(runDir));
     if (aggregateError !== null) return contractError("review tally", [aggregateError]);
-    let aggregateRaw: unknown;
-    try { aggregateRaw = JSON.parse(readFileSync(aggregatePath, "utf-8")); }
-    catch (error) {
-      return contractError("review tally", [`cannot re-read standalone aggregate: ${error instanceof Error ? error.message : String(error)}`]);
-    }
-    const aggregate = parseStandaloneAggregate(aggregateRaw);
+    const aggregate = loadEvidenceBoundAggregate(runDir);
     if (!aggregate.ok) return contractError("review tally", aggregate.errors);
-    if (aggregate.value.runId !== basename(runDir)) {
-      return contractError("review tally", [`aggregate.run_id must equal run directory '${basename(runDir)}'`]);
-    }
     const criticals = aggregate.value.findings.filter((finding) => finding.severity === "critical");
     const panel = parseStandalonePanelOutcomes(
       JSON.parse(outcomesJson),
@@ -511,11 +512,7 @@ const handler: HookHandler = async (stdin, args) => {
     const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
     if (!mgr) return contractError("review tally", [`no task graph at ${TASK_GRAPH_PATH}`]);
     try {
-      await mgr.update((s) => {
-        const raced = replayedOutcomes(tallied.value, refutedIdsOf(s.tasks));
-        if (raced.length > 0) throw new Error(replayError(raced));
-        return { ...s, tasks: s.tasks.map((task) => applyFindingOutcomes(task, tallied.value)) };
-      });
+      await applyWaveTallyState(mgr, tallied.value);
     } catch (error) {
       return contractError("review tally", [
         `wave tally was closed but task state was not updated; start a fresh run: ${error instanceof Error ? error.message : String(error)}`,

@@ -513,8 +513,42 @@ describe("the load boundary proves wave_gates and spec_check, not just tasks", (
   });
 
   it("accepts a well-formed spec_check", () => {
-    const parsed = parseTaskGraph(graph({ spec_check: { wave: 1, run_at: "t", verdict: "PASSED" } }));
+    const parsed = parseTaskGraph(graph({
+      spec_check: {
+        wave: 1,
+        run_at: "t",
+        verdict: "PASSED",
+        critical_count: 0,
+        high_count: 0,
+        critical_findings: [],
+        high_findings: [],
+        medium_findings: [],
+      },
+    }));
     expect(parsed.ok).toBe(true);
+  });
+
+  it("refuses spec-check count/view drift at the state boundary", () => {
+    const parsed = parseTaskGraph(graph({
+      spec_check: {
+        wave: 1,
+        run_at: "t",
+        verdict: "PASSED",
+        critical_count: 0,
+        high_count: 0,
+        critical_findings: ["real drift"],
+        high_findings: [],
+        medium_findings: [],
+      },
+    }));
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("must equal critical_findings.length");
+  });
+
+  it("refuses a string current_wave before task execution can coerce it", () => {
+    const parsed = parseTaskGraph(graph({ current_wave: "2" }));
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("current_wave must be an integer >= 1");
   });
 
   it("an absent spec_check is not an error — it is the pre-wave-gate state", () => {

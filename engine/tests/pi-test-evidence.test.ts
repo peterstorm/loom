@@ -60,6 +60,16 @@ describe("Pi test-evidence transcript adapter", () => {
     }
   });
 
+  it("keeps an errored Bash tool result failing even when its text looks like a pass", () => {
+    const messages = testRun("654 pass\n0 fail\n");
+    messages[1] = { ...messages[1], isError: true };
+
+    expect(piStructuredTestResult(messages)).toEqual({
+      passed: false,
+      evidence: "bun: 654 pass",
+    });
+  });
+
   it("requires the classified test segment to own the Bash result", () => {
     expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "bun test || true"))).toBeNull();
     expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "bun test | tee out.log"))).toBeNull();

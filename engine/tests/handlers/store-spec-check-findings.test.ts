@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { parseSpecCheckOutput } from "../../src/handlers/subagent-stop/store-spec-check-findings";
 import handler from "../../src/handlers/subagent-stop/store-spec-check-findings";
 import { projectSlug } from "../../src/utils/agent-transcript-path";
+import { reconcileSpecCheck } from "../../src/core/spec-check";
 
 describe("parseSpecCheckOutput (pure)", () => {
   it("parses all severity levels", () => {
@@ -55,6 +56,21 @@ describe("parseSpecCheckOutput (pure)", () => {
     const result = parseSpecCheckOutput(output);
     expect(result.critical).toHaveLength(2);
     expect(result.high).toHaveLength(3);
+  });
+
+  it("fails evidence reconciliation when the high count drifts from HIGH lines", () => {
+    const parsed = parseSpecCheckOutput([
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+      "HIGH: uncounted risk",
+    ].join("\n"));
+
+    const resolution = reconcileSpecCheck(parsed, 1, "now");
+    expect(resolution.kind).toBe("evidence-failed");
+    if (resolution.kind === "evidence-failed") {
+      expect(resolution.specCheck.error).toContain("SPEC_CHECK_HIGH_COUNT");
+    }
   });
 
   it("finds last spec-check block, not skill template", () => {

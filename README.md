@@ -334,7 +334,7 @@ User-invokable commands defined under `/commands/`.
 | `/clarify` | `/clarify [spec-path]` | Resolve `[NEEDS CLARIFICATION]` markers |
 | `/brainstorming` | `/brainstorming` | Standalone interactive idea-to-design session |
 
-`/review-pr` aspect keywords: `code`, `errors`, `tests`, `types`, `comments`, `architecture`, `simplify`, `all`. The `architecture-tech-lead` agent auto-triggers when the diff is large (>500 additions or >10 files).
+`/review-pr` aspect keywords: `code`, `errors`, `tests`, `types`, `comments`, `architecture`, `simplify`, `all`. The `architecture-tech-lead` agent is selected for explicit `architecture`/`all` reviews and auto-triggers for >500 additions, >10 changed files, or a new service, package, or migration.
 
 Prompt templates for phase agents live in `/commands/templates/` (`phase-brainstorm.md`, `phase-specify.md`, `phase-clarify.md`, `phase-architecture.md`, `phase-plan-alignment.md`, `phase-decompose.md`, `impl-agent-context.md`). Variables like `{feature_description}`, `{spec_file_path}`, `{date_slug}` are substituted before spawning; the `validate-template-substitution` hook blocks any unresolved `{variable}` placeholder.
 

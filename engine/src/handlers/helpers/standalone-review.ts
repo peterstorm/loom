@@ -247,10 +247,53 @@ function loadBoundAggregate(runDir: string): Parse<StandaloneReviewAggregate> {
     : { ok: false, errors: [`aggregate.run_id must equal run directory '${basename(runDir)}'`] };
 }
 
+/**
+ * Reload the immutable review authority and prove that aggregate.json is still
+ * exactly the value derived from its physical transcript slots. A standalone
+ * result is remediation authority, so schema validity alone is insufficient:
+ * a hand-authored clean aggregate must never become evidence merely because it
+ * carries the right run id.
+ */
+export function loadEvidenceBoundAggregate(runDir: string): Parse<StandaloneReviewAggregate> {
+  const runId = basename(runDir);
+  const sessionRaw = readJson(join(runDir, "session.json"), "review session", runDir);
+  if (!sessionRaw.ok) return sessionRaw;
+  const session = parseSession(sessionRaw.value, runId);
+  if (!session.ok) return session;
+
+  const inputRaw = readJson(join(runDir, "review-input.json"), "review input", runDir);
+  if (!inputRaw.ok) return inputRaw;
+  const reviews = parseObservedReviews(inputRaw.value, session.value.expectedAgents);
+  if (!reviews.ok) return reviews;
+  const transcripts = loadTranscripts(runDir, reviews.value);
+  if (!transcripts.ok) return transcripts;
+
+  const derived = aggregateStandaloneReview({
+    runId,
+    scope: session.value.scope,
+    transcripts: transcripts.value,
+  });
+  if (!derived.ok) return { ok: false, errors: derived.errors };
+
+  const stored = loadBoundAggregate(runDir);
+  if (!stored.ok) return stored;
+  const derivedCanonical = serializeStandaloneAggregate(derived.value.aggregate);
+  const storedCanonical = serializeStandaloneAggregate(stored.value);
+  if (derivedCanonical !== storedCanonical) {
+    return {
+      ok: false,
+      errors: [
+        "aggregate.json does not match the aggregate rederived from session.json, review-input.json, and reviewer transcripts",
+      ],
+    };
+  }
+  return { ok: true, value: derived.value.aggregate };
+}
+
 function finalize(runDir: string): HookResult {
   const resultPath = join(runDir, "result.json");
   if (existsSync(resultPath)) return contractError("standalone review", ["this run has already been finalized"]);
-  const aggregate = loadBoundAggregate(runDir);
+  const aggregate = loadEvidenceBoundAggregate(runDir);
   if (!aggregate.ok) return contractError("standalone review", aggregate.errors);
   if (aggregate.value.findings.some((finding) => finding.severity === "critical")) {
     return contractError("standalone review", ["critical findings require review-panel tally, which validates verdicts and atomically publishes result.json"]);

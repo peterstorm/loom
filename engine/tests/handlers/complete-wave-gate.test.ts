@@ -16,7 +16,7 @@ import {
   type GateDeps,
   type GateIO,
 } from "../../src/handlers/helpers/complete-wave-gate";
-import type { Task, TaskGraph } from "../../src/types";
+import type { CapturedSpecCheck, Task, TaskGraph } from "../../src/types";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 
 const satisfiedProof = evaluateTaskProof(
@@ -192,6 +192,17 @@ describe("checkCriticalFindings (pure)", () => {
 });
 
 describe("checkSpecAlignment (pure)", () => {
+  const captured = (overrides: Partial<CapturedSpecCheck> = {}): CapturedSpecCheck => ({
+    wave: 1,
+    run_at: "",
+    verdict: "PASSED",
+    critical_count: 0,
+    high_count: 0,
+    critical_findings: [],
+    high_findings: [],
+    medium_findings: [],
+    ...overrides,
+  });
   const mkState = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
     current_phase: "execute",
     phase_artifacts: {},
@@ -211,7 +222,7 @@ describe("checkSpecAlignment (pure)", () => {
 
   it("fails when spec-check for different wave", () => {
     const state = mkState({
-      spec_check: { wave: 1, run_at: "", verdict: "PASSED" },
+      spec_check: captured({ wave: 1 }),
     });
     const result = checkSpecAlignment(state, 2);
     expect(result.passed).toBe(false);
@@ -221,7 +232,7 @@ describe("checkSpecAlignment (pure)", () => {
 
   it("passes when spec-check matches wave with no criticals", () => {
     const state = mkState({
-      spec_check: { wave: 2, run_at: "", verdict: "PASSED", critical_count: 0 },
+      spec_check: captured({ wave: 2 }),
     });
     const result = checkSpecAlignment(state, 2);
     expect(result.passed).toBe(true);
@@ -229,12 +240,24 @@ describe("checkSpecAlignment (pure)", () => {
 
   it("fails when spec-check has critical findings", () => {
     const state = mkState({
-      spec_check: { wave: 1, run_at: "", verdict: "BLOCKED", critical_count: 2, critical_findings: ["drift", "missing"] },
+      spec_check: captured({
+        verdict: "BLOCKED",
+        critical_count: 2,
+        critical_findings: ["drift", "missing"],
+      }),
     });
     const result = checkSpecAlignment(state, 1);
     expect(result.passed).toBe(false);
     expect(gateCheckMessage(result)).toContain("2 critical");
   });
+
+  for (const verdict of ["UNKNOWN", "BLOCKED"] as const) {
+    it(`fails when a zero-critical spec-check verdict is ${verdict}`, () => {
+      const result = checkSpecAlignment(mkState({ spec_check: captured({ verdict }) }), 1);
+      expect(result.passed).toBe(false);
+      expect(gateCheckMessage(result)).toContain(`verdict is ${verdict}`);
+    });
+  }
 });
 
 describe("computeNextWave (pure)", () => {
@@ -279,11 +302,14 @@ describe("generateWaveGateSummary (pure)", () => {
       mkTask("T2", { critical_findings: [], advisory_findings: [] }),
     ];
 
-    const specCheck = {
+    const specCheck: CapturedSpecCheck = {
       wave: 1,
       run_at: "2024-01-01",
-      verdict: "PASSED" as const,
+      verdict: "PASSED",
       critical_count: 0,
+      high_count: 0,
+      critical_findings: [],
+      high_findings: [],
       medium_findings: ["Minor drift in validation"],
     };
 

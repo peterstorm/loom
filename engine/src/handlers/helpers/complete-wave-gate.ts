@@ -112,17 +112,22 @@ export function checkSpecAlignment(state: TaskGraph, wave: number): GateCheck {
   // Fail CLOSED on capture failures: a spec_check with no critical_count
   // (the EVIDENCE_CAPTURE_FAILED shape) has an UNKNOWN count — coalescing
   // it to 0 would pass the gate on exactly the runs where the checker broke.
-  if (state.spec_check.verdict === "EVIDENCE_CAPTURE_FAILED" || state.spec_check.critical_count === undefined) {
-    const cause = state.spec_check.error ? `\n  ${state.spec_check.error}` : "";
+  if (state.spec_check.verdict === "EVIDENCE_CAPTURE_FAILED") {
     return fail(
-      `FAILED: Spec alignment evidence is unusable (verdict: ${state.spec_check.verdict}, critical_count: ${state.spec_check.critical_count ?? "missing"}).${cause}\n  Re-run /spec-check for wave ${wave}.`
+      `FAILED: Spec alignment evidence is unusable (verdict: ${state.spec_check.verdict}, critical_count: missing).` +
+      `\n  ${state.spec_check.error}\n  Re-run /spec-check for wave ${wave}.`,
     );
   }
   if (state.spec_check.critical_count > 0) {
-    const findings = (state.spec_check.critical_findings ?? []).map((f) => `  - ${f}`).join("\n");
+    const findings = state.spec_check.critical_findings.map((finding) => `  - ${finding}`).join("\n");
     return fail(`FAILED: Spec alignment has ${state.spec_check.critical_count} critical findings.\n${findings}`);
   }
-  return pass(`5. Spec alignment verified (verdict: ${state.spec_check.verdict}).`);
+  if (state.spec_check.verdict !== "PASSED") {
+    return fail(
+      `FAILED: Spec alignment verdict is ${state.spec_check.verdict}; only PASSED with zero critical findings can advance wave ${wave}.`,
+    );
+  }
+  return pass("5. Spec alignment verified (verdict: PASSED).");
 }
 
 /** Check 6: No critical code review findings */

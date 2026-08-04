@@ -109,8 +109,8 @@ describe("StateManager", () => {
   it("handles concurrent updates via locking", async () => {
     const mgr = new StateManager(statePath);
 
-    // Write initial state with a counter
-    await mgr.update((s) => ({ ...s, current_wave: 0 }));
+    // current_wave is a positive domain value; start at one.
+    await mgr.update((s) => ({ ...s, current_wave: 1 }));
 
     // Run 5 concurrent updates
     await Promise.all(
@@ -120,7 +120,7 @@ describe("StateManager", () => {
     );
 
     const final = mgr.load();
-    expect(final.current_wave).toBe(5);
+    expect(final.current_wave).toBe(6);
   });
 
   it("throws on empty file", () => {

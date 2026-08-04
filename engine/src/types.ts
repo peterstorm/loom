@@ -334,20 +334,37 @@ export function parseSpecCheckVerdict(raw: string): SpecCheckVerdict | null {
   return (SPEC_CHECK_VERDICTS as readonly string[]).includes(raw) ? (raw as SpecCheckVerdict) : null;
 }
 
-export interface SpecCheck {
-  wave: number;
-  run_at: string;
-  critical_count?: number;
-  high_count?: number;
+interface SpecCheckBase {
+  readonly wave: number;
+  readonly run_at: string;
+}
+
+/** Captured evidence is complete: count/view lockstep is established at construction. */
+export type CapturedSpecCheck = Readonly<SpecCheckBase & {
+  verdict: Exclude<SpecCheckVerdict, "EVIDENCE_CAPTURE_FAILED">;
+  critical_count: number;
+  high_count: number;
   /** `readonly` for the reason `Task.critical_findings` is: a holder that can
    *  `push` into a findings view mutates gate input in place, with no compile
    *  error at the site that did it. */
-  critical_findings?: readonly string[];
-  high_findings?: readonly string[];
-  medium_findings?: readonly string[];
-  verdict: SpecCheckVerdict;
-  error?: string;
-}
+  critical_findings: readonly string[];
+  high_findings: readonly string[];
+  medium_findings: readonly string[];
+  error?: never;
+}>;
+
+/** A failed capture carries a cause and cannot masquerade as usable counts. */
+export type EvidenceFailedSpecCheck = Readonly<SpecCheckBase & {
+  verdict: "EVIDENCE_CAPTURE_FAILED";
+  error: string;
+  critical_count?: never;
+  high_count?: never;
+  critical_findings?: never;
+  high_findings?: never;
+  medium_findings?: never;
+}>;
+
+export type SpecCheck = CapturedSpecCheck | EvidenceFailedSpecCheck;
 
 export interface TaskGraph {
   current_phase: Phase;

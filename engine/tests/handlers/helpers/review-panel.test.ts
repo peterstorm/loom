@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { applyWaveTallyState } from "../../../src/handlers/helpers/review-panel";
+import type { FindingOutcome, WaveFindingId } from "../../../src/core/review-panel";
+import type { TaskGraph } from "../../../src/types";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "src", "cli.ts");
 
@@ -39,6 +42,46 @@ function taskGraph() {
     }],
   };
 }
+
+describe("review-panel locked tally update", () => {
+  it("rejects state that becomes already-refuted after the preflight read", async () => {
+    const beforeRace = taskGraph();
+    const graph = {
+      ...beforeRace,
+      tasks: [{
+        ...beforeRace.tasks[0],
+        refuted_findings: [{
+          finding: beforeRace.tasks[0].findings[0],
+          refutations: [{ lens: "reproduction", reason: "already adjudicated" }],
+        }],
+      }],
+    };
+    const outcome: FindingOutcome = {
+      finding: {
+        id: F1 as WaveFindingId,
+        taskId: "T1",
+        agent: "code-reviewer",
+        severity: "critical",
+        file: "src/auth/token.ts",
+        line: 42,
+        claim: "unchecked cast in the token reducer",
+      },
+      survives: false,
+      upheldBy: [],
+      uncertainFrom: [],
+      refutations: [{ lens: "reproduction", reason: "refuted now" }],
+    };
+    let committed: TaskGraph | null = null;
+    const updater = {
+      update: async (transform: (state: TaskGraph) => TaskGraph) => {
+        committed = transform(graph as unknown as TaskGraph);
+      },
+    };
+
+    await expect(applyWaveTallyState(updater, [outcome])).rejects.toThrow("already been tallied");
+    expect(committed).toBeNull();
+  });
+});
 
 describe("review-panel helper CLI", () => {
   let tmp: string;

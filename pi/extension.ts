@@ -8,7 +8,7 @@
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { existsSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Engine core — harness-agnostic, no Claude Code dependency (these do fs I/O)
@@ -30,8 +30,8 @@ import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-
 import {
   hasStandaloneReviewContext, resolveReviewFindings, applyReviewResolution, reviewResolutionLog,
 } from "../engine/src/core/review-output";
-import { parseSpecCheckOutput } from "../engine/src/handlers/subagent-stop/store-spec-check-findings";
-import type { ReviewStatus, SpecCheck, Phase } from "../engine/src/types";
+import { parseSpecCheckOutput, reconcileSpecCheck } from "../engine/src/core/spec-check";
+import type { ReviewStatus, Phase } from "../engine/src/types";
 import { newWaveGate } from "../engine/src/types";
 
 // `isReviewAgent` lives in `config`, NOT in `core/review-output` beside the three
@@ -70,6 +70,19 @@ const isLoomOwnedResultAgent = (agentType: string): boolean =>
   IMPL_AGENTS.has(agentType) ||
   isReviewAgent(agentType) ||
   agentType === "spec-check-invoker";
+
+/** Stable per-spawn roster identity shared by tool_call and tool_result. */
+export const piSpawnRosterId = (
+  toolCallId: unknown,
+  index: number,
+  agent: string,
+  task: string,
+) => rosterAgentId(JSON.stringify([
+  typeof toolCallId === "string" ? toolCallId : "",
+  index,
+  agent,
+  task,
+]));
 
 export default function (pi: ExtensionAPI) {
   // ─── Resource Discovery ───────────────────────────────────────────────
@@ -213,54 +226,71 @@ export default function (pi: ExtensionAPI) {
 
         }
 
-        currentGuard = "validate-task-execution";
-        const taskResult = await validateTaskExecutionBatch(
-          parsedItems.map((item) => ({ prompt: item.task, description: "" })),
+        // Reserve every lifecycle identity before task-state mutation. A roster
+        // failure can now refuse the spawn without leaving executing_tasks or
+        // artifact baselines claiming work began. The ids include batch ordinal
+        // and task text, so repeated verifier/designer types remain distinct.
+        currentGuard = "subagent-tracking";
+        const safeSessionId = parseSessionId(sessionId);
+        if (safeSessionId === null) {
+          return {
+            block: true,
+            reason: `Cannot record Loom subagent lifecycle evidence for invalid session id ${JSON.stringify(sessionId)}; refusing spawn.`,
+          };
+        }
+        const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
+        const rosterIds = parsedItems.map((item, index) =>
+          piSpawnRosterId(toolCallId, index, item.agent, item.task),
         );
-        if (taskResult.kind === "block") return { block: true, reason: taskResult.message };
-
-        // Mark subagent active (equivalent of SubagentStart hook) only after
-        // the complete batch has passed. Pi currently exposes no per-spawn id,
-        // so retain one roster entry per requested agent type.
-        for (const { agent } of parsedItems) {
-          // Mark subagent active (equivalent of SubagentStart hook).
-          // Parse the session id before interpolating it into SUBAGENT_DIR paths
-          // — a raw id with a separator/`..`/whitespace could address files
-          // outside the subagent dir. Without lifecycle evidence the completion
-          // cannot be routed honestly, so refuse the spawn rather than degrading.
-          currentGuard = "subagent-tracking";
-          const safeSessionId = parseSessionId(sessionId);
-          if (safeSessionId === null) {
-            return {
-              block: true,
-              reason: `Cannot record Loom subagent lifecycle evidence for invalid session id ${JSON.stringify(sessionId)}; refusing spawn.`,
-            };
+        const reserved: Array<(typeof rosterIds)[number]> = [];
+        let taskGraphPointerCreated = false;
+        const rollbackLifecycle = async (): Promise<void> => {
+          for (const agentId of [...reserved].reverse()) {
+            await fsSessionRegistry.removeActive(safeSessionId, agentId);
           }
-          try {
-            mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
-            // Roster line: the engine contract expects a unique per-spawn
-            // AgentId (SubagentStart's agent_id); pi's tool_call event
-            // carries only the agent TYPE at this seam, so the type is
-            // sanitized through rosterAgentId — the same producer the
-            // engine roster uses, guaranteeing the line parses on read.
-            // LATENT MISMATCH (documented, deferred): with only a type to
-            // write, two parallel same-type pi subagents are
-            // indistinguishable on the roster; a real per-spawn id would
-            // need pi to expose one on the subagent tool_call.
-            appendFileSync(`${SUBAGENT_DIR}/${safeSessionId}.active`, `${rosterAgentId(agent)}\n`);
-            if (existsSync(TASK_GRAPH_PATH)) {
-              const taskGraphFile = `${SUBAGENT_DIR}/${safeSessionId}.task_graph`;
-              if (!existsSync(taskGraphFile)) {
-                writeFileSync(taskGraphFile, resolve(TASK_GRAPH_PATH));
-              }
+          if (taskGraphPointerCreated) {
+            try { unlinkSync(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`); }
+            catch (error) {
+              process.stderr.write(
+                `loom(pi): lifecycle rollback could not remove task-graph pointer: ${error instanceof Error ? error.message : String(error)}\n`,
+              );
             }
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            return {
-              block: true,
-              reason: `Cannot record Loom subagent lifecycle evidence; refusing spawn: ${message}`,
-            };
           }
+        };
+        try {
+          mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+          for (const agentId of rosterIds) {
+            await fsSessionRegistry.markActive(safeSessionId, agentId);
+            reserved.push(agentId);
+          }
+          if (existsSync(TASK_GRAPH_PATH)) {
+            const taskGraphFile = `${SUBAGENT_DIR}/${safeSessionId}.task_graph`;
+            if (!existsSync(taskGraphFile)) {
+              writeFileSync(taskGraphFile, resolve(TASK_GRAPH_PATH));
+              taskGraphPointerCreated = true;
+            }
+          }
+        } catch (error) {
+          await rollbackLifecycle();
+          return {
+            block: true,
+            reason: `Cannot record Loom subagent lifecycle evidence; refusing spawn: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+
+        currentGuard = "validate-task-execution";
+        let taskResult;
+        try {
+          taskResult = await validateTaskExecutionBatch(
+            parsedItems.map((item) => ({ prompt: item.task, description: "" })),
+          );
+        } catch (error) {
+          await rollbackLifecycle();
+          throw error;
+        }
+        if (taskResult.kind === "block") {
+          await rollbackLifecycle();
+          return { block: true, reason: taskResult.message };
         }
       }
     } catch (err) {
@@ -390,7 +420,7 @@ export default function (pi: ExtensionAPI) {
       messages: unknown[];
     }>;
 
-    for (const result of results) {
+    for (const [resultIndex, result] of results.entries()) {
       // Per-result error isolation (mirrors dispatch.ts's safeRun): a throw
       // while processing result #1 must not abort results #2..N — that
       // leaves tasks stuck "executing" with zero diagnostics.
@@ -408,8 +438,9 @@ export default function (pi: ExtensionAPI) {
         );
       } else {
         try {
-          const activeFile = `${SUBAGENT_DIR}/${safeSessionId}.active`;
-          if (existsSync(activeFile)) unlinkSync(activeFile);
+          const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
+          const rosterId = piSpawnRosterId(toolCallId, resultIndex, agentType, result.task ?? "");
+          await fsSessionRegistry.removeActive(safeSessionId, rosterId);
         } catch (err) {
           process.stderr.write(`loom: subagent flag cleanup failed: ${(err as Error).message}\n`);
         }
@@ -509,6 +540,10 @@ export default function (pi: ExtensionAPI) {
             if (executing.length > 0) {
               process.stderr.write(
                 `WARNING: ${agentType} completed without task ID, ${executing.length} tasks executing (ambiguous)\n`,
+              );
+            } else {
+              process.stderr.write(
+                `WARNING: ${agentType} completed without task ID and executing_tasks is empty — task status was NOT recorded\n`,
               );
             }
             await mgr.update((s) => ({ ...s, executing_tasks: [] }));
@@ -730,33 +765,18 @@ export default function (pi: ExtensionAPI) {
         const state = mgr.load();
         const wave = findings.wave ?? state.current_wave ?? 1;
 
-        if (findings.criticalCount === null) {
-          await mgr.update((s) => ({
-            ...s,
-            spec_check: {
-              wave,
-              run_at: new Date().toISOString(),
-              verdict: "EVIDENCE_CAPTURE_FAILED",
-              error: "SPEC_CHECK_CRITICAL_COUNT marker not found - re-run /wave-gate",
-            },
-          }));
+        const resolution = reconcileSpecCheck(findings, wave, new Date().toISOString());
+        if (resolution.kind === "evidence-failed") {
+          process.stderr.write(
+            `loom(pi): ${resolution.specCheck.error} — marking spec-check evidence_capture_failed\n`,
+          );
+          await mgr.update((s) => ({ ...s, spec_check: resolution.specCheck }));
           continue;
         }
 
-        const specCheck: SpecCheck = {
-          wave,
-          run_at: new Date().toISOString(),
-          critical_count: findings.criticalCount,
-          high_count: findings.highCount ?? 0,
-          critical_findings: findings.critical,
-          high_findings: findings.high,
-          medium_findings: findings.medium,
-          verdict: findings.verdict ?? "UNKNOWN",
-        };
-
         await mgr.update((s) => {
-          const updated = { ...s, spec_check: specCheck };
-          if (findings.criticalCount! > 0) {
+          const updated = { ...s, spec_check: resolution.specCheck };
+          if (resolution.specCheck.critical_count > 0) {
             const waveKey = String(wave);
             updated.wave_gates = {
               ...s.wave_gates,

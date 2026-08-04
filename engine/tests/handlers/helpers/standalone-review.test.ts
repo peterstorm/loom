@@ -177,6 +177,36 @@ describe("standalone review helper and refutation adapter", () => {
     expect(result.panel).toBeNull();
   });
 
+  it("refuses to finalize a schema-valid aggregate after its reviewer evidence is removed", () => {
+    initialize();
+    writeFileSync(join(tmp, runDir, "reviewers/1-code-reviewer.md"), cleanReviewOutput);
+    let run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
+    expect(run.status, run.stderr).toBe(0);
+
+    rmSync(join(tmp, runDir, "session.json"));
+    rmSync(join(tmp, runDir, "review-input.json"));
+    rmSync(join(tmp, runDir, "reviewers/1-code-reviewer.md"));
+    run = cli("standalone-review", ["finalize", "--runs-root", runsRoot, "--run-dir", runDir]);
+
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("cannot read review session");
+    expect(() => readFileSync(join(tmp, runDir, "result.json"), "utf-8")).toThrow();
+  });
+
+  it("rejects a standalone panel brief when aggregate.json drifts from the transcripts", () => {
+    initialize();
+    let run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
+    expect(run.status, run.stderr).toBe(0);
+    const aggregatePath = join(tmp, runDir, "aggregate.json");
+    const aggregate = JSON.parse(readFileSync(aggregatePath, "utf-8"));
+    aggregate.findings[0].claim = "forged replacement claim";
+    writeFileSync(aggregatePath, JSON.stringify(aggregate));
+
+    run = cli("review-panel", ["brief", "--runs-root", runsRoot, "--run-dir", runDir, "--standalone", join(runDir, "aggregate.json")]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("does not match the aggregate rederived");
+  });
+
   it("cannot turn a hand-authored outcomes file into a finalized critical review", () => {
     initialize();
     let run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);

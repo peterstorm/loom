@@ -37,7 +37,14 @@ function exec(cmd: string): string {
 function execArgs(args: string[]): string {
   try {
     return execFileSync("git", args, { encoding: "utf-8", cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] });
-  } catch {
+  } catch (error: unknown) {
+    const detail = error && typeof error === "object" ? error as { stderr?: unknown; status?: unknown } : {};
+    const stderr = detail.stderr === undefined ? "" : String(detail.stderr).trim();
+    const status = typeof detail.status === "number" ? ` (exit ${detail.status})` : "";
+    const command = args.map((arg) => JSON.stringify(arg)).join(" ");
+    process.stderr.write(
+      `git warning: git ${command} failed${status}${stderr === "" ? "" : `: ${stderr}`}\n`,
+    );
     return "";
   }
 }

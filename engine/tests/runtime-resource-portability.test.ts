@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, extname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { renderMarkdownForPi } from "../src/core/harness-resources";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -22,6 +23,25 @@ function markdownFiles(root: string): readonly string[] {
 
 const FILES = RUNTIME_TREES.flatMap((tree) => markdownFiles(join(REPO_ROOT, tree)));
 const LEGACY_LOOM_CACHE = /\.claude\/plugins\/cache[^\n`]*loom|plugins\/cache\/plugins\/loom|LOOM_DIR=.*plugins\/cache/;
+
+describe("Pi harness detection", () => {
+  it("uses the Pi process marker when no agent-directory override is set", () => {
+    const env: NodeJS.ProcessEnv = { ...process.env, PI_CODING_AGENT: "true" };
+    delete env.PI_CODING_AGENT_DIR;
+    delete env.LOOM_STATE_PATH;
+    const run = spawnSync("bun", ["-e", [
+      'import { HARNESS, TASK_GRAPH_PATH, PROJECT_RULES_DIR } from "./engine/src/config.ts";',
+      "console.log(JSON.stringify({ HARNESS, TASK_GRAPH_PATH, PROJECT_RULES_DIR }));",
+    ].join(" ")], { cwd: REPO_ROOT, env, encoding: "utf-8" });
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(JSON.parse(run.stdout)).toEqual({
+      HARNESS: "pi",
+      TASK_GRAPH_PATH: ".pi/state/active_task_graph.json",
+      PROJECT_RULES_DIR: ".pi/linter/rules",
+    });
+  });
+});
 
 describe("runtime markdown is portable across harnesses", () => {
   it("scans a non-vacuous command/skill/agent/reference surface", () => {

@@ -4,9 +4,9 @@
   "description": "Loom orchestration hooks for Claude Code",
   "type": "module",
   "scripts": {
-    "test": "vitest run && npm run test:smoke",
-    "test:unit": "vitest run",
-    "test:watch": "vitest",
+    "test": "npm run test:unit && env -u PI_CODING_AGENT npm run test:smoke",
+    "test:unit": "env -u PI_CODING_AGENT vitest run",
+    "test:watch": "env -u PI_CODING_AGENT vitest",
     "test:smoke": "bash ../scripts/smoke-panel-mode.sh && bash ../scripts/smoke-review-panel.sh && bash ../scripts/smoke-standalone-review.sh && bash ../scripts/smoke-pi-resources.sh",
     "calibrate:models": "LOOM_RUN_MODEL_CALIBRATION=1 bun ../scripts/run-model-calibration.ts",
     "typecheck": "bunx tsc --noEmit"

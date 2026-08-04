@@ -123,6 +123,12 @@ export function validateFull(
     else if (typeof json[field] !== "string") errors.push(`Field '${field}' must be a string`);
   }
   if (!json.tasks) errors.push("Missing required field: tasks");
+  if (
+    json.current_wave !== undefined &&
+    (typeof json.current_wave !== "number" || !Number.isInteger(json.current_wave) || json.current_wave < 1)
+  ) {
+    errors.push(`current_wave must be an integer >= 1 when present, got ${JSON.stringify(json.current_wave)}`);
+  }
 
   const tasks = json.tasks;
   if (!Array.isArray(tasks)) {
@@ -308,14 +314,20 @@ interface FindingsRepair {
 function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
   const refuted = parseStoredRefutations(t.refuted_findings);
   const rawRefutedCount = Array.isArray(t.refuted_findings) ? t.refuted_findings.length : 0;
-  const stored = parseStoredFindings(t.findings);
-  const rawFindingCount = Array.isArray(t.findings) ? t.findings.length : 0;
+  // A singleton object is malformed as a container, not necessarily as a
+  // finding. Normalize it to one input entry so repair can conserve its claim
+  // (or count it as dropped) rather than silently treating it as no evidence.
+  const rawFindings = Array.isArray(t.findings)
+    ? t.findings
+    : t.findings === undefined ? [] : [t.findings];
+  const stored = parseStoredFindings(rawFindings);
+  const rawFindingCount = rawFindings.length;
   // Order- and length-preserving, so an id that differs at the same index is
   // exactly one this repair re-minted.
   const parsed = deduplicateFindingIds(stored, refuted);
   const reminted = parsed.filter((finding, index) => finding.id !== stored[index]?.id).length;
 
-  const salvagedDrafts = salvageMalformedFindings(t.findings);
+  const salvagedDrafts = salvageMalformedFindings(rawFindings);
   const salvagedFindings = salvagedDrafts.length === 0
     ? []
     : attributeFindings(salvagedDrafts, RECOVERED_AGENT, nextOrdinal(parsed, refuted, RECOVERED_AGENT));
@@ -415,8 +427,14 @@ export interface FixReport {
 export function fixFull(json: Record<string, unknown>): FixReport {
   const tasks = Array.isArray(json.tasks) ? (json.tasks as Record<string, unknown>[]) : [];
   const notes: string[] = [];
+  const currentWaveValid =
+    typeof json.current_wave === "number" && Number.isInteger(json.current_wave) && json.current_wave >= 1;
+  if (json.current_wave !== undefined && !currentWaveValid) {
+    notes.push(`normalized invalid current_wave ${JSON.stringify(json.current_wave)} to 1`);
+  }
   const fixed = {
     ...json,
+    ...(json.current_wave === undefined ? {} : { current_wave: currentWaveValid ? json.current_wave : 1 }),
     tasks: tasks.map((t) => {
       const repair = fixTaskFindings(t);
       const id = typeof t.id === "string" ? t.id : "<task with no id>";
