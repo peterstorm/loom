@@ -5,7 +5,7 @@
  */
 
 import { existsSync } from "node:fs";
-import type { HookResult, TaskGraph } from "../types";
+import type { HookResult, Task, TaskGraph } from "../types";
 import { IMPL_AGENTS, TASK_GRAPH_PATH } from "../config";
 import { extractTaskId } from "../utils/extract-task-id";
 import { stripNamespace } from "../utils/strip-namespace";
@@ -13,6 +13,7 @@ import { hasStandaloneReviewContext } from "./review-output";
 import { StateManager } from "../state-manager";
 import * as git from "../utils/git";
 import { captureDeclaredArtifactBaseline } from "../utils/artifact-baseline";
+import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 
 export interface ValidateTaskExecutionInput {
   readonly agentType: string;
@@ -117,6 +118,21 @@ export function parseImplementationTaskBindings(
   return { ok: true, taskIds };
 }
 
+/** Preserve the first execution boundary across retries. A retry may add
+ * missing baseline fields, but must never move an existing baseline forward
+ * over bytes already produced by an earlier attempt. */
+export function registerTaskExecutionBaseline(
+  task: Task,
+  sha: string,
+  captured: readonly DeclaredArtifactBaseline[],
+): Task {
+  return {
+    ...task,
+    start_sha: task.start_sha ?? sha,
+    artifact_baseline: task.artifact_baseline ?? captured,
+  };
+}
+
 /**
  * Imperative shell: preflight every input against one state snapshot, capture
  * every baseline, then register the accepted batch in one locked update. A
@@ -168,7 +184,9 @@ export async function validateTaskExecutionBatch(
     executing_tasks: [...new Set([...(current.executing_tasks ?? []), ...baselines.keys()])],
     tasks: current.tasks.map((task) => {
       const artifactBaseline = baselines.get(task.id);
-      return artifactBaseline === undefined ? task : { ...task, start_sha: sha, artifact_baseline: artifactBaseline };
+      return artifactBaseline === undefined
+        ? task
+        : registerTaskExecutionBaseline(task, sha, artifactBaseline);
     }),
   }));
   return { kind: "allow" };

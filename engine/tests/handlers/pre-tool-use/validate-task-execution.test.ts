@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   classifyTaskExecutionSpawn,
   parseImplementationTaskBindings,
+  registerTaskExecutionBaseline,
   taskExecutionDecision,
 } from "../../../src/core/validate-task-execution";
 import type { TaskGraph, Task, WaveGate } from "../../../src/types";
@@ -95,6 +96,39 @@ describe("validate-task-execution — spawn lifecycle parsing", () => {
       .toEqual({ ok: false, error: expect.stringContaining("unknown task T99") });
     expect(parseImplementationTaskBindings(state, [implementation("Task ID: T1"), implementation("Task ID: T1")]))
       .toEqual({ ok: false, error: expect.stringContaining("more than once") });
+  });
+});
+
+describe("validate-task-execution — retry baselines", () => {
+  it("never moves an existing execution boundary forward on retry", () => {
+    const originalBaseline = [{
+      artifact: "src/a.ts",
+      snapshot: { kind: "sha256" as const, digest: "a".repeat(64) },
+    }];
+    const retryBaseline = [{
+      artifact: "src/a.ts",
+      snapshot: { kind: "sha256" as const, digest: "b".repeat(64) },
+    }];
+    const existing = mkTask({
+      id: "T1", wave: 1, start_sha: "1".repeat(40), artifact_baseline: originalBaseline,
+    });
+
+    const registered = registerTaskExecutionBaseline(existing, "2".repeat(40), retryBaseline);
+
+    expect(registered.start_sha).toBe("1".repeat(40));
+    expect(registered.artifact_baseline).toBe(originalBaseline);
+  });
+
+  it("fills a missing execution boundary on first spawn", () => {
+    const captured = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
+    const registered = registerTaskExecutionBaseline(
+      mkTask({ id: "T1", wave: 1 }),
+      "1".repeat(40),
+      captured,
+    );
+
+    expect(registered.start_sha).toBe("1".repeat(40));
+    expect(registered.artifact_baseline).toBe(captured);
   });
 });
 

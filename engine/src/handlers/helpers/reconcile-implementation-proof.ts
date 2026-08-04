@@ -7,7 +7,10 @@ import {
   PI_STRUCTURED_EVIDENCE_POLICY,
 } from "../../core/proof-obligations";
 import { attributedChangedArtifacts } from "../../core/artifact-baseline";
-import { changedDeclaredArtifactsSince } from "../../utils/artifact-baseline";
+import {
+  changedDeclaredArtifactsSince,
+  changedDeclaredArtifactsSinceRevision,
+} from "../../utils/artifact-baseline";
 import * as git from "../../utils/git";
 import {
   collectNewTestEvidence,
@@ -92,7 +95,11 @@ const handler: HookHandler = async (_stdin, args) => {
       }
       const tasks = state.tasks.map((task) => {
         if (task.wave !== wave || task.status === "completed" || task.proof?.state === "satisfied") return task;
-        const byteChanges = changedDeclaredArtifactsSince(root, task.artifact_baseline);
+        const snapshotChanges = changedDeclaredArtifactsSince(root, task.artifact_baseline);
+        const revisionChanges = task.start_sha
+          ? changedDeclaredArtifactsSinceRevision(root, task.start_sha, task.file_list ?? [])
+          : [];
+        const byteChanges = [...new Set([...snapshotChanges, ...revisionChanges])];
         const proofArtifactsChanged = attributedChangedArtifacts(byteChanges, task.files_modified ?? []);
         const collectedNewTests = collectNewTestEvidence(
           task.files_modified ?? [],
