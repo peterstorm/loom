@@ -297,10 +297,10 @@ The brief and manifest are **engine-authored** (`helper review-panel brief` /
 findings already live in the task graph; in a standalone `/review-pr` or
 `/review-and-fix` run, `helper standalone-review init` freezes the exact scope
 and reviewer batch before spawn, then `aggregate` parses the complete transcript
-set into immutable `aggregate.json`. Standalone
-`tally` writes only run-scoped `outcomes.json` and never touches orchestration
-state. In either source mode, a hand-built finding manifest cannot quietly omit
-an inconvenient critical.
+set into immutable `aggregate.json`. Standalone `tally` atomically publishes
+run-scoped `outcomes.json` plus authoritative `result.json` and never touches
+orchestration state. In either source mode, a hand-built finding manifest cannot
+quietly omit an inconvenient critical.
 
 ### Gate outcomes
 

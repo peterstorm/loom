@@ -1,8 +1,8 @@
 /**
  * The Pi harness is the half of this codebase that nothing else checks.
  *
- * `pi/` is outside `tsconfig.json`'s `include`, its peer dependencies
- * (`@earendil-works/*`) are not installed here, and no test imports it — so
+ * `pi/` is outside `tsconfig.json`'s `include`, and its peer dependencies are
+ * type-only in the extension entry point. Historically no test loaded it, so
  * `bun run typecheck` and `vitest run` were both green while
  * `pi/extension.ts` imported `isReviewAgent` from a module that had stopped
  * exporting it. That is an ESM LINK-time failure, not a lazy `undefined`: the

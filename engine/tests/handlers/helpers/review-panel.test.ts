@@ -542,6 +542,27 @@ describe("review-panel helper CLI", () => {
     });
   });
 
+  it("closes an all-upheld run so changed verdicts cannot be re-tallied", () => {
+    stage();
+    writeVerdicts([["upheld", "upheld"], ["upheld", "upheld"], ["upheld", "upheld"]]);
+    const first = run(["tally", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+    expect(first.status, first.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(join(runDir, "outcomes.json"), "utf-8")).refuted).toBe(0);
+    expect(readFileSync(join(runDir, "tally-closure.json"), "utf-8")).toContain(F1);
+
+    // Rewrite every canonical slot to a majority-refuted result. The immutable
+    // run closure, not task.refuted_findings, must reject this second decision.
+    writeVerdicts([["refuted", "refuted"], ["refuted", "refuted"], ["upheld", "upheld"]]);
+    const second = run(["tally", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+    expect(second.status).toBe(1);
+    expect(second.stderr).toContain("already been tallied");
+    expect(second.stderr).toContain(F1);
+
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.tasks[0].critical_findings).toHaveLength(2);
+    expect(state.tasks[0].refuted_findings ?? []).toHaveLength(0);
+  });
+
   it("refuses to re-tally a run it has already adjudicated", () => {
     // A second tally sent applyFindingOutcomes looking for findings the first
     // one had already moved into refuted_findings, where the invariant throw

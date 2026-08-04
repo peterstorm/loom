@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -151,6 +152,50 @@ describe("quality-program helper boundaries", () => {
     expect(written.artifacts.map((artifact: { path: string }) => artifact.path))
       .toEqual(["engine/src/core/model-profiles.ts"]);
     expect(cli(["helper", "review-packet", "verify", "--packet", packet]).trim()).toBe(id);
+  });
+
+  it("fails review-packet creation on an unexpected git probe error", () => {
+    const dir = mkdtempSync(join(ROOT, ".tmp-review-packet-git-failure-test-"));
+    cleanup.push(dir);
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim();
+    const state = join(dir, "state.json");
+    const packet = join(dir, "packet.json");
+    writeFileSync(state, JSON.stringify({
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
+      tasks: [{
+        id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [], start_sha: head,
+        file_list: ["engine/src/types.ts"], files_modified: ["engine/src/types.ts"],
+      }],
+    }));
+
+    const fakeBin = join(dir, "bin");
+    mkdirSync(fakeBin);
+    const fakeGit = join(fakeBin, "git");
+    writeFileSync(fakeGit, [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"ls-files\" ]; then",
+      "  echo forced-ls-files-failure >&2",
+      "  exit 2",
+      "fi",
+      "exec \"$REAL_GIT\" \"$@\"",
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const run = spawnSync("bun", [CLI, "helper", "review-packet", "create", "--task", "T1", "--output", packet], {
+      cwd: ROOT,
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        LOOM_STATE_PATH: state,
+        REAL_GIT: execFileSync("which", ["git"], { encoding: "utf-8" }).trim(),
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      },
+    });
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("forced-ls-files-failure");
+    expect(existsSync(packet)).toBe(false);
   });
 
   it("rejects external task paths instead of reading them into a review packet", () => {

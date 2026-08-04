@@ -36,8 +36,20 @@ function git(args: readonly string[], cwd: string, allowDiffExit = false): strin
   }
 }
 
-function tryGit(args: readonly string[], cwd: string): string {
-  try { return git(args, cwd); } catch { return ""; }
+function optionalGit(
+  args: readonly string[],
+  cwd: string,
+  absentStatuses: readonly number[],
+): string | null {
+  try {
+    return git(args, cwd);
+  } catch (error) {
+    const status = error && typeof error === "object" && "status" in error
+      ? (error as { status?: unknown }).status
+      : undefined;
+    if (typeof status === "number" && absentStatuses.includes(status)) return null;
+    throw error;
+  }
 }
 
 function repoRoot(): string {
@@ -47,7 +59,7 @@ function repoRoot(): string {
 function artifact(root: string, baseSha: string, path: string): ReviewPacketArtifactInput {
   const inspected = inspectRepositoryPath(root, path, "review packet path", { mustBeFile: true });
   const absolute = inspected.absolute;
-  const tracked = tryGit(["ls-files", "--error-unmatch", "--", path], root).trim() !== "";
+  const tracked = optionalGit(["ls-files", "--error-unmatch", "--", path], root, [1]) !== null;
   const diff = tracked
     ? git(["diff", "--binary", baseSha, "--", path], root)
     : existsSync(absolute)
@@ -91,11 +103,22 @@ const handler: HookHandler = async (_stdin, args) => {
   try {
     const root = repoRoot();
     const headSha = git(["rev-parse", "HEAD"], root).trim();
-    const defaultBranch = tryGit(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], root)
-      .trim().replace(/^origin\//, "") || "main";
+    const remoteHead = optionalGit(
+      ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+      root,
+      [1],
+    );
+    const defaultBranch = remoteHead?.trim().replace(/^origin\//, "") || "main";
+    const remoteBranch = `origin/${defaultBranch}`;
+    const hasRemoteBranch = optionalGit(
+      ["show-ref", "--verify", "--quiet", `refs/remotes/${remoteBranch}`],
+      root,
+      [1],
+    ) !== null;
     const baseSha = task.start_sha ?? (
-      tryGit(["merge-base", "HEAD", `origin/${defaultBranch}`], root).trim()
-      || tryGit(["rev-parse", "HEAD^"], root).trim()
+      hasRemoteBranch
+        ? git(["merge-base", "HEAD", remoteBranch], root).trim()
+        : git(["rev-parse", "HEAD^"], root).trim()
     );
     if (!baseSha || !headSha) throw new Error("could not resolve packet base/head SHA");
     // Transcript APIs commonly report absolute paths. Canonicalize both current

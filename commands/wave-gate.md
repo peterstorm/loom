@@ -331,12 +331,13 @@ Re-spawn only an invalid verifier with diagnostics, once; if still invalid, stop
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper review-panel tally \
   --runs-root ".claude/reviews/panel-runs" \
-  --manifest "<review-run-dir>/manifest.json" \
-  > "<review-run-dir>/outcomes.json"
+  --manifest "<review-run-dir>/manifest.json"
 ```
 
 `tally` re-reads and re-validates **every** verdict file from the run directory
-(it does not trust Step 3.5.3's output), reads `verdict-N.json` as **lens N** and
+(it does not trust Step 3.5.3's output), atomically claims the run and publishes
+run-scoped `outcomes.json` before updating task state, reads `verdict-N.json` as
+**lens N**, and
 rejects any file whose `criterion` does not match that slot, then verifies the
 collected set is exactly the selected lenses with no duplicates or omissions, and
 adjudicates:

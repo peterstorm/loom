@@ -4,9 +4,10 @@
  *
  * Nothing executed this file before. `review-findings-parity.test.ts` asserted
  * on its SOURCE TEXT — that it contains the string `core/review-output"` and
- * three function names — which its own comment justifies for `pi/extension.ts`
- * ("needs the Pi runtime to execute") and which the directly-executable sibling
- * inherited by proximity. The cost was measured: six branches survived semantic
+ * three function names — which its own comment historically justified for
+ * `pi/extension.ts` before the fake-runtime event test existed, and which the
+ * directly-executable sibling inherited by proximity. The cost was measured:
+ * six branches survived semantic
  * mutation with the whole suite green, including deleting the
  * `resolveAgentTranscriptPath` call, which reverts commit `0710b76` ("survive
  * the Task → Agent rename and stop failing silently"). A harness that sends no

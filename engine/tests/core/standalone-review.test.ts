@@ -57,6 +57,18 @@ describe("standalone review aggregate", () => {
     expect(!result.ok && result.errors.join("\n")).toContain("CRITICAL_COUNT marker not found");
   });
 
+  it("rejects a transcript finding outside the frozen scope", () => {
+    const result = aggregateStandaloneReview({
+      runId: "run.abc",
+      scope: ["src/inside.ts"],
+      transcripts: [{ agent: "code-reviewer", output: transcript(["outside blocker"]) }],
+    });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.errors.join("\n")).toContain(
+      "code-reviewer findings[0].file is outside the frozen review scope: src/x.ts",
+    );
+  });
+
   it("represents zero criticals as an explicit clean state", () => {
     const result = aggregateStandaloneReview({
       runId: "run.abc",
@@ -70,6 +82,16 @@ describe("standalone review aggregate", () => {
     const aggregate = required().aggregate;
     const parsed = parseStandaloneAggregate(JSON.parse(serializeStandaloneAggregate(aggregate)));
     expect(parsed).toEqual({ ok: true, value: aggregate });
+  });
+
+  it("rejects a stored aggregate tampered with an out-of-scope finding", () => {
+    const raw = JSON.parse(serializeStandaloneAggregate(required().aggregate));
+    raw.findings[0].file = "src/outside.ts";
+    const parsed = parseStandaloneAggregate(raw);
+    expect(parsed.ok).toBe(false);
+    expect(!parsed.ok && parsed.errors.join("\n")).toContain(
+      "aggregate.findings[0].file is outside the frozen review scope: src/outside.ts",
+    );
   });
 });
 

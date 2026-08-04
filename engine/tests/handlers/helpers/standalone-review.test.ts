@@ -144,6 +144,22 @@ describe("standalone review helper and refutation adapter", () => {
     expect(run.stderr).toContain("must not contain dot path segments");
   });
 
+  it("distinguishes incomplete and corrupt prior aggregate publication", () => {
+    initialize();
+    const pending = join(tmp, runDir, ".aggregate.pending.json");
+    writeFileSync(pending, "{\"partial\":");
+    let run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("incomplete prior aggregation");
+
+    rmSync(pending);
+    writeFileSync(join(tmp, runDir, "aggregate.json"), "{\"partial\":");
+    run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("corrupt prior aggregate");
+    expect(run.stderr).not.toContain("already been aggregated");
+  });
+
   it("fails closed on missing reviewer evidence and refuses a second aggregation", () => {
     initialize();
     writeFileSync(join(tmp, runDir, "reviewers/code-reviewer.md"), "looks fine");

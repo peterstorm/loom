@@ -63,6 +63,11 @@ describe("detectPhase (pure)", () => {
     expect(detectPhase("code-simplifier", "")).toBe("execute");
   });
 
+  it("maps refutation verifiers to execute by exact and bare name", () => {
+    expect(detectPhase("review-verifier-agent", "")).toBe("execute");
+    expect(detectPhase("review-verifier", "")).toBe("execute");
+  });
+
   it("falls back to prompt keywords", () => {
     expect(detectPhase("custom-agent", "brainstorm ideas")).toBe("brainstorm");
     expect(detectPhase("custom-agent", "write specification")).toBe("specify");

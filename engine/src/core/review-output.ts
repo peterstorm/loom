@@ -7,10 +7,11 @@
  * (the same claims with file/line). They can disagree, and which one wins
  * decides whether a critical reaches the wave gate at all.
  *
- * The rule, in one sentence: **the block wins only when it accounts for at
- * least as many findings of each severity as the marker lines name — and, for
- * criticals only, as the reviewer's own `CRITICAL_COUNT` — and any marker claim
- * it does not NAME is carried over beside it.** The asymmetry is deliberate and
+ * The rule, in one sentence: **marker lines settle the severity of claims they
+ * name, then the block wins only when it accounts for at least as many findings
+ * of each severity as the marker lines name — and, for criticals only, as the
+ * reviewer's own `CRITICAL_COUNT` — and any marker claim it does not NAME is
+ * carried over beside it.** The asymmetry is deliberate and
  * `chooseSource` states why: `advisoryCount` is not part of the bar, because an
  * advisory shortfall against a self-reported tally degrades triage while a
  * critical shortfall opens a gate. A
@@ -311,16 +312,43 @@ function unconsumedClaims(claims: readonly string[], pool: string[]): readonly s
   return claims.filter((claim) => !consumeClaim(pool, claim));
 }
 
+/**
+ * Enrich marker claims with structured locations without letting the optional
+ * block change their severity. Claim text remains the cross-source identity,
+ * but each occurrence consumes exactly one marker slot, preferring a
+ * same-severity slot when duplicate wording appears at both severities.
+ */
+function alignStructuredSeverity(
+  structured: readonly DraftFinding[],
+  markers: readonly DraftFinding[],
+): readonly DraftFinding[] {
+  const remaining = [...markers];
+  return structured.map((draft) => {
+    const sameSeverity = remaining.findIndex(
+      (marker) => marker.claim === draft.claim && marker.severity === draft.severity,
+    );
+    const match = sameSeverity >= 0
+      ? sameSeverity
+      : remaining.findIndex((marker) => marker.claim === draft.claim);
+    if (match < 0) return draft;
+    const [marker] = remaining.splice(match, 1);
+    return marker!.severity === draft.severity
+      ? draft
+      : Object.freeze({ ...draft, severity: marker!.severity });
+  });
+}
+
 function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
   const counts = { criticalCount: scraped.criticalCount, advisoryCount: scraped.advisoryCount };
-  const structured = parseFindingsBlock(block);
-  if (structured === null) {
+  const parsedBlock = parseFindingsBlock(block);
+  if (parsedBlock === null) {
     return makeParsedFindings({
       drafts: scraped.drafts,
       ...counts,
       blockStatus: hasFindingsBlock(block) ? { kind: "rejected" } : { kind: "absent" },
     });
   }
+  const structured = alignStructuredSeverity(parsedBlock, scraped.drafts);
   const fromBlock = makeParsedFindings({ drafts: structured, ...counts, blockStatus: { kind: "used" } });
   const claimedCritical = Math.max(scraped.criticalCount ?? 0, scraped.critical.length);
   const accountsForAll =
@@ -332,14 +360,11 @@ function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
   // Both sides are `collapseWhitespace`-normalized (every claim reaching either
   // view is built by makeDraftFinding), so comparison by value is exact.
   //
-  // Severity-BLIND, from one shared pool. Matching per-severity meant a block
-  // entry whose severity disagreed with its own marker line matched nothing:
-  // `CRITICAL: the claim` beside a block calling that same claim advisory
-  // recorded it TWICE, once at each severity. One defect then occupies two
-  // slots in the brief, and the panel can dismiss the advisory copy while the
-  // critical copy still blocks the gate — with no note, because from each
-  // severity's side the arithmetic looked right. Identity is the claim text;
-  // whichever side wins arbitration also settles the severity.
+  // Claim identity is severity-blind, but severity authority is not. Matching
+  // by (claim, severity) duplicated a claim when the block mislabeled its own
+  // marker; allowing the winning block to settle severity instead let that same
+  // mismatch demote a blocker. `alignStructuredSeverity` keeps one record with
+  // the block's location and the marker's severity before this pool is built.
   const blockPool = structured.map((draft) => draft.claim);
   const unnamedByBlock = draftsFromClaims(
     unconsumedClaims(scraped.critical, blockPool),

@@ -44,13 +44,12 @@ const TRANSCRIPT = [
  * Pi must reach the shared decision + transform, and must NOT re-implement the
  * parse → reconcile → merge sequence out of the lower-level parts.
  *
- * What the structural assertions can and cannot prove: Pi's review logic lives
- * inside `export default function (pi: ExtensionAPI)` and needs the Pi runtime
- * to execute, so these grep the source rather than run it. That catches the
- * realistic regression — a harness quietly reaching for the lower-level parts
- * again — but it would not catch a harness that inlined its own copy under
- * different names. The output-contract test below is the other half: it pins
- * the exact task shape both shells must write.
+ * What the structural assertions can and cannot prove: these grep the source to
+ * pin shared-path architecture, while `pi-extension-review-events.test.ts`
+ * separately executes the registered handler on a fake Pi event bus. The grep
+ * catches a harness quietly reaching for lower-level parts again; the runtime
+ * test catches event-shape and message-extraction drift. The output-contract
+ * test below pins the exact task shape both shells must write.
  */
 describe("harness parity: one path from transcript to task", () => {
   const CLAUDE_CODE_HOOK = readFileSync(

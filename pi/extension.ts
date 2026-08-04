@@ -10,7 +10,6 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { existsSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 
 // Engine core — harness-agnostic, no Claude Code dependency (these do fs I/O)
 import { shouldBlockDirectEdit } from "../engine/src/core/block-direct-edits";
@@ -122,7 +121,7 @@ export default function (pi: ExtensionAPI) {
       const sessionId = ctx.sessionManager.getSessionId() ?? "unknown";
 
       // Block direct edits during orchestration
-      if (isToolCallEventType("edit", event) || isToolCallEventType("write", event)) {
+      if (event.toolName === "edit" || event.toolName === "write") {
         currentGuard = "block-direct-edits";
         const result = shouldBlockDirectEdit(event.toolName, sessionId);
         if (result.kind === "block") {
@@ -131,7 +130,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       // Guard state file from bash writes
-      if (isToolCallEventType("bash", event)) {
+      if (event.toolName === "bash") {
         currentGuard = "guard-state-file";
         const result = guardStateFile(event.input.command ?? "");
         // Call-start stamp (PRODUCER only — pi has no PostToolUse evidence

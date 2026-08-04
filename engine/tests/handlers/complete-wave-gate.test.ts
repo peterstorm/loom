@@ -328,6 +328,32 @@ describe("generateWaveGateSummary (pure)", () => {
 
     expect(summary).toContain("Keep this advisory");
   });
+
+  it("audits every refuted finding with every refuting lens and reason", () => {
+    const tasks = [mkTask("T1", {
+      critical_findings: [],
+      refuted_findings: [{
+        finding: {
+          id: "code-reviewer-1",
+          agent: "code-reviewer",
+          severity: "critical",
+          file: "src/x.ts",
+          line: 7,
+          claim: "reported blocker",
+        },
+        refutations: [
+          { lens: "reproduction", reason: "the guard makes the path unreachable" },
+          { lens: "intent", reason: "the fallback is documented architecture" },
+        ],
+      }],
+    })];
+
+    const summary = generateWaveGateSummary(1, tasks);
+    expect(summary).toContain("<summary>1 refuted critical findings</summary>");
+    expect(summary).toContain("- code-reviewer-1: reported blocker");
+    expect(summary).toContain("  - reproduction: the guard makes the path unreachable");
+    expect(summary).toContain("  - intent: the fallback is documented architecture");
+  });
 });
 
 describe("evaluateWaveGate + applyGateDecision — fs resolved once before the lock, checks on locked state", () => {

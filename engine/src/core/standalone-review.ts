@@ -54,8 +54,12 @@ export interface AdjudicatedStandaloneReview {
 const nonEmptyStrings = (raw: unknown): raw is string[] =>
   Array.isArray(raw) && raw.length > 0 && raw.every((entry) => typeof entry === "string" && entry.trim() !== "");
 
+function normalizeRepoRelativePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
+}
+
 function repoRelativePathError(path: string): string | null {
-  const normalized = path.replace(/\\/g, "/");
+  const normalized = normalizeRepoRelativePath(path);
   if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized)) return `review scope path must be repo-relative: ${path}`;
   if (normalized.split("/").includes("..")) return `review scope path must not escape the repository: ${path}`;
   if (/[\r\n\0]/.test(path)) return `review scope path must be a single line without NUL: ${JSON.stringify(path)}`;
@@ -70,6 +74,18 @@ function uniqueNonEmpty(values: readonly string[], label: string): readonly stri
   return errors;
 }
 
+function findingScopeErrors(
+  scope: readonly string[],
+  findings: readonly Pick<Finding, "file">[],
+  label: string,
+): readonly string[] {
+  const allowed = new Set(scope.map(normalizeRepoRelativePath));
+  return findings.flatMap((finding, index) => {
+    if (finding.file === null || allowed.has(normalizeRepoRelativePath(finding.file))) return [];
+    return [`${label}[${index}].file is outside the frozen review scope: ${finding.file}`];
+  });
+}
+
 /** Pure transcript boundary: parse, reconcile, attribute, and preserve every finding. */
 export function aggregateStandaloneReview(input: {
   readonly runId: string;
@@ -77,7 +93,7 @@ export function aggregateStandaloneReview(input: {
   readonly transcripts: readonly StandaloneReviewTranscript[];
 }): ParseResult<StandaloneReviewState> {
   const runId = input.runId.trim();
-  const scope = input.scope.map((path) => path.trim());
+  const scope = input.scope.map((path) => normalizeRepoRelativePath(path.trim()));
   const transcripts = input.transcripts.map((transcript) => ({
     agent: transcript.agent.trim(),
     output: transcript.output,
@@ -99,6 +115,15 @@ export function aggregateStandaloneReview(input: {
     const resolution = resolveReviewFindings(transcript.output, transcript.agent);
     if (resolution.kind === "evidence-failed") {
       errors.push(`${transcript.agent}: ${resolution.message}`);
+      continue;
+    }
+    const outsideScope = findingScopeErrors(
+      scope,
+      resolution.findings.drafts,
+      `${transcript.agent} findings`,
+    );
+    if (outsideScope.length > 0) {
+      errors.push(...outsideScope);
       continue;
     }
     findings.push(...attributeFindings(resolution.findings.drafts, transcript.agent));
@@ -141,7 +166,9 @@ export function parseStandaloneAggregate(raw: unknown): ParseResult<StandaloneRe
   const runId = typeof raw.run_id === "string" ? raw.run_id.trim() : "";
   if (runId === "") errors.push("aggregate.run_id must be non-empty");
   if (raw.subject_id !== STANDALONE_REVIEW_SUBJECT) errors.push(`aggregate.subject_id must be '${STANDALONE_REVIEW_SUBJECT}'`);
-  const scope = nonEmptyStrings(raw.scope) ? raw.scope.map((path) => path.trim()) : [];
+  const scope = nonEmptyStrings(raw.scope)
+    ? raw.scope.map((path) => normalizeRepoRelativePath(path.trim()))
+    : [];
   if (scope.length === 0) errors.push("aggregate.scope must be a non-empty string array");
   if (new Set(scope).size !== scope.length) errors.push("aggregate.scope must be distinct");
   for (const path of scope) {
@@ -152,6 +179,7 @@ export function parseStandaloneAggregate(raw: unknown): ParseResult<StandaloneRe
   const findingError = findingsUnionError(raw.findings, "aggregate.findings");
   if (findingError !== null) errors.push(findingError);
   const findings = parseStoredFindings(raw.findings);
+  errors.push(...findingScopeErrors(scope, findings, "aggregate.findings"));
   const ids = findings.map(({ id }) => id);
   if (new Set(ids).size !== ids.length) errors.push("aggregate finding ids must be distinct");
   return errors.length > 0

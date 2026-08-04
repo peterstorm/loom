@@ -12,13 +12,13 @@
  *              lens set before any verifier spawns.
  *   lenses   — emit the selected lenses, derived from the validated brief.
  *   verdict  — validate one verifier's raw output; emit canonical JSON.
- *   tally    — re-read every verdict from disk and adjudicate; wave runs update
- *              task state, standalone runs write only run-scoped outcomes.json.
+ *   tally    — re-read every verdict from disk and adjudicate; wave runs publish
+ *              a run closure and update task state, while critical-bearing
+ *              standalone runs atomically publish outcomes.json and result.json.
  *
- * `brief` and `manifest` are ENGINE-authored, unlike the architecture panel's
- * orchestrator-written manifest: findings already exist in wave state or the
- * standalone aggregate, so an orchestrator building this by hand could quietly
- * omit a critical.
+ * `brief` and `manifest` are ENGINE-authored here and in the architecture panel.
+ * Review findings already exist in wave state or the standalone aggregate, so
+ * an orchestrator building this manifest by hand could quietly omit a critical.
  */
 
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -471,12 +471,41 @@ const handler: HookHandler = async (stdin, args) => {
       ]);
     }
   } else {
+    const closurePath = join(runDir, "tally-closure.json");
+    const outcomesPath = join(runDir, "outcomes.json");
+    const pendingOutcomesPath = join(runDir, ".outcomes.pending.json");
+    if (existsSync(closurePath) || existsSync(outcomesPath) || existsSync(pendingOutcomesPath)) {
+      return contractError("review tally", [
+        `this review run has already been tallied or has an incomplete prior tally: ${findingIds.join(", ")}`,
+      ]);
+    }
+
     const current = loadGraph();
     if (!current.ok) return contractError("review tally", current.errors);
-    // Checked EARLY for the diagnostic — a replay caught here costs nothing and
-    // named again under the StateManager lock before the write lands.
+    // The task graph catches a different run trying to adjudicate findings that
+    // have already moved to the audit trail. The run closure below handles the
+    // complementary all-upheld case where task state is intentionally unchanged.
     const replays = replayedOutcomes(tallied.value, refutedIdsOf(current.value.tasks));
     if (replays.length > 0) return contractError("review tally", [replayError(replays)]);
+
+    const target = prepareWriteTargets(
+      runDir,
+      [],
+      ["tally-closure.json", "outcomes.json", ".outcomes.pending.json"],
+    );
+    if (!target.ok) return contractError("review run boundary", target.errors);
+    try {
+      // Claim the run before state mutation. Even an all-upheld decision changes
+      // no task fields, so task state alone cannot prove that this manifest has
+      // already been adjudicated. A crash can dead-end this run, never reopen it.
+      writeFileSync(closurePath, JSON.stringify({ run_id: basename(runDir), finding_ids: findingIds }, null, 2) + "\n", { flag: "wx" });
+      writeFileSync(pendingOutcomesPath, outcomesJson, { flag: "wx" });
+      renameSync(pendingOutcomesPath, outcomesPath);
+    } catch (error) {
+      return contractError("review tally", [
+        `cannot publish wave tally closure (the run may already be closed): ${error instanceof Error ? error.message : String(error)}`,
+      ]);
+    }
 
     const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
     if (!mgr) return contractError("review tally", [`no task graph at ${TASK_GRAPH_PATH}`]);
@@ -487,7 +516,9 @@ const handler: HookHandler = async (stdin, args) => {
         return { ...s, tasks: s.tasks.map((task) => applyFindingOutcomes(task, tallied.value)) };
       });
     } catch (error) {
-      return contractError("review tally", [error instanceof Error ? error.message : String(error)]);
+      return contractError("review tally", [
+        `wave tally was closed but task state was not updated; start a fresh run: ${error instanceof Error ? error.message : String(error)}`,
+      ]);
     }
   }
 

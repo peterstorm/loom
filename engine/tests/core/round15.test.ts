@@ -326,7 +326,7 @@ describe("staleWaveError", () => {
 // A8 / A17 — arbitration branches that survived mutation
 // ---------------------------------------------------------------------------
 
-describe("chooseSource identifies a claim by its text, not by (text, severity)", () => {
+describe("chooseSource keeps claim identity and marker severity in lockstep", () => {
   const block = (entries: unknown[]) =>
     ["```findings", JSON.stringify(entries), "```"].join("\n");
 
@@ -351,10 +351,10 @@ describe("chooseSource identifies a claim by its text, not by (text, severity)",
     ]);
   });
 
-  it("does not duplicate across severities on the WINNING side either", () => {
-    // The same identity bug in the other branch: the block clears the cardinal
-    // bar, so it wins, and the marker claim it named at a different severity used
-    // to be carried over beside it as a second record.
+  it("does not duplicate or demote across severities on the WINNING side", () => {
+    // The block clears the cardinal bar through another critical. Claim text is
+    // still one identity, but the marker is severity authority: the optional
+    // location-bearing block must not turn its critical into an advisory.
     const parsed = parseMachineSummary([
       "### Machine Summary",
       "CRITICAL_COUNT: 2",
@@ -370,6 +370,13 @@ describe("chooseSource identifies a claim by its text, not by (text, severity)",
 
     const all = [...parsed.critical, ...parsed.advisory];
     expect(all.filter((c) => c === "claim one")).toHaveLength(1);
+    expect(parsed.critical).toContain("claim one");
+    expect(parsed.advisory).not.toContain("claim one");
+    expect(parsed.drafts.find((draft) => draft.claim === "claim one")).toMatchObject({
+      severity: "critical",
+      file: "src/a.ts",
+      line: 1,
+    });
   });
 
   it("a CRITICAL_COUNT that understates its own marker lines still sets the bar", () => {

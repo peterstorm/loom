@@ -12,6 +12,7 @@ import {
   parseAgentFrontmatter,
   parseLlmProfile,
   parseLlmProfileId,
+  parsePiSpawnItems,
   resolveAgentPolicy,
   resolveAgentProfile,
   resolveHarnessBinding,
@@ -112,6 +113,49 @@ describe("semantic model profiles", () => {
       expect(() => parseLlmProfile(raw)).not.toThrow();
       expect(() => parseAgentFrontmatter(raw)).not.toThrow();
     }));
+  });
+});
+
+describe("Pi spawn input parsing", () => {
+  it("parses each single, parallel, and chain mode in order", () => {
+    expect(parsePiSpawnItems({ agent: "code-reviewer", task: "review" })).toEqual({
+      ok: true,
+      value: [{ agent: "code-reviewer", task: "review" }],
+    });
+    expect(parsePiSpawnItems({ tasks: [
+      { agent: "code-reviewer", task: "first" },
+      { agent: "comment-analyzer", task: "second" },
+    ] })).toEqual({
+      ok: true,
+      value: [
+        { agent: "code-reviewer", task: "first" },
+        { agent: "comment-analyzer", task: "second" },
+      ],
+    });
+    expect(parsePiSpawnItems({ chain: [
+      { agent: "code-reviewer", task: "first" },
+      { agent: "type-design-analyzer", task: "use {previous}" },
+    ] })).toEqual({
+      ok: true,
+      value: [
+        { agent: "code-reviewer", task: "first" },
+        { agent: "type-design-analyzer", task: "use {previous}" },
+      ],
+    });
+  });
+
+  it("rejects empty, mixed, and partially malformed batches as a whole", () => {
+    for (const raw of [
+      {},
+      { tasks: [] },
+      { agent: "code-reviewer", task: "single", tasks: [{ agent: "comment-analyzer", task: "parallel" }] },
+      { tasks: [
+        { agent: "code-reviewer", task: "valid first" },
+        { agent: "comment-analyzer", task: "" },
+      ] },
+    ]) {
+      expect(parsePiSpawnItems(raw).ok).toBe(false);
+    }
   });
 });
 

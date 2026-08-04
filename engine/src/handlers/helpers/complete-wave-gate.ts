@@ -403,6 +403,18 @@ export function generateWaveGateSummary(
       task.advisory_findings.forEach((a) => lines.push(`- ${a}`));
       lines.push('</details>');
     }
+    const refuted = task.refuted_findings ?? [];
+    if (refuted.length > 0) {
+      lines.push('<details>');
+      lines.push(`<summary>${refuted.length} refuted critical findings</summary>\n`);
+      for (const record of refuted) {
+        lines.push(`- ${record.finding.id}: ${record.finding.claim}`);
+        for (const refutation of record.refutations) {
+          lines.push(`  - ${refutation.lens}: ${refutation.reason}`);
+        }
+      }
+      lines.push('</details>');
+    }
     lines.push('');
   }
 

@@ -1,4 +1,13 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { isReviewAgent } from "../../config";
 import type { HookHandler, HookResult } from "../../types";
@@ -165,7 +174,29 @@ function init(runDir: string, inputPath: string): HookResult {
 }
 
 function aggregate(runDir: string, inputPath: string): HookResult {
-  if (existsSync(join(runDir, "aggregate.json"))) return contractError("standalone review", ["this run has already been aggregated"]);
+  const aggregatePath = join(runDir, "aggregate.json");
+  const pendingPath = join(runDir, ".aggregate.pending.json");
+  if (existsSync(pendingPath)) {
+    return contractError("standalone review", [
+      "this run has an incomplete prior aggregation — start a new run directory",
+    ]);
+  }
+  if (existsSync(aggregatePath)) {
+    const existing = readJson(aggregatePath, "standalone aggregate", runDir);
+    if (!existing.ok) {
+      return contractError("standalone review", [
+        "this run has a corrupt prior aggregate and cannot be resumed",
+        ...existing.errors,
+      ]);
+    }
+    const parsed = parseStandaloneAggregate(existing.value);
+    return parsed.ok
+      ? contractError("standalone review", ["this run has already been aggregated"])
+      : contractError("standalone review", [
+          "this run has a corrupt prior aggregate and cannot be resumed",
+          ...parsed.errors,
+        ]);
+  }
   if (resolve(inputPath) !== resolve(join(runDir, "review-input.json"))) {
     return contractError("standalone review boundary", [`--input must be ${join(runDir, "review-input.json")}`]);
   }
@@ -182,10 +213,19 @@ function aggregate(runDir: string, inputPath: string): HookResult {
   const result = aggregateStandaloneReview({ runId: session.value.runId, scope: session.value.scope, transcripts: loaded.value });
   if (!result.ok) return contractError("standalone review", result.errors);
   const json = serializeStandaloneAggregate(result.value.aggregate) + "\n";
-  const target = prepareWriteTargets(runDir, [], ["aggregate.json"]);
+  const target = prepareWriteTargets(runDir, [], ["aggregate.json", ".aggregate.pending.json"]);
   if (!target.ok) return contractError("standalone review boundary", target.errors);
-  try { writeFileSync(join(runDir, "aggregate.json"), json, { flag: "wx" }); }
-  catch (error) { return contractError("standalone review", [`cannot write aggregate: ${error instanceof Error ? error.message : String(error)}`]); }
+  try {
+    writeFileSync(pendingPath, json, { flag: "wx" });
+    const staged = parseStandaloneAggregate(JSON.parse(readFileSync(pendingPath, "utf-8")));
+    if (!staged.ok) throw new Error(`staged aggregate failed validation: ${staged.errors.join("; ")}`);
+    renameSync(pendingPath, aggregatePath);
+  } catch (error) {
+    try { if (existsSync(pendingPath)) unlinkSync(pendingPath); } catch { /* preserve original diagnostic */ }
+    return contractError("standalone review", [
+      `cannot atomically publish aggregate: ${error instanceof Error ? error.message : String(error)}`,
+    ]);
+  }
   process.stderr.write(result.value.kind === "clean"
     ? `Standalone review: 0 critical, ${result.value.aggregate.findings.filter((f) => f.severity === "advisory").length} advisory; skip refutation panel\n`
     : `Standalone review: ${result.value.criticals.length} critical; refutation panel required\n`);
