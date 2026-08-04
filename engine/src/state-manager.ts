@@ -161,6 +161,13 @@ export function taskUnionError(v: unknown, index: number): string | null {
     );
     if (!baseline.ok) return baseline.errors.join("; ");
   }
+  if (
+    t.artifact_baseline_recovered_from !== undefined &&
+    (typeof t.artifact_baseline_recovered_from !== "string" ||
+      !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(t.artifact_baseline_recovered_from))
+  ) {
+    return `tasks[${index}] ("${id}"): artifact_baseline_recovered_from must be a lowercase 40- or 64-character Git SHA`;
+  }
   if (t.plan_context !== undefined && typeof t.plan_context !== "string") {
     return `tasks[${index}] ("${id}"): plan_context must be a string when present`;
   }

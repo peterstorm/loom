@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import type { HookHandler, Task, TaskGraph } from "../../types";
 import { newWaveGate } from "../../types";
 import { taskGraphPath } from "../../config";
@@ -8,6 +9,7 @@ import {
 } from "../../core/proof-obligations";
 import { attributedChangedArtifacts } from "../../core/artifact-baseline";
 import {
+  captureDeclaredArtifactBaselineAtRevision,
   changedDeclaredArtifactsSince,
   changedDeclaredArtifactsSinceRevision,
 } from "../../utils/artifact-baseline";
@@ -18,6 +20,19 @@ import {
   type NewTestEvidence,
 } from "../subagent-stop/update-task-status";
 import { parseWaveArg } from "./wave-args";
+
+const GIT_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
+export function parseRecoveredBaselineSha(args: readonly string[]): string | null {
+  const indexes = args.flatMap((arg, index) => arg === "--baseline-sha" ? [index] : []);
+  if (indexes.length === 0) return null;
+  if (indexes.length > 1) throw new Error("--baseline-sha may be supplied only once");
+  const value = args[indexes[0]! + 1];
+  if (!value || !GIT_SHA.test(value)) {
+    throw new Error("--baseline-sha must be a lowercase 40- or 64-character Git SHA");
+  }
+  return value;
+}
 
 function taskCompletionWasObserved(task: Task): boolean {
   return task.proof?.state !== "pending" && task.proof !== undefined &&
@@ -71,8 +86,10 @@ function failureSummary(task: Task): string {
 
 const handler: HookHandler = async (_stdin, args) => {
   let requestedWave: number | null;
+  let recoveredBaselineSha: string | null;
   try {
     requestedWave = parseWaveArg(args);
+    recoveredBaselineSha = parseRecoveredBaselineSha(args);
   } catch (error) {
     return { kind: "error", message: `reconcile-implementation-proof: ${(error as Error).message}` };
   }
@@ -83,6 +100,21 @@ const handler: HookHandler = async (_stdin, args) => {
   const root = git.repositoryRoot();
   if (!root || !git.isGitRepo()) {
     return { kind: "error", message: "reconcile-implementation-proof requires a git repository" };
+  }
+  if (recoveredBaselineSha !== null) {
+    try {
+      execFileSync("git", ["cat-file", "-e", `${recoveredBaselineSha}^{commit}`], {
+        cwd: root, stdio: ["ignore", "ignore", "pipe"],
+      });
+      execFileSync("git", ["merge-base", "--is-ancestor", recoveredBaselineSha, "HEAD"], {
+        cwd: root, stdio: ["ignore", "ignore", "pipe"],
+      });
+    } catch {
+      return {
+        kind: "error",
+        message: `--baseline-sha ${recoveredBaselineSha} must identify a commit that is an ancestor of HEAD`,
+      };
+    }
   }
 
   let wave = requestedWave ?? 1;
@@ -95,18 +127,30 @@ const handler: HookHandler = async (_stdin, args) => {
       }
       const tasks = state.tasks.map((task) => {
         if (task.wave !== wave || task.status === "completed" || task.proof?.state === "satisfied") return task;
-        const snapshotChanges = changedDeclaredArtifactsSince(root, task.artifact_baseline);
-        const revisionChanges = task.start_sha
-          ? changedDeclaredArtifactsSinceRevision(root, task.start_sha, task.file_list ?? [])
+        const sourceTask: Task = recoveredBaselineSha === null
+          ? task
+          : {
+              ...task,
+              start_sha: recoveredBaselineSha,
+              artifact_baseline: captureDeclaredArtifactBaselineAtRevision(
+                root,
+                recoveredBaselineSha,
+                task.file_list ?? [],
+              ),
+              artifact_baseline_recovered_from: recoveredBaselineSha,
+            };
+        const snapshotChanges = changedDeclaredArtifactsSince(root, sourceTask.artifact_baseline);
+        const revisionChanges = sourceTask.start_sha
+          ? changedDeclaredArtifactsSinceRevision(root, sourceTask.start_sha, sourceTask.file_list ?? [])
           : [];
         const byteChanges = [...new Set([...snapshotChanges, ...revisionChanges])];
-        const proofArtifactsChanged = attributedChangedArtifacts(byteChanges, task.files_modified ?? []);
+        const proofArtifactsChanged = attributedChangedArtifacts(byteChanges, sourceTask.files_modified ?? []);
         const collectedNewTests = collectNewTestEvidence(
-          task.files_modified ?? [],
-          task.start_sha,
-          task.new_tests_required,
+          sourceTask.files_modified ?? [],
+          sourceTask.start_sha,
+          sourceTask.new_tests_required,
         );
-        return reconcileTaskFromStoredEvidence(task, proofArtifactsChanged, collectedNewTests);
+        return reconcileTaskFromStoredEvidence(sourceTask, proofArtifactsChanged, collectedNewTests);
       });
       const resolved: TaskGraph = { ...state, tasks };
       reconciled = {

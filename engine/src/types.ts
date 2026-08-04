@@ -302,6 +302,10 @@ export interface Task {
    *  starts. Proof compares current bytes to this baseline; transcript tool
    *  calls remain lint targets and cannot vouch that a change occurred. */
   artifact_baseline?: readonly DeclaredArtifactBaseline[];
+  /** Historical commit explicitly supplied to the sanctioned recovery helper
+   * after a legacy retry overwrote the original baseline. Persisted so the
+   * exceptional evidence source remains auditable. */
+  artifact_baseline_recovered_from?: string;
   start_sha?: string;
   failure_reason?: string;
   retry_count?: number;

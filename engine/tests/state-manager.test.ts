@@ -380,6 +380,21 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it("parses only exact Git SHAs as recovered artifact baseline provenance", () => {
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, artifact_baseline_recovered_from: "a".repeat(40) }],
+    }).ok).toBe(true);
+    for (const artifact_baseline_recovered_from of ["HEAD~1", "A".repeat(40), "a".repeat(39)]) {
+      const parsed = parseTaskGraph({
+        ...validGraph,
+        tasks: [{ ...validTask, artifact_baseline_recovered_from }],
+      });
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toContain("artifact_baseline_recovered_from");
+    }
+  });
+
   it("rejects non-array tasks and non-object wave_gates", () => {
     expect(parseTaskGraph({ ...validGraph, tasks: "none" }).ok).toBe(false);
     expect(parseTaskGraph({ ...validGraph, wave_gates: [] }).ok).toBe(false);

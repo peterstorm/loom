@@ -52,6 +52,25 @@ function snapshotArtifactAtRevision(
   }
 }
 
+/** Capture exact artifact bytes from a validated historical Git commit. The
+ * current-worktree snapshot is intentionally taken first only to apply the
+ * repository path boundary before any path enters a Git revision expression. */
+export function captureDeclaredArtifactBaselineAtRevision(
+  root: string,
+  revision: string,
+  artifacts: readonly string[],
+): readonly DeclaredArtifactBaseline[] {
+  captureDeclaredArtifactBaseline(root, artifacts);
+  execFileSync("git", ["cat-file", "-e", `${revision}^{commit}`], {
+    cwd: root,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  return Object.freeze([...new Set(artifacts)].map((artifact) => Object.freeze({
+    artifact,
+    snapshot: snapshotArtifactAtRevision(root, revision, artifact),
+  })));
+}
+
 /** Compare current bytes to a trusted git commit retained as task start_sha.
  * This is the recovery source when a legacy retry overwrote artifact_baseline
  * after implementation bytes had already landed. */
@@ -60,14 +79,7 @@ export function changedDeclaredArtifactsSinceRevision(
   revision: string,
   artifacts: readonly string[],
 ): readonly string[] {
-  execFileSync("git", ["cat-file", "-e", `${revision}^{commit}`], {
-    cwd: root,
-    stdio: ["ignore", "ignore", "pipe"],
-  });
-  const baseline = Object.freeze([...new Set(artifacts)].map((artifact) => Object.freeze({
-    artifact,
-    snapshot: snapshotArtifactAtRevision(root, revision, artifact),
-  })));
+  const baseline = captureDeclaredArtifactBaselineAtRevision(root, revision, artifacts);
   const current = captureDeclaredArtifactBaseline(root, artifacts);
   const compared = changedDeclaredArtifacts(baseline, current);
   if (!compared.ok) throw new Error(compared.errors.join("; "));
