@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { detectPhase, checkArtifacts, canRunPanelAgent } from "../../src/handlers/pre-tool-use/validate-phase-order";
 import type { ArtifactState } from "../../src/handlers/pre-tool-use/validate-phase-order";
 import { VALID_TRANSITIONS } from "../../src/config";
+import { validatePhaseOrder } from "../../src/core/validate-phase-order";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,15 @@ function baseState(overrides: Partial<ArtifactState> = {}): ArtifactState {
 }
 
 // ─── detectPhase ────────────────────────────────────────────────────────────
+
+describe("standalone lifecycle", () => {
+  it("allows the exact standalone marker before phase or task-graph checks", () => {
+    expect(validatePhaseOrder({
+      agentType: "unknown-to-phase-order",
+      prompt: "LOOM_REVIEW_CONTEXT: standalone\nReview the frozen scope",
+    })).toEqual({ kind: "allow" });
+  });
+});
 
 describe("detectPhase (pure)", () => {
   it("maps known phase agents", () => {

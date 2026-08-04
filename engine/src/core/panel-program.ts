@@ -1,6 +1,6 @@
 import { PANEL_LENSES, type PanelLens } from "./panel-contract";
 import type { LlmProfileId } from "./model-profiles";
-import { REVIEW_LENSES, type ReviewLens } from "./review-panel";
+import { REVIEW_LENSES, type ReviewLens, type WaveFindingId } from "./review-panel";
 import { fail, ok, type ParseResult } from "./panel-kernel";
 
 /** A non-empty immutable sequence. Parallel fan-out actions use this type. */
@@ -187,14 +187,14 @@ export type ArchitectureProgramEvent =
   | EngineOutcomeEvent<ArchitectureEngineOperation>;
 
 export interface RefutationProgramInput {
-  readonly criticalFindingIds: readonly string[];
+  readonly criticalFindingIds: readonly WaveFindingId[];
   readonly lenses: readonly ReviewLens[];
 }
 
 interface RefutationStateBase {
   readonly panel: "refutation";
   readonly input: Readonly<{
-    criticalFindingIds: readonly string[];
+    criticalFindingIds: readonly WaveFindingId[];
     lenses: readonly ReviewLens[];
   }>;
   readonly completedRequestIds: readonly string[];

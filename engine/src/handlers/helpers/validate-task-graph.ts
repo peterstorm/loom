@@ -23,6 +23,7 @@ import {
   parseStoredRefutations,
   recoverViewOnlyClaims,
   unrecoverableViewClaims,
+  salvageFindingsFromMalformedRefutations,
   salvageMalformedFindings,
   RECOVERED_AGENT,
 } from "../../core/findings";
@@ -271,7 +272,9 @@ interface FindingsRepair {
    *  this file that loses data, so it is counted and reported rather than
    *  vanishing between the raw array and the parsed one. */
   readonly dropped: number;
-  /** Malformed `refuted_findings` records — audit trail, unrecoverable. */
+  /** Claims returned to the active set from malformed refutation envelopes. */
+  readonly recoveredRefutationFindings: readonly string[];
+  /** Malformed `refuted_findings` records whose audit trail was unrecoverable. */
   readonly droppedRefutations: number;
   /** The review record was cleared because its evidence-failure biconditional
    *  was broken and no honest reconstruction exists. */
@@ -305,8 +308,9 @@ interface FindingsRepair {
  *      is what stops a salvaged claim being minted twice.
  *   3. Colliding ids are re-minted, because the load boundary now rejects
  *      duplicates and a rejection with no working repair dead-ends the operator.
- *   4. Malformed refutation records are dropped — they are audit trail with no
- *      derived view to rebuild them from — and counted, for the same reason.
+ *   4. Malformed refutation records lose their unusable audit decision, but a
+ *      valid nested finding is returned to the active set before views are
+ *      derived. The malformed record is still counted and reported.
  *
  * The views are then re-derived from the result, which is the lockstep
  * `findingsLockstepError` proves at load.
@@ -321,11 +325,20 @@ function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
     ? t.findings
     : t.findings === undefined ? [] : [t.findings];
   const stored = parseStoredFindings(rawFindings);
+  const represented = [...stored, ...refuted.map((record) => record.finding)];
+  const recoveredRefutationFindings = salvageFindingsFromMalformedRefutations(t.refuted_findings)
+    .filter((candidate) => !represented.some((existing) =>
+      existing.id === candidate.id &&
+      existing.severity === candidate.severity &&
+      existing.claim === candidate.claim
+    ));
   const rawFindingCount = rawFindings.length;
   // Order- and length-preserving, so an id that differs at the same index is
-  // exactly one this repair re-minted.
-  const parsed = deduplicateFindingIds(stored, refuted);
-  const reminted = parsed.filter((finding, index) => finding.id !== stored[index]?.id).length;
+  // exactly one this repair re-minted. Recovered nested findings participate in
+  // the same collision proof before returning to the active set.
+  const beforeDedup = [...stored, ...recoveredRefutationFindings];
+  const parsed = deduplicateFindingIds(beforeDedup, refuted);
+  const reminted = parsed.filter((finding, index) => finding.id !== beforeDedup[index]?.id).length;
 
   const salvagedDrafts = salvageMalformedFindings(rawFindings);
   const salvagedFindings = salvagedDrafts.length === 0
@@ -362,7 +375,8 @@ function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
     salvaged: salvagedFindings.map((finding) => finding.claim),
     unrecoverableViewClaims: unrecoverable,
     reminted,
-    dropped: rawFindingCount - parsed.length - salvagedFindings.length,
+    dropped: rawFindingCount - stored.length - salvagedFindings.length,
+    recoveredRefutationFindings: recoveredRefutationFindings.map((finding) => finding.claim),
     droppedRefutations: rawRefutedCount - refuted.length,
     clearedReviewRecord: review.cleared,
   };
@@ -455,10 +469,13 @@ export function fixFull(json: Record<string, unknown>): FixReport {
             `data lost; check the reviewer output for this task`,
         );
       }
+      for (const claim of repair.recoveredRefutationFindings) {
+        notes.push(`${id}: recovered finding from malformed refutation record — "${claim}"`);
+      }
       if (repair.droppedRefutations > 0) {
         notes.push(
           `${id}: DROPPED ${repair.droppedRefutations} malformed refutation record(s) — ` +
-            `audit trail lost, the findings themselves are unaffected`,
+            `audit trail lost; valid nested findings were preserved or returned to the active set`,
         );
       }
       for (const claim of repair.unrecoverableViewClaims) {

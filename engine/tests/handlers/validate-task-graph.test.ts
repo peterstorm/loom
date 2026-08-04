@@ -568,7 +568,7 @@ describe("fixFull repairs findings WITH their derived views", () => {
     }));
     expect(notes).toEqual([
       "T1: DROPPED 2 findings entr(y/ies) carrying no usable claim — data lost; check the reviewer output for this task",
-      "T1: DROPPED 1 malformed refutation record(s) — audit trail lost, the findings themselves are unaffected",
+      "T1: DROPPED 1 malformed refutation record(s) — audit trail lost; valid nested findings were preserved or returned to the active set",
     ]);
   });
 
@@ -583,7 +583,24 @@ describe("fixFull repairs findings WITH their derived views", () => {
     expect(twice.notes, "a repaired graph reports nothing further").toEqual([]);
   });
 
-  it("drops a refutation record whose pair shape is broken", () => {
+  it("returns a valid nested finding to the active set when its refutation envelope is malformed", () => {
+    const once = fixFull(graphOf({
+      id: "T1",
+      refuted_findings: [{ finding: wellFormed, refutations: [] }],
+    }));
+    const repaired = JSON.parse(once.json).tasks[0];
+    expect(repaired.refuted_findings).toEqual([]);
+    expect(repaired.findings).toEqual([wellFormed]);
+    expect(repaired.critical_findings).toEqual([wellFormed.claim]);
+    expect(once.notes).toContain(
+      `T1: recovered finding from malformed refutation record — "${wellFormed.claim}"`,
+    );
+    const twice = fixFull(JSON.parse(once.json));
+    expect(twice.json).toBe(once.json);
+    expect(twice.notes).toEqual([]);
+  });
+
+  it("drops a refutation record whose pair shape is broken without resurrecting an already-refuted finding", () => {
     const repaired = fix({
       id: "T1",
       refuted_findings: [
@@ -592,6 +609,8 @@ describe("fixFull repairs findings WITH their derived views", () => {
       ],
     });
     expect(repaired.refuted_findings).toHaveLength(1);
+    expect(repaired.findings).toEqual([]);
+    expect(repaired.critical_findings).toEqual([]);
   });
 
   it("normalizes an invalid current_wave and reports the repair", () => {

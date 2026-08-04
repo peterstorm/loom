@@ -9,7 +9,7 @@ import {
   type PanelEngineOperation,
 } from "../../core/panel-program";
 import type { PanelLens } from "../../core/panel-contract";
-import type { ReviewLens } from "../../core/review-panel";
+import { parseWaveFindingId, type ReviewLens } from "../../core/review-panel";
 
 const PANELS = ["architecture", "refutation"] as const;
 const OPERATIONS: readonly PanelEngineOperation[] = [
@@ -95,8 +95,16 @@ const handler: HookHandler = async (stdin, args) => {
   if (!strings(raw.input.criticalFindingIds) || !strings(raw.input.lenses)) {
     return { kind: "error", message: "refutation input requires criticalFindingIds[] and lenses[]" };
   }
+  const criticalFindingIds = raw.input.criticalFindingIds.map(parseWaveFindingId);
+  const malformedId = criticalFindingIds.findIndex((id) => id === null);
+  if (malformedId >= 0) {
+    return {
+      kind: "error",
+      message: `criticalFindingIds[${malformedId}] must be a wave-scoped task-id:finding-id`,
+    };
+  }
   let step = startRefutationDispatchProgram({
-    criticalFindingIds: raw.input.criticalFindingIds,
+    criticalFindingIds: criticalFindingIds.filter((id): id is NonNullable<typeof id> => id !== null),
     lenses: raw.input.lenses as ReviewLens[],
   });
   if (!step.ok) return { kind: "error", message: step.errors.join("\n") };

@@ -56,6 +56,7 @@ const initialGraph = () => ({
     status: "implemented",
     depends_on: [],
     review_status: "pending",
+    file_list: ["pi/extension.ts"],
   }],
 });
 
@@ -78,7 +79,11 @@ afterAll(() => {
   rmSync(temp, { recursive: true, force: true });
 });
 
-const reviewResult = (task: string, claim: string) => ({
+const reviewResult = (
+  task: string,
+  claim: string,
+  resultOverrides: Record<string, unknown> = {},
+) => ({
   toolName: "subagent",
   isError: false,
   input: {},
@@ -103,6 +108,7 @@ const reviewResult = (task: string, claim: string) => ({
           ].join("\n"),
         }],
       }],
+      ...resultOverrides,
     }],
   },
 });
@@ -163,6 +169,62 @@ describe("Pi extension review tool_result integration", () => {
       context,
     );
     expect(JSON.parse(readFileSync(statePath, "utf-8"))).toEqual(captured);
+  });
+
+  it("keeps standalone spawn and completion isolated from an active task graph", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad410";
+    const context = { sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-standalone-active-graph";
+    const taskPrompt = "LOOM_REVIEW_CONTEXT: standalone\nReview the frozen scope";
+    const before = readFileSync(statePath, "utf-8");
+
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: { agent: "code-reviewer", task: taskPrompt, agentScope: "user" },
+    }, context);
+    expect(call).toEqual([undefined]);
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+    expect(() => readFileSync(join(subagentDir, `${session}.task_graph`), "utf-8")).toThrow();
+
+    await pi.emit("tool_result", {
+      ...reviewResult(taskPrompt, "must remain run-scoped"),
+      toolCallId,
+    }, context);
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+    expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
+  });
+
+  it("does not register review or verifier prompts as implementation execution", async () => {
+    const planPath = join(temp, "review-not-execution-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      plan_file: planPath,
+      skipped_phases: ["plan-alignment"],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad413";
+    const context = { sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-review-not-execution";
+    const prompt = "Task: T1\nReview the implementation and emit Machine Summary findings.";
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: { agent: "code-reviewer", task: prompt, agentScope: "user" },
+    }, context);
+    expect(call).toEqual([undefined]);
+    const afterStart = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(afterStart.executing_tasks).toEqual([]);
+    expect(afterStart.tasks[0].start_sha).toBeUndefined();
+
+    await pi.emit("tool_result", {
+      ...reviewResult(prompt, "review completed"),
+      toolCallId,
+    }, context);
+    expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
   });
 
   it("allows a valid user-scoped Loom spawn and records lifecycle evidence", async () => {
@@ -299,6 +361,76 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("cleans a chain roster slot even when Pi substitutes {previous} in result.task", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad411";
+    const context = { sessionManager: { getSessionId: () => session } };
+    const backup = `${statePath}.chain-backup`;
+    renameSync(statePath, backup);
+    const toolCallId = "call-chain-previous";
+    try {
+      const call = await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: {
+          agentScope: "user",
+          chain: [
+            { agent: "review-verifier-agent", task: "Judge the manifest" },
+            { agent: "review-verifier-agent", task: "Use {previous} and judge again" },
+          ],
+        },
+      }, context);
+      expect(call).toEqual([undefined]);
+      const activePath = join(subagentDir, `${session}.active`);
+      expect(readFileSync(activePath, "utf-8").split("\n").filter(Boolean)).toHaveLength(2);
+
+      await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId,
+        content: [],
+        details: {
+          results: [
+            { agent: "review-verifier-agent", task: "Judge the manifest", exitCode: 0, messages: [] },
+            { agent: "review-verifier-agent", task: "Use prior verifier output and judge again", exitCode: 0, messages: [] },
+          ],
+        },
+      }, context);
+      expect(() => readFileSync(activePath, "utf-8")).toThrow();
+    } finally {
+      rmSync(join(subagentDir, `${session}.active`), { force: true });
+      renameSync(backup, statePath);
+    }
+  });
+
+  it("rolls back roster and task-graph pointer when task validation blocks after reservation", async () => {
+    writeState({
+      ...initialGraph(),
+      tasks: [
+        { id: "T1", description: "wave one", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], file_list: ["pi/extension.ts"] },
+        { id: "T2", description: "wave two", agent: "code-implementer-agent", wave: 2, status: "pending", depends_on: [], file_list: ["pi/extension.ts"] },
+      ],
+    });
+    const before = readFileSync(statePath, "utf-8");
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad412";
+    const result = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-post-reservation-block",
+      input: {
+        agentScope: "user",
+        tasks: [
+          { agent: "code-implementer-agent", task: "Task ID: T1\nUse the code-implementer skill. Implement and test." },
+          { agent: "code-implementer-agent", task: "Task ID: T2\nUse the code-implementer skill. Implement and test." },
+        ],
+      },
+    }, { sessionManager: { getSessionId: () => session } });
+
+    expect(result).toContainEqual(expect.objectContaining({ block: true }));
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+    expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
+    expect(() => readFileSync(join(subagentDir, `${session}.task_graph`), "utf-8")).toThrow();
+  });
+
   it("validates a task batch completely before one atomic registration", async () => {
     const graph = {
       ...initialGraph(),
@@ -309,11 +441,11 @@ describe("Pi extension review tool_result integration", () => {
     };
     writeState(graph);
     const before = JSON.parse(readFileSync(statePath, "utf-8"));
-    const { validateTaskExecutionBatch } = await import("../src/core/validate-task-execution");
+    const { classifyTaskExecutionSpawn, validateTaskExecutionBatch } = await import("../src/core/validate-task-execution");
 
     const result = await validateTaskExecutionBatch([
-      { prompt: "Task ID: T1", description: "" },
-      { prompt: "Task ID: T2", description: "" },
+      classifyTaskExecutionSpawn({ agentType: "code-implementer-agent", prompt: "Task ID: T1", description: "" }),
+      classifyTaskExecutionSpawn({ agentType: "code-implementer-agent", prompt: "Task ID: T2", description: "" }),
     ]);
 
     expect(result.kind).toBe("block");
@@ -381,6 +513,79 @@ describe("Pi extension review tool_result integration", () => {
       stderr.mockRestore();
       renameSync(backup, statePath);
     }
+  });
+
+  it("ignores failed review evidence while continuing with a healthy sibling", async () => {
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const failed = reviewResult("Task: T1", "failed result must not gate", { exitCode: 1 }).details.results[0];
+    const healthy = reviewResult("Task: T1", "healthy sibling stored").details.results[0];
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      content: [],
+      details: { results: [failed, healthy] },
+    }, context);
+
+    const taskState = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+    expect(taskState.critical_findings).toEqual(["healthy sibling stored"]);
+    expect(taskState.critical_findings).not.toContain("failed result must not gate");
+  });
+
+  it("does not advance a failed phase agent even when its messages contain a valid artifact", async () => {
+    const planPath = join(temp, "failed-phase-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({ ...initialGraph(), current_phase: "architecture", phase_artifacts: {}, plan_file: null });
+    const before = readFileSync(statePath, "utf-8");
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      content: [],
+      details: {
+        results: [{
+          agent: "architecture-agent",
+          task: "finalize architecture",
+          exitCode: 1,
+          messages: [{
+            role: "assistant",
+            content: [{ type: "toolCall", name: "write", arguments: { path: planPath } }],
+          }],
+        }],
+      },
+    }, context);
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+  });
+
+  it("ignores aborted spec evidence and clears failed implementation execution without completing it", async () => {
+    writeState({ ...initialGraph(), executing_tasks: ["T1"], tasks: [{ ...initialGraph().tasks[0], status: "pending" }] });
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      content: [],
+      details: {
+        results: [
+          {
+            agent: "code-implementer-agent",
+            task: "Task ID: T1",
+            exitCode: 1,
+            messages: [{ role: "assistant", content: [{ type: "text", text: "tests passed" }] }],
+          },
+          {
+            agent: "spec-check-invoker",
+            task: "spec check",
+            exitCode: 0,
+            stopReason: "aborted",
+            messages: [{ role: "assistant", content: [{ type: "text", text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED" }] }],
+          },
+        ],
+      },
+    }, context);
+
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.executing_tasks).toEqual([]);
+    expect(state.tasks[0].status).toBe("pending");
+    expect(state.spec_check).toBeUndefined();
   });
 
   it("continues processing later Pi results when the first result throws", async () => {

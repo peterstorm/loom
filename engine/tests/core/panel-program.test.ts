@@ -15,6 +15,13 @@ import {
   type RefutationProgramState,
   type SpawnBatchAction,
 } from "../../src/core/panel-program";
+import { parseWaveFindingId } from "../../src/core/review-panel";
+
+const waveId = (raw: string) => {
+  const parsed = parseWaveFindingId(raw);
+  if (parsed === null) throw new Error(`invalid test wave finding id: ${raw}`);
+  return parsed;
+};
 
 const architectureInput = {
   candidateLenses: ["simplicity-first", "type-driven-fp"] as const,
@@ -22,7 +29,7 @@ const architectureInput = {
 };
 
 const refutationInput = {
-  criticalFindingIds: ["T1:code-reviewer-1", "T2:security-agent-1"],
+  criticalFindingIds: [waveId("T1:code-reviewer-1"), waveId("T2:security-agent-1")],
   lenses: ["reproduction", "intent", "blast-radius"] as const,
 };
 
@@ -159,6 +166,38 @@ describe("architecture panel program", () => {
     step = reduced(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:finalize")));
     expect(step.state.stage).toBe("complete");
     expect(step.action).toEqual({ type: "done", panel: "architecture", outcome: "completed" });
+  });
+
+  it("blocks on failed prepare and aggregate engine operations with the original reason", () => {
+    const afterInterview = reduced(reduceArchitectureProgram(
+      architectureStart().state,
+      spawnSucceeded("architecture:interview"),
+    ));
+    const prepareFailed = reduced(reduceArchitectureProgram(afterInterview.state, {
+      type: "engine-outcome",
+      operationId: "architecture-prepare-candidates",
+      outcome: "failed",
+      error: "candidate manifest invalid",
+    }));
+    expect(prepareFailed.state).toMatchObject({ stage: "blocked", reason: "candidate manifest invalid" });
+    expect(prepareFailed.action).toEqual({
+      type: "blocked", panel: "architecture", stage: "prepare-candidates", reason: "candidate manifest invalid",
+    });
+
+    let aggregate = enterJudges();
+    for (const id of ["architecture:judge:1", "architecture:judge:2", "architecture:judge:3"]) {
+      aggregate = reduced(reduceArchitectureProgram(aggregate.state, spawnSucceeded(id)));
+    }
+    const aggregateFailed = reduced(reduceArchitectureProgram(aggregate.state, {
+      type: "engine-outcome",
+      operationId: "architecture-aggregate",
+      outcome: "failed",
+      error: "ranking invalid",
+    }));
+    expect(aggregateFailed.state).toMatchObject({ stage: "blocked", reason: "ranking invalid" });
+    expect(aggregateFailed.action).toEqual({
+      type: "blocked", panel: "architecture", stage: "aggregate", reason: "ranking invalid",
+    });
   });
 
   it("does not make aggregate reachable until every judge slot succeeds", () => {
@@ -331,6 +370,34 @@ describe("refutation panel program", () => {
     expect(step.action).toEqual({ type: "done", panel: "refutation", outcome: "completed" });
   });
 
+  it("blocks on failed prepare and tally engine operations with the original reason", () => {
+    const prepareFailed = reduced(reduceRefutationProgram(refutationStart().state, {
+      type: "engine-outcome",
+      operationId: "refutation-prepare-verifiers",
+      outcome: "failed",
+      error: "manifest invalid",
+    }));
+    expect(prepareFailed.state).toMatchObject({ stage: "blocked", reason: "manifest invalid" });
+    expect(prepareFailed.action).toEqual({
+      type: "blocked", panel: "refutation", stage: "prepare-verifiers", reason: "manifest invalid",
+    });
+
+    let tally = enterVerifiers();
+    for (const id of ["refutation:verifier:1", "refutation:verifier:2", "refutation:verifier:3"]) {
+      tally = reduced(reduceRefutationProgram(tally.state, spawnSucceeded(id)));
+    }
+    const tallyFailed = reduced(reduceRefutationProgram(tally.state, {
+      type: "engine-outcome",
+      operationId: "refutation-tally",
+      outcome: "failed",
+      error: "verdict set invalid",
+    }));
+    expect(tallyFailed.state).toMatchObject({ stage: "blocked", reason: "verdict set invalid" });
+    expect(tallyFailed.action).toEqual({
+      type: "blocked", panel: "refutation", stage: "tally", reason: "verdict set invalid",
+    });
+  });
+
   it("retries one verifier once and preserves deterministic completion", () => {
     let retried = enterVerifiers();
     retried = reduced(reduceRefutationProgram(retried.state, {
@@ -366,7 +433,7 @@ describe("panel program construction invariants", () => {
     }
 
     const duplicate = startRefutationProgram({
-      criticalFindingIds: ["T1:f-1"],
+      criticalFindingIds: [waveId("T1:f-1")],
       lenses: ["intent", "intent"],
     });
     expect(duplicate).toEqual({ ok: false, errors: ["refutation lenses must be distinct"] });

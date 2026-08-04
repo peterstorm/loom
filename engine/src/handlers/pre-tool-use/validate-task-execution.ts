@@ -24,6 +24,7 @@ const handler: HookHandler = async (stdin) => {
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
   return validateTaskExecution({
+    agentType: (input.tool_input?.subagent_type as string) ?? (input.tool_input?.agent as string) ?? "",
     prompt: (input.tool_input?.prompt as string) ?? (input.tool_input?.task as string) ?? "",
     description: (input.tool_input?.description as string) ?? "",
   });

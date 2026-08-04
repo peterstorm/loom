@@ -478,6 +478,25 @@ describe("unquoted & — background compositions (round-10 Fix 3)", () => {
     });
   });
 
+  it("drops a green report when the entire pipeline containing the test is backgrounded", () => {
+    const green = reportSummary(5, 0);
+    const command = "npm test | tee report.json &";
+    const classified = classifyTestCommandDetailed(command)!;
+    expect(classified.opAfter).toBe("|");
+    expect(classified.isBackgrounded).toBe(true);
+
+    const run = extractEvidence(
+      "Bash",
+      { command },
+      { exit_code: 0, stdout: "" },
+      () => green,
+    ).find((event) => event.kind === "TestRun");
+    expect(run).toEqual({ kind: "TestRun", command, exit: null, report: null });
+    if (run?.kind === "TestRun") {
+      expect(judgeTestRun(run.exit, run.report)).toEqual({ verdict: "untrusted" });
+    }
+  });
+
   it("`X & npm test`: the foreground test owns the exit (both polarities — `&` sequences unconditionally)", () => {
     expect(mintTestRun("false & npm test", 0)!.exit).toBe(0);
     expect(mintTestRun("false & npm test", 1)!.exit).toBe(1);

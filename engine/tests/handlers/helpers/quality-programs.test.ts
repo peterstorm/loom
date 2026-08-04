@@ -252,10 +252,20 @@ describe("quality-program helper boundaries", () => {
   it("rejects an unknown refutation lens at the CLI boundary", () => {
     const run = spawnSync("bun", [CLI, "helper", "panel-program", "refutation"], {
       cwd: ROOT,
-      input: JSON.stringify({ input: { criticalFindingIds: ["F1"], lenses: ["invented"] }, events: [] }),
+      input: JSON.stringify({ input: { criticalFindingIds: ["T1:F1"], lenses: ["invented"] }, events: [] }),
       encoding: "utf-8",
     });
     expect(run.status).not.toBe(0);
     expect(run.stderr).toContain("unknown refutation lens");
+  });
+
+  it("rejects a task-local finding id before constructing a refutation program", () => {
+    const run = spawnSync("bun", [CLI, "helper", "panel-program", "refutation"], {
+      cwd: ROOT,
+      input: JSON.stringify({ input: { criticalFindingIds: ["code-reviewer-1"], lenses: ["intent"] }, events: [] }),
+      encoding: "utf-8",
+    });
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("wave-scoped task-id:finding-id");
   });
 });

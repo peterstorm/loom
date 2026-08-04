@@ -18,6 +18,7 @@ import {
 import { StateManager } from "../state-manager";
 import { stripNamespace } from "../utils/strip-namespace";
 import { findFile } from "../utils/find-file";
+import { hasStandaloneReviewContext } from "./review-output";
 
 /**
  * Resolves an artifact reference to an existing file path.
@@ -162,6 +163,9 @@ export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string
 }
 
 export function validatePhaseOrder(input: ValidatePhaseOrderInput): HookResult {
+  // A standalone review is an isolated run artifact, not an orchestration
+  // phase transition. Recognize the exact marker before touching task state.
+  if (hasStandaloneReviewContext(input.prompt)) return { kind: "allow" };
   if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
 
   const bareAgent = stripNamespace(input.agentType);

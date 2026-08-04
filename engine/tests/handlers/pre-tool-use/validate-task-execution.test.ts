@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { taskExecutionDecision } from "../../../src/core/validate-task-execution";
+import {
+  classifyTaskExecutionSpawn,
+  taskExecutionDecision,
+} from "../../../src/core/validate-task-execution";
 import type { TaskGraph, Task, WaveGate } from "../../../src/types";
 
 /** Exercise the production pure decision while preserving concise assertions. */
@@ -51,6 +54,34 @@ function mkState(
     ...overrides,
   };
 }
+
+describe("validate-task-execution — spawn lifecycle parsing", () => {
+  it("makes only implementation agents eligible for task execution state", () => {
+    expect(classifyTaskExecutionSpawn({
+      agentType: "code-implementer-agent",
+      prompt: "Task ID: T1",
+      description: "",
+    })).toEqual({ kind: "implementation", prompt: "Task ID: T1", description: "" });
+    expect(classifyTaskExecutionSpawn({
+      agentType: "code-reviewer",
+      prompt: "Task: T1",
+      description: "",
+    })).toEqual({ kind: "non-implementation" });
+    expect(classifyTaskExecutionSpawn({
+      agentType: "review-verifier-agent",
+      prompt: "Task: T1",
+      description: "",
+    })).toEqual({ kind: "non-implementation" });
+  });
+
+  it("classifies the exact standalone marker before agent category", () => {
+    expect(classifyTaskExecutionSpawn({
+      agentType: "code-implementer-agent",
+      prompt: "LOOM_REVIEW_CONTEXT: standalone\nTask ID: T1",
+      description: "",
+    })).toEqual({ kind: "standalone" });
+  });
+});
 
 describe("validate-task-execution — wave gates", () => {
   it("blocks task in wave 2 when current_wave=1", () => {

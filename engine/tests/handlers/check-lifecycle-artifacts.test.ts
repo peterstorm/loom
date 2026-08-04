@@ -153,6 +153,10 @@ describe("complete-wave-gate handler wiring (check 7 is actually in the gate)", 
       spec_file: null,
       plan_file: planFile,
       current_wave: 1,
+      spec_check: {
+        wave: 1, run_at: "", verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
       executing_tasks: [],
       tasks: [{
         id: "T1", description: "implement machine", agent: "code-implementer-agent",

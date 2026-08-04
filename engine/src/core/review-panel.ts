@@ -205,10 +205,17 @@ declare const WAVE_SCOPED: unique symbol;
  * Branded because the two id spaces are both strings and mixing them is
  * silent: hand `briefFindingFilename` a task-local `code-reviewer-1` and it
  * returns a filename two tasks in the same wave would both claim — exactly the
- * collision the scoping exists to prevent. `waveFindingId` and
- * `parseBriefFindingEntry` are the only constructors.
+ * collision the scoping exists to prevent. `waveFindingId`,
+ * `parseWaveFindingId`, and `parseBriefFindingEntry` are the only constructors.
  */
 export type WaveFindingId = string & { readonly [WAVE_SCOPED]: true };
+
+/** Parse the external `task-id:finding-id` spelling into its wave-scoped brand. */
+export function parseWaveFindingId(raw: unknown): WaveFindingId | null {
+  return typeof raw === "string" && /^[^:\s]+:[^:\s]+$/.test(raw)
+    ? raw as WaveFindingId
+    : null;
+}
 
 /** A finding as the panel sees it: wave-scoped id, plus its task. */
 export interface BriefFinding {

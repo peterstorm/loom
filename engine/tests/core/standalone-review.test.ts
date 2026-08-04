@@ -174,6 +174,10 @@ describe("standalone review adjudication", () => {
     const panel = parseStandalonePanelOutcomes(raw, state.criticals, ["reproduction", "intent", "blast-radius"]);
     expect(panel.ok).toBe(true);
     if (!panel.ok) return;
+    expect(panel.value.outcomes[1]?.refutations).toEqual([
+      { lens: "reproduction", reason: "cannot trigger" },
+      { lens: "intent", reason: "deliberate" },
+    ]);
     const result = finalizeStandaloneReview(state.aggregate, panel.value);
     expect(result.ok).toBe(true);
     if (!result.ok) return;

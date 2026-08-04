@@ -214,10 +214,11 @@ describe("checkSpecAlignment (pure)", () => {
     ...overrides,
   });
 
-  it("passes when no spec-check data", () => {
+  it("fails closed when no spec-check data exists", () => {
     const result = checkSpecAlignment(mkState(), 1);
-    expect(result.passed).toBe(true);
-    expect(gateCheckMessage(result)).toContain("skipped");
+    expect(result.passed).toBe(false);
+    expect(gateCheckMessage(result)).toContain("missing for wave 1");
+    expect(gateCheckMessage(result)).toContain("/spec-check");
   });
 
   it("fails when spec-check for different wave", () => {
@@ -416,6 +417,17 @@ describe("generateWaveGateSummary (pure)", () => {
 });
 
 describe("evaluateWaveGate + applyGateDecision — fs resolved once before the lock, checks on locked state", () => {
+  const specCheck = (wave: number): CapturedSpecCheck => ({
+    wave,
+    run_at: "",
+    verdict: "PASSED",
+    critical_count: 0,
+    high_count: 0,
+    critical_findings: [],
+    high_findings: [],
+    medium_findings: [],
+  });
+
   const mkGraph = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
     current_phase: "execute",
     phase_artifacts: {},
@@ -423,6 +435,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
     spec_file: null,
     plan_file: null,
     current_wave: 1,
+    spec_check: specCheck(1),
     tasks: [baseTask, { ...baseTask, id: "T2", wave: 2 }],
     wave_gates: { "1": { impl_complete: true, tests_passed: null, reviews_complete: false, blocked: false } },
     ...overrides,
@@ -613,7 +626,11 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
   });
 
   it("an explicit --wave argument overrides current_wave", () => {
-    const decision = evaluateWaveGate(mkGraph({ current_wave: 1 }), 2, countingDeps().deps);
+    const decision = evaluateWaveGate(
+      mkGraph({ current_wave: 1, spec_check: specCheck(2) }),
+      2,
+      countingDeps().deps,
+    );
     expect(decision.wave).toBe(2);
     expect(decision.verdict).toMatchObject({ kind: "pass", taskIds: ["T2"], nextWave: null });
   });

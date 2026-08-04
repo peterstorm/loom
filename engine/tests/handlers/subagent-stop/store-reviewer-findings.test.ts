@@ -155,6 +155,35 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
     }
   });
 
+  it("fails evidence capture when a located finding is outside the Review Packet scope", async () => {
+    const claim = "outside-scope blocker";
+    const located = [
+      "Task T1 review.",
+      "### Machine Summary",
+      "CRITICAL_COUNT: 1",
+      "ADVISORY_COUNT: 0",
+      `CRITICAL: ${claim}`,
+      "```findings",
+      JSON.stringify([{ severity: "critical", file: "src/outside.ts", line: 9, claim }]),
+      "```",
+    ].join("\n");
+    const f = fixture("scope", located, [{ ...task("T1"), file_list: ["src/inside.ts"] }]);
+    try {
+      const { stderr } = await run({
+        session_id: f.session,
+        agent_type: "code-reviewer",
+        agent_transcript_path: f.transcriptPath,
+      });
+      const stored = f.state().tasks[0];
+      expect(stored.review_status).toBe("evidence_capture_failed");
+      expect(stored.findings).toBeUndefined();
+      expect(stored.review_error).toContain("src/outside.ts");
+      expect(stderr).toContain("outside Review Packet scope");
+    } finally {
+      f.cleanup();
+    }
+  });
+
   it("records a clean review as passed", async () => {
     const f = fixture("clean", `Task T1 review.\n${CLEAN}`);
     try {

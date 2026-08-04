@@ -257,11 +257,11 @@ export interface ClassifiedTestCommand {
   readonly isSole: boolean;
   readonly isLast: boolean;
   readonly opBefore: SegmentOp | null;
-  /** The operator immediately FOLLOWING the matched segment (null when none):
-   *  `&` here means the segment is backgrounded — its exit is never the
-   *  line's exit. Computed over the RAW segment list, so a trailing blank
-   *  fragment (`npx vitest &`) still reveals the `&`. */
+  /** The operator immediately FOLLOWING the matched segment (null when none). */
   readonly opAfter: SegmentOp | null;
+  /** Whether the complete pipe chain containing the test is terminated by `&`.
+   *  Unlike opAfter, this catches `npm test | tee report.json &`. */
+  readonly isBackgrounded: boolean;
 }
 
 /**
@@ -284,12 +284,16 @@ export function classifyTestCommandDetailed(command: string): ClassifiedTestComm
     const lower = segment.toLowerCase();
     if (!headMatchesRunner(lower)) continue;
     if (isMavenHead(lower) && !hasMavenTestGoal(lower)) continue;
+    const rawIndex = segments[i].rawIndex;
+    let afterPipeChain = rawIndex + 1;
+    while (raw[afterPipeChain]?.opBefore === "|") afterPipeChain++;
     return {
       segment,
       isSole: segments.length === 1,
       isLast: i === segments.length - 1,
       opBefore: segments[i].opBefore,
-      opAfter: raw[segments[i].rawIndex + 1]?.opBefore ?? null,
+      opAfter: raw[rawIndex + 1]?.opBefore ?? null,
+      isBackgrounded: raw[afterPipeChain]?.opBefore === "&",
     };
   }
   return null;
@@ -326,7 +330,7 @@ export function classifyTestCommand(command: string): string | null {
  */
 export function attributeExit(exit: number | null, classified: ClassifiedTestCommand): number | null {
   if (exit === null) return null;
-  if (classified.opAfter === "&") return null;
+  if (classified.isBackgrounded) return null;
   if (classified.isSole) return exit;
   if (!classified.isLast) return null;
   if (exit === 0) return classified.opBefore === "||" ? null : exit;
@@ -637,12 +641,11 @@ export function extractEvidence(
       // any later evidence correct it. `findReport`'s guards bound STALENESS;
       // nothing bounds completeness, so the only honest answer here is no
       // evidence at all.
-      const backgrounded = classified.opAfter === "&";
       events.push({
         kind: "TestRun",
         command,
         exit: attributeExit(outcome.exit, classified),
-        report: backgrounded ? null : report,
+        report: classified.isBackgrounded ? null : report,
       });
     }
     return events;

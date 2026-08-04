@@ -6,15 +6,37 @@
 
 import { existsSync } from "node:fs";
 import type { HookResult, TaskGraph } from "../types";
-import { TASK_GRAPH_PATH } from "../config";
+import { IMPL_AGENTS, TASK_GRAPH_PATH } from "../config";
 import { extractTaskId } from "../utils/extract-task-id";
+import { stripNamespace } from "../utils/strip-namespace";
+import { hasStandaloneReviewContext } from "./review-output";
 import { StateManager } from "../state-manager";
 import * as git from "../utils/git";
 import { captureDeclaredArtifactBaseline } from "../utils/artifact-baseline";
 
 export interface ValidateTaskExecutionInput {
-  prompt: string;
-  description: string;
+  readonly agentType: string;
+  readonly prompt: string;
+  readonly description: string;
+}
+
+/**
+ * Parsed lifecycle for one spawn. Only the implementation arm carries text
+ * from which a task id may be extracted; review/refutation/phase work cannot
+ * accidentally enter implementation execution state.
+ */
+export type TaskExecutionSpawn =
+  | Readonly<{ kind: "standalone" }>
+  | Readonly<{ kind: "implementation"; prompt: string; description: string }>
+  | Readonly<{ kind: "non-implementation" }>;
+
+/** Pure boundary parser from harness fields to the closed lifecycle union. */
+export function classifyTaskExecutionSpawn(input: ValidateTaskExecutionInput): TaskExecutionSpawn {
+  if (hasStandaloneReviewContext(input.prompt)) return { kind: "standalone" };
+  const agent = stripNamespace(input.agentType);
+  return IMPL_AGENTS.has(agent) || IMPL_AGENTS.has(`${agent}-agent`)
+    ? { kind: "implementation", prompt: input.prompt, description: input.description }
+    : { kind: "non-implementation" };
 }
 
 /** Pure task gate used by both single and batch shell entry points. */
@@ -75,9 +97,13 @@ export function taskExecutionDecision(state: TaskGraph, taskId: string): HookRes
  * blocked sibling therefore leaves no ghost execution state behind.
  */
 export async function validateTaskExecutionBatch(
-  inputs: readonly ValidateTaskExecutionInput[],
+  spawns: readonly TaskExecutionSpawn[],
 ): Promise<HookResult> {
-  if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
+  const inputs = spawns.filter(
+    (spawn): spawn is Extract<TaskExecutionSpawn, { kind: "implementation" }> =>
+      spawn.kind === "implementation",
+  );
+  if (inputs.length === 0 || !existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
   const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
   if (!mgr) return { kind: "allow" };
 
@@ -124,5 +150,5 @@ export async function validateTaskExecutionBatch(
 }
 
 export async function validateTaskExecution(input: ValidateTaskExecutionInput): Promise<HookResult> {
-  return validateTaskExecutionBatch([input]);
+  return validateTaskExecutionBatch([classifyTaskExecutionSpawn(input)]);
 }

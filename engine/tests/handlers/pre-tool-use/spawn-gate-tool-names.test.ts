@@ -64,7 +64,7 @@ const GATES: ReadonlyArray<{
   {
     name: "validate-task-execution",
     handler: validateTaskExecution,
-    toolInput: { prompt: "Task ID: T9", description: "wave-2 task" },
+    toolInput: { subagent_type: "code-implementer-agent", prompt: "Task ID: T9", description: "wave-2 task" },
     expect: "current wave is 1",
   },
   {

@@ -405,6 +405,21 @@ export function parseStoredRefutations(raw: unknown): RefutedFinding[] {
     .filter((record): record is RefutedFinding => record !== null);
 }
 
+/**
+ * Recover a valid nested finding from a malformed refutation record. The audit
+ * decision is unusable, so the finding returns to the active set rather than
+ * disappearing with the broken envelope.
+ */
+export function salvageFindingsFromMalformedRefutations(raw: unknown): readonly Finding[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    if (parseStoredRefutation(entry) !== null) return [];
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
+    const finding = parseStoredFinding((entry as Record<string, unknown>).finding);
+    return finding === null ? [] : [finding];
+  });
+}
+
 /** The repair a rejected task graph needs, named in the diagnostic itself. */
 const REPAIR_HINT = "repair with: helper validate-task-graph --fix";
 

@@ -26,12 +26,16 @@ export type StandaloneReviewState =
       criticals: readonly [Finding, ...Finding[]];
     }>;
 
-export interface SerializedPanelOutcome {
+export interface PanelRefutation {
+  readonly lens: string;
+  readonly reason: string;
+}
+
+export interface ParsedPanelOutcome {
   readonly findingId: string;
   readonly claim: string;
   readonly survives: boolean;
-  readonly refutedBy: readonly string[];
-  readonly reasoning: readonly string[];
+  readonly refutations: readonly PanelRefutation[];
   readonly upheldBy: readonly string[];
   readonly uncertainFrom: readonly string[];
 }
@@ -39,7 +43,7 @@ export interface SerializedPanelOutcome {
 export interface ParsedPanelOutcomes {
   readonly lenses: readonly string[];
   readonly threshold: number;
-  readonly outcomes: readonly SerializedPanelOutcome[];
+  readonly outcomes: readonly ParsedPanelOutcome[];
 }
 
 export interface AdjudicatedStandaloneReview {
@@ -223,7 +227,7 @@ export function parseStandalonePanelOutcomes(
   const expected = new Map<string, Finding>(
     criticals.map((finding) => [`${STANDALONE_REVIEW_SUBJECT}:${finding.id}`, finding]),
   );
-  const outcomes: SerializedPanelOutcome[] = [];
+  const outcomes: ParsedPanelOutcome[] = [];
   for (const [index, entry] of raw.outcomes.entries()) {
     const path = `outcomes.outcomes[${index}]`;
     if (!isRecord(entry)) { errors.push(`${path} must be an object`); continue; }
@@ -248,7 +252,11 @@ export function parseStandalonePanelOutcomes(
     }
     if (entry.survives === false && refutedBy.length < threshold) errors.push(`${path} refuted finding must meet threshold`);
     if (entry.survives === true && refutedBy.length >= threshold) errors.push(`${path} surviving finding must be below threshold`);
-    outcomes.push({ findingId, claim, survives: entry.survives === true, refutedBy, reasoning, upheldBy, uncertainFrom });
+    const refutations = refutedBy.map((lens, refutationIndex) => ({
+      lens,
+      reason: reasoning[refutationIndex] ?? "",
+    }));
+    outcomes.push({ findingId, claim, survives: entry.survives === true, refutations, upheldBy, uncertainFrom });
   }
   const ids = outcomes.map(({ findingId }) => findingId);
   if (new Set(ids).size !== ids.length) errors.push("panel outcome finding ids must be distinct");
@@ -285,8 +293,7 @@ export function finalizeStandaloneReview(
       survivingCriticals.push(finding);
       continue;
     }
-    const pairs = outcome.refutedBy.map((lens, index) => ({ lens, reason: outcome.reasoning[index]! }));
-    const [head, ...tail] = pairs;
+    const [head, ...tail] = outcome.refutations;
     if (!head) return fail([`refuted finding ${finding.id} has no refutation evidence`]);
     refutedCriticals.push({ finding, refutations: [head, ...tail] });
   }
@@ -307,8 +314,8 @@ export function serializeAdjudicatedStandaloneReview(result: AdjudicatedStandalo
         finding_id: outcome.findingId,
         claim: outcome.claim,
         survives: outcome.survives,
-        refuted_by: outcome.refutedBy,
-        reasoning: outcome.reasoning,
+        refuted_by: outcome.refutations.map(({ lens }) => lens),
+        reasoning: outcome.refutations.map(({ reason }) => reason),
         upheld_by: outcome.upheldBy,
         uncertain_from: outcome.uncertainFrom,
       })),

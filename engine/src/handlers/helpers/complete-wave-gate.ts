@@ -104,7 +104,9 @@ export function checkReviews(tasks: Task[]): GateCheck {
 /** Check 5: Spec alignment */
 export function checkSpecAlignment(state: TaskGraph, wave: number): GateCheck {
   if (!state.spec_check) {
-    return pass("5. Spec alignment: skipped (no spec-check data).");
+    return fail(
+      `FAILED: Spec alignment evidence is missing for wave ${wave}. Run /spec-check for wave ${wave}.`,
+    );
   }
   if (state.spec_check.wave !== wave) {
     return fail(`FAILED: Spec alignment was run for wave ${state.spec_check.wave}, not ${wave}. Re-run /spec-check for wave ${wave}.`);

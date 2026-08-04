@@ -15,7 +15,10 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { shouldBlockDirectEdit } from "../engine/src/core/block-direct-edits";
 import { guardStateFile } from "../engine/src/core/guard-state-file";
 import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
-import { validateTaskExecutionBatch } from "../engine/src/core/validate-task-execution";
+import {
+  classifyTaskExecutionSpawn,
+  validateTaskExecutionBatch,
+} from "../engine/src/core/validate-task-execution";
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { classifyPiSpawnItems, expectedSpawnModel } from "../engine/src/core/model-profiles";
 
@@ -28,7 +31,11 @@ import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-outpu
 import { extractTestEvidence, analyzeNewTests, applyUntrustedStopResolution, isWaveComplete } from "../engine/src/handlers/subagent-stop/update-task-status";
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
-  hasStandaloneReviewContext, resolveReviewFindings, applyReviewResolution, reviewResolutionLog,
+  applyReviewResolution,
+  constrainReviewResolutionToScope,
+  hasStandaloneReviewContext,
+  resolveReviewFindings,
+  reviewResolutionLog,
 } from "../engine/src/core/review-output";
 import { parseSpecCheckOutput, reconcileSpecCheck } from "../engine/src/core/spec-check";
 import type { ReviewStatus, Phase } from "../engine/src/types";
@@ -71,18 +78,26 @@ const isLoomOwnedResultAgent = (agentType: string): boolean =>
   isReviewAgent(agentType) ||
   agentType === "spec-check-invoker";
 
-/** Stable per-spawn roster identity shared by tool_call and tool_result. */
+/** Stable per-spawn roster identity shared by tool_call and tool_result.
+ * Task text is deliberately excluded: Pi substitutes `{previous}` in chain
+ * results, so it is not stable across the lifecycle. */
 export const piSpawnRosterId = (
   toolCallId: unknown,
   index: number,
   agent: string,
-  task: string,
 ) => rosterAgentId(JSON.stringify([
   typeof toolCallId === "string" ? toolCallId : "",
   index,
   agent,
-  task,
 ]));
+
+/** Pi result failure boundary. Missing/malformed exit codes fail closed. */
+export function piSubagentResultFailed(result: {
+  readonly exitCode?: unknown;
+  readonly stopReason?: unknown;
+}): boolean {
+  return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+}
 
 export default function (pi: ExtensionAPI) {
   // ─── Resource Discovery ───────────────────────────────────────────────
@@ -171,6 +186,12 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         const parsedItems = classifiedItems.value.items;
+        const taskExecutionSpawns = parsedItems.map((item) => classifyTaskExecutionSpawn({
+          agentType: item.agent,
+          prompt: item.task,
+          description: "",
+        }));
+        const needsTaskGraphLifecycle = taskExecutionSpawns.some((spawn) => spawn.kind !== "standalone");
 
         const requestedScope = (event.input as { agentScope?: unknown }).agentScope ?? "user";
         if (requestedScope !== "user") {
@@ -240,7 +261,7 @@ export default function (pi: ExtensionAPI) {
         }
         const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
         const rosterIds = parsedItems.map((item, index) =>
-          piSpawnRosterId(toolCallId, index, item.agent, item.task),
+          piSpawnRosterId(toolCallId, index, item.agent),
         );
         const reserved: Array<(typeof rosterIds)[number]> = [];
         let taskGraphPointerCreated = false;
@@ -263,7 +284,7 @@ export default function (pi: ExtensionAPI) {
             await fsSessionRegistry.markActive(safeSessionId, agentId);
             reserved.push(agentId);
           }
-          if (existsSync(TASK_GRAPH_PATH)) {
+          if (needsTaskGraphLifecycle && existsSync(TASK_GRAPH_PATH)) {
             const taskGraphFile = `${SUBAGENT_DIR}/${safeSessionId}.task_graph`;
             if (!existsSync(taskGraphFile)) {
               writeFileSync(taskGraphFile, resolve(TASK_GRAPH_PATH));
@@ -281,9 +302,7 @@ export default function (pi: ExtensionAPI) {
         currentGuard = "validate-task-execution";
         let taskResult;
         try {
-          taskResult = await validateTaskExecutionBatch(
-            parsedItems.map((item) => ({ prompt: item.task, description: "" })),
-          );
+          taskResult = await validateTaskExecutionBatch(taskExecutionSpawns);
         } catch (error) {
           await rollbackLifecycle();
           throw error;
@@ -417,6 +436,7 @@ export default function (pi: ExtensionAPI) {
       agent: string;
       task: string;
       exitCode: number;
+      stopReason?: string;
       messages: unknown[];
     }>;
 
@@ -439,11 +459,23 @@ export default function (pi: ExtensionAPI) {
       } else {
         try {
           const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
-          const rosterId = piSpawnRosterId(toolCallId, resultIndex, agentType, result.task ?? "");
+          const rosterId = piSpawnRosterId(toolCallId, resultIndex, agentType);
           await fsSessionRegistry.removeActive(safeSessionId, rosterId);
         } catch (err) {
           process.stderr.write(`loom: subagent flag cleanup failed: ${(err as Error).message}\n`);
         }
+      }
+
+      // Standalone review/refutation results are run artifacts. Short-circuit
+      // before StateManager resolution so an unrelated local graph is neither
+      // read nor mutated merely because it exists.
+      if (hasStandaloneReviewContext(result.task ?? "")) {
+        process.stderr.write(
+          piSubagentResultFailed(result)
+            ? `loom(pi): failed standalone ${agentType} result ignored — task state untouched\n`
+            : `loom(pi): ${agentType} belongs to a standalone review run — task state untouched\n`,
+        );
+        continue;
       }
 
       const mgr = StateManager.fromSession(sessionId);
@@ -453,6 +485,24 @@ export default function (pi: ExtensionAPI) {
             `loom(pi): no task graph for session ${JSON.stringify(sessionId)}; ${agentType} completion was NOT applied\n`,
           );
         }
+        continue;
+      }
+
+      // A failed process may retain valid-looking assistant text. Never let
+      // that stale text advance a phase or become review/spec evidence.
+      if (piSubagentResultFailed(result)) {
+        if (IMPL_AGENTS.has(agentType)) {
+          const failedTaskId = extractTaskId(result.task ?? "");
+          if (failedTaskId !== null) {
+            await mgr.update((s) => ({
+              ...s,
+              executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== failedTaskId),
+            }));
+          }
+        }
+        process.stderr.write(
+          `loom(pi): ${agentType} result failed (exitCode=${String(result.exitCode)}, stopReason=${String(result.stopReason ?? "unset")}) — completion evidence ignored\n`,
+        );
         continue;
       }
 
@@ -705,10 +755,6 @@ export default function (pi: ExtensionAPI) {
 
       // --- Review agent → store findings ---
       if (isReviewAgent(agentType)) {
-        if (hasStandaloneReviewContext(result.task ?? "")) {
-          process.stderr.write(`loom(pi): ${agentType} belongs to a standalone review run — task state untouched\n`);
-          continue;
-        }
         const taskId = extractTaskId(result.task ?? "") ?? extractTaskId(
           event.content.filter((c: { type: string }) => c.type === "text").map((c: { type: string; text?: string }) => c.text ?? "").join("\n")
         );
@@ -734,7 +780,8 @@ export default function (pi: ExtensionAPI) {
         // quoting an unrelated id resolves to a task the graph does not have —
         // and that reviewer's criticals were discarded while stderr reported
         // them recorded. Both harnesses guard it, or they drift.
-        if (!mgr.load().tasks.some((t: { id: string }) => t.id === taskId)) {
+        const reviewTask = mgr.load().tasks.find((t: { id: string }) => t.id === taskId);
+        if (!reviewTask) {
           process.stderr.write(
             `WARNING: ${agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored\n`,
           );
@@ -743,8 +790,12 @@ export default function (pi: ExtensionAPI) {
 
         // Identical decision + transform as the Claude Code SubagentStop hook —
         // one shared implementation, so findings cannot have identity on one
-        // harness and not the other.
-        const resolution = resolveReviewFindings(transcriptText, agentType);
+        // harness and not the other. Scope is the Review Packet's canonical
+        // declared/observed file union.
+        const resolution = constrainReviewResolutionToScope(
+          resolveReviewFindings(transcriptText, agentType),
+          [...(reviewTask.file_list ?? []), ...(reviewTask.files_modified ?? [])],
+        );
         await mgr.update((s) => ({
           ...s,
           tasks: s.tasks.map((t) => (t.id === taskId ? applyReviewResolution(t, resolution) : t)),

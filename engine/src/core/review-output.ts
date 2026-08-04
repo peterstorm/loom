@@ -484,6 +484,29 @@ export function resolveReviewFindings(transcript: string, agent: string): Review
     : { kind: "findings", agent, findings: reconcileFindings(findings) };
 }
 
+/**
+ * Bind located wave findings to the task's Review Packet scope. A null location
+ * is honest for cross-cutting claims and remains valid; a supplied path must be
+ * one of the task's declared or observed files.
+ */
+export function constrainReviewResolutionToScope(
+  resolution: ReviewResolution,
+  scope: readonly string[],
+): ReviewResolution {
+  if (resolution.kind === "evidence-failed") return resolution;
+  const normalize = (path: string): string => path.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
+  const allowed = new Set(scope.map(normalize));
+  const outside = resolution.findings.drafts
+    .map((finding) => finding.file)
+    .filter((file): file is string => file !== null && !allowed.has(normalize(file)));
+  if (outside.length === 0) return resolution;
+  return {
+    kind: "evidence-failed",
+    agent: resolution.agent,
+    message: `review finding location(s) outside Review Packet scope: ${[...new Set(outside)].join(", ")}`,
+  };
+}
+
 /** Pure: the complete task transform a resolution implies. */
 export function applyReviewResolution(task: Task, resolution: ReviewResolution): Task {
   return match(resolution)

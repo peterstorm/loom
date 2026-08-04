@@ -18,6 +18,7 @@ import { readFileSync } from "node:fs";
 import type { HookHandler, SubagentStopInput } from "../../types";
 import {
   applyReviewResolution,
+  constrainReviewResolutionToScope,
   hasStandaloneReviewContext,
   resolveReviewFindings,
   reviewResolutionLog,
@@ -90,9 +91,9 @@ const handler: HookHandler = async (stdin) => {
   // reviewer's criticals were discarded while stderr reported them recorded.
   // The sibling helper (helpers/store-review-findings.ts) guards exactly this;
   // the SubagentStop path did not.
-  let known: boolean;
+  let targetTask: ReturnType<typeof mgr.load>["tasks"][number] | undefined;
   try {
-    known = mgr.load().tasks.some((t) => t.id === taskId);
+    targetTask = mgr.load().tasks.find((t) => t.id === taskId);
   } catch (error) {
     // `mgr.update` below loads too, so an unloadable graph fails either way —
     // but it fails as an unhandled throw from inside the hook rather than as a
@@ -100,12 +101,15 @@ const handler: HookHandler = async (stdin) => {
     warn(`cannot load task graph for ${agentType} (${error instanceof Error ? error.message : String(error)}) — findings NOT stored`);
     return { kind: "passthrough" };
   }
-  if (!known) {
+  if (!targetTask) {
     warn(`${agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored`);
     return { kind: "passthrough" };
   }
 
-  const resolution = resolveReviewFindings(transcript, agentType);
+  const resolution = constrainReviewResolutionToScope(
+    resolveReviewFindings(transcript, agentType),
+    [...(targetTask.file_list ?? []), ...(targetTask.files_modified ?? [])],
+  );
 
   await mgr.update((s) => ({
     ...s,
