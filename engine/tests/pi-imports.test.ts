@@ -80,10 +80,20 @@ const PI_FILES = ["extension.ts", "loom-bridge.ts"];
 const IMPORTS = PI_FILES.flatMap(engineImports);
 
 describe("pi package manifest", () => {
-  it("loads only the extension entry point, not helper modules", () => {
+  it("loads only the extension entry point; it renders harness-specific resources", () => {
     const manifest = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf-8"));
 
-    expect(manifest.pi?.extensions).toEqual(["./pi/extension.ts"]);
+    expect(manifest.pi).toEqual({ extensions: ["./pi/extension.ts"] });
+    const extension = readFileSync(join(PI_DIR, "extension.ts"), "utf-8");
+    expect(extension).toContain('pi.on("resources_discover"');
+    expect(extension).toContain("materializePiResources(PACKAGE_ROOT");
+  });
+
+  it("binds Loom spawns to the same user agent file Pi executes", () => {
+    const extension = readFileSync(join(PI_DIR, "extension.ts"), "utf-8");
+    expect(extension).toContain('requestedScope !== "user"');
+    expect(extension).toContain("validatePiAgentDefinitionFile(");
+    expect(extension).toContain('join(PI_AGENT_DIR, "agents", `${item.agent}.md`)');
   });
 });
 

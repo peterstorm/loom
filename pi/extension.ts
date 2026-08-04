@@ -6,6 +6,7 @@
  */
 
 import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { existsSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -54,29 +55,14 @@ import * as git from "../engine/src/utils/git";
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
 import { lintFile } from "../engine/src/linter/index";
 import { messagesToClaudeJsonl, type PiMessage } from "./transcript-adapter";
+import { materializePiResources } from "./resources";
+import { checkAgentSkillPrompt } from "../engine/src/core/agent-skills";
+import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
+import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const AGENTS_DIR = join(PACKAGE_ROOT, "agents");
-const SKILLS_DIR = join(PACKAGE_ROOT, "skills");
-
-function piAgentModel(agent: string): string | null {
-  const agentRoot = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
-  const candidates = [
-    join(process.cwd(), ".pi", "agents", `${agent}.md`),
-    join(agentRoot, "agents", `${agent}.md`),
-  ];
-  for (const path of candidates) {
-    if (!existsSync(path)) continue;
-    try {
-      const match = readFileSync(path, "utf-8").match(/^---\r?\n([\s\S]*?)\r?\n---/);
-      const model = match?.[1]?.match(/^model:\s*(\S+)\s*$/m)?.[1];
-      if (model) return model;
-    } catch {
-      // Try the next definition; the guard below fails closed if none parse.
-    }
-  }
-  return null;
-}
+const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+const PI_RESOURCE_CACHE = join(PI_AGENT_DIR, "cache", "loom-resources");
 
 /** Structured Pi tool results are weaker than Loom's evidence ledger but
  * stronger than flattened prose: the model cannot fabricate a toolResult
@@ -112,9 +98,17 @@ export default function (pi: ExtensionAPI) {
   // auto-discovery (the manifest covers skills/ and commands/ already,
   // but we also register agents dir for the subagent tool).
 
-  // Resource paths handled by package.json "pi" manifest.
-  // Only register paths NOT covered there.
-  // pi.on("resources_discover", () => ({ ... }));
+  // Pi does not expand Claude Code's CLAUDE_PLUGIN_ROOT token in markdown.
+  // Render package-owned prompts and skills from THIS extension's import URL;
+  // cwd and the Claude plugin cache are never package identity.
+  process.env.LOOM_PLUGIN_ROOT = PACKAGE_ROOT;
+  pi.on("resources_discover", () => {
+    const resources = materializePiResources(PACKAGE_ROOT, PI_RESOURCE_CACHE);
+    return {
+      promptPaths: [...resources.promptPaths],
+      skillPaths: [...resources.skillPaths],
+    };
+  });
 
   // ─── PreToolUse Guards (tool_call event) ──────────────────────────────
 
@@ -173,15 +167,47 @@ export default function (pi: ExtensionAPI) {
         const parsedItems = parsePiSpawnItems(event.input);
         if (!parsedItems.ok) return { block: true, reason: parsedItems.error.message };
 
+        const requestedScope = (event.input as { agentScope?: unknown }).agentScope ?? "user";
+        if (requestedScope !== "user") {
+          return {
+            block: true,
+            reason: `Loom-owned Pi agents require agentScope='user' so the validated generated definition is exactly the definition Pi executes; got ${JSON.stringify(requestedScope)}.`,
+          };
+        }
+
         for (const item of parsedItems.value) {
           const expected = expectedSpawnModel(item.agent, "pi");
-          const actual = piAgentModel(item.agent);
-          if (!expected.ok || actual !== expected.value) {
+          const definitionPath = join(PI_AGENT_DIR, "agents", `${item.agent}.md`);
+          const definition = validatePiAgentDefinitionFile(
+            definitionPath,
+            item.agent,
+            PACKAGE_ROOT,
+          );
+          if (!expected.ok || !definition.ok) {
             return {
               block: true,
               reason: expected.ok
-                ? `Pi agent '${item.agent}' must use explicit model '${expected.value}', got ${JSON.stringify(actual)}. Run scripts/sync-pi-agents.sh; parent-model inheritance is forbidden.`
+                ? `Pi agent '${item.agent}' must be rendered from active Loom package ${PACKAGE_ROOT}: ${definition.ok ? "unknown definition mismatch" : definition.error}. Run \"${PACKAGE_ROOT}/scripts/sync-pi-agents.sh\" and /reload.`
                 : expected.error.message,
+            };
+          }
+
+          currentGuard = "validate-agent-skill";
+          const sourceAgentPath = join(PACKAGE_ROOT, "agents", `${item.agent}.md`);
+          let sourceAgent: string;
+          try {
+            sourceAgent = readFileSync(sourceAgentPath, "utf-8");
+          } catch (error) {
+            return {
+              block: true,
+              reason: `Cannot read active Loom agent definition ${sourceAgentPath}: ${error instanceof Error ? error.message : String(error)}`,
+            };
+          }
+          const skillCheck = checkAgentSkillPrompt(sourceAgent, item.task);
+          if (!skillCheck.ok) {
+            return {
+              block: true,
+              reason: `Pi agent '${item.agent}' skill policy failed: ${skillCheck.error}`,
             };
           }
 
@@ -511,7 +537,24 @@ export default function (pi: ExtensionAPI) {
         const piJsonl = resultMessages
           .map((m) => JSON.stringify({ type: "message", message: m }))
           .join("\n");
-        const filesModified = parseFilesModified(piJsonl, "pi");
+        const rawFilesModified = parseFilesModified(piJsonl, "pi");
+        let filesModified: readonly string[];
+        try {
+          filesModified = canonicalRepositoryPaths(
+            git.repositoryRoot() ?? process.cwd(),
+            rawFilesModified,
+            "Pi transcript files_modified",
+          );
+        } catch (error) {
+          await mgr.update((s) => ({
+            ...s,
+            executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
+          }));
+          process.stderr.write(
+            `loom(pi): unsafe modified-file evidence for ${taskId}: ${error instanceof Error ? error.message : String(error)} — task left pending\n`,
+          );
+          continue;
+        }
 
         let newTestEvidence = { written: false, evidence: "" };
         if (git.isGitRepo()) {

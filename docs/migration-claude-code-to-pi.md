@@ -674,69 +674,26 @@ Use `/settings` in interactive mode for common options (thinking level, theme, e
 
 ## 7. Quick Start Migration Steps
 
+Loom's migration is complete enough to install as a native Pi package; do not
+copy its commands, skills, extension, or agents out of the package tree.
+
 ```bash
-# 1. Create pi directories
-mkdir -p ~/.pi/agent/{extensions,skills,prompts}
+# Local development checkout (referenced in place)
+pi install /absolute/path/to/loom
 
-# 2. Copy simple commands as prompt templates
-# Note: Use the repo version (~/dev/claude-plugins/loom), NOT the installed
-# cache — the repo is newer and self-contained with ${CLAUDE_PLUGIN_ROOT} paths
-LOOM_REPO=~/dev/claude-plugins/loom
+# Render Pi-specific agent model bindings and package paths
+cd /absolute/path/to/loom
+bash scripts/sync-pi-agents.sh
 
-cp ~/.claude/plugins/cache/plugins/feynman/0.1.0/commands/feynman.md \
-   ~/.pi/agent/prompts/
-cp $LOOM_REPO/commands/clarify.md \
-   ~/.pi/agent/prompts/
-cp $LOOM_REPO/commands/brainstorming.md \
-   ~/.pi/agent/prompts/
-cp $LOOM_REPO/commands/review-pr.md \
-   ~/.pi/agent/prompts/
-cp $LOOM_REPO/commands/wave-gate.md \
-   ~/.pi/agent/prompts/
-
-# 3. Copy complex skills (repo already has proper skills/ structure)
-mkdir -p ~/.pi/agent/skills/loom
-cp $LOOM_REPO/commands/loom.md \
-   ~/.pi/agent/skills/loom/SKILL.md
-cp -r $LOOM_REPO/commands/templates \
-   ~/.pi/agent/skills/loom/
-cp -r $LOOM_REPO/engine \
-   ~/.pi/agent/skills/loom/
-cp -r $LOOM_REPO/references \
-   ~/.pi/agent/skills/loom/
-cp -r $LOOM_REPO/rules \
-   ~/.pi/agent/skills/loom/
-
-# Copy bundled skills (already in skills/ with SKILL.md)
-cp -r $LOOM_REPO/skills/* ~/.pi/agent/skills/
-
-cp -r ~/.claude/plugins/cache/impeccable/impeccable/3.0.7/skills/impeccable \
-   ~/.pi/agent/skills/
-
-# 4. Copy agents (for subagent extension)
-mkdir -p ~/.pi/agent/agents
-cp $LOOM_REPO/agents/*.md ~/.pi/agent/agents/
-
-# 5. Copy cortex commands as prompt templates
-cp ~/.claude/plugins/cache/plugins/cortex/0.1.0/commands/remember.md \
-   ~/.pi/agent/prompts/
-cp ~/.claude/plugins/cache/plugins/cortex/0.1.0/commands/recall.md \
-   ~/.pi/agent/prompts/
-cp ~/.claude/plugins/cache/plugins/cortex/0.1.0/commands/forget.md \
-   ~/.pi/agent/prompts/
-cp ~/.claude/plugins/cache/plugins/cortex/0.1.0/commands/inspect.md \
-   ~/.pi/agent/prompts/
-
-# 5. Create extensions for hooks (see examples in section 3 above)
-# → ~/.pi/agent/extensions/cortex.ts
-# → ~/.pi/agent/extensions/loom-guards.ts
-
-# 6. Copy context files
-cp ~/.claude/CLAUDE.md ~/.pi/agent/AGENTS.md 2>/dev/null || true
-
-# 7. Verify
-pi  # Start pi, check startup header for loaded skills/extensions/prompts
+# Reload and verify
+pi
+# then run /reload and inspect: printf '%s\n' "$LOOM_PLUGIN_ROOT"
 ```
+
+For a distributed install, use `pi install git:...` or `pi install npm:...`,
+run the sync script from that installed package root, and reload. Other plugins
+should be migrated independently; never use another harness's cache as Loom's
+package locator.
 
 ---
 
@@ -1204,44 +1161,18 @@ Claude Code rules with `globs:` frontmatter — these inject into context for ma
 - `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md`
 ```
 
-Note: There are **two versions** of the rule paths in the wild:
-- **Repo (dev, newer — use this):** `${CLAUDE_PLUGIN_ROOT}/rules/` — self-contained copies bundled in the plugin (commit `22ee2f4` refactored to this)
-- **Installed (cached, older):** `~/.dotfiles/claude/project/*/rules/` — references external dotfiles
+Loom keeps one self-contained markdown source tree. Claude Code expands
+`${CLAUDE_PLUGIN_ROOT}` itself; Pi does not. The implemented Pi adapter resolves
+its package root from `pi/extension.ts`'s `import.meta.url` and lowers every
+command and skill into a content-addressed resource cache during
+`resources_discover`. `model-profiles render-pi` performs the same lowering for
+agent definitions.
 
-The repo version (`dev/claude-plugins/loom`) is 19 commits ahead of the installed version and is already **self-contained** — it bundles rules, skills, and references with `${CLAUDE_PLUGIN_ROOT}/` relative paths. **Port from the repo version**, not the installed cache.
-
-Pi works exactly the same way — agents tell the model to `read` files at paths, and the model uses the `read` tool.
-
-**For the pi package, replace `${CLAUDE_PLUGIN_ROOT}` with the package root path:**
-
-In your extension, resolve the package root:
-```typescript
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-```
-
-Then update agent system prompts. Since agents are markdown files loaded by the subagent extension, you can either:
-
-**Option A: Use absolute paths (simplest)**
-```markdown
-<!-- Agent system prompt references rules at known location -->
-**Always read:**
-- `~/.pi/agent/rules/architecture.md`
-```
-
-**Option B: Keep `${CLAUDE_PLUGIN_ROOT}` and resolve in extension**
-
-Your extension can resolve `${CLAUDE_PLUGIN_ROOT}` in agent system prompts before passing them to the subagent:
-
-```typescript
-// In your custom agent loader, replace the variable:
-const systemPrompt = raw.replace(/\$\{CLAUDE_PLUGIN_ROOT\}/g, PACKAGE_ROOT);
-```
-
-**Option C: Dotfiles references still work**
-
-If you prefer keeping `~/.dotfiles/claude/...` paths (e.g., for a shared source of truth across tools), pi's `read` tool can access them just fine. No migration needed for the paths themselves.
+Do not replace the token with a user-home path, infer the root from cwd, or scan
+a Claude installation from Pi. Those approaches select the wrong package when a
+local checkout, git install, npm install, or read-only package store is active.
+See `pi/resources.ts`, `engine/src/core/harness-resources.ts`, and
+`docs/pi-usage.md` for the executable contract.
 
 #### References (3 reference docs)
 

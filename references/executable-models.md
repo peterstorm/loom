@@ -133,7 +133,7 @@ The plan declares invariants in an `## Invariants` section, each tiered:
   before any implementation agent runs. Filename and JSON `name` field share
   the same `inv-<n>-<slug>`. After writing rules, the architecture phase
   proves they load (`LOOM_DIR` = the loom plugin directory, resolved as
-  `LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/ 2>/dev/null | tail -1 | sed 's:/$::')`):
+  `LOOM_DIR` resolved by the invoking Loom command from its own package root):
 
   ```bash
   bun "$LOOM_DIR"/engine/src/cli.ts helper validate-lint-rules .claude/linter/rules

@@ -12,6 +12,18 @@ Formalize requirements into structured specifications before architecture/planni
 
 ---
 
+## Package resources
+
+Resolve this command's owning package once. Claude Code expands the token in
+source; Loom's Pi adapter renders it from the extension module's `import.meta.url`:
+
+```bash
+LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"
+test -f "$LOOM_DIR/references/spec-template.md" || { echo "FATAL: active Loom package is incomplete: $LOOM_DIR"; exit 1; }
+```
+
+Never infer package identity from cwd or scan another harness's cache.
+
 ## Arguments
 
 - `/specify "feature description"` - Create new specification
@@ -51,7 +63,7 @@ Before writing spec:
 
 ### 3. Write Specification
 
-Load the spec template (resolve loom plugin path: `ls -d "$HOME/.claude/plugins/cache/plugins/loom"/*/`, then read `references/spec-template.md` from it) and populate sections.
+Read `$LOOM_DIR/references/spec-template.md` from the package resolved above and populate its sections.
 
 **Critical constraint:** Spec describes WHAT users need and WHY. NO implementation details:
 - No tech stack mentions

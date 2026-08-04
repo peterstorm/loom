@@ -4,7 +4,7 @@
  * mentions the skill name. Only active during loom orchestration.
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { allowWithNotice } from "../../types";
@@ -15,6 +15,15 @@ import {
 } from "../../config";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { stripNamespace, extractNamespace } from "../../utils/strip-namespace";
+import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
+import {
+  parseDeclaredSkills,
+  promptReferencesSkill,
+  type DeclaredSkills,
+} from "../../core/agent-skills";
+
+export { promptReferencesSkill } from "../../core/agent-skills";
+export type { DeclaredSkills } from "../../core/agent-skills";
 
 /** All agents whose skill we validate */
 export const VALIDATED_AGENTS: ReadonlySet<string> = new Set([
@@ -31,14 +40,18 @@ const SKILL_EXEMPT_AGENTS = new Set([
   "general-purpose",
 ]);
 
-/** Resolve agent .md path — checks CLAUDE_PLUGIN_ROOT, git root, home dir, and plugin cache */
+/** Resolve an agent definition without crossing harness/package boundaries. */
 function resolveAgentPath(agentName: string, fullAgentType: string): string | null {
   const candidates: string[] = [];
+  const namespace = extractNamespace(fullAgentType);
 
-  // Prefer CLAUDE_PLUGIN_ROOT — set by the plugin system, portable across OS and users
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
   if (pluginRoot) {
     candidates.push(join(pluginRoot, "agents", `${agentName}.md`));
+  }
+
+  if (namespace === "loom") {
+    candidates.push(join(LOOM_PACKAGE_ROOT, "agents", `${agentName}.md`));
   }
 
   try {
@@ -47,48 +60,10 @@ function resolveAgentPath(agentName: string, fullAgentType: string): string | nu
   } catch {}
 
   candidates.push(join(process.env.HOME ?? "", ".claude/agents", `${agentName}.md`));
-
-  // Fallback: scan plugin cache directories (covers both "plugins" and "local-plugins")
-  const namespace = extractNamespace(fullAgentType);
-  if (namespace) {
-    const cacheBase = join(process.env.HOME ?? "", ".claude/plugins/cache");
-    try {
-      for (const cacheDir of readdirSync(cacheBase)) {
-        const pluginBase = join(cacheBase, cacheDir, namespace);
-        try {
-          for (const version of readdirSync(pluginBase)) {
-            candidates.push(join(pluginBase, version, "agents", `${agentName}.md`));
-          }
-        } catch {}
-      }
-    } catch {}
-  }
-
   return candidates.find((p) => existsSync(p)) ?? null;
 }
 
-/**
- * What an agent file says about its skills. A closed union, because "declares
- * no skills" and "could not be read" must not be the same value.
- *
- * They used to be: every failure path returned `[]`, and the handler reads an
- * empty list as "nothing to enforce, allow the spawn". On a route that is in
- * FAIL_CLOSED_ROUTES — and in a handler that already blocks on malformed stdin
- * specifically so a spawn cannot slip through — that polarity was backwards.
- */
-export type DeclaredSkills =
-  | { readonly kind: "none" }
-  | { readonly kind: "skills"; readonly names: readonly string[] }
-  | { readonly kind: "unreadable"; readonly reason: string };
-
-/**
- * Parse the skills list from YAML frontmatter.
- *
- * Both block style (`skills:` then `  - name`) and flow style
- * (`skills: [a, b]`) are recognized, and CRLF files parse the same as LF ones.
- * Each was previously a silent miss that looked exactly like "declares no
- * skills".
- */
+/** Read an agent file at the shell boundary, then use the shared pure parser. */
 export function parseSkillsFromFrontmatter(filePath: string): DeclaredSkills {
   let content: string;
   try {
@@ -99,36 +74,10 @@ export function parseSkillsFromFrontmatter(filePath: string): DeclaredSkills {
       reason: `cannot read ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-
-  const normalized = content.replace(/\r\n/g, "\n");
-  const fm = normalized.match(/^---\n([\s\S]*?)\n---/);
-  if (!fm) {
-    return { kind: "unreadable", reason: `${filePath} has no YAML frontmatter block` };
-  }
-
-  const flow = fm[1].match(/^skills:[ \t]*\[([^\]]*)\][ \t]*$/m);
-  if (flow) {
-    const names = flow[1]
-      .split(",")
-      .map((name) => name.trim().replace(/^["']|["']$/g, ""))
-      .filter((name) => name !== "");
-    return names.length === 0 ? { kind: "none" } : { kind: "skills", names };
-  }
-
-  const block = fm[1].match(/^skills:[ \t]*\n((?:[ \t]+-[ \t]+.+\n?)*)/m);
-  if (!block) return { kind: "none" };
-  const names = [...block[1].matchAll(/^[ \t]+-[ \t]+(.+)$/gm)]
-    .map((m) => m[1].trim())
-    .filter((name) => name !== "");
-  return names.length === 0 ? { kind: "none" } : { kind: "skills", names };
-}
-
-/** Check if prompt references a skill (by name or /name pattern) */
-export function promptReferencesSkill(prompt: string, skill: string): boolean {
-  const lower = prompt.toLowerCase();
-  const skillLower = skill.toLowerCase();
-  // Match: skill name as word, /skill-name, or "skill-name" in quotes
-  return lower.includes(skillLower);
+  const parsed = parseDeclaredSkills(content);
+  return parsed.kind === "unreadable"
+    ? { ...parsed, reason: `${filePath}: ${parsed.reason}` }
+    : parsed;
 }
 
 const handler: HookHandler = async (stdin) => {
@@ -149,7 +98,9 @@ const handler: HookHandler = async (stdin) => {
   }
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
-  const subagentType = (input.tool_input?.subagent_type as string) ?? "";
+  const subagentType = (input.tool_input?.subagent_type as string | undefined)
+    ?? (input.tool_input?.agent as string | undefined)
+    ?? "";
   const bareAgent = stripNamespace(subagentType);
 
   if (!VALIDATED_AGENTS.has(bareAgent)) return { kind: "allow" };
@@ -177,8 +128,8 @@ const handler: HookHandler = async (stdin) => {
     // for the log.
     const notice =
       `[loom] validate-agent-skill: no agent file found for "${subagentType}" — ` +
-      `skill enforcement SKIPPED for this spawn (searched CLAUDE_PLUGIN_ROOT, ` +
-      `<git-root>/.claude/agents, ~/.claude/agents, and the plugin cache)`;
+      `skill enforcement SKIPPED for this spawn (searched the executing Loom package, ` +
+      `CLAUDE_PLUGIN_ROOT, <git-root>/.claude/agents, and ~/.claude/agents)`;
     process.stderr.write(notice + "\n");
     return allowWithNotice(notice);
   }
@@ -199,7 +150,9 @@ const handler: HookHandler = async (stdin) => {
   if (declared.kind === "none") return { kind: "allow" };
   const declaredSkills = declared.names;
 
-  const prompt = (input.tool_input?.prompt as string) ?? "";
+  const prompt = (input.tool_input?.prompt as string | undefined)
+    ?? (input.tool_input?.task as string | undefined)
+    ?? "";
   if (!prompt) {
     return {
       kind: "block",

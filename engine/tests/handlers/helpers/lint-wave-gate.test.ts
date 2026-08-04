@@ -1,8 +1,12 @@
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   parseWaveArg,
   collectModifiedFiles,
   filterExistingFiles,
+  resolveLintTargets,
   aggregateResults,
   lintFiles,
   type FileLintResult,
@@ -128,6 +132,38 @@ describe("filterExistingFiles", () => {
   it("returns empty when none exist", () => {
     const files = ["a.ts", "b.ts"];
     expect(filterExistingFiles(files, () => false)).toEqual([]);
+  });
+});
+
+// --- repository-confined lint targets ---
+
+describe("resolveLintTargets", () => {
+  it("canonicalizes absolute in-repo paths and skips deleted files", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-lint-targets-"));
+    try {
+      mkdirSync(join(root, "src"));
+      writeFileSync(join(root, "src", "a.ts"), "export {};\n");
+      expect(resolveLintTargets(root, [join(root, "src", "a.ts"), "./src/a.ts", "src/deleted.ts"]))
+        .toEqual([join(root, "src", "a.ts")]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects external and symlink-traversing transcript paths before lint reads", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-lint-root-"));
+    const outside = mkdtempSync(join(tmpdir(), "loom-lint-outside-"));
+    try {
+      writeFileSync(join(outside, "secret.ts"), "secret\n");
+      symlinkSync(outside, join(root, "linked"));
+      expect(() => resolveLintTargets(root, [join(outside, "secret.ts")]))
+        .toThrow("must identify a file inside the repository");
+      expect(() => resolveLintTargets(root, ["linked/secret.ts"]))
+        .toThrow("must not traverse a symlink");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });
 

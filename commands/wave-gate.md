@@ -16,10 +16,14 @@ Claude Code passes `claudeCode.model` explicitly; Pi uses the generated agent
 definition with the exact `pi` binding. Missing/mismatched models block — never
 inherit the orchestrator's current model.
 
-**Resolve plugin path first** (if not already set from `/loom`):
+**Resolve the active package first** (if not already set from `/loom`). Claude
+Code expands the shared-source token; Loom's Pi adapter renders it from the
+extension module's `import.meta.url`:
 ```bash
-LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/ 2>/dev/null | tail -1 | sed 's:/$::')
+LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"
+test -f "$LOOM_DIR/engine/src/cli.ts" || { echo "FATAL: active Loom package is incomplete: $LOOM_DIR"; exit 1; }
 ```
+Never infer package identity from cwd or another harness's install cache.
 
 **Important:** State file writes via Bash are blocked by `guard-state-file`. All state mutations happen through SubagentStop hooks and whitelisted helper scripts. Read access (jq, cat) is allowed.
 
@@ -68,8 +72,10 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper review-packet create \
   --output "$REVIEW_PACKET_DIR/<TASK_ID>.json"
 ```
 
-Run `create` once for each Task needing review. It fails on an empty/unsafe
-scope and refuses to overwrite a packet. Retain each concrete packet path;
+Run `create` once for each Task needing review. It canonicalizes tool-recorded
+absolute paths only when they are inside the current repository (legacy state
+included), rejects traversal/external/symlink paths, fails on an empty scope,
+and refuses to overwrite a packet. Retain each concrete packet path;
 shell variables do not persist across Bash calls. Verify before spawning:
 
 ```bash

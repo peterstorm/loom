@@ -1,13 +1,11 @@
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
-  lstatSync,
   mkdirSync,
   readFileSync,
-  realpathSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname } from "node:path";
 import type { HookHandler } from "../../types";
 import { StateManager } from "../../state-manager";
 import { taskGraphPath } from "../../config";
@@ -17,6 +15,7 @@ import {
   serializeReviewPacket,
   type ReviewPacketArtifactInput,
 } from "../../core/review-packet";
+import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 
 const OPERATIONS = ["create", "verify", "show"] as const;
 const USAGE = `Usage: helper review-packet <${OPERATIONS.join("|")}> --task <id> --output <file> | --packet <file>`;
@@ -45,25 +44,9 @@ function repoRoot(): string {
   return git(["rev-parse", "--show-toplevel"], process.cwd()).trim();
 }
 
-function safeRepoPath(root: string, path: string): string {
-  if (isAbsolute(path)) throw new Error(`review packet path must be repo-relative: ${path}`);
-  const absolute = resolve(root, path);
-  const rel = relative(root, absolute);
-  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
-    throw new Error(`review packet path escapes repository: ${path}`);
-  }
-  if (existsSync(absolute)) {
-    if (lstatSync(absolute).isSymbolicLink()) throw new Error(`review packet path must not be a symlink: ${path}`);
-    const real = realpathSync(absolute);
-    const realRel = relative(root, real);
-    if (realRel.startsWith("..") || isAbsolute(realRel)) throw new Error(`review packet path resolves outside repository: ${path}`);
-    if (!lstatSync(absolute).isFile()) throw new Error(`review packet path must be a regular file: ${path}`);
-  }
-  return absolute;
-}
-
 function artifact(root: string, baseSha: string, path: string): ReviewPacketArtifactInput {
-  const absolute = safeRepoPath(root, path);
+  const inspected = inspectRepositoryPath(root, path, "review packet path", { mustBeFile: true });
+  const absolute = inspected.absolute;
   const tracked = tryGit(["ls-files", "--error-unmatch", "--", path], root).trim() !== "";
   const diff = tracked
     ? git(["diff", "--binary", baseSha, "--", path], root)
@@ -115,8 +98,11 @@ const handler: HookHandler = async (_stdin, args) => {
       || tryGit(["rev-parse", "HEAD^"], root).trim()
     );
     if (!baseSha || !headSha) throw new Error("could not resolve packet base/head SHA");
-    const declaredPaths = [...new Set(task.file_list ?? [])].sort();
-    const modifiedPaths = [...new Set(task.files_modified ?? [])].sort();
+    // Transcript APIs commonly report absolute paths. Canonicalize both current
+    // and legacy task state at the packet boundary so packet identity remains
+    // repo-relative and deterministic while outside-repository aliases fail.
+    const declaredPaths = [...canonicalRepositoryPaths(root, task.file_list ?? [], "task.file_list")];
+    const modifiedPaths = [...canonicalRepositoryPaths(root, task.files_modified ?? [], "task.files_modified")];
     const scope = [...new Set([...declaredPaths, ...modifiedPaths])].sort();
     const packet = createReviewPacket({
       task: {
@@ -135,9 +121,8 @@ const handler: HookHandler = async (_stdin, args) => {
       proofObligations: task.proof?.obligations ?? [],
     });
     if (!packet.ok) return { kind: "error", message: `Review packet creation failed:\n${packet.errors.map((e) => `  - ${e}`).join("\n")}` };
-    const absoluteOutput = resolve(output);
-    const outputRel = relative(root, absoluteOutput);
-    if (outputRel.startsWith("..") || isAbsolute(outputRel)) throw new Error("review packet output must be inside the repository");
+    const outputPath = inspectRepositoryPath(root, output, "review packet output");
+    const absoluteOutput = outputPath.absolute;
     mkdirSync(dirname(absoluteOutput), { recursive: true });
     writeFileSync(absoluteOutput, serializeReviewPacket(packet.value), { flag: "wx" });
     process.stdout.write(`${packet.value.packetId}\n`);

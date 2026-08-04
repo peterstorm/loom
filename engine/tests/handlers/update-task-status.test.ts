@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import updateTaskStatus, { extractTestEvidence, analyzeNewTests, isMachineBound, resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
 import { legacyTestsPassedNote } from "../../src/types";
 import type { TaskGraph } from "../../src/types";
@@ -422,7 +423,7 @@ describe("update-task-status — transcript path resolution", () => {
    * A session with a task graph, a bound state pointer, and — when asked — a
    * transcript planted exactly where the harness writes one.
    */
-  async function makeSession(opts: { plantTranscript: boolean }): Promise<{
+  async function makeSession(opts: { plantTranscript: boolean; modifiedPath?: string }): Promise<{
     session: string;
     agentId: string;
     read: () => TaskGraph;
@@ -448,7 +449,10 @@ describe("update-task-status — transcript path resolution", () => {
       current_wave: 1,
       executing_tasks: [],
       tasks: [
-        { id: "T1", description: "a task", agent: "code-implementer-agent", status: "pending", wave: 1, depends_on: [] },
+        {
+          id: "T1", description: "a task", agent: "code-implementer-agent", status: "pending", wave: 1, depends_on: [],
+          ...(opts.modifiedPath ? { file_list: ["engine/src/types.ts"] } : {}),
+        },
       ],
       wave_gates: {},
     }));
@@ -464,7 +468,12 @@ describe("update-task-status — transcript path resolution", () => {
         join(dir, `agent-${agentId}.jsonl`),
         JSON.stringify({
           type: "assistant",
-          message: { content: [{ type: "text", text: "**Task ID:** T1\n\nImplemented the thing." }] },
+          message: { content: [
+            { type: "text", text: "**Task ID:** T1\n\nImplemented the thing." },
+            ...(opts.modifiedPath
+              ? [{ type: "tool_use", name: "Write", input: { file_path: opts.modifiedPath } }]
+              : []),
+          ] },
         }) + "\n",
       );
     }
@@ -500,6 +509,31 @@ describe("update-task-status — transcript path resolution", () => {
     const task = s.read().tasks.find((t) => t.id === "T1");
     expect(task?.status, "untrusted transcript evidence must not claim implementation").toBe("pending");
     expect(task?.proof?.state).toBe("failed");
+  });
+
+  it("canonicalizes an absolute in-repo transcript path before proof/state persistence", async () => {
+    const s = await makeSession({
+      plantTranscript: true,
+      modifiedPath: join(dirname(fileURLToPath(import.meta.url)), "../../src/types.ts"),
+    });
+
+    const result = await updateTaskStatus(JSON.stringify({
+      session_id: s.session,
+      agent_id: s.agentId,
+      agent_type: "code-implementer-agent",
+    }), []);
+
+    expect(result.kind).toBe("passthrough");
+    const task = s.read().tasks.find((candidate) => candidate.id === "T1");
+    expect(task?.files_modified).toEqual(["engine/src/types.ts"]);
+    expect(task?.proof?.obligations).toContainEqual({
+      kind: "declared-artifact-changed",
+      artifact: "engine/src/types.ts",
+    });
+    expect(task?.proof?.results).toContainEqual(expect.objectContaining({
+      state: "satisfied",
+      evidence: { kind: "declared-artifact-changed", artifact: "engine/src/types.ts" },
+    }));
   });
 
   it("says out loud that nothing was recorded when there is no transcript and nothing executing", async () => {

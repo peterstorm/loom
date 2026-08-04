@@ -837,12 +837,22 @@ The `/references/` directory holds templates used by phase agents: `spec-templat
 
 ## Pi Harness
 
-Loom's engine is harness-agnostic. The `/pi/` directory ships a Pi extension (`extension.ts`) and a bridge (`loom-bridge.ts`) that adapts Pi's `tool_call` / `tool_result` events to the same handlers used under Claude Code.
+Loom's engine is harness-agnostic. The Pi package loads `pi/extension.ts`, which
+adapts Pi's `tool_call` / `tool_result` events to the shared engine.
 
-- The `HARNESS` constant in `config.ts` detects `claude` vs `pi` at runtime.
-- Everything in `engine/src/core/` has zero harness dependency.
-- The Pi adapter (`engine/src/handlers/pi-adapter.ts`) maps lint results to Pi's `ToolResultResponse` shape.
-- State paths shift from `.claude/state/…` to `.pi/state/…`.
+Package identity is derived from the extension module's `import.meta.url`—never
+from cwd or a Claude Code cache. At `resources_discover`, Loom renders shared
+commands and skills into a content-addressed Pi cache, replacing Claude's
+`${CLAUDE_PLUGIN_ROOT}` token with the active package root. The agent sync script
+performs the same lowering for Pi subagent definitions, inlines declared skills,
+and stamps integrity metadata. Every Pi spawn byte-compares that definition with
+a fresh render from the active package before execution.
+
+- `package.json` statically registers only the extension; rendered resources are
+  contributed dynamically.
+- `LOOM_PLUGIN_ROOT` exposes the active root to Pi child processes for diagnostics.
+- Everything in `engine/src/core/` remains harness-neutral.
+- `pi/loom-bridge.ts` is legacy compatibility code; the package does not load it.
 
 See `docs/pi-usage.md` and `docs/migration-claude-code-to-pi.md` for details.
 

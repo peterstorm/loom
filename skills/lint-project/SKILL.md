@@ -168,8 +168,8 @@ Files scanned: N | Violations: N (boundary: X, purity: Y, quality: Z)
 - MUST validate JSON syntax before writing rule files
 - MUST NOT generate boundaries that conflict with the project's actual import graph
 - Config location: `.claude/linter/rules/config.json` (Claude Code) or `.pi/linter/rules/config.json` (Pi)
-- When running the linter, use `${CLAUDE_PLUGIN_ROOT}/../lint-rules` as default rules dir
-- When running the linter, use `${CLAUDE_PLUGIN_ROOT}/../engine/src/linter/index.ts` as linter entry
+- When running the linter, use `${CLAUDE_PLUGIN_ROOT}/lint-rules` as the default rules directory
+- When running the linter, use `${CLAUDE_PLUGIN_ROOT}/engine/src/linter/index.ts` as the linter entry
 
 ---
 

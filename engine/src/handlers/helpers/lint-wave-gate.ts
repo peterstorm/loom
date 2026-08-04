@@ -17,6 +17,8 @@ import { TASK_GRAPH_PATH, DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../con
 import { StateManager } from "../../state-manager";
 import { lintFile, lintFiles as lintFilesBatch, formatOutput, formatBlockMessage } from "../../linter/index";
 import type { LintResult, LintOutput } from "../../linter/index";
+import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
+import { repositoryRoot } from "../../utils/git";
 
 // --- Pure logic (extracted for testability) ---
 
@@ -48,6 +50,15 @@ export function filterExistingFiles(
   existsFn: (path: string) => boolean = existsSync
 ): readonly string[] {
   return files.filter(existsFn);
+}
+
+/** Canonical, repository-confined filesystem targets for the lint shell. */
+export function resolveLintTargets(root: string, files: readonly string[]): readonly string[] {
+  const canonical = canonicalRepositoryPaths(root, files, "task.files_modified");
+  return canonical
+    .map((path) => inspectRepositoryPath(root, path, "lint target", { mustBeFile: true }))
+    .filter(({ exists }) => exists)
+    .map(({ absolute }) => absolute);
 }
 
 /**
@@ -138,8 +149,11 @@ const handler: HookHandler = async (_stdin, args) => {
     const wave = waveArg ?? state.current_wave ?? 1;
 
     const waveTasks = state.tasks.filter((t) => t.wave === wave);
-    const allFiles = collectModifiedFiles(waveTasks);
-    const existingFiles = filterExistingFiles(allFiles);
+    // Legacy graphs may contain absolute tool paths. Canonicalize before any
+    // read, then inspect every component so transcript-controlled paths cannot
+    // make the linter read through a symlink or outside the repository.
+    const root = repositoryRoot() ?? process.cwd();
+    const existingFiles = resolveLintTargets(root, collectModifiedFiles(waveTasks));
 
     if (existingFiles.length === 0) {
       process.stderr.write(`lint-wave-gate: wave ${wave} — no modified files to lint.\n`);

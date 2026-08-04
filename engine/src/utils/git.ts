@@ -17,6 +17,11 @@ function resolveRepoRoot(): string | undefined {
 
 const repoRoot = resolveRepoRoot();
 
+/** Canonical repository root used by every git/path boundary in this process. */
+export function repositoryRoot(): string | undefined {
+  return repoRoot;
+}
+
 /** Run a fixed git command (no user input in args) */
 function exec(cmd: string): string {
   try {

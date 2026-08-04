@@ -217,7 +217,12 @@ describe("the smoke scripts this file's own header cites are actually run", () =
 
   it("`test:smoke` names every panel smoke script, and all exist", () => {
     const smoke = pkg.scripts["test:smoke"]!;
-    for (const script of ["smoke-panel-mode.sh", "smoke-review-panel.sh", "smoke-standalone-review.sh"]) {
+    for (const script of [
+      "smoke-panel-mode.sh",
+      "smoke-review-panel.sh",
+      "smoke-standalone-review.sh",
+      "smoke-pi-resources.sh",
+    ]) {
       expect(smoke, `test:smoke does not run ${script}`).toContain(script);
       expect(
         existsSync(join(REPO_ROOT, "scripts", script)),

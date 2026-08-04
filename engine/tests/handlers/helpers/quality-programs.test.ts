@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  existsSync,
   lstatSync,
   mkdtempSync,
   readFileSync,
@@ -38,14 +39,40 @@ describe("quality-program helper boundaries", () => {
     writeFileSync(symlinkTarget, "source must remain unchanged\n");
     symlinkSync(symlinkTarget, reviewerOutput);
 
-    cli(["helper", "model-profiles", "render-pi", "--agents-dir", "agents", "--output", output]);
+    cli([
+      "helper", "model-profiles", "render-pi",
+      "--agents-dir", "agents",
+      "--package-root", ROOT,
+      "--output", output,
+    ]);
 
     expect(readFileSync(symlinkTarget, "utf-8")).toBe("source must remain unchanged\n");
     expect(lstatSync(reviewerOutput).isSymbolicLink()).toBe(false);
-    expect(readFileSync(reviewerOutput, "utf-8"))
-      .toContain("model: openai-codex/gpt-5.6-sol:high");
+    const renderedReviewer = readFileSync(reviewerOutput, "utf-8");
+    expect(renderedReviewer).toContain("model: openai-codex/gpt-5.6-sol:high");
+    expect(renderedReviewer).toContain(`${ROOT}/rules/architecture.md`);
+    expect(renderedReviewer).not.toContain("CLAUDE_PLUGIN_ROOT");
     expect(readFileSync(join(output, "comment-analyzer.md"), "utf-8"))
       .toContain("model: openai-codex/gpt-5.4-mini:medium");
+    const specify = readFileSync(join(output, "specify-agent.md"), "utf-8");
+    expect(specify).toContain("## Preloaded Loom Skill: specify");
+    expect(specify).toContain("# Specify - Requirements Before Design");
+    expect(specify).toMatch(/^loom-agent-digest: [a-f0-9]{64}$/m);
+  });
+
+  it("the user-facing sync script publishes a fully lowered Pi agent catalog", () => {
+    const piRoot = mkdtempSync(join(tmpdir(), "loom-pi-agent-home-"));
+    cleanup.push(piRoot);
+    execFileSync("bash", [join(ROOT, "scripts", "sync-pi-agents.sh")], {
+      cwd: ROOT,
+      env: { ...process.env, PI_CODING_AGENT_DIR: piRoot },
+      encoding: "utf-8",
+    });
+    const reviewer = readFileSync(join(piRoot, "agents", "code-reviewer.md"), "utf-8");
+    expect(reviewer).toContain("loom-package-root:");
+    expect(reviewer).toContain("loom-agent-digest:");
+    expect(reviewer).toContain(`${ROOT}/rules/architecture.md`);
+    expect(reviewer).not.toContain("CLAUDE_PLUGIN_ROOT");
   });
 
   it("validates the committed historical corpus and refuses to call missing history green", () => {
@@ -106,7 +133,10 @@ describe("quality-program helper boundaries", () => {
         id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
         status: "pending", depends_on: [], start_sha: head,
         file_list: ["engine/src/core/model-profiles.ts"],
-        files_modified: ["engine/src/core/model-profiles.ts"],
+        // Pi and Claude tool APIs commonly record this as an absolute path.
+        // The packet boundary must canonicalize it to the same repo-relative
+        // identity as file_list instead of rejecting valid in-repo evidence.
+        files_modified: [join(ROOT, "engine/src/core/model-profiles.ts")],
       }],
       wave_gates: {},
     }));
@@ -116,7 +146,62 @@ describe("quality-program helper boundaries", () => {
       { LOOM_STATE_PATH: state },
     ).trim();
     expect(id).toMatch(/^[0-9a-f]{64}$/);
+    const written = JSON.parse(readFileSync(packet, "utf-8"));
+    expect(written.modifiedPaths).toEqual(["engine/src/core/model-profiles.ts"]);
+    expect(written.artifacts.map((artifact: { path: string }) => artifact.path))
+      .toEqual(["engine/src/core/model-profiles.ts"]);
     expect(cli(["helper", "review-packet", "verify", "--packet", packet]).trim()).toBe(id);
+  });
+
+  it("rejects external task paths instead of reading them into a review packet", () => {
+    const dir = mkdtempSync(join(ROOT, ".tmp-review-packet-outside-test-"));
+    const outside = mkdtempSync(join(tmpdir(), "loom-review-packet-outside-"));
+    cleanup.push(dir, outside);
+    const state = join(dir, "state.json");
+    const packet = join(dir, "packet.json");
+    const external = join(outside, "secret.ts");
+    writeFileSync(external, "secret\n");
+    writeFileSync(state, JSON.stringify({
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
+      tasks: [{
+        id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [], start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
+        file_list: ["engine/src/types.ts"], files_modified: [external],
+      }],
+    }));
+
+    const run = spawnSync("bun", [CLI, "helper", "review-packet", "create", "--task", "T1", "--output", packet], {
+      cwd: ROOT, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: state },
+    });
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("must identify a file inside the repository");
+    expect(existsSync(packet)).toBe(false);
+  });
+
+  it("rejects a review-packet output path with a symlinked parent", () => {
+    const dir = mkdtempSync(join(ROOT, ".tmp-review-packet-symlink-test-"));
+    const outside = mkdtempSync(join(tmpdir(), "loom-review-packet-output-"));
+    cleanup.push(dir, outside);
+    const state = join(dir, "state.json");
+    const linked = join(dir, "linked-output");
+    symlinkSync(outside, linked);
+    writeFileSync(state, JSON.stringify({
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
+      tasks: [{
+        id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [], start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
+        file_list: ["engine/src/types.ts"], files_modified: ["engine/src/types.ts"],
+      }],
+    }));
+
+    const run = spawnSync("bun", [CLI, "helper", "review-packet", "create", "--task", "T1", "--output", join(linked, "packet.json")], {
+      cwd: ROOT, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: state },
+    });
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("must not traverse a symlink");
+    expect(existsSync(join(outside, "packet.json"))).toBe(false);
   });
 
   it("rejects an unknown refutation lens at the CLI boundary", () => {

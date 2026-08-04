@@ -7,7 +7,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { HookHandler } from "../../types";
 import {
   AGENT_POLICIES,
@@ -18,9 +18,10 @@ import {
   validateAgentPolicyCatalog,
   validateAgentPolicyFrontmatter,
 } from "../../core/model-profiles";
+import { renderPiAgentDefinition } from "../../utils/render-pi-agent";
 
 const OPERATIONS = ["show", "agent", "validate", "render-pi"] as const;
-const USAGE = `Usage: helper model-profiles <${OPERATIONS.join("|")}> [--agent <name> --agents-dir <dir> --output <dir>]`;
+const USAGE = `Usage: helper model-profiles <${OPERATIONS.join("|")}> [--agent <name> --agents-dir <dir> --package-root <dir> --output <dir>]`;
 
 function arg(args: readonly string[], name: string): string | null {
   const index = args.indexOf(name);
@@ -43,16 +44,6 @@ function markdownFiles(dir: string): string[] {
   return readdirSync(dir)
     .filter((name) => name.endsWith(".md") && name !== "README.md")
     .sort();
-}
-
-function renderPiAgent(content: string, agent: string): string {
-  const profile = resolveAgentProfile(agent);
-  if (!profile.ok) throw new Error(profile.error.message);
-  const target = lowerModelProfile(profile.value, "pi");
-  const exactModel = `${target.provider}/${target.model}:${target.thinking}`;
-  const modelLine = /^model:\s*.*$/m;
-  if (!modelLine.test(content)) throw new Error(`agent '${agent}' has no explicit Claude model line`);
-  return content.replace(modelLine, `model: ${exactModel}`);
 }
 
 /** Replace the directory entry atomically so a pre-existing symlink is never followed. */
@@ -115,11 +106,12 @@ const handler: HookHandler = async (_stdin, args) => {
 
   const output = arg(args, "--output");
   if (!output) return { kind: "error", message: `${USAGE}\n--output is required for render-pi` };
+  const packageRoot = resolve(arg(args, "--package-root") ?? dirname(agentsDir));
   mkdirSync(output, { recursive: true });
   for (const file of files) {
     const agent = basename(file, ".md");
     const content = readFileSync(join(agentsDir, file), "utf-8");
-    writePiAgent(join(output, file), renderPiAgent(content, agent));
+    writePiAgent(join(output, file), renderPiAgentDefinition(content, agent, packageRoot));
   }
   process.stdout.write(`Rendered ${files.length} Pi agent definitions to ${output}.\n`);
   return { kind: "passthrough" };

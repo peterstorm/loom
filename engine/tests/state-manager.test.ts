@@ -279,6 +279,21 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it("proves files_modified is an array of strings before consumers read it", () => {
+    for (const files_modified of ["src/a.ts", ["src/a.ts", 42], null]) {
+      const parsed = parseTaskGraph({
+        ...validGraph,
+        tasks: [{ ...validTask, files_modified }],
+      });
+      expect(parsed.ok, JSON.stringify(files_modified)).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toContain("files_modified");
+    }
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, files_modified: ["src/a.ts"] }],
+    }).ok).toBe(true);
+  });
+
   it("rejects non-array tasks and non-object wave_gates", () => {
     expect(parseTaskGraph({ ...validGraph, tasks: "none" }).ok).toBe(false);
     expect(parseTaskGraph({ ...validGraph, wave_gates: [] }).ok).toBe(false);

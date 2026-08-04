@@ -50,6 +50,7 @@ If your plan context declares none of these, this section imposes nothing.
 **Task ID:** {task_id}
 **Wave:** {wave}
 **Agent:** {agent_type}
+**Required Loom skill:** {required_skill}
 **Dependencies:** {dependencies}
 
 ## Your Task

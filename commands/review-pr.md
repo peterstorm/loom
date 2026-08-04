@@ -8,6 +8,16 @@ allowed-tools: ["Bash", "Glob", "Grep", "Read", "Task", "Agent"]
 
 Run a comprehensive pull request review using multiple specialized agents, each focusing on a different aspect of code quality.
 
+**Resolve the active package first.** Claude Code expands the shared-source
+token; Loom's Pi adapter renders it from the extension module's `import.meta.url`:
+
+```bash
+LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"
+test -f "$LOOM_DIR/engine/src/cli.ts" || { echo "FATAL: active Loom package is incomplete: $LOOM_DIR"; exit 1; }
+```
+
+Never infer package identity from cwd or another harness's install cache.
+
 **Model policy:** resolve every Loom agent before spawning with
 `bun ${LOOM_DIR}/engine/src/cli.ts helper model-profiles agent --agent <name>`.
 Claude Code MUST pass the returned `claudeCode.model`; Pi MUST use the generated

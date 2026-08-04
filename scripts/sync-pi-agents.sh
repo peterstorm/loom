@@ -24,6 +24,7 @@ done
 
 bun "$LOOM_DIR/engine/src/cli.ts" helper model-profiles render-pi \
   --agents-dir "$LOOM_DIR/agents" \
+  --package-root "$LOOM_DIR" \
   --output "$PI_AGENTS_DIR"
 
 copied=0

@@ -18,16 +18,19 @@ command -v bun || echo "FATAL: bun not found. Run: nix develop ./.claude"
 ```
 If `bun` is missing, **STOP and tell the user**. Loom hooks require bun for TypeScript transcript parsing. Dev shell: `nix develop ./.claude`
 
-## Setup: Resolve Plugin Path
+## Setup: Resolve Package Path
 
-**FIRST STEP of every `/loom` invocation** — resolve loom plugin install path:
+**FIRST STEP of every `/loom` invocation** — bind this command to the package
+that supplied it. Claude Code expands the token in the shared source; Loom's Pi
+adapter renders it from the extension module's `import.meta.url`:
 ```bash
-LOOM_DIR=$(ls -d "$HOME/.claude/plugins/cache/"*"/loom"/*/ 2>/dev/null | tail -1 | sed 's:/$::')
-[ -z "$LOOM_DIR" ] && echo "FATAL: loom plugin not installed" && exit 1
-echo "LOOM_DIR=$LOOM_DIR"
+LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"
+test -f "$LOOM_DIR/engine/src/cli.ts" || { echo "FATAL: active Loom package is incomplete: $LOOM_DIR"; exit 1; }
+printf 'LOOM_DIR=%s\n' "$LOOM_DIR"
 ```
 
-Store the printed path. **All subsequent references use it:**
+Never infer package identity from cwd and never scan another harness's install
+cache. Store the printed path. **All subsequent references use it:**
 - Templates: `{LOOM_DIR}/commands/templates/<name>.md`
 - Engine CLI: `bun {LOOM_DIR}/engine/src/cli.ts`
 - References: `{LOOM_DIR}/references/<name>.md`
@@ -212,6 +215,7 @@ Substitute variables:
 - `{feature_description}` - Feature name/description
 - `{spec_file_path}` - Path to spec from Phase 1
 - `{date_slug}` - `YYYY-MM-DD-feature-name` format
+- `{loom_dir}` - the exact `LOOM_DIR` resolved during setup
 
 **Spawn architecture-agent** with the substituted template as prompt.
 
@@ -539,6 +543,7 @@ Re-spawn each pending wave task whose agent did not reach `implemented`.
 
 Substitute variables:
 - `{task_id}`, `{wave}`, `{agent_type}`, `{dependencies}`
+- `{required_skill}` - Read the selected source agent's `skills:` frontmatter and substitute its exact declared skill name (for agents with no declared skill, use `none`). This is both the Claude spawn-gate evidence and the Pi preloaded-skill audit label; never infer it from the agent name.
 - `{task_description}` - From task breakdown
 - `{spec_anchors_formatted}` - Formatted anchor list with requirement text
 - `{plan_context}` - Relevant section from plan

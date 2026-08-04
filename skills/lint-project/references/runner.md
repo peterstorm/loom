@@ -13,7 +13,7 @@ import { resolve, join, extname, dirname, relative } from "node:path";
 import { readdirSync, statSync, existsSync } from "node:fs";
 
 // --- Resolve loom installation ---
-const LOOM_ROOT = "${CLAUDE_PLUGIN_ROOT}/..";
+const LOOM_ROOT = "${CLAUDE_PLUGIN_ROOT}";
 const DEFAULT_RULES_DIR = join(LOOM_ROOT, "lint-rules");
 const { lintFile } = await import(join(LOOM_ROOT, "engine/src/linter/index.ts"));
 
@@ -146,7 +146,7 @@ bun /tmp/loom-lint-run.ts --include-tests
 
 ## Important Notes
 
-- Replace `${CLAUDE_PLUGIN_ROOT}` with the actual resolved path to the loom skills directory at runtime
+- `${CLAUDE_PLUGIN_ROOT}` means the owning Loom package root. Claude Code expands it directly; Loom's Pi resource adapter renders it from the extension module's `import.meta.url`.
 - The script auto-detects project root by walking up to find `.git`, `package.json`, or `pom.xml`
 - The script auto-detects rules directory (`.claude/linter/rules/` or `.pi/linter/rules/`)
 - If no rules directory exists, only loom's default rules fire (which is still useful)

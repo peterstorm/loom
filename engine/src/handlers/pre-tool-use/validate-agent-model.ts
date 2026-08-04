@@ -7,7 +7,7 @@
  * session's current model.
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import type { HookHandler, PreToolUseInput } from "../../types";
@@ -19,22 +19,22 @@ import {
   validateAgentPolicyFrontmatter,
 } from "../../core/model-profiles";
 import { extractNamespace, stripNamespace } from "../../utils/strip-namespace";
+import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
+import { validatePiAgentDefinitionFile } from "../../utils/render-pi-agent";
 
 function claudeAgentPath(agentName: string, fullAgentType: string): string | null {
   const candidates: string[] = [];
   const namespace = extractNamespace(fullAgentType);
   if (namespace) {
-    // A namespaced spawn names the plugin definition, not a same-named global
-    // or project agent. Prefer Claude Code's exact package root, then caches.
+    // The executing engine and its agent catalog are one package. Import URL is
+    // authoritative under local Pi installs, npm/git packages, Nix stores, and
+    // Claude Code; another harness's cache is never consulted.
     if (process.env.CLAUDE_PLUGIN_ROOT) {
       candidates.push(join(process.env.CLAUDE_PLUGIN_ROOT, "agents", `${agentName}.md`));
     }
-    const pluginBase = join(process.env.HOME ?? "", ".claude/plugins/cache/plugins", namespace);
-    try {
-      for (const version of readdirSync(pluginBase).sort().reverse()) {
-        candidates.push(join(pluginBase, version, "agents", `${agentName}.md`));
-      }
-    } catch {}
+    if (namespace === "loom") {
+      candidates.push(join(LOOM_PACKAGE_ROOT, "agents", `${agentName}.md`));
+    }
   } else {
     try {
       const root = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
@@ -49,10 +49,7 @@ function claudeAgentPath(agentName: string, fullAgentType: string): string | nul
 
 function piAgentPath(agentName: string): string | null {
   const home = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
-  const candidates = [
-    join(process.cwd(), ".pi", "agents", `${agentName}.md`),
-    join(home, "agents", `${agentName}.md`),
-  ];
+  const candidates = [join(home, "agents", `${agentName}.md`)];
   return candidates.find(existsSync) ?? null;
 }
 
@@ -99,6 +96,13 @@ const handler: HookHandler = async (stdin) => {
   const agent = stripNamespace(parsedAgent.value);
 
   if (input.tool_name === "subagent") {
+    const requestedScope = input.tool_input?.agentScope ?? "user";
+    if (requestedScope !== "user") {
+      return {
+        kind: "block",
+        message: `BLOCKED: Loom-owned Pi agents require agentScope='user'; got ${JSON.stringify(requestedScope)}.`,
+      };
+    }
     const path = piAgentPath(agent);
     if (!path) {
       return {
@@ -106,15 +110,13 @@ const handler: HookHandler = async (stdin) => {
         message: `BLOCKED: Pi agent '${agent}' has no generated definition. Run scripts/sync-pi-agents.sh; current-model inheritance is forbidden.`,
       };
     }
-    const fields = modelFrontmatter(path);
-    const validation = validateExplicitSpawnModel(agent, "pi", fields?.model);
-    if (!validation.ok) {
-      return {
-        kind: "block",
-        message: `BLOCKED: Pi model policy failed for '${agent}' (${path}):\n${validation.errors.map((e) => `  - ${e}`).join("\n")}`,
-      };
-    }
-    return { kind: "allow" };
+    const validation = validatePiAgentDefinitionFile(path, agent, LOOM_PACKAGE_ROOT);
+    return validation.ok
+      ? { kind: "allow" }
+      : {
+          kind: "block",
+          message: `BLOCKED: Pi agent policy failed for '${agent}' (${path}):\n  - ${validation.error}`,
+        };
   }
 
   const path = claudeAgentPath(agent, rawAgent);

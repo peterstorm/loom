@@ -17,6 +17,7 @@ import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { extractTaskId } from "../../utils/extract-task-id";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
+import { canonicalRepositoryPaths } from "../../utils/repository-path";
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
@@ -552,7 +553,7 @@ export const runUpdateTaskStatus = async (
     }
   }
   const transcript = parseTranscript(transcriptContent);
-  const filesModified = parseFilesModified(transcriptContent);
+  const rawFilesModified = parseFilesModified(transcriptContent);
   const bashTestOutput = parseBashTestOutput(transcriptContent);
 
   // Extract task ID
@@ -598,6 +599,27 @@ export const runUpdateTaskStatus = async (
   const state = mgr.load();
   const task = state.tasks.find((t) => t.id === taskId);
   if (!task) return { kind: "passthrough" };
+
+  let filesModified: string[];
+  try {
+    filesModified = [...canonicalRepositoryPaths(
+      git.repositoryRoot() ?? process.cwd(),
+      rawFilesModified,
+      "transcript files_modified",
+    )];
+  } catch (error) {
+    // An agent that edited outside the repository cannot satisfy task proof.
+    // Clear its live marker, leave the task pending, and fail loudly rather
+    // than persisting a path later consumers might read.
+    await mgr.update((s) => ({
+      ...s,
+      executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
+    }));
+    return {
+      kind: "error",
+      message: `update-task-status: unsafe modified-file evidence for ${taskId}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 
   // Pre-refactor graphs carried `tests_passed` on the task (replaced by
   // `test_result`, no compat read — unshipped branch). Explain the
