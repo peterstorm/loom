@@ -163,7 +163,9 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
       files_modified: ["src/old.ts"],
       new_tests_written: true,
       new_test_evidence: "earlier test evidence",
-      review_status: "passed",
+      review_status: "evidence_capture_failed",
+      review_error: "review transcript did not contain a machine summary",
+      review_evidence_failures: ["code-reviewer"],
     })], ["T1"]);
     s.spec_check = {
       wave: 1, run_at: "now", verdict: "PASSED", critical_count: 0, high_count: 0,
@@ -187,6 +189,8 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     expect(resolved.new_tests_written).toBe(false);
     expect(resolved.new_test_evidence).toBe("");
     expect(resolved.review_status).toBe("pending");
+    expect(resolved.review_error).toBeUndefined();
+    expect(resolved.review_evidence_failures).toBeUndefined();
     expect(applied.state.spec_check).toBeUndefined();
     expect(applied.state.wave_gates["1"]).toMatchObject({
       tests_passed: null, reviews_complete: false,

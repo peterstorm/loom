@@ -256,7 +256,7 @@ export function taskUnionError(v: unknown, index: number): string | null {
   // as an unhandled TypeError from inside a pure function rather than as a
   // contract diagnostic. Rejected rather than repaired here — dropping a
   // malformed entry on every read would silently lose a critical, and
-  // `validate-task-graph --fix` is the repair that restores lockstep.
+  // `repair-task-graph` is the guarded, atomic repair that restores lockstep.
   const findingsError = findingsUnionError(t.findings, `tasks[${index}] ("${id}"): findings`);
   if (findingsError !== null) return findingsError;
   // The two derived views earn their `readonly string[]` type independently of

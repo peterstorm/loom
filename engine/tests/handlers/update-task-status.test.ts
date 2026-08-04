@@ -424,7 +424,12 @@ describe("update-task-status — transcript path resolution", () => {
    * A session with a task graph, a bound state pointer, and — when asked — a
    * transcript planted exactly where the harness writes one.
    */
-  async function makeSession(opts: { plantTranscript: boolean; modifiedPath?: string; transcriptTaskId?: string }): Promise<{
+  async function makeSession(opts: {
+    plantTranscript: boolean;
+    modifiedPath?: string;
+    transcriptTaskId?: string;
+    failedReview?: boolean;
+  }): Promise<{
     session: string;
     agentId: string;
     read: () => TaskGraph;
@@ -456,6 +461,11 @@ describe("update-task-status — transcript path resolution", () => {
       tasks: [
         {
           id: "T1", description: "a task", agent: "code-implementer-agent", status: "pending", wave: 1, depends_on: [],
+          ...(opts.failedReview ? {
+            review_status: "evidence_capture_failed",
+            review_error: "review transcript missing evidence",
+            review_evidence_failures: ["code-reviewer"],
+          } : {}),
           ...(opts.modifiedPath ? {
             file_list: ["engine/src/types.ts"],
             artifact_baseline: artifactBaseline,
@@ -541,6 +551,7 @@ describe("update-task-status — transcript path resolution", () => {
     const s = await makeSession({
       plantTranscript: true,
       modifiedPath: join(dirname(fileURLToPath(import.meta.url)), "../../src/types.ts"),
+      failedReview: true,
     });
 
     const result = await updateTaskStatus(JSON.stringify({
@@ -552,6 +563,9 @@ describe("update-task-status — transcript path resolution", () => {
     expect(result.kind).toBe("passthrough");
     const task = s.read().tasks.find((candidate) => candidate.id === "T1");
     expect(task?.files_modified).toEqual(["engine/src/types.ts"]);
+    expect(task?.review_status).toBe("pending");
+    expect(task?.review_error).toBeUndefined();
+    expect(task?.review_evidence_failures).toBeUndefined();
     expect(task?.proof?.obligations).toContainEqual({
       kind: "declared-artifact-changed",
       artifact: "engine/src/types.ts",

@@ -133,7 +133,9 @@ describe("historical baseline recovery CLI", () => {
       tasks: [{
         id: "T5", description: "implementation", agent: "code-implementer-agent",
         wave: 2, status: "pending", depends_on: [], new_tests_required: false,
-        review_status: "passed",
+        review_status: "evidence_capture_failed",
+        review_error: "review transcript missing evidence",
+        review_evidence_failures: ["code-reviewer"],
         file_list: ["src/a.ts"], files_modified: ["latest-only.ts"], proof,
         start_sha: poisonedStart,
         artifact_baseline: [{
@@ -220,6 +222,8 @@ describe("historical baseline recovery CLI", () => {
       }],
     });
     expect(state.tasks[0].review_status).toBe("pending");
+    expect(state.tasks[0].review_error).toBeUndefined();
+    expect(state.tasks[0].review_evidence_failures).toBeUndefined();
     expect(state.spec_check).toBeUndefined();
     expect(state.wave_gates["2"]).toMatchObject({
       impl_complete: true, tests_passed: null, reviews_complete: false,

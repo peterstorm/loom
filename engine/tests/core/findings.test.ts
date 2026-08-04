@@ -432,7 +432,7 @@ describe("the load boundary proves what the Task type asserts", () => {
   });
 
   it("points at the repair command rather than leaving the operator stuck", () => {
-    expect(findingsUnionError([{}], "findings")).toContain("validate-task-graph --fix");
+    expect(findingsUnionError([{}], "findings")).toContain("repair-task-graph");
   });
 
   it("rejects exactly what the repair path drops — the two must agree", () => {
@@ -454,7 +454,7 @@ describe("the load boundary proves the LOCKSTEP, not only the shapes", () => {
     // against the wrong claim.
     const error = findingsUnionError([wellFormed, { ...wellFormed, claim: "y" }], "tasks[0].findings");
     expect(error).toContain("repeats finding id 'code-reviewer-1'");
-    expect(error).toContain("validate-task-graph --fix");
+    expect(error).toContain("repair-task-graph");
   });
 
   it("accepts distinct ids carrying the same claim", () => {
@@ -473,7 +473,7 @@ describe("the load boundary proves the LOCKSTEP, not only the shapes", () => {
   ])("rejects %s", (_label, findings, critical, advisory) => {
     const error = findingsLockstepError(findings, critical, advisory, "tasks[0]");
     expect(error).toContain("is not the derived view of findings");
-    expect(error).toContain("validate-task-graph --fix");
+    expect(error).toContain("repair-task-graph");
   });
 
   it("compares as a MULTISET — two reviewers may word a claim identically", () => {

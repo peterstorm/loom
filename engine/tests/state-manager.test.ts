@@ -619,6 +619,6 @@ describe("parseTaskGraph proves findings, not just the fields that always did", 
   it("names the repair so a rejected graph is not a dead end", () => {
     const parsed = parseTaskGraph(graph({ findings: [{}] }));
     expect(parsed.ok).toBe(false);
-    if (!parsed.ok) expect(parsed.error).toContain("validate-task-graph --fix");
+    if (!parsed.ok) expect(parsed.error).toContain("repair-task-graph");
   });
 });

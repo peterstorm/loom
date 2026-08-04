@@ -20,6 +20,7 @@ import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import { canonicalRepositoryPaths } from "../../utils/repository-path";
 import { changedDeclaredArtifactsSince } from "../../utils/artifact-baseline";
 import { attributedChangedArtifacts } from "../../core/artifact-baseline";
+import { invalidateTaskReview } from "../../core/review-output";
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
@@ -356,21 +357,22 @@ export function applyUntrustedStopResolution(
   );
   const resolved: TaskGraph = {
     ...s,
-    tasks: s.tasks.map((t) =>
-      t.id === taskId
-        ? {
-            ...t,
-            status: proof.state === "satisfied" ? "implemented" as const : "pending" as const,
-            proof,
-            test_result: proofTestResult,
-            test_evidence: preserveExistingTrusted ? t.test_evidence : resolution.testEvidence,
-            files_modified: cumulativeFiles,
-            new_tests_written: currentNewTests.written,
-            new_test_evidence: currentNewTests.evidence,
-            ...(resolution.filesModified.length > 0 ? { review_status: "pending" as const } : {}),
-          }
-        : t,
-    ),
+    tasks: s.tasks.map((t) => {
+      if (t.id !== taskId) return t;
+      const updated: Task = {
+        ...t,
+        status: proof.state === "satisfied" ? "implemented" : "pending",
+        proof,
+        test_result: proofTestResult,
+        test_evidence: preserveExistingTrusted ? t.test_evidence : resolution.testEvidence,
+        files_modified: cumulativeFiles,
+        new_tests_written: currentNewTests.written,
+        new_test_evidence: currentNewTests.evidence,
+      };
+      return resolution.filesModified.length > 0
+        ? invalidateTaskReview(updated)
+        : updated;
+    }),
     executing_tasks: clearedExecuting,
   };
   const wave = target.wave;
@@ -833,21 +835,22 @@ export const runUpdateTaskStatus = async (
       },
       TRUSTED_LEDGER_ONLY_POLICY,
     );
-    const updatedTasks = s.tasks.map((t) =>
-      t.id === taskId
-        ? {
-            ...t,
-            status: proof.state === "satisfied" ? "implemented" as const : "pending" as const,
-            proof,
-            test_result: resolvedTestResult,
-            test_evidence: resolvedTestEvidence,
-            files_modified: cumulativeFiles,
-            new_tests_written: currentNewTestEvidence.written,
-            new_test_evidence: currentNewTestEvidence.evidence,
-            ...(filesModified.length > 0 ? { review_status: "pending" as const } : {}),
-          }
-        : t
-    );
+    const updatedTasks = s.tasks.map((t) => {
+      if (t.id !== taskId) return t;
+      const updated: Task = {
+        ...t,
+        status: proof.state === "satisfied" ? "implemented" : "pending",
+        proof,
+        test_result: resolvedTestResult,
+        test_evidence: resolvedTestEvidence,
+        files_modified: cumulativeFiles,
+        new_tests_written: currentNewTestEvidence.written,
+        new_test_evidence: currentNewTestEvidence.evidence,
+      };
+      return filesModified.length > 0
+        ? invalidateTaskReview(updated)
+        : updated;
+    });
 
     const resolved: TaskGraph = {
       ...s,

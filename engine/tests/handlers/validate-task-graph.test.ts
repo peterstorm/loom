@@ -532,7 +532,7 @@ describe("fixFull repairs findings WITH their derived views", () => {
     // The bug this pins, verified against the real CLI. Conservation used to
     // rest entirely on step 2 recovering the dropped entry's claim from the
     // `string[]` view. When the view did NOT hold it — the exact state the load
-    // boundary rejects with "repair with: validate-task-graph --fix" — nothing
+    // boundary rejects with an installable `repair-task-graph` hint — nothing
     // recovered it and nothing reported it: FindingsRepair had no channel for a
     // drop. The critical was deleted by the one command the engine tells the
     // operator to run, and complete-wave-gate's check 5 then counted zero.
@@ -590,7 +590,7 @@ describe("fixFull repairs findings WITH their derived views", () => {
     // An entry with no usable severity or claim carries nothing to salvage, so
     // it IS lost — which is exactly why it has to be said out loud. A dropped
     // critical is indistinguishable from one that was never found.
-    const { notes } = fixFull(graphOf({
+    const { notes, dataLoss } = fixFull(graphOf({
       id: "T1",
       findings: [{ severity: "not-a-severity", claim: "" }, { nothing: true }],
       refuted_findings: [{ finding: { bogus: true }, refutations: [] }],
@@ -599,6 +599,7 @@ describe("fixFull repairs findings WITH their derived views", () => {
       "T1: DROPPED 2 findings entr(y/ies) carrying no usable claim — data lost; check the reviewer output for this task",
       "T1: DROPPED 1 malformed refutation record(s) — audit trail lost; valid nested findings were preserved or returned to the active set",
     ]);
+    expect(dataLoss).toEqual(notes);
   });
 
   it("stays idempotent once a malformed entry has been salvaged", () => {
@@ -819,7 +820,11 @@ describe("validateFull agrees with the load boundary about the findings aggregat
     // gate failure, while inventing an agent name would leave a permanent block.
     const broken = graph({ review_status: "evidence_capture_failed" });
     expect(parseTaskGraph(broken).ok).toBe(false);
-    const repaired = JSON.parse(fixFull(broken).json);
+    const repair = fixFull(broken);
+    const repaired = JSON.parse(repair.json);
+    expect(repair.notes).toContain(
+      "T1: cleared an inconsistent review evidence-failure record and reset review_status to pending",
+    );
     expect(repaired.tasks[0].review_status).toBe("pending");
     expect(repaired.tasks[0].review_evidence_failures).toBeUndefined();
     expect(parseTaskGraph(repaired).ok).toBe(true);

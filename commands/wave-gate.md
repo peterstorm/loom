@@ -259,8 +259,8 @@ a hand-built brief could quietly omit an inconvenient critical.
 `brief` proves its own completeness and **fails** rather than building a set the
 panel cannot honestly adjudicate — a wave with no tasks (check `--wave` against
 `.current_wave`), a wave with no criticals (skip the step), or a wave whose
-criticals lack structured identity (re-run the reviewers, or repair the graph
-with `helper validate-task-graph --fix`). An empty brief would otherwise satisfy
+criticals lack structured identity (re-run the reviewers, or atomically repair
+and install the graph with `helper repair-task-graph`). An empty brief would otherwise satisfy
 every downstream length and coverage rule vacuously and report
 "0 survived, 0 refuted" — indistinguishable from a panel that upheld nothing.
 

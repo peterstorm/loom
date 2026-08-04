@@ -14,6 +14,7 @@ import {
   PI_STRUCTURED_EVIDENCE_POLICY,
 } from "../../core/proof-obligations";
 import { attributedChangedArtifacts } from "../../core/artifact-baseline";
+import { invalidateTaskReview } from "../../core/review-output";
 import {
   parseReviewPacketRecovery,
   type VerifiedReviewPacketRecovery,
@@ -295,7 +296,7 @@ const handler: HookHandler = async (_stdin, args) => {
         const priorAudit = task.recovered_artifact_writes ?? [];
         const auditByPacket = new Map(priorAudit.map((entry) => [entry.packet_id, entry]));
         for (const entry of recoveredAudit) auditByPacket.set(entry.packet_id, entry);
-        const sourceTask: Task = {
+        const recoveredTask: Task = {
           ...task,
           files_modified: [...new Set([...(task.files_modified ?? []), ...recoveredPaths])].sort(),
           ...(recoveredBaselineSha === null
@@ -312,8 +313,10 @@ const handler: HookHandler = async (_stdin, args) => {
           ...(auditByPacket.size > 0
             ? { recovered_artifact_writes: [...auditByPacket.values()] }
             : {}),
-          ...(recoveredPaths.length > 0 ? { review_status: "pending" as const } : {}),
         };
+        const sourceTask = recoveredPaths.length > 0
+          ? invalidateTaskReview(recoveredTask)
+          : recoveredTask;
         const snapshotChanges = changedDeclaredArtifactsSince(root, sourceTask.artifact_baseline);
         const revisionChanges = sourceTask.start_sha
           ? changedDeclaredArtifactsSinceRevision(root, sourceTask.start_sha, sourceTask.file_list ?? [])

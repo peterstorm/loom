@@ -511,7 +511,7 @@ describe("review-panel helper CLI", () => {
       const result = buildBrief();
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("carry structured identity");
-      expect(result.stderr, "the diagnostic names a repair").toContain("validate-task-graph --fix");
+      expect(result.stderr, "the diagnostic names an installable repair").toContain("repair-task-graph");
     });
 
     it("rejects a graph whose findings undercount the view the gate counts", () => {
@@ -526,7 +526,7 @@ describe("review-panel helper CLI", () => {
       const result = buildBrief();
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("critical_findings is not the derived view of findings");
-      expect(result.stderr, "the diagnostic names a repair").toContain("validate-task-graph --fix");
+      expect(result.stderr, "the diagnostic names an installable repair").toContain("repair-task-graph");
     });
   });
 

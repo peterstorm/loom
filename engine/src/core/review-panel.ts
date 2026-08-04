@@ -495,7 +495,7 @@ export function briefIsEmpty(brief: FindingBrief): boolean {
  *  diagnostic itself — the same hint core/findings gives at the load boundary. */
 const BRIEF_REPAIR_HINT =
   "Re-run the reviewers so every critical is emitted through the findings block, " +
-  "or repair the graph with: helper validate-task-graph --fix";
+  "or repair and install the graph with: helper repair-task-graph";
 
 /**
  * `buildFindingBrief`'s postcondition: the brief accounts for every finding the

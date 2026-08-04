@@ -674,12 +674,20 @@ Hooks auto-activate when `active_task_graph.json` exists:
 
 **Do not call hook-owned state-writing helpers yourself.** The helpers that hooks/`/wave-gate` drive — `complete-wave-gate`, `StateManager`, `store-review-findings`/`store-spec-check` (except as a sanctioned override, below) — run automatically; calling them by hand races the hook that owns that write. A small set of DIRECT helper invocations IS sanctioned, used only where this document says to; they fall into two distinct classes:
 
-- **Whitelisted in the guard** (`engine/src/config.ts` `WHITELISTED_HELPERS`, so the guard permits them even on a guarded path): `populate-task-graph` (Phase 4d), `set-phase` loop-back, `mark-tests-passed` (read-only evidence status check, run during `/wave-gate` Step 2 — it reads the ledger and does NOT modify state), and the `store-review-findings` / `store-spec-check` false-positive overrides.
+- **Whitelisted in the guard** (`engine/src/config.ts` `WHITELISTED_HELPERS`, so the guard permits them even on a guarded path): `populate-task-graph` (Phase 4d), `set-phase` loop-back, `mark-tests-passed` (read-only evidence status check, run during `/wave-gate` Step 2 — it reads the ledger and does NOT modify state), `repair-task-graph` (recovery only; it reads rejected JSON directly, applies `fixFull`, validates, and atomically replaces the graph without calling `StateManager.load()`), and the `store-review-findings` / `store-spec-check` false-positive overrides.
 - **Merely out of the guard's scope when invoked as documented** (NOT in `WHITELISTED_HELPERS`): `validate-task-graph` / `validate-lint-rules`; the two panel contract helpers `panel-contract` (this document, Phase 3 panel mode) and `review-panel` (`commands/wave-gate.md` Step 3.5); and `standalone-review` (`skills/review-and-fix/SKILL.md`) — they pass only because their documented invocations name no guarded path, writing instead into a run directory under the runs-root each one is given — `.claude/specs/{date_slug}/panel-runs/` for the architecture panel, `.claude/reviews/panel-runs/` for the wave refutation panel, and `.claude/reviews/review-and-fix-runs/` for standalone review. Invoked against a guarded path they would be blocked like anything else.
 
   **One exception inside that class:** `review-panel tally` DOES write the task graph through `StateManager` — it moves refuted findings into `refuted_findings` and can demote `review_status` from `blocked` to `passed`. It is out of the guard's scope only because its arguments name the run directory rather than the state file. It is nonetheless the wave gate's own adjudication step, run exactly once per run directory at the point `wave-gate.md` says to, and it refuses a second tally on a run it has already adjudicated. Do not invoke it to "re-check" a wave.
 
 Each sanctioned direct invocation still requires user approval. Everything else is hook-driven.
+
+When the load boundary reports a corrupt graph and names `repair-task-graph`, run:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper repair-task-graph
+```
+
+Set `LOOM_STATE_PATH` only when repairing a non-default graph. The helper fails closed if repair would drop findings or audit data, validates the repaired graph at both the full-graph and typed load boundaries, and leaves the state file `0444` after its atomic replacement. Do not redirect `validate-task-graph --fix` into the guarded state file; that pure transformer cannot install its own output through the guard.
 
 ---
 

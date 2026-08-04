@@ -507,6 +507,21 @@ export function constrainReviewResolutionToScope(
   };
 }
 
+/**
+ * Pure review invalidation for any transition that records implementation writes.
+ * A pending review cannot simultaneously carry outstanding evidence-capture
+ * failures: that pairing is reserved for `evidence_capture_failed` and is enforced
+ * at the task-graph load boundary.
+ */
+export function invalidateTaskReview(task: Task): Task {
+  return {
+    ...task,
+    review_status: "pending",
+    review_error: undefined,
+    review_evidence_failures: undefined,
+  };
+}
+
 /** Pure: the complete task transform a resolution implies. */
 export function applyReviewResolution(task: Task, resolution: ReviewResolution): Task {
   return match(resolution)

@@ -396,6 +396,7 @@ export const WHITELISTED_HELPERS: readonly string[] = [
   "store-review-findings",
   "store-spec-check",
   "populate-task-graph",
+  "repair-task-graph",
   "store-test-evidence",
   "reconcile-implementation-proof",
   "set-phase",

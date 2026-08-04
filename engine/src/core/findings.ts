@@ -350,7 +350,7 @@ function parseStoredRefutation(raw: unknown): RefutedFinding | null {
 /**
  * Repair-path parse of `Task.findings`: malformed entries are DROPPED.
  *
- * Only `validate-task-graph --fix` should reach this. The LOAD path fails loudly
+ * Only a `fixFull` repair caller should reach this. The LOAD path fails loudly
  * instead (findingsUnionError) — dropping on every read would silently lose a
  * critical, and the repair is only safe because `fixFull` re-derives the two
  * `string[]` views from whatever survives, restoring lockstep rather than
@@ -421,7 +421,7 @@ export function salvageFindingsFromMalformedRefutations(raw: unknown): readonly 
 }
 
 /** The repair a rejected task graph needs, named in the diagnostic itself. */
-const REPAIR_HINT = "repair with: helper validate-task-graph --fix";
+const REPAIR_HINT = "repair and install atomically with: helper repair-task-graph";
 
 /**
  * Load-boundary check for `Task.findings`. Returns the first error, or null.

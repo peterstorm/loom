@@ -459,6 +459,8 @@ function repairReviewRecord(t: Record<string, unknown>): {
 export interface FixReport {
   readonly json: string;
   readonly notes: readonly string[];
+  /** Exact notes for transformations that discard unrecoverable source data. */
+  readonly dataLoss: readonly string[];
 }
 
 /**
@@ -471,6 +473,7 @@ export interface FixReport {
 export function fixFull(json: Record<string, unknown>): FixReport {
   const tasks = Array.isArray(json.tasks) ? (json.tasks as Record<string, unknown>[]) : [];
   const notes: string[] = [];
+  const dataLoss: string[] = [];
   const currentWaveValid =
     typeof json.current_wave === "number" && Number.isInteger(json.current_wave) && json.current_wave >= 1;
   if (json.current_wave !== undefined && !currentWaveValid) {
@@ -494,26 +497,34 @@ export function fixFull(json: Record<string, unknown>): FixReport {
       // The only lossy paths in this repair. Loud, and named as data loss —
       // a dropped critical is indistinguishable from one that was never found.
       if (repair.dropped > 0) {
-        notes.push(
+        const note =
           `${id}: DROPPED ${repair.dropped} findings entr(y/ies) carrying no usable claim — ` +
-            `data lost; check the reviewer output for this task`,
-        );
+          `data lost; check the reviewer output for this task`;
+        notes.push(note);
+        dataLoss.push(note);
       }
       for (const claim of repair.recoveredRefutationFindings) {
         notes.push(`${id}: recovered finding from malformed refutation record — "${claim}"`);
       }
       if (repair.droppedRefutations > 0) {
-        notes.push(
+        const note =
           `${id}: DROPPED ${repair.droppedRefutations} malformed refutation record(s) — ` +
-            `audit trail lost; valid nested findings were preserved or returned to the active set`,
+          `audit trail lost; valid nested findings were preserved or returned to the active set`;
+        notes.push(note);
+        dataLoss.push(note);
+      }
+      if (repair.clearedReviewRecord) {
+        notes.push(
+          `${id}: cleared an inconsistent review evidence-failure record and reset review_status to pending`,
         );
       }
       for (const claim of repair.unrecoverableViewClaims) {
-        notes.push(
+        const note =
           `${id}: DROPPED view-only claim carrying no finding — "${claim}". ` +
-            `The wave gate counts that view and does not filter sentinels, so this task ` +
-            `blocked the gate before this repair and no longer does`,
-        );
+          `The wave gate counts that view and does not filter sentinels, so this task ` +
+          `blocked the gate before this repair and no longer does`;
+        notes.push(note);
+        dataLoss.push(note);
       }
       return {
         ...t,
@@ -524,7 +535,7 @@ export function fixFull(json: Record<string, unknown>): FixReport {
       };
     }),
   };
-  return { json: JSON.stringify(fixed, null, 2), notes };
+  return { json: JSON.stringify(fixed, null, 2), notes, dataLoss };
 }
 
 /** Production filesystem port for model-binding checks; failures retain their cause. */
@@ -576,7 +587,9 @@ const handler: HookHandler = async (stdin, args) => {
     // and this path discards its result and re-validates the REPAIRED graph
     // below — so evaluating it eagerly printed every such warning twice, once
     // for a verdict nothing reads.
-    const repair = isMinimal ? { json: fixMinimal(json), notes: [] } : fixFull(json);
+    const repair = isMinimal
+      ? { json: fixMinimal(json), notes: [], dataLoss: [] }
+      : fixFull(json);
     process.stdout.write(repair.json);
     // A repair that gave a claim identity or renamed one changed the data the
     // panel will vote on. Silent conservation is still a change.

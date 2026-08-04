@@ -243,7 +243,7 @@ describe("briefCompletenessErrors — buildFindingBrief's postcondition", () => 
   it("catches a task whose view outruns its findings, and names it", () => {
     const errors = briefFor([withView("T1", [], ["orphaned critical"])]);
     expect(errors[0]).toContain("T1 has 1 critical_findings but only 0 carry structured identity");
-    expect(errors[0]).toContain("validate-task-graph --fix");
+    expect(errors[0]).toContain("repair-task-graph");
   });
 
   it("counts the view that matches the brief's severity, not always the critical one", () => {
