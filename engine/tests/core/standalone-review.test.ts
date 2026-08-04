@@ -85,7 +85,7 @@ describe("standalone review aggregate", () => {
     );
   });
 
-  it("rejects an unlocated finding that cannot be proven inside the frozen scope", () => {
+  it("preserves an honestly unlocated finding while enforcing scope on located findings", () => {
     const output = transcript(["unlocated blocker"]).replace(
       '"file":"src/x.ts"',
       '"file":null',
@@ -95,10 +95,8 @@ describe("standalone review aggregate", () => {
       scope: ["src/x.ts"],
       transcripts: [{ agent: "code-reviewer", output }],
     });
-    expect(result.ok).toBe(false);
-    expect(!result.ok && result.errors.join("\n")).toContain(
-      "code-reviewer findings[0].file must identify a path in the frozen review scope",
-    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.aggregate.findings[0]?.file).toBeNull();
   });
 
   it("represents zero criticals as an explicit clean state", () => {
@@ -126,14 +124,13 @@ describe("standalone review aggregate", () => {
     );
   });
 
-  it("rejects a stored aggregate tampered with a null finding location", () => {
+  it("accepts and round-trips a stored aggregate with a null finding location", () => {
     const raw = JSON.parse(serializeStandaloneAggregate(required().aggregate));
     raw.findings[0].file = null;
+    raw.findings[0].line = null;
     const parsed = parseStandaloneAggregate(raw);
-    expect(parsed.ok).toBe(false);
-    expect(!parsed.ok && parsed.errors.join("\n")).toContain(
-      "aggregate.findings[0].file must identify a path in the frozen review scope",
-    );
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.value.findings[0]?.file).toBeNull();
   });
 });
 

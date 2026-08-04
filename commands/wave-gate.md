@@ -148,9 +148,10 @@ order as your CRITICAL/ADVISORY lines. Never invent an id. If you cannot locate
 a finding, use null rather than guessing — a wrong location is worse than none.
 ````
 
-The block is what gives each finding a stable identity, which the refutation
-panel in Step 3.5 needs. Without it the marker lines are parsed instead and the
-findings simply carry no file/line — degraded, not broken.
+The engine derives stable identity from reviewer agent and emission order. The
+block adds preferred file/line metadata; without it the marker lines are parsed
+instead and the findings remain adjudicable with null locations — degraded, not
+broken.
 
 **What happens automatically on completion:**
 
@@ -403,7 +404,7 @@ EOF
 
 ### Step 4b: Triage & Fix Relevant Advisories
 
-Critical findings block the gate (Step 5). Advisory findings do **not** block — but they must not be silently dropped. Before advancing, triage every advisory finding across the wave's tasks.
+Critical findings block the gate (Step 5). Advisory findings do **not** block — but they must not be silently dropped. Classifying and reporting every advisory is a mandatory workflow step before advancement; it is not an additional deterministic gate condition, and `complete-wave-gate` blocks only on unresolved critical findings.
 
 **Read the advisories** (self-contained jq — the wave is resolved inside the
 program; `WAVE=$(jq … state)` is blocked by the guard):
@@ -496,7 +497,7 @@ jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | .id' .claude/state
 - MUST report refuted findings in the GH comment — a refutation nobody can see is a deletion
 - NEVER hand-build the finding brief or manifest; the engine authors both from state
 - MUST post GH comment before advancing
-- MUST triage advisory findings and fix the relevant ones before advancing — advisories don't block, but must not be silently dropped
+- MUST classify and report advisory findings before advancing — this workflow obligation is not a `complete-wave-gate` condition; advisories remain non-blocking and may be fixed, deferred, or dismissed with a reason
 - NEVER advance if spec-check has critical findings
 - NEVER advance if code review has critical findings
 - NEVER manually write to state file (guard hook blocks it)

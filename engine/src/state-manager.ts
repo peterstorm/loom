@@ -141,8 +141,14 @@ export function taskUnionError(v: unknown, index: number): string | null {
   if (typeof t.id !== "string" || t.id === "") {
     return `tasks[${index}]: id must be a non-empty string, got ${JSON.stringify(t.id)}`;
   }
-  if (typeof t.wave !== "number" || !Number.isFinite(t.wave)) {
-    return `tasks[${index}] ("${id}"): wave must be a finite number, got ${JSON.stringify(t.wave)}`;
+  if (typeof t.description !== "string" || t.description.trim() === "") {
+    return `tasks[${index}] ("${id}"): description must be a non-empty string, got ${JSON.stringify(t.description)}`;
+  }
+  if (typeof t.agent !== "string" || t.agent.trim() === "") {
+    return `tasks[${index}] ("${id}"): agent must be a non-empty string, got ${JSON.stringify(t.agent)}`;
+  }
+  if (typeof t.wave !== "number" || !Number.isInteger(t.wave) || t.wave < 1) {
+    return `tasks[${index}] ("${id}"): wave must be an integer >= 1, got ${JSON.stringify(t.wave)}`;
   }
   if (!Array.isArray(t.depends_on) || t.depends_on.some((d) => typeof d !== "string")) {
     return `tasks[${index}] ("${id}"): depends_on must be an array of strings`;

@@ -217,8 +217,9 @@ or malformed, the marker lines are parsed instead. Either way the claims survive
 and only the locations are at risk: verification quality degrades, nothing
 breaks.
 
-The engine arbitrates on **counts per severity, not claim text** — it cannot tell
-a reworded claim from a substituted one — and then reconciles the winner **by
+Counts per severity choose which representation is the primary source; claim
+text still drives the subsequent reconciliation. The engine cannot tell a
+reworded claim from a substituted one, so it reconciles both sources **by
 value**. Neither side is ever deleted for losing: any marker claim the winning
 block does not name is carried over beside it without a location, and any block
 claim the marker lines do not name survives a losing block the same way. The

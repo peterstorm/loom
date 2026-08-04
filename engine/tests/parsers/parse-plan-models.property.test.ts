@@ -3,7 +3,7 @@ import fc from "fast-check";
 import { parsePlanModels, hasModels, renderStray, type PlanModels, type Stray } from "../../src/parsers/parse-plan-models";
 import { validateModelBindings, type ModelBindingDeps } from "../../src/handlers/helpers/validate-model-bindings";
 
-const NO_FILES: ModelBindingDeps = { readFile: () => null };
+const NO_FILES: ModelBindingDeps = { readFile: (path) => ({ ok: false, error: `ENOENT: ${path}` }) };
 
 const STRAY_KINDS: ReadonlyArray<Stray["kind"]> = [
   "unterminated-fence",

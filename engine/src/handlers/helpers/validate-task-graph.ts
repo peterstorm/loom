@@ -141,10 +141,15 @@ export function validateFull(
     if (!tid) { errors.push(`Task [${i}]: missing 'id'`); continue; }
     if (!/^T\d+$/.test(tid)) errors.push(`Task ${tid}: id must match T\\d+`);
 
-    if (!task.description) errors.push(`Task ${tid}: missing 'description'`);
-    const agent = task.agent as string | undefined;
-    if (!agent) errors.push(`Task ${tid}: missing 'agent'`);
-    else if (!KNOWN_AGENTS.has(agent)) errors.push(`Task ${tid}: unknown agent '${agent}'`);
+    if (typeof task.description !== "string" || task.description.trim() === "") {
+      errors.push(`Task ${tid}: 'description' must be a non-empty string`);
+    }
+    const agent = task.agent;
+    if (typeof agent !== "string" || agent.trim() === "") {
+      errors.push(`Task ${tid}: 'agent' must be a non-empty string`);
+    } else if (!KNOWN_AGENTS.has(agent)) {
+      errors.push(`Task ${tid}: unknown agent '${agent}'`);
+    }
 
     const wave = task.wave as number | undefined;
     if (wave === undefined) errors.push(`Task ${tid}: missing 'wave'`);
@@ -156,7 +161,11 @@ export function validateFull(
     }
 
     if (Array.isArray(deps)) {
-      for (const dep of deps as string[]) {
+      for (const dep of deps) {
+        if (typeof dep !== "string") {
+          errors.push(`Task ${tid}: 'depends_on' entries must be strings`);
+          continue;
+        }
         if (dep === tid) { errors.push(`Task ${tid}: self-dependency`); continue; }
         if (!allIds.has(dep)) { errors.push(`Task ${tid}: depends on non-existent '${dep}'`); continue; }
         const depTask = tasks.find((t: Record<string, unknown>) => t.id === dep);
@@ -166,6 +175,14 @@ export function validateFull(
       }
     }
 
+    if (
+      scope === "decompose-payload" &&
+      task.file_list !== undefined &&
+      (!Array.isArray(task.file_list) || task.file_list.some((file) => typeof file !== "string" || file.trim() === ""))
+    ) {
+      errors.push(`Task ${tid}: 'file_list' must be an array of non-empty strings if present`);
+    }
+
     // The findings aggregate, checked with the SAME functions the load boundary
     // uses. This validator ran none of them, so `helper validate-task-graph`
     // reported `{ok: true}` on a graph `StateManager.load()` refuses to open —
@@ -173,13 +190,11 @@ export function validateFull(
     // the weaker one. Sharing the functions is what keeps "valid" one answer.
     if (scope === "state-file") {
       for (const check of findingsErrorsOf(task, `Task ${tid}`)) errors.push(check);
-      // Decompose payloads intentionally omit execution state; populated state
-      // records carry `status`, and must agree with StateManager's exact task
-      // parser rather than a weaker second implementation.
-      if ("status" in task) {
-        const stateError = taskUnionError(task, i);
-        if (stateError !== null) errors.push(stateError);
-      }
+      // Decompose payloads intentionally omit execution state; every persisted
+      // state task must agree with StateManager's exact parser, including when a
+      // required field is absent rather than merely malformed.
+      const stateError = taskUnionError(task, i);
+      if (stateError !== null) errors.push(stateError);
     }
 
     // Optional field type checks
@@ -447,13 +462,13 @@ export function fixFull(json: Record<string, unknown>): FixReport {
   return { json: JSON.stringify(fixed, null, 2), notes };
 }
 
-/** Production filesystem port for model-binding checks — honest null on any read failure */
+/** Production filesystem port for model-binding checks; failures retain their cause. */
 const PROD_DEPS: ModelBindingDeps = {
   readFile: (p) => {
     try {
-      return readFileSync(p, "utf-8");
-    } catch {
-      return null;
+      return { ok: true, content: readFileSync(p, "utf-8") };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
 };

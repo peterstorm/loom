@@ -1,7 +1,9 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 
@@ -21,12 +23,21 @@ class FakePi {
   }
 }
 
+const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const temp = mkdtempSync(join(tmpdir(), "loom-pi-review-events-"));
 const statePath = join(temp, "active_task_graph.json");
+const subagentDir = join(temp, "subagents");
+const piAgentDir = join(temp, "pi-agent");
 const previousStatePath = process.env.LOOM_STATE_PATH;
 const previousPiDir = process.env.PI_CODING_AGENT_DIR;
+const previousSubagentDir = process.env.LOOM_SUBAGENT_DIR;
 process.env.LOOM_STATE_PATH = statePath;
-process.env.PI_CODING_AGENT_DIR = join(temp, "pi-agent");
+process.env.PI_CODING_AGENT_DIR = piAgentDir;
+process.env.LOOM_SUBAGENT_DIR = subagentDir;
+execFileSync("bash", [join(ROOT, "scripts/sync-pi-agents.sh")], {
+  cwd: ROOT,
+  env: { ...process.env, PI_CODING_AGENT_DIR: piAgentDir },
+});
 
 const initialGraph = () => ({
   current_phase: "execute",
@@ -62,6 +73,8 @@ afterAll(() => {
   else process.env.LOOM_STATE_PATH = previousStatePath;
   if (previousPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = previousPiDir;
+  if (previousSubagentDir === undefined) delete process.env.LOOM_SUBAGENT_DIR;
+  else process.env.LOOM_SUBAGENT_DIR = previousSubagentDir;
   rmSync(temp, { recursive: true, force: true });
 });
 
@@ -152,6 +165,60 @@ describe("Pi extension review tool_result integration", () => {
     expect(JSON.parse(readFileSync(statePath, "utf-8"))).toEqual(captured);
   });
 
+  it("allows a valid user-scoped Loom spawn and records lifecycle evidence", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad40b";
+    const context = { sessionManager: { getSessionId: () => session } };
+    const backup = `${statePath}.valid-spawn-backup`;
+    renameSync(statePath, backup);
+    try {
+      const results = await pi.emit("tool_call", {
+        toolName: "subagent",
+        input: {
+          agent: "review-verifier-agent",
+          task: "LOOM_REVIEW_CONTEXT: standalone\nAdjudicate the supplied manifest",
+          agentScope: "user",
+        },
+      }, context);
+
+      expect(results).toEqual([undefined]);
+      expect(readFileSync(join(subagentDir, `${session}.active`), "utf-8"))
+        .toContain("review-verifier-agent");
+    } finally {
+      rmSync(join(subagentDir, `${session}.active`), { force: true });
+      renameSync(backup, statePath);
+    }
+  });
+
+  it("blocks a Loom spawn when lifecycle evidence cannot be recorded", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad40c";
+    const context = { sessionManager: { getSessionId: () => session } };
+    const stateBackup = `${statePath}.tracking-failure-backup`;
+    renameSync(statePath, stateBackup);
+    rmSync(subagentDir, { recursive: true, force: true });
+    writeFileSync(subagentDir, "not a directory");
+    try {
+      const results = await pi.emit("tool_call", {
+        toolName: "subagent",
+        input: {
+          agent: "review-verifier-agent",
+          task: "LOOM_REVIEW_CONTEXT: standalone\nAdjudicate the supplied manifest",
+          agentScope: "user",
+        },
+      }, context);
+
+      expect(results).toContainEqual(expect.objectContaining({
+        block: true,
+        reason: expect.stringContaining("Cannot record Loom subagent lifecycle evidence"),
+      }));
+    } finally {
+      rmSync(subagentDir, { force: true });
+      mkdirSync(subagentDir, { recursive: true });
+      renameSync(stateBackup, statePath);
+    }
+  });
+
   it("validates a task batch completely before one atomic registration", async () => {
     const graph = {
       ...initialGraph(),
@@ -208,6 +275,32 @@ describe("Pi extension review tool_result integration", () => {
     expect(state.executing_tasks).toEqual([]);
     if (_label === "trusted") expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-pass" });
     if (_label === "completed") expect(state.tasks[0].status).toBe("completed");
+  });
+
+  it("reports a Loom completion that cannot resolve orchestration state", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad40d";
+    const context = { sessionManager: { getSessionId: () => session } };
+    const backup = `${statePath}.graphless-completion-backup`;
+    renameSync(statePath, backup);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await pi.emit("tool_result", {
+        toolName: "subagent",
+        content: [],
+        details: {
+          results: [{
+            agent: "code-implementer-agent", task: "Task ID: T1", exitCode: 0, messages: [],
+          }],
+        },
+      }, context);
+
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toContain(`${JSON.stringify(session)}; code-implementer-agent completion was NOT applied`);
+    } finally {
+      stderr.mockRestore();
+      renameSync(backup, statePath);
+    }
   });
 
   it("passes external Pi agents through outside Loom orchestration and blocks them during it", async () => {

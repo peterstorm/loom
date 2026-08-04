@@ -57,6 +57,7 @@ describe("validateFull (pure)", () => {
     description: "Implement feature",
     agent: "code-implementer-agent",
     wave: 1,
+    status: "pending",
     depends_on: [],
   };
 
@@ -95,6 +96,33 @@ describe("validateFull (pure)", () => {
     });
     expect(result.ok).toBe(false);
     expect(errorsOf(result)).toContain("Task T1: 'depends_on' must be array");
+  });
+
+  it("holds state-file validation in lockstep with the loader for absent execution fields", () => {
+    const withoutStatus = { ...validTask } as Record<string, unknown>;
+    delete withoutStatus.status;
+    const withoutDependencies = { ...validTask } as Record<string, unknown>;
+    delete withoutDependencies.depends_on;
+
+    for (const task of [withoutStatus, withoutDependencies]) {
+      const graph = { plan_title: "x", plan_file: "x", spec_file: "x", tasks: [task] };
+      expect(validateFull(graph).ok).toBe(false);
+      expect(parseTaskGraph({
+        current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+        spec_file: null, plan_file: null, tasks: [task], wave_gates: {},
+      }).ok).toBe(false);
+    }
+  });
+
+  it("rejects malformed decompose file_list before proof derivation", () => {
+    for (const file_list of [["src/x.ts", 42], [""], "src/x.ts"]) {
+      const result = validateFull({
+        plan_title: "x", plan_file: "x", spec_file: "x",
+        tasks: [{ ...validTask, status: undefined, file_list }],
+      }, "decompose-payload");
+      expect(result.ok).toBe(false);
+      expect(errorsOf(result)).toContain("Task T1: 'file_list' must be an array of non-empty strings if present");
+    }
   });
 
   it("rejects a non-array spec_anchors when present", () => {
@@ -543,7 +571,10 @@ describe("fixFull repairs findings WITH their derived views", () => {
     const broken = {
       current_phase: "execute",
       phase_artifacts: {},
-      tasks: [{ id: "T1", wave: 1, status: "pending", findings: [{ nonsense: true }], critical_findings: ["orphan"] }],
+      tasks: [{
+        id: "T1", description: "repair findings", agent: "code-implementer-agent",
+        wave: 1, status: "pending", findings: [{ nonsense: true }], critical_findings: ["orphan"],
+      }],
     };
     expect(parseTaskGraph(broken).ok).toBe(false);
     expect(parseTaskGraph(JSON.parse(fixFull(broken).json)).ok).toBe(true);
@@ -559,7 +590,14 @@ describe("fixFull repairs findings WITH their derived views", () => {
       { id: "T1", wave: 1, findings: [], critical_findings: ["view only"] },
     ];
     for (const task of rejected) {
-      const graph = { current_phase: "execute", phase_artifacts: {}, tasks: [{ status: "pending", ...task }] };
+      const graph = {
+        current_phase: "execute",
+        phase_artifacts: {},
+        tasks: [{
+          description: "repair findings", agent: "code-implementer-agent",
+          status: "pending", ...task,
+        }],
+      };
       expect(parseTaskGraph(graph).ok).toBe(false);
       expect(parseTaskGraph(JSON.parse(fixFull(graph).json)).ok).toBe(true);
     }

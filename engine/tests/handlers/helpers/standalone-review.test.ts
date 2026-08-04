@@ -99,10 +99,22 @@ describe("standalone review helper and refutation adapter", () => {
     expect(JSON.parse(readFileSync(join(tmp, runDir, "outcomes.json"), "utf-8")).refuted).toBe(1);
     expect(() => readFileSync(join(tmp, ".claude/state/active_task_graph.json"), "utf-8")).toThrow();
 
-    const result = JSON.parse(readFileSync(join(tmp, runDir, "result.json"), "utf-8"));
+    const resultPath = join(tmp, runDir, "result.json");
+    const outcomesPath = join(tmp, runDir, "outcomes.json");
+    const result = JSON.parse(readFileSync(resultPath, "utf-8"));
     expect(result.surviving_critical_findings).toEqual([]);
     expect(result.refuted_critical_findings).toHaveLength(1);
     expect(result.advisory_findings).toHaveLength(1);
+
+    const published = {
+      result: readFileSync(resultPath, "utf-8"),
+      outcomes: readFileSync(outcomesPath, "utf-8"),
+    };
+    run = cli("review-panel", ["tally", "--runs-root", runsRoot, "--manifest", join(runDir, "manifest.json")]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("already been tallied");
+    expect(readFileSync(resultPath, "utf-8")).toBe(published.result);
+    expect(readFileSync(outcomesPath, "utf-8")).toBe(published.outcomes);
 
     run = cli("standalone-review", ["finalize", "--runs-root", runsRoot, "--run-dir", runDir]);
     expect(run.status).toBe(1);

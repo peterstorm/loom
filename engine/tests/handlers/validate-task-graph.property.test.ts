@@ -13,7 +13,7 @@ function wrapTasks(tasks: Record<string, unknown>[]) {
     plan_title: "Test Plan",
     plan_file: ".claude/plans/test.md",
     spec_file: ".claude/specs/test/spec.md",
-    tasks,
+    tasks: tasks.map((task) => ({ status: "pending", ...task })),
   };
 }
 

@@ -200,6 +200,21 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it.each([
+    ["description", 42, "description must be a non-empty string"],
+    ["description", "", "description must be a non-empty string"],
+    ["agent", { name: "code-implementer-agent" }, "agent must be a non-empty string"],
+    ["wave", 1.5, "wave must be an integer >= 1"],
+    ["wave", 0, "wave must be an integer >= 1"],
+  ])("rejects an invalid required task %s field", (field, value, message) => {
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, [field]: value }],
+    });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain(message);
+  });
+
   it("enforces status/proof lockstep for proof-bearing graphs", () => {
     const pendingProof = derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] });
     const impossible = parseTaskGraph({

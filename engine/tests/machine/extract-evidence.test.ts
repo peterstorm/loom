@@ -461,6 +461,23 @@ describe("unquoted & — background compositions (round-10 Fix 3)", () => {
     expect(mintTestRun("npm test & echo done", 0)!.exit).toBeNull();
   });
 
+  it("drops even a parsed green report for a backgrounded test", () => {
+    const green = reportSummary(5, 0);
+    const run = (command: string) => extractEvidence(
+      "Bash",
+      { command },
+      { exit_code: 0, stdout: "" },
+      () => green,
+    ).find((event) => event.kind === "TestRun");
+
+    expect(run("npm test &")).toEqual({
+      kind: "TestRun", command: "npm test &", exit: null, report: null,
+    });
+    expect(run("npm test")).toEqual({
+      kind: "TestRun", command: "npm test", exit: 0, report: green,
+    });
+  });
+
   it("`X & npm test`: the foreground test owns the exit (both polarities — `&` sequences unconditionally)", () => {
     expect(mintTestRun("false & npm test", 0)!.exit).toBe(0);
     expect(mintTestRun("false & npm test", 1)!.exit).toBe(1);

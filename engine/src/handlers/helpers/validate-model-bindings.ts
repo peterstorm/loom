@@ -18,9 +18,13 @@
 import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../parsers/parse-plan-models";
 import type { ValidationResult } from "./validate-task-graph";
 
+export type ModelFileRead =
+  | { readonly ok: true; readonly content: string }
+  | { readonly ok: false; readonly error: string };
+
 export interface ModelBindingDeps {
-  /** Returns file content, or null when the file does not exist or is unreadable */
-  readonly readFile: (path: string) => string | null;
+  /** Reads one binding artifact while preserving the concrete boundary failure. */
+  readonly readFile: (path: string) => ModelFileRead;
 }
 
 function ok(): ValidationResult {
@@ -86,14 +90,14 @@ export function validateModelBindings(
     if (dagFile === null) {
       errors.push("Pipeline section declares no '**AuthoredDag:**' path — a pipeline without an authored DAG is a descriptive model (see references/executable-models.md)");
     } else {
-      const content = deps.readFile(dagFile);
-      if (content === null) {
-        errors.push(`Pipeline: AuthoredDag file '${dagFile}' not found or unreadable — the architecture phase must author it before decompose`);
+      const read = deps.readFile(dagFile);
+      if (!read.ok) {
+        errors.push(`Pipeline: cannot read AuthoredDag file '${dagFile}': ${read.error} — the architecture phase must author it before decompose`);
       } else {
         let dag: unknown;
         let parseError: string | null = null;
         try {
-          dag = JSON.parse(content);
+          dag = JSON.parse(read.content);
         } catch (e) {
           parseError = jsonParseError(e);
         }
@@ -142,15 +146,15 @@ export function validateModelBindings(
       errors.push(`${inv.id} ("${inv.title}"): tier is 'checkable' but no '**Rule file:**' declared — a checkable invariant must be a lint rule, or be honestly tiered 'advisory'`);
       continue;
     }
-    const content = deps.readFile(ruleFile);
-    if (content === null) {
-      errors.push(`${inv.id}: rule file '${ruleFile}' not found or unreadable — the architecture phase must write it (validate with the validate-lint-rules helper)`);
+    const read = deps.readFile(ruleFile);
+    if (!read.ok) {
+      errors.push(`${inv.id}: cannot read rule file '${ruleFile}': ${read.error} — the architecture phase must write it (validate with the validate-lint-rules helper)`);
       continue;
     }
     let rule: unknown;
     let parseError: string | null = null;
     try {
-      rule = JSON.parse(content);
+      rule = JSON.parse(read.content);
     } catch (e) {
       parseError = jsonParseError(e);
     }
@@ -201,15 +205,15 @@ export function checkPlanModelBindings(
       errors: ["plan_file must be a non-empty string path — executable-model bindings cannot be verified without the plan"],
     };
   }
-  const content = deps.readFile(planFile);
-  if (content === null) {
+  const read = deps.readFile(planFile);
+  if (!read.ok) {
     return {
       kind: "plan-unavailable",
       ok: false,
-      errors: [`plan_file '${planFile}' not found or unreadable — executable-model bindings cannot be verified (fix the path or run from the repo root)`],
+      errors: [`cannot read plan_file '${planFile}': ${read.error} — executable-model bindings cannot be verified (fix the path or run from the repo root)`],
     };
   }
-  const models = parsePlanModels(content);
+  const models = parsePlanModels(read.content);
   if (!hasModels(models)) return { kind: "opted-out", ok: true, models };
   const result = validateModelBindings(models, tasks, deps);
   return result.ok

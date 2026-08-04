@@ -165,6 +165,27 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     expect(t9.spec_anchors).toEqual([]);
   });
 
+  it("rejects malformed file_list before proof derivation and leaves state untouched", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, []);
+    const malformed = JSON.stringify({
+      plan_title: "t",
+      spec_file: "spec.md",
+      plan_file: plan,
+      tasks: [{
+        id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1,
+        depends_on: [], spec_anchors: [], new_tests_required: true, file_list: ["src/x.ts", 42],
+      }],
+    });
+
+    const result = await populate(malformed, []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("file_list");
+    expect((JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph).tasks).toEqual([]);
+  });
+
   it("--fix re-validates: unfixable structural errors fail loudly instead of persisting", async () => {
     const dir = tempDir();
     const plan = modelFreePlan(dir);

@@ -65,6 +65,12 @@ const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const PI_RESOURCE_CACHE = join(PI_AGENT_DIR, "cache", "loom-resources");
 
+const isLoomOwnedResultAgent = (agentType: string): boolean =>
+  PHASE_AGENT_MAP[agentType] !== undefined ||
+  IMPL_AGENTS.has(agentType) ||
+  isReviewAgent(agentType) ||
+  agentType === "spec-check-invoker";
+
 export default function (pi: ExtensionAPI) {
   // ─── Resource Discovery ───────────────────────────────────────────────
   // Contribute skills from this package that aren't in the pi manifest's
@@ -161,7 +167,7 @@ export default function (pi: ExtensionAPI) {
           };
         }
 
-        for (const item of parsedItems.value) {
+        for (const item of parsedItems) {
           const expected = expectedSpawnModel(item.agent, "pi");
           const definitionPath = join(PI_AGENT_DIR, "agents", `${item.agent}.md`);
           const definition = validatePiAgentDefinitionFile(
@@ -216,40 +222,44 @@ export default function (pi: ExtensionAPI) {
         // Mark subagent active (equivalent of SubagentStart hook) only after
         // the complete batch has passed. Pi currently exposes no per-spawn id,
         // so retain one roster entry per requested agent type.
-        for (const { agent } of parsedItems.value) {
+        for (const { agent } of parsedItems) {
           // Mark subagent active (equivalent of SubagentStart hook).
           // Parse the session id before interpolating it into SUBAGENT_DIR paths
           // — a raw id with a separator/`..`/whitespace could address files
-          // outside the subagent dir. Stand down loudly on an unsafe id, mirroring
-          // the engine's record-evidence boundary.
+          // outside the subagent dir. Without lifecycle evidence the completion
+          // cannot be routed honestly, so refuse the spawn rather than degrading.
           currentGuard = "subagent-tracking";
           const safeSessionId = parseSessionId(sessionId);
           if (safeSessionId === null) {
-            process.stderr.write(
-              `loom: invalid session id ${JSON.stringify(sessionId)} — subagent tracking skipped\n`,
-            );
-          } else {
-            try {
-              mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
-              // Roster line: the engine contract expects a unique per-spawn
-              // AgentId (SubagentStart's agent_id); pi's tool_call event
-              // carries only the agent TYPE at this seam, so the type is
-              // sanitized through rosterAgentId — the same producer the
-              // engine roster uses, guaranteeing the line parses on read.
-              // LATENT MISMATCH (documented, deferred): with only a type to
-              // write, two parallel same-type pi subagents are
-              // indistinguishable on the roster; a real per-spawn id would
-              // need pi to expose one on the subagent tool_call.
-              appendFileSync(`${SUBAGENT_DIR}/${safeSessionId}.active`, `${rosterAgentId(agent)}\n`);
-              if (existsSync(TASK_GRAPH_PATH)) {
-                const taskGraphFile = `${SUBAGENT_DIR}/${safeSessionId}.task_graph`;
-                if (!existsSync(taskGraphFile)) {
-                  writeFileSync(taskGraphFile, resolve(TASK_GRAPH_PATH));
-                }
+            return {
+              block: true,
+              reason: `Cannot record Loom subagent lifecycle evidence for invalid session id ${JSON.stringify(sessionId)}; refusing spawn.`,
+            };
+          }
+          try {
+            mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+            // Roster line: the engine contract expects a unique per-spawn
+            // AgentId (SubagentStart's agent_id); pi's tool_call event
+            // carries only the agent TYPE at this seam, so the type is
+            // sanitized through rosterAgentId — the same producer the
+            // engine roster uses, guaranteeing the line parses on read.
+            // LATENT MISMATCH (documented, deferred): with only a type to
+            // write, two parallel same-type pi subagents are
+            // indistinguishable on the roster; a real per-spawn id would
+            // need pi to expose one on the subagent tool_call.
+            appendFileSync(`${SUBAGENT_DIR}/${safeSessionId}.active`, `${rosterAgentId(agent)}\n`);
+            if (existsSync(TASK_GRAPH_PATH)) {
+              const taskGraphFile = `${SUBAGENT_DIR}/${safeSessionId}.task_graph`;
+              if (!existsSync(taskGraphFile)) {
+                writeFileSync(taskGraphFile, resolve(TASK_GRAPH_PATH));
               }
-            } catch (err) {
-              process.stderr.write(`loom: subagent tracking write failed: ${(err as Error).message}\n`);
             }
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return {
+              block: true,
+              reason: `Cannot record Loom subagent lifecycle evidence; refusing spawn: ${message}`,
+            };
           }
         }
       }
@@ -406,7 +416,14 @@ export default function (pi: ExtensionAPI) {
       }
 
       const mgr = StateManager.fromSession(sessionId);
-      if (!mgr) continue;
+      if (!mgr) {
+        if (isLoomOwnedResultAgent(agentType)) {
+          process.stderr.write(
+            `loom(pi): no task graph for session ${JSON.stringify(sessionId)}; ${agentType} completion was NOT applied\n`,
+          );
+        }
+        continue;
+      }
 
       // --- Phase agent → advance phase ---
       const completedPhase = PHASE_AGENT_MAP[agentType];

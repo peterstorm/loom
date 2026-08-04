@@ -15,13 +15,13 @@ import { validateFull, fixFull } from "./validate-task-graph";
 import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
 import { derivePendingTaskProof } from "../../core/proof-obligations";
 
-/** Honest null on any read failure — the binding check reports it in context */
+/** Filesystem adapter for the pure binding check; failures retain their cause. */
 const BINDING_DEPS: ModelBindingDeps = {
   readFile: (p) => {
     try {
-      return readFileSync(p, "utf-8");
-    } catch {
-      return null;
+      return { ok: true, content: readFileSync(p, "utf-8") };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
 };

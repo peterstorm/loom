@@ -81,9 +81,10 @@ function findingScopeErrors(
 ): readonly string[] {
   const allowed = new Set(scope.map(normalizeRepoRelativePath));
   return findings.flatMap((finding, index) => {
-    if (finding.file === null) {
-      return [`${label}[${index}].file must identify a path in the frozen review scope`];
-    }
+    // Location metadata is optional in every reviewer contract. Preserve
+    // cross-cutting findings with no honest single-file location; when a file
+    // is supplied, it still must belong to the immutable review scope.
+    if (finding.file === null) return [];
     if (allowed.has(normalizeRepoRelativePath(finding.file))) return [];
     return [`${label}[${index}].file is outside the frozen review scope: ${finding.file}`];
   });

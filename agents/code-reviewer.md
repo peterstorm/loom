@@ -100,9 +100,9 @@ ADVISORY: {one advisory finding per line}
 ```
 ````
 
-The fenced `findings` block is optional but strongly preferred — it is what
-gives each finding a stable identity and a location, which the wave gate's
-refutation panel needs to adjudicate it. Rules:
+The fenced `findings` block is optional but strongly preferred. The engine
+derives stable identity from agent and emission order; the block adds preferred
+file/line metadata, and the panel can adjudicate an honest null location. Rules:
 
 - `severity` is exactly `"critical"` or `"advisory"`; entries must appear in the
   same order as your `CRITICAL:` / `ADVISORY:` lines.

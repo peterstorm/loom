@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseSpecCheckOutput } from "../../src/handlers/subagent-stop/store-spec-check-findings";
 import handler from "../../src/handlers/subagent-stop/store-spec-check-findings";
+import { projectSlug } from "../../src/utils/agent-transcript-path";
 
 describe("parseSpecCheckOutput (pure)", () => {
   it("parses all severity levels", () => {
@@ -221,6 +222,63 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       stderrSpy.mockRestore();
       rmSync(tmpDir, { recursive: true, force: true });
       rmSync(pointer, { force: true });
+    }
+  });
+
+  it("derives and consumes the transcript when agent_transcript_path is absent", async () => {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    const tmpDir = join(tmpdir(), `spec-check-derived-${Date.now()}`);
+    const configDir = join(tmpDir, "claude-config");
+    const projectDir = join(tmpDir, "project");
+    const statePath = join(tmpDir, "active_task_graph.json");
+    const session = `spec-check-derived-${process.pid}-${Date.now()}`;
+    const agentId = "a0a0057138606bfd0";
+    const transcriptDir = join(
+      configDir, "projects", projectSlug(projectDir), session, "subagents",
+    );
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    const previousConfig = process.env.CLAUDE_CONFIG_DIR;
+    const previousProject = process.env.CLAUDE_PROJECT_DIR;
+    mkdirSync(transcriptDir, { recursive: true });
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, current_wave: 2, tasks: [], wave_gates: {},
+    }));
+    writeFileSync(pointer, statePath);
+    writeFileSync(join(transcriptDir, `agent-${agentId}.jsonl`), JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "text",
+          text: "SPEC_CHECK_WAVE: 2\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED",
+        }],
+      },
+    }));
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    process.env.CLAUDE_PROJECT_DIR = projectDir;
+
+    try {
+      const result = await handler(JSON.stringify({
+        session_id: session,
+        agent_id: agentId,
+        agent_type: "spec-check-invoker",
+      }), []);
+
+      expect(result.kind).toBe("passthrough");
+      const state = JSON.parse(readFileSync(statePath, "utf-8"));
+      expect(state.spec_check).toMatchObject({
+        wave: 2,
+        verdict: "PASSED",
+        critical_count: 0,
+      });
+    } finally {
+      if (previousConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousConfig;
+      if (previousProject === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = previousProject;
+      rmSync(pointer, { force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 

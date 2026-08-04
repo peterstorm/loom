@@ -23,10 +23,14 @@ function expectError(r: { ok: true } | { ok: false; errors: readonly string[] },
 
 const NO_MODELS: PlanModels = { lifecycles: [], pipeline: null, invariants: [], strays: [] };
 
-const NO_FILES: ModelBindingDeps = { readFile: () => null };
+const NO_FILES: ModelBindingDeps = { readFile: (path) => ({ ok: false, error: `ENOENT: ${path}` }) };
 
 function depsWith(files: Record<string, string>): ModelBindingDeps {
-  return { readFile: (p: string) => files[p] ?? null };
+  return {
+    readFile: (path) => path in files
+      ? { ok: true, content: files[path]! }
+      : { ok: false, error: `ENOENT: ${path}` },
+  };
 }
 
 function task(overrides: Record<string, unknown>): Record<string, unknown> {
@@ -124,7 +128,7 @@ describe("validateModelBindings", () => {
 
     it("rejects a missing AuthoredDag file", () => {
       const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "plans/x.dag.authored.json", declaredNodes: [] } };
-      expectError(validateModelBindings(models, [], NO_FILES), "not found or unreadable");
+      expectError(validateModelBindings(models, [], NO_FILES), "cannot read AuthoredDag");
     });
 
     it("rejects invalid JSON and preserves the parse error detail", () => {
@@ -187,7 +191,7 @@ describe("validateModelBindings", () => {
 
     it("rejects a checkable invariant whose rule file does not exist", () => {
       const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: "checkable", ruleFile: ".claude/linter/rules/inv-1.json" }] };
-      expectError(validateModelBindings(models, [], NO_FILES), "not found or unreadable");
+      expectError(validateModelBindings(models, [], NO_FILES), "cannot read rule file");
     });
 
     it("rejects a rule file that is not a rule-shaped JSON object", () => {
@@ -232,8 +236,10 @@ describe("checkPlanModelBindings (fail-closed entry point)", () => {
     expectError(checkPlanModelBindings("  ", [], NO_FILES), "plan_file must be a non-empty string");
   });
 
-  it("errors when the plan file is unreadable — a typo'd path must not disarm the gate", () => {
-    expectError(checkPlanModelBindings("/nonexistent/plan.md", [], NO_FILES), "not found or unreadable");
+  it("errors with the concrete read cause when the plan file is unavailable", () => {
+    const result = checkPlanModelBindings("/nonexistent/plan.md", [], NO_FILES);
+    expectError(result, "cannot read plan_file");
+    expectError(result, "ENOENT: /nonexistent/plan.md");
   });
 
   it("passes when the plan is readable and declares no models (genuine opt-out)", () => {
@@ -273,7 +279,7 @@ describe("validate-task-graph handler integration (plan file on disk)", () => {
       plan_title: "t",
       spec_file: "spec.md",
       plan_file: planFile,
-      tasks: [{ id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [], spec_anchors: [], new_tests_required: true, plan_context: "", file_list: fileList }],
+      tasks: [{ id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], spec_anchors: [], new_tests_required: true, plan_context: "", file_list: fileList }],
     });
   }
 
@@ -294,10 +300,13 @@ describe("validate-task-graph handler integration (plan file on disk)", () => {
     if (result.kind === "error") expect(result.message).toContain("LC-1");
   });
 
-  it("FAILS CLOSED when plan_file does not exist", async () => {
+  it("FAILS CLOSED with the filesystem cause when plan_file does not exist", async () => {
     const result = await handler(graphJson("/nonexistent/plan.md", []), ["-"]);
     expect(result.kind).toBe("error");
-    if (result.kind === "error") expect(result.message).toContain("not found or unreadable");
+    if (result.kind === "error") {
+      expect(result.message).toContain("cannot read plan_file");
+      expect(result.message).toMatch(/ENOENT|no such file/i);
+    }
   });
 
   it("rejects a non-string plan_file at schema level (no silent skip)", async () => {
