@@ -129,8 +129,13 @@ function loadTranscripts(runDir: string, reviews: readonly ReviewInputEntry[]): 
   const transcripts: StandaloneReviewTranscript[] = [];
   const seenRealpaths = new Set<string>();
   const seenFiles = new Set<string>();
-  for (const review of reviews) {
+  for (const [index, review] of reviews.entries()) {
     const path = resolve(review.transcript);
+    const expectedPath = resolve(join(runDir, "reviewers", `${index + 1}-${review.agent}.md`));
+    if (path !== expectedPath) {
+      errors.push(`review transcript slot ${index + 1} for ${review.agent} must be exactly ${expectedPath}: ${review.transcript}`);
+      continue;
+    }
     if (dirname(path) !== expectedParent) { errors.push(`review transcript must be directly inside ${expectedParent}: ${review.transcript}`); continue; }
     try {
       const stat = lstatSync(path);

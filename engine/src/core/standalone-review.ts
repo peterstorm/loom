@@ -81,7 +81,10 @@ function findingScopeErrors(
 ): readonly string[] {
   const allowed = new Set(scope.map(normalizeRepoRelativePath));
   return findings.flatMap((finding, index) => {
-    if (finding.file === null || allowed.has(normalizeRepoRelativePath(finding.file))) return [];
+    if (finding.file === null) {
+      return [`${label}[${index}].file must identify a path in the frozen review scope`];
+    }
+    if (allowed.has(normalizeRepoRelativePath(finding.file))) return [];
     return [`${label}[${index}].file is outside the frozen review scope: ${finding.file}`];
   });
 }

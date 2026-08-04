@@ -5,7 +5,7 @@
  */
 
 import { existsSync } from "node:fs";
-import type { HookResult } from "../types";
+import type { HookResult, TaskGraph } from "../types";
 import { TASK_GRAPH_PATH } from "../config";
 import { extractTaskId } from "../utils/extract-task-id";
 import { StateManager } from "../state-manager";
@@ -17,22 +17,12 @@ export interface ValidateTaskExecutionInput {
   description: string;
 }
 
-export async function validateTaskExecution(input: ValidateTaskExecutionInput): Promise<HookResult> {
-  if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
-
-  const taskId = extractTaskId(input.prompt) ?? extractTaskId(input.description);
-  if (!taskId) return { kind: "allow" };
-
-  const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
-  if (!mgr) return { kind: "allow" };
-
-  const state = mgr.load();
-  const task = state.tasks.find((t) => t.id === taskId);
+/** Pure task gate used by both single and batch shell entry points. */
+export function taskExecutionDecision(state: TaskGraph, taskId: string): HookResult {
+  const task = state.tasks.find((candidate) => candidate.id === taskId);
   if (!task) return { kind: "allow" };
 
   const currentWave = state.current_wave ?? 1;
-
-  // Check 1: Wave order
   if (task.wave > currentWave) {
     return {
       kind: "block",
@@ -40,9 +30,8 @@ export async function validateTaskExecution(input: ValidateTaskExecutionInput): 
     };
   }
 
-  // Check 2: Dependencies complete
   for (const dep of task.depends_on) {
-    const depTask = state.tasks.find((t) => t.id === dep);
+    const depTask = state.tasks.find((candidate) => candidate.id === dep);
     if (!depTask) {
       return {
         kind: "block",
@@ -57,54 +46,83 @@ export async function validateTaskExecution(input: ValidateTaskExecutionInput): 
     }
   }
 
-  // Check 3: Previous wave review gate (only for wave > 1)
   if (task.wave === currentWave && currentWave > 1) {
     const prevWave = String(currentWave - 1);
     const gate = state.wave_gates[prevWave];
-
     if (gate && !gate.reviews_complete) {
       const lines = [`BLOCKED: Wave ${prevWave} review gate not passed.`, ""];
       if (gate.blocked) {
         lines.push(`Wave ${prevWave} is BLOCKED due to:`);
         if (gate.tests_passed === false) lines.push("  - Integration tests failed");
         const critCount = state.tasks
-          .filter((t) => t.wave === currentWave - 1)
-          .reduce((sum, t) => sum + (t.critical_findings?.length ?? 0), 0);
+          .filter((candidate) => candidate.wave === currentWave - 1)
+          .reduce((sum, candidate) => sum + (candidate.critical_findings?.length ?? 0), 0);
         if (critCount > 0) lines.push(`  - ${critCount} critical review findings`);
       } else {
         lines.push(`Wave ${prevWave} gates not yet run.`);
       }
       lines.push("", "Run: /wave-gate");
-
       return { kind: "block", message: lines.join("\n") };
     }
   }
 
-  // Capture the exact declared-artifact state BEFORE the agent starts. A
-  // transcript records attempted tool calls; only this byte-level baseline can
-  // prove that a declared artifact actually changed during the task.
-  if (taskId && git.isGitRepo()) {
-    const sha = git.headSha();
-    const root = git.repositoryRoot();
-    if (sha && root) {
-      let artifactBaseline: ReturnType<typeof captureDeclaredArtifactBaseline>;
-      try {
-        artifactBaseline = captureDeclaredArtifactBaseline(root, task.file_list ?? []);
-      } catch (error) {
-        return {
-          kind: "block",
-          message: `BLOCKED: Cannot snapshot declared artifacts for ${taskId}: ${error instanceof Error ? error.message : String(error)}`,
-        };
-      }
-      await mgr.update((s) => ({
-        ...s,
-        executing_tasks: [...new Set([...(s.executing_tasks ?? []), taskId])],
-        tasks: s.tasks.map((t) =>
-          t.id === taskId ? { ...t, start_sha: sha, artifact_baseline: artifactBaseline } : t
-        ),
-      }));
-    }
+  return { kind: "allow" };
+}
+
+/**
+ * Imperative shell: preflight every input against one state snapshot, capture
+ * every baseline, then register the accepted batch in one locked update. A
+ * blocked sibling therefore leaves no ghost execution state behind.
+ */
+export async function validateTaskExecutionBatch(
+  inputs: readonly ValidateTaskExecutionInput[],
+): Promise<HookResult> {
+  if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
+  const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
+  if (!mgr) return { kind: "allow" };
+
+  const state = mgr.load();
+  const taskIds = [...new Set(inputs.flatMap((input) => {
+    const taskId = extractTaskId(input.prompt) ?? extractTaskId(input.description);
+    return taskId === null ? [] : [taskId];
+  }))];
+
+  for (const taskId of taskIds) {
+    const decision = taskExecutionDecision(state, taskId);
+    if (decision.kind === "block") return decision;
   }
 
+  if (!git.isGitRepo()) return { kind: "allow" };
+  const sha = git.headSha();
+  const root = git.repositoryRoot();
+  if (!sha || !root) return { kind: "allow" };
+
+  const baselines = new Map<string, ReturnType<typeof captureDeclaredArtifactBaseline>>();
+  for (const taskId of taskIds) {
+    const task = state.tasks.find((candidate) => candidate.id === taskId);
+    if (!task) continue;
+    try {
+      baselines.set(taskId, captureDeclaredArtifactBaseline(root, task.file_list ?? []));
+    } catch (error) {
+      return {
+        kind: "block",
+        message: `BLOCKED: Cannot snapshot declared artifacts for ${taskId}: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+  if (baselines.size === 0) return { kind: "allow" };
+
+  await mgr.update((current) => ({
+    ...current,
+    executing_tasks: [...new Set([...(current.executing_tasks ?? []), ...baselines.keys()])],
+    tasks: current.tasks.map((task) => {
+      const artifactBaseline = baselines.get(task.id);
+      return artifactBaseline === undefined ? task : { ...task, start_sha: sha, artifact_baseline: artifactBaseline };
+    }),
+  }));
   return { kind: "allow" };
+}
+
+export async function validateTaskExecution(input: ValidateTaskExecutionInput): Promise<HookResult> {
+  return validateTaskExecutionBatch([input]);
 }

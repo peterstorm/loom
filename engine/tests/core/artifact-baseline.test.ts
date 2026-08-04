@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  attributedChangedArtifacts,
   changedDeclaredArtifacts,
   parseDeclaredArtifactBaseline,
 } from "../../src/core/artifact-baseline";
@@ -43,6 +44,12 @@ describe("declared artifact baseline", () => {
 
   it("fails closed when there is no pre-spawn baseline", () => {
     expect(changedDeclaredArtifactsSince(fixture(), undefined)).toEqual([]);
+  });
+
+  it("requires byte changes and the stopped task's own structured write evidence", () => {
+    const byteChanges = ["src/shared.ts", "src/owned.ts"];
+    expect(attributedChangedArtifacts(byteChanges, ["src/owned.ts"])).toEqual(["src/owned.ts"]);
+    expect(attributedChangedArtifacts(byteChanges, ["src/other.ts"])).toEqual([]);
   });
 
   it("rejects malformed snapshots and exact-set drift", () => {

@@ -347,9 +347,12 @@ export function validateAgentPolicyCatalog(
 }
 
 export type PiSpawnItem = Readonly<{ agent: LoomAgentName; task: string }>;
+export type ExternalPiSpawnItem = Readonly<{ agent: string; task: string }>;
+export type ClassifiedPiSpawnBatch =
+  | Readonly<{ kind: "loom-owned"; items: readonly PiSpawnItem[] }>
+  | Readonly<{ kind: "external"; items: readonly ExternalPiSpawnItem[] }>;
 
-/** Parse all Pi subagent modes before any spawn guard runs. */
-export function parsePiSpawnItems(raw: unknown): PolicyResult<readonly PiSpawnItem[]> {
+function parseRawPiSpawnItems(raw: unknown): PolicyResult<readonly ExternalPiSpawnItem[]> {
   if (!isRecord(raw)) {
     return failure({ kind: "unknown-agent", message: "Pi subagent input must be an object" });
   }
@@ -363,20 +366,59 @@ export function parsePiSpawnItems(raw: unknown): PolicyResult<readonly PiSpawnIt
     });
   }
   const entries: unknown[] = single ? [raw] : parallel ? raw.tasks as unknown[] : raw.chain as unknown[];
-  const items: PiSpawnItem[] = [];
+  const items: ExternalPiSpawnItem[] = [];
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index];
-    if (!isRecord(entry) || typeof entry.task !== "string" || entry.task.trim() === "") {
+    if (
+      !isRecord(entry) || typeof entry.agent !== "string" || entry.agent.trim() === "" ||
+      typeof entry.task !== "string" || entry.task.trim() === ""
+    ) {
       return failure({
         kind: "unknown-agent",
-        message: `Pi subagent item ${index + 1} must contain a non-empty task`,
+        message: `Pi subagent item ${index + 1} must contain a non-empty agent and task`,
       });
     }
-    const agent = parseAgentName(entry.agent);
-    if (!agent.ok) return agent;
-    items.push(Object.freeze({ agent: agent.value, task: entry.task }));
+    items.push(Object.freeze({ agent: entry.agent, task: entry.task }));
   }
   return success(Object.freeze(items));
+}
+
+/**
+ * Classify a structurally valid Pi batch before Loom applies its own policy.
+ * Mixed ownership is rejected: passing only the external siblings through
+ * would let one malformed/unknown item bypass an otherwise Loom-owned batch.
+ */
+export function classifyPiSpawnItems(raw: unknown): PolicyResult<ClassifiedPiSpawnBatch> {
+  const parsed = parseRawPiSpawnItems(raw);
+  if (!parsed.ok) return parsed;
+  const resolved = parsed.value.map((item) => parseAgentName(item.agent));
+  const knownCount = resolved.filter((agent) => agent.ok).length;
+  if (knownCount === 0) return success(Object.freeze({ kind: "external", items: parsed.value }));
+  if (knownCount !== parsed.value.length) {
+    return failure({
+      kind: "unknown-agent",
+      message: "Pi subagent batches must not mix Loom-owned and external agents",
+    });
+  }
+  const items = parsed.value.map((item, index) => {
+    const agent = resolved[index]!;
+    if (!agent.ok) throw new Error("Pi spawn classification invariant: known batch contains an unknown agent");
+    return Object.freeze({ agent: agent.value, task: item.task });
+  });
+  return success(Object.freeze({ kind: "loom-owned", items: Object.freeze(items) }));
+}
+
+/** Parse an all-Loom Pi batch for callers that require Loom ownership. */
+export function parsePiSpawnItems(raw: unknown): PolicyResult<readonly PiSpawnItem[]> {
+  const classified = classifyPiSpawnItems(raw);
+  if (!classified.ok) return classified;
+  if (classified.value.kind === "external") {
+    return failure({
+      kind: "unknown-agent",
+      message: `no Loom model policy for agent '${classified.value.items[0]?.agent ?? "<empty>"}'`,
+    });
+  }
+  return success(classified.value.items);
 }
 
 export type AgentFrontmatter = Readonly<{

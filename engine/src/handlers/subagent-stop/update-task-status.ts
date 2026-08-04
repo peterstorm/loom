@@ -19,6 +19,7 @@ import { extractTaskId } from "../../utils/extract-task-id";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import { canonicalRepositoryPaths } from "../../utils/repository-path";
 import { changedDeclaredArtifactsSince } from "../../utils/artifact-baseline";
+import { attributedChangedArtifacts } from "../../core/artifact-baseline";
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
@@ -627,9 +628,12 @@ export const runUpdateTaskStatus = async (
 
   let proofArtifactsChanged: readonly string[];
   try {
-    proofArtifactsChanged = changedDeclaredArtifactsSince(
-      git.repositoryRoot() ?? process.cwd(),
-      task.artifact_baseline,
+    proofArtifactsChanged = attributedChangedArtifacts(
+      changedDeclaredArtifactsSince(
+        git.repositoryRoot() ?? process.cwd(),
+        task.artifact_baseline,
+      ),
+      filesModified,
     );
   } catch (error) {
     await mgr.update((s) => ({

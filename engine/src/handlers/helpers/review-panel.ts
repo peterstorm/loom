@@ -77,6 +77,7 @@ import {
   realRunDir,
   runArtifactErrors,
   writeCanonicalOutput,
+  writeRunFileNoFollow,
 } from "./panel-run";
 
 const LAYOUT = REVIEW_LAYOUT;
@@ -210,10 +211,10 @@ function operationBrief(
   if (!pruned.ok) return contractError("review run boundary", pruned.errors);
 
   try {
-    writeFileSync(join(runDir, LAYOUT.contextMd), renderFindingBriefMarkdown(brief));
-    writeFileSync(join(runDir, LAYOUT.contextJson), briefJson + "\n");
+    writeRunFileNoFollow(join(runDir, LAYOUT.contextMd), renderFindingBriefMarkdown(brief));
+    writeRunFileNoFollow(join(runDir, LAYOUT.contextJson), briefJson + "\n");
     for (const finding of brief.findings) {
-      writeFileSync(
+      writeRunFileNoFollow(
         join(runDir, LAYOUT.itemDir, briefFindingFilename(finding.id)),
         serializeBriefFinding(finding) + "\n",
       );
@@ -334,7 +335,7 @@ const handler: HookHandler = async (stdin, args) => {
     const target = prepareWriteTargets(runDir, [], ["manifest.json"]);
     if (!target.ok) return contractError("review run boundary", target.errors);
     try {
-      writeFileSync(manifestPath, manifestJson + "\n");
+      writeRunFileNoFollow(manifestPath, manifestJson + "\n");
     } catch (error) {
       return contractError("review manifest", [
         `cannot write ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,

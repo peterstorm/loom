@@ -427,7 +427,7 @@ Call `complete-wave-gate` — it handles ALL verification and advancement:
 bun ${LOOM_DIR}/engine/src/cli.ts helper complete-wave-gate
 ```
 
-The helper performs **six checks** before advancing (in evaluation order):
+The helper performs **seven checks** before advancing (in evaluation order):
 1. **Implementation proof** — every wave task must have status `implemented`/`completed` and `proof.state == "satisfied"`; the gate never manufactures completion from pending or failed proof
 2. **Per-task test evidence** — all wave tasks must have a passing `test_result` (`{"verdict": "trusted-pass"}`, or an untrusted result with `passed: true`); tasks declaring `new_tests_required == false` are exempt
 3. **New tests written** — all wave tasks must have `new_tests_written == true` OR `new_tests_required == false`

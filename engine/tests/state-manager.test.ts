@@ -327,6 +327,20 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     expect(parseTaskGraph({ ...validGraph, wave_gates: [] }).ok).toBe(false);
   });
 
+  it("requires every persisted wave gate field instead of casting partial records", () => {
+    const complete = {
+      impl_complete: false,
+      tests_passed: null,
+      reviews_complete: false,
+      blocked: false,
+    };
+    expect(parseTaskGraph({ ...validGraph, wave_gates: { "1": complete } }).ok).toBe(true);
+    for (const partial of [{}, { impl_complete: false }, { ...complete, tests_passed: undefined }]) {
+      const parsed = parseTaskGraph({ ...validGraph, wave_gates: { "1": partial } });
+      expect(parsed.ok, JSON.stringify(partial)).toBe(false);
+    }
+  });
+
   it("StateManager.load surfaces the parse error as a contextual throw", () => {
     const dir = makeTmpDir();
     const statePath = join(dir, "active_task_graph.json");

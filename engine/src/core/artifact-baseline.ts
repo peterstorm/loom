@@ -48,6 +48,19 @@ const snapshotEquals = (left: ArtifactSnapshot, right: ArtifactSnapshot): boolea
   left.kind === right.kind && (left.kind === "missing" || (right.kind === "sha256" && left.digest === right.digest));
 
 /**
+ * A declared artifact is attributable to one task only when both independent
+ * observations agree: repository bytes changed after its baseline, and that
+ * task's structured transcript records a write to the same canonical path.
+ */
+export function attributedChangedArtifacts(
+  byteChanges: readonly string[],
+  taskWrites: readonly string[],
+): readonly string[] {
+  const written = new Set(taskWrites);
+  return Object.freeze([...new Set(byteChanges)].filter((artifact) => written.has(artifact)));
+}
+
+/**
  * Pure comparison of two exact artifact sets. A missing or foreign current
  * entry is contract corruption, never evidence that an artifact changed.
  */

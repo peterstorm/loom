@@ -1,47 +1,16 @@
 import { describe, it, expect } from "vitest";
+import { taskExecutionDecision } from "../../../src/core/validate-task-execution";
 import type { TaskGraph, Task, WaveGate } from "../../../src/types";
 
-/**
- * Test the pure decision logic from validate-task-execution.
- * We extract the guard logic to avoid needing FS/git mocks.
- */
-
-/** Simulate the wave/dep validation decision (extracted from handler) */
+/** Exercise the production pure decision while preserving concise assertions. */
 function validateExecution(
   taskId: string,
   state: TaskGraph,
 ): { kind: "allow" } | { kind: "block"; reason: string } {
-  const task = state.tasks.find((t) => t.id === taskId);
-  if (!task) return { kind: "allow" }; // Unknown task → passthrough
-
-  const currentWave = state.current_wave ?? 1;
-
-  // Check 1: Wave order
-  if (task.wave > currentWave) {
-    return { kind: "block", reason: `wave ${task.wave} > current ${currentWave}` };
-  }
-
-  // Check 2: Dependencies complete
-  for (const dep of task.depends_on) {
-    const depTask = state.tasks.find((t) => t.id === dep);
-    if (!depTask) {
-      return { kind: "block", reason: `dep ${dep} not found in task graph` };
-    }
-    if (depTask.status !== "completed") {
-      return { kind: "block", reason: `dep ${dep} not complete (${depTask.status})` };
-    }
-  }
-
-  // Check 3: Previous wave review gate (wave > 1)
-  if (task.wave === currentWave && currentWave > 1) {
-    const prevWave = String(currentWave - 1);
-    const gate = state.wave_gates[prevWave];
-    if (gate && !gate.reviews_complete) {
-      return { kind: "block", reason: `wave ${prevWave} reviews not complete` };
-    }
-  }
-
-  return { kind: "allow" };
+  const decision = taskExecutionDecision(state, taskId);
+  return decision.kind === "block"
+    ? { kind: "block", reason: decision.message }
+    : { kind: "allow" };
 }
 
 /** Helper to build a task */

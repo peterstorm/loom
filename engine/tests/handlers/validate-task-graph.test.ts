@@ -634,6 +634,13 @@ describe("validateFull agrees with the load boundary about the findings aggregat
     expect(parseTaskGraph(repaired).ok).toBe(true);
   });
 
+  it("rejects the same invalid execution-state union as the load boundary", () => {
+    const invalid = graph({ status: "nonsense" });
+    expect(validateFull(invalid, "state-file").ok).toBe(false);
+    expect(parseTaskGraph(invalid).ok).toBe(false);
+    expect(errorsOf(validateFull(invalid, "state-file")).join("\n")).toContain("status");
+  });
+
   it("accepts a graph whose findings are in step", () => {
     const inStep = graph({
       findings: [{ id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "real" }],

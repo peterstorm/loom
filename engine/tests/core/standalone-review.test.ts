@@ -19,7 +19,7 @@ const transcript = (critical: string[] = [], advisory: string[] = []) => [
   "```findings",
   JSON.stringify([
     ...critical.map((claim) => ({ severity: "critical", file: "src/x.ts", line: 3, claim })),
-    ...advisory.map((claim) => ({ severity: "advisory", file: null, line: null, claim })),
+    ...advisory.map((claim) => ({ severity: "advisory", file: "src/x.ts", line: 4, claim })),
   ]),
   "```",
 ].join("\n");
@@ -85,6 +85,22 @@ describe("standalone review aggregate", () => {
     );
   });
 
+  it("rejects an unlocated finding that cannot be proven inside the frozen scope", () => {
+    const output = transcript(["unlocated blocker"]).replace(
+      '"file":"src/x.ts"',
+      '"file":null',
+    );
+    const result = aggregateStandaloneReview({
+      runId: "run.abc",
+      scope: ["src/x.ts"],
+      transcripts: [{ agent: "code-reviewer", output }],
+    });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.errors.join("\n")).toContain(
+      "code-reviewer findings[0].file must identify a path in the frozen review scope",
+    );
+  });
+
   it("represents zero criticals as an explicit clean state", () => {
     const result = aggregateStandaloneReview({
       runId: "run.abc",
@@ -107,6 +123,16 @@ describe("standalone review aggregate", () => {
     expect(parsed.ok).toBe(false);
     expect(!parsed.ok && parsed.errors.join("\n")).toContain(
       "aggregate.findings[0].file is outside the frozen review scope: src/outside.ts",
+    );
+  });
+
+  it("rejects a stored aggregate tampered with a null finding location", () => {
+    const raw = JSON.parse(serializeStandaloneAggregate(required().aggregate));
+    raw.findings[0].file = null;
+    const parsed = parseStandaloneAggregate(raw);
+    expect(parsed.ok).toBe(false);
+    expect(!parsed.ok && parsed.errors.join("\n")).toContain(
+      "aggregate.findings[0].file must identify a path in the frozen review scope",
     );
   });
 });

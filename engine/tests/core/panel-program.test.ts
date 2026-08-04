@@ -152,7 +152,7 @@ describe("architecture panel program", () => {
         id: "architecture:finalize",
         agent: "architecture-agent",
         interaction: "interactive",
-        modelProfile: PANEL_PROGRAM_MODEL_PROFILES.architecture,
+        modelProfile: PANEL_PROGRAM_MODEL_PROFILES.architectureFinalization,
       },
     });
 

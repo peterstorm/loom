@@ -27,6 +27,7 @@ import {
   RECOVERED_AGENT,
 } from "../../core/findings";
 import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
+import { taskUnionError } from "../../state-manager";
 
 export type ValidationResult =
   | { ok: true }
@@ -172,6 +173,13 @@ export function validateFull(
     // the weaker one. Sharing the functions is what keeps "valid" one answer.
     if (scope === "state-file") {
       for (const check of findingsErrorsOf(task, `Task ${tid}`)) errors.push(check);
+      // Decompose payloads intentionally omit execution state; populated state
+      // records carry `status`, and must agree with StateManager's exact task
+      // parser rather than a weaker second implementation.
+      if ("status" in task) {
+        const stateError = taskUnionError(task, i);
+        if (stateError !== null) errors.push(stateError);
+      }
     }
 
     // Optional field type checks

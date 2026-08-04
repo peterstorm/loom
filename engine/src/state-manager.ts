@@ -81,21 +81,27 @@ function waveGateError(v: unknown, wave: string): string | null {
     return `wave_gates["${wave}"] must be an object`;
   }
   const gate = v as Record<string, unknown>;
-  for (const field of ["impl_complete", "reviews_complete", "blocked"] as const) {
-    if (gate[field] !== undefined && typeof gate[field] !== "boolean") {
+  const booleanFields = ["impl_complete", "reviews_complete", "blocked"] as const;
+  // Diagnose malformed fields before absent siblings so a partially supplied
+  // record points at the value the writer actually got wrong.
+  for (const field of booleanFields) {
+    if (field in gate && typeof gate[field] !== "boolean") {
       return `wave_gates["${wave}"]: ${field} must be a boolean, got ${JSON.stringify(gate[field])}`;
     }
   }
   if (
-    gate.tests_passed !== undefined &&
-    gate.tests_passed !== null &&
-    typeof gate.tests_passed !== "boolean"
+    "tests_passed" in gate &&
+    gate.tests_passed !== null && typeof gate.tests_passed !== "boolean"
   ) {
     return (
       `wave_gates["${wave}"]: tests_passed must be a boolean or null, ` +
       `got ${JSON.stringify(gate.tests_passed)}`
     );
   }
+  for (const field of booleanFields) {
+    if (!(field in gate)) return `wave_gates["${wave}"]: missing required field ${field}`;
+  }
+  if (!("tests_passed" in gate)) return `wave_gates["${wave}"]: missing required field tests_passed`;
   return null;
 }
 
@@ -123,7 +129,7 @@ function specCheckError(v: unknown): string | null {
   return null;
 }
 
-function taskUnionError(v: unknown, index: number): string | null {
+export function taskUnionError(v: unknown, index: number): string | null {
   if (typeof v !== "object" || v === null || Array.isArray(v)) {
     return `tasks[${index}] must be an object`;
   }

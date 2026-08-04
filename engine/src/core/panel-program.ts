@@ -20,6 +20,7 @@ const mapNonEmpty = <Input, Output>(
  */
 export const PANEL_PROGRAM_MODEL_PROFILES = Object.freeze({
   architecture: "panel-design",
+  architectureFinalization: "architecture-finalize",
   design: "panel-design",
   judging: "panel-judge",
   refutation: "refutation",
@@ -249,7 +250,7 @@ const finalizerRequest = (attempt: 1 | 2): InteractiveSpawnRequest => ({
   id: "architecture:finalize",
   agent: "architecture-agent",
   interaction: "interactive",
-  modelProfile: PANEL_PROGRAM_MODEL_PROFILES.architecture,
+  modelProfile: PANEL_PROGRAM_MODEL_PROFILES.architectureFinalization,
   attempt,
   outputContract: "selected architecture plan with panel decision record",
 });

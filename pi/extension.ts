@@ -15,9 +15,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { shouldBlockDirectEdit } from "../engine/src/core/block-direct-edits";
 import { guardStateFile } from "../engine/src/core/guard-state-file";
 import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
-import { validateTaskExecution } from "../engine/src/core/validate-task-execution";
+import { validateTaskExecutionBatch } from "../engine/src/core/validate-task-execution";
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
-import { expectedSpawnModel, parsePiSpawnItems } from "../engine/src/core/model-profiles";
+import { classifyPiSpawnItems, expectedSpawnModel } from "../engine/src/core/model-profiles";
 
 
 // Engine parsers (format-aware)
@@ -59,6 +59,7 @@ import { checkAgentSkillPrompt } from "../engine/src/core/agent-skills";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
 import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
 import { changedDeclaredArtifactsSince } from "../engine/src/utils/artifact-baseline";
+import { attributedChangedArtifacts } from "../engine/src/core/artifact-baseline";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
@@ -136,8 +137,21 @@ export default function (pi: ExtensionAPI) {
       // top-level `agent`/`task` fields never represented.
       if (event.toolName === "subagent") {
         currentGuard = "parse-pi-subagent-batch";
-        const parsedItems = parsePiSpawnItems(event.input);
-        if (!parsedItems.ok) return { block: true, reason: parsedItems.error.message };
+        const classifiedItems = classifyPiSpawnItems(event.input);
+        if (!classifiedItems.ok) return { block: true, reason: classifiedItems.error.message };
+        if (classifiedItems.value.kind === "external") {
+          // Loom owns only its catalog outside orchestration. During an active
+          // graph, an unknown agent would bypass phase/task/model gates; without
+          // one, it belongs to another Pi workflow and must pass through.
+          if (existsSync(TASK_GRAPH_PATH)) {
+            return {
+              block: true,
+              reason: "External Pi subagents cannot run while a Loom task graph is active",
+            };
+          }
+          return;
+        }
+        const parsedItems = classifiedItems.value.items;
 
         const requestedScope = (event.input as { agentScope?: unknown }).agentScope ?? "user";
         if (requestedScope !== "user") {
@@ -191,10 +205,13 @@ export default function (pi: ExtensionAPI) {
           const templateResult = validateTemplateSubstitution(item.task);
           if (templateResult.kind === "block") return { block: true, reason: templateResult.message };
 
-          currentGuard = "validate-task-execution";
-          const taskResult = await validateTaskExecution({ prompt: item.task, description: "" });
-          if (taskResult.kind === "block") return { block: true, reason: taskResult.message };
         }
+
+        currentGuard = "validate-task-execution";
+        const taskResult = await validateTaskExecutionBatch(
+          parsedItems.map((item) => ({ prompt: item.task, description: "" })),
+        );
+        if (taskResult.kind === "block") return { block: true, reason: taskResult.message };
 
         // Mark subagent active (equivalent of SubagentStart hook) only after
         // the complete batch has passed. Pi currently exposes no per-spawn id,
@@ -340,11 +357,16 @@ export default function (pi: ExtensionAPI) {
     if (event.toolName !== "subagent") return;
 
     const details = event.details as Record<string, unknown> | undefined;
-    if (!details) return;
+    if (!details || !("results" in details)) {
+      process.stderr.write(
+        "loom(pi): subagent tool_result is missing details.results — no task status or findings updated\n",
+      );
+      return;
+    }
 
     // Shape guard: a pi version drifting details.results away from an array
     // must be a LOUD no-op, not a silent one (or a throw mid-dispatch).
-    const rawResults = details.results ?? [];
+    const rawResults = details.results;
     if (!Array.isArray(rawResults)) {
       process.stderr.write(
         `loom(pi): subagent tool_result has unrecognized details.results shape (${typeof rawResults}) — no task status updated\n`,
@@ -483,14 +505,23 @@ export default function (pi: ExtensionAPI) {
         // update (TOCTOU, see below).
         const state = mgr.load();
         const task = state.tasks.find((t) => t.id === taskId);
-        if (!task || task.status === "completed") continue;
-        // Trust-aware skip (mirrors update-task-status): a trusted verdict is
-        // preserved only against an UNTRUSTED incoming resolution — newer
-        // ground truth supersedes older. pi has no evidence ledger, so this
-        // handler's resolution is ALWAYS untrusted (see below): the rule
-        // degenerates to "never overwrite a trusted verdict here".
-        const priorVerdict = task.test_result?.verdict;
-        if (priorVerdict === "trusted-pass" || priorVerdict === "trusted-fail") continue;
+        // Evidence collection below needs a live unresolved task. A stopped
+        // missing/completed/trusted task still needs locked execution cleanup;
+        // skipping it outright leaves a ghost marker forever.
+        const priorVerdict = task?.test_result?.verdict;
+        if (
+          !task || task.status === "completed" ||
+          priorVerdict === "trusted-pass" || priorVerdict === "trusted-fail"
+        ) {
+          await mgr.update((s) => ({
+            ...s,
+            executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
+          }));
+          process.stderr.write(
+            `loom(pi): ${taskId} stopped; preserved existing state and cleared executing_tasks\n`,
+          );
+          continue;
+        }
 
         // parseBashTestOutput deliberately accepts only paired Bash tool calls
         // and results in Claude-compatible JSONL. Passing flattened prose here
@@ -530,9 +561,12 @@ export default function (pi: ExtensionAPI) {
 
         let proofArtifactsChanged: readonly string[];
         try {
-          proofArtifactsChanged = changedDeclaredArtifactsSince(
-            git.repositoryRoot() ?? process.cwd(),
-            task.artifact_baseline,
+          proofArtifactsChanged = attributedChangedArtifacts(
+            changedDeclaredArtifactsSince(
+              git.repositoryRoot() ?? process.cwd(),
+              task.artifact_baseline,
+            ),
+            filesModified,
           );
         } catch (error) {
           await mgr.update((s) => ({

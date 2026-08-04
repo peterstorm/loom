@@ -8,6 +8,19 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const CLI = join(ROOT, "engine/src/cli.ts");
 
+const cleanReviewOutput = [
+  "### Machine Summary",
+  "CRITICAL_COUNT: 0",
+  "ADVISORY_COUNT: 1",
+  "CRITICAL:",
+  "ADVISORY: improve the name",
+  "```findings",
+  JSON.stringify([
+    { severity: "advisory", file: "src/x.ts", line: 2, claim: "improve the name" },
+  ]),
+  "```",
+].join("\n");
+
 const reviewOutput = [
   "### Machine Summary",
   "CRITICAL_COUNT: 1",
@@ -35,9 +48,9 @@ describe("standalone review helper and refutation adapter", () => {
     tmp = mkdtempSync(join(tmpdir(), "loom-standalone-review-"));
     runDir = join(runsRoot, "run.abcdef12");
     mkdirSync(join(tmp, runDir, "reviewers"), { recursive: true });
-    writeFileSync(join(tmp, runDir, "reviewers/code-reviewer.md"), reviewOutput);
+    writeFileSync(join(tmp, runDir, "reviewers/1-code-reviewer.md"), reviewOutput);
     writeFileSync(join(tmp, runDir, "review-input.json"), JSON.stringify({
-      reviews: [{ agent: "code-reviewer", transcript: join(runDir, "reviewers/code-reviewer.md") }],
+      reviews: [{ agent: "code-reviewer", transcript: join(runDir, "reviewers/1-code-reviewer.md") }],
     }));
   });
 
@@ -96,26 +109,60 @@ describe("standalone review helper and refutation adapter", () => {
     expect(run.stderr).toContain("already been finalized");
   });
 
-  it("requires the observed reviewer set to match the expected batch and transcript files to be unique", () => {
+  it("requires the observed reviewer set, immutable slots, and physical files to match", () => {
     initialize(["code-reviewer", "type-design-analyzer"]);
     writeFileSync(join(tmp, runDir, "review-input.json"), JSON.stringify({
-      reviews: [{ agent: "code-reviewer", transcript: join(runDir, "reviewers/code-reviewer.md") }],
+      reviews: [{ agent: "code-reviewer", transcript: join(runDir, "reviewers/1-code-reviewer.md") }],
     }));
     let run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
     expect(run.status).toBe(1);
     expect(run.stderr).toContain("must match the pre-spawn session expected_agents exactly");
 
-    const hardlink = join(tmp, runDir, "reviewers/type-design-analyzer.md");
-    linkSync(join(tmp, runDir, "reviewers/code-reviewer.md"), hardlink);
+    const second = join(tmp, runDir, "reviewers/2-type-design-analyzer.md");
+    writeFileSync(second, reviewOutput);
     writeFileSync(join(tmp, runDir, "review-input.json"), JSON.stringify({
       reviews: [
-        { agent: "code-reviewer", transcript: join(runDir, "reviewers/code-reviewer.md") },
-        { agent: "type-design-analyzer", transcript: join(runDir, "reviewers/type-design-analyzer.md") },
+        { agent: "code-reviewer", transcript: join(runDir, "reviewers/2-type-design-analyzer.md") },
+        { agent: "type-design-analyzer", transcript: join(runDir, "reviewers/1-code-reviewer.md") },
+      ],
+    }));
+    run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("review transcript slot 1 for code-reviewer must be exactly");
+
+    rmSync(second);
+    linkSync(join(tmp, runDir, "reviewers/1-code-reviewer.md"), second);
+    writeFileSync(join(tmp, runDir, "review-input.json"), JSON.stringify({
+      reviews: [
+        { agent: "code-reviewer", transcript: join(runDir, "reviewers/1-code-reviewer.md") },
+        { agent: "type-design-analyzer", transcript: join(runDir, "reviewers/2-type-design-analyzer.md") },
       ],
     }));
     run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
     expect(run.status).toBe(1);
     expect(run.stderr).toContain("assigned to more than one reviewer");
+  });
+
+  it("finalizes a zero-critical run and rejects unexpected panel outcomes", () => {
+    initialize();
+    writeFileSync(join(tmp, runDir, "reviewers/1-code-reviewer.md"), cleanReviewOutput);
+    let run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
+    expect(run.status, run.stderr).toBe(0);
+
+    const outcomesPath = join(tmp, runDir, "outcomes.json");
+    writeFileSync(outcomesPath, JSON.stringify({ lenses: [], outcomes: [] }));
+    run = cli("standalone-review", ["finalize", "--runs-root", runsRoot, "--run-dir", runDir]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("clean review unexpectedly has panel outcomes");
+
+    rmSync(outcomesPath);
+    run = cli("standalone-review", ["finalize", "--runs-root", runsRoot, "--run-dir", runDir]);
+    expect(run.status, run.stderr).toBe(0);
+    const result = JSON.parse(readFileSync(join(tmp, runDir, "result.json"), "utf-8"));
+    expect(result.surviving_critical_findings).toEqual([]);
+    expect(result.refuted_critical_findings).toEqual([]);
+    expect(result.advisory_findings).toHaveLength(1);
+    expect(result.panel).toBeNull();
   });
 
   it("cannot turn a hand-authored outcomes file into a finalized critical review", () => {
@@ -162,12 +209,12 @@ describe("standalone review helper and refutation adapter", () => {
 
   it("fails closed on missing reviewer evidence and refuses a second aggregation", () => {
     initialize();
-    writeFileSync(join(tmp, runDir, "reviewers/code-reviewer.md"), "looks fine");
+    writeFileSync(join(tmp, runDir, "reviewers/1-code-reviewer.md"), "looks fine");
     let run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
     expect(run.status).toBe(1);
     expect(run.stderr).toContain("CRITICAL_COUNT marker not found");
 
-    writeFileSync(join(tmp, runDir, "reviewers/code-reviewer.md"), reviewOutput);
+    writeFileSync(join(tmp, runDir, "reviewers/1-code-reviewer.md"), reviewOutput);
     run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
     expect(run.status, run.stderr).toBe(0);
     run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);

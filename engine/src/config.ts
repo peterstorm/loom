@@ -248,6 +248,8 @@ export const PANEL_JUDGES_DEFAULT = 3;
 export const IMPL_AGENTS = new Set([
   "code-implementer-agent",
   "ts-test-agent",
+  "java-test-agent",
+  "test-engineer",
   "frontend-agent",
   "security-agent",
   "dotfiles-agent",

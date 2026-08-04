@@ -10,7 +10,18 @@
  * Not pure: lstat/realpath/read/write. Kept out of `core/` for that reason.
  */
 
-import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { HookResult } from "../../types";
 import type { ParseResult, RunLayout } from "../../core/panel-kernel";
@@ -286,6 +297,28 @@ export function prepareWriteTargets(
     }
   }
   return errors.length > 0 ? fail(errors) : ok(undefined);
+}
+
+/**
+ * Open and write one run artifact without ever following the final path if it
+ * is swapped to a symlink after prepareWriteTargets. Validation and use share
+ * the same file descriptor, closing the lstat-before-write race.
+ */
+export function writeRunFileNoFollow(path: string, data: string): void {
+  const noFollow = fsConstants.O_NOFOLLOW;
+  if (typeof noFollow !== "number" || noFollow === 0) {
+    throw new Error("O_NOFOLLOW is unavailable; refusing an unsafe panel artifact write");
+  }
+  const fd = openSync(
+    path,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | noFollow,
+    0o600,
+  );
+  try {
+    writeFileSync(fd, data);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**

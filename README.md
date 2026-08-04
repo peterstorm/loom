@@ -65,7 +65,7 @@ claude plugin add /path/to/loom
 /loom --abort                 # Tear down state file on abandonment
 
 # After a wave's implementation tasks finish
-/wave-gate                    # Tests + spec-check + 5 review agents + advance
+/wave-gate                    # Tests + spec-check + reviews + refutation panel + advisory triage + advance
 
 # Standalone (no orchestration needed)
 /review-pr                    # Full multi-agent review of the current diff
@@ -307,14 +307,15 @@ quietly omit an inconvenient critical.
 - **PASSED** — Tasks marked `completed`, wave advances, GitHub issue checkboxes update.
 - **BLOCKED** — One or more critical findings (in spec-check or code review) or missing evidence. Fix and re-run `/wave-gate`; on re-run only blocked tasks are re-reviewed.
 
-The six mandatory checks performed by the `complete-wave-gate` helper (in evaluation order):
+The seven mandatory checks performed by the `complete-wave-gate` helper (in evaluation order):
 
-1. Per-task test evidence (a passing `test_result`, except tasks declaring `new_tests_required == false`, which are exempt)
-2. New tests written (`new_tests_written == true` OR `new_tests_required == false`)
-3. Per-task review status (every task's `review_status` is `passed` or `blocked` — `pending`, absent, or `evidence_capture_failed` all fail the check)
-4. Spec alignment (`spec_check.critical_count == 0`)
-5. No critical findings in code review
-6. Lifecycle machine artifacts exist on disk for every lifecycle the plan binds to this wave (a named-but-unreadable plan fails the gate, fail-closed)
+1. Implementation proof (every task is `implemented`/`completed` with `proof.state == "satisfied"`)
+2. Per-task test evidence (a passing `test_result`, except tasks declaring `new_tests_required == false`, which are exempt)
+3. New tests written (`new_tests_written == true` OR `new_tests_required == false`)
+4. Per-task review status (every task's `review_status` is `passed` or `blocked` — `pending`, absent, or `evidence_capture_failed` all fail the check)
+5. Spec alignment (`spec_check.critical_count == 0`)
+6. No critical findings in code review
+7. Lifecycle machine artifacts exist on disk for every lifecycle the plan binds to this wave (a named-but-unreadable plan fails the gate, fail-closed)
 
 ---
 

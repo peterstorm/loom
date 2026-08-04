@@ -8,6 +8,7 @@ import {
   LLM_PROFILE_IDS,
   LLM_PROFILES,
   LOOM_OWNED_AGENTS,
+  classifyPiSpawnItems,
   lowerModelProfile,
   parseAgentFrontmatter,
   parseLlmProfile,
@@ -19,8 +20,10 @@ import {
   resolveModelProfile,
   validateAgentPolicyCatalog,
   validateAgentPolicyFrontmatter,
+  validateExplicitSpawnModel,
   type LlmProfileId,
 } from "../../src/core/model-profiles";
+import { IMPL_AGENTS } from "../../src/config";
 
 const EXPECTED_PROFILES = {
   implementation: {
@@ -157,6 +160,17 @@ describe("Pi spawn input parsing", () => {
       expect(parsePiSpawnItems(raw).ok).toBe(false);
     }
   });
+
+  it("classifies external batches without weakening all-or-nothing Loom ownership", () => {
+    expect(classifyPiSpawnItems({ agent: "external-agent", task: "outside workflow" })).toEqual({
+      ok: true,
+      value: { kind: "external", items: [{ agent: "external-agent", task: "outside workflow" }] },
+    });
+    expect(classifyPiSpawnItems({ tasks: [
+      { agent: "code-reviewer", task: "Loom review" },
+      { agent: "external-agent", task: "outside workflow" },
+    ] }).ok).toBe(false);
+  });
 });
 
 describe("exhaustive Loom agent policy", () => {
@@ -186,6 +200,13 @@ describe("exhaustive Loom agent policy", () => {
     });
   });
 
+  it("makes every implementation-profile agent executable", () => {
+    const implementationAgents = AGENT_POLICIES
+      .filter(({ profile }) => profile === "implementation")
+      .map(({ agent }) => agent);
+    expect(implementationAgents.filter((agent) => !IMPL_AGENTS.has(agent))).toEqual([]);
+  });
+
   it("resolves bare and loom-namespaced agents deterministically", () => {
     expect(resolveAgentPolicy("code-reviewer")).toEqual({
       ok: true,
@@ -212,6 +233,16 @@ describe("exhaustive Loom agent policy", () => {
 });
 
 describe("typed harness lowering", () => {
+  it.each([
+    ["claude-code", "sonnet", "opus"],
+    ["pi", "openai-codex/gpt-5.6-sol:high", "openai-codex/gpt-5.5:high"],
+  ] as const)("requires the exact explicit %s model", (harness, expected, wrong) => {
+    expect(validateExplicitSpawnModel("code-reviewer", harness, expected)).toEqual({ ok: true });
+    const mismatch = validateExplicitSpawnModel("code-reviewer", harness, wrong);
+    expect(mismatch.ok).toBe(false);
+    expect(!mismatch.ok && mismatch.errors.join("\n")).toContain("model mismatch");
+  });
+
   it("lowers Claude Code to exactly its model field", () => {
     const selected = resolveModelProfile("implementation");
     expect(selected.ok).toBe(true);
