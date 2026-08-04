@@ -154,6 +154,30 @@ describe("quality-program helper boundaries", () => {
     expect(cli(["helper", "review-packet", "verify", "--packet", packet]).trim()).toBe(id);
   });
 
+  it("rejects a scoped path that is neither tracked nor present", () => {
+    const dir = mkdtempSync(join(ROOT, ".tmp-review-packet-absent-test-"));
+    cleanup.push(dir);
+    const state = join(dir, "state.json");
+    const packet = join(dir, "packet.json");
+    writeFileSync(state, JSON.stringify({
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
+      tasks: [{
+        id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [],
+        start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
+        file_list: ["definitely-not-present-review-packet.ts"], files_modified: [],
+      }],
+    }));
+
+    const run = spawnSync("bun", [CLI, "helper", "review-packet", "create", "--task", "T1", "--output", packet], {
+      cwd: ROOT, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: state },
+    });
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("neither tracked nor present");
+    expect(existsSync(packet)).toBe(false);
+  });
+
   it("fails review-packet creation on an unexpected git probe error", () => {
     const dir = mkdtempSync(join(ROOT, ".tmp-review-packet-git-failure-test-"));
     cleanup.push(dir);

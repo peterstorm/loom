@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseFindingBriefJson } from "../../src/core/review-panel";
+import { buildStandaloneFindingBrief, parseFindingBriefJson } from "../../src/core/review-panel";
 import {
   STANDALONE_REVIEW_SUBJECT,
   aggregateStandaloneReview,
@@ -171,7 +171,12 @@ describe("standalone review adjudication", () => {
         uncertain_from: index === 0 ? ["blast-radius"] : [],
       })),
     };
-    const panel = parseStandalonePanelOutcomes(raw, state.criticals, ["reproduction", "intent", "blast-radius"]);
+    const panel = parseStandalonePanelOutcomes(
+      raw,
+      state.criticals,
+      buildStandaloneFindingBrief(state.aggregate).findings,
+      ["reproduction", "intent", "blast-radius"],
+    );
     expect(panel.ok).toBe(true);
     if (!panel.ok) return;
     expect(panel.value.outcomes[1]?.refutations).toEqual([
@@ -201,10 +206,45 @@ describe("standalone review adjudication", () => {
         survives: false,
         refuted_by: ["intent"], reasoning: ["not enough"], upheld_by: [], uncertain_from: [],
       }],
-    }, state.criticals, ["reproduction", "intent", "blast-radius"]);
+    }, state.criticals, buildStandaloneFindingBrief(state.aggregate).findings, ["reproduction", "intent", "blast-radius"]);
     expect(parsed.ok).toBe(false);
     expect(!parsed.ok && parsed.errors.join("\n")).toContain("must meet threshold");
     expect(!parsed.ok && parsed.errors.join("\n")).toContain("missing critical finding");
+  });
+
+  it("accepts sanitized panel claims while retaining the original aggregate claim", () => {
+    const aggregated = aggregateStandaloneReview({
+      runId: "run.braces",
+      scope: ["src/x.ts"],
+      transcripts: [{ agent: "code-reviewer", output: transcript(["the {config} value is unchecked"]) }],
+    });
+    expect(aggregated.ok).toBe(true);
+    if (!aggregated.ok || aggregated.value.kind !== "requires-refutation") return;
+    const panelFindings = buildStandaloneFindingBrief(aggregated.value.aggregate).findings;
+    expect(panelFindings[0]?.claim).toBe("the config value is unchecked");
+    const raw = {
+      lenses: ["reproduction", "intent"], threshold: 2, surviving: 1, refuted: 0,
+      outcomes: [{
+        finding_id: panelFindings[0]!.id,
+        task_id: STANDALONE_REVIEW_SUBJECT,
+        claim: panelFindings[0]!.claim,
+        survives: true,
+        refuted_by: [], reasoning: [], upheld_by: ["reproduction", "intent"], uncertain_from: [],
+      }],
+    };
+    const parsed = parseStandalonePanelOutcomes(
+      raw,
+      aggregated.value.criticals,
+      panelFindings,
+      ["reproduction", "intent"],
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const finalized = finalizeStandaloneReview(aggregated.value.aggregate, parsed.value);
+    expect(finalized.ok).toBe(true);
+    if (finalized.ok) {
+      expect(finalized.value.survivingCriticals[0]?.claim).toBe("the {config} value is unchecked");
+    }
   });
 
   it("cannot finalize critical findings without a panel", () => {

@@ -250,6 +250,49 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     if (!parsed.ok) expect(parsed.error).toContain('"vibing"');
   });
 
+  it.each([null, [], "artifact", 42])("rejects non-object phase_artifacts: %j", (phase_artifacts) => {
+    const parsed = parseTaskGraph({ ...validGraph, phase_artifacts });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("phase_artifacts must be an object");
+  });
+
+  it("rejects unknown phase-artifact keys and non-string artifact paths", () => {
+    for (const phase_artifacts of [{ invented: "x.md" }, { architecture: 42 }]) {
+      expect(parseTaskGraph({ ...validGraph, phase_artifacts }).ok).toBe(false);
+    }
+  });
+
+  it("parses adjacent top-level TaskGraph fields instead of admitting impossible values", () => {
+    const cases = [
+      { skipped_phases: ["invented"] },
+      { spec_file: 42 },
+      { plan_file: {} },
+      { executing_tasks: ["T1", "T1"] },
+      { github_issue: 0 },
+      { github_repo: 42 },
+    ];
+    for (const fields of cases) expect(parseTaskGraph({ ...validGraph, ...fields }).ok).toBe(false);
+  });
+
+  it("rejects a captured spec check carrying the failed-capture error field", () => {
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      spec_check: {
+        wave: 1, run_at: "now", verdict: "PASSED", error: "stale",
+        critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+    });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("error must be absent");
+  });
+
+  it("rejects duplicate task ids at the load boundary", () => {
+    const parsed = parseTaskGraph({ ...validGraph, tasks: [validTask, { ...validTask }] });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("duplicate task id: T1");
+  });
+
   it("rejects an out-of-union task status (drifted 'in_progress' fails at load, not inside .exhaustive())", () => {
     const parsed = parseTaskGraph({ ...validGraph, tasks: [{ ...validTask, status: "in_progress" }] });
     expect(parsed.ok).toBe(false);

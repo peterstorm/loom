@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   classifyTaskExecutionSpawn,
+  parseImplementationTaskBindings,
   taskExecutionDecision,
 } from "../../../src/core/validate-task-execution";
 import type { TaskGraph, Task, WaveGate } from "../../../src/types";
@@ -80,6 +81,20 @@ describe("validate-task-execution — spawn lifecycle parsing", () => {
       prompt: "LOOM_REVIEW_CONTEXT: standalone\nTask ID: T1",
       description: "",
     })).toEqual({ kind: "standalone" });
+  });
+
+  it("requires every implementation spawn to bind one existing task exactly once", () => {
+    const state = mkState([mkTask({ id: "T1", wave: 1 }), mkTask({ id: "T2", wave: 1 })]);
+    const implementation = (prompt: string) => ({ kind: "implementation" as const, prompt, description: "" });
+
+    expect(parseImplementationTaskBindings(state, [implementation("Task ID: T1"), implementation("Task ID: T2")]))
+      .toEqual({ ok: true, taskIds: ["T1", "T2"] });
+    expect(parseImplementationTaskBindings(state, [implementation("implement this")]))
+      .toEqual({ ok: false, error: expect.stringContaining("no extractable Task ID") });
+    expect(parseImplementationTaskBindings(state, [implementation("Task ID: T99")]))
+      .toEqual({ ok: false, error: expect.stringContaining("unknown task T99") });
+    expect(parseImplementationTaskBindings(state, [implementation("Task ID: T1"), implementation("Task ID: T1")]))
+      .toEqual({ ok: false, error: expect.stringContaining("more than once") });
   });
 });
 

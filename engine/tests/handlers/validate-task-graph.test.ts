@@ -102,6 +102,21 @@ describe("validateFull (pure)", () => {
     expect(errorsOf(result)).toContain("'tasks' array is empty");
   });
 
+  it.each([null, 42, "task", []])("returns a validation error for malformed task entry %j", (entry) => {
+    const result = validateFull({ plan_title: "x", plan_file: "x", spec_file: "x", tasks: [entry] });
+    expect(result.ok).toBe(false);
+    expect(errorsOf(result)).toContain("Task [0]: must be an object");
+  });
+
+  it("rejects duplicate task ids", () => {
+    const result = validateFull({
+      plan_title: "x", plan_file: "x", spec_file: "x",
+      tasks: [validTask, { ...validTask, description: "duplicate" }],
+    });
+    expect(result.ok).toBe(false);
+    expect(errorsOf(result)).toContain("Duplicate task id: T1");
+  });
+
   it("rejects a non-array depends_on", () => {
     const result = validateFull({
       plan_title: "x", plan_file: "x", spec_file: "x",
@@ -583,6 +598,33 @@ describe("fixFull repairs findings WITH their derived views", () => {
     expect(twice.notes, "a repaired graph reports nothing further").toEqual([]);
   });
 
+  it("preserves a valid singleton refutation object as a one-element array", () => {
+    const refutation = {
+      finding: wellFormed,
+      refutations: [{ lens: "intent", reason: "deliberate architecture" }],
+    };
+    const once = fixFull(graphOf({ id: "T1", refuted_findings: refutation }));
+    const repaired = JSON.parse(once.json).tasks[0];
+    expect(repaired.refuted_findings).toEqual([refutation]);
+    expect(repaired.findings).toEqual([]);
+    expect(once.notes).toEqual([]);
+    expect(fixFull(JSON.parse(once.json)).json).toBe(once.json);
+  });
+
+  it("returns a valid nested finding from a malformed singleton refutation envelope", () => {
+    const once = fixFull(graphOf({
+      id: "T1",
+      refuted_findings: { finding: wellFormed, refutations: [] },
+    }));
+    const repaired = JSON.parse(once.json).tasks[0];
+    expect(repaired.refuted_findings).toEqual([]);
+    expect(repaired.findings).toEqual([wellFormed]);
+    expect(repaired.critical_findings).toEqual([wellFormed.claim]);
+    expect(once.notes).toContain(
+      `T1: recovered finding from malformed refutation record — "${wellFormed.claim}"`,
+    );
+  });
+
   it("returns a valid nested finding to the active set when its refutation envelope is malformed", () => {
     const once = fixFull(graphOf({
       id: "T1",
@@ -768,6 +810,22 @@ describe("validateFull agrees with the load boundary about the findings aggregat
     expect(repaired.tasks[0].review_evidence_failures).toBeUndefined();
     expect(parseTaskGraph(repaired).ok).toBe(true);
   });
+
+  it.each([
+    { review_evidence_failures: [42] },
+    { review_evidence_failures: [""] },
+    { review_evidence_failures: ["code-reviewer", "code-reviewer"] },
+  ])(
+    "--fix clears an invalid empty-equivalent or duplicate evidence-failure array: $review_evidence_failures",
+    ({ review_evidence_failures }) => {
+      const broken = graph({ review_status: "pending", review_evidence_failures });
+      expect(parseTaskGraph(broken).ok).toBe(false);
+      const repaired = JSON.parse(fixFull(broken).json);
+      expect(repaired.tasks[0].review_status).toBe("pending");
+      expect(repaired.tasks[0].review_evidence_failures).toBeUndefined();
+      expect(parseTaskGraph(repaired).ok).toBe(true);
+    },
+  );
 
   it("--fix preserves a well-formed evidence-failure record", () => {
     const valid = graph({

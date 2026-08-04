@@ -5,8 +5,6 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { execSync } from "node:child_process";
-import { join } from "node:path";
 import { allowWithNotice } from "../../types";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import {
@@ -14,8 +12,8 @@ import {
   REVIEW_PANEL_AGENTS, UTILITY_AGENTS, ARCH_PANEL_AGENTS,
 } from "../../config";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
-import { stripNamespace, extractNamespace } from "../../utils/strip-namespace";
-import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
+import { stripNamespace } from "../../utils/strip-namespace";
+import { resolveClaudeAgentDefinitionPath } from "../../utils/agent-definition";
 import {
   parseDeclaredSkills,
   promptReferencesSkill,
@@ -39,29 +37,6 @@ const SKILL_EXEMPT_AGENTS = new Set([
   "decompose-agent",
   "general-purpose",
 ]);
-
-/** Resolve an agent definition without crossing harness/package boundaries. */
-function resolveAgentPath(agentName: string, fullAgentType: string): string | null {
-  const candidates: string[] = [];
-  const namespace = extractNamespace(fullAgentType);
-
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-  if (pluginRoot) {
-    candidates.push(join(pluginRoot, "agents", `${agentName}.md`));
-  }
-
-  if (namespace === "loom") {
-    candidates.push(join(LOOM_PACKAGE_ROOT, "agents", `${agentName}.md`));
-  }
-
-  try {
-    const root = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
-    candidates.push(join(root, ".claude/agents", `${agentName}.md`));
-  } catch {}
-
-  candidates.push(join(process.env.HOME ?? "", ".claude/agents", `${agentName}.md`));
-  return candidates.find((p) => existsSync(p)) ?? null;
-}
 
 /** Read an agent file at the shell boundary, then use the shared pure parser. */
 export function parseSkillsFromFrontmatter(filePath: string): DeclaredSkills {
@@ -107,7 +82,7 @@ const handler: HookHandler = async (stdin) => {
   if (UTILITY_AGENTS.has(bareAgent)) return { kind: "allow" };
   if (SKILL_EXEMPT_AGENTS.has(bareAgent)) return { kind: "allow" };
 
-  const agentPath = resolveAgentPath(bareAgent, subagentType);
+  const agentPath = resolveClaudeAgentDefinitionPath(bareAgent, subagentType);
   if (!agentPath) {
     // The same uncertainty the `unreadable` branch below BLOCKS on — we cannot
     // determine which skills this agent requires — but reached by a different
@@ -129,7 +104,7 @@ const handler: HookHandler = async (stdin) => {
     const notice =
       `[loom] validate-agent-skill: no agent file found for "${subagentType}" — ` +
       `skill enforcement SKIPPED for this spawn (searched the executing Loom package, ` +
-      `CLAUDE_PLUGIN_ROOT, <git-root>/.claude/agents, and ~/.claude/agents)`;
+      `CLAUDE_PLUGIN_ROOT, repository/user agent catalogs, and development checkout agents)`;
     process.stderr.write(notice + "\n");
     return allowWithNotice(notice);
   }

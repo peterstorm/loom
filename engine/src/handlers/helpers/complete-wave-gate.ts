@@ -8,7 +8,8 @@
  */
 
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
 import { legacyTestsPassedNote, testResultPassed, newWaveGate } from "../../types";
 import { taskGraphPath } from "../../config";
@@ -450,16 +451,27 @@ export function generateWaveGateSummary(
   return lines.join('\n');
 }
 
+/** Persist the durable fallback promised by the wave-gate runbook. */
+export function persistWaveGateSummaryFallback(
+  completedWave: number,
+  body: string,
+  root: string = process.cwd(),
+): string {
+  const path = join(root, ".claude", "reviews", `wave-${completedWave}-review.md`);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, body);
+  return path;
+}
+
 /** Post GitHub comment summarizing wave gate results.
  *  Takes a snapshot of state captured under the update lock to avoid a second read. */
 function postWaveGateSummary(state: TaskGraph, completedWave: number): void {
   const githubIssue = state.github_issue;
   if (!githubIssue) return;
+  const waveTasks = state.tasks.filter((t) => t.wave === completedWave);
+  const body = generateWaveGateSummary(completedWave, waveTasks, state.spec_check);
 
   try {
-    const waveTasks = state.tasks.filter((t) => t.wave === completedWave);
-    const body = generateWaveGateSummary(completedWave, waveTasks, state.spec_check);
-
     const repoFlag = state.github_repo ? `--repo ${state.github_repo}` : "";
     execSync(`gh issue comment ${githubIssue} ${repoFlag} --body-file -`, {
       input: body,
@@ -468,8 +480,20 @@ function postWaveGateSummary(state: TaskGraph, completedWave: number): void {
     });
     process.stderr.write(`Posted wave ${completedWave} summary to issue #${githubIssue}\n`);
   } catch (e) {
-    // Non-blocking — don't fail the gate on comment failure
-    process.stderr.write(`WARNING: Failed to post GH comment: ${(e as Error).message}\n`);
+    // Non-blocking — don't fail the gate on comment failure, but preserve the
+    // summary in the documented durable fallback rather than losing it with
+    // this process's stderr.
+    try {
+      const fallback = persistWaveGateSummaryFallback(completedWave, body);
+      process.stderr.write(
+        `WARNING: Failed to post GH comment: ${(e as Error).message}; wrote fallback summary to ${fallback}\n`,
+      );
+    } catch (fallbackError) {
+      process.stderr.write(
+        `WARNING: Failed to post GH comment: ${(e as Error).message}; ` +
+        `failed to write fallback summary: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}\n`,
+      );
+    }
   }
 }
 

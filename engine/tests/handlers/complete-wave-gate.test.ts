@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   applyGateDecision,
   checkImplementationProof,
@@ -12,6 +15,7 @@ import {
   generateWaveGateSummary,
   gateCheckMessage,
   parseWaveArg,
+  persistWaveGateSummaryFallback,
   snapshotGateDeps,
   type GateDeps,
   type GateIO,
@@ -46,6 +50,19 @@ const baseTask: Task = {
   critical_findings: [],
   advisory_findings: [],
 };
+
+describe("wave-gate durable summary fallback", () => {
+  it("writes the documented fallback path", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-wave-summary-"));
+    try {
+      const path = persistWaveGateSummaryFallback(3, "wave summary\n", root);
+      expect(path).toBe(join(root, ".claude", "reviews", "wave-3-review.md"));
+      expect(readFileSync(path, "utf-8")).toBe("wave summary\n");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("checkImplementationProof (pure)", () => {
   it("requires both an implementation-bearing status and satisfied proof", () => {

@@ -97,6 +97,27 @@ function parseSession(raw: unknown, expectedRunId: string): Parse<ReviewSession>
   return errors.length > 0 || !plan.ok ? { ok: false, errors } : { ok: true, value: plan.value };
 }
 
+/** Load both copies of the frozen authority and prove lockstep. */
+function loadReviewAuthority(runDir: string): Parse<ReviewSession> {
+  const runId = basename(runDir);
+  const planRaw = readJson(join(runDir, "review-plan.json"), "review plan", runDir);
+  if (!planRaw.ok) return planRaw;
+  const plan = parseReviewPlan(planRaw.value, runId);
+  if (!plan.ok) return plan;
+
+  const sessionRaw = readJson(join(runDir, "session.json"), "review session", runDir);
+  if (!sessionRaw.ok) return sessionRaw;
+  const session = parseSession(sessionRaw.value, runId);
+  if (!session.ok) return session;
+
+  return serializeSession(plan.value) === serializeSession(session.value)
+    ? session
+    : {
+        ok: false,
+        errors: ["session.json does not match the frozen scope and expected agents in review-plan.json"],
+      };
+}
+
 function parseObservedReviews(raw: unknown, expectedAgents: readonly string[]): Parse<readonly ReviewInputEntry[]> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ok: false, errors: ["review input must be an object"] };
   const record = raw as Record<string, unknown>;
@@ -205,9 +226,7 @@ function aggregate(runDir: string, inputPath: string): HookResult {
   if (resolve(inputPath) !== resolve(join(runDir, "review-input.json"))) {
     return contractError("standalone review boundary", [`--input must be ${join(runDir, "review-input.json")}`]);
   }
-  const sessionRaw = readJson(join(runDir, "session.json"), "review session", runDir);
-  if (!sessionRaw.ok) return contractError("standalone review", sessionRaw.errors);
-  const session = parseSession(sessionRaw.value, basename(runDir));
+  const session = loadReviewAuthority(runDir);
   if (!session.ok) return contractError("standalone review", session.errors);
   const inputRaw = readJson(inputPath, "review input", runDir);
   if (!inputRaw.ok) return contractError("standalone review", inputRaw.errors);
@@ -256,9 +275,7 @@ function loadBoundAggregate(runDir: string): Parse<StandaloneReviewAggregate> {
  */
 export function loadEvidenceBoundAggregate(runDir: string): Parse<StandaloneReviewAggregate> {
   const runId = basename(runDir);
-  const sessionRaw = readJson(join(runDir, "session.json"), "review session", runDir);
-  if (!sessionRaw.ok) return sessionRaw;
-  const session = parseSession(sessionRaw.value, runId);
+  const session = loadReviewAuthority(runDir);
   if (!session.ok) return session;
 
   const inputRaw = readJson(join(runDir, "review-input.json"), "review input", runDir);

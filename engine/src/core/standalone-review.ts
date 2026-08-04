@@ -207,6 +207,7 @@ function parseStringArray(raw: unknown, path: string, errors: string[]): readonl
 export function parseStandalonePanelOutcomes(
   raw: unknown,
   criticals: readonly Finding[],
+  panelFindings: readonly { readonly id: string; readonly claim: string }[],
   expectedLenses: readonly string[],
 ): ParseResult<ParsedPanelOutcomes> {
   if (!isRecord(raw)) return fail(["standalone panel outcomes must be an object"]);
@@ -227,6 +228,15 @@ export function parseStandalonePanelOutcomes(
   const expected = new Map<string, Finding>(
     criticals.map((finding) => [`${STANDALONE_REVIEW_SUBJECT}:${finding.id}`, finding]),
   );
+  const expectedPanelClaims = new Map(panelFindings.map((finding) => [finding.id, finding.claim] as const));
+  if (expectedPanelClaims.size !== panelFindings.length) errors.push("panel findings must have distinct ids");
+  const expectedIds = [...expected.keys()];
+  const panelIds = panelFindings.map((finding) => finding.id);
+  if (panelIds.length !== expectedIds.length
+    || panelIds.some((id) => !expected.has(id))
+    || expectedIds.some((id) => !expectedPanelClaims.has(id))) {
+    errors.push("panel findings must exactly cover aggregate critical finding ids");
+  }
   const outcomes: ParsedPanelOutcome[] = [];
   for (const [index, entry] of raw.outcomes.entries()) {
     const path = `outcomes.outcomes[${index}]`;
@@ -238,7 +248,10 @@ export function parseStandalonePanelOutcomes(
     }
     if (!finding) errors.push(`${path}.finding_id is not an expected critical: ${findingId || "<empty>"}`);
     const claim = typeof entry.claim === "string" ? entry.claim.trim() : "";
-    if (finding && claim !== finding.claim) errors.push(`${path}.claim does not match aggregate finding ${findingId}`);
+    const expectedPanelClaim = expectedPanelClaims.get(findingId);
+    if (finding && expectedPanelClaim !== undefined && claim !== expectedPanelClaim) {
+      errors.push(`${path}.claim does not match canonical panel finding ${findingId}`);
+    }
     if (typeof entry.survives !== "boolean") errors.push(`${path}.survives must be boolean`);
     const refutedBy = parseStringArray(entry.refuted_by, `${path}.refuted_by`, errors);
     const reasoning = parseStringArray(entry.reasoning, `${path}.reasoning`, errors);

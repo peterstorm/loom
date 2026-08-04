@@ -424,7 +424,7 @@ describe("update-task-status — transcript path resolution", () => {
    * A session with a task graph, a bound state pointer, and — when asked — a
    * transcript planted exactly where the harness writes one.
    */
-  async function makeSession(opts: { plantTranscript: boolean; modifiedPath?: string }): Promise<{
+  async function makeSession(opts: { plantTranscript: boolean; modifiedPath?: string; transcriptTaskId?: string }): Promise<{
     session: string;
     agentId: string;
     read: () => TaskGraph;
@@ -477,7 +477,7 @@ describe("update-task-status — transcript path resolution", () => {
         JSON.stringify({
           type: "assistant",
           message: { content: [
-            { type: "text", text: "**Task ID:** T1\n\nImplemented the thing." },
+            { type: "text", text: `**Task ID:** ${opts.transcriptTaskId ?? "T1"}\n\nImplemented the thing.` },
             ...(opts.modifiedPath
               ? [{ type: "tool_use", name: "Write", input: { file_path: opts.modifiedPath } }]
               : []),
@@ -517,6 +517,24 @@ describe("update-task-status — transcript path resolution", () => {
     const task = s.read().tasks.find((t) => t.id === "T1");
     expect(task?.status, "untrusted transcript evidence must not claim implementation").toBe("pending");
     expect(task?.proof?.state).toBe("failed");
+  });
+
+  it("fails loudly when the transcript names a task outside the graph", async () => {
+    const s = await makeSession({ plantTranscript: true, transcriptTaskId: "T999" });
+
+    const result = await updateTaskStatus(JSON.stringify({
+      session_id: s.session,
+      agent_id: s.agentId,
+      agent_type: "code-implementer-agent",
+    }), []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      expect(result.message).toContain("unknown task T999");
+      expect(result.message).toContain("known tasks: T1");
+      expect(result.message).toContain("evidence was NOT stored");
+    }
+    expect(s.read().tasks[0]?.status).toBe("pending");
   });
 
   it("canonicalizes transcript paths but does not treat an attempted no-op Write as artifact proof", async () => {

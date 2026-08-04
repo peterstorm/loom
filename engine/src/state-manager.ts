@@ -265,6 +265,43 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
       `current_phase ${JSON.stringify(obj.current_phase)} is not one of ${PHASE_ORDER.join(", ")}`,
     );
   }
+  const phaseArtifacts = obj.phase_artifacts;
+  if (typeof phaseArtifacts !== "object" || phaseArtifacts === null || Array.isArray(phaseArtifacts)) {
+    return parseErr("phase_artifacts must be an object");
+  }
+  for (const [phase, artifact] of Object.entries(phaseArtifacts)) {
+    if (!(PHASE_ORDER as readonly string[]).includes(phase)) {
+      return parseErr(`phase_artifacts contains unknown phase ${JSON.stringify(phase)}`);
+    }
+    if (typeof artifact !== "string") {
+      return parseErr(`phase_artifacts.${phase} must be a string, got ${JSON.stringify(artifact)}`);
+    }
+  }
+  const skippedPhases = obj.skipped_phases ?? [];
+  if (!Array.isArray(skippedPhases)
+    || skippedPhases.some((phase) => !(PHASE_ORDER as readonly unknown[]).includes(phase))) {
+    return parseErr(`skipped_phases must be an array containing only: ${PHASE_ORDER.join(", ")}`);
+  }
+  for (const field of ["spec_dir", "spec_file", "plan_file"] as const) {
+    if (obj[field] !== undefined && obj[field] !== null && typeof obj[field] !== "string") {
+      return parseErr(`${field} must be a string or null when present, got ${JSON.stringify(obj[field])}`);
+    }
+  }
+  for (const field of ["plan_title", "github_repo", "updated_at"] as const) {
+    if (obj[field] !== undefined && typeof obj[field] !== "string") {
+      return parseErr(`${field} must be a string when present, got ${JSON.stringify(obj[field])}`);
+    }
+  }
+  if (obj.github_issue !== undefined
+    && (typeof obj.github_issue !== "number" || !Number.isInteger(obj.github_issue) || obj.github_issue < 1)) {
+    return parseErr(`github_issue must be an integer >= 1 when present, got ${JSON.stringify(obj.github_issue)}`);
+  }
+  if (obj.executing_tasks !== undefined
+    && (!Array.isArray(obj.executing_tasks)
+      || obj.executing_tasks.some((id) => typeof id !== "string" || id.trim() === "")
+      || new Set(obj.executing_tasks).size !== obj.executing_tasks.length)) {
+    return parseErr("executing_tasks must be an array of distinct non-empty strings when present");
+  }
   if (
     obj.current_wave !== undefined &&
     (typeof obj.current_wave !== "number" || !Number.isInteger(obj.current_wave) || obj.current_wave < 1)
@@ -277,6 +314,9 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
     const err = taskUnionError(tasks[i], i);
     if (err !== null) return parseErr(err);
   }
+  const taskIds = tasks.map((task) => (task as Record<string, unknown>).id as string);
+  const duplicateTaskId = taskIds.find((id, index) => taskIds.indexOf(id) !== index);
+  if (duplicateTaskId !== undefined) return parseErr(`duplicate task id: ${duplicateTaskId}`);
   const waveGates = obj.wave_gates ?? {};
   if (typeof waveGates !== "object" || waveGates === null || Array.isArray(waveGates)) {
     return parseErr("wave_gates must be an object");
@@ -288,7 +328,15 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
   const specErr = specCheckError(obj.spec_check);
   if (specErr !== null) return parseErr(specErr);
   // The single blessed cast: every union field above is proven in place.
-  return parseOk({ ...obj, tasks, wave_gates: waveGates } as unknown as TaskGraph);
+  return parseOk({
+    ...obj,
+    phase_artifacts: phaseArtifacts,
+    skipped_phases: skippedPhases,
+    spec_file: obj.spec_file ?? null,
+    plan_file: obj.plan_file ?? null,
+    tasks,
+    wave_gates: waveGates,
+  } as unknown as TaskGraph);
 }
 
 export class StateManager {

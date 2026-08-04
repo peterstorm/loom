@@ -59,16 +59,20 @@ function repoRoot(): string {
 function artifact(root: string, baseSha: string, path: string): ReviewPacketArtifactInput {
   const inspected = inspectRepositoryPath(root, path, "review packet path", { mustBeFile: true });
   const absolute = inspected.absolute;
+  const present = existsSync(absolute);
   const tracked = optionalGit(["ls-files", "--error-unmatch", "--", path], root, [1]) !== null;
+  if (!tracked && !present) {
+    throw new Error(`review packet path is neither tracked nor present: ${path}`);
+  }
   const diff = tracked
     ? git(["diff", "--binary", baseSha, "--", path], root)
-    : existsSync(absolute)
+    : present
       ? git(["diff", "--no-index", "--binary", "/dev/null", path], root, true)
       : "";
   return {
     path,
     diff,
-    postimage: existsSync(absolute) ? readFileSync(absolute, "utf-8") : null,
+    postimage: present ? readFileSync(absolute, "utf-8") : null,
   };
 }
 

@@ -13,7 +13,8 @@ failure mode** — the way this lens gets it wrong.
 
 There are **five** lenses. `reproduction` and `intent` are always included; the
 rest are selected from signals in the finding set, then this table's order fills
-any remaining slots. The panel needs at least 2 lenses, and is capped at 5.
+any remaining slots. The accepted panel size is 2–5 lenses; values outside that
+range are rejected.
 
 The first three are therefore the default unsignalled panel — cause, intent,
 consequence — the smallest set covering the three ways a finding is wrong on its

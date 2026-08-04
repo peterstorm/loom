@@ -36,6 +36,8 @@ export type ValidationResult =
 
 function ok(): ValidationResult { return { ok: true }; }
 function fail(errors: string[]): ValidationResult { return { ok: false, errors }; }
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const VALID_PHASES = new Set<string>(PHASE_ORDER);
 
@@ -139,11 +141,22 @@ export function validateFull(
 
   if (tasks.length === 0) errors.push("'tasks' array is empty");
 
-  const allIds = new Set(tasks.map((t: Record<string, unknown>) => t.id as string));
+  const taskRecords = tasks.map((task) => isRecord(task) ? task : null);
+  const validTaskRecords = taskRecords.filter((task): task is Record<string, unknown> => task !== null);
+  const taskIds = validTaskRecords.flatMap((task) =>
+    typeof task.id === "string" && task.id !== "" ? [task.id] : [],
+  );
+  const allIds = new Set(taskIds);
+  const duplicateIds = [...new Set(taskIds.filter((id, index) => taskIds.indexOf(id) !== index))];
+  for (const id of duplicateIds) errors.push(`Duplicate task id: ${id}`);
 
   for (let i = 0; i < tasks.length; i++) {
-    const task = tasks[i] as Record<string, unknown>;
-    const tid = task.id as string | undefined;
+    const task = taskRecords[i];
+    if (task === null) {
+      errors.push(`Task [${i}]: must be an object`);
+      continue;
+    }
+    const tid = typeof task.id === "string" ? task.id : undefined;
 
     if (!tid) { errors.push(`Task [${i}]: missing 'id'`); continue; }
     if (!/^T\d+$/.test(tid)) errors.push(`Task ${tid}: id must match T\\d+`);
@@ -175,9 +188,9 @@ export function validateFull(
         }
         if (dep === tid) { errors.push(`Task ${tid}: self-dependency`); continue; }
         if (!allIds.has(dep)) { errors.push(`Task ${tid}: depends on non-existent '${dep}'`); continue; }
-        const depTask = tasks.find((t: Record<string, unknown>) => t.id === dep);
-        if (depTask && wave && (depTask as Record<string, unknown>).wave as number >= wave) {
-          errors.push(`Task ${tid} (wave ${wave}): depends on '${dep}' (wave ${(depTask as Record<string, unknown>).wave}) — deps must be in earlier wave`);
+        const depTask = validTaskRecords.find((candidate) => candidate.id === dep);
+        if (depTask && wave && (depTask.wave as number) >= wave) {
+          errors.push(`Task ${tid} (wave ${wave}): depends on '${dep}' (wave ${depTask.wave}) — deps must be in earlier wave`);
         }
       }
     }
@@ -221,7 +234,7 @@ export function validateFull(
   }
 
   // Check wave contiguity — waves must be consecutive (1,2,3 not 1,3,5)
-  const waves = [...new Set(tasks.map((t: Record<string, unknown>) => t.wave as number))]
+  const waves = [...new Set(validTaskRecords.map((task) => task.wave as number))]
     .filter((w): w is number => typeof w === "number" && Number.isInteger(w))
     .sort((a, b) => a - b);
   for (let i = 1; i < waves.length; i++) {
@@ -231,11 +244,11 @@ export function validateFull(
   }
 
   // ADR tasks must be in the highest wave so they document what already shipped.
-  const adrTasks = tasks.filter((t: Record<string, unknown>) => t.agent === "adr-writer-agent");
+  const adrTasks = validTaskRecords.filter((task) => task.agent === "adr-writer-agent");
   if (adrTasks.length > 0 && waves.length > 0) {
     const maxWave = waves[waves.length - 1];
-    const nonImplTasks = tasks.filter((t: Record<string, unknown>) => t.agent !== "adr-writer-agent");
-    const implWaves = [...new Set(nonImplTasks.map((t: Record<string, unknown>) => t.wave as number))]
+    const nonImplTasks = validTaskRecords.filter((task) => task.agent !== "adr-writer-agent");
+    const implWaves = [...new Set(nonImplTasks.map((task) => task.wave as number))]
       .filter((w): w is number => typeof w === "number" && Number.isInteger(w));
     const maxImplWave = implWaves.length > 0 ? Math.max(...implWaves) : 0;
 
@@ -316,17 +329,22 @@ interface FindingsRepair {
  * `findingsLockstepError` proves at load.
  */
 function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
-  const refuted = parseStoredRefutations(t.refuted_findings);
-  const rawRefutedCount = Array.isArray(t.refuted_findings) ? t.refuted_findings.length : 0;
   // A singleton object is malformed as a container, not necessarily as a
-  // finding. Normalize it to one input entry so repair can conserve its claim
-  // (or count it as dropped) rather than silently treating it as no evidence.
+  // refutation. Normalize it to one input entry so repair can conserve its
+  // audit record (or reactivate its nested finding) instead of treating it as
+  // no evidence.
+  const rawRefutations = Array.isArray(t.refuted_findings)
+    ? t.refuted_findings
+    : t.refuted_findings === undefined ? [] : [t.refuted_findings];
+  const refuted = parseStoredRefutations(rawRefutations);
+  const rawRefutedCount = rawRefutations.length;
+  // Apply the same conservation rule to a singleton findings container.
   const rawFindings = Array.isArray(t.findings)
     ? t.findings
     : t.findings === undefined ? [] : [t.findings];
   const stored = parseStoredFindings(rawFindings);
   const represented = [...stored, ...refuted.map((record) => record.finding)];
-  const recoveredRefutationFindings = salvageFindingsFromMalformedRefutations(t.refuted_findings)
+  const recoveredRefutationFindings = salvageFindingsFromMalformedRefutations(rawRefutations)
     .filter((candidate) => !represented.some((existing) =>
       existing.id === candidate.id &&
       existing.severity === candidate.severity &&
@@ -405,7 +423,12 @@ function repairReviewRecord(t: Record<string, unknown>): {
     ? [...new Set(raw.filter((a): a is string => typeof a === "string" && a.trim() !== ""))]
     : [];
   const failed = t.review_status === "evidence_capture_failed";
-  const wellFormed = failed === agents.length > 0 && (raw === undefined || Array.isArray(raw));
+  const rawArrayWellFormed = raw === undefined || (
+    Array.isArray(raw) &&
+    raw.every((agent) => typeof agent === "string" && agent.trim() !== "") &&
+    new Set(raw).size === raw.length
+  );
+  const wellFormed = failed === agents.length > 0 && rawArrayWellFormed;
 
   if (wellFormed) {
     // Still normalize: a duplicate or blank entry loads as an error but carries

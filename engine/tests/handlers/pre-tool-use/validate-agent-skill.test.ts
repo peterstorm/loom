@@ -203,6 +203,34 @@ describe("validate-agent-skill — integration scenarios", () => {
     }
   });
 
+  it("uses the checkout agent definition for an unnamespaced spawn instead of skipping skill policy", async () => {
+    const createdGraph = !existsSync(TASK_GRAPH_PATH);
+    const previousRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    const previousHome = process.env.HOME;
+    const empty = mkdtempSync(join(tmpdir(), "loom-checkout-agent-resolution-"));
+    if (createdGraph) {
+      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
+      writeFileSync(TASK_GRAPH_PATH, "{}");
+    }
+    process.env.CLAUDE_PLUGIN_ROOT = empty;
+    process.env.HOME = empty;
+    try {
+      const result = await validateAgentSkill(JSON.stringify({
+        tool_name: "Task",
+        tool_input: { subagent_type: "arch-designer-agent", prompt: "Design one panel candidate." },
+      }), []);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") expect(result.message).toContain("architecture-tech-lead");
+    } finally {
+      if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      rmSync(empty, { recursive: true, force: true });
+      if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
+    }
+  });
+
   it("allows a namespaced panel designer spawn with its declared skill", async () => {
     const createdGraph = !existsSync(TASK_GRAPH_PATH);
     const previousRoot = process.env.CLAUDE_PLUGIN_ROOT;

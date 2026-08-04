@@ -376,12 +376,14 @@ function parseBriefFindingEntry(
 
   const errors: string[] = [];
   const id = typeof entry.id === "string" ? entry.id.trim() : "";
+  const parsedId = parseWaveFindingId(id);
   const taskId = typeof entry.task_id === "string" ? entry.task_id.trim() : "";
   const agent = typeof entry.agent === "string" ? entry.agent.trim() : "";
   const claim = typeof entry.claim === "string" ? sanitizeProse(entry.claim) : "";
   const severity = parseFindingSeverity(entry.severity);
 
   if (id === "") errors.push(`${path}.id must be a non-empty string`);
+  else if (parsedId === null) errors.push(`${path}.id must match task-id:finding-id without whitespace or extra colons`);
   if (taskId === "") errors.push(`${path}.task_id must be a non-empty string`);
   if (agent === "") errors.push(`${path}.agent must be a non-empty string`);
   if (claim === "") errors.push(`${path}.claim must be non-empty after sanitization`);
@@ -405,9 +407,10 @@ function parseBriefFindingEntry(
   const line = Number.isInteger(entry.line) && (entry.line as number) > 0 ? (entry.line as number) : null;
 
   return {
-    // The `${taskId}:` prefix was proven above, which is what earns the brand.
-    finding: errors.length === 0 && severity !== null
-      ? { id: id as WaveFindingId, taskId, agent, severity, file: file || null, line, claim }
+    // Both the external grammar and the `${taskId}:` cross-field invariant are
+    // proven above; only the smart constructor's value earns the brand.
+    finding: errors.length === 0 && severity !== null && parsedId !== null
+      ? { id: parsedId, taskId, agent, severity, file: file || null, line, claim }
       : null,
     errors,
   };

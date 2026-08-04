@@ -326,6 +326,15 @@ describe("parseFindingBriefJson — re-parse, never trust the writer", () => {
     expect(parseFindingBriefJson(raw).ok).toBe(false);
   });
 
+  it.each(["T1:code:reviewer-1", "T1:code reviewer-1"])(
+    "rejects an id outside the WaveFindingId grammar: %s",
+    (id) => {
+      const raw = validBrief();
+      raw.findings[0].id = id;
+      expect(parseFindingBriefJson(raw).ok).toBe(false);
+    },
+  );
+
   it("rejects duplicate finding ids", () => {
     const raw = validBrief();
     raw.findings.push({ ...raw.findings[0] });

@@ -160,6 +160,7 @@ export function parseStoredSpecCheck(raw: unknown): SpecCheckParseResult {
       : { ok: true, value: spec as unknown as EvidenceFailedSpecCheck };
   }
 
+  if (spec.error !== undefined) errors.push("spec_check.error must be absent when evidence capture succeeded");
   if (!count(spec.critical_count)) errors.push("spec_check.critical_count must be a non-negative integer");
   if (!count(spec.high_count)) errors.push("spec_check.high_count must be a non-negative integer");
   if (!stringArray(spec.critical_findings)) errors.push("spec_check.critical_findings must be an array of strings");

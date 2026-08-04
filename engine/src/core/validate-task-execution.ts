@@ -91,6 +91,32 @@ export function taskExecutionDecision(state: TaskGraph, taskId: string): HookRes
   return { kind: "allow" };
 }
 
+export type ImplementationTaskBindings =
+  | Readonly<{ ok: true; taskIds: readonly string[] }>
+  | Readonly<{ ok: false; error: string }>;
+
+/** Pure smart constructor for the task identities carried by one spawn batch. */
+export function parseImplementationTaskBindings(
+  state: TaskGraph,
+  inputs: readonly Extract<TaskExecutionSpawn, { kind: "implementation" }>[],
+): ImplementationTaskBindings {
+  const taskIds: string[] = [];
+  for (const [index, input] of inputs.entries()) {
+    const taskId = extractTaskId(input.prompt) ?? extractTaskId(input.description);
+    if (taskId === null) {
+      return { ok: false, error: `Implementation spawn ${index + 1} has no extractable Task ID while a task graph is active.` };
+    }
+    if (!state.tasks.some((task) => task.id === taskId)) {
+      return { ok: false, error: `Implementation spawn ${index + 1} names unknown task ${taskId}.` };
+    }
+    if (taskIds.includes(taskId)) {
+      return { ok: false, error: `Implementation batch binds task ${taskId} more than once.` };
+    }
+    taskIds.push(taskId);
+  }
+  return { ok: true, taskIds };
+}
+
 /**
  * Imperative shell: preflight every input against one state snapshot, capture
  * every baseline, then register the accepted batch in one locked update. A
@@ -108,10 +134,9 @@ export async function validateTaskExecutionBatch(
   if (!mgr) return { kind: "allow" };
 
   const state = mgr.load();
-  const taskIds = [...new Set(inputs.flatMap((input) => {
-    const taskId = extractTaskId(input.prompt) ?? extractTaskId(input.description);
-    return taskId === null ? [] : [taskId];
-  }))];
+  const bindings = parseImplementationTaskBindings(state, inputs);
+  if (!bindings.ok) return { kind: "block", message: `BLOCKED: ${bindings.error}` };
+  const taskIds = bindings.taskIds;
 
   for (const taskId of taskIds) {
     const decision = taskExecutionDecision(state, taskId);

@@ -198,9 +198,8 @@ describe("validateFull — edge cases", () => {
         { id: "T1", description: "duplicate", agent: "ts-test-agent", wave: 1, depends_on: [] },
       ]),
     );
-    // Both T1s exist in allIds set — no direct "duplicate" error but still valid check
-    // The key is: does the system handle it gracefully?
-    expect(result).toBeDefined();
+    expect(result.ok).toBe(false);
+    expect(errorsOf(result)).toContain("Duplicate task id: T1");
   });
 
   it("rejects wave gaps (wave 1, wave 3, no wave 2)", () => {

@@ -128,17 +128,78 @@ function loadGraph(): ParseResult<TaskGraph> {
   }
 }
 
-/** Read back and re-validate the brief a run wrote. */
+/**
+ * Re-read the brief and bind it to its live authority. Parsing proves shape;
+ * exact canonical equality proves the verifier-facing claim set still comes
+ * from the task graph or the standalone evidence chain.
+ */
 function loadBrief(runDir: string): ParseResult<FindingBrief> {
   const path = join(runDir, LAYOUT.contextJson);
+  let parsed: ParseResult<FindingBrief>;
   try {
-    return parseFindingBriefJson(JSON.parse(readFileSync(path, "utf-8")));
+    parsed = parseFindingBriefJson(JSON.parse(readFileSync(path, "utf-8")));
   } catch (error) {
     return {
       ok: false,
       errors: [`cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`],
     };
   }
+  if (!parsed.ok) return parsed;
+
+  // session.json is created only for standalone runs. Use the run-local marker
+  // rather than a tamperable source_kind field so a standalone operation can
+  // never be redirected into the active orchestration Task State File.
+  let expected: FindingBrief;
+  if (existsSync(join(runDir, "session.json"))) {
+    if (parsed.value.source !== "standalone") {
+      return { ok: false, errors: ["standalone run brief must declare source_kind 'standalone'"] };
+    }
+    const aggregate = loadEvidenceBoundAggregate(runDir);
+    if (!aggregate.ok) return aggregate;
+    expected = buildStandaloneFindingBrief(aggregate.value);
+  } else {
+    if (parsed.value.source === "standalone") {
+      return { ok: false, errors: ["standalone brief is missing its run-local session authority"] };
+    }
+    const state = loadGraph();
+    if (!state.ok) return state;
+    const stale = staleWaveError(parsed.value.wave, state.value.current_wave);
+    if (stale !== null) return { ok: false, errors: [stale] };
+    expected = buildFindingBrief(parsed.value.wave, state.value.tasks, parsed.value.severity);
+    const completeness = briefCompletenessErrors(expected, state.value.tasks);
+    if (completeness.length > 0) return { ok: false, errors: completeness };
+  }
+
+  return serializeFindingBrief(parsed.value) === serializeFindingBrief(expected)
+    ? { ok: true, value: expected }
+    : { ok: false, errors: ["brief.json does not match the canonical brief rederived from review authority"] };
+}
+
+/** Exact content binding for every artifact the verifier reads. */
+function canonicalArtifactErrors(
+  brief: FindingBrief,
+  manifest: { readonly briefFile: string; readonly briefJson: string; readonly findings: readonly { readonly id: WaveFindingId; readonly path: string }[] },
+): string[] {
+  const byId = new Map(brief.findings.map((finding) => [finding.id, finding] as const));
+  const expected: Array<readonly [string, string]> = [
+    [manifest.briefFile, renderFindingBriefMarkdown(brief)],
+    [manifest.briefJson, serializeFindingBrief(brief) + "\n"],
+    ...manifest.findings.flatMap((entry): Array<readonly [string, string]> => {
+      const finding = byId.get(entry.id);
+      return finding === undefined ? [] : [[entry.path, serializeBriefFinding(finding) + "\n"]];
+    }),
+  ];
+  const errors: string[] = [];
+  for (const [path, canonical] of expected) {
+    try {
+      if (readFileSync(path, "utf-8") !== canonical) {
+        errors.push(`artifact content does not match the canonical review brief: ${path}`);
+      }
+    } catch (error) {
+      errors.push(`cannot read artifact content ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return errors;
 }
 
 /** brief — engine-authored context artifacts for a wave or standalone run. */
@@ -281,6 +342,26 @@ const handler: HookHandler = async (stdin, args) => {
     manifestPath = boundary.value.manifestPath;
   }
 
+  // A completed wave tally intentionally changes the authority from which its
+  // brief was derived. Recognize the immutable run closure before re-binding
+  // artifacts so replay gets the precise closed-run diagnostic rather than a
+  // misleading content-drift error caused by the tally's own state update.
+  if (operation === "verdict" || operation === "tally") {
+    const closurePath = join(runDir, "tally-closure.json");
+    if (existsSync(closurePath)) {
+      let closedIds = "<unknown findings>";
+      try {
+        const closure = JSON.parse(readFileSync(closurePath, "utf-8")) as { finding_ids?: unknown };
+        if (Array.isArray(closure.finding_ids) && closure.finding_ids.every((id) => typeof id === "string")) {
+          closedIds = closure.finding_ids.join(", ");
+        }
+      } catch { /* the closed-run polarity is still authoritative */ }
+      return contractError("review tally", [
+        `this review run has already been tallied or has an incomplete prior tally: ${closedIds}`,
+      ]);
+    }
+  }
+
   // The manifest is read BEFORE lens selection, not after, because it is what
   // fixes the panel size for this run. `--lenses` chooses that size once, at
   // `manifest`; every later operation recovers it from the file rather than
@@ -370,6 +451,8 @@ const handler: HookHandler = async (stdin, args) => {
     manifest.value.findings.map((finding) => finding.path),
   );
   if (artifacts.length > 0) return contractError("review artifacts", artifacts);
+  const contentErrors = canonicalArtifactErrors(brief.value, manifest.value);
+  if (contentErrors.length > 0) return contractError("review artifacts", contentErrors);
 
   if (operation === "manifest") {
     return writeCanonicalOutput(JSON.stringify(manifestRaw, null, 2) + "\n");
@@ -450,6 +533,7 @@ const handler: HookHandler = async (stdin, args) => {
     const panel = parseStandalonePanelOutcomes(
       JSON.parse(outcomesJson),
       criticals,
+      brief.value.findings,
       manifest.value.lenses,
     );
     if (!panel.ok) return contractError("review tally", panel.errors);

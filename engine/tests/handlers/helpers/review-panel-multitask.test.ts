@@ -277,11 +277,19 @@ describe("review panel over a multi-task wave", () => {
     expect(tally().status).toBe(0);
     expect(taskById("T1").review_status).toBe("passed");
 
-    writeVerdicts({
-      [T1_F1]: ["upheld", "upheld", "upheld"],
-      [T2_F1]: ["refuted", "refuted", "refuted"],
-      [T2_F2]: ["refuted", "refuted", "refuted"],
-    });
+    const rewrittenVerdict = run(
+      ["verdict", "--lens", "reproduction", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST],
+      JSON.stringify({
+        criterion: "reproduction",
+        verdicts: [
+          { finding_id: T1_F1, verdict: "upheld", reasoning: "changed" },
+          { finding_id: T2_F1, verdict: "refuted", reasoning: "changed" },
+          { finding_id: T2_F2, verdict: "refuted", reasoning: "changed" },
+        ],
+      }),
+    );
+    expect(rewrittenVerdict.status).toBe(1);
+    expect(rewrittenVerdict.stderr).toContain("already been tallied");
     const second = tally();
     expect(second.status, "the replay guard must fire").toBe(1);
     expect(second.stderr).toContain("already been tallied");

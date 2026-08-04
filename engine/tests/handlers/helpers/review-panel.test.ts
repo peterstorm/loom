@@ -256,6 +256,38 @@ describe("review-panel helper CLI", () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("review artifacts contract failed");
     });
+
+    it("rejects a schema-valid brief claim that drifts from task-state authority", () => {
+      stage();
+      const path = join(runDir, "brief.json");
+      const brief = JSON.parse(readFileSync(path, "utf-8"));
+      brief.findings[0].claim = "substituted claim";
+      writeFileSync(path, JSON.stringify(brief, null, 2) + "\n");
+      const result = run(["lenses", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("does not match the canonical brief rederived");
+    });
+
+    it("rejects a tampered Markdown brief even when brief.json is intact", () => {
+      stage();
+      writeFileSync(join(runDir, "brief.md"), "different verifier context\n");
+      const result = run(["lenses", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("artifact content does not match");
+      expect(result.stderr).toContain("brief.md");
+    });
+
+    it("rejects a tampered per-finding claim under an unchanged finding id", () => {
+      stage();
+      const path = join(runDir, "findings", "finding-T1-code-reviewer-1.json");
+      const finding = JSON.parse(readFileSync(path, "utf-8"));
+      finding.claim = "substituted claim";
+      writeFileSync(path, JSON.stringify(finding, null, 2) + "\n");
+      const result = run(["lenses", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("artifact content does not match");
+      expect(result.stderr).toContain("finding-T1-code-reviewer-1.json");
+    });
   });
 
   describe("verdict", () => {
@@ -593,9 +625,14 @@ describe("review-panel helper CLI", () => {
     expect(JSON.parse(readFileSync(join(runDir, "outcomes.json"), "utf-8")).refuted).toBe(0);
     expect(readFileSync(join(runDir, "tally-closure.json"), "utf-8")).toContain(F1);
 
-    // Rewrite every canonical slot to a majority-refuted result. The immutable
-    // run closure, not task.refuted_findings, must reject this second decision.
-    writeVerdicts([["refuted", "refuted"], ["refuted", "refuted"], ["upheld", "upheld"]]);
+    // Attempt to rewrite a canonical slot to a refuted result. The immutable
+    // run closure blocks the verdict handoff before a second decision can form.
+    const rewritten = run(
+      ["verdict", "--lens", "reproduction", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST],
+      verdictJson("reproduction", "refuted", "refuted"),
+    );
+    expect(rewritten.status).toBe(1);
+    expect(rewritten.stderr).toContain("already been tallied");
     const second = run(["tally", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
     expect(second.status).toBe(1);
     expect(second.stderr).toContain("already been tallied");

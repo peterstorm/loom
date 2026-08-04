@@ -603,7 +603,15 @@ export const runUpdateTaskStatus = async (
 
   const state = mgr.load();
   const task = state.tasks.find((t) => t.id === taskId);
-  if (!task) return { kind: "passthrough" };
+  if (!task) {
+    return {
+      kind: "error",
+      message:
+        `update-task-status: transcript named unknown task ${taskId}; ` +
+        `known tasks: ${state.tasks.map((candidate) => candidate.id).join(", ") || "<none>"}. ` +
+        "Implementation evidence was NOT stored.",
+    };
+  }
 
   let filesModified: string[];
   try {

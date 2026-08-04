@@ -121,6 +121,48 @@ describe("standalone review helper and refutation adapter", () => {
     expect(run.stderr).toContain("already been finalized");
   });
 
+  it("rejects session authority that drifts from the frozen review plan", () => {
+    initialize();
+    const sessionPath = join(tmp, runDir, "session.json");
+    const session = JSON.parse(readFileSync(sessionPath, "utf-8"));
+    session.scope = ["src/other.ts"];
+    writeFileSync(sessionPath, JSON.stringify(session));
+
+    const run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("does not match the frozen scope and expected agents");
+  });
+
+  it("tallies a brace-bearing claim and publishes the original reviewer text", () => {
+    initialize();
+    writeFileSync(
+      join(tmp, runDir, "reviewers/1-code-reviewer.md"),
+      reviewOutput.replaceAll("impossible failure", "the {config} value is unchecked"),
+    );
+    let run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
+    expect(run.status, run.stderr).toBe(0);
+    run = cli("review-panel", ["brief", "--runs-root", runsRoot, "--run-dir", runDir, "--standalone", join(runDir, "aggregate.json")]);
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toContain("the config value is unchecked");
+    expect(run.stdout).not.toContain("{config}");
+    run = cli("review-panel", ["manifest", "--runs-root", runsRoot, "--run-dir", runDir]);
+    expect(run.status, run.stderr).toBe(0);
+    const manifest = JSON.parse(run.stdout);
+    for (const [index, lens] of manifest.lenses.entries()) {
+      const raw = JSON.stringify({
+        criterion: lens,
+        verdicts: [{ finding_id: manifest.findings[0].id, verdict: "upheld", reasoning: "reachable" }],
+      });
+      run = cli("review-panel", ["verdict", "--lens", lens, "--runs-root", runsRoot, "--manifest", join(runDir, "manifest.json")], raw);
+      expect(run.status, run.stderr).toBe(0);
+      writeFileSync(join(tmp, runDir, `verdicts/verdict-${index + 1}.json`), run.stdout);
+    }
+    run = cli("review-panel", ["tally", "--runs-root", runsRoot, "--manifest", join(runDir, "manifest.json")]);
+    expect(run.status, run.stderr).toBe(0);
+    const result = JSON.parse(readFileSync(join(tmp, runDir, "result.json"), "utf-8"));
+    expect(result.surviving_critical_findings[0].claim).toBe("the {config} value is unchecked");
+  });
+
   it("requires the observed reviewer set, immutable slots, and physical files to match", () => {
     initialize(["code-reviewer", "type-design-analyzer"]);
     writeFileSync(join(tmp, runDir, "review-input.json"), JSON.stringify({
