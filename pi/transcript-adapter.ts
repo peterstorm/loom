@@ -29,9 +29,49 @@ export interface PiMessage {
   readonly isError?: boolean;
 }
 
+export type PiTranscriptResult<T> =
+  | Readonly<{ ok: true; value: T }>
+  | Readonly<{ ok: false; errors: readonly string[] }>;
+
+function transcriptErrors(messages: readonly PiMessage[]): readonly string[] {
+  const errors: string[] = [];
+  messages.forEach((message, messageIndex) => {
+    if (!Array.isArray(message.content)) {
+      errors.push(`messages[${messageIndex}].content must be an array`);
+      return;
+    }
+    message.content.forEach((block, blockIndex) => {
+      const label = `messages[${messageIndex}].content[${blockIndex}]`;
+      if (!block || typeof block !== "object" || typeof block.type !== "string") {
+        errors.push(`${label} must be a typed content block`);
+        return;
+      }
+      if (block.type !== "toolCall") return;
+      if (typeof block.id !== "string" || block.id.trim() === "") errors.push(`${label}.id must be non-empty`);
+      if (typeof block.name !== "string" || block.name.trim() === "") errors.push(`${label}.name must be non-empty`);
+      if (block.name?.toLowerCase() === "bash" && typeof block.arguments?.command !== "string") {
+        errors.push(`${label}.arguments.command must be a string for Bash`);
+      }
+    });
+    if (message.role === "toolResult") {
+      if (typeof message.toolCallId !== "string" || message.toolCallId.trim() === "") {
+        errors.push(`messages[${messageIndex}].toolCallId must be non-empty`);
+      }
+      if (typeof message.toolName !== "string" || message.toolName.trim() === "") {
+        errors.push(`messages[${messageIndex}].toolName must be non-empty`);
+      }
+    }
+  });
+  return errors;
+}
+
 /** Pair only parser-proven test commands with their exact Pi tool result.
  * The classified test segment must own the Bash call's exit status. */
-export function piStructuredTestResult(messages: readonly PiMessage[]): { passed: boolean; evidence: string } | null {
+export function piStructuredTestResult(
+  messages: readonly PiMessage[],
+): PiTranscriptResult<{ passed: boolean; evidence: string } | null> {
+  const errors = transcriptErrors(messages);
+  if (errors.length > 0) return { ok: false, errors };
   const testCalls = new Map<string, ClassifiedTestCommand>();
   let latest: { passed: boolean; evidence: string } | null = null;
   for (const message of messages) {
@@ -56,7 +96,7 @@ export function piStructuredTestResult(messages: readonly PiMessage[]): { passed
     const parsed = extractTestEvidence(text);
     latest = { passed: attributedExit === 0 && parsed.passed, evidence: parsed.evidence };
   }
-  return latest;
+  return { ok: true, value: latest };
 }
 
 /**
@@ -64,17 +104,20 @@ export function piStructuredTestResult(messages: readonly PiMessage[]): { passed
  * by Loom's transcript parsers. Tool-call IDs are preserved so anti-spoofing
  * parsers can pair a real command with its exact result.
  */
-export function messagesToClaudeJsonl(messages: readonly PiMessage[]): string {
+export function messagesToClaudeJsonl(messages: readonly PiMessage[]): PiTranscriptResult<string> {
+  const errors = transcriptErrors(messages);
+  if (errors.length > 0) return { ok: false, errors };
   const lines: string[] = [];
 
   for (const msg of messages) {
     if (msg.role === "assistant") {
       const content = msg.content.map((block) => {
         if (block.type === "toolCall") {
+          if (!block.name || !block.id) throw new Error("validated Pi tool call lost its identity");
           return {
             type: "tool_use",
-            name: TOOL_NAME_MAP[block.name ?? ""] ?? block.name ?? "",
-            id: block.id ?? "",
+            name: TOOL_NAME_MAP[block.name] ?? block.name,
+            id: block.id,
             input: block.arguments ?? {},
           };
         }
@@ -86,6 +129,7 @@ export function messagesToClaudeJsonl(messages: readonly PiMessage[]): string {
     }
 
     if (msg.role === "toolResult") {
+      if (!msg.toolCallId) throw new Error("validated Pi tool result lost its call identity");
       const resultContent = msg.content.map((block) =>
         block.type === "text" ? { type: "text", text: block.text ?? "" } : block,
       );
@@ -94,7 +138,7 @@ export function messagesToClaudeJsonl(messages: readonly PiMessage[]): string {
           role: "user",
           content: [{
             type: "tool_result",
-            tool_use_id: msg.toolCallId ?? "",
+            tool_use_id: msg.toolCallId,
             content: resultContent,
           }],
         },
@@ -110,5 +154,5 @@ export function messagesToClaudeJsonl(messages: readonly PiMessage[]): string {
     }
   }
 
-  return lines.length === 0 ? "" : `${lines.join("\n")}\n`;
+  return { ok: true, value: lines.length === 0 ? "" : `${lines.join("\n")}\n` };
 }

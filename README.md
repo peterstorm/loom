@@ -634,7 +634,11 @@ keeps the generation, packet/head identity, and all reviewer reasons. A single
 
 Implementation writes increment `review_generation`. `review-packet create`
 starts a `review_run` bound to that generation, packet, exact reviewer roster,
-and the ordered active finding IDs. Reviewer results stage new findings and must
+and the ordered active finding IDs. In the same atomic state transition it
+appends an `issued_review_packets` registration containing the Task, canonical
+packet path, packet id, base/head revisions, and exact scope. Historical write
+recovery requires an exact registration match: a packet's self-hashes prove
+integrity but cannot prove the engine issued it. Reviewer results stage new findings and must
 assess every prior ID exactly once. Nothing retires and no new finding becomes
 active until the complete roster lands; missing/malformed lifecycle evidence
 fails closed. Finalization is atomic, so concurrent reviewers cannot erase one

@@ -8,8 +8,8 @@ import {
   registerTaskExecutionBaseline,
   taskExecutionDecision,
   taskExecutionOwnershipError,
-  validateTaskExecutionBatch,
 } from "../../../src/core/validate-task-execution";
+import { validateTaskExecutionBatch } from "../../../src/handlers/task-execution";
 import type { TaskGraph, Task, WaveGate } from "../../../src/types";
 
 /** Exercise the production pure decision while preserving concise assertions. */
@@ -124,6 +124,42 @@ describe("validate-task-execution — lazy task graph authority", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+});
+
+describe("validate-task-execution — repository proof boundary", () => {
+  it.each(["not-a-repository", "unborn-repository"])(
+    "blocks an active implementation spawn in %s",
+    async (scenario) => {
+      const root = mkdtempSync(join(tmpdir(), "loom-task-execution-git-"));
+      const statePath = join(root, "active_task_graph.json");
+      const previousState = process.env.LOOM_STATE_PATH;
+      const previousProject = process.env.CLAUDE_PROJECT_DIR;
+      writeFileSync(statePath, JSON.stringify(mkState([mkTask({ id: "T1", wave: 1 })])));
+      if (scenario === "unborn-repository") {
+        const { execFileSync } = await import("node:child_process");
+        execFileSync("git", ["init", "--quiet"], { cwd: root });
+      }
+      process.env.LOOM_STATE_PATH = statePath;
+      process.env.CLAUDE_PROJECT_DIR = root;
+      try {
+        const result = await validateTaskExecutionBatch([{
+          kind: "implementation",
+          prompt: "Task ID: T1",
+          description: "",
+        }]);
+        expect(result).toMatchObject({
+          kind: "block",
+          message: expect.stringContaining("Cannot capture implementation baseline"),
+        });
+      } finally {
+        if (previousState === undefined) delete process.env.LOOM_STATE_PATH;
+        else process.env.LOOM_STATE_PATH = previousState;
+        if (previousProject === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+        else process.env.CLAUDE_PROJECT_DIR = previousProject;
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe("validate-task-execution — exclusive ownership", () => {

@@ -21,6 +21,39 @@ function loadCorpus(path: string) {
   catch (error) { return { ok: false as const, errors: [`cannot read corpus ${path}: ${error}`] }; }
 }
 
+export type CalibrationRevisionProbe =
+  | Readonly<{ kind: "present" }>
+  | Readonly<{ kind: "missing" }>
+  | Readonly<{ kind: "error"; message: string }>;
+
+export function classifyCalibrationRevisionProbeError(
+  error: unknown,
+  revision: string,
+): CalibrationRevisionProbe {
+  const detail = error && typeof error === "object"
+    ? error as { status?: unknown; stderr?: unknown; code?: unknown; message?: unknown }
+    : {};
+  const status = typeof detail.status === "number" ? detail.status : null;
+  const stderr = detail.stderr === undefined ? "" : String(detail.stderr).trim();
+  if (status === 128 && /(?:not a valid object name|bad object|unknown revision|invalid object name)/i.test(stderr)) {
+    return { kind: "missing" };
+  }
+  const code = typeof detail.code === "string" ? `${detail.code}: ` : "";
+  const reason = stderr || (typeof detail.message === "string" ? detail.message : String(error));
+  return { kind: "error", message: `cannot verify calibration revision ${revision}: ${code}${reason}` };
+}
+
+function probeCalibrationRevision(revision: string): CalibrationRevisionProbe {
+  try {
+    execFileSync("git", ["cat-file", "-e", `${revision}^{commit}`], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    return { kind: "present" };
+  } catch (error) {
+    return classifyCalibrationRevisionProbeError(error, revision);
+  }
+}
+
 const handler: HookHandler = async (stdin, args) => {
   const operation = args[0];
   const corpusPath = arg(args, "--corpus") ?? "calibration/corpus.json";
@@ -31,12 +64,12 @@ const handler: HookHandler = async (stdin, args) => {
   if (!corpus.ok) return { kind: "error", message: `Invalid calibration corpus:\n${corpus.errors.map((e) => `  - ${e}`).join("\n")}` };
 
   if (operation === "validate") {
-    const missing = corpus.value.cases.filter((entry) => {
-      try {
-        execFileSync("git", ["cat-file", "-e", `${entry.revision}^{commit}`], { stdio: "ignore" });
-        return false;
-      } catch { return true; }
-    });
+    const missing: Array<(typeof corpus.value.cases)[number]> = [];
+    for (const entry of corpus.value.cases) {
+      const probe = probeCalibrationRevision(entry.revision);
+      if (probe.kind === "error") return { kind: "error", message: probe.message };
+      if (probe.kind === "missing") missing.push(entry);
+    }
     if (missing.length > 0) {
       return { kind: "error", message: `Calibration revisions are missing: ${missing.map((entry) => `${entry.id}:${entry.revision}`).join(", ")}` };
     }

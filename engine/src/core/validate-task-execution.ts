@@ -1,18 +1,10 @@
-/**
- * Core: Validate wave order, dependencies, and review gates before task execution.
- * Harness-agnostic — no stdin parsing. Not pure: reads the filesystem
- * (existsSync; loads the task graph).
- */
+/** Pure task-execution lifecycle classification and gate decisions. */
 
-import { existsSync } from "node:fs";
 import type { HookResult, Task, TaskGraph } from "../types";
-import { IMPL_AGENTS, taskGraphPath } from "../config";
+import { IMPL_AGENTS } from "../config";
 import { extractTaskId } from "../utils/extract-task-id";
 import { stripNamespace } from "../utils/strip-namespace";
 import { hasStandaloneReviewContext } from "./review-output";
-import { StateManager } from "../state-manager";
-import * as git from "../utils/git";
-import { captureDeclaredArtifactBaseline } from "../utils/artifact-baseline";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 
 export interface ValidateTaskExecutionInput {
@@ -182,87 +174,4 @@ export function registerTaskExecutionBaseline(
     artifact_baseline: task.artifact_baseline ?? proofBaseline,
     attempt_artifact_baseline: attemptBaseline,
   };
-}
-
-/**
- * Imperative shell: preflight every input against one state snapshot, capture
- * every baseline, then register the accepted batch in one locked update. A
- * blocked sibling therefore leaves no ghost execution state behind.
- */
-export async function validateTaskExecutionBatch(
-  spawns: readonly TaskExecutionSpawn[],
-  mode: ExecutionBatchMode = "parallel",
-): Promise<HookResult> {
-  const inputs = spawns.filter(
-    (spawn): spawn is Extract<TaskExecutionSpawn, { kind: "implementation" }> =>
-      spawn.kind === "implementation",
-  );
-  if (inputs.length === 0) return { kind: "allow" };
-  const statePath = taskGraphPath();
-  if (!existsSync(statePath)) return { kind: "allow" };
-  const mgr = StateManager.fromPath(statePath);
-  if (!mgr) return { kind: "allow" };
-
-  const state = mgr.load();
-  const bindings = parseImplementationTaskBindings(state, inputs);
-  if (!bindings.ok) return { kind: "block", message: `BLOCKED: ${bindings.error}` };
-  const taskIds = bindings.taskIds;
-  const ownershipError = taskExecutionOwnershipError(state, taskIds, mode);
-  if (ownershipError !== null) return { kind: "block", message: `BLOCKED: ${ownershipError}` };
-
-  for (const taskId of taskIds) {
-    const decision = taskExecutionDecision(state, taskId);
-    if (decision.kind === "block") return decision;
-  }
-
-  if (!git.isGitRepo()) return { kind: "allow" };
-  const sha = git.headSha();
-  const root = git.repositoryRoot();
-  if (!sha || !root) return { kind: "allow" };
-
-  const baselines = new Map<string, Readonly<{
-    proof: ReturnType<typeof captureDeclaredArtifactBaseline>;
-    attempt: ReturnType<typeof captureDeclaredArtifactBaseline>;
-  }>>();
-  for (const taskId of taskIds) {
-    const task = state.tasks.find((candidate) => candidate.id === taskId);
-    if (!task) continue;
-    try {
-      const declared = task.file_list ?? [];
-      const attemptScope = [...new Set([...declared, ...(task.files_modified ?? [])])];
-      baselines.set(taskId, {
-        proof: captureDeclaredArtifactBaseline(root, declared),
-        attempt: captureDeclaredArtifactBaseline(root, attemptScope),
-      });
-    } catch (error) {
-      return {
-        kind: "block",
-        message: `BLOCKED: Cannot snapshot declared artifacts for ${taskId}: ${error instanceof Error ? error.message : String(error)}`,
-      };
-    }
-  }
-  if (baselines.size === 0) return { kind: "allow" };
-
-  let lockedOwnershipError: string | null = null;
-  await mgr.update((current) => {
-    lockedOwnershipError = taskExecutionOwnershipError(current, taskIds, mode);
-    if (lockedOwnershipError !== null) return current;
-    return {
-      ...current,
-      executing_tasks: [...new Set([...(current.executing_tasks ?? []), ...baselines.keys()])],
-      tasks: current.tasks.map((task) => {
-        const artifactBaselines = baselines.get(task.id);
-        return artifactBaselines === undefined
-          ? task
-          : registerTaskExecutionBaseline(task, sha, artifactBaselines.proof, artifactBaselines.attempt);
-      }),
-    };
-  });
-  return lockedOwnershipError === null
-    ? { kind: "allow" }
-    : { kind: "block", message: `BLOCKED: ${lockedOwnershipError}` };
-}
-
-export async function validateTaskExecution(input: ValidateTaskExecutionInput): Promise<HookResult> {
-  return validateTaskExecutionBatch([classifyTaskExecutionSpawn(input)]);
 }

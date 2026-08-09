@@ -72,9 +72,13 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper reconcile-implementation-proof \
 
 Repeat `--packet` to union immutable packets for one Task or cover multiple
 Tasks. The override must be one exact commit SHA that is an ancestor of `HEAD`.
-Every packet is canonical-ID and internal-content-digest verified (including
-legacy schema-v1 packets), bound to its embedded Task and the same baseline,
-and constrained to that Task's declared paths. Recovery then verifies that each
+Every packet must exactly match the engine-issued registration atomically
+stored on its Task when `review-packet create` published it: Task id, canonical
+packet path, packet id, base/head revisions, and scope. Self-hashes prove packet
+integrity, not provenance; legacy or hand-authored packets without that protected
+registration cannot supply write attribution. Recovery also verifies the packet's
+canonical identity/content digests, embedded Task, baseline, and declared paths,
+then verifies that each
 attributed path's current bytes differ from the trusted Git baseline. It does
 not require current bytes to equal the packet's historical postimage, because
 later legitimate edits are cumulative. Declared paths are repository-validated,

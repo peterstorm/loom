@@ -17,6 +17,44 @@ function resolveRepoRoot(): string | undefined {
 
 const repoRoot = resolveRepoRoot();
 
+export type GitRepositoryContext =
+  | Readonly<{ ok: true; root: string; headSha: string }>
+  | Readonly<{ ok: false; error: string }>;
+
+function commandFailure(error: unknown): string {
+  if (!error || typeof error !== "object") return String(error);
+  const detail = error as { code?: unknown; status?: unknown; stderr?: unknown; message?: unknown };
+  const code = typeof detail.code === "string" ? detail.code : null;
+  const status = typeof detail.status === "number" ? `exit ${detail.status}` : null;
+  const stderr = detail.stderr === undefined ? "" : String(detail.stderr).trim();
+  const message = typeof detail.message === "string" ? detail.message : "git command failed";
+  return [code, status, stderr || message].filter((part): part is string => part !== null && part !== "").join(": ");
+}
+
+/** Resolve the repository root and exact HEAD as one typed proof boundary. */
+export function repositoryContext(): GitRepositoryContext {
+  const cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  try {
+    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    if (root === "") return { ok: false, error: `git returned an empty repository root for ${cwd}` };
+    const headSha = execFileSync("git", ["rev-parse", "--verify", "HEAD"], {
+      cwd: root,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(headSha)) {
+      return { ok: false, error: `git returned an invalid HEAD for ${root}: ${JSON.stringify(headSha)}` };
+    }
+    return { ok: true, root, headSha };
+  } catch (error) {
+    return { ok: false, error: `cannot resolve repository root and HEAD from ${cwd}: ${commandFailure(error)}` };
+  }
+}
+
 /** Canonical repository root used by every git/path boundary in this process. */
 export function repositoryRoot(): string | undefined {
   return repoRoot;

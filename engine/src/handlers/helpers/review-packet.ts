@@ -94,10 +94,11 @@ function artifact(root: string, baseSha: string, path: string): ReviewPacketArti
   const absolute = inspected.absolute;
   const present = existsSync(absolute);
   const tracked = optionalGit(["ls-files", "--error-unmatch", "--", path], root, [1]) !== null;
-  if (!tracked && !present) {
-    throw new Error(`review packet path is neither tracked nor present: ${path}`);
+  const trackedAtBase = git(["ls-tree", "-z", "--full-tree", baseSha, "--", path], root) !== "";
+  if (!trackedAtBase && !tracked && !present) {
+    throw new Error(`review packet path is neither tracked nor present at its base: ${path}`);
   }
-  const diff = tracked
+  const diff = trackedAtBase || tracked
     ? git(["diff", "--binary", baseSha, "--", path], root)
     : present
       ? git(["diff", "--no-index", "--binary", "/dev/null", path], root, true)
@@ -196,6 +197,14 @@ const handler: HookHandler = async (_stdin, args) => {
     if (!packet.ok) return { kind: "error", message: `Review packet creation failed:\n${packet.errors.map((e) => `  - ${e}`).join("\n")}` };
     const outputPath = inspectRepositoryPath(root, output, "review packet output");
     const absoluteOutput = outputPath.absolute;
+    const registration = Object.freeze({
+      task_id: task.id,
+      packet_id: packet.value.packetId,
+      packet_path: outputPath.relative,
+      base_sha: baseSha,
+      head_sha: headSha,
+      scope: Object.freeze(scope),
+    });
     mkdirSync(dirname(absoluteOutput), { recursive: true });
     await persistReviewPacketAndBind(
       absoluteOutput,
@@ -217,10 +226,18 @@ const handler: HookHandler = async (_stdin, args) => {
           expectedAgents: WAVE_REVIEW_AGENTS,
         });
         if (!transition.ok) throw new Error(transition.error);
+        const existingRegistrations = currentTask.issued_review_packets ?? [];
+        if (existingRegistrations.some((entry) =>
+          entry.packet_id === registration.packet_id || entry.packet_path === registration.packet_path
+        )) {
+          throw new Error(`Task ${taskId} already registered packet ${registration.packet_id} or path ${registration.packet_path}`);
+        }
         return {
           ...current,
           tasks: current.tasks.map((candidate) =>
-            candidate.id === taskId ? transition.task : candidate
+            candidate.id === taskId
+              ? { ...transition.task, issued_review_packets: [...existingRegistrations, registration] }
+              : candidate
           ),
         };
       }),

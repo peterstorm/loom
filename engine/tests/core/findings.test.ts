@@ -20,6 +20,7 @@ import {
   FINDING_SEVERITIES,
   makeDraftFinding,
   nextOrdinal,
+  parseFindingId,
   parseFindingSeverity,
   parseFindingsBlock,
   parseStoredFindings,
@@ -51,6 +52,15 @@ describe("parseFindingSeverity", () => {
   it("rejects anything else", () => {
     for (const raw of ["CRITICAL", "high", "", null, 1, undefined, {}]) {
       expect(parseFindingSeverity(raw)).toBeNull();
+    }
+  });
+});
+
+describe("parseFindingId", () => {
+  it("accepts task-local ids and rejects panel-ambiguous spellings", () => {
+    expect(parseFindingId("code-reviewer-1")).toBe("code-reviewer-1");
+    for (const raw of ["bad:id", "bad id", "bad\tid", "", "  code-reviewer-1  "]) {
+      expect(parseFindingId(raw)).toBeNull();
     }
   });
 });
@@ -228,9 +238,11 @@ describe("parseStoredFindings — untrusted state file", () => {
     expect(parseStoredFindings([stored])).toEqual([stored]);
   });
 
-  it("drops entries missing identity rather than failing the whole task", () => {
+  it("drops entries missing or carrying panel-incompatible identity rather than failing the whole task", () => {
     const parsed = parseStoredFindings([
       { ...stored, id: "" },
+      { ...stored, id: "bad:id" },
+      { ...stored, id: "bad id" },
       { ...stored, agent: undefined },
       { ...stored, severity: "high" },
       { ...stored, claim: "" },

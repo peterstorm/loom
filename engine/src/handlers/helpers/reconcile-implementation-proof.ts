@@ -83,6 +83,27 @@ function samePathSet(left: readonly string[], right: readonly string[]): boolean
   return left.length === right.length && left.every((path, index) => path === right[index]);
 }
 
+function verifyIssuedPacketRegistration(
+  task: Task,
+  packetPath: string,
+  packet: VerifiedReviewPacketRecovery,
+): void {
+  const registration = (task.issued_review_packets ?? []).find((entry) => entry.packet_id === packet.packetId);
+  if (registration === undefined) {
+    throw new Error(`recovery packet ${packetPath} is not registered as engine-issued for ${task.id}`);
+  }
+  const packetScope = [...new Set([...packet.declaredPaths, ...packet.modifiedPaths])].sort();
+  if (
+    registration.task_id !== task.id ||
+    registration.packet_path !== packetPath ||
+    registration.base_sha !== packet.baseSha ||
+    registration.head_sha !== packet.headSha ||
+    !samePathSet(registration.scope, packetScope)
+  ) {
+    throw new Error(`recovery packet ${packetPath} does not exactly match its engine-issued registration`);
+  }
+}
+
 function verifyPacketCommitRange(root: string, packet: VerifiedReviewPacketRecovery): void {
   execFileSync("git", ["cat-file", "-e", `${packet.headSha}^{commit}`], {
     cwd: root, stdio: ["ignore", "ignore", "pipe"],
@@ -126,6 +147,7 @@ function recoverPacketEvidence(
     if (packet.taskId !== task.id) {
       throw new Error(`recovery packet ${inspectedPacket.relative} belongs to ${packet.taskId}, not ${task.id}`);
     }
+    verifyIssuedPacketRegistration(task, inspectedPacket.relative, packet);
     if (packet.baseSha !== baselineSha) {
       throw new Error(`recovery packet ${inspectedPacket.relative} base ${packet.baseSha} does not equal ${baselineSha}`);
     }

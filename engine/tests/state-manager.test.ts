@@ -461,6 +461,33 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it("parses engine-issued packet registrations and rejects authority drift", () => {
+    const registration = {
+      task_id: "T1",
+      packet_id: "b".repeat(64),
+      packet_path: ".claude/reviews/T1.json",
+      base_sha: "a".repeat(40),
+      head_sha: "c".repeat(40),
+      scope: ["src/a.ts"],
+    };
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, issued_review_packets: [registration] }],
+    }).ok).toBe(true);
+    for (const issued_review_packets of [
+      [{ ...registration, task_id: "T2" }],
+      [{ ...registration, packet_path: "../outside.json" }],
+      [{ ...registration, packet_id: "bad" }],
+      [{ ...registration, scope: ["src/a.ts", "src/a.ts"] }],
+      [registration, { ...registration }],
+    ]) {
+      expect(parseTaskGraph({
+        ...validGraph,
+        tasks: [{ ...validTask, issued_review_packets }],
+      }).ok).toBe(false);
+    }
+  });
+
   it("parses only exact Git SHAs as recovered artifact baseline provenance", () => {
     expect(parseTaskGraph({
       ...validGraph,
@@ -666,6 +693,8 @@ describe("parseTaskGraph proves findings, not just the fields that always did", 
     ["findings that are not an array", { findings: {} }],
     ["refuted_findings that are not an array", { refuted_findings: "none" }],
     ["a finding with no id", { findings: [{ ...wellFormed, id: "" }] }],
+    ["a finding id with an extra colon", { findings: [{ ...wellFormed, id: "bad:id" }] }],
+    ["a finding id with whitespace", { findings: [{ ...wellFormed, id: "bad id" }] }],
     ["a finding with no agent", { findings: [{ ...wellFormed, agent: undefined }] }],
     ["a finding with an unknown severity", { findings: [{ ...wellFormed, severity: "blocker" }] }],
     ["a finding with a non-string claim", { findings: [{ ...wellFormed, claim: 7 }] }],

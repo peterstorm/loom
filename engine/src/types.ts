@@ -268,6 +268,15 @@ export interface RefutedFinding {
   readonly refutations: NonEmptyRefutations;
 }
 
+export interface IssuedReviewPacketRegistration {
+  readonly task_id: string;
+  readonly packet_id: string;
+  readonly packet_path: string;
+  readonly base_sha: string;
+  readonly head_sha: string;
+  readonly scope: readonly string[];
+}
+
 export interface RecoveredArtifactWriteEvidence {
   readonly baseline_sha: string;
   readonly packet_id: string;
@@ -381,6 +390,10 @@ export interface Task {
    * from that attempt invalidate older evidence even when current transcript
    * tool attribution is missing. */
   attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
+  /** Engine-issued packet authority retained after a review run closes. A
+   * self-hashed packet is integrity evidence, not provenance; historical write
+   * recovery accepts a packet only when every registration field matches. */
+  issued_review_packets?: readonly IssuedReviewPacketRegistration[];
   /** Historical commit explicitly supplied to the sanctioned recovery helper
    * after a legacy retry overwrote the original baseline. Persisted so the
    * exceptional evidence source remains auditable. */

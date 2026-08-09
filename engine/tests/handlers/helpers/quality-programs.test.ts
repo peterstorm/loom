@@ -196,6 +196,14 @@ describe("quality-program helper boundaries", () => {
       prior_finding_ids: ["recovered-view-1"],
       evidence: [],
     });
+    expect(started.tasks[0].issued_review_packets).toEqual([{
+      task_id: "T1",
+      packet_id: id,
+      packet_path: relative(ROOT, packet),
+      base_sha: head,
+      head_sha: head,
+      scope: ["engine/src/core/model-profiles.ts"],
+    }]);
     expect(started.tasks[0].findings).toMatchObject([
       { id: "recovered-view-1", severity: "critical", claim: "stale finding" },
     ]);
@@ -207,6 +215,51 @@ describe("quality-program helper boundaries", () => {
       "comment-analyzer",
     ]);
     expect(cli(["helper", "review-packet", "verify", "--packet", packet]).trim()).toBe(id);
+  });
+
+  it("captures a staged deletion with a null postimage", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-review-packet-deletion-"));
+    cleanup.push(root);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "deleted.ts"), "export const deleted = true;\n");
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd: root });
+    execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: root });
+    rmSync(join(root, "src", "deleted.ts"));
+    execFileSync("git", ["add", "-u"], { cwd: root });
+
+    const state = join(root, "state.json");
+    const packet = join(root, ".claude", "reviews", "packet.json");
+    writeFileSync(state, JSON.stringify({
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
+      tasks: [{
+        id: "T1", description: "delete", agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [], start_sha: head,
+        file_list: ["src/deleted.ts"], files_modified: ["src/deleted.ts"],
+        review_status: "pending", review_generation: 0,
+      }],
+    }));
+
+    const id = execFileSync("bun", [
+      CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
+    ], {
+      cwd: root,
+      encoding: "utf-8",
+      env: { ...process.env, LOOM_STATE_PATH: state },
+    }).trim();
+    expect(id).toMatch(/^[0-9a-f]{64}$/);
+    const written = JSON.parse(readFileSync(packet, "utf-8"));
+    expect(written.artifacts).toMatchObject([{
+      path: "src/deleted.ts",
+      postimage: null,
+    }]);
+    expect(written.artifacts[0].diff.content).toContain("deleted file mode");
   });
 
   it("preserves and byte-hashes a binary postimage through the real CLI", () => {

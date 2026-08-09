@@ -7,7 +7,7 @@
  * Usage: bun cli.ts helper complete-wave-gate [--wave N]
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { closeSync, constants as fsConstants, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
@@ -387,21 +387,52 @@ export function applyGateDecision(state: TaskGraph, decision: GateDecision): Tas
   };
 }
 
-/** Update GitHub issue checkboxes */
-function updateGitHubIssue(state: TaskGraph, taskIds: string[]): void {
+export interface GitHubIssuePort {
+  readonly readBody: (issue: number, repository?: string) => string;
+  readonly editBody: (issue: number, body: string, repository?: string) => void;
+  readonly postComment: (issue: number, body: string, repository?: string) => void;
+}
+
+function repositoryArgs(repository: string | undefined): readonly string[] {
+  return repository === undefined ? [] : ["--repo", repository];
+}
+
+export const githubCliIssuePort: GitHubIssuePort = Object.freeze({
+  readBody: (issue: number, repository?: string) => execFileSync("gh", [
+    "issue", "view", String(issue), ...repositoryArgs(repository), "--json", "body", "-q", ".body",
+  ], { encoding: "utf-8", timeout: 15000 }),
+  editBody: (issue: number, body: string, repository?: string) => {
+    execFileSync("gh", ["issue", "edit", String(issue), ...repositoryArgs(repository), "--body-file", "-"], {
+      input: body,
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 15000,
+    });
+  },
+  postComment: (issue: number, body: string, repository?: string) => {
+    execFileSync("gh", ["issue", "comment", String(issue), ...repositoryArgs(repository), "--body-file", "-"], {
+      input: body,
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 15000,
+    });
+  },
+});
+
+/** Update GitHub issue checkboxes through the injected notification port. */
+export function updateGitHubIssue(
+  state: TaskGraph,
+  taskIds: readonly string[],
+  port: GitHubIssuePort = githubCliIssuePort,
+): void {
   const issue = state.github_issue;
   if (!issue) return;
 
   try {
-    const repoFlag = state.github_repo ? `--repo ${state.github_repo}` : "";
-    const body = execSync(`gh issue view ${issue} ${repoFlag} --json body -q '.body'`, { encoding: "utf-8", timeout: 15000 });
-
+    const body = port.readBody(issue, state.github_repo);
     let updated = body;
     for (const id of taskIds) {
       updated = updated.replace(new RegExp(`- \\[ \\] ${id}:`, "g"), `- [x] ${id}:`);
     }
-
-    execSync(`gh issue edit ${issue} ${repoFlag} --body-file -`, { input: updated, stdio: ["pipe", "pipe", "pipe"], timeout: 15000 });
+    port.editBody(issue, updated, state.github_repo);
     process.stderr.write(`Updated checkboxes in issue #${issue}\n`);
   } catch (e) {
     process.stderr.write(`WARNING: Failed to update GH issue #${issue} checkboxes: ${(e as Error).message}\n`);
@@ -494,26 +525,26 @@ export function persistWaveGateSummaryFallback(
 
 /** Post GitHub comment summarizing wave gate results.
  *  Takes a snapshot of state captured under the update lock to avoid a second read. */
-function postWaveGateSummary(state: TaskGraph, completedWave: number): void {
+export function postWaveGateSummary(
+  state: TaskGraph,
+  completedWave: number,
+  port: GitHubIssuePort = githubCliIssuePort,
+  fallbackRoot: string = process.cwd(),
+): void {
   const githubIssue = state.github_issue;
   if (!githubIssue) return;
   const waveTasks = state.tasks.filter((t) => t.wave === completedWave);
   const body = generateWaveGateSummary(completedWave, waveTasks, state.spec_check);
 
   try {
-    const repoFlag = state.github_repo ? `--repo ${state.github_repo}` : "";
-    execSync(`gh issue comment ${githubIssue} ${repoFlag} --body-file -`, {
-      input: body,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 15000,
-    });
+    port.postComment(githubIssue, body, state.github_repo);
     process.stderr.write(`Posted wave ${completedWave} summary to issue #${githubIssue}\n`);
   } catch (e) {
     // Non-blocking — don't fail the gate on comment failure, but preserve the
     // summary in the documented durable fallback rather than losing it with
     // this process's stderr.
     try {
-      const fallback = persistWaveGateSummaryFallback(completedWave, body);
+      const fallback = persistWaveGateSummaryFallback(completedWave, body, fallbackRoot);
       process.stderr.write(
         `WARNING: Failed to post GH comment: ${(e as Error).message}; wrote fallback summary to ${fallback}\n`,
       );

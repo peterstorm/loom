@@ -171,7 +171,7 @@ After adjudication, summarize:
 
 ### Machine Summary
 CRITICAL_COUNT: {number of critical issues}
-ADVISORY_COUNT: {number of important + suggestion issues}
+ADVISORY_COUNT: {number of advisory findings}
 CRITICAL: {each critical finding on its own line}
 ADVISORY: {each non-critical finding on its own line}
 ```

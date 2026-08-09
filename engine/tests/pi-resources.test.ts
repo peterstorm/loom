@@ -5,7 +5,7 @@ import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, renameSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { materializePiResources } from "../../pi/resources";
+import { classifyResourceReadinessError, materializePiResources } from "../../pi/resources";
 
 const execFileAsync = promisify(execFile);
 const roots: string[] = [];
@@ -34,6 +34,13 @@ function fixture(): { packageRoot: string; cacheRoot: string } {
 }
 
 describe("Pi resource materialization", () => {
+  it("distinguishes an absent cache entry from an unreadable cache", () => {
+    expect(classifyResourceReadinessError(Object.assign(new Error("missing"), { code: "ENOENT" }), "/cache/digest"))
+      .toEqual({ kind: "not-ready" });
+    expect(classifyResourceReadinessError(Object.assign(new Error("not a directory"), { code: "ENOTDIR" }), "/cache/digest"))
+      .toEqual({ kind: "error", message: "cannot inspect Loom Pi resource cache /cache/digest: not a directory" });
+  });
+
   it("renders every markdown file and preserves non-markdown assets", () => {
     const { packageRoot, cacheRoot } = fixture();
     const resources = materializePiResources(packageRoot, cacheRoot);

@@ -351,7 +351,7 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
   });
 
   it("panel agents are not PHASE_AGENT_MAP members — handler short-circuits before resolveTransition", () => {
-    // advance-phase.ts:133 does `PHASE_AGENT_MAP[stripNamespace(agent_type)]`
+    // advance-phase looks up `PHASE_AGENT_MAP[stripNamespace(agent_type)]`
     // and returns passthrough on undefined. Panel agents must miss this map, or
     // their SubagentStop would run resolveTransition and could advance the phase.
     for (const agent of ARCH_PANEL_AGENTS) {

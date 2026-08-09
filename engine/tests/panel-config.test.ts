@@ -12,6 +12,11 @@ import {
   PANEL_LENS_COUNT,
   PHASE_AGENT_MAP,
   KNOWN_AGENTS,
+  IMPL_AGENTS,
+  UTILITY_AGENTS,
+  REVIEW_SUB_AGENTS,
+  REVIEW_AGENTS,
+  EXECUTE_AGENTS,
   panelPhaseOverlap,
   assertPanelPhaseDisjoint,
   panelExecuteOverlap,
@@ -77,7 +82,7 @@ function readRepoFile(...segments: string[]): string {
  * rather than comments so a future edit that breaks them fails CI:
  *
  *  1. Panel agents are DISJOINT from PHASE_AGENT_MAP. advance-phase keys off
- *     PHASE_AGENT_MAP at SubagentStop (advance-phase.ts:133) — if a designer or
+ *     PHASE_AGENT_MAP at SubagentStop — if a designer or
  *     judge were mapped there, its completion would fire resolveTransition and
  *     the date-prefix plan fallback could advance the phase mid-panel (design
  *     constraint 2). Only architecture-agent (already in the map) advances.
@@ -85,6 +90,23 @@ function readRepoFile(...segments: string[]): string {
  *  2. Panel agents are NOT in KNOWN_AGENTS. That set gates task-graph agents;
  *     panel agents never appear in a task graph.
  */
+describe("exported agent-policy sets are immutable", () => {
+  it.each([
+    ["IMPL_AGENTS", IMPL_AGENTS],
+    ["KNOWN_AGENTS", KNOWN_AGENTS],
+    ["UTILITY_AGENTS", UTILITY_AGENTS],
+    ["REVIEW_SUB_AGENTS", REVIEW_SUB_AGENTS],
+    ["REVIEW_AGENTS", REVIEW_AGENTS],
+    ["EXECUTE_AGENTS", EXECUTE_AGENTS],
+  ] as const)("blocks ordinary mutation of %s", (_name, policy) => {
+    const before = [...policy];
+    expect(() => (policy as Set<string>).add("injected-agent")).toThrow(/immutable/);
+    expect(() => (policy as Set<string>).delete(before[0] ?? "missing")).toThrow(/immutable/);
+    expect(() => (policy as Set<string>).clear()).toThrow(/immutable/);
+    expect([...policy]).toEqual(before);
+  });
+});
+
 describe("ARCH_PANEL_AGENTS invariants", () => {
   it("holds the three panel agent roles", () => {
     expect(ARCH_PANEL_AGENTS).toEqual(

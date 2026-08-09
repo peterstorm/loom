@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { classifyCalibrationRevisionProbeError } from "../../src/handlers/helpers/model-calibration";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const tempDirs: string[] = [];
@@ -43,6 +44,22 @@ function fixture(): { readonly dir: string; readonly corpus: string; readonly ou
 }
 
 describe("run-model-calibration", () => {
+  it("distinguishes a missing object from Git infrastructure failure", () => {
+    expect(classifyCalibrationRevisionProbeError({
+      status: 128,
+      stderr: "fatal: Not a valid object name deadbeef^{commit}",
+    }, "deadbeef")).toEqual({ kind: "missing" });
+    expect(classifyCalibrationRevisionProbeError({
+      status: 128,
+      stderr: "fatal: not a git repository",
+    }, "deadbeef")).toEqual({
+      kind: "error",
+      message: "cannot verify calibration revision deadbeef: fatal: not a git repository",
+    });
+    expect(classifyCalibrationRevisionProbeError({ code: "ENOENT", message: "spawn git ENOENT" }, "deadbeef"))
+      .toEqual({ kind: "error", message: "cannot verify calibration revision deadbeef: ENOENT: spawn git ENOENT" });
+  });
+
   it("persists diagnostics but exits nonzero when any Pi case is not executed", () => {
     const f = fixture();
     const run = spawnSync("bun", [

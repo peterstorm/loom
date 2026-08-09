@@ -5,7 +5,7 @@
  */
 
 import type { HookHandler, PreToolUseInput } from "../../types";
-import { validateTaskExecution } from "../../core/validate-task-execution";
+import { validateTaskExecution } from "../task-execution";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 
 const handler: HookHandler = async (stdin) => {

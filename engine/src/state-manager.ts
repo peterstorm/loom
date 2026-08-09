@@ -27,7 +27,7 @@ import type { TaskGraph } from "./types";
 import { deriveProofObligations, parseTaskProof } from "./core/proof-obligations";
 import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
 import { parseStoredSpecCheck } from "./core/spec-check";
-import { parseReviewPath } from "./core/review-packet";
+import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
 
 /** Resolve task graph path for cross-repo access. The session id comes from
  *  hook input, so it is PARSED before naming a file under SUBAGENT_DIR — an
@@ -184,6 +184,23 @@ export function taskUnionError(v: unknown, index: number): string | null {
       declaredArtifacts.some((artifact, artifactIndex) => artifact !== actualArtifacts[artifactIndex])
     ) {
       return `tasks[${index}] ("${id}"): attempt_artifact_baseline must cover file_list first and in order`;
+    }
+  }
+  if (t.issued_review_packets !== undefined) {
+    if (!Array.isArray(t.issued_review_packets)) {
+      return `tasks[${index}] ("${id}"): issued_review_packets must be an array`;
+    }
+    const packetIds = new Set<string>();
+    const packetPaths = new Set<string>();
+    for (const [packetIndex, raw] of t.issued_review_packets.entries()) {
+      const label = `tasks[${index}] ("${id}"): issued_review_packets[${packetIndex}]`;
+      const registration = parseIssuedReviewPacketRegistration(raw, label);
+      if (!registration.ok) return registration.errors.join("; ");
+      if (registration.value.task_id !== id) return `${label}.task_id must equal task id ${id}`;
+      if (packetIds.has(registration.value.packet_id)) return `${label}.packet_id duplicates an earlier registration`;
+      if (packetPaths.has(registration.value.packet_path)) return `${label}.packet_path duplicates an earlier registration`;
+      packetIds.add(registration.value.packet_id);
+      packetPaths.add(registration.value.packet_path);
     }
   }
   if (

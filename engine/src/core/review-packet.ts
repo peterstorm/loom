@@ -6,6 +6,7 @@
  */
 
 import { createHash } from "node:crypto";
+import type { IssuedReviewPacketRegistration } from "../types";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -163,6 +164,42 @@ export function parseReviewPath(raw: unknown, label = "path"): ParseResult<strin
     return fail([`${label} must be canonical and must not contain traversal segments`]);
   }
   return ok(raw);
+}
+
+/** Parse the protected state authority that proves a packet was engine-issued. */
+export function parseIssuedReviewPacketRegistration(
+  raw: unknown,
+  label = "issued review packet",
+): ParseResult<IssuedReviewPacketRegistration> {
+  if (!isRecord(raw)) return fail([`${label} must be an object`]);
+  const errors: string[] = [];
+  const taskId = typeof raw.task_id === "string" && raw.task_id.trim() === raw.task_id && raw.task_id !== ""
+    ? raw.task_id
+    : null;
+  if (taskId === null) errors.push(`${label}.task_id must be a non-empty string without surrounding whitespace`);
+  const packetId = typeof raw.packet_id === "string" && SHA256_HEX.test(raw.packet_id)
+    ? raw.packet_id
+    : null;
+  if (packetId === null) errors.push(`${label}.packet_id must be a lowercase SHA-256 digest`);
+  const packetPath = parseReviewPath(raw.packet_path, `${label}.packet_path`);
+  if (!packetPath.ok) errors.push(...packetPath.errors);
+  const baseSha = parseGitSha(raw.base_sha, `${label}.base_sha`);
+  if (!baseSha.ok) errors.push(...baseSha.errors);
+  const headSha = parseGitSha(raw.head_sha, `${label}.head_sha`);
+  if (!headSha.ok) errors.push(...headSha.errors);
+  const scope = parsePathSet(raw.scope, `${label}.scope`);
+  if (!scope.ok) errors.push(...scope.errors);
+  if (errors.length > 0 || taskId === null || packetId === null || !packetPath.ok || !baseSha.ok || !headSha.ok || !scope.ok) {
+    return fail(errors);
+  }
+  return ok(Object.freeze({
+    task_id: taskId,
+    packet_id: packetId,
+    packet_path: packetPath.value,
+    base_sha: baseSha.value,
+    head_sha: headSha.value,
+    scope: Object.freeze([...scope.value]),
+  }));
 }
 
 function parsePathSet(raw: unknown, label: string): ParseResult<readonly string[]> {

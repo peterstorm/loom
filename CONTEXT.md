@@ -149,8 +149,12 @@ An engine-authored requirement a Task must discharge before its status can becom
 _Avoid_: Checklist item, self-report, completion claim
 
 **Review Packet**:
-A canonical immutable snapshot binding one Task to its base/head revisions, exact declared/modified path scope, diffs, byte-preserving postimages, plan context, and Proof Obligations. Postimages use `utf8` when lossless and `base64` otherwise; their digest identifies the original bytes. The sole review scope; empty scope fails rather than broadening to the wave.
-_Avoid_: File list, live diff, review context, fallback scope
+A canonical immutable snapshot binding one Task to its base/head revisions, exact declared/modified path scope, diffs, byte-preserving postimages, plan context, and Proof Obligations. Postimages use `utf8` when lossless and `base64` otherwise; their digest identifies the original bytes. The sole review scope; empty scope fails rather than broadening to the wave. Its self-hashes prove integrity, not provenance; historical write recovery additionally requires the exact engine-issued packet registration stored in protected Task state at packet creation.
+_Avoid_: File list, live diff, review context, fallback scope, self-authenticating recovery packet
+
+**Issued Review Packet Registration**:
+Protected Task-state authority written atomically with Review Packet publication. Binds Task id, canonical packet path, packet id, base/head revisions, and exact scope so later historical recovery can distinguish an engine-issued packet from operator-authored content with recomputed hashes.
+_Avoid_: Packet hash, packet signature, inferred provenance
 
 **Panel Program**:
 The executable event-sourced dispatch policy for an architecture panel or Refutation Panel. Emits exact spawn batches, LLM Profiles, retry actions, engine operations, and terminal outcomes; Markdown explains execution but does not own ordering.

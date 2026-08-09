@@ -87,6 +87,13 @@ export function parseFindingSeverity(raw: unknown): FindingSeverity | null {
     : null;
 }
 
+/** Parse the task-local identity that can be safely composed into a
+ * `task-id:finding-id` panel identity. Colons and whitespace would make that
+ * composition ambiguous or unparsable, so they are rejected at the boundary. */
+export function parseFindingId(raw: unknown): string | null {
+  return typeof raw === "string" && /^[^:\s]+$/.test(raw) ? raw : null;
+}
+
 /**
  * Claims reach prompt templates (the verifier brief) and JSON manifests, so a
  * claim carrying a raw line terminator would break the one-finding-per-line
@@ -240,17 +247,21 @@ export function attributeFindings(
   provenance?: { readonly generation: number; readonly packetId: string },
 ): readonly Finding[] {
   const safe = idSafeAgent(agent);
-  return drafts.map((draft, index) => ({
-    ...draft,
-    id: `${safe}-${startOrdinal + index}`,
-    agent,
-    ...(provenance === undefined
-      ? {}
-      : {
-          review_generation: provenance.generation,
-          review_packet_id: provenance.packetId,
-        }),
-  }));
+  return drafts.map((draft, index) => {
+    const id = parseFindingId(`${safe}-${startOrdinal + index}`);
+    if (id === null) throw new Error("finding identity minting produced an invalid id");
+    return {
+      ...draft,
+      id,
+      agent,
+      ...(provenance === undefined
+        ? {}
+        : {
+            review_generation: provenance.generation,
+            review_packet_id: provenance.packetId,
+          }),
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +354,8 @@ function parseStoredFinding(raw: unknown): Finding | null {
   const record = raw as Record<string, unknown>;
   const severity = parseFindingSeverity(record.severity);
   if (severity === null || typeof record.claim !== "string") return null;
-  if (typeof record.id !== "string" || record.id.trim() === "") return null;
+  const id = typeof record.id === "string" ? parseFindingId(record.id.trim()) : null;
+  if (id === null) return null;
   if (typeof record.agent !== "string" || record.agent.trim() === "") return null;
   const draft = makeDraftFinding({
     severity,
@@ -364,7 +376,7 @@ function parseStoredFinding(raw: unknown): Finding | null {
     ? null
     : {
         ...draft,
-        id: record.id.trim(),
+        id,
         agent: record.agent.trim(),
         ...(reviewGeneration === undefined
           ? {}

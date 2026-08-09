@@ -16,8 +16,11 @@ import {
   gateCheckMessage,
   parseWaveArg,
   persistWaveGateSummaryFallback,
+  postWaveGateSummary,
   snapshotGateDeps,
+  updateGitHubIssue,
   type GateDeps,
+  type GitHubIssuePort,
   type GateIO,
 } from "../../src/handlers/helpers/complete-wave-gate";
 import type { CapturedSpecCheck, Task, TaskGraph } from "../../src/types";
@@ -77,6 +80,63 @@ describe("wave-gate durable summary fallback", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("GitHub issue notification port", () => {
+  const state = (repository = "owner/repo; echo unsafe"): TaskGraph => ({
+    current_phase: "execute",
+    phase_artifacts: {},
+    skipped_phases: [],
+    spec_file: null,
+    plan_file: null,
+    github_issue: 42,
+    github_repo: repository,
+    tasks: [baseTask],
+    wave_gates: {},
+  });
+
+  it("updates checkboxes and forwards repository identity as one typed value", () => {
+    const calls: unknown[][] = [];
+    const port: GitHubIssuePort = {
+      readBody: (issue, repository) => {
+        calls.push(["read", issue, repository]);
+        return "- [ ] T1: implement\n";
+      },
+      editBody: (issue, body, repository) => { calls.push(["edit", issue, body, repository]); },
+      postComment: () => {},
+    };
+    updateGitHubIssue(state(), ["T1"], port);
+    expect(calls).toEqual([
+      ["read", 42, "owner/repo; echo unsafe"],
+      ["edit", 42, "- [x] T1: implement\n", "owner/repo; echo unsafe"],
+    ]);
+  });
+
+  it("posts through a fake and writes the durable fallback when the port fails", () => {
+    const comments: unknown[][] = [];
+    const success: GitHubIssuePort = {
+      readBody: () => "",
+      editBody: () => {},
+      postComment: (issue, body, repository) => { comments.push([issue, body, repository]); },
+    };
+    postWaveGateSummary(state("owner/repo"), 1, success);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toEqual([42, expect.stringContaining("Wave 1"), "owner/repo"]);
+
+    const root = mkdtempSync(join(tmpdir(), "loom-wave-summary-port-"));
+    const failure: GitHubIssuePort = {
+      readBody: () => "",
+      editBody: () => {},
+      postComment: () => { throw new Error("offline"); },
+    };
+    try {
+      postWaveGateSummary(state(), 1, failure, root);
+      expect(readFileSync(join(root, ".claude", "reviews", "wave-1-review.md"), "utf-8"))
+        .toContain("Wave 1");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

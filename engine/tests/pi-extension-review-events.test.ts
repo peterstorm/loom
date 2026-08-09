@@ -634,7 +634,8 @@ describe("Pi extension review tool_result integration", () => {
     };
     writeState(graph);
     const before = JSON.parse(readFileSync(statePath, "utf-8"));
-    const { classifyTaskExecutionSpawn, validateTaskExecutionBatch } = await import("../src/core/validate-task-execution");
+    const { classifyTaskExecutionSpawn } = await import("../src/core/validate-task-execution");
+    const { validateTaskExecutionBatch } = await import("../src/handlers/task-execution");
 
     const result = await validateTaskExecutionBatch([
       classifyTaskExecutionSpawn({ agentType: "code-implementer-agent", prompt: "Task ID: T1", description: "" }),

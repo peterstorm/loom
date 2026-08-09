@@ -245,7 +245,7 @@ export const PANEL_JUDGES_DEFAULT = 3;
  *  in transpile-only mode, so a TS brand would not enforce anything at
  *  runtime; the real boundary check lives in validate-task-graph.ts via
  *  KNOWN_AGENTS.has(agent). */
-export const IMPL_AGENTS = new Set([
+export const IMPL_AGENTS: ReadonlySet<string> = frozenSet([
   "code-implementer-agent",
   "ts-test-agent",
   "java-test-agent",
@@ -258,10 +258,10 @@ export const IMPL_AGENTS = new Set([
 ]);
 
 /** Known agents for task graph validation */
-export const KNOWN_AGENTS = new Set([...IMPL_AGENTS, ...Object.keys(PHASE_AGENT_MAP)]);
+export const KNOWN_AGENTS: ReadonlySet<string> = frozenSet([...IMPL_AGENTS, ...Object.keys(PHASE_AGENT_MAP)]);
 
 /** Utility agents allowed through phase validation */
-export const UTILITY_AGENTS = new Set(["Explore", "Plan", "haiku"]);
+export const UTILITY_AGENTS: ReadonlySet<string> = frozenSet(["Explore", "Plan", "haiku"]);
 
 /** Exact reviewer batch required for every wave-gate task review. */
 export const WAVE_REVIEW_AGENTS = Object.freeze([
@@ -273,7 +273,7 @@ export const WAVE_REVIEW_AGENTS = Object.freeze([
 ] as const);
 
 /** Review sub-agents that produce findings per task. */
-export const REVIEW_SUB_AGENTS = new Set([
+export const REVIEW_SUB_AGENTS: ReadonlySet<string> = frozenSet([
   ...WAVE_REVIEW_AGENTS,
   "code-simplifier",
   "architecture-tech-lead",
@@ -295,7 +295,7 @@ export function isReviewAgent(agentType: string): boolean {
 }
 
 /** All review-related agents (sub-agents + spec-check invoker) */
-export const REVIEW_AGENTS = new Set([
+export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
   ...REVIEW_SUB_AGENTS,
   "spec-check-invoker",
 ]);
@@ -347,7 +347,7 @@ export function assertReviewPanelDisjoint(
 assertReviewPanelDisjoint();
 
 /** All agents that map to execute phase (impl + review) */
-export const EXECUTE_AGENTS = new Set([...IMPL_AGENTS, ...REVIEW_AGENTS]);
+export const EXECUTE_AGENTS: ReadonlySet<string> = frozenSet([...IMPL_AGENTS, ...REVIEW_AGENTS]);
 
 /** Panel agents that would be MISROUTED away from architecture classification
  *  by colliding with an execute-phase or utility agent. detectPhase

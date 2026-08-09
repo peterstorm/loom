@@ -107,47 +107,78 @@ function expectedDirectories(files: readonly SourceFile[]): ReadonlySet<string> 
   return directories;
 }
 
-function isReady(root: string, packageRoot: string, digest: string, files: readonly SourceFile[]): boolean {
-  try {
-    const expectedFiles = new Map<string, { readonly content: Buffer; readonly mode: number }>(
-      files.map((file) => [file.relativePath, {
-        content: renderedContent(file, packageRoot),
-        mode: file.executable ? 0o700 : 0o600,
-      }]),
-    );
-    expectedFiles.set(READY_FILE, {
-      content: readyContent(packageRoot, digest, files),
-      mode: 0o600,
-    });
-    const expectedDirs = expectedDirectories(files);
-    const observedFiles = new Set<string>();
+function isReadyUnchecked(root: string, packageRoot: string, digest: string, files: readonly SourceFile[]): boolean {
+  const expectedFiles = new Map<string, { readonly content: Buffer; readonly mode: number }>(
+    files.map((file) => [file.relativePath, {
+      content: renderedContent(file, packageRoot),
+      mode: file.executable ? 0o700 : 0o600,
+    }]),
+  );
+  expectedFiles.set(READY_FILE, {
+    content: readyContent(packageRoot, digest, files),
+    mode: 0o600,
+  });
+  const expectedDirs = expectedDirectories(files);
+  const observedFiles = new Set<string>();
 
-    const visit = (dir: string, relativeDir: string): boolean => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const path = join(dir, entry.name);
-        const relativePath = relativeDir === "" ? entry.name : join(relativeDir, entry.name);
-        const stat = lstatSync(path);
-        if (stat.isSymbolicLink()) return false;
-        if (stat.isDirectory()) {
-          if ((stat.mode & 0o777) !== 0o700) return false;
-          if (!expectedDirs.has(relativePath) || !visit(path, relativePath)) return false;
-          continue;
-        }
-        if (!stat.isFile()) return false;
-        const expected = expectedFiles.get(relativePath);
-        if (!expected || (stat.mode & 0o777) !== expected.mode || !readFileSync(path).equals(expected.content)) return false;
-        observedFiles.add(relativePath);
+  const visit = (dir: string, relativeDir: string): boolean => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      const relativePath = relativeDir === "" ? entry.name : join(relativeDir, entry.name);
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) return false;
+      if (stat.isDirectory()) {
+        if ((stat.mode & 0o777) !== 0o700) return false;
+        if (!expectedDirs.has(relativePath) || !visit(path, relativePath)) return false;
+        continue;
       }
-      return true;
-    };
+      if (!stat.isFile()) return false;
+      const expected = expectedFiles.get(relativePath);
+      if (!expected || (stat.mode & 0o777) !== expected.mode || !readFileSync(path).equals(expected.content)) return false;
+      observedFiles.add(relativePath);
+    }
+    return true;
+  };
 
-    const rootStat = lstatSync(root);
-    if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || (rootStat.mode & 0o777) !== 0o700 || !visit(root, "")) return false;
-    return observedFiles.size === expectedFiles.size
-      && [...expectedFiles.keys()].every((path) => observedFiles.has(path));
-  } catch {
-    return false;
+  const rootStat = lstatSync(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || (rootStat.mode & 0o777) !== 0o700 || !visit(root, "")) return false;
+  return observedFiles.size === expectedFiles.size
+    && [...expectedFiles.keys()].every((path) => observedFiles.has(path));
+}
+
+export type ResourceReadiness =
+  | Readonly<{ kind: "ready" }>
+  | Readonly<{ kind: "not-ready" }>
+  | Readonly<{ kind: "error"; message: string }>;
+
+export function classifyResourceReadinessError(error: unknown, root: string): ResourceReadiness {
+  const code = error && typeof error === "object" && "code" in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  if (code === "ENOENT") return { kind: "not-ready" };
+  const detail = error instanceof Error ? error.message : String(error);
+  return { kind: "error", message: `cannot inspect Loom Pi resource cache ${root}: ${detail}` };
+}
+
+function resourceReadiness(
+  root: string,
+  packageRoot: string,
+  digest: string,
+  files: readonly SourceFile[],
+): ResourceReadiness {
+  try {
+    return isReadyUnchecked(root, packageRoot, digest, files)
+      ? { kind: "ready" }
+      : { kind: "not-ready" };
+  } catch (error) {
+    return classifyResourceReadinessError(error, root);
   }
+}
+
+function isReady(root: string, packageRoot: string, digest: string, files: readonly SourceFile[]): boolean {
+  const readiness = resourceReadiness(root, packageRoot, digest, files);
+  if (readiness.kind === "error") throw new Error(readiness.message);
+  return readiness.kind === "ready";
 }
 
 function writeRenderedTree(

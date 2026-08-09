@@ -15,10 +15,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { shouldBlockDirectEdit } from "../engine/src/core/block-direct-edits";
 import { guardStateFileDecision } from "../engine/src/core/guard-state-file";
 import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
-import {
-  classifyTaskExecutionSpawn,
-  validateTaskExecutionBatch,
-} from "../engine/src/core/validate-task-execution";
+import { classifyTaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
+import { validateTaskExecutionBatch } from "../engine/src/handlers/task-execution";
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { classifyPiSpawnItems, expectedSpawnModel } from "../engine/src/core/model-profiles";
 
@@ -993,10 +991,26 @@ export default function (pi: ExtensionAPI) {
         // parseBashTestOutput deliberately accepts only paired Bash tool calls
         // and results in Claude-compatible JSONL. Passing flattened prose here
         // silently discards every Pi test run as spoofable free text.
-        const bashOutput = parseBashTestOutput(messagesToClaudeJsonl(resultMessages));
-        const transcriptEvidence = extractTestEvidence(bashOutput);
+        const adaptedTranscript = messagesToClaudeJsonl(resultMessages);
         const structuredEvidence = piStructuredTestResult(resultMessages);
-        const testEvidence = structuredEvidence ?? transcriptEvidence;
+        if (!adaptedTranscript.ok || !structuredEvidence.ok) {
+          const errors = !adaptedTranscript.ok ? adaptedTranscript.errors : structuredEvidence.errors;
+          const failureReason = `Pi transcript evidence capture failed: ${errors.join("; ")}`;
+          await mgr.update((current) => ({
+            ...current,
+            executing_tasks: (current.executing_tasks ?? []).filter((id) => id !== taskId),
+            tasks: current.tasks.map((candidate) =>
+              candidate.id === taskId && candidate.status === "pending"
+                ? { ...candidate, failure_reason: failureReason }
+                : candidate
+            ),
+          }));
+          process.stderr.write(`loom(pi): ${failureReason} — ${taskId} left pending\n`);
+          continue;
+        }
+        const bashOutput = parseBashTestOutput(adaptedTranscript.value);
+        const transcriptEvidence = extractTestEvidence(bashOutput);
+        const testEvidence = structuredEvidence.value ?? transcriptEvidence;
 
         // files_modified feeds lint-wave-gate's target collection (it
         // collects lint targets EXCLUSIVELY from tasks' files_modified) —

@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -152,6 +152,28 @@ describe("historical baseline recovery CLI", () => {
       cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
     });
     expect(withoutOverride.status).not.toBe(0);
+
+    const unregistered = spawnSync("bun", [
+      CLI, "helper", "reconcile-implementation-proof", "--wave", "2",
+      "--baseline-sha", historical,
+      "--packet", `T5=${packetRelative}`,
+    ], {
+      cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
+    });
+    expect(unregistered.status).not.toBe(0);
+    expect(unregistered.stderr).toContain("is not registered as engine-issued");
+
+    const registeredState = JSON.parse(readFileSync(statePath, "utf-8"));
+    registeredState.tasks[0].issued_review_packets = [{
+      task_id: "T5",
+      packet_id: packet.value.packetId,
+      packet_path: packetRelative,
+      base_sha: historical,
+      head_sha: poisonedStart,
+      scope: ["src/a.ts"],
+    }];
+    chmodSync(statePath, 0o600);
+    writeFileSync(statePath, JSON.stringify(registeredState, null, 2));
 
     const invalidPacketRelative = ".claude/reviews/T6-bound-as-T5.json";
     const wrongTaskPacket = createReviewPacket({
