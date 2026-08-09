@@ -1,7 +1,7 @@
 /** Pure task-execution lifecycle classification and gate decisions. */
 
 import type { HookResult, Task, TaskGraph } from "../types";
-import { IMPL_AGENTS } from "../config";
+import { IMPL_AGENTS, isStandaloneReviewAgent } from "../config";
 import { extractTaskId } from "../utils/extract-task-id";
 import { stripNamespace } from "../utils/strip-namespace";
 import { hasStandaloneReviewContext } from "./review-output";
@@ -25,8 +25,10 @@ export type TaskExecutionSpawn =
 
 /** Pure boundary parser from harness fields to the closed lifecycle union. */
 export function classifyTaskExecutionSpawn(input: ValidateTaskExecutionInput): TaskExecutionSpawn {
-  if (hasStandaloneReviewContext(input.prompt)) return { kind: "standalone" };
   const agent = stripNamespace(input.agentType);
+  if (hasStandaloneReviewContext(input.prompt) && isStandaloneReviewAgent(agent)) {
+    return { kind: "standalone" };
+  }
   return IMPL_AGENTS.has(agent) || IMPL_AGENTS.has(`${agent}-agent`)
     ? { kind: "implementation", prompt: input.prompt, description: input.description }
     : { kind: "non-implementation" };

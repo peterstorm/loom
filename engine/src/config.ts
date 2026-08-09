@@ -311,6 +311,14 @@ export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
  *  SubagentStop dispatcher. Frozen, symmetric with ARCH_PANEL_AGENTS. */
 export const REVIEW_PANEL_AGENTS: ReadonlySet<string> = frozenSet(["review-verifier-agent"]);
 
+/** Closed control-plane authority for the standalone review lifecycle marker.
+ * Only Machine-Summary review producers and refutation verifiers create
+ * standalone run evidence; implementation, phase, and spec-check agents must
+ * remain attached to orchestration state even if their prompt is untrusted. */
+export function isStandaloneReviewAgent(agentType: string): boolean {
+  return REVIEW_SUB_AGENTS.has(agentType) || REVIEW_PANEL_AGENTS.has(agentType);
+}
+
 /** Review-panel agents that would be MISROUTED by colliding with a phase,
  *  impl, review, or utility agent — detectPhase probes bare and `-agent`-
  *  suffixed forms and reaches those sets first. Must always be empty. Exported
@@ -533,17 +541,21 @@ export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = new Set([
   "pwd", "dirname", "basename", "readlink", "realpath", "du",
 ]);
 
-/** Valid phase transitions: from → allowed targets */
-export const VALID_TRANSITIONS: Record<Phase, Phase[]> = {
-  "init":            ["brainstorm", "specify", "architecture"],
-  "brainstorm":      ["brainstorm", "specify"],
-  "specify":         ["specify", "clarify", "architecture"],
-  "clarify":         ["clarify", "architecture"],
-  "architecture":    ["architecture", "plan-alignment", "decompose"],
-  "plan-alignment":  ["plan-alignment", "architecture", "decompose"],
-  "decompose":       ["decompose", "execute"],
-  "execute":         ["execute"],
-};
+/** Valid phase transitions: from → allowed targets. Both the record and
+ * each member are frozen: a readonly annotation alone would not protect the
+ * runtime state-machine policy from ordinary consumer mutation. */
+const frozenPhases = (...phases: Phase[]): readonly Phase[] => Object.freeze(phases);
+
+export const VALID_TRANSITIONS: Readonly<Record<Phase, readonly Phase[]>> = Object.freeze({
+  "init":            frozenPhases("brainstorm", "specify", "architecture"),
+  "brainstorm":      frozenPhases("brainstorm", "specify"),
+  "specify":         frozenPhases("specify", "clarify", "architecture"),
+  "clarify":         frozenPhases("clarify", "architecture"),
+  "architecture":    frozenPhases("architecture", "plan-alignment", "decompose"),
+  "plan-alignment":  frozenPhases("plan-alignment", "architecture", "decompose"),
+  "decompose":       frozenPhases("decompose", "execute"),
+  "execute":         frozenPhases("execute"),
+});
 
 /** Detect which harness is running */
 function detectHarness(): "claude" | "pi" {

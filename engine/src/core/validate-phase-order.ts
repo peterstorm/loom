@@ -13,7 +13,7 @@ import type { HookResult, Phase } from "../types";
 import {
   taskGraphPath, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
   REVIEW_PANEL_AGENTS, UTILITY_AGENTS, VALID_TRANSITIONS, CLARIFY_THRESHOLD,
-  ARCH_PANEL_AGENTS, ARCH_PANEL_PHASE,
+  ARCH_PANEL_AGENTS, ARCH_PANEL_PHASE, isStandaloneReviewAgent,
 } from "../config";
 import { StateManager } from "../state-manager";
 import { stripNamespace } from "../utils/strip-namespace";
@@ -163,13 +163,20 @@ export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string
 }
 
 export function validatePhaseOrder(input: ValidatePhaseOrderInput): HookResult {
-  // A standalone review is an isolated run artifact, not an orchestration
-  // phase transition. Recognize the exact marker before touching task state.
-  if (hasStandaloneReviewContext(input.prompt)) return { kind: "allow" };
+  const bareAgent = stripNamespace(input.agentType);
+  // A standalone review is an isolated run artifact, but the marker is prompt
+  // text supplied across a harness boundary. Only the closed review/verifier
+  // roster may exercise that authority; every other use fails loudly.
+  if (hasStandaloneReviewContext(input.prompt)) {
+    return isStandaloneReviewAgent(bareAgent)
+      ? { kind: "allow" }
+      : {
+          kind: "block",
+          message: `BLOCKED: Agent ${input.agentType} is not authorized for LOOM_REVIEW_CONTEXT: standalone.`,
+        };
+  }
   const statePath = taskGraphPath();
   if (!existsSync(statePath)) return { kind: "allow" };
-
-  const bareAgent = stripNamespace(input.agentType);
 
   // Allow utility agents
   if (UTILITY_AGENTS.has(bareAgent) || UTILITY_AGENTS.has(bareAgent + "-agent")) return { kind: "allow" };

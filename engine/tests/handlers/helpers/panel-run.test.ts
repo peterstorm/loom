@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -28,6 +28,24 @@ describe("panel run no-follow writes", () => {
     expect(() => writeRunFileNoFollow(target, "panel bytes")).toThrow();
     expect(() => writeRunFileExclusiveNoFollow(target, "authority bytes")).toThrow();
     expect(readFileSync(outside, "utf-8")).toBe("outside remains unchanged");
+  });
+
+  it("refuses a parent directory swapped to a symlink after preparation", () => {
+    const runDir = mkdtempSync(join(tmpdir(), "loom-panel-parent-write-"));
+    roots.push(runDir);
+    const outside = join(runDir, "outside");
+    const verdicts = join(runDir, "verdicts");
+    mkdirSync(outside);
+
+    expect(prepareWriteTargets(runDir, ["verdicts"], ["verdicts/verdict-1.json"]))
+      .toEqual({ ok: true, value: undefined });
+    rmSync(verdicts, { recursive: true });
+    symlinkSync(outside, verdicts);
+
+    expect(() => writeRunFileNoFollow(join(verdicts, "verdict-1.json"), "panel bytes")).toThrow();
+    expect(() => writeRunFileExclusiveNoFollow(join(verdicts, "result.json"), "authority bytes")).toThrow();
+    expect(() => readFileSync(join(outside, "verdict-1.json"), "utf-8")).toThrow();
+    expect(() => readFileSync(join(outside, "result.json"), "utf-8")).toThrow();
   });
 
   it("publishes a staged authority file without following a raced final symlink", () => {

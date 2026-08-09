@@ -33,12 +33,29 @@ function baseState(overrides: Partial<ArtifactState> = {}): ArtifactState {
 // ─── detectPhase ────────────────────────────────────────────────────────────
 
 describe("standalone lifecycle", () => {
-  it("allows the exact standalone marker before phase or task-graph checks", () => {
+  it("allows the marker only for the closed standalone review roster", () => {
     expect(validatePhaseOrder({
-      agentType: "unknown-to-phase-order",
+      agentType: "loom:code-reviewer",
       prompt: "LOOM_REVIEW_CONTEXT: standalone\nReview the frozen scope",
     })).toEqual({ kind: "allow" });
+    expect(validatePhaseOrder({
+      agentType: "review-verifier-agent",
+      prompt: "LOOM_REVIEW_CONTEXT: standalone\nJudge the manifest",
+    })).toEqual({ kind: "allow" });
   });
+
+  it.each(["code-implementer-agent", "architecture-agent", "spec-check-invoker", "unknown-agent"])(
+    "rejects standalone marker authority for %s",
+    (agentType) => {
+      expect(validatePhaseOrder({
+        agentType,
+        prompt: "LOOM_REVIEW_CONTEXT: standalone\nTask ID: T1",
+      })).toMatchObject({
+        kind: "block",
+        message: expect.stringContaining("not authorized"),
+      });
+    },
+  );
 
   it("resolves a late LOOM_STATE_PATH once per phase-order invocation", () => {
     const dir = makeTmpDir();
@@ -184,6 +201,13 @@ describe("panel agents — VALID_TRANSITIONS + artifact gate", () => {
 // ─── VALID_TRANSITIONS ───────────────────────────────────────────────────────
 
 describe("VALID_TRANSITIONS", () => {
+  it("is structurally immutable at runtime", () => {
+    expect(Object.isFrozen(VALID_TRANSITIONS)).toBe(true);
+    for (const targets of Object.values(VALID_TRANSITIONS)) expect(Object.isFrozen(targets)).toBe(true);
+    expect(() => (VALID_TRANSITIONS.init as unknown as string[]).push("execute")).toThrow();
+    expect(VALID_TRANSITIONS.init).not.toContain("execute");
+  });
+
   it("init allows architecture (for --skip-specify)", () => {
     expect(VALID_TRANSITIONS["init"]).toContain("architecture");
   });

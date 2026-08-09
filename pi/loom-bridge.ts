@@ -21,5 +21,9 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_result", async (event) => {
     if (event.toolName !== "subagent") return;
     process.stderr.write(MESSAGE + "\n");
+    return {
+      content: [{ type: "text" as const, text: MESSAGE }],
+      isError: true,
+    };
   });
 }

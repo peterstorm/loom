@@ -64,7 +64,7 @@ import * as git from "../engine/src/utils/git";
 // Linter integration (PostEdit lint via tool_result)
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
 import { lintFile } from "../engine/src/linter/index";
-import { messagesToClaudeJsonl, parsePiMessages, piStructuredTestResult, type PiMessage } from "./transcript-adapter";
+import { messagesToClaudeJsonl, parsePiMessages, piStructuredTestResult } from "./transcript-adapter";
 import { materializePiResources } from "./resources";
 import { checkAgentSkillPrompt } from "../engine/src/core/agent-skills";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
@@ -186,18 +186,50 @@ export async function runPiCleanupActions(
 const cleanupFailureSuffix = (errors: readonly string[]): string =>
   errors.length === 0 ? "" : ` Cleanup failures: ${errors.join("; ")}`;
 
+type PiSessionId = NonNullable<ReturnType<typeof parseSessionId>>;
+
+type PiSpawnReservation = Readonly<{
+  sessionId: PiSessionId;
+  needsTaskGraphLifecycle: boolean;
+  items: readonly Readonly<{
+    agentType: string;
+    rosterId: AgentId;
+    taskId: string | null;
+    implementation: boolean;
+    standalone: boolean;
+  }>[];
+}>;
+
+interface PiParentSessionRuntime {
+  readonly issuedWriteGrants: Map<string, readonly string[]>;
+  readonly spawnReservations: Map<string, PiSpawnReservation>;
+  taskGraphPointerOwned: boolean;
+}
+
+const emptyParentSessionRuntime = (): PiParentSessionRuntime => ({
+  issuedWriteGrants: new Map(),
+  spawnReservations: new Map(),
+  taskGraphPointerOwned: false,
+});
+
 export default function (pi: ExtensionAPI) {
-  const issuedWriteGrants = new Map<string, string[]>();
-  const spawnReservations = new Map<string, Readonly<{
-    sessionId: NonNullable<ReturnType<typeof parseSessionId>>;
-    items: readonly Readonly<{
-      agentType: string;
-      rosterId: AgentId;
-      taskId: string | null;
-      implementation: boolean;
-      standalone: boolean;
-    }>[];
-  }>>();
+  // A Pi process may host overlapping sessions. Parent reservations and
+  // capabilities are therefore aggregates owned by one parsed session, never
+  // process-global maps whose shutdown can consume another session's state.
+  const parentSessionRuntimes = new Map<PiSessionId, PiParentSessionRuntime>();
+  const runtimeFor = (sessionId: PiSessionId): PiParentSessionRuntime => {
+    const existing = parentSessionRuntimes.get(sessionId);
+    if (existing) return existing;
+    const created = emptyParentSessionRuntime();
+    parentSessionRuntimes.set(sessionId, created);
+    return created;
+  };
+  const pruneRuntime = (sessionId: PiSessionId, runtime: PiParentSessionRuntime): void => {
+    if (runtime.issuedWriteGrants.size === 0 && runtime.spawnReservations.size === 0 &&
+        !runtime.taskGraphPointerOwned) {
+      parentSessionRuntimes.delete(sessionId);
+    }
+  };
   const activeChildWriteGrants = new Map<string, { agentId: AgentId; pointerCreated: boolean }>();
   const rejectedChildWriteGrantSessions = new Set<string>();
 
@@ -377,6 +409,14 @@ export default function (pi: ExtensionAPI) {
             reason: "Cannot bind Loom subagent lifecycle cleanup without a subagent toolCallId; refusing spawn.",
           };
         }
+        const existingRuntime = parentSessionRuntimes.get(safeSessionId);
+        if (existingRuntime?.spawnReservations.has(toolCallId) ||
+            existingRuntime?.issuedWriteGrants.has(toolCallId)) {
+          return {
+            block: true,
+            reason: `Duplicate Pi subagent toolCallId ${JSON.stringify(toolCallId)} in session ${safeSessionId}; refusing spawn.`,
+          };
+        }
         const rosterIds = parsedItems.map((item, index) =>
           piSpawnRosterId(toolCallId, index, item.agent),
         );
@@ -409,9 +449,7 @@ export default function (pi: ExtensionAPI) {
               run: () => unlinkSync(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`),
             });
           }
-          const errors = await runPiCleanupActions(actions);
-          issuedWriteGrants.delete(toolCallId);
-          return errors;
+          return runPiCleanupActions(actions);
         };
         try {
           mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
@@ -483,11 +521,14 @@ export default function (pi: ExtensionAPI) {
           const cleanupErrors = await rollbackLifecycle();
           return { block: true, reason: `${taskResult.message}${cleanupFailureSuffix(cleanupErrors)}` };
         }
+        const sessionRuntime = runtimeFor(safeSessionId);
         if (writeGrants.length > 0) {
-          issuedWriteGrants.set(toolCallId, writeGrants.map((grant) => grant.token));
+          sessionRuntime.issuedWriteGrants.set(toolCallId, writeGrants.map((grant) => grant.token));
         }
-        spawnReservations.set(toolCallId, {
+        if (taskGraphPointerCreated) sessionRuntime.taskGraphPointerOwned = true;
+        sessionRuntime.spawnReservations.set(toolCallId, {
           sessionId: safeSessionId,
+          needsTaskGraphLifecycle,
           items: parsedItems.map((item, index) => ({
             agentType: item.agent,
             rosterId: rosterIds[index]!,
@@ -569,11 +610,12 @@ export default function (pi: ExtensionAPI) {
     const binding = activeChildWriteGrants.get(rawSessionId);
     const actions: PiCleanupAction[] = [];
 
-    // Capabilities are the security boundary: schedule every revocation before
-    // fallible roster/pointer housekeeping, then execute all actions regardless
-    // of individual failures.
+    // Capabilities are the security boundary: schedule this session's every
+    // revocation before fallible roster/pointer housekeeping, then execute all
+    // actions regardless of individual failures. Other sessions are untouched.
+    const parentRuntime = sessionId ? parentSessionRuntimes.get(sessionId) : undefined;
     let grantOrdinal = 0;
-    for (const tokens of issuedWriteGrants.values()) {
+    for (const tokens of parentRuntime?.issuedWriteGrants.values() ?? []) {
       for (const token of tokens) {
         grantOrdinal++;
         actions.push({
@@ -594,7 +636,7 @@ export default function (pi: ExtensionAPI) {
         });
       }
     }
-    for (const reservation of spawnReservations.values()) {
+    for (const reservation of parentRuntime?.spawnReservations.values() ?? []) {
       for (const item of reservation.items) {
         actions.push({
           label: `remove shutdown roster entry for ${item.agentType}`,
@@ -602,12 +644,17 @@ export default function (pi: ExtensionAPI) {
         });
       }
     }
+    if (sessionId && parentRuntime?.taskGraphPointerOwned) {
+      actions.push({
+        label: `remove parent task-graph pointer for ${sessionId}`,
+        run: () => rmSync(`${SUBAGENT_DIR}/${sessionId}.task_graph`, { force: true }),
+      });
+    }
 
     const cleanupErrors = await runPiCleanupActions(actions);
-    issuedWriteGrants.clear();
+    if (sessionId) parentSessionRuntimes.delete(sessionId);
     activeChildWriteGrants.delete(rawSessionId);
     rejectedChildWriteGrantSessions.delete(rawSessionId);
-    spawnReservations.clear();
     for (const cleanupError of cleanupErrors) {
       process.stderr.write(`loom(pi): shutdown cleanup failed: ${cleanupError}\n`);
     }
@@ -694,30 +741,46 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_result", async (event, _ctx) => {
     if (event.toolName !== "subagent") return;
 
-    const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
-    const reservation = typeof toolCallId === "string" ? spawnReservations.get(toolCallId) : undefined;
-    if (typeof toolCallId === "string") {
-      for (const token of issuedWriteGrants.get(toolCallId) ?? []) revokePiWriteGrant(token);
-      issuedWriteGrants.delete(toolCallId);
-      spawnReservations.delete(toolCallId);
-    }
-
-    // Release roster authority before consulting any result-envelope field.
-    // The immutable reservation still owns standalone/task attribution and
-    // failed-attempt cleanup after the child process has stopped.
-    if (reservation) {
-      for (const item of reservation.items) {
-        try {
-          await fsSessionRegistry.removeActive(reservation.sessionId, item.rosterId);
-        } catch (error) {
-          process.stderr.write(
-            `loom(pi): reserved subagent cleanup failed for ${item.agentType}: ${error instanceof Error ? error.message : String(error)}\n`,
-          );
-        }
-      }
-    }
-
     const processingErrors: string[] = [];
+    const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
+    const rawSessionId = _ctx.sessionManager.getSessionId() ?? "";
+    const resultSessionId = parseSessionId(rawSessionId);
+    const sessionRuntime = resultSessionId === null
+      ? undefined
+      : parentSessionRuntimes.get(resultSessionId);
+    const reservation = typeof toolCallId === "string"
+      ? sessionRuntime?.spawnReservations.get(toolCallId)
+      : undefined;
+    const grantTokens = typeof toolCallId === "string"
+      ? sessionRuntime?.issuedWriteGrants.get(toolCallId) ?? []
+      : [];
+
+    // Consume only this session's reservation. Capability, roster, and owned
+    // pointer cleanup are isolated: one failure is reported but never prevents
+    // result reconciliation or the remaining cleanup actions.
+    if (typeof toolCallId === "string" && sessionRuntime) {
+      sessionRuntime.spawnReservations.delete(toolCallId);
+    }
+    const cleanupActions: PiCleanupAction[] = grantTokens.map((token, index) => ({
+      label: `revoke write grant ${index + 1}`,
+      run: () => revokePiWriteGrant(token),
+    }));
+    for (const item of reservation?.items ?? []) {
+      cleanupActions.push({
+        label: `remove reserved roster entry for ${item.agentType}`,
+        run: () => fsSessionRegistry.removeActive(reservation.sessionId, item.rosterId),
+      });
+    }
+    const cleanupErrors = await runPiCleanupActions(cleanupActions);
+    processingErrors.push(...cleanupErrors);
+    for (const cleanupError of cleanupErrors) {
+      process.stderr.write(`loom(pi): reserved subagent cleanup failed: ${cleanupError}\n`);
+    }
+    if (typeof toolCallId === "string" && sessionRuntime &&
+        !cleanupErrors.some((error) => error.startsWith("revoke write grant "))) {
+      sessionRuntime.issuedWriteGrants.delete(toolCallId);
+    }
+    if (resultSessionId && sessionRuntime) pruneRuntime(resultSessionId, sessionRuntime);
     const processingErrorResponse = () => processingErrors.length === 0
       ? undefined
       : {
@@ -727,6 +790,24 @@ export default function (pi: ExtensionAPI) {
           }],
           isError: true,
         };
+    let parentPointerCleanupAttempted = false;
+    const cleanupParentTaskGraphPointer = async (): Promise<void> => {
+      if (parentPointerCleanupAttempted || !resultSessionId || !sessionRuntime?.taskGraphPointerOwned ||
+          [...sessionRuntime.spawnReservations.values()].some((entry) => entry.needsTaskGraphLifecycle)) {
+        return;
+      }
+      parentPointerCleanupAttempted = true;
+      const errors = await runPiCleanupActions([{
+        label: `remove parent task-graph pointer for ${resultSessionId}`,
+        run: () => {
+          rmSync(`${SUBAGENT_DIR}/${resultSessionId}.task_graph`, { force: true });
+          sessionRuntime.taskGraphPointerOwned = false;
+        },
+      }]);
+      processingErrors.push(...errors);
+      for (const error of errors) process.stderr.write(`loom(pi): reserved subagent cleanup failed: ${error}\n`);
+      pruneRuntime(resultSessionId, sessionRuntime);
+    };
 
     const finalizeReservedImplementations = async (
       rawResults: readonly unknown[],
@@ -802,7 +883,10 @@ export default function (pi: ExtensionAPI) {
               taskCompleted: false,
               testResult: { verdict: "untrusted", passed: false, label: "pi-implementation-failed" },
               testEvidence: failure,
-              filesModified: changedRepositoryArtifacts,
+              // The repository attempt baseline is shared by a parallel batch.
+              // Its delta proves stale evidence must be invalidated, but cannot
+              // attribute any sibling's paths to this failed task.
+              filesModified: [],
               changedDeclaredArtifacts,
               bytesChangedSinceAttempt: true,
               newTestsWritten: false,
@@ -893,18 +977,21 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (!details || !("results" in details)) {
-      process.stderr.write(
-        "loom(pi): subagent tool_result is missing details.results — successful evidence was not applied\n",
-      );
+      const diagnostic = "subagent tool_result is missing details.results — successful evidence was not applied";
+      processingErrors.push(diagnostic);
+      process.stderr.write(`loom(pi): ${diagnostic}\n`);
+      await cleanupParentTaskGraphPointer();
       return processingErrorResponse();
     }
 
     // Shape guard: a pi version drifting details.results away from an array
     // must be a LOUD no-op, not a silent one (or a throw mid-dispatch).
     if (!Array.isArray(details.results)) {
-      process.stderr.write(
-        `loom(pi): subagent tool_result has unrecognized details.results shape (${typeof details.results}) — successful evidence was not applied\n`,
-      );
+      const diagnostic =
+        `subagent tool_result has unrecognized details.results shape (${typeof details.results}) — successful evidence was not applied`;
+      processingErrors.push(diagnostic);
+      process.stderr.write(`loom(pi): ${diagnostic}\n`);
+      await cleanupParentTaskGraphPointer();
       return processingErrorResponse();
     }
     const results = rawResults as Array<{
@@ -1024,11 +1111,19 @@ export default function (pi: ExtensionAPI) {
       // --- Phase agent → advance phase ---
       const completedPhase = PHASE_AGENT_MAP[agentType];
       if (completedPhase) {
-        // Extract spec_file/plan_file from subagent messages (Pi format)
-        // Pi messages use { type: "toolCall", name: "write", arguments: { path } }
+        // Parse the untrusted Pi envelope before artifact extraction. A valid
+        // envelope with no write calls may still use the documented filesystem
+        // fallback; a malformed envelope cannot authorize phase advancement.
+        const parsedPhaseMessages = parsePiMessages(result.messages ?? []);
+        if (!parsedPhaseMessages.ok) {
+          const diagnostic = `${agentType} phase artifact extraction failed: ${parsedPhaseMessages.errors.join("; ")}`;
+          processingErrors.push(diagnostic);
+          process.stderr.write(`loom(pi): ${diagnostic} — phase was not advanced\n`);
+          continue;
+        }
         try {
           const specDir = mgr.load().spec_dir ?? ".claude/specs";
-          for (const msg of (result.messages ?? []) as PiMessage[]) {
+          for (const msg of parsedPhaseMessages.value) {
             if (msg.role !== "assistant") continue;
             for (const block of msg.content ?? []) {
               if (block.type !== "toolCall" || (block.name !== "write" && block.name !== "Write")) continue;
@@ -1044,7 +1139,10 @@ export default function (pi: ExtensionAPI) {
             }
           }
         } catch (err) {
-          process.stderr.write(`loom: spec/plan extraction failed: ${(err as Error).message}\n`);
+          const diagnostic = `${agentType} phase artifact extraction failed: ${err instanceof Error ? err.message : String(err)}`;
+          processingErrors.push(diagnostic);
+          process.stderr.write(`loom(pi): ${diagnostic} — phase was not advanced\n`);
+          continue;
         }
 
         const state = mgr.load();
@@ -1197,7 +1295,9 @@ export default function (pi: ExtensionAPI) {
               taskCompleted: false,
               testResult: { verdict: "untrusted", passed: false, label: "pi-transcript-capture-failed" },
               testEvidence: failureReason,
-              filesModified: changedRepositoryArtifacts,
+              // Malformed messages provide no task-attributed path evidence.
+              // The batch-wide repository delta is invalidation-only.
+              filesModified: [],
               changedDeclaredArtifacts: changedArtifacts,
               bytesChangedSinceAttempt,
               newTestsWritten: false,
@@ -1477,6 +1577,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
+    await cleanupParentTaskGraphPointer();
     return processingErrorResponse();
   });
 

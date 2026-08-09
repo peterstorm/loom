@@ -82,12 +82,26 @@ describe("validate-task-execution — spawn lifecycle parsing", () => {
     })).toEqual({ kind: "non-implementation" });
   });
 
-  it("classifies the exact standalone marker before agent category", () => {
+  it("restricts the standalone marker to review and verifier agents", () => {
+    expect(classifyTaskExecutionSpawn({
+      agentType: "loom:code-reviewer",
+      prompt: "LOOM_REVIEW_CONTEXT: standalone\nReview the frozen scope",
+      description: "",
+    })).toEqual({ kind: "standalone" });
+    expect(classifyTaskExecutionSpawn({
+      agentType: "review-verifier-agent",
+      prompt: "LOOM_REVIEW_CONTEXT: standalone\nJudge the manifest",
+      description: "",
+    })).toEqual({ kind: "standalone" });
     expect(classifyTaskExecutionSpawn({
       agentType: "code-implementer-agent",
       prompt: "LOOM_REVIEW_CONTEXT: standalone\nTask ID: T1",
       description: "",
-    })).toEqual({ kind: "standalone" });
+    })).toEqual({
+      kind: "implementation",
+      prompt: "LOOM_REVIEW_CONTEXT: standalone\nTask ID: T1",
+      description: "",
+    });
   });
 
   it("requires every implementation spawn to bind one existing task exactly once", () => {

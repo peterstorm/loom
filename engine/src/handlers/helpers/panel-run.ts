@@ -23,7 +23,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import type { HookResult } from "../../types";
 import type { ParseResult, RunLayout } from "../../core/panel-kernel";
 import { fail, ok } from "../../core/panel-kernel";
@@ -268,16 +268,24 @@ export function prepareWriteTargets(
   files: readonly string[],
 ): ParseResult<void> {
   const errors: string[] = [];
+  let runDirectoryFd: number | null = null;
+  try {
+    runDirectoryFd = openDirectoryNoFollow(runDir);
+  } catch (error) {
+    errors.push(`cannot anchor run directory ${runDir}: ${error instanceof Error ? error.message : String(error)}`);
+  }
   for (const directory of directories) {
     const path = join(runDir, directory);
     try {
-      mkdirSync(path, { recursive: true });
+      if (runDirectoryFd === null) throw new Error("run directory descriptor is unavailable");
+      ensureRelativeDirectoryNoFollow(runDirectoryFd, runDir, path);
     } catch (error) {
       errors.push(`cannot create ${path}: ${error instanceof Error ? error.message : String(error)}`);
       continue;
     }
     errors.push(...entryErrors("run subdirectory", path, "directory"));
   }
+  if (runDirectoryFd !== null) closeSync(runDirectoryFd);
   for (const file of files) {
     const path = join(runDir, file);
     try {
@@ -313,40 +321,111 @@ function noFollowFlag(): number {
   return noFollow;
 }
 
-export function writeRunFileNoFollow(path: string, data: string): void {
-  const fd = openSync(
-    path,
-    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | noFollowFlag(),
-    0o600,
-  );
-  try {
-    writeFileSync(fd, data);
-  } finally {
-    closeSync(fd);
+function directoryFlag(): number {
+  const directory = fsConstants.O_DIRECTORY;
+  if (process.platform !== "linux" || typeof directory !== "number" || directory === 0) {
+    throw new Error("anchored /proc directory traversal is unavailable; refusing an unsafe panel artifact write");
   }
+  return directory;
+}
+
+const procFdChild = (fd: number, child: string): string => `/proc/self/fd/${fd}/${child}`;
+
+/** Open every absolute directory component relative to the descriptor for its
+ * parent. O_NOFOLLOW therefore protects every hop, not only the final file. */
+function openDirectoryNoFollow(path: string): number {
+  const absolute = resolve(path);
+  const root = parse(absolute).root;
+  let current = openSync(root, fsConstants.O_RDONLY | directoryFlag() | noFollowFlag());
+  try {
+    const components = relative(root, absolute).split(sep).filter(Boolean);
+    for (const component of components) {
+      const next = openSync(
+        procFdChild(current, component),
+        fsConstants.O_RDONLY | directoryFlag() | noFollowFlag(),
+      );
+      closeSync(current);
+      current = next;
+    }
+    return current;
+  } catch (error) {
+    closeSync(current);
+    throw error;
+  }
+}
+
+/** Create a run subdirectory one anchored component at a time. mkdir and open
+ * both resolve relative to a retained parent descriptor, closing the parent
+ * replacement race that recursive path-string creation leaves open. */
+function ensureRelativeDirectoryNoFollow(rootFd: number, runDir: string, target: string): void {
+  const fromRun = relative(resolve(runDir), resolve(target));
+  if (fromRun === ".." || fromRun.startsWith(`..${sep}`) || isAbsolute(fromRun)) {
+    throw new Error(`run subdirectory escapes run directory: ${target}`);
+  }
+  let current = rootFd;
+  let ownsCurrent = false;
+  try {
+    for (const component of fromRun.split(sep).filter(Boolean)) {
+      const child = procFdChild(current, component);
+      try {
+        mkdirSync(child, { mode: 0o700 });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+      const next = openSync(
+        child,
+        fsConstants.O_RDONLY | directoryFlag() | noFollowFlag(),
+      );
+      if (ownsCurrent) closeSync(current);
+      current = next;
+      ownsCurrent = true;
+    }
+  } finally {
+    if (ownsCurrent) closeSync(current);
+  }
+}
+
+function writeAnchoredRunFile(path: string, data: string, exclusive: boolean): void {
+  const parentFd = openDirectoryNoFollow(dirname(path));
+  let fileFd: number | null = null;
+  try {
+    fileFd = openSync(
+      procFdChild(parentFd, basename(path)),
+      fsConstants.O_WRONLY | fsConstants.O_CREAT |
+        (exclusive ? fsConstants.O_EXCL : fsConstants.O_TRUNC) | noFollowFlag(),
+      0o600,
+    );
+    writeFileSync(fileFd, data);
+  } finally {
+    if (fileFd !== null) closeSync(fileFd);
+    closeSync(parentFd);
+  }
+}
+
+export function writeRunFileNoFollow(path: string, data: string): void {
+  writeAnchoredRunFile(path, data, false);
 }
 
 /** Claim one fresh authority artifact without following or replacing a leaf. */
 export function writeRunFileExclusiveNoFollow(path: string, data: string): void {
-  const fd = openSync(
-    path,
-    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollowFlag(),
-    0o600,
-  );
-  try {
-    writeFileSync(fd, data);
-  } finally {
-    closeSync(fd);
-  }
+  writeAnchoredRunFile(path, data, true);
 }
 
-/** Publish bytes already staged in the same run directory. rename replaces a
- * raced final symlink as a directory entry; it never follows it to its target. */
+/** Publish staged bytes through one retained parent descriptor. Both names are
+ * resolved inside that directory even if an ancestor is replaced concurrently. */
 export function publishStagedRunFile(stagedPath: string, finalPath: string): void {
-  if (dirname(stagedPath) !== dirname(finalPath)) {
+  if (resolve(dirname(stagedPath)) !== resolve(dirname(finalPath))) {
     throw new Error("staged and final panel artifacts must share one run directory");
   }
-  renameSync(stagedPath, finalPath);
+  const parentFd = openDirectoryNoFollow(dirname(stagedPath));
+  try {
+    renameSync(
+      procFdChild(parentFd, basename(stagedPath)),
+      procFdChild(parentFd, basename(finalPath)),
+    );
+  } finally {
+    closeSync(parentFd);
+  }
 }
 
 /**
