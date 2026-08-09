@@ -108,8 +108,11 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper review-packet create \
 Run `create` once for each Task needing review. It canonicalizes tool-recorded
 absolute paths only when they are inside the current repository (legacy state
 included), rejects traversal/external/symlink paths, fails on an empty scope,
-and refuses to overwrite a packet. Retain each concrete packet path;
-shell variables do not persist across Bash calls. Verify before spawning:
+and refuses to overwrite a packet. Creation also atomically starts the Task's
+packet-bound review run: it snapshots the active finding IDs and exact expected
+reviewer roster. A second, different packet is refused while that run is active.
+Retain each concrete packet path; shell variables do not persist across Bash
+calls. Verify before spawning:
 
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper review-packet verify \
@@ -171,15 +174,45 @@ Review Packet: {review_packet_path}
 Task: {task_id}
 
 Read and verify the Review Packet, then review exactly its scoped artifacts.
-Do not discover a broader live-worktree scope. Produce a Machine Summary with
-CRITICAL_COUNT, CRITICAL, and ADVISORY lines.
+Do not discover a broader live-worktree scope. Read `task.reviewGeneration`,
+`task.priorFindings`, and the packet's `packetId`. Produce a Machine Summary with
+REVIEW_GENERATION, REVIEW_PACKET_ID, CRITICAL_COUNT, CRITICAL, and ADVISORY lines.
+Copy the generation and packet id exactly; stale or unbound evidence is ignored.
+
+Every entry in `task.priorFindings` must be assessed exactly once, in packet
+order, by every reviewer. `resolved_by_remediation` means the finding held before
+and this packet proves the implementation fixed it. `still_present` means it
+remains active. Omission, duplication, unknown IDs, malformed JSON, or an empty
+reason fails evidence capture; silence can never erase a blocker.
 
 Also emit a fenced ```findings JSON block inside the Machine Summary: one entry
 per finding as {"severity": "critical"|"advisory", "file": path|null,
 "line": number|null, "claim": "the single assertion to refute"}, in the same
 order as your CRITICAL/ADVISORY lines. Never invent an id. If you cannot locate
 a finding, use null rather than guessing — a wrong location is worse than none.
+Do not re-emit a prior finding as new; classify it in `review_lifecycle`.
+
+Also emit:
+```review_lifecycle
+{
+  "prior_findings": [
+    {
+      "finding_id": "<exact prior id>",
+      "verdict": "resolved_by_remediation" | "still_present",
+      "reason": "concrete evidence from this packet"
+    }
+  ]
+}
+```
+Use an empty array when the packet has no prior findings.
 ````
+
+New findings are staged per reviewer and do not enter the active set until every
+expected reviewer has supplied valid packet-bound evidence. Then the engine
+finalizes atomically: a prior finding moves to `resolved_findings` only when all
+reviewers explicitly mark it `resolved_by_remediation`; any `still_present`
+verdict keeps it active. Resolved findings are audit history, distinct from
+panel-refuted false positives.
 
 The engine derives stable identity from reviewer agent and emission order. The
 block adds preferred file/line metadata; without it the marker lines are parsed
@@ -191,11 +224,11 @@ broken.
 | Agent | SubagentStop Hook | Effect |
 |-------|-------------------|--------|
 | spec-check-invoker | `store-spec-check-findings` | Sets `spec_check.critical_count`, `spec_check.verdict` |
-| code-reviewer | `store-reviewer-findings` | Merges findings into task `review_status` |
-| silent-failure-hunter | `store-reviewer-findings` | Merges findings into task `review_status` |
-| pr-test-analyzer | `store-reviewer-findings` | Merges findings into task `review_status` |
-| type-design-analyzer | `store-reviewer-findings` | Merges findings into task `review_status` |
-| comment-analyzer | `store-reviewer-findings` | Merges findings into task `review_status` |
+| code-reviewer | `store-reviewer-findings` | Stages packet-bound findings and prior-finding assessments |
+| silent-failure-hunter | `store-reviewer-findings` | Stages packet-bound findings and prior-finding assessments |
+| pr-test-analyzer | `store-reviewer-findings` | Stages packet-bound findings and prior-finding assessments |
+| type-design-analyzer | `store-reviewer-findings` | Stages packet-bound findings and prior-finding assessments |
+| comment-analyzer | `store-reviewer-findings` | Stages evidence; the final expected reviewer atomically resolves/carries prior findings and activates all new findings |
 
 **Task-to-review mapping algorithm:**
 1. Read `task.file_list` and `task.files_modified` through `helper review-packet create`.

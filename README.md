@@ -328,7 +328,7 @@ User-invokable commands defined under `/commands/`.
 | `/loom` | `/loom "description" [--skip-…]` | Full orchestration entry point |
 | `/wave-gate` | `/wave-gate` | Test + spec + review gate after a wave finishes |
 | `/review-pr` | `/review-pr [aspects] [--files …] [--task …] [--dry-run]` | Standalone multi-agent PR review |
-| `/review-and-fix` | `/review-and-fix [aspects] [--no-push] [--dry-run] [--commit-msg …]` | Review → refutation panel → plan → implement → commit → push |
+| `/review-and-fix` | `/review-and-fix [aspects] [--no-push] [--dry-run] [--commit-msg …]` | Review → refutation panel when criticals exist → plan → implement → commit → push |
 | `/spec-check` | `/spec-check` | Standalone drift audit against the active spec |
 | `/specify` | `/specify "description" [--update] [--status]` | Write/update a formal spec (no plan, no code) |
 | `/clarify` | `/clarify [spec-path]` | Resolve `[NEEDS CLARIFICATION]` markers |
@@ -589,7 +589,7 @@ interface TaskGraph {
 }
 ```
 
-`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `plan_context`, `proof`, `test_result`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `file_list`, `review_status`, `review_error`, `review_evidence_failures`, `findings`, `critical_findings`, `advisory_findings`, `refuted_findings`, `start_sha`, `failure_reason`, `retry_count`.
+`Task` fields include `id`, `description`, `agent`, `wave`, `status`, `depends_on`, `spec_anchors`, `new_tests_required`, `plan_context`, `proof`, `test_result`, `test_evidence`, `new_tests_written`, `new_test_evidence`, `files_modified`, `file_list`, `review_status`, `review_generation`, `review_run`, `review_error`, `review_evidence_failures`, `findings`, `critical_findings`, `advisory_findings`, `refuted_findings`, `resolved_findings`, `start_sha`, `failure_reason`, `retry_count`.
 
 `proof` is the engine-authored completion authority. It contains one result per
 obligation: task completion, regression-test pass and new tests when tests are
@@ -625,6 +625,20 @@ so a wrong refutation stays auditable. A manual override
 (`helper store-review-findings`) files what it replaces here too, under the
 `manual-override` lens: an operator dismissing a false positive is making the
 same kind of decision a verifier makes, and it should be as auditable.
+
+`resolved_findings` is deliberately separate: these findings held before an
+implementation change and every expected reviewer explicitly verified them
+`resolved_by_remediation` against the same immutable Review Packet. Each record
+keeps the generation, packet/head identity, and all reviewer reasons. A single
+`still_present` verdict keeps the finding active.
+
+Implementation writes increment `review_generation`. `review-packet create`
+starts a `review_run` bound to that generation, packet, exact reviewer roster,
+and the ordered active finding IDs. Reviewer results stage new findings and must
+assess every prior ID exactly once. Nothing retires and no new finding becomes
+active until the complete roster lands; missing/malformed lifecycle evidence
+fails closed. Finalization is atomic, so concurrent reviewers cannot erase one
+another and a clean rerun cannot silently erase an old blocker by omission.
 
 `review_evidence_failures` names the reviewers whose transcript could not be
 parsed. `review_status` is per-task but evidence capture fails per-agent, and

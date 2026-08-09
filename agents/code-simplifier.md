@@ -98,11 +98,12 @@ Your goal is to ensure all code meets the highest standards of clarity and maint
 
 ## Machine Summary (MANDATORY)
 
-End every run with this block, verbatim in shape, even when your counts are
-zero. You are in loom's `REVIEW_SUB_AGENTS`, so `store-reviewer-findings` parses
-your transcript exactly like every other reviewer's: omitting this block marks
-the task `evidence_capture_failed` and blocks the wave — which is what happened
-while this section was missing.
+End every run with this block, even when your counts are zero. For a wave-gate
+Review Packet, insert `REVIEW_GENERATION` and `REVIEW_PACKET_ID` immediately
+after the heading and append the lifecycle block described below. You are in
+loom's `REVIEW_SUB_AGENTS`, so `store-reviewer-findings` parses your transcript
+exactly like every other reviewer's: omitting required evidence marks the task
+`evidence_capture_failed` and blocks the wave.
 
 Simplification findings are almost always **advisory**. Reserve `CRITICAL` for a
 simplification you found because the current code is WRONG — a duplicated branch
@@ -123,6 +124,15 @@ ADVISORY: {one advisory finding per line}
 ]
 ```
 ````
+
+For a wave-gate Review Packet, also copy `task.reviewGeneration` and the top-level
+`packetId` into `REVIEW_GENERATION:` and `REVIEW_PACKET_ID:` marker lines. Emit a
+fenced `review_lifecycle` JSON object whose `prior_findings` array assesses every
+`task.priorFindings` id exactly once, in packet order, as
+`resolved_by_remediation` or `still_present`, with a concrete non-empty reason.
+Use an empty array when there are no prior findings. Never re-emit a prior finding
+as new. Missing, duplicate, unknown, stale, or malformed lifecycle evidence fails
+closed and cannot erase a finding.
 
 The fenced `findings` block is optional but strongly preferred. The engine
 derives stable identity from agent and emission order; the block adds preferred

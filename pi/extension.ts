@@ -39,7 +39,7 @@ import {
   applyReviewResolution,
   constrainReviewResolutionToScope,
   hasStandaloneReviewContext,
-  resolveReviewFindings,
+  resolveTaskReviewFindings,
   reviewResolutionLog,
 } from "../engine/src/core/review-output";
 import { parseSpecCheckOutput, reconcileSpecCheck } from "../engine/src/core/spec-check";
@@ -1057,14 +1057,28 @@ export default function (pi: ExtensionAPI) {
         // harness and not the other. Scope is the Review Packet's canonical
         // declared/observed file union.
         const resolution = constrainReviewResolutionToScope(
-          resolveReviewFindings(transcriptText, agentType),
+          resolveTaskReviewFindings(
+            transcriptText,
+            agentType,
+            reviewTask.review_run,
+            reviewTask.review_generation,
+          ),
           [...(reviewTask.file_list ?? []), ...(reviewTask.files_modified ?? [])],
         );
+        let appliedTask = reviewTask;
+        let applicationChanged = false;
         await mgr.update((s) => ({
           ...s,
-          tasks: s.tasks.map((t) => (t.id === taskId ? applyReviewResolution(t, resolution) : t)),
+          tasks: s.tasks.map((t) => {
+            if (t.id !== taskId) return t;
+            appliedTask = applyReviewResolution(t, resolution);
+            applicationChanged = appliedTask !== t;
+            return appliedTask;
+          }),
         }));
-        process.stderr.write(reviewResolutionLog(taskId, resolution) + "\n");
+        process.stderr.write(
+          reviewResolutionLog(taskId, resolution, appliedTask, applicationChanged) + "\n",
+        );
         continue;
       }
 

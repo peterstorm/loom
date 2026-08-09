@@ -35,15 +35,25 @@
  */
 
 import { match } from "ts-pattern";
-import { FINDING_SEVERITIES, type FindingSeverity, type ReviewStatus, type Task } from "../types";
+import {
+  FINDING_SEVERITIES,
+  PRIOR_FINDING_VERDICTS,
+  type FindingSeverity,
+  type PriorFindingAssessment,
+  type ReviewRun,
+  type ReviewStatus,
+  type Task,
+} from "../types";
 import {
   claimsOfSeverity,
   draftsFromClaims,
   hasFindingsBlock,
   mergeFindings,
   parseFindingsBlock,
+  recordReviewRunEvidence,
   type DraftFinding,
 } from "./findings";
+import { parseReviewPath } from "./review-packet";
 
 /** Marker placed in standalone reviewer prompts so harness lifecycle hooks know
  * the transcript belongs to a run artifact, not to an orchestration Task. */
@@ -472,16 +482,151 @@ function scrapeLegacyFindings(output: string): ParsedFindings {
  * reconciled finding set. There is no third state, and no "maybe" shape a
  * caller could forget to handle.
  */
+export interface BoundReviewEvidence {
+  readonly packetId: string;
+  readonly generation: number;
+  readonly priorAssessments: readonly PriorFindingAssessment[];
+}
+
 export type ReviewResolution =
   | { readonly kind: "evidence-failed"; readonly agent: string; readonly message: string }
-  | { readonly kind: "findings"; readonly agent: string; readonly findings: ParsedFindings };
+  | { readonly kind: "ignored-stale"; readonly agent: string; readonly message: string }
+  | {
+      readonly kind: "findings";
+      readonly agent: string;
+      readonly findings: ParsedFindings;
+      readonly bound?: BoundReviewEvidence;
+    };
+
+export type UnboundReviewResolution = Exclude<ReviewResolution, { readonly kind: "ignored-stale" }>;
 
 /** Pure: parse → reconcile, in one place, for every harness. */
-export function resolveReviewFindings(transcript: string, agent: string): ReviewResolution {
+export function resolveReviewFindings(transcript: string, agent: string): UnboundReviewResolution {
   const findings = parseMachineSummary(transcript) ?? parseLegacyFindings(transcript);
   return findings.criticalCount === null
     ? { kind: "evidence-failed", agent, message: buildEvidenceFailureMessage(findings) }
     : { kind: "findings", agent, findings: reconcileFindings(findings) };
+}
+
+const REVIEW_LIFECYCLE_BLOCK =
+  /^[ \t]*```[ \t]*review_lifecycle[ \t]*\r?\n([\s\S]*?)^[ \t]*```[ \t]*$/gm;
+
+function lastMarker(text: string, name: string): string | null {
+  const pattern = new RegExp(`^[ \\t\\-*]*\\*{0,2}${name}:?\\*{0,2}\\s*(\\S+)`, "gim");
+  let value: string | null = null;
+  for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) value = match[1]!;
+  return value;
+}
+
+function parsePriorAssessments(
+  transcript: string,
+  priorIds: readonly string[],
+): { readonly ok: true; readonly value: readonly PriorFindingAssessment[] } |
+   { readonly ok: false; readonly error: string } {
+  REVIEW_LIFECYCLE_BLOCK.lastIndex = 0;
+  const bodies: string[] = [];
+  for (let match = REVIEW_LIFECYCLE_BLOCK.exec(transcript); match !== null;
+       match = REVIEW_LIFECYCLE_BLOCK.exec(transcript)) bodies.push(match[1]!);
+  if (bodies.length === 0) {
+    return { ok: false, error: "review_lifecycle block missing for packet-bound review" };
+  }
+  if (bodies.length > 1) {
+    return { ok: false, error: "packet-bound review must contain exactly one review_lifecycle block" };
+  }
+  const body = bodies[0]!;
+  let raw: unknown;
+  try { raw = JSON.parse(body); }
+  catch { return { ok: false, error: "review_lifecycle block is not valid JSON" }; }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, error: "review_lifecycle block must be a JSON object" };
+  }
+  const entries = (raw as Record<string, unknown>).prior_findings;
+  if (!Array.isArray(entries)) return { ok: false, error: "review_lifecycle.prior_findings must be an array" };
+  const assessments: PriorFindingAssessment[] = [];
+  for (const [index, entry] of entries.entries()) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      return { ok: false, error: `review_lifecycle.prior_findings[${index}] must be an object` };
+    }
+    const record = entry as Record<string, unknown>;
+    const findingId = typeof record.finding_id === "string" ? record.finding_id.trim() : "";
+    const reason = typeof record.reason === "string" ? record.reason.trim() : "";
+    if (findingId === "" || reason === "" ||
+        !(PRIOR_FINDING_VERDICTS as readonly unknown[]).includes(record.verdict)) {
+      return { ok: false, error: `review_lifecycle.prior_findings[${index}] is malformed` };
+    }
+    assessments.push({
+      finding_id: findingId,
+      verdict: record.verdict as PriorFindingAssessment["verdict"],
+      reason,
+    });
+  }
+  const ids = assessments.map((assessment) => assessment.finding_id);
+  if (ids.length !== priorIds.length || ids.some((id, index) => id !== priorIds[index])) {
+    return { ok: false, error: "review_lifecycle must assess every prior finding exactly once in packet order" };
+  }
+  return { ok: true, value: assessments };
+}
+
+/** Parse a reviewer result against the immutable run that authorized it. */
+export function resolveBoundReviewFindings(
+  transcript: string,
+  agent: string,
+  run: ReviewRun,
+): ReviewResolution {
+  const packetId = lastMarker(transcript, "REVIEW_PACKET_ID");
+  const generationRaw = lastMarker(transcript, "REVIEW_GENERATION");
+  if (packetId === null || generationRaw === null) {
+    return {
+      kind: "evidence-failed",
+      agent,
+      message: "review output omitted REVIEW_PACKET_ID or REVIEW_GENERATION",
+    };
+  }
+  if (packetId !== run.packet_id || generationRaw !== String(run.generation)) {
+    return {
+      kind: "ignored-stale",
+      agent,
+      message: `review output is not bound to current packet ${run.packet_id} generation ${run.generation}`,
+    };
+  }
+  const base = resolveReviewFindings(transcript, agent);
+  if (base.kind !== "findings") return base;
+  const assessments = parsePriorAssessments(transcript, run.prior_finding_ids);
+  if (!assessments.ok) {
+    return { kind: "evidence-failed", agent, message: assessments.error };
+  }
+  return {
+    ...base,
+    bound: {
+      packetId: run.packet_id,
+      generation: run.generation,
+      priorAssessments: assessments.value,
+    },
+  };
+}
+
+/**
+ * Select the bound or legacy parser from current task authority. A transcript
+ * carrying packet markers can never fall back to legacy merge merely because
+ * implementation invalidation or an override cleared its now-stale run first.
+ */
+export function resolveTaskReviewFindings(
+  transcript: string,
+  agent: string,
+  run: ReviewRun | undefined,
+  reviewGeneration: number | undefined,
+): ReviewResolution {
+  if (run !== undefined) return resolveBoundReviewFindings(transcript, agent, run);
+  if (reviewGeneration !== undefined ||
+      lastMarker(transcript, "REVIEW_PACKET_ID") !== null ||
+      lastMarker(transcript, "REVIEW_GENERATION") !== null) {
+    return {
+      kind: "ignored-stale",
+      agent,
+      message: "review output has no matching active review run for this generation-aware task",
+    };
+  }
+  return resolveReviewFindings(transcript, agent);
 }
 
 /**
@@ -493,12 +638,18 @@ export function constrainReviewResolutionToScope(
   resolution: ReviewResolution,
   scope: readonly string[],
 ): ReviewResolution {
-  if (resolution.kind === "evidence-failed") return resolution;
-  const normalize = (path: string): string => path.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
-  const allowed = new Set(scope.map(normalize));
+  if (resolution.kind !== "findings") return resolution;
+  const allowed = new Set(scope.flatMap((path) => {
+    const parsed = parseReviewPath(path, "review scope path");
+    return parsed.ok ? [parsed.value] : [];
+  }));
   const outside = resolution.findings.drafts
     .map((finding) => finding.file)
-    .filter((file): file is string => file !== null && !allowed.has(normalize(file)));
+    .filter((file): file is string => {
+      if (file === null) return false;
+      const parsed = parseReviewPath(file, "review finding path");
+      return !parsed.ok || !allowed.has(parsed.value);
+    });
   if (outside.length === 0) return resolution;
   return {
     kind: "evidence-failed",
@@ -517,6 +668,8 @@ export function invalidateTaskReview(task: Task): Task {
   return {
     ...task,
     review_status: "pending",
+    review_generation: (task.review_generation ?? 0) + 1,
+    review_run: undefined,
     review_error: undefined,
     review_evidence_failures: undefined,
   };
@@ -525,20 +678,60 @@ export function invalidateTaskReview(task: Task): Task {
 /** Pure: the complete task transform a resolution implies. */
 export function applyReviewResolution(task: Task, resolution: ReviewResolution): Task {
   return match(resolution)
-    .with({ kind: "evidence-failed" }, (r): Task => ({
-      ...task,
-      review_status: "evidence_capture_failed" as ReviewStatus,
-      review_error: r.message,
-      // Named, not just counted. The status is per-task and the failure is
-      // per-agent, so recording WHICH reviewer could not be parsed is what lets
-      // `mergeFindings` keep the block alive across a sibling's clean pass and
-      // still clear it when that reviewer itself re-runs successfully.
-      review_evidence_failures: [
-        ...(task.review_evidence_failures ?? []).filter((failed) => failed !== r.agent),
-        r.agent,
-      ],
-    }))
-    .with({ kind: "findings" }, (r): Task => mergeFindings(task, r.findings, r.agent))
+    .with({ kind: "ignored-stale" }, (): Task => task)
+    .with({ kind: "evidence-failed" }, (r): Task => {
+      // One immutable slot per expected reviewer. A duplicate process failure
+      // arriving after that slot succeeded is stale noise, not grounds to poison
+      // an otherwise completeable run.
+      if (task.review_run !== undefined && !task.review_run.expected_agents.includes(r.agent)) return task;
+      if (task.review_run?.evidence.some((evidence) => evidence.agent === r.agent)) return task;
+      return {
+        ...task,
+        review_status: "evidence_capture_failed" as ReviewStatus,
+        review_error: r.message,
+        // Named, not just counted. The status is per-task and the failure is
+        // per-agent, so recording WHICH reviewer could not be parsed is what lets
+        // a clean retry clear exactly its own failed evidence.
+        review_evidence_failures: [
+          ...(task.review_evidence_failures ?? []).filter((failed) => failed !== r.agent),
+          r.agent,
+        ],
+      };
+    })
+    .with({ kind: "findings" }, (r): Task => {
+      if (r.bound === undefined) return mergeFindings(task, r.findings, r.agent);
+      const transition = recordReviewRunEvidence(
+        task,
+        r.bound.packetId,
+        r.bound.generation,
+        {
+          agent: r.agent,
+          prior_assessments: r.bound.priorAssessments,
+          new_findings: r.findings.drafts,
+        },
+      );
+      if (transition.ok) return transition.task;
+
+      // A result resolved against an older snapshot must not poison the current
+      // packet. For the still-active matching packet, however, losing the
+      // transition error would let the shell report evidence as staged when no
+      // state was written. Preserve that failure in the same typed review
+      // record used for transcript parse failures.
+      const currentRun = task.review_run;
+      if (currentRun === undefined ||
+          currentRun.packet_id !== r.bound.packetId ||
+          currentRun.generation !== r.bound.generation ||
+          currentRun.evidence.some((evidence) => evidence.agent === r.agent)) return task;
+      return {
+        ...task,
+        review_status: "evidence_capture_failed" as ReviewStatus,
+        review_error: transition.error,
+        review_evidence_failures: [
+          ...(task.review_evidence_failures ?? []).filter((agent) => agent !== r.agent),
+          r.agent,
+        ],
+      };
+    })
     .exhaustive();
 }
 
@@ -580,20 +773,41 @@ function blockStatusNote(status: FindingsBlockStatus): string {
 }
 
 /** Pure: the operator-facing line a harness writes to stderr for a resolution. */
-export function reviewResolutionLog(taskId: string, resolution: ReviewResolution): string {
+export function reviewResolutionLog(
+  taskId: string,
+  resolution: ReviewResolution,
+  appliedTask?: Task,
+  applicationChanged?: boolean,
+): string {
   return match(resolution)
     .with(
       { kind: "evidence-failed" },
       (r) => `WARNING: ${r.message} for ${taskId} — marking evidence_capture_failed`,
     )
+    .with(
+      { kind: "ignored-stale" },
+      (r) => `WARNING: ${r.message} for ${taskId} — evidence ignored`,
+    )
     .with({ kind: "findings" }, (r) => {
+      if (r.bound !== undefined && appliedTask?.review_evidence_failures?.includes(r.agent)) {
+        return `WARNING: ${appliedTask.review_error ?? "review evidence was rejected"} for ${taskId} — marking evidence_capture_failed`;
+      }
+      if (r.bound !== undefined && applicationChanged === false) {
+        return `WARNING: review evidence did not apply to current task state for ${taskId} — evidence ignored`;
+      }
+      if (r.bound !== undefined && appliedTask !== undefined &&
+          appliedTask.review_generation !== r.bound.generation) {
+        return `WARNING: review output is stale for ${taskId} — evidence ignored`;
+      }
       // The larger of the reviewer's tally and what was actually captured —
       // the same disjunction `mergeFindings` blocks on. Reporting the tally
       // alone logged "passed (0 critical)" for a task the very next line
       // recorded as blocked with a real critical in it.
       const count = Math.max(r.findings.criticalCount ?? 0, r.findings.critical.length);
       return (
-        `Task ${taskId} review: ${count > 0 ? "blocked" : "passed"} (${count} critical)` +
+        (r.bound === undefined
+          ? `Task ${taskId} review: ${count > 0 ? "blocked" : "passed"} (${count} critical)`
+          : `Task ${taskId} review evidence staged for packet ${r.bound.packetId} (${count} new critical)`) +
         blockStatusNote(r.findings.blockStatus)
       );
     })

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { REVIEW_SUB_AGENTS, isReviewAgent } from "../src/config";
+import { REVIEW_SUB_AGENTS, WAVE_REVIEW_AGENTS, isReviewAgent } from "../src/config";
 import { carriedOverCount, resolveReviewFindings } from "../src/core/review-output";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -46,6 +46,15 @@ describe("every REVIEW_SUB_AGENT declares the Machine Summary contract", () => {
 
   it.each(agents)("%s routes through the review parser at runtime", (agent) => {
     expect(isReviewAgent(agent)).toBe(true);
+  });
+
+  it.each(WAVE_REVIEW_AGENTS)("%s declares remediation lifecycle evidence", (agent) => {
+    const md = agentFile(agent);
+    expect(md).toContain("REVIEW_GENERATION:");
+    expect(md).toContain("REVIEW_PACKET_ID:");
+    expect(md).toContain("review_lifecycle");
+    expect(md).toContain("resolved_by_remediation");
+    expect(md).toContain("still_present");
   });
 
   /**

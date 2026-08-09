@@ -20,6 +20,8 @@ import {
   findingsViewError,
   evidenceFailureError,
   refutationsUnionError,
+  resolutionsUnionError,
+  reviewRunError,
 } from "./core/findings";
 import type { TaskGraph } from "./types";
 import { deriveProofObligations, parseTaskProof } from "./core/proof-obligations";
@@ -239,6 +241,17 @@ export function taskUnionError(v: unknown, index: number): string | null {
   if (t.review_status !== undefined && !(REVIEW_STATUSES as readonly string[]).includes(t.review_status as string)) {
     return `tasks[${index}] ("${id}"): review_status ${JSON.stringify(t.review_status)} is not one of ${REVIEW_STATUSES.join(", ")}`;
   }
+  if (t.review_generation !== undefined && (
+    typeof t.review_generation !== "number" || !Number.isInteger(t.review_generation) || t.review_generation < 0
+  )) {
+    return `tasks[${index}] ("${id}"): review_generation must be a non-negative integer`;
+  }
+  if (t.review_run !== undefined && t.review_generation === undefined) {
+    return `tasks[${index}] ("${id}"): review_run requires review_generation`;
+  }
+  if (t.review_run !== undefined && t.review_status !== "pending" && t.review_status !== "evidence_capture_failed") {
+    return `tasks[${index}] ("${id}"): an in-progress review_run requires pending or evidence_capture_failed status`;
+  }
   const statusClaimsImplementation = t.status === "implemented" || t.status === "completed";
   if (t.proof !== undefined) {
     const proof = parseTaskProof(t.proof);
@@ -317,12 +330,25 @@ export function taskUnionError(v: unknown, index: number): string | null {
     `tasks[${index}] ("${id}"): refuted_findings`,
   );
   if (refutationsError !== null) return refutationsError;
+  const resolutionsError = resolutionsUnionError(
+    t.resolved_findings,
+    `tasks[${index}] ("${id}"): resolved_findings`,
+  );
+  if (resolutionsError !== null) return resolutionsError;
   const collisionError = findingIdCollisionError(
     t.findings,
     t.refuted_findings,
     `tasks[${index}] ("${id}")`,
+    t.resolved_findings,
   );
   if (collisionError !== null) return collisionError;
+  const runError = reviewRunError(
+    t.review_run,
+    t.review_generation,
+    t.findings,
+    `tasks[${index}] ("${id}"): review_run`,
+  );
+  if (runError !== null) return runError;
   return evidenceFailureError(t, `tasks[${index}] ("${id}")`);
 }
 

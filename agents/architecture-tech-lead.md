@@ -119,8 +119,10 @@ If no high-confidence issues exist, confirm the architecture meets standards wit
 
 ## Machine Summary (MANDATORY)
 
-End every review with this exact machine-readable section. Emit one `CRITICAL:`
-or `ADVISORY:` line per finding and account for every line in the JSON block.
+End every review with this machine-readable section. For a wave-gate Review
+Packet, insert `REVIEW_GENERATION` and `REVIEW_PACKET_ID` immediately after the
+heading and append the lifecycle block described below. Emit one `CRITICAL:` or
+`ADVISORY:` line per new finding and account for every line in the JSON block.
 Never invent an id; the engine derives identity from your agent name and order.
 
 ````
@@ -137,6 +139,15 @@ ADVISORY: {one advisory claim per line; omit when zero}
 ]
 ```
 ````
+
+For a wave-gate Review Packet, also copy `task.reviewGeneration` and the top-level
+`packetId` into `REVIEW_GENERATION:` and `REVIEW_PACKET_ID:` marker lines. Emit a
+fenced `review_lifecycle` JSON object whose `prior_findings` array assesses every
+`task.priorFindings` id exactly once, in packet order, as
+`resolved_by_remediation` or `still_present`, with a concrete non-empty reason.
+Use an empty array when there are no prior findings. Never re-emit a prior finding
+as new. Missing, duplicate, unknown, stale, or malformed lifecycle evidence fails
+closed and cannot erase a finding.
 
 Use exactly `critical` or `advisory`. Use `null` rather than guessing a location.
 The claim text in the block must exactly match its marker line. Standalone and

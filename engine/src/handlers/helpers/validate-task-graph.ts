@@ -19,11 +19,15 @@ import {
   evidenceFailureError,
   nextOrdinal,
   refutationsUnionError,
+  resolutionsUnionError,
+  reviewRunError,
   parseStoredFindings,
   parseStoredRefutations,
+  parseStoredResolutions,
   recoverViewOnlyClaims,
   unrecoverableViewClaims,
   salvageFindingsFromMalformedRefutations,
+  salvageFindingsFromMalformedResolutions,
   salvageMalformedFindings,
   RECOVERED_AGENT,
 } from "../../core/findings";
@@ -93,7 +97,9 @@ function findingsErrorsOf(task: Record<string, unknown>, label: string): string[
   }
   push(findingsLockstepError(task.findings, task.critical_findings, task.advisory_findings, label));
   push(refutationsUnionError(task.refuted_findings, `${label}: refuted_findings`));
-  push(findingIdCollisionError(task.findings, task.refuted_findings, label));
+  push(resolutionsUnionError(task.resolved_findings, `${label}: resolved_findings`));
+  push(findingIdCollisionError(task.findings, task.refuted_findings, label, task.resolved_findings));
+  push(reviewRunError(task.review_run, task.review_generation, task.findings, `${label}: review_run`));
   push(evidenceFailureError(task, label));
   return errors;
 }
@@ -296,6 +302,10 @@ interface FindingsRepair {
   readonly recoveredRefutationFindings: readonly string[];
   /** Malformed `refuted_findings` records whose audit trail was unrecoverable. */
   readonly droppedRefutations: number;
+  /** Claims returned to the active set from malformed remediation envelopes. */
+  readonly recoveredResolutionFindings: readonly string[];
+  /** Malformed remediation records whose audit trail was unrecoverable. */
+  readonly droppedResolutions: number;
   /** The review record was cleared because its evidence-failure biconditional
    *  was broken and no honest reconstruction exists. */
   readonly clearedReviewRecord: boolean;
@@ -345,30 +355,45 @@ function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
     : t.refuted_findings === undefined ? [] : [t.refuted_findings];
   const refuted = parseStoredRefutations(rawRefutations);
   const rawRefutedCount = rawRefutations.length;
+  const rawResolutions = Array.isArray(t.resolved_findings)
+    ? t.resolved_findings
+    : t.resolved_findings === undefined ? [] : [t.resolved_findings];
+  const resolved = parseStoredResolutions(rawResolutions);
+  const rawResolvedCount = rawResolutions.length;
   // Apply the same conservation rule to a singleton findings container.
   const rawFindings = Array.isArray(t.findings)
     ? t.findings
     : t.findings === undefined ? [] : [t.findings];
   const stored = parseStoredFindings(rawFindings);
-  const represented = [...stored, ...refuted.map((record) => record.finding)];
+  const represented = [
+    ...stored,
+    ...refuted.map((record) => record.finding),
+    ...resolved.map((record) => record.finding),
+  ];
+  const sameFinding = (left: { readonly id: string; readonly severity: string; readonly claim: string },
+    right: { readonly id: string; readonly severity: string; readonly claim: string }): boolean =>
+    left.id === right.id && left.severity === right.severity && left.claim === right.claim;
   const recoveredRefutationFindings = salvageFindingsFromMalformedRefutations(rawRefutations)
-    .filter((candidate) => !represented.some((existing) =>
-      existing.id === candidate.id &&
-      existing.severity === candidate.severity &&
-      existing.claim === candidate.claim
-    ));
+    .filter((candidate) => !represented.some((existing) => sameFinding(existing, candidate)));
+  const recoveredResolutionFindings = salvageFindingsFromMalformedResolutions(rawResolutions)
+    .filter((candidate) => ![...represented, ...recoveredRefutationFindings]
+      .some((existing) => sameFinding(existing, candidate)));
   const rawFindingCount = rawFindings.length;
   // Order- and length-preserving, so an id that differs at the same index is
   // exactly one this repair re-minted. Recovered nested findings participate in
   // the same collision proof before returning to the active set.
-  const beforeDedup = [...stored, ...recoveredRefutationFindings];
-  const parsed = deduplicateFindingIds(beforeDedup, refuted);
+  const beforeDedup = [...stored, ...recoveredRefutationFindings, ...recoveredResolutionFindings];
+  const parsed = deduplicateFindingIds(beforeDedup, refuted, resolved);
   const reminted = parsed.filter((finding, index) => finding.id !== beforeDedup[index]?.id).length;
 
   const salvagedDrafts = salvageMalformedFindings(rawFindings);
   const salvagedFindings = salvagedDrafts.length === 0
     ? []
-    : attributeFindings(salvagedDrafts, RECOVERED_AGENT, nextOrdinal(parsed, refuted, RECOVERED_AGENT));
+    : attributeFindings(
+        salvagedDrafts,
+        RECOVERED_AGENT,
+        nextOrdinal(parsed, refuted, RECOVERED_AGENT, resolved),
+      );
   const identified = [...parsed, ...salvagedFindings];
 
   const viewClaims = (raw: unknown): string[] =>
@@ -378,6 +403,7 @@ function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
     refuted,
     viewClaims(t.critical_findings),
     viewClaims(t.advisory_findings),
+    resolved,
   );
   const findings = [...identified, ...recoveredFindings];
   const unrecoverable = unrecoverableViewClaims(
@@ -387,6 +413,13 @@ function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
   );
 
   const review = repairReviewRecord(t);
+  const runInvalidated = t.review_run !== undefined && (
+    recoveredFindings.length > 0 || salvagedFindings.length > 0 ||
+    unrecoverable.length > 0 || reminted > 0 || recoveredRefutationFindings.length > 0 ||
+    recoveredResolutionFindings.length > 0 ||
+    rawFindingCount !== stored.length || rawRefutedCount !== refuted.length ||
+    rawResolvedCount !== resolved.length
+  );
 
   return {
     fields: {
@@ -394,7 +427,16 @@ function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
       critical_findings: [...claimsOfSeverity(findings, "critical")],
       advisory_findings: [...claimsOfSeverity(findings, "advisory")],
       refuted_findings: refuted,
+      resolved_findings: resolved,
       ...review.fields,
+      ...(runInvalidated
+        ? {
+            review_run: undefined,
+            review_status: "pending",
+            review_error: undefined,
+            review_evidence_failures: undefined,
+          }
+        : {}),
     },
     recovered: recoveredFindings.map((finding) => finding.claim),
     salvaged: salvagedFindings.map((finding) => finding.claim),
@@ -403,7 +445,9 @@ function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
     dropped: rawFindingCount - stored.length - salvagedFindings.length,
     recoveredRefutationFindings: recoveredRefutationFindings.map((finding) => finding.claim),
     droppedRefutations: rawRefutedCount - refuted.length,
-    clearedReviewRecord: review.cleared,
+    recoveredResolutionFindings: recoveredResolutionFindings.map((finding) => finding.claim),
+    droppedResolutions: rawResolvedCount - resolved.length,
+    clearedReviewRecord: review.cleared || runInvalidated,
   };
 }
 
@@ -517,6 +561,16 @@ export function fixFull(json: Record<string, unknown>): FixReport {
         const note =
           `${id}: DROPPED ${repair.droppedRefutations} malformed refutation record(s) — ` +
           `audit trail lost; valid nested findings were preserved or returned to the active set`;
+        notes.push(note);
+        dataLoss.push(note);
+      }
+      for (const claim of repair.recoveredResolutionFindings) {
+        notes.push(`${id}: recovered finding from malformed remediation resolution — "${claim}"`);
+      }
+      if (repair.droppedResolutions > 0) {
+        const note =
+          `${id}: DROPPED ${repair.droppedResolutions} malformed remediation resolution record(s) — ` +
+          `audit trail lost; valid nested findings were returned to the active set`;
         notes.push(note);
         dataLoss.push(note);
       }

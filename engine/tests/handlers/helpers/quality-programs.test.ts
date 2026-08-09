@@ -164,6 +164,15 @@ describe("quality-program helper boundaries", () => {
         // The packet boundary must canonicalize it to the same repo-relative
         // identity as file_list instead of rejecting valid in-repo evidence.
         files_modified: [join(ROOT, "engine/src/core/model-profiles.ts")],
+        review_status: "pending",
+        review_generation: 1,
+        // A pre-identity graph may carry only the derived views. Packet
+        // creation must mint the same identity into both packet and run before
+        // any reviewer is asked to assess it.
+        critical_findings: ["stale finding"],
+        advisory_findings: [],
+        refuted_findings: [],
+        resolved_findings: [],
       }],
       wave_gates: {},
     }));
@@ -175,8 +184,28 @@ describe("quality-program helper boundaries", () => {
     expect(id).toMatch(/^[0-9a-f]{64}$/);
     const written = JSON.parse(readFileSync(packet, "utf-8"));
     expect(written.modifiedPaths).toEqual(["engine/src/core/model-profiles.ts"]);
+    expect(written.task.reviewGeneration).toBe(1);
+    expect(written.task.priorFindings.map((finding: { id: string }) => finding.id))
+      .toEqual(["recovered-view-1"]);
     expect(written.artifacts.map((artifact: { path: string }) => artifact.path))
       .toEqual(["engine/src/core/model-profiles.ts"]);
+    const started = JSON.parse(readFileSync(state, "utf-8"));
+    expect(started.tasks[0].review_run).toMatchObject({
+      generation: 1,
+      packet_id: id,
+      prior_finding_ids: ["recovered-view-1"],
+      evidence: [],
+    });
+    expect(started.tasks[0].findings).toMatchObject([
+      { id: "recovered-view-1", severity: "critical", claim: "stale finding" },
+    ]);
+    expect(started.tasks[0].review_run.expected_agents).toEqual([
+      "code-reviewer",
+      "silent-failure-hunter",
+      "pr-test-analyzer",
+      "type-design-analyzer",
+      "comment-analyzer",
+    ]);
     expect(cli(["helper", "review-packet", "verify", "--packet", packet]).trim()).toBe(id);
   });
 

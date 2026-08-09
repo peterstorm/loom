@@ -20,7 +20,7 @@ import {
   applyReviewResolution,
   constrainReviewResolutionToScope,
   hasStandaloneReviewContext,
-  resolveReviewFindings,
+  resolveTaskReviewFindings,
   reviewResolutionLog,
 } from "../../core/review-output";
 import { isReviewAgent } from "../../config";
@@ -108,7 +108,12 @@ const handler: HookHandler = async (stdin) => {
   const transcript = await readTranscriptWithRetry(rawPath, /\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*\d+/);
   const resolution = transcript
     ? constrainReviewResolutionToScope(
-        resolveReviewFindings(transcript, agentType),
+        resolveTaskReviewFindings(
+          transcript,
+          agentType,
+          targetTask.review_run,
+          targetTask.review_generation,
+        ),
         [...(targetTask.file_list ?? []), ...(targetTask.files_modified ?? [])],
       )
     : {
@@ -117,12 +122,21 @@ const handler: HookHandler = async (stdin) => {
         message: `review transcript empty or unreadable at ${rawPath || "<unset>"}`,
       };
 
+  let appliedTask = targetTask;
+  let applicationChanged = false;
   await mgr.update((s) => ({
     ...s,
-    tasks: s.tasks.map((t) => (t.id === taskId ? applyReviewResolution(t, resolution) : t)),
+    tasks: s.tasks.map((t) => {
+      if (t.id !== taskId) return t;
+      appliedTask = applyReviewResolution(t, resolution);
+      applicationChanged = appliedTask !== t;
+      return appliedTask;
+    }),
   }));
 
-  process.stderr.write(reviewResolutionLog(taskId, resolution) + "\n");
+  process.stderr.write(
+    reviewResolutionLog(taskId, resolution, appliedTask, applicationChanged) + "\n",
+  );
   return { kind: "passthrough" };
 };
 

@@ -44,6 +44,18 @@ _Avoid_: Review panel (ambiguous with the reviewers themselves), jury, second op
 A finding a **Refutation Panel** killed, recorded with the lenses and reasoning that killed it. Moved out of the active set, never deleted — a wrong refutation is a shipped bug, and a silently dropped critical is indistinguishable from one that was never found.
 _Avoid_: Dismissed finding, false positive, resolved
 
+**Resolved Finding**:
+A Finding that held before implementation changed and that every expected review Agent explicitly verified as fixed against one immutable Review Packet. Retained with Review Generation, packet/head identity, and all assessment reasons; never stored as a Refuted Finding.
+_Avoid_: Refuted finding, dismissed finding, false positive
+
+**Review Generation**:
+A Task's monotonic implementation revision for review purposes. Any implementation byte change increments it and invalidates an in-progress Review Run, preventing late evidence for older bytes from mutating current review state.
+_Avoid_: Review round, retry count, packet version
+
+**Review Run**:
+A packet-bound collection of evidence from the exact expected reviewer roster for one Task and Review Generation. It snapshots all active Finding IDs; every reviewer must assess each prior ID exactly once before atomic finalization can resolve old Findings or activate new ones.
+_Avoid_: Review Generation, Refutation Panel, reviewer batch (without the binding)
+
 **Lens**:
 A single committed perspective an agent argues from, assigned rather than chosen, so a panel's diversity is structural instead of hoped for. Deliberately two disjoint vocabularies — see Flagged Ambiguities.
 _Avoid_: Angle, viewpoint, role, persona
@@ -166,6 +178,8 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - Every Loom-owned **Agent** resolves one explicit **LLM Profile** before spawn
 - A **Task** becomes implemented only after all of its **Proof Obligations** are satisfied
 - Review Agents consume one immutable **Review Packet** per Task
+- A **Review Run** binds that Review Packet to one **Review Generation**, the expected review Agents, and all prior active Finding IDs
+- A **Resolved Finding** leaves the active set only when every Agent in its Review Run explicitly verifies remediation; any `still_present` assessment keeps it active
 - A **Panel Program** emits the exact Agent batches and engine operations for each panel
 - A **Standalone Review Run** feeds identified critical Findings through the same **Refutation Panel** without creating a Task or mutating the State File
 - A **Skill** is loaded into an **Agent** to provide domain expertise

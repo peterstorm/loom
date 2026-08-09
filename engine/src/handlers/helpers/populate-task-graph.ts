@@ -76,10 +76,12 @@ function sanitizeDecomposedTask(t: Task): Task {
       declaredArtifacts: t.file_list ?? [],
     }),
     review_status: "pending",
+    review_generation: 0,
     findings: [],
     critical_findings: [],
     advisory_findings: [],
     refuted_findings: [],
+    resolved_findings: [],
   };
 }
 

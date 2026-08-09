@@ -77,7 +77,7 @@ export function updateTaskFindings(
 
   // A pre-identity task's claims live only in the views; give them identity
   // through `recoverViewOnlyClaims` — the same primitive `mergeFindings` and
-  // `--fix` reach for, making this its third caller — so all five lockstep
+  // `--fix` reach for, making this its third caller — so all six lockstep
   // writers (enumerated on `Task.findings` in types.ts) agree on what a legacy
   // task's findings ARE before any of them decides what to keep.
   const existing: readonly Finding[] = [
@@ -87,6 +87,7 @@ export function updateTaskFindings(
       task.refuted_findings ?? [],
       task.critical_findings,
       task.advisory_findings,
+      task.resolved_findings ?? [],
     ),
   ];
 
@@ -123,13 +124,14 @@ export function updateTaskFindings(
   const supplied = attributeFindings(
     draftsFromClaims(critical, advisory),
     OVERRIDE_AGENT,
-    nextOrdinal(existing, refuted, OVERRIDE_AGENT),
+    nextOrdinal(existing, refuted, OVERRIDE_AGENT, task.resolved_findings ?? []),
   );
   const findings = [...keptAdvisory, ...supplied];
 
   return {
     ...task,
     review_status: reviewStatus,
+    review_run: undefined,
     // An override replaces the review record outright, and `review_error` plus
     // the outstanding evidence failures are part of that record — both are
     // meaningful only for evidence_capture_failed, which this write leaves.

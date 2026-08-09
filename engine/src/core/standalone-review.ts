@@ -1,6 +1,7 @@
 import { attributeFindings, findingsUnionError, parseStoredFindings, type Finding, type RefutedFinding } from "./findings";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import { resolveReviewFindings } from "./review-output";
+import { parseReviewPath } from "./review-packet";
 
 export const STANDALONE_REVIEW_SCHEMA_VERSION = 1;
 export const STANDALONE_REVIEW_SUBJECT = "standalone-review";
@@ -55,18 +56,6 @@ export interface AdjudicatedStandaloneReview {
   readonly panel: ParsedPanelOutcomes | null;
 }
 
-function normalizeRepoRelativePath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
-}
-
-function repoRelativePathError(path: string): string | null {
-  const normalized = normalizeRepoRelativePath(path);
-  if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized)) return `review scope path must be repo-relative: ${path}`;
-  if (normalized.split("/").includes("..")) return `review scope path must not escape the repository: ${path}`;
-  if (/[\r\n\0]/.test(path)) return `review scope path must be a single line without NUL: ${JSON.stringify(path)}`;
-  return null;
-}
-
 function uniqueNonEmpty(values: readonly string[], label: string): readonly string[] {
   const errors: string[] = [];
   if (values.length === 0) errors.push(`${label} must be non-empty`);
@@ -83,14 +72,12 @@ export function parseStandaloneReviewScope(
   if (!Array.isArray(raw)) return fail([`${label} must be a non-empty string array`]);
   const errors: string[] = [];
   const scope = raw.flatMap((entry, index): string[] => {
-    if (typeof entry !== "string" || entry.trim() === "") {
-      errors.push(`${label}[${index}] must be a non-empty string`);
+    const parsed = parseReviewPath(entry, `${label}[${index}]`);
+    if (!parsed.ok) {
+      errors.push(...parsed.errors);
       return [];
     }
-    const normalized = normalizeRepoRelativePath(entry.trim());
-    const pathError = repoRelativePathError(normalized);
-    if (pathError !== null) errors.push(pathError.replace(/^review scope path/, `${label}[${index}]`));
-    return [normalized];
+    return [parsed.value];
   });
   errors.push(...uniqueNonEmpty(scope, label));
   return errors.length > 0 ? fail(errors) : ok(Object.freeze(scope));
@@ -101,13 +88,14 @@ function findingScopeErrors(
   findings: readonly Pick<Finding, "file">[],
   label: string,
 ): readonly string[] {
-  const allowed = new Set(scope.map(normalizeRepoRelativePath));
+  const allowed = new Set(scope);
   return findings.flatMap((finding, index) => {
     // Location metadata is optional in every reviewer contract. Preserve
     // cross-cutting findings with no honest single-file location; when a file
-    // is supplied, it still must belong to the immutable review scope.
+    // is supplied, it still must be canonical and belong to the frozen scope.
     if (finding.file === null) return [];
-    if (allowed.has(normalizeRepoRelativePath(finding.file))) return [];
+    const parsed = parseReviewPath(finding.file, `${label}[${index}].file`);
+    if (parsed.ok && allowed.has(parsed.value)) return [];
     return [`${label}[${index}].file is outside the frozen review scope: ${finding.file}`];
   });
 }

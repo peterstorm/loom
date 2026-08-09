@@ -24,10 +24,10 @@
  *
  * This module owns the `Task.findings` aggregate: minting identity, reading it
  * back out of an untrusted state file, proving the lockstep invariant at the
- * load boundary, and the two REVIEW-path writers that must keep the
+ * load boundary, and the three REVIEW-path writers that must keep the
  * authoritative array and its two derived `string[]` views in step —
- * `mergeFindings` (a reviewer finished) and `applyFindingOutcomes` (the panel
- * adjudicated). They live together because the invariant is one invariant;
+ * `mergeFindings` (legacy review), `finalizeReviewRun` (packet-bound review),
+ * and `applyFindingOutcomes` (the panel adjudicated). They live together because the invariant is one invariant;
  * splitting them across modules is how it drifted before.
  *
  * Three further lockstep writers live in handlers because none of them is a
@@ -35,20 +35,30 @@
  * `fixTaskFindings` (`--fix`), and `sanitizeDecomposedTask` (the decomposition
  * that first admits a task to the graph). All three derive their views through
  * `claimsOfSeverity` here, and all three are held to the same invariant by
- * `findingsLockstepError` at the load boundary — the enumeration of all five
+ * `findingsLockstepError` at the load boundary — the enumeration of all six
  * writers lives on `Task.findings` in types.ts.
  *
  * Pure module: no I/O, no clock, no randomness.
  */
 
-import { FINDING_SEVERITIES, type ReviewStatus, type Task } from "../types";
+import {
+  FINDING_SEVERITIES,
+  PRIOR_FINDING_VERDICTS,
+  type ReviewStatus,
+  type Task,
+} from "../types";
 import type {
   DraftFinding,
   Finding,
+  FindingResolutionAssessment,
   FindingSeverity,
   NonEmptyRefutations,
+  PriorFindingAssessment,
   Refutation,
   RefutedFinding,
+  ResolvedFinding,
+  ReviewRun,
+  ReviewRunEvidence,
 } from "../types";
 import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
 
@@ -56,7 +66,19 @@ import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
 // their BEHAVIOUR. Re-exported so every existing import site keeps working and
 // so "where findings come from" stays one answer.
 export { FINDING_SEVERITIES };
-export type { DraftFinding, Finding, FindingSeverity, NonEmptyRefutations, Refutation, RefutedFinding };
+export type {
+  DraftFinding,
+  Finding,
+  FindingResolutionAssessment,
+  FindingSeverity,
+  NonEmptyRefutations,
+  PriorFindingAssessment,
+  Refutation,
+  RefutedFinding,
+  ResolvedFinding,
+  ReviewRun,
+  ReviewRunEvidence,
+};
 
 /** Smart constructor: null when `raw` is not a known severity. */
 export function parseFindingSeverity(raw: unknown): FindingSeverity | null {
@@ -199,11 +221,14 @@ export function nextOrdinal(
   existing: readonly Finding[],
   refuted: readonly RefutedFinding[],
   agent: string,
+  resolved: readonly ResolvedFinding[] = [],
 ): number {
   const safe = idSafeAgent(agent);
-  const minted = [...existing, ...refuted.map((record) => record.finding)].map((finding) =>
-    ordinalOf(finding.id, safe),
-  );
+  const minted = [
+    ...existing,
+    ...refuted.map((record) => record.finding),
+    ...resolved.map((record) => record.finding),
+  ].map((finding) => ordinalOf(finding.id, safe));
   return Math.max(0, ...minted) + 1;
 }
 
@@ -212,12 +237,19 @@ export function attributeFindings(
   drafts: readonly DraftFinding[],
   agent: string,
   startOrdinal = 1,
+  provenance?: { readonly generation: number; readonly packetId: string },
 ): readonly Finding[] {
   const safe = idSafeAgent(agent);
   return drafts.map((draft, index) => ({
     ...draft,
     id: `${safe}-${startOrdinal + index}`,
     agent,
+    ...(provenance === undefined
+      ? {}
+      : {
+          review_generation: provenance.generation,
+          review_packet_id: provenance.packetId,
+        }),
   }));
 }
 
@@ -319,7 +351,39 @@ function parseStoredFinding(raw: unknown): Finding | null {
     file: record.file,
     line: record.line,
   });
-  return draft === null ? null : { ...draft, id: record.id.trim(), agent: record.agent.trim() };
+  const reviewGeneration = record.review_generation;
+  if (reviewGeneration !== undefined && (
+    typeof reviewGeneration !== "number" || !Number.isInteger(reviewGeneration) || reviewGeneration < 0
+  )) return null;
+  const packetId = record.review_packet_id;
+  if (packetId !== undefined && (typeof packetId !== "string" || !/^[0-9a-f]{64}$/.test(packetId))) {
+    return null;
+  }
+  if ((reviewGeneration === undefined) !== (packetId === undefined)) return null;
+  return draft === null
+    ? null
+    : {
+        ...draft,
+        id: record.id.trim(),
+        agent: record.agent.trim(),
+        ...(reviewGeneration === undefined
+          ? {}
+          : { review_generation: reviewGeneration, review_packet_id: packetId as string }),
+      };
+}
+
+function parseStoredAssessment(raw: unknown): PriorFindingAssessment | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const findingId = typeof record.finding_id === "string" ? record.finding_id.trim() : "";
+  const reason = typeof record.reason === "string" ? record.reason.trim() : "";
+  if (findingId === "" || reason === "") return null;
+  if (!(PRIOR_FINDING_VERDICTS as readonly unknown[]).includes(record.verdict)) return null;
+  return {
+    finding_id: findingId,
+    verdict: record.verdict as PriorFindingAssessment["verdict"],
+    reason,
+  };
 }
 
 /** The one definition of a well-formed stored refutation record. */
@@ -345,6 +409,55 @@ function parseStoredRefutation(raw: unknown): RefutedFinding | null {
   if (head === undefined) return null;
   const nonEmpty: NonEmptyRefutations = [head, ...tail];
   return { finding, refutations: nonEmpty };
+}
+
+function parseStoredResolution(raw: unknown): ResolvedFinding | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const finding = parseStoredFinding(record.finding);
+  if (finding === null || typeof record.resolution !== "object" || record.resolution === null ||
+      Array.isArray(record.resolution)) return null;
+  const resolution = record.resolution as Record<string, unknown>;
+  if (resolution.kind !== "resolved_by_remediation") return null;
+  if (typeof resolution.generation !== "number" || !Number.isInteger(resolution.generation) ||
+      resolution.generation < 0) return null;
+  if (typeof resolution.packet_id !== "string" || !/^[0-9a-f]{64}$/.test(resolution.packet_id)) return null;
+  if (typeof resolution.head_sha !== "string" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(resolution.head_sha)) return null;
+  if (!Array.isArray(resolution.expected_agents) || resolution.expected_agents.length === 0 ||
+      resolution.expected_agents.some((agent) => typeof agent !== "string" || agent.trim() === "") ||
+      new Set(resolution.expected_agents).size !== resolution.expected_agents.length) return null;
+  const [firstExpectedAgent, ...remainingExpectedAgents] = resolution.expected_agents as string[];
+  if (firstExpectedAgent === undefined) return null;
+  const expectedAgents = [firstExpectedAgent, ...remainingExpectedAgents];
+  if (!Array.isArray(resolution.assessments) || resolution.assessments.length === 0) return null;
+  const assessments = resolution.assessments.map((raw) => {
+    const assessment = parseStoredAssessment(raw);
+    if (assessment === null || typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+    const agent = typeof (raw as Record<string, unknown>).agent === "string"
+      ? ((raw as Record<string, unknown>).agent as string).trim()
+      : "";
+    return agent === "" ? null : { ...assessment, agent };
+  });
+  if (assessments.some((assessment) => assessment === null)) return null;
+  const parsed = assessments as FindingResolutionAssessment[];
+  if (parsed.some((assessment) => assessment.finding_id !== finding.id ||
+      assessment.verdict !== "resolved_by_remediation")) return null;
+  if (new Set(parsed.map((assessment) => assessment.agent)).size !== parsed.length) return null;
+  if (parsed.length !== expectedAgents.length ||
+      parsed.some((assessment, index) => assessment.agent !== expectedAgents[index])) return null;
+  const [first, ...rest] = parsed;
+  if (first === undefined) return null;
+  return {
+    finding,
+    resolution: {
+      kind: "resolved_by_remediation",
+      generation: resolution.generation,
+      packet_id: resolution.packet_id,
+      head_sha: resolution.head_sha,
+      expected_agents: [firstExpectedAgent, ...remainingExpectedAgents],
+      assessments: [first, ...rest],
+    },
+  };
 }
 
 /**
@@ -403,6 +516,29 @@ export function parseStoredRefutations(raw: unknown): RefutedFinding[] {
   return raw
     .map(parseStoredRefutation)
     .filter((record): record is RefutedFinding => record !== null);
+}
+
+/** Repair-path parse of `Task.resolved_findings`. */
+export function parseStoredResolutions(raw: unknown): ResolvedFinding[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(parseStoredResolution)
+    .filter((record): record is ResolvedFinding => record !== null);
+}
+
+/**
+ * Recover a valid nested finding from a malformed remediation record. The
+ * remediation audit is unusable, so the finding returns to the active set
+ * rather than disappearing with the broken envelope.
+ */
+export function salvageFindingsFromMalformedResolutions(raw: unknown): readonly Finding[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    if (parseStoredResolution(entry) !== null) return [];
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
+    const finding = parseStoredFinding((entry as Record<string, unknown>).finding);
+    return finding === null ? [] : [finding];
+  });
 }
 
 /**
@@ -473,7 +609,7 @@ export function findingsViewError(raw: unknown, label: string): string | null {
 /**
  * Load-boundary check that `findings` and its two `string[]` views agree.
  *
- * `types.ts` calls the views DERIVED, five writers keep them so, and both the
+ * `types.ts` calls the views DERIVED, six writers keep them so, and both the
  * wave gate and the GH comment read the views rather than the array. Nothing
  * proved it. Shape validation alone leaves both drift directions open, and the
  * dangerous one is silent: a critical present in `findings` but missing from
@@ -532,6 +668,95 @@ export function refutationsUnionError(raw: unknown, label: string): string | nul
   return duplicate < 0
     ? null
     : `${label}[${duplicate}] repeats refuted finding id '${ids[duplicate]}' (${REPAIR_HINT})`;
+}
+
+/** Load-boundary check for findings retired because a later implementation fixed them. */
+export function resolutionsUnionError(raw: unknown, label: string): string | null {
+  if (raw === undefined) return null;
+  if (!Array.isArray(raw)) return `${label} must be an array when present`;
+  const index = raw.findIndex((entry) => parseStoredResolution(entry) === null);
+  if (index >= 0) return `${label}[${index}] is not a well-formed resolution record (${REPAIR_HINT})`;
+  const ids = raw.map((entry) => parseStoredResolution(entry)!.finding.id);
+  const duplicate = ids.findIndex((id, at) => ids.indexOf(id) !== at);
+  return duplicate < 0
+    ? null
+    : `${label}[${duplicate}] repeats resolved finding id '${ids[duplicate]}' (${REPAIR_HINT})`;
+}
+
+function parseStoredDraft(raw: unknown): DraftFinding | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const severity = parseFindingSeverity(record.severity);
+  return severity === null || typeof record.claim !== "string"
+    ? null
+    : makeDraftFinding({ severity, claim: record.claim, file: record.file, line: record.line });
+}
+
+/** Prove the packet-bound in-progress review run before the Task cast. */
+export function reviewRunError(
+  raw: unknown,
+  taskGeneration: unknown,
+  rawFindings: unknown,
+  label: string,
+): string | null {
+  if (raw === undefined) return null;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return `${label} must be an object`;
+  const run = raw as Record<string, unknown>;
+  if (typeof run.generation !== "number" || !Number.isInteger(run.generation) || run.generation < 0) {
+    return `${label}.generation must be a non-negative integer`;
+  }
+  if (run.generation !== taskGeneration) return `${label}.generation must equal task review_generation`;
+  if (typeof run.packet_id !== "string" || !/^[0-9a-f]{64}$/.test(run.packet_id)) {
+    return `${label}.packet_id must be a lowercase SHA-256 digest`;
+  }
+  if (typeof run.head_sha !== "string" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(run.head_sha)) {
+    return `${label}.head_sha must be an exact Git SHA`;
+  }
+  if (!Array.isArray(run.expected_agents) || run.expected_agents.length === 0 ||
+      run.expected_agents.some((agent) => typeof agent !== "string" || agent.trim() === "")) {
+    return `${label}.expected_agents must be a non-empty array of non-empty strings`;
+  }
+  if (new Set(run.expected_agents).size !== run.expected_agents.length) return `${label}.expected_agents must be unique`;
+  const expectedAgents = run.expected_agents as string[];
+  if (!Array.isArray(run.prior_finding_ids) || run.prior_finding_ids.some((id) => typeof id !== "string" || id.trim() === "")) {
+    return `${label}.prior_finding_ids must be an array of non-empty strings`;
+  }
+  if (new Set(run.prior_finding_ids).size !== run.prior_finding_ids.length) return `${label}.prior_finding_ids must be unique`;
+  const priorIds = run.prior_finding_ids as string[];
+  const activeIds = Array.isArray(rawFindings)
+    ? rawFindings.flatMap((entry) => {
+        const finding = parseStoredFinding(entry);
+        return finding === null ? [] : [finding.id];
+      })
+    : [];
+  if (priorIds.length !== activeIds.length || priorIds.some((id, index) => id !== activeIds[index])) {
+    return `${label}.prior_finding_ids must exactly snapshot the active findings in order`;
+  }
+  if (!Array.isArray(run.evidence)) return `${label}.evidence must be an array`;
+  const evidenceAgents: string[] = [];
+  for (const [index, rawEvidence] of run.evidence.entries()) {
+    const evidenceLabel = `${label}.evidence[${index}]`;
+    if (typeof rawEvidence !== "object" || rawEvidence === null || Array.isArray(rawEvidence)) {
+      return `${evidenceLabel} must be an object`;
+    }
+    const evidence = rawEvidence as Record<string, unknown>;
+    if (typeof evidence.agent !== "string" || !expectedAgents.includes(evidence.agent)) {
+      return `${evidenceLabel}.agent must be expected by this run`;
+    }
+    evidenceAgents.push(evidence.agent);
+    if (!Array.isArray(evidence.prior_assessments)) return `${evidenceLabel}.prior_assessments must be an array`;
+    const assessments = evidence.prior_assessments.map(parseStoredAssessment);
+    if (assessments.some((assessment) => assessment === null)) return `${evidenceLabel}.prior_assessments is malformed`;
+    const ids = (assessments as PriorFindingAssessment[]).map((assessment) => assessment.finding_id);
+    if (ids.length !== priorIds.length || ids.some((id, at) => id !== priorIds[at])) {
+      return `${evidenceLabel}.prior_assessments must cover every prior finding exactly once in order`;
+    }
+    if (!Array.isArray(evidence.new_findings) || evidence.new_findings.some((draft) => parseStoredDraft(draft) === null)) {
+      return `${evidenceLabel}.new_findings must be well-formed draft findings`;
+    }
+  }
+  if (new Set(evidenceAgents).size !== evidenceAgents.length) return `${label}.evidence repeats a reviewer`;
+  return null;
 }
 
 /**
@@ -593,25 +818,29 @@ export function findingIdCollisionError(
   rawFindings: unknown,
   rawRefuted: unknown,
   label: string,
+  rawResolved?: unknown,
 ): string | null {
-  if (rawFindings === undefined || rawRefuted === undefined) return null;
-  if (!Array.isArray(rawFindings) || !Array.isArray(rawRefuted)) return null;
-  const refutedIds = new Set(
-    rawRefuted.flatMap((entry) => {
-      const record = parseStoredRefutation(entry);
-      return record === null ? [] : [record.finding.id];
-    }),
-  );
-  const index = rawFindings.findIndex((entry) => {
-    const finding = parseStoredFinding(entry);
-    return finding !== null && refutedIds.has(finding.id);
-  });
-  if (index < 0) return null;
-  const id = parseStoredFinding(rawFindings[index])!.id;
-  return (
-    `${label}: findings[${index}] uses id '${id}', which refuted_findings already holds — ` +
-    `the refutation panel's replay guard would refuse to adjudicate it (${REPAIR_HINT})`
-  );
+  const groups: ReadonlyArray<readonly [string, unknown, (entry: unknown) => Finding | null]> = [
+    ["findings", rawFindings, parseStoredFinding],
+    ["refuted_findings", rawRefuted, (entry) => parseStoredRefutation(entry)?.finding ?? null],
+    ["resolved_findings", rawResolved, (entry) => parseStoredResolution(entry)?.finding ?? null],
+  ];
+  const owner = new Map<string, string>();
+  for (const [group, raw, parse] of groups) {
+    if (!Array.isArray(raw)) continue;
+    for (const entry of raw) {
+      const finding = parse(entry);
+      if (finding === null) continue;
+      const prior = owner.get(finding.id);
+      if (prior !== undefined && prior !== group) {
+        return prior === "findings" && group === "refuted_findings"
+          ? `${label}: finding id '${finding.id}' is live but refuted_findings already holds it (${REPAIR_HINT})`
+          : `${label}: finding id '${finding.id}' is present in both ${prior} and ${group} (${REPAIR_HINT})`;
+      }
+      owner.set(finding.id, group);
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -633,8 +862,8 @@ export function findingIdCollisionError(
  * branch it is building at the moment it counts the votes, so it says so.
  *
  * `FindingOutcome` (core/review-panel) satisfies this structurally. Declaring
- * the narrow shape here rather than importing the wide one is what lets the two
- * lockstep writers — mergeFindings and applyFindingOutcomes — live in the module
+ * the narrow shape here rather than importing the wide one is what lets the
+ * lockstep review writers live in the module
  * that owns the invariant: review-panel imports findings, so findings cannot
  * import review-panel back.
  */
@@ -681,12 +910,17 @@ export function recoverViewOnlyClaims(
   refuted: readonly RefutedFinding[],
   criticalView: readonly string[] | undefined,
   advisoryView: readonly string[] | undefined,
+  resolved: readonly ResolvedFinding[] = [],
 ): readonly Finding[] {
   const { critical, advisory } = viewOnlyClaims(findings, criticalView, advisoryView);
   const drafts = draftsFromClaims(critical, advisory);
   return drafts.length === 0
     ? []
-    : attributeFindings(drafts, RECOVERED_AGENT, nextOrdinal(findings, refuted, RECOVERED_AGENT));
+    : attributeFindings(
+        drafts,
+        RECOVERED_AGENT,
+        nextOrdinal(findings, refuted, RECOVERED_AGENT, resolved),
+      );
 }
 
 /** The view claims no structured finding accounts for, by severity. */
@@ -750,12 +984,14 @@ export function unrecoverableViewClaims(
 export function deduplicateFindingIds(
   findings: readonly Finding[],
   refuted: readonly RefutedFinding[],
+  resolved: readonly ResolvedFinding[] = [],
 ): readonly Finding[] {
-  // Seeded with the refuted ids, not just the ones seen so far in this array:
-  // `findingIdCollisionError` rejects a live finding that shares an id with a
-  // refuted one, and a rejection with no repair dead-ends the operator on an
-  // unloadable graph. Same rule, both sides.
-  const taken = new Set(refuted.map((record) => record.finding.id));
+  // Seeded with every retired id, not just the ones seen so far in this array:
+  // retired identities are audit records and can never be reissued.
+  const taken = new Set([
+    ...refuted.map((record) => record.finding.id),
+    ...resolved.map((record) => record.finding.id),
+  ]);
   const kept: Finding[] = [];
   for (const finding of findings) {
     if (!taken.has(finding.id)) {
@@ -769,7 +1005,7 @@ export function deduplicateFindingIds(
     // `findingsUnionError` still rejects — pointing the operator at THIS repair.
     // Advancing past every id already taken is what makes the repair actually
     // clear the rejection, in one pass, for any input.
-    let ordinal = nextOrdinal(kept, refuted, finding.agent);
+    let ordinal = nextOrdinal(kept, refuted, finding.agent, resolved);
     let reminted = attributeFindings([finding], finding.agent, ordinal)[0]!;
     while (taken.has(reminted.id)) {
       ordinal += 1;
@@ -779,6 +1015,191 @@ export function deduplicateFindingIds(
     kept.push(reminted);
   }
   return kept;
+}
+
+export type ReviewRunTransition =
+  | { readonly ok: true; readonly task: Task; readonly completed: boolean }
+  | { readonly ok: false; readonly error: string };
+
+export interface ReviewRunBinding {
+  readonly generation: number;
+  readonly packetId: string;
+  readonly headSha: string;
+  readonly expectedAgents: readonly string[];
+}
+
+/**
+ * Authoritative finding snapshot for a packet-bound review. Legacy view-only
+ * claims receive identity before packet serialization and run creation so the
+ * reviewer sees exactly the ids the run later requires it to assess.
+ */
+export function reviewRunPriorFindings(task: Task): readonly Finding[] {
+  const stored = task.findings ?? [];
+  return [
+    ...stored,
+    ...recoverViewOnlyClaims(
+      stored,
+      task.refuted_findings ?? [],
+      task.critical_findings,
+      task.advisory_findings,
+      task.resolved_findings ?? [],
+    ),
+  ];
+}
+
+/** Begin one immutable-packet reviewer batch, snapshotting every active finding. */
+export function startReviewRun(task: Task, binding: ReviewRunBinding): ReviewRunTransition {
+  const existing = task.review_run;
+  if (existing !== undefined) {
+    return existing.packet_id === binding.packetId && existing.generation === binding.generation
+      ? { ok: true, task, completed: false }
+      : { ok: false, error: `task ${task.id} already has review packet ${existing.packet_id} in progress` };
+  }
+  if ((task.review_generation ?? 0) !== binding.generation) {
+    return {
+      ok: false,
+      error: `task ${task.id} review generation changed from ${binding.generation} to ${task.review_generation ?? 0}`,
+    };
+  }
+  if (!/^[0-9a-f]{64}$/.test(binding.packetId)) return { ok: false, error: "review packet id is invalid" };
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(binding.headSha)) return { ok: false, error: "review head SHA is invalid" };
+  if (binding.expectedAgents.length === 0 || new Set(binding.expectedAgents).size !== binding.expectedAgents.length ||
+      binding.expectedAgents.some((agent) => agent.trim() === "")) {
+    return { ok: false, error: "review run expected agents must be non-empty and unique" };
+  }
+  const [firstAgent, ...remainingAgents] = binding.expectedAgents;
+  if (firstAgent === undefined) return { ok: false, error: "review run expected agents must be non-empty" };
+  const findings = [...reviewRunPriorFindings(task)];
+  return {
+    ok: true,
+    completed: false,
+    task: {
+      ...task,
+      review_status: "pending",
+      review_generation: binding.generation,
+      review_error: undefined,
+      review_evidence_failures: undefined,
+      findings,
+      critical_findings: [...claimsOfSeverity(findings, "critical")],
+      advisory_findings: [...claimsOfSeverity(findings, "advisory")],
+      review_run: {
+        generation: binding.generation,
+        packet_id: binding.packetId,
+        head_sha: binding.headSha,
+        expected_agents: [firstAgent, ...remainingAgents],
+        prior_finding_ids: findings.map((finding) => finding.id),
+        evidence: [],
+      },
+    },
+  };
+}
+
+function finalizeReviewRun(task: Task, run: ReviewRun): Task {
+  const prior = new Map((task.findings ?? []).map((finding) => [finding.id, finding]));
+  const resolvedIds = new Set(run.prior_finding_ids.filter((id) =>
+    run.evidence.every((evidence) =>
+      evidence.prior_assessments.find((assessment) => assessment.finding_id === id)?.verdict ===
+        "resolved_by_remediation"
+    )
+  ));
+  const retired: ResolvedFinding[] = run.prior_finding_ids.flatMap((id) => {
+    const finding = prior.get(id);
+    if (finding === undefined || !resolvedIds.has(id)) return [];
+    const assessments = run.expected_agents.map((agent) => {
+      const evidence = run.evidence.find((candidate) => candidate.agent === agent)!;
+      return {
+        ...evidence.prior_assessments.find((assessment) => assessment.finding_id === id)!,
+        agent,
+      };
+    });
+    const [firstAssessment, ...remainingAssessments] = assessments;
+    if (firstAssessment === undefined) return [];
+    return [{
+      finding,
+      resolution: {
+        kind: "resolved_by_remediation" as const,
+        generation: run.generation,
+        packet_id: run.packet_id,
+        head_sha: run.head_sha,
+        expected_agents: run.expected_agents,
+        assessments: [firstAssessment, ...remainingAssessments],
+      },
+    }];
+  });
+  const resolved = [...(task.resolved_findings ?? []), ...retired];
+  const priorFindings = task.findings ?? [];
+  let active = priorFindings.filter((finding) => !resolvedIds.has(finding.id));
+  for (const agent of run.expected_agents) {
+    const evidence = run.evidence.find((candidate) => candidate.agent === agent)!;
+    const genuinelyNew = evidence.new_findings.filter((draft) => !priorFindings.some((finding) =>
+      finding.severity === draft.severity &&
+      finding.claim === draft.claim &&
+      finding.file === draft.file &&
+      finding.line === draft.line
+    ));
+    const attributed = attributeFindings(
+      genuinelyNew,
+      agent,
+      nextOrdinal(active, task.refuted_findings ?? [], agent, resolved),
+      { generation: run.generation, packetId: run.packet_id },
+    );
+    active = [...active, ...attributed];
+  }
+  return {
+    ...task,
+    review_status: active.some((finding) => finding.severity === "critical") ? "blocked" : "passed",
+    review_error: undefined,
+    review_evidence_failures: undefined,
+    review_run: undefined,
+    findings: active,
+    critical_findings: [...claimsOfSeverity(active, "critical")],
+    advisory_findings: [...claimsOfSeverity(active, "advisory")],
+    resolved_findings: resolved,
+  };
+}
+
+/** Stage one reviewer atomically; activate changes only after the full roster lands. */
+export function recordReviewRunEvidence(
+  task: Task,
+  packetId: string,
+  generation: number,
+  evidence: ReviewRunEvidence,
+): ReviewRunTransition {
+  const run = task.review_run;
+  if (run === undefined) return { ok: false, error: `task ${task.id} has no review run in progress` };
+  if (run.packet_id !== packetId || run.generation !== generation) {
+    return { ok: false, error: `stale review evidence for task ${task.id} was ignored` };
+  }
+  if (!run.expected_agents.includes(evidence.agent)) {
+    return { ok: false, error: `${evidence.agent} is not expected by review packet ${packetId}` };
+  }
+  if (run.evidence.some((stored) => stored.agent === evidence.agent)) {
+    return { ok: false, error: `${evidence.agent} already supplied evidence for review packet ${packetId}` };
+  }
+  const assessmentIds = evidence.prior_assessments.map((assessment) => assessment.finding_id);
+  if (assessmentIds.length !== run.prior_finding_ids.length ||
+      assessmentIds.some((id, index) => id !== run.prior_finding_ids[index])) {
+    return {
+      ok: false,
+      error: `${evidence.agent} must assess every prior finding exactly once in packet order`,
+    };
+  }
+  const nextRun: ReviewRun = { ...run, evidence: [...run.evidence, evidence] };
+  const complete = nextRun.expected_agents.every((agent) =>
+    nextRun.evidence.some((stored) => stored.agent === agent)
+  );
+  const outstanding = (task.review_evidence_failures ?? []).filter((agent) => agent !== evidence.agent);
+  const staged: Task = {
+    ...task,
+    review_status: outstanding.length > 0 ? "evidence_capture_failed" : "pending",
+    ...(outstanding.length > 0
+      ? { review_evidence_failures: outstanding }
+      : { review_error: undefined, review_evidence_failures: undefined }),
+    review_run: nextRun,
+  };
+  return complete
+    ? { ok: true, task: finalizeReviewRun(staged, nextRun), completed: true }
+    : { ok: true, task: staged, completed: false };
 }
 
 /**
@@ -796,6 +1217,11 @@ export function mergeFindings(
   findings: { readonly drafts: readonly DraftFinding[]; readonly criticalCount: number | null },
   agent: string,
 ): Task {
+  if (task.review_run !== undefined) {
+    throw new Error(
+      `findings invariant: unbound merge cannot mutate active packet ${task.review_run.packet_id}`,
+    );
+  }
   const refuted = task.refuted_findings ?? [];
   // A pre-identity task's claims live only in the views. Appending beside them
   // without migrating would leave `findings` holding strictly less than the
@@ -807,12 +1233,13 @@ export function mergeFindings(
       refuted,
       task.critical_findings,
       task.advisory_findings,
+      task.resolved_findings ?? [],
     ),
   ];
   const attributed = attributeFindings(
     findings.drafts,
     agent,
-    nextOrdinal(existing, refuted, agent),
+    nextOrdinal(existing, refuted, agent, task.resolved_findings ?? []),
   );
   const merged = [...existing, ...attributed];
 
@@ -899,6 +1326,11 @@ export function applyFindingOutcomes(
 
   const mine = outcomes.filter(refutedHere);
   if (mine.length === 0) return task;
+  if (task.review_run !== undefined) {
+    throw new Error(
+      `findings invariant: cannot adjudicate ${task.id} while review packet ${task.review_run.packet_id} is still collecting evidence`,
+    );
+  }
 
   const refutedLocalIds = new Set(
     mine.map((outcome) => localFindingId(outcome.finding.id, task.id)),

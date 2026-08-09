@@ -153,7 +153,7 @@ function parseJsonObject(raw: unknown, label: string): ParseResult<JsonObject> {
 export function parseReviewPath(raw: unknown, label = "path"): ParseResult<string> {
   if (typeof raw !== "string" || raw.length === 0) return fail([`${label} must be non-empty`]);
   if (raw.trim() !== raw) return fail([`${label} must not have surrounding whitespace`]);
-  if (raw.includes("\0")) return fail([`${label} must not contain NUL`]);
+  if (/[\r\n\0]/.test(raw)) return fail([`${label} must be a single line without NUL`]);
   if (raw.startsWith("/") || WINDOWS_ABSOLUTE.test(raw)) {
     return fail([`${label} must be repository-relative, not absolute`]);
   }

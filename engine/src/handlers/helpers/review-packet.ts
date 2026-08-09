@@ -3,21 +3,36 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
 import type { HookHandler } from "../../types";
 import { StateManager } from "../../state-manager";
-import { taskGraphPath } from "../../config";
+import { taskGraphPath, WAVE_REVIEW_AGENTS } from "../../config";
 import {
   createReviewPacket,
   parseReviewPacket,
   serializeReviewPacket,
   type ReviewPacketArtifactInput,
 } from "../../core/review-packet";
+import { reviewRunPriorFindings, startReviewRun } from "../../core/findings";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 
 const OPERATIONS = ["create", "verify", "show"] as const;
+
+export function reviewPacketCleanupFailure(
+  original: unknown,
+  outputPath: string,
+  cleanup: unknown,
+): Error {
+  return new Error(
+    `${original instanceof Error ? original.message : String(original)}; additionally failed to remove ` +
+    `unbound review packet ${outputPath}: ${cleanup instanceof Error ? cleanup.message : String(cleanup)}`,
+    { cause: original },
+  );
+}
+
 const USAGE = `Usage: helper review-packet <${OPERATIONS.join("|")}> --task <id> --output <file> | --packet <file>`;
 
 function arg(args: readonly string[], name: string): string | null {
@@ -103,6 +118,7 @@ const handler: HookHandler = async (_stdin, args) => {
   const state = manager.load();
   const task = state.tasks.find((candidate) => candidate.id === taskId);
   if (!task) return { kind: "error", message: `Task ${taskId} is not in the task graph` };
+  const priorFindings = reviewRunPriorFindings(task);
 
   try {
     const root = repoRoot();
@@ -138,6 +154,18 @@ const handler: HookHandler = async (_stdin, args) => {
         agent: task.agent,
         wave: task.wave,
         specAnchors: task.spec_anchors ?? [],
+        reviewGeneration: task.review_generation ?? 0,
+        priorFindings: priorFindings.map((finding) => ({
+          id: finding.id,
+          agent: finding.agent,
+          severity: finding.severity,
+          file: finding.file,
+          line: finding.line,
+          claim: finding.claim,
+          reviewGeneration: finding.review_generation ?? null,
+          reviewPacketId: finding.review_packet_id ?? null,
+        })),
+        expectedReviewers: WAVE_REVIEW_AGENTS,
       },
       baseSha,
       headSha,
@@ -152,6 +180,40 @@ const handler: HookHandler = async (_stdin, args) => {
     const absoluteOutput = outputPath.absolute;
     mkdirSync(dirname(absoluteOutput), { recursive: true });
     writeFileSync(absoluteOutput, serializeReviewPacket(packet.value), { flag: "wx" });
+    try {
+      await manager.update((current) => {
+        const currentTask = current.tasks.find((candidate) => candidate.id === taskId);
+        if (currentTask === undefined) throw new Error(`Task ${taskId} disappeared before review run start`);
+        const packetPriorIds = priorFindings.map((finding) => finding.id);
+        const currentPriorIds = reviewRunPriorFindings(currentTask).map((finding) => finding.id);
+        if ((currentTask.review_generation ?? 0) !== (task.review_generation ?? 0) ||
+            packetPriorIds.length !== currentPriorIds.length ||
+            packetPriorIds.some((id, index) => id !== currentPriorIds[index])) {
+          throw new Error(`Task ${taskId} changed while its Review Packet was being created`);
+        }
+        const transition = startReviewRun(currentTask, {
+          generation: task.review_generation ?? 0,
+          packetId: packet.value.packetId,
+          headSha,
+          expectedAgents: WAVE_REVIEW_AGENTS,
+        });
+        if (!transition.ok) throw new Error(transition.error);
+        return {
+          ...current,
+          tasks: current.tasks.map((candidate) =>
+            candidate.id === taskId ? transition.task : candidate
+          ),
+        };
+      });
+    } catch (error) {
+      let cleanupError: unknown = null;
+      try { unlinkSync(absoluteOutput); }
+      catch (cleanup) { cleanupError = cleanup; }
+      if (cleanupError !== null) {
+        throw reviewPacketCleanupFailure(error, absoluteOutput, cleanupError);
+      }
+      throw error;
+    }
     process.stdout.write(`${packet.value.packetId}\n`);
     return { kind: "passthrough" };
   } catch (error) {

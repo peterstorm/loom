@@ -7,6 +7,7 @@ import { claimsOfSeverity, findingsLockstepError } from "../../src/core/findings
 import { mergeFindings } from "../../src/core/findings";
 import {
   applyReviewResolution,
+  constrainReviewResolutionToScope,
   hasStandaloneReviewContext,
   makeParsedFindings,
   resolveReviewFindings,
@@ -66,7 +67,7 @@ describe("harness parity: one path from transcript to task", () => {
     // one pure module. A harness that grew its own copy would still mention the
     // names, and it is the shared module that makes drift impossible.
     expect(source).toContain('core/review-output"');
-    for (const fn of ["resolveReviewFindings", "applyReviewResolution", "reviewResolutionLog"]) {
+    for (const fn of ["resolveTaskReviewFindings", "applyReviewResolution", "reviewResolutionLog"]) {
       expect(source, `${_name} must call ${fn}`).toContain(fn);
     }
   });
@@ -162,6 +163,26 @@ describe("harness parity: one path from transcript to task", () => {
 });
 
 describe("resolveReviewFindings (pure)", () => {
+  it("rejects non-canonical finding path aliases at the Review Packet scope boundary", () => {
+    const transcript = [
+      "### Machine Summary",
+      "CRITICAL_COUNT: 1",
+      "ADVISORY_COUNT: 0",
+      "CRITICAL: aliased location",
+      "```findings",
+      JSON.stringify([{ severity: "critical", file: "./src/x.ts", line: 1, claim: "aliased location" }]),
+      "```",
+    ].join("\n");
+    const constrained = constrainReviewResolutionToScope(
+      resolveReviewFindings(transcript, "code-reviewer"),
+      ["src/x.ts"],
+    );
+    expect(constrained).toMatchObject({
+      kind: "evidence-failed",
+      message: expect.stringContaining("outside Review Packet scope"),
+    });
+  });
+
   it("recognizes only the exact standalone lifecycle marker line", () => {
     expect(hasStandaloneReviewContext("prompt\nLOOM_REVIEW_CONTEXT: standalone\nrest")).toBe(true);
     expect(hasStandaloneReviewContext("LOOM_REVIEW_CONTEXT: wave")).toBe(false);

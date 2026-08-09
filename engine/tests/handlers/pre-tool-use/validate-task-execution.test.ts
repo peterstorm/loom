@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, it, expect } from "vitest";
 import {
   classifyTaskExecutionSpawn,
@@ -5,6 +8,7 @@ import {
   registerTaskExecutionBaseline,
   taskExecutionDecision,
   taskExecutionOwnershipError,
+  validateTaskExecutionBatch,
 } from "../../../src/core/validate-task-execution";
 import type { TaskGraph, Task, WaveGate } from "../../../src/types";
 
@@ -97,6 +101,28 @@ describe("validate-task-execution — spawn lifecycle parsing", () => {
       .toEqual({ ok: false, error: expect.stringContaining("unknown task T99") });
     expect(parseImplementationTaskBindings(state, [implementation("Task ID: T1"), implementation("Task ID: T1")]))
       .toEqual({ ok: false, error: expect.stringContaining("more than once") });
+  });
+});
+
+describe("validate-task-execution — lazy task graph authority", () => {
+  it("honors LOOM_STATE_PATH set after the module was imported", async () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-lazy-task-graph-"));
+    const statePath = join(root, "active_task_graph.json");
+    const previous = process.env.LOOM_STATE_PATH;
+    writeFileSync(statePath, JSON.stringify(mkState([mkTask({ id: "T1", wave: 1 })])));
+    process.env.LOOM_STATE_PATH = statePath;
+    try {
+      const result = await validateTaskExecutionBatch([{
+        kind: "implementation",
+        prompt: "implement this without a binding",
+        description: "",
+      }]);
+      expect(result).toMatchObject({ kind: "block", message: expect.stringContaining("no extractable Task ID") });
+    } finally {
+      if (previous === undefined) delete process.env.LOOM_STATE_PATH;
+      else process.env.LOOM_STATE_PATH = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

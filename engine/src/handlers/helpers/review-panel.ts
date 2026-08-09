@@ -64,6 +64,19 @@ import {
   serializeAdjudicatedStandaloneReview,
 } from "../../core/standalone-review";
 import { loadEvidenceBoundAggregate } from "./standalone-review";
+
+export function standaloneTallyPublishErrors(
+  original: unknown,
+  pendingResultPath: string,
+  cleanup: unknown | null,
+): readonly string[] {
+  return [
+    `cannot publish standalone tally (the run may already be closed): ${original instanceof Error ? original.message : String(original)}`,
+    ...(cleanup === null
+      ? []
+      : [`also failed to remove pending result ${pendingResultPath}: ${cleanup instanceof Error ? cleanup.message : String(cleanup)}`]),
+  ];
+}
 import {
   REVIEW_LAYOUT,
   argumentValue,
@@ -551,10 +564,13 @@ const handler: HookHandler = async (stdin, args) => {
       writeFileSync(outcomesPath, outcomesJson, { flag: "wx" });
       renameSync(pendingResultPath, resultPath);
     } catch (error) {
-      try { if (existsSync(pendingResultPath)) unlinkSync(pendingResultPath); } catch { /* preserve original diagnostic */ }
-      return contractError("review tally", [
-        `cannot publish standalone tally (the run may already be closed): ${error instanceof Error ? error.message : String(error)}`,
-      ]);
+      let cleanupError: unknown = null;
+      try { if (existsSync(pendingResultPath)) unlinkSync(pendingResultPath); }
+      catch (cleanup) { cleanupError = cleanup; }
+      return contractError(
+        "review tally",
+        standaloneTallyPublishErrors(error, pendingResultPath, cleanupError),
+      );
     }
   } else {
     const closurePath = join(runDir, "tally-closure.json");

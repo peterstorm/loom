@@ -6,7 +6,7 @@
 
 import { existsSync } from "node:fs";
 import type { HookResult, Task, TaskGraph } from "../types";
-import { IMPL_AGENTS, TASK_GRAPH_PATH } from "../config";
+import { IMPL_AGENTS, taskGraphPath } from "../config";
 import { extractTaskId } from "../utils/extract-task-id";
 import { stripNamespace } from "../utils/strip-namespace";
 import { hasStandaloneReviewContext } from "./review-output";
@@ -197,8 +197,10 @@ export async function validateTaskExecutionBatch(
     (spawn): spawn is Extract<TaskExecutionSpawn, { kind: "implementation" }> =>
       spawn.kind === "implementation",
   );
-  if (inputs.length === 0 || !existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
-  const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
+  if (inputs.length === 0) return { kind: "allow" };
+  const statePath = taskGraphPath();
+  if (!existsSync(statePath)) return { kind: "allow" };
+  const mgr = StateManager.fromPath(statePath);
   if (!mgr) return { kind: "allow" };
 
   const state = mgr.load();

@@ -164,6 +164,65 @@ export interface Finding extends DraftFinding {
   readonly id: string;
   /** The review agent that emitted the claim (namespace already stripped). */
   readonly agent: string;
+  /** Implementation generation whose immutable Review Packet produced this finding. */
+  readonly review_generation?: number;
+  /** Canonical Review Packet identity; absent only on legacy findings. */
+  readonly review_packet_id?: string;
+}
+
+export const PRIOR_FINDING_VERDICTS = ["resolved_by_remediation", "still_present"] as const;
+export type PriorFindingVerdict = (typeof PRIOR_FINDING_VERDICTS)[number];
+
+/** One reviewer's explicit assessment of one finding that pre-dates the run. */
+export interface PriorFindingAssessment {
+  readonly finding_id: string;
+  readonly verdict: PriorFindingVerdict;
+  readonly reason: string;
+}
+
+/** Evidence staged by one reviewer. It is not activated until the whole run completes. */
+export interface ReviewRunEvidence {
+  readonly agent: string;
+  readonly prior_assessments: readonly PriorFindingAssessment[];
+  readonly new_findings: readonly DraftFinding[];
+}
+
+/**
+ * In-progress, packet-bound review run. Every expected reviewer must cover every
+ * prior finding exactly once before any prior finding can leave the active set.
+ */
+export interface ReviewRun {
+  readonly generation: number;
+  readonly packet_id: string;
+  readonly head_sha: string;
+  readonly expected_agents: readonly [string, ...string[]];
+  readonly prior_finding_ids: readonly string[];
+  readonly evidence: readonly ReviewRunEvidence[];
+}
+
+export interface FindingResolutionAssessment extends PriorFindingAssessment {
+  readonly agent: string;
+}
+
+export type NonEmptyPriorAssessments = readonly [
+  FindingResolutionAssessment,
+  ...FindingResolutionAssessment[],
+];
+
+/** Why a previously valid finding left the active set after implementation. */
+export interface FindingResolution {
+  readonly kind: "resolved_by_remediation";
+  readonly generation: number;
+  readonly packet_id: string;
+  readonly head_sha: string;
+  readonly expected_agents: readonly [string, ...string[]];
+  readonly assessments: NonEmptyPriorAssessments;
+}
+
+/** A remediated finding, kept separately from findings a panel proved false. */
+export interface ResolvedFinding {
+  readonly finding: Finding;
+  readonly resolution: FindingResolution;
 }
 
 /**
@@ -238,6 +297,10 @@ export interface Task {
   new_test_evidence?: string;
   files_modified?: string[];
   review_status?: ReviewStatus;
+  /** Monotonic implementation generation; incremented whenever task bytes change. */
+  review_generation?: number;
+  /** Packet-bound reviewer batch currently collecting evidence. */
+  review_run?: ReviewRun;
   /**
    * Why evidence capture failed. Meaningful ONLY alongside
    * `review_status: "evidence_capture_failed"` — every writer that moves the
@@ -278,11 +341,12 @@ export interface Task {
    * prints, so no consumer had to migrate when identity arrived; they can
    * migrate opportunistically.
    *
-   * Exactly five writers keep the three in lockstep, and every one of them
+   * Exactly six writers keep the three in lockstep, and every one of them
    * writes all three together: `sanitizeDecomposedTask` (the initializer, in
-   * handlers/helpers/populate-task-graph); `mergeFindings` (a reviewer
-   * finished) and `applyFindingOutcomes` (the panel adjudicated), both in
-   * core/findings; `updateTaskFindings` (the manual operator override) in
+   * handlers/helpers/populate-task-graph); `mergeFindings` (legacy/unbound
+   * review), `finalizeReviewRun` (packet-bound review), and
+   * `applyFindingOutcomes` (the panel adjudicated), all in core/findings;
+   * `updateTaskFindings` (the manual operator override) in
    * handlers/helpers/store-review-findings; and `fixTaskFindings` (repair) in
    * handlers/helpers/validate-task-graph. A writer that touched only the views
    * would produce a critical no panel can reach and no gate can clear — and one
@@ -292,7 +356,7 @@ export interface Task {
    * `readonly` for the same reason `findings` is. The DERIVED fields were the
    * mutable ones, which is exactly backwards: a holder of a `Task` could
    * `push` a claim into a view and break, in place and with no compile error,
-   * the invariant a load-boundary check, five coordinated writers and a `--fix`
+   * the invariant a load-boundary check, six coordinated writers and a `--fix`
    * repair path all exist to protect. Every producer already returns a fresh
    * array, so nothing had to change but the type.
    */
@@ -305,6 +369,8 @@ export interface Task {
    * dropped critical is indistinguishable from one that was never found.
    */
   refuted_findings?: readonly RefutedFinding[];
+  /** Findings that held before code changed and were explicitly verified fixed. */
+  resolved_findings?: readonly ResolvedFinding[];
   /** Exact declared-artifact state captured before the implementation agent
    *  starts. Proof compares current bytes to this baseline; transcript tool
    *  calls remain lint targets and cannot vouch that a change occurred. */

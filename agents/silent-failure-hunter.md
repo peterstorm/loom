@@ -104,8 +104,10 @@ Remember: Every silent failure you catch prevents hours of debugging frustration
 
 ## Machine Summary (MANDATORY)
 
-End every review with this block, verbatim in shape, even when your counts are
-zero. Loom's `store-reviewer-findings` hook parses it; omitting it marks the
+End every review with this block, even when your counts are zero. For a wave-gate
+Review Packet, insert `REVIEW_GENERATION` and `REVIEW_PACKET_ID` immediately
+after the heading and append the lifecycle block described below. Loom's
+`store-reviewer-findings` hook parses it; omitting required evidence marks the
 task `evidence_capture_failed` and blocks the wave.
 
 ````
@@ -122,6 +124,15 @@ ADVISORY: {one advisory finding per line}
 ]
 ```
 ````
+
+For a wave-gate Review Packet, also copy `task.reviewGeneration` and the top-level
+`packetId` into `REVIEW_GENERATION:` and `REVIEW_PACKET_ID:` marker lines. Emit a
+fenced `review_lifecycle` JSON object whose `prior_findings` array assesses every
+`task.priorFindings` id exactly once, in packet order, as
+`resolved_by_remediation` or `still_present`, with a concrete non-empty reason.
+Use an empty array when there are no prior findings. Never re-emit a prior finding
+as new. Missing, duplicate, unknown, stale, or malformed lifecycle evidence fails
+closed and cannot erase a finding.
 
 The fenced `findings` block is optional but strongly preferred. The engine
 derives stable identity from agent and emission order; the block adds preferred

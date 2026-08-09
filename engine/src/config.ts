@@ -263,13 +263,18 @@ export const KNOWN_AGENTS = new Set([...IMPL_AGENTS, ...Object.keys(PHASE_AGENT_
 /** Utility agents allowed through phase validation */
 export const UTILITY_AGENTS = new Set(["Explore", "Plan", "haiku"]);
 
-/** Review sub-agents that produce findings per task */
-export const REVIEW_SUB_AGENTS = new Set([
+/** Exact reviewer batch required for every wave-gate task review. */
+export const WAVE_REVIEW_AGENTS = Object.freeze([
   "code-reviewer",
   "silent-failure-hunter",
   "pr-test-analyzer",
   "type-design-analyzer",
   "comment-analyzer",
+] as const);
+
+/** Review sub-agents that produce findings per task. */
+export const REVIEW_SUB_AGENTS = new Set([
+  ...WAVE_REVIEW_AGENTS,
   "code-simplifier",
   "architecture-tech-lead",
 ]);
@@ -397,6 +402,7 @@ export const WHITELISTED_HELPERS: readonly string[] = [
   "store-spec-check",
   "populate-task-graph",
   "repair-task-graph",
+  "review-packet",
   "store-test-evidence",
   "reconcile-implementation-proof",
   "set-phase",

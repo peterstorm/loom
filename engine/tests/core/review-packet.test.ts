@@ -101,6 +101,8 @@ describe("Review Packet", () => {
     ["engine\\src\\x.ts", /POSIX/],
     ["engine//src/x.ts", /canonical/],
     ["./engine/src/x.ts", /canonical/],
+    ["engine/src/bad\npath.ts", /single line/],
+    ["engine/src/bad\0path.ts", /NUL/],
   ])("rejects unsafe or aliased path %s", (path, message) => {
     expectError(createReviewPacket(input({ declaredPaths: [path] })), message);
   });

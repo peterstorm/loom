@@ -77,11 +77,14 @@ describe("standalone review aggregate", () => {
   });
 
   it.each([
-    ["absolute", "/tmp/outside.ts", "repo-relative"],
-    ["drive-absolute", "C:/outside.ts", "repo-relative"],
-    ["traversal", "src/../../outside.ts", "must not escape"],
+    ["absolute", "/tmp/outside.ts", "repository-relative"],
+    ["drive-absolute", "C:/outside.ts", "repository-relative"],
+    ["traversal", "src/../../outside.ts", "canonical"],
+    ["dot alias", "./src/x.ts", "canonical"],
+    ["repeated separator", "src//x.ts", "canonical"],
+    ["backslash alias", "src\\x.ts", "POSIX"],
     ["newline", "src/bad\npath.ts", "single line without NUL"],
-    ["NUL", "src/bad\0path.ts", "single line without NUL"],
+    ["NUL", "src/bad\0path.ts", "NUL"],
   ])("rejects malformed %s scope paths", (_label, scopePath, message) => {
     const result = aggregateStandaloneReview({
       runId: "run.abc",
@@ -90,6 +93,16 @@ describe("standalone review aggregate", () => {
     });
     expect(result.ok).toBe(false);
     expect(!result.ok && result.errors.join("\n")).toContain(message);
+  });
+
+  it("rejects duplicate canonical scope paths", () => {
+    const result = aggregateStandaloneReview({
+      runId: "run.abc",
+      scope: ["src/x.ts", "src/x.ts"],
+      transcripts: [{ agent: "code-reviewer", output: transcript() }],
+    });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.errors.join("\n")).toContain("must be distinct");
   });
 
   it("rejects a transcript finding outside the frozen scope", () => {
