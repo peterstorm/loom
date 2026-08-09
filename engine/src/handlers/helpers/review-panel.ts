@@ -363,14 +363,20 @@ const handler: HookHandler = async (stdin, args) => {
     const closurePath = join(runDir, "tally-closure.json");
     if (existsSync(closurePath)) {
       let closedIds = "<unknown findings>";
+      let closureReadError: string | null = null;
       try {
         const closure = JSON.parse(readFileSync(closurePath, "utf-8")) as { finding_ids?: unknown };
         if (Array.isArray(closure.finding_ids) && closure.finding_ids.every((id) => typeof id === "string")) {
           closedIds = closure.finding_ids.join(", ");
         }
-      } catch { /* the closed-run polarity is still authoritative */ }
+      } catch (error) {
+        // The closed-run polarity remains authoritative, but corruption or
+        // permission failures must stay visible to the operator.
+        closureReadError = error instanceof Error ? error.message : String(error);
+      }
       return contractError("review tally", [
         `this review run has already been tallied or has an incomplete prior tally: ${closedIds}`,
+        ...(closureReadError === null ? [] : [`cannot read tally closure ${closurePath}: ${closureReadError}`]),
       ]);
     }
   }

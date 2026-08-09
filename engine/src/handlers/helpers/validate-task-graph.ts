@@ -32,7 +32,7 @@ import {
   RECOVERED_AGENT,
 } from "../../core/findings";
 import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
-import { taskGraphLifecycleErrors, taskUnionError } from "../../state-manager";
+import { taskGraphLifecycleErrors, taskIdError, taskUnionError } from "../../state-manager";
 import { parseReviewPath } from "../../core/review-packet";
 
 export type ValidationResult =
@@ -167,7 +167,8 @@ export function validateFull(
     const tid = typeof task.id === "string" ? task.id : undefined;
 
     if (!tid) { errors.push(`Task [${i}]: missing 'id'`); continue; }
-    if (!/^T\d+$/.test(tid)) errors.push(`Task ${tid}: id must match T\\d+`);
+    const identityError = taskIdError(tid, `Task ${tid}`);
+    if (identityError !== null) errors.push(identityError);
 
     if (typeof task.description !== "string" || task.description.trim() === "") {
       errors.push(`Task ${tid}: 'description' must be a non-empty string`);

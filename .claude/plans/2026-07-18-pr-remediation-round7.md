@@ -68,8 +68,9 @@ cd engine && bun test
 ```
 
 ## Deferred (by user decision)
-- **A** — AgentRole illegal-state refactor: conflicts with the intentional
+- **Historical note:** The decisions below record the Round 7 design state. Later remediation replaced the genuinely-derived `ARCH_PANEL_PHASE` design with the current hardcoded `"architecture"` policy, so this is not a claim about current code.
+- **A** — AgentRole illegal-state refactor: conflicted at that time with the intentional
   "genuinely derived" ARCH_PANEL_PHASE design built over prior rounds and verified
-  accurate by comment-analyzer. Not a defect; a design trade-off.
+  accurate by comment-analyzer. It was treated as a design trade-off in that round.
 - **H** — advance-phase state-path injection to bring the e2e no-advance contract
   in-process: broader boundary change; smoke test covers it out-of-process today.

@@ -229,6 +229,15 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     if (!parsed.ok) expect(parsed.error).toContain(message);
   });
 
+  it.each(["bad:id", " T1", "T 1", "task-1"])(
+    "rejects task id %j that cannot form a wave finding identity",
+    (id) => {
+      const parsed = parseTaskGraph({ ...validGraph, tasks: [{ ...validTask, id }] });
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toContain("id must match T\\d+");
+    },
+  );
+
   it.each([
     ["absolute", ["/tmp/outside.ts"]],
     ["traversal", ["src/../outside.ts"]],

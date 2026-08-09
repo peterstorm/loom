@@ -122,18 +122,29 @@ function specCheckError(v: unknown): string | null {
   return parsed.ok ? null : parsed.errors.join("; ");
 }
 
+export const TASK_ID_PATTERN = /^T\d+$/;
+
+/** One task-identity grammar shared by load and operator-validation boundaries. */
+export function taskIdError(value: unknown, label: string): string | null {
+  if (typeof value !== "string" || value === "") {
+    return `${label}: id must be a non-empty string, got ${JSON.stringify(value)}`;
+  }
+  return TASK_ID_PATTERN.test(value)
+    ? null
+    : `${label}: id must match T\\d+, got ${JSON.stringify(value)}`;
+}
+
 export function taskUnionError(v: unknown, index: number): string | null {
   if (typeof v !== "object" || v === null || Array.isArray(v)) {
     return `tasks[${index}] must be an object`;
   }
   const t = v as Record<string, unknown>;
-  const id = typeof t.id === "string" ? t.id : `#${index}`;
+  const identityError = taskIdError(t.id, `tasks[${index}]`);
+  if (identityError !== null) return identityError;
+  const id = t.id as string;
   // Structural fields the cast below asserts — proven, not assumed: a
   // drifted or hand-edited graph must fail at the load boundary, not
   // explode later inside typed gate logic that trusts Task's shape.
-  if (typeof t.id !== "string" || t.id === "") {
-    return `tasks[${index}]: id must be a non-empty string, got ${JSON.stringify(t.id)}`;
-  }
   if (typeof t.description !== "string" || t.description.trim() === "") {
     return `tasks[${index}] ("${id}"): description must be a non-empty string, got ${JSON.stringify(t.description)}`;
   }

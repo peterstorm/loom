@@ -54,6 +54,16 @@ function probeCalibrationRevision(revision: string): CalibrationRevisionProbe {
   }
 }
 
+/** Label-blind review scope derived only from the historical revision itself. */
+export function calibrationRevisionPaths(revision: string): readonly string[] {
+  const output = execFileSync(
+    "git",
+    ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", revision],
+    { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+  );
+  return [...new Set(output.split("\n").map((path) => path.trim()).filter(Boolean))].sort();
+}
+
 const handler: HookHandler = async (stdin, args) => {
   const operation = args[0];
   const corpusPath = arg(args, "--corpus") ?? "calibration/corpus.json";
@@ -81,13 +91,21 @@ const handler: HookHandler = async (stdin, args) => {
     const caseId = arg(args, "--case");
     const selected = corpus.value.cases.find((entry) => entry.id === caseId);
     if (!selected) return { kind: "error", message: `Unknown calibration case ${JSON.stringify(caseId)}` };
-    const paths = [...new Set(selected.expectedCriticals.flatMap((finding) => finding.file ? [finding.file] : []))];
+    let paths: readonly string[];
+    try {
+      paths = calibrationRevisionPaths(selected.revision);
+    } catch (error) {
+      return {
+        kind: "error",
+        message: `Cannot derive changed-path scope for calibration revision ${selected.revision}: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
     process.stdout.write([
-      `Review historical revision ${selected.revision} (${selected.state}) for critical correctness defects.`,
-      `Inspect only these seeded paths first: ${paths.join(", ") || "the changed implementation"}.`,
+      `Review historical revision ${selected.revision} for critical correctness defects.`,
+      `Inspect the complete revision-derived changed-path scope: ${paths.join(", ") || "no changed paths reported"}.`,
       `Use git show ${selected.revision}:<path> to read that snapshot; do not judge the current worktree.`,
       "Return ONLY JSON: an array of {severity:'critical', file:string|null, line:number|null, claim:string}.",
-      "Report real criticals even when they are not among the seeded expectations; novel findings are retained as unscored.",
+      "Report every real critical in scope; novel findings are retained as unscored.",
     ].join("\n") + "\n");
     return { kind: "passthrough" };
   }

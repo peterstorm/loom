@@ -17,10 +17,11 @@
 
 ## Critical Fixes
 
-### Fix 1: `ARCH_PANEL_PHASE` claims to be derived but is a hardcoded literal
+### Fix 1: `ARCH_PANEL_PHASE` claimed to be derived but was a hardcoded literal
+- **Historical note:** This finding describes the Round 6 code. Later remediation removed the panel variant's `phase` field; it is not a description of the current `AgentRole` shape.
 - **Source:** type-design-analyzer
-- **File:** engine/src/config.ts:80-86
-- **Issue:** The doc comment says `ARCH_PANEL_PHASE` is "Derived from the panel
+- **File:** engine/src/config.ts:80-86 at the reviewed revision
+- **Issue at the reviewed revision:** The doc comment said `ARCH_PANEL_PHASE` was "Derived from the panel
   agents' shared `phase` in ARCHITECTURE_AGENTS so the set and the phase it maps
   to cannot drift," but it is `export const ARCH_PANEL_PHASE: Phase = "architecture"`
   — a hardcoded literal. The `phase` field on the `panel` variant of `AgentRole`

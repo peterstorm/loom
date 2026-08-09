@@ -66,8 +66,12 @@ function candidateProjectDirs(): string[] {
   try {
     const real = realpathSync(start);
     if (real !== start) dirs.push(real);
-  } catch {
-    // Unresolvable (gone, or permission-denied): the stated form is all we have.
+  } catch (error) {
+    // Unresolvable (gone, or permission-denied): keep the stated fallback, but
+    // preserve the filesystem cause so a missing transcript is diagnosable.
+    process.stderr.write(
+      `loom: cannot resolve transcript project directory ${start}: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
   }
   return dirs;
 }
@@ -80,7 +84,10 @@ function projectDirCandidates(root: string, slug: string): string[] {
     return readdirSync(root, { withFileTypes: true })
       .filter((e) => e.isDirectory() && e.name.startsWith(prefix))
       .map((e) => join(root, e.name));
-  } catch {
+  } catch (error) {
+    process.stderr.write(
+      `loom: cannot scan transcript projects root ${root} for prefix ${prefix}: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
     return [];
   }
 }

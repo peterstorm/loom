@@ -7,7 +7,7 @@
  * agrees with itself.
  */
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -111,6 +111,24 @@ describe("deriveAgentTranscriptPath", () => {
     setEnv("CLAUDE_CONFIG_DIR", join(tmpdir(), "loom-no-such-config-dir-ever"));
     setEnv("CLAUDE_PROJECT_DIR", "/nonexistent/project/dir");
     expect(deriveAgentTranscriptPath("sess", "agent")).toBeNull();
+  });
+
+  it("returns null while preserving realpath and long-slug scan diagnostics", () => {
+    const missingRoot = join(tmp("loom-missing-root-parent"), "missing-config");
+    const longMissingProject = `/${"missing-project-segment".repeat(12)}`;
+    setEnv("CLAUDE_CONFIG_DIR", missingRoot);
+    setEnv("CLAUDE_PROJECT_DIR", longMissingProject);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(deriveAgentTranscriptPath("sess", "agent")).toBeNull();
+      const diagnostic = stderr.mock.calls.map(([text]) => String(text)).join("");
+      expect(diagnostic).toContain("cannot resolve transcript project directory");
+      expect(diagnostic).toContain(longMissingProject);
+      expect(diagnostic).toContain("cannot scan transcript projects root");
+      expect(diagnostic).toContain(join(missingRoot, "projects"));
+    } finally {
+      stderr.mockRestore();
+    }
   });
 });
 

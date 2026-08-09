@@ -136,6 +136,23 @@ describe("Pi extension review tool_result integration", () => {
     return pi;
   };
 
+  it("runs later capability cleanup after an earlier cleanup action fails", async () => {
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      runPiCleanupActions: (actions: readonly { label: string; run: () => void | Promise<void> }[]) => Promise<readonly string[]>;
+    };
+    const calls: string[] = [];
+
+    const errors = await module.runPiCleanupActions([
+      { label: "roster", run: () => { calls.push("roster"); throw new Error("lock unavailable"); } },
+      { label: "revoke", run: () => { calls.push("revoke"); } },
+      { label: "restore", run: async () => { calls.push("restore"); } },
+    ]);
+
+    expect(calls).toEqual(["roster", "revoke", "restore"]);
+    expect(errors).toEqual(["roster: lock unavailable"]);
+  });
+
   it("makes rejected child write grants an unconditional direct-edit denial", async () => {
     const extensionSpecifier = "../../pi/extension.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
@@ -526,6 +543,67 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("revokes every outstanding grant when shutdown roster cleanup fails", async () => {
+    const planPath = join(temp, "shutdown-revocation-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [
+        { id: "T1", description: "one", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], file_list: ["pi/extension.ts"] },
+        { id: "T2", description: "two", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], file_list: ["README.md"] },
+      ],
+    });
+    const pi = await extension();
+    const parentSession = "019fca39-f989-7510-8e62-50dadbcad426";
+    const childSession = "019fca39-f989-7510-8e62-50dadbcad427";
+    const replaySession = "019fca39-f989-7510-8e62-50dadbcad428";
+    const input = {
+      agentScope: "user",
+      tasks: [
+        { agent: "code-implementer-agent", task: "Task ID: T1\nUse the code-implementer skill. Implement and test." },
+        { agent: "code-implementer-agent", task: "Task ID: T2\nUse the code-implementer skill. Implement and test." },
+      ],
+    };
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-shutdown-revocation",
+      input,
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => parentSession } })).toEqual([undefined]);
+
+    await pi.emit("before_agent_start", {
+      prompt: `Task: ${input.tasks[0].task}`,
+      systemPrompt: "<!-- LOOM_PI_AGENT_ID:code-implementer-agent -->",
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+    expect(readFileSync(join(subagentDir, `${childSession}.active`), "utf-8")).not.toBe("");
+
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    let shutdownDiagnostic = "";
+    try {
+      chmodSync(subagentDir, 0o500);
+      await pi.emit("session_shutdown", {}, {
+        cwd: ROOT,
+        sessionManager: { getSessionId: () => childSession },
+      });
+      shutdownDiagnostic = stderr.mock.calls.map(([text]) => String(text)).join("");
+    } finally {
+      chmodSync(subagentDir, 0o700);
+      stderr.mockRestore();
+    }
+    expect(shutdownDiagnostic).toContain("shutdown cleanup failed");
+
+    const replay = await pi.emit("before_agent_start", {
+      prompt: `Task: ${input.tasks[1].task}`,
+      systemPrompt: "<!-- LOOM_PI_AGENT_ID:code-implementer-agent -->",
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => replaySession } });
+    expect(replay).toContainEqual(expect.objectContaining({
+      message: expect.objectContaining({ customType: "loom-write-grant-error" }),
+    }));
+    expect(() => readFileSync(join(subagentDir, `${replaySession}.active`), "utf-8")).toThrow();
+  });
+
   it("gives repeated agent types distinct roster entries and removes each exact spawn", async () => {
     const pi = await extension();
     const session = "019fca39-f989-7510-8e62-50dadbcad40f";
@@ -618,19 +696,22 @@ describe("Pi extension review tool_result integration", () => {
     const before = readFileSync(statePath, "utf-8");
     const pi = await extension();
     const session = "019fca39-f989-7510-8e62-50dadbcad412";
+    const input = {
+      agentScope: "user",
+      tasks: [
+        { agent: "code-implementer-agent", task: "Task ID: T1\nUse the code-implementer skill. Implement and test." },
+        { agent: "code-implementer-agent", task: "Task ID: T2\nUse the code-implementer skill. Implement and test." },
+      ],
+    };
+    const originalPrompts = input.tasks.map((item) => item.task);
     const result = await pi.emit("tool_call", {
       toolName: "subagent",
       toolCallId: "call-post-reservation-block",
-      input: {
-        agentScope: "user",
-        tasks: [
-          { agent: "code-implementer-agent", task: "Task ID: T1\nUse the code-implementer skill. Implement and test." },
-          { agent: "code-implementer-agent", task: "Task ID: T2\nUse the code-implementer skill. Implement and test." },
-        ],
-      },
+      input,
     }, { sessionManager: { getSessionId: () => session } });
 
     expect(result).toContainEqual(expect.objectContaining({ block: true }));
+    expect(input.tasks.map((item) => item.task)).toEqual(originalPrompts);
     expect(readFileSync(statePath, "utf-8")).toBe(before);
     expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
     expect(() => readFileSync(join(subagentDir, `${session}.task_graph`), "utf-8")).toThrow();
@@ -1180,6 +1261,37 @@ describe("Pi extension review tool_result integration", () => {
     } finally {
       stderr.mockRestore();
     }
+  });
+
+  it("replaces stale passing spec evidence when successful Pi messages are malformed", async () => {
+    writeState({
+      ...initialGraph(),
+      spec_check: {
+        wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+    });
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      content: [],
+      details: {
+        results: [{
+          agent: "spec-check-invoker",
+          task: "spec check",
+          exitCode: 0,
+          messages: [null],
+        }],
+      },
+    }, context);
+
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).spec_check).toMatchObject({
+      wave: 1,
+      verdict: "EVIDENCE_CAPTURE_FAILED",
+      error: expect.stringContaining("messages[0] must be an object"),
+    });
   });
 
   it("marks a Pi spec-check count/findings mismatch as evidence capture failed", async () => {

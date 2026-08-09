@@ -159,6 +159,29 @@ export function piSubagentResultFailed(result: {
   return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 }
 
+export interface PiCleanupAction {
+  readonly label: string;
+  readonly run: () => void | Promise<void>;
+}
+
+/** Run every cleanup action even when an earlier capability/roster operation fails. */
+export async function runPiCleanupActions(
+  actions: readonly PiCleanupAction[],
+): Promise<readonly string[]> {
+  const errors: string[] = [];
+  for (const action of actions) {
+    try {
+      await action.run();
+    } catch (error) {
+      errors.push(`${action.label}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return errors;
+}
+
+const cleanupFailureSuffix = (errors: readonly string[]): string =>
+  errors.length === 0 ? "" : ` Cleanup failures: ${errors.join("; ")}`;
+
 export default function (pi: ExtensionAPI) {
   const issuedWriteGrants = new Map<string, string[]>();
   const spawnReservations = new Map<string, Readonly<{
@@ -361,30 +384,35 @@ export default function (pi: ExtensionAPI) {
         const reserved: Array<(typeof rosterIds)[number]> = [];
         const writeGrants: Array<{ index: number; token: string; task: string; originalTask: string; injected: boolean }> = [];
         let taskGraphPointerCreated = false;
-        const rollbackLifecycle = async (): Promise<void> => {
-          for (const agentId of [...reserved].reverse()) {
-            await fsSessionRegistry.removeActive(safeSessionId, agentId);
-          }
+        const rollbackLifecycle = async (): Promise<readonly string[]> => {
+          const actions: PiCleanupAction[] = [];
           for (const grant of writeGrants) {
-            revokePiWriteGrant(grant.token);
+            actions.push({
+              label: `revoke write grant for spawn item ${grant.index + 1}`,
+              run: () => revokePiWriteGrant(grant.token),
+            });
             if (grant.injected) {
-              try { replacePiSpawnTask(event.input, grant.index, grant.originalTask); }
-              catch (error) {
-                process.stderr.write(
-                  `loom(pi): lifecycle rollback could not restore child prompt: ${error instanceof Error ? error.message : String(error)}\n`,
-                );
-              }
+              actions.push({
+                label: `restore child prompt for spawn item ${grant.index + 1}`,
+                run: () => replacePiSpawnTask(event.input, grant.index, grant.originalTask),
+              });
             }
           }
-          if (typeof toolCallId === "string") issuedWriteGrants.delete(toolCallId);
+          for (const agentId of [...reserved].reverse()) {
+            actions.push({
+              label: `remove active roster entry ${agentId}`,
+              run: () => fsSessionRegistry.removeActive(safeSessionId, agentId),
+            });
+          }
           if (taskGraphPointerCreated) {
-            try { unlinkSync(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`); }
-            catch (error) {
-              process.stderr.write(
-                `loom(pi): lifecycle rollback could not remove task-graph pointer: ${error instanceof Error ? error.message : String(error)}\n`,
-              );
-            }
+            actions.push({
+              label: "remove task-graph pointer",
+              run: () => unlinkSync(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`),
+            });
           }
+          const errors = await runPiCleanupActions(actions);
+          issuedWriteGrants.delete(toolCallId);
+          return errors;
         };
         try {
           mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
@@ -431,10 +459,10 @@ export default function (pi: ExtensionAPI) {
             grant.injected = true;
           }
         } catch (error) {
-          await rollbackLifecycle();
+          const cleanupErrors = await rollbackLifecycle();
           return {
             block: true,
-            reason: `Cannot record Loom subagent lifecycle evidence; refusing spawn: ${error instanceof Error ? error.message : String(error)}`,
+            reason: `Cannot record Loom subagent lifecycle evidence; refusing spawn: ${error instanceof Error ? error.message : String(error)}${cleanupFailureSuffix(cleanupErrors)}`,
           };
         }
 
@@ -446,12 +474,15 @@ export default function (pi: ExtensionAPI) {
             : "parallel" as const;
           taskResult = await validateTaskExecutionBatch(taskExecutionSpawns, executionMode);
         } catch (error) {
-          await rollbackLifecycle();
-          throw error;
+          const cleanupErrors = await rollbackLifecycle();
+          throw new Error(
+            `${error instanceof Error ? error.message : String(error)}${cleanupFailureSuffix(cleanupErrors)}`,
+            error instanceof Error ? { cause: error } : undefined,
+          );
         }
         if (taskResult.kind === "block") {
-          await rollbackLifecycle();
-          return { block: true, reason: taskResult.message };
+          const cleanupErrors = await rollbackLifecycle();
+          return { block: true, reason: `${taskResult.message}${cleanupFailureSuffix(cleanupErrors)}` };
         }
         if (writeGrants.length > 0) {
           issuedWriteGrants.set(toolCallId, writeGrants.map((grant) => grant.token));
@@ -517,7 +548,13 @@ export default function (pi: ExtensionAPI) {
       const rejectedSession = ctx.sessionManager.getSessionId() ?? "";
       if (parseSessionId(rejectedSession)) rejectedChildWriteGrantSessions.add(rejectedSession);
       if (partialBinding) {
-        await fsSessionRegistry.removeActive(partialBinding.sessionId, partialBinding.agentId);
+        const cleanupErrors = await runPiCleanupActions([{
+          label: `remove partial child roster entry ${partialBinding.agentId}`,
+          run: () => fsSessionRegistry.removeActive(partialBinding.sessionId, partialBinding.agentId),
+        }]);
+        for (const cleanupError of cleanupErrors) {
+          process.stderr.write(`loom(pi): child write-grant cleanup failed: ${cleanupError}\n`);
+        }
       }
       const message = `loom(pi): child write grant rejected — edits remain blocked: ${error instanceof Error ? error.message : String(error)}`;
       process.stderr.write(message + "\n");
@@ -531,28 +568,50 @@ export default function (pi: ExtensionAPI) {
     const rawSessionId = ctx.sessionManager.getSessionId() ?? "";
     const sessionId = parseSessionId(rawSessionId);
     const binding = activeChildWriteGrants.get(rawSessionId);
-    if (sessionId && binding) {
-      await fsSessionRegistry.removeActive(sessionId, binding.agentId);
-      activeChildWriteGrants.delete(rawSessionId);
-      if (binding.pointerCreated) rmSync(`${SUBAGENT_DIR}/${sessionId}.task_graph`, { force: true });
-    }
-    rejectedChildWriteGrantSessions.delete(rawSessionId);
+    const actions: PiCleanupAction[] = [];
+
+    // Capabilities are the security boundary: schedule every revocation before
+    // fallible roster/pointer housekeeping, then execute all actions regardless
+    // of individual failures.
+    let grantOrdinal = 0;
     for (const tokens of issuedWriteGrants.values()) {
-      for (const token of tokens) revokePiWriteGrant(token);
-    }
-    issuedWriteGrants.clear();
-    for (const reservation of spawnReservations.values()) {
-      for (const item of reservation.items) {
-        try {
-          await fsSessionRegistry.removeActive(reservation.sessionId, item.rosterId);
-        } catch (error) {
-          process.stderr.write(
-            `loom(pi): shutdown cleanup failed for ${item.agentType}: ${error instanceof Error ? error.message : String(error)}\n`,
-          );
-        }
+      for (const token of tokens) {
+        grantOrdinal++;
+        actions.push({
+          label: `revoke outstanding write grant ${grantOrdinal}`,
+          run: () => revokePiWriteGrant(token),
+        });
       }
     }
+    if (sessionId && binding) {
+      actions.push({
+        label: `remove child roster entry ${binding.agentId}`,
+        run: () => fsSessionRegistry.removeActive(sessionId, binding.agentId),
+      });
+      if (binding.pointerCreated) {
+        actions.push({
+          label: `remove child task-graph pointer for ${sessionId}`,
+          run: () => rmSync(`${SUBAGENT_DIR}/${sessionId}.task_graph`, { force: true }),
+        });
+      }
+    }
+    for (const reservation of spawnReservations.values()) {
+      for (const item of reservation.items) {
+        actions.push({
+          label: `remove shutdown roster entry for ${item.agentType}`,
+          run: () => fsSessionRegistry.removeActive(reservation.sessionId, item.rosterId),
+        });
+      }
+    }
+
+    const cleanupErrors = await runPiCleanupActions(actions);
+    issuedWriteGrants.clear();
+    activeChildWriteGrants.delete(rawSessionId);
+    rejectedChildWriteGrantSessions.delete(rawSessionId);
     spawnReservations.clear();
+    for (const cleanupError of cleanupErrors) {
+      process.stderr.write(`loom(pi): shutdown cleanup failed: ${cleanupError}\n`);
+    }
   });
 
   // ─── Resume Context (before_agent_start) ──────────────────────────────
@@ -1231,10 +1290,24 @@ export default function (pi: ExtensionAPI) {
 
       // --- Spec-check invoker → store spec-check findings ---
       if (agentType === "spec-check-invoker") {
-        const resultMessages = (result.messages ?? []) as PiMessage[];
-        const transcriptText = resultMessages
-          .filter((m: PiMessage) => m.role === "assistant" || m.role === "toolResult")
-          .flatMap((m: PiMessage) => (m.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? ""))
+        const parsedMessages = parsePiMessages(result.messages ?? []);
+        if (!parsedMessages.ok) {
+          const error = `spec-check-invoker messages are malformed: ${parsedMessages.errors.join("; ")}`;
+          await mgr.update((s) => ({
+            ...s,
+            spec_check: {
+              wave: s.current_wave ?? 1,
+              run_at: new Date().toISOString(),
+              verdict: "EVIDENCE_CAPTURE_FAILED" as const,
+              error,
+            },
+          }));
+          process.stderr.write(`loom(pi): ${error} — marking spec-check evidence_capture_failed\n`);
+          continue;
+        }
+        const transcriptText = parsedMessages.value
+          .filter((message) => message.role === "assistant" || message.role === "toolResult")
+          .flatMap((message) => message.content.filter((block) => block.type === "text").map((block) => block.text ?? ""))
           .join("\n");
 
         const findings = parseSpecCheckOutput(transcriptText);

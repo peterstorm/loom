@@ -62,6 +62,15 @@ function unreadyTaskMessage(task: Task): string {
   return `${task.id} (status=${task.status}, proof=${task.proof?.state ?? "missing"}${failures})`;
 }
 
+/** Locked-state precondition: no selected-wave implementation child is live. */
+export function checkNoExecutingTasks(tasks: readonly Task[], executingTaskIds: readonly string[]): GateCheck {
+  const waveTaskIds = new Set(tasks.map((task) => task.id));
+  const active = [...new Set(executingTaskIds.filter((id) => waveTaskIds.has(id)))];
+  return active.length === 0
+    ? pass("No wave tasks are still executing")
+    : fail(`FAILED: wave tasks still executing: ${active.join(", ")} — wait for every implementation agent to stop before completing the wave`);
+}
+
 /** Check 1: every task reached an implementation-bearing status through a
  * satisfied proof. Completing any other state would violate TaskGraph's
  * status/proof lockstep at the next load. */
@@ -322,6 +331,7 @@ export function evaluateWaveGate(state: TaskGraph, waveArg: number | null, deps:
   }
 
   const checks: readonly GateCheck[] = [
+    checkNoExecutingTasks(waveTasks, state.executing_tasks ?? []),
     checkImplementationProof(waveTasks),
     checkTestEvidence(waveTasks),
     checkNewTests(waveTasks),

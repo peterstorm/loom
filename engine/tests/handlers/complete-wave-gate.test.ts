@@ -672,6 +672,28 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
     expect(applyGateDecision(locked, decision)).toBe(locked); // no-op, nothing stamped
   });
 
+  it("fails closed while any selected-wave task is still executing", () => {
+    const state = mkGraph({ executing_tasks: ["T1"] });
+    const decision = evaluateWaveGate(state, null, countingDeps().deps);
+
+    expect(decision.verdict.kind).toBe("fail");
+    if (decision.verdict.kind === "fail") {
+      expect(decision.verdict.reason).toContain("wave tasks still executing: T1");
+    }
+    expect(gateCheckMessage(decision.checks[0]!)).toContain("T1");
+    expect(applyGateDecision(state, decision)).toBe(state);
+  });
+
+  it("does not let an executing task from another wave block the selected wave", () => {
+    const decision = evaluateWaveGate(
+      mkGraph({ executing_tasks: ["T2"] }),
+      1,
+      countingDeps().deps,
+    );
+
+    expect(decision.verdict).toEqual({ kind: "pass", taskIds: ["T1"], nextWave: 2 });
+  });
+
   it("a failed proof can never be force-completed into an unloadable graph", () => {
     const failedProof = evaluateTaskProof(
       { newTestsRequired: false, declaredArtifacts: ["missing.ts"] },
@@ -682,15 +704,15 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
     });
     const decision = evaluateWaveGate(state, null, countingDeps().deps);
     expect(decision.verdict.kind).toBe("fail");
-    expect(gateCheckMessage(decision.checks[0]!)).toContain("proof=failed");
-    expect(gateCheckMessage(decision.checks[0]!)).toContain("declared-artifact-not-changed:missing.ts");
+    expect(gateCheckMessage(decision.checks[1]!)).toContain("proof=failed");
+    expect(gateCheckMessage(decision.checks[1]!)).toContain("declared-artifact-not-changed:missing.ts");
     expect(applyGateDecision(state, decision)).toBe(state);
   });
 
   it("a passing decision carries the wave's task ids and the next wave", () => {
     const decision = evaluateWaveGate(mkGraph(), null, countingDeps().deps);
     expect(decision.wave).toBe(1);
-    expect(decision.checks).toHaveLength(7);
+    expect(decision.checks).toHaveLength(8);
     expect(decision.verdict).toEqual({ kind: "pass", taskIds: ["T1"], nextWave: 2 });
   });
 

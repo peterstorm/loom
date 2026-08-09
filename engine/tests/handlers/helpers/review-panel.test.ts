@@ -643,6 +643,20 @@ describe("review-panel helper CLI", () => {
     expect(state.tasks[0].refuted_findings ?? []).toHaveLength(0);
   });
 
+  it("keeps a malformed tally closure fail-closed and reports its parse cause", () => {
+    stage();
+    writeVerdicts([["upheld", "upheld"], ["upheld", "upheld"], ["upheld", "upheld"]]);
+    const first = run(["tally", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+    expect(first.status, first.stderr).toBe(0);
+    writeFileSync(join(runDir, "tally-closure.json"), "{not-json\n");
+
+    const second = run(["tally", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+    expect(second.status).toBe(1);
+    expect(second.stderr).toContain("already been tallied or has an incomplete prior tally");
+    expect(second.stderr).toContain("cannot read tally closure");
+    expect(second.stderr).toMatch(/JSON|parse/i);
+  });
+
   it("refuses to re-tally a run it has already adjudicated", () => {
     // A second tally sent applyFindingOutcomes looking for findings the first
     // one had already moved into refuted_findings, where the invariant throw

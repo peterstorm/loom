@@ -134,3 +134,116 @@ Run in priority order:
 5. `bash -n scripts/*.sh`
 
 Only after all validation is green: stage the audited path set plus this plan, verify the staged names exactly, commit, and push without force.
+
+---
+
+# Adjudicated PR Remediation — Standalone Run `run.mAvoxjxrya`
+
+## Review authority
+
+- **Date:** 2026-08-09
+- **Branch:** `feat/architecture-panel-mode-plan`
+- **Standalone run:** `.claude/reviews/review-and-fix-runs/run.mAvoxjxrya`
+- **Exact frozen scope:** the 244-path `result.json.scope` array in that run, initialized as the audited remediation allowlist in `audited-remediation-paths.json`
+- **Diff reviewed:** 43,876 additions, 2,981 deletions; 153 TypeScript, 80 Markdown, 5 shell, 4 JSON, and 2 gitignore files
+- **Panel:** `reproduction`, `intent`, `security`; strict-majority threshold 2
+- **Adjudication:** 3 canonical criticals → 3 surviving, 0 refuted; 10 advisories → 7 accepted, 3 deferred
+
+## Surviving critical fixes
+
+### 1. Block wave completion while a wave task is executing
+
+- **Source:** `code-reviewer-1` (`code-reviewer`), `engine/src/handlers/helpers/complete-wave-gate.ts:306`
+- **Claim:** the wave gate can pass and mark a task completed while that task remains in `executing_tasks`.
+- **Minimal fix:** add a pure gate check that fails when the selected wave task IDs intersect `state.executing_tasks`, before proof/review checks can produce a pass. Keep state mutation under the existing locked gate update.
+- **Regression:** prove an otherwise passing graph with an active wave task fails closed and that an executing task from another wave does not block the selected wave.
+- **Validation:** `cd engine && bunx vitest run tests/handlers/complete-wave-gate.test.ts`.
+
+### 2. Make spawn rollback revoke capabilities despite roster cleanup failures
+
+- **Source:** `silent-failure-hunter-1` (`silent-failure-hunter`), `pi/extension.ts:366`
+- **Claim:** `rollbackLifecycle` awaits active-roster cleanup before revoking Pi write grants, so a cleanup exception can leave a blocked spawn with a live grant.
+- **Minimal fix:** perform every rollback action independently, revoke grants and restore prompts before/independently of roster and pointer cleanup, collect all cleanup diagnostics, and keep the spawn fail-closed.
+- **Regression:** force roster removal failure after grant injection and prove the call is blocked, the prompt is restored, and the grant is unusable/removed.
+- **Validation:** `cd engine && bunx vitest run tests/pi-extension-review-events.test.ts tests/pi-write-grant.test.ts`.
+
+### 3. Make session shutdown revoke capabilities in a guaranteed cleanup path
+
+- **Source:** `silent-failure-hunter-2` (`silent-failure-hunter`), `pi/extension.ts:535`
+- **Claim:** active-roster or pointer cleanup can throw before `issuedWriteGrants` are revoked.
+- **Minimal fix:** revoke and clear every issued grant in a `finally`-equivalent path; isolate child-binding, pointer, rejected-session, and reservation cleanup failures so all cleanup steps run and emit diagnostics.
+- **Regression:** force active-roster cleanup failure during shutdown and prove outstanding nested grants are still revoked and subsequent reservations are attempted.
+- **Validation:** `cd engine && bunx vitest run tests/pi-extension-review-events.test.ts tests/pi-write-grant.test.ts`.
+
+## Accepted advisories
+
+### 4. Fail closed on malformed Pi spec-check messages
+
+- **Source:** `code-reviewer-2` (`code-reviewer`), `pi/extension.ts:1233`
+- **Claim:** malformed successful Pi messages can throw before replacing a stale same-wave passing `spec_check`.
+- **Minimal fix:** parse result messages through `parsePiMessages`; on malformed envelopes, atomically store an `EVIDENCE_CAPTURE_FAILED` spec-check for the current wave.
+- **Regression:** start with a same-wave passing spec-check, deliver `messages: [null]`, and prove the stale pass is replaced.
+- **Validation:** `cd engine && bunx vitest run tests/pi-extension-review-events.test.ts`.
+
+### 5. Blind model-calibration prompts to expected outcomes
+
+- **Source:** `code-reviewer-3` (`code-reviewer`), `engine/src/handlers/helpers/model-calibration.ts:86`
+- **Claim:** prompts reveal `vulnerable`/`fixed` state and seed expected-finding paths, biasing the measured reviewer.
+- **Minimal fix:** emit only the revision and a revision-derived changed-path scope; keep corpus state and expected critical metadata exclusively in scoring.
+- **Regression:** assert generated prompts contain neither outcome label nor expected-critical-derived hints.
+- **Validation:** `cd engine && bunx vitest run tests/handlers/helpers/quality-programs.test.ts`.
+
+### 6. Preserve transcript-derivation filesystem diagnostics
+
+- **Source:** `silent-failure-hunter-3` (`silent-failure-hunter`), `engine/src/utils/agent-transcript-path.ts:69`
+- **Claim:** `realpathSync`/`readdirSync` failures collapse into a misleading “no transcript found” result.
+- **Minimal fix:** retain null-returning fallback semantics but emit contextual stderr diagnostics for each failed derivation step.
+- **Regression:** force both operations to fail and assert null plus actionable diagnostic output.
+- **Validation:** `cd engine && bunx vitest run tests/utils/agent-transcript-path.test.ts`.
+
+### 7. Preserve tally-closure read failure diagnostics
+
+- **Source:** `silent-failure-hunter-4` (`silent-failure-hunter`), `engine/src/handlers/helpers/review-panel.ts:371`
+- **Claim:** a closed-run catch hides whether closure evidence is unreadable or malformed.
+- **Minimal fix:** preserve closed-run fail-closed polarity while appending the concrete closure read/parse error to the contract diagnostic.
+- **Regression:** use malformed closure JSON and assert the operation reports both closed-run state and the parse cause.
+- **Validation:** `cd engine && bunx vitest run tests/handlers/helpers/review-cleanup-diagnostics.test.ts tests/handlers/helpers/review-panel.test.ts`.
+
+### 8. Enforce task identity grammar at the load boundary
+
+- **Source:** `type-design-analyzer-1` (`type-design-analyzer`), `engine/src/state-manager.ts:134`
+- **Claim:** task-graph load accepts task IDs that cannot be represented as `WaveFindingId`.
+- **Minimal fix:** reuse a single task-ID parser/grammar at state load and graph validation boundaries so only `T\d+` task identities become typed `Task` values.
+- **Regression:** reject IDs containing colons/whitespace and retain accepted canonical IDs.
+- **Validation:** `cd engine && bunx vitest run tests/state-manager.test.ts tests/handlers/validate-task-graph.test.ts`.
+
+### 9. Mark superseded architecture-phase claims as historical
+
+- **Sources:**
+  - `comment-analyzer-1` (`comment-analyzer`), `.claude/plans/2026-07-17-pr-remediation-round6.md:20`
+  - `comment-analyzer-2` (`comment-analyzer`), `.claude/plans/2026-07-18-pr-remediation-round7.md:71`
+- **Claims:** old remediation notes describe a removed `AgentRole.phase` field and a no-longer-derived `ARCH_PANEL_PHASE` as current design.
+- **Minimal fix:** retain the audit history but label those statements as historical and point at the later implementation outcome.
+- **Validation:** documentation review plus `cd engine && bunx vitest run tests/prose-contract-round14.test.ts tests/panel-config.test.ts`.
+
+## Deferred advisories
+
+- **`architecture-tech-lead-1` (`pi/extension.ts:162`):** extracting a harness-neutral lifecycle orchestrator is a broad boundary redesign; defer rather than combine it with the minimal capability-revocation fix.
+- **`architecture-tech-lead-2` (`engine/src/core/validate-phase-order.ts:1`):** moving all phase-order I/O out of `core` is a cross-handler architecture refactor, not needed to remedy the adjudicated correctness failures.
+- **`architecture-tech-lead-3` (`engine/src/config.ts:7`):** splitting policy constants from runtime path discovery is a broad module migration; defer to a dedicated architecture change with import-boundary validation.
+
+## Refuted Findings (not fixing)
+
+None. All three canonical critical findings were upheld by `reproduction`, `intent`, and `security`; `result.json.refuted_critical_findings` is empty.
+
+## Project validation
+
+Run in order:
+
+1. Focused Vitest files named above.
+2. `cd engine && npm run typecheck`.
+3. `cd engine && npm run test:unit`.
+4. `cd engine && npm test` (unit plus all smoke suites).
+5. `bash -n scripts/*.sh`.
+
+Only the audited remediation path set plus this plan may be staged. Run evidence under `.claude/reviews/review-and-fix-runs/` must remain untracked/ignored.

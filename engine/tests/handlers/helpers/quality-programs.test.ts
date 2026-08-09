@@ -94,6 +94,29 @@ describe("quality-program helper boundaries", () => {
     expect(score.vulnerable.executedCaseCount).toBe(0);
   });
 
+  it("keeps calibration prompts blind to corpus labels and expected findings", () => {
+    const corpus = JSON.parse(readFileSync(join(ROOT, "calibration/corpus.json"), "utf-8")) as {
+      cases: Array<{
+        id: string;
+        revision: string;
+        state: string;
+        expected_criticals: Array<{ claim: string }>;
+      }>;
+    };
+    const selected = corpus.cases[0]!;
+    const prompt = cli([
+      "helper", "model-calibration", "prompt",
+      "--corpus", "calibration/corpus.json",
+      "--case", selected.id,
+    ]);
+
+    expect(prompt).toContain(`Review historical revision ${selected.revision} for critical correctness defects.`);
+    expect(prompt).toContain("complete revision-derived changed-path scope");
+    expect(prompt).not.toContain(`(${selected.state})`);
+    expect(prompt).not.toContain("seeded");
+    expect(prompt).not.toContain(selected.expected_criticals[0]!.claim);
+  });
+
   it("event-sources the exact refutation batch and waits for all slots before tally", () => {
     const input = {
       input: {
