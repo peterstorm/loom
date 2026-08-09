@@ -10,7 +10,7 @@
 import { readFileSync, writeFileSync, chmodSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { withLock } from "./utils/lock";
-import { PHASE_ORDER, TASK_GRAPH_PATH } from "./config";
+import { PHASE_ORDER, taskGraphPath } from "./config";
 import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
 import { REVIEW_STATUSES, TASK_STATUSES } from "./types";
 import {
@@ -60,7 +60,8 @@ export function resolveTaskGraph(sessionId?: string): string | null {
     }
   }
 
-  if (existsSync(TASK_GRAPH_PATH)) return TASK_GRAPH_PATH;
+  const localTaskGraph = taskGraphPath();
+  if (existsSync(localTaskGraph)) return localTaskGraph;
 
   return null;
 }

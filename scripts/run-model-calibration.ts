@@ -36,7 +36,8 @@ function prompt(caseId: string): string {
 
 function finalText(stdout: string): string | null {
   let answer: string | null = null;
-  for (const line of stdout.split("\n")) {
+  const malformed: string[] = [];
+  for (const [index, line] of stdout.split("\n").entries()) {
     if (!line.trim()) continue;
     try {
       const event = JSON.parse(line) as { type?: string; message?: { role?: string; content?: Array<{ type?: string; text?: string }> } };
@@ -44,7 +45,12 @@ function finalText(stdout: string): string | null {
         const text = event.message.content?.filter((part) => part.type === "text").map((part) => part.text ?? "").join("") ?? "";
         if (text.trim()) answer = text;
       }
-    } catch { /* stderr/non-JSON is diagnosed by exit status */ }
+    } catch (error) {
+      malformed.push(`line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (malformed.length > 0) {
+    throw new Error(`Pi JSON stream contained ${malformed.length} malformed line(s): ${malformed.join("; ")}`);
   }
   return answer;
 }

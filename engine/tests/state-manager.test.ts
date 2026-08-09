@@ -550,6 +550,22 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
 });
 
 describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR files", () => {
+  it("resolves a LOOM_STATE_PATH established after module import", () => {
+    const dir = makeTmpDir();
+    const latePath = join(dir, "late-active-task-graph.json");
+    const previous = process.env.LOOM_STATE_PATH;
+    writeFileSync(latePath, JSON.stringify(minimalGraph()));
+    process.env.LOOM_STATE_PATH = latePath;
+    try {
+      expect(resolveTaskGraph()).toBe(latePath);
+      expect(StateManager.fromSession("sm-late-binding")?.getPath()).toBe(latePath);
+    } finally {
+      if (previous === undefined) delete process.env.LOOM_STATE_PATH;
+      else process.env.LOOM_STATE_PATH = previous;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("a valid session id resolves through its .task_graph pointer", () => {
     const s = `sm-resolve-${process.pid}-${Date.now()}`;
     const dir = makeTmpDir();

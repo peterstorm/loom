@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -103,6 +103,25 @@ describe("Pi child write grants", () => {
     const revoked = issuePiWriteGrant({ agent: "frontend-agent", taskId: "T2", cwd, taskGraphPath: graph });
     revokePiWriteGrant(revoked.token);
     expect(() => consumePiWriteGrant(injectPiWriteGrant("Task ID: T2", revoked), cwd, "frontend-agent")).toThrow();
+  });
+
+  it("audits malformed abandoned capabilities before deleting them", () => {
+    const { cwd, graph } = fixture();
+    issuePiWriteGrant({
+      agent: "code-implementer-agent", taskId: "T1", cwd, taskGraphPath: graph,
+    });
+    const grantDir = join(process.env.LOOM_SUBAGENT_DIR!, "pi-write-grants");
+    const grantPath = join(grantDir, readdirSync(grantDir)[0]!);
+    writeFileSync(grantPath, "{not-json");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      sweepExpiredPiWriteGrants();
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toContain(`removing malformed write grant ${grantPath}`);
+      expect(readdirSync(grantDir)).toEqual([]);
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it("rejects marker smuggling and sweeps abandoned capabilities", () => {

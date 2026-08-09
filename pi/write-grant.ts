@@ -180,8 +180,17 @@ export function sweepExpiredPiWriteGrants(now: number = Date.now()): void {
     const path = join(directory, entry.name);
     try {
       const grant = parseStoredGrant(JSON.parse(readFileSync(path, "utf-8")));
-      if (!grant || grant.expiresAt < now) unlinkSync(path);
-    } catch {
+      if (!grant) {
+        process.stderr.write(`loom(pi): removing malformed write grant ${path}: stored grant schema is invalid\n`);
+        unlinkSync(path);
+      } else if (grant.expiresAt < now) {
+        unlinkSync(path);
+      }
+    } catch (error) {
+      const classification = error instanceof SyntaxError ? "malformed" : "unreadable";
+      process.stderr.write(
+        `loom(pi): removing ${classification} write grant ${path}: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
       rmSync(path, { force: true });
     }
   }

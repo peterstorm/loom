@@ -66,4 +66,58 @@ describe("run-model-calibration", () => {
       cases: [{ case_id: "failing-pi", status: "not-executed", reason: "simulated provider failure" }],
     });
   });
+
+  it("parses fenced findings from a successful Pi JSON assistant result", () => {
+    const f = fixture();
+    const finding = { severity: "critical", claim: "known critical", file: "engine/src/core/findings.ts", line: 12 };
+    const event = {
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: `\`\`\`json\n${JSON.stringify([finding])}\n\`\`\`` }] },
+    };
+    writeFileSync(join(f.bin, "pi"), `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(event)}'\n`);
+    chmodSync(join(f.bin, "pi"), 0o755);
+
+    const run = spawnSync("bun", [
+      "scripts/run-model-calibration.ts", "--corpus", f.corpus, "--output", f.output,
+    ], {
+      cwd: REPO_ROOT,
+      encoding: "utf-8",
+      env: { ...process.env, LOOM_RUN_MODEL_CALIBRATION: "1", PATH: `${f.bin}:${process.env.PATH ?? ""}` },
+    });
+
+    expect(run.status).toBe(0);
+    expect(JSON.parse(readFileSync(f.output, "utf-8"))).toMatchObject({
+      cases: [{ case_id: "failing-pi", status: "executed", findings: [finding] }],
+    });
+  });
+
+  it("rejects malformed Pi JSONL even when a later final message is valid", () => {
+    const f = fixture();
+    const event = {
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "[]" }] },
+    };
+    writeFileSync(
+      join(f.bin, "pi"),
+      `#!/bin/sh\nprintf '%s\\n' 'not-json' '${JSON.stringify(event)}'\n`,
+    );
+    chmodSync(join(f.bin, "pi"), 0o755);
+
+    const run = spawnSync("bun", [
+      "scripts/run-model-calibration.ts", "--corpus", f.corpus, "--output", f.output,
+    ], {
+      cwd: REPO_ROOT,
+      encoding: "utf-8",
+      env: { ...process.env, LOOM_RUN_MODEL_CALIBRATION: "1", PATH: `${f.bin}:${process.env.PATH ?? ""}` },
+    });
+
+    expect(run.status).toBe(1);
+    expect(JSON.parse(readFileSync(f.output, "utf-8"))).toMatchObject({
+      cases: [{
+        case_id: "failing-pi",
+        status: "not-executed",
+        reason: expect.stringContaining("Pi JSON stream contained 1 malformed line"),
+      }],
+    });
+  });
 });

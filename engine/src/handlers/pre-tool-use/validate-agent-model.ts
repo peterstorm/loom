@@ -27,24 +27,32 @@ function piAgentPath(agentName: string): string | null {
   return candidates.find(existsSync) ?? null;
 }
 
-function modelFrontmatter(path: string): { name: string; model?: string; "model-profile"?: string } | null {
+type ModelFrontmatterRead =
+  | Readonly<{ ok: true; value: { name: string; model?: string; "model-profile"?: string } | null }>
+  | Readonly<{ ok: false; error: string }>;
+
+function modelFrontmatter(path: string): ModelFrontmatterRead {
+  let content: string;
   try {
-    const content = readFileSync(path, "utf-8");
-    const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-    if (!match) return null;
-    const fields: Record<string, string> = {};
-    for (const line of match[1]!.split(/\r?\n/)) {
-      const field = line.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.*?)\s*$/);
-      if (field && field[2] !== "") fields[field[1]!] = field[2]!;
-    }
-    return {
+    content = readFileSync(path, "utf-8");
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!match) return { ok: true, value: null };
+  const fields: Record<string, string> = {};
+  for (const line of match[1]!.split(/\r?\n/)) {
+    const field = line.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.*?)\s*$/);
+    if (field && field[2] !== "") fields[field[1]!] = field[2]!;
+  }
+  return {
+    ok: true,
+    value: {
       name: fields.name ?? "",
       ...(fields.model ? { model: fields.model } : {}),
       ...(fields["model-profile"] ? { "model-profile": fields["model-profile"] } : {}),
-    };
-  } catch {
-    return null;
-  }
+    },
+  };
 }
 
 const handler: HookHandler = async (stdin) => {
@@ -99,7 +107,13 @@ const handler: HookHandler = async (stdin) => {
     };
   }
   const fields = modelFrontmatter(path);
-  const frontmatter = validateAgentPolicyFrontmatter(fields);
+  if (!fields.ok) {
+    return {
+      kind: "block",
+      message: `BLOCKED: cannot read Claude Code agent definition '${rawAgent}' (${path}): ${fields.error}`,
+    };
+  }
+  const frontmatter = validateAgentPolicyFrontmatter(fields.value);
   const requested = validateExplicitSpawnModel(agent, "claude-code", input.tool_input?.model);
   const errors = [
     ...(frontmatter.ok ? [] : frontmatter.errors),

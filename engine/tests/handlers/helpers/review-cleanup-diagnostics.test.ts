@@ -1,8 +1,40 @@
 import { describe, expect, it } from "vitest";
-import { reviewPacketCleanupFailure } from "../../../src/handlers/helpers/review-packet";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  persistReviewPacketAndBind,
+  reviewPacketCleanupFailure,
+} from "../../../src/handlers/helpers/review-packet";
 import { standaloneTallyPublishErrors } from "../../../src/handlers/helpers/review-panel";
 
 describe("review cleanup diagnostics", () => {
+  it("removes a packet when the post-write state binding fails", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "loom-review-packet-bind-"));
+    const packet = join(dir, "packet.json");
+    try {
+      await expect(persistReviewPacketAndBind(
+        packet,
+        "packet bytes\n",
+        async () => { throw new Error("state update failed"); },
+      )).rejects.toThrow("state update failed");
+      expect(existsSync(packet)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the packet only after its state binding succeeds", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "loom-review-packet-bind-"));
+    const packet = join(dir, "packet.json");
+    try {
+      await persistReviewPacketAndBind(packet, "packet bytes\n", async () => {});
+      expect(readFileSync(packet, "utf-8")).toBe("packet bytes\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("retains both packet state-update and cleanup failures", () => {
     const original = new Error("state update failed");
     const combined = reviewPacketCleanupFailure(

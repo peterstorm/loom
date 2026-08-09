@@ -8,7 +8,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
 import { legacyTestsPassedNote, testResultPassed, newWaveGate } from "../../types";
@@ -17,6 +17,7 @@ import { StateManager } from "../../state-manager";
 import { parsePlanModels, type PlanModels } from "../../parsers/parse-plan-models";
 import { pathsMatch } from "./validate-model-bindings";
 import type { ProofFailure } from "../../core/proof-obligations";
+import { inspectRepositoryPath } from "../../utils/repository-path";
 
 /** Resolve the plan's executable models from state — effectful shell helper */
 export function loadPlanModelsSource(planFile: string | null | undefined): PlanModelsSource {
@@ -474,10 +475,21 @@ export function persistWaveGateSummaryFallback(
   body: string,
   root: string = process.cwd(),
 ): string {
-  const path = join(root, ".claude", "reviews", `wave-${completedWave}-review.md`);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, body);
-  return path;
+  const relativePath = join(".claude", "reviews", `wave-${completedWave}-review.md`);
+  const initial = inspectRepositoryPath(root, relativePath, "wave-gate summary fallback");
+  mkdirSync(dirname(initial.absolute), { recursive: true });
+  const target = inspectRepositoryPath(root, relativePath, "wave-gate summary fallback");
+  const descriptor = openSync(
+    target.absolute,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    writeFileSync(descriptor, body);
+  } finally {
+    closeSync(descriptor);
+  }
+  return target.absolute;
 }
 
 /** Post GitHub comment summarizing wave gate results.

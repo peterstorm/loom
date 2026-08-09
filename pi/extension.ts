@@ -52,7 +52,7 @@ import { newWaveGate } from "../engine/src/types";
 // with it — every hook below, not just review capture. `tests/pi-imports.test.ts`
 // resolves every engine import in this file against the real exports so the next
 // move of a shared symbol fails a test instead of silently disarming Pi.
-import { isReviewAgent, taskGraphPath, TASK_GRAPH_PATH, SUBAGENT_DIR, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
+import { isReviewAgent, taskGraphPath, SUBAGENT_DIR, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { fsSessionRegistry, parseAgentId, parseSessionId, rosterAgentId } from "../engine/src/machine";
@@ -164,6 +164,7 @@ export default function (pi: ExtensionAPI) {
       rosterId: AgentId;
       taskId: string | null;
       implementation: boolean;
+      standalone: boolean;
     }>[];
   }>>();
   const activeChildWriteGrants = new Map<string, { agentId: AgentId; pointerCreated: boolean }>();
@@ -202,7 +203,7 @@ export default function (pi: ExtensionAPI) {
         currentGuard = "block-direct-edits";
         const safeSessionId = parseSessionId(sessionId);
         const result = shouldBlockDirectEdit(event.toolName, sessionId, () =>
-          existsSync(TASK_GRAPH_PATH) ||
+          existsSync(taskGraphPath()) ||
           rejectedChildWriteGrantSessions.has(sessionId) ||
           (safeSessionId !== null && existsSync(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`))
         );
@@ -251,7 +252,7 @@ export default function (pi: ExtensionAPI) {
           // Loom owns only its catalog outside orchestration. During an active
           // graph, an unknown agent would bypass phase/task/model gates; without
           // one, it belongs to another Pi workflow and must pass through.
-          if (existsSync(TASK_GRAPH_PATH)) {
+          if (existsSync(taskGraphPath())) {
             return {
               block: true,
               reason: "External Pi subagents cannot run while a Loom task graph is active",
@@ -380,10 +381,11 @@ export default function (pi: ExtensionAPI) {
             await fsSessionRegistry.markActive(safeSessionId, agentId);
             reserved.push(agentId);
           }
-          if (needsTaskGraphLifecycle && existsSync(TASK_GRAPH_PATH)) {
+          const activeTaskGraphPath = taskGraphPath();
+          if (needsTaskGraphLifecycle && existsSync(activeTaskGraphPath)) {
             const taskGraphFile = `${SUBAGENT_DIR}/${safeSessionId}.task_graph`;
             if (!existsSync(taskGraphFile)) {
-              writeFileSync(taskGraphFile, resolve(TASK_GRAPH_PATH));
+              writeFileSync(taskGraphFile, resolve(activeTaskGraphPath));
               taskGraphPointerCreated = true;
             }
           }
@@ -450,6 +452,7 @@ export default function (pi: ExtensionAPI) {
             rosterId: rosterIds[index]!,
             taskId: extractTaskId(item.task),
             implementation: taskExecutionSpawns[index]?.kind === "implementation",
+            standalone: taskExecutionSpawns[index]?.kind === "standalone",
           })),
         });
       }
@@ -546,9 +549,10 @@ export default function (pi: ExtensionAPI) {
   // so the LLM knows where we are (equivalent of resume-after-clear).
 
   pi.on("before_agent_start", async (_event, _ctx) => {
-    if (!existsSync(TASK_GRAPH_PATH)) return;
+    const activeTaskGraphPath = taskGraphPath();
+    if (!existsSync(activeTaskGraphPath)) return;
 
-    const sm = StateManager.fromPath(TASK_GRAPH_PATH);
+    const sm = StateManager.fromPath(activeTaskGraphPath);
     if (!sm) return;
 
     let state;
@@ -629,9 +633,9 @@ export default function (pi: ExtensionAPI) {
       spawnReservations.delete(toolCallId);
     }
 
-    // Release from pre-spawn authority before trusting any result-envelope
-    // field. A malformed/truncated envelope still represents a completed tool
-    // call and must not leak roster or executing-task state.
+    // Release roster authority before consulting any result-envelope field.
+    // The immutable reservation still owns standalone/task attribution and
+    // failed-attempt cleanup after the child process has stopped.
     if (reservation) {
       for (const item of reservation.items) {
         try {
@@ -642,40 +646,110 @@ export default function (pi: ExtensionAPI) {
           );
         }
       }
-      const implementationTasks = reservation.items.flatMap((item) =>
-        item.implementation && item.taskId !== null ? [item.taskId] : []
-      );
-      if (implementationTasks.length > 0) {
-        const reservedManager = StateManager.fromSession(reservation.sessionId);
-        if (reservedManager) {
-          try {
-            await reservedManager.update((state) => ({
-              ...state,
-              executing_tasks: (state.executing_tasks ?? []).filter((id) => !implementationTasks.includes(id)),
-            }));
-          } catch (error) {
-            process.stderr.write(
-              `loom(pi): reserved implementation cleanup failed: ${error instanceof Error ? error.message : String(error)}\n`,
-            );
-          }
-        }
-      }
     }
 
+    const finalizeReservedImplementations = async (rawResults: readonly unknown[]): Promise<void> => {
+      if (!reservation || !reservation.items.some((item) => item.implementation)) return;
+      const manager = StateManager.fromSession(reservation.sessionId);
+      if (!manager) {
+        process.stderr.write(
+          `loom(pi): cannot finalize reserved implementation attempts for session ${reservation.sessionId} — task graph unavailable\n`,
+        );
+        return;
+      }
+      const root = git.repositoryRoot() ?? process.cwd();
+      try {
+        await manager.update((initial) => {
+          let state = initial;
+          for (const [index, item] of reservation.items.entries()) {
+            if (!item.implementation || item.taskId === null) continue;
+            const raw = rawResults[index];
+            const envelope = typeof raw === "object" && raw !== null && !Array.isArray(raw)
+              ? raw as Record<string, unknown>
+              : null;
+            const resultAgent = typeof envelope?.agent === "string"
+              ? stripNamespace(envelope.agent)
+              : null;
+            const succeeded = resultAgent === item.agentType && !piSubagentResultFailed({
+              exitCode: envelope?.exitCode,
+              stopReason: envelope?.stopReason,
+            });
+            if (succeeded) continue;
+
+            const task = state.tasks.find((candidate) => candidate.id === item.taskId);
+            if (!task) {
+              state = {
+                ...state,
+                executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== item.taskId),
+              };
+              continue;
+            }
+
+            let changedDeclaredArtifacts: readonly string[] = [];
+            let bytesChangedSinceAttempt = true;
+            try {
+              changedDeclaredArtifacts = changedDeclaredArtifactsSince(root, task.artifact_baseline);
+              bytesChangedSinceAttempt = task.attempt_artifact_baseline === undefined ||
+                changedDeclaredArtifactsSince(root, task.attempt_artifact_baseline).length > 0;
+            } catch (error) {
+              // Comparison failure cannot prove the old evidence still matches
+              // current bytes. Fail closed by invalidating it and retain the
+              // concrete diagnostic for the operator.
+              process.stderr.write(
+                `loom(pi): failed-attempt baseline comparison failed for ${item.taskId}: ${error instanceof Error ? error.message : String(error)} — invalidating stale evidence\n`,
+              );
+            }
+
+            if (!bytesChangedSinceAttempt) {
+              state = {
+                ...state,
+                executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== item.taskId),
+              };
+              continue;
+            }
+
+            const failure = resultAgent !== null && resultAgent !== item.agentType
+              ? `reserved ${item.agentType} result was returned as ${resultAgent}`
+              : envelope === null
+                ? "reserved implementation result was missing or malformed"
+                : `${item.agentType} failed before implementation evidence completed`;
+            state = applyUntrustedStopResolution(state, item.taskId, {
+              testResult: { verdict: "untrusted", passed: false, label: "pi-implementation-failed" },
+              testEvidence: failure,
+              filesModified: [],
+              changedDeclaredArtifacts,
+              bytesChangedSinceAttempt: true,
+              newTestsWritten: false,
+              newTestEvidence: "",
+            }).state;
+          }
+          return state;
+        });
+      } catch (error) {
+        process.stderr.write(
+          `loom(pi): reserved implementation finalization failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
+    };
+
     const details = event.details as Record<string, unknown> | undefined;
+    const rawResults = details && "results" in details && Array.isArray(details.results)
+      ? details.results
+      : [];
+    await finalizeReservedImplementations(rawResults);
+
     if (!details || !("results" in details)) {
       process.stderr.write(
-        "loom(pi): subagent tool_result is missing details.results — no task status or findings updated\n",
+        "loom(pi): subagent tool_result is missing details.results — successful evidence was not applied\n",
       );
       return;
     }
 
     // Shape guard: a pi version drifting details.results away from an array
     // must be a LOUD no-op, not a silent one (or a throw mid-dispatch).
-    const rawResults = details.results;
-    if (!Array.isArray(rawResults)) {
+    if (!Array.isArray(details.results)) {
       process.stderr.write(
-        `loom(pi): subagent tool_result has unrecognized details.results shape (${typeof rawResults}) — no task status updated\n`,
+        `loom(pi): subagent tool_result has unrecognized details.results shape (${typeof details.results}) — successful evidence was not applied\n`,
       );
       return;
     }
@@ -724,7 +798,7 @@ export default function (pi: ExtensionAPI) {
       // Standalone review/refutation results are run artifacts. Short-circuit
       // before StateManager resolution so an unrelated local graph is neither
       // read nor mutated merely because it exists.
-      if (hasStandaloneReviewContext(result.task ?? "")) {
+      if (reservedItem?.standalone ?? hasStandaloneReviewContext(result.task ?? "")) {
         process.stderr.write(
           piSubagentResultFailed(result)
             ? `loom(pi): failed standalone ${agentType} result ignored — task state untouched\n`
@@ -750,7 +824,7 @@ export default function (pi: ExtensionAPI) {
       if (piSubagentResultFailed(result)) {
         const failure = `${agentType} failed before evidence capture completed (exitCode=${String(result.exitCode)}, stopReason=${String(result.stopReason ?? "unset")})`;
         if (isReviewAgent(agentType)) {
-          const failedTaskId = extractTaskId(result.task ?? "");
+          const failedTaskId = reservedItem?.taskId ?? extractTaskId(result.task ?? "");
           if (failedTaskId === null || !mgr.load().tasks.some((task) => task.id === failedTaskId)) {
             process.stderr.write(
               `loom(pi): ${failure}; trusted task binding is missing or unknown — review evidence NOT stored\n`,
@@ -781,8 +855,8 @@ export default function (pi: ExtensionAPI) {
           process.stderr.write(`loom(pi): ${failure} — marking spec-check evidence_capture_failed\n`);
           continue;
         }
-        if (IMPL_AGENTS.has(agentType)) {
-          const failedTaskId = reservedItem?.taskId ?? extractTaskId(result.task ?? "");
+        if (IMPL_AGENTS.has(agentType) && !reservedItem) {
+          const failedTaskId = extractTaskId(result.task ?? "");
           if (failedTaskId !== null) {
             await mgr.update((s) => ({
               ...s,
@@ -1019,7 +1093,7 @@ export default function (pi: ExtensionAPI) {
 
       // --- Review agent → store findings ---
       if (isReviewAgent(agentType)) {
-        const taskId = extractTaskId(result.task ?? "") ?? extractTaskId(
+        const taskId = reservedItem?.taskId ?? extractTaskId(result.task ?? "") ?? extractTaskId(
           event.content.filter((c: { type: string }) => c.type === "text").map((c: { type: string; text?: string }) => c.text ?? "").join("\n")
         );
         const resultMessages = (result.messages ?? []) as PiMessage[];
@@ -1140,12 +1214,13 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("loom-status", {
     description: "Show current loom orchestration status",
     handler: async (_args, ctx) => {
-      if (!existsSync(TASK_GRAPH_PATH)) {
+      const activeTaskGraphPath = taskGraphPath();
+      if (!existsSync(activeTaskGraphPath)) {
         ctx.ui.notify("No active loom orchestration", "info");
         return;
       }
 
-      const sm = StateManager.fromPath(TASK_GRAPH_PATH);
+      const sm = StateManager.fromPath(activeTaskGraphPath);
       if (!sm) {
         ctx.ui.notify("Could not load task graph", "error");
         return;

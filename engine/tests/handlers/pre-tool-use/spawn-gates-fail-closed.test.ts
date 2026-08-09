@@ -68,6 +68,29 @@ describe("spawn-gate handlers — malformed stdin fails CLOSED", () => {
     }
   });
 
+  it("validate-agent-model reports the concrete agent-definition read failure", async () => {
+    const priorHome = process.env.HOME;
+    const home = join(tmpdir(), `unreadable-model-policy-${process.pid}-${Date.now()}`);
+    const definition = join(home, ".claude", "agents", "code-reviewer.md");
+    mkdirSync(definition, { recursive: true });
+    process.env.HOME = home;
+    try {
+      const result = await validateAgentModel(JSON.stringify({
+        tool_name: "Agent",
+        tool_input: { subagent_type: "code-reviewer", model: "sonnet" },
+      }), []);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") {
+        expect(result.message).toContain(`cannot read Claude Code agent definition 'code-reviewer' (${definition})`);
+        expect(result.message).toMatch(/EISDIR|illegal operation on a directory/i);
+      }
+    } finally {
+      if (priorHome === undefined) delete process.env.HOME;
+      else process.env.HOME = priorHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   // Skill policy remains orchestration-gated; model policy above protects
   // pre-graph panel and standalone Loom spawns too.
   const orchestrationGated: ReadonlyArray<[string, HookHandler]> = [

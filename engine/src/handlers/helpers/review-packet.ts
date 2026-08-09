@@ -33,6 +33,24 @@ export function reviewPacketCleanupFailure(
   );
 }
 
+/** Write a packet and bind it to state as one compensating transaction. */
+export async function persistReviewPacketAndBind(
+  outputPath: string,
+  serializedPacket: string,
+  bind: () => Promise<void>,
+): Promise<void> {
+  writeFileSync(outputPath, serializedPacket, { flag: "wx" });
+  try {
+    await bind();
+  } catch (error) {
+    let cleanupError: unknown = null;
+    try { unlinkSync(outputPath); }
+    catch (cleanup) { cleanupError = cleanup; }
+    if (cleanupError !== null) throw reviewPacketCleanupFailure(error, outputPath, cleanupError);
+    throw error;
+  }
+}
+
 const USAGE = `Usage: helper review-packet <${OPERATIONS.join("|")}> --task <id> --output <file> | --packet <file>`;
 
 function arg(args: readonly string[], name: string): string | null {
@@ -179,9 +197,10 @@ const handler: HookHandler = async (_stdin, args) => {
     const outputPath = inspectRepositoryPath(root, output, "review packet output");
     const absoluteOutput = outputPath.absolute;
     mkdirSync(dirname(absoluteOutput), { recursive: true });
-    writeFileSync(absoluteOutput, serializeReviewPacket(packet.value), { flag: "wx" });
-    try {
-      await manager.update((current) => {
+    await persistReviewPacketAndBind(
+      absoluteOutput,
+      serializeReviewPacket(packet.value),
+      async () => manager.update((current) => {
         const currentTask = current.tasks.find((candidate) => candidate.id === taskId);
         if (currentTask === undefined) throw new Error(`Task ${taskId} disappeared before review run start`);
         const packetPriorIds = priorFindings.map((finding) => finding.id);
@@ -204,16 +223,8 @@ const handler: HookHandler = async (_stdin, args) => {
             candidate.id === taskId ? transition.task : candidate
           ),
         };
-      });
-    } catch (error) {
-      let cleanupError: unknown = null;
-      try { unlinkSync(absoluteOutput); }
-      catch (cleanup) { cleanupError = cleanup; }
-      if (cleanupError !== null) {
-        throw reviewPacketCleanupFailure(error, absoluteOutput, cleanupError);
-      }
-      throw error;
-    }
+      }),
+    );
     process.stdout.write(`${packet.value.packetId}\n`);
     return { kind: "passthrough" };
   } catch (error) {

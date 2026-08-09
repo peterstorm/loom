@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -60,6 +60,23 @@ describe("wave-gate durable summary fallback", () => {
       expect(readFileSync(path, "utf-8")).toBe("wave summary\n");
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a symlinked fallback leaf without modifying its target", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-wave-summary-root-"));
+    const outside = mkdtempSync(join(tmpdir(), "loom-wave-summary-outside-"));
+    const sentinel = join(outside, "sentinel.md");
+    writeFileSync(sentinel, "do not overwrite\n");
+    mkdirSync(join(root, ".claude", "reviews"), { recursive: true });
+    symlinkSync(sentinel, join(root, ".claude", "reviews", "wave-4-review.md"));
+    try {
+      expect(() => persistWaveGateSummaryFallback(4, "escaped\n", root))
+        .toThrow("must not traverse a symlink");
+      expect(readFileSync(sentinel, "utf-8")).toBe("do not overwrite\n");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 });
