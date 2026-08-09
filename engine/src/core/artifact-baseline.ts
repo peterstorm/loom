@@ -1,4 +1,5 @@
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
+import { parseReviewPath } from "./review-packet";
 
 export type ArtifactSnapshot =
   | Readonly<{ kind: "missing" }>
@@ -31,15 +32,20 @@ export function parseDeclaredArtifactBaseline(
   const seen = new Set<string>();
   raw.forEach((entry, index) => {
     const entryPath = `${path}[${index}]`;
-    if (!isRecord(entry) || typeof entry.artifact !== "string" || entry.artifact.trim() === "") {
-      errors.push(`${entryPath}.artifact must be a non-empty string`);
+    if (!isRecord(entry)) {
+      errors.push(`${entryPath} must be an object`);
       return;
     }
-    if (seen.has(entry.artifact)) errors.push(`${entryPath}.artifact duplicates ${JSON.stringify(entry.artifact)}`);
-    seen.add(entry.artifact);
+    const artifact = parseReviewPath(entry.artifact, `${entryPath}.artifact`);
+    if (!artifact.ok) {
+      errors.push(...artifact.errors);
+      return;
+    }
+    if (seen.has(artifact.value)) errors.push(`${entryPath}.artifact duplicates ${JSON.stringify(artifact.value)}`);
+    seen.add(artifact.value);
     const snapshot = parseArtifactSnapshot(entry.snapshot, `${entryPath}.snapshot`);
     if (!snapshot.ok) errors.push(...snapshot.errors);
-    else entries.push(Object.freeze({ artifact: entry.artifact, snapshot: snapshot.value }));
+    else entries.push(Object.freeze({ artifact: artifact.value, snapshot: snapshot.value }));
   });
   return errors.length > 0 ? fail(errors) : ok(Object.freeze(entries));
 }

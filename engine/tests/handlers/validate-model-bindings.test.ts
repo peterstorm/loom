@@ -171,6 +171,22 @@ describe("validateModelBindings", () => {
       expectError(result, "have drifted");
       expect(errorsOf(result).some((e) => e.includes("fetch"))).toBe(true);
     });
+
+    it("does not accept a declared node name found only in node metadata", () => {
+      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "x.json", declaredNodes: ["review"] } };
+      const dag = JSON.stringify({ nodes: [{ id: "fetch", description: "then review" }] });
+      expectError(validateModelBindings(models, [], depsWith({ "x.json": dag })), "have drifted");
+    });
+
+    it.each([
+      [{ nodes: ["fetch"] }, "nodes[0] must be an object"],
+      [{ nodes: [{ kind: "fetch" }] }, "nodes[0].id"],
+      [{ nodes: [{ id: " fetch " }] }, "surrounding whitespace"],
+      [{ nodes: [{ id: "fetch" }, { id: "fetch" }] }, "duplicates 'fetch'"],
+    ])("rejects malformed or duplicate AuthoredDag node identities", (dag, message) => {
+      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "x.json", declaredNodes: [] } };
+      expectError(validateModelBindings(models, [], depsWith({ "x.json": JSON.stringify(dag) })), message);
+    });
   });
 
   describe("invariants", () => {

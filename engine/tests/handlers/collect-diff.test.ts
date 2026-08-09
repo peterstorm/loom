@@ -16,6 +16,7 @@ function fakeDeps(overrides: Partial<DiffDeps> = {}): DiffDeps {
     isTracked: (f) => !f.startsWith("untracked/"),
     diffFiles: (files) => (files.length ? `diff --tracked\n${files.map((f) => `+modified ${f}`).join("\n")}` : ""),
     diffFilesStaged: () => "",
+    diffFilesSince: () => "",
     diffUntracked: (f) => `diff --untracked ${f}\n+new content in ${f}`,
     fileExists: () => true,
     ...overrides,
@@ -78,6 +79,7 @@ describe("collectDiff", () => {
     const evidence = collectNewTestEvidence(
       ["engine/tests/existing.test.ts"],
       true,
+      undefined,
       fakeDeps({
         diffFiles: () => [
           "diff --git a/engine/tests/existing.test.ts b/engine/tests/existing.test.ts",
@@ -89,6 +91,37 @@ describe("collectDiff", () => {
       }),
     );
 
+    expect(evidence).toEqual({
+      written: true,
+      evidence: "1 new test methods, 1 assertions (ts: 1 it/test/describe)",
+    });
+  });
+
+  it("proves an attributed test committed after the task start SHA", () => {
+    const calls: Array<{ revision: string; files: string[] }> = [];
+    const evidence = collectNewTestEvidence(
+      ["engine/tests/committed.test.ts"],
+      true,
+      "a".repeat(40),
+      fakeDeps({
+        diffFiles: () => "",
+        diffFilesStaged: () => "",
+        diffFilesSince: (revision, files) => {
+          calls.push({ revision, files });
+          return [
+            "diff --git a/engine/tests/committed.test.ts b/engine/tests/committed.test.ts",
+            "+  it(\"survives an agent commit\", () => {",
+            "+    expect(result).toBe(true);",
+            "+  });",
+          ].join("\n");
+        },
+      }),
+    );
+
+    expect(calls).toEqual([{
+      revision: "a".repeat(40),
+      files: ["engine/tests/committed.test.ts"],
+    }]);
     expect(evidence).toEqual({
       written: true,
       evidence: "1 new test methods, 1 assertions (ts: 1 it/test/describe)",

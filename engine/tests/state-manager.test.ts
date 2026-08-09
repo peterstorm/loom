@@ -201,6 +201,20 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it("shares task-agent authority with validate-task-graph", () => {
+    const unknown = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, agent: "not-a-real-agent" }],
+    });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.error).toContain("unknown agent");
+
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, agent: "code-implementer-agent" }],
+    }).ok).toBe(true);
+  });
+
   it("preserves unknown extra fields (legacy tests_passed still visible downstream)", () => {
     const parsed = parseTaskGraph({
       ...validGraph,
@@ -441,7 +455,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }];
     expect(parseTaskGraph({
       ...validGraph,
-      tasks: [{ ...validTask, artifact_baseline: valid }],
+      tasks: [{ ...validTask, file_list: ["src/a.ts", "src/new.ts"], artifact_baseline: valid }],
     }).ok).toBe(true);
     expect(parseTaskGraph({
       ...validGraph,
@@ -468,6 +482,14 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
         attempt_artifact_baseline: valid,
       }],
     }).ok).toBe(true);
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        file_list: ["src/new.ts", "src/a.ts"],
+        artifact_baseline: valid,
+      }],
+    }).ok).toBe(false);
 
     for (const artifact_baseline of [
       "not-an-array",

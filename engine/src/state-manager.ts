@@ -10,7 +10,7 @@
 import { readFileSync, writeFileSync, chmodSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { withLock } from "./utils/lock";
-import { PHASE_ORDER, taskGraphPath } from "./config";
+import { KNOWN_AGENTS, PHASE_ORDER, taskGraphPath } from "./config";
 import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
 import { REVIEW_STATUSES, TASK_STATUSES } from "./types";
 import {
@@ -151,6 +151,9 @@ export function taskUnionError(v: unknown, index: number): string | null {
   if (typeof t.agent !== "string" || t.agent.trim() === "") {
     return `tasks[${index}] ("${id}"): agent must be a non-empty string, got ${JSON.stringify(t.agent)}`;
   }
+  if (!KNOWN_AGENTS.has(t.agent)) {
+    return `tasks[${index}] ("${id}"): unknown agent ${JSON.stringify(t.agent)}`;
+  }
   if (typeof t.wave !== "number" || !Number.isInteger(t.wave) || t.wave < 1) {
     return `tasks[${index}] ("${id}"): wave must be an integer >= 1, got ${JSON.stringify(t.wave)}`;
   }
@@ -181,6 +184,14 @@ export function taskUnionError(v: unknown, index: number): string | null {
       `tasks[${index}] ("${id}"): artifact_baseline`,
     );
     if (!baseline.ok) return baseline.errors.join("; ");
+    const declaredArtifacts = Array.isArray(t.file_list) ? t.file_list : [];
+    const actualArtifacts = baseline.value.map(({ artifact }) => artifact);
+    if (
+      actualArtifacts.length !== declaredArtifacts.length ||
+      declaredArtifacts.some((artifact, artifactIndex) => artifact !== actualArtifacts[artifactIndex])
+    ) {
+      return `tasks[${index}] ("${id}"): artifact_baseline must exactly match file_list in order`;
+    }
   }
   if (t.attempt_artifact_baseline !== undefined) {
     const baseline = parseDeclaredArtifactBaseline(

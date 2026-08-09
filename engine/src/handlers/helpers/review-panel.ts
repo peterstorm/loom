@@ -21,7 +21,7 @@
  * an orchestrator building this manifest by hand could quietly omit a critical.
  */
 
-import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { HookHandler, HookResult, TaskGraph } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
@@ -86,10 +86,12 @@ import {
   parseRunDirectory,
   prepareWriteTargets,
   pruneSurplusItems,
+  publishStagedRunFile,
   readVerdicts,
   realRunDir,
   runArtifactErrors,
   writeCanonicalOutput,
+  writeRunFileExclusiveNoFollow,
   writeRunFileNoFollow,
 } from "./panel-run";
 
@@ -566,9 +568,9 @@ const handler: HookHandler = async (stdin, args) => {
       // Stage the result first, claim the replay marker second, and publish the
       // result last. A crash can dead-end the run, never expose a fabricated or
       // partial remediation input as finalized.
-      writeFileSync(pendingResultPath, resultJson, { flag: "wx" });
-      writeFileSync(outcomesPath, outcomesJson, { flag: "wx" });
-      renameSync(pendingResultPath, resultPath);
+      writeRunFileExclusiveNoFollow(pendingResultPath, resultJson);
+      writeRunFileExclusiveNoFollow(outcomesPath, outcomesJson);
+      publishStagedRunFile(pendingResultPath, resultPath);
     } catch (error) {
       let cleanupError: unknown = null;
       try { if (existsSync(pendingResultPath)) unlinkSync(pendingResultPath); }
@@ -606,9 +608,12 @@ const handler: HookHandler = async (stdin, args) => {
       // Claim the run before state mutation. Even an all-upheld decision changes
       // no task fields, so task state alone cannot prove that this manifest has
       // already been adjudicated. A crash can dead-end this run, never reopen it.
-      writeFileSync(closurePath, JSON.stringify({ run_id: basename(runDir), finding_ids: findingIds }, null, 2) + "\n", { flag: "wx" });
-      writeFileSync(pendingOutcomesPath, outcomesJson, { flag: "wx" });
-      renameSync(pendingOutcomesPath, outcomesPath);
+      writeRunFileExclusiveNoFollow(
+        closurePath,
+        JSON.stringify({ run_id: basename(runDir), finding_ids: findingIds }, null, 2) + "\n",
+      );
+      writeRunFileExclusiveNoFollow(pendingOutcomesPath, outcomesJson);
+      publishStagedRunFile(pendingOutcomesPath, outcomesPath);
     } catch (error) {
       return contractError("review tally", [
         `cannot publish wave tally closure (the run may already be closed): ${error instanceof Error ? error.message : String(error)}`,

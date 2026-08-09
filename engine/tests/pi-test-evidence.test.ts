@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { messagesToClaudeJsonl, piStructuredTestResult, type PiMessage } from "../../pi/transcript-adapter";
+import { messagesToClaudeJsonl, parsePiMessages, piStructuredTestResult, type PiMessage } from "../../pi/transcript-adapter";
 import { parseBashTestOutput } from "../src/parsers/parse-bash-test-output";
 import { extractTestEvidence } from "../src/handlers/subagent-stop/update-task-status";
 
@@ -93,14 +93,30 @@ describe("Pi test-evidence transcript adapter", () => {
     ["null message", [null]],
     ["primitive message", [42]],
     ["missing role", [{ content: [] }]],
+    ["empty role", [{ role: "", content: [] }]],
     ["non-array content", [{ role: "assistant", content: null }]],
+    ["invalid optional result id", [{ role: "assistant", toolCallId: 42, content: [] }]],
+    ["invalid optional error flag", [{ role: "assistant", isError: "no", content: [] }]],
     ["missing call id", [{ role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command: "bun test" } }] }]],
     ["missing tool name", [{ role: "assistant", content: [{ type: "toolCall", id: "call-1", arguments: { command: "bun test" } }] }]],
     ["missing Bash command", [{ role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: {} }] }]],
+    ["missing tool arguments", [{ role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "read" }] }]],
+    ["missing text", [{ role: "assistant", content: [{ type: "text" }] }]],
+    ["non-string text", [{ role: "assistant", content: [{ type: "text", text: 42 }] }]],
     ["missing result id", [{ role: "toolResult", toolName: "bash", content: [{ type: "text", text: "ok" }] }]],
     ["missing result name", [{ role: "toolResult", toolCallId: "call-1", content: [{ type: "text", text: "ok" }] }]],
   ] as const)("rejects malformed tool evidence without throwing: %s", (_label, messages) => {
     expect(messagesToClaudeJsonl(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
     expect(piStructuredTestResult(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
+  });
+
+  it("returns immutable parser-owned copies rather than trusting harness objects", () => {
+    const raw = [{ role: "assistant", content: [{ type: "text", text: "before" }] }];
+    const parsed = parsePiMessages(raw);
+    expect(parsed.ok).toBe(true);
+    raw[0]!.content[0]!.text = "after";
+    expect(parsed.ok && parsed.value[0]!.content[0]).toEqual({ type: "text", text: "before" });
+    expect(parsed.ok && Object.isFrozen(parsed.value[0])).toBe(true);
+    expect(parsed.ok && Object.isFrozen(parsed.value[0]!.content)).toBe(true);
   });
 });

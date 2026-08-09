@@ -12,6 +12,7 @@ import { join } from "node:path";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import {
+  isLoomNamespacedAgent,
   parseAgentName,
   validateExplicitSpawnModel,
   validateAgentPolicyFrontmatter,
@@ -71,8 +72,13 @@ const handler: HookHandler = async (stdin) => {
     ?? (input.tool_input?.agent as string | undefined)
     ?? "";
   const parsedAgent = parseAgentName(rawAgent);
-  // Non-Loom utility agents remain outside Loom model policy.
-  if (!parsedAgent.ok) return { kind: "allow" };
+  // Non-Loom utility agents remain outside Loom model policy. An unknown name
+  // that claims Loom's reserved namespace is Loom-owned and fails closed.
+  if (!parsedAgent.ok) {
+    return isLoomNamespacedAgent(rawAgent)
+      ? { kind: "block", message: `BLOCKED: ${parsedAgent.error.message}` }
+      : { kind: "allow" };
+  }
   const agent = stripNamespace(parsedAgent.value);
 
   if (input.tool_name === "subagent") {

@@ -716,8 +716,10 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
     expect(decision.verdict).toEqual({ kind: "pass", taskIds: ["T1"], nextWave: 2 });
   });
 
-  it("applyGateDecision completes the wave, stamps the gate, advances current_wave — and does not mutate its input", () => {
-    const state = mkGraph();
+  it("applyGateDecision completes the wave, stamps every gate invariant, and is idempotent", () => {
+    const state = mkGraph({
+      wave_gates: { "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false } },
+    });
     const frozen = JSON.parse(JSON.stringify(state));
     const decision = evaluateWaveGate(state, null, countingDeps().deps);
 
@@ -725,9 +727,15 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
     expect(state).toEqual(frozen); // input untouched
     expect(updated.tasks.find((t) => t.id === "T1")?.status).toBe("completed");
     expect(updated.tasks.find((t) => t.id === "T2")?.status).toBe("implemented"); // other waves untouched
-    expect(updated.wave_gates["1"]).toMatchObject({ tests_passed: true, reviews_complete: true, blocked: false });
+    expect(updated.wave_gates["1"]).toMatchObject({
+      impl_complete: true,
+      tests_passed: true,
+      reviews_complete: true,
+      blocked: false,
+    });
     expect(updated.wave_gates["2"]).toBeDefined();
     expect(updated.current_wave).toBe(2);
+    expect(applyGateDecision(updated, decision)).toEqual(updated);
   });
 
   it("a failing decision names the first failing check and applies as a no-op", () => {

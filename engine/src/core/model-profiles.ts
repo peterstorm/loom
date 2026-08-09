@@ -214,6 +214,11 @@ export function resolveModelProfile(raw: unknown): PolicyResult<LlmProfile> {
     : success(resolved);
 }
 
+/** Reserved harness namespace ownership is independent of catalog membership. */
+export function isLoomNamespacedAgent(raw: unknown): raw is string {
+  return typeof raw === "string" && raw.startsWith("loom:");
+}
+
 /** Parse a Loom agent name. The harness namespace is accepted, arbitrary namespaces are not. */
 export function parseAgentName(raw: unknown): PolicyResult<LoomAgentName> {
   if (typeof raw !== "string") {
@@ -392,6 +397,15 @@ export function classifyPiSpawnItems(raw: unknown): PolicyResult<ClassifiedPiSpa
   const parsed = parseRawPiSpawnItems(raw);
   if (!parsed.ok) return parsed;
   const resolved = parsed.value.map((item) => parseAgentName(item.agent));
+  const unknownOwned = parsed.value.find((item, index) =>
+    !resolved[index]!.ok && isLoomNamespacedAgent(item.agent)
+  );
+  if (unknownOwned !== undefined) {
+    return failure({
+      kind: "unknown-agent",
+      message: `no Loom model policy for agent '${unknownOwned.agent}'`,
+    });
+  }
   const knownCount = resolved.filter((agent) => agent.ok).length;
   if (knownCount === 0) return success(Object.freeze({ kind: "external", items: parsed.value }));
   if (knownCount !== parsed.value.length) {

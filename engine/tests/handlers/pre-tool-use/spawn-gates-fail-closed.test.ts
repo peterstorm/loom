@@ -44,6 +44,23 @@ describe("spawn-gate handlers — malformed stdin fails CLOSED", () => {
     if (result.kind === "block") expect(result.message).toContain("malformed hook input");
   });
 
+  it("validate-agent-model blocks unknown reserved names but allows external utilities", async () => {
+    const unknown = await validateAgentModel(JSON.stringify({
+      tool_name: "Agent",
+      tool_input: { subagent_type: "loom:not-a-real-agent", model: "sonnet" },
+    }), []);
+    expect(unknown).toMatchObject({
+      kind: "block",
+      message: expect.stringContaining("no Loom model policy"),
+    });
+
+    const external = await validateAgentModel(JSON.stringify({
+      tool_name: "Agent",
+      tool_input: { subagent_type: "external-agent" },
+    }), []);
+    expect(external).toEqual({ kind: "allow" });
+  });
+
   it("validate-agent-model rejects graphless Loom model inheritance", async () => {
     if (existsSync(TASK_GRAPH_PATH)) return;
     const priorHome = process.env.HOME;

@@ -19,6 +19,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -304,14 +305,18 @@ export function prepareWriteTargets(
  * is swapped to a symlink after prepareWriteTargets. Validation and use share
  * the same file descriptor, closing the lstat-before-write race.
  */
-export function writeRunFileNoFollow(path: string, data: string): void {
+function noFollowFlag(): number {
   const noFollow = fsConstants.O_NOFOLLOW;
   if (typeof noFollow !== "number" || noFollow === 0) {
     throw new Error("O_NOFOLLOW is unavailable; refusing an unsafe panel artifact write");
   }
+  return noFollow;
+}
+
+export function writeRunFileNoFollow(path: string, data: string): void {
   const fd = openSync(
     path,
-    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | noFollow,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | noFollowFlag(),
     0o600,
   );
   try {
@@ -319,6 +324,29 @@ export function writeRunFileNoFollow(path: string, data: string): void {
   } finally {
     closeSync(fd);
   }
+}
+
+/** Claim one fresh authority artifact without following or replacing a leaf. */
+export function writeRunFileExclusiveNoFollow(path: string, data: string): void {
+  const fd = openSync(
+    path,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollowFlag(),
+    0o600,
+  );
+  try {
+    writeFileSync(fd, data);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Publish bytes already staged in the same run directory. rename replaces a
+ * raced final symlink as a directory entry; it never follows it to its target. */
+export function publishStagedRunFile(stagedPath: string, finalPath: string): void {
+  if (dirname(stagedPath) !== dirname(finalPath)) {
+    throw new Error("staged and final panel artifacts must share one run directory");
+  }
+  renameSync(stagedPath, finalPath);
 }
 
 /**

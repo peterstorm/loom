@@ -139,6 +139,12 @@ export function diffFilesStaged(files: string[]): string {
   return execArgs(["diff", "--cached", "--", ...files]);
 }
 
+/** Diff committed changes for specific files from one trusted task baseline. */
+export function diffFilesSince(revision: string, files: string[]): string {
+  if (files.length === 0) return "";
+  return execArgs(["diff", revision, "HEAD", "--", ...files]);
+}
+
 /** Check if file is tracked by git */
 export function isTracked(file: string): boolean {
   try {

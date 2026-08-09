@@ -165,6 +165,49 @@ describe("Pi extension review tool_result integration", () => {
     });
   });
 
+  it("blocks later Edit and Write calls in the child session after grant rejection", async () => {
+    const planPath = join(temp, "rejected-write-grant-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const parentSession = "019fca39-f989-7510-8e62-50dadbcad432";
+    const childSession = "019fca39-f989-7510-8e62-50dadbcad433";
+    const input = {
+      agent: "code-implementer-agent",
+      task: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+      agentScope: "user",
+    };
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-rejected-write-grant",
+      input,
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => parentSession } })).toEqual([undefined]);
+
+    const rejected = await pi.emit("before_agent_start", {
+      prompt: input.task,
+      systemPrompt: "<!-- LOOM_PI_AGENT_ID:security-agent -->",
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+    expect(rejected).toContainEqual(expect.objectContaining({
+      message: expect.objectContaining({ customType: "loom-write-grant-error" }),
+    }));
+
+    for (const toolName of ["edit", "write"] as const) {
+      const result = await pi.emit("tool_call", {
+        toolName,
+        input: { path: "README.md" },
+      }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+      expect(result).toContainEqual({
+        block: true,
+        reason: "Loom Pi write grant was rejected for this session; direct edits remain blocked.",
+      });
+    }
+  });
+
   it("stores wave findings, leaves standalone review state untouched, and enforces Pi agent scope", async () => {
     // A runtime-resolved ESM import avoids Vitest-only module APIs and keeps
     // this real extension boundary executable under both Vitest and Bun.
@@ -920,6 +963,67 @@ describe("Pi extension review tool_result integration", () => {
     expect(taskState.review_status).toBe("evidence_capture_failed");
     expect(taskState.review_evidence_failures).toEqual(["code-reviewer"]);
     expect(taskState.review_error).toContain("failed before evidence capture completed");
+  });
+
+  it("persists malformed successful reviewer messages and continues with a healthy sibling", async () => {
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad430" } };
+    const malformed = reviewResult("Task: T1", "must not parse").details.results[0];
+    malformed.messages = [null] as unknown as typeof malformed.messages;
+    const healthy = reviewResult("Task: T1", "healthy after malformed").details.results[0];
+    healthy.agent = "silent-failure-hunter";
+
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      content: [],
+      details: { results: [malformed, healthy] },
+    }, context);
+
+    const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+    expect(task.critical_findings).toEqual(["healthy after malformed"]);
+    expect(task.review_status).toBe("evidence_capture_failed");
+    expect(task.review_evidence_failures).toEqual(["code-reviewer"]);
+    expect(task.review_error).toContain("Pi review messages are malformed");
+  });
+
+  it("marks an omitted reserved reviewer result as evidence_capture_failed", async () => {
+    const planPath = join(temp, "truncated-review-results-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad431";
+    const context = { sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-truncated-review-results";
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agentScope: "user",
+        tasks: [
+          { agent: "code-reviewer", task: "Task ID: T1\nReview and emit Machine Summary findings." },
+          { agent: "silent-failure-hunter", task: "Task ID: T1\nReview and emit Machine Summary findings." },
+        ],
+      },
+    }, context);
+    expect(call).toEqual([undefined]);
+
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId,
+      content: [],
+      details: { results: [reviewResult("Task: T1", "returned reviewer stored").details.results[0]] },
+    }, context);
+
+    const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+    expect(task.critical_findings).toEqual(["returned reviewer stored"]);
+    expect(task.review_status).toBe("evidence_capture_failed");
+    expect(task.review_evidence_failures).toEqual(["silent-failure-hunter"]);
+    expect(task.review_error).toContain("reserved reviewer result 2");
   });
 
   it("does not advance a failed phase agent even when its messages contain a valid artifact", async () => {

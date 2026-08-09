@@ -98,8 +98,9 @@ export type ExecutionBatchMode = "parallel" | "sequential";
 
 /**
  * Pure ownership invariant for one execution reservation. Active tasks own
- * their declared paths until stop cleanup. A sequential chain may intentionally
- * hand one path from one requested task to the next; parallel siblings may not.
+ * their declared paths until stop cleanup. One reservation captures all task
+ * baselines before dispatch, so even sequential siblings must be disjoint;
+ * path handoff requires separate calls so each task gets a fresh baseline.
  */
 export function taskExecutionOwnershipError(
   state: TaskGraph,
@@ -127,17 +128,16 @@ export function taskExecutionOwnershipError(
     }
   }
 
-  if (mode === "parallel") {
-    for (let leftIndex = 0; leftIndex < requestedTasks.length; leftIndex++) {
-      const left = requestedTasks[leftIndex]!;
-      for (let rightIndex = leftIndex + 1; rightIndex < requestedTasks.length; rightIndex++) {
-        const right = requestedTasks[rightIndex]!;
-        if (left.wave !== right.wave) continue;
-        const overlap = (left.file_list ?? []).find((path) => right.file_list?.includes(path));
-        if (overlap !== undefined) {
-          return `Parallel implementation tasks ${left.id} and ${right.id} both declare ${overlap}; use a sequential chain or disjoint scopes.`;
-        }
-      }
+  for (let leftIndex = 0; leftIndex < requestedTasks.length; leftIndex++) {
+    const left = requestedTasks[leftIndex]!;
+    for (let rightIndex = leftIndex + 1; rightIndex < requestedTasks.length; rightIndex++) {
+      const right = requestedTasks[rightIndex]!;
+      if (left.wave !== right.wave) continue;
+      const overlap = (left.file_list ?? []).find((path) => right.file_list?.includes(path));
+      if (overlap === undefined) continue;
+      return mode === "parallel"
+        ? `Parallel implementation tasks ${left.id} and ${right.id} both declare ${overlap}; use disjoint scopes.`
+        : `Sequential implementation tasks ${left.id} and ${right.id} both declare ${overlap}; overlapping handoff requires separate subagent calls so each task receives a fresh baseline.`;
     }
   }
   return null;

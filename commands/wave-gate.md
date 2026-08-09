@@ -93,13 +93,15 @@ exact failed obligations when evidence is still missing.
 
 ### Step 3: Build Review Packets and Spawn Verification (Parallel)
 
-Before any reviewer starts, create one immutable Review Packet per Task. The
+Before any reviewer starts, bind each Task to one immutable Review Packet. The
 packet binds the Task, proof obligations, base/head revisions, exact diff and
 postimages, declared/modified paths, and plan context. Postimages preserve their
 original bytes: valid text is stored as `utf8`, while binary content is `base64`;
 the digest always hashes the decoded/original bytes. Reviewers MUST read only
 the packet's manifest-listed scope; never fall back to all wave changes or scan
 the live worktree.
+
+For a new review run, create the packet once:
 
 ```bash
 mkdir -p ".claude/reviews/packets"
@@ -109,7 +111,25 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper review-packet create \
   --output "$REVIEW_PACKET_DIR/<TASK_ID>.json"
 ```
 
-Run `create` once for each Task needing review. It canonicalizes tool-recorded
+For `evidence_capture_failed`, do **not** create another packet. Reuse the active
+run's engine-issued packet and generation. Resolve its path from the immutable
+registration whose id matches `review_run.packet_id`:
+
+```bash
+jq -r --arg task "<TASK_ID>" '
+  .tasks[] | select(.id == $task) |
+  .review_run.packet_id as $packet |
+  .issued_review_packets[] | select(.packet_id == $packet) |
+  .packet_path
+' .claude/state/active_task_graph.json
+```
+
+Re-spawn only the agents listed in `review_evidence_failures` (or expected agents
+absent from `review_run.evidence`) using that same packet path, packet id, and
+`review_run.generation`. A retry remains part of the original packet-bound run;
+a fresh packet is valid only after that run has closed.
+
+`create` canonicalizes tool-recorded
 absolute paths only when they are inside the current repository (legacy state
 included), rejects traversal/external/symlink paths, fails on an empty scope,
 and refuses to overwrite a packet. Creation also atomically starts the Task's
@@ -143,7 +163,7 @@ git diff --name-only $BASE...HEAD
 
 **Get tasks needing review:**
 ```bash
-jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | select(.review_status == "pending" or .review_status == "blocked") | .id' .claude/state/active_task_graph.json
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | select(.review_status == "pending" or .review_status == "blocked" or .review_status == "evidence_capture_failed") | .id' .claude/state/active_task_graph.json
 ```
 
 **Spawn ALL in parallel (single message, multiple Agent calls):**

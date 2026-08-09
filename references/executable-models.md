@@ -160,8 +160,9 @@ The plan declares invariants in an `## Invariants` section, each tiered:
    `AuthoredDag` sidecar exists, is structurally sound, AND every node named in
    the plan's `## Pipeline` table appears in the sidecar (a plan node absent
    from the sidecar is plan↔sidecar drift — the gate blocks it here rather than
-   letting it reach fugue runtime; checked as a substring of the raw sidecar so
-   loom gains no new knowledge of fugue's DAG shape beyond "has a nodes array");
+   letting it reach fugue runtime; checked against the exact non-empty `id` of
+   each node object, the narrow identity boundary Loom needs while Fugue retains
+   ownership of deeper DAG-shape validation);
    every checkable `INV-N` rule file exists and is rule-shaped; near-miss
    declarations (typo'd headings/labels) are errors; an unreadable `plan_file`
    is an error, never a skipped check.

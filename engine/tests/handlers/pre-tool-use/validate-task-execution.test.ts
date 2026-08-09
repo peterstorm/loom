@@ -186,8 +186,14 @@ describe("validate-task-execution — exclusive ownership", () => {
       .toContain("T1 owns declared path src/a.ts");
   });
 
-  it("allows an explicitly sequential chain to hand off the same path", () => {
+  it("rejects sequential overlap until each child can receive a fresh baseline", () => {
     const state = mkState([scoped("T1", "src/a.ts"), scoped("T2", "src/a.ts")]);
+    expect(taskExecutionOwnershipError(state, ["T1", "T2"], "sequential"))
+      .toContain("separate subagent calls");
+  });
+
+  it("allows a sequential chain with disjoint proof scopes", () => {
+    const state = mkState([scoped("T1", "src/a.ts"), scoped("T2", "src/b.ts")]);
     expect(taskExecutionOwnershipError(state, ["T1", "T2"], "sequential")).toBeNull();
   });
 

@@ -175,6 +175,32 @@ describe("promptReferencesSkill", () => {
 });
 
 describe("validate-agent-skill — integration scenarios", () => {
+  it("blocks unknown reserved names and preserves external utility pass-through", async () => {
+    const createdGraph = !existsSync(TASK_GRAPH_PATH);
+    if (createdGraph) {
+      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
+      writeFileSync(TASK_GRAPH_PATH, "{}");
+    }
+    try {
+      const unknown = await validateAgentSkill(JSON.stringify({
+        tool_name: "Task",
+        tool_input: { subagent_type: "loom:not-a-real-agent", prompt: "review" },
+      }), []);
+      expect(unknown).toMatchObject({
+        kind: "block",
+        message: expect.stringContaining("unknown Loom agent"),
+      });
+
+      const external = await validateAgentSkill(JSON.stringify({
+        tool_name: "Task",
+        tool_input: { subagent_type: "external-agent", prompt: "outside workflow" },
+      }), []);
+      expect(external).toEqual({ kind: "allow" });
+    } finally {
+      if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
+    }
+  });
+
   it("enforces skill policy for the panel designer", () => {
     expect(VALIDATED_AGENTS.has("arch-designer-agent")).toBe(true);
     expect(promptReferencesSkill("Use the architecture-tech-lead skill.", "architecture-tech-lead")).toBe(true);

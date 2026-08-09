@@ -460,6 +460,7 @@ export interface DiffDeps {
   readonly isTracked: (file: string) => boolean;
   readonly diffFiles: (files: string[]) => string;
   readonly diffFilesStaged: (files: string[]) => string;
+  readonly diffFilesSince: (revision: string, files: string[]) => string;
   readonly diffUntracked: (file: string) => string;
   readonly fileExists: (path: string) => boolean;
 }
@@ -468,6 +469,7 @@ const REAL_DIFF_DEPS: DiffDeps = {
   isTracked: git.isTracked,
   diffFiles: git.diffFiles,
   diffFilesStaged: git.diffFilesStaged,
+  diffFilesSince: git.diffFilesSince,
   diffUntracked: git.diffUntracked,
   fileExists: existsSync,
 };
@@ -475,6 +477,7 @@ const REAL_DIFF_DEPS: DiffDeps = {
 export function collectDiff(
   filesModified: readonly string[],
   deps: DiffDeps = REAL_DIFF_DEPS,
+  startSha?: string,
 ): string {
   // New-test proof is task-scoped evidence. A branch-wide fallback or a scan of
   // every untracked test lets a sibling task's test satisfy this task. Missing
@@ -484,6 +487,7 @@ export function collectDiff(
   const tracked = filesModified.filter((file) => deps.isTracked(file));
   const untracked = filesModified.filter((file) => deps.fileExists(file) && !deps.isTracked(file));
   return [
+    startSha === undefined ? "" : deps.diffFilesSince(startSha, tracked),
     deps.diffFiles(tracked),
     deps.diffFilesStaged(tracked),
     ...untracked.map((file) => deps.diffUntracked(file)),
@@ -496,9 +500,10 @@ export function collectDiff(
 export function collectNewTestEvidence(
   filesModified: readonly string[],
   newTestsRequired: boolean | undefined,
+  startSha?: string,
   deps: DiffDeps = REAL_DIFF_DEPS,
 ): NewTestEvidence {
-  return analyzeNewTests(collectDiff(filesModified, deps), newTestsRequired);
+  return analyzeNewTests(collectDiff(filesModified, deps, startSha), newTestsRequired);
 }
 
 /**
@@ -786,7 +791,7 @@ export const runUpdateTaskStatus = async (
     const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, filesModified);
     const proofArtifactsChanged = attributedChangedArtifacts(changedDeclaredArtifacts, cumulativeFiles);
     const currentNewTestEvidence = git.isGitRepo()
-      ? collectNewTestEvidence(cumulativeFiles, target.new_tests_required)
+      ? collectNewTestEvidence(cumulativeFiles, target.new_tests_required, target.start_sha)
       : { written: false, evidence: "" };
     const proof = evaluateTaskProof(
       {

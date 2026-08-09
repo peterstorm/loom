@@ -13,13 +13,15 @@ const TOOL_NAME_MAP: Readonly<Record<string, string>> = Object.freeze({
   ls: "Ls",
 });
 
-export interface PiContentBlock {
-  readonly type: string;
-  readonly text?: string;
-  readonly id?: string;
-  readonly name?: string;
-  readonly arguments?: Readonly<Record<string, unknown>>;
-}
+export type PiContentBlock =
+  | Readonly<{ type: "text"; text: string }>
+  | Readonly<{
+      type: "toolCall";
+      id: string;
+      name: string;
+      arguments: Readonly<Record<string, unknown>>;
+    }>
+  | Readonly<{ type: "opaque"; originalType: string }>;
 
 export interface PiMessage {
   readonly role: string;
@@ -37,49 +39,97 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Parse the untrusted harness payload once so every consumer receives messages
- * whose object/content shape has already been proven. */
+/** Parse the untrusted harness payload once so every consumer receives fresh,
+ * immutable messages whose complete trusted shape has already been proven. */
 export function parsePiMessages(messages: unknown): PiTranscriptResult<readonly PiMessage[]> {
   if (!Array.isArray(messages)) return { ok: false, errors: ["messages must be an array"] };
   const errors: string[] = [];
+  const parsedMessages: PiMessage[] = [];
   messages.forEach((message, messageIndex) => {
+    const messageLabel = `messages[${messageIndex}]`;
     if (!isRecord(message)) {
-      errors.push(`messages[${messageIndex}] must be an object`);
+      errors.push(`${messageLabel} must be an object`);
       return;
     }
-    if (typeof message.role !== "string") errors.push(`messages[${messageIndex}].role must be a string`);
+    if (typeof message.role !== "string" || message.role.trim() === "") {
+      errors.push(`${messageLabel}.role must be a non-empty string`);
+    }
     if (!Array.isArray(message.content)) {
-      errors.push(`messages[${messageIndex}].content must be an array`);
+      errors.push(`${messageLabel}.content must be an array`);
       return;
     }
+
+    const blockErrorsBefore = errors.length;
+    const content: PiContentBlock[] = [];
     message.content.forEach((block, blockIndex) => {
-      const label = `messages[${messageIndex}].content[${blockIndex}]`;
-      if (!isRecord(block) || typeof block.type !== "string") {
+      const label = `${messageLabel}.content[${blockIndex}]`;
+      if (!isRecord(block) || typeof block.type !== "string" || block.type.trim() === "") {
         errors.push(`${label} must be a typed content block`);
         return;
       }
-      if (block.type !== "toolCall") return;
-      if (typeof block.id !== "string" || block.id.trim() === "") errors.push(`${label}.id must be non-empty`);
-      const blockName = typeof block.name === "string" ? block.name : null;
-      if (blockName === null || blockName.trim() === "") errors.push(`${label}.name must be non-empty`);
-      const argumentsValue = block.arguments;
-      if (blockName?.toLowerCase() === "bash" &&
-          (!isRecord(argumentsValue) || typeof argumentsValue.command !== "string")) {
-        errors.push(`${label}.arguments.command must be a string for Bash`);
+      if (block.type === "text") {
+        if (typeof block.text !== "string") errors.push(`${label}.text must be a string`);
+        else content.push(Object.freeze({ type: "text", text: block.text }));
+        return;
       }
+      if (block.type === "toolCall") {
+        const id = typeof block.id === "string" && block.id.trim() !== "" ? block.id : null;
+        const name = typeof block.name === "string" && block.name.trim() !== "" ? block.name : null;
+        const argumentsValue = isRecord(block.arguments) ? block.arguments : null;
+        if (id === null) errors.push(`${label}.id must be non-empty`);
+        if (name === null) errors.push(`${label}.name must be non-empty`);
+        if (argumentsValue === null) errors.push(`${label}.arguments must be an object`);
+        if (name?.toLowerCase() === "bash" &&
+            (argumentsValue === null || typeof argumentsValue.command !== "string")) {
+          errors.push(`${label}.arguments.command must be a string for Bash`);
+        }
+        if (id !== null && name !== null && argumentsValue !== null) {
+          content.push(Object.freeze({
+            type: "toolCall",
+            id,
+            name,
+            arguments: Object.freeze({ ...argumentsValue }),
+          }));
+        }
+        return;
+      }
+      content.push(Object.freeze({ type: "opaque", originalType: block.type }));
     });
+
+    const role = typeof message.role === "string" ? message.role : null;
+    const toolCallId = typeof message.toolCallId === "string" && message.toolCallId.trim() !== ""
+      ? message.toolCallId
+      : null;
+    const toolName = typeof message.toolName === "string" && message.toolName.trim() !== ""
+      ? message.toolName
+      : null;
+    if (message.toolCallId !== undefined && toolCallId === null) {
+      errors.push(`${messageLabel}.toolCallId must be non-empty when present`);
+    }
+    if (message.toolName !== undefined && toolName === null) {
+      errors.push(`${messageLabel}.toolName must be non-empty when present`);
+    }
     if (message.role === "toolResult") {
-      if (typeof message.toolCallId !== "string" || message.toolCallId.trim() === "") {
-        errors.push(`messages[${messageIndex}].toolCallId must be non-empty`);
-      }
-      if (typeof message.toolName !== "string" || message.toolName.trim() === "") {
-        errors.push(`messages[${messageIndex}].toolName must be non-empty`);
-      }
+      if (toolCallId === null) errors.push(`${messageLabel}.toolCallId must be non-empty`);
+      if (toolName === null) errors.push(`${messageLabel}.toolName must be non-empty`);
+    }
+    if (message.isError !== undefined && typeof message.isError !== "boolean") {
+      errors.push(`${messageLabel}.isError must be a boolean when present`);
+    }
+
+    if (role !== null && errors.length === blockErrorsBefore) {
+      parsedMessages.push(Object.freeze({
+        role,
+        content: Object.freeze(content),
+        ...(toolCallId === null ? {} : { toolCallId }),
+        ...(toolName === null ? {} : { toolName }),
+        ...(typeof message.isError === "boolean" ? { isError: message.isError } : {}),
+      }));
     }
   });
   return errors.length > 0
-    ? { ok: false, errors }
-    : { ok: true, value: messages as unknown as readonly PiMessage[] };
+    ? { ok: false, errors: Object.freeze(errors) }
+    : { ok: true, value: Object.freeze(parsedMessages) };
 }
 
 /** Pair only parser-proven test commands with their exact Pi tool result.

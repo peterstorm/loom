@@ -383,6 +383,7 @@ export function applyGateDecision(state: TaskGraph, decision: GateDecision): Tas
       ...state.wave_gates,
       [String(wave)]: {
         ...(state.wave_gates[String(wave)] ?? defaultGate),
+        impl_complete: true,
         tests_passed: true,
         reviews_complete: true,
         blocked: false,

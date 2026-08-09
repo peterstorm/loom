@@ -64,4 +64,18 @@ describe("declared artifact baseline", () => {
     expect(compared.ok).toBe(false);
     expect(!compared.ok && compared.errors.join("\n")).toContain("missing declared artifact");
   });
+
+  it.each([
+    "/tmp/outside.ts",
+    "../outside.ts",
+    "./src/a.ts",
+    "src//a.ts",
+    "src\\a.ts",
+  ])("rejects non-canonical persisted artifact path %s", (artifact) => {
+    const parsed = parseDeclaredArtifactBaseline([{
+      artifact,
+      snapshot: { kind: "missing" },
+    }]);
+    expect(parsed.ok).toBe(false);
+  });
 });

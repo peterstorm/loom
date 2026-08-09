@@ -648,6 +648,33 @@ describe("fixFull repairs findings WITH their derived views", () => {
     expect(dataLoss).toEqual(notes);
   });
 
+  it("requires explicit acknowledgement before emitting a lossy repaired graph", async () => {
+    const handler = (await import("../../src/handlers/helpers/validate-task-graph")).default;
+    const input = JSON.stringify(graphOf({
+      id: "T1",
+      findings: [{ severity: "not-a-severity", claim: "" }],
+    }));
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const refused = await handler(input, ["--fix"]);
+      expect(refused).toMatchObject({
+        kind: "error",
+        message: expect.stringContaining("--accept-data-loss"),
+      });
+      expect(stdoutSpy).not.toHaveBeenCalled();
+
+      const accepted = await handler(input, ["--fix", "--accept-data-loss"]);
+      expect(accepted.kind).toBe("passthrough");
+      const repaired = stdoutSpy.mock.calls.map(([text]) => String(text)).join("");
+      expect(JSON.parse(repaired).tasks[0].findings).toEqual([]);
+      expect(fixFull(JSON.parse(repaired)).json).toBe(repaired);
+    } finally {
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
   it("stays idempotent once a malformed entry has been salvaged", () => {
     const once = fixFull(graphOf({
       id: "T1",

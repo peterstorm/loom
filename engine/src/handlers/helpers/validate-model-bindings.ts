@@ -106,24 +106,33 @@ export function validateModelBindings(
         } else if (typeof dag !== "object" || dag === null || Array.isArray(dag) || !Array.isArray((dag as Record<string, unknown>).nodes)) {
           errors.push(`Pipeline: AuthoredDag file '${dagFile}' must be a JSON object with a 'nodes' array (deep validation is fugue's job — 'fugue new --from' gates codegen)`);
         } else {
-          // Drift guard: every node the plan's Pipeline table names must appear
-          // in the sidecar. Matched as an EXACT QUOTED JSON token (`"name"`)
-          // inside the serialized `nodes` array, not a bare substring of the
-          // raw sidecar text. A substring test false-passes three ways: a
-          // substring collision (declared `fetch` satisfied by a sidecar
-          // `fetch-order`), a non-node occurrence (the name appearing in a
-          // comment/other field), and a degenerate empty name (`includes("")`
-          // is always true). Serializing only the `nodes` array — already
-          // parsed and in scope — keeps loom's "no schema knowledge of fugue's
-          // DAG shape" stance (it assumes only a `nodes` array) while catching
-          // real plan↔sidecar drift that the unguarded-intermediate leak
-          // allowed through to fugue runtime.
-          const nodesJson = JSON.stringify((dag as { nodes: unknown[] }).nodes);
-          const missing = models.pipeline.declaredNodes.filter((n) => !nodesJson.includes(`"${n}"`));
-          if (missing.length > 0) {
-            errors.push(
-              `Pipeline: node(s) named in the plan's table are absent from AuthoredDag file '${dagFile}': ${missing.join(", ")} — plan and sidecar have drifted; re-author the sidecar or fix the table`,
-            );
+          // Narrow anti-corruption boundary: Loom knows only the node identity
+          // field needed for plan↔sidecar drift checks. Fugue still owns every
+          // deeper node-kind/schema invariant.
+          const nodeIds = new Set<string>();
+          const nodeErrors: string[] = [];
+          for (const [index, node] of (dag as { nodes: unknown[] }).nodes.entries()) {
+            if (typeof node !== "object" || node === null || Array.isArray(node)) {
+              nodeErrors.push(`nodes[${index}] must be an object with a non-empty id`);
+              continue;
+            }
+            const id = (node as Record<string, unknown>).id;
+            if (typeof id !== "string" || id.trim() === "" || id.trim() !== id) {
+              nodeErrors.push(`nodes[${index}].id must be a non-empty string without surrounding whitespace`);
+              continue;
+            }
+            if (nodeIds.has(id)) nodeErrors.push(`nodes[${index}].id duplicates '${id}'`);
+            nodeIds.add(id);
+          }
+          if (nodeErrors.length > 0) {
+            errors.push(`Pipeline: AuthoredDag file '${dagFile}' has invalid node identities: ${nodeErrors.join("; ")}`);
+          } else {
+            const missing = models.pipeline.declaredNodes.filter((node) => !nodeIds.has(node));
+            if (missing.length > 0) {
+              errors.push(
+                `Pipeline: node(s) named in the plan's table are absent from AuthoredDag file '${dagFile}': ${missing.join(", ")} — plan and sidecar have drifted; re-author the sidecar or fix the table`,
+              );
+            }
           }
         }
       }

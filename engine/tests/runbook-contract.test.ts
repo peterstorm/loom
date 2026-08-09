@@ -199,6 +199,18 @@ describe("interview digest vocabulary ↔ parseInterviewDigest", () => {
   });
 });
 
+describe("wave-gate review evidence retry contract", () => {
+  const waveGate = read("commands", "wave-gate.md");
+
+  it("selects evidence-capture failures and reuses their active packet binding", () => {
+    expect(waveGate).toContain('.review_status == "evidence_capture_failed"');
+    expect(waveGate).toContain("do **not** create another packet");
+    expect(waveGate).toContain(".review_run.packet_id as $packet");
+    expect(waveGate).toContain(".issued_review_packets[] | select(.packet_id == $packet)");
+    expect(waveGate).toContain("review_evidence_failures");
+  });
+});
+
 describe("the smoke scripts this file's own header cites are actually run", () => {
   const pkg = JSON.parse(read("engine", "package.json")) as {
     scripts: Record<string, string>;

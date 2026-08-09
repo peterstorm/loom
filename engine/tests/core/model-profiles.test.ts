@@ -171,6 +171,16 @@ describe("Pi spawn input parsing", () => {
       { agent: "external-agent", task: "outside workflow" },
     ] }).ok).toBe(false);
   });
+
+  it.each([
+    { agent: "loom:not-a-real-agent", task: "single" },
+    { tasks: [{ agent: "loom:not-a-real-agent", task: "parallel" }] },
+    { chain: [{ agent: "loom:not-a-real-agent", task: "chain" }] },
+  ])("fails closed when an unknown Pi agent claims Loom's namespace", (input) => {
+    const result = classifyPiSpawnItems(input);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toContain("loom:not-a-real-agent");
+  });
 });
 
 describe("exhaustive Loom agent policy", () => {

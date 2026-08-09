@@ -18,6 +18,7 @@ import {
   promptReferencesSkill,
   type DeclaredSkills,
 } from "../../core/agent-skills";
+import { isLoomNamespacedAgent } from "../../core/model-profiles";
 
 export { promptReferencesSkill } from "../../core/agent-skills";
 export type { DeclaredSkills } from "../../core/agent-skills";
@@ -77,7 +78,11 @@ const handler: HookHandler = async (stdin) => {
     ?? "";
   const bareAgent = stripNamespace(subagentType);
 
-  if (!VALIDATED_AGENTS.has(bareAgent)) return { kind: "allow" };
+  if (!VALIDATED_AGENTS.has(bareAgent)) {
+    return isLoomNamespacedAgent(subagentType)
+      ? { kind: "block", message: `BLOCKED: unknown Loom agent "${subagentType}"; skill policy cannot be proven.` }
+      : { kind: "allow" };
+  }
   if (UTILITY_AGENTS.has(bareAgent)) return { kind: "allow" };
   if (SKILL_EXEMPT_AGENTS.has(bareAgent)) return { kind: "allow" };
 

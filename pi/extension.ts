@@ -809,6 +809,46 @@ export default function (pi: ExtensionAPI) {
       : [];
     await finalizeReservedImplementations(rawResults);
 
+    // A reservation is the authoritative expected batch. Pi may return a
+    // shorter results array after a child disappears; persist that absence as
+    // typed review evidence failure rather than leaving the slot unresolved.
+    if (reservation) {
+      const missingReviews = reservation.items.flatMap((item, index) => {
+        if (item.standalone || item.taskId === null || !isReviewAgent(item.agentType)) return [];
+        const raw = rawResults[index];
+        const returnedAgent = typeof raw === "object" && raw !== null && !Array.isArray(raw) &&
+          typeof (raw as Record<string, unknown>).agent === "string"
+          ? stripNamespace((raw as Record<string, unknown>).agent as string)
+          : null;
+        return returnedAgent === item.agentType ? [] : [{ item, index }];
+      });
+      if (missingReviews.length > 0) {
+        const manager = StateManager.fromSession(reservation.sessionId);
+        if (!manager) {
+          process.stderr.write(
+            `loom(pi): cannot persist ${missingReviews.length} missing reserved review result(s) for session ${reservation.sessionId} — task graph unavailable\n`,
+          );
+        } else {
+          await manager.update((state) => ({
+            ...state,
+            tasks: state.tasks.map((task) => {
+              const failures = missingReviews.filter(({ item }) => item.taskId === task.id);
+              return failures.reduce((current, { item, index }) => applyReviewResolution(current, {
+                kind: "evidence-failed" as const,
+                agent: item.agentType,
+                message: `reserved reviewer result ${index + 1} for ${item.agentType} was missing or mismatched`,
+              }), task);
+            }),
+          }));
+          for (const { item, index } of missingReviews) {
+            process.stderr.write(
+              `loom(pi): reserved reviewer result ${index + 1} for ${item.agentType}/${item.taskId} was missing or mismatched — marking evidence_capture_failed\n`,
+            );
+          }
+        }
+      }
+    }
+
     if (!details || !("results" in details)) {
       process.stderr.write(
         "loom(pi): subagent tool_result is missing details.results — successful evidence was not applied\n",
@@ -829,7 +869,7 @@ export default function (pi: ExtensionAPI) {
       task: string;
       exitCode: number;
       stopReason?: string;
-      messages: unknown[];
+      messages: unknown;
     }>;
 
     for (const [resultIndex, result] of results.entries()) {
@@ -1188,6 +1228,7 @@ export default function (pi: ExtensionAPI) {
             ? collectNewTestEvidence(
                 cumulativeFiles,
                 currentTarget?.new_tests_required,
+                currentTarget?.start_sha,
               )
             : { written: false, evidence: "" };
           const applied = applyUntrustedStopResolution(s, resolvedTaskId, {
@@ -1228,11 +1269,6 @@ export default function (pi: ExtensionAPI) {
         const taskId = reservedItem?.taskId ?? extractTaskId(result.task ?? "") ?? extractTaskId(
           event.content.filter((c: { type: string }) => c.type === "text").map((c: { type: string; text?: string }) => c.text ?? "").join("\n")
         );
-        const resultMessages = (result.messages ?? []) as PiMessage[];
-        const transcriptText = resultMessages
-          .filter((m: PiMessage) => m.role === "assistant" || m.role === "toolResult")
-          .flatMap((m: PiMessage) => (m.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? ""))
-          .join("\n");
         if (!taskId) {
           // A review whose task ID is unextractable stores nothing — its
           // findings silently never gate the wave. Say so instead of
@@ -1257,6 +1293,27 @@ export default function (pi: ExtensionAPI) {
           );
           continue;
         }
+
+        const parsedMessages = parsePiMessages(result.messages ?? []);
+        if (!parsedMessages.ok) {
+          const message = `Pi review messages are malformed: ${parsedMessages.errors.join("; ")}`;
+          const resolution = { kind: "evidence-failed" as const, agent: agentType, message };
+          let appliedTask = reviewTask;
+          await mgr.update((state) => ({
+            ...state,
+            tasks: state.tasks.map((task) => {
+              if (task.id !== taskId) return task;
+              appliedTask = applyReviewResolution(task, resolution);
+              return appliedTask;
+            }),
+          }));
+          process.stderr.write(reviewResolutionLog(taskId, resolution, appliedTask, true) + "\n");
+          continue;
+        }
+        const transcriptText = parsedMessages.value
+          .filter((message) => message.role === "assistant" || message.role === "toolResult")
+          .flatMap((message) => message.content.filter((block) => block.type === "text").map((block) => block.text ?? ""))
+          .join("\n");
 
         // Identical decision + transform as the Claude Code SubagentStop hook —
         // one shared implementation, so findings cannot have identity on one

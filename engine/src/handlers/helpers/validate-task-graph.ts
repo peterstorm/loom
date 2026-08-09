@@ -1,6 +1,6 @@
 /**
  * Validate task graph JSON schema.
- * Usage: bun cli.ts helper validate-task-graph [--minimal] [--fix]
+ * Usage: bun cli.ts helper validate-task-graph [--minimal] [--fix] [--accept-data-loss]
  * Reads JSON from stdin or file arg.
  */
 
@@ -623,9 +623,12 @@ function tasksOf(json: Record<string, unknown>): Record<string, unknown>[] {
 const handler: HookHandler = async (stdin, args) => {
   const isMinimal = args.includes("--minimal");
   const isFix = args.includes("--fix");
+  const acceptsDataLoss = args.includes("--accept-data-loss");
 
   // Read JSON from stdin or file arg
-  const fileArg = args.find((a) => a !== "--minimal" && a !== "--fix" && a !== "-");
+  const fileArg = args.find((a) =>
+    a !== "--minimal" && a !== "--fix" && a !== "--accept-data-loss" && a !== "-"
+  );
   let raw: string;
 
   if (fileArg && fileArg !== "-") {
@@ -657,6 +660,15 @@ const handler: HookHandler = async (stdin, args) => {
     const repair = isMinimal
       ? { json: fixMinimal(json), notes: [], dataLoss: [] }
       : fixFull(json);
+    if (repair.dataLoss.length > 0 && !acceptsDataLoss) {
+      return {
+        kind: "error",
+        message: [
+          "validate-task-graph --fix refused a lossy repair; inspect the source evidence or retry with --accept-data-loss:",
+          ...repair.dataLoss.map((loss) => `  - ${loss}`),
+        ].join("\n"),
+      };
+    }
     process.stdout.write(repair.json);
     // A repair that gave a claim identity or renamed one changed the data the
     // panel will vote on. Silent conservation is still a change.
