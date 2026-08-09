@@ -75,7 +75,7 @@ engine/src/core/wave-gate-machine.ts                               — Wave Gate
 engine/src/types.ts                                                — protected active-run registration/status types
 engine/src/state-manager.ts                                        — parse registration; remains sole State File writer
 engine/src/handlers/helpers/complete-wave-gate.ts                  — compatibility commit adapter
-engine/tests/handlers/complete-wave-gate.test.ts                   — readiness/status/locked-commit parity
+engine/tests/handlers/complete-wave-gate.test.ts                   — full status-contract/render/readiness/locked-commit parity
 engine/src/core/standalone-review.ts                               — byte-aware complete-roster aggregate/finalization
 engine/src/core/standalone-review-machine.ts                       — Standalone Review machine (new)
 engine/src/handlers/helpers/standalone-review.ts                   — versioned legacy adapter
@@ -168,7 +168,44 @@ type EffectIntent = PublishArtifactSet | CommitProtectedWaveState | ReserveAgent
   | CaptureRawTranscript | InspectGitRemediation | InstallVerifiedIndex;
 type EffectReceipt = ArtifactSetPublished | ProtectedWaveStateCommitted | AgentRequestsReserved
   | RawTranscriptCaptured | GitRemediationInspected | VerifiedIndexInstalled;
+
+type StatusFact<T> =
+  | Readonly<{ kind: "known"; value: T }>
+  | Readonly<{ kind: "unavailable"; reasons: NonEmpty<StatusReason> }>;
+
+type StatusTaskCounts = Readonly<{
+  pending: number; running: number; implemented: number; blocked: number; completed: number;
+}>;
+
+type CanonicalStatusFacts = Readonly<{
+  location: StatusFact<Readonly<{ activePhase: Phase; activeWave: number | null }>>;
+  tasks: StatusFact<Readonly<{ counts: StatusTaskCounts }>>;
+  failedProofObligations: StatusFact<readonly FailedProofObligation[]>;
+  testReadiness: StatusFact<TestReadiness>;
+  reviewRuns: StatusFact<Readonly<{
+    rosterGaps: readonly ReviewRosterGap[];
+    evidenceFailures: readonly ReviewEvidenceFailure[];
+  }>>;
+  findingCounts: StatusFact<Readonly<{
+    active: number; advisory: number; resolved: number; refuted: number;
+  }>>;
+  refutationPanelNeed: StatusFact<RefutationPanelNeed>;
+  waveGateCompletionEligibility: StatusFact<WaveGateCompletionEligibility>;
+}>;
+
+type NextActionDecision = Readonly<{
+  action: ExternalAction; // exactly one action, never an array or nullable
+  reasons: NonEmpty<StatusReason>; // complete ordered reason set for that action
+}>;
+
+type LoomStatus = Readonly<{
+  schemaVersion: 1;
+  facts: CanonicalStatusFacts;
+  next: NextActionDecision;
+}>;
 ```
+
+`LoomStatus` is the one versioned status contract. `activeWave` is `null` only when the parsed active Phase has no Wave; a missing/invalid Wave during `execute` is `unavailable`, never silently defaulted. `StatusTaskCounts` is an exhaustive, mutually exclusive projection of every Task: parsed contradictions fail closed; otherwise completed wins for `completed`, failed proof/status or blocking review authority yields `blocked`, membership in `executing_tasks` yields `running`, implementation-bearing status yields `implemented`, and the remainder is `pending`. The five counts must sum to the Task total. `failedProofObligations` carries Task identity and every typed proof failure. `TestReadiness` carries ready/not-ready state plus every affected Task and reason. Review facts name every missing expected Agent and every evidence-failure Agent/error by Review Run and Task. Finding counts are derived without overlap from canonical active critical, advisory, resolved, and refuted collections. `RefutationPanelNeed` carries need/no-need plus the authoritative active critical Finding ids and reasons. `WaveGateCompletionEligibility` carries eligible/ineligible plus every failed prerequisite. If authority cannot be parsed, every unavailable category remains present as `StatusFact.unavailable`, and `next.action` is the single typed blocked action rather than fabricated zero/ready values.
 
 `parseCompleteRoster(exactRoster, results)` is its only constructor. It proves length, identity, uniqueness, canonical order, accepted attempt, request/context/model/Skill binding, and no surplus. Aggregate/tally APIs accept only this proof. `BlockedDiagnostic` is a closed union with run/category/request/slot/effect, retry eligibility, and one permissible recovery. Infrastructure retries never consume semantic attempts.
 
@@ -188,7 +225,7 @@ const remediationMachine: Machine<RemediationState, RemediationEvent, Remediatio
 
 Architecture/refutation lens types remain disjoint. Caller lens/criterion/candidate/Finding claims are compared but never authoritative; request authority supplies canonical identity. New sessions expose no parent `engine-operation`: deterministic operation DAGs run internally and return typed receipts. The legacy panel event helper translates historical/in-flight documents without rewriting them.
 
-Wave Gate owns readiness, batch-atomic packet/request/context preparation, exact missing-slot recovery, critical routing, advisory decision, and completion. `deriveLoomStatus(graph, session)` calls the same pure readiness/action priority used by the machine and yields exactly one next action plus all reasons. The protected graph stores a parsed active Wave Gate registration (run/wave/authority digest/revision/terminal outcome); Run Directory progress cannot independently advance Tasks.
+Wave Gate owns readiness, batch-atomic packet/request/context preparation, exact missing-slot recovery, critical routing, advisory decision, and completion. One pure `deriveWaveReadiness(parsedGraph, parsedSession)` produces the canonical readiness snapshot containing all status facts above. Both the Wave Gate reducer and `deriveLoomStatus(readinessSnapshot)` consume that same value; `deriveNextAction(readinessSnapshot)` returns one `NextActionDecision` with the complete ordered set of contributing reasons. Neither status nor rendering may re-run or reinterpret gate checks. The protected graph stores a parsed active Wave Gate registration (run/wave/authority digest/revision/terminal outcome); Run Directory progress cannot independently advance Tasks.
 
 Standalone Review freezes exact scope, changed-path metadata, roster, model/context/request authority, and transcript slots before spawn. Absent scope becomes only the canonical changed-path union; empty/ambiguous/external/unsafe scope blocks. Aggregate accepts `CompleteRoster<CapturedReviewerResult>` and routes zero criticals directly to finalization.
 
@@ -299,7 +336,7 @@ helper orchestration decide --request <decision-id> < decision.json
 helper orchestration status [--json] [--run <registered-run>]
 ```
 
-Each mutating call locks one aggregate, parses authority, applies at most one event/receipt reconciliation, persists it, runs eligible internal DAGs, and returns one external action. Resume is idempotent and never silently spawns or decides policy.
+Each mutating call locks one aggregate, parses authority, applies at most one event/receipt reconciliation, persists it, runs eligible internal DAGs, and returns one external action. Resume is idempotent and never silently spawns or decides policy. `status` derives one `LoomStatus` value, then pure `renderLoomStatusHuman(status)` and `renderLoomStatusJson(status)` adapters expose, respectively, the human and machine forms. Both forms include every `CanonicalStatusFacts` category, the same exactly-one typed next action, and the same complete reason list; renderers contain no readiness or action policy.
 
 Migration is format-detected, not a destructive flag: new sessions use versioned programs; old helpers remain adapters; historical/in-flight runs are never rewritten; Wave/status switch after replay parity; harness capture switches after attribution/byte parity; procedural Bash/`jq`/journal/transcript/staging recipes are deleted only after benchmark success. Existing artifacts remain readable indefinitely.
 
@@ -429,7 +466,8 @@ Eleven implementation slices occupy four implementation Waves. Decompose also em
 - **Files:** `engine/src/core/panel-program.ts`, `engine/src/handlers/helpers/panel-program.ts`, `engine/tests/core/panel-program.test.ts`, `engine/tests/handlers/helpers/panel-program.test.ts`
 
 **Task 3 — Wave Gate machine/status/protected registration**
-- Implement LC-1, shared readiness/status, active run parsing, and locked `complete-wave-gate` delegation.
+- Implement LC-1, the versioned `LoomStatus`/`CanonicalStatusFacts` contract, one shared readiness snapshot, active run parsing, and locked `complete-wave-gate` delegation.
+- Derive and test active Phase/Wave; exhaustive pending/running/implemented/blocked/completed Task counts; failed Proof Obligations; test readiness; Review Run roster gaps and evidence failures; active/advisory/resolved/refuted Finding counts; Refutation Panel need; Wave Gate completion eligibility; and exactly one typed next action with all reasons. Malformed authority keeps every category present but unavailable and returns only a blocked action.
 - **Files:** `engine/src/core/wave-gate-machine.ts`, `engine/src/types.ts`, `engine/src/state-manager.ts`, `engine/src/handlers/helpers/complete-wave-gate.ts`, `engine/tests/handlers/complete-wave-gate.test.ts`
 
 **Task 4 — Standalone Review machine/byte aggregation**
@@ -462,12 +500,12 @@ Eleven implementation slices occupy four implementation Waves. Decompose also em
 ### Phase 4: Interface, harness parity, and cutover (depends on Phase 3)
 
 **Task 10 — Façade/status/compatibility/runbook deletion**
-- Implement deep commands and legacy adapters; remove parent `jq`, journals, packet/model loops, transcript copies, and staging recipes.
+- Implement deep commands and legacy adapters; render human and JSON forms from the same `LoomStatus` value with the complete fact inventory, one action, and identical reasons; remove parent `jq`, journals, packet/model loops, transcript copies, and staging recipes.
 - **Files:** `engine/src/handlers/helpers/orchestration.ts`, `engine/src/cli.ts`, `commands/loom.md`, `commands/wave-gate.md`, `skills/review-and-fix/SKILL.md`
 
 **Task 11 — Pi/Claude capture and replay benchmark**
 - Implement request reservation/context lowering/exact-byte capture before legacy routing.
-- Run all five fixtures, interruption points, invalid evidence classes, parity, and byte equality.
+- Run all five fixtures, interruption points, invalid evidence classes, parity, and byte equality; at every sampled status boundary assert the human and JSON projections preserve every required fact category and agree with the active program on readiness, roster gaps/evidence failures, panel need, completion eligibility, exactly one action, and its complete reasons.
 - Enforce ≥80% fewer command characters, ≥70% fewer deterministic parent calls, and all mandated zero counts.
 - **Files:** `pi/transcript-adapter.ts`, `pi/extension.ts`, `engine/src/handlers/subagent-stop/capture-orchestration-result.ts`, `engine/src/handlers/subagent-stop/dispatch.ts`, `engine/tests/orchestration/orchestration-acceptance.test.ts`
 
@@ -483,7 +521,7 @@ Decompose creates one `adr-writer-agent` Task from AD-1 after implementation, re
 |---|---|---|---|
 | Authority kernel | constructors, bindings, errors, action priority | disk/harness parser round trips | roster conservation; no partial proof; order independence |
 | Panels | every state/event/attempt | legacy document → persistent same outcome | arbitrary order/duplicates/stale/surplus/retry/terminal/replay |
-| Wave/status | readiness and action priority | locked registration/completion | status/program agreement; all-or-none batch |
+| Wave/status | full fact inventory, five-state Task partition, human/JSON renderers, readiness and one-action priority | locked registration/completion and unavailable-fact blocked status | counts sum to Task total; human/JSON canonical equivalence; status/program readiness, roster, evidence, panel, eligibility, action, and reason agreement; all-or-none batch |
 | Standalone | scope, attribution, bytes, finalization | six reviewers → optional panel | exact slots; zero-critical skip; complete dispositions |
 | Remediation | paths/witnesses/set algebra | temp Git add/modify/rename/delete/absent | staged=audited=dirty; unauthorized/run paths never install |
 | Fugue runtime | Machine/HALT/checkpoint parsers | real file JobLike/runStateMachine/replay | prefix replay=checkpoint; no duplicate event/effect |
@@ -501,7 +539,7 @@ Approved replay fixtures:
 4. six-reviewer Standalone Review, three refutation lenses;
 5. remediation adding a regression test and deleting a scoped file.
 
-Compare canonical transitions, request identities, slots, artifacts, Finding dispositions, next actions, and gate decisions across legacy/new and Pi/Claude runs. Persist measured baseline/new counters as fixtures; Agent prose is never measurement evidence.
+Compare canonical transitions, request identities, slots, artifacts, Finding dispositions, next actions, and gate decisions across legacy/new and Pi/Claude runs. For every fixture and generated/interruption status checkpoint, assert the JSON contract contains active Phase/Wave, all five named Task counts, failed Proof Obligations, test readiness, Review Run roster gaps and evidence failures, all four named Finding counts, Refutation Panel need, Wave Gate completion eligibility, one typed next action, and every reason; assert the human renderer reports the same values from the same `LoomStatus` object. Include malformed/missing/contradictory authority cases proving all fact keys remain present as unavailable and the sole action is blocked. Persist measured baseline/new counters as fixtures; Agent prose is never measurement evidence.
 
 ---
 
@@ -530,5 +568,6 @@ Compare canonical transitions, request identities, slots, artifacts, Finding dis
 4. Fault injection after every event/checkpoint/artifact/context/transcript/StateManager/index boundary yields zero false completion/partial authority.
 5. Five-scenario benchmark meets ≥80% character and ≥70% tool-call reductions plus every mandated zero count.
 6. Pi/Claude fixtures have byte-equal raw captures and equivalent transitions, identities, artifacts, dispositions, actions, and completion.
-7. Loom's model parser binds LC-1..LC-3 exactly and finds no Pipeline/invariant artifact requirement.
-8. Remediation fixtures stage zero Run Directory evidence and no unauthorized paths.
+7. Status contract/property/benchmark assertions cover every FR-051 category in human and JSON forms; the five Task counts conserve the Task total; exactly one typed action and all reasons are preserved; and unchanged authority produces the same readiness, roster gaps/evidence failures, panel need, and completion eligibility in status and the executable program.
+8. Loom's model parser binds LC-1..LC-3 exactly and finds no Pipeline/invariant artifact requirement.
+9. Remediation fixtures stage zero Run Directory evidence and no unauthorized paths.
