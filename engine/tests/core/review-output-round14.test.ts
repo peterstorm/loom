@@ -77,6 +77,7 @@ describe("a block that loses arbitration still contributes its claims", () => {
     const transcript = [
       "### Machine Summary",
       "CRITICAL_COUNT: 2",
+      "ADVISORY_COUNT: 0",
       block([{ severity: "critical", file: "src/a.ts", line: 3, claim: "real blocker A" }]),
     ].join("\n");
     const resolved = resolveReviewFindings(transcript, "code-reviewer");
@@ -192,9 +193,12 @@ describe("ADVISORY_COUNT is an authority, not decoration", () => {
     expect(reconciled.advisory).toHaveLength(1);
   });
 
-  it("a missing ADVISORY_COUNT is NOT an evidence failure — only CRITICAL_COUNT is", () => {
+  it("fails evidence capture when the mandatory ADVISORY_COUNT marker is missing", () => {
     const resolved = resolveReviewFindings("### Machine Summary\nCRITICAL_COUNT: 0", "code-reviewer");
-    expect(resolved.kind).toBe("findings");
+    expect(resolved).toMatchObject({
+      kind: "evidence-failed",
+      message: expect.stringContaining("ADVISORY_COUNT marker not found"),
+    });
   });
 
   it("property: a shortfall is always reported, and a met count is never padded", () => {

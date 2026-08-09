@@ -327,7 +327,7 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
     }
   });
 
-  it("warns rather than throwing out of the hook on a corrupt state file", async () => {
+  it("fails the hook after warning that a corrupt state file lost reviewer evidence", async () => {
     const f = fixture("corrupt", BLOCKING);
     try {
       writeFileSync(f.statePath, "{ not json");
@@ -336,7 +336,8 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
         agent_type: "code-reviewer",
         agent_transcript_path: f.transcriptPath,
       });
-      expect(result.kind).toBe("passthrough");
+      expect(result.kind).toBe("error");
+      if (result.kind === "error") expect(result.message).toContain("findings NOT stored");
       expect(stderr).toContain("cannot load task graph");
       expect(stderr).toContain("findings NOT stored");
     } finally {

@@ -352,6 +352,34 @@ export function taskUnionError(v: unknown, index: number): string | null {
   return evidenceFailureError(t, `tasks[${index}] ("${id}")`);
 }
 
+/** The persisted lifecycle fields shared by the loader and operator validator. */
+export function taskGraphLifecycleErrors(obj: Record<string, unknown>): readonly string[] {
+  const errors: string[] = [];
+  if (!("current_phase" in obj)) errors.push("missing current_phase");
+  else if (!(PHASE_ORDER as readonly unknown[]).includes(obj.current_phase)) {
+    errors.push(`current_phase ${JSON.stringify(obj.current_phase)} is not one of ${PHASE_ORDER.join(", ")}`);
+  }
+  if (!("phase_artifacts" in obj)) errors.push("missing phase_artifacts");
+  else if (typeof obj.phase_artifacts !== "object" || obj.phase_artifacts === null ||
+      Array.isArray(obj.phase_artifacts)) {
+    errors.push("phase_artifacts must be an object");
+  } else {
+    for (const [phase, artifact] of Object.entries(obj.phase_artifacts)) {
+      if (!(PHASE_ORDER as readonly string[]).includes(phase)) {
+        errors.push(`phase_artifacts contains unknown phase ${JSON.stringify(phase)}`);
+      } else if (typeof artifact !== "string") {
+        errors.push(`phase_artifacts.${phase} must be a string, got ${JSON.stringify(artifact)}`);
+      }
+    }
+  }
+  const skippedPhases = obj.skipped_phases ?? [];
+  if (!Array.isArray(skippedPhases)
+    || skippedPhases.some((phase) => !(PHASE_ORDER as readonly unknown[]).includes(phase))) {
+    errors.push(`skipped_phases must be an array containing only: ${PHASE_ORDER.join(", ")}`);
+  }
+  return errors;
+}
+
 /**
  * Parse raw disk JSON into a TaskGraph, mirroring parseMachine: every
  * union-typed field (current_phase, task status / review_status /
@@ -367,30 +395,10 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
     return parseErr("not an object");
   }
   const obj = raw as Record<string, unknown>;
-  if (!("current_phase" in obj)) return parseErr("missing current_phase");
-  if (!("phase_artifacts" in obj)) return parseErr("missing phase_artifacts");
-  if (!(PHASE_ORDER as readonly string[]).includes(obj.current_phase as string)) {
-    return parseErr(
-      `current_phase ${JSON.stringify(obj.current_phase)} is not one of ${PHASE_ORDER.join(", ")}`,
-    );
-  }
-  const phaseArtifacts = obj.phase_artifacts;
-  if (typeof phaseArtifacts !== "object" || phaseArtifacts === null || Array.isArray(phaseArtifacts)) {
-    return parseErr("phase_artifacts must be an object");
-  }
-  for (const [phase, artifact] of Object.entries(phaseArtifacts)) {
-    if (!(PHASE_ORDER as readonly string[]).includes(phase)) {
-      return parseErr(`phase_artifacts contains unknown phase ${JSON.stringify(phase)}`);
-    }
-    if (typeof artifact !== "string") {
-      return parseErr(`phase_artifacts.${phase} must be a string, got ${JSON.stringify(artifact)}`);
-    }
-  }
-  const skippedPhases = obj.skipped_phases ?? [];
-  if (!Array.isArray(skippedPhases)
-    || skippedPhases.some((phase) => !(PHASE_ORDER as readonly unknown[]).includes(phase))) {
-    return parseErr(`skipped_phases must be an array containing only: ${PHASE_ORDER.join(", ")}`);
-  }
+  const lifecycleErrors = taskGraphLifecycleErrors(obj);
+  if (lifecycleErrors[0] !== undefined) return parseErr(lifecycleErrors[0]);
+  const phaseArtifacts = obj.phase_artifacts as Record<string, string>;
+  const skippedPhases = (obj.skipped_phases ?? []) as string[];
   for (const field of ["spec_dir", "spec_file", "plan_file"] as const) {
     if (obj[field] !== undefined && obj[field] !== null && typeof obj[field] !== "string") {
       return parseErr(`${field} must be a string or null when present, got ${JSON.stringify(obj[field])}`);

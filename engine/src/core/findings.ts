@@ -421,6 +421,7 @@ function parseStoredResolution(raw: unknown): ResolvedFinding | null {
   if (resolution.kind !== "resolved_by_remediation") return null;
   if (typeof resolution.generation !== "number" || !Number.isInteger(resolution.generation) ||
       resolution.generation < 0) return null;
+  if (finding.review_generation !== undefined && resolution.generation <= finding.review_generation) return null;
   if (typeof resolution.packet_id !== "string" || !/^[0-9a-f]{64}$/.test(resolution.packet_id)) return null;
   if (typeof resolution.head_sha !== "string" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(resolution.head_sha)) return null;
   if (!Array.isArray(resolution.expected_agents) || resolution.expected_agents.length === 0 ||
@@ -762,7 +763,8 @@ export function reviewRunError(
 /**
  * Load-boundary proof of the review record's biconditional:
  * `review_status === "evidence_capture_failed"` iff `review_evidence_failures`
- * names at least one reviewer.
+ * names at least one reviewer. `review_error`, when present, belongs only to
+ * that failed state and must carry a non-empty diagnostic.
  *
  * Both directions matter and both are silent when broken. A status with no named
  * agent is UNCLEARABLE — `mergeFindings` drops the merging agent from the set
@@ -787,6 +789,16 @@ export function evidenceFailureError(t: Record<string, unknown>, label: string):
   }
   const outstanding = Array.isArray(raw) ? raw.length : 0;
   const failed = t.review_status === "evidence_capture_failed";
+  const reviewError = t.review_error;
+  if (reviewError !== undefined && (typeof reviewError !== "string" || reviewError.trim() === "")) {
+    return `${label}: review_error must be a non-empty string when present`;
+  }
+  if (!failed && reviewError !== undefined) {
+    return (
+      `${label}: review_error is meaningful only when review_status is evidence_capture_failed, ` +
+      `not ${JSON.stringify(t.review_status ?? null)} (${REPAIR_HINT})`
+    );
+  }
   if (failed && outstanding === 0) {
     return (
       `${label}: review_status is evidence_capture_failed but review_evidence_failures names ` +
@@ -1094,14 +1106,24 @@ export function startReviewRun(task: Task, binding: ReviewRunBinding): ReviewRun
   };
 }
 
+function sameFindingContent(left: DraftFinding, right: DraftFinding): boolean {
+  return left.severity === right.severity &&
+    left.claim === right.claim &&
+    left.file === right.file &&
+    left.line === right.line;
+}
+
 function finalizeReviewRun(task: Task, run: ReviewRun): Task {
   const prior = new Map((task.findings ?? []).map((finding) => [finding.id, finding]));
-  const resolvedIds = new Set(run.prior_finding_ids.filter((id) =>
-    run.evidence.every((evidence) =>
-      evidence.prior_assessments.find((assessment) => assessment.finding_id === id)?.verdict ===
-        "resolved_by_remediation"
-    )
-  ));
+  const resolvedIds = new Set(run.prior_finding_ids.filter((id) => {
+    const finding = prior.get(id);
+    return finding !== undefined &&
+      (finding.review_generation === undefined || run.generation > finding.review_generation) &&
+      run.evidence.every((evidence) =>
+        evidence.prior_assessments.find((assessment) => assessment.finding_id === id)?.verdict ===
+          "resolved_by_remediation"
+      );
+  }));
   const retired: ResolvedFinding[] = run.prior_finding_ids.flatMap((id) => {
     const finding = prior.get(id);
     if (finding === undefined || !resolvedIds.has(id)) return [];
@@ -1131,12 +1153,9 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
   let active = priorFindings.filter((finding) => !resolvedIds.has(finding.id));
   for (const agent of run.expected_agents) {
     const evidence = run.evidence.find((candidate) => candidate.agent === agent)!;
-    const genuinelyNew = evidence.new_findings.filter((draft) => !priorFindings.some((finding) =>
-      finding.severity === draft.severity &&
-      finding.claim === draft.claim &&
-      finding.file === draft.file &&
-      finding.line === draft.line
-    ));
+    const genuinelyNew = evidence.new_findings.filter((draft) =>
+      !priorFindings.some((finding) => sameFindingContent(finding, draft))
+    );
     const attributed = attributeFindings(
       genuinelyNew,
       agent,
@@ -1182,6 +1201,21 @@ export function recordReviewRunEvidence(
     return {
       ok: false,
       error: `${evidence.agent} must assess every prior finding exactly once in packet order`,
+    };
+  }
+  const prior = new Map((task.findings ?? []).map((finding) => [finding.id, finding]));
+  const contradictory = evidence.prior_assessments.find((assessment) => {
+    if (assessment.verdict !== "resolved_by_remediation") return false;
+    const finding = prior.get(assessment.finding_id);
+    return finding !== undefined && evidence.new_findings.some((draft) => sameFindingContent(finding, draft));
+  });
+  if (contradictory !== undefined) {
+    return {
+      ok: false,
+      error: (
+        `${evidence.agent} cannot mark prior finding ${contradictory.finding_id} resolved_by_remediation ` +
+        "and re-emit the identical finding"
+      ),
     };
   }
   const nextRun: ReviewRun = { ...run, evidence: [...run.evidence, evidence] };

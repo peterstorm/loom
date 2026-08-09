@@ -430,7 +430,9 @@ describe("mergeFindings (pure)", () => {
 describe("buildEvidenceFailureMessage (pure)", () => {
   it("returns generic message when no partial findings", () => {
     const msg = buildEvidenceFailureMessage(makeParsedFindings({ critical: [], advisory: [], criticalCount: null }));
-    expect(msg).toBe("CRITICAL_COUNT marker not found in agent output");
+    expect(msg).toBe(
+      "CRITICAL_COUNT marker not found; ADVISORY_COUNT marker not found in agent output",
+    );
   });
 
   it("surfaces partial counts when section parsing extracted findings", () => {
@@ -491,6 +493,7 @@ describe("the structured block never costs a claim the markers made", () => {
     [
       "### Machine Summary",
       `CRITICAL_COUNT: ${count}`,
+      `ADVISORY_COUNT: ${advisories.length}`,
       ...criticals.map((claim) => `CRITICAL: ${claim}`),
       ...advisories.map((claim) => `ADVISORY: ${claim}`),
       ...(block === null ? [] : ["```findings", block, "```"]),
@@ -748,7 +751,12 @@ describe("reconcileFindings backstops a SHORTFALL, not only a total loss", () =>
 
   it("a partially-parsed reviewer still blocks the wave", () => {
     const resolution = resolveReviewFindings(
-      ["### Machine Summary", "CRITICAL_COUNT: 3", "CRITICAL: leak in the cache"].join("\n"),
+      [
+        "### Machine Summary",
+        "CRITICAL_COUNT: 3",
+        "ADVISORY_COUNT: 0",
+        "CRITICAL: leak in the cache",
+      ].join("\n"),
       "code-reviewer",
     );
     expect(resolution.kind).toBe("findings");

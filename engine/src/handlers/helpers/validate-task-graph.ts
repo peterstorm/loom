@@ -32,7 +32,7 @@ import {
   RECOVERED_AGENT,
 } from "../../core/findings";
 import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
-import { taskUnionError } from "../../state-manager";
+import { taskGraphLifecycleErrors, taskUnionError } from "../../state-manager";
 import { parseReviewPath } from "../../core/review-packet";
 
 export type ValidationResult =
@@ -125,6 +125,7 @@ export function validateFull(
 ): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
+  if (scope === "state-file") errors.push(...taskGraphLifecycleErrors(json));
 
   // Required top-level fields — path fields must be real strings, not merely
   // truthy, or a garbage value silently disarms downstream plan-based checks
@@ -452,10 +453,10 @@ function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
 }
 
 /**
- * Repair the review record's evidence-failure biconditional
+ * Repair the review record's evidence-failure invariant
  * (`evidenceFailureError` at the load boundary): the status is
  * `evidence_capture_failed` exactly when `review_evidence_failures` names at
- * least one reviewer.
+ * least one reviewer, and only that state may retain `review_error`.
  *
  * There is no honest reconstruction of a broken pairing — nothing on disk says
  * WHICH reviewer's transcript could not be parsed — so the repair clears the
@@ -479,7 +480,11 @@ function repairReviewRecord(t: Record<string, unknown>): {
     raw.every((agent) => typeof agent === "string" && agent.trim() !== "") &&
     new Set(raw).size === raw.length
   );
-  const wellFormed = failed === agents.length > 0 && rawArrayWellFormed;
+  const reviewErrorWellFormed = t.review_error === undefined ||
+    (typeof t.review_error === "string" && t.review_error.trim() !== "");
+  const staleReviewError = !failed && t.review_error !== undefined;
+  const wellFormed = failed === agents.length > 0 && rawArrayWellFormed &&
+    reviewErrorWellFormed && !staleReviewError;
 
   if (wellFormed) {
     // Still normalize: a duplicate or blank entry loads as an error but carries

@@ -10,6 +10,9 @@ function errorsOf(r: import("../../src/handlers/helpers/validate-task-graph").Va
 /** Build a minimal valid top-level graph wrapper around tasks */
 function wrapTasks(tasks: Record<string, unknown>[]) {
   return {
+    current_phase: "execute",
+    phase_artifacts: {},
+    skipped_phases: [],
     plan_title: "Test Plan",
     plan_file: ".claude/plans/test.md",
     spec_file: ".claude/specs/test/spec.md",

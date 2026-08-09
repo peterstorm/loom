@@ -144,10 +144,19 @@ describe("evidence_capture_failed is per-agent, so a sibling cannot erase it", (
     if (!parsed.ok) expect(parsed.error).toContain("review_status is \"passed\"");
   });
 
+  it("rejects stale review_error after review_status has moved to passed", () => {
+    const parsed = parseTaskGraph(
+      graphWith({ review_status: "passed", review_error: "CRITICAL_COUNT marker not found" }),
+    );
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("review_error is meaningful only");
+  });
+
   it("accepts the well-formed pairing", () => {
     const parsed = parseTaskGraph(
       graphWith({
         review_status: "evidence_capture_failed",
+        review_error: "CRITICAL_COUNT marker not found",
         review_evidence_failures: ["code-reviewer"],
       }),
     );

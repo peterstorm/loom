@@ -252,6 +252,27 @@ describe("packet-bound remediation review runs", () => {
     expect(task.review_status).toBe("blocked");
   });
 
+  it("cannot retire packet-bound findings without a newer implementation generation", () => {
+    const packetBound: Task = {
+      ...reviewedTask(),
+      findings: reviewedTask().findings?.map((finding) => ({
+        ...finding,
+        review_generation: 1,
+        review_packet_id: "d".repeat(64),
+      })),
+    };
+    let task = start(packetBound);
+    task = applyAgent(task, AGENTS[0], ["resolved_by_remediation", "resolved_by_remediation"]);
+    task = applyAgent(task, AGENTS[1], ["resolved_by_remediation", "resolved_by_remediation"]);
+
+    expect(task.resolved_findings).toEqual([]);
+    expect(task.findings?.map(({ id }) => id)).toEqual([
+      "code-reviewer-1",
+      "silent-failure-hunter-1",
+    ]);
+    expect(task.review_status).toBe("blocked");
+  });
+
   it("requires exactly one lifecycle block even when a packet has no prior findings", () => {
     const empty = start({
       ...reviewedTask(),
@@ -375,6 +396,25 @@ describe("packet-bound remediation review runs", () => {
       .toHaveLength(1);
   });
 
+  it("fails evidence capture when one reviewer resolves and identically re-emits a prior finding", () => {
+    const original = reviewedTask();
+    original.findings = original.findings?.map((finding, index) =>
+      index === 0 ? { ...finding, line: 2 } : finding
+    );
+    const task = applyAgent(
+      start(original),
+      AGENTS[0],
+      ["resolved_by_remediation", "still_present"],
+      [{ severity: "critical", claim: "null result is silently accepted" }],
+    );
+
+    expect(task.review_status).toBe("evidence_capture_failed");
+    expect(task.review_evidence_failures).toEqual([AGENTS[0]]);
+    expect(task.review_error).toContain("cannot mark prior finding code-reviewer-1 resolved_by_remediation");
+    expect(task.findings?.filter(({ claim }) => claim === "null result is silently accepted"))
+      .toHaveLength(1);
+  });
+
   it("ignores evidence bound to an older packet or generation", () => {
     const task = start();
     const run = task.review_run!;
@@ -464,6 +504,17 @@ describe("packet-bound remediation review runs", () => {
     const rejectedCollision = parseTaskGraph(collision);
     expect(rejectedCollision.ok).toBe(false);
     if (!rejectedCollision.ok) expect(rejectedCollision.error).toContain("resolved_findings");
+
+    const impossibleGeneration = structuredClone(graph(completed)) as unknown as Record<string, unknown>;
+    const impossibleTask = (impossibleGeneration.tasks as Array<Record<string, unknown>>)[0]!;
+    const impossibleResolution = (impossibleTask.resolved_findings as Array<Record<string, unknown>>)[0]!;
+    const storedFinding = impossibleResolution.finding as Record<string, unknown>;
+    const storedResolution = impossibleResolution.resolution as Record<string, unknown>;
+    storedFinding.review_generation = storedResolution.generation;
+    storedFinding.review_packet_id = "e".repeat(64);
+    const rejectedGeneration = parseTaskGraph(impossibleGeneration);
+    expect(rejectedGeneration.ok).toBe(false);
+    if (!rejectedGeneration.ok) expect(rejectedGeneration.error).toContain("resolved_findings");
   });
 
   it("repairs malformed remediation audit without deleting its valid nested finding", () => {

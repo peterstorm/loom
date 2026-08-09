@@ -276,6 +276,9 @@ describe("validate-task-graph handler integration (plan file on disk)", () => {
 
   function graphJson(planFile: unknown, fileList: string[]): string {
     return JSON.stringify({
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
       plan_title: "t",
       spec_file: "spec.md",
       plan_file: planFile,
@@ -468,6 +471,7 @@ describe("validateFull path-field type checks", () => {
   it("rejects non-string spec_file and plan_title", async () => {
     const { validateFull } = await import("../../src/handlers/helpers/validate-task-graph");
     const base = {
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
       plan_title: "t", plan_file: "p.md", spec_file: "s.md",
       tasks: [{ id: "T1", description: "x", agent: "code-implementer-agent", wave: 1, depends_on: [] }],
     };

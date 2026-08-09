@@ -117,9 +117,8 @@ export interface ParsedFindings {
    * declared four advisories whose `ADVISORY:` lines failed to scrape — wrapped,
    * re-indented, reformatted — recorded zero with nothing reporting the
    * shortfall, and `/wave-gate` Step 4b (a MUST-level constraint) had nothing to
-   * triage. Unlike `criticalCount`, a missing value is NOT an evidence failure:
-   * the contract has always made `CRITICAL_COUNT` the one marker whose absence
-   * means "the parse failed".
+   * triage. Both count markers are mandatory evidence: omitting either means the
+   * transcript may be truncated and must fail closed.
    */
   readonly advisoryCount: number | null;
   /** What became of the block, and — on the two arms that carry claims across —
@@ -158,10 +157,15 @@ export const EMPTY_FINDINGS: ParsedFindings = makeParsedFindings({});
 
 /** Pure: Build evidence_capture_failed error message, surfacing partial findings if any. */
 export function buildEvidenceFailureMessage(findings: ParsedFindings): string {
+  const missing = [
+    ...(findings.criticalCount === null ? ["CRITICAL_COUNT marker not found"] : []),
+    ...(findings.advisoryCount === null ? ["ADVISORY_COUNT marker not found"] : []),
+  ].join("; ");
+  const reason = missing === "" ? "review count markers are inconsistent" : missing;
   const partial = findings.critical.length + findings.advisory.length;
   return partial > 0
-    ? `CRITICAL_COUNT marker not found — partial findings extracted (${findings.critical.length} critical, ${findings.advisory.length} advisory)`
-    : "CRITICAL_COUNT marker not found in agent output";
+    ? `${reason} — partial findings extracted (${findings.critical.length} critical, ${findings.advisory.length} advisory)`
+    : `${reason} in agent output`;
 }
 
 /** The self-describing claim a broken parse leaves behind. */
@@ -503,7 +507,7 @@ export type UnboundReviewResolution = Exclude<ReviewResolution, { readonly kind:
 /** Pure: parse → reconcile, in one place, for every harness. */
 export function resolveReviewFindings(transcript: string, agent: string): UnboundReviewResolution {
   const findings = parseMachineSummary(transcript) ?? parseLegacyFindings(transcript);
-  return findings.criticalCount === null
+  return findings.criticalCount === null || findings.advisoryCount === null
     ? { kind: "evidence-failed", agent, message: buildEvidenceFailureMessage(findings) }
     : { kind: "findings", agent, findings: reconcileFindings(findings) };
 }

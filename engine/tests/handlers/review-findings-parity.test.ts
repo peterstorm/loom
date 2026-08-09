@@ -31,6 +31,7 @@ const TRANSCRIPT = [
   "",
   "### Machine Summary",
   "CRITICAL_COUNT: 1",
+  "ADVISORY_COUNT: 1",
   "CRITICAL: unchecked cast in the reducer",
   "ADVISORY: prefer a named constant",
 ].join("\n");
@@ -204,6 +205,7 @@ describe("resolveReviewFindings (pure)", () => {
     const transcript = [
       "### Machine Summary",
       "CRITICAL_COUNT: 1",
+      "ADVISORY_COUNT: 1",
       "CRITICAL: unchecked cast in the reducer",
       "```findings",
       JSON.stringify([
@@ -235,6 +237,7 @@ describe("resolveReviewFindings (pure)", () => {
     const transcript = [
       "### Machine Summary",
       "CRITICAL_COUNT: 2",
+      "ADVISORY_COUNT: 0",
       "```findings",
       "[]",
       "```",

@@ -80,4 +80,10 @@ const cases = corpus.value.cases.map((entry) => {
 const output = { schema_version: 1, profile_id: profileId, cases };
 mkdirSync(dirname(outputPath), { recursive: true });
 writeFileSync(outputPath, JSON.stringify(output, null, 2) + "\n");
+const notExecuted = cases.filter((entry) => entry.status === "not-executed");
 process.stdout.write(`${outputPath}\n`);
+process.stderr.write(
+  `Calibration execution: ${cases.length - notExecuted.length}/${cases.length} executed, ` +
+  `${notExecuted.length} not executed.\n`,
+);
+if (notExecuted.length > 0) process.exitCode = 1;

@@ -1,6 +1,29 @@
 import { describe, it, expect, vi } from "vitest";
-import { validateMinimal, validateFull, fixFull } from "../../src/handlers/helpers/validate-task-graph";
+import {
+  validateMinimal,
+  validateFull as validateFullImplementation,
+  fixFull,
+  type ValidationResult,
+  type ValidationScope,
+} from "../../src/handlers/helpers/validate-task-graph";
 import { parseTaskGraph } from "../../src/state-manager";
+
+const PERSISTED_LIFECYCLE = {
+  current_phase: "execute",
+  phase_artifacts: {},
+  skipped_phases: [],
+} as const;
+
+/** Most tests focus on task validation; supply the persisted lifecycle invariant explicitly. */
+function validateFull(
+  json: Record<string, unknown>,
+  scope: ValidationScope = "state-file",
+): ValidationResult {
+  return validateFullImplementation(
+    scope === "state-file" ? { ...PERSISTED_LIFECYCLE, ...json } : json,
+    scope,
+  );
+}
 
 /** Narrowing helper: errors of a failed validation, [] when ok */
 function errorsOf(r: import("../../src/handlers/helpers/validate-task-graph").ValidationResult): readonly string[] {
@@ -82,6 +105,29 @@ describe("validateFull (pure)", () => {
     expect(errorsOf(validateFull(graph))).toContain(
       'current_wave must be an integer >= 1 when present, got "2"',
     );
+  });
+
+  it("rejects state files missing mandatory lifecycle fields before the loader does", () => {
+    const graph = {
+      plan_title: "Test plan",
+      plan_file: ".claude/plans/plan.md",
+      spec_file: ".claude/specs/spec.md",
+      tasks: [validTask],
+    };
+    const result = validateFullImplementation(graph, "state-file");
+    expect(errorsOf(result)).toContain("missing current_phase");
+    expect(errorsOf(result)).toContain("missing phase_artifacts");
+    expect(parseTaskGraph(graph).ok).toBe(false);
+  });
+
+  it("keeps decompose payloads independent of persisted lifecycle fields", () => {
+    const result = validateFullImplementation({
+      plan_title: "Test plan",
+      plan_file: ".claude/plans/plan.md",
+      spec_file: ".claude/specs/spec.md",
+      tasks: [validTask],
+    }, "decompose-payload");
+    expect(result.ok).toBe(true);
   });
 
   it("rejects missing required top-level fields", () => {
@@ -846,14 +892,29 @@ describe("validateFull agrees with the load boundary about the findings aggregat
     },
   );
 
+  it("--fix clears stale review_error conservatively and is idempotent", () => {
+    const stale = graph({ review_status: "passed", review_error: "old parser failure" });
+    expect(validateFull(stale).ok).toBe(false);
+    expect(parseTaskGraph(stale).ok).toBe(false);
+
+    const once = fixFull(stale);
+    const repaired = JSON.parse(once.json);
+    expect(repaired.tasks[0].review_status).toBe("pending");
+    expect(repaired.tasks[0].review_error).toBeUndefined();
+    expect(parseTaskGraph(repaired).ok).toBe(true);
+    expect(fixFull(repaired).json).toBe(once.json);
+  });
+
   it("--fix preserves a well-formed evidence-failure record", () => {
     const valid = graph({
       review_status: "evidence_capture_failed",
+      review_error: "CRITICAL_COUNT marker not found",
       review_evidence_failures: ["code-reviewer"],
     });
     expect(parseTaskGraph(valid).ok).toBe(true);
     const repaired = JSON.parse(fixFull(valid).json);
     expect(repaired.tasks[0].review_status).toBe("evidence_capture_failed");
+    expect(repaired.tasks[0].review_error).toBe("CRITICAL_COUNT marker not found");
     expect(repaired.tasks[0].review_evidence_failures).toEqual(["code-reviewer"]);
   });
 });
