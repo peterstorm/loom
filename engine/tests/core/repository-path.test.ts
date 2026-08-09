@@ -53,6 +53,24 @@ describe("inspectRepositoryPath", () => {
       .toMatchObject({ relative: "src/deleted.ts", exists: false });
   });
 
+  it("can permit a leaf symlink for no-follow callers while rejecting symlinked parents", () => {
+    const root = repository();
+    const outside = mkdtempSync(join(tmpdir(), "loom-repository-path-outside-"));
+    cleanup.push(outside);
+    writeFileSync(join(outside, "secret.ts"), "secret\n");
+    symlinkSync(join(outside, "secret.ts"), join(root, "leaf.ts"));
+    symlinkSync(outside, join(root, "linked"));
+
+    expect(inspectRepositoryPath(root, "leaf.ts", "artifact", { allowLeafSymlink: true }))
+      .toMatchObject({ relative: "leaf.ts", exists: true });
+    expect(() => inspectRepositoryPath(
+      root,
+      "linked/secret.ts",
+      "artifact",
+      { allowLeafSymlink: true },
+    )).toThrow("must not traverse a symlink");
+  });
+
   it("rejects both leaf symlinks and symlinked parent directories", () => {
     const root = repository();
     const outside = mkdtempSync(join(tmpdir(), "loom-repository-path-outside-"));

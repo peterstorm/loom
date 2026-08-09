@@ -182,6 +182,36 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
     }
   });
 
+  it("resolves review generation against the task held under the update lock", async () => {
+    const f = fixture("locked-authority", BLOCKING);
+    const { StateManager } = await import("../../../src/state-manager");
+    const originalUpdate = StateManager.prototype.update;
+    const update = vi.spyOn(StateManager.prototype, "update").mockImplementation(async function (
+      this: typeof StateManager.prototype,
+      updater,
+    ) {
+      const current = JSON.parse(readFileSync(f.statePath, "utf-8"));
+      current.tasks[0].review_generation = 1;
+      writeFileSync(f.statePath, JSON.stringify(current));
+      return originalUpdate.call(this, updater);
+    });
+    try {
+      const { stderr } = await run({
+        session_id: f.session,
+        agent_type: "code-reviewer",
+        agent_transcript_path: f.transcriptPath,
+      });
+      const stored = f.state().tasks[0];
+      expect(stored.review_generation).toBe(1);
+      expect(stored.review_status).toBe("pending");
+      expect(stored.findings).toBeUndefined();
+      expect(stderr).toContain("evidence ignored");
+    } finally {
+      update.mockRestore();
+      f.cleanup();
+    }
+  });
+
   it("fails evidence capture when a located finding is outside the Review Packet scope", async () => {
     const claim = "outside-scope blocker";
     const located = [

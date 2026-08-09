@@ -28,10 +28,12 @@ pi install npm:@peterstorm/loom@<version>
 After install or update, run `scripts/sync-pi-agents.sh` from that installed
 package root, then `/reload`. Loom agents require explicit Pi model bindings and
 are generated into `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/agents`.
-`PI_CODING_AGENT` is Pi's process marker and is what Loom uses to select Pi
-state/rule paths. When set, `PI_CODING_AGENT_DIR` is the active base directory
-for generated Pi agents and rendered Loom resources; otherwise Loom falls back
-to `$HOME/.pi/agent`.
+`PI_CODING_AGENT` is Pi's process identity marker. Loom selects Pi state/rule
+paths when either that marker or `PI_CODING_AGENT_DIR` is present, so explicit
+agent-directory configuration also works in processes that do not carry the
+marker. When set, `PI_CODING_AGENT_DIR` is the active base directory for
+generated Pi agents and rendered Loom resources; otherwise Loom falls back to
+`$HOME/.pi/agent`.
 
 ## Package-root contract
 
@@ -41,8 +43,8 @@ That token is correct only in Claude Code. Pi does not expand it.
 Loom's Pi adapter therefore performs harness lowering at resource discovery:
 
 1. `pi/extension.ts` derives `PACKAGE_ROOT` from its own `import.meta.url`.
-2. `pi/resources.ts` renders commands and skills into a content-addressed cache
-   under the Pi agent directory.
+2. `pi/resources.ts` renders commands, skills, references, and rules into a
+   content-addressed cache under the Pi agent directory.
 3. Every root token in rendered markdown becomes the active package's absolute
    path.
 4. `scripts/sync-pi-agents.sh` applies the same lowering to generated Pi agent

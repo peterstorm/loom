@@ -390,6 +390,10 @@ export interface Task {
    * from that attempt invalidate older evidence even when current transcript
    * tool attribution is missing. */
   attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
+  /** Compact snapshot of every Git-visible dirty path immediately before the
+   * current implementation attempt. Comparing this boundary with the later
+   * dirty set detects writes outside declared/previously-attributed scope. */
+  attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
   /** Engine-issued packet authority retained after a review run closes. A
    * self-hashed packet is integrity evidence, not provenance; historical write
    * recovery accepts a packet only when every registration field matches. */

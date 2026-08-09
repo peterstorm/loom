@@ -10,7 +10,7 @@
 import { readFileSync, writeFileSync, chmodSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { withLock } from "./utils/lock";
-import { KNOWN_AGENTS, PHASE_ORDER, taskGraphPath } from "./config";
+import { KNOWN_AGENTS, PHASE_ORDER, REVIEW_SUB_AGENTS, taskGraphPath } from "./config";
 import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
 import { REVIEW_STATUSES, TASK_STATUSES } from "./types";
 import {
@@ -208,6 +208,13 @@ export function taskUnionError(v: unknown, index: number): string | null {
       return `tasks[${index}] ("${id}"): attempt_artifact_baseline must cover file_list first and in order`;
     }
   }
+  if (t.attempt_repository_baseline !== undefined) {
+    const baseline = parseDeclaredArtifactBaseline(
+      t.attempt_repository_baseline,
+      `tasks[${index}] ("${id}"): attempt_repository_baseline`,
+    );
+    if (!baseline.ok) return baseline.errors.join("; ");
+  }
   if (t.issued_review_packets !== undefined) {
     if (!Array.isArray(t.issued_review_packets)) {
       return `tasks[${index}] ("${id}"): issued_review_packets must be an array`;
@@ -389,7 +396,7 @@ export function taskUnionError(v: unknown, index: number): string | null {
     `tasks[${index}] ("${id}"): review_run`,
   );
   if (runError !== null) return runError;
-  return evidenceFailureError(t, `tasks[${index}] ("${id}")`);
+  return evidenceFailureError(t, `tasks[${index}] ("${id}")`, REVIEW_SUB_AGENTS);
 }
 
 /** The persisted lifecycle fields shared by the loader and operator validator. */

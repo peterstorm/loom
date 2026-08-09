@@ -42,6 +42,11 @@ describe("exact Pi agent rendering", () => {
         ok: false,
         error: expect.stringContaining("differs from active package"),
       });
+      writeFileSync(path, Buffer.from([0xff, 0xfe, 0xfd]));
+      expect(validatePiAgentDefinitionFile(path, "code-reviewer", ROOT)).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("differs from active package"),
+      });
       expect(validatePiAgentDefinitionFile(join(dir, "missing.md"), "code-reviewer", ROOT))
         .toMatchObject({ ok: false, error: expect.stringContaining("cannot read generated agent") });
     } finally {

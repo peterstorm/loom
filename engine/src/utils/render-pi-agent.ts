@@ -63,9 +63,9 @@ export function validatePiAgentDefinitionFile(
   agent: string,
   packageRoot: string,
 ): PiAgentFileValidation {
-  let actual: string;
+  let actual: Buffer;
   try {
-    actual = readFileSync(path, "utf-8");
+    actual = readFileSync(path);
   } catch (error) {
     return {
       ok: false,
@@ -83,7 +83,7 @@ export function validatePiAgentDefinitionFile(
     };
   }
 
-  return actual === expected
+  return actual.equals(Buffer.from(expected, "utf-8"))
     ? { ok: true }
     : {
         ok: false,

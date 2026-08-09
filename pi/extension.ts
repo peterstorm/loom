@@ -39,6 +39,7 @@ import {
   hasStandaloneReviewContext,
   resolveTaskReviewFindings,
   reviewResolutionLog,
+  type ReviewResolution,
 } from "../engine/src/core/review-output";
 import { parseSpecCheckOutput, reconcileSpecCheck } from "../engine/src/core/spec-check";
 import { newWaveGate } from "../engine/src/types";
@@ -68,7 +69,10 @@ import { materializePiResources } from "./resources";
 import { checkAgentSkillPrompt } from "../engine/src/core/agent-skills";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
 import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
-import { changedDeclaredArtifactsSince } from "../engine/src/utils/artifact-baseline";
+import {
+  changedDeclaredArtifactsSince,
+  changedRepositoryArtifactsSince,
+} from "../engine/src/utils/artifact-baseline";
 import {
   consumePiWriteGrant,
   injectPiWriteGrant,
@@ -224,17 +228,17 @@ export default function (pi: ExtensionAPI) {
     let currentGuard = "session-id";
     try {
       const sessionId = ctx.sessionManager.getSessionId() ?? "unknown";
+      const safeSessionId = parseSessionId(sessionId);
+      const graphIsActive = existsSync(taskGraphPath()) ||
+        rejectedChildWriteGrantSessions.has(sessionId) ||
+        (safeSessionId !== null && existsSync(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`));
 
       // Block direct edits during orchestration
       if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "multi_edit") {
         currentGuard = "block-direct-edits";
         const rejectedGrant = rejectedChildWriteGrantBlock(rejectedChildWriteGrantSessions.has(sessionId));
         if (rejectedGrant !== null) return rejectedGrant;
-        const safeSessionId = parseSessionId(sessionId);
-        const result = shouldBlockDirectEdit(event.toolName, sessionId, () =>
-          existsSync(taskGraphPath()) ||
-          (safeSessionId !== null && existsSync(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`))
-        );
+        const result = shouldBlockDirectEdit(event.toolName, sessionId, () => graphIsActive);
         if (result.kind === "block") {
           return { block: true, reason: result.message };
         }
@@ -243,10 +247,6 @@ export default function (pi: ExtensionAPI) {
       // Guard state file from bash writes
       if (event.toolName === "bash") {
         currentGuard = "guard-state-file";
-        const safeSessionId = parseSessionId(sessionId);
-        const graphIsActive = existsSync(taskGraphPath()) ||
-          rejectedChildWriteGrantSessions.has(sessionId) ||
-          (safeSessionId !== null && existsSync(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`));
         const result = graphIsActive
           ? guardStateFileDecision(event.input.command ?? "")
           : { kind: "allow" as const };
@@ -260,7 +260,6 @@ export default function (pi: ExtensionAPI) {
         // engine recorder fails closed on artifact-backed reports.
         try {
           const toolUseId = (event as { toolCallId?: unknown }).toolCallId;
-          const safeSessionId = parseSessionId(sessionId);
           if (safeSessionId !== null && typeof toolUseId === "string" && toolUseId !== "") {
             await fsSessionRegistry.recordCallStart(safeSessionId, toolUseId, Date.now());
           }
@@ -286,7 +285,7 @@ export default function (pi: ExtensionAPI) {
           // Loom owns only its catalog outside orchestration. During an active
           // graph, an unknown agent would bypass phase/task/model gates; without
           // one, it belongs to another Pi workflow and must pass through.
-          if (existsSync(taskGraphPath())) {
+          if (graphIsActive) {
             return {
               block: true,
               reason: "External Pi subagents cannot run while a Loom task graph is active",
@@ -718,14 +717,26 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    const finalizeReservedImplementations = async (rawResults: readonly unknown[]): Promise<void> => {
-      if (!reservation || !reservation.items.some((item) => item.implementation)) return;
+    const processingErrors: string[] = [];
+    const processingErrorResponse = () => processingErrors.length === 0
+      ? undefined
+      : {
+          content: [{
+            type: "text" as const,
+            text: `Loom Pi subagent evidence processing failed:\n- ${processingErrors.join("\n- ")}`,
+          }],
+          isError: true,
+        };
+
+    const finalizeReservedImplementations = async (
+      rawResults: readonly unknown[],
+    ): Promise<readonly string[]> => {
+      if (!reservation || !reservation.items.some((item) => item.implementation)) return [];
       const manager = StateManager.fromSession(reservation.sessionId);
       if (!manager) {
-        process.stderr.write(
-          `loom(pi): cannot finalize reserved implementation attempts for session ${reservation.sessionId} — task graph unavailable\n`,
-        );
-        return;
+        const diagnostic = `cannot finalize reserved implementation attempts for session ${reservation.sessionId} — task graph unavailable`;
+        process.stderr.write(`loom(pi): ${diagnostic}\n`);
+        return [diagnostic];
       }
       const root = git.repositoryRoot() ?? process.cwd();
       try {
@@ -756,11 +767,15 @@ export default function (pi: ExtensionAPI) {
             }
 
             let changedDeclaredArtifacts: readonly string[] = [];
+            let changedRepositoryArtifacts: readonly string[] = [];
             let bytesChangedSinceAttempt = true;
             try {
               changedDeclaredArtifacts = changedDeclaredArtifactsSince(root, task.artifact_baseline);
-              bytesChangedSinceAttempt = task.attempt_artifact_baseline === undefined ||
-                changedDeclaredArtifactsSince(root, task.attempt_artifact_baseline).length > 0;
+              changedRepositoryArtifacts = changedRepositoryArtifactsSince(
+                root,
+                task.attempt_repository_baseline,
+              );
+              bytesChangedSinceAttempt = changedRepositoryArtifacts.length > 0;
             } catch (error) {
               // Comparison failure cannot prove the old evidence still matches
               // current bytes. Fail closed by invalidating it and retain the
@@ -787,7 +802,7 @@ export default function (pi: ExtensionAPI) {
               taskCompleted: false,
               testResult: { verdict: "untrusted", passed: false, label: "pi-implementation-failed" },
               testEvidence: failure,
-              filesModified: [],
+              filesModified: changedRepositoryArtifacts,
               changedDeclaredArtifacts,
               bytesChangedSinceAttempt: true,
               newTestsWritten: false,
@@ -796,10 +811,11 @@ export default function (pi: ExtensionAPI) {
           }
           return state;
         });
+        return [];
       } catch (error) {
-        process.stderr.write(
-          `loom(pi): reserved implementation finalization failed: ${error instanceof Error ? error.message : String(error)}\n`,
-        );
+        const diagnostic = `reserved implementation finalization failed: ${error instanceof Error ? error.message : String(error)}`;
+        process.stderr.write(`loom(pi): ${diagnostic}\n`);
+        return [diagnostic];
       }
     };
 
@@ -807,7 +823,7 @@ export default function (pi: ExtensionAPI) {
     const rawResults = details && "results" in details && Array.isArray(details.results)
       ? details.results
       : [];
-    await finalizeReservedImplementations(rawResults);
+    processingErrors.push(...await finalizeReservedImplementations(rawResults));
 
     // A reservation is the authoritative expected batch. Pi may return a
     // shorter or reordered results array after a child disappears. Reconcile
@@ -880,7 +896,7 @@ export default function (pi: ExtensionAPI) {
       process.stderr.write(
         "loom(pi): subagent tool_result is missing details.results — successful evidence was not applied\n",
       );
-      return;
+      return processingErrorResponse();
     }
 
     // Shape guard: a pi version drifting details.results away from an array
@@ -889,7 +905,7 @@ export default function (pi: ExtensionAPI) {
       process.stderr.write(
         `loom(pi): subagent tool_result has unrecognized details.results shape (${typeof details.results}) — successful evidence was not applied\n`,
       );
-      return;
+      return processingErrorResponse();
     }
     const results = rawResults as Array<{
       agent: string;
@@ -898,8 +914,6 @@ export default function (pi: ExtensionAPI) {
       stopReason?: string;
       messages: unknown;
     }>;
-    const processingErrors: string[] = [];
-
     for (const [resultIndex, result] of results.entries()) {
       // Per-result error isolation (mirrors dispatch.ts's safeRun): a throw
       // while processing result #1 must not abort results #2..N — that
@@ -1147,11 +1161,20 @@ export default function (pi: ExtensionAPI) {
               };
             }
             let changedArtifacts: readonly string[];
+            let changedRepositoryArtifacts: readonly string[] = [];
             let bytesChangedSinceAttempt: boolean;
             try {
               changedArtifacts = changedDeclaredArtifactsSince(root, currentTarget.artifact_baseline);
-              bytesChangedSinceAttempt = currentTarget.attempt_artifact_baseline === undefined ||
-                changedDeclaredArtifactsSince(root, currentTarget.attempt_artifact_baseline).length > 0;
+              if (currentTarget.attempt_repository_baseline === undefined) {
+                bytesChangedSinceAttempt = currentTarget.attempt_artifact_baseline === undefined ||
+                  changedDeclaredArtifactsSince(root, currentTarget.attempt_artifact_baseline).length > 0;
+              } else {
+                changedRepositoryArtifacts = changedRepositoryArtifactsSince(
+                  root,
+                  currentTarget.attempt_repository_baseline,
+                );
+                bytesChangedSinceAttempt = changedRepositoryArtifacts.length > 0;
+              }
             } catch (error) {
               changedArtifacts = currentTarget.file_list ?? [];
               bytesChangedSinceAttempt = true;
@@ -1174,7 +1197,7 @@ export default function (pi: ExtensionAPI) {
               taskCompleted: false,
               testResult: { verdict: "untrusted", passed: false, label: "pi-transcript-capture-failed" },
               testEvidence: failureReason,
-              filesModified: [],
+              filesModified: changedRepositoryArtifacts,
               changedDeclaredArtifacts: changedArtifacts,
               bytesChangedSinceAttempt,
               newTestsWritten: false,
@@ -1223,12 +1246,13 @@ export default function (pi: ExtensionAPI) {
         try {
           const root = git.repositoryRoot() ?? process.cwd();
           changedArtifacts = changedDeclaredArtifactsSince(root, task.artifact_baseline);
-          const attemptBaselinePaths = new Set(
-            task.attempt_artifact_baseline?.map(({ artifact }) => artifact) ?? [],
-          );
-          bytesChangedSinceAttempt = task.attempt_artifact_baseline === undefined ||
-            changedDeclaredArtifactsSince(root, task.attempt_artifact_baseline).length > 0 ||
-            filesModified.some((path) => !attemptBaselinePaths.has(path));
+          bytesChangedSinceAttempt = task.attempt_repository_baseline === undefined
+            ? task.attempt_artifact_baseline === undefined ||
+              changedDeclaredArtifactsSince(root, task.attempt_artifact_baseline).length > 0 ||
+              filesModified.some((path) =>
+                !task.attempt_artifact_baseline?.some(({ artifact }) => artifact === path)
+              )
+            : changedRepositoryArtifactsSince(root, task.attempt_repository_baseline).length > 0;
         } catch (error) {
           await mgr.update((s) => ({
             ...s,
@@ -1343,30 +1367,42 @@ export default function (pi: ExtensionAPI) {
           .flatMap((message) => message.content.filter((block) => block.type === "text").map((block) => block.text ?? ""))
           .join("\n");
 
-        // Identical decision + transform as the Claude Code SubagentStop hook —
-        // one shared implementation, so findings cannot have identity on one
-        // harness and not the other. Scope is the Review Packet's canonical
-        // declared/observed file union.
-        const resolution = constrainReviewResolutionToScope(
-          resolveTaskReviewFindings(
-            transcriptText,
-            agentType,
-            reviewTask.review_run,
-            reviewTask.review_generation,
-          ),
-          [...(reviewTask.file_list ?? []), ...(reviewTask.files_modified ?? [])],
-        );
+        // Transcript bytes are captured outside the lock; packet generation and
+        // scope authority are resolved against the current task INSIDE it. The
+        // Claude Code shell uses the same state-ownership boundary.
+        let resolution: ReviewResolution = {
+          kind: "evidence-failed",
+          agent: agentType,
+          message: "review task disappeared before evidence could be applied",
+        };
         let appliedTask = reviewTask;
         let applicationChanged = false;
+        let taskFound = false;
         await mgr.update((s) => ({
           ...s,
           tasks: s.tasks.map((t) => {
             if (t.id !== taskId) return t;
+            taskFound = true;
+            resolution = constrainReviewResolutionToScope(
+              resolveTaskReviewFindings(
+                transcriptText,
+                agentType,
+                t.review_run,
+                t.review_generation,
+              ),
+              [...(t.file_list ?? []), ...(t.files_modified ?? [])],
+            );
             appliedTask = applyReviewResolution(t, resolution);
             applicationChanged = appliedTask !== t;
             return appliedTask;
           }),
         }));
+        if (!taskFound) {
+          process.stderr.write(
+            `WARNING: ${agentType} review task ${taskId} disappeared before evidence application — findings NOT stored\n`,
+          );
+          continue;
+        }
         process.stderr.write(
           reviewResolutionLog(taskId, resolution, appliedTask, applicationChanged) + "\n",
         );
@@ -1441,15 +1477,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    if (processingErrors.length > 0) {
-      return {
-        content: [{
-          type: "text" as const,
-          text: `Loom Pi subagent evidence processing failed:\n- ${processingErrors.join("\n- ")}`,
-        }],
-        isError: true,
-      };
-    }
+    return processingErrorResponse();
   });
 
   // ─── Commands ─────────────────────────────────────────────────────────

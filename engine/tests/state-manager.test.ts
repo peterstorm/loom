@@ -490,6 +490,20 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
         artifact_baseline: valid,
       }],
     }).ok).toBe(false);
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, attempt_repository_baseline: valid }],
+    }).ok).toBe(true);
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        attempt_repository_baseline: [{
+          artifact: "src/a.ts",
+          snapshot: { kind: "sha256", digest: "bad" },
+        }],
+      }],
+    }).ok).toBe(false);
 
     for (const artifact_baseline of [
       "not-an-array",

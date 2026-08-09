@@ -861,9 +861,10 @@ adapts Pi's `tool_call` / `tool_result` events to the shared engine.
 
 Package identity is derived from the extension module's `import.meta.url`—never
 from cwd or a Claude Code cache. At `resources_discover`, Loom renders shared
-commands and skills into a content-addressed Pi cache, replacing Claude's
-`${CLAUDE_PLUGIN_ROOT}` token with the active package root. The agent sync script
-performs the same lowering for Pi subagent definitions, inlines declared skills,
+commands, skills, references, and rules into a content-addressed Pi cache,
+replacing Claude's `${CLAUDE_PLUGIN_ROOT}` token with the active package root.
+The agent sync script performs the same lowering for Pi subagent definitions,
+inlines declared skills,
 and stamps integrity metadata. Every Pi spawn byte-compares that definition with
 a fresh render from the active package before execution.
 

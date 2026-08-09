@@ -789,10 +789,18 @@ export function reviewRunError(
  * passing record: a reviewer whose transcript nobody could parse, on a task the
  * gate is about to advance.
  *
+ * A named failure must also be retryable: packet-bound failures belong to that
+ * run's expected batch, while legacy failures belong to the configured reviewer
+ * roster supplied by the state boundary.
+ *
  * Lives here, with the other aggregate rules, so `taskUnionError` and
  * `validate-task-graph` enforce it from one definition.
  */
-export function evidenceFailureError(t: Record<string, unknown>, label: string): string | null {
+export function evidenceFailureError(
+  t: Record<string, unknown>,
+  label: string,
+  configuredReviewers: ReadonlySet<string>,
+): string | null {
   const raw = t.review_evidence_failures;
   if (raw !== undefined) {
     if (!Array.isArray(raw) || raw.some((agent) => typeof agent !== "string" || agent.trim() === "")) {
@@ -800,6 +808,20 @@ export function evidenceFailureError(t: Record<string, unknown>, label: string):
     }
     const duplicate = raw.findIndex((agent, at) => raw.indexOf(agent) !== at);
     if (duplicate >= 0) return `${label}: review_evidence_failures repeats '${raw[duplicate]}'`;
+    const run = typeof t.review_run === "object" && t.review_run !== null && !Array.isArray(t.review_run)
+      ? t.review_run as Record<string, unknown>
+      : null;
+    const expected = Array.isArray(run?.expected_agents) &&
+      run.expected_agents.every((agent) => typeof agent === "string")
+      ? new Set(run.expected_agents as string[])
+      : null;
+    const allowed = expected ?? configuredReviewers;
+    const unknown = raw.find((agent) => typeof agent === "string" && !allowed.has(agent));
+    if (unknown !== undefined) {
+      return expected === null
+        ? `${label}: review_evidence_failures names unconfigured reviewer '${unknown}'`
+        : `${label}: review_evidence_failures names reviewer '${unknown}' outside the active review run`;
+    }
   }
   const outstanding = Array.isArray(raw) ? raw.length : 0;
   const failed = t.review_status === "evidence_capture_failed";

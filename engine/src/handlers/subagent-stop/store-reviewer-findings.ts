@@ -22,6 +22,7 @@ import {
   hasStandaloneReviewContext,
   resolveTaskReviewFindings,
   reviewResolutionLog,
+  type ReviewResolution,
 } from "../../core/review-output";
 import { isReviewAgent } from "../../config";
 import { StateManager } from "../../state-manager";
@@ -109,34 +110,40 @@ const handler: HookHandler = async (stdin) => {
   }
 
   const transcript = await readTranscriptWithRetry(rawPath, /\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*\d+/);
-  const resolution = transcript
-    ? constrainReviewResolutionToScope(
-        resolveTaskReviewFindings(
-          transcript,
-          agentType,
-          targetTask.review_run,
-          targetTask.review_generation,
-        ),
-        [...(targetTask.file_list ?? []), ...(targetTask.files_modified ?? [])],
-      )
-    : {
-        kind: "evidence-failed" as const,
-        agent: agentType,
-        message: `review transcript empty or unreadable at ${rawPath || "<unset>"}`,
-      };
-
+  let resolution: ReviewResolution = {
+    kind: "evidence-failed",
+    agent: agentType,
+    message: `review transcript empty or unreadable at ${rawPath || "<unset>"}`,
+  };
   let appliedTask = targetTask;
   let applicationChanged = false;
+  let taskFound = false;
   await mgr.update((s) => ({
     ...s,
     tasks: s.tasks.map((t) => {
       if (t.id !== taskId) return t;
+      taskFound = true;
+      resolution = transcript
+        ? constrainReviewResolutionToScope(
+            resolveTaskReviewFindings(
+              transcript,
+              agentType,
+              t.review_run,
+              t.review_generation,
+            ),
+            [...(t.file_list ?? []), ...(t.files_modified ?? [])],
+          )
+        : resolution;
       appliedTask = applyReviewResolution(t, resolution);
       applicationChanged = appliedTask !== t;
       return appliedTask;
     }),
   }));
 
+  if (!taskFound) {
+    warn(`${agentType} review task ${taskId} disappeared before evidence application — findings NOT stored`);
+    return { kind: "passthrough" };
+  }
   process.stderr.write(
     reviewResolutionLog(taskId, resolution, appliedTask, applicationChanged) + "\n",
   );

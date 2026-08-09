@@ -13,6 +13,10 @@ export interface InspectedRepositoryPath extends RepositoryPath {
 export interface RepositoryPathInspectionOptions {
   readonly mustExist?: boolean;
   readonly mustBeFile?: boolean;
+  /** Permit a symlink only at the final component. Parent symlinks remain an
+   * escape and are always rejected. Callers must use lstat/readlink, not follow
+   * the permitted leaf. */
+  readonly allowLeafSymlink?: boolean;
 }
 
 function resultError(errors: readonly string[]): Error {
@@ -62,7 +66,9 @@ export function inspectRepositoryPath(
       pathExists = false;
       break;
     }
-    if (stat.isSymbolicLink()) throw new Error(`${label} must not traverse a symlink: ${raw}`);
+    if (stat.isSymbolicLink() && !(options.allowLeafSymlink && index === segments.length - 1)) {
+      throw new Error(`${label} must not traverse a symlink: ${raw}`);
+    }
     if (index < segments.length - 1 && !stat.isDirectory()) {
       throw new Error(`${label} has a non-directory parent component: ${raw}`);
     }

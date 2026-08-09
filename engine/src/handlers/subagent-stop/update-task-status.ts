@@ -18,7 +18,10 @@ import { stripNamespace } from "../../utils/strip-namespace";
 import { extractTaskId } from "../../utils/extract-task-id";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import { canonicalRepositoryPaths } from "../../utils/repository-path";
-import { changedDeclaredArtifactsSince } from "../../utils/artifact-baseline";
+import {
+  changedDeclaredArtifactsSince,
+  changedRepositoryArtifactsSince,
+} from "../../utils/artifact-baseline";
 import { attributedChangedArtifacts } from "../../core/artifact-baseline";
 import { invalidateTaskReview } from "../../core/review-output";
 import { parseTranscript } from "../../parsers/parse-transcript";
@@ -652,14 +655,16 @@ export const runUpdateTaskStatus = async (
   try {
     const root = git.repositoryRoot() ?? process.cwd();
     changedDeclaredArtifacts = changedDeclaredArtifactsSince(root, task.artifact_baseline);
-    // A pre-field graph cannot prove that this retry changed no bytes. Treat it
-    // as changed so historical evidence is invalidated rather than trusted.
-    const attemptBaselinePaths = new Set(
-      task.attempt_artifact_baseline?.map(({ artifact }) => artifact) ?? [],
-    );
-    bytesChangedSinceAttempt = task.attempt_artifact_baseline === undefined ||
-      changedDeclaredArtifactsSince(root, task.attempt_artifact_baseline).length > 0 ||
-      filesModified.some((path) => !attemptBaselinePaths.has(path));
+    // The compact repository boundary detects declared and undeclared writes,
+    // including paths that became clean again. A missing legacy boundary fails
+    // closed through changedRepositoryArtifactsSince.
+    bytesChangedSinceAttempt = task.attempt_repository_baseline === undefined
+      ? task.attempt_artifact_baseline === undefined ||
+        changedDeclaredArtifactsSince(root, task.attempt_artifact_baseline).length > 0 ||
+        filesModified.some((path) =>
+          !task.attempt_artifact_baseline?.some(({ artifact }) => artifact === path)
+        )
+      : changedRepositoryArtifactsSince(root, task.attempt_repository_baseline).length > 0;
   } catch (error) {
     await mgr.update((s) => ({
       ...s,

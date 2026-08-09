@@ -13,7 +13,10 @@ import {
   type TaskExecutionSpawn,
   type ValidateTaskExecutionInput,
 } from "../core/validate-task-execution";
-import { captureDeclaredArtifactBaseline } from "../utils/artifact-baseline";
+import {
+  captureDeclaredArtifactBaseline,
+  captureRepositoryChangeBaseline,
+} from "../utils/artifact-baseline";
 import { repositoryContext } from "../utils/git";
 
 /**
@@ -58,7 +61,17 @@ export async function validateTaskExecutionBatch(
   const baselines = new Map<string, Readonly<{
     proof: ReturnType<typeof captureDeclaredArtifactBaseline>;
     attempt: ReturnType<typeof captureDeclaredArtifactBaseline>;
+    repositoryAttempt: ReturnType<typeof captureRepositoryChangeBaseline>;
   }>>();
+  let repositoryAttempt: ReturnType<typeof captureRepositoryChangeBaseline>;
+  try {
+    repositoryAttempt = captureRepositoryChangeBaseline(repository.root);
+  } catch (error) {
+    return {
+      kind: "block",
+      message: `BLOCKED: Cannot snapshot repository changes: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
   for (const taskId of taskIds) {
     const task = state.tasks.find((candidate) => candidate.id === taskId);
     if (!task) continue;
@@ -68,6 +81,7 @@ export async function validateTaskExecutionBatch(
       baselines.set(taskId, {
         proof: captureDeclaredArtifactBaseline(repository.root, declared),
         attempt: captureDeclaredArtifactBaseline(repository.root, attemptScope),
+        repositoryAttempt,
       });
     } catch (error) {
       return {
@@ -99,6 +113,7 @@ export async function validateTaskExecutionBatch(
               repository.headSha,
               artifactBaselines.proof,
               artifactBaselines.attempt,
+              artifactBaselines.repositoryAttempt,
             );
       }),
     };

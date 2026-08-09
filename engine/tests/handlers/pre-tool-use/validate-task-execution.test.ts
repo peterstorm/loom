@@ -210,7 +210,10 @@ describe("validate-task-execution — exclusive ownership", () => {
   it("revalidates status, wave authority, and artifact scope under the lock", () => {
     const input = [{ kind: "implementation" as const, prompt: "Task ID: T1", description: "" }];
     const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
-    const baselines = new Map([["T1", { proof: baseline, attempt: baseline }]]);
+    const baselines = new Map([[
+      "T1",
+      { proof: baseline, attempt: baseline, repositoryAttempt: [] },
+    ]]);
     const pending = scoped("T1", "src/a.ts");
 
     expect(taskExecutionRegistrationError(
@@ -249,16 +252,22 @@ describe("validate-task-execution — retry baselines", () => {
       ...retryBaseline,
       { artifact: "tests/a.test.ts", snapshot: { kind: "missing" as const } },
     ];
+    const repositoryAttemptBaseline = [{
+      artifact: "dirty-before-spawn.ts",
+      snapshot: { kind: "sha256" as const, digest: "c".repeat(64) },
+    }];
     const registered = registerTaskExecutionBaseline(
       existing,
       "2".repeat(40),
       retryBaseline,
       retryAttemptBaseline,
+      repositoryAttemptBaseline,
     );
 
     expect(registered.start_sha).toBe("1".repeat(40));
     expect(registered.artifact_baseline).toBe(originalBaseline);
     expect(registered.attempt_artifact_baseline).toBe(retryAttemptBaseline);
+    expect(registered.attempt_repository_baseline).toBe(repositoryAttemptBaseline);
   });
 
   it("fills a missing execution boundary on first spawn", () => {
@@ -272,6 +281,7 @@ describe("validate-task-execution — retry baselines", () => {
     expect(registered.start_sha).toBe("1".repeat(40));
     expect(registered.artifact_baseline).toBe(captured);
     expect(registered.attempt_artifact_baseline).toBe(captured);
+    expect(registered.attempt_repository_baseline).toEqual([]);
   });
 });
 

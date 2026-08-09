@@ -7,7 +7,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookHandler, Phase, TaskGraph } from "../../types";
-import { PHASE_ORDER, KNOWN_AGENTS } from "../../config";
+import { PHASE_ORDER, KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
 import {
   attributeFindings,
   claimsOfSeverity,
@@ -100,7 +100,7 @@ function findingsErrorsOf(task: Record<string, unknown>, label: string): string[
   push(resolutionsUnionError(task.resolved_findings, `${label}: resolved_findings`));
   push(findingIdCollisionError(task.findings, task.refuted_findings, label, task.resolved_findings));
   push(reviewRunError(task.review_run, task.review_generation, task.findings, `${label}: review_run`));
-  push(evidenceFailureError(task, label));
+  push(evidenceFailureError(task, label, REVIEW_SUB_AGENTS));
   return errors;
 }
 
@@ -472,13 +472,23 @@ function repairReviewRecord(t: Record<string, unknown>): {
   readonly cleared: boolean;
 } {
   const raw = t.review_evidence_failures;
+  const run = typeof t.review_run === "object" && t.review_run !== null && !Array.isArray(t.review_run)
+    ? t.review_run as Record<string, unknown>
+    : null;
+  const expected = Array.isArray(run?.expected_agents) &&
+    run.expected_agents.every((agent) => typeof agent === "string")
+    ? new Set(run.expected_agents as string[])
+    : null;
+  const allowed = expected ?? REVIEW_SUB_AGENTS;
   const agents = Array.isArray(raw)
-    ? [...new Set(raw.filter((a): a is string => typeof a === "string" && a.trim() !== ""))]
+    ? [...new Set(raw.filter((a): a is string =>
+        typeof a === "string" && a.trim() !== "" && allowed.has(a),
+      ))]
     : [];
   const failed = t.review_status === "evidence_capture_failed";
   const rawArrayWellFormed = raw === undefined || (
     Array.isArray(raw) &&
-    raw.every((agent) => typeof agent === "string" && agent.trim() !== "") &&
+    raw.every((agent) => typeof agent === "string" && agent.trim() !== "" && allowed.has(agent)) &&
     new Set(raw).size === raw.length
   );
   const reviewErrorWellFormed = t.review_error === undefined ||

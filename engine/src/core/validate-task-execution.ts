@@ -168,6 +168,7 @@ export function parseImplementationTaskBindings(
 export type TaskExecutionBaselines = ReadonlyMap<string, Readonly<{
   proof: readonly DeclaredArtifactBaseline[];
   attempt: readonly DeclaredArtifactBaseline[];
+  repositoryAttempt: readonly DeclaredArtifactBaseline[];
 }>>;
 
 function samePaths(left: readonly string[], right: readonly string[]): boolean {
@@ -216,11 +217,13 @@ export function registerTaskExecutionBaseline(
   sha: string,
   proofBaseline: readonly DeclaredArtifactBaseline[],
   attemptBaseline: readonly DeclaredArtifactBaseline[] = proofBaseline,
+  repositoryAttemptBaseline: readonly DeclaredArtifactBaseline[] = [],
 ): Task {
   return {
     ...task,
     start_sha: task.start_sha ?? sha,
     artifact_baseline: task.artifact_baseline ?? proofBaseline,
     attempt_artifact_baseline: attemptBaseline,
+    attempt_repository_baseline: repositoryAttemptBaseline,
   };
 }

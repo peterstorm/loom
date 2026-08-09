@@ -152,6 +152,39 @@ describe("evidence_capture_failed is per-agent, so a sibling cannot erase it", (
     if (!parsed.ok) expect(parsed.error).toContain("review_error is meaningful only");
   });
 
+  it("rejects an unconfigured legacy reviewer that no retry can spawn", () => {
+    const parsed = parseTaskGraph(
+      graphWith({
+        review_status: "evidence_capture_failed",
+        review_error: "capture failed",
+        review_evidence_failures: ["retired-reviewer"],
+      }),
+    );
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("unconfigured reviewer 'retired-reviewer'");
+  });
+
+  it("rejects a failed reviewer outside the active packet's expected batch", () => {
+    const parsed = parseTaskGraph(
+      graphWith({
+        review_status: "evidence_capture_failed",
+        review_error: "capture failed",
+        review_generation: 1,
+        review_evidence_failures: ["silent-failure-hunter"],
+        review_run: {
+          generation: 1,
+          packet_id: "a".repeat(64),
+          head_sha: "b".repeat(40),
+          expected_agents: ["code-reviewer"],
+          prior_finding_ids: [],
+          evidence: [],
+        },
+      }),
+    );
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("outside the active review run");
+  });
+
   it("accepts the well-formed pairing", () => {
     const parsed = parseTaskGraph(
       graphWith({

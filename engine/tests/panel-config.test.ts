@@ -251,12 +251,11 @@ describe("panelExecuteOverlap (module-load guard for detectPhase's check orderin
   });
 });
 
-describe("ARCH_PANEL_PHASE (derived, not a literal)", () => {
+describe("ARCH_PANEL_PHASE (intentional singleton policy)", () => {
   it("is the single phase every panel agent is classified as", () => {
-    // Derived from the panel entries' shared `phase` in ARCHITECTURE_AGENTS
-    // (derivePanelPhase), so it cannot drift from the set. The module loading at
-    // all proves the derivation found exactly one shared phase — a divergent
-    // panel-agent phase would throw at import before any test runs.
+    // Panel roles deliberately carry no per-agent phase. One typed constant is
+    // the policy source used by phase-order validation, so no panel declaration
+    // can encode a conflicting phase for a retired derivation to reconcile.
     expect(ARCH_PANEL_PHASE).toBe("architecture");
   });
 
