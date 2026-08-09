@@ -810,25 +810,35 @@ export default function (pi: ExtensionAPI) {
     await finalizeReservedImplementations(rawResults);
 
     // A reservation is the authoritative expected batch. Pi may return a
-    // shorter results array after a child disappears; persist that absence as
-    // typed review evidence failure rather than leaving the slot unresolved.
+    // shorter or reordered results array after a child disappears. Reconcile
+    // every gate-owned slot before any malformed-details early return so stale
+    // review/spec evidence cannot remain authoritative.
     if (reservation) {
-      const missingReviews = reservation.items.flatMap((item, index) => {
-        if (item.standalone || item.taskId === null || !isReviewAgent(item.agentType)) return [];
+      const returnedAgentAt = (index: number): string | null => {
         const raw = rawResults[index];
-        const returnedAgent = typeof raw === "object" && raw !== null && !Array.isArray(raw) &&
-          typeof (raw as Record<string, unknown>).agent === "string"
-          ? stripNamespace((raw as Record<string, unknown>).agent as string)
-          : null;
-        return returnedAgent === item.agentType ? [] : [{ item, index }];
-      });
-      if (missingReviews.length > 0) {
+        if (typeof raw !== "object" || raw === null || Array.isArray(raw) || !("agent" in raw)) return null;
+        return typeof raw.agent === "string" ? stripNamespace(raw.agent) : null;
+      };
+      const missingReviews = reservation.items.flatMap((item, index) =>
+        item.standalone || item.taskId === null || !isReviewAgent(item.agentType) ||
+          returnedAgentAt(index) === item.agentType
+          ? []
+          : [{ item, index }]
+      );
+      const missingSpecChecks = reservation.items.flatMap((item, index) =>
+        item.standalone || item.agentType !== "spec-check-invoker" ||
+          returnedAgentAt(index) === item.agentType
+          ? []
+          : [{ item, index }]
+      );
+      if (missingReviews.length > 0 || missingSpecChecks.length > 0) {
         const manager = StateManager.fromSession(reservation.sessionId);
         if (!manager) {
           process.stderr.write(
-            `loom(pi): cannot persist ${missingReviews.length} missing reserved review result(s) for session ${reservation.sessionId} — task graph unavailable\n`,
+            `loom(pi): cannot persist ${missingReviews.length} missing reserved review result(s) and ${missingSpecChecks.length} missing reserved spec-check result(s) for session ${reservation.sessionId} — task graph unavailable\n`,
           );
         } else {
+          const runAt = new Date().toISOString();
           await manager.update((state) => ({
             ...state,
             tasks: state.tasks.map((task) => {
@@ -839,10 +849,27 @@ export default function (pi: ExtensionAPI) {
                 message: `reserved reviewer result ${index + 1} for ${item.agentType} was missing or mismatched`,
               }), task);
             }),
+            ...(missingSpecChecks.length === 0
+              ? {}
+              : {
+                  spec_check: {
+                    wave: state.current_wave ?? 1,
+                    run_at: runAt,
+                    verdict: "EVIDENCE_CAPTURE_FAILED" as const,
+                    error: missingSpecChecks.map(({ index }) =>
+                      `reserved spec-check result ${index + 1} for spec-check-invoker was missing or mismatched`
+                    ).join("; "),
+                  },
+                }),
           }));
           for (const { item, index } of missingReviews) {
             process.stderr.write(
               `loom(pi): reserved reviewer result ${index + 1} for ${item.agentType}/${item.taskId} was missing or mismatched — marking evidence_capture_failed\n`,
+            );
+          }
+          for (const { index } of missingSpecChecks) {
+            process.stderr.write(
+              `loom(pi): reserved spec-check result ${index + 1} for spec-check-invoker was missing or mismatched — marking evidence_capture_failed\n`,
             );
           }
         }
@@ -871,6 +898,7 @@ export default function (pi: ExtensionAPI) {
       stopReason?: string;
       messages: unknown;
     }>;
+    const processingErrors: string[] = [];
 
     for (const [resultIndex, result] of results.entries()) {
       // Per-result error isolation (mirrors dispatch.ts's safeRun): a throw
@@ -1405,10 +1433,22 @@ export default function (pi: ExtensionAPI) {
         } catch {
           /* best-effort only — the log line must never throw */
         }
+        const diagnostic = `result ${resultIndex + 1} for agent ${String(result?.agent ?? "<unknown>")} (task ${taskIdForLog}): ${err instanceof Error ? err.message : String(err)}`;
+        processingErrors.push(diagnostic);
         process.stderr.write(
-          `loom(pi): subagent-stop processing failed for agent ${String(result?.agent ?? "<unknown>")} (task ${taskIdForLog}): ${err instanceof Error ? err.message : String(err)} — continuing with remaining results\n`,
+          `loom(pi): subagent-stop processing failed for ${diagnostic} — continuing with remaining results\n`,
         );
       }
+    }
+
+    if (processingErrors.length > 0) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Loom Pi subagent evidence processing failed:\n- ${processingErrors.join("\n- ")}`,
+        }],
+        isError: true,
+      };
     }
   });
 

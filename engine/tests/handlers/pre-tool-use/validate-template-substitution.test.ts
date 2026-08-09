@@ -1,6 +1,12 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { findResidualPlaceholders } from "../../../src/core/validate-template-substitution";
+import {
+  findResidualPlaceholders,
+  validateTemplateSubstitution,
+} from "../../../src/core/validate-template-substitution";
 
 /**
  * Tests for the template substitution validation logic.
@@ -41,6 +47,24 @@ describe("validate-template-substitution — property tests", () => {
         },
       ),
     );
+  });
+});
+
+describe("validate-template-substitution — active graph boundary", () => {
+  it("resolves LOOM_STATE_PATH after module import and blocks against a newly created graph", () => {
+    const temp = mkdtempSync(join(tmpdir(), "loom-template-state-"));
+    const statePath = join(temp, "active_task_graph.json");
+    const previous = process.env.LOOM_STATE_PATH;
+    process.env.LOOM_STATE_PATH = statePath;
+    try {
+      expect(validateTemplateSubstitution("Use {task_id}")).toEqual({ kind: "allow" });
+      writeFileSync(statePath, "{}\n");
+      expect(validateTemplateSubstitution("Use {task_id}")).toMatchObject({ kind: "block" });
+    } finally {
+      if (previous === undefined) delete process.env.LOOM_STATE_PATH;
+      else process.env.LOOM_STATE_PATH = previous;
+      rmSync(temp, { recursive: true, force: true });
+    }
   });
 });
 

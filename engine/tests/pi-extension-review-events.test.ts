@@ -1026,6 +1026,53 @@ describe("Pi extension review tool_result integration", () => {
     expect(task.review_error).toContain("reserved reviewer result 2");
   });
 
+  it.each([
+    ["missing details", {}],
+    ["short results", { results: [] }],
+    ["mismatched agent", {
+      results: [{ agent: "code-reviewer", task: "spec check", exitCode: 0, messages: [] }],
+    }],
+  ])("replaces stale passing spec evidence for a reserved %s result", async (label, details) => {
+    const planPath = join(temp, `reserved-spec-${label.replaceAll(" ", "-")}.md`);
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      spec_check: {
+        wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad432";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = `call-reserved-spec-${label.replaceAll(" ", "-")}`;
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agentScope: "user",
+        agent: "spec-check-invoker",
+        task: "Follow the preloaded spec-check skill with --wave 1 --tasks T1.",
+      },
+    }, context)).toEqual([undefined]);
+
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId,
+      content: [],
+      details,
+    }, context);
+
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).spec_check).toMatchObject({
+      wave: 1,
+      verdict: "EVIDENCE_CAPTURE_FAILED",
+      error: expect.stringContaining("reserved spec-check result 1"),
+    });
+  });
+
   it("does not advance a failed phase agent even when its messages contain a valid artifact", async () => {
     const planPath = join(temp, "failed-phase-plan.md");
     writeFileSync(planPath, "# Plan\n");
@@ -1347,7 +1394,7 @@ describe("Pi extension review tool_result integration", () => {
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const second = reviewResult("Task: T1", "second result still stored").details.results[0];
-      await pi.emit("tool_result", {
+      const responses = await pi.emit("tool_result", {
         toolName: "subagent",
         content: [],
         details: {
@@ -1360,6 +1407,10 @@ describe("Pi extension review tool_result integration", () => {
 
       expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
         .toContain("subagent-stop processing failed");
+      expect(responses).toContainEqual(expect.objectContaining({
+        isError: true,
+        content: [expect.objectContaining({ text: expect.stringContaining("result 1") })],
+      }));
       expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings)
         .toEqual(["second result still stored"]);
     } finally {

@@ -28,9 +28,21 @@ const AGENTS = [
   "ts-test-agent",
   "frontend-agent",
   "security-agent",
-  "dotfiles-agent",
-  "general-purpose",
 ];
+
+describe("task implementation-agent authority", () => {
+  it.each(["dotfiles-agent", "general-purpose"])("rejects unsupported task agent %s", (agent) => {
+    const result = validateFull(wrapTasks([{
+      id: "T1",
+      description: "Unsupported task agent",
+      agent,
+      wave: 1,
+      depends_on: [],
+    }]));
+    expect(result.ok).toBe(false);
+    expect(errorsOf(result)).toContain(`Task T1: unknown agent '${agent}'`);
+  });
+});
 
 /** Generate a valid task with given constraints */
 function arbTask(id: string, wave: number, deps: string[]) {

@@ -153,6 +153,17 @@ describe("historical baseline recovery CLI", () => {
     });
     expect(withoutOverride.status).not.toBe(0);
 
+    const beforePacketlessRecovery = readFileSync(statePath, "utf-8");
+    const packetlessRecovery = spawnSync("bun", [
+      CLI, "helper", "reconcile-implementation-proof", "--wave", "2",
+      "--baseline-sha", historical,
+    ], {
+      cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
+    });
+    expect(packetlessRecovery.status).not.toBe(0);
+    expect(packetlessRecovery.stderr).toContain("requires at least one --packet binding");
+    expect(readFileSync(statePath, "utf-8")).toBe(beforePacketlessRecovery);
+
     const unregistered = spawnSync("bun", [
       CLI, "helper", "reconcile-implementation-proof", "--wave", "2",
       "--baseline-sha", historical,

@@ -210,11 +210,12 @@ describe("exhaustive Loom agent policy", () => {
     });
   });
 
-  it("makes every implementation-profile agent executable", () => {
+  it("keeps implementation profile and task-graph execution authority mutually resolvable", () => {
     const implementationAgents = AGENT_POLICIES
       .filter(({ profile }) => profile === "implementation")
       .map(({ agent }) => agent);
     expect(implementationAgents.filter((agent) => !IMPL_AGENTS.has(agent))).toEqual([]);
+    expect([...IMPL_AGENTS].filter((agent) => !resolveAgentPolicy(agent).ok)).toEqual([]);
   });
 
   it("resolves bare and loom-namespaced agents deterministically", () => {

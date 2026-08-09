@@ -37,6 +37,22 @@ describe("parseFirstUserPrompt", () => {
     });
   });
 
+  it.each([
+    ["pi", [
+      JSON.stringify({ type: "session", version: 1 }),
+      JSON.stringify({ type: "message", message: { role: "user", content: { malformed: true } } }),
+    ].join("\n")],
+    ["claude", JSON.stringify({
+      type: "user",
+      message: { role: "user", content: { malformed: true } },
+    })],
+  ] as const)("returns a typed failure for malformed %s user content", (format, content) => {
+    expect(parseFirstUserPrompt(content, format)).toEqual({
+      ok: false,
+      error: expect.stringContaining("unsupported content"),
+    });
+  });
+
   it("rejects a Claude tool-result envelope as the first user-authored prompt", () => {
     const content = JSON.stringify({
       type: "user",

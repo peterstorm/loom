@@ -1,12 +1,12 @@
 /**
  * Core: Validate that task prompts have no unsubstituted template variables.
- * Harness-agnostic — no stdin parsing. Not pure: reads the filesystem
- * (existsSync).
+ * Harness-agnostic — no stdin parsing. Not pure: resolves the active graph
+ * lazily and reads the filesystem (existsSync).
  */
 
 import { existsSync } from "node:fs";
 import type { HookResult } from "../types";
-import { TASK_GRAPH_PATH } from "../config";
+import { taskGraphPath } from "../config";
 
 const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}"]);
 
@@ -37,7 +37,7 @@ export function findResidualPlaceholders(prompt: string): string[] {
 }
 
 export function validateTemplateSubstitution(prompt: string): HookResult {
-  if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
+  if (!existsSync(taskGraphPath())) return { kind: "allow" };
   if (!prompt) return { kind: "allow" };
 
   const realIssues = findResidualPlaceholders(prompt);

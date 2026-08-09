@@ -58,6 +58,24 @@ describe("parseSpecCheckOutput (pure)", () => {
     expect(result.high).toHaveLength(3);
   });
 
+  it("fails evidence reconciliation when the required verdict marker is absent", () => {
+    const parsed = parseSpecCheckOutput([
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+    ].join("\n"));
+
+    const resolution = reconcileSpecCheck(parsed, 1, "now");
+    expect(resolution).toEqual({
+      kind: "evidence-failed",
+      specCheck: {
+        wave: 1,
+        run_at: "now",
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: "SPEC_CHECK_VERDICT marker not found - re-run /wave-gate",
+      },
+    });
+  });
+
   it("fails evidence reconciliation when the high count drifts from HIGH lines", () => {
     const parsed = parseSpecCheckOutput([
       "SPEC_CHECK_CRITICAL_COUNT: 0",

@@ -252,9 +252,7 @@ export const IMPL_AGENTS: ReadonlySet<string> = frozenSet([
   "test-engineer",
   "frontend-agent",
   "security-agent",
-  "dotfiles-agent",
   "adr-writer-agent",
-  "general-purpose",
 ]);
 
 /** Known agents for task graph validation */

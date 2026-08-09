@@ -90,6 +90,18 @@ export type FirstUserPromptParse =
 
 const promptFailure = (error: string): FirstUserPromptParse => ({ ok: false, error });
 
+function authoredPromptText(body: unknown): string | null {
+  if (typeof body === "string") return body;
+  if (!Array.isArray(body)) return null;
+  return body.flatMap((block) =>
+    typeof block === "object" && block !== null &&
+      "type" in block && block.type === "text" &&
+      "text" in block && typeof block.text === "string"
+      ? [block.text]
+      : []
+  ).join("\n");
+}
+
 /** The first user-authored prompt only. Unlike general transcript extraction,
  * this is an attribution boundary: malformed JSON before the prompt and
  * user-role tool-result envelopes fail closed instead of being skipped. */
@@ -118,9 +130,10 @@ export function parseFirstUserPrompt(
       const entry = parsed as PiEntry;
       if (entry.type !== "message" || entry.message?.role !== "user") continue;
       const body = entry.message.content;
-      const prompt = typeof body === "string"
-        ? body
-        : body.filter((block) => block.type === "text" && block.text).map((block) => block.text).join("\n");
+      const prompt = authoredPromptText(body);
+      if (prompt === null) {
+        return promptFailure(`first Pi user prompt has unsupported content at line ${index + 1}`);
+      }
       return prompt.trim() === ""
         ? promptFailure(`first user prompt is empty at line ${index + 1}`)
         : { ok: true, prompt };
@@ -129,12 +142,16 @@ export function parseFirstUserPrompt(
     const line = parsed as TranscriptLine;
     if (line.message?.role !== "user") continue;
     const body = line.message.content;
-    if (Array.isArray(body) && body.some((block) => block.type === "tool_result")) {
+    if (Array.isArray(body) && body.some((block) =>
+      typeof block === "object" && block !== null &&
+      "type" in block && block.type === "tool_result"
+    )) {
       return promptFailure(`first user-role entry is a tool result, not an authored prompt, at line ${index + 1}`);
     }
-    const prompt = typeof body === "string"
-      ? body
-      : (body ?? []).filter((block) => block.type === "text" && block.text).map((block) => block.text).join("\n");
+    const prompt = authoredPromptText(body);
+    if (prompt === null) {
+      return promptFailure(`first Claude user prompt has unsupported content at line ${index + 1}`);
+    }
     return prompt.trim() === ""
       ? promptFailure(`first user prompt is empty at line ${index + 1}`)
       : { ok: true, prompt };

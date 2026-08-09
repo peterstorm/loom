@@ -16,7 +16,6 @@ describe("categorize (pure)", () => {
     expect(categorize("ts-test-agent")).toBe("impl");
     expect(categorize("frontend-agent")).toBe("impl");
     expect(categorize("security-agent")).toBe("impl");
-    expect(categorize("general-purpose")).toBe("impl");
   });
 
   it("categorizes review sub-agents", () => {
@@ -64,8 +63,9 @@ describe("categorize — exhaustive config coverage", () => {
     }
   });
 
-  it("dotfiles-agent covered", () => {
-    expect(categorize("dotfiles-agent")).toBe("impl");
+  it("rejects task agents without Loom model-policy authority", () => {
+    expect(categorize("dotfiles-agent")).toBe("unknown");
+    expect(categorize("general-purpose")).toBe("unknown");
   });
 
   it("undefined/null-ish strings → unknown", () => {

@@ -32,11 +32,8 @@ export const VALIDATED_AGENTS: ReadonlySet<string> = new Set([
   ...REVIEW_AGENTS,
 ]);
 
-/** Agents that don't require a skill (tools-only or general-purpose) */
-const SKILL_EXEMPT_AGENTS = new Set([
-  "decompose-agent",
-  "general-purpose",
-]);
+/** Loom agents that do not require a skill preload. */
+const SKILL_EXEMPT_AGENTS = new Set(["decompose-agent"]);
 
 /** Read an agent file at the shell boundary, then use the shared pure parser. */
 export function parseSkillsFromFrontmatter(filePath: string): DeclaredSkills {

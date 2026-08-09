@@ -266,6 +266,9 @@ const handler: HookHandler = async (_stdin, args) => {
     if (packetBindings.length > 0 && recoveredBaselineSha === null) {
       throw new Error("--packet recovery requires --baseline-sha");
     }
+    if (recoveredBaselineSha !== null && packetBindings.length === 0) {
+      throw new Error("--baseline-sha recovery requires at least one --packet binding");
+    }
   } catch (error) {
     return { kind: "error", message: `reconcile-implementation-proof: ${(error as Error).message}` };
   }
@@ -304,15 +307,14 @@ const handler: HookHandler = async (_stdin, args) => {
       const recoveredPackets = recoveredBaselineSha !== null && packetBindings.length > 0
         ? recoverPacketEvidence(root, state, wave, recoveredBaselineSha, packetBindings)
         : { modifiedPathsByTask: new Map(), auditByTask: new Map() };
-      const packetMode = packetBindings.length > 0;
       let recoveredWritesApplied = false;
       const tasks = state.tasks.map((task) => {
         if (task.wave !== wave || task.status === "completed" || task.proof?.state === "satisfied") return task;
         const recoveredPaths = recoveredPackets.modifiedPathsByTask.get(task.id) ?? [];
-        // Explicit packet mode may only alter Tasks carrying verified packet
-        // evidence. `--baseline-sha` without packets remains the intentional
-        // blanket legacy baseline-recovery operation.
-        if (packetMode && recoveredPaths.length === 0) return task;
+        // Historical recovery may alter only Tasks carrying engine-issued,
+        // registration-verified packet evidence. Ordinary reconciliation has
+        // no recovered baseline and re-evaluates every unresolved Task.
+        if (recoveredBaselineSha !== null && recoveredPaths.length === 0) return task;
         if (recoveredPaths.length > 0) recoveredWritesApplied = true;
         const recoveredAudit = recoveredPackets.auditByTask.get(task.id) ?? [];
         const priorAudit = task.recovered_artifact_writes ?? [];
