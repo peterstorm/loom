@@ -8,6 +8,7 @@ import {
   registerTaskExecutionBaseline,
   taskExecutionDecision,
   taskExecutionOwnershipError,
+  taskExecutionRegistrationError,
   type ExecutionBatchMode,
   type TaskExecutionSpawn,
   type ValidateTaskExecutionInput,
@@ -82,10 +83,10 @@ export async function validateTaskExecutionBatch(
     };
   }
 
-  let lockedOwnershipError: string | null = null;
+  let lockedRegistrationError: string | null = null;
   await manager.update((current) => {
-    lockedOwnershipError = taskExecutionOwnershipError(current, taskIds, mode);
-    if (lockedOwnershipError !== null) return current;
+    lockedRegistrationError = taskExecutionRegistrationError(current, inputs, taskIds, mode, baselines);
+    if (lockedRegistrationError !== null) return current;
     return {
       ...current,
       executing_tasks: [...new Set([...(current.executing_tasks ?? []), ...baselines.keys()])],
@@ -102,9 +103,9 @@ export async function validateTaskExecutionBatch(
       }),
     };
   });
-  return lockedOwnershipError === null
+  return lockedRegistrationError === null
     ? { kind: "allow" }
-    : { kind: "block", message: `BLOCKED: ${lockedOwnershipError}` };
+    : { kind: "block", message: `BLOCKED: ${lockedRegistrationError}` };
 }
 
 export async function validateTaskExecution(input: ValidateTaskExecutionInput): Promise<HookResult> {

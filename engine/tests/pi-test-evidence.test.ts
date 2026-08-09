@@ -88,13 +88,18 @@ describe("Pi test-evidence transcript adapter", () => {
   });
 
   it.each([
+    ["non-array payload", null],
+    ["object payload", { role: "assistant", content: [] }],
+    ["null message", [null]],
+    ["primitive message", [42]],
+    ["missing role", [{ content: [] }]],
+    ["non-array content", [{ role: "assistant", content: null }]],
     ["missing call id", [{ role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command: "bun test" } }] }]],
     ["missing tool name", [{ role: "assistant", content: [{ type: "toolCall", id: "call-1", arguments: { command: "bun test" } }] }]],
     ["missing Bash command", [{ role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: {} }] }]],
     ["missing result id", [{ role: "toolResult", toolName: "bash", content: [{ type: "text", text: "ok" }] }]],
     ["missing result name", [{ role: "toolResult", toolCallId: "call-1", content: [{ type: "text", text: "ok" }] }]],
-  ] as const)("rejects malformed tool evidence: %s", (_label, rawMessages) => {
-    const messages = rawMessages as unknown as readonly PiMessage[];
+  ] as const)("rejects malformed tool evidence without throwing: %s", (_label, messages) => {
     expect(messagesToClaudeJsonl(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
     expect(piStructuredTestResult(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
   });

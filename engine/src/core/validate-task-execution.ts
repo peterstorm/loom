@@ -36,6 +36,12 @@ export function classifyTaskExecutionSpawn(input: ValidateTaskExecutionInput): T
 export function taskExecutionDecision(state: TaskGraph, taskId: string): HookResult {
   const task = state.tasks.find((candidate) => candidate.id === taskId);
   if (!task) return { kind: "allow" };
+  if (task.status === "completed") {
+    return {
+      kind: "block",
+      message: `BLOCKED: Cannot execute ${taskId} because it is already completed.`,
+    };
+  }
 
   const currentWave = state.current_wave ?? 1;
   if (task.wave > currentWave) {
@@ -157,6 +163,49 @@ export function parseImplementationTaskBindings(
     taskIds.push(taskId);
   }
   return { ok: true, taskIds };
+}
+
+export type TaskExecutionBaselines = ReadonlyMap<string, Readonly<{
+  proof: readonly DeclaredArtifactBaseline[];
+  attempt: readonly DeclaredArtifactBaseline[];
+}>>;
+
+function samePaths(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((path, index) => path === right[index]);
+}
+
+/** Revalidate every preflight assumption against the graph held under the
+ * state lock. Returning one error keeps batch registration all-or-nothing. */
+export function taskExecutionRegistrationError(
+  current: TaskGraph,
+  inputs: readonly Extract<TaskExecutionSpawn, { kind: "implementation" }>[],
+  expectedTaskIds: readonly string[],
+  mode: ExecutionBatchMode,
+  baselines: TaskExecutionBaselines,
+): string | null {
+  const rebound = parseImplementationTaskBindings(current, inputs);
+  if (!rebound.ok) return rebound.error;
+  if (!samePaths(rebound.taskIds, expectedTaskIds)) {
+    return "Implementation task bindings changed before execution registration.";
+  }
+  const ownership = taskExecutionOwnershipError(current, expectedTaskIds, mode);
+  if (ownership !== null) return ownership;
+  for (const taskId of expectedTaskIds) {
+    const decision = taskExecutionDecision(current, taskId);
+    if (decision.kind === "block") return decision.message.replace(/^BLOCKED:\s*/, "");
+    const task = current.tasks.find((candidate) => candidate.id === taskId);
+    const baseline = baselines.get(taskId);
+    if (task === undefined || baseline === undefined) {
+      return `Cannot prove locked execution baseline for ${taskId}.`;
+    }
+    const declared = task.file_list ?? [];
+    const attemptScope = [...new Set([...declared, ...(task.files_modified ?? [])])];
+    if (!samePaths(declared, baseline.proof.map(({ artifact }) => artifact)) ||
+        !samePaths(attemptScope, baseline.attempt.map(({ artifact }) => artifact))) {
+      return `Task ${taskId} artifact scope changed before execution registration.`;
+    }
+  }
+  return null;
 }
 
 /** Preserve the first proof boundary across retries while refreshing the

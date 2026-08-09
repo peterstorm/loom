@@ -8,6 +8,7 @@ import {
   registerTaskExecutionBaseline,
   taskExecutionDecision,
   taskExecutionOwnershipError,
+  taskExecutionRegistrationError,
 } from "../../../src/core/validate-task-execution";
 import { validateTaskExecutionBatch } from "../../../src/handlers/task-execution";
 import type { TaskGraph, Task, WaveGate } from "../../../src/types";
@@ -199,6 +200,29 @@ describe("validate-task-execution — exclusive ownership", () => {
       "parallel",
     )).toContain("T1 owns declared path");
   });
+
+  it("revalidates status, wave authority, and artifact scope under the lock", () => {
+    const input = [{ kind: "implementation" as const, prompt: "Task ID: T1", description: "" }];
+    const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
+    const baselines = new Map([["T1", { proof: baseline, attempt: baseline }]]);
+    const pending = scoped("T1", "src/a.ts");
+
+    expect(taskExecutionRegistrationError(
+      mkState([pending], { current_wave: 1 }), input, ["T1"], "parallel", baselines,
+    )).toBeNull();
+    expect(taskExecutionRegistrationError(
+      mkState([{ ...pending, status: "completed" }], { current_wave: 1 }),
+      input, ["T1"], "parallel", baselines,
+    )).toContain("already completed");
+    expect(taskExecutionRegistrationError(
+      mkState([{ ...pending, wave: 2 }], { current_wave: 1 }),
+      input, ["T1"], "parallel", baselines,
+    )).toContain("current wave is 1");
+    expect(taskExecutionRegistrationError(
+      mkState([{ ...pending, file_list: ["src/changed.ts"] }], { current_wave: 1 }),
+      input, ["T1"], "parallel", baselines,
+    )).toContain("artifact scope changed");
+  });
 });
 
 describe("validate-task-execution — retry baselines", () => {
@@ -261,6 +285,14 @@ describe("validate-task-execution — wave gates", () => {
       { current_wave: 1 },
     );
     expect(validateExecution("T1", state).kind).toBe("allow");
+  });
+
+  it("blocks a completed task from acquiring a new implementation reservation", () => {
+    const state = mkState([mkTask({ id: "T1", wave: 1, status: "completed" })]);
+    expect(validateExecution("T1", state)).toMatchObject({
+      kind: "block",
+      reason: expect.stringContaining("already completed"),
+    });
   });
 
   it("allows task in wave 1 when current_wave=2 (earlier wave ok)", () => {

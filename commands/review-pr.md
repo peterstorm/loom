@@ -36,7 +36,7 @@ the orchestrator's current model.
 - Review aspects: code, errors, tests, types, comments, architecture, simplify, all
 
 **If --files provided:** Use those files instead of git diff
-**Otherwise:** Check git status to identify changed files
+**Otherwise:** Use the sorted union of unstaged, staged, and `main...HEAD` changed paths. An empty union is a hard stop.
 
 ### 2. Available Review Aspects
 
@@ -56,9 +56,11 @@ Use the explicit file list directly.
 
 **Otherwise:**
 ```bash
-git diff --name-only
-git diff --cached --name-only
+{ git diff --name-only; git diff --cached --name-only; git diff --name-only main...HEAD; } \
+  | LC_ALL=C sort -u | awk 'NF'
 ```
+
+This includes clean-worktree commits already on the branch. Stop if the resulting scope is empty.
 
 Check if PR already exists: `gh pr view`
 

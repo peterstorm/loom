@@ -63,7 +63,7 @@ import * as git from "../engine/src/utils/git";
 // Linter integration (PostEdit lint via tool_result)
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
 import { lintFile } from "../engine/src/linter/index";
-import { messagesToClaudeJsonl, piStructuredTestResult, type PiMessage } from "./transcript-adapter";
+import { messagesToClaudeJsonl, parsePiMessages, piStructuredTestResult, type PiMessage } from "./transcript-adapter";
 import { materializePiResources } from "./resources";
 import { checkAgentSkillPrompt } from "../engine/src/core/agent-skills";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
@@ -89,6 +89,12 @@ const isLoomOwnedResultAgent = (agentType: string): boolean =>
 
 const PI_AGENT_ID_MARKER = /<!-- LOOM_PI_AGENT_ID:([a-z0-9-]+) -->/g;
 const PI_WRITE_GRANT_MARKER = /<!-- LOOM_PI_WRITE_GRANT:[0-9a-f]{64} -->/;
+
+export function rejectedChildWriteGrantBlock(rejected: boolean): Readonly<{ block: true; reason: string }> | null {
+  return rejected
+    ? { block: true, reason: "Loom Pi write grant was rejected for this session; direct edits remain blocked." }
+    : null;
+}
 
 export function piSystemAgentIdentity(systemPrompt: string): string {
   PI_AGENT_ID_MARKER.lastIndex = 0;
@@ -199,10 +205,11 @@ export default function (pi: ExtensionAPI) {
       // Block direct edits during orchestration
       if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "multi_edit") {
         currentGuard = "block-direct-edits";
+        const rejectedGrant = rejectedChildWriteGrantBlock(rejectedChildWriteGrantSessions.has(sessionId));
+        if (rejectedGrant !== null) return rejectedGrant;
         const safeSessionId = parseSessionId(sessionId);
         const result = shouldBlockDirectEdit(event.toolName, sessionId, () =>
           existsSync(taskGraphPath()) ||
-          rejectedChildWriteGrantSessions.has(sessionId) ||
           (safeSessionId !== null && existsSync(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`))
         );
         if (result.kind === "block") {
@@ -934,12 +941,9 @@ export default function (pi: ExtensionAPI) {
         let taskId = reservedItem?.taskId ?? extractTaskId(result.task ?? "") ?? extractTaskId(
           event.content.filter((c: { type: string }) => c.type === "text").map((c: { type: string; text?: string }) => c.text ?? "").join("\n")
         );
-        // Build transcript from per-result messages (each parallel result has its own messages)
-        const resultMessages = (result.messages ?? []) as PiMessage[];
-        const transcriptText = resultMessages
-          .filter((m: PiMessage) => m.role === "assistant" || m.role === "toolResult")
-          .flatMap((m: PiMessage) => (m.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? ""))
-          .join("\n");
+        // Parse per-result messages at the untrusted harness boundary before
+        // any consumer dereferences their content.
+        const parsedMessages = parsePiMessages(result.messages ?? []);
 
         // Mirrors the engine's update-task-status: an unextractable task ID
         // must not vanish silently. Exactly one executing task → infer it;
@@ -991,26 +995,73 @@ export default function (pi: ExtensionAPI) {
         // parseBashTestOutput deliberately accepts only paired Bash tool calls
         // and results in Claude-compatible JSONL. Passing flattened prose here
         // silently discards every Pi test run as spoofable free text.
-        const adaptedTranscript = messagesToClaudeJsonl(resultMessages);
-        const structuredEvidence = piStructuredTestResult(resultMessages);
-        if (!adaptedTranscript.ok || !structuredEvidence.ok) {
-          const errors = !adaptedTranscript.ok ? adaptedTranscript.errors : structuredEvidence.errors;
+        const adaptedTranscript = parsedMessages.ok
+          ? messagesToClaudeJsonl(parsedMessages.value)
+          : parsedMessages;
+        const structuredEvidence = parsedMessages.ok
+          ? piStructuredTestResult(parsedMessages.value)
+          : parsedMessages;
+        if (!adaptedTranscript.ok || !structuredEvidence.ok || !parsedMessages.ok) {
+          const errors = !parsedMessages.ok
+            ? parsedMessages.errors
+            : !adaptedTranscript.ok
+              ? adaptedTranscript.errors
+              : !structuredEvidence.ok
+                ? structuredEvidence.errors
+                : [];
           const failureReason = `Pi transcript evidence capture failed: ${errors.join("; ")}`;
-          await mgr.update((current) => ({
-            ...current,
-            executing_tasks: (current.executing_tasks ?? []).filter((id) => id !== taskId),
-            tasks: current.tasks.map((candidate) =>
-              candidate.id === taskId && candidate.status === "pending"
-                ? { ...candidate, failure_reason: failureReason }
-                : candidate
-            ),
-          }));
-          process.stderr.write(`loom(pi): ${failureReason} — ${taskId} left pending\n`);
+          const root = git.repositoryRoot() ?? process.cwd();
+          await mgr.update((current) => {
+            const currentTarget = current.tasks.find((candidate) => candidate.id === taskId);
+            if (currentTarget === undefined || currentTarget.status === "completed") {
+              return {
+                ...current,
+                executing_tasks: (current.executing_tasks ?? []).filter((id) => id !== taskId),
+              };
+            }
+            let changedArtifacts: readonly string[];
+            let bytesChangedSinceAttempt: boolean;
+            try {
+              changedArtifacts = changedDeclaredArtifactsSince(root, currentTarget.artifact_baseline);
+              bytesChangedSinceAttempt = currentTarget.attempt_artifact_baseline === undefined ||
+                changedDeclaredArtifactsSince(root, currentTarget.attempt_artifact_baseline).length > 0;
+            } catch (error) {
+              changedArtifacts = currentTarget.file_list ?? [];
+              bytesChangedSinceAttempt = true;
+              process.stderr.write(
+                `loom(pi): cannot compare malformed-transcript attempt baseline for ${taskId}: ${error instanceof Error ? error.message : String(error)} — invalidating stale evidence\n`,
+              );
+            }
+            if (!bytesChangedSinceAttempt) {
+              return {
+                ...current,
+                executing_tasks: (current.executing_tasks ?? []).filter((id) => id !== taskId),
+                tasks: current.tasks.map((candidate) =>
+                  candidate.id === taskId && candidate.status === "pending"
+                    ? { ...candidate, failure_reason: failureReason }
+                    : candidate
+                ),
+              };
+            }
+            return applyUntrustedStopResolution(current, taskId, {
+              taskCompleted: false,
+              testResult: { verdict: "untrusted", passed: false, label: "pi-transcript-capture-failed" },
+              testEvidence: failureReason,
+              filesModified: [],
+              changedDeclaredArtifacts: changedArtifacts,
+              bytesChangedSinceAttempt,
+              newTestsWritten: false,
+              newTestEvidence: "",
+            }).state;
+          });
+          process.stderr.write(`loom(pi): ${failureReason} — ${taskId} evidence was not accepted\n`);
           continue;
         }
+        const resultMessages = parsedMessages.value;
         const bashOutput = parseBashTestOutput(adaptedTranscript.value);
         const transcriptEvidence = extractTestEvidence(bashOutput);
-        const testEvidence = structuredEvidence.value ?? transcriptEvidence;
+        const structuredTestEvidence = structuredEvidence.value;
+        const testEvidence = structuredTestEvidence ?? transcriptEvidence;
 
         // files_modified feeds lint-wave-gate's target collection (it
         // collects lint targets EXCLUSIVELY from tasks' files_modified) —
@@ -1088,8 +1139,8 @@ export default function (pi: ExtensionAPI) {
             testResult: {
               verdict: "untrusted" as const,
               passed: testEvidence.passed,
-              label: structuredEvidence
-                ? `pi-structured: ${structuredEvidence.evidence || "test tool result"}`
+              label: structuredTestEvidence !== null
+                ? `pi-structured: ${structuredTestEvidence.evidence || "test tool result"}`
                 : "transcript-regex (fallback)",
             },
             testEvidence: testEvidence.evidence,

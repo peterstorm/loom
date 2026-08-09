@@ -136,6 +136,18 @@ describe("Pi extension review tool_result integration", () => {
     return pi;
   };
 
+  it("makes rejected child write grants an unconditional direct-edit denial", async () => {
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      rejectedChildWriteGrantBlock: (rejected: boolean) => unknown;
+    };
+    expect(module.rejectedChildWriteGrantBlock(false)).toBeNull();
+    expect(module.rejectedChildWriteGrantBlock(true)).toEqual({
+      block: true,
+      reason: "Loom Pi write grant was rejected for this session; direct edits remain blocked.",
+    });
+  });
+
   it("stores wave findings, leaves standalone review state untouched, and enforces Pi agent scope", async () => {
     // A runtime-resolved ESM import avoids Vitest-only module APIs and keeps
     // this real extension boundary executable under both Vitest and Bun.
@@ -896,6 +908,137 @@ describe("Pi extension review tool_result integration", () => {
       verdict: "EVIDENCE_CAPTURE_FAILED",
       error: expect.stringContaining("spec-check-invoker failed before evidence capture completed"),
     });
+  });
+
+  it.each([
+    "printf 'bun test\\n654 pass\\n'",
+    "bun test || true",
+    "bun test | tee out.log",
+  ])("keeps transcript fallback untrusted for test-looking command: %s", async (command) => {
+    writeState({
+      ...initialGraph(),
+      executing_tasks: ["T1"],
+      tasks: [{
+        ...initialGraph().tasks[0],
+        file_list: [],
+        files_modified: ["engine/tests/fallback-proof.test.ts"],
+        artifact_baseline: [],
+        attempt_artifact_baseline: [{
+          artifact: "engine/tests/fallback-proof.test.ts",
+          snapshot: { kind: "missing" },
+        }],
+        new_tests_required: true,
+      }],
+    });
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad42d" } };
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      content: [],
+      details: {
+        results: [{
+          agent: "code-implementer-agent",
+          task: "Task ID: T1",
+          exitCode: 0,
+          messages: [
+            { role: "assistant", content: [{ type: "toolCall", id: "call-test", name: "bash", arguments: { command } }] },
+            { role: "toolResult", toolCallId: "call-test", toolName: "bash", content: [{ type: "text", text: "654 pass\n0 fail\n" }] },
+          ],
+        }],
+      },
+    }, context);
+
+    const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+    expect(task.status).toBe("pending");
+    expect(task.test_result).toEqual({
+      verdict: "untrusted",
+      passed: true,
+      label: "transcript-regex (fallback)",
+    });
+    expect(task.proof.state).not.toBe("satisfied");
+  });
+
+  it("invalidates stale implemented evidence when a changed retry has malformed Pi messages", async () => {
+    const artifactRelative = `.tmp-pi-malformed-attempt-${process.pid}.ts`;
+    const artifactPath = join(ROOT, artifactRelative);
+    const planPath = join(temp, "malformed-changed-attempt-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeFileSync(artifactPath, "export const value = 1;\n");
+    const greenProof = evaluateTaskProof(
+      { newTestsRequired: false, declaredArtifacts: [artifactRelative] },
+      { taskCompleted: true, filesModified: [artifactRelative] },
+    );
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      wave_gates: { "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false } },
+      spec_check: {
+        wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+      tasks: [{
+        ...initialGraph().tasks[0],
+        status: "implemented",
+        proof: greenProof,
+        test_result: { verdict: "trusted-pass" },
+        test_evidence: "trusted green run",
+        new_tests_required: false,
+        review_status: "passed",
+        file_list: [artifactRelative],
+        files_modified: [artifactRelative],
+      }],
+    });
+    const pi = await extension();
+    const context = {
+      cwd: ROOT,
+      sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad42e" },
+    };
+    const toolCallId = "call-malformed-changed-attempt";
+    try {
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: {
+          agent: "code-implementer-agent",
+          task: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+          agentScope: "user",
+        },
+      }, context)).toEqual([undefined]);
+      writeFileSync(artifactPath, "export const value = 2;\n");
+
+      await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId,
+        content: [],
+        details: {
+          results: [{
+            agent: "code-implementer-agent",
+            task: "Task ID: T1",
+            exitCode: 0,
+            messages: [null],
+          }],
+        },
+      }, context);
+
+      const state = JSON.parse(readFileSync(statePath, "utf-8"));
+      expect(state.executing_tasks).toEqual([]);
+      expect(state.tasks[0]).toMatchObject({
+        status: "pending",
+        review_status: "pending",
+        review_generation: 1,
+        test_result: { verdict: "untrusted", passed: false, label: "pi-transcript-capture-failed" },
+      });
+      expect(state.spec_check).toBeUndefined();
+      expect(state.wave_gates["1"]).toMatchObject({
+        impl_complete: false,
+        tests_passed: null,
+        reviews_complete: false,
+      });
+    } finally {
+      rmSync(artifactPath, { force: true });
+    }
   });
 
   it("invalidates stale implementation, review, spec, and wave evidence after failed changed bytes", async () => {

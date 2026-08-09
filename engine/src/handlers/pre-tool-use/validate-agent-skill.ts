@@ -5,7 +5,6 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { allowWithNotice } from "../../types";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import {
   TASK_GRAPH_PATH, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
@@ -84,29 +83,15 @@ const handler: HookHandler = async (stdin) => {
 
   const agentPath = resolveClaudeAgentDefinitionPath(bareAgent, subagentType);
   if (!agentPath) {
-    // The same uncertainty the `unreadable` branch below BLOCKS on — we cannot
-    // determine which skills this agent requires — but reached by a different
-    // route: no CLAUDE_PLUGIN_ROOT, a cwd outside a git repo, an agent defined
-    // somewhere the four candidate paths do not cover. Users legitimately
-    // define agents outside those paths, so blocking every such spawn would
-    // break working installs to enforce a rule we cannot even read.
-    //
-    // What is NOT acceptable is the silence: this used to return `allow` with
-    // nothing on stderr, so a panel designer spawning without its preloaded
-    // `architecture-tech-lead` skill looked exactly like one that passed the
-    // check. The gate says out loud that it did not run.
-    //
-    // Through `systemMessage`, NOT stderr. An exit-0 PreToolUse hook's stderr is
-    // not surfaced outside `--debug`, so the announcement this branch exists to
-    // make was still, in practice, silent — the skipped gate looked exactly like
-    // a passed one to the operator it was written for. Kept on stderr as well
-    // for the log.
-    const notice =
-      `[loom] validate-agent-skill: no agent file found for "${subagentType}" — ` +
-      `skill enforcement SKIPPED for this spawn (searched the executing Loom package, ` +
-      `CLAUDE_PLUGIN_ROOT, repository/user agent catalogs, and development checkout agents)`;
-    process.stderr.write(notice + "\n");
-    return allowWithNotice(notice);
+    return {
+      kind: "block",
+      message: [
+        `BLOCKED: cannot locate Loom agent definition for "${subagentType}"; skill policy cannot be proven.`,
+        "",
+        "Searched the executing Loom package, CLAUDE_PLUGIN_ROOT, repository/user agent catalogs, and development checkout agents.",
+        "Run the Pi agent sync/reload command or repair the package root before retrying.",
+      ].join("\n"),
+    };
   }
 
   const declared = parseSkillsFromFrontmatter(agentPath);

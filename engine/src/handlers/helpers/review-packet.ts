@@ -7,7 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import type { HookHandler } from "../../types";
+import type { HookHandler, Task } from "../../types";
 import { StateManager } from "../../state-manager";
 import { taskGraphPath, WAVE_REVIEW_AGENTS } from "../../config";
 import {
@@ -20,6 +20,23 @@ import { reviewRunPriorFindings, startReviewRun } from "../../core/findings";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 
 const OPERATIONS = ["create", "verify", "show"] as const;
+
+export interface ReviewPacketAuthority {
+  readonly taskStartSha: string | undefined;
+  readonly packetId: string;
+}
+
+/** Pure lock-time authority comparison. The packet id commits to every packet
+ * input; startSha is checked separately because it selects the packet base. */
+export function reviewPacketAuthorityError(
+  expected: ReviewPacketAuthority,
+  current: ReviewPacketAuthority,
+  taskId: string,
+): string | null {
+  return expected.taskStartSha === current.taskStartSha && expected.packetId === current.packetId
+    ? null
+    : `Task ${taskId}, repository HEAD, or review artifacts changed while its Review Packet was being created`;
+}
 
 export function reviewPacketCleanupFailure(
   original: unknown,
@@ -110,6 +127,45 @@ function artifact(root: string, baseSha: string, path: string): ReviewPacketArti
   };
 }
 
+/** Build the complete task-derived packet authority. Rebuilding this under the
+ * state lock makes one packet id the comparison for metadata, findings, scope,
+ * proof context, git head, diffs, and artifact bytes. */
+function prepareTaskReviewPacket(root: string, task: Task, baseSha: string, headSha: string) {
+  const priorFindings = reviewRunPriorFindings(task);
+  const declaredPaths = [...canonicalRepositoryPaths(root, task.file_list ?? [], "task.file_list")];
+  const modifiedPaths = [...canonicalRepositoryPaths(root, task.files_modified ?? [], "task.files_modified")];
+  const scope = [...new Set([...declaredPaths, ...modifiedPaths])].sort();
+  const packet = createReviewPacket({
+    task: {
+      id: task.id,
+      description: task.description,
+      agent: task.agent,
+      wave: task.wave,
+      specAnchors: task.spec_anchors ?? [],
+      reviewGeneration: task.review_generation ?? 0,
+      priorFindings: priorFindings.map((finding) => ({
+        id: finding.id,
+        agent: finding.agent,
+        severity: finding.severity,
+        file: finding.file,
+        line: finding.line,
+        claim: finding.claim,
+        reviewGeneration: finding.review_generation ?? null,
+        reviewPacketId: finding.review_packet_id ?? null,
+      })),
+      expectedReviewers: WAVE_REVIEW_AGENTS,
+    },
+    baseSha,
+    headSha,
+    declaredPaths,
+    modifiedPaths,
+    artifacts: scope.map((path) => artifact(root, baseSha, path)),
+    planContext: task.plan_context ?? "",
+    proofObligations: task.proof?.obligations ?? [],
+  });
+  return { packet, scope } as const;
+}
+
 const handler: HookHandler = async (_stdin, args) => {
   const operation = args[0];
   if (!operation || !(OPERATIONS as readonly string[]).includes(operation)) {
@@ -137,7 +193,6 @@ const handler: HookHandler = async (_stdin, args) => {
   const state = manager.load();
   const task = state.tasks.find((candidate) => candidate.id === taskId);
   if (!task) return { kind: "error", message: `Task ${taskId} is not in the task graph` };
-  const priorFindings = reviewRunPriorFindings(task);
 
   try {
     const root = repoRoot();
@@ -160,40 +215,10 @@ const handler: HookHandler = async (_stdin, args) => {
         : git(["rev-parse", "HEAD^"], root).trim()
     );
     if (!baseSha || !headSha) throw new Error("could not resolve packet base/head SHA");
-    // Transcript APIs commonly report absolute paths. Canonicalize both current
-    // and legacy task state at the packet boundary so packet identity remains
-    // repo-relative and deterministic while outside-repository aliases fail.
-    const declaredPaths = [...canonicalRepositoryPaths(root, task.file_list ?? [], "task.file_list")];
-    const modifiedPaths = [...canonicalRepositoryPaths(root, task.files_modified ?? [], "task.files_modified")];
-    const scope = [...new Set([...declaredPaths, ...modifiedPaths])].sort();
-    const packet = createReviewPacket({
-      task: {
-        id: task.id,
-        description: task.description,
-        agent: task.agent,
-        wave: task.wave,
-        specAnchors: task.spec_anchors ?? [],
-        reviewGeneration: task.review_generation ?? 0,
-        priorFindings: priorFindings.map((finding) => ({
-          id: finding.id,
-          agent: finding.agent,
-          severity: finding.severity,
-          file: finding.file,
-          line: finding.line,
-          claim: finding.claim,
-          reviewGeneration: finding.review_generation ?? null,
-          reviewPacketId: finding.review_packet_id ?? null,
-        })),
-        expectedReviewers: WAVE_REVIEW_AGENTS,
-      },
-      baseSha,
-      headSha,
-      declaredPaths,
-      modifiedPaths,
-      artifacts: scope.map((path) => artifact(root, baseSha, path)),
-      planContext: task.plan_context ?? "",
-      proofObligations: task.proof?.obligations ?? [],
-    });
+    // Transcript APIs commonly report absolute paths. Canonicalization and
+    // packet identity are rebuilt under the lock before this packet is bound.
+    const prepared = prepareTaskReviewPacket(root, task, baseSha, headSha);
+    const { packet, scope } = prepared;
     if (!packet.ok) return { kind: "error", message: `Review packet creation failed:\n${packet.errors.map((e) => `  - ${e}`).join("\n")}` };
     const outputPath = inspectRepositoryPath(root, output, "review packet output");
     const absoluteOutput = outputPath.absolute;
@@ -212,13 +237,17 @@ const handler: HookHandler = async (_stdin, args) => {
       async () => manager.update((current) => {
         const currentTask = current.tasks.find((candidate) => candidate.id === taskId);
         if (currentTask === undefined) throw new Error(`Task ${taskId} disappeared before review run start`);
-        const packetPriorIds = priorFindings.map((finding) => finding.id);
-        const currentPriorIds = reviewRunPriorFindings(currentTask).map((finding) => finding.id);
-        if ((currentTask.review_generation ?? 0) !== (task.review_generation ?? 0) ||
-            packetPriorIds.length !== currentPriorIds.length ||
-            packetPriorIds.some((id, index) => id !== currentPriorIds[index])) {
-          throw new Error(`Task ${taskId} changed while its Review Packet was being created`);
+        const lockedHeadSha = git(["rev-parse", "HEAD"], root).trim();
+        const currentPrepared = prepareTaskReviewPacket(root, currentTask, baseSha, lockedHeadSha);
+        if (!currentPrepared.packet.ok) {
+          throw new Error(`Task ${taskId} became invalid while its Review Packet was being created`);
         }
+        const authorityError = reviewPacketAuthorityError(
+          { taskStartSha: task.start_sha, packetId: packet.value.packetId },
+          { taskStartSha: currentTask.start_sha, packetId: currentPrepared.packet.value.packetId },
+          taskId,
+        );
+        if (authorityError !== null) throw new Error(authorityError);
         const transition = startReviewRun(currentTask, {
           generation: task.review_generation ?? 0,
           packetId: packet.value.packetId,

@@ -33,23 +33,38 @@ export type PiTranscriptResult<T> =
   | Readonly<{ ok: true; value: T }>
   | Readonly<{ ok: false; errors: readonly string[] }>;
 
-function transcriptErrors(messages: readonly PiMessage[]): readonly string[] {
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Parse the untrusted harness payload once so every consumer receives messages
+ * whose object/content shape has already been proven. */
+export function parsePiMessages(messages: unknown): PiTranscriptResult<readonly PiMessage[]> {
+  if (!Array.isArray(messages)) return { ok: false, errors: ["messages must be an array"] };
   const errors: string[] = [];
   messages.forEach((message, messageIndex) => {
+    if (!isRecord(message)) {
+      errors.push(`messages[${messageIndex}] must be an object`);
+      return;
+    }
+    if (typeof message.role !== "string") errors.push(`messages[${messageIndex}].role must be a string`);
     if (!Array.isArray(message.content)) {
       errors.push(`messages[${messageIndex}].content must be an array`);
       return;
     }
     message.content.forEach((block, blockIndex) => {
       const label = `messages[${messageIndex}].content[${blockIndex}]`;
-      if (!block || typeof block !== "object" || typeof block.type !== "string") {
+      if (!isRecord(block) || typeof block.type !== "string") {
         errors.push(`${label} must be a typed content block`);
         return;
       }
       if (block.type !== "toolCall") return;
       if (typeof block.id !== "string" || block.id.trim() === "") errors.push(`${label}.id must be non-empty`);
-      if (typeof block.name !== "string" || block.name.trim() === "") errors.push(`${label}.name must be non-empty`);
-      if (block.name?.toLowerCase() === "bash" && typeof block.arguments?.command !== "string") {
+      const blockName = typeof block.name === "string" ? block.name : null;
+      if (blockName === null || blockName.trim() === "") errors.push(`${label}.name must be non-empty`);
+      const argumentsValue = block.arguments;
+      if (blockName?.toLowerCase() === "bash" &&
+          (!isRecord(argumentsValue) || typeof argumentsValue.command !== "string")) {
         errors.push(`${label}.arguments.command must be a string for Bash`);
       }
     });
@@ -62,19 +77,21 @@ function transcriptErrors(messages: readonly PiMessage[]): readonly string[] {
       }
     }
   });
-  return errors;
+  return errors.length > 0
+    ? { ok: false, errors }
+    : { ok: true, value: messages as unknown as readonly PiMessage[] };
 }
 
 /** Pair only parser-proven test commands with their exact Pi tool result.
  * The classified test segment must own the Bash call's exit status. */
 export function piStructuredTestResult(
-  messages: readonly PiMessage[],
+  input: unknown,
 ): PiTranscriptResult<{ passed: boolean; evidence: string } | null> {
-  const errors = transcriptErrors(messages);
-  if (errors.length > 0) return { ok: false, errors };
+  const parsed = parsePiMessages(input);
+  if (!parsed.ok) return parsed;
   const testCalls = new Map<string, ClassifiedTestCommand>();
   let latest: { passed: boolean; evidence: string } | null = null;
-  for (const message of messages) {
+  for (const message of parsed.value) {
     if (message.role === "assistant") {
       for (const block of message.content ?? []) {
         if (block.type !== "toolCall" || block.name?.toLowerCase() !== "bash" || !block.id) continue;
@@ -104,12 +121,12 @@ export function piStructuredTestResult(
  * by Loom's transcript parsers. Tool-call IDs are preserved so anti-spoofing
  * parsers can pair a real command with its exact result.
  */
-export function messagesToClaudeJsonl(messages: readonly PiMessage[]): PiTranscriptResult<string> {
-  const errors = transcriptErrors(messages);
-  if (errors.length > 0) return { ok: false, errors };
+export function messagesToClaudeJsonl(input: unknown): PiTranscriptResult<string> {
+  const parsed = parsePiMessages(input);
+  if (!parsed.ok) return parsed;
   const lines: string[] = [];
 
-  for (const msg of messages) {
+  for (const msg of parsed.value) {
     if (msg.role === "assistant") {
       const content = msg.content.map((block) => {
         if (block.type === "toolCall") {

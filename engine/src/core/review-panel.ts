@@ -311,11 +311,11 @@ export function buildFindingBrief(
 /** Adapt an identified standalone finding set to the panel's scoped item model.
  *  The subject id is run-local and never becomes an orchestration Task. */
 export function buildStandaloneFindingBrief(source: {
-  readonly subjectId: string;
+  readonly subjectId: typeof STANDALONE_REVIEW_SUBJECT;
   readonly findings: readonly Finding[];
 }): FindingBrief {
   const task = {
-    id: source.subjectId,
+    id: STANDALONE_REVIEW_SUBJECT,
     wave: 1,
     findings: source.findings,
     critical_findings: source.findings

@@ -292,16 +292,9 @@ describe("validate-agent-skill — integration scenarios", () => {
     }
   });
 
-  it("SAYS SO when it cannot find the agent file at all, instead of allowing in silence", async () => {
-    // The sibling of the branch above, with the opposite polarity and the same
-    // uncertainty: `resolveAgentPath` returning null means we cannot determine
-    // which skills the agent requires either. Blocking would break installs
-    // that legitimately define agents outside the four searched paths, so this
-    // one allows — but it used to allow with NOTHING on stderr, so a panel
-    // designer spawning without its preloaded architecture-tech-lead skill was
-    // indistinguishable from one that passed the check. This branch widened
-    // when the PR added ARCH_PANEL_AGENTS and REVIEW_PANEL_AGENTS to
-    // VALIDATED_AGENTS.
+  it("blocks when a validated Loom agent definition cannot be resolved", async () => {
+    // A validated Loom agent without definition authority cannot prove its
+    // required skill preload, so the spawn fails closed.
     const createdGraph = !existsSync(TASK_GRAPH_PATH);
     const previousRoot = process.env.CLAUDE_PLUGIN_ROOT;
     const previousHome = process.env.HOME;
@@ -326,19 +319,10 @@ describe("validate-agent-skill — integration scenarios", () => {
         tool_name: "Task",
         tool_input: { subagent_type: "loom:dotfiles-agent", prompt: "do the thing" },
       }), []);
-      expect(result.kind, "allowing is correct; silence was not").toBe("allow");
-      const note = written.join("");
-      expect(note).toContain("no agent file found");
-      expect(note).toContain("skill enforcement SKIPPED");
-      expect(note).toContain("loom:dotfiles-agent");
-
-      // And on a channel the operator can actually see. An exit-0 PreToolUse
-      // hook's stderr is not surfaced outside --debug, so asserting only on
-      // stderr proved the code ran, not that anyone was told: the skipped gate
-      // still looked exactly like a passed one. `systemMessage` is the JSON
-      // stdout field the harness does surface.
-      expect(result.kind === "allow" && result.systemMessage, "the notice must reach the operator")
-        .toContain("skill enforcement SKIPPED");
+      expect(result.kind).toBe("block");
+      expect(result.kind === "block" ? result.message : "").toContain("skill policy cannot be proven");
+      expect(result.kind === "block" ? result.message : "").toContain("loom:dotfiles-agent");
+      expect(written).toEqual([]);
     } finally {
       spy.mockRestore();
       if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;

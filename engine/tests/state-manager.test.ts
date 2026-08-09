@@ -79,6 +79,20 @@ describe("StateManager", () => {
     expect(mode).toBe(0o444);
   });
 
+  it("rejects an invalid produced graph before replacing state authority", async () => {
+    const mgr = new StateManager(statePath);
+    const before = readFileSync(statePath, "utf-8");
+
+    await expect(mgr.update((state) => ({
+      ...state,
+      current_phase: "not-a-phase",
+    } as unknown as TaskGraph))).rejects.toThrow("Refusing to persist invalid task graph");
+
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+    expect(() => readFileSync(`${statePath}.tmp`, "utf-8")).toThrow();
+    expect(statSync(statePath).mode & 0o777).toBe(0o444);
+  });
+
   it("replaces state entirely", async () => {
     const mgr = new StateManager(statePath);
     const newState: TaskGraph = {

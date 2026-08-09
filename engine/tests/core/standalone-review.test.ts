@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildStandaloneFindingBrief, parseFindingBriefJson } from "../../src/core/review-panel";
+import { buildStandaloneFindingBrief, parseFindingBriefJson, serializeFindingBrief } from "../../src/core/review-panel";
 import {
   STANDALONE_REVIEW_SUBJECT,
   aggregateStandaloneReview,
@@ -167,6 +167,13 @@ describe("standalone review aggregate", () => {
 });
 
 describe("standalone brief source invariant", () => {
+  it("constructs only canonical standalone subjects and round-trips its output", () => {
+    const brief = buildStandaloneFindingBrief(required().aggregate);
+    expect(brief.taskIds).toEqual([STANDALONE_REVIEW_SUBJECT]);
+    expect(brief.findings.every((finding) => finding.taskId === STANDALONE_REVIEW_SUBJECT)).toBe(true);
+    expect(parseFindingBriefJson(JSON.parse(serializeFindingBrief(brief)))).toEqual({ ok: true, value: brief });
+  });
+
   it("rejects a standalone source flag on a non-standalone subject", () => {
     const parsed = parseFindingBriefJson({
       wave: 9,

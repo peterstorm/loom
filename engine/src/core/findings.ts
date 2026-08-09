@@ -354,7 +354,9 @@ function parseStoredFinding(raw: unknown): Finding | null {
   const record = raw as Record<string, unknown>;
   const severity = parseFindingSeverity(record.severity);
   if (severity === null || typeof record.claim !== "string") return null;
-  const id = typeof record.id === "string" ? parseFindingId(record.id.trim()) : null;
+  const id = typeof record.id === "string" && record.id === record.id.trim()
+    ? parseFindingId(record.id)
+    : null;
   if (id === null) return null;
   if (typeof record.agent !== "string" || record.agent.trim() === "") return null;
   const draft = makeDraftFinding({

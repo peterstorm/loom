@@ -517,21 +517,53 @@ export class StateManager {
     await this.atomicWrite(() => state);
   }
 
-  /** lock → chmod 644 → produce → write tmp → rename → chmod 444 → unlock */
+  /** lock → chmod 644 → produce/parse → write tmp → rename → chmod 444 → unlock */
   private async atomicWrite(produce: () => TaskGraph): Promise<void> {
     const lockFile = `${dirname(this.path)}/.task_graph`;
     const tmp = `${this.path}.tmp`;
     await withLock(lockFile, () => {
       chmodSync(this.path, 0o644);
+      let primaryError: unknown = null;
+      let committed = false;
       try {
-        writeFileSync(tmp, JSON.stringify(produce(), null, 2));
+        const parsed = parseTaskGraph(produce());
+        if (!parsed.ok) throw new Error(`Refusing to persist invalid task graph (${parsed.error}): ${this.path}`);
+        writeFileSync(tmp, JSON.stringify(parsed.value, null, 2));
         renameSync(tmp, this.path);
-      } catch (e) {
-        // Clean up orphaned .tmp file
-        try { unlinkSync(tmp); } catch {}
-        throw e;
-      } finally {
+        committed = true;
+      } catch (error) {
+        primaryError = error;
+        if (!committed && existsSync(tmp)) {
+          try {
+            unlinkSync(tmp);
+          } catch (cleanupError) {
+            primaryError = new AggregateError(
+              [error, cleanupError],
+              `Task graph write failed and temporary-file cleanup failed: ${this.path}`,
+            );
+          }
+        }
+      }
+
+      let permissionError: unknown = null;
+      try {
         chmodSync(this.path, 0o444);
+      } catch (error) {
+        permissionError = error;
+      }
+
+      if (primaryError !== null && permissionError !== null) {
+        throw new AggregateError(
+          [primaryError, permissionError],
+          `Task graph write and permission restoration both failed: ${this.path}`,
+        );
+      }
+      if (primaryError !== null) throw primaryError;
+      if (permissionError !== null) {
+        throw new Error(
+          `Task graph ${committed ? "was committed but" : "was not committed and"} read-only permission restoration failed: ${this.path}: ${permissionError instanceof Error ? permissionError.message : String(permissionError)}`,
+          { cause: permissionError },
+        );
       }
     });
   }

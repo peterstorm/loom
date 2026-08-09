@@ -243,6 +243,8 @@ describe("parseStoredFindings — untrusted state file", () => {
       { ...stored, id: "" },
       { ...stored, id: "bad:id" },
       { ...stored, id: "bad id" },
+      { ...stored, id: " code-reviewer-1" },
+      { ...stored, id: "code-reviewer-1 " },
       { ...stored, agent: undefined },
       { ...stored, severity: "high" },
       { ...stored, claim: "" },
