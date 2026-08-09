@@ -39,6 +39,37 @@ describe("standalone lifecycle", () => {
       prompt: "LOOM_REVIEW_CONTEXT: standalone\nReview the frozen scope",
     })).toEqual({ kind: "allow" });
   });
+
+  it("resolves a late LOOM_STATE_PATH once per phase-order invocation", () => {
+    const dir = makeTmpDir();
+    const graphPath = join(dir, "active_task_graph.json");
+    const previous = process.env.LOOM_STATE_PATH;
+    writeFileSync(graphPath, JSON.stringify({
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      current_wave: 1,
+      executing_tasks: [],
+      tasks: [],
+      wave_gates: {},
+    }));
+    process.env.LOOM_STATE_PATH = graphPath;
+    try {
+      expect(validatePhaseOrder({
+        agentType: "arch-designer-agent",
+        prompt: "Design through the architecture panel",
+      })).toMatchObject({
+        kind: "block",
+        message: expect.stringContaining("Architecture panel agents may run only during the architecture phase"),
+      });
+    } finally {
+      if (previous === undefined) delete process.env.LOOM_STATE_PATH;
+      else process.env.LOOM_STATE_PATH = previous;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("detectPhase (pure)", () => {

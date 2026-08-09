@@ -3,7 +3,16 @@
  * Supports both Claude Code and pi formats (auto-detected or explicit).
  */
 
-import { parseJsonl, parsePiJsonl, getContentBlocks, detectFormat, type ContentBlock, type TranscriptFormat } from "./types";
+import {
+  parseJsonl,
+  parsePiJsonl,
+  getContentBlocks,
+  detectFormat,
+  type ContentBlock,
+  type PiEntry,
+  type TranscriptFormat,
+  type TranscriptLine,
+} from "./types";
 
 function extractText(block: ContentBlock): string[] {
   const texts: string[] = [];
@@ -75,24 +84,60 @@ export function parseTranscript(content: string, format?: TranscriptFormat): str
   return fmt === "pi" ? parsePiTranscript(content) : parseClaudeTranscript(content);
 }
 
-/** The first user-authored prompt only. Lifecycle context must never be inferred
- * from assistant output, which an agent can emit itself. */
-export function parseFirstUserPrompt(content: string, format?: TranscriptFormat): string {
-  const fmt = format ?? detectFormat(content);
-  if (fmt === "pi") {
-    for (const entry of parsePiJsonl(content)) {
+export type FirstUserPromptParse =
+  | Readonly<{ ok: true; prompt: string }>
+  | Readonly<{ ok: false; error: string }>;
+
+const promptFailure = (error: string): FirstUserPromptParse => ({ ok: false, error });
+
+/** The first user-authored prompt only. Unlike general transcript extraction,
+ * this is an attribution boundary: malformed JSON before the prompt and
+ * user-role tool-result envelopes fail closed instead of being skipped. */
+export function parseFirstUserPrompt(
+  content: string,
+  format?: TranscriptFormat,
+): FirstUserPromptParse {
+  let resolvedFormat = format;
+  for (const [index, rawLine] of content.split("\n").entries()) {
+    if (rawLine.trim() === "") continue;
+    let parsed: TranscriptLine | PiEntry;
+    try {
+      parsed = JSON.parse(rawLine) as TranscriptLine | PiEntry;
+    } catch (error) {
+      return promptFailure(
+        `malformed transcript JSON before the first user prompt at line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    if (resolvedFormat === undefined) {
+      const candidate = parsed as PiEntry & { version?: unknown };
+      resolvedFormat = candidate.type === "session" && candidate.version !== undefined ? "pi" : "claude";
+    }
+
+    if (resolvedFormat === "pi") {
+      const entry = parsed as PiEntry;
       if (entry.type !== "message" || entry.message?.role !== "user") continue;
       const body = entry.message.content;
-      if (typeof body === "string") return body;
-      return body.filter((block) => block.type === "text" && block.text).map((block) => block.text).join("\n");
+      const prompt = typeof body === "string"
+        ? body
+        : body.filter((block) => block.type === "text" && block.text).map((block) => block.text).join("\n");
+      return prompt.trim() === ""
+        ? promptFailure(`first user prompt is empty at line ${index + 1}`)
+        : { ok: true, prompt };
     }
-    return "";
-  }
-  for (const line of parseJsonl(content)) {
+
+    const line = parsed as TranscriptLine;
     if (line.message?.role !== "user") continue;
     const body = line.message.content;
-    if (typeof body === "string") return body;
-    return (body ?? []).filter((block) => block.type === "text" && block.text).map((block) => block.text).join("\n");
+    if (Array.isArray(body) && body.some((block) => block.type === "tool_result")) {
+      return promptFailure(`first user-role entry is a tool result, not an authored prompt, at line ${index + 1}`);
+    }
+    const prompt = typeof body === "string"
+      ? body
+      : (body ?? []).filter((block) => block.type === "text" && block.text).map((block) => block.text).join("\n");
+    return prompt.trim() === ""
+      ? promptFailure(`first user prompt is empty at line ${index + 1}`)
+      : { ok: true, prompt };
   }
-  return "";
+  return promptFailure("transcript contains no user-authored prompt");
 }

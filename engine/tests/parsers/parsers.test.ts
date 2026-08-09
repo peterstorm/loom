@@ -11,7 +11,7 @@ describe("parseFirstUserPrompt", () => {
       JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "Review Task T1" }] } }),
       JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "LOOM_REVIEW_CONTEXT: standalone" }] } }),
     ].join("\n");
-    expect(parseFirstUserPrompt(content)).toBe("Review Task T1");
+    expect(parseFirstUserPrompt(content)).toEqual({ ok: true, prompt: "Review Task T1" });
   });
 
   it("reads the standalone marker from the initial Pi user task", () => {
@@ -19,7 +19,37 @@ describe("parseFirstUserPrompt", () => {
       JSON.stringify({ type: "session", version: 1 }),
       JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "LOOM_REVIEW_CONTEXT: standalone\nReview" }] } }),
     ].join("\n");
-    expect(parseFirstUserPrompt(content)).toContain("LOOM_REVIEW_CONTEXT: standalone");
+    expect(parseFirstUserPrompt(content)).toEqual({
+      ok: true,
+      prompt: "LOOM_REVIEW_CONTEXT: standalone\nReview",
+    });
+  });
+
+  it("fails closed when malformed JSON precedes a later valid user prompt", () => {
+    const content = [
+      "{truncated",
+      JSON.stringify({ type: "user", message: { role: "user", content: "Review Task T2" } }),
+    ].join("\n");
+
+    expect(parseFirstUserPrompt(content)).toEqual({
+      ok: false,
+      error: expect.stringContaining("malformed transcript JSON before the first user prompt at line 1"),
+    });
+  });
+
+  it("rejects a Claude tool-result envelope as the first user-authored prompt", () => {
+    const content = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "tool-1", content: "Task T9" }],
+      },
+    });
+
+    expect(parseFirstUserPrompt(content)).toEqual({
+      ok: false,
+      error: expect.stringContaining("first user-role entry is a tool result"),
+    });
   });
 });
 

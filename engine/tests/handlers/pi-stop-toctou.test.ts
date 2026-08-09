@@ -36,6 +36,7 @@ const graph = (tasks: Task[], executing: string[]): TaskGraph => ({
 });
 
 const untrustedPass: UntrustedStopResolution = {
+  taskCompleted: true,
   testResult: { verdict: "untrusted", passed: true, label: "pi-structured: bun: 5 pass" },
   testEvidence: "pi-structured: bun: 5 pass",
   filesModified: ["src/a.ts", "tests/a.test.ts"],
@@ -83,6 +84,41 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
       test_evidence: latestFailure.testEvidence,
     });
     expect(applied.state.tasks[0]!.proof?.state).toBe("failed");
+    expect(applied.state.wave_gates["1"].impl_complete).toBe(false);
+  });
+
+  it("does not let a failed child satisfy completion with retained artifact attribution", () => {
+    const s = graph([task({
+      id: "T1",
+      status: "implemented",
+      new_tests_required: false,
+      file_list: ["src/a.ts"],
+      files_modified: ["src/a.ts"],
+    })], ["T1"]);
+    const failedChild: UntrustedStopResolution = {
+      ...untrustedPass,
+      taskCompleted: false,
+      testResult: { verdict: "untrusted", passed: false, label: "pi-implementation-failed" },
+      testEvidence: "implementation process failed",
+      filesModified: [],
+      changedDeclaredArtifacts: ["src/a.ts"],
+      newTestsWritten: false,
+      newTestEvidence: "",
+    };
+
+    const applied = applyUntrustedStopResolution(s, "T1", failedChild);
+
+    expect(applied.state.tasks[0]).toMatchObject({
+      status: "pending",
+      test_result: failedChild.testResult,
+      files_modified: ["src/a.ts"],
+    });
+    expect(applied.state.tasks[0]!.proof?.state).toBe("failed");
+    expect(applied.state.tasks[0]!.proof?.results).toContainEqual(expect.objectContaining({
+      state: "failed",
+      obligation: { kind: "task-completed" },
+      failure: { kind: "task-not-completed" },
+    }));
     expect(applied.state.wave_gates["1"].impl_complete).toBe(false);
   });
 

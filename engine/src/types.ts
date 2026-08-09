@@ -282,7 +282,7 @@ export interface Task {
   wave: number;
   status: TaskStatus;
   depends_on: readonly string[];
-  spec_anchors?: string[];
+  spec_anchors?: readonly string[];
   new_tests_required?: boolean;
   /** Exact architecture context selected for this Task by decompose. */
   plan_context?: string;
@@ -295,7 +295,7 @@ export interface Task {
   test_evidence?: string;
   new_tests_written?: boolean;
   new_test_evidence?: string;
-  files_modified?: string[];
+  files_modified?: readonly string[];
   review_status?: ReviewStatus;
   /** Monotonic implementation generation; incremented whenever task bytes change. */
   review_generation?: number;

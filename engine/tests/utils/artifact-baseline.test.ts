@@ -36,6 +36,19 @@ describe("changedDeclaredArtifactsSinceRevision", () => {
     ])).toEqual(["assets/icon.bin", "created.txt"]);
   });
 
+  it("fails closed when a historical path exists but its blob is unreadable", () => {
+    const { root, revision } = repository();
+    const blob = execFileSync("git", ["rev-parse", `${revision}:unchanged.txt`], {
+      cwd: root,
+      encoding: "utf-8",
+    }).trim();
+    const blobPath = join(root, ".git", "objects", blob.slice(0, 2), blob.slice(2));
+    rmSync(blobPath);
+
+    expect(() => changedDeclaredArtifactsSinceRevision(root, revision, ["unchanged.txt"]))
+      .toThrow(/Cannot read declared artifact unchanged\.txt/);
+  });
+
   it("rejects a revision that is not a trusted commit", () => {
     const { root } = repository();
     expect(() => changedDeclaredArtifactsSinceRevision(root, "0".repeat(40), ["unchanged.txt"]))

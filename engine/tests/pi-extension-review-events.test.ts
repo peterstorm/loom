@@ -932,6 +932,7 @@ describe("Pi extension review tool_result integration", () => {
         review_error: undefined,
         review_evidence_failures: undefined,
         file_list: [artifactRelative],
+        files_modified: [artifactRelative],
       }],
     });
     const pi = await extension();
@@ -985,6 +986,29 @@ describe("Pi extension review tool_result integration", () => {
       });
     } finally {
       rmSync(artifactPath, { force: true });
+    }
+  });
+
+  it("guards Bash state writes when only the child session pointer binds a graph", async () => {
+    const sessionId = "019fca39-f989-7510-8e62-50dadbcad42c";
+    const pointer = join(subagentDir, `${sessionId}.task_graph`);
+    rmSync(statePath, { force: true });
+    mkdirSync(subagentDir, { recursive: true });
+    writeFileSync(pointer, join(temp, "parent", ".pi", "state", "active_task_graph.json"));
+    try {
+      const pi = await extension();
+      const results = await pi.emit("tool_call", {
+        toolName: "bash",
+        input: { command: "printf compromised > .claude/state/active_task_graph.json" },
+      }, { sessionManager: { getSessionId: () => sessionId } });
+
+      expect(results).toContainEqual(expect.objectContaining({
+        block: true,
+        reason: expect.stringContaining("loom-guarded state"),
+      }));
+    } finally {
+      rmSync(pointer, { force: true });
+      writeState(initialGraph());
     }
   });
 

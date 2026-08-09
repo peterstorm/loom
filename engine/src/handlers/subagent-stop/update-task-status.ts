@@ -277,6 +277,9 @@ export function capVerdictForMachineCompletion(
 
 /** What an untrusted Stop-handler resolution wants to persist on the task. */
 export interface UntrustedStopResolution {
+  /** Process-level completion observed by the harness. A failed child may
+   * retain structural attribution, but it must never mint completion proof. */
+  readonly taskCompleted: boolean;
   readonly testResult: Extract<TaskTestResult, { verdict: "untrusted" }>;
   readonly testEvidence: string;
   /** Files the agent modified (parsed from its transcript) — persisted on
@@ -351,7 +354,7 @@ export function applyUntrustedStopResolution(
       declaredArtifacts: target.file_list ?? [],
     },
     {
-      taskCompleted: true,
+      taskCompleted: resolution.taskCompleted,
       testResult: proofTestResult,
       filesModified: proofArtifactsChanged,
       newTestsWritten: currentNewTests.written,

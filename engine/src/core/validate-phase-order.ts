@@ -11,7 +11,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookResult, Phase } from "../types";
 import {
-  TASK_GRAPH_PATH, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
+  taskGraphPath, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
   REVIEW_PANEL_AGENTS, UTILITY_AGENTS, VALID_TRANSITIONS, CLARIFY_THRESHOLD,
   ARCH_PANEL_AGENTS, ARCH_PANEL_PHASE,
 } from "../config";
@@ -166,7 +166,8 @@ export function validatePhaseOrder(input: ValidatePhaseOrderInput): HookResult {
   // A standalone review is an isolated run artifact, not an orchestration
   // phase transition. Recognize the exact marker before touching task state.
   if (hasStandaloneReviewContext(input.prompt)) return { kind: "allow" };
-  if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
+  const statePath = taskGraphPath();
+  if (!existsSync(statePath)) return { kind: "allow" };
 
   const bareAgent = stripNamespace(input.agentType);
 
@@ -190,7 +191,7 @@ export function validatePhaseOrder(input: ValidatePhaseOrderInput): HookResult {
     };
   }
 
-  const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
+  const mgr = StateManager.fromPath(statePath);
   if (!mgr) return { kind: "allow" };
   const state = mgr.load();
   const currentPhase: Phase = state.current_phase ?? "init";

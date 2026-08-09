@@ -13,7 +13,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Engine core — harness-agnostic, no Claude Code dependency (these do fs I/O)
 import { shouldBlockDirectEdit } from "../engine/src/core/block-direct-edits";
-import { guardStateFile } from "../engine/src/core/guard-state-file";
+import { guardStateFileDecision } from "../engine/src/core/guard-state-file";
 import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
 import {
   classifyTaskExecutionSpawn,
@@ -215,7 +215,13 @@ export default function (pi: ExtensionAPI) {
       // Guard state file from bash writes
       if (event.toolName === "bash") {
         currentGuard = "guard-state-file";
-        const result = guardStateFile(event.input.command ?? "");
+        const safeSessionId = parseSessionId(sessionId);
+        const graphIsActive = existsSync(taskGraphPath()) ||
+          rejectedChildWriteGrantSessions.has(sessionId) ||
+          (safeSessionId !== null && existsSync(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`));
+        const result = graphIsActive
+          ? guardStateFileDecision(event.input.command ?? "")
+          : { kind: "allow" as const };
         // Call-start stamp (PRODUCER only — pi has no PostToolUse evidence
         // recorder yet, so nothing on the pi side consumes these stamps;
         // they exist so the engine's recorder can order artifacts if it
@@ -714,6 +720,7 @@ export default function (pi: ExtensionAPI) {
                 ? "reserved implementation result was missing or malformed"
                 : `${item.agentType} failed before implementation evidence completed`;
             state = applyUntrustedStopResolution(state, item.taskId, {
+              taskCompleted: false,
               testResult: { verdict: "untrusted", passed: false, label: "pi-implementation-failed" },
               testEvidence: failure,
               filesModified: [],
@@ -1060,6 +1067,7 @@ export default function (pi: ExtensionAPI) {
               )
             : { written: false, evidence: "" };
           const applied = applyUntrustedStopResolution(s, resolvedTaskId, {
+            taskCompleted: true,
             // Pi has no Loom evidence ledger. Preserve the real provenance:
             // paired tool-result evidence may discharge Pi's structured proof
             // policy; flattened transcript output may not.

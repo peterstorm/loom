@@ -32,14 +32,22 @@ export interface PanelRefutation {
   readonly reason: string;
 }
 
-export interface ParsedPanelOutcome {
+interface ParsedPanelOutcomeBase {
   readonly findingId: string;
   readonly claim: string;
-  readonly survives: boolean;
-  readonly refutations: readonly PanelRefutation[];
   readonly upheldBy: readonly string[];
   readonly uncertainFrom: readonly string[];
 }
+
+export type ParsedPanelOutcome =
+  | Readonly<ParsedPanelOutcomeBase & {
+      survives: true;
+      refutations: readonly PanelRefutation[];
+    }>
+  | Readonly<ParsedPanelOutcomeBase & {
+      survives: false;
+      refutations: readonly [PanelRefutation, ...PanelRefutation[]];
+    }>;
 
 export interface ParsedPanelOutcomes {
   readonly lenses: readonly string[];
@@ -266,7 +274,16 @@ export function parseStandalonePanelOutcomes(
       lens,
       reason: reasoning[refutationIndex] ?? "",
     }));
-    outcomes.push({ findingId, claim, survives: entry.survives === true, refutations, upheldBy, uncertainFrom });
+    if (entry.survives === true) {
+      outcomes.push({ findingId, claim, survives: true, refutations, upheldBy, uncertainFrom });
+    } else {
+      const [head, ...tail] = refutations;
+      if (head === undefined) {
+        errors.push(`${path} refuted finding must carry at least one refutation`);
+      } else {
+        outcomes.push({ findingId, claim, survives: false, refutations: [head, ...tail], upheldBy, uncertainFrom });
+      }
+    }
   }
   const ids = outcomes.map(({ findingId }) => findingId);
   if (new Set(ids).size !== ids.length) errors.push("panel outcome finding ids must be distinct");
@@ -303,9 +320,7 @@ export function finalizeStandaloneReview(
       survivingCriticals.push(finding);
       continue;
     }
-    const [head, ...tail] = outcome.refutations;
-    if (!head) return fail([`refuted finding ${finding.id} has no refutation evidence`]);
-    refutedCriticals.push({ finding, refutations: [head, ...tail] });
+    refutedCriticals.push({ finding, refutations: outcome.refutations });
   }
   return ok({ runId: aggregate.runId, scope: aggregate.scope, survivingCriticals, advisories, refutedCriticals, panel });
 }

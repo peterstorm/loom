@@ -30,11 +30,27 @@ export function captureDeclaredArtifactBaseline(
   })));
 }
 
+function artifactExistsAtRevision(
+  root: string,
+  revision: string,
+  artifact: string,
+): boolean {
+  const entries = execFileSync(
+    "git",
+    ["ls-tree", "-z", "--name-only", revision, "--", artifact],
+    { cwd: root, encoding: "buffer", stdio: ["ignore", "pipe", "pipe"] },
+  );
+  return entries.length > 0;
+}
+
 function snapshotArtifactAtRevision(
   root: string,
   revision: string,
   artifact: string,
 ): ArtifactSnapshot {
+  if (!artifactExistsAtRevision(root, revision, artifact)) {
+    return Object.freeze({ kind: "missing" });
+  }
   try {
     const bytes = execFileSync("git", ["show", `${revision}:${artifact}`], {
       cwd: root,
@@ -44,11 +60,9 @@ function snapshotArtifactAtRevision(
     });
     return Object.freeze({ kind: "sha256", digest: digest(bytes) });
   } catch (error) {
-    const status = error && typeof error === "object" && "status" in error
-      ? (error as { status?: unknown }).status
-      : undefined;
-    if (typeof status === "number" && status !== 0) return Object.freeze({ kind: "missing" });
-    throw error;
+    throw new Error(
+      `Cannot read declared artifact ${artifact} at ${revision}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 

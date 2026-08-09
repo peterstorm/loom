@@ -134,6 +134,31 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
     } finally { f.cleanup(); }
   });
 
+  it("fails attribution instead of skipping a malformed first prompt line", async () => {
+    const f = fixture("malformed-prompt", BLOCKING);
+    try {
+      writeFileSync(f.transcriptPath, [
+        "{truncated",
+        JSON.stringify({ type: "user", message: { role: "user", content: "Review Task T1." } }),
+        JSON.stringify({ type: "assistant", message: { role: "assistant", content: BLOCKING } }),
+      ].join("\n"));
+      const before = readFileSync(f.statePath, "utf-8");
+
+      const { result, stderr } = await run({
+        session_id: f.session,
+        agent_type: "code-reviewer",
+        agent_transcript_path: f.transcriptPath,
+      });
+
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringContaining("malformed transcript JSON before the first user prompt"),
+      });
+      expect(readFileSync(f.statePath, "utf-8")).toBe(before);
+      expect(stderr).toContain("review evidence cannot be attributed");
+    } finally { f.cleanup(); }
+  });
+
   it("stores a reviewer's critical and blocks the task", async () => {
     const f = fixture("stores", BLOCKING);
     try {

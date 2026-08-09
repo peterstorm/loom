@@ -4,8 +4,9 @@
  * A reviewer emits three overlapping descriptions of what it found: a
  * `CRITICAL_COUNT` marker (its own tally), `CRITICAL:` / `ADVISORY:` marker
  * lines (the claims as text), and — optionally — a fenced ```findings block
- * (the same claims with file/line). They can disagree, and which one wins
- * decides whether a critical reaches the wave gate at all.
+ * (the same claims with file/line). They can disagree; arbitration chooses
+ * the primary location-bearing representation, while unmatched claims from
+ * the other source are preserved and critical-count shortfalls fail closed.
  *
  * The rule, in one sentence: **marker lines settle the severity of claims they
  * name, then the block wins only when it accounts for at least as many findings
