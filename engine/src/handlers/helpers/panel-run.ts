@@ -262,6 +262,29 @@ function surplusItemErrors(
  * because `artifactErrors` runs at the manifest step, by which time the bytes
  * have already landed.
  */
+export function requireRunDirectoriesNoFollow(
+  runDir: string,
+  directories: readonly string[],
+): ParseResult<void> {
+  const errors: string[] = [];
+  for (const directory of directories) {
+    const path = join(runDir, directory);
+    let directoryFd: number | null = null;
+    try {
+      const fromRun = relative(resolve(runDir), resolve(path));
+      if (fromRun === ".." || fromRun.startsWith(`..${sep}`) || isAbsolute(fromRun)) {
+        throw new Error(`run subdirectory escapes run directory: ${path}`);
+      }
+      directoryFd = openDirectoryNoFollow(path);
+    } catch (error) {
+      errors.push(`cannot anchor existing run subdirectory ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      if (directoryFd !== null) closeSync(directoryFd);
+    }
+  }
+  return errors.length > 0 ? fail(errors) : ok(undefined);
+}
+
 export function prepareWriteTargets(
   runDir: string,
   directories: readonly string[],
@@ -411,6 +434,29 @@ export function writeRunFileExclusiveNoFollow(path: string, data: string): void 
   writeAnchoredRunFile(path, data, true);
 }
 
+/** Read one run artifact through descriptors for every path hop. */
+export function readRunFileNoFollow(path: string): string {
+  const parentFd = openDirectoryNoFollow(dirname(path));
+  let fileFd: number | null = null;
+  try {
+    fileFd = openSync(procFdChild(parentFd, basename(path)), fsConstants.O_RDONLY | noFollowFlag());
+    return readFileSync(fileFd, "utf-8");
+  } finally {
+    if (fileFd !== null) closeSync(fileFd);
+    closeSync(parentFd);
+  }
+}
+
+/** Remove a run artifact from its retained parent directory without following it. */
+export function removeRunFileNoFollow(path: string): void {
+  const parentFd = openDirectoryNoFollow(dirname(path));
+  try {
+    unlinkSync(procFdChild(parentFd, basename(path)));
+  } finally {
+    closeSync(parentFd);
+  }
+}
+
 /** Publish staged bytes through one retained parent descriptor. Both names are
  * resolved inside that directory even if an ancestor is replaced concurrently. */
 export function publishStagedRunFile(stagedPath: string, finalPath: string): void {
@@ -453,10 +499,13 @@ export function pruneSurplusItems(
 ): ParseResult<readonly string[]> {
   const directory = join(runDir, itemDir);
   const keep = new Set(expected);
+  let directoryFd: number | null = null;
   let entries: readonly string[];
   try {
-    entries = readdirSync(directory);
+    directoryFd = openDirectoryNoFollow(directory);
+    entries = readdirSync(`/proc/self/fd/${directoryFd}`);
   } catch (error) {
+    if (directoryFd !== null) closeSync(directoryFd);
     // A run directory that has never held items is the normal first-brief case.
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return ok([]);
     return fail([
@@ -466,26 +515,31 @@ export function pruneSurplusItems(
 
   const removed: string[] = [];
   const errors: string[] = [];
-  for (const entry of entries) {
-    if (keep.has(entry)) continue;
-    const path = join(directory, entry);
-    try {
-      const stat = lstatSync(path);
-      if (stat.isSymbolicLink()) {
-        errors.push(`stale run artifact must not be a symbolic link: ${path}`);
-        continue;
+  try {
+    for (const entry of entries) {
+      if (keep.has(entry)) continue;
+      const path = join(directory, entry);
+      const anchoredPath = procFdChild(directoryFd, entry);
+      try {
+        const stat = lstatSync(anchoredPath);
+        if (stat.isSymbolicLink()) {
+          errors.push(`stale run artifact must not be a symbolic link: ${path}`);
+          continue;
+        }
+        if (!stat.isFile()) {
+          errors.push(`stale run artifact must be a regular file: ${path}`);
+          continue;
+        }
+        unlinkSync(anchoredPath);
+        removed.push(entry);
+      } catch (error) {
+        errors.push(
+          `cannot clear stale run artifact ${path}: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
-      if (!stat.isFile()) {
-        errors.push(`stale run artifact must be a regular file: ${path}`);
-        continue;
-      }
-      unlinkSync(path);
-      removed.push(entry);
-    } catch (error) {
-      errors.push(
-        `cannot clear stale run artifact ${path}: ${error instanceof Error ? error.message : String(error)}`,
-      );
     }
+  } finally {
+    closeSync(directoryFd);
   }
   return errors.length > 0 ? fail(errors) : ok(removed);
 }

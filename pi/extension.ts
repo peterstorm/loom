@@ -1001,7 +1001,14 @@ export default function (pi: ExtensionAPI) {
       stopReason?: string;
       messages: unknown;
     }>;
-    for (const [resultIndex, result] of results.entries()) {
+    if (reservation && results.length > reservation.items.length) {
+      const diagnostic =
+        `subagent tool_result returned ${results.length} result(s) for ${reservation.items.length} reserved slot(s) — surplus evidence ignored`;
+      processingErrors.push(diagnostic);
+      process.stderr.write(`loom(pi): ${diagnostic}\n`);
+    }
+    const authorizedResults = reservation ? results.slice(0, reservation.items.length) : results;
+    for (const [resultIndex, result] of authorizedResults.entries()) {
       // Per-result error isolation (mirrors dispatch.ts's safeRun): a throw
       // while processing result #1 must not abort results #2..N — that
       // leaves tasks stuck "executing" with zero diagnostics.

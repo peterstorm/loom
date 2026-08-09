@@ -237,6 +237,27 @@ describe("standalone review helper and refutation adapter", () => {
     expect(run.stderr).toContain("assigned to more than one reviewer");
   });
 
+  it("rejects a symlinked reviewers directory before publishing session authority", () => {
+    rmSync(join(tmp, runDir, "reviewers"), { recursive: true });
+    const outsideReviewers = join(tmp, "outside-reviewers");
+    mkdirSync(outsideReviewers);
+    symlinkSync(outsideReviewers, join(tmp, runDir, "reviewers"));
+    writeFileSync(
+      join(tmp, runDir, "review-plan.json"),
+      JSON.stringify({ scope: ["src/x.ts"], expected_agents: ["code-reviewer"] }),
+    );
+
+    const run = cli("standalone-review", [
+      "init", "--runs-root", runsRoot, "--run-dir", runDir,
+      "--input", join(runDir, "review-plan.json"),
+    ]);
+
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("cannot create");
+    expect(() => readFileSync(join(tmp, runDir, "session.json"), "utf-8")).toThrow();
+    expect(() => readFileSync(join(outsideReviewers, "session.json"), "utf-8")).toThrow();
+  });
+
   it("rejects a symlinked reviewer transcript before publishing an aggregate", () => {
     initialize();
     const slot = join(tmp, runDir, "reviewers/1-code-reviewer.md");

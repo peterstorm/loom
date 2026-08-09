@@ -10,7 +10,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -866,6 +866,24 @@ describe("pruneSurplusItems — a re-brief owns its item directory", () => {
       expect(pruned.ok).toBe(false);
       if (!pruned.ok) expect(pruned.errors[0]).toContain("must be a regular file");
     });
+  });
+
+  it("REFUSES a symlinked item directory without deleting its outside sentinel", () => {
+    const root = mkdtempSync(join(tmpdir(), "prune-parent-symlink-"));
+    const runDir = join(root, "run");
+    const outside = join(root, "outside");
+    mkdirSync(runDir);
+    mkdirSync(outside);
+    const sentinel = join(outside, "sentinel.json");
+    writeFileSync(sentinel, "outside\n");
+    symlinkSync(outside, join(runDir, "findings"));
+    try {
+      const pruned = pruneSurplusItems(runDir, "findings", []);
+      expect(pruned.ok).toBe(false);
+      expect(readFileSync(sentinel, "utf-8")).toBe("outside\n");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("a first brief, with no item directory yet, is not an error", () => {

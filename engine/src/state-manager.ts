@@ -134,6 +134,38 @@ export function taskIdError(value: unknown, label: string): string | null {
     : `${label}: id must match T\\d+, got ${JSON.stringify(value)}`;
 }
 
+export function taskDependencyErrors(tasks: readonly Record<string, unknown>[]): readonly string[] {
+  const byId = new Map(
+    tasks.flatMap((task) => typeof task.id === "string" ? [[task.id, task] as const] : []),
+  );
+  const errors: string[] = [];
+  for (const task of tasks) {
+    if (typeof task.id !== "string" || !Array.isArray(task.depends_on)) continue;
+    const id = task.id;
+    for (const dependency of task.depends_on) {
+      if (typeof dependency !== "string") continue;
+      if (dependency === id) {
+        errors.push(`Task ${id}: self-dependency`);
+        continue;
+      }
+      const dependencyTask = byId.get(dependency);
+      if (!dependencyTask) {
+        errors.push(`Task ${id}: depends on non-existent '${dependency}'`);
+        continue;
+      }
+      if (
+        typeof task.wave === "number" && typeof dependencyTask.wave === "number" &&
+        dependencyTask.wave >= task.wave
+      ) {
+        errors.push(
+          `Task ${id} (wave ${task.wave}): depends on '${dependency}' (wave ${dependencyTask.wave}) — deps must be in earlier wave`,
+        );
+      }
+    }
+  }
+  return errors;
+}
+
 export function taskUnionError(v: unknown, index: number): string | null {
   if (typeof v !== "object" || v === null || Array.isArray(v)) {
     return `tasks[${index}] must be an object`;
@@ -278,6 +310,13 @@ export function taskUnionError(v: unknown, index: number): string | null {
         seenPaths.add(parsed.value);
       }
     }
+  }
+  if (
+    t.spec_anchors !== undefined &&
+    (!Array.isArray(t.spec_anchors) ||
+      t.spec_anchors.some((anchor) => typeof anchor !== "string" || anchor.trim() === ""))
+  ) {
+    return `tasks[${index}] ("${id}"): spec_anchors must be an array of non-empty strings when present`;
   }
   if (t.plan_context !== undefined && typeof t.plan_context !== "string") {
     return `tasks[${index}] ("${id}"): plan_context must be a string when present`;
@@ -481,6 +520,8 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
   const taskIds = tasks.map((task) => (task as Record<string, unknown>).id as string);
   const duplicateTaskId = taskIds.find((id, index) => taskIds.indexOf(id) !== index);
   if (duplicateTaskId !== undefined) return parseErr(`duplicate task id: ${duplicateTaskId}`);
+  const dependencyError = taskDependencyErrors(tasks as Record<string, unknown>[])[0];
+  if (dependencyError !== undefined) return parseErr(dependencyError);
   const waveGates = obj.wave_gates ?? {};
   if (typeof waveGates !== "object" || waveGates === null || Array.isArray(waveGates)) {
     return parseErr("wave_gates must be an object");

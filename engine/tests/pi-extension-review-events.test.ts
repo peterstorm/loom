@@ -1144,6 +1144,48 @@ describe("Pi extension review tool_result integration", () => {
     expect(task.review_error).toContain("reserved reviewer result 2");
   });
 
+  it("rejects surplus reserved results instead of applying them through compatibility dispatch", async () => {
+    const planPath = join(temp, "surplus-review-results-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad437";
+    const context = { sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-surplus-review-results";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agentScope: "user",
+        agent: "code-reviewer",
+        task: "Task ID: T1\nReview and emit Machine Summary findings.",
+      },
+    }, context)).toEqual([undefined]);
+
+    const reserved = reviewResult("Task: T1", "reserved reviewer stored").details.results[0];
+    const surplus = reviewResult("Task: T1", "surplus reviewer must be ignored").details.results[0];
+    surplus.agent = "silent-failure-hunter";
+    const responses = await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId,
+      content: [],
+      details: { results: [reserved, surplus] },
+    }, context);
+
+    const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+    expect(task.critical_findings).toEqual(["reserved reviewer stored"]);
+    expect(task.critical_findings).not.toContain("surplus reviewer must be ignored");
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("surplus evidence ignored") })],
+    }));
+  });
+
   it.each([
     ["missing details", {}],
     ["short results", { results: [] }],

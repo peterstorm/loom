@@ -32,7 +32,12 @@ import {
   RECOVERED_AGENT,
 } from "../../core/findings";
 import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
-import { taskGraphLifecycleErrors, taskIdError, taskUnionError } from "../../state-manager";
+import {
+  taskDependencyErrors,
+  taskGraphLifecycleErrors,
+  taskIdError,
+  taskUnionError,
+} from "../../state-manager";
 import { parseReviewPath } from "../../core/review-packet";
 
 export type ValidationResult =
@@ -154,9 +159,9 @@ export function validateFull(
   const taskIds = validTaskRecords.flatMap((task) =>
     typeof task.id === "string" && task.id !== "" ? [task.id] : [],
   );
-  const allIds = new Set(taskIds);
   const duplicateIds = [...new Set(taskIds.filter((id, index) => taskIds.indexOf(id) !== index))];
   for (const id of duplicateIds) errors.push(`Duplicate task id: ${id}`);
+  errors.push(...taskDependencyErrors(validTaskRecords));
 
   for (let i = 0; i < tasks.length; i++) {
     const task = taskRecords[i];
@@ -189,19 +194,8 @@ export function validateFull(
       errors.push(`Task ${tid}: 'depends_on' must be array`);
     }
 
-    if (Array.isArray(deps)) {
-      for (const dep of deps) {
-        if (typeof dep !== "string") {
-          errors.push(`Task ${tid}: 'depends_on' entries must be strings`);
-          continue;
-        }
-        if (dep === tid) { errors.push(`Task ${tid}: self-dependency`); continue; }
-        if (!allIds.has(dep)) { errors.push(`Task ${tid}: depends on non-existent '${dep}'`); continue; }
-        const depTask = validTaskRecords.find((candidate) => candidate.id === dep);
-        if (depTask && wave && (depTask.wave as number) >= wave) {
-          errors.push(`Task ${tid} (wave ${wave}): depends on '${dep}' (wave ${depTask.wave}) — deps must be in earlier wave`);
-        }
-      }
+    if (Array.isArray(deps) && deps.some((dep) => typeof dep !== "string")) {
+      errors.push(`Task ${tid}: 'depends_on' entries must be strings`);
     }
 
     if (scope === "decompose-payload" && task.file_list !== undefined) {
@@ -233,8 +227,12 @@ export function validateFull(
     }
 
     // Optional field type checks
-    if (task.spec_anchors !== undefined && task.spec_anchors !== null && !Array.isArray(task.spec_anchors)) {
-      errors.push(`Task ${tid}: 'spec_anchors' must be array if present`);
+    if (
+      task.spec_anchors !== undefined && task.spec_anchors !== null &&
+      (!Array.isArray(task.spec_anchors) ||
+        task.spec_anchors.some((anchor) => typeof anchor !== "string" || anchor.trim() === ""))
+    ) {
+      errors.push(`Task ${tid}: 'spec_anchors' must be an array of non-empty strings if present`);
     }
     if (task.new_tests_required !== undefined && typeof task.new_tests_required !== "boolean") {
       errors.push(`Task ${tid}: 'new_tests_required' must be boolean if present`);

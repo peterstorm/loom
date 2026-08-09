@@ -1,12 +1,8 @@
 import {
   existsSync,
   lstatSync,
-  mkdirSync,
   readFileSync,
   realpathSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { isReviewAgent } from "../../config";
@@ -22,7 +18,18 @@ import {
   type StandaloneReviewTranscript,
 } from "../../core/standalone-review";
 import { resolveReviewFindings, reviewResolutionLog } from "../../core/review-output";
-import { argumentValue, contractError, parseRunDirectory, prepareWriteTargets, writeCanonicalOutput } from "./panel-run";
+import {
+  argumentValue,
+  contractError,
+  parseRunDirectory,
+  prepareWriteTargets,
+  publishStagedRunFile,
+  readRunFileNoFollow,
+  removeRunFileNoFollow,
+  requireRunDirectoriesNoFollow,
+  writeCanonicalOutput,
+  writeRunFileExclusiveNoFollow,
+} from "./panel-run";
 
 export const STANDALONE_REVIEW_OPERATIONS = ["init", "aggregate", "finalize"] as const;
 const USAGE =
@@ -194,7 +201,7 @@ function init(runDir: string, inputPath: string): HookResult {
   const json = serializeSession(session.value) + "\n";
   const target = prepareWriteTargets(runDir, [], ["session.json"]);
   if (!target.ok) return contractError("standalone review boundary", target.errors);
-  try { writeFileSync(sessionPath, json, { flag: "wx" }); }
+  try { writeRunFileExclusiveNoFollow(sessionPath, json); }
   catch (error) { return contractError("standalone review", [`cannot write session: ${error instanceof Error ? error.message : String(error)}`]); }
   return writeCanonicalOutput(json);
 }
@@ -239,14 +246,16 @@ function aggregate(runDir: string, inputPath: string): HookResult {
   const json = serializeStandaloneAggregate(result.value.aggregate) + "\n";
   const target = prepareWriteTargets(runDir, [], ["aggregate.json", ".aggregate.pending.json"]);
   if (!target.ok) return contractError("standalone review boundary", target.errors);
+  let stagedCreated = false;
   try {
-    writeFileSync(pendingPath, json, { flag: "wx" });
-    const staged = parseStandaloneAggregate(JSON.parse(readFileSync(pendingPath, "utf-8")));
+    writeRunFileExclusiveNoFollow(pendingPath, json);
+    stagedCreated = true;
+    const staged = parseStandaloneAggregate(JSON.parse(readRunFileNoFollow(pendingPath)));
     if (!staged.ok) throw new Error(`staged aggregate failed validation: ${staged.errors.join("; ")}`);
-    renameSync(pendingPath, aggregatePath);
+    publishStagedRunFile(pendingPath, aggregatePath);
   } catch (error) {
     let cleanupError: string | null = null;
-    try { if (existsSync(pendingPath)) unlinkSync(pendingPath); }
+    try { if (stagedCreated) removeRunFileNoFollow(pendingPath); }
     catch (cleanup) { cleanupError = cleanup instanceof Error ? cleanup.message : String(cleanup); }
     return contractError("standalone review", [
       `cannot atomically publish aggregate: ${error instanceof Error ? error.message : String(error)}`,
@@ -340,15 +349,17 @@ function finalize(runDir: string): HookResult {
   const json = serializeAdjudicatedStandaloneReview(finalized.value) + "\n";
   const target = prepareWriteTargets(runDir, [], ["result.json", ".result.pending.json"]);
   if (!target.ok) return contractError("standalone review boundary", target.errors);
+  let stagedCreated = false;
   try {
-    writeFileSync(pendingResultPath, json, { flag: "wx" });
-    const staged = readFileSync(pendingResultPath, "utf-8");
+    writeRunFileExclusiveNoFollow(pendingResultPath, json);
+    stagedCreated = true;
+    const staged = readRunFileNoFollow(pendingResultPath);
     JSON.parse(staged);
     if (staged !== json) throw new Error("staged result bytes differ from the engine-authored result");
-    renameSync(pendingResultPath, resultPath);
+    publishStagedRunFile(pendingResultPath, resultPath);
   } catch (error) {
     let cleanupError: string | null = null;
-    try { if (existsSync(pendingResultPath)) unlinkSync(pendingResultPath); }
+    try { if (stagedCreated) removeRunFileNoFollow(pendingResultPath); }
     catch (cleanup) { cleanupError = cleanup instanceof Error ? cleanup.message : String(cleanup); }
     return contractError("standalone review", [
       `cannot atomically publish result: ${error instanceof Error ? error.message : String(error)}`,
@@ -365,7 +376,10 @@ const handler: HookHandler = async (_stdin, args) => {
   if (!operation || !runsRoot || !runDir || !(STANDALONE_REVIEW_OPERATIONS as readonly string[]).includes(operation)) return usageError;
   const boundary = parseRunDirectory(runsRoot, runDir);
   if (!boundary.ok) return contractError("standalone review boundary", boundary.errors);
-  mkdirSync(join(runDir, "reviewers"), { recursive: true });
+  const reviewers = operation === "init"
+    ? prepareWriteTargets(runDir, ["reviewers"], [])
+    : requireRunDirectoriesNoFollow(runDir, ["reviewers"]);
+  if (!reviewers.ok) return contractError("standalone review boundary", reviewers.errors);
   if (operation === "finalize") return finalize(runDir);
   const input = argumentValue(args, "--input");
   if (!input) return usageError;

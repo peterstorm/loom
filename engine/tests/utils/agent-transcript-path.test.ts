@@ -162,20 +162,28 @@ describe("resolveAgentTranscriptPath — precedence", () => {
     expect(resolveAgentTranscriptPath({ session_id: "sess-5", agent_id: "agent1" })).toBe(derived);
   });
 
-  it("falls back to derivation when the supplied path no longer exists", () => {
+  it("diagnoses a missing supplied path before falling back to derivation", () => {
     const config = tmp("loom-cfg");
     const project = tmp("loom-proj");
     setEnv("CLAUDE_CONFIG_DIR", config);
     setEnv("CLAUDE_PROJECT_DIR", project);
     const derived = plantTranscript(config, project, "sess-6", "agent1");
-
-    expect(
-      resolveAgentTranscriptPath({
-        session_id: "sess-6",
-        agent_id: "agent1",
-        agent_transcript_path: join(project, "gone.jsonl"),
-      }),
-    ).toBe(derived);
+    const supplied = join(project, "gone.jsonl");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(
+        resolveAgentTranscriptPath({
+          session_id: "sess-6",
+          agent_id: "agent1",
+          agent_transcript_path: supplied,
+        }),
+      ).toBe(derived);
+      const diagnostic = stderr.mock.calls.map(([text]) => String(text)).join("");
+      expect(diagnostic).toContain(`supplied agent transcript path ${supplied} is unavailable`);
+      expect(diagnostic).toContain("falling back to derived lookup");
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it("expands a tilde-prefixed supplied path before believing it", () => {

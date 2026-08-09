@@ -28,7 +28,7 @@
  * had, never crash a lifecycle hook.
  */
 
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseAgentId, parseSessionId } from "../machine/evidence";
@@ -134,6 +134,15 @@ export interface TranscriptLocator {
  */
 export function resolveAgentTranscriptPath(input: TranscriptLocator): string | null {
   const supplied = input.agent_transcript_path?.replace(/^~/, process.env.HOME ?? "~") ?? "";
-  if (supplied && existsSync(supplied)) return supplied;
+  if (supplied) {
+    try {
+      lstatSync(supplied);
+      return supplied;
+    } catch (error) {
+      process.stderr.write(
+        `loom: supplied agent transcript path ${supplied} is unavailable: ${error instanceof Error ? error.message : String(error)} — falling back to derived lookup\n`,
+      );
+    }
+  }
   return deriveAgentTranscriptPath(input.session_id ?? "", input.agent_id ?? "");
 }

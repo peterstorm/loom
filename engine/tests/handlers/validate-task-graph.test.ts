@@ -213,13 +213,19 @@ describe("validateFull (pure)", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("rejects a non-array spec_anchors when present", () => {
+  it.each([
+    ["a non-array", "REQ-1"],
+    ["a non-string entry", ["REQ-1", 42]],
+    ["a blank entry", ["REQ-1", "  "]],
+  ])("rejects %s spec_anchors value", (_label, spec_anchors) => {
     const result = validateFull({
       plan_title: "x", plan_file: "x", spec_file: "x",
-      tasks: [{ ...validTask, spec_anchors: "REQ-1" }],
+      tasks: [{ ...validTask, spec_anchors }],
     });
     expect(result.ok).toBe(false);
-    expect(errorsOf(result)).toContain("Task T1: 'spec_anchors' must be array if present");
+    expect(errorsOf(result)).toContain(
+      "Task T1: 'spec_anchors' must be an array of non-empty strings if present",
+    );
   });
 
   it("rejects a non-boolean new_tests_required when present", () => {

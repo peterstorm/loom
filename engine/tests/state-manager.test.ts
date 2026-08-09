@@ -243,6 +243,42 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     if (!parsed.ok) expect(parsed.error).toContain(message);
   });
 
+  it.each([
+    ["a non-array", "REQ-1"],
+    ["a non-string entry", ["REQ-1", 42]],
+    ["a blank entry", ["REQ-1", "  "]],
+  ])("rejects %s spec_anchors value at the typed load boundary", (_label, spec_anchors) => {
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, spec_anchors }],
+    });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("spec_anchors must be an array of non-empty strings");
+  });
+
+  it("enforces dependency existence and earlier-wave ordering at the typed load boundary", () => {
+    const task2 = { ...validTask, id: "T2", wave: 2, depends_on: ["T1"] };
+    expect(parseTaskGraph({ ...validGraph, tasks: [validTask, task2] }).ok).toBe(true);
+
+    const invalid = [
+      { tasks: [{ ...validTask, depends_on: ["T1"] }], message: "self-dependency" },
+      { tasks: [{ ...validTask, depends_on: ["T99"] }], message: "depends on non-existent" },
+      {
+        tasks: [validTask, { ...task2, wave: 1 }],
+        message: "deps must be in earlier wave",
+      },
+      {
+        tasks: [{ ...validTask, depends_on: ["T2"] }, task2],
+        message: "deps must be in earlier wave",
+      },
+    ];
+    for (const { tasks, message } of invalid) {
+      const parsed = parseTaskGraph({ ...validGraph, tasks });
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toContain(message);
+    }
+  });
+
   it.each(["bad:id", " T1", "T 1", "task-1"])(
     "rejects task id %j that cannot form a wave finding identity",
     (id) => {
