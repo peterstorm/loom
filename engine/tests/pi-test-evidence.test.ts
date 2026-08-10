@@ -110,6 +110,81 @@ describe("Pi test-evidence transcript adapter", () => {
     expect(piStructuredTestResult(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
   });
 
+  it.each([
+    [
+      "user",
+      { role: "user", content: "hello from Pi" },
+      { role: "user", content: [{ type: "text", text: "hello from Pi" }] },
+    ],
+    [
+      "assistant",
+      { role: "assistant", content: "working on it" },
+      { role: "assistant", content: [{ type: "text", text: "working on it" }] },
+    ],
+    [
+      "toolResult",
+      { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: "command output" },
+      {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName: "bash",
+        content: [{ type: "text", text: "command output" }],
+      },
+    ],
+    [
+      "custom role",
+      { role: "custom", content: "custom harness output" },
+      { role: "custom", content: [{ type: "text", text: "custom harness output" }] },
+    ],
+  ] as const)("normalizes Pi %s string content to one immutable text block", (_role, message, expected) => {
+    const parsed = parsePiMessages([message]);
+
+    expect(parsed).toEqual({ ok: true, value: [expected] });
+    expect(parsed.ok && parsed.value[0]!.content).toHaveLength(1);
+    expect(parsed.ok && Object.isFrozen(parsed.value[0]!.content)).toBe(true);
+    expect(parsed.ok && Object.isFrozen(parsed.value[0]!.content[0])).toBe(true);
+  });
+
+  it("omits unknown-role strings from JSONL and test evidence", () => {
+    const unknownMessage = {
+      role: "custom",
+      toolCallId: "call-test-1",
+      toolName: "bash",
+      content: "654 pass\n0 fail\n",
+    };
+
+    expect(messagesToClaudeJsonl([unknownMessage])).toEqual({ ok: true, value: "" });
+    expect(piStructuredTestResult([testRun("")[0], unknownMessage])).toEqual({ ok: true, value: null });
+  });
+
+  it("pairs a string-form tool result with its real Bash call for structured evidence", () => {
+    const messages = [
+      testRun("")[0],
+      {
+        role: "toolResult",
+        toolCallId: "call-test-1",
+        toolName: "bash",
+        content: "654 pass\n0 fail\n",
+      },
+    ];
+
+    expect(piStructuredTestResult(messages)).toEqual({
+      ok: true,
+      value: { passed: true, evidence: "bun: 654 pass" },
+    });
+  });
+
+  it.each([
+    ["toolCallId", { role: "toolResult", toolName: "bash", content: "654 pass\n0 fail\n" }],
+    ["toolName", { role: "toolResult", toolCallId: "call-test-1", content: "654 pass\n0 fail\n" }],
+  ] as const)("fails closed when a string-form tool result is missing %s", (_field, result) => {
+    const messages = [testRun("")[0], result];
+
+    expect(parsePiMessages(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
+    expect(messagesToClaudeJsonl(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
+    expect(piStructuredTestResult(messages)).toMatchObject({ ok: false, errors: [expect.any(String)] });
+  });
+
   it("returns immutable parser-owned copies rather than trusting harness objects", () => {
     const raw = [{ role: "assistant", content: [{ type: "text", text: "before" }] }];
     const parsed = parsePiMessages(raw);

@@ -51,17 +51,23 @@ export function parsePiMessages(messages: unknown): PiTranscriptResult<readonly 
       errors.push(`${messageLabel} must be an object`);
       return;
     }
-    if (typeof message.role !== "string" || message.role.trim() === "") {
-      errors.push(`${messageLabel}.role must be a non-empty string`);
-    }
-    if (!Array.isArray(message.content)) {
+    const role = typeof message.role === "string" && message.role.trim() !== ""
+      ? message.role
+      : null;
+    if (role === null) errors.push(`${messageLabel}.role must be a non-empty string`);
+
+    const contentValue = message.content;
+    const isStringContent = role !== null && typeof contentValue === "string";
+    if (!isStringContent && !Array.isArray(contentValue)) {
       errors.push(`${messageLabel}.content must be an array`);
       return;
     }
 
     const blockErrorsBefore = errors.length;
-    const content: PiContentBlock[] = [];
-    message.content.forEach((block, blockIndex) => {
+    const content: PiContentBlock[] = isStringContent
+      ? [Object.freeze({ type: "text", text: contentValue })]
+      : [];
+    if (Array.isArray(contentValue)) contentValue.forEach((block, blockIndex) => {
       const label = `${messageLabel}.content[${blockIndex}]`;
       if (!isRecord(block) || typeof block.type !== "string" || block.type.trim() === "") {
         errors.push(`${label} must be a typed content block`);
@@ -96,7 +102,6 @@ export function parsePiMessages(messages: unknown): PiTranscriptResult<readonly 
       content.push(Object.freeze({ type: "opaque", originalType: block.type }));
     });
 
-    const role = typeof message.role === "string" ? message.role : null;
     const toolCallId = typeof message.toolCallId === "string" && message.toolCallId.trim() !== ""
       ? message.toolCallId
       : null;
