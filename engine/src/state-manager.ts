@@ -311,6 +311,14 @@ export function taskDependencyErrors(tasks: readonly Record<string, unknown>[]):
   return errors;
 }
 
+/**
+ * Prove one task entry at the load boundary.
+ *
+ * Split into one validator per concern. The ORDER is preserved exactly —
+ * each helper runs in the sequence its checks originally ran in, and the
+ * first non-null error still wins — so the diagnostic a drifted graph
+ * produces is unchanged.
+ */
 export function taskUnionError(v: unknown, index: number): string | null {
   if (typeof v !== "object" || v === null || Array.isArray(v)) {
     return `tasks[${index}] must be an object`;
@@ -320,6 +328,20 @@ export function taskUnionError(v: unknown, index: number): string | null {
   if (identityError !== null) return identityError;
   const id = t.id as string;
   // Structural fields the cast below asserts — proven, not assumed: a
+  return taskShapeError(t, index, id)
+    ?? taskBaselineError(t, index, id)
+    ?? taskPacketError(t, index, id)
+    ?? taskStatusError(t, index, id)
+    ?? taskEvidenceError(t, index, id)
+    ?? taskFindingsError(t, index, id);
+}
+
+/** Structural fields the Task cast asserts: names, wave, dependencies, files. */
+function taskShapeError(
+  t: Record<string, unknown>,
+  index: number,
+  id: string,
+): string | null {
   // drifted or hand-edited graph must fail at the load boundary, not
   // explode later inside typed gate logic that trusts Task's shape.
   if (typeof t.description !== "string" || t.description.trim() === "") {
@@ -355,6 +377,15 @@ export function taskUnionError(v: unknown, index: number): string | null {
   ) {
     return `tasks[${index}] ("${id}"): files_modified must be an array of strings when present`;
   }
+  return null;
+}
+
+/** Declared artifact baselines and their agreement with file_list. */
+function taskBaselineError(
+  t: Record<string, unknown>,
+  index: number,
+  id: string,
+): string | null {
   if (t.artifact_baseline !== undefined) {
     const baseline = parseDeclaredArtifactBaseline(
       t.artifact_baseline,
@@ -392,6 +423,15 @@ export function taskUnionError(v: unknown, index: number): string | null {
     );
     if (!baseline.ok) return baseline.errors.join("; ");
   }
+  return null;
+}
+
+/** Issued review packets, recovered writes, and plan context. */
+function taskPacketError(
+  t: Record<string, unknown>,
+  index: number,
+  id: string,
+): string | null {
   if (t.issued_review_packets !== undefined) {
     if (!Array.isArray(t.issued_review_packets)) {
       return `tasks[${index}] ("${id}"): issued_review_packets must be an array`;
@@ -466,6 +506,15 @@ export function taskUnionError(v: unknown, index: number): string | null {
   if (t.plan_context !== undefined && typeof t.plan_context !== "string") {
     return `tasks[${index}] ("${id}"): plan_context must be a string when present`;
   }
+  return null;
+}
+
+/** Status, review status/generation/run, and proof obligations. */
+function taskStatusError(
+  t: Record<string, unknown>,
+  index: number,
+  id: string,
+): string | null {
   if (!(TASK_STATUSES as readonly string[]).includes(t.status as string)) {
     return `tasks[${index}] ("${id}"): status ${JSON.stringify(t.status)} is not one of ${TASK_STATUSES.join(", ")}`;
   }
@@ -510,6 +559,15 @@ export function taskUnionError(v: unknown, index: number): string | null {
       );
     }
   }
+  return null;
+}
+
+/** Test evidence. */
+function taskEvidenceError(
+  t: Record<string, unknown>,
+  index: number,
+  id: string,
+): string | null {
   if (t.test_result !== undefined) {
     if (typeof t.test_result !== "object" || t.test_result === null) {
       return `tasks[${index}] ("${id}"): test_result must be an object`;
@@ -523,6 +581,15 @@ export function taskUnionError(v: unknown, index: number): string | null {
       return `tasks[${index}] ("${id}"): test_result.verdict ${JSON.stringify(r.verdict)} is not one of trusted-pass, trusted-fail, untrusted`;
     }
   }
+  return null;
+}
+
+/** Findings and every view derived from them. */
+function taskFindingsError(
+  t: Record<string, unknown>,
+  index: number,
+  id: string,
+): string | null {
   // `findings` and `refuted_findings` are proven for the same reason every
   // union above is: the cast at the bottom of parseTaskGraph asserts
   // `readonly Finding[]`, and a panel helper reading an unproven one surfaces
@@ -611,6 +678,7 @@ export function taskUnionError(v: unknown, index: number): string | null {
     }
   }
   return evidenceFailureError(t, `tasks[${index}] ("${id}")`, REVIEW_SUB_AGENTS);
+  return null;
 }
 
 /** The persisted lifecycle fields shared by the loader and operator validator. */

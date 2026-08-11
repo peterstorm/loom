@@ -248,34 +248,53 @@ export function openRunDirectory(
   return success(buildHandle(runId, directory, authorityPath));
 }
 
+/**
+ * The handle is assembled from one group of operations per concern rather than
+ * written as a single object literal. Each group closes over the same proven
+ * run identity, so composition changes nothing about what the handle can do —
+ * it only keeps each concern small enough to read on its own.
+ */
 function buildHandle(runId: OrchestrationRunId, directory: string, authorityPath: string): RunDirHandle {
   return Object.freeze({
     runId,
     runDirectory: directory,
+    readAuthority: (): DomainResult<RunAuthority, RunDirectoryError> =>
+      readRunAuthority(runId, authorityPath),
+    ...journalOperations(directory),
+    ...contextOperations(runId, directory),
+    ...requestOperations(runId, directory),
+    ...artifactOperations(runId, directory),
+    ...receiptOperations(directory),
+  });
+}
 
-    readAuthority(): DomainResult<RunAuthority, RunDirectoryError> {
-      const raw = ((): unknown => {
-        try {
-          return readJsonNoFollow(authorityPath);
-        } catch (error) {
-          return { __unreadable: (error as Error).message };
-        }
-      })();
-      if (typeof raw !== "object" || raw === null) return failure("authority", "run authority is unreadable");
-      const record = raw as Record<string, unknown>;
-      if (record["schemaVersion"] !== RUN_DIRECTORY_SCHEMA_VERSION || record["runId"] !== runId) {
-        return failure("authority", "run authority does not describe this run");
-      }
-      return success(canonicalRecord({
-        schemaVersion: RUN_DIRECTORY_SCHEMA_VERSION,
-        runId,
-        runsRoot: record["runsRoot"] as string,
-        runDirectory: record["runDirectory"] as string,
-      }));
-    },
+function readRunAuthority(
+  runId: OrchestrationRunId,
+  authorityPath: string,
+): DomainResult<RunAuthority, RunDirectoryError> {
+  const raw = ((): unknown => {
+    try {
+      return readJsonNoFollow(authorityPath);
+    } catch (error) {
+      return { __unreadable: (error as Error).message };
+    }
+  })();
+  if (typeof raw !== "object" || raw === null) return failure("authority", "run authority is unreadable");
+  const record = raw as Record<string, unknown>;
+  if (record["schemaVersion"] !== RUN_DIRECTORY_SCHEMA_VERSION || record["runId"] !== runId) {
+    return failure("authority", "run authority does not describe this run");
+  }
+  return success(canonicalRecord({
+    schemaVersion: RUN_DIRECTORY_SCHEMA_VERSION,
+    runId,
+    runsRoot: record["runsRoot"] as string,
+    runDirectory: record["runDirectory"] as string,
+  }));
+}
 
-    // --- ProgramJournal -----------------------------------------------------
-
+/** Append-only event log plus the checkpoint and progress projections. */
+function journalOperations(directory: string) {
+  return {
     async appendEvent(record: ProgramEventRecord): Promise<void> {
       const events = listNoFollow(join(directory, EVENTS));
       if (events.some((name) => name.endsWith(`-${record.dedupKey}.json`))) return;
@@ -310,9 +329,12 @@ function buildHandle(runId: OrchestrationRunId, directory: string, authorityPath
     async writeProgress(percent: number): Promise<void> {
       writeRunFileNoFollow(join(directory, PROGRESS_FILE), JSON.stringify({ percent }));
     },
+  };
+}
 
-    // --- Fixed operations ---------------------------------------------------
-
+/** Content-addressed context packets. */
+function contextOperations(runId: OrchestrationRunId, directory: string) {
+  return {
     async publishContext(packet: ContextPacket): Promise<DomainResult<ContextPublishedReceipt, RunDirectoryError>> {
       const path = join(directory, CONTEXTS, `${packet.digest}.json`);
       const body = JSON.stringify(packet);
@@ -348,7 +370,12 @@ function buildHandle(runId: OrchestrationRunId, directory: string, authorityPath
       if (parsed.value.digest !== digest) return failure("context", "stored context packet digest does not match its slot");
       return success(parsed.value);
     },
+  };
+}
 
+/** Request reservations and their exclusive transcript slots. */
+function requestOperations(runId: OrchestrationRunId, directory: string) {
+  return {
     /**
      * Reserve one request's authority and transcript slot before it can be
      * spawned. Exclusive creation makes the reservation the proof: a second
@@ -385,31 +412,108 @@ function buildHandle(runId: OrchestrationRunId, directory: string, authorityPath
       authority: AgentRequestAuthority,
       bytes: readonly number[],
     ): Promise<DomainResult<ArtifactRef, RunDirectoryError>> {
-      const requestPath = join(directory, REQUESTS, `${authority.requestId}.json`);
-      try {
-        readRunFileNoFollow(requestPath);
-      } catch {
-        return failure("request", `request ${authority.requestId} was never reserved`);
-      }
-      const path = transcriptSlotPath(directory, authority);
-      try {
-        writeRunBytesExclusiveNoFollow(path, Uint8Array.from(bytes));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-          return failure("transcript", `attempt ${authority.attempt} for slot ${authority.slotId} is already captured`);
-        }
-        return failure("transcript", `cannot capture transcript: ${(error as Error).message}`);
-      }
-      const byteLength = parseArtifactByteLength(bytes.length);
-      if (!byteLength.ok) return failure("transcript", byteLength.error.message);
-      return success(canonicalRecord({
-        runId,
-        slot: canonicalRecord({ kind: "fixed-artifact-slot" as const, path: `${TRANSCRIPTS}/${authority.slotId}/attempt-${authority.attempt}.raw` }),
-        digest: digestOf(bytes),
-        byteLength: byteLength.value,
-      }));
+      return captureIntoSlot(runId, directory, authority, bytes);
     },
 
+    readTranscriptBytes(authority: AgentRequestAuthority): DomainResult<Uint8Array, RunDirectoryError> {
+      try {
+        return success(new Uint8Array(readRunBytesNoFollow(transcriptSlotPath(directory, authority))));
+      } catch (error) {
+        return failure("transcript", `cannot read captured transcript: ${(error as Error).message}`);
+      }
+    },
+  };
+}
+
+function captureIntoSlot(
+  runId: OrchestrationRunId,
+  directory: string,
+  authority: AgentRequestAuthority,
+  bytes: readonly number[],
+): DomainResult<ArtifactRef, RunDirectoryError> {
+  const requestPath = join(directory, REQUESTS, `${authority.requestId}.json`);
+  try {
+    readRunFileNoFollow(requestPath);
+  } catch {
+    return failure("request", `request ${authority.requestId} was never reserved`);
+  }
+  try {
+    writeRunBytesExclusiveNoFollow(transcriptSlotPath(directory, authority), Uint8Array.from(bytes));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      return failure("transcript", `attempt ${authority.attempt} for slot ${authority.slotId} is already captured`);
+    }
+    return failure("transcript", `cannot capture transcript: ${(error as Error).message}`);
+  }
+  const byteLength = parseArtifactByteLength(bytes.length);
+  if (!byteLength.ok) return failure("transcript", byteLength.error.message);
+  return success(canonicalRecord({
+    runId,
+    slot: canonicalRecord({
+      kind: "fixed-artifact-slot" as const,
+      path: `${TRANSCRIPTS}/${authority.slotId}/attempt-${authority.attempt}.raw`,
+    }),
+    digest: digestOf(bytes),
+    byteLength: byteLength.value,
+  }));
+}
+
+type StagedPair = Readonly<{ staged: string; final: string }>;
+
+/** Write every member beside its final name; a fault discards the whole set. */
+function stageArtifactSet(
+  directory: string,
+  staged: readonly StagedArtifact[],
+): DomainResult<readonly StagedPair[], RunDirectoryError> {
+  const stagedPaths: StagedPair[] = [];
+  try {
+    for (const artifact of staged) {
+      const final = join(directory, ARTIFACTS, artifact.relativePath);
+      mkdirSync(join(final, ".."), { recursive: true, mode: 0o700 });
+      const stagedPath = `${final}.staged`;
+      writeRunBytesNoFollow(stagedPath, Uint8Array.from(artifact.bytes));
+      stagedPaths.push({ staged: stagedPath, final });
+    }
+  } catch (error) {
+    discardStaged(stagedPaths);
+    return failure("artifacts", `cannot stage artifact set: ${(error as Error).message}`);
+  }
+  return success(Object.freeze(stagedPaths));
+}
+
+/**
+ * Promote a fully staged set. Every target is checked BEFORE any rename,
+ * because renaming is the one step that cannot be undone member-by-member —
+ * ruling out the predictable failures while the set is still entirely staged
+ * is what keeps "all or none" true rather than merely intended.
+ */
+function promoteArtifactSet(
+  stagedPaths: readonly StagedPair[],
+): DomainResult<readonly StagedPair[], RunDirectoryError> {
+  const blocked = stagedPaths.find((entry) => isExistingDirectory(entry.final));
+  if (blocked !== undefined) {
+    discardStaged(stagedPaths);
+    return failure("artifacts", `artifact slot is occupied by a directory: ${blocked.final}`);
+  }
+
+  // A failure here must still not report success. Any member already promoted
+  // stays on disk but is inert: nothing treats a set as published until its
+  // receipt is recorded, and the effect runner records that receipt only on a
+  // successful return.
+  for (const [index, entry] of stagedPaths.entries()) {
+    try {
+      publishStagedRunFile(entry.staged, entry.final);
+    } catch (error) {
+      discardStaged(stagedPaths.slice(index));
+      return failure("artifacts", `cannot publish artifact set: ${(error as Error).message}`);
+    }
+  }
+  return success(stagedPaths);
+}
+
+/** All-or-nothing artifact set publication. */
+function artifactOperations(runId: OrchestrationRunId, directory: string) {
+  return {
     /**
      * Publish a whole artifact set or none of it. Every member is staged first
      * and only renamed into place once all of them are on disk, so a fault
@@ -419,42 +523,11 @@ function buildHandle(runId: OrchestrationRunId, directory: string, authorityPath
       staged: readonly StagedArtifact[],
     ): Promise<DomainResult<readonly ArtifactRef[], RunDirectoryError>> {
       if (staged.length === 0) return failure("artifacts", "an artifact set must not be empty");
-      const stagedPaths: { staged: string; final: string }[] = [];
-      try {
-        for (const artifact of staged) {
-          const final = join(directory, ARTIFACTS, artifact.relativePath);
-          mkdirSync(join(final, ".."), { recursive: true, mode: 0o700 });
-          const stagedPath = `${final}.staged`;
-          writeRunBytesNoFollow(stagedPath, Uint8Array.from(artifact.bytes));
-          stagedPaths.push({ staged: stagedPath, final });
-        }
-      } catch (error) {
-        discardStaged(stagedPaths);
-        return failure("artifacts", `cannot stage artifact set: ${(error as Error).message}`);
-      }
 
-      // Check every target before promoting any of them. Renaming is the one
-      // step that cannot be undone member-by-member, so the predictable reasons
-      // it fails are ruled out while the set is still entirely staged — that is
-      // what keeps "all or none" true rather than merely intended.
-      const blocked = stagedPaths.find((entry) => isExistingDirectory(entry.final));
-      if (blocked !== undefined) {
-        discardStaged(stagedPaths);
-        return failure("artifacts", `artifact slot is occupied by a directory: ${blocked.final}`);
-      }
-
-      // A failure here must still not report success. Any member already
-      // promoted stays on disk but is inert: nothing treats a set as published
-      // until its receipt is recorded, and the effect runner records that
-      // receipt only on a successful return.
-      for (const [index, entry] of stagedPaths.entries()) {
-        try {
-          publishStagedRunFile(entry.staged, entry.final);
-        } catch (error) {
-          discardStaged(stagedPaths.slice(index));
-          return failure("artifacts", `cannot publish artifact set: ${(error as Error).message}`);
-        }
-      }
+      const stagedPaths = stageArtifactSet(directory, staged);
+      if (!stagedPaths.ok) return stagedPaths;
+      const promoted = promoteArtifactSet(stagedPaths.value);
+      if (!promoted.ok) return promoted;
 
       const refs: ArtifactRef[] = [];
       for (const artifact of staged) {
@@ -469,15 +542,12 @@ function buildHandle(runId: OrchestrationRunId, directory: string, authorityPath
       }
       return success(Object.freeze(refs));
     },
+  };
+}
 
-    readTranscriptBytes(authority: AgentRequestAuthority): DomainResult<Uint8Array, RunDirectoryError> {
-      try {
-        return success(new Uint8Array(readRunBytesNoFollow(transcriptSlotPath(directory, authority))));
-      } catch (error) {
-        return failure("transcript", `cannot read captured transcript: ${(error as Error).message}`);
-      }
-    },
-
+/** Typed effect receipts, recorded once under their own effect id. */
+function receiptOperations(directory: string) {
+  return {
     async recordReceipt(receipt: EffectReceipt): Promise<DomainResult<EffectId, RunDirectoryError>> {
       const path = join(directory, RECEIPTS, `${receipt.effectId}.json`);
       const body = JSON.stringify(receipt);
@@ -501,7 +571,7 @@ function buildHandle(runId: OrchestrationRunId, directory: string, authorityPath
         return null;
       }
     },
-  });
+  };
 }
 
 export const RUN_DIRECTORY_LAYOUT = Object.freeze({
