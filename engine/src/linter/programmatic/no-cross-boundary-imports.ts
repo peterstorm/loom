@@ -60,6 +60,19 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       // omission — this allowlist is fail-closed.
       "engine/src/machine/evidence",
       "engine/src/machine/types",
+      // extract-evidence is the same pure family: it folds transcript spans
+      // using core's own tool vocabulary and shell normalizer and touches no
+      // filesystem. Listed individually rather than opening `machine/`, which
+      // would also admit the ledger and report-discovery shells.
+      "engine/src/machine/extract-evidence",
+      // Dependency-free string helpers. Each imports NOTHING (verified: zero
+      // import statements), so naming them individually cannot open a path
+      // back into the shell. `engine/src/utils/` as a whole stays denied by
+      // omission because utils also holds modules that import core, and a
+      // blanket entry would legitimise a core→utils→core cycle.
+      "engine/src/utils/extract-task-id",
+      "engine/src/utils/no-finding-sentinel",
+      "engine/src/utils/strip-namespace",
       "ts-pattern",
     ],
     deny: [
@@ -70,11 +83,28 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
   },
   {
     module: "engine/src/parsers/",
-    allow: ["./", "engine/src/parsers/", "node:", "engine/src/types", "ts-pattern"],
+    allow: [
+      "./",
+      "engine/src/parsers/",
+      "node:",
+      "engine/src/types",
+      // The single source of truth for harness tool names. Both
+      // parse-bash-test-output and parse-files-modified must classify spans
+      // using the SAME vocabulary the gates are wired for; a parser-local copy
+      // is exactly the drift GATE_WIRED_TOOLS exists to prevent. Nothing else
+      // in core/ is reachable — this allowlist stays fail-closed.
+      "engine/src/core/tool-vocabulary",
+      "ts-pattern",
+    ],
     deny: [
       "engine/src/linter/",
       "engine/src/handlers/",
-      "engine/src/core/",
+      // `engine/src/core/` is NOT denied here, and the omission is deliberate.
+      // Deny is evaluated before allow, so a blanket core deny would override
+      // the one core module parsers must share (tool-vocabulary). The allow
+      // list is fail-closed — every other core module is refused by not
+      // appearing in it — so the protection is unchanged and the single
+      // sanctioned exception becomes expressible.
       "engine/src/state-manager",
     ],
   },
