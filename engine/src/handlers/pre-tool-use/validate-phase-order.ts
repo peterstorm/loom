@@ -4,10 +4,28 @@
  * Claude Code wrapper — delegates to core/.
  */
 
-import type { HookHandler, PreToolUseInput } from "../../types";
-import { validatePhaseOrder } from "../../core/validate-phase-order";
+import { existsSync } from "node:fs";
+import type { HookHandler, PreToolUseInput, TaskGraph } from "../../types";
+import { validatePhaseOrder, type PhaseOrderDeps } from "../../core/validate-phase-order";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
+import { taskGraphPath } from "../../config";
+import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
+
+/**
+ * The real protected-state read. It lives HERE rather than in the gate core
+ * because `StateManager` is the sole writer of the task graph: keeping the
+ * import in the shell means the gate cannot, even accidentally, write the
+ * state it exists to judge.
+ */
+export const realPhaseOrderDeps: PhaseOrderDeps = {
+  loadState: (): TaskGraph | null => {
+    const statePath = taskGraphPath();
+    if (!existsSync(statePath)) return null;
+    const manager = StateManager.fromPath(statePath);
+    return manager === null ? null : manager.load();
+  },
+};
 
 const handler: HookHandler = async (stdin) => {
   let input: PreToolUseInput;
@@ -26,7 +44,7 @@ const handler: HookHandler = async (stdin) => {
   return validatePhaseOrder({
     agentType: stripNamespace((input.tool_input?.subagent_type as string) ?? (input.tool_input?.agent as string) ?? ""),
     prompt: (input.tool_input?.prompt as string) ?? (input.tool_input?.task as string) ?? "",
-  });
+  }, realPhaseOrderDeps);
 };
 
 export default handler;

@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import type { PlanModels } from "../parsers/parse-plan-models";
 import type {
   ActiveWaveGateRegistration,
   CanonicalStatusFacts,
@@ -10,6 +9,7 @@ import type {
   IssuedReviewPacketRegistration,
   LoomStatus,
   NextActionDecision,
+  PlanModels,
   RefutationPanelNeed,
   ReviewEvidenceFailure,
   ReviewRosterGap,

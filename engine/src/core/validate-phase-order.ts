@@ -9,13 +9,12 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { match } from "ts-pattern";
-import type { HookResult, Phase } from "../types";
+import type { HookResult, Phase, TaskGraph } from "../types";
 import {
-  taskGraphPath, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
+  PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
   REVIEW_PANEL_AGENTS, UTILITY_AGENTS, VALID_TRANSITIONS, CLARIFY_THRESHOLD,
   ARCH_PANEL_AGENTS, ARCH_PANEL_PHASE, isStandaloneReviewAgent,
 } from "../config";
-import { StateManager } from "../state-manager";
 import { stripNamespace } from "../utils/strip-namespace";
 import { findFile } from "../utils/find-file";
 import { hasStandaloneReviewContext } from "./review-output";
@@ -162,7 +161,24 @@ export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string
     .exhaustive();
 }
 
-export function validatePhaseOrder(input: ValidatePhaseOrderInput): HookResult {
+/**
+ * The protected-state read this gate needs, injected rather than imported.
+ *
+ * `StateManager` is the sole writer of the protected task graph, and a gate
+ * that imports it acquires — in type terms — the ability to write the state it
+ * is meant to judge. Passing a read seam keeps that capability in the shell
+ * and lets this module be exercised without a real state file. The shell
+ * supplies `realPhaseOrderDeps`; nothing else may.
+ */
+export interface PhaseOrderDeps {
+  /** Loaded protected graph, or null when there is no active plan. */
+  readonly loadState: () => TaskGraph | null;
+}
+
+export function validatePhaseOrder(
+  input: ValidatePhaseOrderInput,
+  deps: PhaseOrderDeps,
+): HookResult {
   const bareAgent = stripNamespace(input.agentType);
   // A standalone review is an isolated run artifact, but the marker is prompt
   // text supplied across a harness boundary. Only the closed review/verifier
@@ -175,8 +191,10 @@ export function validatePhaseOrder(input: ValidatePhaseOrderInput): HookResult {
           message: `BLOCKED: Agent ${input.agentType} is not authorized for LOOM_REVIEW_CONTEXT: standalone.`,
         };
   }
-  const statePath = taskGraphPath();
-  if (!existsSync(statePath)) return { kind: "allow" };
+  // No active plan → nothing to order. The shell decides what "no state"
+  // means; this gate only reacts to the answer.
+  const loadedState = deps.loadState();
+  if (loadedState === null) return { kind: "allow" };
 
   // Allow utility agents
   if (UTILITY_AGENTS.has(bareAgent) || UTILITY_AGENTS.has(bareAgent + "-agent")) return { kind: "allow" };
@@ -198,9 +216,7 @@ export function validatePhaseOrder(input: ValidatePhaseOrderInput): HookResult {
     };
   }
 
-  const mgr = StateManager.fromPath(statePath);
-  if (!mgr) return { kind: "allow" };
-  const state = mgr.load();
+  const state = loadedState;
   const currentPhase: Phase = state.current_phase ?? "init";
 
   // Panel mode is an architecture-only fan-out. Generic transition rules allow

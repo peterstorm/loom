@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { detectPhase, checkArtifacts, canRunPanelAgent } from "../../src/handlers/pre-tool-use/validate-phase-order";
+import { detectPhase, checkArtifacts, canRunPanelAgent, realPhaseOrderDeps } from "../../src/handlers/pre-tool-use/validate-phase-order";
 import type { ArtifactState } from "../../src/handlers/pre-tool-use/validate-phase-order";
 import { VALID_TRANSITIONS } from "../../src/config";
 import { validatePhaseOrder } from "../../src/core/validate-phase-order";
@@ -37,11 +37,11 @@ describe("standalone lifecycle", () => {
     expect(validatePhaseOrder({
       agentType: "loom:code-reviewer",
       prompt: "LOOM_REVIEW_CONTEXT: standalone\nReview the frozen scope",
-    })).toEqual({ kind: "allow" });
+    }, realPhaseOrderDeps)).toEqual({ kind: "allow" });
     expect(validatePhaseOrder({
       agentType: "review-verifier-agent",
       prompt: "LOOM_REVIEW_CONTEXT: standalone\nJudge the manifest",
-    })).toEqual({ kind: "allow" });
+    }, realPhaseOrderDeps)).toEqual({ kind: "allow" });
   });
 
   it.each(["code-implementer-agent", "architecture-agent", "spec-check-invoker", "unknown-agent"])(
@@ -50,7 +50,7 @@ describe("standalone lifecycle", () => {
       expect(validatePhaseOrder({
         agentType,
         prompt: "LOOM_REVIEW_CONTEXT: standalone\nTask ID: T1",
-      })).toMatchObject({
+      }, realPhaseOrderDeps)).toMatchObject({
         kind: "block",
         message: expect.stringContaining("not authorized"),
       });
@@ -77,7 +77,7 @@ describe("standalone lifecycle", () => {
       expect(validatePhaseOrder({
         agentType: "arch-designer-agent",
         prompt: "Design through the architecture panel",
-      })).toMatchObject({
+      }, realPhaseOrderDeps)).toMatchObject({
         kind: "block",
         message: expect.stringContaining("Architecture panel agents may run only during the architecture phase"),
       });

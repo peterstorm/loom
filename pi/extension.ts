@@ -15,6 +15,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { shouldBlockDirectEdit } from "../engine/src/core/block-direct-edits";
 import { guardStateFileDecision } from "../engine/src/core/guard-state-file";
 import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
+// Both harnesses share ONE protected-state read seam, so a Pi gate and a
+// Claude gate cannot disagree about what "no active plan" means.
+import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate-phase-order";
 import { classifyTaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
 import { validateTaskExecutionBatch } from "../engine/src/handlers/task-execution";
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
@@ -378,7 +381,10 @@ export default function (pi: ExtensionAPI) {
           }
 
           currentGuard = "validate-phase-order";
-          const phaseResult = validatePhaseOrder({ agentType: item.agent, prompt: item.task });
+          const phaseResult = validatePhaseOrder(
+            { agentType: item.agent, prompt: item.task },
+            realPhaseOrderDeps,
+          );
           if (phaseResult.kind === "block") return { block: true, reason: phaseResult.message };
 
           currentGuard = "validate-template-substitution";

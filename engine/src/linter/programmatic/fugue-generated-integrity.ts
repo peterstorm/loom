@@ -52,7 +52,13 @@ const INTEGRITY_RE = /^\/\/ @fugue-integrity sha256:([0-9a-f]{64})$/m;
  *  (truncated/upper-case hash, trailing whitespace, CRLF) — that is a structural
  *  change to the banner, so it must fail CLOSED rather than fall through to the
  *  no-marker "not a generated file" N/A path (which would silently disable the
- *  check — the accidental-edit class this rule targets). */
+ *  check — the accidental-edit class this rule targets).
+ *
+ *  LINE-ANCHORED, like the strict form. A real banner always begins its own
+ *  line; a marker quoted mid-line — inside a JSDoc block explaining the format,
+ *  as this very file does — is documentation, not a corrupted stamp. An
+ *  unanchored probe reported the rule's own doc comment as a malformed banner. */
+const INTEGRITY_MARKER_PREFIX_RE = /^\/\/ @fugue-integrity sha256:/m;
 const INTEGRITY_MARKER_PREFIX = "// @fugue-integrity sha256:";
 
 /** Marker strings delimiting a human-owned placeholder body. Must match
@@ -75,8 +81,9 @@ export function handler(content: string, filePath: string): Violation[] {
   if (m === null) {
     // No well-formed marker. If the marker PREFIX is present the stamp is
     // corrupted (not absent) — fail closed instead of silently N/A.
-    const idx = content.indexOf(INTEGRITY_MARKER_PREFIX);
-    if (idx === -1) return []; // genuinely not a stamped generated file — rule N/A
+    const probe = INTEGRITY_MARKER_PREFIX_RE.exec(content);
+    if (probe === null) return []; // genuinely not a stamped generated file — rule N/A
+    const idx = probe.index;
     return [
       makeViolation(
         "fugue-generated-integrity",

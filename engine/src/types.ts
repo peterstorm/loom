@@ -709,3 +709,86 @@ export interface TaskGraph {
   wave_gate_history?: readonly CompletedWaveGateRegistration[];
   updated_at?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Plan executable-model declarations
+// ---------------------------------------------------------------------------
+//
+// These are pure data shapes describing what a plan DECLARED, not how it is
+// parsed. They live here rather than in `parsers/parse-plan-models.ts` because
+// both the producer (that parser) and a consumer in the functional core
+// (`core/wave-gate-machine.ts`, which binds lifecycle artifacts to a wave) need
+// them. Keeping them in the parser forced core to import across a denied
+// boundary for a type-only dependency; keeping them here lets the arrow point
+// at shared data instead. `parse-plan-models.ts` re-exports them, so its
+// public surface is unchanged.
+
+export type InvariantTier = "checkable" | "advisory";
+
+/** Model sections that carry `### ` id-blocks. */
+export type BlockSection = "Lifecycles" | "Invariants";
+
+/** All canonical model sections. */
+export type ModelSection = BlockSection | "Pipeline";
+
+/**
+ * A near-miss or misplaced model marker. Each variant carries the context
+ * needed to explain itself (`renderStray`); validation treats ANY stray as
+ * an error — a typo must never read as an opt-out.
+ */
+export type Stray =
+  | { readonly kind: "unterminated-fence" }
+  | { readonly kind: "empty-section"; readonly section: BlockSection }
+  | { readonly kind: "near-miss-heading"; readonly heading: string }
+  | {
+      readonly kind: "bad-block-grammar";
+      readonly heading: string;
+      readonly section: BlockSection;
+      readonly prefix: "LC" | "INV";
+    }
+  | { readonly kind: "misplaced-heading"; readonly heading: string; readonly home: BlockSection }
+  | { readonly kind: "misplaced-label"; readonly label: string; readonly home: ModelSection };
+
+export interface PlanLifecycle {
+  /** e.g. "LC-1" */
+  readonly id: string;
+  readonly title: string;
+  /** Path from the `**Machine file:**` line; null when the line is missing */
+  readonly machineFile: string | null;
+}
+
+export interface PlanPipeline {
+  /** Path from the `**AuthoredDag:**` line; null when the line is missing */
+  readonly dagFile: string | null;
+  /** Node names from the first column of the Pipeline section's node table
+   *  (header/separator rows skipped); empty when the section has no table.
+   *  Cross-checked against the sidecar to catch plan↔sidecar drift. */
+  readonly declaredNodes: readonly string[];
+}
+
+export interface PlanInvariant {
+  /** e.g. "INV-1" */
+  readonly id: string;
+  readonly title: string;
+  /** null when the `**Tier:**` line is missing or not a recognized tier */
+  readonly tier: InvariantTier | null;
+  /** Path from the `**Rule file:**` line; null when the line is missing */
+  readonly ruleFile: string | null;
+}
+
+export interface PlanModels {
+  readonly lifecycles: readonly PlanLifecycle[];
+  readonly pipeline: PlanPipeline | null;
+  readonly invariants: readonly PlanInvariant[];
+  /**
+   * Near-miss / misplaced model markers: section headings that almost match
+   * (`## Lifecycles:`, `## Pipelines`), `###` blocks inside a model section
+   * that don't match the block grammar (`### INV-A1:`, `### lc-1:`, missing
+   * colon), LC/INV headings outside their sections, and model field labels
+   * (`**Machine file:**` etc.) outside their sections. Each entry is a
+   * discriminated Stray carrying its context; render with `renderStray`.
+   * Any stray means the plan tried to declare a model and failed —
+   * validation must error, not skip.
+   */
+  readonly strays: readonly Stray[];
+}

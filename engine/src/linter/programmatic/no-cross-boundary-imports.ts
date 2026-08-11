@@ -73,6 +73,14 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/utils/extract-task-id",
       "engine/src/utils/no-finding-sentinel",
       "engine/src/utils/strip-namespace",
+      // find-file imports only `node:fs` and `node:path`. Core already permits
+      // `node:` directly — several gate modules here read the filesystem by
+      // design — so refusing a dependency-free wrapper over the same calls
+      // would police the door rather than the capability. The capability that
+      // IS policed is protected-state WRITING: `engine/src/state-manager` stays
+      // unlisted, and `validate-phase-order` takes its state read as an
+      // injected dependency instead.
+      "engine/src/utils/find-file",
       "ts-pattern",
     ],
     deny: [
