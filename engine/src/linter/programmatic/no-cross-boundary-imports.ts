@@ -113,6 +113,22 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
  *   - TS/JS: import ... from "specifier", import "specifier", require("specifier")
  *   - Java: import com.example.package.Class;
  */
+/**
+ * Reject captures that cannot be module specifiers.
+ *
+ * The regex is line-based, so prose describing an import still matches — a
+ * diagnostic like `` `must not import from "${denied}"` `` captured
+ * `${denied}` and reported the message string as a cross-boundary import. A
+ * real specifier never contains a template interpolation, whitespace, or a
+ * newline, so those are the tells.
+ */
+function isPlausibleSpecifier(specifier: string | undefined): specifier is string {
+  return specifier !== undefined &&
+    specifier.length > 0 &&
+    !specifier.includes("${") &&
+    !/\s/.test(specifier);
+}
+
 export function extractImports(
   content: string
 ): readonly { line: number; specifier: string; text: string }[] {
@@ -149,7 +165,7 @@ export function extractImports(
 
     // Try TS/JS import first
     const tsMatch = tsImportRe.exec(line);
-    if (tsMatch) {
+    if (tsMatch && isPlausibleSpecifier(tsMatch[1])) {
       imports.push({ line: i + 1, specifier: tsMatch[1], text: line });
       continue;
     }
@@ -238,6 +254,43 @@ export function checkBoundaryViolation(
   return null; // Explicitly allowed and not denied
 }
 
+// --- Path normalization ---
+
+/**
+ * Reduce an absolute path to the repository-relative form the boundary rules
+ * are written in.
+ *
+ * Boundary `module` prefixes are repo-relative (`engine/src/core/`), but
+ * `lintFile` resolves every path to absolute before handing it to a rule. An
+ * absolute path matches no prefix, so `checkBoundaryViolation` found no
+ * applicable rule and returned "allow" for every file — the rule failed OPEN
+ * and enforced nothing in production.
+ *
+ * The repository root is not threaded into rule handlers, so it is recovered
+ * from the boundary prefixes themselves: a full boundary prefix occurring at a
+ * segment boundary marks where the repo-relative portion begins. The RIGHTMOST
+ * such occurrence wins — a checkout nested inside a directory of the same
+ * shape (`/srv/engine/src/core/checkout/engine/src/core/x.ts`) must resolve
+ * against its own root, and taking the leftmost match would climb out of it.
+ *
+ * A path already relative is returned unchanged, so the direct-call form used
+ * by tests and tooling keeps working.
+ */
+export function toRepositoryRelative(
+  filePath: string,
+  boundaries: readonly BoundaryRule[] = DEFAULT_BOUNDARIES
+): string {
+  const normalized = filePath.split(sep).join("/");
+  if (!normalized.startsWith("/")) return normalized;
+
+  let bestIndex = -1;
+  for (const boundary of boundaries) {
+    const index = normalized.lastIndexOf(`/${boundary.module}`);
+    if (index > bestIndex) bestIndex = index;
+  }
+  return bestIndex === -1 ? normalized : normalized.slice(bestIndex + 1);
+}
+
 // --- Rule handler ---
 
 /**
@@ -251,10 +304,13 @@ export function handler(
 ): Violation[] {
   const imports = extractImports(content);
   const violations: Violation[] = [];
+  // Normalize ONCE at entry: `resolveImportPath` joins against this path, so a
+  // relative file path yields relative resolved imports for free.
+  const relativeFile = toRepositoryRelative(filePath, boundaries);
 
   for (const imp of imports) {
-    const resolved = resolveImportPath(filePath, imp.specifier);
-    const violation = checkBoundaryViolation(filePath, resolved, boundaries);
+    const resolved = resolveImportPath(relativeFile, imp.specifier);
+    const violation = checkBoundaryViolation(relativeFile, resolved, boundaries);
 
     if (violation) {
       violations.push(

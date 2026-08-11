@@ -5,6 +5,7 @@ import {
   checkBoundaryViolation,
   underPrefix,
   handler,
+  toRepositoryRelative,
   DEFAULT_BOUNDARIES,
 } from "../../../src/linter/programmatic/no-cross-boundary-imports";
 
@@ -329,6 +330,62 @@ describe("no-cross-boundary-imports (extended)", () => {
       const content = `import java.util.List;\nimport java.time.Instant;`;
       const violations = handler(content, "src/domain/model/User.java", boundaries);
       expect(violations).toHaveLength(0);
+    });
+  });
+
+  describe("absolute paths", () => {
+    // lintFile resolves every path to absolute before calling a rule. Boundary
+    // prefixes are repo-relative, so an unnormalized absolute path matched no
+    // rule and the check returned "allow" for every file — failing OPEN.
+    const content = `import { dispatch } from "../handlers/dispatch";`;
+
+    it("enforces boundaries on the absolute path lintFile actually passes", () => {
+      const violations = handler(
+        content,
+        "/home/dev/checkout/engine/src/core/thing.ts",
+        DEFAULT_BOUNDARIES,
+      );
+
+      expect(violations).toHaveLength(1);
+      expect(violations[0].rule).toBe("no-cross-boundary-imports");
+    });
+
+    it("agrees with the relative form for the same file", () => {
+      const absolute = handler(content, "/home/dev/checkout/engine/src/core/thing.ts", DEFAULT_BOUNDARIES);
+      const relative = handler(content, "engine/src/core/thing.ts", DEFAULT_BOUNDARIES);
+
+      expect(absolute).toHaveLength(relative.length);
+    });
+
+    it("still allows a permitted import when the path is absolute", () => {
+      const violations = handler(
+        `import { parseSessionId } from "./block-direct-edits";`,
+        "/home/dev/checkout/engine/src/core/thing.ts",
+        DEFAULT_BOUNDARIES,
+      );
+
+      expect(violations).toHaveLength(0);
+    });
+
+    describe("toRepositoryRelative", () => {
+      it("reduces an absolute path to its repo-relative form", () => {
+        expect(toRepositoryRelative("/home/dev/checkout/engine/src/core/thing.ts"))
+          .toBe("engine/src/core/thing.ts");
+      });
+
+      it("leaves an already-relative path untouched", () => {
+        expect(toRepositoryRelative("engine/src/core/thing.ts")).toBe("engine/src/core/thing.ts");
+      });
+
+      it("resolves against the innermost checkout when one is nested in another", () => {
+        expect(toRepositoryRelative("/srv/engine/src/core/checkout/engine/src/core/thing.ts"))
+          .toBe("engine/src/core/thing.ts");
+      });
+
+      it("returns a path under no boundary unchanged", () => {
+        expect(toRepositoryRelative("/home/dev/checkout/scripts/tool.ts"))
+          .toBe("/home/dev/checkout/scripts/tool.ts");
+      });
     });
   });
 });

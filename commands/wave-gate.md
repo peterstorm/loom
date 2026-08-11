@@ -510,6 +510,33 @@ jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | select((.advisory_
 
 **Non-blocking:** if a relevant advisory can't be fixed cleanly (breaks tests, needs an upstream change), defer it with a reason rather than holding the wave. Every advisory must end as *fixed*, *deferred (reason)*, or *dismissed (reason)* — never silently ignored.
 
+### Step 4c: Full-Tier Lint (MANDATORY)
+
+The PostEdit hook runs the **immediate** tier only — regex rules. The
+**programmatic** rules (`no-cross-boundary-imports`, `no-io-in-pure-modules`,
+`max-function-lines`, `fugue-generated-integrity`) run in the **full** tier,
+and the wave gate is the boundary where they are meant to run. Without this
+step nothing ever invokes them, and architectural violations accumulate
+unseen — the rules exist but enforce nothing.
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper lint-wave-gate
+```
+
+Pass `--wave N` to lint a wave other than the current one. The helper collects
+its targets **exclusively** from each task's `files_modified`, so a wave whose
+tasks never recorded modified files lints an empty set and reports clean — if
+the output says "no modified files to lint" while the wave plainly changed
+code, that is a fail-open to investigate, not a pass.
+
+**Violations block the wave.** Fix them the same way as a critical finding:
+spawn a fix subagent (the orchestrator's Edit/Write are blocked), then re-run
+this step. Do not widen a boundary's allow-list or raise the line limit to make
+a violation disappear — a rule edited to fit the code it is meant to constrain
+enforces nothing. If a violation is genuinely a false positive or an
+intentional exception, record the reason and fix the RULE deliberately, as its
+own change.
+
 ### Step 5: Advance
 
 Call `complete-wave-gate` — it handles ALL verification and advancement:
@@ -588,8 +615,11 @@ jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | .id' .claude/state
 - NEVER hand-build the finding brief or manifest; the engine authors both from state
 - MUST post GH comment before advancing
 - MUST report advisory findings before advancing; classification/remediation is non-blocking operator follow-up and is not a `complete-wave-gate` condition
+- MUST run the full-tier lint (Step 4c) before advancing — the PostEdit hook covers regex rules only, so this is the only place the programmatic rules ever run
+- NEVER silence a lint violation by editing the rule that caught it
 - NEVER advance if spec-check has critical findings
 - NEVER advance if code review has critical findings
+- NEVER advance with unresolved full-tier lint violations
 - NEVER manually write to state file (guard hook blocks it)
 - All status comes from SubagentStop hooks — cannot be set manually
 - `complete-wave-gate` is the ONLY path to advance waves
