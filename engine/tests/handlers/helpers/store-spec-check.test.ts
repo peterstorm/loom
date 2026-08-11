@@ -81,6 +81,7 @@ describe("store-spec-check helper", () => {
     const { exitCode, stderr } = runHelper(
       [
         "SPEC_CHECK_CRITICAL_COUNT: 0",
+        "SPEC_CHECK_HIGH_COUNT: 0",
         "SPEC_CHECK_VERDICT: PASSED",
         "CRITICAL: requirement REQ-1 not implemented",
       ].join("\n"),

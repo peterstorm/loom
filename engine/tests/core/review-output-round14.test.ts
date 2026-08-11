@@ -18,6 +18,7 @@ import {
   resolveReviewFindings,
   reviewResolutionLog,
 } from "../../src/core/review-output";
+import { isNoFindingSentinel } from "../../src/utils/no-finding-sentinel";
 
 const block = (entries: readonly Record<string, unknown>[]): string =>
   ["```findings", JSON.stringify(entries), "```"].join("\n");
@@ -89,8 +90,13 @@ describe("a block that loses arbitration still contributes its claims", () => {
   });
 
   it("property: no claim of either severity is lost, whoever wins", () => {
+    // Exclude sentinels by asking the production classifier, not a hand-rolled
+    // subset of it: an inlined `none|n/a|nothing` regex still admits `na`,
+    // `nil`, `null` and the punctuated forms, which the parser drops on
+    // purpose — so the generator produced claims the property then demanded be
+    // preserved, and the suite failed on roughly one seed in 1700.
     const claim = fc.string({ minLength: 3, maxLength: 12 })
-      .filter((s) => s.trim() !== "" && !/^(none|n\/a|nothing)$/i.test(s.trim()) && !/[\r\n{}"\\]/.test(s));
+      .filter((s) => s.trim() !== "" && !isNoFindingSentinel(s) && !/[\r\n{}"\\]/.test(s));
     fc.assert(
       fc.property(
         fc.uniqueArray(claim, { maxLength: 3 }),

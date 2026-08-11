@@ -1495,3 +1495,99 @@ describe("panel program construction invariants", () => {
     });
   });
 });
+
+/**
+ * Round-33: the request-binding boundary, driven with a registration that
+ * genuinely diverges from the canonical roster.
+ *
+ * `resolvePanelRequest` re-derives every request from a registered publication
+ * receipt rather than trusting the identity it was handed, and then compares the
+ * result against the roster slot. Every existing test resolved through a
+ * registration that agreed with the roster, so the divergence branch was never
+ * taken. Note where the rejection actually lands: `parseIssuedSpawnRequest`
+ * compares the roster authority against the registered one on the SAME field set
+ * `authorityMatches` does, so a divergence is caught there as
+ * `request-rehydration-failed`, and the later `request-binding-mismatch` check is
+ * a redundant second net that this call path cannot reach. Pinning that keeps a
+ * future narrowing of either comparison honest.
+ */
+describe("a registration diverging from the canonical roster is refused", () => {
+  const divergences: readonly (readonly [string, Record<string, unknown>])[] = [
+    ["role", { role: "arch-judge-agent" }],
+    ["attempt", { attempt: 2 }],
+    ["modelProfile", { modelProfile: "panel-judge" }],
+    ["requiredSkill", { requiredSkill: null }],
+    ["contextDigest", { contextDigest: hexDigest("foreign-context") }],
+    ["slotId", { slotId: "slot:foreign" }],
+    ["outputSlot", { outputSlot: { kind: "fixed-artifact-slot", path: "artifacts/foreign.md" } }],
+    ["claude harness binding", {
+      harnessBinding: { pi: panelBindings.pi, claude: { harness: "claude-code", model: "sonnet" } },
+    }],
+    ["pi harness binding", {
+      harnessBinding: { pi: { ...panelBindings.pi, model: "gpt-5.5" }, claude: panelBindings.claude },
+    }],
+  ];
+
+  it.each(divergences)("refuses a registration whose %s diverges from the roster", (_field, override) => {
+    const fixture = architectureFixture(`divergent-${String(_field).replace(/\s+/g, "-")}`);
+    const request = fixture.candidates[0]!;
+    const identity = JSON.parse(JSON.stringify(panelRequestIdentity(request)));
+
+    // Re-register the SAME publication identity with a tampered issued request,
+    // so the identity still resolves but the authority behind it has moved.
+    const key = registrationKey({ runId: request.issuance.runId, effectId: request.issuance.effectId });
+    const original = JSON.parse(new TextDecoder().decode(Uint8Array.from(registrationBytes.get(key)!)));
+    const tampered = {
+      ...original,
+      issuedRequests: original.issuedRequests.map((entry: Record<string, unknown>, index: number) =>
+        index === request.issuance.batchIndex
+          ? { ...entry, authority: { ...(entry.authority as Record<string, unknown>), ...override } }
+          : entry),
+    };
+    registrationBytes.set(key, bytes(tampered));
+
+    try {
+      const submitted = submitArchitectureCandidateResult(
+        startPersistentArchitecturePanel(fixture.authority).state,
+        publicationResolver,
+        identity,
+        candidatePayload(fixture.authority, 0),
+      );
+
+      expect(submitted.ok).toBe(false);
+      if (submitted.ok) return;
+      expect(submitted.error.kind).toBe("request-rehydration-failed");
+      expect(submitted.error).toMatchObject({ requestId: request.authority.requestId });
+    } finally {
+      registrationBytes.set(key, bytes(original));
+    }
+  });
+
+  it("accepts the untampered registration the divergences are varied from", () => {
+    const fixture = architectureFixture("divergent-control");
+    const submitted = submitArchitectureCandidateResult(
+      startPersistentArchitecturePanel(fixture.authority).state,
+      publicationResolver,
+      JSON.parse(JSON.stringify(panelRequestIdentity(fixture.candidates[0]!))),
+      candidatePayload(fixture.authority, 0),
+    );
+    expect(submitted.ok).toBe(true);
+  });
+
+  it("refuses an identity whose requestId is absent from the canonical roster", () => {
+    const fixture = architectureFixture("unknown-request");
+    const identity = JSON.parse(JSON.stringify(panelRequestIdentity(fixture.candidates[0]!)));
+    identity.requestId = "request:not-in-roster";
+
+    const submitted = submitArchitectureCandidateResult(
+      startPersistentArchitecturePanel(fixture.authority).state,
+      publicationResolver,
+      identity,
+      candidatePayload(fixture.authority, 0),
+    );
+
+    expect(submitted.ok).toBe(false);
+    if (submitted.ok) return;
+    expect(submitted.error.kind).toBe("unknown-request");
+  });
+});

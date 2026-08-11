@@ -76,6 +76,41 @@ describe("parseSpecCheckOutput (pure)", () => {
     });
   });
 
+  it("fails evidence reconciliation when the required high-count marker is absent", () => {
+    // A transcript truncated after CRITICAL_COUNT and VERDICT carries no HIGH:
+    // lines either, so coercing the missing marker to 0 made the count agree
+    // with the itemization and recorded a truncated report as a clean one.
+    const parsed = parseSpecCheckOutput([
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+    ].join("\n"));
+
+    const resolution = reconcileSpecCheck(parsed, 1, "now");
+    expect(resolution).toEqual({
+      kind: "evidence-failed",
+      specCheck: {
+        wave: 1,
+        run_at: "now",
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: "SPEC_CHECK_HIGH_COUNT marker not found - re-run /wave-gate",
+      },
+    });
+  });
+
+  it("captures a genuinely clean report that emits all three markers", () => {
+    const parsed = parseSpecCheckOutput([
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+    ].join("\n"));
+
+    const resolution = reconcileSpecCheck(parsed, 1, "now");
+    expect(resolution.kind).toBe("captured");
+    if (resolution.kind !== "captured") return;
+    expect(resolution.specCheck.high_count).toBe(0);
+    expect(resolution.specCheck.verdict).toBe("PASSED");
+  });
+
   it("fails evidence reconciliation when the high count drifts from HIGH lines", () => {
     const parsed = parseSpecCheckOutput([
       "SPEC_CHECK_CRITICAL_COUNT: 0",

@@ -42,7 +42,9 @@ SPEC_CHECK_HIGH_COUNT: M
 SPEC_CHECK_VERDICT: PASSED | BLOCKED
 ```
 
-**Important:** The SPEC_CHECK_CRITICAL_COUNT and SPEC_CHECK_VERDICT lines are REQUIRED for hook parsing.
+**Important:** The SPEC_CHECK_CRITICAL_COUNT, SPEC_CHECK_HIGH_COUNT, and
+SPEC_CHECK_VERDICT lines are REQUIRED for hook parsing. Omitting any of them
+fails evidence capture — a truncated report is never read as a clean one.
 
 ## Constraints
 

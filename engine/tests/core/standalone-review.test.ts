@@ -217,6 +217,39 @@ describe("standalone review aggregate", () => {
     expect(parsed).toEqual({ ok: true, value: aggregate });
   });
 
+  /** Promote a stored evidence entry to request-bound with the given profile. */
+  const withRequestBoundProfile = (modelProfile: unknown) => {
+    const raw = JSON.parse(serializeStandaloneAggregate(required().aggregate));
+    expect(raw.reviewer_evidence.length).toBeGreaterThan(0);
+    raw.reviewer_evidence[0] = {
+      ...raw.reviewer_evidence[0],
+      authority_kind: "request-bound",
+      model_profile: modelProfile,
+      context_digest: "c".repeat(64),
+    };
+    return raw;
+  };
+
+  it("rejects a stored aggregate whose model_profile is outside the closed profile set", () => {
+    // aggregate.json is untrusted on-disk input: shape-checking `model_profile`
+    // as a non-empty string and casting it to LlmProfileId would type an
+    // off-roster value as a member of a finite enum it never belonged to.
+    const parsed = parseStandaloneAggregate(withRequestBoundProfile("not-a-real-profile"));
+    expect(parsed.ok).toBe(false);
+    expect(!parsed.ok && parsed.errors.join("\n")).toContain("model profile must be one of");
+  });
+
+  it("rejects a non-string model_profile on request-bound evidence", () => {
+    for (const bogus of [null, 42, {}, [], ""]) {
+      const parsed = parseStandaloneAggregate(withRequestBoundProfile(bogus));
+      expect(parsed.ok, `model_profile ${JSON.stringify(bogus)} must be refused`).toBe(false);
+    }
+  });
+
+  it("still accepts a request-bound entry naming a real profile", () => {
+    expect(parseStandaloneAggregate(withRequestBoundProfile("general-review")).ok).toBe(true);
+  });
+
   it("rejects a stored aggregate tampered with an out-of-scope finding", () => {
     const raw = JSON.parse(serializeStandaloneAggregate(required().aggregate));
     raw.findings[0].file = "src/outside.ts";
@@ -1862,5 +1895,196 @@ describe("LC-2 standalone lifecycle machine", () => {
     fc.assert(fc.property(fc.constantFrom(...invalidEvents), (event) => {
       expect(reduceStandaloneReviewMachine(preparing, event).ok).toBe(false);
     }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-33: the roster and slot guards whose REJECTING branch nothing reached
+// ---------------------------------------------------------------------------
+
+/**
+ * Every fixture above builds a self-consistent roster and submits results only
+ * for slots that are genuinely pending, so the guards that refuse a foreign
+ * run, a resubmitted slot, an off-roster slot, or a roster diverging from the
+ * deterministic selection were present but never made to fire. A test that only
+ * asserts `.ok === false` is not enough either: it cannot tell which guard
+ * rejected, so these pin the diagnostic `kind` as well.
+ */
+describe("standalone review rejects a foreign run, a duplicate slot, and an unknown slot", () => {
+  /** An awaiting-results state with both slots still pending. */
+  function awaitingState() {
+    const authority = preparedAuthority();
+    const started = startStandaloneReviewMachine(authority);
+    const awaiting = reduceStandaloneReviewMachine(started, {
+      kind: "review-batch-published", runId: authority.runId,
+    });
+    if (!awaiting.ok || awaiting.value.kind !== "awaiting-results") throw new Error("awaiting state required");
+    return { authority, awaiting: awaiting.value };
+  }
+
+  describe("foreign-run-event", () => {
+    it("rejects a publication announcing another run, by that exact category", () => {
+      const authority = preparedAuthority();
+      const rejected = reduceStandaloneReviewMachine(startStandaloneReviewMachine(authority), {
+        kind: "review-batch-published", runId: "run.foreign",
+      });
+      expect(rejected.ok).toBe(false);
+      if (rejected.ok) return;
+      expect(rejected.error.kind).toBe("foreign-run-event");
+      expect(rejected.error.message).toContain("stale or foreign");
+    });
+
+    it("rejects an accepted result whose authority names another run", () => {
+      const { authority, awaiting } = awaitingState();
+      const complete = completeCapturedRoster(authority, [transcript(), transcript()]);
+      const original = complete.roster.ordered[0]!;
+      const foreign = {
+        ...original,
+        authority: { ...original.authority, runId: "run.foreign" },
+      } as unknown as AcceptedAgentResult<CapturedReviewerResult>;
+
+      const rejected = reduceStandaloneReviewMachine(awaiting, { kind: "result-accepted", result: foreign });
+
+      expect(rejected.ok).toBe(false);
+      if (rejected.ok) return;
+      // The run check runs BEFORE the roster comparison, so a foreign run is
+      // reported as foreign rather than as a generic roster mismatch.
+      expect(rejected.error.kind).toBe("foreign-run-event");
+    });
+
+    it("rejects a rejected-result event whose request names another run", () => {
+      const { authority, awaiting } = awaitingState();
+      const slot = authority.roster.orderedSlots[0]!;
+      const rejected = reduceStandaloneReviewMachine(awaiting, {
+        kind: "result-rejected",
+        request: { ...slot.attempts[0], runId: "run.foreign" },
+        message: "spawn failed",
+      });
+      expect(rejected.ok).toBe(false);
+      if (rejected.ok) return;
+      expect(rejected.error.kind).toBe("foreign-run-event");
+    });
+  });
+
+  describe("duplicate-result and unknown-slot", () => {
+    it("refuses to accept a slot that already has an accepted result", () => {
+      const { authority, awaiting } = awaitingState();
+      const complete = completeCapturedRoster(authority, [transcript(), transcript()]);
+      const first = reduceStandaloneReviewMachine(awaiting, {
+        kind: "result-accepted", result: complete.roster.ordered[0]!,
+      });
+      expect(first.ok).toBe(true);
+      if (!first.ok || first.value.kind !== "awaiting-results") return;
+
+      const again = reduceStandaloneReviewMachine(first.value, {
+        kind: "result-accepted", result: complete.roster.ordered[0]!,
+      });
+
+      expect(again.ok).toBe(false);
+      if (again.ok) return;
+      expect(again.error.kind).toBe("duplicate-result");
+      expect(again.error.message).toContain("already has an accepted result");
+    });
+
+    it("refuses to accept a slot that is not in the frozen roster", () => {
+      const { authority, awaiting } = awaitingState();
+      const complete = completeCapturedRoster(authority, [transcript(), transcript()]);
+      const original = complete.roster.ordered[0]!;
+      const offRoster = {
+        ...original,
+        authority: { ...original.authority, slotId: "slot:not-in-roster" },
+      } as unknown as AcceptedAgentResult<CapturedReviewerResult>;
+
+      const rejected = reduceStandaloneReviewMachine(awaiting, { kind: "result-accepted", result: offRoster });
+
+      expect(rejected.ok).toBe(false);
+      if (rejected.ok) return;
+      expect(rejected.error.kind).toBe("unknown-slot");
+      expect(rejected.error.message).toContain("not in the frozen roster");
+    });
+
+    it("refuses to reject a slot whose result was already accepted", () => {
+      const { authority, awaiting } = awaitingState();
+      const complete = completeCapturedRoster(authority, [transcript(), transcript()]);
+      const accepted = reduceStandaloneReviewMachine(awaiting, {
+        kind: "result-accepted", result: complete.roster.ordered[0]!,
+      });
+      expect(accepted.ok).toBe(true);
+      if (!accepted.ok || accepted.value.kind !== "awaiting-results") return;
+
+      const rejected = reduceStandaloneReviewMachine(accepted.value, {
+        kind: "result-rejected",
+        request: authority.roster.orderedSlots[0]!.attempts[0],
+        message: "late failure report",
+      });
+
+      expect(rejected.ok).toBe(false);
+      if (rejected.ok) return;
+      expect(rejected.error.kind).toBe("duplicate-result");
+      expect(rejected.error.message).toContain("cannot later be rejected");
+    });
+
+    it("refuses to reject a slot that was never pending", () => {
+      const { authority, awaiting } = awaitingState();
+      const slot = authority.roster.orderedSlots[0]!;
+      const rejected = reduceStandaloneReviewMachine(awaiting, {
+        kind: "result-rejected",
+        request: { ...slot.attempts[0], slotId: "slot:not-in-roster" as typeof slot.attempts[0]["slotId"] },
+        message: "spawn failed",
+      });
+
+      expect(rejected.ok).toBe(false);
+      if (rejected.ok) return;
+      expect(rejected.error.kind).toBe("unknown-slot");
+      expect(rejected.error.message).toContain("not pending");
+    });
+  });
+});
+
+describe("prepareStandaloneReview refuses a roster that diverges from the selection", () => {
+  const errorsOf = (input: ReturnType<typeof preparationInput>): readonly string[] => {
+    const prepared = prepareStandaloneReview(input);
+    expect(prepared.ok).toBe(false);
+    if (prepared.ok) throw new Error("expected the roster to be refused");
+    return prepared.error.errors;
+  };
+
+  it("accepts the canonical roster these cases are varied from", () => {
+    expect(prepareStandaloneReview(preparationInput()).ok).toBe(true);
+  });
+
+  it("refuses a roster whose authorities name another run", () => {
+    const foreign = rawStandaloneRoster().map((slot) => ({
+      ...slot,
+      attempts: slot.attempts.map((attempt) => ({ ...attempt, runId: "run.foreign" })),
+    }));
+    expect(errorsOf(preparationInput({ roster: foreign })).join(" ")).toMatch(/run/i);
+  });
+
+  it("refuses a roster whose authorities claim another program", () => {
+    const wrongProgram = rawStandaloneRoster().map((slot) => ({
+      ...slot,
+      attempts: slot.attempts.map((attempt) => ({ ...attempt, program: "wave-gate" })),
+    }));
+    expect(errorsOf(preparationInput({ roster: wrongProgram })).join(" ")).toMatch(/program/i);
+  });
+
+  it("refuses a roster carrying a real reviewer role the selection did not choose", () => {
+    // `comment-analyzer` is a legitimate reviewer, so this clears the shape
+    // check and lands on the roster-vs-selection comparison rather than on
+    // `malformed-attempt-authority` the way an unknown role would.
+    const wrongRole = rawStandaloneRoster().map((slot, index) => index === 1
+      ? { ...slot, attempts: slot.attempts.map((attempt) => ({ ...attempt, role: "comment-analyzer" })) }
+      : slot);
+    expect(errorsOf(preparationInput({ roster: wrongRole })).length).toBeGreaterThan(0);
+  });
+
+  it("refuses a roster whose selected roles appear in the wrong order", () => {
+    const reversed = [...rawStandaloneRoster()].reverse();
+    expect(errorsOf(preparationInput({ roster: reversed })).length).toBeGreaterThan(0);
+  });
+
+  it("refuses a roster missing a slot the selection requires", () => {
+    expect(errorsOf(preparationInput({ roster: rawStandaloneRoster().slice(0, 1) })).length).toBeGreaterThan(0);
   });
 });

@@ -91,6 +91,9 @@ export function reconcileSpecCheck(
   if (parsed.criticalCount === null) {
     return evidenceFailure(wave, runAt, "SPEC_CHECK_CRITICAL_COUNT marker not found - re-run /wave-gate");
   }
+  if (parsed.highCount === null) {
+    return evidenceFailure(wave, runAt, "SPEC_CHECK_HIGH_COUNT marker not found - re-run /wave-gate");
+  }
   if (parsed.verdict === null) {
     return evidenceFailure(wave, runAt, "SPEC_CHECK_VERDICT marker not found - re-run /wave-gate");
   }
@@ -101,7 +104,7 @@ export function reconcileSpecCheck(
       `SPEC_CHECK_CRITICAL_COUNT (${parsed.criticalCount}) does not match CRITICAL: findings (${parsed.critical.length}); counts must match the findings - re-run /wave-gate`,
     );
   }
-  const highCount = parsed.highCount ?? 0;
+  const highCount = parsed.highCount;
   if (highCount !== parsed.high.length) {
     return evidenceFailure(
       wave,

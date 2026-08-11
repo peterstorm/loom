@@ -1985,6 +1985,92 @@ describe("Pi extension review tool_result integration", () => {
       renameSync(backup, statePath);
     }
   });
+
+  /**
+   * `files_modified` comes from an agent's own transcript, so the paths in it
+   * are untrusted input, and they go on to drive the wave-gate lint target set.
+   * `canonicalRepositoryPaths` is the containment boundary; every existing
+   * fixture handed it well-behaved in-repo relative paths, so the catch that
+   * leaves the task pending was never entered.
+   */
+  describe("Pi-reported files_modified cannot escape the repository", () => {
+    const piWriteMessage = (path: string) => ({
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call-write-1", name: "write", arguments: { path } }],
+    });
+
+    const runImplementerWith = async (path: string, toolCallId: string) => {
+      const planPath = join(temp, "files-modified-containment-plan.md");
+      writeFileSync(planPath, "# Plan\n");
+      writeState({
+        ...initialGraph(),
+        phase_artifacts: { architecture: planPath },
+        skipped_phases: ["plan-alignment"],
+        plan_file: planPath,
+        executing_tasks: [],
+      });
+      const pi = await extension();
+      const context = {
+        cwd: ROOT,
+        sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad42d" },
+      };
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: {
+          agent: "code-implementer-agent",
+          task: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+          agentScope: "user",
+        },
+      }, context)).toEqual([undefined]);
+
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        await pi.emit("tool_result", {
+          toolName: "subagent",
+          toolCallId,
+          content: [],
+          details: {
+            results: [{
+              agent: "code-implementer-agent",
+              task: "Task ID: T1",
+              exitCode: 0,
+              messages: [piWriteMessage(path)],
+            }],
+          },
+        }, context);
+        return {
+          state: JSON.parse(readFileSync(statePath, "utf-8")),
+          audit: stderr.mock.calls.map(([text]) => String(text)).join(""),
+        };
+      } finally {
+        stderr.mockRestore();
+      }
+    };
+
+    it.each([
+      ["a traversal path", "../outside-the-repo.ts"],
+      ["a deep traversal path", "engine/../../outside-the-repo.ts"],
+      ["an absolute path outside the repository", "/etc/passwd"],
+    ])("leaves the task pending and audits %s", async (label, path) => {
+      const { state, audit } = await runImplementerWith(path, `call-unsafe-${label.replace(/\s+/g, "-")}`);
+
+      expect(state.tasks[0].status).toBe("pending");
+      // The task must also leave the executing set, or the wave stalls on a
+      // task nothing will ever complete.
+      expect(state.executing_tasks).toEqual([]);
+      expect(audit).toContain("unsafe modified-file evidence for T1");
+      // Nothing from the refused transcript was persisted as evidence.
+      expect(state.tasks[0].files_modified ?? []).not.toContain(path);
+    });
+
+    it("accepts an in-repository relative path through the same boundary", async () => {
+      const { state, audit } = await runImplementerWith("pi/extension.ts", "call-safe-in-repo");
+
+      expect(audit).not.toContain("unsafe modified-file evidence");
+      expect(state.tasks[0].files_modified ?? []).toContain("pi/extension.ts");
+    });
+  });
 });
 
 describe("legacy Pi bridge", () => {

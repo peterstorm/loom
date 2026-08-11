@@ -1491,3 +1491,161 @@ describe("durable LC-3 lifecycle and recovery", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Round-33: proofs spliced from a foreign authority, and a hostile LC-2 loader
+// ---------------------------------------------------------------------------
+
+/**
+ * Every proof fixture above is built from the SAME authority it is then fed to,
+ * so the run/digest cross-checks that block a proof spliced in from another
+ * remediation were present but never made to fire. These build a genuinely
+ * foreign proof — a complete, internally valid one minted under a different
+ * reviewed scope, and therefore a different authority digest — and hand it to
+ * each transition in turn.
+ */
+describe("a proof minted under a foreign authority is refused at every transition", () => {
+  const FOREIGN_SCOPE = ["src/foreign.ts"] as const;
+
+  /** A parallel, internally consistent lifecycle under a different authority. */
+  function foreignLifecycle() {
+    const frozen = valueOf(freezePathAuthority(standaloneInput([...FOREIGN_SCOPE])));
+    const registered = valueOf(registerSupportPath(frozen, "engine/tests/foreign.test.ts"));
+    const foreignPaths = ["engine/tests/foreign.test.ts", "src/foreign.ts"];
+    const audit = valueOf(auditRemediationPaths(registered, {
+      expectedDirtyPaths: foreignPaths,
+      actualDirtyPaths: [
+        { path: "engine/tests/foreign.test.ts", change: "added", nodeKind: "file" },
+        { path: "src/foreign.ts", change: "modified", nodeKind: "file" },
+      ],
+      preexistingStagedPaths: [],
+      repositoryWitness: repositoryWitness(),
+    }));
+    const stage = valueOf(stageTemporaryIndex(audit, digest(41), repositoryWitness()));
+    const index = valueOf(verifyTemporaryIndex(stage, {
+      actualTemporaryIndexStagedPaths: foreignPaths,
+      actualIndexDigest: digest(41),
+      currentRepositoryWitness: repositoryWitness(),
+    }));
+    const prepared = valueOf(prepareVerifiedIndexInstallation(index, "effect.install-foreign", repositoryWitness()));
+    return { audit, stage, index, prepared };
+  }
+
+  it("proves the foreign lifecycle is internally valid, so only its authority differs", () => {
+    const foreign = foreignLifecycle();
+    expect(foreign.audit.authorityDigest).not.toBe(registeredAuthority().digest);
+    expect(foreign.prepared.intent.effectId).toBe("effect.install-foreign");
+  });
+
+  it("refuses a foreign audit proof at paths-registered", () => {
+    const { registered } = lifecycleStates();
+    const rejected = reduceRemediation(registered, { kind: "audit-succeeded", audited: foreignLifecycle().audit });
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) return;
+    expect(rejected.error.kind).toBe("remediation-authority-mismatch");
+    expect(rejected.error.field).toBe("audited");
+  });
+
+  it("refuses a foreign staged-index proof at audited", () => {
+    const { auditedState } = lifecycleStates();
+    const rejected = reduceRemediation(auditedState, { kind: "temporary-index-staged", staged: foreignLifecycle().stage });
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) return;
+    expect(rejected.error.kind).toBe("remediation-authority-mismatch");
+    expect(rejected.error.field).toBe("staged");
+  });
+
+  it("refuses a foreign verified-index proof at staged-temporary-index", () => {
+    const { stagedState } = lifecycleStates();
+    const rejected = reduceRemediation(stagedState, { kind: "staged-set-verified", verified: foreignLifecycle().index });
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) return;
+    expect(rejected.error.kind).toBe("remediation-authority-mismatch");
+    expect(rejected.error.field).toBe("verified");
+  });
+
+  it("refuses a foreign installation proof at verified", () => {
+    const { verifiedState } = lifecycleStates();
+    const foreign = foreignLifecycle();
+    const rejected = reduceRemediation(verifiedState, {
+      kind: "index-installed",
+      installation: foreign.prepared,
+      receipt: installedReceipt(foreign.prepared),
+    });
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) return;
+    expect(rejected.error.kind).toBe("remediation-authority-mismatch");
+    expect(rejected.error.field).toBe("installation");
+  });
+
+  it("still accepts each matching proof, so the guards reject authority and not shape", () => {
+    const { registered, auditedState, stagedState, verifiedState, audit, stage, index, prepared } = lifecycleStates();
+    expect(reduceRemediation(registered, { kind: "audit-succeeded", audited: audit }).ok).toBe(true);
+    expect(reduceRemediation(auditedState, { kind: "temporary-index-staged", staged: stage }).ok).toBe(true);
+    expect(reduceRemediation(stagedState, { kind: "staged-set-verified", verified: index }).ok).toBe(true);
+    expect(reduceRemediation(verifiedState, {
+      kind: "index-installed", installation: prepared, receipt: installedReceipt(prepared),
+    }).ok).toBe(true);
+  });
+});
+
+/**
+ * The LC-2 publication loader is an imperative-shell seam: it can throw, it can
+ * be the wrong kind of value entirely, and it can return an envelope that is not
+ * a `DomainResult`. Every existing fixture handed the resolver a well-behaved
+ * loader, so the fault arms of that boundary were never taken — even though the
+ * module documents this resolver as "the only resolver remediation parsers trust
+ * after restart".
+ */
+describe("a hostile LC-2 publication loader cannot produce an authority", () => {
+  const rehydrate = (loader: unknown) => parseRemediationStateWithAuthority(
+    jsonRoundTrip(lifecycleStates().start),
+    createStandaloneResultPublicationAuthorityResolver(loader as never),
+  );
+
+  const errorOf = (result: ReturnType<typeof rehydrate>): string => {
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected the rehydration to fail");
+    return typeof result.error === "string" ? result.error : JSON.stringify(result.error);
+  };
+
+  it("refuses a loader that throws", () => {
+    expect(errorOf(rehydrate(() => { throw new Error("registration store is offline"); })))
+      .toContain("threw");
+  });
+
+  it("refuses a loader that throws a non-Error value", () => {
+    expect(errorOf(rehydrate(() => { throw "offline"; }))).toContain("threw");
+  });
+
+  it.each([
+    ["undefined", undefined],
+    ["null", null],
+    ["a string", "loader"],
+    ["a plain object", {}],
+  ])("refuses a loader that is %s rather than a function", (_label, loader) => {
+    expect(errorOf(rehydrate(loader))).toMatch(/loader is required|invalid/i);
+  });
+
+  it.each([
+    ["a bare value", () => 42],
+    ["an envelope with neither ok arm", () => ({ value: {} })],
+    ["an ok envelope carrying an error", () => ({ ok: true, error: {} })],
+    ["a failure envelope with no error", () => ({ ok: false })],
+    ["a failure envelope carrying an extra field", () => ({ ok: false, error: { kind: "x", message: "y", extra: 1 } })],
+    ["a failure envelope with the wrong error kind", () => ({ ok: false, error: { kind: "some-other-kind", message: "y" } })],
+    ["a failure envelope with an empty message", () => ({ ok: false, error: { kind: "standalone-result-publication-authority-unavailable", message: "   " } })],
+  ])("refuses a loader returning %s", (_label, loader) => {
+    expect(errorOf(rehydrate(loader))).toMatch(/invalid|unavailable/i);
+  });
+
+  it("refuses a loader returning a well-shaped envelope wrapping a foreign receipt", () => {
+    const foreignReceipt = standaloneFixture(["src/foreign.ts"]).input.publicationReceipt;
+    expect(errorOf(rehydrate(() => ({ ok: true, value: foreignReceipt })))).not.toBe("");
+  });
+
+  it("accepts the well-behaved loader these cases are varied from", () => {
+    const start = lifecycleStates().start;
+    expect(parseRemediationStateWithAuthority(jsonRoundTrip(start), standalonePublicationResolver()).ok).toBe(true);
+  });
+});

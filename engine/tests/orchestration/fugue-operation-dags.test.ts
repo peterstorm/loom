@@ -326,6 +326,63 @@ describe("standalone review critical routing", () => {
     if (!result.ok) return;
     expect(result.value.kind).toBe("finalize");
   });
+
+  describe("a reconciliation failure blocks rather than finalising", () => {
+    // Every sibling join in these DAGs — the scope join here, `panel-operations`,
+    // `remediation-operations` — fails closed when neither predecessor produced
+    // a result. This one defaulted to a clean `finalize` with zero advisories,
+    // which is indistinguishable from a genuinely clean review.
+    // `defineDag` normalizes the node map into an ordered array, so nodes are
+    // located by their own `id` rather than by an object key.
+    const nodeById = (id: string) => {
+      const nodes = standaloneCriticalRouteDag.nodes as unknown as readonly { readonly id: string }[];
+      const node = nodes.find((candidate) => candidate.id === id);
+      expect(node, `${id} must exist in the DAG`).toBeDefined();
+      return node as unknown as {
+        run: (input: unknown, ctx: unknown) => Promise<{ ok: boolean; value: CriticalRoute }>;
+      };
+    };
+
+    const runNode = (id: string, envelope: Record<string, unknown>) =>
+      nodeById(id).run(envelope, context(standaloneCriticalRouteDag.id));
+
+    it("blocks when neither routing branch produced a result", async () => {
+      const routed = await runNode("route-result", {});
+      expect(routed.ok).toBe(true);
+      expect(routed.value).toEqual({
+        kind: "blocked",
+        reason: "neither routing branch produced a result",
+      });
+    });
+
+    it("passes a branch result through unchanged when one did produce a result", async () => {
+      const finalized = await runNode("route-result", {
+        "route-to-finalization": { kind: "finalize", advisoryCount: 4 },
+      });
+      expect(finalized.value).toEqual({ kind: "finalize", advisoryCount: 4 });
+
+      const refuting = await runNode("route-result", {
+        "route-to-refutation": { kind: "refutation-required", criticalCount: 1 },
+      });
+      expect(refuting.value).toEqual({ kind: "refutation-required", criticalCount: 1 });
+    });
+
+    it.each(["route-to-refutation", "route-to-finalization"])(
+      "blocks when the %s branch fires without its aggregate summary",
+      async (id) => {
+        const routed = await runNode(id, {});
+        expect(routed.ok).toBe(true);
+        expect(routed.value.kind).toBe("blocked");
+      },
+    );
+
+    it("still finalises a zero-critical summary, which is a routing decision and not a failure", async () => {
+      const routed = await runNode("route-to-refutation", {
+        "route-criticals": { criticalCount: 0, advisoryCount: 2 },
+      });
+      expect(routed.value).toEqual({ kind: "finalize", advisoryCount: 2 });
+    });
+  });
 });
 
 // --- Wave gate preparation fan-in -------------------------------------------

@@ -160,8 +160,12 @@ export function createEffectRunner(args: Readonly<{
 }>): EffectRunner {
   return async (intent: EffectIntent): Promise<DomainResult<EffectReceipt, EffectRunnerError>> => {
     // Resume path: an effect that already recorded a receipt is never re-run.
+    // A receipt that exists but cannot be read stops the runner: re-executing
+    // on an unreadable receipt is exactly the double-effect this guard exists
+    // to prevent, so it is retriable rather than silently re-run.
     const recorded = args.handle.readReceipt(intent.effectId);
-    if (recorded !== null) return reconcile(intent, recorded);
+    if (!recorded.ok) return failure(intent.effectId, true, recorded.error.message);
+    if (recorded.value !== null) return reconcile(intent, recorded.value);
 
     const executed = await executeIntent(args, intent);
     if (!executed.ok) return executed;

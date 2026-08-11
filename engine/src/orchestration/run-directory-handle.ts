@@ -160,7 +160,8 @@ export interface RunDirHandle extends ProgramJournal {
   readTranscriptBytes(authority: AgentRequestAuthority): DomainResult<Uint8Array, RunDirectoryError>;
   publishArtifactSet(staged: readonly StagedArtifact[]): Promise<DomainResult<readonly ArtifactRef[], RunDirectoryError>>;
   recordReceipt(receipt: EffectReceipt): Promise<DomainResult<EffectId, RunDirectoryError>>;
-  readReceipt(effectId: EffectId): EffectReceipt | null;
+  /** `success(null)` = never recorded; a failure = recorded but unreadable. */
+  readReceipt(effectId: EffectId): DomainResult<EffectReceipt | null, RunDirectoryError>;
 }
 
 function ensureFixedLayout(runDirectory: string): void {
@@ -482,10 +483,46 @@ function stageArtifactSet(
 }
 
 /**
+ * Read an already-occupied artifact slot for the byte comparison below.
+ * `null` means the slot is free; a slot that exists but cannot be read is a
+ * distinct, non-empty result so it can never be mistaken for a free slot.
+ */
+function occupiedArtifactBytes(path: string): Uint8Array | Readonly<{ __unreadable: string }> | null {
+  try {
+    return readRunBytesNoFollow(path);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? null
+      : Object.freeze({ __unreadable: (error as Error).message });
+  }
+}
+
+const sameBytes = (a: Uint8Array, b: Uint8Array): boolean =>
+  a.length === b.length && a.every((byte, index) => byte === b[index]);
+
+/**
+ * True only when the staged bytes are provably identical to what already
+ * occupies the slot. A staged file that cannot be read answers `false`, so an
+ * unreadable member refuses the promotion instead of licensing an overwrite.
+ */
+function stagedBytesMatch(stagedPath: string, occupied: Uint8Array): boolean {
+  try {
+    return sameBytes(occupied, readRunBytesNoFollow(stagedPath));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Promote a fully staged set. Every target is checked BEFORE any rename,
  * because renaming is the one step that cannot be undone member-by-member —
  * ruling out the predictable failures while the set is still entirely staged
  * is what keeps "all or none" true rather than merely intended.
+ *
+ * `renameSync` replaces an existing regular file, so the O_EXCL immutability
+ * this module promises has to be enforced here explicitly: an occupied slot is
+ * refused unless its bytes are already identical to what would be written, in
+ * which case the promotion is a no-op replay rather than a rewrite of history.
  */
 function promoteArtifactSet(
   stagedPaths: readonly StagedPair[],
@@ -494,6 +531,20 @@ function promoteArtifactSet(
   if (blocked !== undefined) {
     discardStaged(stagedPaths);
     return failure("artifacts", `artifact slot is occupied by a directory: ${blocked.final}`);
+  }
+
+  for (const entry of stagedPaths) {
+    const occupied = occupiedArtifactBytes(entry.final);
+    if (occupied === null) continue;
+    const reason = !(occupied instanceof Uint8Array)
+      ? `artifact slot is occupied by unreadable bytes: ${entry.final}`
+      : !stagedBytesMatch(entry.staged, occupied)
+        ? `a different artifact already occupies this slot: ${entry.final}`
+        : null;
+    if (reason !== null) {
+      discardStaged(stagedPaths);
+      return failure("artifacts", reason);
+    }
   }
 
   // A failure here must still not report success. Any member already promoted
@@ -564,11 +615,20 @@ function receiptOperations(directory: string) {
       return success(receipt.effectId);
     },
 
-    readReceipt(effectId: EffectId): EffectReceipt | null {
+    /**
+     * `success(null)` means the effect never recorded a receipt; anything that
+     * exists but cannot be read or parsed is a failure. Collapsing the two
+     * would let a truncated receipt read as "never ran", and the effect runner
+     * would re-execute an effect it already performed.
+     */
+    readReceipt(effectId: EffectId): DomainResult<EffectReceipt | null, RunDirectoryError> {
+      const path = join(directory, RECEIPTS, `${effectId}.json`);
       try {
-        return readJsonNoFollow(join(directory, RECEIPTS, `${effectId}.json`)) as EffectReceipt;
-      } catch {
-        return null;
+        return success(readJsonNoFollow(path) as EffectReceipt);
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ENOENT"
+          ? success(null)
+          : failure("receipt", `receipt for effect ${effectId} is unreadable: ${(error as Error).message}`);
       }
     },
   };

@@ -165,7 +165,8 @@ export type AggregateSummary = Readonly<{
 
 export type CriticalRoute =
   | Readonly<{ kind: "refutation-required"; criticalCount: number }>
-  | Readonly<{ kind: "finalize"; advisoryCount: number }>;
+  | Readonly<{ kind: "finalize"; advisoryCount: number }>
+  | Readonly<{ kind: "blocked"; reason: string }>;
 
 const aggregateSummarySchema = z.object({
   criticalCount: z.number().int().nonnegative(),
@@ -175,6 +176,7 @@ const aggregateSummarySchema = z.object({
 const criticalRouteSchema = z.union([
   z.object({ kind: z.literal("refutation-required"), criticalCount: z.number().int().positive() }),
   z.object({ kind: z.literal("finalize"), advisoryCount: z.number().int().nonnegative() }),
+  z.object({ kind: z.literal("blocked"), reason: z.string().min(1) }),
 ]) as unknown as z.ZodType<CriticalRoute>;
 
 type RouteEnvelope = Readonly<Partial<Record<string, AggregateSummary>>>;
@@ -200,7 +202,9 @@ const summarizeNode = createTransformNode<AggregateSummary, AggregateSummary>({
  * Reached only when the aggregate carries at least one critical. A zero count
  * here would mean the panel was convened with nothing to adjudicate, which
  * reports "0 refuted, 0 survived" — indistinguishable from a panel that upheld
- * everything — so it routes to finalisation instead.
+ * everything — so it routes to finalisation instead. A *missing* summary is a
+ * different thing: the branch fired without its predecessor's output, which is a
+ * reconciliation failure, and blocks rather than routing anywhere.
  */
 const toRefutationNode = createTransformNode<RouteEnvelope, CriticalRoute>({
   id: TO_REFUTATION,
@@ -208,9 +212,8 @@ const toRefutationNode = createTransformNode<RouteEnvelope, CriticalRoute>({
   outputSchema: criticalRouteSchema,
   transform: (envelope) => {
     const summary = envelope[ROUTE_CRITICALS];
-    if (summary === undefined || summary.criticalCount === 0) {
-      return ok({ kind: "finalize", advisoryCount: summary?.advisoryCount ?? 0 });
-    }
+    if (summary === undefined) return ok({ kind: "blocked", reason: "the refutation branch ran without an aggregate summary" });
+    if (summary.criticalCount === 0) return ok({ kind: "finalize", advisoryCount: summary.advisoryCount });
     return ok({ kind: "refutation-required", criticalCount: summary.criticalCount });
   },
 });
@@ -221,10 +224,11 @@ const toFinalizeNode = createTransformNode<RouteEnvelope, CriticalRoute>({
   outputSchema: criticalRouteSchema,
   transform: (envelope) => {
     const summary = envelope[ROUTE_CRITICALS];
-    if (summary !== undefined && summary.criticalCount > 0) {
+    if (summary === undefined) return ok({ kind: "blocked", reason: "the finalize branch ran without an aggregate summary" });
+    if (summary.criticalCount > 0) {
       return ok({ kind: "refutation-required", criticalCount: summary.criticalCount });
     }
-    return ok({ kind: "finalize", advisoryCount: summary?.advisoryCount ?? 0 });
+    return ok({ kind: "finalize", advisoryCount: summary.advisoryCount });
   },
 });
 
@@ -234,7 +238,7 @@ const routeResultNode = createTransformNode<RouteOutcomeEnvelope, CriticalRoute>
   outputSchema: criticalRouteSchema,
   transform: (envelope) => {
     const routed = envelope[TO_REFUTATION] ?? envelope[TO_FINALIZE];
-    return ok(routed ?? { kind: "finalize", advisoryCount: 0 });
+    return ok(routed ?? { kind: "blocked", reason: "neither routing branch produced a result" });
   },
 });
 

@@ -31,6 +31,7 @@ import {
 } from "./orchestration-contract";
 import {
   lowerModelProfile,
+  parseLlmProfileId,
   resolveAgentPolicy,
   resolveModelProfile,
   type LlmProfileId,
@@ -1310,19 +1311,24 @@ function parseReviewerEvidence(raw: unknown, runId: string, label: string): Pars
     if (typeof entry.request_id !== "string" || entry.request_id.trim() === "") errors.push(`${path}.request_id must be non-empty`);
     if (entry.attempt !== 1 && entry.attempt !== 2) errors.push(`${path}.attempt must be 1 or 2`);
     const requestBound = entry.authority_kind === "request-bound";
-    if (requestBound && (typeof entry.model_profile !== "string" || entry.model_profile.trim() === "")) errors.push(`${path}.model_profile must be non-empty for request-bound evidence`);
+    // A closed-set id has to be parsed against the allowlist, not merely
+    // shape-checked: aggregate.json is untrusted on-disk input, and a bare cast
+    // would type an off-roster string as a member of LLM_PROFILE_IDS.
+    const modelProfile = requestBound ? parseLlmProfileId(entry.model_profile) : null;
+    if (modelProfile !== null && !modelProfile.ok) errors.push(`${path}.model_profile: ${modelProfile.error.message}`);
     if (!requestBound && entry.model_profile !== null) errors.push(`${path}.model_profile must be null for legacy evidence`);
     if (requestBound && (typeof entry.context_digest !== "string" || !/^[0-9a-f]{64}$/.test(entry.context_digest))) errors.push(`${path}.context_digest must be a SHA-256 digest for request-bound evidence`);
     if (!requestBound && entry.context_digest !== null) errors.push(`${path}.context_digest must be null for legacy evidence`);
     if (artifact.ok && typeof entry.agent === "string" && typeof entry.slot_id === "string" && typeof entry.request_id === "string" &&
-        (entry.attempt === 1 || entry.attempt === 2) && (entry.authority_kind === "request-bound" || entry.authority_kind === "legacy-slot-bound")) {
+        (entry.attempt === 1 || entry.attempt === 2) && (entry.authority_kind === "request-bound" || entry.authority_kind === "legacy-slot-bound") &&
+        (modelProfile === null || modelProfile.ok)) {
       evidence.push(Object.freeze({
         authorityKind: entry.authority_kind,
         agent: entry.agent as StandaloneReviewerRole,
         slotId: entry.slot_id,
         requestId: entry.request_id,
         attempt: entry.attempt,
-        modelProfile: requestBound ? entry.model_profile as LlmProfileId : null,
+        modelProfile: modelProfile === null ? null : modelProfile.value,
         contextDigest: requestBound ? entry.context_digest as string : null,
         artifact: artifact.value,
       }));

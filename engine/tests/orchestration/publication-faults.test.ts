@@ -346,6 +346,65 @@ describe("artifact set publication", () => {
     expect(artifacts).not.toContain("first.json");
     expect(artifacts.some((name) => name.endsWith(".staged"))).toBe(false);
   });
+
+  /**
+   * `renameSync` replaces an existing regular file, so the module's own O_EXCL
+   * immutability promise ("republishing a slot fails loudly instead of silently
+   * rewriting history") has to be enforced here explicitly. It matters because
+   * the standalone result publishes to the FIXED slot `result.json` under a
+   * CONTENT-ADDRESSED effect id: different bytes mean a different effect id, so
+   * the runner's receipt short-circuit never fires and the second publish
+   * reaches the same path.
+   */
+  describe("an occupied slot is never silently overwritten", () => {
+    it("refuses a second publish of the same path with different bytes", async () => {
+      const { directory, handle } = freshRun();
+      const first = await handle.publishArtifactSet([
+        { relativePath: "result.json", bytes: [...Buffer.from("{\"surviving\":3}", "utf-8")] },
+      ]);
+      expect(first.ok).toBe(true);
+
+      const second = await handle.publishArtifactSet([
+        { relativePath: "result.json", bytes: [...Buffer.from("{\"surviving\":0}", "utf-8")] },
+      ]);
+
+      expect(second.ok).toBe(false);
+      if (second.ok) return;
+      expect(second.error.message).toContain("a different artifact already occupies this slot");
+      // The originally published, audit-relevant bytes are still there.
+      expect(readFileSync(join(directory, "artifacts", "result.json"), "utf-8")).toBe("{\"surviving\":3}");
+      expect(readdirSync(join(directory, "artifacts")).some((name) => name.endsWith(".staged"))).toBe(false);
+    });
+
+    it("accepts a byte-identical republish as the idempotent replay it is", async () => {
+      const { directory, handle } = freshRun();
+      const bytes = [...Buffer.from("{\"surviving\":3}", "utf-8")];
+      expect((await handle.publishArtifactSet([{ relativePath: "result.json", bytes }])).ok).toBe(true);
+
+      const replay = await handle.publishArtifactSet([{ relativePath: "result.json", bytes }]);
+
+      expect(replay.ok).toBe(true);
+      expect(readFileSync(join(directory, "artifacts", "result.json"), "utf-8")).toBe("{\"surviving\":3}");
+    });
+
+    it("publishes no member of a set when one member's slot is already occupied differently", async () => {
+      const { directory, handle } = freshRun();
+      expect((await handle.publishArtifactSet([
+        { relativePath: "taken.json", bytes: [...Buffer.from("original", "utf-8")] },
+      ])).ok).toBe(true);
+
+      const second = await handle.publishArtifactSet([
+        { relativePath: "fresh.json", bytes: [...Buffer.from("fresh", "utf-8")] },
+        { relativePath: "taken.json", bytes: [...Buffer.from("replacement", "utf-8")] },
+      ]);
+
+      expect(second.ok).toBe(false);
+      const artifacts = readdirSync(join(directory, "artifacts"));
+      expect(artifacts).not.toContain("fresh.json");
+      expect(artifacts.some((name) => name.endsWith(".staged"))).toBe(false);
+      expect(readFileSync(join(directory, "artifacts", "taken.json"), "utf-8")).toBe("original");
+    });
+  });
 });
 
 // --- Receipts and effect reconciliation ------------------------------------
@@ -384,8 +443,57 @@ describe("effect receipts", () => {
     await runner(captureIntent([1]));
 
     const stored = handle.readReceipt("effect:capture-1" as EffectReceipt["effectId"]);
-    expect(stored).not.toBeNull();
-    expect(stored?.kind).toBe("raw-transcript-captured");
+    expect(stored.ok).toBe(true);
+    if (!stored.ok) return;
+    expect(stored.value?.kind).toBe("raw-transcript-captured");
+  });
+
+  /**
+   * A receipt is written with a plain O_EXCL open, so a crash mid-write leaves
+   * a truncated file. Returning `null` for it would make "recorded but
+   * unreadable" indistinguishable from "never ran", and the runner would
+   * re-execute an effect it had already performed — the exact double-effect the
+   * receipt exists to prevent.
+   */
+  describe("a corrupt receipt is not an absent one", () => {
+    const corruptReceipt = (directory: string, effectId: string) => {
+      writeFileSync(join(directory, "receipts", `${effectId}.json`), "{ this is not json", "utf-8");
+    };
+
+    it("reports an unreadable receipt as a failure rather than as absent", async () => {
+      const { directory, handle } = freshRun();
+      corruptReceipt(directory, "effect:capture-1");
+
+      const stored = handle.readReceipt("effect:capture-1" as EffectReceipt["effectId"]);
+
+      expect(stored.ok).toBe(false);
+      if (stored.ok) return;
+      expect(stored.error.message).toContain("unreadable");
+    });
+
+    it("still reports a receipt that was never written as absent", () => {
+      const { handle } = freshRun();
+      expect(handle.readReceipt("effect:never-ran" as EffectReceipt["effectId"]))
+        .toEqual({ ok: true, value: null });
+    });
+
+    it("stops the effect runner instead of re-executing the effect", async () => {
+      const { directory, handle } = freshRun();
+      await handle.reserveRequest(authority());
+      const runner = createEffectRunner({ handle, ports: ports(), resolveArtifacts: () => [] });
+      const intent = captureIntent([7, 8, 9]);
+      expect((await runner(intent)).ok).toBe(true);
+      corruptReceipt(directory, "effect:capture-1");
+
+      const resumed = await runner(intent);
+
+      expect(resumed.ok).toBe(false);
+      if (resumed.ok) return;
+      expect(resumed.error.message).toContain("unreadable");
+      // Retriable: the effect may well have happened, so the operator has to
+      // resolve the receipt rather than the runner guessing it did not.
+      expect(resumed.error.retriable).toBe(true);
+    });
   });
 
   it("reports a failing external port as retriable without recording a receipt", async () => {
@@ -408,7 +516,7 @@ describe("effect receipts", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.retriable).toBe(true);
-    expect(handle.readReceipt("effect:commit-1" as EffectReceipt["effectId"])).toBeNull();
+    expect(handle.readReceipt("effect:commit-1" as EffectReceipt["effectId"])).toEqual({ ok: true, value: null });
   });
 
   it("refuses a receipt that answers a different effect", async () => {
@@ -438,7 +546,7 @@ describe("effect receipts", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.retriable).toBe(false);
-    expect(handle.readReceipt("effect:commit-1" as EffectReceipt["effectId"])).toBeNull();
+    expect(handle.readReceipt("effect:commit-1" as EffectReceipt["effectId"])).toEqual({ ok: true, value: null });
   });
 
   it("refuses a publish whose staged bytes do not cover the intent's set", async () => {

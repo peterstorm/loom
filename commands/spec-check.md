@@ -199,7 +199,7 @@ SPEC_CHECK_VERDICT: PASSED | BLOCKED
 - Each `CRITICAL:` / `HIGH:` / `MEDIUM:` line MUST start at column 0 (no leading spaces)
 - One finding per line, no line breaks within a finding
 - Counts MUST match the number of CRITICAL/HIGH/MEDIUM lines above them
-- Even if counts are zero, emit the SPEC_CHECK_CRITICAL_COUNT and SPEC_CHECK_VERDICT lines
+- Even if counts are zero, emit the SPEC_CHECK_CRITICAL_COUNT, SPEC_CHECK_HIGH_COUNT, and SPEC_CHECK_VERDICT lines — all three are required, and a missing marker fails evidence capture rather than reading as zero
 - These lines appear AFTER the human-readable report, as the very last output
 
 ---

@@ -137,3 +137,56 @@ describe("Pi child write grants", () => {
     expect(() => consumePiWriteGrant(issued.marker, cwd, "code-implementer-agent", 111)).toThrow();
   });
 });
+
+describe("Pi write grants fail closed when their bound task graph disappears", () => {
+  /**
+   * The grant binds a specific task graph path, and the child is about to write
+   * to it. Between issuance and consumption that file can be deleted, renamed,
+   * or replaced by a directory — so the existence check is the last thing
+   * standing between a stale capability and a write against a graph that is no
+   * longer the one the parent authorised. Nothing exercised it, because every
+   * other test left the fixture graph in place for the whole run.
+   */
+  const grantFor = (cwd: string, graph: string) => {
+    const issued = issuePiWriteGrant({
+      agent: "code-implementer-agent", taskId: "T1", cwd, taskGraphPath: graph,
+    });
+    return injectPiWriteGrant("Task ID: T1\nImplement it.", issued);
+  };
+
+  it("refuses a grant whose task graph was deleted after issuance", () => {
+    const { cwd, graph } = fixture();
+    const prompt = grantFor(cwd, graph);
+    rmSync(graph, { force: true });
+
+    expect(() => consumePiWriteGrant(prompt, cwd, "code-implementer-agent"))
+      .toThrow(/task graph no longer exists/);
+  });
+
+  it("refuses a grant whose task graph directory was removed wholesale", () => {
+    const { cwd, graph } = fixture();
+    const prompt = grantFor(cwd, graph);
+    rmSync(join(cwd, ".claude", "state"), { recursive: true, force: true });
+
+    expect(() => consumePiWriteGrant(prompt, cwd, "code-implementer-agent"))
+      .toThrow(/task graph no longer exists/);
+  });
+
+  it("still burns the one-time capability when the existence check refuses it", () => {
+    const { cwd, graph } = fixture();
+    const prompt = grantFor(cwd, graph);
+    rmSync(graph, { force: true });
+    expect(() => consumePiWriteGrant(prompt, cwd, "code-implementer-agent")).toThrow();
+
+    // Restoring the file must NOT resurrect the grant: the record was claimed
+    // and deleted on the first attempt, so a retry has nothing to consume.
+    writeFileSync(graph, "{}\n");
+    expect(() => consumePiWriteGrant(prompt, cwd, "code-implementer-agent")).toThrow();
+  });
+
+  it("accepts the same grant while its bound task graph is still present", () => {
+    const { cwd, graph } = fixture();
+    expect(consumePiWriteGrant(grantFor(cwd, graph), cwd, "code-implementer-agent"))
+      .toMatchObject({ agent: "code-implementer-agent", taskId: "T1", taskGraphPath: graph });
+  });
+});

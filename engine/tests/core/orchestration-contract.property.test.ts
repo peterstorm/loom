@@ -3203,3 +3203,93 @@ describe("retry diagnostics", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Round-33: every terminal-blocked category, not only the five in use
+// ---------------------------------------------------------------------------
+
+/**
+ * `TerminalBlockedDiagnostic` carries eleven categories, and which one a caller
+ * passes decides which fields the constructor demands: run-scoped categories
+ * take a runId, request-scoped ones additionally require a requestId and slotId,
+ * and the exhausted-result ones require a complete attempt-2 authority instead.
+ * Only five were ever constructed in a test, so moving a category between those
+ * groups — silently widening or narrowing what a blocked diagnostic must prove —
+ * changed no assertion.
+ */
+describe("terminal blocked diagnostics cover every declared category", () => {
+  const RUN_SCOPED = ["invalid-authority", "roster-invalid"] as const;
+  const REQUEST_SCOPED = [
+    "duplicate-result", "stale-request", "surplus-result",
+    "context-drift", "model-mismatch", "skill-mismatch",
+  ] as const;
+  const EXHAUSTED = ["missing-result", "malformed-result", "result-binding-mismatch"] as const;
+
+  it.each(RUN_SCOPED)("constructs the run-scoped category %s from a runId alone", (category) => {
+    const run = runId();
+    const diagnostic = valueOf(terminalBlockedDiagnostic({ category, runId: run, message: `${category} occurred` }));
+    expect(diagnostic).toMatchObject({
+      kind: "terminal-blocked",
+      category,
+      runId: run,
+      retry: { kind: "not-retryable", eligible: false },
+      recovery: { kind: "inspect-run-and-stop" },
+    });
+    expect(diagnostic).not.toHaveProperty("requestId");
+    expect(diagnostic).not.toHaveProperty("slotId");
+  });
+
+  it.each(RUN_SCOPED)("refuses request fields on the run-scoped category %s", (category) => {
+    expect(terminalBlockedDiagnostic({
+      category, runId: runId(), requestId: requestId("r"), slotId: slotId("s"), message: "extra fields",
+    } as never).ok).toBe(false);
+  });
+
+  it.each(REQUEST_SCOPED)("constructs the request-scoped category %s with its request identity", (category) => {
+    const run = runId();
+    const diagnostic = valueOf(terminalBlockedDiagnostic({
+      category, runId: run, requestId: requestId(category), slotId: slotId(category), message: `${category} occurred`,
+    }));
+    expect(diagnostic).toMatchObject({
+      kind: "terminal-blocked",
+      category,
+      runId: run,
+      requestId: requestId(category),
+      slotId: slotId(category),
+      retry: { kind: "not-retryable", eligible: false },
+    });
+  });
+
+  it.each(REQUEST_SCOPED)("refuses the request-scoped category %s when its request identity is missing", (category) => {
+    expect(terminalBlockedDiagnostic({ category, runId: runId(), message: "no request identity" } as never).ok).toBe(false);
+  });
+
+  it.each(EXHAUSTED)("constructs the exhausted-result category %s from a complete attempt-2 authority", (category) => {
+    const failedRequest = authority(1, 2);
+    const diagnostic = valueOf(terminalBlockedDiagnostic({
+      category, failedRequest, message: `${category} occurred`,
+    } as never));
+    expect(diagnostic).toMatchObject({
+      kind: "terminal-blocked",
+      category,
+      runId: failedRequest.runId,
+      requestId: failedRequest.requestId,
+      slotId: failedRequest.slotId,
+      attempt: 2,
+    });
+  });
+
+  it.each(EXHAUSTED)("refuses the exhausted-result category %s on a first-attempt authority", (category) => {
+    expect(terminalBlockedDiagnostic({ category, failedRequest: authority(1, 1), message: "attempt one" } as never).ok)
+      .toBe(false);
+  });
+
+  it("refuses a category outside the declared set", () => {
+    expect(terminalBlockedDiagnostic({ category: "not-a-category", runId: runId(), message: "nope" } as never).ok)
+      .toBe(false);
+  });
+
+  it("covers all eleven declared categories between the three groups", () => {
+    expect(new Set([...RUN_SCOPED, ...REQUEST_SCOPED, ...EXHAUSTED]).size).toBe(11);
+  });
+});

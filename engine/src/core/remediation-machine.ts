@@ -2255,6 +2255,12 @@ function enforceRecoveryHistoryLifecycle(
       ? ok(recoveryHistory)
       : fail(`${label} recoverable-blocked history requires an outstanding recovery attempt`);
   }
+  // A resolved lifecycle needs SOME receipt, not one per attempt. Repeated
+  // failures while already blocked append an attempt id and replace
+  // `state.failure`, and `recovery-receipt-accepted` only ever matches the
+  // latest attempt — so one receipt discharges the block however many attempts
+  // preceded it, and `0 < receiptCount < attemptCount` is a state the reducer
+  // itself produces. Only a resolved history with NO receipt at all is forged.
   if (attemptCount > 0 && receiptCount === 0) {
     return fail(`${label} ${lifecycle} history cannot contain recovery attempts before any recovery receipt was accepted`);
   }
