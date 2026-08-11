@@ -25,7 +25,7 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
     "suggest-spec-anchors", "extract-task-id", "store-test-evidence",
     "reconcile-implementation-proof", "set-phase", "cleanup-state", "lint-wave-gate", "validate-lint-rules",
     "panel-contract", "review-panel", "model-profiles", "review-packet",
-    "model-calibration", "panel-program", "standalone-review",
+    "model-calibration", "panel-program", "standalone-review", "orchestration",
   ]),
 };
 

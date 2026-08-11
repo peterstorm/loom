@@ -63,7 +63,7 @@ parent orchestrator's current model.
 - `/loom --skip-specify` - Skip brainstorm/specify/clarify (use existing spec)
 - `/loom --skip-plan-alignment` - Skip plan-alignment phase (proceed directly to decompose)
 - `/loom --panel` - Architecture panel mode: N designer agents generate candidates in parallel (each with a lens), adversarial judges rank them against interview-derived criteria, and the finalizer presents the ranked approaches. `--panel=N` requires a decimal integer of at least `PANEL_DESIGNERS_MIN` (currently 2); malformed, fractional, duplicate, or smaller values are rejected. Values above the number of distinct lenses (5) are rejected. Bare `--panel` uses `PANEL_DESIGNERS_DEFAULT` (currently 3). Opt-in; only Phase 3 changes. See [panel-lenses.md](../references/panel-lenses.md) and [Phase 3 (panel mode)](#phase-3-panel-mode-loom---panel).
-- `/loom --status` - Show current task graph status *(planned — use jq commands in Observability section)*
+- `/loom --status` - Show current status. Runs `bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration status` (add `--json` for the machine form). Both forms project ONE `LoomStatus` value, so they cannot disagree, and neither re-runs a gate check. When authority is unreadable every fact category is still reported as `unavailable` with its reasons and the next action is `blocked` — never a fabricated zero-or-ready value. Prefer this over the ad-hoc `jq` recipes in [Observability](#observability), which read raw fields and can contradict the engine.
 - `/loom --complete` - Finalize, clean up state *(planned — manually remove state file for now)*
 - `/loom --abort` - Cancel mid-execution, clean state *(planned — manually remove state file for now)*
 
@@ -623,16 +623,35 @@ After Phase 4 (Decompose), the task graph is populated with tasks, waves, and Gi
 4. Execute waves with full enforcement
 
 ### On `/loom --status`:
-```
-Plan: Issue #42 - User Authentication
-Phase: Execute (Wave 2/3)
-Spec: .claude/specs/2025-01-29-user-auth/spec.md
-Plan: .claude/plans/2025-01-29-user-auth.md
 
-[✓] T1: User model (code-implementer) — tests: PASS
-[✓] T2: JWT service (code-implementer) — tests: PASS
-[→] T3: Login endpoint (code-implementer) — tests: pending
+Run the façade and relay what it prints — do not hand-assemble a summary from
+`jq`, and do not re-derive readiness:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration status
 ```
+
+Every fact category appears, present or `unavailable`, followed by exactly one
+typed next action and its complete reason list:
+
+```
+Loom Status v1
+- location: {"activePhase":"execute","activeWave":2}
+- tasks: {"counts":{"pending":1,"running":0,"implemented":2,"blocked":0,"completed":0}}
+- failedProofObligations: []
+- testReadiness: {"kind":"ready"}
+- reviewRuns: {"rosterGaps":[],"evidenceFailures":[]}
+- findingCounts: {"active":0,"advisory":3,"resolved":0,"refuted":0}
+- refutationPanelNeed: {"kind":"no-need"}
+- waveGateCompletionEligibility: {"kind":"ineligible","failed":["T3 has no test evidence"]}
+- nextAction: spawn-batch
+- reasons:
+  - [wave-incomplete] T3 has not reached implemented
+```
+
+An `unavailable` category is a real answer, not a rendering gap: it means the
+authority behind that fact could not be parsed, and the action will be
+`blocked` with the reason attached.
 
 ### On `/loom --complete`:
 1. Verify all tasks completed
@@ -676,7 +695,7 @@ Hooks auto-activate when `active_task_graph.json` exists:
 **Do not call hook-owned state-writing helpers yourself.** The helpers that hooks/`/wave-gate` drive — `complete-wave-gate`, `StateManager`, `store-review-findings`/`store-spec-check` (except as a sanctioned override, below) — run automatically; calling them by hand races the hook that owns that write. A small set of DIRECT helper invocations IS sanctioned, used only where this document says to; they fall into two distinct classes:
 
 - **Whitelisted in the guard** (`engine/src/config.ts` `WHITELISTED_HELPERS`, so the guard permits them even on a guarded path): `populate-task-graph` (Phase 4d), `set-phase` loop-back, `mark-tests-passed` (read-only evidence status check, run during `/wave-gate` Step 2 — it reads the ledger and does NOT modify state), `repair-task-graph` (recovery only; it reads rejected JSON directly, applies `fixFull`, validates, and atomically replaces the graph without calling `StateManager.load()`), `review-packet create` (starts the packet-bound Review Run atomically while writing its immutable packet outside guarded state), and the `store-review-findings` / `store-spec-check` false-positive overrides.
-- **Merely out of the guard's scope when invoked as documented** (NOT in `WHITELISTED_HELPERS`): `validate-task-graph` / `validate-lint-rules`; the two panel contract helpers `panel-contract` (this document, Phase 3 panel mode) and `review-panel` (`commands/wave-gate.md` Step 3.5); and `standalone-review` (`skills/review-and-fix/SKILL.md`) — they pass only because their documented invocations name no guarded path, writing instead into a run directory under the runs-root each one is given — `.claude/specs/{date_slug}/panel-runs/` for the architecture panel, `.claude/reviews/panel-runs/` for the wave refutation panel, and `.claude/reviews/review-and-fix-runs/` for standalone review. Invoked against a guarded path they would be blocked like anything else.
+- **Merely out of the guard's scope when invoked as documented** (NOT in `WHITELISTED_HELPERS`): `validate-task-graph` / `validate-lint-rules`; `lint-wave-gate` (`commands/wave-gate.md` Step 4c — it READS the graph to collect targets and writes nothing); `orchestration status` (a pure read that derives the canonical status value and renders it); the two panel contract helpers `panel-contract` (this document, Phase 3 panel mode) and `review-panel` (`commands/wave-gate.md` Step 3.5); and `standalone-review` (`skills/review-and-fix/SKILL.md`) — they pass only because their documented invocations name no guarded path, writing instead into a run directory under the runs-root each one is given — `.claude/specs/{date_slug}/panel-runs/` for the architecture panel, `.claude/reviews/panel-runs/` for the wave refutation panel, and `.claude/reviews/review-and-fix-runs/` for standalone review. Invoked against a guarded path they would be blocked like anything else.
 
   **One exception inside that class:** `review-panel tally` DOES write the task graph through `StateManager` — it moves refuted findings into `refuted_findings` and can demote `review_status` from `blocked` to `passed`. It is out of the guard's scope only because its arguments name the run directory rather than the state file. It is nonetheless the wave gate's own adjudication step, run exactly once per run directory at the point `wave-gate.md` says to, and it refuses a second tally on a run it has already adjudicated. Do not invoke it to "re-check" a wave.
 
@@ -703,6 +722,26 @@ implemented → completed  (wave gate passed: tests + review + no critical findi
 ```
 
 ### Observability
+
+**Prefer the engine's own status.** It derives one canonical value and renders
+it two ways, so the human and machine forms cannot drift from each other or
+from the program that actually decides readiness:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration status          # human
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration status --json   # machine
+```
+
+It reports active Phase and Wave, an exhaustive five-way Task partition,
+failed proof obligations, test readiness, Review Run roster gaps and evidence
+failures, the four Finding counts, Refutation Panel need, Wave Gate completion
+eligibility, exactly one typed next action, and every contributing reason.
+
+The `jq` recipes below read raw fields directly. They remain useful for
+inspecting a specific stored value, but they do NOT reproduce the engine's
+readiness logic — a task that looks `implemented` here may still be ineligible
+for advancement, and a missing field reads as absent rather than as the
+authority failure it is. Never derive a gate decision from them:
 
 ```bash
 # Current state
