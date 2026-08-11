@@ -243,3 +243,35 @@ export function messagesToClaudeJsonl(input: unknown): PiTranscriptResult<string
 
   return { ok: true, value: lines.length === 0 ? "" : `${lines.join("\n")}\n` };
 }
+
+/**
+ * Collect every candidate final text payload from a Pi subagent result.
+ *
+ * Deliberately COLLECTS rather than selects. A Pi result is a list of content
+ * blocks, and more than one text block means the engine genuinely cannot tell
+ * which is the Agent's final answer. Returning them all lets
+ * `parseFinalPayload` refuse the ambiguity; picking the last one here would
+ * bury that decision in an adapter and hash whichever block happened to come
+ * last as if it were the result.
+ *
+ * Text is passed through verbatim — no trim, no join, no normalisation — so
+ * the bytes hashed on the Pi side are byte-identical to Claude's for the same
+ * Agent output.
+ */
+export function piFinalPayloadCandidates(
+  content: unknown,
+): PiTranscriptResult<readonly Readonly<{ origin: string; text: string }>[]> {
+  if (!Array.isArray(content)) {
+    return { ok: false, errors: ["pi result content must be an array of blocks"] };
+  }
+  const candidates: Readonly<{ origin: string; text: string }>[] = [];
+  for (const [index, block] of content.entries()) {
+    if (!isRecord(block) || block["type"] !== "text") continue;
+    const text = block["text"];
+    if (typeof text !== "string") {
+      return { ok: false, errors: [`pi text block at index ${index} carries no string text`] };
+    }
+    candidates.push({ origin: `content[${index}].text`, text });
+  }
+  return { ok: true, value: Object.freeze(candidates) };
+}

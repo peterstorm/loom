@@ -11,6 +11,7 @@ import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { parseSessionId, readEvidence } from "../../machine";
 
+import captureOrchestrationResult from "./capture-orchestration-result";
 import cleanupSubagentFlag from "./cleanup-subagent-flag";
 import advancePhase from "./advance-phase";
 import { runUpdateTaskStatus, type EvidenceSnapshot } from "./update-task-status";
@@ -75,6 +76,14 @@ const handler: HookHandler = async (stdin, args) => {
       evidenceSnapshot = { kind: "snapshot-failed" };
     }
   }
+
+  // Request-bound capture runs BEFORE any legacy routing, and before the task
+  // graph is resolved at all. Both orderings are load-bearing: the graph lookup
+  // below returns early when there is none, which would skip capture for every
+  // standalone run; and the legacy handlers mutate task state, so capturing
+  // afterwards would record evidence for a decision already taken. It resolves
+  // only the run directory it is pointed at, never a State File.
+  await safeRun("captureOrchestrationResult", () => captureOrchestrationResult(stdin, args));
 
   // Cleanup always runs — but must never abort the rest of the pipeline
   // (a lock-acquisition failure here would otherwise leave the task stuck

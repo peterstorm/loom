@@ -14,7 +14,7 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
   "subagent-stop": new Set([
     "dispatch", "advance-phase", "update-task-status",
     "store-reviewer-findings", "store-spec-check-findings",
-    "cleanup-subagent-flag",
+    "cleanup-subagent-flag", "capture-orchestration-result",
   ]),
   "post-tool-use": new Set(["lint-file", "record-evidence"]),
   "subagent-start": new Set(["mark-subagent-active"]),
