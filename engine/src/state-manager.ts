@@ -719,6 +719,85 @@ export function taskGraphLifecycleErrors(obj: Record<string, unknown>): readonly
  * through untouched (legacyTestsPassedNote still fires downstream);
  * missing tasks/wave_gates default for early phases (populated in Phase 4).
  */
+type ParsedWaveGateRegistrations = Readonly<{
+  activeWaveGate: ActiveWaveGateRegistration | undefined;
+  waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined;
+}>;
+
+/**
+ * Parse the active and terminal Wave Gate registrations together.
+ *
+ * They are validated as a PAIR because the interesting rules are relational: a
+ * run cannot be simultaneously active and terminal, terminal Waves cannot
+ * overlap or precede the active one, and a nonterminal active registration
+ * must agree with the protected phase and wave. Splitting them apart would let
+ * each half look individually valid while contradicting the other.
+ */
+function parseWaveGateRegistrations(
+  obj: Record<string, unknown>,
+): ParseResult<ParsedWaveGateRegistrations> {
+  let activeWaveGate: ActiveWaveGateRegistration | undefined;
+  if (obj.active_wave_gate !== undefined) {
+    const parsedRegistration = parseActiveWaveGateRegistration(obj.active_wave_gate);
+    if (!parsedRegistration.ok) return parseErr(parsedRegistration.error);
+    activeWaveGate = parsedRegistration.value;
+  }
+
+  let waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined;
+  if (obj.wave_gate_history !== undefined) {
+    const parsedHistory = parseWaveGateHistory(obj.wave_gate_history, activeWaveGate);
+    if (!parsedHistory.ok) return parseErr(parsedHistory.error);
+    waveGateHistory = parsedHistory.value;
+  }
+
+  if (activeWaveGate?.terminalOutcome === null) {
+    const conflict = nonterminalActiveGateConflict(obj, activeWaveGate, waveGateHistory);
+    if (conflict !== null) return parseErr(conflict);
+  }
+  return parseOk({ activeWaveGate, waveGateHistory });
+}
+
+function parseWaveGateHistory(
+  raw: unknown,
+  activeWaveGate: ActiveWaveGateRegistration | undefined,
+): ParseResult<readonly CompletedWaveGateRegistration[]> {
+  if (!Array.isArray(raw)) return parseErr("wave_gate_history must be an array when present");
+  const parsedHistory: CompletedWaveGateRegistration[] = [];
+  for (let index = 0; index < raw.length; index++) {
+    const parsed = parseCompletedWaveGateRegistration(raw[index]);
+    if (!parsed.ok) return parseErr(`wave_gate_history[${index}]: ${parsed.error}`);
+    parsedHistory.push(parsed.value);
+  }
+  const runIds = parsedHistory.map(({ runId }) => runId);
+  if (new Set(runIds).size !== runIds.length) return parseErr("wave_gate_history contains duplicate run identities");
+  const waves = parsedHistory.map(({ wave }) => wave);
+  if (new Set(waves).size !== waves.length) return parseErr("wave_gate_history contains duplicate completed Waves");
+  if (activeWaveGate !== undefined && runIds.includes(activeWaveGate.runId)) {
+    return parseErr(`active_wave_gate run ${activeWaveGate.runId} is already terminal in wave_gate_history`);
+  }
+  return parseOk(Object.freeze(parsedHistory));
+}
+
+/** An in-flight gate must agree with the protected phase, wave, and history. */
+function nonterminalActiveGateConflict(
+  obj: Record<string, unknown>,
+  activeWaveGate: ActiveWaveGateRegistration,
+  waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined,
+): string | null {
+  if (obj.current_phase !== "execute") {
+    return `nonterminal active_wave_gate run ${activeWaveGate.runId} requires current_phase execute, got ${String(obj.current_phase)}`;
+  }
+  if (obj.current_wave !== activeWaveGate.wave) {
+    return `nonterminal active_wave_gate wave ${activeWaveGate.wave} must match protected current_wave ${obj.current_wave ?? "missing"}`;
+  }
+  const terminalOverlap = waveGateHistory?.find((entry) => entry.wave >= activeWaveGate.wave);
+  if (terminalOverlap !== undefined) {
+    return `nonterminal active_wave_gate wave ${activeWaveGate.wave} overlaps terminal wave_gate_history ` +
+      `Wave ${terminalOverlap.wave} run ${terminalOverlap.runId}; active authority must be newer than terminal history`;
+  }
+  return null;
+}
+
 export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return parseErr("not an object");
@@ -775,49 +854,11 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
   }
   const specErr = specCheckError(obj.spec_check);
   if (specErr !== null) return parseErr(specErr);
-  let activeWaveGate: ActiveWaveGateRegistration | undefined;
-  if (obj.active_wave_gate !== undefined) {
-    const parsedRegistration = parseActiveWaveGateRegistration(obj.active_wave_gate);
-    if (!parsedRegistration.ok) return parseErr(parsedRegistration.error);
-    activeWaveGate = parsedRegistration.value;
-  }
-  let waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined;
-  if (obj.wave_gate_history !== undefined) {
-    if (!Array.isArray(obj.wave_gate_history)) return parseErr("wave_gate_history must be an array when present");
-    const parsedHistory: CompletedWaveGateRegistration[] = [];
-    for (let index = 0; index < obj.wave_gate_history.length; index++) {
-      const parsed = parseCompletedWaveGateRegistration(obj.wave_gate_history[index]);
-      if (!parsed.ok) return parseErr(`wave_gate_history[${index}]: ${parsed.error}`);
-      parsedHistory.push(parsed.value);
-    }
-    const runIds = parsedHistory.map(({ runId }) => runId);
-    if (new Set(runIds).size !== runIds.length) return parseErr("wave_gate_history contains duplicate run identities");
-    const waves = parsedHistory.map(({ wave }) => wave);
-    if (new Set(waves).size !== waves.length) return parseErr("wave_gate_history contains duplicate completed Waves");
-    if (activeWaveGate !== undefined && runIds.includes(activeWaveGate.runId)) {
-      return parseErr(`active_wave_gate run ${activeWaveGate.runId} is already terminal in wave_gate_history`);
-    }
-    waveGateHistory = Object.freeze(parsedHistory);
-  }
-  if (activeWaveGate?.terminalOutcome === null) {
-    if (obj.current_phase !== "execute") {
-      return parseErr(
-        `nonterminal active_wave_gate run ${activeWaveGate.runId} requires current_phase execute, got ${String(obj.current_phase)}`,
-      );
-    }
-    if (obj.current_wave !== activeWaveGate.wave) {
-      return parseErr(
-        `nonterminal active_wave_gate wave ${activeWaveGate.wave} must match protected current_wave ${obj.current_wave ?? "missing"}`,
-      );
-    }
-    const terminalOverlap = waveGateHistory?.find((entry) => entry.wave >= activeWaveGate.wave);
-    if (terminalOverlap !== undefined) {
-      return parseErr(
-        `nonterminal active_wave_gate wave ${activeWaveGate.wave} overlaps terminal wave_gate_history ` +
-        `Wave ${terminalOverlap.wave} run ${terminalOverlap.runId}; active authority must be newer than terminal history`,
-      );
-    }
-  }
+
+  const registrations = parseWaveGateRegistrations(obj);
+  if (!registrations.ok) return parseErr(registrations.error);
+  const { activeWaveGate, waveGateHistory } = registrations.value;
+
   // The single blessed cast: every union field above is proven in place.
   return parseOk({
     ...obj,

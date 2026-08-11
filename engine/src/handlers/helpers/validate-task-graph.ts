@@ -345,47 +345,23 @@ interface FindingsRepair {
  * The views are then re-derived from the result, which is the lockstep
  * `findingsLockstepError` proves at load.
  */
-function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
-  // A singleton object is malformed as a container, not necessarily as a
-  // refutation. Normalize it to one input entry so repair can conserve its
-  // audit record (or reactivate its nested finding) instead of treating it as
-  // no evidence.
-  const rawRefutations = Array.isArray(t.refuted_findings)
-    ? t.refuted_findings
-    : t.refuted_findings === undefined ? [] : [t.refuted_findings];
-  const refuted = parseStoredRefutations(rawRefutations);
-  const rawRefutedCount = rawRefutations.length;
-  const rawResolutions = Array.isArray(t.resolved_findings)
-    ? t.resolved_findings
-    : t.resolved_findings === undefined ? [] : [t.resolved_findings];
-  const resolved = parseStoredResolutions(rawResolutions);
-  const rawResolvedCount = rawResolutions.length;
-  // Apply the same conservation rule to a singleton findings container.
-  const rawFindings = Array.isArray(t.findings)
-    ? t.findings
-    : t.findings === undefined ? [] : [t.findings];
-  const stored = parseStoredFindings(rawFindings);
-  const represented = [
-    ...stored,
-    ...refuted.map((record) => record.finding),
-    ...resolved.map((record) => record.finding),
-  ];
-  const sameFinding = (left: { readonly id: string; readonly severity: string; readonly claim: string },
-    right: { readonly id: string; readonly severity: string; readonly claim: string }): boolean =>
-    left.id === right.id && left.severity === right.severity && left.claim === right.claim;
-  const recoveredRefutationFindings = salvageFindingsFromMalformedRefutations(rawRefutations)
-    .filter((candidate) => !represented.some((existing) => sameFinding(existing, candidate)));
-  const recoveredResolutionFindings = salvageFindingsFromMalformedResolutions(rawResolutions)
-    .filter((candidate) => ![...represented, ...recoveredRefutationFindings]
-      .some((existing) => sameFinding(existing, candidate)));
-  const rawFindingCount = rawFindings.length;
-  // Order- and length-preserving, so an id that differs at the same index is
-  // exactly one this repair re-minted. Recovered nested findings participate in
-  // the same collision proof before returning to the active set.
-  const beforeDedup = [...stored, ...recoveredRefutationFindings, ...recoveredResolutionFindings];
-  const parsed = deduplicateFindingIds(beforeDedup, refuted, resolved);
-  const reminted = parsed.filter((finding, index) => finding.id !== beforeDedup[index]?.id).length;
-
+/**
+ * Recover findings that survive only as malformed entries or as claims left in
+ * a derived view.
+ *
+ * Both recoveries exist for the same reason: a finding that reaches only the
+ * `critical_findings`/`advisory_findings` string views, or that is structurally
+ * broken in `findings`, would otherwise be dropped by repair — and dropping one
+ * silently loses a blocker. What cannot be recovered is reported rather than
+ * discarded.
+ */
+function salvageAndRecoverFindings(
+  t: Record<string, unknown>,
+  rawFindings: readonly unknown[],
+  parsed: ReturnType<typeof deduplicateFindingIds>,
+  refuted: ReturnType<typeof parseStoredRefutations>,
+  resolved: ReturnType<typeof parseStoredResolutions>,
+) {
   const salvagedDrafts = salvageMalformedFindings(rawFindings);
   const salvagedFindings = salvagedDrafts.length === 0
     ? []
@@ -405,12 +381,77 @@ function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
     viewClaims(t.advisory_findings),
     resolved,
   );
-  const findings = [...identified, ...recoveredFindings];
-  const unrecoverable = unrecoverableViewClaims(
-    identified,
-    viewClaims(t.critical_findings),
-    viewClaims(t.advisory_findings),
-  );
+  return {
+    salvagedFindings,
+    recoveredFindings,
+    findings: [...identified, ...recoveredFindings],
+    unrecoverable: unrecoverableViewClaims(
+      identified,
+      viewClaims(t.critical_findings),
+      viewClaims(t.advisory_findings),
+    ),
+  };
+}
+
+/**
+ * Normalize the three stored containers and recover findings nested inside
+ * malformed refutation/resolution records.
+ *
+ * A singleton object is malformed as a CONTAINER but not necessarily as a
+ * record, so it is normalized to one entry rather than read as no evidence —
+ * discarding it would lose the audit record and any finding nested in it.
+ */
+function readFindingContainers(t: Record<string, unknown>) {
+  const asEntries = (raw: unknown): readonly unknown[] =>
+    Array.isArray(raw) ? raw : raw === undefined ? [] : [raw];
+
+  const rawRefutations = asEntries(t.refuted_findings);
+  const rawResolutions = asEntries(t.resolved_findings);
+  const rawFindings = asEntries(t.findings);
+  const refuted = parseStoredRefutations(rawRefutations);
+  const resolved = parseStoredResolutions(rawResolutions);
+  const stored = parseStoredFindings(rawFindings);
+
+  const represented = [
+    ...stored,
+    ...refuted.map((record) => record.finding),
+    ...resolved.map((record) => record.finding),
+  ];
+  type FindingIdentity = { readonly id: string; readonly severity: string; readonly claim: string };
+  const sameFinding = (left: FindingIdentity, right: FindingIdentity): boolean =>
+    left.id === right.id && left.severity === right.severity && left.claim === right.claim;
+
+  const recoveredRefutationFindings = salvageFindingsFromMalformedRefutations(rawRefutations)
+    .filter((candidate) => !represented.some((existing) => sameFinding(existing, candidate)));
+  const recoveredResolutionFindings = salvageFindingsFromMalformedResolutions(rawResolutions)
+    .filter((candidate) => ![...represented, ...recoveredRefutationFindings]
+      .some((existing) => sameFinding(existing, candidate)));
+
+  return {
+    rawFindings,
+    refuted,
+    resolved,
+    stored,
+    recoveredRefutationFindings,
+    recoveredResolutionFindings,
+    rawRefutedCount: rawRefutations.length,
+    rawResolvedCount: rawResolutions.length,
+    rawFindingCount: rawFindings.length,
+  };
+}
+
+function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
+  const { rawFindings, refuted, resolved, stored, recoveredRefutationFindings,
+    recoveredResolutionFindings, rawRefutedCount, rawResolvedCount, rawFindingCount } = readFindingContainers(t);
+  // Order- and length-preserving, so an id that differs at the same index is
+  // exactly one this repair re-minted. Recovered nested findings participate in
+  // the same collision proof before returning to the active set.
+  const beforeDedup = [...stored, ...recoveredRefutationFindings, ...recoveredResolutionFindings];
+  const parsed = deduplicateFindingIds(beforeDedup, refuted, resolved);
+  const reminted = parsed.filter((finding, index) => finding.id !== beforeDedup[index]?.id).length;
+
+  const salvage = salvageAndRecoverFindings(t, rawFindings, parsed, refuted, resolved);
+  const { salvagedFindings, recoveredFindings, findings, unrecoverable } = salvage;
 
   const review = repairReviewRecord(t);
   const runInvalidated = t.review_run !== undefined && (
