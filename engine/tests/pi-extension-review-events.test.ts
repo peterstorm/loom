@@ -1,10 +1,12 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { evaluateTaskProof } from "../src/core/proof-obligations";
+import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
+import { openRunDirectory, type RunDirHandle } from "../src/orchestration/run-directory-handle";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 
@@ -32,6 +34,8 @@ const piAgentDir = join(temp, "pi-agent");
 const previousStatePath = process.env.LOOM_STATE_PATH;
 const previousPiDir = process.env.PI_CODING_AGENT_DIR;
 const previousSubagentDir = process.env.LOOM_SUBAGENT_DIR;
+const previousOrchestrationRunsRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+const previousOrchestrationRunDir = process.env.LOOM_ORCHESTRATION_RUN_DIR;
 process.env.LOOM_STATE_PATH = statePath;
 process.env.PI_CODING_AGENT_DIR = piAgentDir;
 process.env.LOOM_SUBAGENT_DIR = subagentDir;
@@ -68,7 +72,11 @@ function writeState(state: unknown): void {
 
 mkdirSync(dirname(statePath), { recursive: true });
 writeState(initialGraph());
-beforeEach(() => writeState(initialGraph()));
+beforeEach(() => {
+  writeState(initialGraph());
+  delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+  delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+});
 
 afterAll(() => {
   if (previousStatePath === undefined) delete process.env.LOOM_STATE_PATH;
@@ -77,6 +85,10 @@ afterAll(() => {
   else process.env.PI_CODING_AGENT_DIR = previousPiDir;
   if (previousSubagentDir === undefined) delete process.env.LOOM_SUBAGENT_DIR;
   else process.env.LOOM_SUBAGENT_DIR = previousSubagentDir;
+  if (previousOrchestrationRunsRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+  else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousOrchestrationRunsRoot;
+  if (previousOrchestrationRunDir === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+  else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousOrchestrationRunDir;
   rmSync(temp, { recursive: true, force: true });
 });
 
@@ -125,6 +137,38 @@ const reviewResult = (
   },
 });
 
+async function piCaptureRun(runSuffix: string): Promise<Readonly<{
+  runsRoot: string;
+  runDir: string;
+  request: AgentRequestAuthority;
+  handle: RunDirHandle;
+}>> {
+  const runsRoot = join(temp, `orchestration-runs-${runSuffix}`);
+  const runDir = join(runsRoot, `run.${runSuffix}`);
+  mkdirSync(runDir, { recursive: true });
+  const opened = openRunDirectory(runsRoot, runDir);
+  if (!opened.ok) throw new Error(opened.error.message);
+  const request = {
+    runId: `run.${runSuffix}`,
+    requestId: "request:reviewer:1",
+    slotId: "slot-1",
+    program: "wave-gate",
+    role: "code-reviewer",
+    attempt: 1,
+    modelProfile: "general-review",
+    harnessBinding: {
+      pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+      claude: { harness: "claude-code", model: "sonnet" },
+    },
+    requiredSkill: null,
+    contextDigest: "a".repeat(64),
+    outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
+  } as AgentRequestAuthority;
+  const reserved = await opened.value.reserveRequest(request);
+  if (!reserved.ok) throw new Error(reserved.error.message);
+  return { runsRoot, runDir, request, handle: opened.value };
+}
+
 describe("Pi extension review tool_result integration", () => {
   const extension = async () => {
     const extensionSpecifier = "../../pi/extension.ts";
@@ -135,6 +179,72 @@ describe("Pi extension review tool_result integration", () => {
     module.default(pi as never);
     return pi;
   };
+
+  it("captures Pi tool_result bytes through request-bound run authority", async () => {
+    const pi = await extension();
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
+    };
+    const staged = await piCaptureRun("pi-tool-result");
+    const toolCallId = "call-request-bound-capture";
+    const nativeId = module.piSpawnRosterId(toolCallId, 0, "code-reviewer");
+    const correlated = await staged.handle.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "pi",
+      nativeId,
+      requestId: staged.request.requestId,
+      attempt: staged.request.attempt,
+    });
+    expect(correlated.ok).toBe(true);
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = staged.runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = staged.runDir;
+    const result = reviewResult("Task: T1", "request-bound finding");
+    const expected = (result.details.results[0].messages[0].content[0] as { text: string }).text;
+
+    await pi.emit("tool_result", { ...result, toolCallId }, {
+      sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad499" },
+    });
+
+    expect(readFileSync(join(staged.runDir, "transcripts", "slot-1", "attempt-1.raw"), "utf-8")).toBe(expected);
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings).toEqual(["request-bound finding"]);
+  });
+
+  it("does not apply Pi review evidence after request-bound capture rejection", async () => {
+    const pi = await extension();
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
+    };
+    const staged = await piCaptureRun("pi-rejected-capture");
+    const toolCallId = "call-rejected-capture";
+    const nativeId = module.piSpawnRosterId(toolCallId, 0, "code-reviewer");
+    const correlated = await staged.handle.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "pi",
+      nativeId,
+      requestId: staged.request.requestId,
+      attempt: staged.request.attempt,
+    });
+    expect(correlated.ok).toBe(true);
+    const correlatorDir = join(staged.runDir, "requests", "correlators");
+    writeFileSync(join(correlatorDir, readdirSync(correlatorDir)[0]!), "{broken", "utf-8");
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = staged.runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = staged.runDir;
+
+    const responses = await pi.emit("tool_result", {
+      ...reviewResult("Task: T1", "must not be applied"),
+      toolCallId,
+    }, {
+      sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad498" },
+    });
+
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings ?? []).toEqual([]);
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("request-bound capture rejected") })],
+    }));
+  });
 
   it("runs later capability cleanup after an earlier cleanup action fails", async () => {
     const extensionSpecifier = "../../pi/extension.ts";

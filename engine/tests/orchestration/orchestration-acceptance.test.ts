@@ -1,16 +1,17 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   bindCapture,
+  captureKey,
   capturesAgree,
   parseFinalPayload,
   type FinalPayloadCandidate,
   type HarnessResultIdentity,
 } from "../../src/core/harness-capture";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
-import {
+import captureOrchestrationResult, {
   alreadyCapturedSlots,
   captureClaudeResult,
   claudeFinalPayloadCandidates,
@@ -18,7 +19,7 @@ import {
 } from "../../src/handlers/subagent-stop/capture-orchestration-result";
 import { piFinalPayloadCandidates, piResultFinalPayloadCandidates } from "../../../pi/transcript-adapter";
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
-import { captureHarnessResult } from "../../src/orchestration/harness-capture-runtime";
+import { captureAuditLine, captureHarnessResult } from "../../src/orchestration/harness-capture-runtime";
 import {
   characterCount,
   reduction,
@@ -221,22 +222,34 @@ describe("Pi and Claude reach the same result", () => {
       if (!opened.ok) throw new Error(opened.error.message);
       // Reserve through the handle, exactly as the spawn side does: the
       // reservation is what creates the attempt slot the capture writes into.
-      const request = authority();
+      const request = authority({ runId: "run.capture-parity" as AgentRequestAuthority["runId"] });
       const reserved = await opened.value.reserveRequest(request);
       if (!reserved.ok) throw new Error(reserved.error.message);
       return { runsRoot, directory, request };
     }
 
-    function correlate(directory: string, nativeId: string, request: AgentRequestAuthority): void {
-      writeFileSync(
-        join(directory, "requests", "correlators.json"),
-        JSON.stringify({ [nativeId]: { requestId: request.requestId, attempt: request.attempt } }),
-      );
+    async function correlate(
+      runsRoot: string,
+      directory: string,
+      harness: "pi" | "claude",
+      nativeId: string,
+      request: AgentRequestAuthority,
+    ): Promise<void> {
+      const opened = openRunDirectory(runsRoot, directory);
+      if (!opened.ok) throw new Error(opened.error.message);
+      const recorded = await opened.value.recordHarnessCorrelator({
+        schemaVersion: 1,
+        harness,
+        nativeId,
+        requestId: request.requestId,
+        attempt: request.attempt,
+      });
+      if (!recorded.ok) throw new Error(recorded.error.message);
     }
 
     it("captures a Pi result into its reserved slot", async () => {
       const { runsRoot, directory, request } = await stagedRun();
-      correlate(directory, "pi-native-1", request);
+      await correlate(runsRoot, directory, "pi", "pi-native-1", request);
 
       const outcome = await captureHarnessResult({
         harness: "pi",
@@ -256,9 +269,9 @@ describe("Pi and Claude reach the same result", () => {
 
     it("writes byte-identical transcripts from either harness", async () => {
       const pi = await stagedRun();
-      correlate(pi.directory, "pi-native-1", pi.request);
+      await correlate(pi.runsRoot, pi.directory, "pi", "pi-native-1", pi.request);
       const claude = await stagedRun();
-      correlate(claude.directory, "claude-native-1", claude.request);
+      await correlate(claude.runsRoot, claude.directory, "claude", "claude-native-1", claude.request);
 
       const piOutcome = await captureHarnessResult({
         harness: "pi",
@@ -283,7 +296,7 @@ describe("Pi and Claude reach the same result", () => {
 
     it("applies the same refusals to a Pi result as to a Claude one", async () => {
       const { runsRoot, directory, request } = await stagedRun();
-      correlate(directory, "pi-native-1", request);
+      await correlate(runsRoot, directory, "pi", "pi-native-1", request);
 
       // Unknown correlator: someone else's agent, ignored rather than failed.
       expect((await captureHarnessResult({
@@ -336,6 +349,54 @@ describe("Pi and Claude reach the same result", () => {
         nativeId: "pi-native-1",
         candidates: piCandidates(AGENT_OUTPUT),
       })).kind).toBe("not-an-orchestration-run");
+    });
+
+    it("rejects and audits malformed correlator authority", async () => {
+      const { runsRoot, directory, request } = await stagedRun();
+      await correlate(runsRoot, directory, "pi", "pi-native-1", request);
+      const correlatorDir = join(directory, "requests", "correlators");
+      const file = readdirSync(correlatorDir)[0]!;
+      writeFileSync(join(correlatorDir, file), "{broken", "utf-8");
+
+      const outcome = await captureHarnessResult({
+        harness: "pi",
+        runsRoot,
+        runDirectory: directory,
+        nativeId: "pi-native-1",
+        candidates: piCandidates(AGENT_OUTPUT),
+      });
+
+      expect(outcome.kind).toBe("rejected");
+      expect(captureAuditLine("capture", outcome)).toContain("rejected (correlator)");
+    });
+
+    it("refuses a symlinked correlator without reading its target", async () => {
+      const { runsRoot, directory, request } = await stagedRun();
+      await correlate(runsRoot, directory, "pi", "pi-native-1", request);
+      const correlatorDir = join(directory, "requests", "correlators");
+      const file = readdirSync(correlatorDir)[0]!;
+      const outside = join(runsRoot, "outside-correlator.json");
+      writeFileSync(outside, JSON.stringify({
+        schemaVersion: 1,
+        harness: "pi",
+        nativeId: "pi-native-1",
+        requestId: request.requestId,
+        attempt: 1,
+      }));
+      rmSync(join(correlatorDir, file));
+      symlinkSync(outside, join(correlatorDir, file));
+
+      const outcome = await captureHarnessResult({
+        harness: "pi",
+        runsRoot,
+        runDirectory: directory,
+        nativeId: "pi-native-1",
+        candidates: piCandidates(AGENT_OUTPUT),
+      });
+
+      expect(outcome.kind).toBe("rejected");
+      if (outcome.kind !== "rejected") return;
+      expect(outcome.reason).toBe("correlator");
     });
   });
 
@@ -411,12 +472,28 @@ describe("invalid evidence is audited but never accepted", () => {
       issued: [authority()],
       identity: identity(),
       payload: payload(),
-      alreadyCaptured: new Set(["slot-1"]),
+      alreadyCaptured: new Set([captureKey("slot-1", 1)]),
     });
 
     expect(bound.ok).toBe(false);
     if (bound.ok) return;
     expect(bound.error.reason).toBe("duplicate-capture");
+  });
+
+  it("permits the canonical attempt-2 request after attempt 1 was captured", () => {
+    const retry = authority({
+      requestId: "request:reviewer:2" as AgentRequestAuthority["requestId"],
+      attempt: 2,
+      outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-2.raw" },
+    });
+    const bound = bindCapture({
+      issued: [retry],
+      identity: identity({ requestId: retry.requestId, attempt: 2 }),
+      payload: payload(),
+      alreadyCaptured: new Set([captureKey("slot-1", 1)]),
+    });
+
+    expect(bound.ok).toBe(true);
   });
 
   it("refuses a result carrying no native correlator", () => {
@@ -452,7 +529,7 @@ describe("invalid evidence is audited but never accepted", () => {
 // --- End-to-end Claude capture ----------------------------------------------
 
 describe("Claude capture against a real run directory", () => {
-  function stagedRun(): Readonly<{ runsRoot: string; runDir: string }> {
+  async function stagedRun(): Promise<Readonly<{ runsRoot: string; runDir: string }>> {
     const root = mkdtempSync(join(tmpdir(), "loom-capture-run-"));
     cleanup.push(root);
     const runsRoot = join(root, "runs");
@@ -461,11 +538,17 @@ describe("Claude capture against a real run directory", () => {
 
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
-    writeFileSync(join(runDir, "requests", "request:reviewer:1.json"), JSON.stringify(authority()));
-    writeFileSync(join(runDir, "requests", "correlators.json"), JSON.stringify({
-      "agent-abc": { requestId: "request:reviewer:1", attempt: 1 },
-    }));
-    mkdirSync(join(runDir, "transcripts", "slot-1"), { recursive: true });
+    const request = authority();
+    const reserved = await opened.value.reserveRequest(request);
+    if (!reserved.ok) throw new Error(reserved.error.message);
+    const correlated = await opened.value.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "claude",
+      nativeId: "agent-abc",
+      requestId: request.requestId,
+      attempt: request.attempt,
+    });
+    if (!correlated.ok) throw new Error(correlated.error.message);
     return { runsRoot, runDir };
   }
 
@@ -478,7 +561,7 @@ describe("Claude capture against a real run directory", () => {
   }
 
   it("captures a reserved request's exact bytes", async () => {
-    const { runsRoot, runDir } = stagedRun();
+    const { runsRoot, runDir } = await stagedRun();
     const text = "## Machine Summary\nCRITICAL_COUNT: 0\n";
 
     const outcome = await captureClaudeResult(
@@ -493,7 +576,7 @@ describe("Claude capture against a real run directory", () => {
   });
 
   it("reports a stop that matches no reservation instead of capturing it", async () => {
-    const { runsRoot, runDir } = stagedRun();
+    const { runsRoot, runDir } = await stagedRun();
 
     const outcome = await captureClaudeResult(
       { session_id: "s1", agent_id: "some-other-agent", agent_type: "code-reviewer", agent_transcript_path: transcript(runDir, "hello") },
@@ -515,7 +598,7 @@ describe("Claude capture against a real run directory", () => {
   });
 
   it("refuses a second capture for a slot that already landed", async () => {
-    const { runsRoot, runDir } = stagedRun();
+    const { runsRoot, runDir } = await stagedRun();
     const first = await captureClaudeResult(
       { session_id: "s1", agent_id: "agent-abc", agent_type: "code-reviewer", agent_transcript_path: transcript(runDir, "first result") },
       runsRoot,
@@ -534,8 +617,8 @@ describe("Claude capture against a real run directory", () => {
     expect(second.reason).toBe("duplicate-capture");
   });
 
-  it("reads back every issued request and no more", () => {
-    const { runsRoot, runDir } = stagedRun();
+  it("reads back every issued request and no more", async () => {
+    const { runsRoot, runDir } = await stagedRun();
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
 
@@ -544,7 +627,7 @@ describe("Claude capture against a real run directory", () => {
   });
 
   it("refuses an ambiguous transcript rather than salvaging one block", async () => {
-    const { runsRoot, runDir } = stagedRun();
+    const { runsRoot, runDir } = await stagedRun();
     const path = join(runDir, "ambiguous.jsonl");
     writeFileSync(path, `${JSON.stringify({
       message: { role: "assistant", content: [{ type: "text", text: "one" }, { type: "text", text: "two" }] },
@@ -562,7 +645,7 @@ describe("Claude capture against a real run directory", () => {
   });
 
   it("survives an interrupted transcript without inventing a payload", async () => {
-    const { runsRoot, runDir } = stagedRun();
+    const { runsRoot, runDir } = await stagedRun();
     const path = join(runDir, "truncated.jsonl");
     // A crash mid-write leaves a partial final line.
     writeFileSync(path, `${JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "ok" }] } })}\n{"message":{"role":"assist`);
@@ -578,7 +661,7 @@ describe("Claude capture against a real run directory", () => {
   });
 
   it("reports a missing transcript rather than capturing nothing silently", async () => {
-    const { runsRoot, runDir } = stagedRun();
+    const { runsRoot, runDir } = await stagedRun();
 
     const outcome = await captureClaudeResult(
       { session_id: "s1", agent_id: "agent-abc", agent_type: "code-reviewer", agent_transcript_path: join(runDir, "absent.jsonl") },
@@ -589,6 +672,28 @@ describe("Claude capture against a real run directory", () => {
     expect(outcome.kind).toBe("rejected");
     if (outcome.kind !== "rejected") return;
     expect(outcome.reason).toBe("no-final-payload");
+  });
+
+  it("returns a hook error for rejected request-bound Claude capture", async () => {
+    const { runsRoot, runDir } = await stagedRun();
+    const previousRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+    const previousRun = process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = runDir;
+    try {
+      const result = await captureOrchestrationResult(JSON.stringify({
+        session_id: "s1",
+        agent_id: "agent-abc",
+        agent_type: "code-reviewer",
+        agent_transcript_path: join(runDir, "absent.jsonl"),
+      }), []);
+      expect(result.kind).toBe("error");
+    } finally {
+      if (previousRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+      else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;
+      if (previousRun === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+      else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousRun;
+    }
   });
 });
 

@@ -143,6 +143,13 @@ export type HarnessResultIdentity = Readonly<{
   nativeId: string;
 }>;
 
+declare const CAPTURE_KEY: unique symbol;
+export type CaptureKey = string & { readonly [CAPTURE_KEY]: true };
+
+export function captureKey(slotId: string, attempt: SemanticAttempt): CaptureKey {
+  return `${slotId}:attempt-${attempt}` as CaptureKey;
+}
+
 export type CaptureReceipt = Readonly<{
   schemaVersion: typeof CAPTURE_SCHEMA_VERSION;
   kind: "capture-receipt";
@@ -168,8 +175,8 @@ export function bindCapture(input: Readonly<{
   issued: readonly AgentRequestAuthority[];
   identity: HarnessResultIdentity;
   payload: FinalPayload;
-  /** Requests whose slot already accepted a capture in this run. */
-  alreadyCaptured?: ReadonlySet<string>;
+  /** Exact semantic attempts that already accepted a capture in this run. */
+  alreadyCaptured?: ReadonlySet<CaptureKey>;
 }>): DomainResult<CaptureReceipt, CaptureRejection> {
   const claimed = input.identity.requestId;
   const request = input.issued.find(({ requestId }) => requestId === claimed);
@@ -183,11 +190,11 @@ export function bindCapture(input: Readonly<{
       `result claims attempt ${input.identity.attempt} but request ${claimed} was issued for attempt ${request.attempt}`,
     );
   }
-  if (input.alreadyCaptured?.has(request.slotId) === true) {
+  if (input.alreadyCaptured?.has(captureKey(request.slotId, request.attempt)) === true) {
     return reject(
       "duplicate-capture",
       request.requestId,
-      `slot ${request.slotId} already accepted a capture; a late or duplicate result cannot replace it`,
+      `slot ${request.slotId} attempt ${request.attempt} already accepted a capture; a duplicate result cannot replace it`,
     );
   }
   if (typeof input.identity.nativeId !== "string" || input.identity.nativeId.length === 0) {

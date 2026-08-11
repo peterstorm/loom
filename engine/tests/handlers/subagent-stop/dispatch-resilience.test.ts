@@ -17,6 +17,8 @@ import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-
 import { SUBAGENT_DIR } from "../../../src/config";
 import { parseEpoch } from "../../../src/machine";
 import type { EvidenceRecord } from "../../../src/machine";
+import type { AgentRequestAuthority } from "../../../src/core/orchestration-contract";
+import { openRunDirectory } from "../../../src/orchestration/run-directory-handle";
 import { reportSummary } from "../../machine/report-summary";
 
 const run = `dispatch-resilience-${process.pid}-${Date.now()}`;
@@ -74,6 +76,64 @@ function pointSessionAt(session: string, statePath: string): void {
   writeFileSync(pointer, statePath);
   sessionFiles.push(pointer);
 }
+
+describe("request-bound capture gates legacy dispatch", () => {
+  it("runs cleanup but skips state mutation after Claude capture rejection", async () => {
+    const dir = tempDir();
+    const statePath = writeState(dir);
+    const session = sid("capture-rejected");
+    pointSessionAt(session, statePath);
+    const runsRoot = join(dir, "runs");
+    const runDir = join(runsRoot, "run.dispatch-capture");
+    mkdirSync(runDir, { recursive: true });
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const request = {
+      runId: "run.dispatch-capture",
+      requestId: "request:reviewer:1",
+      slotId: "slot-1",
+      program: "wave-gate",
+      role: "code-reviewer",
+      attempt: 1,
+      modelProfile: "general-review",
+      harnessBinding: {
+        pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+        claude: { harness: "claude-code", model: "sonnet" },
+      },
+      requiredSkill: null,
+      contextDigest: "a".repeat(64),
+      outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
+    } as AgentRequestAuthority;
+    expect((await opened.value.reserveRequest(request)).ok).toBe(true);
+    expect((await opened.value.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "claude",
+      nativeId: "agent-capture",
+      requestId: request.requestId,
+      attempt: request.attempt,
+    })).ok).toBe(true);
+    const previousRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+    const previousRun = process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = runDir;
+    try {
+      const result = await dispatch(JSON.stringify({
+        session_id: session,
+        agent_id: "agent-capture",
+        agent_type: "code-reviewer",
+        agent_transcript_path: join(dir, "missing-transcript.jsonl"),
+      }), []);
+      expect(result.kind).toBe("error");
+      const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+      expect(task.critical_findings ?? []).toEqual([]);
+    } finally {
+      if (previousRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+      else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;
+      if (previousRun === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+      else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousRun;
+    }
+  });
+});
 
 describe("malformed hook input is caught, not crashed on (Advisory 4)", () => {
   it("dispatch: malformed stdin → passthrough + 'bindings may leak' stderr", async () => {

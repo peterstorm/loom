@@ -18,6 +18,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -41,6 +42,138 @@ export function directoryFlag(): number {
 }
 
 export const procFdChild = (fd: number, child: string): string => `/proc/self/fd/${fd}/${child}`;
+
+function assertLeafName(name: string): void {
+  if (name.length === 0 || name === "." || name === ".." || name.includes("/") || name.includes("\\")) {
+    throw new Error(`anchored directory entry must be one safe leaf name: ${JSON.stringify(name)}`);
+  }
+}
+
+/** List one retained directory descriptor without resolving its path again. */
+export function listDirectoryNamesNoFollow(directoryFd: number): readonly string[] {
+  return Object.freeze(readdirSync(`/proc/self/fd/${directoryFd}`).sort());
+}
+
+/** Read one leaf relative to a retained directory descriptor with O_NOFOLLOW. */
+export function readDirectoryFileNoFollow(directoryFd: number, name: string): Buffer {
+  assertLeafName(name);
+  let fileFd: number | null = null;
+  try {
+    fileFd = openSync(procFdChild(directoryFd, name), fsConstants.O_RDONLY | noFollowFlag());
+    return readFileSync(fileFd);
+  } finally {
+    if (fileFd !== null) closeSync(fileFd);
+  }
+}
+
+/** Exclusively publish one leaf relative to a retained directory descriptor. */
+export function writeDirectoryFileExclusiveNoFollow(
+  directoryFd: number,
+  name: string,
+  data: string | Uint8Array,
+): void {
+  assertLeafName(name);
+  let fileFd: number | null = null;
+  try {
+    fileFd = openSync(
+      procFdChild(directoryFd, name),
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollowFlag(),
+      0o600,
+    );
+    writeFileSync(fileFd, data);
+  } finally {
+    if (fileFd !== null) closeSync(fileFd);
+  }
+}
+
+const LOCK_ATTEMPTS = 50;
+const LOCK_RETRY_MS = 100;
+const wait = (milliseconds: number): Promise<void> =>
+  new Promise((resolveWait) => setTimeout(resolveWait, milliseconds));
+
+function processIsAlive(rawPid: string): boolean {
+  const pid = Number(rawPid.trim());
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/** Atomically move and inspect one stale descriptor-relative lock. */
+function stealStaleDirectoryLock(directoryFd: number, lockName: string): boolean {
+  const tomb = `${lockName}.tomb-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    renameSync(procFdChild(directoryFd, lockName), procFdChild(directoryFd, tomb));
+  } catch {
+    return false;
+  }
+
+  let live = true;
+  try {
+    live = processIsAlive(readDirectoryFileNoFollow(directoryFd, tomb).toString("utf-8"));
+  } catch {
+    live = true;
+  }
+  if (live) {
+    try {
+      renameSync(procFdChild(directoryFd, tomb), procFdChild(directoryFd, lockName));
+    } catch {
+      try { unlinkSync(procFdChild(directoryFd, tomb)); } catch { /* already gone */ }
+    }
+    return false;
+  }
+  unlinkSync(procFdChild(directoryFd, tomb));
+  return true;
+}
+
+async function acquireDirectoryLock(directoryFd: number, lockName: string): Promise<void> {
+  for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
+    try {
+      writeDirectoryFileExclusiveNoFollow(directoryFd, lockName, `${process.pid}`);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (attempt === 0 && stealStaleDirectoryLock(directoryFd, lockName)) continue;
+      await wait(LOCK_RETRY_MS);
+    }
+  }
+  throw new Error(`Could not acquire anchored lock after ${LOCK_ATTEMPTS} attempts: ${lockName}`);
+}
+
+function releaseDirectoryLock(directoryFd: number, lockName: string): void {
+  try {
+    if (readDirectoryFileNoFollow(directoryFd, lockName).toString("utf-8").trim() !== `${process.pid}`) return;
+    unlinkSync(procFdChild(directoryFd, lockName));
+  } catch {
+    // Missing/foreign lock: this process no longer owns it.
+  }
+}
+
+/**
+ * Hold a lock and its target directory through one retained descriptor. A path
+ * swap after acquisition cannot redirect either the lock or callback I/O.
+ */
+export async function withAnchoredDirectoryLock<T>(
+  directory: string,
+  lockName: string,
+  operation: (directoryFd: number) => T | Promise<T>,
+): Promise<T> {
+  assertLeafName(lockName);
+  const directoryFd = openDirectoryNoFollow(directory);
+  try {
+    await acquireDirectoryLock(directoryFd, lockName);
+    try {
+      return await operation(directoryFd);
+    } finally {
+      releaseDirectoryLock(directoryFd, lockName);
+    }
+  } finally {
+    closeSync(directoryFd);
+  }
+}
 
 /**
  * Open every absolute directory component relative to the descriptor for its

@@ -141,6 +141,13 @@ const handler: HookHandler = async (stdin): Promise<HookResult> => {
   // would look exactly like a run that had nothing to capture.
   const audit = captureAuditLine("capture-orchestration-result", outcome);
   if (audit !== null) process.stderr.write(audit);
+  if (outcome.kind === "rejected" &&
+      process.env[RUNS_ROOT_ENV] !== undefined && process.env[RUN_DIR_ENV] !== undefined) {
+    return {
+      kind: "error",
+      message: `request-bound capture rejected (${outcome.reason}): ${outcome.message}`,
+    };
+  }
   return { kind: "passthrough" };
 };
 

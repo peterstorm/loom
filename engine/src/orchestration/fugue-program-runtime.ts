@@ -113,14 +113,14 @@ function atomicWriteFile(path: string, contents: string): void {
   }
 }
 
-function parseEventRecord(raw: unknown, source: string): ProgramEventRecord {
+export function parseProgramEventRecord(raw: unknown, source: string): ProgramEventRecord {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new Error(`Corrupt program event ${source}: not an object`);
   }
   const record = raw as Record<string, unknown>;
   if (record["schemaVersion"] !== PROGRAM_JOURNAL_SCHEMA_VERSION ||
-      typeof record["sequence"] !== "number" || !Number.isInteger(record["sequence"]) ||
-      typeof record["dedupKey"] !== "string" || record["dedupKey"].length === 0 ||
+      typeof record["sequence"] !== "number" || !Number.isInteger(record["sequence"]) || record["sequence"] < 0 ||
+      typeof record["dedupKey"] !== "string" || !/^[A-Za-z0-9:_-]{1,256}$/.test(record["dedupKey"]) ||
       typeof record["recordedAtMs"] !== "number" || !Number.isFinite(record["recordedAtMs"]) ||
       !("event" in record)) {
     throw new Error(`Corrupt program event ${source}: field contract violated`);
@@ -168,7 +168,7 @@ export function createFileProgramJournal(directory: string): ProgramJournal {
     },
     async readEvents(): Promise<readonly ProgramEventRecord[]> {
       return Object.freeze(eventFiles().map((name) =>
-        parseEventRecord(fromJson(readFileSync(join(eventsDirectory, name), "utf-8")), name)));
+        parseProgramEventRecord(fromJson(readFileSync(join(eventsDirectory, name), "utf-8")), name)));
     },
     async readCheckpoint(): Promise<string | null> {
       return existsSync(checkpointPath) ? readFileSync(checkpointPath, "utf-8") : null;

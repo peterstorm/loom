@@ -14,6 +14,7 @@ import {
 import { ORCHESTRATION_CAPABILITIES } from "../../src/orchestration/dags/capabilities";
 import {
   createWavePreparationDag,
+  parseWaveNumber,
   waveAdvisoryDag,
   WAVE_GATE_DAG_NODE_IDS,
   type DerivedPart,
@@ -475,10 +476,24 @@ describe("wave gate preparation", () => {
     contexts: part("contexts"),
   });
 
+  it("rejects wave zero at the DAG boundary", async () => {
+    expect(parseWaveNumber(0)).toBeNull();
+    expect(parseWaveNumber(-1)).toBeNull();
+    expect(parseWaveNumber(1.5)).toBeNull();
+    expect(parseWaveNumber(1)).toBe(1);
+
+    const result = await runDag<PreparationInput, PreparedBatch>(
+      allGood,
+      { wave: 0, graph: {}, tasks: ["T2"] } as unknown as PreparationInput,
+      context(allGood.id),
+    );
+    expect(result.ok).toBe(false);
+  });
+
   it("joins every derived part before anything can be published", async () => {
     const result = await runDag<PreparationInput, PreparedBatch>(
       allGood,
-      { wave: 2, graph: {}, tasks: ["T2", "T3"] },
+      { wave: parseWaveNumber(2)!, graph: {}, tasks: ["T2", "T3"] },
       context(allGood.id),
     );
 
@@ -499,7 +514,7 @@ describe("wave gate preparation", () => {
 
     const result = await runDag<PreparationInput, PreparedBatch>(
       dag,
-      { wave: 2, graph: {}, tasks: ["T2", "T3"] },
+      { wave: parseWaveNumber(2)!, graph: {}, tasks: ["T2", "T3"] },
       context(dag.id),
     );
 

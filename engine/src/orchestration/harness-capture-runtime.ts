@@ -16,19 +16,15 @@
  * to observe an Agent's final payload, and what its own correlator is.
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
 import {
   bindCapture,
   parseFinalPayload,
+  type CaptureKey,
   type CaptureReceipt,
   type FinalPayloadCandidate,
   type HarnessResultIdentity,
 } from "../core/harness-capture";
-import {
-  parseAgentRequestAuthority,
-  type AgentRequestAuthority,
-} from "../core/orchestration-contract";
+import type { AgentRequestAuthority } from "../core/orchestration-contract";
 import { openRunDirectory, type RunDirHandle } from "./run-directory-handle";
 
 /**
@@ -45,49 +41,30 @@ export type CaptureOutcome =
   | Readonly<{ kind: "captured"; receipt: CaptureReceipt }>
   | Readonly<{ kind: "rejected"; reason: string; message: string }>;
 
-/** Every request this run reserved, parsed from its immutable reservations. */
+/** Every request this run reserved, read through the anchored handle. */
 export function readIssuedRequests(handle: RunDirHandle): readonly AgentRequestAuthority[] {
-  const directory = join(handle.runDirectory, "requests");
-  if (!existsSync(directory)) return Object.freeze([]);
-  const issued: AgentRequestAuthority[] = [];
-  for (const name of readdirSync(directory).sort()) {
-    if (!name.endsWith(".json")) continue;
-    const parsed = ((): unknown => {
-      try {
-        return JSON.parse(readFileSync(join(directory, name), "utf-8")) as unknown;
-      } catch {
-        return null;
-      }
-    })();
-    const authority = parseAgentRequestAuthority(parsed);
-    if (authority.ok) issued.push(authority.value);
-  }
-  return Object.freeze(issued);
+  const issued = handle.readIssuedRequests();
+  if (!issued.ok) throw new Error(issued.error.message);
+  return issued.value;
 }
 
-/** Slots whose transcript already landed — the duplicate/late guard's input. */
-export function alreadyCapturedSlots(handle: RunDirHandle): ReadonlySet<string> {
-  const directory = join(handle.runDirectory, "transcripts");
-  if (!existsSync(directory)) return new Set();
-  const captured = new Set<string>();
-  for (const slot of readdirSync(directory)) {
-    const slotDir = join(directory, slot);
-    try {
-      if (readdirSync(slotDir).some((file) => file.endsWith(".raw"))) captured.add(slot);
-    } catch {
-      // An unreadable slot directory proves nothing was captured there.
-    }
-  }
-  return captured;
+/** Exact semantic attempts whose transcript already landed. */
+export function alreadyCapturedAttempts(handle: RunDirHandle): ReadonlySet<CaptureKey> {
+  const captured = handle.readCapturedAttempts();
+  if (!captured.ok) throw new Error(captured.error.message);
+  return captured.value;
 }
+
+/** Historical import name retained while its value is now attempt-specific. */
+export const alreadyCapturedSlots = alreadyCapturedAttempts;
 
 /**
  * Resolve the reservation a finished Agent answers for.
  *
  * Neither harness hands the request id back, so it is recovered by matching the
- * spawn-time correlator recorded alongside the reservation. A result whose
- * correlator is absent from the mapping belongs to some other agent — a
- * `no-reservation`, not a failure.
+ * spawn-time correlator recorded in its immutable, descriptor-anchored binding
+ * beside the reservation. A result with no binding belongs to some other agent
+ * — a `no-reservation`, not a failure; an unreadable binding is a rejection.
  */
 export function readCorrelatorIdentity(
   handle: RunDirHandle,
@@ -95,23 +72,16 @@ export function readCorrelatorIdentity(
   nativeId: string,
 ): HarnessResultIdentity | null {
   if (nativeId.length === 0) return null;
-
-  const correlators = join(handle.runDirectory, "requests", "correlators.json");
-  const mapping = ((): Record<string, unknown> => {
-    try {
-      return JSON.parse(readFileSync(correlators, "utf-8")) as Record<string, unknown>;
-    } catch {
-      return {};
-    }
-  })();
-  const entry = mapping[nativeId];
-  if (typeof entry !== "object" || entry === null) return null;
-  const record = entry as Record<string, unknown>;
-  const requestId = record["requestId"];
-  const attempt = record["attempt"];
-  if (typeof requestId !== "string" || typeof attempt !== "number") return null;
-
-  return Object.freeze({ harness, requestId, attempt, nativeId });
+  const resolved = handle.readHarnessCorrelator(harness, nativeId);
+  if (!resolved.ok) throw new Error(resolved.error.message);
+  return resolved.value === null
+    ? null
+    : Object.freeze({
+        harness: resolved.value.harness,
+        requestId: resolved.value.requestId,
+        attempt: resolved.value.attempt,
+        nativeId: resolved.value.nativeId,
+      });
 }
 
 /**
@@ -141,25 +111,38 @@ export async function captureHarnessResult(args: Readonly<{
   if (!opened.ok) return { kind: "rejected", reason: "run-directory", message: opened.error.message };
   const handle = opened.value;
 
-  const identity = readCorrelatorIdentity(handle, args.harness, args.nativeId);
-  if (identity === null) {
+  const correlator = handle.readHarnessCorrelator(args.harness, args.nativeId);
+  if (!correlator.ok) {
+    return { kind: "rejected", reason: "correlator", message: correlator.error.message };
+  }
+  if (correlator.value === null) {
     return { kind: "no-reservation", agentId: args.nativeId.length === 0 ? "(missing)" : args.nativeId };
   }
+  const identity: HarnessResultIdentity = Object.freeze({
+    harness: correlator.value.harness,
+    requestId: correlator.value.requestId,
+    attempt: correlator.value.attempt,
+    nativeId: correlator.value.nativeId,
+  });
 
   const payload = parseFinalPayload(args.candidates);
   if (!payload.ok) {
     return { kind: "rejected", reason: payload.error.reason, message: payload.error.message };
   }
 
+  const issued = handle.readIssuedRequests();
+  if (!issued.ok) return { kind: "rejected", reason: "requests", message: issued.error.message };
+  const captured = handle.readCapturedAttempts();
+  if (!captured.ok) return { kind: "rejected", reason: "transcripts", message: captured.error.message };
   const bound = bindCapture({
-    issued: readIssuedRequests(handle),
+    issued: issued.value,
     identity,
     payload: payload.value,
-    alreadyCaptured: alreadyCapturedSlots(handle),
+    alreadyCaptured: captured.value,
   });
   if (!bound.ok) return { kind: "rejected", reason: bound.error.reason, message: bound.error.message };
 
-  const request = readIssuedRequests(handle).find(({ requestId }) => requestId === bound.value.requestId);
+  const request = issued.value.find(({ requestId }) => requestId === bound.value.requestId);
   if (request === undefined) {
     return { kind: "rejected", reason: "unknown-request", message: "issued request vanished between binding and capture" };
   }

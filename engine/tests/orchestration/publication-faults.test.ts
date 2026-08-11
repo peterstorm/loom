@@ -18,6 +18,7 @@ import {
 } from "../../src/orchestration/context-packets";
 import { createEffectRunner, type EffectPorts } from "../../src/orchestration/effect-runner";
 import {
+  createStagedArtifact,
   openRunDirectory,
   parseRunDirectoryIdentity,
   promoteArtifactSet,
@@ -305,6 +306,20 @@ describe("request reservation and transcript capture", () => {
     if (conflicting.ok) return;
     expect(conflicting.error.message).toContain("already reserved under different authority");
   });
+
+  it("refuses capture authority that reuses a reserved request id for another slot", async () => {
+    const { handle } = freshRun();
+    await handle.reserveRequest(authority());
+
+    const captured = await handle.captureTranscript(authority({
+      slotId: "slot-2" as AgentRequestAuthority["slotId"],
+      outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-2/attempt-1.raw" },
+    }), [1, 2, 3]);
+
+    expect(captured.ok).toBe(false);
+    if (captured.ok) return;
+    expect(captured.error.message).toContain("does not match its immutable reservation");
+  });
 });
 
 // --- Artifact-set atomicity -------------------------------------------------
@@ -329,6 +344,30 @@ describe("artifact set publication", () => {
     const { handle } = freshRun();
     const published = await handle.publishArtifactSet([]);
     expect(published.ok).toBe(false);
+  });
+
+  it("rejects traversal before it can overwrite a protected run artifact", async () => {
+    const { directory, handle } = freshRun();
+    const authorityBefore = readFileSync(join(directory, "authority.json"), "utf-8");
+
+    const published = await handle.publishArtifactSet([
+      { relativePath: "../authority.json", bytes: [...Buffer.from("forged", "utf-8")] },
+    ]);
+
+    expect(published.ok).toBe(false);
+    expect(readFileSync(join(directory, "authority.json"), "utf-8")).toBe(authorityBefore);
+    expect(readdirSync(join(directory, "artifacts"))).toEqual([]);
+  });
+
+  it("rejects duplicate normalized destinations before staging bytes", async () => {
+    const { directory, handle } = freshRun();
+    const published = await handle.publishArtifactSet([
+      { relativePath: "report.json", bytes: [1] },
+      { relativePath: "./report.json", bytes: [1] },
+    ]);
+
+    expect(published.ok).toBe(false);
+    expect(readdirSync(join(directory, "artifacts"))).toEqual([]);
   });
 
   it("publishes nothing when a member of the set cannot be staged", async () => {
@@ -570,6 +609,28 @@ describe("effect receipts", () => {
     if (result.ok) return;
     expect(result.error.message).toContain("does not match the intent's artifact set");
   });
+
+  it("reconciles staged digest and slot before publishing any bytes", async () => {
+    const { directory, handle } = freshRun();
+    const staged = createStagedArtifact("result.json", [...Buffer.from("{}", "utf-8")]);
+    if (!staged.ok) throw new Error(staged.error.message);
+    const runner = createEffectRunner({ handle, ports: ports(), resolveArtifacts: () => [staged.value] });
+
+    const result = await runner({
+      kind: "publish-artifact-set",
+      effectId: "effect:publish-preflight",
+      runId: RUN_ID,
+      artifacts: [{
+        runId: RUN_ID,
+        slot: { kind: "fixed-artifact-slot", path: "artifacts/result.json" },
+        digest: "0".repeat(64),
+        byteLength: 2,
+      }],
+    } as unknown as EffectIntent);
+
+    expect(result.ok).toBe(false);
+    expect(readdirSync(join(directory, "artifacts"))).toEqual([]);
+  });
 });
 
 // --- Journal ----------------------------------------------------------------
@@ -601,6 +662,26 @@ describe("run directory as a program journal", () => {
   it("reports a missing checkpoint as absent rather than throwing", async () => {
     const { handle } = freshRun();
     expect(await handle.readCheckpoint()).toBeNull();
+  });
+
+  it("rejects schema-invalid event JSON instead of casting it into replay", async () => {
+    const { directory, handle } = freshRun();
+    writeFileSync(join(directory, "events", "000000-bad.json"), JSON.stringify({}));
+
+    await expect(handle.readEvents()).rejects.toThrow(/Corrupt program event/);
+  });
+
+  it("rejects event filename and record identity disagreement", async () => {
+    const { directory, handle } = freshRun();
+    writeFileSync(join(directory, "events", "000000-key-a.json"), JSON.stringify({
+      schemaVersion: 1,
+      sequence: 1,
+      dedupKey: "key-b",
+      recordedAtMs: 1,
+      event: { kind: "x" },
+    }));
+
+    await expect(handle.readEvents()).rejects.toThrow(/filename does not match|sequence prefix/);
   });
 });
 
@@ -637,6 +718,23 @@ describe("run-directory anchoring holds for directory creation, not just writes"
     ]);
 
     expect(published.ok).toBe(false);
+    expect(readdirSync(escape)).toEqual([]);
+  });
+
+  it("never creates an append lock through a swapped events symlink", async () => {
+    const { root, directory, handle } = freshRun();
+    const escape = join(root, "escape-events");
+    mkdirSync(escape, { recursive: true });
+    rmSync(join(directory, "events"), { recursive: true, force: true });
+    symlinkSync(escape, join(directory, "events"));
+
+    await expect(handle.appendEvent({
+      schemaVersion: 1,
+      sequence: 0,
+      dedupKey: "safe-key",
+      recordedAtMs: 1,
+      event: { kind: "x" },
+    })).rejects.toThrow();
     expect(readdirSync(escape)).toEqual([]);
   });
 });

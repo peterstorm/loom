@@ -76,6 +76,7 @@ import {
   captureHarnessResult,
   RUN_DIR_ENV,
   RUNS_ROOT_ENV,
+  type CaptureOutcome,
 } from "../engine/src/orchestration/harness-capture-runtime";
 import { materializePiResources } from "./resources";
 import { checkAgentSkillPrompt } from "../engine/src/core/agent-skills";
@@ -180,12 +181,12 @@ export const piSpawnRosterId = (
  * abort the evidence processing that follows. Every non-capture is audited,
  * because silence looks exactly like a run that had nothing to capture.
  */
-async function capturePiSubagentResult(
+export async function capturePiSubagentResult(
   toolCallId: unknown,
   resultIndex: number,
   agentType: string,
   messages: unknown,
-): Promise<void> {
+): Promise<CaptureOutcome> {
   try {
     const candidates = piResultFinalPayloadCandidates(messages ?? []);
     const outcome = await captureHarnessResult({
@@ -200,10 +201,11 @@ async function capturePiSubagentResult(
     });
     const audit = captureAuditLine("loom(pi): capture-orchestration-result", outcome);
     if (audit !== null) process.stderr.write(audit);
+    return outcome;
   } catch (error) {
-    process.stderr.write(
-      `loom(pi): capture-orchestration-result crashed for ${agentType}: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`loom(pi): capture-orchestration-result crashed for ${agentType}: ${message}\n`);
+    return { kind: "rejected", reason: "capture-crashed", message };
   }
 }
 
@@ -1105,7 +1107,12 @@ export default function (pi: ExtensionAPI) {
       // path serves; and capture must record evidence before any handler acts
       // on it. It reads only the run directory it is pointed at, never a State
       // File, so a run beside an active wave cannot cross into it.
-      await capturePiSubagentResult(toolCallId, resultIndex, agentType, result.messages);
+      const captureOutcome = await capturePiSubagentResult(
+        toolCallId,
+        resultIndex,
+        agentType,
+        result.messages,
+      );
 
       // Standalone review/refutation results are run artifacts. Short-circuit
       // before StateManager resolution so an unrelated local graph is neither
@@ -1116,6 +1123,16 @@ export default function (pi: ExtensionAPI) {
             ? `loom(pi): failed standalone ${agentType} result ignored — task state untouched\n`
             : `loom(pi): ${agentType} belongs to a standalone review run — task state untouched\n`,
         );
+        continue;
+      }
+
+      // A request-bound rejection cannot be followed by legacy state mutation:
+      // that would accept evidence the run authority just refused. Unrelated
+      // agents remain `no-reservation` and retain the compatibility path.
+      if (captureOutcome.kind === "rejected") {
+        const diagnostic = `request-bound capture rejected for ${agentType}: ${captureOutcome.reason}: ${captureOutcome.message}`;
+        processingErrors.push(diagnostic);
+        process.stderr.write(`loom(pi): ${diagnostic}; protected state unchanged\n`);
         continue;
       }
 

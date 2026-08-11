@@ -45,8 +45,18 @@ const APPLY_ADVISORY = "apply-advisory-decision";
 // Preparation
 // ---------------------------------------------------------------------------
 
+declare const WAVE_NUMBER: unique symbol;
+export type WaveNumber = number & { readonly [WAVE_NUMBER]: true };
+
+const waveNumberSchema = z.number().int().positive().transform((wave) => wave as WaveNumber);
+
+export function parseWaveNumber(raw: unknown): WaveNumber | null {
+  const parsed = waveNumberSchema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
+}
+
 export type PreparationInput = Readonly<{
-  wave: number;
+  wave: WaveNumber;
   graph: unknown;
   tasks: readonly string[];
 }>;
@@ -71,7 +81,7 @@ export type PreparedBatch =
   | Readonly<{ kind: "blocked"; reasons: readonly string[] }>;
 
 const preparationInputSchema = z.object({
-  wave: z.number().int().nonnegative(),
+  wave: waveNumberSchema,
   graph: z.unknown(),
   tasks: z.array(z.string()),
 }) as unknown as z.ZodType<PreparationInput>;
@@ -167,24 +177,24 @@ export function createWavePreparationDag(parts: Readonly<{
 // ---------------------------------------------------------------------------
 
 export type AdvisoryTriage = Readonly<{
-  wave: number;
+  wave: WaveNumber;
   advisories: readonly Readonly<{ id: string; task: string; text: string }>[];
 }>;
 
 const advisoryTriageSchema = z.object({
-  wave: z.number().int().nonnegative(),
+  wave: waveNumberSchema,
   advisories: z.array(z.object({ id: z.string(), task: z.string(), text: z.string() })),
 }) as unknown as z.ZodType<AdvisoryTriage>;
 
 export type AdvisoryOutcome = Readonly<{
   kind: "advisory-decision-accepted";
-  wave: number;
+  wave: WaveNumber;
   advisoryCount: number;
 }>;
 
 const advisoryOutcomeSchema = z.object({
   kind: z.literal("advisory-decision-accepted"),
-  wave: z.number().int().nonnegative(),
+  wave: waveNumberSchema,
   advisoryCount: z.number().int().nonnegative(),
 }) as unknown as z.ZodType<AdvisoryOutcome>;
 

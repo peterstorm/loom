@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { renderStatus } from "../../../src/handlers/helpers/orchestration";
 import type { GateDeps } from "../../../src/core/wave-gate-machine";
+import type { AgentRequestAuthority } from "../../../src/core/orchestration-contract";
+import { openRunDirectory } from "../../../src/orchestration/run-directory-handle";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const CLI = join(ENGINE, "src", "cli.ts");
@@ -180,6 +182,65 @@ describe("orchestration CLI", () => {
     expect(result.stderr).toContain("cannot bind run directory");
   });
 
+  it("starts, submits to, and idempotently resumes a registered refutation reducer", async () => {
+    const root = project();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.refutation-facade");
+    mkdirSync(runDir, { recursive: true });
+    const program = JSON.stringify({
+      input: {
+        criticalFindingIds: ["T1:finding-1"],
+        lenses: ["reproduction", "intent"],
+      },
+      events: [],
+    });
+
+    const started = runCli([
+      "start", "refutation", "--runs-root", runsRoot, "--run", runDir,
+    ], program, root);
+    expect(started.status).toBe(0);
+    expect(JSON.parse(started.stdout).type).toBe("spawn-batch");
+    expect(JSON.parse(started.stdout).requests).toHaveLength(2);
+
+    const startedAction = JSON.parse(started.stdout) as {
+      requests: readonly Readonly<{ authority: AgentRequestAuthority }>[];
+    };
+    const firstRequest = startedAction.requests[0]!.authority;
+    const secondRequest = startedAction.requests[1]!.authority;
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const issued = opened.value.readIssuedRequests();
+    expect(issued.ok && issued.value).toHaveLength(2);
+    const firstSubmitted = runCli([
+      "submit", "--runs-root", runsRoot, "--run", runDir,
+      "--request", firstRequest.requestId, "--slot", firstRequest.slotId, "--attempt", "1",
+    ], "verdict one", root);
+    expect(firstSubmitted.status).toBe(0);
+    expect(JSON.parse(firstSubmitted.stdout).type).toBe("await-results");
+
+    const secondSubmitted = runCli([
+      "submit", "--runs-root", runsRoot, "--run", runDir,
+      "--request", secondRequest.requestId, "--slot", secondRequest.slotId, "--attempt", "1",
+    ], "verdict two", root);
+    expect(secondSubmitted.status).toBe(0);
+    const engineAction = JSON.parse(secondSubmitted.stdout);
+    expect(engineAction.type).toBe("engine-operation");
+
+    const completed = runCli([
+      "complete", "--runs-root", runsRoot, "--run", runDir,
+      "--operation", engineAction.operation, "--outcome", "succeeded",
+    ], "", root);
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(completed.status).toBe(0);
+    expect(resumed.status).toBe(0);
+    expect(JSON.parse(completed.stdout)).toEqual(JSON.parse(resumed.stdout));
+    expect(JSON.parse(completed.stdout)).toEqual({
+      type: "done",
+      panel: "refutation",
+      outcome: "completed",
+    });
+  }, 15_000);
+
   it("resumes an anchored run idempotently without spawning anything", () => {
     const root = project();
     const runsRoot = join(root, "runs");
@@ -209,6 +270,43 @@ describe("orchestration CLI", () => {
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("never reserved");
+  });
+
+  it("records a native harness correlator against reserved authority", async () => {
+    const root = project();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.orchestration-correlator");
+    mkdirSync(runDir, { recursive: true });
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const request = {
+      runId: "run.orchestration-correlator",
+      requestId: "request:reviewer:1",
+      slotId: "slot-1",
+      program: "wave-gate",
+      role: "code-reviewer",
+      attempt: 1,
+      modelProfile: "general-review",
+      harnessBinding: {
+        pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+        claude: { harness: "claude-code", model: "sonnet" },
+      },
+      requiredSkill: null,
+      contextDigest: "a".repeat(64),
+      outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
+    } as AgentRequestAuthority;
+    expect((await opened.value.reserveRequest(request)).ok).toBe(true);
+
+    const result = runCli([
+      "correlate", "--runs-root", runsRoot, "--run", runDir,
+      "--request", request.requestId, "--harness", "pi", "--native-id", "tool-call:0",
+    ], "", root);
+
+    expect(result.status).toBe(0);
+    const stored = opened.value.readHarnessCorrelator("pi", "tool-call:0");
+    expect(stored.ok).toBe(true);
+    if (!stored.ok) return;
+    expect(stored.value?.requestId).toBe(request.requestId);
   });
 
   it("records a user decision durably in the run's event log", () => {

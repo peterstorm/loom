@@ -8,14 +8,16 @@ trap 'rm -rf "$TMP"' EXIT
 
 command -v pi >/dev/null || { echo "FATAL: pi not found" >&2; exit 1; }
 
-printf '%s\n' '{"type":"get_commands"}' \
+{ sleep 3; printf '%s\n' '{"type":"get_commands"}'; } \
   | PI_CODING_AGENT_DIR="$TMP/agent" PI_OFFLINE=1 timeout 20 \
-      pi --mode rpc --no-session --no-context-files -e "$LOOM_DIR/pi/extension.ts" \
+      pi --approve --mode rpc --no-session --no-context-files -e "$LOOM_DIR/pi/extension.ts" \
       > "$TMP/commands.jsonl" 2> "$TMP/commands.stderr"
 
-{ printf '%s\n' '{"id":"root","type":"bash","command":"printf %s \"$LOOM_PLUGIN_ROOT\""}'; sleep 2; } \
+# Pi attaches its RPC stdin consumer after extension/resource initialization;
+# delay the request so a cold cache cannot race and drop the first JSONL record.
+{ sleep 3; printf '%s\n' '{"id":"root","type":"bash","command":"printf %s \"$LOOM_PLUGIN_ROOT\""}'; sleep 2; } \
   | PI_CODING_AGENT_DIR="$TMP/agent" PI_OFFLINE=1 timeout 20 \
-      pi --mode rpc --no-session --no-context-files -e "$LOOM_DIR/pi/extension.ts" \
+      pi --approve --mode rpc --no-session --no-context-files -e "$LOOM_DIR/pi/extension.ts" \
       > "$TMP/root.jsonl" 2> "$TMP/root.stderr"
 
 cat "$TMP/commands.jsonl" "$TMP/root.jsonl" > "$TMP/rpc.jsonl"

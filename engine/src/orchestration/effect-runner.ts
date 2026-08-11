@@ -15,6 +15,7 @@
  * one.
  */
 
+import { createHash } from "node:crypto";
 import {
   canonicalRecord,
   reconcileEffectReceipt,
@@ -87,6 +88,26 @@ async function runPublishArtifactSet(
   const staged = resolveArtifacts(intent);
   if (staged.length !== intent.artifacts.length) {
     return failure(intent.effectId, false, "staged artifact count does not match the intent's artifact set");
+  }
+  const destinations = new Set<string>();
+  for (let index = 0; index < staged.length; index += 1) {
+    const candidate = staged[index]!;
+    const expected = intent.artifacts[index]!;
+    const slotPath = `artifacts/${candidate.relativePath}`;
+    if (destinations.has(slotPath)) {
+      return failure(intent.effectId, false, `staged artifact destination is duplicated: ${slotPath}`);
+    }
+    destinations.add(slotPath);
+    if (expected.slot.path !== slotPath) {
+      return failure(intent.effectId, false, `staged artifact ${index} does not match intent slot ${expected.slot.path}`);
+    }
+    if (expected.byteLength !== candidate.bytes.length) {
+      return failure(intent.effectId, false, `staged artifact ${index} byte length does not match its intent`);
+    }
+    const digest = createHash("sha256").update(Uint8Array.from(candidate.bytes)).digest("hex");
+    if (expected.digest !== digest) {
+      return failure(intent.effectId, false, `staged artifact ${index} digest does not match its intent`);
+    }
   }
   const published = await handle.publishArtifactSet(staged);
   if (!published.ok) return failure(intent.effectId, true, published.error.message);

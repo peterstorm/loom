@@ -80,15 +80,25 @@ const handler: HookHandler = async (stdin, args) => {
   // Request-bound capture runs BEFORE any legacy routing, and before the task
   // graph is resolved at all. Both orderings are load-bearing: the graph lookup
   // below returns early when there is none, which would skip capture for every
-  // standalone run; and the legacy handlers mutate task state, so capturing
-  // afterwards would record evidence for a decision already taken. It resolves
-  // only the run directory it is pointed at, never a State File.
-  await safeRun("captureOrchestrationResult", () => captureOrchestrationResult(stdin, args));
+  // standalone run; and legacy handlers must not mutate task state after run
+  // authority rejected the same result.
+  let captureFailure: string | null = null;
+  try {
+    const capture = await captureOrchestrationResult(stdin, args);
+    if (capture.kind === "error") captureFailure = capture.message;
+  } catch (error) {
+    captureFailure = `captureOrchestrationResult crashed: ${error instanceof Error ? error.message : String(error)}`;
+    process.stderr.write(`ERROR in captureOrchestrationResult: ${captureFailure}\n`);
+  }
 
   // Cleanup always runs — but must never abort the rest of the pipeline
   // (a lock-acquisition failure here would otherwise leave the task stuck
   // in executing with no status update).
   await safeRun("cleanupSubagentFlag", () => cleanupSubagentFlag(stdin, args));
+
+  if (captureFailure !== null) {
+    return { kind: "error", message: captureFailure };
+  }
 
   // No task graph → no orchestration hooks
   const mgr = StateManager.fromSession(input.session_id);
