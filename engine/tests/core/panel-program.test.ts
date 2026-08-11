@@ -764,11 +764,9 @@ describe("persistent panel authority", () => {
     });
   });
 
-  // The roster and its lens list are independently-ordered fields of the same
-  // untrusted checkpoint input, paired by POSITION with nothing in the roster
-  // naming its entry. Equal cardinality is therefore the whole of what the
-  // authority boundary can prove, and it must actually prove it — otherwise a
-  // slot resolves to `undefined` and gets carried downstream as a lens.
+  // Cardinality and canonical ordinal identity are both required. A complete
+  // roster in the wrong order is not evidence for the semantic list it is
+  // paired with.
   it("refuses a roster whose slot count disagrees with the ordered list it is paired with", () => {
     const refutation = refutationFixture("cardinality-authority");
     const architecture = architectureFixture("cardinality-authority");
@@ -792,6 +790,47 @@ describe("persistent panel authority", () => {
     })).toMatchObject({
       ok: false,
       error: { kind: "invalid-authority", message: expect.stringContaining("exactly 1 slot") },
+    });
+  });
+
+  it("refuses reordered candidate, judge, and refutation rosters with exact slot diagnostics", () => {
+    const architecture = architectureFixture("reordered-authority");
+    const refutation = refutationFixture("reordered-authority");
+    const architectureInput = {
+      runId: architecture.authority.runId,
+      candidateLenses: architecture.authority.candidateLenses,
+      judgeCriteria: architecture.authority.judgeCriteria,
+    };
+
+    const candidates = parseArchitecturePanelAuthority({
+      ...architectureInput,
+      candidateSlots: [...architecture.authority.candidateRoster.orderedSlots].reverse(),
+      judgeSlots: architecture.authority.judgeRoster.orderedSlots,
+    });
+    expect(candidates).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("candidate slot 1") },
+    });
+
+    const judges = parseArchitecturePanelAuthority({
+      ...architectureInput,
+      candidateSlots: architecture.authority.candidateRoster.orderedSlots,
+      judgeSlots: [...architecture.authority.judgeRoster.orderedSlots].reverse(),
+    });
+    expect(judges).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("judge slot 1") },
+    });
+
+    const verifiers = parseRefutationPanelAuthority({
+      runId: refutation.authority.runId,
+      findings: refutation.authority.findings,
+      lenses: refutation.authority.lenses,
+      verifierSlots: [...refutation.authority.verifierRoster.orderedSlots].reverse(),
+    });
+    expect(verifiers).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("verifier slot 1") },
     });
   });
 

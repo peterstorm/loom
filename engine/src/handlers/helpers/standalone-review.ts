@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -286,9 +290,28 @@ function loadTranscripts(runDir: string, reviews: readonly ReviewInputEntry[]): 
         errors.push(`review transcript file is assigned to more than one reviewer: ${review.transcript}`);
         continue;
       }
+      let transcriptFd: number | null = null;
+      let bytes: Buffer;
+      try {
+        transcriptFd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+        const openedStat = fstatSync(transcriptFd);
+        if (!openedStat.isFile() || openedStat.size === 0 ||
+            openedStat.dev !== stat.dev || openedStat.ino !== stat.ino) {
+          errors.push(`review transcript changed between inspection and open: ${review.transcript}`);
+          continue;
+        }
+        bytes = readFileSync(transcriptFd);
+        const afterRead = fstatSync(transcriptFd);
+        if (afterRead.dev !== openedStat.dev || afterRead.ino !== openedStat.ino ||
+            afterRead.size !== openedStat.size || bytes.byteLength !== openedStat.size) {
+          errors.push(`review transcript changed while being read: ${review.transcript}`);
+          continue;
+        }
+      } finally {
+        if (transcriptFd !== null) closeSync(transcriptFd);
+      }
       seenRealpaths.add(real);
       seenFiles.add(fileIdentity);
-      const bytes = readFileSync(path);
       const sha256 = createHash("sha256").update(bytes).digest("hex");
       if (review.expectedByteLength !== null && review.expectedByteLength !== bytes.byteLength) {
         errors.push(`review transcript byte_length is stale for ${review.agent}`);

@@ -466,7 +466,7 @@ export function prepareFreshStandaloneReview(
         },
         requiredSkill: AGENT_REQUIRED_SKILLS[role],
         contextDigest: contexts.attempts[attemptIndex],
-        outputSlot: `transcripts/${index + 1}-${role}/attempt-${attempt}.raw`,
+        outputSlot: `transcripts/${slotId}/attempt-${attempt}.raw`,
       })),
     };
   });

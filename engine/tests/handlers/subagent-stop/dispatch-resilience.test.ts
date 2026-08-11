@@ -110,6 +110,7 @@ describe("request-bound capture gates legacy dispatch", () => {
       harness: "claude",
       nativeId: "agent-capture",
       requestId: request.requestId,
+      role: request.role,
       attempt: request.attempt,
     })).ok).toBe(true);
     const previousRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;

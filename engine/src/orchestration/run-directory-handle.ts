@@ -55,7 +55,6 @@ import {
   withAnchoredDirectoryLock,
   writeDirectoryFileExclusiveNoFollow,
   writeRunBytesExclusiveNoFollow,
-  writeRunBytesNoFollow,
   writeRunFileExclusiveNoFollow,
   writeRunFileNoFollow,
 } from "./no-follow-fs";
@@ -127,6 +126,7 @@ export type HarnessCorrelatorBinding = Readonly<{
   harness: "pi" | "claude";
   nativeId: string;
   requestId: AgentRequestAuthority["requestId"];
+  role: AgentRequestAuthority["role"];
   attempt: AgentRequestAuthority["attempt"];
 }>;
 
@@ -338,6 +338,7 @@ function parseHarnessCorrelatorBinding(raw: unknown): DomainResult<HarnessCorrel
       (record["harness"] !== "pi" && record["harness"] !== "claude") ||
       typeof record["nativeId"] !== "string" || record["nativeId"].length === 0 ||
       typeof record["requestId"] !== "string" || record["requestId"].length === 0 ||
+      typeof record["role"] !== "string" || record["role"].length === 0 ||
       (record["attempt"] !== 1 && record["attempt"] !== 2)) {
     return failure("correlator", "harness correlator binding violates its field contract");
   }
@@ -346,6 +347,7 @@ function parseHarnessCorrelatorBinding(raw: unknown): DomainResult<HarnessCorrel
     harness: record["harness"],
     nativeId: record["nativeId"],
     requestId: record["requestId"] as AgentRequestAuthority["requestId"],
+    role: record["role"] as AgentRequestAuthority["role"],
     attempt: record["attempt"],
   }));
 }
@@ -386,9 +388,11 @@ export function openRunDirectory(
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
       return failure("authority", `cannot claim run authority: ${(error as Error).message}`);
     }
+    const existing = readRunAuthority(authority, authorityPath);
+    if (!existing.ok) return existing;
   }
 
-  return success(buildHandle(runId, directory, authorityPath));
+  return success(buildHandle(authority, directory, authorityPath));
 }
 
 /**
@@ -397,12 +401,13 @@ export function openRunDirectory(
  * run identity, so composition changes nothing about what the handle can do —
  * it only keeps each concern small enough to read on its own.
  */
-function buildHandle(runId: OrchestrationRunId, directory: string, authorityPath: string): RunDirHandle {
+function buildHandle(authority: RunAuthority, directory: string, authorityPath: string): RunDirHandle {
+  const { runId } = authority;
   return Object.freeze({
     runId,
     runDirectory: directory,
     readAuthority: (): DomainResult<RunAuthority, RunDirectoryError> =>
-      readRunAuthority(runId, authorityPath),
+      readRunAuthority(authority, authorityPath),
     ...programOperations(runId, directory),
     ...journalOperations(directory),
     ...contextOperations(runId, directory),
@@ -413,7 +418,7 @@ function buildHandle(runId: OrchestrationRunId, directory: string, authorityPath
 }
 
 function readRunAuthority(
-  runId: OrchestrationRunId,
+  expected: RunAuthority,
   authorityPath: string,
 ): DomainResult<RunAuthority, RunDirectoryError> {
   const raw = ((): unknown => {
@@ -425,15 +430,21 @@ function readRunAuthority(
   })();
   if (typeof raw !== "object" || raw === null) return failure("authority", "run authority is unreadable");
   const record = raw as Record<string, unknown>;
-  if (record["schemaVersion"] !== RUN_DIRECTORY_SCHEMA_VERSION || record["runId"] !== runId) {
+  if (record["schemaVersion"] !== RUN_DIRECTORY_SCHEMA_VERSION ||
+      record["runId"] !== expected.runId ||
+      typeof record["runsRoot"] !== "string" ||
+      typeof record["runDirectory"] !== "string") {
     return failure("authority", "run authority does not describe this run");
   }
-  return success(canonicalRecord({
+  const parsed = canonicalRecord({
     schemaVersion: RUN_DIRECTORY_SCHEMA_VERSION,
-    runId,
-    runsRoot: record["runsRoot"] as string,
-    runDirectory: record["runDirectory"] as string,
-  }));
+    runId: expected.runId,
+    runsRoot: resolve(record["runsRoot"]),
+    runDirectory: resolve(record["runDirectory"]),
+  });
+  return canonicalStructuralEquals(parsed, expected)
+    ? success(expected)
+    : failure("authority", "existing run authority does not match the opened run identity");
 }
 
 function programOperations(runId: OrchestrationRunId, directory: string) {
@@ -647,18 +658,20 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
         const issued: AgentRequestAuthority[] = [];
         for (const name of listDirectoryNamesNoFollow(requestsFd)) {
           if (!name.endsWith(".json")) continue;
+          let raw: unknown;
           try {
-            const parsed = parseAgentRequestAuthority(
-              JSON.parse(readDirectoryFileNoFollow(requestsFd, name).toString("utf-8")) as unknown,
-            );
-            // Deliberate compatibility policy: only canonical request authority
-            // files contribute to the issued set; sidecars and malformed entries
-            // cannot authorize a capture.
-            if (parsed.ok && parsed.value.runId === runId) issued.push(parsed.value);
-          } catch {
-            // A mapped malformed request becomes an audited unknown-request at
-            // binding; it is never accepted as authority.
+            raw = JSON.parse(readDirectoryFileNoFollow(requestsFd, name).toString("utf-8")) as unknown;
+          } catch (error) {
+            return failure("request", `request authority ${name} is unreadable: ${(error as Error).message}`);
           }
+          const parsed = parseAgentRequestAuthority(raw);
+          if (!parsed.ok) {
+            return failure("request", `request authority ${name} is malformed: ${parsed.error.violations.map(({ message }) => message).join("; ")}`);
+          }
+          if (parsed.value.runId !== runId) {
+            return failure("request", `request authority ${name} belongs to a different run`);
+          }
+          issued.push(parsed.value);
         }
         return success(Object.freeze(issued));
       } catch (error) {
@@ -706,6 +719,9 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
       if (!reserved.ok) return reserved;
       if (reserved.value.attempt !== parsed.value.attempt) {
         return failure("correlator", `correlator attempt does not match request ${parsed.value.requestId}`);
+      }
+      if (reserved.value.role !== parsed.value.role) {
+        return failure("correlator", `correlator role ${parsed.value.role} does not match request ${parsed.value.requestId}/${reserved.value.role}`);
       }
       const path = correlatorPath(directory, parsed.value.harness, parsed.value.nativeId);
       const body = JSON.stringify(parsed.value);
@@ -822,12 +838,16 @@ function stageArtifactSet(
   }
 
   const stagedPaths: StagedPair[] = [];
+  const publicationId = createHash("sha256")
+    .update(`${process.pid}:${Date.now()}:${Math.random()}:${parsedArtifacts.map(({ relativePath }) => relativePath).join("\0")}`)
+    .digest("hex")
+    .slice(0, 24);
   try {
     for (const artifact of parsedArtifacts) {
       const final = join(directory, ARTIFACTS, artifact.relativePath);
       ensureRunSubdirectories(directory, [resolve(final, "..")]);
-      const stagedPath = `${final}.staged`;
-      writeRunBytesNoFollow(stagedPath, Uint8Array.from(artifact.bytes));
+      const stagedPath = `${final}.staged-${publicationId}`;
+      writeRunBytesExclusiveNoFollow(stagedPath, Uint8Array.from(artifact.bytes));
       stagedPaths.push({ staged: stagedPath, final });
     }
   } catch (error) {
@@ -938,26 +958,38 @@ function artifactOperations(runId: OrchestrationRunId, directory: string) {
     ): Promise<DomainResult<readonly ArtifactRef[], RunDirectoryError>> {
       if (staged.length === 0) return failure("artifacts", "an artifact set must not be empty");
 
-      const stagedPaths = stageArtifactSet(directory, staged);
-      if (!stagedPaths.ok) return stagedPaths;
-      const promoted = promoteArtifactSet(stagedPaths.value);
-      if (!promoted.ok) return promoted;
+      try {
+        return await withAnchoredDirectoryLock(join(directory, ARTIFACTS), "publish.lock", async () => {
+        const stagedPaths = stageArtifactSet(directory, staged);
+        if (!stagedPaths.ok) return stagedPaths;
+        const promoted = promoteArtifactSet(stagedPaths.value);
+        if (!promoted.ok) return promoted;
 
-      const refs: ArtifactRef[] = [];
-      for (const input of staged) {
-        const parsed = createStagedArtifact(input.relativePath, input.bytes);
-        if (!parsed.ok) return parsed;
-        const artifact = parsed.value;
-        const byteLength = parseArtifactByteLength(artifact.bytes.length);
-        if (!byteLength.ok) return failure("artifacts", byteLength.error.message);
-        refs.push(canonicalRecord({
-          runId,
-          slot: canonicalRecord({ kind: "fixed-artifact-slot" as const, path: `${ARTIFACTS}/${artifact.relativePath}` }),
-          digest: digestOf(artifact.bytes),
-          byteLength: byteLength.value,
-        }));
+        const refs: ArtifactRef[] = [];
+        for (const input of staged) {
+          const parsed = createStagedArtifact(input.relativePath, input.bytes);
+          if (!parsed.ok) return parsed;
+          const artifact = parsed.value;
+          let publishedBytes: Uint8Array;
+          try {
+            publishedBytes = readRunBytesNoFollow(join(directory, ARTIFACTS, artifact.relativePath));
+          } catch (error) {
+            return failure("artifacts", `cannot verify published artifact ${artifact.relativePath}: ${(error as Error).message}`);
+          }
+          const byteLength = parseArtifactByteLength(publishedBytes.length);
+          if (!byteLength.ok) return failure("artifacts", byteLength.error.message);
+          refs.push(canonicalRecord({
+            runId,
+            slot: canonicalRecord({ kind: "fixed-artifact-slot" as const, path: `${ARTIFACTS}/${artifact.relativePath}` }),
+            digest: digestOf([...publishedBytes]),
+            byteLength: byteLength.value,
+          }));
+        }
+        return success(Object.freeze(refs));
+        });
+      } catch (error) {
+        return failure("artifacts", `cannot lock artifact publication safely: ${(error as Error).message}`);
       }
-      return success(Object.freeze(refs));
     },
   };
 }

@@ -284,8 +284,12 @@ path or a claim about tests pulls in `test-coverage`. Default panel size is 3.
 - A finding **survives** unless a strict majority of verifiers refuted it.
   `uncertain` counts toward neither side, and **ties favor keeping the finding**
   — a false positive costs a cycle, a false negative ships a bug.
-- **Only critical findings are verified.** Advisories do not block the gate, so
-  refuting one saves nothing while the quota it burns is real.
+- **Only critical findings are verified.** Advisories bypass refutation, but an
+  advisory-bearing wave pauses at `awaiting-advisory-decision` while the user
+  chooses which findings to accept, defer, or dismiss. The machine records that
+  completed triage with its single `advisory-decision-accepted` transition; it
+  does not model defer/dismiss as separate lifecycle states. Spending verifier
+  quota on advisories would still be wrong.
 - Refuted findings move into `refuted_findings` with the lenses that killed them
   and their reasoning — **recorded, not deleted**, so a wrong refutation stays
   auditable. A task whose criticals were all refuted moves `blocked → passed`;

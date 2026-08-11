@@ -10,14 +10,19 @@
  * start following links out of the run directory.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  listDirectoryNamesNoFollow,
+  openDirectoryNoFollow,
+  procFdChild,
   readRunBytesNoFollow,
   readRunFileNoFollow,
+  recoverStaleDirectoryLock,
   removeRunFileNoFollow,
+  withAnchoredDirectoryLock,
   writeRunFileNoFollow,
 } from "../../src/orchestration/no-follow-fs";
 
@@ -86,6 +91,59 @@ describe("reads refuse to follow a planted symlink", () => {
     } catch (error) {
       expect((error as NodeJS.ErrnoException).code).toBe("ENOENT");
     }
+  });
+});
+
+describe("anchored lock ownership", () => {
+  it("recovers a lock whose recorded owner is provably dead", async () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    writeFileSync(join(directory, "stale.lock"), "999999999");
+    let entered = false;
+
+    await withAnchoredDirectoryLock(directory, "stale.lock", () => { entered = true; });
+
+    expect(entered).toBe(true);
+    expect(() => readFileSync(join(directory, "stale.lock"))).toThrow();
+  });
+
+  it("refuses stale recovery when the tombstone owner changes after rename", () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    writeFileSync(join(directory, "changed.lock"), "999999999");
+    const directoryFd = openDirectoryNoFollow(directory);
+    try {
+      const recovered = recoverStaleDirectoryLock(directoryFd, "changed.lock", (tombName) => {
+        expect(listDirectoryNamesNoFollow(directoryFd)).toContain(tombName);
+        writeFileSync(procFdChild(directoryFd, tombName), `${process.pid}:new-live-owner`);
+      });
+
+      expect(recovered).toBe(false);
+      expect(readFileSync(join(directory, "changed.lock"), "utf-8")).toBe(`${process.pid}:new-live-owner`);
+    } finally {
+      closeSync(directoryFd);
+    }
+  });
+
+  it("never overlaps critical sections while the recorded owner is alive", async () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    let active = 0;
+    let maxActive = 0;
+    const critical = async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      active -= 1;
+    };
+
+    await Promise.all([
+      withAnchoredDirectoryLock(directory, "live.lock", critical),
+      withAnchoredDirectoryLock(directory, "live.lock", critical),
+      withAnchoredDirectoryLock(directory, "live.lock", critical),
+    ]);
+
+    expect(maxActive).toBe(1);
   });
 });
 

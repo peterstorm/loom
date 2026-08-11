@@ -145,13 +145,27 @@ export function diffFilesSince(revision: string, files: string[]): string {
   return execArgs(["diff", revision, "HEAD", "--", ...files]);
 }
 
-/** Check if file is tracked by git */
-export function isTracked(file: string): boolean {
+export type GitTrackedResult =
+  | Readonly<{ ok: true; tracked: boolean }>
+  | Readonly<{ ok: false; error: string }>;
+
+/**
+ * Parse Git's tracking answer without collapsing infrastructure failure into
+ * "untracked". `ls-files --error-unmatch` uses exit 1 for the one expected
+ * negative answer; every other failure leaves tracking authority unknown.
+ */
+export function isTracked(file: string): GitTrackedResult {
+  if (repoRoot === undefined) return { ok: false, error: "cannot inspect tracking outside a Git repository" };
   try {
-    execFileSync("git", ["ls-files", "--error-unmatch", file], { cwd: repoRoot, stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
+    execFileSync("git", ["ls-files", "--error-unmatch", "--", file], { cwd: repoRoot, stdio: "ignore" });
+    return { ok: true, tracked: true };
+  } catch (error) {
+    const status = typeof error === "object" && error !== null && "status" in error
+      ? (error as { status?: unknown }).status
+      : undefined;
+    return status === 1
+      ? { ok: true, tracked: false }
+      : { ok: false, error: `cannot determine whether ${JSON.stringify(file)} is tracked: ${commandFailure(error)}` };
   }
 }
 

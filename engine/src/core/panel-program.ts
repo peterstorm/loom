@@ -33,6 +33,7 @@ import {
   parseOrchestrationRunId,
   parseIssuedSpawnRequest,
   parseRequestId,
+  parseSlotId,
   semanticRetryDiagnostic,
   terminalBlockedDiagnostic,
   type AcceptedAgentResult,
@@ -1009,24 +1010,98 @@ function authorityMatches(left: AgentRequestAuthority, right: AgentRequestAuthor
  * does not actually hold, rather than indexing a parallel array and asserting
  * the result is present.
  */
+type CanonicalPanelSlotBinding = Readonly<{
+  slotId: SlotId;
+  requestIds: readonly [RequestId, RequestId];
+}>;
+
+function parseCanonicalPanelSlotBinding(
+  runId: OrchestrationRunId,
+  stage: "candidate" | "judge" | "verifier",
+  ordinal: number,
+  semanticEntry: string,
+  findingIds: readonly string[] = [],
+): CanonicalPanelSlotBinding | null {
+  const legacySlot = parseSlotId(`${stage}:${ordinal}`);
+  const legacyRequests = ([1, 2] as const).map((attempt) =>
+    parseRequestId(`${runId}:${stage}:${ordinal}:${attempt}`));
+  if (!legacySlot.ok || !legacyRequests[0].ok || !legacyRequests[1].ok) return null;
+
+  if (stage !== "verifier" || findingIds.length === 0) {
+    return Object.freeze({
+      slotId: legacySlot.value,
+      requestIds: Object.freeze([legacyRequests[0].value, legacyRequests[1].value]) as readonly [RequestId, RequestId],
+    });
+  }
+
+  // Wave Gate derives refutation identities from the semantic lens and exact
+  // finding set rather than from a caller-selected ordinal. Recompute that
+  // production authority here so swapping two complete slots cannot silently
+  // relabel their captured verdicts.
+  const slotHash = createHash("sha256")
+    .update(`${runId}|${semanticEntry}|${findingIds.join("|")}`)
+    .digest("hex")
+    .slice(0, 32);
+  const slotId = parseSlotId(`refutation-slot:${slotHash}`);
+  const requestIds = ([1, 2] as const).map((attempt) =>
+    parseRequestId(`refutation-request:${slotHash}:${attempt}`));
+  return slotId.ok && requestIds[0].ok && requestIds[1].ok
+    ? Object.freeze({
+        slotId: slotId.value,
+        requestIds: Object.freeze([requestIds[0].value, requestIds[1].value]) as readonly [RequestId, RequestId],
+      })
+    : null;
+}
+
 function rosterAuthorityErrors(
   roster: ExactRoster,
   runId: OrchestrationRunId,
   program: "architecture-panel" | "refutation-panel",
   role: "arch-designer-agent" | "arch-judge-agent" | "review-verifier-agent",
-  expectedLength: number,
+  semanticEntries: readonly string[],
+  stage: "candidate" | "judge" | "verifier",
+  findingIds: readonly string[] = [],
 ): readonly string[] {
   const errors: string[] = [];
   if (roster.runId !== runId) errors.push("roster run does not match panel run");
   if (roster.program !== program) errors.push(`roster program must be ${program}`);
-  if (roster.orderedSlots.length !== expectedLength) errors.push(`roster must contain exactly ${expectedLength} slot(s)`);
-  for (const slot of roster.orderedSlots) {
+  if (roster.orderedSlots.length !== semanticEntries.length) {
+    errors.push(`roster must contain exactly ${semanticEntries.length} slot(s)`);
+  }
+  for (const [index, slot] of roster.orderedSlots.entries()) {
     if (slot.attempts.some((request) => request.role !== role)) errors.push(`slot ${slot.slotId} must be assigned to ${role}`);
-    // Every attempt in a slot must answer for that slot. Without this, an
-    // attempt naming a sibling slot would resolve through `locateProgress` and
-    // then be paired with the WRONG positional entry below.
     if (slot.attempts.some((request) => request.slotId !== slot.slotId)) {
       errors.push(`slot ${slot.slotId} holds an attempt bound to a different slot`);
+    }
+    const semanticEntry = semanticEntries[index];
+    if (semanticEntry === undefined) continue;
+    const expected = parseCanonicalPanelSlotBinding(runId, stage, index + 1, semanticEntry, findingIds);
+    if (expected === null) {
+      errors.push(`${stage} slot ${index + 1} canonical identity could not be derived`);
+      continue;
+    }
+    const bindingMatches = (binding: CanonicalPanelSlotBinding): boolean =>
+      slot.slotId === binding.slotId &&
+      slot.attempts.every((request, attemptIndex) => request.requestId === binding.requestIds[attemptIndex]);
+    const legacySlot = parseSlotId(`${stage}:${index + 1}`);
+    const legacyRequests = ([1, 2] as const).map((attempt) =>
+      parseRequestId(`${runId}:${stage}:${index + 1}:${attempt}`));
+    const legacy = legacySlot.ok && legacyRequests[0].ok && legacyRequests[1].ok
+      ? Object.freeze({
+          slotId: legacySlot.value,
+          requestIds: Object.freeze([legacyRequests[0].value, legacyRequests[1].value]) as readonly [RequestId, RequestId],
+        })
+      : null;
+    const ordinal = String(index + 1);
+    const slotParts = slot.slotId.split(":");
+    const ordinalBinding = slotParts.at(-1) === ordinal && slot.attempts.every((request, attemptIndex) => {
+      const parts = request.requestId.split(":");
+      return parts.at(-2) === ordinal && parts.at(-1) === String(attemptIndex + 1);
+    });
+    if (!bindingMatches(expected) && (legacy === null || !bindingMatches(legacy)) && !ordinalBinding) {
+      errors.push(
+        `${stage} slot ${index + 1} for ${JSON.stringify(semanticEntry)} has non-canonical slot/request identity`,
+      );
     }
   }
   return errors;
@@ -1109,10 +1184,24 @@ export function parseArchitecturePanelAuthority(raw: ArchitecturePanelAuthorityI
     if (!candidateRoster.ok) errors.push(...candidateRoster.error.violations.map(({ kind }) => `candidate roster: ${kind}`));
     if (!judgeRoster.ok) errors.push(...judgeRoster.error.violations.map(({ kind }) => `judge roster: ${kind}`));
     if (runId.ok && lenses !== null && candidateRoster.ok) {
-      errors.push(...rosterAuthorityErrors(candidateRoster.value, runId.value, "architecture-panel", "arch-designer-agent", lenses.length));
+      errors.push(...rosterAuthorityErrors(
+        candidateRoster.value,
+        runId.value,
+        "architecture-panel",
+        "arch-designer-agent",
+        lenses,
+        "candidate",
+      ));
     }
     if (runId.ok && criteria !== null && judgeRoster.ok) {
-      errors.push(...rosterAuthorityErrors(judgeRoster.value, runId.value, "architecture-panel", "arch-judge-agent", criteria.length));
+      errors.push(...rosterAuthorityErrors(
+        judgeRoster.value,
+        runId.value,
+        "architecture-panel",
+        "arch-judge-agent",
+        criteria,
+        "judge",
+      ));
     }
     if (candidateRoster.ok && judgeRoster.ok) errors.push(...crossRosterErrors(candidateRoster.value, judgeRoster.value));
     if (errors.length > 0 || !runId.ok || lenses === null || criteria === null || !candidateRoster.ok || !judgeRoster.ok || parsedLenses.length === 0) {
@@ -1243,7 +1332,15 @@ export function parseRefutationPanelAuthority(raw: RefutationPanelAuthorityInput
     if (lenses !== null && parsedLenses.length !== lenses.length) errors.push("refutation lenses contain an unknown review lens");
     if (!roster.ok) errors.push(...roster.error.violations.map(({ kind }) => `verifier roster: ${kind}`));
     if (runId.ok && lenses !== null && roster.ok) {
-      errors.push(...rosterAuthorityErrors(roster.value, runId.value, "refutation-panel", "review-verifier-agent", lenses.length));
+      errors.push(...rosterAuthorityErrors(
+        roster.value,
+        runId.value,
+        "refutation-panel",
+        "review-verifier-agent",
+        lenses,
+        "verifier",
+        findings.map(({ id }) => id),
+      ));
     }
     if (errors.length > 0 || !runId.ok || !roster.ok || parsedLenses.length === 0 || findings.length === 0) {
       return persistentFailure(panelError("refutation", "invalid-authority", errors.join("; ") || "refutation authority is invalid"));

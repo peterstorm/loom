@@ -91,8 +91,8 @@ const LOCK_RETRY_MS = 100;
 const wait = (milliseconds: number): Promise<void> =>
   new Promise((resolveWait) => setTimeout(resolveWait, milliseconds));
 
-function processIsAlive(rawPid: string): boolean {
-  const pid = Number(rawPid.trim());
+function processIsAlive(rawOwner: string): boolean {
+  const pid = Number(rawOwner.trim().split(":", 1)[0]);
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
@@ -102,50 +102,121 @@ function processIsAlive(rawPid: string): boolean {
   }
 }
 
-/** Atomically move and inspect one stale descriptor-relative lock. */
-function stealStaleDirectoryLock(directoryFd: number, lockName: string): boolean {
-  const tomb = `${lockName}.tomb-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+/**
+ * Recover one stale descriptor-relative lock without ever removing a lock that
+ * may still have a live owner. The owner is inspected while the canonical lock
+ * name remains occupied; only a proven-dead owner may be moved aside. The
+ * tombstone is then re-read to close the release/reacquire race between the
+ * first observation and the rename.
+ */
+function directoryEntryExistsNoFollow(directoryFd: number, name: string): boolean {
   try {
-    renameSync(procFdChild(directoryFd, lockName), procFdChild(directoryFd, tomb));
-  } catch {
-    return false;
+    readDirectoryFileNoFollow(directoryFd, name);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
   }
-
-  let live = true;
-  try {
-    live = processIsAlive(readDirectoryFileNoFollow(directoryFd, tomb).toString("utf-8"));
-  } catch {
-    live = true;
-  }
-  if (live) {
-    try {
-      renameSync(procFdChild(directoryFd, tomb), procFdChild(directoryFd, lockName));
-    } catch {
-      try { unlinkSync(procFdChild(directoryFd, tomb)); } catch { /* already gone */ }
-    }
-    return false;
-  }
-  unlinkSync(procFdChild(directoryFd, tomb));
-  return true;
 }
 
-async function acquireDirectoryLock(directoryFd: number, lockName: string): Promise<void> {
-  for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
+/**
+ * Stale recovery is serialized by a second exclusive name. Every normal
+ * acquirer checks that guard both before and after publishing its owner token,
+ * so a contender created just as recovery begins withdraws before entering its
+ * critical section. While the guard is held, no new owner can become live and
+ * the canonical stale inode cannot be replaced between observation and rename.
+ */
+export function recoverStaleDirectoryLock(
+  directoryFd: number,
+  lockName: string,
+  afterTombstoned: (tombName: string) => void = () => undefined,
+): boolean {
+  const recoveryName = `${lockName}.recovery`;
+  const recoveryToken = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 12)}`;
+  try {
+    writeDirectoryFileExclusiveNoFollow(directoryFd, recoveryName, recoveryToken);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
+
+  try {
+    let observedOwner: string;
     try {
-      writeDirectoryFileExclusiveNoFollow(directoryFd, lockName, `${process.pid}`);
-      return;
+      observedOwner = readDirectoryFileNoFollow(directoryFd, lockName).toString("utf-8");
+    } catch {
+      return false;
+    }
+    if (processIsAlive(observedOwner)) return false;
+
+    const tomb = `${lockName}.tomb-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      renameSync(procFdChild(directoryFd, lockName), procFdChild(directoryFd, tomb));
+      afterTombstoned(tomb);
+    } catch {
+      return false;
+    }
+
+    let tombOwner: string | null = null;
+    try {
+      tombOwner = readDirectoryFileNoFollow(directoryFd, tomb).toString("utf-8");
+    } catch {
+      tombOwner = null;
+    }
+    if (tombOwner !== observedOwner || tombOwner === null || processIsAlive(tombOwner)) {
+      try {
+        renameSync(procFdChild(directoryFd, tomb), procFdChild(directoryFd, lockName));
+      } catch {
+        // The recovery guard prevents a new legitimate owner from occupying
+        // the canonical name. Failure here is therefore corruption; preserve
+        // the tombstone as evidence and fail closed.
+      }
+      return false;
+    }
+    unlinkSync(procFdChild(directoryFd, tomb));
+    return true;
+  } finally {
+    try {
+      if (readDirectoryFileNoFollow(directoryFd, recoveryName).toString("utf-8") === recoveryToken) {
+        unlinkSync(procFdChild(directoryFd, recoveryName));
+      }
+    } catch {
+      // A missing/foreign recovery guard is never ours to remove.
+    }
+  }
+}
+
+async function acquireDirectoryLock(directoryFd: number, lockName: string): Promise<string> {
+  const ownerToken = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 12)}`;
+  const recoveryName = `${lockName}.recovery`;
+  for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
+    if (directoryEntryExistsNoFollow(directoryFd, recoveryName)) {
+      await wait(LOCK_RETRY_MS);
+      continue;
+    }
+    try {
+      writeDirectoryFileExclusiveNoFollow(directoryFd, lockName, ownerToken);
+      // Recovery may have claimed its guard between the pre-check and our
+      // exclusive create. Withdraw this exact token before entering; the
+      // recovery owner will either reclaim the prior stale file or stand down.
+      if (directoryEntryExistsNoFollow(directoryFd, recoveryName)) {
+        releaseDirectoryLock(directoryFd, lockName, ownerToken);
+        await wait(LOCK_RETRY_MS);
+        continue;
+      }
+      return ownerToken;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (attempt === 0 && stealStaleDirectoryLock(directoryFd, lockName)) continue;
+      if (recoverStaleDirectoryLock(directoryFd, lockName)) continue;
       await wait(LOCK_RETRY_MS);
     }
   }
   throw new Error(`Could not acquire anchored lock after ${LOCK_ATTEMPTS} attempts: ${lockName}`);
 }
 
-function releaseDirectoryLock(directoryFd: number, lockName: string): void {
+function releaseDirectoryLock(directoryFd: number, lockName: string, ownerToken: string): void {
   try {
-    if (readDirectoryFileNoFollow(directoryFd, lockName).toString("utf-8").trim() !== `${process.pid}`) return;
+    if (readDirectoryFileNoFollow(directoryFd, lockName).toString("utf-8").trim() !== ownerToken) return;
     unlinkSync(procFdChild(directoryFd, lockName));
   } catch {
     // Missing/foreign lock: this process no longer owns it.
@@ -164,11 +235,11 @@ export async function withAnchoredDirectoryLock<T>(
   assertLeafName(lockName);
   const directoryFd = openDirectoryNoFollow(directory);
   try {
-    await acquireDirectoryLock(directoryFd, lockName);
+    const ownerToken = await acquireDirectoryLock(directoryFd, lockName);
     try {
       return await operation(directoryFd);
     } finally {
-      releaseDirectoryLock(directoryFd, lockName);
+      releaseDirectoryLock(directoryFd, lockName, ownerToken);
     }
   } finally {
     closeSync(directoryFd);

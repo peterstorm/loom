@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -147,6 +148,20 @@ describe("run directory identity", () => {
     expect(second.ok).toBe(true);
     if (!second.ok) return;
     expect(second.value).toEqual(first.value);
+  });
+
+  it("refuses to reopen a run whose stored root or directory authority drifted", () => {
+    const { root, directory } = freshRun();
+    const path = join(directory, "authority.json");
+    const forged = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    forged["runsRoot"] = join(root, "elsewhere");
+    writeFileSync(path, JSON.stringify(forged));
+
+    const reopened = openRunDirectory(root, directory);
+
+    expect(reopened.ok).toBe(false);
+    if (reopened.ok) return;
+    expect(reopened.error.message).toContain("does not match");
   });
 });
 
@@ -320,6 +335,36 @@ describe("request reservation and transcript capture", () => {
     if (captured.ok) return;
     expect(captured.error.message).toContain("does not match its immutable reservation");
   });
+
+  it("fails issued-request enumeration on malformed authority instead of omitting it", () => {
+    const { directory, handle } = freshRun();
+    writeFileSync(join(directory, "requests", "request-broken.json"), "{broken");
+
+    const issued = handle.readIssuedRequests();
+
+    expect(issued.ok).toBe(false);
+    if (issued.ok) return;
+    expect(issued.error.message).toContain("request-broken.json");
+  });
+
+  it("refuses a harness correlator whose observed role differs from the request", async () => {
+    const { handle } = freshRun();
+    const request = authority();
+    await handle.reserveRequest(request);
+
+    const recorded = await handle.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "pi",
+      nativeId: "native-wrong-role",
+      requestId: request.requestId,
+      role: "silent-failure-hunter",
+      attempt: request.attempt,
+    });
+
+    expect(recorded.ok).toBe(false);
+    if (recorded.ok) return;
+    expect(recorded.error.message).toContain("does not match");
+  });
 });
 
 // --- Artifact-set atomicity -------------------------------------------------
@@ -344,6 +389,20 @@ describe("artifact set publication", () => {
     const { handle } = freshRun();
     const published = await handle.publishArtifactSet([]);
     expect(published.ok).toBe(false);
+  });
+
+  it("serializes concurrent publishers and returns references for the promoted bytes", async () => {
+    const { directory, handle } = freshRun();
+    const attempts = await Promise.all([
+      handle.publishArtifactSet([{ relativePath: "race.bin", bytes: [1, 2, 3] }]),
+      handle.publishArtifactSet([{ relativePath: "race.bin", bytes: [4, 5, 6] }]),
+    ]);
+    const successes = attempts.filter((result) => result.ok);
+    expect(successes).toHaveLength(1);
+    const bytes = readFileSync(join(directory, "artifacts", "race.bin"));
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    if (successes[0]?.ok) expect(successes[0].value[0]?.digest).toBe(digest);
+    expect(readdirSync(join(directory, "artifacts")).some((name) => name.includes(".staged-"))).toBe(false);
   });
 
   it("rejects traversal before it can overwrite a protected run artifact", async () => {

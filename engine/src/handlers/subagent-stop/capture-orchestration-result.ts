@@ -57,11 +57,12 @@ export function claudeFinalPayloadCandidates(transcriptPath: string): readonly F
     }
   })();
 
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const text = assistantTextOf(lines[index]);
-    if (text !== null) return Object.freeze([{ origin: `transcript.line[${index}]`, text }]);
-  }
-  return Object.freeze([]);
+  const finalIndex = lines.length - 1;
+  if (finalIndex < 0) return Object.freeze([]);
+  const text = assistantTextOf(lines[finalIndex]);
+  return text === null
+    ? Object.freeze([])
+    : Object.freeze([{ origin: `transcript.line[${finalIndex}]`, text }]);
 }
 
 function assistantTextOf(line: string | undefined): string | null {

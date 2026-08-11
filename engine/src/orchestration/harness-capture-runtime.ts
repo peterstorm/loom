@@ -146,6 +146,24 @@ export async function captureHarnessResult(args: Readonly<{
   if (request === undefined) {
     return { kind: "rejected", reason: "unknown-request", message: "issued request vanished between binding and capture" };
   }
+  if (correlator.value.role !== request.role) {
+    return {
+      kind: "rejected",
+      reason: "wrong-agent-role",
+      message: `native ${args.harness} result is bound as ${correlator.value.role}, not ${request.role}`,
+    };
+  }
+  const context = handle.readContext(request.contextDigest);
+  if (!context.ok) {
+    return { kind: "rejected", reason: "context", message: context.error.message };
+  }
+  if (context.value.requestId !== request.requestId || context.value.role !== request.role) {
+    return {
+      kind: "rejected",
+      reason: "context-binding",
+      message: `context ${request.contextDigest} does not describe request ${request.requestId}/${request.role}`,
+    };
+  }
   const written = await handle.captureTranscript(request, payload.value.bytes);
   if (!written.ok) return { kind: "rejected", reason: "transcript", message: written.error.message };
 

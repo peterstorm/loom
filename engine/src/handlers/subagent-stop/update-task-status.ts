@@ -460,7 +460,7 @@ export function analyzeNewTests(
  * literals (no module mocking, which bun's vitest shim does not support).
  */
 export interface DiffDeps {
-  readonly isTracked: (file: string) => boolean;
+  readonly isTracked: (file: string) => git.GitTrackedResult;
   readonly diffFiles: (files: string[]) => string;
   readonly diffFilesStaged: (files: string[]) => string;
   readonly diffFilesSince: (revision: string, files: string[]) => string;
@@ -487,8 +487,14 @@ export function collectDiff(
   // attribution therefore fails closed instead of broadening the evidence set.
   if (filesModified.length === 0) return "";
 
-  const tracked = filesModified.filter((file) => deps.isTracked(file));
-  const untracked = filesModified.filter((file) => deps.fileExists(file) && !deps.isTracked(file));
+  const classified = filesModified.map((file) => ({ file, result: deps.isTracked(file) }));
+  const failed = classified.find(({ result }) => !result.ok);
+  if (failed !== undefined && !failed.result.ok) {
+    throw new Error(`new-test diff authority unavailable: ${failed.result.error}`);
+  }
+  const tracked = classified.flatMap(({ file, result }) => result.ok && result.tracked ? [file] : []);
+  const untracked = classified.flatMap(({ file, result }) =>
+    result.ok && !result.tracked && deps.fileExists(file) ? [file] : []);
   return [
     startSha === undefined ? "" : deps.diffFilesSince(startSha, tracked),
     deps.diffFiles(tracked),

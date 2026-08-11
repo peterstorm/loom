@@ -515,7 +515,7 @@ For each wave:
 4. If any wave task never reached `implemented` (agent crashed): re-spawn it (still `pending`, `executing_tasks` was cleared)
 5. **RUN `/wave-gate` — MANDATORY, via subagents** (see below)
 6. If blocked (critical findings): spawn fix agents with the findings, re-run `/wave-gate`
-7. **Triage advisory findings and fix the RELEVANT ones** before advancing (see [Addressing Advisories](#addressing-advisories)). Advisories do not block the gate, but must not be silently dropped.
+7. **Triage advisory findings and fix the RELEVANT ones** before advancing (see [Addressing Advisories](#addressing-advisories)). Advisories bypass refutation but pause the lifecycle at `awaiting-advisory-decision`; record an accept/defer disposition before completion.
 8. **Run the full-tier lint** (`/wave-gate` Step 4c) — the PostEdit `lint-file.sh` hook runs the *immediate* tier (regex rules) only, so the wave gate is the only place the programmatic rules (boundaries, purity, function length, generated-file integrity) ever run. Violations block; never silence one by editing the rule that caught it.
 9. Once the gate passes AND relevant advisories are addressed AND the full-tier lint is clean: advance to next wave
 

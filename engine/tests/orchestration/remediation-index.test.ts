@@ -25,13 +25,18 @@ afterEach(() => {
 });
 
 /** Real Git, fixed identity and config so the fixture is deterministic. */
-function git(root: string, args: readonly string[]): void {
+function gitResult(root: string, args: readonly string[]) {
   const result = spawnSync("git", [...args], {
     cwd: root,
     encoding: "utf-8",
     env: { PATH: process.env["PATH"] ?? "", HOME: root, LC_ALL: "C" },
   });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+  return result;
+}
+
+function git(root: string, args: readonly string[]): void {
+  gitResult(root, args);
 }
 
 function write(root: string, path: string, contents: string): void {
@@ -312,6 +317,29 @@ describe("installing a verified index", () => {
     if (installed.ok) return;
     expect(installed.error.message).toContain("changed since verification");
     expect(installed.error.message).toContain("nothing was installed");
+  });
+
+  it("rechecks the witness under the real index lock and preserves a concurrent writer's staged work", () => {
+    const repository = fixtureRepository();
+    write(repository.root, "src/edited.ts", "export const edited = 2;\n");
+    write(repository.root, "unrelated.ts", "export const unrelated = 2;\n");
+    const { temporary, staged } = stageInto(repository, ["src/edited.ts"]);
+    expect(staged.ok).toBe(true);
+    const witness = snapshotRepositoryWitness(repository);
+    if (!witness.ok) throw new Error(witness.error.message);
+
+    // This is a real Git index writer, not a mocked witness. It lands after
+    // verification and before installation. installVerifiedIndex must acquire
+    // .git/index.lock first, observe the moved index there, and refuse rather
+    // than overwrite the unrelated staged entry.
+    git(repository.root, ["add", "--", "unrelated.ts"]);
+
+    const installed = installVerifiedIndex(repository, temporary, witness.value);
+
+    expect(installed.ok).toBe(false);
+    if (installed.ok) return;
+    expect(installed.error.message).toContain("indexDigest");
+    expect(gitResult(repository.root, ["diff", "--cached", "--name-only"]).stdout.trim()).toBe("unrelated.ts");
   });
 
   it("leaves the real index unchanged when installation is refused", () => {

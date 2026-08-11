@@ -38,10 +38,10 @@ describe("review-panel template placeholder audit", () => {
     expect(residual, `residual placeholders: ${residual.join(" ")}`).toEqual([]);
   });
 
-  it("every declared variable appears in the template and the wave-gate runbook", () => {
+  it("keeps every declared variable inside the engine-owned template boundary", () => {
     for (const v of VARS) {
       expect(template.includes(`{${v}}`), `declared but unused in template: {${v}}`).toBe(true);
-      expect(runbook.includes(`{${v}}`), `runbook never substitutes: {${v}}`).toBe(true);
+      expect(runbook.includes(`{${v}}`), `parent runbook leaked engine substitution variable: {${v}}`).toBe(false);
     }
   });
 

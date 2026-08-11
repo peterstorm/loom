@@ -3,7 +3,7 @@
  *
  * Usage:
  *   helper orchestration status [--json] [--wave N]
- *   helper orchestration start <architecture|refutation> --run <run-directory>
+ *   helper orchestration start <architecture|refutation|standalone-review|wave-gate|remediation> --run <run-directory>
  *                              --runs-root <root> < program.json
  *   helper orchestration resume --run <run-directory> --runs-root <root>
  *   helper orchestration submit --run <run-directory> --runs-root <root>
@@ -11,7 +11,7 @@
  *                               --attempt <1|2>   (raw bytes on stdin)
  *   helper orchestration correlate --run <run-directory> --runs-root <root>
  *                                  --request <request-id> --harness <pi|claude>
- *                                  --native-id <harness-native-id>
+ *                                  --native-id <harness-native-id> --agent <role>
  *   helper orchestration decide --run <run-directory> --runs-root <root>
  *                               --request <decision-id>   (decision on stdin)
  *
@@ -62,12 +62,29 @@ import {
 } from "../../core/panel-program";
 import { resolveModelProfile, lowerModelProfile } from "../../core/model-profiles";
 import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../orchestration/context-packets";
+import { parseRefutationVerdict, type RefutationVerdict } from "../../core/review-panel";
+import { aggregateVerdicts, candidateFilename, parseJudgeVerdict, type JudgeVerdict } from "../../core/panel-contract";
+import type { VerdictEnvelope } from "../../core/panel-kernel";
 import { createEffectRunner } from "../../orchestration/effect-runner";
+import { captureKey } from "../../core/harness-capture";
 import {
   translateLegacyPanelJournal,
   type LegacyArchitecturePanelJournal,
   type LegacyRefutationPanelJournal,
 } from "./panel-program";
+import {
+  applyWaveFacadeSubmission,
+  parseRegisteredFacadeProgram,
+  parseRemediationStartInput,
+  parseStandaloneStartInput,
+  parseWaveGateStartInput,
+  resumeRemediationFacade,
+  resumeStandaloneFacade,
+  resumeWaveGateFacade,
+  startRemediationFacade,
+  startStandaloneFacade,
+  startWaveGateFacade,
+} from "./orchestration-programs";
 
 const OPERATIONS = ["status", "start", "resume", "submit", "correlate", "complete", "decide"] as const;
 type Operation = (typeof OPERATIONS)[number];
@@ -82,11 +99,11 @@ function usage(): HookResult {
       "Usage: bun cli.ts helper orchestration <operation> [flags]",
       "",
       "  status  [--json] [--wave N]",
-      "  start   <architecture|refutation> --runs-root <root> --run <run-directory> < program.json",
+      "  start   <architecture|refutation|standalone-review|wave-gate|remediation> --runs-root <root> --run <run-directory> < program.json",
       "  resume  --runs-root <root> --run <run-directory>",
       "  submit  --runs-root <root> --run <run-directory> --request <id> --slot <id> --attempt <1|2>",
-      "  correlate --runs-root <root> --run <run-directory> --request <id> --harness <pi|claude> --native-id <id>",
-      "  complete --runs-root <root> --run <run-directory> --operation <id> --outcome <succeeded|failed>",
+      "  correlate --runs-root <root> --run <run-directory> --request <id> --harness <pi|claude> --native-id <id> --agent <role>",
+      "  complete --runs-root <root> --run <run-directory> --operation <id>",
       "  decide  --runs-root <root> --run <run-directory> --request <decision-id>",
     ].join("\n"),
   };
@@ -176,6 +193,8 @@ type RegisteredPanelProgram = Readonly<{
   schemaVersion: 1;
   kind: "architecture" | "refutation";
   input: LegacyArchitecturePanelJournal["input"] | LegacyRefutationPanelJournal["input"];
+  /** Exact immutable caller context from which role-specific packets derive. */
+  context: unknown;
 }>;
 
 function parseRegisteredPanelProgram(raw: unknown): RegisteredPanelProgram | null {
@@ -186,7 +205,12 @@ function parseRegisteredPanelProgram(raw: unknown): RegisteredPanelProgram | nul
       typeof record["input"] !== "object" || record["input"] === null) return null;
   const translated = translateLegacyPanelJournal(record["kind"], { input: record["input"], events: [] });
   return translated.ok
-    ? Object.freeze({ schemaVersion: 1, kind: record["kind"], input: translated.value.input })
+    ? Object.freeze({
+        schemaVersion: 1,
+        kind: record["kind"],
+        input: translated.value.input,
+        context: Object.hasOwn(record, "context") ? record["context"] : record["input"],
+      })
     : null;
 }
 
@@ -216,7 +240,9 @@ function materializePanelRequest(
   registration: RegisteredPanelProgram,
   request: PanelSpawnRequest,
 ): Readonly<{ ok: true; value: MaterializedPanelRequest }> | Readonly<{ ok: false; message: string }> {
-  const requestId = parseRequestId(request.id);
+  const requestId = parseRequestId(
+    request.attempt === 1 ? request.id : `${request.id}:attempt-${request.attempt}`,
+  );
   const slotId = parseSlotId(`slot:${createHash("sha256").update(request.id).digest("hex").slice(0, 32)}`);
   const profile = resolveModelProfile(request.modelProfile);
   const role = request.agent as keyof typeof AGENT_REQUIRED_SKILLS;
@@ -230,19 +256,28 @@ function materializePanelRequest(
     };
   }
   const requiredSkill = AGENT_REQUIRED_SKILLS[role];
-  const section = encodeByteSection("panel-request", JSON.stringify({
+  const authoritySection = encodeByteSection("panel-authority", JSON.stringify({
     panel: registration.kind,
-    requestId: request.id,
+    input: registration.input,
+    context: registration.context,
+  }));
+  if (!authoritySection.ok) return { ok: false, message: authoritySection.error.message };
+  const requestSection = encodeByteSection("panel-request", JSON.stringify({
+    panel: registration.kind,
+    logicalRequestId: request.id,
+    requestId: requestId.value,
+    attempt: request.attempt,
+    role: request.agent,
     outputContract: request.outputContract,
   }));
-  if (!section.ok) return { ok: false, message: section.error.message };
+  if (!requestSection.ok) return { ok: false, message: requestSection.error.message };
   const packet = buildContextPacket({
     requestId: requestId.value,
     role: request.agent,
     requiredSkill: requiredSkill ?? "none",
     outputContract: request.outputContract,
-    fixedContext: Object.freeze([]),
-    variableContext: Object.freeze([section.value]),
+    fixedContext: Object.freeze([authoritySection.value]),
+    variableContext: Object.freeze([requestSection.value]),
   });
   if (!packet.ok) return { ok: false, message: packet.error.message };
   const outputSlot = parseFixedArtifactSlot(
@@ -280,7 +315,11 @@ async function materializePanelAction(
     : action.type === "await-user"
       ? [action.request]
       : [];
-  if (panelRequests.length === 0) return { ok: true, action };
+  if (panelRequests.length === 0) {
+    if (action.type === "done") return { ok: true, action: Object.freeze({ kind: "done", ...action, type: undefined }) };
+    if (action.type === "blocked") return { ok: true, action: Object.freeze({ kind: "blocked", runId: handle.runId, diagnostic: action }) };
+    return { ok: true, action };
+  }
 
   const materialized: MaterializedPanelRequest[] = [];
   for (const request of panelRequests) {
@@ -308,20 +347,27 @@ async function materializePanelAction(
   const enriched = materialized.map(({ request, authority, packet }) => Object.freeze({
     ...request,
     authority,
+    // Harness adapters execute this exact task text. The marker binds a Pi
+    // batch item to one issued request without reconstructing authority from
+    // role or lexical request ordering.
+    task: `LOOM_REQUEST_ID: ${authority.requestId}\nLOOM_CONTEXT_DIGEST: ${packet.digest}\n${request.outputContract}`,
     context: Object.freeze({
       digest: packet.digest,
       slot: Object.freeze({ kind: "fixed-artifact-slot", path: `contexts/${packet.digest}.json` }),
     }),
   }));
-  return action.type === "spawn-batch"
-    ? { ok: true, action: Object.freeze({ ...action, requests: Object.freeze(enriched) }) }
-    : { ok: true, action: Object.freeze({ ...action, request: enriched[0] }) };
+  return { ok: true, action: Object.freeze({
+    kind: "spawn-batch",
+    runId: handle.runId,
+    requests: Object.freeze(enriched),
+  }) };
 }
 
-async function driveRegisteredPanel(
+async function nextRegisteredPanelAction(
   handle: RunDirHandle,
   registration: RegisteredPanelProgram,
-): Promise<Readonly<{ ok: true; action: unknown }> | Readonly<{ ok: false; message: string }>> {
+): Promise<Readonly<{ ok: true; action: PanelProgramAction | Readonly<{ type: "await-results"; runId: string }> }> |
+  Readonly<{ ok: false; message: string }>> {
   const records = await handle.readEvents();
   const translated = translateLegacyPanelJournal(registration.kind, {
     input: registration.input,
@@ -337,11 +383,7 @@ async function driveRegisteredPanel(
       if (!reduced.ok) return { ok: false, message: JSON.stringify(reduced.error) };
       step = { ok: true, value: reduced.value };
     }
-    return materializePanelAction(
-      handle,
-      registration,
-      step.value.action ?? { type: "await-results", runId: handle.runId },
-    );
+    return { ok: true, action: step.value.action ?? { type: "await-results", runId: handle.runId } };
   }
 
   let step = startRefutationDispatchProgram(translated.value.input);
@@ -351,17 +393,64 @@ async function driveRegisteredPanel(
     if (!reduced.ok) return { ok: false, message: JSON.stringify(reduced.error) };
     step = { ok: true, value: reduced.value };
   }
-  return materializePanelAction(
-    handle,
-    registration,
-    step.value.action ?? { type: "await-results", runId: handle.runId },
-  );
+  return { ok: true, action: step.value.action ?? { type: "await-results", runId: handle.runId } };
+}
+
+/**
+ * Drive deterministic operations internally until the program reaches a true
+ * external boundary. Publication precedes the immutable success event; resume
+ * safely republishes byte-identical artifacts after a publication→event crash.
+ */
+async function driveRegisteredPanel(
+  handle: RunDirHandle,
+  registration: RegisteredPanelProgram,
+): Promise<Readonly<{ ok: true; action: unknown }> | Readonly<{ ok: false; message: string }>> {
+  for (let operationCount = 0; operationCount <= 4; operationCount += 1) {
+    const next = await nextRegisteredPanelAction(handle, registration);
+    if (!next.ok) return next;
+    if (next.action.type === "await-results") {
+      const issued = handle.readIssuedRequests();
+      const captured = handle.readCapturedAttempts();
+      if (!issued.ok) return { ok: false, message: issued.error.message };
+      if (!captured.ok) return { ok: false, message: captured.error.message };
+      const pending = issued.value.filter((request) => !captured.value.has(captureKey(request.slotId, request.attempt)));
+      return { ok: true, action: Object.freeze({
+        kind: "spawn-batch",
+        runId: handle.runId,
+        requests: Object.freeze(pending.map((authority) => Object.freeze({
+          authority,
+          context: Object.freeze({
+            digest: authority.contextDigest,
+            slot: Object.freeze({ kind: "fixed-artifact-slot", path: `contexts/${authority.contextDigest}.json` }),
+          }),
+          task: `LOOM_REQUEST_ID: ${authority.requestId}\nLOOM_CONTEXT_DIGEST: ${authority.contextDigest}\nComplete the exact pending panel request.`,
+        }))),
+      }) };
+    }
+    if (next.action.type !== "engine-operation") {
+      return materializePanelAction(handle, registration, next.action);
+    }
+    const operationId = next.action.operation;
+    const executed = executeDeterministicPanelOperation(handle, registration, operationId);
+    if (!executed.ok) return executed;
+    const published = await handle.publishArtifactSet(executed.artifacts);
+    if (!published.ok) return { ok: false, message: published.error.message };
+    await handle.appendEvent({
+      schemaVersion: 1,
+      sequence: 0,
+      dedupKey: `engine:${createHash("sha256").update(`${operationId}:succeeded`).digest("hex")}`,
+      recordedAtMs: Date.now(),
+      event: { type: "engine-outcome", operationId, outcome: "succeeded" },
+    });
+  }
+  return { ok: false, message: "panel emitted more deterministic operations than its closed operation vocabulary allows" };
 }
 
 async function startOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
-  const panel = args[0];
-  if (panel !== "architecture" && panel !== "refutation") {
-    return { kind: "error", message: "start requires architecture or refutation" };
+  const program = args[0];
+  if (program !== "architecture" && program !== "refutation" && program !== "standalone-review" &&
+      program !== "wave-gate" && program !== "remediation") {
+    return { kind: "error", message: "start requires architecture, refutation, standalone-review, wave-gate, or remediation" };
   }
   const bound = bindRun(args.slice(1));
   if (!isBound(bound)) return bound;
@@ -371,6 +460,31 @@ async function startOperation(stdin: string, args: readonly string[]): Promise<H
   } catch (error) {
     return { kind: "error", message: `program input is invalid JSON: ${error instanceof Error ? error.message : String(error)}` };
   }
+  if (program === "standalone-review") {
+    const parsed = parseStandaloneStartInput(raw);
+    if (!parsed.ok) return { kind: "error", message: parsed.message };
+    const driven = await startStandaloneFacade(bound.value.handle, parsed.value);
+    if (!driven.ok) return { kind: "error", message: driven.message };
+    process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
+    return { kind: "allow" };
+  }
+  if (program === "remediation") {
+    const parsed = parseRemediationStartInput(raw);
+    if (!parsed.ok) return { kind: "error", message: parsed.message };
+    const driven = await startRemediationFacade(bound.value.handle, parsed.value);
+    if (!driven.ok) return { kind: "error", message: driven.message };
+    process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
+    return { kind: "allow" };
+  }
+  if (program === "wave-gate") {
+    const parsed = parseWaveGateStartInput(raw);
+    if (!parsed.ok) return { kind: "error", message: parsed.message };
+    const driven = await startWaveGateFacade(bound.value.handle, parsed.value);
+    if (!driven.ok) return { kind: "error", message: driven.message };
+    process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
+    return { kind: "allow" };
+  }
+  const panel = program;
   const translated = translateLegacyPanelJournal(panel, raw);
   if (!translated.ok) return { kind: "error", message: translated.error };
   if (translated.value.events.length !== 0) {
@@ -380,6 +494,7 @@ async function startOperation(stdin: string, args: readonly string[]): Promise<H
     schemaVersion: 1,
     kind: panel,
     input: translated.value.input,
+    context: raw,
   });
   const registered = await bound.value.handle.registerProgram(registration);
   if (!registered.ok) return { kind: "error", message: registered.error.message };
@@ -395,6 +510,52 @@ async function startOperation(stdin: string, args: readonly string[]): Promise<H
  * be read is reported as such rather than restarted, because restarting would
  * discard the very evidence that explains the failure.
  */
+async function reconcileCapturedPanelResults(
+  handle: RunDirHandle,
+  registration: RegisteredPanelProgram,
+): Promise<Readonly<{ ok: true }> | Readonly<{ ok: false; message: string }>> {
+  const events = await handle.readEvents();
+  const settled = new Set(events.flatMap(({ event }) => {
+    if (typeof event !== "object" || event === null) return [];
+    const record = event as Record<string, unknown>;
+    return record["type"] === "spawn-outcome" && typeof record["requestId"] === "string" &&
+      (record["attempt"] === 1 || record["attempt"] === 2)
+      ? [`${record["requestId"]}:${record["attempt"]}`]
+      : [];
+  }));
+  const issued = handle.readIssuedRequests();
+  if (!issued.ok) return { ok: false, message: issued.error.message };
+  const captured = handle.readCapturedAttempts();
+  if (!captured.ok) return { ok: false, message: captured.error.message };
+
+  for (const request of issued.value) {
+    if (!captured.value.has(captureKey(request.slotId, request.attempt))) continue;
+    const logicalRequestId = logicalPanelRequestId(request.requestId, request.attempt);
+    if (settled.has(`${logicalRequestId}:${request.attempt}`)) continue;
+    const bytes = handle.readTranscriptBytes(request);
+    if (!bytes.ok) return { ok: false, message: bytes.error.message };
+    const problem = panelSubmissionProblem(
+      registration,
+      logicalRequestId,
+      Buffer.from(bytes.value).toString("utf-8"),
+    );
+    await handle.appendEvent({
+      schemaVersion: 1,
+      sequence: 0,
+      dedupKey: `result:${createHash("sha256").update(`${request.requestId}:${request.attempt}`).digest("hex")}`,
+      recordedAtMs: Date.now(),
+      event: {
+        type: "spawn-outcome",
+        requestId: logicalRequestId,
+        attempt: request.attempt,
+        outcome: problem === null ? "succeeded" : "failed",
+        ...(problem === null ? {} : { error: problem }),
+      },
+    });
+  }
+  return { ok: true };
+}
+
 async function resumeOperation(args: readonly string[]): Promise<HookResult> {
   const bound = bindRun(args);
   if (!isBound(bound)) return bound;
@@ -404,8 +565,21 @@ async function resumeOperation(args: readonly string[]): Promise<HookResult> {
   const stored = bound.value.handle.readProgramRegistration();
   if (!stored.ok) return { kind: "error", message: stored.error.message };
   if (stored.value !== null) {
+    const facadeRegistration = parseRegisteredFacadeProgram(stored.value);
+    if (facadeRegistration !== null) {
+      const driven = facadeRegistration.kind === "standalone-review"
+        ? await resumeStandaloneFacade(bound.value.handle, facadeRegistration)
+        : facadeRegistration.kind === "remediation"
+          ? await resumeRemediationFacade(bound.value.handle, facadeRegistration)
+          : await resumeWaveGateFacade(bound.value.handle, facadeRegistration);
+      if (!driven.ok) return { kind: "error", message: driven.message };
+      process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
+      return { kind: "allow" };
+    }
     const registration = parseRegisteredPanelProgram(stored.value);
     if (registration === null) return { kind: "error", message: "registered orchestration program is malformed" };
+    const reconciled = await reconcileCapturedPanelResults(bound.value.handle, registration);
+    if (!reconciled.ok) return { kind: "error", message: reconciled.message };
     const driven = await driveRegisteredPanel(bound.value.handle, registration);
     if (!driven.ok) return { kind: "error", message: driven.message };
     process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
@@ -420,6 +594,77 @@ async function resumeOperation(args: readonly string[]): Promise<HookResult> {
     runDirectory: authority.value.runDirectory,
   }, null, 2)}\n`);
   return { kind: "allow" };
+}
+
+function logicalPanelRequestId(requestId: string, attempt: 1 | 2): string {
+  return attempt === 2 && requestId.endsWith(":attempt-2")
+    ? requestId.slice(0, -":attempt-2".length)
+    : requestId;
+}
+
+function panelSubmissionProblem(
+  registration: RegisteredPanelProgram,
+  logicalRequestId: string,
+  raw: string,
+): string | null {
+  if (registration.kind === "refutation") {
+    const match = /^refutation:verifier:(\d+)$/.exec(logicalRequestId);
+    const input = registration.input as LegacyRefutationPanelJournal["input"];
+    const index = match === null ? -1 : Number(match[1]) - 1;
+    const lens = input.lenses[index];
+    if (lens === undefined) return `request ${logicalRequestId} is not a canonical verifier slot`;
+    const parsed = parseRefutationVerdict(raw, lens, input.criticalFindingIds);
+    return parsed.ok ? null : parsed.errors.join("; ");
+  }
+
+  const input = registration.input as LegacyArchitecturePanelJournal["input"];
+  const candidateMatch = /^architecture:candidate:(\d+)$/.exec(logicalRequestId);
+  if (candidateMatch !== null) {
+    const index = Number(candidateMatch[1]) - 1;
+    const lens = input.candidateLenses[index];
+    if (lens === undefined) return `request ${logicalRequestId} is not a canonical candidate slot`;
+    try {
+      const value = JSON.parse(raw) as unknown;
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return "architecture candidate must be a JSON object";
+      }
+      const record = value as Record<string, unknown>;
+      const expectedCandidate = candidateFilename(lens);
+      return record["lens"] === lens && record["candidate"] === expectedCandidate &&
+        typeof record["artifact"] === "string" && record["artifact"].trim().length > 0
+        ? null
+        : `architecture candidate must bind lens ${lens}, candidate ${expectedCandidate}, and a non-empty artifact`;
+    } catch (error) {
+      return `architecture candidate is invalid JSON: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  const judgeMatch = /^architecture:judge:(\d+)$/.exec(logicalRequestId);
+  if (judgeMatch !== null) {
+    const criterion = input.judgeCriteria[Number(judgeMatch[1]) - 1];
+    if (criterion === undefined) return `request ${logicalRequestId} is not a canonical judge slot`;
+    const verdict = parseJudgeVerdict(raw, criterion, input.candidateLenses.map(candidateFilename));
+    return verdict.ok ? null : verdict.errors.join("; ");
+  }
+
+  if (logicalRequestId === "architecture:finalize") {
+    try {
+      const value = JSON.parse(raw) as unknown;
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return "architecture finalization must be a JSON object";
+      }
+      const record = value as Record<string, unknown>;
+      const candidates = new Set(input.candidateLenses.map(candidateFilename));
+      return typeof record["selectedCandidate"] === "string" && candidates.has(record["selectedCandidate"] as never) &&
+        typeof record["planArtifact"] === "string" && record["planArtifact"].trim().length > 0
+        ? null
+        : "architecture finalization must select a canonical candidate and name a non-empty plan artifact";
+    } catch (error) {
+      return `architecture finalization is invalid JSON: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  return `request ${logicalRequestId} is not a canonical architecture result slot`;
 }
 
 /**
@@ -458,42 +703,85 @@ async function submitOperation(stdin: string, args: readonly string[]): Promise<
     };
   }
 
-  const effectId = parseEffectId(`effect:capture:${createHash("sha256").update(`${requestId}:${attempt}`).digest("hex")}`);
-  if (!effectId.ok) return { kind: "error", message: effectId.error.message };
-  const captureIntent: Extract<EffectIntent, { kind: "capture-raw-transcript" }> = {
-    kind: "capture-raw-transcript",
-    effectId: effectId.value,
-    runId: reserved.runId,
-    request: reserved,
-    bytes: [...Buffer.from(stdin, "utf-8")],
-  };
-  const unreachablePort = async (): Promise<never> => { throw new Error("effect port is unreachable for transcript capture"); };
-  const runEffect = createEffectRunner({
-    handle: bound.value.handle,
-    ports: {
-      commitProtectedWaveState: unreachablePort,
-      inspectGitRemediation: unreachablePort,
-      installVerifiedIndex: unreachablePort,
-    },
-    resolveArtifacts: () => [],
-  });
-  const captured = await runEffect(captureIntent);
-  if (!captured.ok) return { kind: "error", message: captured.error.message };
-  if (captured.value.kind !== "raw-transcript-captured") {
-    return { kind: "error", message: "transcript capture reconciled to the wrong receipt kind" };
-  }
-
   const stored = bound.value.handle.readProgramRegistration();
   if (!stored.ok) return { kind: "error", message: stored.error.message };
-  if (stored.value !== null) {
-    const registration = parseRegisteredPanelProgram(stored.value);
-    if (registration === null) return { kind: "error", message: "registered orchestration program is malformed" };
+  const facadeRegistration = stored.value === null ? null : parseRegisteredFacadeProgram(stored.value);
+  const registration = stored.value === null ? null : parseRegisteredPanelProgram(stored.value);
+  if (stored.value !== null && registration === null && facadeRegistration === null) {
+    return { kind: "error", message: "registered orchestration program is malformed" };
+  }
+
+  const attempts = bound.value.handle.readCapturedAttempts();
+  if (!attempts.ok) return { kind: "error", message: attempts.error.message };
+  const alreadyCaptured = attempts.value.has(captureKey(reserved.slotId, reserved.attempt));
+  let semanticRaw = stdin;
+  let capturedArtifact: unknown = null;
+
+  if (alreadyCaptured && registration !== null) {
+    const existing = bound.value.handle.readTranscriptBytes(reserved);
+    if (!existing.ok) return { kind: "error", message: existing.error.message };
+    semanticRaw = Buffer.from(existing.value).toString("utf-8");
+  } else {
+    const effectId = parseEffectId(`effect:capture:${createHash("sha256").update(`${requestId}:${attempt}`).digest("hex")}`);
+    if (!effectId.ok) return { kind: "error", message: effectId.error.message };
+    const captureIntent: Extract<EffectIntent, { kind: "capture-raw-transcript" }> = {
+      kind: "capture-raw-transcript",
+      effectId: effectId.value,
+      runId: reserved.runId,
+      request: reserved,
+      bytes: [...Buffer.from(stdin, "utf-8")],
+    };
+    const unreachablePort = async (): Promise<never> => { throw new Error("effect port is unreachable for transcript capture"); };
+    const runEffect = createEffectRunner({
+      handle: bound.value.handle,
+      ports: {
+        commitProtectedWaveState: unreachablePort,
+        inspectGitRemediation: unreachablePort,
+        installVerifiedIndex: unreachablePort,
+      },
+      resolveArtifacts: () => [],
+    });
+    const captured = await runEffect(captureIntent);
+    if (!captured.ok) return { kind: "error", message: captured.error.message };
+    if (captured.value.kind !== "raw-transcript-captured") {
+      return { kind: "error", message: "transcript capture reconciled to the wrong receipt kind" };
+    }
+    capturedArtifact = captured.value;
+  }
+
+  if (facadeRegistration?.kind === "standalone-review") {
+    const driven = await resumeStandaloneFacade(bound.value.handle, facadeRegistration);
+    if (!driven.ok) return { kind: "error", message: driven.message };
+    process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
+    return { kind: "allow" };
+  }
+  if (facadeRegistration?.kind === "wave-gate") {
+    if (reserved.program === "wave-gate") {
+      const applied = await applyWaveFacadeSubmission(bound.value.handle, reserved, semanticRaw);
+      if (!applied.ok) return { kind: "error", message: applied.message };
+    }
+    const driven = await resumeWaveGateFacade(bound.value.handle, facadeRegistration);
+    if (!driven.ok) return { kind: "error", message: driven.message };
+    process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
+    return { kind: "allow" };
+  }
+
+  if (registration !== null) {
+    const numericAttempt = Number(attempt) as 1 | 2;
+    const logicalRequestId = logicalPanelRequestId(requestId, numericAttempt);
+    const problem = panelSubmissionProblem(registration, logicalRequestId, semanticRaw);
     await bound.value.handle.appendEvent({
       schemaVersion: 1,
       sequence: 0,
       dedupKey: `result:${createHash("sha256").update(`${requestId}:${attempt}`).digest("hex")}`,
       recordedAtMs: Date.now(),
-      event: { type: "spawn-outcome", requestId, attempt: Number(attempt), outcome: "succeeded" },
+      event: {
+        type: "spawn-outcome",
+        requestId: logicalRequestId,
+        attempt: numericAttempt,
+        outcome: problem === null ? "succeeded" : "failed",
+        ...(problem === null ? {} : { error: problem }),
+      },
     });
     const driven = await driveRegisteredPanel(bound.value.handle, registration);
     if (!driven.ok) return { kind: "error", message: driven.message };
@@ -504,7 +792,7 @@ async function submitOperation(stdin: string, args: readonly string[]): Promise<
   process.stdout.write(`${JSON.stringify({
     kind: "captured",
     requestId,
-    artifact: captured.value,
+    artifact: capturedArtifact,
   }, null, 2)}\n`);
   return { kind: "allow" };
 }
@@ -522,11 +810,16 @@ async function correlateOperation(args: readonly string[]): Promise<HookResult> 
   if (!issued.ok) return { kind: "error", message: issued.error.message };
   const request = issued.value.find((candidate) => candidate.requestId === requestId);
   if (request === undefined) return { kind: "error", message: `request ${requestId} was never reserved in this run` };
+  const agent = flag(args, "agent");
+  if (agent === null || agent !== request.role) {
+    return { kind: "error", message: `--agent must match reserved request role ${request.role}` };
+  }
   const recorded = await bound.value.handle.recordHarnessCorrelator({
     schemaVersion: 1,
     harness,
     nativeId,
     requestId: request.requestId,
+    role: request.role,
     attempt: request.attempt,
   });
   if (!recorded.ok) return { kind: "error", message: recorded.error.message };
@@ -540,37 +833,168 @@ async function correlateOperation(args: readonly string[]): Promise<HookResult> 
   return { kind: "allow" };
 }
 
+type DeterministicOperationArtifact = Readonly<{ relativePath: string; bytes: readonly number[] }>;
+
+function operationArtifact(relativePath: string, value: unknown): DeterministicOperationArtifact {
+  return Object.freeze({
+    relativePath,
+    bytes: Object.freeze([...Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf-8")]),
+  });
+}
+
+function capturedPanelRaw(
+  handle: RunDirHandle,
+  logicalRequestId: string,
+): Readonly<{ ok: true; raw: string }> | Readonly<{ ok: false; message: string }> {
+  const issued = handle.readIssuedRequests();
+  if (!issued.ok) return { ok: false, message: issued.error.message };
+  const captured = handle.readCapturedAttempts();
+  if (!captured.ok) return { ok: false, message: captured.error.message };
+  const candidates = issued.value
+    .filter((request) => logicalPanelRequestId(request.requestId, request.attempt) === logicalRequestId &&
+      captured.value.has(captureKey(request.slotId, request.attempt)))
+    .sort((left, right) => right.attempt - left.attempt);
+  const request = candidates[0];
+  if (request === undefined) return { ok: false, message: `operation is missing captured result for ${logicalRequestId}` };
+  const bytes = handle.readTranscriptBytes(request);
+  return bytes.ok
+    ? { ok: true, raw: Buffer.from(bytes.value).toString("utf-8") }
+    : { ok: false, message: bytes.error.message };
+}
+
+function executeDeterministicPanelOperation(
+  handle: RunDirHandle,
+  registration: RegisteredPanelProgram,
+  operationId: string,
+): Readonly<{ ok: true; artifacts: readonly DeterministicOperationArtifact[] }> |
+  Readonly<{ ok: false; message: string }> {
+  if (registration.kind === "refutation") {
+    const input = registration.input as LegacyRefutationPanelJournal["input"];
+    if (operationId === "refutation-prepare-verifiers") {
+      return {
+        ok: true,
+        artifacts: Object.freeze([operationArtifact("operations/refutation-prepare-verifiers.json", {
+          schemaVersion: 1, runId: handle.runId, findingIds: input.criticalFindingIds, lenses: input.lenses,
+        })]),
+      };
+    }
+    if (operationId !== "refutation-tally") {
+      return { ok: false, message: `unsupported refutation operation ${operationId}` };
+    }
+    const verdicts: VerdictEnvelope<RefutationVerdict>[] = [];
+    for (let index = 0; index < input.lenses.length; index += 1) {
+      const logicalRequestId = `refutation:verifier:${index + 1}`;
+      const captured = capturedPanelRaw(handle, logicalRequestId);
+      if (!captured.ok) return captured;
+      const parsed = parseRefutationVerdict(captured.raw, input.lenses[index]!, input.criticalFindingIds);
+      if (!parsed.ok) return { ok: false, message: parsed.errors.join("; ") };
+      verdicts.push(parsed.value);
+    }
+    const threshold = Math.floor(input.lenses.length / 2) + 1;
+    const outcomes = input.criticalFindingIds.map((findingId) => {
+      const votes = verdicts.map((verdict, index) => Object.freeze({
+        lens: input.lenses[index]!,
+        vote: verdict.entries.find((entry) => entry.findingId === findingId)!,
+      }));
+      const refutations = votes.filter(({ vote }) => vote.verdict === "refuted");
+      return Object.freeze({
+        finding_id: findingId,
+        survives: refutations.length < threshold,
+        refuted_by: Object.freeze(refutations.map(({ lens }) => lens)),
+        votes: Object.freeze(votes),
+      });
+    });
+    const result = Object.freeze({
+      schemaVersion: 1,
+      kind: "refutation-panel-result",
+      runId: handle.runId,
+      lenses: input.lenses,
+      threshold,
+      outcomes: Object.freeze(outcomes),
+    });
+    return {
+      ok: true,
+      artifacts: Object.freeze([
+        operationArtifact("operations/refutation-tally.json", result),
+        operationArtifact("result.json", result),
+      ]),
+    };
+  }
+
+  const input = registration.input as LegacyArchitecturePanelJournal["input"];
+  const candidates = input.candidateLenses.map(candidateFilename);
+  if (operationId === "architecture-prepare-candidates") {
+    return {
+      ok: true,
+      artifacts: Object.freeze([operationArtifact("operations/architecture-prepare-candidates.json", {
+        schemaVersion: 1, runId: handle.runId, lenses: input.candidateLenses, candidates,
+      })]),
+    };
+  }
+  if (operationId === "architecture-prepare-judges") {
+    const accepted = [];
+    for (let index = 0; index < input.candidateLenses.length; index += 1) {
+      const captured = capturedPanelRaw(handle, `architecture:candidate:${index + 1}`);
+      if (!captured.ok) return captured;
+      const problem = panelSubmissionProblem(registration, `architecture:candidate:${index + 1}`, captured.raw);
+      if (problem !== null) return { ok: false, message: problem };
+      accepted.push(JSON.parse(captured.raw) as unknown);
+    }
+    return {
+      ok: true,
+      artifacts: Object.freeze([operationArtifact("operations/architecture-prepare-judges.json", {
+        schemaVersion: 1, candidates: accepted, criteria: input.judgeCriteria,
+      })]),
+    };
+  }
+  if (operationId === "architecture-aggregate") {
+    const verdicts: JudgeVerdict[] = [];
+    for (let index = 0; index < input.judgeCriteria.length; index += 1) {
+      const captured = capturedPanelRaw(handle, `architecture:judge:${index + 1}`);
+      if (!captured.ok) return captured;
+      const parsed = parseJudgeVerdict(captured.raw, input.judgeCriteria[index]!, candidates);
+      if (!parsed.ok) return { ok: false, message: parsed.errors.join("; ") };
+      verdicts.push(parsed.value);
+    }
+    const ranking = aggregateVerdicts(verdicts, input.judgeCriteria, candidates);
+    if (!ranking.ok) return { ok: false, message: ranking.errors.join("; ") };
+    return {
+      ok: true,
+      artifacts: Object.freeze([
+        operationArtifact("operations/architecture-aggregate.json", {
+          schemaVersion: 1, kind: "architecture-ranking", runId: handle.runId, ranking: ranking.value,
+        }),
+        operationArtifact("ranking.json", ranking.value),
+      ]),
+    };
+  }
+  return { ok: false, message: `unsupported architecture operation ${operationId}` };
+}
+
 async function completeOperation(args: readonly string[]): Promise<HookResult> {
   const bound = bindRun(args);
   if (!isBound(bound)) return bound;
   const operationId = flag(args, "operation");
-  const outcome = flag(args, "outcome");
-  const error = flag(args, "error");
-  if (operationId === null || (outcome !== "succeeded" && outcome !== "failed")) {
-    return { kind: "error", message: "--operation and --outcome (succeeded or failed) are required" };
+  if (operationId === null) {
+    return { kind: "error", message: "--operation is required" };
+  }
+  if (flag(args, "outcome") !== null || flag(args, "error") !== null) {
+    return { kind: "error", message: "deterministic engine operations do not accept caller-attested outcomes" };
   }
   const stored = bound.value.handle.readProgramRegistration();
   if (!stored.ok) return { kind: "error", message: stored.error.message };
   const registration = stored.value === null ? null : parseRegisteredPanelProgram(stored.value);
   if (registration === null) return { kind: "error", message: "complete requires a registered panel program" };
-  const current = await driveRegisteredPanel(bound.value.handle, registration);
-  if (!current.ok) return { kind: "error", message: current.message };
-  const action = current.action as Record<string, unknown> | null;
-  if (action === null || action["type"] !== "engine-operation" || action["operation"] !== operationId) {
-    return { kind: "error", message: `registered panel is not awaiting engine operation ${operationId}` };
+  // Compatibility adapter for historical callers. New façade runs execute
+  // deterministic operations inside start/resume/submit, so complete merely
+  // proves the named operation belongs to the closed vocabulary and returns
+  // the already-reconciled next external action.
+  const allowed = registration.kind === "architecture"
+    ? ["architecture-prepare-candidates", "architecture-prepare-judges", "architecture-aggregate"]
+    : ["refutation-prepare-verifiers", "refutation-tally"];
+  if (!allowed.includes(operationId)) {
+    return { kind: "error", message: `operation ${operationId} does not belong to ${registration.kind}` };
   }
-  await bound.value.handle.appendEvent({
-    schemaVersion: 1,
-    sequence: 0,
-    dedupKey: `engine:${createHash("sha256").update(`${operationId}:${outcome}`).digest("hex")}`,
-    recordedAtMs: Date.now(),
-    event: {
-      type: "engine-outcome",
-      operationId,
-      outcome,
-      ...(error === null ? {} : { error }),
-    },
-  });
   const next = await driveRegisteredPanel(bound.value.handle, registration);
   if (!next.ok) return { kind: "error", message: next.message };
   process.stdout.write(`${JSON.stringify(next.action, null, 2)}\n`);
@@ -589,8 +1013,9 @@ async function decideOperation(stdin: string, args: readonly string[]): Promise<
 
   const registered = bound.value.handle.readProgramRegistration();
   if (!registered.ok) return { kind: "error", message: registered.error.message };
-  if (registered.value !== null) {
-    return { kind: "error", message: "registered panel programs do not accept user decisions" };
+  const facadeRegistration = registered.value === null ? null : parseRegisteredFacadeProgram(registered.value);
+  if (registered.value !== null && facadeRegistration?.kind !== "wave-gate") {
+    return { kind: "error", message: "this registered program does not accept user decisions" };
   }
 
   const decisionId = flag(args, "request");
@@ -617,6 +1042,12 @@ async function decideOperation(stdin: string, args: readonly string[]): Promise<
     event: { kind: "user-decision-recorded", decisionId, decision },
   });
 
+  if (facadeRegistration?.kind === "wave-gate") {
+    const driven = await resumeWaveGateFacade(bound.value.handle, facadeRegistration);
+    if (!driven.ok) return { kind: "error", message: driven.message };
+    process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
+    return { kind: "allow" };
+  }
   process.stdout.write(`${JSON.stringify({ kind: "decision-recorded", decisionId }, null, 2)}\n`);
   return { kind: "allow" };
 }

@@ -2,8 +2,6 @@ import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { REVIEW_PANEL_OPERATIONS } from "../src/handlers/helpers/review-panel";
-import { STANDALONE_REVIEW_OPERATIONS } from "../src/handlers/helpers/standalone-review";
 import { PANEL_CONTRACT_OPERATIONS } from "../src/handlers/helpers/panel-contract";
 import {
   CODEBASE_MATURITIES,
@@ -67,25 +65,11 @@ function mentionsFlag(prose: string, flag: string): boolean {
 
 const PANELS = [
   {
-    label: "review panel",
-    helper: "review-panel",
-    runbook: "commands/wave-gate.md",
-    prose: read("commands", "wave-gate.md"),
-    operations: REVIEW_PANEL_OPERATIONS,
-  },
-  {
     label: "architecture panel",
     helper: "panel-contract",
     runbook: "commands/loom.md",
     prose: read("commands", "loom.md"),
     operations: PANEL_CONTRACT_OPERATIONS,
-  },
-  {
-    label: "standalone review",
-    helper: "standalone-review",
-    runbook: "skills/review-and-fix/SKILL.md",
-    prose: read("skills", "review-and-fix", "SKILL.md"),
-    operations: STANDALONE_REVIEW_OPERATIONS,
   },
 ] as const;
 
@@ -199,15 +183,28 @@ describe("interview digest vocabulary ↔ parseInterviewDigest", () => {
   });
 });
 
-describe("wave-gate review evidence retry contract", () => {
-  const waveGate = read("commands", "wave-gate.md");
+describe("engine-owned orchestration runbook contract", () => {
+  const runbooks = [
+    ["commands/wave-gate.md", read("commands", "wave-gate.md")],
+    ["skills/review-and-fix/SKILL.md", read("skills", "review-and-fix", "SKILL.md")],
+  ] as const;
 
-  it("selects evidence-capture failures and reuses their active packet binding", () => {
-    expect(waveGate).toContain('.review_status == "evidence_capture_failed"');
-    expect(waveGate).toContain("do **not** create another packet");
-    expect(waveGate).toContain(".review_run.packet_id as $packet");
-    expect(waveGate).toContain(".issued_review_packets[] | select(.packet_id == $packet)");
-    expect(waveGate).toContain("review_evidence_failures");
+  it.each(runbooks)("%s starts and resumes only through the façade", (_name, prose) => {
+    expect(prose).toContain("helper orchestration start");
+    expect(prose).toContain("helper orchestration resume");
+  });
+
+  it.each(runbooks)("%s contains no parent-executable deterministic recipes", (_name, prose) => {
+    for (const forbidden of [
+      "helper model-profiles agent",
+      "helper review-panel brief",
+      "helper review-panel manifest",
+      "helper review-panel tally",
+      "helper standalone-review aggregate",
+      "helper standalone-review finalize",
+      "GIT_INDEX_FILE",
+      "git add -A",
+    ]) expect(prose, `parent recipe survived: ${forbidden}`).not.toContain(forbidden);
   });
 });
 

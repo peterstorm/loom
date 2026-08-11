@@ -901,13 +901,19 @@ describe("fresh preparation and request-bound byte capture", () => {
         role: "code-reviewer",
         slot: "standalone-slot:1:code-reviewer",
         profile: "general-review",
-        outputs: ["transcripts/1-code-reviewer/attempt-1.raw", "transcripts/1-code-reviewer/attempt-2.raw"],
+        outputs: [
+          "transcripts/standalone-slot:1:code-reviewer/attempt-1.raw",
+          "transcripts/standalone-slot:1:code-reviewer/attempt-2.raw",
+        ],
       },
       {
         role: "type-design-analyzer",
         slot: "standalone-slot:2:type-design-analyzer",
         profile: "focused-review",
-        outputs: ["transcripts/2-type-design-analyzer/attempt-1.raw", "transcripts/2-type-design-analyzer/attempt-2.raw"],
+        outputs: [
+          "transcripts/standalone-slot:2:type-design-analyzer/attempt-1.raw",
+          "transcripts/standalone-slot:2:type-design-analyzer/attempt-2.raw",
+        ],
       },
     ]);
     expect(new Set(fresh.value.authority.roster.orderedSlots.flatMap((slot) =>

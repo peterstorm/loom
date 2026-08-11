@@ -78,6 +78,8 @@ import {
   RUNS_ROOT_ENV,
   type CaptureOutcome,
 } from "../engine/src/orchestration/harness-capture-runtime";
+import { openRunDirectory } from "../engine/src/orchestration/run-directory-handle";
+import { captureKey } from "../engine/src/core/harness-capture";
 import { materializePiResources } from "./resources";
 import { checkAgentSkillPrompt } from "../engine/src/core/agent-skills";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
@@ -177,10 +179,61 @@ export const piSpawnRosterId = (
  * spawn side records it beside the reservation; a result whose correlator is
  * absent belongs to some other agent and is ignored, not failed.
  *
- * Never throws: capture is evidence collection, and a failure here must not
- * abort the evidence processing that follows. Every non-capture is audited,
- * because silence looks exactly like a run that had nothing to capture.
+ * This is a fail-spawn boundary and therefore throws when exact run/request
+ * authority cannot be recorded. The tool-call guard catches the failure,
+ * rolls back lifecycle reservations, and refuses dispatch.
  */
+export async function recordPiSpawnCorrelators(
+  items: readonly Readonly<{ agent: string; task: string }>[],
+  rosterIds: readonly string[],
+): Promise<void> {
+  const runsRoot = process.env[RUNS_ROOT_ENV];
+  const runDirectory = process.env[RUN_DIR_ENV];
+  if (runsRoot === undefined && runDirectory === undefined) return;
+  if (runsRoot === undefined || runDirectory === undefined) {
+    throw new Error("Pi orchestration spawn requires both run-root and run-directory authority");
+  }
+  if (items.length !== rosterIds.length) throw new Error("Pi correlator roster length does not match spawn batch");
+
+  const opened = openRunDirectory(runsRoot, runDirectory);
+  if (!opened.ok) throw new Error(opened.error.message);
+  const issued = opened.value.readIssuedRequests();
+  if (!issued.ok) throw new Error(issued.error.message);
+  const captured = opened.value.readCapturedAttempts();
+  if (!captured.ok) throw new Error(captured.error.message);
+  const available = issued.value.filter(
+    (request) => !captured.value.has(captureKey(request.slotId, request.attempt)),
+  );
+  const consumed = new Set<string>();
+
+  for (const [index, item] of items.entries()) {
+    const markers = [...item.task.matchAll(/^LOOM_REQUEST_ID:[ \t]*(\S+)[ \t]*$/gm)].map((match) => match[1]!);
+    if (markers.length !== 1) {
+      throw new Error(`Pi spawn item ${index + 1}/${item.agent} must carry exactly one LOOM_REQUEST_ID authority marker`);
+    }
+    const exactRequestId = markers[0]!;
+    const request = available.find((candidate) => candidate.requestId === exactRequestId);
+    if (request === undefined || consumed.has(request.requestId)) {
+      throw new Error(`issued request ${exactRequestId} is unavailable for Pi spawn item ${index + 1}/${item.agent}`);
+    }
+    if (request.role !== item.agent) {
+      throw new Error(`issued request ${exactRequestId} belongs to ${request.role}, not Pi spawn item role ${item.agent}`);
+    }
+    const nativeId = rosterIds[index];
+    if (nativeId === undefined) throw new Error(`Pi spawn item ${index + 1} has no native correlator`);
+    const recorded = await opened.value.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "pi",
+      nativeId,
+      requestId: request.requestId,
+      role: request.role,
+      attempt: request.attempt,
+    });
+    if (!recorded.ok) throw new Error(recorded.error.message);
+    consumed.add(request.requestId);
+  }
+}
+
 export async function capturePiSubagentResult(
   toolCallId: unknown,
   resultIndex: number,
@@ -522,6 +575,11 @@ export default function (pi: ExtensionAPI) {
               taskGraphPointerCreated = true;
             }
           }
+          // Bind every Loom-owned Pi native spawn identity to the exact issued
+          // request before the harness can dispatch the batch. The durable run
+          // directory, not the in-memory lifecycle map below, owns capture
+          // authority for both Pi and Claude.
+          await recordPiSpawnCorrelators(parsedItems, rosterIds);
           for (const index of implementationIndexes) {
             const item = parsedItems[index]!;
             const taskId = extractTaskId(item.task);
@@ -1116,21 +1174,44 @@ export default function (pi: ExtensionAPI) {
 
       // Standalone review/refutation results are run artifacts. Short-circuit
       // before StateManager resolution so an unrelated local graph is neither
-      // read nor mutated merely because it exists.
+      // read nor mutated merely because it exists. When a run directory is
+      // active, however, capture is mandatory evidence: a rejection or missing
+      // correlator must be surfaced rather than disguised as a harmless
+      // task-state short-circuit.
       if (reservedItem?.standalone ?? hasStandaloneReviewContext(result.task ?? "")) {
-        process.stderr.write(
-          piSubagentResultFailed(result)
-            ? `loom(pi): failed standalone ${agentType} result ignored — task state untouched\n`
-            : `loom(pi): ${agentType} belongs to a standalone review run — task state untouched\n`,
-        );
+        const runBound = process.env[RUNS_ROOT_ENV] !== undefined && process.env[RUN_DIR_ENV] !== undefined;
+        if (runBound && captureOutcome.kind !== "captured") {
+          const detail = captureOutcome.kind === "rejected"
+            ? `${captureOutcome.reason}: ${captureOutcome.message}`
+            : captureOutcome.kind === "no-reservation"
+              ? `no reservation for ${captureOutcome.agentId}`
+              : "orchestration run authority was unavailable";
+          const diagnostic = `standalone request-bound capture failed for ${agentType}: ${detail}`;
+          processingErrors.push(diagnostic);
+          process.stderr.write(`loom(pi): ${diagnostic}; task state untouched\n`);
+        } else {
+          process.stderr.write(
+            piSubagentResultFailed(result)
+              ? `loom(pi): failed standalone ${agentType} result ignored — task state untouched\n`
+              : `loom(pi): ${agentType} belongs to a standalone review run — task state untouched\n`,
+          );
+        }
         continue;
       }
 
-      // A request-bound rejection cannot be followed by legacy state mutation:
-      // that would accept evidence the run authority just refused. Unrelated
-      // agents remain `no-reservation` and retain the compatibility path.
-      if (captureOutcome.kind === "rejected") {
-        const diagnostic = `request-bound capture rejected for ${agentType}: ${captureOutcome.reason}: ${captureOutcome.message}`;
+      // Any Loom-owned result under explicit run authority must have exact
+      // request-bound evidence before protected state can change. Only truly
+      // unrelated legacy agents may retain the no-reservation compatibility
+      // path.
+      const runBound = process.env[RUNS_ROOT_ENV] !== undefined && process.env[RUN_DIR_ENV] !== undefined;
+      if (captureOutcome.kind === "rejected" ||
+          (runBound && isLoomOwnedResultAgent(agentType) && captureOutcome.kind !== "captured")) {
+        const detail = captureOutcome.kind === "rejected"
+          ? `${captureOutcome.reason}: ${captureOutcome.message}`
+          : captureOutcome.kind === "no-reservation"
+            ? `no reservation for ${captureOutcome.agentId}`
+            : "orchestration run authority was unavailable";
+        const diagnostic = `request-bound capture rejected for ${agentType}: ${detail}`;
         processingErrors.push(diagnostic);
         process.stderr.write(`loom(pi): ${diagnostic}; protected state unchanged\n`);
         continue;
@@ -1255,7 +1336,9 @@ export default function (pi: ExtensionAPI) {
                 updated_at: new Date().toISOString(),
               }));
             } catch (err) {
-              process.stderr.write(`loom: phase advancement failed: ${(err as Error).message}\n`);
+              const diagnostic = `phase advancement failed: ${err instanceof Error ? err.message : String(err)}`;
+              processingErrors.push(diagnostic);
+              process.stderr.write(`loom: ${diagnostic}\n`);
             }
           }
         }

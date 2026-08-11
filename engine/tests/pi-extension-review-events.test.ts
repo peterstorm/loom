@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { evaluateTaskProof } from "../src/core/proof-obligations";
 import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
 import { openRunDirectory, type RunDirHandle } from "../src/orchestration/run-directory-handle";
+import { buildContextPacket, encodeByteSection } from "../src/orchestration/context-packets";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 
@@ -148,9 +149,23 @@ async function piCaptureRun(runSuffix: string): Promise<Readonly<{
   mkdirSync(runDir, { recursive: true });
   const opened = openRunDirectory(runsRoot, runDir);
   if (!opened.ok) throw new Error(opened.error.message);
+  const requestId = "request:reviewer:1" as AgentRequestAuthority["requestId"];
+  const section = encodeByteSection("test", "Pi capture context");
+  if (!section.ok) throw new Error(section.error.message);
+  const packet = buildContextPacket({
+    requestId,
+    role: "code-reviewer",
+    requiredSkill: "none",
+    outputContract: "review output",
+    fixedContext: [section.value],
+    variableContext: [],
+  });
+  if (!packet.ok) throw new Error(packet.error.message);
+  const published = await opened.value.publishContext(packet.value);
+  if (!published.ok) throw new Error(published.error.message);
   const request = {
     runId: `run.${runSuffix}`,
-    requestId: "request:reviewer:1",
+    requestId,
     slotId: "slot-1",
     program: "wave-gate",
     role: "code-reviewer",
@@ -161,7 +176,7 @@ async function piCaptureRun(runSuffix: string): Promise<Readonly<{
       claude: { harness: "claude-code", model: "sonnet" },
     },
     requiredSkill: null,
-    contextDigest: "a".repeat(64),
+    contextDigest: packet.value.digest,
     outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
   } as AgentRequestAuthority;
   const reserved = await opened.value.reserveRequest(request);
@@ -194,6 +209,7 @@ describe("Pi extension review tool_result integration", () => {
       harness: "pi",
       nativeId,
       requestId: staged.request.requestId,
+      role: staged.request.role,
       attempt: staged.request.attempt,
     });
     expect(correlated.ok).toBe(true);
@@ -224,6 +240,7 @@ describe("Pi extension review tool_result integration", () => {
       harness: "pi",
       nativeId,
       requestId: staged.request.requestId,
+      role: staged.request.role,
       attempt: staged.request.attempt,
     });
     expect(correlated.ok).toBe(true);
@@ -243,6 +260,26 @@ describe("Pi extension review tool_result integration", () => {
     expect(responses).toContainEqual(expect.objectContaining({
       isError: true,
       content: [expect.objectContaining({ text: expect.stringContaining("request-bound capture rejected") })],
+    }));
+  });
+
+  it("does not mutate protected state for a run-bound Loom result with no correlator", async () => {
+    const pi = await extension();
+    const staged = await piCaptureRun("pi-missing-correlator");
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = staged.runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = staged.runDir;
+
+    const responses = await pi.emit("tool_result", {
+      ...reviewResult("Task: T1", "must remain untrusted"),
+      toolCallId: "call-without-correlator",
+    }, {
+      sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad497" },
+    });
+
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings ?? []).toEqual([]);
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("no reservation") })],
     }));
   });
 
@@ -579,6 +616,95 @@ describe("Pi extension review tool_result integration", () => {
       const roster = readFileSync(join(subagentDir, `${session}.active`), "utf-8")
         .split("\n").filter(Boolean);
       expect(roster).toHaveLength(1);
+    } finally {
+      rmSync(join(subagentDir, `${session}.active`), { force: true });
+      renameSync(backup, statePath);
+    }
+  });
+
+  it("records the durable Pi correlator before accepting an orchestration spawn", async () => {
+    const pi = await extension();
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
+    };
+    const staged = await piCaptureRun("pi-spawn-correlator");
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = staged.runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = staged.runDir;
+    const session = "019fca39-f989-7510-8e62-50dadbcad43a";
+    const toolCallId = "call-durable-correlator";
+    const backup = `${statePath}.correlator-spawn-backup`;
+    renameSync(statePath, backup);
+    try {
+      const results = await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: {
+          agent: "code-reviewer",
+          task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${staged.request.requestId}\nReview the exact issued request`,
+          agentScope: "user",
+        },
+      }, { sessionManager: { getSessionId: () => session } });
+
+      expect(results).toEqual([undefined]);
+      const nativeId = module.piSpawnRosterId(toolCallId, 0, "code-reviewer");
+      const binding = staged.handle.readHarnessCorrelator("pi", nativeId);
+      expect(binding.ok).toBe(true);
+      if (binding.ok) {
+        expect(binding.value?.requestId).toBe(staged.request.requestId);
+        expect(binding.value?.role).toBe(staged.request.role);
+      }
+    } finally {
+      rmSync(join(subagentDir, `${session}.active`), { force: true });
+      renameSync(backup, statePath);
+    }
+  });
+
+  it("binds duplicate-role Pi batch items by exact request marker instead of lexical request order", async () => {
+    const pi = await extension();
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
+    };
+    const staged = await piCaptureRun("pi-duplicate-role-correlator");
+    const second = {
+      ...staged.request,
+      requestId: "request:reviewer:10",
+      slotId: "slot-2",
+      outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-2/attempt-1.raw" },
+    } as AgentRequestAuthority;
+    const reserved = await staged.handle.reserveRequest(second);
+    expect(reserved.ok).toBe(true);
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = staged.runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = staged.runDir;
+    const session = "019fca39-f989-7510-8e62-50dadbcad43b";
+    const toolCallId = "call-duplicate-role-correlators";
+    const backup = `${statePath}.duplicate-correlator-spawn-backup`;
+    renameSync(statePath, backup);
+    try {
+      const results = await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: {
+          agentScope: "user",
+          tasks: [
+            { agent: "code-reviewer", task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${second.requestId}\nReview second` },
+            { agent: "code-reviewer", task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${staged.request.requestId}\nReview first` },
+          ],
+        },
+      }, { sessionManager: { getSessionId: () => session } });
+
+      expect(results).toEqual([undefined]);
+      const firstBinding = staged.handle.readHarnessCorrelator(
+        "pi",
+        module.piSpawnRosterId(toolCallId, 0, "code-reviewer"),
+      );
+      const secondBinding = staged.handle.readHarnessCorrelator(
+        "pi",
+        module.piSpawnRosterId(toolCallId, 1, "code-reviewer"),
+      );
+      expect(firstBinding.ok && firstBinding.value?.requestId).toBe(second.requestId);
+      expect(secondBinding.ok && secondBinding.value?.requestId).toBe(staged.request.requestId);
     } finally {
       rmSync(join(subagentDir, `${session}.active`), { force: true });
       renameSync(backup, statePath);

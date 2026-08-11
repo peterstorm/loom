@@ -118,6 +118,15 @@
     ],
     "PostToolUse": [
       {
+        "matcher": "Task|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/record-orchestration-spawn.sh"
+          }
+        ]
+      },
+      {
         "matcher": "Edit",
         "hooks": [
           {

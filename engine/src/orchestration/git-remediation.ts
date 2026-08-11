@@ -31,7 +31,20 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fsyncSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -189,6 +202,16 @@ function changeOf(code: string, present: boolean): ObservedDirtyPath["change"] {
  * Rename entries carry two NUL-separated paths; both halves are reported, so
  * a rename is visible as the pair it is rather than as a single edit.
  */
+export function observeStagedPaths(
+  repository: GitRepository,
+): DomainResult<readonly string[], GitBoundaryError> {
+  const output = runGit(repository.root, {
+    operation: "diff-index-staged",
+    args: ["diff-index", "--cached", "--name-only", "-z", "HEAD"],
+  });
+  return output.ok ? success(Object.freeze([...splitNul(output.value)].sort())) : output;
+}
+
 export function observeDirtyPaths(
   repository: GitRepository,
 ): DomainResult<readonly ObservedDirtyPath[], GitBoundaryError> {
@@ -448,46 +471,62 @@ export function installVerifiedIndex(
   const present = requireTemporaryIndex(temporary, "install");
   if (!present.ok) return present;
 
-  const current = snapshotRepositoryWitness(repository);
-  if (!current.ok) {
-    discardTemporaryIndex(temporary);
-    return current;
-  }
-  const drifted = driftedFields(expectedWitness, current.value);
-  if (drifted.length > 0) {
-    discardTemporaryIndex(temporary);
-    return failure("install", `repository changed since verification (${drifted.join(", ")}); nothing was installed`);
-  }
-
-  const staged = readStagedPaths(repository, temporary);
-  if (!staged.ok) {
-    discardTemporaryIndex(temporary);
-    return staged;
-  }
-
-  // Read the verified tree into the REAL index. `read-tree` writes the index
-  // only; it never touches the work tree, so unrelated unstaged bytes cannot
-  // be disturbed by the installation itself.
-  const tree = runGit(repository.root, {
-    operation: "write-tree",
-    args: ["write-tree"],
-    indexFile: temporary.path,
+  const indexLocation = runGit(repository.root, {
+    operation: "rev-parse-index",
+    args: ["rev-parse", "--git-path", "index"],
   });
-  if (!tree.ok) {
+  if (!indexLocation.ok) {
     discardTemporaryIndex(temporary);
-    return tree;
+    return indexLocation;
   }
-  const installed = runGit(repository.root, {
-    operation: "read-tree",
-    args: ["read-tree", tree.value.toString("utf-8").trim()],
-  });
-  if (!installed.ok) {
+  const rawIndexPath = indexLocation.value.toString("utf-8").trim();
+  if (rawIndexPath.length === 0) {
     discardTemporaryIndex(temporary);
-    return installed;
+    return failure("install", "Git returned an empty real-index path");
   }
+  const indexPath = resolve(repository.root, rawIndexPath);
+  const lockPath = `${indexPath}.lock`;
+  let lockFd: number | null = null;
+  let lockOwned = false;
+  let installed = false;
+  try {
+    lockFd = openSync(
+      lockPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
+      0o600,
+    );
+    lockOwned = true;
 
-  discardTemporaryIndex(temporary);
-  return success(canonicalRecord({ kind: "installed" as const, installedPaths: staged.value }));
+    // The witness is re-read only after the real Git index lock is held. Any
+    // concurrent `git add` either completed before this snapshot (and moves the
+    // digest) or blocks/fails on index.lock; it can no longer land in the old
+    // check→read-tree window and be overwritten.
+    const current = snapshotRepositoryWitness(repository);
+    if (!current.ok) return current;
+    const drifted = driftedFields(expectedWitness, current.value);
+    if (drifted.length > 0) {
+      return failure("install", `repository changed since verification (${drifted.join(", ")}); nothing was installed`);
+    }
+
+    const staged = readStagedPaths(repository, temporary);
+    if (!staged.ok) return staged;
+
+    writeFileSync(lockFd, readFileSync(temporary.path));
+    fsyncSync(lockFd);
+    closeSync(lockFd);
+    lockFd = null;
+    renameSync(lockPath, indexPath);
+    installed = true;
+    return success(canonicalRecord({ kind: "installed" as const, installedPaths: staged.value }));
+  } catch (error) {
+    return failure("install", `cannot atomically install verified index: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    if (lockFd !== null) closeSync(lockFd);
+    if (lockOwned && !installed) {
+      try { unlinkSync(lockPath); } catch { /* already removed */ }
+    }
+    discardTemporaryIndex(temporary);
+  }
 }
 
 function driftedFields(

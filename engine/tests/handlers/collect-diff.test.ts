@@ -13,7 +13,7 @@ import {
 
 function fakeDeps(overrides: Partial<DiffDeps> = {}): DiffDeps {
   return {
-    isTracked: (f) => !f.startsWith("untracked/"),
+    isTracked: (f) => ({ ok: true, tracked: !f.startsWith("untracked/") }),
     diffFiles: (files) => (files.length ? `diff --tracked\n${files.map((f) => `+modified ${f}`).join("\n")}` : ""),
     diffFilesStaged: () => "",
     diffFilesSince: () => "",
@@ -39,7 +39,7 @@ describe("collectDiff", () => {
         return `diff --untracked ${f}\n+content`;
       },
       // Mark test file as untracked so it goes through diffUntracked path from filesModified
-      isTracked: (f) => f === "src/main.ts",
+      isTracked: (f) => ({ ok: true, tracked: f === "src/main.ts" }),
     });
 
     collectDiff(["src/main.ts", "engine/tests/new.test.ts"], deps);
@@ -70,9 +70,16 @@ describe("collectDiff", () => {
   it("collects an attributed untracked test", () => {
     const result = collectDiff(
       ["engine/tests/new.test.ts"],
-      fakeDeps({ isTracked: () => false }),
+      fakeDeps({ isTracked: () => ({ ok: true, tracked: false }) }),
     );
     expect(result).toContain("engine/tests/new.test.ts");
+  });
+
+  it("fails closed when Git cannot establish tracking authority", () => {
+    expect(() => collectDiff(
+      ["engine/tests/existing.test.ts"],
+      fakeDeps({ isTracked: () => ({ ok: false, error: "git index unreadable" }) }),
+    )).toThrow("new-test diff authority unavailable");
   });
 
   it("proves new tests from tracked unstaged worktree changes for every harness", () => {

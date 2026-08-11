@@ -17,12 +17,16 @@ import captureOrchestrationResult, {
   claudeFinalPayloadCandidates,
   readIssuedRequests,
 } from "../../src/handlers/subagent-stop/capture-orchestration-result";
+import { recordClaudeSpawnCorrelation } from "../../src/handlers/post-tool-use/record-orchestration-spawn";
 import { piFinalPayloadCandidates, piResultFinalPayloadCandidates } from "../../../pi/transcript-adapter";
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
 import { captureAuditLine, captureHarnessResult } from "../../src/orchestration/harness-capture-runtime";
+import { buildContextPacket, encodeByteSection } from "../../src/orchestration/context-packets";
 import {
+  BENCHMARK_SCENARIOS,
   characterCount,
   reduction,
+  replayBenchmarkScenario,
   FACADE_STATUS_COMMANDS,
   LEGACY_STATUS_COMMANDS,
   REQUIRED_CALL_REDUCTION,
@@ -180,15 +184,26 @@ describe("Pi and Claude reach the same result", () => {
     expect(piReceipt.value.harness).not.toBe(claudeReceipt.value.harness);
   });
 
-  it("refuses a multi-block Pi result on both sides alike", () => {
-    const extracted = piFinalPayloadCandidates([
+  it("refuses a multi-block result through both harness adapters", () => {
+    const pi = piFinalPayloadCandidates([
       { type: "text", text: "first" },
       { type: "text", text: "second" },
     ]);
-    expect(extracted.ok).toBe(true);
-    if (!extracted.ok) return;
+    expect(pi.ok).toBe(true);
+    if (!pi.ok) return;
 
-    expect(parseFinalPayload(extracted.value).ok).toBe(false);
+    const root = mkdtempSync(join(tmpdir(), "loom-parity-multiblock-"));
+    cleanup.push(root);
+    const transcript = join(root, "transcript.jsonl");
+    writeFileSync(transcript, `${JSON.stringify({
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "first" }, { type: "text", text: "second" }],
+      },
+    })}\n`);
+
+    expect(parseFinalPayload(pi.value).ok).toBe(false);
+    expect(parseFinalPayload(claudeFinalPayloadCandidates(transcript)).ok).toBe(false);
   });
 
   it("ignores non-text Pi blocks when collecting candidates", () => {
@@ -220,9 +235,26 @@ describe("Pi and Claude reach the same result", () => {
       mkdirSync(directory, { recursive: true });
       const opened = openRunDirectory(runsRoot, directory);
       if (!opened.ok) throw new Error(opened.error.message);
-      // Reserve through the handle, exactly as the spawn side does: the
-      // reservation is what creates the attempt slot the capture writes into.
-      const request = authority({ runId: "run.capture-parity" as AgentRequestAuthority["runId"] });
+      // Publish the immutable request context before reservation, exactly as
+      // the spawn side does; capture re-hashes this packet before accepting
+      // evidence.
+      const base = authority({ runId: "run.capture-parity" as AgentRequestAuthority["runId"] });
+      const section = encodeByteSection("test", "capture parity context");
+      if (!section.ok) throw new Error(section.error.message);
+      const packet = buildContextPacket({
+        requestId: base.requestId,
+        role: base.role,
+        requiredSkill: "none",
+        outputContract: "test output",
+        fixedContext: [section.value],
+        variableContext: [],
+      });
+      if (!packet.ok) throw new Error(packet.error.message);
+      if (!(await opened.value.publishContext(packet.value)).ok) throw new Error("context publication failed");
+      const request = authority({
+        runId: "run.capture-parity" as AgentRequestAuthority["runId"],
+        contextDigest: packet.value.digest,
+      });
       const reserved = await opened.value.reserveRequest(request);
       if (!reserved.ok) throw new Error(reserved.error.message);
       return { runsRoot, directory, request };
@@ -242,6 +274,7 @@ describe("Pi and Claude reach the same result", () => {
         harness,
         nativeId,
         requestId: request.requestId,
+        role: request.role,
         attempt: request.attempt,
       });
       if (!recorded.ok) throw new Error(recorded.error.message);
@@ -265,6 +298,23 @@ describe("Pi and Claude reach the same result", () => {
       expect(
         readFileSync(join(directory, "transcripts", request.slotId, `attempt-${request.attempt}.raw`), "utf-8"),
       ).toBe(AGENT_OUTPUT);
+    });
+
+    it("rejects capture when the reserved immutable context was tampered with", async () => {
+      const { runsRoot, directory, request } = await stagedRun();
+      await correlate(runsRoot, directory, "pi", "pi-native-context", request);
+      writeFileSync(join(directory, "contexts", `${request.contextDigest}.json`), "{}");
+
+      const outcome = await captureHarnessResult({
+        harness: "pi",
+        runsRoot,
+        runDirectory: directory,
+        nativeId: "pi-native-context",
+        candidates: piCandidates(AGENT_OUTPUT),
+      });
+
+      expect(outcome.kind).toBe("rejected");
+      if (outcome.kind === "rejected") expect(outcome.reason).toBe("context");
     });
 
     it("writes byte-identical transcripts from either harness", async () => {
@@ -538,17 +588,42 @@ describe("Claude capture against a real run directory", () => {
 
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
-    const request = authority();
+    const base = authority();
+    const section = encodeByteSection("test", "Claude capture context");
+    if (!section.ok) throw new Error(section.error.message);
+    const packet = buildContextPacket({
+      requestId: base.requestId,
+      role: base.role,
+      requiredSkill: "none",
+      outputContract: "test output",
+      fixedContext: [section.value],
+      variableContext: [],
+    });
+    if (!packet.ok) throw new Error(packet.error.message);
+    if (!(await opened.value.publishContext(packet.value)).ok) throw new Error("context publication failed");
+    const request = authority({ contextDigest: packet.value.digest });
     const reserved = await opened.value.reserveRequest(request);
     if (!reserved.ok) throw new Error(reserved.error.message);
-    const correlated = await opened.value.recordHarnessCorrelator({
-      schemaVersion: 1,
-      harness: "claude",
-      nativeId: "agent-abc",
-      requestId: request.requestId,
-      attempt: request.attempt,
-    });
-    if (!correlated.ok) throw new Error(correlated.error.message);
+    const previousRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+    const previousRun = process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = runDir;
+    try {
+      const correlated = await recordClaudeSpawnCorrelation({
+        tool_name: "Agent",
+        tool_input: {
+          subagent_type: "code-reviewer",
+          prompt: `LOOM_REQUEST_ID: ${request.requestId}\nReview the reserved packet`,
+        },
+        tool_response: { agent_id: "agent-abc" },
+      });
+      if (correlated.kind === "error") throw new Error(correlated.message);
+    } finally {
+      if (previousRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+      else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;
+      if (previousRun === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+      else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousRun;
+    }
     return { runsRoot, runDir };
   }
 
@@ -559,6 +634,48 @@ describe("Claude capture against a real run directory", () => {
     })}\n`);
     return path;
   }
+
+  it("persists exact Claude native-id/request/role authority at spawn acceptance", async () => {
+    const { runsRoot, runDir } = await stagedRun();
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+
+    const binding = opened.value.readHarnessCorrelator("claude", "agent-abc");
+    expect(binding.ok).toBe(true);
+    if (!binding.ok) return;
+    expect(binding.value).toMatchObject({
+      requestId: "request:reviewer:1",
+      role: "code-reviewer",
+      attempt: 1,
+    });
+  });
+
+  it("rejects a Claude spawn whose exact request belongs to another role", async () => {
+    const { runsRoot, runDir } = await stagedRun();
+    const previousRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+    const previousRun = process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = runDir;
+    try {
+      const result = await recordClaudeSpawnCorrelation({
+        tool_name: "Agent",
+        tool_input: {
+          subagent_type: "silent-failure-hunter",
+          prompt: "LOOM_REQUEST_ID: request:reviewer:1\nReview",
+        },
+        tool_response: { agent_id: "agent-wrong-role" },
+      });
+      expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("belongs to code-reviewer") });
+      const opened = openRunDirectory(runsRoot, runDir);
+      if (!opened.ok) throw new Error(opened.error.message);
+      expect(opened.value.readHarnessCorrelator("claude", "agent-wrong-role")).toMatchObject({ ok: true, value: null });
+    } finally {
+      if (previousRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+      else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;
+      if (previousRun === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+      else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousRun;
+    }
+  });
 
   it("captures a reserved request's exact bytes", async () => {
     const { runsRoot, runDir } = await stagedRun();
@@ -656,8 +773,10 @@ describe("Claude capture against a real run directory", () => {
       runDir,
     );
 
-    // The unparseable tail is skipped; the last COMPLETE assistant message wins.
-    expect(outcome.kind).toBe("captured");
+    // A malformed terminal record invalidates the final-payload boundary; an
+    // earlier assistant message is never salvaged as canonical evidence.
+    expect(outcome.kind).toBe("rejected");
+    if (outcome.kind === "rejected") expect(outcome.reason).toBe("no-final-payload");
   });
 
   it("reports a missing transcript rather than capturing nothing silently", async () => {
@@ -700,6 +819,30 @@ describe("Claude capture against a real run directory", () => {
 // --- Benchmark ---------------------------------------------------------------
 
 describe("deterministic parent-call benchmark", () => {
+  it.each(BENCHMARK_SCENARIOS)("replays $id to the same canonical terminal outcome and artifacts", (scenario) => {
+    const legacy = replayBenchmarkScenario(scenario, "legacy");
+    const facade = replayBenchmarkScenario(scenario, "facade");
+
+    expect(facade.terminal).toBe(legacy.terminal);
+    expect(facade.artifacts).toEqual(legacy.artifacts);
+  });
+
+  it("covers all five approved lifecycle scenarios", () => {
+    expect(BENCHMARK_SCENARIOS.map(({ id }) => id)).toEqual([
+      "two-task-clean-wave",
+      "missing-reviewer-retry",
+      "mixed-refutation-wave",
+      "standalone-six-reviewers",
+      "remediation-add-delete",
+    ]);
+  });
+
+  it("moves journals, transcript publication, model loops, and raw-output embedding out of facade calls", () => {
+    const forbidden = FACADE_STATUS_COMMANDS.filter((command) =>
+      /\bjq\b|active_task_graph\.json|model-profiles agent|reviewers\/\d+\.md|review-panel verdict|GIT_INDEX_FILE/.test(command));
+    expect(forbidden).toEqual([]);
+  });
+
   // Measured from the transcribed command sequences, never from prose.
   const legacyCalls = LEGACY_STATUS_COMMANDS.length;
   const facadeCalls = FACADE_STATUS_COMMANDS.length;

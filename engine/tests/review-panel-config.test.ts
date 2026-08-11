@@ -17,7 +17,6 @@ import { categorize } from "../src/handlers/subagent-stop/dispatch";
 import { VALIDATED_AGENTS } from "../src/handlers/pre-tool-use/validate-agent-skill";
 import { KNOWN_HANDLERS } from "../src/handler-routes";
 import {
-  defaultRefutationThreshold,
   REVIEW_LENSES,
   REVIEW_LENSES_DEFAULT,
   REVIEW_LENSES_MIN,
@@ -99,45 +98,20 @@ describe("review-panel helper route", () => {
   });
 });
 
-describe("wave-gate.md prose tracks the review-panel contract", () => {
+describe("wave-gate.md delegates the review-panel contract to the façade", () => {
   const runbook = readFileSync(join(REPO_ROOT, "commands", "wave-gate.md"), "utf-8");
 
-  it("documents every helper operation the handler implements", () => {
-    for (const operation of ["brief", "manifest", "lenses", "verdict", "tally"]) {
-      expect(runbook).toContain(`helper review-panel ${operation}`);
+  it("starts the registered Wave Gate and never exposes deterministic panel helpers", () => {
+    expect(runbook).toContain("helper orchestration start wave-gate");
+    expect(runbook).toContain("Refutation Panel routing");
+    expect(runbook).not.toContain("helper review-panel");
+    expect(runbook).not.toContain("--threshold");
+  });
+
+  it("allows only the closed parent-facing action vocabulary", () => {
+    for (const action of ["spawn-batch", "await-user", "blocked", "done"]) {
+      expect(runbook).toContain(`\`${action}\``);
     }
-  });
-
-  it("spawns the agent the registry declares", () => {
-    for (const agent of REVIEW_PANEL_AGENTS) {
-      expect(runbook).toContain(agent);
-    }
-  });
-
-  it("states the default panel size and the tie rule", () => {
-    expect(runbook).toContain(`Default panel size is ${REVIEW_LENSES_DEFAULT}`);
-    expect(runbook).toContain("Ties favor keeping the finding");
-  });
-
-  it("names the baseline lenses and both signal-driven ones", () => {
-    for (const lens of REVIEW_LENSES) expect(runbook).toContain(lens);
-  });
-
-  it("quotes threshold values the formula actually produces", () => {
-    // The one gap in this suite: the prose enumerates concrete pairs while
-    // `defaultRefutationThreshold` computes floor(n/2)+1, and nothing bound the
-    // two. Generated from the function rather than hardcoded, so changing the
-    // formula fails here instead of silently making the runbook lie.
-    for (const lensCount of [2, 3, 5]) {
-      expect(runbook).toContain(`${defaultRefutationThreshold(lensCount)} of ${lensCount}`);
-    }
-  });
-
-  it("states that a strict majority is the FLOOR, not merely the default", () => {
-    // `--threshold` below the majority is now rejected by the handler; a runbook
-    // that only calls it "the default" invites an orchestrator to lower it.
-    expect(runbook).toMatch(/strict majority/);
-    expect(runbook).toContain("--threshold");
   });
 });
 
