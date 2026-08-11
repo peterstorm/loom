@@ -1,0 +1,93 @@
+{
+  "state": {
+    "panel": "architecture",
+    "input": {
+      "candidateLenses": [
+        "simplicity-first",
+        "type-driven-fp",
+        "risk-security-first"
+      ],
+      "judgeCriteria": [
+        "simplicity",
+        "pure functional core",
+        "codebase fit + effort"
+      ]
+    },
+    "stage": "judges",
+    "slots": [
+      {
+        "request": {
+          "id": "architecture:judge:1",
+          "agent": "arch-judge-agent",
+          "interaction": "headless",
+          "modelProfile": "panel-judge",
+          "attempt": 1,
+          "outputContract": "canonical judge verdict for criterion \"simplicity\" covering every candidate exactly once"
+        },
+        "status": "pending"
+      },
+      {
+        "request": {
+          "id": "architecture:judge:2",
+          "agent": "arch-judge-agent",
+          "interaction": "headless",
+          "modelProfile": "panel-judge",
+          "attempt": 1,
+          "outputContract": "canonical judge verdict for criterion \"pure functional core\" covering every candidate exactly once"
+        },
+        "status": "pending"
+      },
+      {
+        "request": {
+          "id": "architecture:judge:3",
+          "agent": "arch-judge-agent",
+          "interaction": "headless",
+          "modelProfile": "panel-judge",
+          "attempt": 1,
+          "outputContract": "canonical judge verdict for criterion \"codebase fit + effort\" covering every candidate exactly once"
+        },
+        "status": "pending"
+      }
+    ],
+    "completedRequestIds": [
+      "architecture:interview",
+      "architecture:candidate:1",
+      "architecture:candidate:2",
+      "architecture:candidate:3"
+    ],
+    "completedOperationIds": [
+      "architecture-prepare-candidates",
+      "architecture-prepare-judges"
+    ]
+  },
+  "action": {
+    "type": "spawn-batch",
+    "execution": "parallel",
+    "requests": [
+      {
+        "id": "architecture:judge:1",
+        "agent": "arch-judge-agent",
+        "interaction": "headless",
+        "modelProfile": "panel-judge",
+        "attempt": 1,
+        "outputContract": "canonical judge verdict for criterion \"simplicity\" covering every candidate exactly once"
+      },
+      {
+        "id": "architecture:judge:2",
+        "agent": "arch-judge-agent",
+        "interaction": "headless",
+        "modelProfile": "panel-judge",
+        "attempt": 1,
+        "outputContract": "canonical judge verdict for criterion \"pure functional core\" covering every candidate exactly once"
+      },
+      {
+        "id": "architecture:judge:3",
+        "agent": "arch-judge-agent",
+        "interaction": "headless",
+        "modelProfile": "panel-judge",
+        "attempt": 1,
+        "outputContract": "canonical judge verdict for criterion \"codebase fit + effort\" covering every candidate exactly once"
+      }
+    ]
+  }
+}

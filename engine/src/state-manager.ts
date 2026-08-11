@@ -7,6 +7,7 @@
  * Replaces: state-file-write.sh, resolve-task-graph.sh, loom-config.sh
  */
 
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, chmodSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { withLock } from "./utils/lock";
@@ -23,7 +24,17 @@ import {
   resolutionsUnionError,
   reviewRunError,
 } from "./core/findings";
-import type { TaskGraph } from "./types";
+import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, TaskGraph } from "./types";
+import type { DomainResult, OrchestrationRunId } from "./core/orchestration-contract";
+import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
+import {
+  parseArtifactDigest,
+  parseArtifactRef,
+  parseBlockedDiagnostic,
+  parseEffectId,
+  parseOrchestrationRunId,
+  parseSlotId,
+} from "./core/orchestration-contract";
 import { deriveProofObligations, parseTaskProof } from "./core/proof-obligations";
 import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
 import { parseStoredSpecCheck } from "./core/spec-check";
@@ -120,6 +131,140 @@ function specCheckError(v: unknown): string | null {
   if (v === undefined) return null;
   const parsed = parseStoredSpecCheck(v);
   return parsed.ok ? null : parsed.errors.join("; ");
+}
+
+const ACTIVE_WAVE_GATE_FIELDS = [
+  "schemaVersion", "kind", "runId", "wave", "authorityDigest", "revision", "terminalOutcome",
+] as const;
+
+/** Parse and re-prove the protected active-run anchor from unknown JSON. */
+export function parseActiveWaveGateRegistration(raw: unknown): ParseResult<ActiveWaveGateRegistration> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return parseErr("active_wave_gate must be an object");
+  }
+  const record = raw as Record<string, unknown>;
+  const unknownFields = Object.keys(record).filter((field) => !(ACTIVE_WAVE_GATE_FIELDS as readonly string[]).includes(field));
+  const missingFields = ACTIVE_WAVE_GATE_FIELDS.filter((field) => !(field in record));
+  if (unknownFields.length > 0) return parseErr(`active_wave_gate contains unknown field(s): ${unknownFields.sort().join(", ")}`);
+  if (missingFields.length > 0) return parseErr(`active_wave_gate is missing field(s): ${missingFields.join(", ")}`);
+  if (record.schemaVersion !== 1) return parseErr("active_wave_gate.schemaVersion must be 1");
+  if (record.kind !== "active-wave-gate") return parseErr("active_wave_gate.kind must be active-wave-gate");
+  const runId = parseOrchestrationRunId(record.runId);
+  if (!runId.ok) return parseErr(`active_wave_gate.runId: ${runId.error.message}`);
+  const authorityDigest = parseArtifactDigest(record.authorityDigest);
+  if (!authorityDigest.ok) return parseErr(`active_wave_gate.authorityDigest: ${authorityDigest.error.message}`);
+  if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
+    return parseErr("active_wave_gate.wave must be an integer >= 1");
+  }
+  if (typeof record.revision !== "number" || !Number.isSafeInteger(record.revision) || record.revision < 0) {
+    return parseErr("active_wave_gate.revision must be a non-negative safe integer");
+  }
+
+  let terminalOutcome: ActiveWaveGateRegistration["terminalOutcome"] = null;
+  if (record.terminalOutcome !== null) {
+    if (typeof record.terminalOutcome !== "object" || Array.isArray(record.terminalOutcome)) {
+      return parseErr("active_wave_gate.terminalOutcome must be null or an object");
+    }
+    const terminal = record.terminalOutcome as Record<string, unknown>;
+    if (terminal.kind === "done") {
+      const keys = Object.keys(terminal);
+      if (keys.length !== 2 || !keys.includes("outcome")) {
+        return parseErr("active_wave_gate.terminalOutcome done must contain exactly kind and outcome");
+      }
+      const outcome = parseArtifactRef(terminal.outcome);
+      if (!outcome.ok) return parseErr(`active_wave_gate.terminalOutcome.outcome: ${outcome.error.message}`);
+      if (outcome.value.runId !== runId.value) return parseErr("active_wave_gate done outcome belongs to a different run");
+      terminalOutcome = Object.freeze({ kind: "done", outcome: outcome.value });
+    } else if (terminal.kind === "terminal-blocked") {
+      const keys = Object.keys(terminal);
+      if (keys.length !== 2 || !keys.includes("diagnostic")) {
+        return parseErr("active_wave_gate.terminalOutcome terminal-blocked must contain exactly kind and diagnostic");
+      }
+      const diagnostic = parseBlockedDiagnostic(terminal.diagnostic);
+      if (!diagnostic.ok) return parseErr(`active_wave_gate.terminalOutcome.diagnostic: ${diagnostic.error.message}`);
+      if (diagnostic.value.kind !== "terminal-blocked") {
+        return parseErr("active_wave_gate terminal-blocked outcome requires a terminal diagnostic");
+      }
+      if (diagnostic.value.runId !== runId.value) return parseErr("active_wave_gate terminal diagnostic belongs to a different run");
+      terminalOutcome = Object.freeze({ kind: "terminal-blocked", diagnostic: diagnostic.value });
+    } else {
+      return parseErr("active_wave_gate.terminalOutcome.kind must be done or terminal-blocked");
+    }
+  }
+
+  return parseOk(Object.freeze({
+    schemaVersion: 1,
+    kind: "active-wave-gate",
+    runId: runId.value,
+    wave: record.wave,
+    authorityDigest: authorityDigest.value,
+    revision: record.revision,
+    terminalOutcome,
+  }));
+}
+
+const COMPLETED_WAVE_GATE_FIELDS = [
+  "schemaVersion", "kind", "runId", "wave", "authorityDigest", "revision", "completionReceipt",
+] as const;
+
+/** Parse immutable terminal history independently from active next-Wave authority. */
+export function parseCompletedWaveGateRegistration(raw: unknown): ParseResult<CompletedWaveGateRegistration> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return parseErr("wave_gate_history entry must be an object");
+  }
+  const record = raw as Record<string, unknown>;
+  const unknownFields = Object.keys(record).filter((field) => !(COMPLETED_WAVE_GATE_FIELDS as readonly string[]).includes(field));
+  const missingFields = COMPLETED_WAVE_GATE_FIELDS.filter((field) => !(field in record));
+  if (unknownFields.length > 0) return parseErr(`wave_gate_history entry contains unknown field(s): ${unknownFields.sort().join(", ")}`);
+  if (missingFields.length > 0) return parseErr(`wave_gate_history entry is missing field(s): ${missingFields.join(", ")}`);
+  if (record.schemaVersion !== 1 || record.kind !== "completed-wave-gate") {
+    return parseErr("wave_gate_history entry must be completed-wave-gate schemaVersion 1");
+  }
+  const runId = parseOrchestrationRunId(record.runId);
+  const authorityDigest = parseArtifactDigest(record.authorityDigest);
+  if (!runId.ok) return parseErr(`wave_gate_history.runId: ${runId.error.message}`);
+  if (!authorityDigest.ok) return parseErr(`wave_gate_history.authorityDigest: ${authorityDigest.error.message}`);
+  if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
+    return parseErr("wave_gate_history.wave must be an integer >= 1");
+  }
+  if (typeof record.revision !== "number" || !Number.isSafeInteger(record.revision) || record.revision < 1) {
+    return parseErr("wave_gate_history.revision must be a positive safe integer");
+  }
+  if (typeof record.completionReceipt !== "object" || record.completionReceipt === null || Array.isArray(record.completionReceipt)) {
+    return parseErr("wave_gate_history.completionReceipt must be an object");
+  }
+  const receipt = record.completionReceipt as Record<string, unknown>;
+  const receiptKeys = Object.keys(receipt).sort();
+  const expectedReceiptKeys = ["committedRevision", "effectId", "kind", "runId", "stateDigest"].sort();
+  if (receiptKeys.length !== expectedReceiptKeys.length || receiptKeys.some((key, index) => key !== expectedReceiptKeys[index])) {
+    return parseErr("wave_gate_history.completionReceipt must contain exactly kind/effectId/runId/committedRevision/stateDigest");
+  }
+  if (receipt.kind !== "protected-wave-state-committed") {
+    return parseErr("wave_gate_history.completionReceipt.kind must be protected-wave-state-committed");
+  }
+  const effectId = parseEffectId(receipt.effectId);
+  const receiptRunId = parseOrchestrationRunId(receipt.runId);
+  const stateDigest = parseArtifactDigest(receipt.stateDigest);
+  if (!effectId.ok) return parseErr(`wave_gate_history.completionReceipt.effectId: ${effectId.error.message}`);
+  if (!receiptRunId.ok) return parseErr(`wave_gate_history.completionReceipt.runId: ${receiptRunId.error.message}`);
+  if (!stateDigest.ok) return parseErr(`wave_gate_history.completionReceipt.stateDigest: ${stateDigest.error.message}`);
+  if (receiptRunId.value !== runId.value) return parseErr("wave_gate_history completion receipt belongs to a different run");
+  if (receipt.committedRevision !== record.revision) return parseErr("wave_gate_history completion receipt revision must equal terminal revision");
+  return parseOk(Object.freeze({
+    schemaVersion: 1,
+    kind: "completed-wave-gate",
+    runId: runId.value,
+    wave: record.wave,
+    authorityDigest: authorityDigest.value,
+    revision: record.revision,
+    completionReceipt: Object.freeze({
+      kind: "protected-wave-state-committed",
+      effectId: effectId.value,
+      runId: runId.value,
+      committedRevision: record.revision,
+      stateDigest: stateDigest.value,
+    }),
+  }));
 }
 
 export const TASK_ID_PATTERN = /^T\d+$/;
@@ -435,6 +580,36 @@ export function taskUnionError(v: unknown, index: number): string | null {
     `tasks[${index}] ("${id}"): review_run`,
   );
   if (runError !== null) return runError;
+  if (t.review_run !== undefined) {
+    const run = t.review_run as Record<string, unknown>;
+    if (run.slot_authority !== undefined) {
+      const slots = run.slot_authority;
+      if (!Array.isArray(slots) || slots.length === 0) {
+        return `tasks[${index}] ("${id}"): review_run.slot_authority must be a non-empty array when present`;
+      }
+      const expectedAgents = run.expected_agents as readonly string[];
+      if (slots.length !== expectedAgents.length) {
+        return `tasks[${index}] ("${id}"): review_run.slot_authority must cover every expected agent exactly once in order`;
+      }
+      const slotIds = new Set<string>();
+      for (const [slotIndex, rawSlot] of slots.entries()) {
+        const label = `tasks[${index}] ("${id}"): review_run.slot_authority[${slotIndex}]`;
+        if (typeof rawSlot !== "object" || rawSlot === null || Array.isArray(rawSlot)) return `${label} must be an object`;
+        const slot = rawSlot as Record<string, unknown>;
+        const fields = Object.keys(slot).sort();
+        const expectedFields = ["agent", "attempted", "slot_id"].sort();
+        if (fields.length !== expectedFields.length || fields.some((field, fieldIndex) => field !== expectedFields[fieldIndex])) {
+          return `${label} must contain exactly agent/slot_id/attempted`;
+        }
+        if (slot.agent !== expectedAgents[slotIndex]) return `${label}.agent must match expected_agents in order`;
+        const slotId = parseSlotId(slot.slot_id);
+        if (!slotId.ok) return `${label}.slot_id: ${slotId.error.message}`;
+        if (slotIds.has(slotId.value)) return `${label}.slot_id duplicates an earlier Review Run slot`;
+        slotIds.add(slotId.value);
+        if (slot.attempted !== 1 && slot.attempted !== 2) return `${label}.attempted must be 1 or 2`;
+      }
+    }
+  }
   return evidenceFailureError(t, `tasks[${index}] ("${id}")`, REVIEW_SUB_AGENTS);
 }
 
@@ -532,6 +707,49 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
   }
   const specErr = specCheckError(obj.spec_check);
   if (specErr !== null) return parseErr(specErr);
+  let activeWaveGate: ActiveWaveGateRegistration | undefined;
+  if (obj.active_wave_gate !== undefined) {
+    const parsedRegistration = parseActiveWaveGateRegistration(obj.active_wave_gate);
+    if (!parsedRegistration.ok) return parseErr(parsedRegistration.error);
+    activeWaveGate = parsedRegistration.value;
+  }
+  let waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined;
+  if (obj.wave_gate_history !== undefined) {
+    if (!Array.isArray(obj.wave_gate_history)) return parseErr("wave_gate_history must be an array when present");
+    const parsedHistory: CompletedWaveGateRegistration[] = [];
+    for (let index = 0; index < obj.wave_gate_history.length; index++) {
+      const parsed = parseCompletedWaveGateRegistration(obj.wave_gate_history[index]);
+      if (!parsed.ok) return parseErr(`wave_gate_history[${index}]: ${parsed.error}`);
+      parsedHistory.push(parsed.value);
+    }
+    const runIds = parsedHistory.map(({ runId }) => runId);
+    if (new Set(runIds).size !== runIds.length) return parseErr("wave_gate_history contains duplicate run identities");
+    const waves = parsedHistory.map(({ wave }) => wave);
+    if (new Set(waves).size !== waves.length) return parseErr("wave_gate_history contains duplicate completed Waves");
+    if (activeWaveGate !== undefined && runIds.includes(activeWaveGate.runId)) {
+      return parseErr(`active_wave_gate run ${activeWaveGate.runId} is already terminal in wave_gate_history`);
+    }
+    waveGateHistory = Object.freeze(parsedHistory);
+  }
+  if (activeWaveGate?.terminalOutcome === null) {
+    if (obj.current_phase !== "execute") {
+      return parseErr(
+        `nonterminal active_wave_gate run ${activeWaveGate.runId} requires current_phase execute, got ${String(obj.current_phase)}`,
+      );
+    }
+    if (obj.current_wave !== activeWaveGate.wave) {
+      return parseErr(
+        `nonterminal active_wave_gate wave ${activeWaveGate.wave} must match protected current_wave ${obj.current_wave ?? "missing"}`,
+      );
+    }
+    const terminalOverlap = waveGateHistory?.find((entry) => entry.wave >= activeWaveGate.wave);
+    if (terminalOverlap !== undefined) {
+      return parseErr(
+        `nonterminal active_wave_gate wave ${activeWaveGate.wave} overlaps terminal wave_gate_history ` +
+        `Wave ${terminalOverlap.wave} run ${terminalOverlap.runId}; active authority must be newer than terminal history`,
+      );
+    }
+  }
   // The single blessed cast: every union field above is proven in place.
   return parseOk({
     ...obj,
@@ -541,14 +759,178 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
     plan_file: obj.plan_file ?? null,
     tasks,
     wave_gates: waveGates,
+    ...(activeWaveGate === undefined ? {} : { active_wave_gate: activeWaveGate }),
+    ...(waveGateHistory === undefined ? {} : { wave_gate_history: waveGateHistory }),
   } as unknown as TaskGraph);
+}
+
+export type LegacyWaveGateCompatibilityAuthority = Readonly<{
+  schemaVersion: 1;
+  kind: "legacy-wave-gate-compatibility";
+  runId: OrchestrationRunId;
+  wave: number;
+  authorityDigest: import("./core/orchestration-contract").ArtifactDigest;
+}>;
+
+/** Format-detected legacy anti-corruption parser. It never defaults a Wave:
+ * protected current_wave (and an explicit --wave when supplied) must agree. */
+export function deriveLegacyWaveGateCompatibilityAuthority(
+  graph: TaskGraph,
+  requestedWave: number | null,
+): DomainResult<LegacyWaveGateCompatibilityAuthority, Readonly<{ kind: "legacy-wave-gate-migration-rejected"; message: string }>> {
+  const reject = (message: string): DomainResult<never, Readonly<{ kind: "legacy-wave-gate-migration-rejected"; message: string }>> =>
+    Object.freeze({ ok: false, error: Object.freeze({ kind: "legacy-wave-gate-migration-rejected", message }) });
+  if (graph.active_wave_gate !== undefined) return reject("active Wave Gate authority already exists");
+  if (graph.current_phase !== "execute" || graph.current_wave === undefined) {
+    return reject("legacy Wave Gate migration requires explicit protected execute/current_wave authority");
+  }
+  if (requestedWave !== null && requestedWave !== graph.current_wave) {
+    return reject(`requested wave ${requestedWave} does not match protected current_wave ${graph.current_wave}`);
+  }
+  const wave = graph.current_wave;
+  if (graph.tasks.every((task) => task.wave !== wave)) return reject(`legacy Wave ${wave} has no protected Tasks`);
+  if (graph.wave_gates[String(wave)] === undefined) return reject(`legacy Wave ${wave} has no wave_gates registration`);
+  const serialized = JSON.stringify({
+    schemaVersion: 1,
+    kind: "legacy-wave-gate-compatibility-source",
+    wave,
+    // Completion mutates the gate booleans and Task statuses. Compatibility
+    // identity is therefore derived only from immutable Wave membership and
+    // plan authority so final-Wave replay resolves the original run exactly.
+    taskIds: graph.tasks.filter((task) => task.wave === wave).map(({ id }) => id),
+    planFile: graph.plan_file ?? graph.phase_artifacts.architecture ?? null,
+  });
+  const rawDigest = createHash("sha256").update(serialized).digest("hex");
+  const runId = parseOrchestrationRunId(`legacy-wave:${rawDigest.slice(0, 32)}`);
+  const digest = parseArtifactDigest(rawDigest);
+  if (!runId.ok || !digest.ok) return reject("derived legacy Wave Gate compatibility identity is invalid");
+  return Object.freeze({ ok: true, value: Object.freeze({
+    schemaVersion: 1,
+    kind: "legacy-wave-gate-compatibility",
+    runId: runId.value,
+    wave,
+    authorityDigest: digest.value,
+  }) });
+}
+
+export type RegisteredWaveGateCompletionReplayError = Readonly<{
+  kind: "registered-wave-gate-completion-replay-rejected";
+  message: string;
+}>;
+
+/** Reconcile a lock loser only against the exact active registration it read
+ * before attempting completion. Terminal history is immutable and parser-
+ * proven, so a matching run/wave/digest and successor revision is the original
+ * committed receipt; any partial identity match is an authority conflict. */
+export function findRegisteredWaveGateCompletionReplay(
+  graph: TaskGraph,
+  authority: ActiveWaveGateRegistration,
+): DomainResult<CompletedWaveGateRegistration | null, RegisteredWaveGateCompletionReplayError> {
+  const reject = (message: string): DomainResult<never, RegisteredWaveGateCompletionReplayError> =>
+    Object.freeze({
+      ok: false,
+      error: Object.freeze({ kind: "registered-wave-gate-completion-replay-rejected", message }),
+    });
+  if (authority.terminalOutcome !== null) {
+    return reject(`Pre-read Wave Gate run ${authority.runId} was already terminal rather than active`);
+  }
+  const history = graph.wave_gate_history ?? [];
+  const sameRun = history.find((entry) => entry.runId === authority.runId);
+  const sameWave = history.find((entry) => entry.wave === authority.wave);
+  const candidate = sameRun ?? sameWave;
+  if (candidate === undefined) return Object.freeze({ ok: true, value: null });
+  if (
+    candidate.runId !== authority.runId || candidate.wave !== authority.wave ||
+    candidate.authorityDigest !== authority.authorityDigest || candidate.revision !== authority.revision + 1
+  ) {
+    return reject(
+      `Wave ${authority.wave} terminal history conflicts with pre-read active run ${authority.runId} ` +
+      `(expected digest ${authority.authorityDigest} and revision ${authority.revision + 1})`,
+    );
+  }
+  if (
+    candidate.completionReceipt.runId !== authority.runId ||
+    candidate.completionReceipt.committedRevision !== candidate.revision
+  ) {
+    return reject(`Wave ${authority.wave} terminal history carries a contradictory completion receipt`);
+  }
+  return Object.freeze({ ok: true, value: candidate });
+}
+
+export type LegacyWaveGateCompletionReplayError = Readonly<{
+  kind: "legacy-wave-gate-completion-replay-rejected";
+  message: string;
+}>;
+
+/** Pure terminal-history lookup used before compatibility migration and again
+ * after lock races. Only the exact deterministic run/wave/digest plus the
+ * completed protected graph shape is an idempotent replay. */
+export function findLegacyWaveGateCompletionReplay(
+  graph: TaskGraph,
+  authority: LegacyWaveGateCompatibilityAuthority,
+): DomainResult<CompletedWaveGateRegistration | null, LegacyWaveGateCompletionReplayError> {
+  const reject = (message: string): DomainResult<never, LegacyWaveGateCompletionReplayError> =>
+    Object.freeze({
+      ok: false,
+      error: Object.freeze({ kind: "legacy-wave-gate-completion-replay-rejected", message }),
+    });
+  const history = graph.wave_gate_history ?? [];
+  const sameWave = history.find((entry) => entry.wave === authority.wave);
+  const sameRun = history.find((entry) => entry.runId === authority.runId);
+  if (sameWave !== undefined) {
+    if (sameWave.runId !== authority.runId || sameWave.authorityDigest !== authority.authorityDigest) {
+      return reject(`Wave ${authority.wave} terminal history conflicts with compatibility replay ${authority.runId}`);
+    }
+    const gate = graph.wave_gates[String(authority.wave)];
+    const waveTasks = graph.tasks.filter((task) => task.wave === authority.wave);
+    const exactTerminalGraph = graph.current_phase === "execute" && graph.current_wave === authority.wave &&
+      !graph.tasks.some((task) => task.wave > authority.wave) && waveTasks.length > 0 &&
+      waveTasks.every((task) => task.status === "completed") && gate !== undefined &&
+      gate.impl_complete && gate.tests_passed === true && gate.reviews_complete && !gate.blocked;
+    if (!exactTerminalGraph) {
+      return reject(`Wave ${authority.wave} history matches run identity but protected terminal graph outcome is contradictory`);
+    }
+    return Object.freeze({ ok: true, value: sameWave });
+  }
+  if (sameRun !== undefined) {
+    return reject(`Compatibility run ${authority.runId} is terminal for conflicting Wave ${sameRun.wave}`);
+  }
+  const newer = history.find((entry) => entry.wave > authority.wave);
+  if (newer !== undefined) {
+    return reject(`Legacy Wave ${authority.wave} is older than completed terminal Wave ${newer.wave}`);
+  }
+  return Object.freeze({ ok: true, value: null });
+}
+
+export type StateFilePermissionPort = (path: string, mode: number) => void;
+
+/** The protected graph was durably renamed, but restoring its read-only mode
+ * failed. The committed value is retained so callers can report the exact
+ * receipt instead of misclassifying the failure as an idempotent lock replay. */
+export class PostCommitStateProtectionError<T> extends Error {
+  readonly kind = "post-commit-state-protection-failed" as const;
+
+  constructor(
+    readonly statePath: string,
+    readonly committedValue: T,
+    readonly permissionCause: unknown,
+  ) {
+    super(
+      `Task graph was committed but read-only permission restoration failed: ${statePath}: ` +
+      `${permissionCause instanceof Error ? permissionCause.message : String(permissionCause)}`,
+      { cause: permissionCause },
+    );
+    this.name = "PostCommitStateProtectionError";
+  }
 }
 
 export class StateManager {
   private readonly path: string;
+  private readonly setPermissions: StateFilePermissionPort;
 
-  constructor(path: string) {
+  constructor(path: string, setPermissions: StateFilePermissionPort = chmodSync) {
     this.path = path;
+    this.setPermissions = setPermissions;
   }
 
   static fromSession(sessionId?: string): StateManager | null {
@@ -579,28 +961,178 @@ export class StateManager {
 
   /** Atomically update state via pure transform: (state) => state */
   async update(fn: (state: TaskGraph) => TaskGraph): Promise<void> {
-    await this.atomicWrite(() => fn(this.load()));
+    await this.updateAndReturn((state) => ({ state: fn(state), value: undefined }));
   }
 
-  /** Replace state entirely (used by populate-task-graph) */
+  /** Atomic shell primitive for effects that must return the locked decision they committed. */
+  async updateAndReturn<T>(
+    fn: (state: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+  ): Promise<T> {
+    return this.atomicWrite(() => fn(this.load()));
+  }
+
+  /** Install one fresh protected active-run anchor, idempotently for exact replay. */
+  async registerActiveWaveGate(rawRegistration: unknown): Promise<ActiveWaveGateRegistration> {
+    const parsed = parseActiveWaveGateRegistration(rawRegistration);
+    if (!parsed.ok) throw new Error(`Invalid active Wave Gate registration: ${parsed.error}`);
+    const registration = parsed.value;
+    return this.updateAndReturn((state) => {
+      if (state.current_phase !== "execute") {
+        throw new Error(`Cannot register Wave Gate run outside execute Phase (current: ${state.current_phase})`);
+      }
+      if (state.current_wave !== registration.wave) {
+        throw new Error(`Cannot register Wave Gate wave ${registration.wave}; protected current_wave is ${state.current_wave ?? "missing"}`);
+      }
+      if (registration.revision !== 0 || registration.terminalOutcome !== null) {
+        throw new Error("A fresh active Wave Gate registration must start at revision 0 without a terminal outcome");
+      }
+      const completed = state.wave_gate_history ?? [];
+      if (completed.some((entry) => entry.runId === registration.runId)) {
+        throw new Error(`Wave Gate run ${registration.runId} is already terminal`);
+      }
+      if (completed.some((entry) => entry.wave >= registration.wave)) {
+        throw new Error(`Wave ${registration.wave} is already completed or older than terminal Wave history`);
+      }
+      const existing = state.active_wave_gate;
+      if (existing !== undefined) {
+        const exactReplay = existing.runId === registration.runId &&
+          existing.wave === registration.wave &&
+          existing.authorityDigest === registration.authorityDigest &&
+          existing.revision === registration.revision && existing.terminalOutcome === null;
+        if (exactReplay) return { state, value: existing };
+        if (existing.terminalOutcome === null) {
+          throw new Error(`Active Wave Gate run ${existing.runId} already owns wave ${existing.wave}`);
+        }
+        throw new Error(
+          `Legacy terminal Wave Gate run ${existing.runId} must be explicitly migrated to terminal history before registering another run`,
+        );
+      }
+      return { state: { ...state, active_wave_gate: registration }, value: registration };
+    });
+  }
+
+  /** Explicit anti-corruption migration for a historical graph that predates
+   * active registrations. No run id, Wave, or digest is invented implicitly. */
+  async migrateLegacyWaveGateRegistration(raw: unknown): Promise<ActiveWaveGateRegistration> {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw new Error("Legacy Wave Gate migration authority must be an object");
+    }
+    const record = raw as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    const expected = ["authorityDigest", "kind", "runId", "schemaVersion", "wave"].sort();
+    if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+      throw new Error("Legacy Wave Gate migration authority must contain exactly schemaVersion/kind/runId/wave/authorityDigest");
+    }
+    if (record.schemaVersion !== 1 || record.kind !== "legacy-wave-gate-compatibility") {
+      throw new Error("Legacy Wave Gate migration authority tag is invalid");
+    }
+    const runId = parseOrchestrationRunId(record.runId);
+    const digest = parseArtifactDigest(record.authorityDigest);
+    if (!runId.ok) throw new Error(runId.error.message);
+    if (!digest.ok) throw new Error(digest.error.message);
+    if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
+      throw new Error("Legacy Wave Gate migration wave must be an integer >= 1");
+    }
+    const registration: ActiveWaveGateRegistration = Object.freeze({
+      schemaVersion: 1,
+      kind: "active-wave-gate",
+      runId: runId.value,
+      wave: record.wave,
+      authorityDigest: digest.value,
+      revision: 0,
+      terminalOutcome: null,
+    });
+    const compatibility: LegacyWaveGateCompatibilityAuthority = Object.freeze({
+      schemaVersion: 1,
+      kind: "legacy-wave-gate-compatibility",
+      runId: registration.runId,
+      wave: registration.wave,
+      authorityDigest: registration.authorityDigest,
+    });
+    return this.updateAndReturn((state) => {
+      const terminalReplay = findLegacyWaveGateCompletionReplay(state, compatibility);
+      if (!terminalReplay.ok) throw new Error(terminalReplay.error.message);
+      if (terminalReplay.value !== null) {
+        throw new Error(`Legacy Wave ${registration.wave} is already completed by run ${terminalReplay.value.runId}`);
+      }
+      const existing = state.active_wave_gate;
+      if (existing !== undefined) {
+        const exactReplay = existing.runId === registration.runId &&
+          existing.wave === registration.wave &&
+          existing.authorityDigest === registration.authorityDigest &&
+          existing.revision === 0 && existing.terminalOutcome === null;
+        if (exactReplay) return { state, value: existing };
+        throw new Error("Legacy migration is allowed only when active Wave Gate authority is absent");
+      }
+      if (state.current_phase !== "execute" || state.current_wave !== registration.wave) {
+        throw new Error("Legacy migration must exactly match protected execute/current_wave authority");
+      }
+      if (state.tasks.every((task) => task.wave !== registration.wave)) {
+        throw new Error(`Legacy migration wave ${registration.wave} has no protected Tasks`);
+      }
+      return { state: { ...state, active_wave_gate: registration }, value: registration };
+    });
+  }
+
+  /** Lock, re-derive completion through the caller's pure domain function,
+   * persist terminal history + advancement together, and return its receipt. */
+  async commitActiveWaveGateCompletion(
+    derive: (lockedState: TaskGraph) => DomainResult<WaveCompletionCommit, WaveCompletionCommitError>,
+  ): Promise<WaveCompletionCommit> {
+    return this.updateAndReturn((state) => {
+      const active = state.active_wave_gate;
+      if (state.current_phase !== "execute" || state.current_wave === undefined || active === undefined) {
+        throw new Error("Protected execute/current Wave Gate authority is missing");
+      }
+      if (active.wave !== state.current_wave || active.terminalOutcome !== null) {
+        throw new Error("Protected active/current Wave Gate authority is contradictory or terminal");
+      }
+      const committed = derive(state);
+      if (!committed.ok) throw new Error(committed.error.message);
+      const terminal = committed.value.completedRegistration;
+      if (
+        terminal.runId !== active.runId || terminal.wave !== active.wave ||
+        terminal.authorityDigest !== active.authorityDigest || terminal.revision !== active.revision + 1 ||
+        committed.value.receipt !== terminal.completionReceipt
+      ) {
+        throw new Error("Completion result does not terminalize the exact locked active registration");
+      }
+      if (committed.value.graph.active_wave_gate !== undefined) {
+        throw new Error("Completion must retire active authority before the next Wave can register");
+      }
+      return { state: committed.value.graph, value: committed.value };
+    });
+  }
+
+  /**
+   * Replace state entirely (used by populate-task-graph and repair-task-graph).
+   * A full replacement never reads the outgoing graph, so it deliberately does
+   * not route through `updateAndReturn`: recovering a graph the load boundary
+   * already rejects is the whole purpose of repair, and loading first would
+   * make the corrupt file block its own repair. The replacement is still
+   * validated by `atomicWrite` before it can reach disk.
+   */
   async replace(state: TaskGraph): Promise<void> {
-    await this.atomicWrite(() => state);
+    await this.atomicWrite(() => ({ state, value: undefined }));
   }
 
   /** lock → chmod 644 → produce/parse → write tmp → rename → chmod 444 → unlock */
-  private async atomicWrite(produce: () => TaskGraph): Promise<void> {
+  private async atomicWrite<T>(produce: () => Readonly<{ state: TaskGraph; value: T }>): Promise<T> {
     const lockFile = `${dirname(this.path)}/.task_graph`;
     const tmp = `${this.path}.tmp`;
-    await withLock(lockFile, () => {
-      chmodSync(this.path, 0o644);
+    return withLock(lockFile, () => {
+      this.setPermissions(this.path, 0o644);
       let primaryError: unknown = null;
       let committed = false;
+      let value: T | undefined;
       try {
-        const parsed = parseTaskGraph(produce());
+        const produced = produce();
+        const parsed = parseTaskGraph(produced.state);
         if (!parsed.ok) throw new Error(`Refusing to persist invalid task graph (${parsed.error}): ${this.path}`);
         writeFileSync(tmp, JSON.stringify(parsed.value, null, 2));
         renameSync(tmp, this.path);
         committed = true;
+        value = produced.value;
       } catch (error) {
         primaryError = error;
         if (!committed && existsSync(tmp)) {
@@ -617,7 +1149,7 @@ export class StateManager {
 
       let permissionError: unknown = null;
       try {
-        chmodSync(this.path, 0o444);
+        this.setPermissions(this.path, 0o444);
       } catch (error) {
         permissionError = error;
       }
@@ -630,11 +1162,15 @@ export class StateManager {
       }
       if (primaryError !== null) throw primaryError;
       if (permissionError !== null) {
+        if (committed) {
+          throw new PostCommitStateProtectionError(this.path, value as T, permissionError);
+        }
         throw new Error(
-          `Task graph ${committed ? "was committed but" : "was not committed and"} read-only permission restoration failed: ${this.path}: ${permissionError instanceof Error ? permissionError.message : String(permissionError)}`,
+          `Task graph was not committed and read-only permission restoration failed: ${this.path}: ${permissionError instanceof Error ? permissionError.message : String(permissionError)}`,
           { cause: permissionError },
         );
       }
+      return value as T;
     });
   }
 }

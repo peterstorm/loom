@@ -145,6 +145,66 @@ describe("Pi test-evidence transcript adapter", () => {
     expect(parsed.ok && Object.isFrozen(parsed.value[0]!.content[0])).toBe(true);
   });
 
+  it("normalizes singleton typed text and toolCall content blocks", () => {
+    const parsed = parsePiMessages([
+      { role: "assistant", content: { type: "text", text: "singleton text" } },
+      { role: "assistant", content: { type: "toolCall", id: "call-write-1", name: "write", arguments: { path: "target.ts" } } },
+    ]);
+
+    expect(parsed).toEqual({
+      ok: true,
+      value: [
+        { role: "assistant", content: [{ type: "text", text: "singleton text" }] },
+        { role: "assistant", content: [{ type: "toolCall", id: "call-write-1", name: "write", arguments: { path: "target.ts" } }] },
+      ],
+    });
+    expect(parsed.ok && parsed.value[0]!.content).toHaveLength(1);
+    expect(parsed.ok && parsed.value[1]!.content).toHaveLength(1);
+    expect(parsed.ok && Object.isFrozen(parsed.value[0]!.content[0])).toBe(true);
+    expect(parsed.ok && Object.isFrozen(parsed.value[1]!.content[0])).toBe(true);
+  });
+
+  it.each([
+    ["arbitrary object", { role: "assistant", content: { text: "missing type" } }],
+    ["missing text", { role: "assistant", content: { type: "text" } }],
+    ["malformed tool call", { role: "assistant", content: { type: "toolCall", id: "call-1", name: "bash", arguments: {} } }],
+  ] as const)("fails closed for malformed singleton content objects: %s", (_label, message) => {
+    expect(parsePiMessages([message])).toMatchObject({ ok: false, errors: [expect.any(String)] });
+    expect(messagesToClaudeJsonl([message])).toMatchObject({ ok: false, errors: [expect.any(String)] });
+    expect(piStructuredTestResult([message])).toMatchObject({ ok: false, errors: [expect.any(String)] });
+  });
+
+  it("returns immutable parser-owned copies for singleton typed content blocks", () => {
+    const singletonText = { type: "text", text: "before" };
+    const singletonToolCall = {
+      type: "toolCall",
+      id: "call-write-1",
+      name: "write",
+      arguments: { path: "before.ts" },
+    };
+    const parsed = parsePiMessages([
+      { role: "assistant", content: singletonText },
+      { role: "assistant", content: singletonToolCall },
+    ]);
+
+    expect(parsed.ok).toBe(true);
+    singletonText.text = "after";
+    singletonToolCall.arguments.path = "after.ts";
+
+    if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+    const parsedText = parsed.value[0]!.content[0]!;
+    const parsedToolCall = parsed.value[1]!.content[0]!;
+    expect(parsedText).toEqual({ type: "text", text: "before" });
+    expect(parsedToolCall.type).toBe("toolCall");
+    if (parsedToolCall.type !== "toolCall") throw new Error("expected singleton toolCall block");
+    expect(parsedToolCall.arguments.path).toBe("before.ts");
+    expect(Object.isFrozen(parsed.value[0])).toBe(true);
+    expect(Object.isFrozen(parsed.value[0]!.content)).toBe(true);
+    expect(Object.isFrozen(parsedText)).toBe(true);
+    expect(Object.isFrozen(parsedToolCall)).toBe(true);
+    expect(Object.isFrozen(parsedToolCall.arguments)).toBe(true);
+  });
+
   it("omits unknown-role strings from JSONL and test evidence", () => {
     const unknownMessage = {
       role: "custom",

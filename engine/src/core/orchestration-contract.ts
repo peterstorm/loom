@@ -43,6 +43,103 @@ export function canonicalRecord<const T extends object>(fields: T): Readonly<T> 
   return Object.freeze(Object.create(null, descriptors) as T);
 }
 
+type StructuralPairs = Map<object, Set<object>>;
+
+function hasNeutralRecordPrototype(value: object): boolean {
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === null || prototype === Object.prototype;
+}
+
+/** Records a left/right pair so cyclic structures terminate instead of recursing forever. */
+function pairAlreadyCompared(left: object, right: object, seen: StructuralPairs): boolean {
+  const partners = seen.get(left);
+  if (partners === undefined) {
+    seen.set(left, new Set([right]));
+    return false;
+  }
+  if (partners.has(right)) return true;
+  partners.add(right);
+  return false;
+}
+
+/** Consumes the first structurally matching candidate, so sizes compare as multisets. */
+function matchOnce<T>(candidates: T[], matches: (candidate: T) => boolean): boolean {
+  const index = candidates.findIndex(matches);
+  if (index === -1) return false;
+  candidates.splice(index, 1);
+  return true;
+}
+
+function mapsEqual(left: unknown, right: unknown, seen: StructuralPairs): boolean {
+  if (!(left instanceof Map) || !(right instanceof Map) || left.size !== right.size) return false;
+  const unmatched = [...right.entries()];
+  for (const [key, value] of left) {
+    const matched = matchOnce(unmatched, ([candidateKey, candidateValue]) =>
+      structurallyEqual(key, candidateKey, seen) && structurallyEqual(value, candidateValue, seen));
+    if (!matched) return false;
+  }
+  return true;
+}
+
+function setsEqual(left: unknown, right: unknown, seen: StructuralPairs): boolean {
+  if (!(left instanceof Set) || !(right instanceof Set) || left.size !== right.size) return false;
+  const unmatched = [...right];
+  for (const entry of left) {
+    if (!matchOnce(unmatched, (candidate) => structurallyEqual(entry, candidate, seen))) return false;
+  }
+  return true;
+}
+
+function recordsEqual(left: object, right: object, seen: StructuralPairs): boolean {
+  const leftNeutral = hasNeutralRecordPrototype(left);
+  if (leftNeutral !== hasNeutralRecordPrototype(right)) return false;
+  if (!leftNeutral && Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)) return false;
+  const leftKeys = Object.keys(left);
+  if (leftKeys.length !== Object.keys(right).length) return false;
+  return leftKeys.every((key) =>
+    Object.prototype.hasOwnProperty.call(right, key) &&
+    structurallyEqual(
+      (left as Record<string, unknown>)[key],
+      (right as Record<string, unknown>)[key],
+      seen,
+    ));
+}
+
+function structurallyEqual(left: unknown, right: unknown, seen: StructuralPairs): boolean {
+  if (Object.is(left, right)) return true;
+  if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) {
+    return false;
+  }
+  if (pairAlreadyCompared(left, right, seen)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length &&
+      left.every((entry, index) => structurallyEqual(entry, right[index], seen));
+  }
+  if (left instanceof Map || right instanceof Map) return mapsEqual(left, right, seen);
+  if (left instanceof Set || right instanceof Set) return setsEqual(left, right, seen);
+  if (left instanceof Date || right instanceof Date) {
+    return left instanceof Date && right instanceof Date && Object.is(left.getTime(), right.getTime());
+  }
+  if (left instanceof RegExp || right instanceof RegExp) {
+    return left instanceof RegExp && right instanceof RegExp &&
+      left.source === right.source && left.flags === right.flags;
+  }
+  return recordsEqual(left, right, seen);
+}
+
+/**
+ * Structural equality that stays exact on values while ignoring the single
+ * prototype distinction `canonicalRecord` introduces: a canonical record (null
+ * prototype) equals the plain object a JSON round trip produces. Every other
+ * prototype must match exactly, so a Map, Set, Date, or class instance never
+ * equals a plain record carrying the same fields, and an own key whose value is
+ * `undefined` stays distinct from an absent key — a persisted document can
+ * therefore never widen its authority by round-tripping through JSON.
+ */
+export function canonicalStructuralEquals(left: unknown, right: unknown): boolean {
+  return structurallyEqual(left, right, new Map());
+}
+
 const success = <T, E = never>(value: T): DomainResult<T, E> => canonicalRecord({ ok: true, value });
 const failure = <T = never, E = never>(error: E): DomainResult<T, E> =>
   canonicalRecord({ ok: false, error });

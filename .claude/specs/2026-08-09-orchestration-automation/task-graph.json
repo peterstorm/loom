@@ -1,0 +1,455 @@
+{
+  "plan_title": "Engine-owned orchestration automation",
+  "spec_file": "/home/peterstorm/dev/claude-plugins/loom/.claude/specs/2026-08-09-orchestration-automation/spec.md",
+  "plan_file": "/home/peterstorm/dev/claude-plugins/loom/.claude/plans/2026-08-09-orchestration-automation.md",
+  "tasks": [
+    {
+      "id": "T1",
+      "description": "Implement shared authority, roster, action, effect, receipt, diagnostic ADTs and properties",
+      "agent": "code-implementer-agent",
+      "wave": 1,
+      "depends_on": [],
+      "spec_anchors": [
+        "FR-001",
+        "FR-002",
+        "FR-040",
+        "FR-041",
+        "FR-042",
+        "FR-043",
+        "FR-044",
+        "FR-070",
+        "FR-071",
+        "FR-077",
+        "FR-080",
+        "SC-008",
+        "SC-013",
+        "SC-014"
+      ],
+      "new_tests_required": true,
+      "plan_context": "Phase 1 Task 1 — Shared authority/roster/action/effect ADTs. Implement authority smart constructors, ExactRoster/CompleteRoster, immutable requests, minimal actions, typed effects/receipts, diagnostics, and properties. Brand only authority-bearing concepts; define no generic stages/workflow types. Shared kernel responsibility: make run, slot, request, roster, effect, and receipt authority explicit without defining workflow stages. parseCompleteRoster is the only CompleteRoster constructor and proves length, identity, uniqueness, canonical order, accepted attempt, request/context/model/Skill binding, and no surplus. Aggregate/tally APIs accept only this proof. BlockedDiagnostic is a closed union with run/category/request/slot/effect, retry eligibility, and one permissible recovery.",
+      "file_list": [
+        "engine/src/core/orchestration-contract.ts",
+        "engine/tests/core/orchestration-contract.property.test.ts"
+      ]
+    },
+    {
+      "id": "T2",
+      "description": "Implement persistent architecture and refutation panel programs with legacy journal compatibility",
+      "agent": "code-implementer-agent",
+      "wave": 2,
+      "depends_on": [
+        "T1"
+      ],
+      "spec_anchors": [
+        "US2",
+        "FR-004",
+        "FR-020",
+        "FR-021",
+        "FR-022",
+        "FR-023",
+        "FR-024",
+        "FR-025",
+        "FR-026",
+        "FR-027",
+        "FR-028",
+        "FR-029",
+        "FR-071",
+        "FR-074",
+        "FR-075",
+        "FR-077",
+        "SC-008",
+        "SC-009"
+      ],
+      "new_tests_required": true,
+      "plan_context": "Phase 2 Task 2 — Persistent panel programs. Deepen separate architecture/refutation reducers, canonical request-slot binding, complete-roster aggregate/tally, Machine adapters, and legacy journal translation. Architecture/refutation lens types remain disjoint. Caller lens/criterion/candidate/Finding claims are compared but never authoritative; request authority supplies canonical identity. The legacy panel event helper translates historical/in-flight documents without rewriting them. Preserve strict-majority refutation, uncertainty as neither refutation nor support, ties retain Findings, and retained/refuted evidence remains auditable.",
+      "file_list": [
+        "engine/src/core/panel-program.ts",
+        "engine/src/handlers/helpers/panel-program.ts",
+        "engine/tests/core/panel-program.test.ts",
+        "engine/tests/handlers/helpers/panel-program.test.ts"
+      ]
+    },
+    {
+      "id": "T3",
+      "description": "Implement Wave Gate lifecycle machine, canonical status, active-run registration, and completion delegation",
+      "agent": "code-implementer-agent",
+      "wave": 2,
+      "depends_on": [
+        "T1"
+      ],
+      "spec_anchors": [
+        "US1",
+        "US5",
+        "FR-010",
+        "FR-011",
+        "FR-012",
+        "FR-013",
+        "FR-014",
+        "FR-015",
+        "FR-016",
+        "FR-017",
+        "FR-018",
+        "FR-050",
+        "FR-051",
+        "FR-052",
+        "FR-053",
+        "FR-054",
+        "FR-076",
+        "SC-004",
+        "SC-010",
+        "SC-011"
+      ],
+      "new_tests_required": true,
+      "plan_context": "### LC-1: Wave Gate program\n\n**Machine file:** engine/src/core/wave-gate-machine.ts\n**Kind:** typed-reducer\n**States:** preparing, awaiting-review-results, awaiting-refutation, awaiting-advisory-decision, ready-to-complete, recoverable-blocked, done, terminal-blocked\n\nEvents and transitions: preparation-published: preparing -> awaiting-review-results; result-accepted incomplete: awaiting-review-results -> awaiting-review-results; result-rejected attempt 1: awaiting-review-results -> awaiting-review-results; result-rejected attempt 2: awaiting-review-results -> terminal-blocked; complete-roster-with-criticals: awaiting-review-results -> awaiting-refutation; complete-roster-with-advisories: awaiting-review-results or awaiting-refutation -> awaiting-advisory-decision; complete-roster-clean: awaiting-review-results or awaiting-refutation -> ready-to-complete; advisory-decision-accepted: awaiting-advisory-decision -> ready-to-complete; completion-committed: ready-to-complete -> done; recoverable-effect-failed: any non-terminal state -> recoverable-blocked; recovery-receipt-accepted: recoverable-blocked -> recorded predecessor state.\n\nYou are implementing this machine. Write property tests proving no undeclared transition is representable or accepted.\n\nPhase 2 Task 3 — Implement the versioned LoomStatus/CanonicalStatusFacts contract, one shared readiness snapshot, active run parsing, and locked complete-wave-gate delegation. Derive and test active Phase/Wave; exhaustive pending/running/implemented/blocked/completed Task counts; failed Proof Obligations; test readiness; Review Run roster gaps and evidence failures; active/advisory/resolved/refuted Finding counts; Refutation Panel need; Wave Gate completion eligibility; exactly one typed next action with all reasons. Malformed authority keeps every category present but unavailable and returns only a blocked action.",
+      "file_list": [
+        "engine/src/core/wave-gate-machine.ts",
+        "engine/src/types.ts",
+        "engine/src/state-manager.ts",
+        "engine/src/handlers/helpers/complete-wave-gate.ts",
+        "engine/tests/handlers/complete-wave-gate.test.ts"
+      ]
+    },
+    {
+      "id": "T4",
+      "description": "Implement Standalone Review lifecycle machine, byte-aware aggregation, routing, and versioned reads",
+      "agent": "code-implementer-agent",
+      "wave": 2,
+      "depends_on": [
+        "T1"
+      ],
+      "spec_anchors": [
+        "US3",
+        "FR-030",
+        "FR-031",
+        "FR-032",
+        "FR-033",
+        "FR-034",
+        "FR-035",
+        "FR-036",
+        "FR-037",
+        "FR-038",
+        "FR-039",
+        "FR-071",
+        "FR-077",
+        "SC-005",
+        "SC-007",
+        "SC-008"
+      ],
+      "new_tests_required": true,
+      "plan_context": "### LC-2: Standalone Review program\n\n**Machine file:** engine/src/core/standalone-review-machine.ts\n**Kind:** typed-reducer\n**States:** preparing, awaiting-results, aggregating, awaiting-refutation, ready-to-finalize, recoverable-blocked, done, terminal-blocked\n\nEvents and transitions: review-batch-published: preparing -> awaiting-results; result-accepted incomplete: awaiting-results -> awaiting-results; result-rejected attempt 1: awaiting-results -> awaiting-results; result-rejected attempt 2: awaiting-results -> terminal-blocked; complete-roster-proved: awaiting-results -> aggregating; aggregate-clean: aggregating -> ready-to-finalize; aggregate-has-criticals: aggregating -> awaiting-refutation; refutation-completed: awaiting-refutation -> ready-to-finalize; result-published: ready-to-finalize -> done; recoverable-effect-failed: any non-terminal state -> recoverable-blocked; recovery-receipt-accepted: recoverable-blocked -> recorded predecessor state.\n\nYou are implementing this machine. Write property tests proving no undeclared transition is representable or accepted.\n\nPhase 2 Task 4 — Implement frozen authority, raw byte metadata, complete aggregation, routing/finalization, and v1 reads. Standalone Review freezes exact scope, changed-path metadata, roster, model/context/request authority, and transcript slots before spawn. Absent scope becomes only the canonical changed-path union; empty/ambiguous/external/unsafe scope blocks. Aggregate accepts CompleteRoster<CapturedReviewerResult> and routes zero criticals directly to finalization.",
+      "file_list": [
+        "engine/src/core/standalone-review.ts",
+        "engine/src/core/standalone-review-machine.ts",
+        "engine/src/handlers/helpers/standalone-review.ts",
+        "engine/tests/core/standalone-review.test.ts",
+        "engine/tests/handlers/helpers/standalone-review.test.ts"
+      ]
+    },
+    {
+      "id": "T5",
+      "description": "Implement remediation authority lifecycle machine and pure path/index witness algebra",
+      "agent": "code-implementer-agent",
+      "wave": 2,
+      "depends_on": [
+        "T1"
+      ],
+      "spec_anchors": [
+        "US6",
+        "FR-060",
+        "FR-061",
+        "FR-062",
+        "FR-063",
+        "FR-064",
+        "FR-065",
+        "FR-066",
+        "FR-067",
+        "SC-012"
+      ],
+      "new_tests_required": true,
+      "plan_context": "### LC-3: Remediation authority\n\n**Machine file:** engine/src/core/remediation-machine.ts\n**Kind:** typed-reducer\n**States:** authority-frozen, paths-registered, audited, staged-temporary-index, verified, recoverable-blocked, done\n\nEvents and transitions: support-path-registered: authority-frozen or paths-registered -> paths-registered; audit-succeeded: authority-frozen or paths-registered -> audited; temporary-index-staged: audited -> staged-temporary-index; staged-set-verified: staged-temporary-index -> verified; index-installed: verified -> done; recoverable-effect-failed: any non-terminal state -> recoverable-blocked; recovery-receipt-accepted: recoverable-blocked -> recorded predecessor state.\n\nYou are implementing this machine. Write property tests proving no undeclared transition is representable or accepted.\n\nPhase 2 Task 5 — Implement pure path/index witness algebra; only audited state can stage and only verified state can install. Remediation makes AuditedPathSet the only staging input and a verified temporary index the only installation input. New test/support paths require an explicit registration event.",
+      "file_list": [
+        "engine/src/core/remediation-machine.ts",
+        "engine/tests/core/remediation-machine.property.test.ts"
+      ]
+    },
+    {
+      "id": "T6",
+      "description": "Implement Fugue runtime, durable local JobLike, replay, serialization, checkpointing, and tracing",
+      "agent": "code-implementer-agent",
+      "wave": 3,
+      "depends_on": [
+        "T2",
+        "T3",
+        "T4",
+        "T5"
+      ],
+      "spec_anchors": [
+        "US7",
+        "FR-070",
+        "FR-071",
+        "FR-072",
+        "FR-073",
+        "FR-074",
+        "FR-075",
+        "FR-080",
+        "FR-081",
+        "FR-082",
+        "FR-084",
+        "SC-009"
+      ],
+      "new_tests_required": true,
+      "plan_context": "Phase 3 Task 6 — Fugue runtime and durable local JobLike. Pin @fuguejs/framework 0.4.0 and direct Zod 4.3.6; implement Machine HALT/replay/serialization/dedup/checkpoint/tracing without Redis/BullMQ. Test append->checkpoint crashes, replay, terminal monotonicity, and corruption. Use only Fugue 0.4.0 public APIs: Machine, JobLike, runStateMachine, replayEvents, defineDag/shape helpers, runDag, runResumableDagJob, capability, conditional-edge, HITL, and tracing APIs. Runtime must execute imported domain machines through public Machine interfaces and must not duplicate LC-1, LC-2, or LC-3 state literals or transitions.",
+      "file_list": [
+        "package.json",
+        "engine/package.json",
+        "engine/bun.lock",
+        "engine/src/orchestration/fugue-program-runtime.ts",
+        "engine/tests/orchestration/fugue-program-runtime.test.ts"
+      ]
+    },
+    {
+      "id": "T7",
+      "description": "Implement anchored RunDirHandle, immutable context packets, effect receipts, and publication fault coverage",
+      "agent": "code-implementer-agent",
+      "wave": 3,
+      "depends_on": [
+        "T2",
+        "T3",
+        "T4",
+        "T5"
+      ],
+      "spec_anchors": [
+        "US4",
+        "US7",
+        "FR-040",
+        "FR-041",
+        "FR-042",
+        "FR-043",
+        "FR-070",
+        "FR-071",
+        "FR-072",
+        "FR-073",
+        "FR-077",
+        "FR-080",
+        "FR-081",
+        "FR-084",
+        "SC-007",
+        "SC-009",
+        "SC-013",
+        "SC-014"
+      ],
+      "new_tests_required": true,
+      "plan_context": "Phase 3 Task 7 — RunDirHandle/context/effect receipts. Implement fixed anchored operations, immutable contexts, artifact-set markers, transcript slots, receipt reconciliation, and every publication fault point. The handle is constructed only from parser-proven runs-root/run identity and retains descriptor anchors; it has no arbitrary path API. Consolidate no-follow/exclusive immutable writes/atomic rename behavior. Write/verify files before protected-state commit; pre-commit files are inert; receipts let resume finish without republishing. Context packets contain fixed rules, variable task/plan/spec/review/lens/criterion data, Skill, exact model binding, output contract, and request identity. Parent actions carry compact references.",
+      "file_list": [
+        "engine/src/orchestration/run-directory-handle.ts",
+        "engine/src/orchestration/context-packets.ts",
+        "engine/src/orchestration/effect-runner.ts",
+        "engine/tests/orchestration/publication-faults.test.ts"
+      ]
+    },
+    {
+      "id": "T8",
+      "description": "Implement static Fugue operation DAGs for panels, Wave Gate, Standalone Review, and remediation",
+      "agent": "code-implementer-agent",
+      "wave": 3,
+      "depends_on": [
+        "T2",
+        "T3",
+        "T4",
+        "T5"
+      ],
+      "spec_anchors": [
+        "FR-001",
+        "FR-004",
+        "FR-011",
+        "FR-014",
+        "FR-015",
+        "FR-016",
+        "FR-020",
+        "FR-026",
+        "FR-028",
+        "FR-030",
+        "FR-037",
+        "FR-038",
+        "FR-060",
+        "FR-063",
+        "FR-064",
+        "SC-010",
+        "SC-011",
+        "SC-012"
+      ],
+      "new_tests_required": true,
+      "plan_context": "### LC-1: Wave Gate program\n**Machine file:** engine/src/core/wave-gate-machine.ts\n**States:** preparing, awaiting-review-results, awaiting-refutation, awaiting-advisory-decision, ready-to-complete, recoverable-blocked, done, terminal-blocked. Transitions: preparation-published preparing->awaiting-review-results; result-accepted incomplete awaiting-review-results->awaiting-review-results; result-rejected attempt 1 awaiting-review-results->awaiting-review-results; result-rejected attempt 2 awaiting-review-results->terminal-blocked; complete-roster-with-criticals awaiting-review-results->awaiting-refutation; complete-roster-with-advisories awaiting-review-results or awaiting-refutation->awaiting-advisory-decision; complete-roster-clean awaiting-review-results or awaiting-refutation->ready-to-complete; advisory-decision-accepted awaiting-advisory-decision->ready-to-complete; completion-committed ready-to-complete->done; recoverable-effect-failed any non-terminal->recoverable-blocked; recovery-receipt-accepted recoverable-blocked->recorded predecessor state.\nThe lifecycle machine at engine/src/core/wave-gate-machine.ts is the single source of truth — import it; never re-implement transitions or duplicate state literals.\n\n### LC-2: Standalone Review program\n**Machine file:** engine/src/core/standalone-review-machine.ts\n**States:** preparing, awaiting-results, aggregating, awaiting-refutation, ready-to-finalize, recoverable-blocked, done, terminal-blocked. Transitions: review-batch-published preparing->awaiting-results; result-accepted incomplete awaiting-results->awaiting-results; result-rejected attempt 1 awaiting-results->awaiting-results; result-rejected attempt 2 awaiting-results->terminal-blocked; complete-roster-proved awaiting-results->aggregating; aggregate-clean aggregating->ready-to-finalize; aggregate-has-criticals aggregating->awaiting-refutation; refutation-completed awaiting-refutation->ready-to-finalize; result-published ready-to-finalize->done; recoverable-effect-failed any non-terminal->recoverable-blocked; recovery-receipt-accepted recoverable-blocked->recorded predecessor state.\nThe lifecycle machine at engine/src/core/standalone-review-machine.ts is the single source of truth — import it; never re-implement transitions or duplicate state literals.\n\n### LC-3: Remediation authority\n**Machine file:** engine/src/core/remediation-machine.ts\n**States:** authority-frozen, paths-registered, audited, staged-temporary-index, verified, recoverable-blocked, done. Transitions: support-path-registered authority-frozen or paths-registered->paths-registered; audit-succeeded authority-frozen or paths-registered->audited; temporary-index-staged audited->staged-temporary-index; staged-set-verified staged-temporary-index->verified; index-installed verified->done; recoverable-effect-failed any non-terminal->recoverable-blocked; recovery-receipt-accepted recoverable-blocked->recorded predecessor state.\nThe lifecycle machine at engine/src/core/remediation-machine.ts is the single source of truth — import it; never re-implement transitions or duplicate state literals.\n\nPhase 3 Task 8 — Implement separate panel, Wave/HITL, standalone, and remediation DAGs using real public Fugue APIs; test topology, routes, capabilities, retries, suspend, and traces. Validation/set/routing nodes use createTransformNode, requires: [], and Zod contracts. Genuine edge effects use narrow capabilities only. Semantic work is returned as spawn-batch; retry is machine state across resumes, not a back-edge.",
+      "file_list": [
+        "engine/src/orchestration/dags/panel-operations.ts",
+        "engine/src/orchestration/dags/wave-gate-operations.ts",
+        "engine/src/orchestration/dags/standalone-review-operations.ts",
+        "engine/src/orchestration/dags/remediation-operations.ts",
+        "engine/tests/orchestration/fugue-operation-dags.test.ts"
+      ]
+    },
+    {
+      "id": "T9",
+      "description": "Implement safe remediation Git adapter with exact set verification and rollback tests",
+      "agent": "code-implementer-agent",
+      "wave": 3,
+      "depends_on": [
+        "T2",
+        "T3",
+        "T4",
+        "T5"
+      ],
+      "spec_anchors": [
+        "US6",
+        "FR-060",
+        "FR-061",
+        "FR-062",
+        "FR-063",
+        "FR-064",
+        "FR-065",
+        "FR-066",
+        "FR-067",
+        "SC-012"
+      ],
+      "new_tests_required": true,
+      "plan_context": "### LC-3: Remediation authority\n**Machine file:** engine/src/core/remediation-machine.ts\n**States:** authority-frozen, paths-registered, audited, staged-temporary-index, verified, recoverable-blocked, done. Transitions: support-path-registered authority-frozen or paths-registered->paths-registered; audit-succeeded authority-frozen or paths-registered->audited; temporary-index-staged audited->staged-temporary-index; staged-set-verified staged-temporary-index->verified; index-installed verified->done; recoverable-effect-failed any non-terminal->recoverable-blocked; recovery-receipt-accepted recoverable-blocked->recorded predecessor state.\nThe lifecycle machine at engine/src/core/remediation-machine.ts is the single source of truth — import it; never re-implement transitions or duplicate state literals.\n\nPhase 3 Task 9 — Safe remediation Git adapter. Implement fixed argv/NUL operations, temporary index, witnesses, exact equality, run-root exclusion, compare-and-swap, rollback/fault tests. Paths enter through one canonical POSIX-relative parser. Git uses fixed executable/argument templates, literal NUL pathspecs, canonical cwd, bounded output/time, and allowlisted environment. Build a temporary index from expected base, handle add/modify/rename/delete/absent paths, verify audited == dirty == staged, exclude every Run Directory root, then install only if index/worktree witnesses have not drifted. Update .gitignore to exclude ephemeral Wave Gate/Refutation run evidence.",
+      "file_list": [
+        "engine/src/orchestration/git-remediation.ts",
+        "engine/tests/orchestration/remediation-index.test.ts",
+        "engine/tests/orchestration/remediation-faults.test.ts",
+        ".gitignore"
+      ]
+    },
+    {
+      "id": "T10",
+      "description": "Implement orchestration façade, CLI routes, status rendering, compatibility adapters, and runbook cleanup",
+      "agent": "code-implementer-agent",
+      "wave": 4,
+      "depends_on": [
+        "T6",
+        "T7",
+        "T8",
+        "T9"
+      ],
+      "spec_anchors": [
+        "US1",
+        "US5",
+        "FR-001",
+        "FR-002",
+        "FR-003",
+        "FR-006",
+        "FR-050",
+        "FR-051",
+        "FR-052",
+        "FR-053",
+        "FR-054",
+        "FR-078",
+        "FR-079",
+        "SC-001",
+        "SC-002",
+        "SC-003",
+        "SC-004",
+        "SC-011",
+        "SC-015"
+      ],
+      "new_tests_required": true,
+      "plan_context": "### LC-1: Wave Gate program\n**Machine file:** engine/src/core/wave-gate-machine.ts\n**States:** preparing, awaiting-review-results, awaiting-refutation, awaiting-advisory-decision, ready-to-complete, recoverable-blocked, done, terminal-blocked. Transitions: preparation-published preparing->awaiting-review-results; result-accepted incomplete awaiting-review-results->awaiting-review-results; result-rejected attempt 1 awaiting-review-results->awaiting-review-results; result-rejected attempt 2 awaiting-review-results->terminal-blocked; complete-roster-with-criticals awaiting-review-results->awaiting-refutation; complete-roster-with-advisories awaiting-review-results or awaiting-refutation->awaiting-advisory-decision; complete-roster-clean awaiting-review-results or awaiting-refutation->ready-to-complete; advisory-decision-accepted awaiting-advisory-decision->ready-to-complete; completion-committed ready-to-complete->done; recoverable-effect-failed any non-terminal->recoverable-blocked; recovery-receipt-accepted recoverable-blocked->recorded predecessor state.\nThe lifecycle machine at engine/src/core/wave-gate-machine.ts is the single source of truth — import it; never re-implement transitions or duplicate state literals.\n\n### LC-2: Standalone Review program\n**Machine file:** engine/src/core/standalone-review-machine.ts\n**States:** preparing, awaiting-results, aggregating, awaiting-refutation, ready-to-finalize, recoverable-blocked, done, terminal-blocked. Transitions: review-batch-published preparing->awaiting-results; result-accepted incomplete awaiting-results->awaiting-results; result-rejected attempt 1 awaiting-results->awaiting-results; result-rejected attempt 2 awaiting-results->terminal-blocked; complete-roster-proved awaiting-results->aggregating; aggregate-clean aggregating->ready-to-finalize; aggregate-has-criticals aggregating->awaiting-refutation; refutation-completed awaiting-refutation->ready-to-finalize; result-published ready-to-finalize->done; recoverable-effect-failed any non-terminal->recoverable-blocked; recovery-receipt-accepted recoverable-blocked->recorded predecessor state.\nThe lifecycle machine at engine/src/core/standalone-review-machine.ts is the single source of truth — import it; never re-implement transitions or duplicate state literals.\n\n### LC-3: Remediation authority\n**Machine file:** engine/src/core/remediation-machine.ts\n**States:** authority-frozen, paths-registered, audited, staged-temporary-index, verified, recoverable-blocked, done. Transitions: support-path-registered authority-frozen or paths-registered->paths-registered; audit-succeeded authority-frozen or paths-registered->audited; temporary-index-staged audited->staged-temporary-index; staged-set-verified staged-temporary-index->verified; index-installed verified->done; recoverable-effect-failed any non-terminal->recoverable-blocked; recovery-receipt-accepted recoverable-blocked->recorded predecessor state.\nThe lifecycle machine at engine/src/core/remediation-machine.ts is the single source of truth — import it; never re-implement transitions or duplicate state literals.\n\nPhase 4 Task 10 — Orchestration façade and migration. Implement helper orchestration start/resume/submit/decide/status/remediate plus CLI routes and legacy adapters. Render human and JSON forms from the same LoomStatus value with complete fact inventory, one action, and identical reasons. Remove parent jq, journals, packet/model loops, transcript copies, and staging recipes from commands and Skill docs; leave only external semantic actions and genuine user decisions.",
+      "file_list": [
+        "engine/src/handlers/helpers/orchestration.ts",
+        "engine/src/cli.ts",
+        "commands/loom.md",
+        "commands/wave-gate.md",
+        "skills/review-and-fix/SKILL.md"
+      ]
+    },
+    {
+      "id": "T11",
+      "description": "Implement Pi and Claude request-bound capture and approved replay benchmark acceptance suite",
+      "agent": "code-implementer-agent",
+      "wave": 4,
+      "depends_on": [
+        "T6",
+        "T7",
+        "T8",
+        "T9"
+      ],
+      "spec_anchors": [
+        "US3",
+        "US4",
+        "US7",
+        "FR-030",
+        "FR-031",
+        "FR-032",
+        "FR-033",
+        "FR-034",
+        "FR-035",
+        "FR-036",
+        "FR-037",
+        "FR-038",
+        "FR-039",
+        "FR-040",
+        "FR-041",
+        "FR-042",
+        "FR-043",
+        "FR-044",
+        "FR-045",
+        "FR-070",
+        "FR-071",
+        "FR-073",
+        "FR-074",
+        "FR-075",
+        "FR-077",
+        "FR-081",
+        "FR-082",
+        "FR-083",
+        "FR-084",
+        "SC-001",
+        "SC-002",
+        "SC-003",
+        "SC-005",
+        "SC-006",
+        "SC-007",
+        "SC-008",
+        "SC-009",
+        "SC-013",
+        "SC-014"
+      ],
+      "new_tests_required": true,
+      "plan_context": "### LC-1: Wave Gate program\n**Machine file:** engine/src/core/wave-gate-machine.ts\n**States:** preparing, awaiting-review-results, awaiting-refutation, awaiting-advisory-decision, ready-to-complete, recoverable-blocked, done, terminal-blocked. Transitions: preparation-published preparing->awaiting-review-results; result-accepted incomplete awaiting-review-results->awaiting-review-results; result-rejected attempt 1 awaiting-review-results->awaiting-review-results; result-rejected attempt 2 awaiting-review-results->terminal-blocked; complete-roster-with-criticals awaiting-review-results->awaiting-refutation; complete-roster-with-advisories awaiting-review-results or awaiting-refutation->awaiting-advisory-decision; complete-roster-clean awaiting-review-results or awaiting-refutation->ready-to-complete; advisory-decision-accepted awaiting-advisory-decision->ready-to-complete; completion-committed ready-to-complete->done; recoverable-effect-failed any non-terminal->recoverable-blocked; recovery-receipt-accepted recoverable-blocked->recorded predecessor state.\nThe lifecycle machine at engine/src/core/wave-gate-machine.ts is the single source of truth — import it; never re-implement transitions or duplicate state literals.\n\n### LC-2: Standalone Review program\n**Machine file:** engine/src/core/standalone-review-machine.ts\n**States:** preparing, awaiting-results, aggregating, awaiting-refutation, ready-to-finalize, recoverable-blocked, done, terminal-blocked. Transitions: review-batch-published preparing->awaiting-results; result-accepted incomplete awaiting-results->awaiting-results; result-rejected attempt 1 awaiting-results->awaiting-results; result-rejected attempt 2 awaiting-results->terminal-blocked; complete-roster-proved awaiting-results->aggregating; aggregate-clean aggregating->ready-to-finalize; aggregate-has-criticals aggregating->awaiting-refutation; refutation-completed awaiting-refutation->ready-to-finalize; result-published ready-to-finalize->done; recoverable-effect-failed any non-terminal->recoverable-blocked; recovery-receipt-accepted recoverable-blocked->recorded predecessor state.\nThe lifecycle machine at engine/src/core/standalone-review-machine.ts is the single source of truth — import it; never re-implement transitions or duplicate state literals.\n\n### LC-3: Remediation authority\n**Machine file:** engine/src/core/remediation-machine.ts\n**States:** authority-frozen, paths-registered, audited, staged-temporary-index, verified, recoverable-blocked, done. Transitions: support-path-registered authority-frozen or paths-registered->paths-registered; audit-succeeded authority-frozen or paths-registered->audited; temporary-index-staged audited->staged-temporary-index; staged-set-verified staged-temporary-index->verified; index-installed verified->done; recoverable-effect-failed any non-terminal->recoverable-blocked; recovery-receipt-accepted recoverable-blocked->recorded predecessor state.\nThe lifecycle machine at engine/src/core/remediation-machine.ts is the single source of truth — import it; never re-implement transitions or duplicate state literals.\n\nPhase 4 Task 11 — Pi/Claude capture and replay benchmark. Implement request reservation, context lowering, and exact-byte capture before legacy routing. Pi binds toolCallId + result index + agent to RequestId; Claude binds stored request authority to session_id + agent_id + agent_type and pre-spawn receipts. Each accepts exactly one unambiguous final text payload, encodes once as UTF-8 without trim/join/reformat, and calls the same capture port. Run all five fixtures, interruption points, invalid evidence classes, parity, and byte equality; assert status/program agreement at sampled boundaries; enforce >=80% fewer command characters, >=70% fewer deterministic parent calls, and all mandated zero counts.",
+      "file_list": [
+        "pi/transcript-adapter.ts",
+        "pi/extension.ts",
+        "engine/src/handlers/subagent-stop/capture-orchestration-result.ts",
+        "engine/src/handlers/subagent-stop/dispatch.ts",
+        "engine/tests/orchestration/orchestration-acceptance.test.ts"
+      ]
+    },
+    {
+      "id": "T12",
+      "description": "Write ADR-0004: Approach selection (panel)",
+      "agent": "adr-writer-agent",
+      "wave": 5,
+      "depends_on": [
+        "T1",
+        "T2",
+        "T3",
+        "T4",
+        "T5",
+        "T6",
+        "T7",
+        "T8",
+        "T9",
+        "T10",
+        "T11"
+      ],
+      "spec_anchors": [
+        "FR-004"
+      ],
+      "new_tests_required": false,
+      "plan_context": "### AD-1: Approach selection (panel)\n\nChoice: Use candidate 2, candidate-type-driven-fp.md, as the base even though the panel recommended candidate 1. Implement separate closed domain programs with pure reducers, parser-produced authority proofs, immutable effect intents/receipts, and persistent Fugue execution. Expose only spawn-batch, await-user, blocked, and done through one minimal shared transport envelope—not a workflow language.\n\nWhy: The user explicitly selected the type-driven candidate for its 10/10 pure-functional-core result and requested substantially more Fugue. Control its additional type/module cost by grafting the simplicity candidate's single façade/minimal contract and the risk candidate's narrow authority boundaries rather than adding a registry, generic program descriptor, broad broker, or monolithic runner.\n\nPanel record: Manifest .claude/specs/2026-08-09-orchestration-automation/panel-runs/run.RIzvYedN0m/manifest.json; run id run.RIzvYedN0m; manifest lenses in order simplicity-first, type-driven-fp, risk-security-first; canonical verdicts verdict-1.json, verdict-2.json, verdict-3.json; ranking .claude/specs/2026-08-09-orchestration-automation/panel-runs/run.RIzvYedN0m/ranking.json. Criterion verdicts: simplicity-first won simplicity and codebase fit + effort; type-driven-fp won pure functional core. Computed ranking: candidate-simplicity-first rank 1 total 25, candidate-type-driven-fp rank 2 total 20, candidate-risk-security-first rank 3 total 16. User selection: candidate-type-driven-fp.md. Panel recommendation: candidate-simplicity-first.md.\n\nCompatible grafts: from simplicity-first, one parent-facing façade and one minimal external-action contract; reuse existing reducers, stores, StateManager, and helpers rather than creating a workflow registry. From type-driven-fp, only an exact-roster parser produces CompleteRoster<AcceptedResult>, which aggregation/tally require. From risk-security-first, anchored RunDirHandle fixed artifact operations, Fugue validation/routing nodes remain capability-free, reducers stay pure, and narrow adapters own filesystem/protected-state/harness/Git effects. Every spawn binds immutable engine-issued AgentRequestAuthority, BatchPublishedReceipt, harness SpawnReceipt, and CaptureReceipt; no request is executable before its artifact batch is durable.\n\nExecutable-model decision: Do not author a plan-level AuthoredDag sidecar. Local AuthoredDag v1 permits one DAG in one of five single shapes and Loom permits one sidecar per plan. This feature needs several distinct operation DAGs plus persistent event-driven machines and roster-sized semantic batches represented as values. Combining them would require a generic DSL or absent nested/dynamic/cyclic/Agent primitives. The executable sources are the imported lifecycle machines and direct use of Fugue public APIs. No decorative graph artifact is created.\n\nRejected: candidate-simplicity-first.md as base due insufficient publication, persistence, dispatch, and Fugue adaptation in replayable core; candidate-risk-security-first.md as base due DAG-for-every-query and hash-linked/write-ahead machinery conflicting with simplicity axis; generic workflow registry/DSL because it violates FR-004 and erases distinct domain vocabularies; one AuthoredDag for the feature because it cannot truthfully express this architecture under Fugue 0.4.0 and Loom's one-pipeline rule.",
+      "file_list": [
+        "docs/adr/ADR-0004-approach-selection-panel.md"
+      ]
+    }
+  ]
+}

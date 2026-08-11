@@ -1,0 +1,89 @@
+{
+  "state": {
+    "panel": "architecture",
+    "stage": "candidates",
+    "input": {
+      "candidateLenses": [
+        "simplicity-first",
+        "type-driven-fp",
+        "risk-security-first"
+      ],
+      "judgeCriteria": [
+        "simplicity",
+        "pure functional core",
+        "codebase fit + effort"
+      ]
+    },
+    "completedRequestIds": [
+      "architecture:interview"
+    ],
+    "completedOperationIds": [
+      "architecture-prepare-candidates"
+    ],
+    "slots": [
+      {
+        "request": {
+          "id": "architecture:candidate:1",
+          "agent": "arch-designer-agent",
+          "interaction": "headless",
+          "modelProfile": "panel-design",
+          "attempt": 1,
+          "outputContract": "non-empty architecture candidate for design lens simplicity-first"
+        },
+        "status": "pending"
+      },
+      {
+        "request": {
+          "id": "architecture:candidate:2",
+          "agent": "arch-designer-agent",
+          "interaction": "headless",
+          "modelProfile": "panel-design",
+          "attempt": 1,
+          "outputContract": "non-empty architecture candidate for design lens type-driven-fp"
+        },
+        "status": "pending"
+      },
+      {
+        "request": {
+          "id": "architecture:candidate:3",
+          "agent": "arch-designer-agent",
+          "interaction": "headless",
+          "modelProfile": "panel-design",
+          "attempt": 1,
+          "outputContract": "non-empty architecture candidate for design lens risk-security-first"
+        },
+        "status": "pending"
+      }
+    ]
+  },
+  "action": {
+    "type": "spawn-batch",
+    "execution": "parallel",
+    "requests": [
+      {
+        "id": "architecture:candidate:1",
+        "agent": "arch-designer-agent",
+        "interaction": "headless",
+        "modelProfile": "panel-design",
+        "attempt": 1,
+        "outputContract": "non-empty architecture candidate for design lens simplicity-first"
+      },
+      {
+        "id": "architecture:candidate:2",
+        "agent": "arch-designer-agent",
+        "interaction": "headless",
+        "modelProfile": "panel-design",
+        "attempt": 1,
+        "outputContract": "non-empty architecture candidate for design lens type-driven-fp"
+      },
+      {
+        "id": "architecture:candidate:3",
+        "agent": "arch-designer-agent",
+        "interaction": "headless",
+        "modelProfile": "panel-design",
+        "attempt": 1,
+        "outputContract": "non-empty architecture candidate for design lens risk-security-first"
+      }
+    ]
+  }
+}

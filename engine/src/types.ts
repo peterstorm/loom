@@ -5,6 +5,18 @@
 import { match } from "ts-pattern";
 import type { TaskProof } from "./core/proof-obligations";
 import type { DeclaredArtifactBaseline } from "./core/artifact-baseline";
+import type {
+  ArtifactDigest,
+  ArtifactRef,
+  AwaitUserAction,
+  BlockedAction,
+  DoneAction,
+  NonEmpty as OrchestrationNonEmpty,
+  OrchestrationRunId,
+  ProtectedWaveStateCommitted,
+  SpawnBatchAction,
+  TerminalBlockedDiagnostic,
+} from "./core/orchestration-contract";
 
 // --- Hook Result (discriminated union) ---
 
@@ -187,6 +199,15 @@ export interface ReviewRunEvidence {
   readonly new_findings: readonly DraftFinding[];
 }
 
+/** Engine-issued semantic-slot authority for one member of an active Review
+ * Run. Legacy runs may omit this field, but exact-slot Wave recovery refuses
+ * such runs rather than accepting caller-authored attempt evidence. */
+export interface ReviewRunSlotAuthority {
+  readonly agent: string;
+  readonly slot_id: string;
+  readonly attempted: 1 | 2;
+}
+
 /**
  * In-progress, packet-bound review run. Every expected reviewer must cover every
  * prior finding exactly once before any prior finding can leave the active set.
@@ -198,6 +219,8 @@ export interface ReviewRun {
   readonly expected_agents: readonly [string, ...string[]];
   readonly prior_finding_ids: readonly string[];
   readonly evidence: readonly ReviewRunEvidence[];
+  /** Present on engine-owned Wave runs; ordered exactly like expected_agents. */
+  readonly slot_authority?: readonly [ReviewRunSlotAuthority, ...ReviewRunSlotAuthority[]];
 }
 
 export interface FindingResolutionAssessment extends PriorFindingAssessment {
@@ -469,6 +492,199 @@ export type EvidenceFailedSpecCheck = Readonly<SpecCheckBase & {
 
 export type SpecCheck = CapturedSpecCheck | EvidenceFailedSpecCheck;
 
+// --- Protected Wave Gate registration and canonical status read model ---
+
+/**
+ * The sole protected reference to an active Wave Gate Run Directory program.
+ * Run-directory progress is inert until this parser-proven registration is
+ * atomically installed through StateManager.
+ */
+export type ActiveWaveGateTerminalOutcome =
+  | Readonly<{ kind: "done"; outcome: ArtifactRef }>
+  | Readonly<{ kind: "terminal-blocked"; diagnostic: TerminalBlockedDiagnostic }>;
+
+export type ActiveWaveGateRegistration = Readonly<{
+  schemaVersion: 1;
+  kind: "active-wave-gate";
+  runId: OrchestrationRunId;
+  wave: number;
+  authorityDigest: ArtifactDigest;
+  revision: number;
+  /** Non-null only while reading a legacy terminal registration. New
+   * completions archive it in wave_gate_history and clear active authority. */
+  terminalOutcome: ActiveWaveGateTerminalOutcome | null;
+}>;
+
+/** Terminal audit is not active authority for the newly-current Wave. */
+export type CompletedWaveGateRegistration = Readonly<{
+  schemaVersion: 1;
+  kind: "completed-wave-gate";
+  runId: OrchestrationRunId;
+  wave: number;
+  authorityDigest: ArtifactDigest;
+  revision: number;
+  completionReceipt: ProtectedWaveStateCommitted;
+}>;
+
+export type StatusFact<T> =
+  | Readonly<{ kind: "known"; value: T }>
+  | Readonly<{ kind: "unavailable"; reasons: OrchestrationNonEmpty<StatusReason> }>;
+
+export type StatusReasonKind =
+  | "authority-unavailable"
+  | "authority-contradiction"
+  | "task-running"
+  | "proof-failed"
+  | "tests-not-ready"
+  | "review-roster-gap"
+  | "review-evidence-failure"
+  | "refutation-required"
+  | "advisory-decision-required"
+  | "review-spawn-required"
+  | "blocked-diagnostic"
+  | "engine-resume-required"
+  | "run-complete"
+  | "completion-prerequisite-failed"
+  | "completion-eligible"
+  | "wave-gate-ready";
+
+export type StatusReason = Readonly<{
+  kind: StatusReasonKind;
+  message: string;
+  taskId: string | null;
+}>;
+
+export type StatusTaskCounts = Readonly<{
+  pending: number;
+  running: number;
+  implemented: number;
+  blocked: number;
+  completed: number;
+}>;
+
+export type FailedProofObligation = Readonly<{
+  taskId: string;
+  failure: import("./core/proof-obligations").ProofFailure;
+}>;
+
+export type TestReadinessIssue = Readonly<{
+  taskId: string;
+  reasons: OrchestrationNonEmpty<string>;
+}>;
+
+export type TestReadiness =
+  | Readonly<{ kind: "ready"; affectedTasks: readonly [] }>
+  | Readonly<{ kind: "not-ready"; affectedTasks: OrchestrationNonEmpty<TestReadinessIssue> }>;
+
+export type ReviewRosterGap = Readonly<{
+  taskId: string;
+  generation: number;
+  packetId: string;
+  agent: string;
+}>;
+
+export type ReviewEvidenceFailure = Readonly<{
+  taskId: string;
+  generation: number | null;
+  packetId: string | null;
+  agent: string;
+  error: string;
+}>;
+
+export type FindingCounts = Readonly<{
+  /** Active blocking critical Findings only; advisories are counted separately. */
+  activeCritical: number;
+  advisory: number;
+  resolved: number;
+  refuted: number;
+}>;
+
+export type RefutationPanelNeed =
+  | Readonly<{
+      kind: "needed";
+      findingIds: OrchestrationNonEmpty<string>;
+      reasons: OrchestrationNonEmpty<string>;
+    }>
+  | Readonly<{
+      kind: "not-needed";
+      findingIds: readonly [];
+      reasons: OrchestrationNonEmpty<string>;
+    }>;
+
+export type WaveGateCompletionEligibility =
+  | Readonly<{ kind: "eligible"; failedPrerequisites: readonly [] }>
+  | Readonly<{ kind: "ineligible"; failedPrerequisites: OrchestrationNonEmpty<string> }>;
+
+export type CanonicalStatusFacts = Readonly<{
+  location: StatusFact<Readonly<{ activePhase: Phase; activeWave: number | null }>>;
+  tasks: StatusFact<Readonly<{ counts: StatusTaskCounts }>>;
+  failedProofObligations: StatusFact<readonly FailedProofObligation[]>;
+  testReadiness: StatusFact<TestReadiness>;
+  reviewRuns: StatusFact<Readonly<{
+    rosterGaps: readonly ReviewRosterGap[];
+    evidenceFailures: readonly ReviewEvidenceFailure[];
+  }>>;
+  findingCounts: StatusFact<FindingCounts>;
+  refutationPanelNeed: StatusFact<RefutationPanelNeed>;
+  waveGateCompletionEligibility: StatusFact<WaveGateCompletionEligibility>;
+}>;
+
+export type WaveGateProtectedSnapshotBinding = Readonly<{
+  runId: OrchestrationRunId;
+  registrationRevision: number;
+  authorityDigest: ArtifactDigest;
+  readinessDigest: ArtifactDigest;
+  lifecycleCheckpointDigest: ArtifactDigest;
+}>;
+
+/** Lifecycle-issued action authority. Every arm carries the complete protected
+ * snapshot identity so a same-run proof cannot cross a registration revision,
+ * readiness derivation, or durable lifecycle checkpoint. */
+export type WaveGateNextAction =
+  | Readonly<{ kind: "review-batch"; lifecycle: "preparing" | "awaiting-review-results"; action: SpawnBatchAction; binding: WaveGateProtectedSnapshotBinding }>
+  | Readonly<{ kind: "advisory-decision"; lifecycle: "awaiting-advisory-decision"; action: AwaitUserAction; binding: WaveGateProtectedSnapshotBinding }>
+  | Readonly<{ kind: "blocked"; lifecycle: "recoverable-blocked" | "terminal-blocked" | "authority-blocked"; action: BlockedAction; binding: WaveGateProtectedSnapshotBinding }>
+  | Readonly<{ kind: "completed"; lifecycle: "done"; action: DoneAction; binding: WaveGateProtectedSnapshotBinding }>;
+
+/** A healthy registered program can be temporarily unable to expose its next
+ * semantic action until the engine replays its checkpoint. This remains one of
+ * the fixed four external action tags (`blocked`) without pretending malformed
+ * authority or a terminal lifecycle failure. */
+export type EngineResumeDiagnostic = Readonly<{
+  kind: "engine-resume-required";
+  category: "healthy-run-suspended";
+  runId: OrchestrationRunId;
+  message: string;
+  retry: Readonly<{
+    kind: "engine-resume";
+    eligible: true;
+    consumesSemanticAttempt: false;
+  }>;
+  recovery: Readonly<{
+    kind: "resume-orchestration";
+    runId: OrchestrationRunId;
+  }>;
+}>;
+
+export type EngineResumeAction = Readonly<{
+  kind: "blocked";
+  runId: OrchestrationRunId;
+  diagnostic: EngineResumeDiagnostic;
+}>;
+
+export type NextActionDecision = Readonly<{
+  /** Exactly one of the fixed four transport tags. Engine resume is a typed,
+   * retryable blocked action rather than terminal invalid authority. */
+  action: WaveGateNextAction["action"] | EngineResumeAction;
+  reasons: OrchestrationNonEmpty<StatusReason>;
+}>;
+
+export type LoomStatus = Readonly<{
+  schemaVersion: 1;
+  facts: CanonicalStatusFacts;
+  next: NextActionDecision;
+}>;
+
 export interface TaskGraph {
   current_phase: Phase;
   phase_artifacts: Partial<Record<Phase, string>>;
@@ -487,5 +703,9 @@ export interface TaskGraph {
   github_issue?: number;
   github_repo?: string;
   spec_check?: SpecCheck;
+  /** Parser-proven protected registration; absent until a Wave Gate is explicitly registered. */
+  active_wave_gate?: ActiveWaveGateRegistration;
+  /** Immutable terminal registrations, separate from authority for the next Wave. */
+  wave_gate_history?: readonly CompletedWaveGateRegistration[];
   updated_at?: string;
 }

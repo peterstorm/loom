@@ -1,0 +1,22 @@
+{
+  "run_id": "run.RIzvYedN0m",
+  "interview_file": ".claude/specs/2026-08-09-orchestration-automation/panel-runs/run.RIzvYedN0m/interview.md",
+  "interview_json": ".claude/specs/2026-08-09-orchestration-automation/panel-runs/run.RIzvYedN0m/interview.json",
+  "candidates": [
+    {
+      "lens": "simplicity-first",
+      "path": ".claude/specs/2026-08-09-orchestration-automation/panel-runs/run.RIzvYedN0m/candidates/candidate-simplicity-first.md",
+      "filename": "candidate-simplicity-first.md"
+    },
+    {
+      "lens": "type-driven-fp",
+      "path": ".claude/specs/2026-08-09-orchestration-automation/panel-runs/run.RIzvYedN0m/candidates/candidate-type-driven-fp.md",
+      "filename": "candidate-type-driven-fp.md"
+    },
+    {
+      "lens": "risk-security-first",
+      "path": ".claude/specs/2026-08-09-orchestration-automation/panel-runs/run.RIzvYedN0m/candidates/candidate-risk-security-first.md",
+      "filename": "candidate-risk-security-first.md"
+    }
+  ]
+}

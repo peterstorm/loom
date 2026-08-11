@@ -1,22 +1,29 @@
+import { createHash } from "node:crypto";
 import {
   existsSync,
   lstatSync,
   readFileSync,
+  readdirSync,
   realpathSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { isReviewAgent } from "../../config";
 import type { HookHandler, HookResult } from "../../types";
 import {
-  aggregateStandaloneReview,
+  aggregateLegacyStandaloneReview,
+  captureStandaloneReviewerBytes,
   finalizeStandaloneReview,
   parseStandaloneAggregate,
   parseStandaloneReviewScope,
-  serializeAdjudicatedStandaloneReview,
+  serializeHistoricalAdjudicatedStandaloneReview,
   serializeStandaloneAggregate,
+  type PreparedStandaloneReviewerCapture,
+  type StandaloneCaptureAuthority,
+  type StandaloneCaptureError,
   type StandaloneReviewAggregate,
-  type StandaloneReviewTranscript,
+  type StandaloneReviewerRole,
 } from "../../core/standalone-review";
+import { parseArtifactRef, type ArtifactRef } from "../../core/orchestration-contract";
 import { resolveReviewFindings, reviewResolutionLog } from "../../core/review-output";
 import {
   argumentValue,
@@ -37,12 +44,32 @@ const USAGE =
   "--runs-root <dir> --run-dir <dir> [--input <review-plan.json|review-input.json>]";
 const usageError: HookResult = { kind: "error", message: USAGE };
 
+/**
+ * Harness-facing FR-033 boundary. Pi/Claude adapters (T11) pass the attributed
+ * request id and exact completion bytes here; this entry point only returns a
+ * request-bound capture intent and never asks the parent to publish output.
+ */
+export function prepareStandaloneReviewHarnessCapture(input: Readonly<{
+  captureAuthority: StandaloneCaptureAuthority;
+  requestId: unknown;
+  rawBytes: unknown;
+}>): Readonly<{ ok: true; value: PreparedStandaloneReviewerCapture }> |
+  Readonly<{ ok: false; error: StandaloneCaptureError }> {
+  return captureStandaloneReviewerBytes(input.captureAuthority, input.requestId, input.rawBytes);
+}
+
 type Parse<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly errors: readonly string[] };
-interface ReviewInputEntry { readonly agent: string; readonly transcript: string }
+interface ReviewInputEntry {
+  readonly agent: StandaloneReviewerRole;
+  readonly transcript: string;
+  readonly expectedByteLength: number | null;
+  readonly expectedSha256: string | null;
+}
 interface ReviewSession {
   readonly runId: string;
   readonly scope: readonly string[];
-  readonly expectedAgents: readonly string[];
+  readonly expectedAgents: readonly StandaloneReviewerRole[];
+  readonly transcriptSlots: readonly string[];
 }
 
 function readJson(path: string, label: string, expectedParent: string): Parse<unknown> {
@@ -61,7 +88,7 @@ function readJson(path: string, label: string, expectedParent: string): Parse<un
   }
 }
 
-function parseAgents(raw: unknown, label: string, errors: string[]): readonly string[] {
+function parseAgents(raw: unknown, label: string, errors: string[]): readonly StandaloneReviewerRole[] {
   const agents = Array.isArray(raw) && raw.every((agent) => typeof agent === "string" && agent.trim() !== "")
     ? raw.map((agent) => (agent as string).trim().replace(/^loom:/, "")) : [];
   if (agents.length === 0) errors.push(`${label} must be a non-empty string array`);
@@ -69,7 +96,39 @@ function parseAgents(raw: unknown, label: string, errors: string[]): readonly st
   for (const agent of agents) {
     if (!isReviewAgent(agent)) errors.push(`${label} contains a non-Machine-Summary reviewer: ${agent}`);
   }
-  return agents;
+  return agents.filter(isReviewAgent) as StandaloneReviewerRole[];
+}
+
+function transcriptSlots(agents: readonly StandaloneReviewerRole[]): readonly string[] {
+  return Object.freeze(agents.map((agent, index) => `reviewers/${index + 1}-${agent}.md`));
+}
+
+/** Existing files and every existing parent component must be non-symlinks. */
+function scopeSafetyErrors(scope: readonly string[]): readonly string[] {
+  const errors: string[] = [];
+  for (const path of scope) {
+    const segments = path.split("/");
+    let cursor = resolve(".");
+    for (const segment of segments) {
+      cursor = join(cursor, segment);
+      try {
+        // lstat must be the first inspection: existsSync follows dangling
+        // symlinks and would misclassify them as an absent safe path.
+        if (lstatSync(cursor).isSymbolicLink()) {
+          errors.push(`review plan.scope contains a symlink-unsafe path component: ${path}`);
+          break;
+        }
+      } catch (error) {
+        const code = typeof error === "object" && error !== null && "code" in error
+          ? (error as { readonly code?: unknown }).code
+          : undefined;
+        if (code === "ENOENT" || code === "ENOTDIR") break; // deletion/new path: explicitly absent
+        errors.push(`cannot inspect review plan.scope path ${path}: ${error instanceof Error ? error.message : String(error)}`);
+        break;
+      }
+    }
+  }
+  return errors;
 }
 
 function parseReviewPlan(raw: unknown, runId: string): Parse<ReviewSession> {
@@ -79,9 +138,15 @@ function parseReviewPlan(raw: unknown, runId: string): Parse<ReviewSession> {
   const parsedScope = parseStandaloneReviewScope(record.scope, "review plan.scope");
   if (!parsedScope.ok) errors.push(...parsedScope.errors);
   const expectedAgents = parseAgents(record.expected_agents, "review plan.expected_agents", errors);
+  if (parsedScope.ok) errors.push(...scopeSafetyErrors(parsedScope.value));
   return errors.length > 0 || !parsedScope.ok
     ? { ok: false, errors }
-    : { ok: true, value: { runId, scope: parsedScope.value, expectedAgents } };
+    : { ok: true, value: {
+        runId,
+        scope: parsedScope.value,
+        expectedAgents,
+        transcriptSlots: transcriptSlots(expectedAgents),
+      } };
 }
 
 function serializeSession(session: ReviewSession): string {
@@ -90,6 +155,7 @@ function serializeSession(session: ReviewSession): string {
     run_id: session.runId,
     scope: session.scope,
     expected_agents: session.expectedAgents,
+    transcript_slots: session.transcriptSlots,
   }, null, 2);
 }
 
@@ -101,6 +167,16 @@ function parseSession(raw: unknown, expectedRunId: string): Parse<ReviewSession>
   if (record.run_id !== expectedRunId) errors.push(`review session.run_id must equal run directory '${expectedRunId}'`);
   const plan = parseReviewPlan(record, expectedRunId);
   if (!plan.ok) errors.push(...plan.errors.map((error) => error.replace(/^review plan\./, "review session.")));
+  // Historical schema-v1 sessions predate the explicit slot projection. Their
+  // slots are still deterministically derived from expected_agents; new v1
+  // sessions persist the projection and must match it exactly.
+  if (plan.ok && record.transcript_slots !== undefined && (
+    !Array.isArray(record.transcript_slots) ||
+    record.transcript_slots.length !== plan.value.transcriptSlots.length ||
+    record.transcript_slots.some((slot, index) => slot !== plan.value.transcriptSlots[index])
+  )) {
+    errors.push("review session.transcript_slots must exactly match the immutable reviewer slots");
+  }
   return errors.length > 0 || !plan.ok ? { ok: false, errors } : { ok: true, value: plan.value };
 }
 
@@ -125,23 +201,40 @@ function loadReviewAuthority(runDir: string): Parse<ReviewSession> {
       };
 }
 
-function parseObservedReviews(raw: unknown, expectedAgents: readonly string[]): Parse<readonly ReviewInputEntry[]> {
+function parseObservedReviews(raw: unknown, expectedAgents: readonly StandaloneReviewerRole[]): Parse<readonly ReviewInputEntry[]> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ok: false, errors: ["review input must be an object"] };
   const record = raw as Record<string, unknown>;
+  const versioned = Object.hasOwn(record, "schema_version");
+  const topKeys = Object.keys(record);
+  const allowedTop = versioned ? ["schema_version", "reviews"] : ["reviews"];
+  const errors = topKeys.filter((key) => !allowedTop.includes(key)).map((key) => `review input contains unknown field '${key}'`);
+  if (versioned && record.schema_version !== 1) errors.push("review input.schema_version must be 1");
   if (!Array.isArray(record.reviews) || record.reviews.length === 0) {
-    return { ok: false, errors: ["review input.reviews must be a non-empty array"] };
+    return { ok: false, errors: [...errors, "review input.reviews must be a non-empty array"] };
   }
-  const errors: string[] = [];
   const reviews: ReviewInputEntry[] = [];
   for (const [index, entry] of record.reviews.entries()) {
     const path = `review input.reviews[${index}]`;
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) { errors.push(`${path} must be an object`); continue; }
     const item = entry as Record<string, unknown>;
-    const agent = typeof item.agent === "string" ? item.agent.trim().replace(/^loom:/, "") : "";
+    const allowed = versioned ? ["agent", "transcript", "byte_length", "sha256"] : ["agent", "transcript"];
+    errors.push(...Object.keys(item).filter((key) => !allowed.includes(key)).map((key) => `${path} contains unknown field '${key}'`));
+    const rawAgent = typeof item.agent === "string" ? item.agent.trim().replace(/^loom:/, "") : "";
     const transcript = typeof item.transcript === "string" ? item.transcript.trim() : "";
-    if (agent === "") errors.push(`${path}.agent must be non-empty`);
+    if (rawAgent === "" || !isReviewAgent(rawAgent)) errors.push(`${path}.agent must be a standalone Machine-Summary reviewer`);
     if (transcript === "") errors.push(`${path}.transcript must be non-empty`);
-    reviews.push({ agent, transcript });
+    const expectedByteLength = versioned && typeof item.byte_length === "number" && Number.isSafeInteger(item.byte_length) && item.byte_length > 0
+      ? item.byte_length : null;
+    const expectedSha256 = versioned && typeof item.sha256 === "string" && /^[0-9a-f]{64}$/.test(item.sha256)
+      ? item.sha256 : null;
+    if (versioned && expectedByteLength === null) errors.push(`${path}.byte_length must be a positive safe integer`);
+    if (versioned && expectedSha256 === null) errors.push(`${path}.sha256 must be a lowercase SHA-256 digest`);
+    if (isReviewAgent(rawAgent)) reviews.push({
+      agent: rawAgent as StandaloneReviewerRole,
+      transcript,
+      expectedByteLength,
+      expectedSha256,
+    });
   }
   const observed = reviews.map(({ agent }) => agent);
   if (new Set(observed).size !== observed.length) errors.push("review input agents must be distinct");
@@ -151,12 +244,27 @@ function parseObservedReviews(raw: unknown, expectedAgents: readonly string[]): 
   return errors.length > 0 ? { ok: false, errors } : { ok: true, value: reviews };
 }
 
-function loadTranscripts(runDir: string, reviews: readonly ReviewInputEntry[]): Parse<readonly StandaloneReviewTranscript[]> {
+type LoadedTranscript = Readonly<{
+  agent: StandaloneReviewerRole;
+  output: string;
+  artifact: ArtifactRef;
+}>;
+
+function loadTranscripts(runDir: string, reviews: readonly ReviewInputEntry[]): Parse<readonly LoadedTranscript[]> {
   const expectedParent = resolve(join(runDir, "reviewers"));
   const errors: string[] = [];
-  const transcripts: StandaloneReviewTranscript[] = [];
+  const transcripts: LoadedTranscript[] = [];
   const seenRealpaths = new Set<string>();
   const seenFiles = new Set<string>();
+  try {
+    const expectedNames = reviews.map((review, index) => `${index + 1}-${review.agent}.md`).sort();
+    const observedNames = readdirSync(expectedParent).sort();
+    if (observedNames.length !== expectedNames.length || observedNames.some((name, index) => name !== expectedNames[index])) {
+      errors.push("reviewers directory must contain exactly the frozen transcript slots; missing or surplus evidence is forbidden");
+    }
+  } catch (error) {
+    errors.push(`cannot enumerate frozen reviewer slots: ${error instanceof Error ? error.message : String(error)}`);
+  }
   for (const [index, review] of reviews.entries()) {
     const path = resolve(review.transcript);
     const expectedPath = resolve(join(runDir, "reviewers", `${index + 1}-${review.agent}.md`));
@@ -180,7 +288,34 @@ function loadTranscripts(runDir: string, reviews: readonly ReviewInputEntry[]): 
       }
       seenRealpaths.add(real);
       seenFiles.add(fileIdentity);
-      transcripts.push({ agent: review.agent, output: readFileSync(path, "utf-8") });
+      const bytes = readFileSync(path);
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      if (review.expectedByteLength !== null && review.expectedByteLength !== bytes.byteLength) {
+        errors.push(`review transcript byte_length is stale for ${review.agent}`);
+        continue;
+      }
+      if (review.expectedSha256 !== null && review.expectedSha256 !== sha256) {
+        errors.push(`review transcript sha256 is stale for ${review.agent}`);
+        continue;
+      }
+      let output: string;
+      try {
+        output = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        errors.push(`review transcript must contain exact valid UTF-8 Agent output: ${review.transcript}`);
+        continue;
+      }
+      const artifact = parseArtifactRef({
+        runId: basename(runDir),
+        slot: `reviewers/${index + 1}-${review.agent}.md`,
+        digest: sha256,
+        byteLength: bytes.byteLength,
+      });
+      if (!artifact.ok) {
+        errors.push(`cannot bind review transcript artifact: ${artifact.error.message}`);
+        continue;
+      }
+      transcripts.push({ agent: review.agent, output, artifact: artifact.value });
     } catch (error) {
       errors.push(`cannot read review transcript ${review.transcript}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -241,7 +376,7 @@ function aggregate(runDir: string, inputPath: string): HookResult {
   if (!reviews.ok) return contractError("standalone review", reviews.errors);
   const loaded = loadTranscripts(runDir, reviews.value);
   if (!loaded.ok) return contractError("standalone review", loaded.errors);
-  const result = aggregateStandaloneReview({ runId: session.value.runId, scope: session.value.scope, transcripts: loaded.value });
+  const result = aggregateLegacyStandaloneReview({ runId: session.value.runId, scope: session.value.scope, transcripts: loaded.value });
   if (!result.ok) return contractError("standalone review", result.errors);
   const json = serializeStandaloneAggregate(result.value.aggregate) + "\n";
   const target = prepareWriteTargets(runDir, [], ["aggregate.json", ".aggregate.pending.json"]);
@@ -307,7 +442,7 @@ export function loadEvidenceBoundAggregate(runDir: string): Parse<StandaloneRevi
   const transcripts = loadTranscripts(runDir, reviews.value);
   if (!transcripts.ok) return transcripts;
 
-  const derived = aggregateStandaloneReview({
+  const derived = aggregateLegacyStandaloneReview({
     runId,
     scope: session.value.scope,
     transcripts: transcripts.value,
@@ -346,7 +481,7 @@ function finalize(runDir: string): HookResult {
   if (existsSync(join(runDir, "outcomes.json"))) return contractError("standalone review", ["clean review unexpectedly has panel outcomes"]);
   const finalized = finalizeStandaloneReview(aggregate.value, null);
   if (!finalized.ok) return contractError("standalone review", finalized.errors);
-  const json = serializeAdjudicatedStandaloneReview(finalized.value) + "\n";
+  const json = serializeHistoricalAdjudicatedStandaloneReview(finalized.value) + "\n";
   const target = prepareWriteTargets(runDir, [], ["result.json", ".result.pending.json"]);
   if (!target.ok) return contractError("standalone review boundary", target.errors);
   let stagedCreated = false;

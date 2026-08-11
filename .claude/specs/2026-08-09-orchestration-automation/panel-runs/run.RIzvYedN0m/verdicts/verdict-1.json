@@ -1,0 +1,23 @@
+{
+  "criterion": "simplicity",
+  "rankings": [
+    {
+      "candidate": "candidate-simplicity-first.md",
+      "score": 8,
+      "fatal_flaw": null,
+      "strongest_idea": "Expose one orchestration façade and one session format while delegating policy to the existing domain-specific reducers."
+    },
+    {
+      "candidate": "candidate-type-driven-fp.md",
+      "score": 4,
+      "fatal_flaw": "Five program ADTs, extensive branded proofs, effect receipts, a capability broker, and separate Fugue pipelines create substantially more conceptual and structural machinery than the orchestration requires.",
+      "strongest_idea": "Use parser-produced CompleteRoster evidence to prevent partial aggregation without spreading checks throughout the runtime."
+    },
+    {
+      "candidate": "candidate-risk-security-first.md",
+      "score": 2,
+      "fatal_flaw": "Mandatory DAG execution for every operation plus hash-linked events, write-ahead publication states, grants, receipts, anchored stores, and index compare-and-swap over-fortifies the system and makes routine orchestration difficult to understand or change.",
+      "strongest_idea": "Use an anchored RunDirHandle with fixed operations so callers never manipulate arbitrary artifact paths."
+    }
+  ]
+}

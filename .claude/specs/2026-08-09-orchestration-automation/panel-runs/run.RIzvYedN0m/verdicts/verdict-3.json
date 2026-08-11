@@ -1,0 +1,23 @@
+{
+  "criterion": "codebase fit + effort",
+  "rankings": [
+    {
+      "candidate": "candidate-simplicity-first.md",
+      "score": 9,
+      "fatal_flaw": null,
+      "strongest_idea": "Introduce one parent-facing orchestration façade that directly reuses existing domain reducers, storage primitives, StateManager authority, and compatibility helpers while using Fugue only for shipped static-DAG and replay capabilities."
+    },
+    {
+      "candidate": "candidate-type-driven-fp.md",
+      "score": 6,
+      "fatal_flaw": "Its 12–16 week proliferation of brands, proof types, effect receipts, capability infrastructure, and phase-specific modules substantially exceeds the brownfield migration needed and raises long-term evolution cost despite matching Loom's type conventions.",
+      "strongest_idea": "Use parser-produced CompleteRoster proofs so partial result sets cannot reach aggregation or tally states."
+    },
+    {
+      "candidate": "candidate-risk-security-first.md",
+      "score": 5,
+      "fatal_flaw": "Requiring every operation, including status, to traverse dedicated Fugue DAGs plus hash-linked events, publication receipts, descriptor-anchored stores, and index compare-and-swap over-fortifies the existing architecture at 12–16 weeks of effort and creates more machinery than the codebase needs to own.",
+      "strongest_idea": "Bind each semantic spawn to an immutable engine-issued grant and publication receipt so no request becomes executable before its complete artifact batch is durably accepted."
+    }
+  ]
+}

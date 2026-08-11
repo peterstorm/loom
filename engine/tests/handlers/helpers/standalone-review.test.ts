@@ -1,9 +1,22 @@
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {
+  createAtomicInitialPublicationClaimPort,
+  createInitialBatchPublicationReconciler,
+  createInitialPublicationEffectPort,
+  prepareInitialBatchPublicationIntent,
+  spawnBatchAction,
+} from "../../../src/core/orchestration-contract";
+import {
+  bindStandaloneCaptureAuthority,
+  prepareStandaloneReview,
+} from "../../../src/core/standalone-review";
+import { prepareStandaloneReviewHarnessCapture } from "../../../src/handlers/helpers/standalone-review";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const CLI = join(ROOT, "engine/src/cli.ts");
@@ -61,6 +74,114 @@ describe("standalone review helper and refutation adapter", () => {
     const run = cli("standalone-review", ["init", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-plan.json")]);
     expect(run.status, run.stderr).toBe(0);
   };
+
+  it("exposes request-bound direct raw capture to harness completion adapters", () => {
+    const runId = "run.capture-route";
+    const binding = {
+      profile: "general-review",
+      pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+      claude: { harness: "claude-code", model: "sonnet" },
+    } as const;
+    const request = {
+      runId,
+      requestId: "request:capture-route:1",
+      slotId: "slot:capture-route",
+      program: "standalone-review" as const,
+      role: "code-reviewer" as const,
+      attempt: 1 as const,
+      modelProfile: binding.profile,
+      harnessBinding: { pi: binding.pi, claude: binding.claude },
+      requiredSkill: null,
+      contextDigest: "1".repeat(64),
+      outputSlot: "transcripts/capture-route/attempt-1.raw",
+    };
+    const authority = prepareStandaloneReview({
+      runId,
+      explicitScope: ["src/x.ts"],
+      changedPaths: {
+        unstaged: ["src/x.ts"], staged: [], committed: [],
+        base_revision: null, head_revision: "HEAD",
+      },
+      reviewMetadata: {
+        requested_kinds: ["comments"], docs_only: false, source_or_test_changed: false,
+        types_changed: false, comments_changed: false, additions: 1, file_count: 1,
+        new_structure: false, languages: ["TypeScript"],
+      },
+      scopeSafety: [{ path: "src/x.ts", status: "safe" }],
+      roster: [{
+        slotId: request.slotId,
+        attempts: [request, {
+          ...request,
+          requestId: "request:capture-route:2",
+          attempt: 2,
+          contextDigest: "2".repeat(64),
+          outputSlot: "transcripts/capture-route/attempt-2.raw",
+        }],
+      }],
+    });
+    expect(authority.ok).toBe(true);
+    if (!authority.ok) return;
+    const rawRequests = [{
+      authority: authority.value.initialRequests[0],
+      context: {
+        digest: authority.value.initialRequests[0].contextDigest,
+        slot: `contexts/${authority.value.initialRequests[0].contextDigest}.json`,
+      },
+    }];
+    const publication = prepareInitialBatchPublicationIntent(runId, "effect:capture-route-batch", rawRequests);
+    expect(publication.ok).toBe(true);
+    if (!publication.ok) return;
+    const receipt = {
+      schemaVersion: 1 as const,
+      kind: "batch-published" as const,
+      effectId: publication.value.identity.effectId,
+      runId: publication.value.identity.runId,
+      requestIds: publication.value.requestIds,
+      contextDigests: publication.value.contextDigests,
+      issuedRequests: publication.value.issuedRequests,
+      publicationDigest: publication.value.identity.publicationDigest,
+    };
+    const receiptBytes = [...new TextEncoder().encode(JSON.stringify(receipt))];
+    const issuance = createInitialBatchPublicationReconciler(
+      createInitialPublicationEffectPort(() => ({ ok: true, value: receiptBytes })),
+      createAtomicInitialPublicationClaimPort((claim) => ({
+        ok: true,
+        value: {
+          schemaVersion: 1,
+          kind: "initial-publication-claimed",
+          key: claim.key,
+          identity: claim.identity,
+        },
+      })),
+    )(publication.value);
+    expect(issuance.ok).toBe(true);
+    if (!issuance.ok) return;
+    const action = spawnBatchAction(issuance.value, rawRequests);
+    expect(action.ok).toBe(true);
+    if (!action.ok) return;
+    const captureAuthority = bindStandaloneCaptureAuthority(authority.value.authority, action.value.requests);
+    expect(captureAuthority.ok).toBe(true);
+    if (!captureAuthority.ok) return;
+
+    const bytes = Buffer.from("exact harness completion bytes\n", "utf-8");
+    const captured = prepareStandaloneReviewHarnessCapture({
+      captureAuthority: captureAuthority.value,
+      requestId: request.requestId,
+      rawBytes: bytes,
+    });
+    expect(captured.ok).toBe(true);
+    if (captured.ok) {
+      expect(captured.value.request.requestId).toBe(request.requestId);
+      expect(captured.value.intent.request.outputSlot.path).toBe(request.outputSlot);
+      expect(captured.value.intent.bytes).toEqual([...bytes]);
+      expect(captured.value.expectedArtifact.digest).toBe(createHash("sha256").update(bytes).digest("hex"));
+    }
+    expect(prepareStandaloneReviewHarnessCapture({
+      captureAuthority: captureAuthority.value,
+      requestId: "request:foreign",
+      rawBytes: bytes,
+    }).ok).toBe(false);
+  });
 
   it("runs end to end without creating or mutating orchestration state", () => {
     initialize();
@@ -314,6 +435,8 @@ describe("standalone review helper and refutation adapter", () => {
     run = cli("standalone-review", ["finalize", "--runs-root", runsRoot, "--run-dir", runDir]);
     expect(run.status, run.stderr).toBe(0);
     const result = JSON.parse(readFileSync(join(tmp, runDir, "result.json"), "utf-8"));
+    expect(result.schema_version).toBeUndefined();
+    expect(result.reviewer_evidence).toBeUndefined();
     expect(result.surviving_critical_findings).toEqual([]);
     expect(result.refuted_critical_findings).toEqual([]);
     expect(result.advisory_findings).toHaveLength(1);
@@ -419,5 +542,159 @@ describe("standalone review helper and refutation adapter", () => {
     run = cli("standalone-review", ["aggregate", "--runs-root", runsRoot, "--run-dir", runDir, "--input", join(runDir, "review-input.json")]);
     expect(run.status).toBe(1);
     expect(run.stderr).toContain("already been aggregated");
+  });
+
+  it("continues an in-flight historical v1 session that predates transcript_slots", () => {
+    initialize();
+    const sessionPath = join(tmp, runDir, "session.json");
+    const historical = JSON.parse(readFileSync(sessionPath, "utf-8"));
+    delete historical.transcript_slots;
+    writeFileSync(sessionPath, JSON.stringify(historical));
+
+    const run = cli("standalone-review", [
+      "aggregate", "--runs-root", runsRoot, "--run-dir", runDir,
+      "--input", join(runDir, "review-input.json"),
+    ]);
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(JSON.parse(run.stdout).schema_version).toBe(1);
+  });
+
+  it("publishes versioned session and aggregate reads with exact byte metadata", () => {
+    initialize();
+    const session = JSON.parse(readFileSync(join(tmp, runDir, "session.json"), "utf-8"));
+    expect(session.schema_version).toBe(1);
+    expect(session.transcript_slots).toEqual(["reviewers/1-code-reviewer.md"]);
+
+    const bytes = Buffer.from(reviewOutput, "utf-8");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    writeFileSync(join(tmp, runDir, "review-input.json"), JSON.stringify({
+      schema_version: 1,
+      reviews: [{
+        agent: "code-reviewer",
+        transcript: join(runDir, "reviewers/1-code-reviewer.md"),
+        byte_length: bytes.byteLength,
+        sha256,
+      }],
+    }));
+
+    const run = cli("standalone-review", [
+      "aggregate", "--runs-root", runsRoot, "--run-dir", runDir,
+      "--input", join(runDir, "review-input.json"),
+    ]);
+    expect(run.status, run.stderr).toBe(0);
+    const aggregate = JSON.parse(run.stdout);
+    expect(aggregate.schema_version).toBe(1);
+    expect(aggregate.reviewer_evidence).toHaveLength(1);
+    expect(aggregate.reviewer_evidence[0].artifact.byteLength).toBe(bytes.byteLength);
+    expect(aggregate.reviewer_evidence[0].artifact.digest).toBe(sha256);
+  });
+
+  it("rejects invalid UTF-8 through handler aggregation without replacement decoding", () => {
+    initialize();
+    const transcriptPath = join(tmp, runDir, "reviewers/1-code-reviewer.md");
+    const invalid = Buffer.from([0x23, 0x20, 0xff, 0xfe, 0x0a]);
+    writeFileSync(transcriptPath, invalid);
+    writeFileSync(join(tmp, runDir, "review-input.json"), JSON.stringify({
+      schema_version: 1,
+      reviews: [{
+        agent: "code-reviewer",
+        transcript: join(runDir, "reviewers/1-code-reviewer.md"),
+        byte_length: invalid.byteLength,
+        sha256: createHash("sha256").update(invalid).digest("hex"),
+      }],
+    }));
+
+    const run = cli("standalone-review", [
+      "aggregate", "--runs-root", runsRoot, "--run-dir", runDir,
+      "--input", join(runDir, "review-input.json"),
+    ]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("exact valid UTF-8 Agent output");
+    expect(run.stderr).not.toContain("�");
+    expect(() => readFileSync(join(tmp, runDir, "aggregate.json"), "utf-8")).toThrow();
+  });
+
+  it("rejects stale v1 bytes and every surplus transcript before aggregation", () => {
+    initialize();
+    const bytes = Buffer.from(reviewOutput, "utf-8");
+    writeFileSync(join(tmp, runDir, "review-input.json"), JSON.stringify({
+      schema_version: 1,
+      reviews: [{
+        agent: "code-reviewer",
+        transcript: join(runDir, "reviewers/1-code-reviewer.md"),
+        byte_length: bytes.byteLength,
+        sha256: "0".repeat(64),
+      }],
+    }));
+    let run = cli("standalone-review", [
+      "aggregate", "--runs-root", runsRoot, "--run-dir", runDir,
+      "--input", join(runDir, "review-input.json"),
+    ]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("sha256 is stale");
+
+    writeFileSync(join(tmp, runDir, "review-input.json"), JSON.stringify({
+      reviews: [{ agent: "code-reviewer", transcript: join(runDir, "reviewers/1-code-reviewer.md") }],
+    }));
+    writeFileSync(join(tmp, runDir, "reviewers/surplus.md"), reviewOutput);
+    run = cli("standalone-review", [
+      "aggregate", "--runs-root", runsRoot, "--run-dir", runDir,
+      "--input", join(runDir, "review-input.json"),
+    ]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("missing or surplus evidence is forbidden");
+  });
+
+  it("blocks a dangling symlink scope component instead of treating it as absent", () => {
+    symlinkSync(join(tmp, "missing-target"), join(tmp, "dangling"));
+    writeFileSync(join(tmp, runDir, "review-plan.json"), JSON.stringify({
+      scope: ["dangling/x.ts"], expected_agents: ["code-reviewer"],
+    }));
+
+    const run = cli("standalone-review", [
+      "init", "--runs-root", runsRoot, "--run-dir", runDir,
+      "--input", join(runDir, "review-plan.json"),
+    ]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("symlink-unsafe path component");
+    expect(() => readFileSync(join(tmp, runDir, "session.json"), "utf-8")).toThrow();
+  });
+
+  it("blocks non-absence scope inspection failures", () => {
+    const denied = join(tmp, "denied");
+    mkdirSync(denied);
+    chmodSync(denied, 0o000);
+    writeFileSync(join(tmp, runDir, "review-plan.json"), JSON.stringify({
+      scope: ["denied/x.ts"], expected_agents: ["code-reviewer"],
+    }));
+    try {
+      const run = cli("standalone-review", [
+        "init", "--runs-root", runsRoot, "--run-dir", runDir,
+        "--input", join(runDir, "review-plan.json"),
+      ]);
+      expect(run.status).toBe(1);
+      expect(run.stderr).toContain("cannot inspect review plan.scope path");
+    } finally {
+      chmodSync(denied, 0o700);
+    }
+  });
+
+  it("blocks a scope whose existing path traverses a symlink", () => {
+    const outside = join(tmp, "outside-src");
+    mkdirSync(outside);
+    symlinkSync(outside, join(tmp, "src"));
+    writeFileSync(join(tmp, runDir, "review-plan.json"), JSON.stringify({
+      scope: ["src/x.ts"], expected_agents: ["code-reviewer"],
+    }));
+
+    const run = cli("standalone-review", [
+      "init", "--runs-root", runsRoot, "--run-dir", runDir,
+      "--input", join(runDir, "review-plan.json"),
+    ]);
+
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("symlink-unsafe path component");
+    expect(() => readFileSync(join(tmp, runDir, "session.json"), "utf-8")).toThrow();
   });
 });

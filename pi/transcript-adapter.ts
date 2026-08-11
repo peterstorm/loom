@@ -39,6 +39,44 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function parsePiContentBlock(
+  block: unknown,
+  label: string,
+  errors: string[],
+): PiContentBlock | null {
+  if (!isRecord(block) || typeof block.type !== "string" || block.type.trim() === "") {
+    errors.push(`${label} must be a typed content block`);
+    return null;
+  }
+  if (block.type === "text") {
+    if (typeof block.text !== "string") {
+      errors.push(`${label}.text must be a string`);
+      return null;
+    }
+    return Object.freeze({ type: "text", text: block.text });
+  }
+  if (block.type === "toolCall") {
+    const id = typeof block.id === "string" && block.id.trim() !== "" ? block.id : null;
+    const name = typeof block.name === "string" && block.name.trim() !== "" ? block.name : null;
+    const argumentsValue = isRecord(block.arguments) ? block.arguments : null;
+    if (id === null) errors.push(`${label}.id must be non-empty`);
+    if (name === null) errors.push(`${label}.name must be non-empty`);
+    if (argumentsValue === null) errors.push(`${label}.arguments must be an object`);
+    if (name?.toLowerCase() === "bash" &&
+        (argumentsValue === null || typeof argumentsValue.command !== "string")) {
+      errors.push(`${label}.arguments.command must be a string for Bash`);
+    }
+    if (id === null || name === null || argumentsValue === null) return null;
+    return Object.freeze({
+      type: "toolCall",
+      id,
+      name,
+      arguments: Object.freeze({ ...argumentsValue }),
+    });
+  }
+  return Object.freeze({ type: "opaque", originalType: block.type });
+}
+
 /** Parse the untrusted harness payload once so every consumer receives fresh,
  * immutable messages whose complete trusted shape has already been proven. */
 export function parsePiMessages(messages: unknown): PiTranscriptResult<readonly PiMessage[]> {
@@ -58,8 +96,15 @@ export function parsePiMessages(messages: unknown): PiTranscriptResult<readonly 
 
     const contentValue = message.content;
     const isStringContent = role !== null && typeof contentValue === "string";
-    if (!isStringContent && !Array.isArray(contentValue)) {
-      errors.push(`${messageLabel}.content must be an array`);
+    const isArrayContent = Array.isArray(contentValue);
+    const isSingletonContentBlock = isRecord(contentValue);
+    const contentBlocks = isArrayContent
+      ? contentValue.map((block, blockIndex): readonly [unknown, string] => [block, `${messageLabel}.content[${blockIndex}]`])
+      : isSingletonContentBlock
+        ? [[contentValue, `${messageLabel}.content`] as const]
+        : [];
+    if (!isStringContent && !isArrayContent && !isSingletonContentBlock) {
+      errors.push(`${messageLabel}.content must be an array, string, or typed content block`);
       return;
     }
 
@@ -67,40 +112,10 @@ export function parsePiMessages(messages: unknown): PiTranscriptResult<readonly 
     const content: PiContentBlock[] = isStringContent
       ? [Object.freeze({ type: "text", text: contentValue })]
       : [];
-    if (Array.isArray(contentValue)) contentValue.forEach((block, blockIndex) => {
-      const label = `${messageLabel}.content[${blockIndex}]`;
-      if (!isRecord(block) || typeof block.type !== "string" || block.type.trim() === "") {
-        errors.push(`${label} must be a typed content block`);
-        return;
-      }
-      if (block.type === "text") {
-        if (typeof block.text !== "string") errors.push(`${label}.text must be a string`);
-        else content.push(Object.freeze({ type: "text", text: block.text }));
-        return;
-      }
-      if (block.type === "toolCall") {
-        const id = typeof block.id === "string" && block.id.trim() !== "" ? block.id : null;
-        const name = typeof block.name === "string" && block.name.trim() !== "" ? block.name : null;
-        const argumentsValue = isRecord(block.arguments) ? block.arguments : null;
-        if (id === null) errors.push(`${label}.id must be non-empty`);
-        if (name === null) errors.push(`${label}.name must be non-empty`);
-        if (argumentsValue === null) errors.push(`${label}.arguments must be an object`);
-        if (name?.toLowerCase() === "bash" &&
-            (argumentsValue === null || typeof argumentsValue.command !== "string")) {
-          errors.push(`${label}.arguments.command must be a string for Bash`);
-        }
-        if (id !== null && name !== null && argumentsValue !== null) {
-          content.push(Object.freeze({
-            type: "toolCall",
-            id,
-            name,
-            arguments: Object.freeze({ ...argumentsValue }),
-          }));
-        }
-        return;
-      }
-      content.push(Object.freeze({ type: "opaque", originalType: block.type }));
-    });
+    for (const [block, label] of contentBlocks) {
+      const parsedBlock = parsePiContentBlock(block, label, errors);
+      if (parsedBlock !== null) content.push(parsedBlock);
+    }
 
     const toolCallId = typeof message.toolCallId === "string" && message.toolCallId.trim() !== ""
       ? message.toolCallId

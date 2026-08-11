@@ -1,0 +1,34 @@
+{
+  "state": {
+    "panel": "architecture",
+    "input": {
+      "candidateLenses": [
+        "simplicity-first",
+        "type-driven-fp",
+        "risk-security-first"
+      ],
+      "judgeCriteria": [
+        "simplicity",
+        "pure functional core",
+        "codebase fit + effort"
+      ]
+    },
+    "stage": "prepare-judges",
+    "operation": "architecture-prepare-judges",
+    "completedRequestIds": [
+      "architecture:interview",
+      "architecture:candidate:1",
+      "architecture:candidate:2",
+      "architecture:candidate:3"
+    ],
+    "completedOperationIds": [
+      "architecture-prepare-candidates"
+    ]
+  },
+  "action": {
+    "type": "engine-operation",
+    "id": "architecture-prepare-judges",
+    "operation": "architecture-prepare-judges",
+    "outputContract": "validated candidate set and exact ordered judge criteria"
+  }
+}
