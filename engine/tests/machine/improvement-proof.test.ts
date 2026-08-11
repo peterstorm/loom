@@ -183,7 +183,7 @@ describe("transcript text is never evidence (standing invariant)", () => {
   });
 
   it("unknown tool_response shapes yield exit: null → judged untrusted, never success", () => {
-    expect(extractBashOutcome({ weird: true })).toEqual({ exit: null, stdout: "" });
+    expect(extractBashOutcome({ weird: true })).toEqual({ exit: null, stdout: "", interrupted: false });
     const ledger = extractEvidence("Bash", { command: "npm test" }, { weird: true, stdout: "5 passing" }, () => null);
     const resolved = resolveTestEvidence(ledger, "", true);
     expect(resolved.result.verdict).toBe("untrusted");

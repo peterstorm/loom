@@ -1280,6 +1280,62 @@ describe("durable LC-3 lifecycle and recovery", () => {
     }));
   });
 
+  // Every mutation above invalidates the digest, so they are all caught by
+  // `parseRecoveryReceipt` and the reducer's cross-field comparison against the
+  // CURRENT state is never reached. A cross-run replay is the case that reaches
+  // it: a receipt genuinely minted elsewhere is internally consistent, its
+  // digest verifies, and its id was never consumed here — nothing before that
+  // chain has any reason to refuse it.
+  describe("a self-consistent receipt minted for another failure is still foreign", () => {
+    const blockedFor = (attempt: string, effect: string) => {
+      const blocked = valueOf(reduceRemediation(lifecycleStates().auditedState, {
+        kind: "recoverable-effect-failed",
+        recoveryAttemptId: attempt,
+        effectId: effect,
+        message: "failure",
+      }));
+      if (blocked.state !== "recoverable-blocked") throw new Error("expected blocked");
+      return blocked;
+    };
+
+    it("refuses a valid receipt bound to a different recovery attempt", () => {
+      const mine = blockedFor("attempt.mine", "effect.shared");
+      const theirs = blockedFor("attempt.theirs", "effect.shared");
+      const foreign = valueOf(recoveryReceiptFor(theirs, "receipt.theirs"));
+
+      // The digest is genuinely valid for the receipt's own fields.
+      expect(reduceRemediation(theirs, { kind: "recovery-receipt-accepted", receipt: foreign }).ok).toBe(true);
+
+      const result = reduceRemediation(mine, { kind: "recovery-receipt-accepted", receipt: foreign });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.field).toBe("receipt.recoveryAttemptId");
+      expect(result.error.message).toContain("stale or foreign");
+    });
+
+    it("refuses a valid receipt bound to a different effect", () => {
+      const mine = blockedFor("attempt.shared", "effect.mine");
+      const theirs = blockedFor("attempt.shared", "effect.theirs");
+      const foreign = valueOf(recoveryReceiptFor(theirs, "receipt.other-effect"));
+
+      const result = reduceRemediation(mine, { kind: "recovery-receipt-accepted", receipt: foreign });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.field).toBe("receipt.effectId");
+    });
+
+    it("accepts the receipt that does answer this failure, so the guard is not simply always-refusing", () => {
+      const mine = blockedFor("attempt.mine", "effect.mine");
+      const own = valueOf(recoveryReceiptFor(mine, "receipt.mine"));
+
+      const result = reduceRemediation(mine, { kind: "recovery-receipt-accepted", receipt: own });
+
+      expect(result.ok).toBe(true);
+    });
+  });
+
   it("rejects every undeclared event/state pair and keeps done monotonic", () => {
     const states = lifecycleStates();
     const blocked = valueOf(reduceRemediation(states.auditedState, {

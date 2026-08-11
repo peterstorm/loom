@@ -224,6 +224,67 @@ describe("parseMachineSummary (pure)", () => {
   });
 });
 
+describe("the declared count survives a skill-template echo", () => {
+  // `parseMachineSummary` slices from the LAST heading precisely because agents
+  // echo the template before their real output. The legacy fallback reads the
+  // count from the WHOLE transcript, where that echo is likeliest — so a
+  // first-match read lets a templated `CRITICAL_COUNT: 0` outrank the real
+  // count, and `reconcileFindings`'s shortfall backstop is gated on `count > 0`
+  // and never fires to notice it.
+  it("takes the LAST count marker, not an earlier echoed one", () => {
+    const output = [
+      "I will end with this block:",
+      "CRITICAL_COUNT: 0",
+      "ADVISORY_COUNT: 0",
+      "",
+      "### Critical Findings",
+      "- **Fail-open guard in the evidence reader**",
+      "### Advisory Findings",
+      "- Consider naming the helper",
+      "### Other",
+      "CRITICAL_COUNT: 1",
+      "ADVISORY_COUNT: 1",
+    ].join("\n");
+
+    const result = parseLegacyFindings(output);
+
+    expect(result.criticalCount).toBe(1);
+    expect(result.advisoryCount).toBe(1);
+    expect(result.critical).toHaveLength(1);
+  });
+
+  it("still reports an absent marker as absent rather than zero", () => {
+    const result = parseLegacyFindings([
+      "### Critical Findings",
+      "- **Something real**",
+      "### Other",
+    ].join("\n"));
+
+    expect(result.criticalCount).toBeNull();
+  });
+
+  it("keeps the last marker inside a Machine Summary too", () => {
+    const output = [
+      "Template I was given:",
+      "### Machine Summary",
+      "CRITICAL_COUNT: 0",
+      "ADVISORY_COUNT: 0",
+      "",
+      "Now my real answer:",
+      "### Machine Summary",
+      "CRITICAL_COUNT: 2",
+      "ADVISORY_COUNT: 0",
+      "CRITICAL: first real defect",
+      "CRITICAL: second real defect",
+    ].join("\n");
+
+    const result = parseMachineSummary(output);
+
+    expect(result?.criticalCount).toBe(2);
+    expect(result?.critical).toHaveLength(2);
+  });
+});
+
 describe("parseLegacyFindings (pure)", () => {
   it("parses Critical/Advisory sections", () => {
     const output = [

@@ -39,6 +39,29 @@ export type TestabilityBar = (typeof TESTABILITY_BARS)[number];
 export const CODEBASE_MATURITIES = ["greenfield", "brownfield", "rewrite"] as const;
 export type CodebaseMaturity = (typeof CODEBASE_MATURITIES)[number];
 
+export const SENSITIVE_BOUNDARY_STATUSES = ["flagged", "none"] as const;
+export type SensitiveBoundaryStatus = (typeof SENSITIVE_BOUNDARY_STATUSES)[number];
+
+/**
+ * Free prose that PROVABLY begins with `flagged` or `none`.
+ *
+ * The status drives lens selection — a `flagged` digest pulls the
+ * security-first lens into the panel — and it is read by prefix. As a bare
+ * `string` the field admitted any text, so `{ ...digest, sensitiveBoundaries:
+ * "lorem ipsum" }` type-checked as a legal digest and silently selected the
+ * panel WITHOUT its security lens rather than being rejected. Branding it makes
+ * `parseInterviewDigest`, which normalises the prefix, the only way to obtain
+ * one — the same treatment `CandidateFilename` already gets in this file, and
+ * the same narrowing its two sibling enum fields get from the same parser.
+ */
+declare const SENSITIVE_BOUNDARIES: unique symbol;
+export type SensitiveBoundaries = string & { readonly [SENSITIVE_BOUNDARIES]: true };
+
+/** The proven status, read from a value only the parser can have produced. */
+export function sensitiveBoundaryStatus(value: SensitiveBoundaries): SensitiveBoundaryStatus {
+  return value.startsWith("flagged") ? "flagged" : "none";
+}
+
 export const PANEL_LENSES = [
   "simplicity-first",
   "type-driven-fp",
@@ -71,11 +94,12 @@ type InterviewValues = Readonly<Record<InterviewField, string>>;
 
 export type InterviewDigest = Omit<
   InterviewValues,
-  "primaryAxis" | "testabilityBar" | "codebaseMaturity"
+  "primaryAxis" | "testabilityBar" | "codebaseMaturity" | "sensitiveBoundaries"
 > & {
   readonly primaryAxis: PrimaryAxis;
   readonly testabilityBar: TestabilityBar;
   readonly codebaseMaturity: CodebaseMaturity;
+  readonly sensitiveBoundaries: SensitiveBoundaries;
 };
 
 function enumError(label: string, value: string, allowed: readonly string[]): string {
@@ -144,7 +168,9 @@ export function parseInterviewDigest(markdown: string): ParseResult<InterviewDig
     primaryAxis: primaryAxis as PrimaryAxis,
     testabilityBar: testabilityBar as TestabilityBar,
     codebaseMaturity: codebaseMaturity as CodebaseMaturity,
-    sensitiveBoundaries: sensitiveBoundaries.replace(/^(flagged|none)/i, sensitiveStatus),
+    // The single mint: the prefix is normalised to the exact status here, which
+    // is what the brand asserts everywhere downstream.
+    sensitiveBoundaries: sensitiveBoundaries.replace(/^(flagged|none)/i, sensitiveStatus) as SensitiveBoundaries,
   });
 }
 
@@ -218,7 +244,7 @@ export function selectPanelLenses(
   return selectLenses<PanelLens>({
     baseline: PANEL_BASELINE_LENSES,
     signalled: [
-      digest.sensitiveBoundaries.startsWith("flagged") ? "risk-security-first" : null,
+      sensitiveBoundaryStatus(digest.sensitiveBoundaries) === "flagged" ? "risk-security-first" : null,
       digest.primaryAxis === "performance" ? "performance-first" : null,
       digest.codebaseMaturity === "brownfield" ? "codebase-conventionist" : null,
     ],

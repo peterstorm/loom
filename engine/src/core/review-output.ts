@@ -243,12 +243,20 @@ function extractFindings(block: string): ParsedFindings {
 }
 
 /** The `<SEVERITY>_COUNT` marker a reviewer declared, or null when absent.
- *  Tolerates the same list-marker and bold decoration the claim scraper does. */
+ *  Tolerates the same list-marker and bold decoration the claim scraper does.
+ *
+ *  Takes the LAST match, for the same reason `parseMachineSummary` and
+ *  `lastMarker` do: agents echo the skill template before their real output, so
+ *  a first-match read lets a templated `CRITICAL_COUNT: 0` outrank the
+ *  reviewer's real later count. The legacy scraper applies this to a WHOLE
+ *  transcript, where that echo is most likely, and `reconcileFindings`'s
+ *  shortfall backstop is gated on `count > 0` — so a first-match zero would
+ *  erase real criticals with nothing left to notice it. */
 function declaredCount(text: string, severity: "CRITICAL" | "ADVISORY"): number | null {
-  const match = text.match(
-    new RegExp(String.raw`^[ \t\-*]*\*{0,2}${severity}_COUNT:?\*{0,2}\s*(\d+)`, "m"),
-  );
-  return match ? Number(match[1]) : null;
+  const pattern = new RegExp(String.raw`^[ \t\-*]*\*{0,2}${severity}_COUNT:?\*{0,2}\s*(\d+)`, "gm");
+  let declared: string | null = null;
+  for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) declared = match[1]!;
+  return declared === null ? null : Number(declared);
 }
 
 /** Parse Machine Summary block for structured findings.

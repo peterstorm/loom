@@ -24,7 +24,7 @@ import {
   resolutionsUnionError,
   reviewRunError,
 } from "./core/findings";
-import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, TaskGraph } from "./types";
+import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, SpecCheck, TaskGraph } from "./types";
 import type { DomainResult, OrchestrationRunId } from "./core/orchestration-contract";
 import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
 import {
@@ -126,11 +126,19 @@ function waveGateError(v: unknown, wave: string): string | null {
  * for it. `parseSpecCheckVerdict` was written to keep free text out of the
  * gate's typed logic and the load path never called it, so a drifted `verdict`
  * reached `complete-wave-gate` unchallenged.
+ *
+ * The PARSED value is returned, not just its errors: the parser rebuilds and
+ * freezes the record, and installing that is what makes the proof survive.
+ * Keeping the raw object from the JSON document instead would leave the holder
+ * of that reference able to write `critical_count` back out of the
+ * count/findings-length equality proven here.
  */
-function specCheckError(v: unknown): string | null {
-  if (v === undefined) return null;
+function parseSpecCheckField(v: unknown):
+  | Readonly<{ ok: true; value: SpecCheck | undefined }>
+  | Readonly<{ ok: false; error: string }> {
+  if (v === undefined) return { ok: true, value: undefined };
   const parsed = parseStoredSpecCheck(v);
-  return parsed.ok ? null : parsed.errors.join("; ");
+  return parsed.ok ? { ok: true, value: parsed.value } : { ok: false, error: parsed.errors.join("; ") };
 }
 
 const ACTIVE_WAVE_GATE_FIELDS = [
@@ -852,8 +860,8 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
     const err = waveGateError(gate, wave);
     if (err !== null) return parseErr(err);
   }
-  const specErr = specCheckError(obj.spec_check);
-  if (specErr !== null) return parseErr(specErr);
+  const specCheck = parseSpecCheckField(obj.spec_check);
+  if (!specCheck.ok) return parseErr(specCheck.error);
 
   const registrations = parseWaveGateRegistrations(obj);
   if (!registrations.ok) return parseErr(registrations.error);
@@ -868,6 +876,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
     plan_file: obj.plan_file ?? null,
     tasks,
     wave_gates: waveGates,
+    ...(specCheck.value === undefined ? {} : { spec_check: specCheck.value }),
     ...(activeWaveGate === undefined ? {} : { active_wave_gate: activeWaveGate }),
     ...(waveGateHistory === undefined ? {} : { wave_gate_history: waveGateHistory }),
   } as unknown as TaskGraph);

@@ -145,10 +145,14 @@ const handler: HookHandler = async (stdin, args) => {
   const mgr = StateManager.fromPath(statePath);
   if (!mgr) return { kind: "error", message: "Cannot open task graph" };
 
-  // Executable-models policy: this is the only whitelisted helper that
-  // populates tasks into active_task_graph.json, so bindings are enforced
-  // here fail-closed — validate-task-graph's 4a run is advisory to the
-  // orchestrator, this is the gate. The plan path prefers evidence-derived
+  // Executable-models policy: bindings are enforced here fail-closed —
+  // validate-task-graph's 4a run is advisory to the orchestrator, this is the
+  // gate for the populate path. `repair-task-graph` is the ONE other
+  // whitelisted helper that writes tasks into active_task_graph.json (it
+  // installs through StateManager.replace, bypassing load() by design), and it
+  // runs the same `checkPlanModelBindings` for the same reason; neither path
+  // may install a graph whose bindings were never checked. The plan path
+  // prefers evidence-derived
   // state (plan_file set by advance-phase from transcript-parsed Write tool
   // calls (existence-checked), else the
   // architecture phase artifact recorded from disk) over the decompose

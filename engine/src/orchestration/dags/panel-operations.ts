@@ -26,6 +26,7 @@ import {
 } from "../../core/panel-program";
 import {
   parseCompleteRoster,
+  type DomainResult,
   type PublicationAuthorityResolver,
   type RosterViolation,
 } from "../../core/orchestration-contract";
@@ -66,14 +67,20 @@ const panelOutcomeSchema = z.union([
 type ProofEnvelope = Readonly<Partial<Record<string, RosterProof>>>;
 type OutcomeEnvelope = Readonly<Partial<Record<string, PanelOutcome>>>;
 
+// The branch envelopes validate their wrapped member with the REAL schema.
+// Declaring it `z.unknown().optional()` behind an `as unknown as
+// z.ZodType<Envelope>` cast made the static type assert a well-formed
+// RosterProof/PanelOutcome while the runtime accepted any value at all — at the
+// one boundary these DAGs exist to parse. The transforms below then read
+// `.kind` and `.reason` off it with nothing having checked either.
 const proofEnvelopeSchema = z.object({
-  [PROVE_ROSTER]: z.unknown().optional(),
-}) as unknown as z.ZodType<ProofEnvelope>;
+  [PROVE_ROSTER]: rosterProofSchema.optional(),
+}) satisfies z.ZodType<ProofEnvelope>;
 
 const outcomeEnvelopeSchema = z.object({
-  [AGGREGATE]: z.unknown().optional(),
-  [REJECT]: z.unknown().optional(),
-}) as unknown as z.ZodType<OutcomeEnvelope>;
+  [AGGREGATE]: panelOutcomeSchema.optional(),
+  [REJECT]: panelOutcomeSchema.optional(),
+}) satisfies z.ZodType<OutcomeEnvelope>;
 
 /**
  * The panel-specific pieces. Both panels share this graph shape and differ
@@ -85,7 +92,15 @@ export type PanelOperationSpec<A> = Readonly<{
   parseAuthority: (raw: unknown) => Readonly<{ ok: true; value: A }> | Readonly<{ ok: false; message: string }>;
   rosterOf: (authority: A) => Parameters<typeof parseCompleteRoster>[1];
   parsePayload: Parameters<typeof parseCompleteRoster>[3];
-  aggregate: (authority: A, complete: never) => Readonly<{ ok: boolean }> & Record<string, unknown>;
+  /**
+   * `DomainResult`, the codebase's own result ADT, which both real
+   * implementations already return. The previous
+   * `Readonly<{ ok: boolean }> & Record<string, unknown>` was satisfied by
+   * `{ ok: true }` alone while the consumer unconditionally read `["value"]`,
+   * so an aggregation with no value type-checked and published
+   * `{ kind: "aggregated", value: undefined }` as a panel's successful result.
+   */
+  aggregate: (authority: A, complete: never) => DomainResult<unknown, unknown>;
 }>;
 
 function proveRosterNode<A>(
@@ -135,9 +150,11 @@ function aggregateNode<A>(spec: PanelOperationSpec<A>) {
 
       const { authority, roster } = proof.complete as Readonly<{ authority: A; roster: never }>;
       const aggregated = spec.aggregate(authority, roster);
+      // `value` and `error` are now reachable only on their own arm, so neither
+      // read needs a stringly-keyed lookup to defend itself.
       return ok(aggregated.ok
-        ? { kind: "aggregated", value: (aggregated as Record<string, unknown>)["value"] }
-        : { kind: "rejected", reason: describeAggregateFailure(aggregated) });
+        ? { kind: "aggregated", value: aggregated.value }
+        : { kind: "rejected", reason: describeAggregateFailure(aggregated.error) });
     },
   });
 }
@@ -159,8 +176,9 @@ function describeRosterViolations(violations: readonly RosterViolation[]): strin
     .join("; ");
 }
 
-function describeAggregateFailure(aggregated: Record<string, unknown>): string {
-  const error = aggregated["error"];
+/** Render an aggregation refusal. The error channel is domain-shaped but its
+ *  payload varies per panel, so the message is read defensively. */
+function describeAggregateFailure(error: unknown): string {
   if (typeof error === "string") return error;
   if (typeof error === "object" && error !== null) {
     const message = (error as Record<string, unknown>)["message"];
@@ -238,8 +256,7 @@ export function createArchitecturePanelDag(
     parseAuthority: input.parseAuthority,
     rosterOf: (authority) => authority.judgeRoster as Parameters<typeof parseCompleteRoster>[1],
     parsePayload: input.parsePayload,
-    aggregate: (authority, complete) =>
-      aggregateArchitecturePanel(authority, complete) as Readonly<{ ok: boolean }> & Record<string, unknown>,
+    aggregate: (authority, complete) => aggregateArchitecturePanel(authority, complete),
   }, input.resolver);
 }
 
@@ -256,8 +273,7 @@ export function createRefutationPanelDag(
     parseAuthority: input.parseAuthority,
     rosterOf: (authority) => authority.verifierRoster as Parameters<typeof parseCompleteRoster>[1],
     parsePayload: input.parsePayload,
-    aggregate: (authority, complete) =>
-      tallyRefutationPanel(authority, complete) as Readonly<{ ok: boolean }> & Record<string, unknown>,
+    aggregate: (authority, complete) => tallyRefutationPanel(authority, complete),
   }, input.resolver);
 }
 

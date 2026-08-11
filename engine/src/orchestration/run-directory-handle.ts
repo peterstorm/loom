@@ -23,7 +23,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { closeSync, readdirSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import {
   canonicalRecord,
@@ -38,7 +38,9 @@ import {
 } from "../core/orchestration-contract";
 import type { ContextPacket } from "./context-packets";
 import { parseContextPacket } from "./context-packets";
+import { withLock } from "../utils/lock";
 import {
+  ensureRelativeDirectoryNoFollow,
   openDirectoryNoFollow,
   procFdChild,
   publishStagedRunFile,
@@ -164,8 +166,29 @@ export interface RunDirHandle extends ProgramJournal {
   readReceipt(effectId: EffectId): DomainResult<EffectReceipt | null, RunDirectoryError>;
 }
 
+/**
+ * Create run subdirectories through descriptors anchored at the run directory.
+ *
+ * `mkdirSync(path, { recursive: true })` hands the whole path to the kernel,
+ * which resolves every intermediate component with ordinary symlink-following
+ * semantics. A component swapped to a symlink — the adversary this module's
+ * O_NOFOLLOW primitives exist to refuse — would therefore have directories
+ * created at the link's TARGET, and that side effect lands before the anchored
+ * write that would have refused it. `ensureRelativeDirectoryNoFollow` walks one
+ * component at a time under O_NOFOLLOW instead, so directory creation is held
+ * to the same anchoring as every read and write here.
+ */
+function ensureRunSubdirectories(runDirectory: string, targets: readonly string[]): void {
+  const rootFd = openDirectoryNoFollow(runDirectory);
+  try {
+    for (const target of targets) ensureRelativeDirectoryNoFollow(rootFd, runDirectory, target);
+  } finally {
+    closeSync(rootFd);
+  }
+}
+
 function ensureFixedLayout(runDirectory: string): void {
-  for (const child of FIXED_SUBDIRECTORIES) mkdirSync(join(runDirectory, child), { recursive: true, mode: 0o700 });
+  ensureRunSubdirectories(runDirectory, FIXED_SUBDIRECTORIES.map((child) => join(runDirectory, child)));
 }
 
 function digestOf(bytes: readonly number[]): ArtifactDigest {
@@ -183,6 +206,15 @@ function listNoFollow(directory: string): readonly string[] {
 
 function readJsonNoFollow(path: string): unknown {
   return JSON.parse(readRunFileNoFollow(path)) as unknown;
+}
+
+/**
+ * The event records only. `events/` also holds the append lock and its
+ * rename-staging directories, so filtering to `.json` keeps the sequence a
+ * count of EVENTS rather than of whatever else the lock left in the directory.
+ */
+function eventFileNames(directory: string): readonly string[] {
+  return listNoFollow(join(directory, EVENTS)).filter((name) => name.endsWith(".json"));
 }
 
 function isExistingDirectory(path: string): boolean {
@@ -296,27 +328,51 @@ function readRunAuthority(
 /** Append-only event log plus the checkpoint and progress projections. */
 function journalOperations(directory: string) {
   return {
+    /**
+     * The sequence prefix is the append ORDER, and O_EXCL on the filename
+     * cannot arbitrate it: two appenders carrying different dedup keys observe
+     * the same directory snapshot, compute the same `events.length`, and write
+     * two differently-named files that both claim that sequence. `readEvents`
+     * then reconstructs order by sorting filenames, so a collision degrades
+     * ordering to a comparison of dedup-key text — unrelated to happens-before
+     * — and `replayProgram`/`resumeProgram` fold in that wrong order.
+     *
+     * The read-count-write is therefore serialized. Exclusivity on the
+     * filename still carries idempotency (the dedup key), and the lock carries
+     * the ordering claim that a derived count cannot make on its own.
+     */
     async appendEvent(record: ProgramEventRecord): Promise<void> {
-      const events = listNoFollow(join(directory, EVENTS));
-      if (events.some((name) => name.endsWith(`-${record.dedupKey}.json`))) return;
-      const sequence = String(events.length).padStart(6, "0");
-      writeRunFileExclusiveNoFollow(
-        join(directory, EVENTS, `${sequence}-${record.dedupKey}.json`),
-        JSON.stringify({ ...record, sequence: events.length }),
-      );
+      await withLock(join(directory, EVENTS, "append"), () => {
+        const events = eventFileNames(directory);
+        if (events.some((name) => name.endsWith(`-${record.dedupKey}.json`))) return;
+        const sequence = events.length;
+        writeRunFileExclusiveNoFollow(
+          join(directory, EVENTS, `${String(sequence).padStart(6, "0")}-${record.dedupKey}.json`),
+          JSON.stringify({ ...record, sequence }),
+        );
+      });
     },
 
     async readEvents(): Promise<readonly ProgramEventRecord[]> {
-      return Object.freeze(listNoFollow(join(directory, EVENTS))
-        .filter((name) => name.endsWith(".json"))
+      return Object.freeze(eventFileNames(directory)
         .map((name) => readJsonNoFollow(join(directory, EVENTS, name)) as ProgramEventRecord));
     },
 
+    /**
+     * `null` means the run never wrote a checkpoint. Anything that exists but
+     * cannot be READ is a failure, exactly as `readReceipt` treats a receipt:
+     * `resumeProgram` short-circuits on `null` and skips the
+     * checkpoint-vs-replay corruption check entirely, so collapsing "absent"
+     * into "unreadable" would turn an ELOOP from a checkpoint path swapped to a
+     * symlink — the very attack the no-follow reads exist to refuse — into a
+     * clean resume.
+     */
     async readCheckpoint(): Promise<string | null> {
       try {
         return readRunFileNoFollow(join(directory, CHECKPOINT_FILE));
-      } catch {
-        return null;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
       }
     },
 
@@ -395,7 +451,15 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
           return failure("request", `request ${authority.requestId} is already reserved under different authority`);
         }
       }
-      mkdirSync(join(directory, TRANSCRIPTS, authority.slotId), { recursive: true, mode: 0o700 });
+      // Anchored creation REFUSES a symlinked or otherwise unsafe component
+      // rather than following it, so this is a reachable failure and belongs in
+      // the result channel: a throw here would escape the DomainResult contract
+      // every other refusal in this handle honours.
+      try {
+        ensureRunSubdirectories(directory, [join(directory, TRANSCRIPTS, authority.slotId)]);
+      } catch (error) {
+        return failure("request", `cannot reserve transcript slot: ${(error as Error).message}`);
+      }
       return success(canonicalRecord({
         kind: "transcript-reserved" as const,
         runId,
@@ -470,7 +534,7 @@ function stageArtifactSet(
   try {
     for (const artifact of staged) {
       const final = join(directory, ARTIFACTS, artifact.relativePath);
-      mkdirSync(join(final, ".."), { recursive: true, mode: 0o700 });
+      ensureRunSubdirectories(directory, [resolve(final, "..")]);
       const stagedPath = `${final}.staged`;
       writeRunBytesNoFollow(stagedPath, Uint8Array.from(artifact.bytes));
       stagedPaths.push({ staged: stagedPath, final });
@@ -523,8 +587,16 @@ function stagedBytesMatch(stagedPath: string, occupied: Uint8Array): boolean {
  * this module promises has to be enforced here explicitly: an occupied slot is
  * refused unless its bytes are already identical to what would be written, in
  * which case the promotion is a no-op replay rather than a rewrite of history.
+ *
+ * EXPORTED for tests. The rename loop's recovery arm handles the failures the
+ * pre-checks cannot rule out — a concurrently removed parent, an EIO — which by
+ * construction cannot be provoked through `publishArtifactSet` synchronously:
+ * every failure reachable from outside is one the pre-checks turn into an
+ * all-staged refusal first. Driving this function directly with explicit staged
+ * pairs is therefore the only way to prove the partial-promotion arm behaves,
+ * and an unproven recovery arm is how "all or none" quietly stops being true.
  */
-function promoteArtifactSet(
+export function promoteArtifactSet(
   stagedPaths: readonly StagedPair[],
 ): DomainResult<readonly StagedPair[], RunDirectoryError> {
   const blocked = stagedPaths.find((entry) => isExistingDirectory(entry.final));

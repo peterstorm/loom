@@ -416,6 +416,47 @@ describe("checkSpecAlignment (pure)", () => {
       expect(gateCheckMessage(result)).toContain(`verdict is ${verdict}`);
     });
   }
+
+  // The `captured()` helper cannot produce this verdict — an evidence failure
+  // carries a cause and NO counts, which is the whole point of the separate
+  // arm — so this branch had no covering case at the wave-gate layer. It is the
+  // fail-closed contract the whole review harness rests on: missing evidence
+  // must block the wave rather than read as zero findings.
+  it("blocks the wave when spec-check evidence capture failed", () => {
+    const state = mkState({
+      spec_check: {
+        wave: 1,
+        run_at: "",
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: "SPEC_CHECK_CRITICAL_COUNT marker not found",
+      },
+    });
+
+    const result = checkSpecAlignment(state, 1);
+
+    expect(result.passed).toBe(false);
+    expect(gateCheckMessage(result)).toContain("unusable");
+    expect(gateCheckMessage(result)).toContain("EVIDENCE_CAPTURE_FAILED");
+    // The cause must survive into the operator-facing message, or a re-run is
+    // the only way to learn what went wrong.
+    expect(gateCheckMessage(result)).toContain("SPEC_CHECK_CRITICAL_COUNT marker not found");
+  });
+
+  it("blocks an evidence-failed spec-check before the wave-mismatch check can excuse it", () => {
+    const state = mkState({
+      spec_check: {
+        wave: 2,
+        run_at: "",
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: "transcript truncated",
+      },
+    });
+
+    // Wrong wave AND unusable: either way the gate refuses; what must never
+    // happen is a pass.
+    expect(checkSpecAlignment(state, 1).passed).toBe(false);
+    expect(checkSpecAlignment(state, 2).passed).toBe(false);
+  });
 });
 
 describe("computeNextWave (pure)", () => {

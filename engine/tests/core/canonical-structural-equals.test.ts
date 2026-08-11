@@ -143,4 +143,62 @@ describe("canonicalStructuralEquals", () => {
       expect(canonicalStructuralEquals(left, right)).toBe(false);
     });
   });
+
+  // The cycle memo records "this pair is currently being compared", never "this
+  // pair compared equal". Map/Set matching tries candidates speculatively and
+  // tolerates failures, so a pair registered by a REJECTED candidate must not
+  // survive to answer for a different comparison later in the structure —
+  // otherwise two plainly different values report equal, and a mismatched
+  // checkpoint passes the agreement check this function exists to enforce.
+  describe("a rejected speculative match never poisons a later comparison", () => {
+    it("separates sets whose failed trial pairing recurs in another field", () => {
+      const shared = { tag: "S" };
+      const decoy = { tag: "D" };
+
+      const left = { a: new Set([shared, { tag: "D" }]), b: new Set([shared]) };
+      const right = { a: new Set([decoy, { tag: "S" }]), b: new Set([decoy]) };
+
+      // Field `b` is {tag:"S"} against {tag:"D"} — plainly unequal. It is only
+      // reachable as `true` if matching field `a` left the (shared, decoy)
+      // pairing it rejected behind in the memo.
+      expect(canonicalStructuralEquals(left, right)).toBe(false);
+    });
+
+    it("separates maps whose failed trial pairing recurs in another field", () => {
+      const shared = { tag: "S" };
+      const decoy = { tag: "D" };
+
+      const left = {
+        a: new Map([[shared, 1], [{ tag: "D" }, 2]]),
+        b: new Map([[shared, 1]]),
+      };
+      const right = {
+        a: new Map([[decoy, 2], [{ tag: "S" }, 1]]),
+        b: new Map([[decoy, 1]]),
+      };
+
+      expect(canonicalStructuralEquals(left, right)).toBe(false);
+    });
+
+    it("still equates values that genuinely share references across fields", () => {
+      const shared = { tag: "S" };
+      const other = { tag: "D" };
+
+      const left = { a: new Set([shared, other]), b: new Set([shared]) };
+      const right = {
+        a: new Set([{ tag: "S" }, { tag: "D" }]),
+        b: new Set([{ tag: "S" }]),
+      };
+
+      expect(canonicalStructuralEquals(left, right)).toBe(true);
+    });
+
+    it("separates records reusing one reference under two differing keys", () => {
+      const shared = { id: 1 };
+      const left = { x: shared, y: shared };
+      const right = { x: { id: 1 }, y: { id: 2 } };
+
+      expect(canonicalStructuralEquals(left, right)).toBe(false);
+    });
+  });
 });

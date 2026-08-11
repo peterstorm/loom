@@ -275,3 +275,30 @@ export function piFinalPayloadCandidates(
   }
   return { ok: true, value: Object.freeze(candidates) };
 }
+
+/**
+ * Every candidate final payload from a whole Pi subagent RESULT.
+ *
+ * Claude's transcript makes "the final assistant text" unambiguous by
+ * construction — one message per JSONL line, so the adapter reads the last
+ * assistant line. Pi hands back a message list, so the equivalent is the LAST
+ * assistant message's content blocks; anything earlier is mid-conversation, not
+ * the Agent's answer.
+ *
+ * Ambiguity inside that message is still refused rather than resolved here:
+ * `piFinalPayloadCandidates` collects every text block and `parseFinalPayload`
+ * decides, so a two-text-block final message is a rejection on both harnesses
+ * instead of a silent "pick the last one" in one of them.
+ */
+export function piResultFinalPayloadCandidates(
+  messages: unknown,
+): PiTranscriptResult<readonly Readonly<{ origin: string; text: string }>[]> {
+  const parsed = parsePiMessages(messages);
+  if (!parsed.ok) return parsed;
+  for (let index = parsed.value.length - 1; index >= 0; index -= 1) {
+    const message = parsed.value[index];
+    if (message === undefined || message.role !== "assistant") continue;
+    return piFinalPayloadCandidates(message.content);
+  }
+  return { ok: true, value: Object.freeze([]) };
+}

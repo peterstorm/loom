@@ -342,26 +342,36 @@ describe("extractShellWriteTargets — Bash-authored writes are visible to the v
 
 describe("extractBashOutcome — defensive harness-shape parsing", () => {
   it("reads known exit-code field names", () => {
-    expect(extractBashOutcome({ exit_code: 1, stdout: "x" })).toEqual({ exit: 1, stdout: "x" });
-    expect(extractBashOutcome({ exitCode: 0, stdout: "y" })).toEqual({ exit: 0, stdout: "y" });
-    expect(extractBashOutcome({ returnCode: 2 })).toEqual({ exit: 2, stdout: "" });
-    expect(extractBashOutcome({ code: 0, output: "z" })).toEqual({ exit: 0, stdout: "z" });
+    expect(extractBashOutcome({ exit_code: 1, stdout: "x" })).toEqual({ exit: 1, stdout: "x", interrupted: false });
+    expect(extractBashOutcome({ exitCode: 0, stdout: "y" })).toEqual({ exit: 0, stdout: "y", interrupted: false });
+    expect(extractBashOutcome({ returnCode: 2 })).toEqual({ exit: 2, stdout: "", interrupted: false });
+    expect(extractBashOutcome({ code: 0, output: "z" })).toEqual({ exit: 0, stdout: "z", interrupted: false });
   });
 
   it("never invents an exit code", () => {
     expect(extractBashOutcome({ exit_code: 1.5 }).exit).toBeNull();
     expect(extractBashOutcome({ exit_code: "0" }).exit).toBeNull();
-    expect(extractBashOutcome({ weird: true })).toEqual({ exit: null, stdout: "" });
-    expect(extractBashOutcome("raw text")).toEqual({ exit: null, stdout: "raw text" });
-    expect(extractBashOutcome(null)).toEqual({ exit: null, stdout: "" });
-    expect(extractBashOutcome(undefined)).toEqual({ exit: null, stdout: "" });
+    expect(extractBashOutcome({ weird: true })).toEqual({ exit: null, stdout: "", interrupted: false });
+    expect(extractBashOutcome("raw text")).toEqual({ exit: null, stdout: "raw text", interrupted: false });
+    expect(extractBashOutcome(null)).toEqual({ exit: null, stdout: "", interrupted: false });
+    expect(extractBashOutcome(undefined)).toEqual({ exit: null, stdout: "", interrupted: false });
   });
 
   it("interrupted runs have no exit (→ never trusted downstream)", () => {
     expect(extractBashOutcome({ interrupted: true, exit_code: 0, stdout: "5 passing" })).toEqual({
       exit: null,
       stdout: "",
+      interrupted: true,
     });
+  });
+
+  // An unknown exit and an INTERRUPTED run both arrive as `exit: null`, but only
+  // the second means the command never finished — the distinction the report
+  // guard below depends on, so it must survive parsing rather than be folded
+  // away.
+  it("separates 'no exit reported' from 'the call was killed'", () => {
+    expect(extractBashOutcome({ weird: true }).interrupted).toBe(false);
+    expect(extractBashOutcome({ interrupted: true }).interrupted).toBe(true);
   });
 });
 
@@ -476,6 +486,46 @@ describe("unquoted & — background compositions (round-10 Fix 3)", () => {
     expect(run("npm test")).toEqual({
       kind: "TestRun", command: "npm test", exit: 0, report: green,
     });
+  });
+
+  // An interrupted FOREGROUND run breaks the same completeness precondition by
+  // the same mechanism: the runner was killed mid-write, so the classes that
+  // finished first left a partial-but-green report. `exit` is already null for
+  // an interrupted call, and `judgeTestRun` reads null-exit-plus-green-report as
+  // `trusted-pass` — so keeping the report would mint a pass for a suite that
+  // never finished.
+  it("drops even a parsed green report for an interrupted (killed) foreground test", () => {
+    const green = reportSummary(5, 0);
+    const run = (toolResponse: unknown) => extractEvidence(
+      "Bash",
+      { command: "npm test" },
+      toolResponse,
+      () => green,
+    ).find((event) => event.kind === "TestRun");
+
+    expect(run({ interrupted: true, exit_code: 0, stdout: "" })).toEqual({
+      kind: "TestRun", command: "npm test", exit: null, report: null,
+    });
+    // The same command that ran to completion still keeps its report.
+    expect(run({ exit_code: 0, stdout: "" })).toEqual({
+      kind: "TestRun", command: "npm test", exit: 0, report: green,
+    });
+  });
+
+  it("an interrupted test run is judged untrusted, never a pass", () => {
+    const green = reportSummary(5, 0);
+    const run = extractEvidence(
+      "Bash",
+      { command: "npm test" },
+      { interrupted: true, exit_code: 0, stdout: "" },
+      () => green,
+    ).find((event) => event.kind === "TestRun");
+    if (run?.kind !== "TestRun") throw new Error("expected a TestRun event");
+
+    // Guard the exact composition the finding named: null exit + green report
+    // is `trusted-pass`, so dropping the report is what makes this untrusted.
+    expect(judgeTestRun(run.exit, green).verdict).toBe("trusted-pass");
+    expect(judgeTestRun(run.exit, run.report).verdict).toBe("untrusted");
   });
 
   it("drops a green report when the entire pipeline containing the test is backgrounded", () => {

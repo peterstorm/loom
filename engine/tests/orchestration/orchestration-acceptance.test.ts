@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,8 +16,9 @@ import {
   claudeFinalPayloadCandidates,
   readIssuedRequests,
 } from "../../src/handlers/subagent-stop/capture-orchestration-result";
-import { piFinalPayloadCandidates } from "../../../pi/transcript-adapter";
+import { piFinalPayloadCandidates, piResultFinalPayloadCandidates } from "../../../pi/transcript-adapter";
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
+import { captureHarnessResult } from "../../src/orchestration/harness-capture-runtime";
 import {
   characterCount,
   reduction,
@@ -199,6 +200,180 @@ describe("Pi and Claude reach the same result", () => {
     if (!extracted.ok) return;
     expect(extracted.value).toHaveLength(1);
     expect(extracted.value[0]?.text).toBe("the answer");
+  });
+
+  // FR-033: both harnesses capture into the SAME engine-declared slot through
+  // one runtime. Previously only Claude was wired — `piFinalPayloadCandidates`
+  // existed with no production caller — so a Pi-driven run captured nothing and
+  // silently skipped every request/attempt/slot-authority check Claude enforces
+  // for the same run.
+  describe("both harnesses capture through one run-directory runtime", () => {
+    async function stagedRun(): Promise<Readonly<{
+      runsRoot: string;
+      directory: string;
+      request: AgentRequestAuthority;
+    }>> {
+      const runsRoot = mkdtempSync(join(tmpdir(), "loom-capture-parity-"));
+      cleanup.push(runsRoot);
+      const directory = join(runsRoot, "run.capture-parity");
+      mkdirSync(directory, { recursive: true });
+      const opened = openRunDirectory(runsRoot, directory);
+      if (!opened.ok) throw new Error(opened.error.message);
+      // Reserve through the handle, exactly as the spawn side does: the
+      // reservation is what creates the attempt slot the capture writes into.
+      const request = authority();
+      const reserved = await opened.value.reserveRequest(request);
+      if (!reserved.ok) throw new Error(reserved.error.message);
+      return { runsRoot, directory, request };
+    }
+
+    function correlate(directory: string, nativeId: string, request: AgentRequestAuthority): void {
+      writeFileSync(
+        join(directory, "requests", "correlators.json"),
+        JSON.stringify({ [nativeId]: { requestId: request.requestId, attempt: request.attempt } }),
+      );
+    }
+
+    it("captures a Pi result into its reserved slot", async () => {
+      const { runsRoot, directory, request } = await stagedRun();
+      correlate(directory, "pi-native-1", request);
+
+      const outcome = await captureHarnessResult({
+        harness: "pi",
+        runsRoot,
+        runDirectory: directory,
+        nativeId: "pi-native-1",
+        candidates: piCandidates(AGENT_OUTPUT),
+      });
+
+      expect(outcome.kind).toBe("captured");
+      if (outcome.kind !== "captured") return;
+      expect(outcome.receipt.harness).toBe("pi");
+      expect(
+        readFileSync(join(directory, "transcripts", request.slotId, `attempt-${request.attempt}.raw`), "utf-8"),
+      ).toBe(AGENT_OUTPUT);
+    });
+
+    it("writes byte-identical transcripts from either harness", async () => {
+      const pi = await stagedRun();
+      correlate(pi.directory, "pi-native-1", pi.request);
+      const claude = await stagedRun();
+      correlate(claude.directory, "claude-native-1", claude.request);
+
+      const piOutcome = await captureHarnessResult({
+        harness: "pi",
+        runsRoot: pi.runsRoot,
+        runDirectory: pi.directory,
+        nativeId: "pi-native-1",
+        candidates: piCandidates(AGENT_OUTPUT),
+      });
+      const claudeOutcome = await captureHarnessResult({
+        harness: "claude",
+        runsRoot: claude.runsRoot,
+        runDirectory: claude.directory,
+        nativeId: "claude-native-1",
+        candidates: claudeCandidates(AGENT_OUTPUT),
+      });
+
+      expect(piOutcome.kind).toBe("captured");
+      expect(claudeOutcome.kind).toBe("captured");
+      if (piOutcome.kind !== "captured" || claudeOutcome.kind !== "captured") return;
+      expect(capturesAgree(piOutcome.receipt, claudeOutcome.receipt)).toBe(true);
+    });
+
+    it("applies the same refusals to a Pi result as to a Claude one", async () => {
+      const { runsRoot, directory, request } = await stagedRun();
+      correlate(directory, "pi-native-1", request);
+
+      // Unknown correlator: someone else's agent, ignored rather than failed.
+      expect((await captureHarnessResult({
+        harness: "pi",
+        runsRoot,
+        runDirectory: directory,
+        nativeId: "not-this-run",
+        candidates: piCandidates(AGENT_OUTPUT),
+      })).kind).toBe("no-reservation");
+
+      // Ambiguous final payload: refused on both harnesses alike.
+      const ambiguous = piFinalPayloadCandidates([
+        { type: "text", text: "first" },
+        { type: "text", text: "second" },
+      ]);
+      if (!ambiguous.ok) throw new Error("candidate extraction failed");
+      expect((await captureHarnessResult({
+        harness: "pi",
+        runsRoot,
+        runDirectory: directory,
+        nativeId: "pi-native-1",
+        candidates: ambiguous.value,
+      })).kind).toBe("rejected");
+
+      // A slot that already accepted a capture refuses the late duplicate.
+      expect((await captureHarnessResult({
+        harness: "pi",
+        runsRoot,
+        runDirectory: directory,
+        nativeId: "pi-native-1",
+        candidates: piCandidates(AGENT_OUTPUT),
+      })).kind).toBe("captured");
+      const duplicate = await captureHarnessResult({
+        harness: "pi",
+        runsRoot,
+        runDirectory: directory,
+        nativeId: "pi-native-1",
+        candidates: piCandidates("a different answer"),
+      });
+      expect(duplicate.kind).toBe("rejected");
+      if (duplicate.kind !== "rejected") return;
+      expect(duplicate.reason).toBe("duplicate-capture");
+    });
+
+    it("is inert outside an orchestration run", async () => {
+      expect((await captureHarnessResult({
+        harness: "pi",
+        runsRoot: undefined,
+        runDirectory: undefined,
+        nativeId: "pi-native-1",
+        candidates: piCandidates(AGENT_OUTPUT),
+      })).kind).toBe("not-an-orchestration-run");
+    });
+  });
+
+  // The Pi adapter reads the LAST assistant message, mirroring Claude's last
+  // assistant transcript line; anything earlier is mid-conversation.
+  describe("piResultFinalPayloadCandidates", () => {
+    it("takes the final assistant message, not an earlier one", () => {
+      const extracted = piResultFinalPayloadCandidates([
+        { role: "assistant", content: [{ type: "text", text: "thinking out loud" }] },
+        { role: "user", content: [{ type: "text", text: "continue" }] },
+        { role: "assistant", content: [{ type: "text", text: AGENT_OUTPUT }] },
+      ]);
+
+      expect(extracted.ok).toBe(true);
+      if (!extracted.ok) return;
+      expect(extracted.value).toHaveLength(1);
+      expect(extracted.value[0]?.text).toBe(AGENT_OUTPUT);
+    });
+
+    it("still refuses an ambiguous final message rather than picking one block", () => {
+      const extracted = piResultFinalPayloadCandidates([
+        { role: "assistant", content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] },
+      ]);
+
+      expect(extracted.ok).toBe(true);
+      if (!extracted.ok) return;
+      expect(parseFinalPayload(extracted.value).ok).toBe(false);
+    });
+
+    it("yields no candidate for malformed messages instead of guessing", () => {
+      expect(piResultFinalPayloadCandidates("not a message list").ok).toBe(false);
+      const none = piResultFinalPayloadCandidates([
+        { role: "user", content: [{ type: "text", text: "only a user turn" }] },
+      ]);
+      expect(none.ok).toBe(true);
+      if (!none.ok) return;
+      expect(none.value).toHaveLength(0);
+    });
   });
 });
 

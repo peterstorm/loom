@@ -193,6 +193,30 @@ describe("panel operation DAGs", () => {
   const runPanel = async (dag: ReturnType<typeof createPanelOperationDag>, input: unknown) =>
     runDag<unknown, PanelOutcome>(dag, input, context(dag.id));
 
+  /** `defineDag` normalizes the node map into an ordered array, so nodes are
+   *  located by their own `id` rather than by an object key. */
+  const panelNode = (dag: ReturnType<typeof createPanelOperationDag>, id: string) => {
+    const nodes = dag.nodes as unknown as readonly { readonly id: string }[];
+    const node = nodes.find((candidate) => candidate.id === id);
+    expect(node, `${id} must exist in the DAG`).toBeDefined();
+    return node as unknown as {
+      inputSchema: { safeParse: (value: unknown) => { success: boolean } };
+      run: (input: unknown, ctx: unknown) => Promise<{ ok: boolean; value: PanelOutcome }>;
+    };
+  };
+
+  /** Drive one node directly, so a branch reachable only from a proved roster
+   *  can be exercised without standing up a complete panel roster. */
+  const runNodeOf = async (
+    dag: ReturnType<typeof createPanelOperationDag>,
+    id: string,
+    envelope: Record<string, unknown>,
+  ): Promise<PanelOutcome> => {
+    const result = await panelNode(dag, id).run(envelope, context(dag.id));
+    expect(result.ok).toBe(true);
+    return result.value;
+  };
+
   it("rejects rather than aggregating when the authority does not parse", async () => {
     const dag = createPanelOperationDag(spec(), panelResolver);
 
@@ -213,6 +237,55 @@ describe("panel operation DAGs", () => {
     expect(result.value).toMatchObject({ kind: "rejected" });
     if (result.value.kind !== "rejected") return;
     expect(result.value.reason.length).toBeGreaterThan(0);
+  });
+
+  // The aggregate contract is `DomainResult`, so a success arm always carries
+  // `value`. Under the old `Readonly<{ ok: boolean }> & Record<string, unknown>`
+  // signature, `{ ok: true }` alone type-checked and published
+  // `{ kind: "aggregated", value: undefined }` as a successful panel result.
+  it("carries the aggregate's value onto the aggregated outcome", async () => {
+    const dag = createPanelOperationDag(
+      spec({ aggregate: () => ({ ok: true, value: { ranked: ["winner"] } }) }),
+      panelResolver,
+    );
+    const outcome = await runNodeOf(dag, PANEL_DAG_NODE_IDS.aggregate, {
+      [PANEL_DAG_NODE_IDS.proveRoster]: {
+        kind: "proved",
+        complete: { authority: { id: "panel-1" }, roster: {} },
+        slotCount: 1,
+      },
+    });
+
+    expect(outcome).toEqual({ kind: "aggregated", value: { ranked: ["winner"] } });
+  });
+
+  it("renders an aggregate refusal from its error channel", async () => {
+    const dag = createPanelOperationDag(
+      spec({ aggregate: () => ({ ok: false, error: { message: "tally is not unanimous" } }) }),
+      panelResolver,
+    );
+    const outcome = await runNodeOf(dag, PANEL_DAG_NODE_IDS.aggregate, {
+      [PANEL_DAG_NODE_IDS.proveRoster]: {
+        kind: "proved",
+        complete: { authority: { id: "panel-1" }, roster: {} },
+        slotCount: 1,
+      },
+    });
+
+    expect(outcome).toEqual({ kind: "rejected", reason: "tally is not unanimous" });
+  });
+
+  // The envelope schemas validate their wrapped member with the real schema, so
+  // the node refuses a malformed proof instead of reading `.kind` off whatever
+  // arrived. Previously the member was `z.unknown().optional()` behind a cast.
+  it("refuses an envelope whose roster proof is not a roster proof", async () => {
+    const dag = createPanelOperationDag(spec(), panelResolver);
+
+    const parsed = panelNode(dag, PANEL_DAG_NODE_IDS.aggregate).inputSchema.safeParse({
+      [PANEL_DAG_NODE_IDS.proveRoster]: { kind: "not-a-proof" },
+    });
+
+    expect(parsed.success).toBe(false);
   });
 
   it("reaches aggregation only along the conditional proved edge", () => {
@@ -388,17 +461,18 @@ describe("standalone review critical routing", () => {
 // --- Wave gate preparation fan-in -------------------------------------------
 
 describe("wave gate preparation", () => {
-  const part = (id: string, okValue: boolean, reason: string | null = null) => ({
+  const part = (id: string, reason: string | null = null) => ({
     id,
-    derive: (input: PreparationInput): DerivedPart =>
-      ({ part: id, ok: okValue, value: { wave: input.wave }, reason }),
+    derive: (input: PreparationInput): DerivedPart => reason === null
+      ? { kind: "derived", part: id, value: { wave: input.wave } }
+      : { kind: "undeliverable", part: id, reason },
   });
 
   const allGood = createWavePreparationDag({
-    readiness: part("readiness", true),
-    packets: part("packets", true),
-    models: part("models", true),
-    contexts: part("contexts", true),
+    readiness: part("readiness"),
+    packets: part("packets"),
+    models: part("models"),
+    contexts: part("contexts"),
   });
 
   it("joins every derived part before anything can be published", async () => {
@@ -417,10 +491,10 @@ describe("wave gate preparation", () => {
 
   it("blocks the whole batch when any single part cannot be derived", async () => {
     const dag = createWavePreparationDag({
-      readiness: part("readiness", true),
-      packets: part("packets", false, "task T3 has an empty review scope"),
-      models: part("models", true),
-      contexts: part("contexts", true),
+      readiness: part("readiness"),
+      packets: part("packets", "task T3 has an empty review scope"),
+      models: part("models"),
+      contexts: part("contexts"),
     });
 
     const result = await runDag<PreparationInput, PreparedBatch>(

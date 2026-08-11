@@ -17,37 +17,26 @@
  * This handler NEVER resolves an unrelated State File. It reads only the run
  * directory it was pointed at, so a standalone review running beside an active
  * wave cannot capture into the wave's graph or vice versa.
+ *
+ * Only the two genuinely harness-native facts live here — how to read Claude's
+ * final payload, and what its native correlator is. Everything the run
+ * directory is asked for is shared with Pi through
+ * `orchestration/harness-capture-runtime`, so the two harnesses cannot drift
+ * into admitting different results for the same run.
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
+import type { FinalPayloadCandidate } from "../../core/harness-capture";
 import {
-  bindCapture,
-  parseFinalPayload,
-  type CaptureReceipt,
-  type FinalPayloadCandidate,
-  type HarnessResultIdentity,
-} from "../../core/harness-capture";
-import {
-  parseAgentRequestAuthority,
-  type AgentRequestAuthority,
-} from "../../core/orchestration-contract";
-import { openRunDirectory, type RunDirHandle } from "../../orchestration/run-directory-handle";
+  captureAuditLine,
+  captureHarnessResult,
+  RUN_DIR_ENV,
+  RUNS_ROOT_ENV,
+  type CaptureOutcome,
+} from "../../orchestration/harness-capture-runtime";
 
-/**
- * Where a Claude run directory is announced. Set by the spawn side; absent for
- * every agent that is not part of an orchestration run, which is the common
- * case and NOT an error.
- */
-const RUNS_ROOT_ENV = "LOOM_ORCHESTRATION_RUNS_ROOT";
-const RUN_DIR_ENV = "LOOM_ORCHESTRATION_RUN_DIR";
-
-export type CaptureOutcome =
-  | Readonly<{ kind: "not-an-orchestration-run" }>
-  | Readonly<{ kind: "no-reservation"; agentId: string }>
-  | Readonly<{ kind: "captured"; receipt: CaptureReceipt }>
-  | Readonly<{ kind: "rejected"; reason: string; message: string }>;
+export type { CaptureOutcome };
 
 /**
  * Read the last assistant message from a Claude agent transcript as the sole
@@ -101,78 +90,15 @@ function assistantTextOf(line: string | undefined): string | null {
   return texts.length === 1 ? texts[0] ?? null : null;
 }
 
-/** Every request this run reserved, parsed from its immutable reservations. */
-export function readIssuedRequests(handle: RunDirHandle): readonly AgentRequestAuthority[] {
-  const directory = join(handle.runDirectory, "requests");
-  if (!existsSync(directory)) return Object.freeze([]);
-  const issued: AgentRequestAuthority[] = [];
-  for (const name of readdirSync(directory).sort()) {
-    if (!name.endsWith(".json")) continue;
-    const parsed = ((): unknown => {
-      try {
-        return JSON.parse(readFileSync(join(directory, name), "utf-8")) as unknown;
-      } catch {
-        return null;
-      }
-    })();
-    const authority = parseAgentRequestAuthority(parsed);
-    if (authority.ok) issued.push(authority.value);
-  }
-  return Object.freeze(issued);
-}
-
-/** Slots whose transcript already landed — the duplicate/late guard's input. */
-export function alreadyCapturedSlots(handle: RunDirHandle): ReadonlySet<string> {
-  const directory = join(handle.runDirectory, "transcripts");
-  if (!existsSync(directory)) return new Set();
-  const captured = new Set<string>();
-  for (const slot of readdirSync(directory)) {
-    const slotDir = join(directory, slot);
-    try {
-      if (readdirSync(slotDir).some((file) => file.endsWith(".raw"))) captured.add(slot);
-    } catch {
-      // An unreadable slot directory proves nothing was captured there.
-    }
-  }
-  return captured;
-}
-
 /**
- * Resolve the reservation this stop answers.
- *
- * Claude does not hand the request id back, so it is recovered by matching the
- * spawn-time correlator recorded alongside the reservation. A stop with no
- * matching correlator belongs to some other agent.
+ * Re-exported so the Claude-side tests and callers keep one import site while
+ * the implementations stay shared with Pi.
  */
-export function resolveIdentity(
-  handle: RunDirHandle,
-  input: SubagentStopInput,
-): HarnessResultIdentity | null {
-  const agentId = input.agent_id;
-  if (typeof agentId !== "string" || agentId.length === 0) return null;
-
-  const correlators = join(handle.runDirectory, "requests", "correlators.json");
-  const mapping = ((): Record<string, unknown> => {
-    try {
-      return JSON.parse(readFileSync(correlators, "utf-8")) as Record<string, unknown>;
-    } catch {
-      return {};
-    }
-  })();
-  const entry = mapping[agentId];
-  if (typeof entry !== "object" || entry === null) return null;
-  const record = entry as Record<string, unknown>;
-  const requestId = record["requestId"];
-  const attempt = record["attempt"];
-  if (typeof requestId !== "string" || typeof attempt !== "number") return null;
-
-  return Object.freeze({
-    harness: "claude" as const,
-    requestId,
-    attempt,
-    nativeId: agentId,
-  });
-}
+export {
+  alreadyCapturedSlots,
+  readCorrelatorIdentity,
+  readIssuedRequests,
+} from "../../orchestration/harness-capture-runtime";
 
 /**
  * Capture one finished Claude agent. Pure with respect to decisions: every
@@ -184,38 +110,15 @@ export async function captureClaudeResult(
   runsRoot: string | undefined,
   runDirectory: string | undefined,
 ): Promise<CaptureOutcome> {
-  if (runsRoot === undefined || runDirectory === undefined) return { kind: "not-an-orchestration-run" };
-
-  const opened = openRunDirectory(runsRoot, runDirectory);
-  if (!opened.ok) return { kind: "rejected", reason: "run-directory", message: opened.error.message };
-  const handle = opened.value;
-
-  const identity = resolveIdentity(handle, input);
-  if (identity === null) return { kind: "no-reservation", agentId: input.agent_id ?? "(missing)" };
-
-  const payload = parseFinalPayload(
-    claudeFinalPayloadCandidates(input.agent_transcript_path ?? ""),
-  );
-  if (!payload.ok) {
-    return { kind: "rejected", reason: payload.error.reason, message: payload.error.message };
-  }
-
-  const bound = bindCapture({
-    issued: readIssuedRequests(handle),
-    identity,
-    payload: payload.value,
-    alreadyCaptured: alreadyCapturedSlots(handle),
+  return captureHarnessResult({
+    harness: "claude",
+    runsRoot,
+    runDirectory,
+    // Claude's native correlator is the agent id its SubagentStop payload
+    // carries; the spawn side recorded it beside the reservation.
+    nativeId: typeof input.agent_id === "string" ? input.agent_id : "",
+    candidates: claudeFinalPayloadCandidates(input.agent_transcript_path ?? ""),
   });
-  if (!bound.ok) return { kind: "rejected", reason: bound.error.reason, message: bound.error.message };
-
-  const request = readIssuedRequests(handle).find(({ requestId }) => requestId === bound.value.requestId);
-  if (request === undefined) {
-    return { kind: "rejected", reason: "unknown-request", message: "issued request vanished between binding and capture" };
-  }
-  const written = await handle.captureTranscript(request, payload.value.bytes);
-  if (!written.ok) return { kind: "rejected", reason: "transcript", message: written.error.message };
-
-  return { kind: "captured", receipt: bound.value };
 }
 
 const handler: HookHandler = async (stdin): Promise<HookResult> => {
@@ -236,13 +139,8 @@ const handler: HookHandler = async (stdin): Promise<HookResult> => {
 
   // Every non-capture is audited. A rejection must be visible: silence here
   // would look exactly like a run that had nothing to capture.
-  if (outcome.kind === "rejected") {
-    process.stderr.write(`capture-orchestration-result: rejected (${outcome.reason}): ${outcome.message}\n`);
-  } else if (outcome.kind === "captured") {
-    process.stderr.write(
-      `capture-orchestration-result: captured ${outcome.receipt.requestId} (${outcome.receipt.byteLength} bytes)\n`,
-    );
-  }
+  const audit = captureAuditLine("capture-orchestration-result", outcome);
+  if (audit !== null) process.stderr.write(audit);
   return { kind: "passthrough" };
 };
 

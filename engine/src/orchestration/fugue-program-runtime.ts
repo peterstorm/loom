@@ -18,6 +18,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { withLock } from "../utils/lock";
 import {
   fromJson,
   replayEvents,
@@ -148,11 +149,22 @@ export function createFileProgramJournal(directory: string): ProgramJournal {
     readdirSync(eventsDirectory).filter((name) => name.endsWith(".json")).sort();
 
   return Object.freeze({
+    /**
+     * Serialized for the same reason as the anchored handle's journal: the
+     * sequence prefix is the append ORDER, and it is derived from a directory
+     * listing that two appenders carrying different dedup keys can observe
+     * identically. Their filenames differ, so nothing refuses the second write
+     * and both records claim the same sequence — after which `readEvents`'s
+     * filename sort ranks them by dedup-key text rather than by happens-before,
+     * and replay folds a history the run never had.
+     */
     async appendEvent(record: ProgramEventRecord): Promise<void> {
-      const existing = eventFiles();
-      if (existing.some((name) => name.endsWith(`-${record.dedupKey}.json`))) return;
-      const sequenced = Object.freeze({ ...record, sequence: existing.length });
-      atomicWriteFile(join(eventsDirectory, eventFileName(sequenced.sequence, sequenced.dedupKey)), toJson(sequenced));
+      await withLock(join(eventsDirectory, "append"), () => {
+        const existing = eventFiles();
+        if (existing.some((name) => name.endsWith(`-${record.dedupKey}.json`))) return;
+        const sequenced = Object.freeze({ ...record, sequence: existing.length });
+        atomicWriteFile(join(eventsDirectory, eventFileName(sequenced.sequence, sequenced.dedupKey)), toJson(sequenced));
+      });
     },
     async readEvents(): Promise<readonly ProgramEventRecord[]> {
       return Object.freeze(eventFiles().map((name) =>

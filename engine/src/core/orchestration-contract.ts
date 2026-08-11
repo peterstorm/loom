@@ -50,16 +50,43 @@ function hasNeutralRecordPrototype(value: object): boolean {
   return prototype === null || prototype === Object.prototype;
 }
 
-/** Records a left/right pair so cyclic structures terminate instead of recursing forever. */
-function pairAlreadyCompared(left: object, right: object, seen: StructuralPairs): boolean {
-  const partners = seen.get(left);
-  if (partners === undefined) {
-    seen.set(left, new Set([right]));
-    return false;
-  }
-  if (partners.has(right)) return true;
+/**
+ * Records a left/right pair for the duration of ITS OWN comparison, so cyclic
+ * structures terminate instead of recursing forever.
+ *
+ * The entry is scoped to the active recursion path and released when that
+ * comparison returns — it records "this pair is currently being compared", not
+ * "this pair compared equal". Leaving it behind would make the memo answer for
+ * a comparison that never concluded: `matchOnce` deliberately tolerates FAILED
+ * speculative sub-comparisons while trying Map/Set candidates, so a pair
+ * registered by a rejected candidate would later short-circuit to `true`
+ * somewhere else in the structure and report two different values as equal.
+ * This function gates checkpoint/state agreement, where a false "equal" admits
+ * exactly the mismatched checkpoint the check exists to reject.
+ */
+function withPairInProgress(
+  left: object,
+  right: object,
+  seen: StructuralPairs,
+  compare: () => boolean,
+): boolean {
+  const open = seen.get(left);
+  // Already on the current path: the structures are cyclic and every finite
+  // difference has been examined by the frame that opened this pair.
+  if (open?.has(right) === true) return true;
+
+  // The stored Set is held directly rather than re-read on the way out: this
+  // runs once per object pair in every comparison, and the map is never
+  // replaced for a key while a frame below it is still open.
+  const partners = open ?? new Set<object>();
+  if (open === undefined) seen.set(left, partners);
   partners.add(right);
-  return false;
+  try {
+    return compare();
+  } finally {
+    partners.delete(right);
+    if (partners.size === 0) seen.delete(left);
+  }
 }
 
 /** Consumes the first structurally matching candidate, so sizes compare as multisets. */
@@ -110,21 +137,22 @@ function structurallyEqual(left: unknown, right: unknown, seen: StructuralPairs)
   if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) {
     return false;
   }
-  if (pairAlreadyCompared(left, right, seen)) return true;
-  if (Array.isArray(left) || Array.isArray(right)) {
-    return Array.isArray(left) && Array.isArray(right) && left.length === right.length &&
-      left.every((entry, index) => structurallyEqual(entry, right[index], seen));
-  }
-  if (left instanceof Map || right instanceof Map) return mapsEqual(left, right, seen);
-  if (left instanceof Set || right instanceof Set) return setsEqual(left, right, seen);
-  if (left instanceof Date || right instanceof Date) {
-    return left instanceof Date && right instanceof Date && Object.is(left.getTime(), right.getTime());
-  }
-  if (left instanceof RegExp || right instanceof RegExp) {
-    return left instanceof RegExp && right instanceof RegExp &&
-      left.source === right.source && left.flags === right.flags;
-  }
-  return recordsEqual(left, right, seen);
+  return withPairInProgress(left, right, seen, () => {
+    if (Array.isArray(left) || Array.isArray(right)) {
+      return Array.isArray(left) && Array.isArray(right) && left.length === right.length &&
+        left.every((entry, index) => structurallyEqual(entry, right[index], seen));
+    }
+    if (left instanceof Map || right instanceof Map) return mapsEqual(left, right, seen);
+    if (left instanceof Set || right instanceof Set) return setsEqual(left, right, seen);
+    if (left instanceof Date || right instanceof Date) {
+      return left instanceof Date && right instanceof Date && Object.is(left.getTime(), right.getTime());
+    }
+    if (left instanceof RegExp || right instanceof RegExp) {
+      return left instanceof RegExp && right instanceof RegExp &&
+        left.source === right.source && left.flags === right.flags;
+    }
+    return recordsEqual(left, right, seen);
+  });
 }
 
 /**

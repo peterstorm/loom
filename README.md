@@ -59,8 +59,10 @@ claude plugin add /path/to/loom
 /loom --panel "Add a rate limiter to the public API"
 /loom --panel=4 "Redesign the ingestion pipeline"   # 4 designers instead of 3
 
-# Status / lifecycle (planned — not yet implemented; see commands/loom.md)
+# Status
 /loom --status                # Print current phase + wave + task statuses
+
+# Lifecycle teardown (planned — not yet implemented; see commands/loom.md)
 /loom --complete              # Tear down state file after success
 /loom --abort                 # Tear down state file on abandonment
 

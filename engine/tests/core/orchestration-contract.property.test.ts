@@ -1306,6 +1306,15 @@ describe("ExactRoster and CompleteRoster conservation", () => {
     expect(Object.isFrozen(complete.ordered[0]!.value)).toBe(true);
   });
 
+  // Explicit timeout: this property builds a fresh roster of up to 8 slots and
+  // runs six full `parseCompleteRoster` rejections per generated case, for 100
+  // cases. It settles around 2.8s alone — comfortably inside the 5s default —
+  // but the whole suite runs 152 files in parallel, and under that contention it
+  // crosses 5s and fails the run. The budget is what is wrong, not the code:
+  // the same test times out identically on an unmodified checkout. Raised
+  // rather than shrunk because the generated size range IS the coverage, and
+  // matching the explicit budget `session-registry.property.test.ts` already
+  // gives its own property suite for the same reason.
   it("rejects missing, duplicate, surplus, malformed, and cross-slot result reuse", () => {
     fc.assert(fc.property(fc.integer({ min: 2, max: 8 }), (size) => {
       const exact = roster(size);
@@ -1319,7 +1328,7 @@ describe("ExactRoster and CompleteRoster conservation", () => {
       expect(parseCompleteRoster(exact, null, parseStringPayload).ok).toBe(false);
       expect(parseCompleteRoster(exact, [{ ...valid[0], authority: valid[1]!.authority }, ...valid.slice(1)], parseStringPayload).ok).toBe(false);
     }));
-  });
+  }, 30000);
 
   it("requires an engine-issued retry request before attempt 2 can complete a roster", () => {
     const exact = roster(1);

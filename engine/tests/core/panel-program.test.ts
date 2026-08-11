@@ -764,6 +764,57 @@ describe("persistent panel authority", () => {
     });
   });
 
+  // The roster and its lens list are independently-ordered fields of the same
+  // untrusted checkpoint input, paired by POSITION with nothing in the roster
+  // naming its entry. Equal cardinality is therefore the whole of what the
+  // authority boundary can prove, and it must actually prove it — otherwise a
+  // slot resolves to `undefined` and gets carried downstream as a lens.
+  it("refuses a roster whose slot count disagrees with the ordered list it is paired with", () => {
+    const refutation = refutationFixture("cardinality-authority");
+    const architecture = architectureFixture("cardinality-authority");
+
+    expect(parseRefutationPanelAuthority({
+      runId: refutation.authority.runId,
+      findings: refutation.authority.findings,
+      lenses: refutation.authority.lenses.slice(0, 1),
+      verifierSlots: refutation.authority.verifierRoster.orderedSlots,
+    })).toMatchObject({
+      ok: false,
+      error: { kind: "invalid-authority", message: expect.stringContaining("exactly 1 slot") },
+    });
+
+    expect(parseArchitecturePanelAuthority({
+      runId: architecture.authority.runId,
+      candidateLenses: architecture.authority.candidateLenses.slice(0, 1),
+      judgeCriteria: architecture.authority.judgeCriteria,
+      candidateSlots: architecture.authority.candidateRoster.orderedSlots,
+      judgeSlots: architecture.authority.judgeRoster.orderedSlots,
+    })).toMatchObject({
+      ok: false,
+      error: { kind: "invalid-authority", message: expect.stringContaining("exactly 1 slot") },
+    });
+  });
+
+  it("refuses a roster slot holding an attempt bound to a different slot", () => {
+    const refutation = refutationFixture("cross-slot-attempt");
+    const slots = refutation.authority.verifierRoster.orderedSlots;
+    const foreign = slots[1]!;
+    // A slot whose second attempt answers for its neighbour: `locateProgress`
+    // would resolve it, and the result would then be paired with whichever
+    // ordinal the OTHER slot occupies.
+    const tampered = [
+      { ...slots[0]!, attempts: [slots[0]!.attempts[0], foreign.attempts[1]] },
+      ...slots.slice(1),
+    ];
+
+    expect(parseRefutationPanelAuthority({
+      runId: refutation.authority.runId,
+      findings: refutation.authority.findings,
+      lenses: refutation.authority.lenses,
+      verifierSlots: tampered,
+    })).toMatchObject({ ok: false, error: { kind: "invalid-authority" } });
+  });
+
   it("uses shared identity/path/prose parsers and stores only canonical sanitized Findings", () => {
     const fixture = refutationFixture("sanitized-authority");
     const parsedAuthority = reduced(parseRefutationPanelAuthority({

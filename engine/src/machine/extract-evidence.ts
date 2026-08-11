@@ -516,10 +516,19 @@ export function extractShellWriteTargets(command: string): string[] {
   return [...new Set(targets)];
 }
 
-/** Outcome of a Bash call as reported by the harness at execution time. */
+/**
+ * Outcome of a Bash call as reported by the harness at execution time.
+ *
+ * `interrupted` is carried rather than folded into `exit: null` because the
+ * two mean different things downstream: an unknown exit still describes a run
+ * that FINISHED, while an interrupted one does not, and only the second breaks
+ * the completeness precondition `judgeTestRun` relies on.
+ */
 export interface BashOutcome {
   readonly exit: number | null;
   readonly stdout: string;
+  /** The harness killed this call (timeout/abort); the command never finished. */
+  readonly interrupted: boolean;
 }
 
 /**
@@ -528,11 +537,13 @@ export interface BashOutcome {
  * which downstream treats as untrusted (never as success).
  */
 export function extractBashOutcome(toolResponse: unknown): BashOutcome {
-  if (typeof toolResponse === "string") return { exit: null, stdout: toolResponse };
-  if (typeof toolResponse !== "object" || toolResponse === null) return { exit: null, stdout: "" };
+  if (typeof toolResponse === "string") return { exit: null, stdout: toolResponse, interrupted: false };
+  if (typeof toolResponse !== "object" || toolResponse === null) {
+    return { exit: null, stdout: "", interrupted: false };
+  }
 
   const o = toolResponse as Record<string, unknown>;
-  if (o.interrupted === true) return { exit: null, stdout: "" };
+  if (o.interrupted === true) return { exit: null, stdout: "", interrupted: true };
 
   const exitRaw = o.exit_code ?? o.exitCode ?? o.returnCode ?? o.code;
   const exit = typeof exitRaw === "number" && Number.isInteger(exitRaw) ? exitRaw : null;
@@ -540,7 +551,7 @@ export function extractBashOutcome(toolResponse: unknown): BashOutcome {
   const stdoutRaw = o.stdout ?? o.output;
   const stdout = typeof stdoutRaw === "string" ? stdoutRaw : "";
 
-  return { exit, stdout };
+  return { exit, stdout, interrupted: false };
 }
 
 function filePathOf(toolInput: Record<string, unknown>): string | null {
@@ -641,11 +652,18 @@ export function extractEvidence(
       // any later evidence correct it. `findReport`'s guards bound STALENESS;
       // nothing bounds completeness, so the only honest answer here is no
       // evidence at all.
+      //
+      // An INTERRUPTED call (harness timeout/abort) breaks the same
+      // precondition by the same mechanism — the runner was killed mid-write,
+      // so the classes that finished first left a partial-but-green report —
+      // and it too arrives here as `exit: null`. Both unfinished cases drop the
+      // report; only a run that actually ended may pair one with an exit.
+      const unfinished = classified.isBackgrounded || outcome.interrupted;
       events.push({
         kind: "TestRun",
         command,
         exit: attributeExit(outcome.exit, classified),
-        report: classified.isBackgrounded ? null : report,
+        report: unfinished ? null : report,
       });
     }
     return events;

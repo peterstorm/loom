@@ -554,6 +554,37 @@ describe("the load boundary proves wave_gates and spec_check, not just tasks", (
   it("an absent spec_check is not an error — it is the pre-wave-gate state", () => {
     expect(parseTaskGraph(graph({})).ok).toBe(true);
   });
+
+  // The parser proves `critical_count === critical_findings.length`. Returning
+  // the caller's own object under the proven type would alias it, so a later
+  // write through the original reference invalidates that proof with no compile
+  // error at the site that did it — the bug class `types.ts` documents beside
+  // CapturedSpecCheck's readonly findings.
+  it("returns a spec_check the caller cannot mutate back out of its proven invariant", () => {
+    const raw = {
+      wave: 1,
+      run_at: "t",
+      verdict: "PASSED",
+      critical_count: 1,
+      high_count: 0,
+      critical_findings: ["real finding"],
+      high_findings: [],
+      medium_findings: [],
+    };
+    const parsed = parseTaskGraph(graph({ spec_check: raw }));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    raw.critical_count = 99;
+    raw.critical_findings.push("smuggled after the proof");
+
+    const stored = parsed.value.spec_check;
+    expect(stored?.verdict).toBe("PASSED");
+    if (stored === undefined || stored.verdict === "EVIDENCE_CAPTURE_FAILED") return;
+    expect(stored.critical_count).toBe(1);
+    expect(stored.critical_findings).toEqual(["real finding"]);
+    expect(stored.critical_count).toBe(stored.critical_findings.length);
+  });
 });
 
 // ---------------------------------------------------------------------------

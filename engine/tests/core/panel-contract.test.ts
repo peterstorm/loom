@@ -12,6 +12,7 @@ import {
   parseJudgeVerdict,
   parsePanelManifest,
   selectPanelLenses,
+  sensitiveBoundaryStatus,
   serializeJudgeVerdict,
   serializeRankings,
   type CandidateFilename,
@@ -133,6 +134,36 @@ describe("selectPanelLenses", () => {
       ok: true,
       value: ["simplicity-first", "type-driven-fp", "risk-security-first", "performance-first"],
     });
+  });
+
+  // The security-first lens is selected by reading this field's prefix, so an
+  // unnormalised value would silently drop the lens instead of being rejected.
+  // The brand makes `parseInterviewDigest` the only way to obtain the field, so
+  // an arbitrary string cannot reach `selectPanelLenses` without a deliberate
+  // cast — this pins the normalisation the brand asserts.
+  it("normalises the sensitive-boundaries prefix so the security lens signal is exact", () => {
+    for (const raw of ["FLAGGED — auth", "Flagged: token exchange", "flagged — auth"]) {
+      const digest = parseInterviewDigest(
+        VALID_DIGEST.replace("**Sensitive boundaries:** none", `**Sensitive boundaries:** ${raw}`),
+      );
+      expect(digest.ok).toBe(true);
+      if (!digest.ok) return;
+      expect(digest.value.sensitiveBoundaries.startsWith("flagged")).toBe(true);
+      expect(sensitiveBoundaryStatus(digest.value.sensitiveBoundaries)).toBe("flagged");
+      expect(selectPanelLenses(digest.value, 3)).toEqual({
+        ok: true,
+        value: ["simplicity-first", "type-driven-fp", "risk-security-first"],
+      });
+    }
+  });
+
+  it("rejects a sensitive-boundaries value that names neither status", () => {
+    const digest = parseInterviewDigest(
+      VALID_DIGEST.replace("**Sensitive boundaries:** none", "**Sensitive boundaries:** lorem ipsum"),
+    );
+    expect(digest.ok).toBe(false);
+    if (digest.ok) return;
+    expect(digest.errors.join("; ")).toContain("must begin with 'flagged' or 'none'");
   });
 
   it("re-parses canonical interview JSON and rejects invalid counts", () => {

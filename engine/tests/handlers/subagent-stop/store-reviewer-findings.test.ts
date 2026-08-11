@@ -382,6 +382,39 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
     }
   });
 
+  // The task is looked up BEFORE the transcript read and applied INSIDE the
+  // locked update, so a graph rewritten in between leaves the `tasks.map` a
+  // no-op. Without the `taskFound` check the handler would then log a stored
+  // resolution for a task that is no longer in the graph. The window is real:
+  // the transcript read is the await that separates the two.
+  it("warns instead of reporting stored findings when the task vanishes mid-update", async () => {
+    // No CRITICAL_COUNT marker, so the reader retries and the window between
+    // the pre-update lookup and the locked update is deterministic.
+    const f = fixture("toctou", "Reviewing Task T1 — still writing the summary.");
+    try {
+      const pending = run({
+        session_id: f.session,
+        agent_type: "code-reviewer",
+        agent_transcript_path: f.transcriptPath,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      // T1 is gone by the time the locked update runs.
+      writeFileSync(f.statePath, graph([task("T2")]));
+
+      const { result, stderr } = await pending;
+
+      expect(result).toEqual({ kind: "passthrough" });
+      expect(stderr).toContain("disappeared before evidence application");
+      expect(stderr).toContain("findings NOT stored");
+      // Nothing was invented for the surviving task either.
+      expect(f.state().tasks).toHaveLength(1);
+      expect(f.state().tasks[0].id).toBe("T2");
+      expect(f.state().tasks[0].review_status).toBe("pending");
+    } finally {
+      f.cleanup();
+    }
+  });
+
   it("fails the hook after warning that a corrupt state file lost reviewer evidence", async () => {
     const f = fixture("corrupt", BLOCKING);
     try {

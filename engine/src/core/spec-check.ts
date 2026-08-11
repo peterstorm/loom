@@ -161,7 +161,7 @@ export function parseStoredSpecCheck(raw: unknown): SpecCheckParseResult {
     }
     return errors.length > 0
       ? { ok: false, errors }
-      : { ok: true, value: spec as unknown as EvidenceFailedSpecCheck };
+      : { ok: true, value: freshEvidenceFailed(spec, verdict) };
   }
 
   if (spec.error !== undefined) errors.push("spec_check.error must be absent when evidence capture succeeded");
@@ -184,5 +184,43 @@ export function parseStoredSpecCheck(raw: unknown): SpecCheckParseResult {
   }
   return errors.length > 0
     ? { ok: false, errors }
-    : { ok: true, value: spec as unknown as CapturedSpecCheck };
+    : { ok: true, value: freshCaptured(spec, verdict) };
+}
+
+/**
+ * Rebuild the parsed value instead of casting the caller's own object.
+ *
+ * Returning `raw` under a proven type aliases it: the caller still holds a
+ * mutable reference, so a later `raw.critical_count = 99` silently invalidates
+ * the count/findings-length equality proven immediately above — and the type
+ * says nothing happened. `types.ts` documents this exact bug class beside
+ * `CapturedSpecCheck`'s `readonly` findings. Freezing a freshly built record
+ * makes the proof survive its own return, as every sibling parser here does.
+ */
+function freshCaptured(
+  spec: Record<string, unknown>,
+  verdict: Exclude<SpecCheckVerdict, "EVIDENCE_CAPTURE_FAILED">,
+): CapturedSpecCheck {
+  return Object.freeze({
+    wave: spec.wave as number,
+    run_at: spec.run_at as string,
+    verdict,
+    critical_count: spec.critical_count as number,
+    high_count: spec.high_count as number,
+    critical_findings: Object.freeze([...(spec.critical_findings as readonly string[])]),
+    high_findings: Object.freeze([...(spec.high_findings as readonly string[])]),
+    medium_findings: Object.freeze([...(spec.medium_findings as readonly string[])]),
+  });
+}
+
+function freshEvidenceFailed(
+  spec: Record<string, unknown>,
+  verdict: "EVIDENCE_CAPTURE_FAILED",
+): EvidenceFailedSpecCheck {
+  return Object.freeze({
+    wave: spec.wave as number,
+    run_at: spec.run_at as string,
+    verdict,
+    error: spec.error as string,
+  });
 }

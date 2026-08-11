@@ -67,7 +67,16 @@ import * as git from "../engine/src/utils/git";
 // Linter integration (PostEdit lint via tool_result)
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
 import { lintFile } from "../engine/src/linter/index";
-import { messagesToClaudeJsonl, parsePiMessages, piStructuredTestResult } from "./transcript-adapter";
+import { messagesToClaudeJsonl, parsePiMessages, piResultFinalPayloadCandidates, piStructuredTestResult } from "./transcript-adapter";
+// FR-033: Pi and Claude Code capture each completed reviewer/verifier output
+// into the SAME engine-declared slot under the same refusals. Both drive this
+// one runtime; only the native correlator and the payload observation differ.
+import {
+  captureAuditLine,
+  captureHarnessResult,
+  RUN_DIR_ENV,
+  RUNS_ROOT_ENV,
+} from "../engine/src/orchestration/harness-capture-runtime";
 import { materializePiResources } from "./resources";
 import { checkAgentSkillPrompt } from "../engine/src/core/agent-skills";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
@@ -157,6 +166,46 @@ export const piSpawnRosterId = (
   index,
   agent,
 ]));
+
+/**
+ * Capture one finished Pi subagent result into its reserved run-directory slot.
+ *
+ * Pi's native correlator is `piSpawnRosterId(toolCallId, index, agent)` — the
+ * same stable per-spawn identity the lifecycle registry already uses, and the
+ * only thing available on both the spawn and result sides of a Pi batch. The
+ * spawn side records it beside the reservation; a result whose correlator is
+ * absent belongs to some other agent and is ignored, not failed.
+ *
+ * Never throws: capture is evidence collection, and a failure here must not
+ * abort the evidence processing that follows. Every non-capture is audited,
+ * because silence looks exactly like a run that had nothing to capture.
+ */
+async function capturePiSubagentResult(
+  toolCallId: unknown,
+  resultIndex: number,
+  agentType: string,
+  messages: unknown,
+): Promise<void> {
+  try {
+    const candidates = piResultFinalPayloadCandidates(messages ?? []);
+    const outcome = await captureHarnessResult({
+      harness: "pi",
+      runsRoot: process.env[RUNS_ROOT_ENV],
+      runDirectory: process.env[RUN_DIR_ENV],
+      nativeId: piSpawnRosterId(toolCallId, resultIndex, agentType),
+      // Malformed messages yield NO candidate rather than a guess, so the
+      // ambiguity rules reject instead of accepting salvage — the same posture
+      // the Claude adapter takes for an unreadable transcript.
+      candidates: candidates.ok ? candidates.value : [],
+    });
+    const audit = captureAuditLine("loom(pi): capture-orchestration-result", outcome);
+    if (audit !== null) process.stderr.write(audit);
+  } catch (error) {
+    process.stderr.write(
+      `loom(pi): capture-orchestration-result crashed for ${agentType}: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}
 
 /** Pi result failure boundary. Missing/malformed exit codes fail closed. */
 export function piSubagentResultFailed(result: {
@@ -1047,6 +1096,16 @@ export default function (pi: ExtensionAPI) {
           process.stderr.write(`loom: subagent flag cleanup failed: ${(err as Error).message}\n`);
         }
       }
+
+      // Request-bound capture runs BEFORE the standalone short-circuit and
+      // before any StateManager resolution — the same two orderings dispatch.ts
+      // documents as load-bearing on the Claude side. Standalone results are
+      // precisely the ones a run directory exists to collect, so capturing
+      // after that `continue` would capture nothing for exactly the flows this
+      // path serves; and capture must record evidence before any handler acts
+      // on it. It reads only the run directory it is pointed at, never a State
+      // File, so a run beside an active wave cannot cross into it.
+      await capturePiSubagentResult(toolCallId, resultIndex, agentType, result.messages);
 
       // Standalone review/refutation results are run artifacts. Short-circuit
       // before StateManager resolution so an unrelated local graph is neither

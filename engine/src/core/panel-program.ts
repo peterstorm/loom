@@ -999,6 +999,16 @@ function authorityMatches(left: AgentRequestAuthority, right: AgentRequestAuthor
     left.harnessBinding.claude.model === right.harnessBinding.claude.model;
 }
 
+/**
+ * `expectedLength` is the length of the ordered list this roster is paired
+ * with — `candidateLenses`, `judgeCriteria`, or the refutation `lenses`. The
+ * pairing is POSITIONAL: slot `i` answers for entry `i`, and the roster carries
+ * nothing that independently names its entry, so equal cardinality is the whole
+ * of what can be proven here. Everything downstream must therefore resolve its
+ * entry through `boundEntryForSlot`, which fails closed on a slot the roster
+ * does not actually hold, rather than indexing a parallel array and asserting
+ * the result is present.
+ */
 function rosterAuthorityErrors(
   roster: ExactRoster,
   runId: OrchestrationRunId,
@@ -1012,8 +1022,34 @@ function rosterAuthorityErrors(
   if (roster.orderedSlots.length !== expectedLength) errors.push(`roster must contain exactly ${expectedLength} slot(s)`);
   for (const slot of roster.orderedSlots) {
     if (slot.attempts.some((request) => request.role !== role)) errors.push(`slot ${slot.slotId} must be assigned to ${role}`);
+    // Every attempt in a slot must answer for that slot. Without this, an
+    // attempt naming a sibling slot would resolve through `locateProgress` and
+    // then be paired with the WRONG positional entry below.
+    if (slot.attempts.some((request) => request.slotId !== slot.slotId)) {
+      errors.push(`slot ${slot.slotId} holds an attempt bound to a different slot`);
+    }
   }
   return errors;
+}
+
+/**
+ * The ordered entry slot `slotId` answers for, or `null` when the roster holds
+ * no such slot.
+ *
+ * `orderedSlots.findIndex(...)` returns -1 for an unknown slot, and indexing a
+ * parallel array with -1 yields `undefined` — which a `!` assertion then passes
+ * downstream as if it were a real lens, criterion, or candidate id. Returning
+ * `null` makes that case a refusal the caller must handle instead of a lie the
+ * type system was told to ignore.
+ */
+function boundEntryForSlot<T>(
+  roster: ExactRoster,
+  ordered: readonly T[],
+  slotId: SlotId,
+): T | null {
+  const index = roster.orderedSlots.findIndex((slot) => slot.slotId === slotId);
+  if (index < 0 || index >= ordered.length) return null;
+  return ordered[index] ?? null;
 }
 
 function crossRosterErrors(left: ExactRoster, right: ExactRoster): readonly string[] {
@@ -1150,6 +1186,36 @@ export type RefutationPanelAuthorityInput = Readonly<{
   lenses: unknown;
   verifierSlots: unknown;
 }>;
+
+/**
+ * Resolve the lens a verifier slot answers for, refusing a slot the verifier
+ * roster does not hold instead of pairing the result with `undefined`.
+ */
+function boundRefutationLens(
+  authority: RefutationPanelAuthority,
+  slotId: SlotId,
+): PersistentPanelResult<ReviewLens> {
+  const lens = boundEntryForSlot(authority.verifierRoster, authority.lenses, slotId);
+  return lens === null
+    ? persistentFailure(panelError("refutation", "request-binding-mismatch", `slot ${slotId} is bound to no refutation lens`, { slotId }))
+    : persistentSuccess(lens);
+}
+
+/**
+ * Resolve the lens and candidate id a designer slot answers for. Both come from
+ * the same ordinal, so they are resolved together — pairing a lens from one
+ * position with a candidate id from another is the mismatch this prevents.
+ */
+function boundCandidateEntry(
+  authority: ArchitecturePanelAuthority,
+  slotId: SlotId,
+): PersistentPanelResult<Readonly<{ lens: PanelLens; candidate: CandidateFilename }>> {
+  const lens = boundEntryForSlot(authority.candidateRoster, authority.candidateLenses, slotId);
+  const candidate = boundEntryForSlot(authority.candidateRoster, authority.candidateIds, slotId);
+  return lens === null || candidate === null
+    ? persistentFailure(panelError("architecture", "request-binding-mismatch", `slot ${slotId} is bound to no candidate lens`, { slotId }))
+    : persistentSuccess(Object.freeze({ lens, candidate }));
+}
 
 export function parseRefutationPanelAuthority(raw: RefutationPanelAuthorityInput): PersistentPanelResult<RefutationPanelAuthority> {
   try {
@@ -1727,8 +1793,9 @@ export function parsePersistentArchitecturePanelEvent(
     if (!resolved.ok) return resolved;
     const located = locateProgress(state.authority.candidateRoster, state.slots, resolved.value.expected.requestId);
     if (!located.ok) return located;
-    const index = state.authority.candidateRoster.orderedSlots.findIndex(({ slotId }) => slotId === resolved.value.expected.slotId);
-    const value = parseCandidateClaim(exact.value, state.authority.candidateLenses[index]!, state.authority.candidateIds[index]!);
+    const bound = boundCandidateEntry(state.authority, resolved.value.expected.slotId);
+    if (!bound.ok) return bound;
+    const value = parseCandidateClaim(exact.value, bound.value.lens, bound.value.candidate);
     if (!value.ok) return value;
     return persistentSuccess(architectureEvent(Object.freeze({ schemaVersion: 1, type: "architecture-candidate-accepted", request: resolved.value.identity, value: value.value })));
   }
@@ -1789,8 +1856,9 @@ export function parsePersistentRefutationPanelEvent(
     if (!resolved.ok) return resolved;
     const located = locateProgress(state.authority.verifierRoster, state.slots, resolved.value.expected.requestId);
     if (!located.ok) return located;
-    const index = state.authority.verifierRoster.orderedSlots.findIndex(({ slotId }) => slotId === resolved.value.expected.slotId);
-    const value = parseCanonicalRefutation(exact.value, state.authority, state.authority.lenses[index]!);
+    const boundLens = boundRefutationLens(state.authority, resolved.value.expected.slotId);
+    if (!boundLens.ok) return boundLens;
+    const value = parseCanonicalRefutation(exact.value, state.authority, boundLens.value);
     if (!value.ok) return persistentFailure(panelError("refutation", "request-binding-mismatch", value.error.message, { requestId: resolved.value.expected.requestId, slotId: resolved.value.expected.slotId }));
     return persistentSuccess(refutationEvent(Object.freeze({ schemaVersion: 1, type: "refutation-verdict-accepted", request: resolved.value.identity, value: value.value })));
   }
@@ -1993,8 +2061,9 @@ export function submitArchitectureCandidateResult(state: ArchitecturePanelState,
   if (!resolved.ok) return resolved;
   const located = locateProgress(state.authority.candidateRoster, state.slots, resolved.value.expected.requestId);
   if (!located.ok) return located;
-  const index = state.authority.candidateRoster.orderedSlots.findIndex(({ slotId }) => slotId === resolved.value.expected.slotId);
-  const parsed = parseCandidateClaim(raw, state.authority.candidateLenses[index]!, state.authority.candidateIds[index]!);
+  const bound = boundCandidateEntry(state.authority, resolved.value.expected.slotId);
+  if (!bound.ok) return bound;
+  const parsed = parseCandidateClaim(raw, bound.value.lens, bound.value.candidate);
   if (!parsed.ok) return reduceParsedArchitecture(state, rejectionEvent("architecture", "candidate", resolved.value.identity, resolved.value.expected, parsed.error) as PersistentArchitecturePanelEvent, resolver);
   return reduceParsedArchitecture(state, Object.freeze({ schemaVersion: 1, type: "architecture-candidate-accepted", request: resolved.value.identity, value: parsed.value }), resolver);
 }
@@ -2056,8 +2125,9 @@ export function submitRefutationVerdict(state: RefutationPanelState, resolver: P
   if (!resolved.ok) return resolved;
   const located = locateProgress(state.authority.verifierRoster, state.slots, resolved.value.expected.requestId);
   if (!located.ok) return located;
-  const index = state.authority.verifierRoster.orderedSlots.findIndex(({ slotId }) => slotId === resolved.value.expected.slotId);
-  const lens = state.authority.lenses[index]!;
+  const boundLens = boundRefutationLens(state.authority, resolved.value.expected.slotId);
+  if (!boundLens.ok) return boundLens;
+  const lens = boundLens.value;
   const findingIds = state.authority.findings.map(({ id }) => id);
   const parsed: ParseResult<VerdictEnvelope<RefutationVerdict>> = typeof rawJson === "string" ? parseRefutationVerdict(rawJson, lens, findingIds) : fail(["refutation result must be raw JSON text"]);
   if (!parsed.ok) {

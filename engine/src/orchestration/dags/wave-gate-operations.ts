@@ -51,13 +51,20 @@ export type PreparationInput = Readonly<{
   tasks: readonly string[];
 }>;
 
-/** One derived part of the batch. `ok: false` blocks the join. */
-export type DerivedPart = Readonly<{
-  part: string;
-  ok: boolean;
-  value: unknown;
-  reason: string | null;
-}>;
+/**
+ * One derived part of the batch. An undeliverable part blocks the join.
+ *
+ * Two arms rather than `ok: boolean` beside `reason: string | null`, which made
+ * the two fields independent: `{ ok: false, reason: null }` and
+ * `{ ok: true, reason: "derivation failed" }` both type-checked and both passed
+ * the schema, and the join had to paper over the first with a manufactured
+ * message. A failure now carries its reason structurally, so there is no state
+ * left for a fallback to cover — the same shape the sibling standalone-review
+ * DAG already uses for this concept.
+ */
+export type DerivedPart =
+  | Readonly<{ kind: "derived"; part: string; value: unknown }>
+  | Readonly<{ kind: "undeliverable"; part: string; reason: string }>;
 
 export type PreparedBatch =
   | Readonly<{ kind: "prepared"; parts: readonly DerivedPart[] }>
@@ -69,12 +76,10 @@ const preparationInputSchema = z.object({
   tasks: z.array(z.string()),
 }) as unknown as z.ZodType<PreparationInput>;
 
-const derivedPartSchema = z.object({
-  part: z.string().min(1),
-  ok: z.boolean(),
-  value: z.unknown(),
-  reason: z.string().nullable(),
-}) as unknown as z.ZodType<DerivedPart>;
+const derivedPartSchema = z.union([
+  z.object({ kind: z.literal("derived"), part: z.string().min(1), value: z.unknown() }),
+  z.object({ kind: z.literal("undeliverable"), part: z.string().min(1), reason: z.string().min(1) }),
+]) as unknown as z.ZodType<DerivedPart>;
 
 const preparedBatchSchema = z.union([
   z.object({ kind: z.literal("prepared"), parts: z.array(derivedPartSchema) }),
@@ -116,9 +121,9 @@ const joinNode = createTransformNode<Readonly<Record<string, DerivedPart>>, Prep
     const ordered = [DERIVE_READINESS, DERIVE_PACKETS, DERIVE_MODELS, DERIVE_CONTEXTS]
       .map((id) => parts[id])
       .filter((part): part is DerivedPart => part !== undefined);
-    const failed = ordered.filter((part) => !part.ok);
+    const failed = ordered.filter((part) => part.kind === "undeliverable");
     return ok(failed.length > 0
-      ? { kind: "blocked", reasons: failed.map((part) => part.reason ?? `${part.part} could not be derived`) }
+      ? { kind: "blocked", reasons: failed.map((part) => part.reason) }
       : { kind: "prepared", parts: ordered });
   },
 });

@@ -1,0 +1,185 @@
+/**
+ * The run-directory half of harness capture, shared by both adapters.
+ *
+ * `core/harness-capture` owns the RULES — one unambiguous final payload, exact
+ * bytes, bind to issued authority. This module owns everything those rules need
+ * from a run directory: which requests the run issued, which slots already
+ * accepted a capture, which request a native correlator claims, and the write
+ * itself.
+ *
+ * It lives here, and not inside either adapter, because FR-033 requires Pi and
+ * Claude Code to capture into the SAME engine-declared slot under the same
+ * refusals. A per-adapter copy of this half is exactly how the two harnesses
+ * drift into disagreeing about which results are admissible — the drift the
+ * shared rules module was written to prevent, reintroduced one layer down.
+ * Each adapter therefore contributes only what is genuinely harness-native: how
+ * to observe an Agent's final payload, and what its own correlator is.
+ */
+
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import {
+  bindCapture,
+  parseFinalPayload,
+  type CaptureReceipt,
+  type FinalPayloadCandidate,
+  type HarnessResultIdentity,
+} from "../core/harness-capture";
+import {
+  parseAgentRequestAuthority,
+  type AgentRequestAuthority,
+} from "../core/orchestration-contract";
+import { openRunDirectory, type RunDirHandle } from "./run-directory-handle";
+
+/**
+ * Where a run directory is announced. Set by the spawn side; absent for every
+ * agent that is not part of an orchestration run, which is the common case and
+ * NOT an error.
+ */
+export const RUNS_ROOT_ENV = "LOOM_ORCHESTRATION_RUNS_ROOT";
+export const RUN_DIR_ENV = "LOOM_ORCHESTRATION_RUN_DIR";
+
+export type CaptureOutcome =
+  | Readonly<{ kind: "not-an-orchestration-run" }>
+  | Readonly<{ kind: "no-reservation"; agentId: string }>
+  | Readonly<{ kind: "captured"; receipt: CaptureReceipt }>
+  | Readonly<{ kind: "rejected"; reason: string; message: string }>;
+
+/** Every request this run reserved, parsed from its immutable reservations. */
+export function readIssuedRequests(handle: RunDirHandle): readonly AgentRequestAuthority[] {
+  const directory = join(handle.runDirectory, "requests");
+  if (!existsSync(directory)) return Object.freeze([]);
+  const issued: AgentRequestAuthority[] = [];
+  for (const name of readdirSync(directory).sort()) {
+    if (!name.endsWith(".json")) continue;
+    const parsed = ((): unknown => {
+      try {
+        return JSON.parse(readFileSync(join(directory, name), "utf-8")) as unknown;
+      } catch {
+        return null;
+      }
+    })();
+    const authority = parseAgentRequestAuthority(parsed);
+    if (authority.ok) issued.push(authority.value);
+  }
+  return Object.freeze(issued);
+}
+
+/** Slots whose transcript already landed — the duplicate/late guard's input. */
+export function alreadyCapturedSlots(handle: RunDirHandle): ReadonlySet<string> {
+  const directory = join(handle.runDirectory, "transcripts");
+  if (!existsSync(directory)) return new Set();
+  const captured = new Set<string>();
+  for (const slot of readdirSync(directory)) {
+    const slotDir = join(directory, slot);
+    try {
+      if (readdirSync(slotDir).some((file) => file.endsWith(".raw"))) captured.add(slot);
+    } catch {
+      // An unreadable slot directory proves nothing was captured there.
+    }
+  }
+  return captured;
+}
+
+/**
+ * Resolve the reservation a finished Agent answers for.
+ *
+ * Neither harness hands the request id back, so it is recovered by matching the
+ * spawn-time correlator recorded alongside the reservation. A result whose
+ * correlator is absent from the mapping belongs to some other agent — a
+ * `no-reservation`, not a failure.
+ */
+export function readCorrelatorIdentity(
+  handle: RunDirHandle,
+  harness: HarnessResultIdentity["harness"],
+  nativeId: string,
+): HarnessResultIdentity | null {
+  if (nativeId.length === 0) return null;
+
+  const correlators = join(handle.runDirectory, "requests", "correlators.json");
+  const mapping = ((): Record<string, unknown> => {
+    try {
+      return JSON.parse(readFileSync(correlators, "utf-8")) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  })();
+  const entry = mapping[nativeId];
+  if (typeof entry !== "object" || entry === null) return null;
+  const record = entry as Record<string, unknown>;
+  const requestId = record["requestId"];
+  const attempt = record["attempt"];
+  if (typeof requestId !== "string" || typeof attempt !== "number") return null;
+
+  return Object.freeze({ harness, requestId, attempt, nativeId });
+}
+
+/**
+ * Capture one finished Agent's result into its reserved slot.
+ *
+ * Pure with respect to decisions: every refusal is returned as a typed outcome
+ * the caller audits, and only an accepted capture writes anything. The adapter
+ * supplies the two harness-native facts — the native correlator and every
+ * candidate final payload it observed — and nothing else differs between them.
+ *
+ * Candidates are handed over in full rather than pre-selected: pre-selection is
+ * exactly where "pick the last text block" hides an ambiguity the engine should
+ * have refused.
+ */
+export async function captureHarnessResult(args: Readonly<{
+  harness: HarnessResultIdentity["harness"];
+  runsRoot: string | undefined;
+  runDirectory: string | undefined;
+  nativeId: string;
+  candidates: readonly FinalPayloadCandidate[];
+}>): Promise<CaptureOutcome> {
+  if (args.runsRoot === undefined || args.runDirectory === undefined) {
+    return { kind: "not-an-orchestration-run" };
+  }
+
+  const opened = openRunDirectory(args.runsRoot, args.runDirectory);
+  if (!opened.ok) return { kind: "rejected", reason: "run-directory", message: opened.error.message };
+  const handle = opened.value;
+
+  const identity = readCorrelatorIdentity(handle, args.harness, args.nativeId);
+  if (identity === null) {
+    return { kind: "no-reservation", agentId: args.nativeId.length === 0 ? "(missing)" : args.nativeId };
+  }
+
+  const payload = parseFinalPayload(args.candidates);
+  if (!payload.ok) {
+    return { kind: "rejected", reason: payload.error.reason, message: payload.error.message };
+  }
+
+  const bound = bindCapture({
+    issued: readIssuedRequests(handle),
+    identity,
+    payload: payload.value,
+    alreadyCaptured: alreadyCapturedSlots(handle),
+  });
+  if (!bound.ok) return { kind: "rejected", reason: bound.error.reason, message: bound.error.message };
+
+  const request = readIssuedRequests(handle).find(({ requestId }) => requestId === bound.value.requestId);
+  if (request === undefined) {
+    return { kind: "rejected", reason: "unknown-request", message: "issued request vanished between binding and capture" };
+  }
+  const written = await handle.captureTranscript(request, payload.value.bytes);
+  if (!written.ok) return { kind: "rejected", reason: "transcript", message: written.error.message };
+
+  return { kind: "captured", receipt: bound.value };
+}
+
+/**
+ * Render a capture outcome for the audit log, or `null` when there was nothing
+ * to capture. Both adapters emit the SAME text: a rejection must be visible,
+ * because silence here looks exactly like a run that had nothing to capture.
+ */
+export function captureAuditLine(prefix: string, outcome: CaptureOutcome): string | null {
+  if (outcome.kind === "rejected") {
+    return `${prefix}: rejected (${outcome.reason}): ${outcome.message}\n`;
+  }
+  if (outcome.kind === "captured") {
+    return `${prefix}: captured ${outcome.receipt.requestId} (${outcome.receipt.byteLength} bytes)\n`;
+  }
+  return null;
+}

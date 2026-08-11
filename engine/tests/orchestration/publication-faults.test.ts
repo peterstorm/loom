@@ -20,6 +20,7 @@ import { createEffectRunner, type EffectPorts } from "../../src/orchestration/ef
 import {
   openRunDirectory,
   parseRunDirectoryIdentity,
+  promoteArtifactSet,
   type RunDirHandle,
 } from "../../src/orchestration/run-directory-handle";
 
@@ -600,5 +601,119 @@ describe("run directory as a program journal", () => {
   it("reports a missing checkpoint as absent rather than throwing", async () => {
     const { handle } = freshRun();
     expect(await handle.readCheckpoint()).toBeNull();
+  });
+});
+
+// --- Anchoring, ordering and recovery under fault -------------------------
+
+describe("run-directory anchoring holds for directory creation, not just writes", () => {
+  // The module opens every hop under O_NOFOLLOW so a planted symlink is refused
+  // rather than followed. `mkdirSync(path, { recursive: true })` resolves the
+  // whole path through the kernel instead, which would create directories at a
+  // symlinked component's TARGET — a side effect that lands before the anchored
+  // write that would have refused it.
+  it("never creates a transcript slot through a symlinked transcripts directory", async () => {
+    const { root, directory, handle } = freshRun();
+    const escape = join(root, "escape");
+    mkdirSync(escape, { recursive: true });
+    rmSync(join(directory, "transcripts"), { recursive: true, force: true });
+    symlinkSync(escape, join(directory, "transcripts"));
+
+    const reserved = await handle.reserveRequest(authority());
+
+    expect(reserved.ok).toBe(false);
+    expect(readdirSync(escape)).toEqual([]);
+  });
+
+  it("never creates a nested artifact directory through a symlinked artifacts directory", async () => {
+    const { root, directory, handle } = freshRun();
+    const escape = join(root, "escape-artifacts");
+    mkdirSync(escape, { recursive: true });
+    rmSync(join(directory, "artifacts"), { recursive: true, force: true });
+    symlinkSync(escape, join(directory, "artifacts"));
+
+    const published = await handle.publishArtifactSet([
+      { relativePath: "nested/report.md", bytes: [...Buffer.from("# report", "utf-8")] },
+    ]);
+
+    expect(published.ok).toBe(false);
+    expect(readdirSync(escape)).toEqual([]);
+  });
+});
+
+describe("event journal ordering", () => {
+  const event = (dedupKey: string) => ({
+    schemaVersion: 1 as const,
+    sequence: 0,
+    dedupKey,
+    recordedAtMs: 1,
+    event: { kind: dedupKey },
+  });
+
+  // `sequence` is the append ORDER and it is derived from a directory listing,
+  // so it cannot be arbitrated by O_EXCL on the filename: two appenders with
+  // DIFFERENT dedup keys write differently-named files and nothing refuses the
+  // second. `readEvents` then sorts by filename, so a collision would rank
+  // records by dedup-key text rather than by happens-before.
+  it("assigns distinct, gap-free sequences across concurrent appends", async () => {
+    const { directory, handle } = freshRun();
+
+    await Promise.all(
+      ["dk-a", "dk-b", "dk-c", "dk-d", "dk-e"].map((key) => handle.appendEvent(event(key))),
+    );
+
+    const records = await handle.readEvents();
+    expect(records).toHaveLength(5);
+    expect(records.map((record) => record.sequence)).toEqual([0, 1, 2, 3, 4]);
+    expect(new Set(readdirSync(join(directory, "events"))
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => name.slice(0, 6))).size).toBe(5);
+  });
+
+  it("stays idempotent on dedup key under concurrency", async () => {
+    const { handle } = freshRun();
+
+    await Promise.all([0, 1, 2, 3].map(() => handle.appendEvent(event("dk-same"))));
+
+    expect(await handle.readEvents()).toHaveLength(1);
+  });
+
+  // `resumeProgram` short-circuits on a null checkpoint and skips the
+  // checkpoint-vs-replay corruption check, so "absent" and "unreadable" must
+  // stay distinguishable — exactly as `readReceipt` keeps them.
+  it("fails closed on an unreadable checkpoint instead of reporting none", async () => {
+    const { directory, handle } = freshRun();
+    symlinkSync(join(directory, "authority.json"), join(directory, "checkpoint.json"));
+
+    await expect(handle.readCheckpoint()).rejects.toThrow();
+  });
+});
+
+describe("promoteArtifactSet partial-promotion recovery", () => {
+  // Every failure reachable through publishArtifactSet is turned into an
+  // all-staged refusal by the pre-checks, so this arm — a member that fails to
+  // rename AFTER an earlier member already promoted — is driven directly.
+  it("discards the unpromoted remainder and reports failure", () => {
+    const { directory } = freshRun();
+    const artifacts = join(directory, "artifacts");
+    const firstStaged = join(artifacts, "first.json.staged");
+    writeFileSync(firstStaged, "first");
+    // The second member's parent no longer exists, so its anchored rename
+    // throws ENOENT — the unpredictable class the pre-checks cannot rule out.
+    const missing = join(artifacts, "vanished");
+    const secondStaged = join(missing, "second.json.staged");
+
+    const promoted = promoteArtifactSet([
+      { staged: firstStaged, final: join(artifacts, "first.json") },
+      { staged: secondStaged, final: join(missing, "second.json") },
+    ]);
+
+    expect(promoted.ok).toBe(false);
+    if (promoted.ok) return;
+    expect(promoted.error.message).toContain("cannot publish artifact set");
+    // The earlier member stays on disk but inert: nothing treats a set as
+    // published until its receipt is recorded, and no receipt is written here.
+    expect(readFileSync(join(artifacts, "first.json"), "utf-8")).toBe("first");
+    expect(readdirSync(artifacts).some((name) => name.endsWith(".staged"))).toBe(false);
   });
 });
