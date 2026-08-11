@@ -224,12 +224,13 @@ describe("the smoke scripts this file's own header cites are actually run", () =
     expect(pkg.scripts.test).toContain("test:smoke");
   });
 
-  it("`test:smoke` names every panel smoke script, and all exist", () => {
+  it("`test:smoke` names every orchestration smoke script, and all exist", () => {
     const smoke = pkg.scripts["test:smoke"]!;
     for (const script of [
       "smoke-panel-mode.sh",
       "smoke-review-panel.sh",
       "smoke-standalone-review.sh",
+      "smoke-orchestration-facades.ts",
       "smoke-pi-resources.sh",
     ]) {
       expect(smoke, `test:smoke does not run ${script}`).toContain(script);
