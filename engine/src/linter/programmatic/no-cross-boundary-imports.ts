@@ -78,6 +78,31 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/state-manager",
     ],
   },
+  {
+    // The orchestration shell drives the pure core through Fugue and owns the
+    // filesystem/protected-state/Git effects. Arrows point inward: it may
+    // import the core, but the core's own allowlist already refuses to import
+    // it back, so the functional core can never acquire a runtime dependency.
+    module: "engine/src/orchestration/",
+    allow: [
+      "./",
+      "engine/src/orchestration/",
+      "engine/src/core/",
+      "engine/src/utils/",
+      "engine/src/types",
+      "engine/src/config",
+      "engine/src/state-manager",
+      "node:",
+      "@fuguejs/framework",
+      "zod",
+      "ts-pattern",
+    ],
+    deny: [
+      "engine/src/linter/",
+      "engine/src/handlers/",
+      "engine/src/parsers/",
+    ],
+  },
 ];
 
 // --- Import extraction ---

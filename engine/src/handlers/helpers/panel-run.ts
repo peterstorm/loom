@@ -12,21 +12,22 @@
 
 import {
   closeSync,
-  constants as fsConstants,
   lstatSync,
-  mkdirSync,
-  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
-  renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { HookResult } from "../../types";
 import type { ParseResult, RunLayout } from "../../core/panel-kernel";
 import { fail, ok } from "../../core/panel-kernel";
+import {
+  ensureRelativeDirectoryNoFollow,
+  openDirectoryNoFollow,
+  procFdChild,
+} from "../../orchestration/no-follow-fs";
 
 // `RunLayout` and the two layouts are pure data and live in the kernel, beside
 // the manifest parsers that give them meaning — those parsers used to hardcode
@@ -332,147 +333,20 @@ export function prepareWriteTargets(
 }
 
 /**
- * Open and write one run artifact without ever following the final path if it
- * is swapped to a symlink after prepareWriteTargets. Validation and use share
- * the same file descriptor, closing the lstat-before-write race.
+ * Descriptor-anchored run-artifact operations now live in the orchestration
+ * layer so the anchored RunDirHandle and these helpers share one
+ * implementation. Re-exported here because they are part of this module's
+ * established public surface.
  */
-function noFollowFlag(): number {
-  const noFollow = fsConstants.O_NOFOLLOW;
-  if (typeof noFollow !== "number" || noFollow === 0) {
-    throw new Error("O_NOFOLLOW is unavailable; refusing an unsafe panel artifact write");
-  }
-  return noFollow;
-}
-
-function directoryFlag(): number {
-  const directory = fsConstants.O_DIRECTORY;
-  if (process.platform !== "linux" || typeof directory !== "number" || directory === 0) {
-    throw new Error("anchored /proc directory traversal is unavailable; refusing an unsafe panel artifact write");
-  }
-  return directory;
-}
-
-const procFdChild = (fd: number, child: string): string => `/proc/self/fd/${fd}/${child}`;
-
-/** Open every absolute directory component relative to the descriptor for its
- * parent. O_NOFOLLOW therefore protects every hop, not only the final file. */
-function openDirectoryNoFollow(path: string): number {
-  const absolute = resolve(path);
-  const root = parse(absolute).root;
-  let current = openSync(root, fsConstants.O_RDONLY | directoryFlag() | noFollowFlag());
-  try {
-    const components = relative(root, absolute).split(sep).filter(Boolean);
-    for (const component of components) {
-      const next = openSync(
-        procFdChild(current, component),
-        fsConstants.O_RDONLY | directoryFlag() | noFollowFlag(),
-      );
-      closeSync(current);
-      current = next;
-    }
-    return current;
-  } catch (error) {
-    closeSync(current);
-    throw error;
-  }
-}
-
-/** Create a run subdirectory one anchored component at a time. mkdir and open
- * both resolve relative to a retained parent descriptor, closing the parent
- * replacement race that recursive path-string creation leaves open. */
-function ensureRelativeDirectoryNoFollow(rootFd: number, runDir: string, target: string): void {
-  const fromRun = relative(resolve(runDir), resolve(target));
-  if (fromRun === ".." || fromRun.startsWith(`..${sep}`) || isAbsolute(fromRun)) {
-    throw new Error(`run subdirectory escapes run directory: ${target}`);
-  }
-  let current = rootFd;
-  let ownsCurrent = false;
-  try {
-    for (const component of fromRun.split(sep).filter(Boolean)) {
-      const child = procFdChild(current, component);
-      try {
-        mkdirSync(child, { mode: 0o700 });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      }
-      const next = openSync(
-        child,
-        fsConstants.O_RDONLY | directoryFlag() | noFollowFlag(),
-      );
-      if (ownsCurrent) closeSync(current);
-      current = next;
-      ownsCurrent = true;
-    }
-  } finally {
-    if (ownsCurrent) closeSync(current);
-  }
-}
-
-function writeAnchoredRunFile(path: string, data: string, exclusive: boolean): void {
-  const parentFd = openDirectoryNoFollow(dirname(path));
-  let fileFd: number | null = null;
-  try {
-    fileFd = openSync(
-      procFdChild(parentFd, basename(path)),
-      fsConstants.O_WRONLY | fsConstants.O_CREAT |
-        (exclusive ? fsConstants.O_EXCL : fsConstants.O_TRUNC) | noFollowFlag(),
-      0o600,
-    );
-    writeFileSync(fileFd, data);
-  } finally {
-    if (fileFd !== null) closeSync(fileFd);
-    closeSync(parentFd);
-  }
-}
-
-export function writeRunFileNoFollow(path: string, data: string): void {
-  writeAnchoredRunFile(path, data, false);
-}
-
-/** Claim one fresh authority artifact without following or replacing a leaf. */
-export function writeRunFileExclusiveNoFollow(path: string, data: string): void {
-  writeAnchoredRunFile(path, data, true);
-}
-
-/** Read one run artifact through descriptors for every path hop. */
-export function readRunFileNoFollow(path: string): string {
-  const parentFd = openDirectoryNoFollow(dirname(path));
-  let fileFd: number | null = null;
-  try {
-    fileFd = openSync(procFdChild(parentFd, basename(path)), fsConstants.O_RDONLY | noFollowFlag());
-    return readFileSync(fileFd, "utf-8");
-  } finally {
-    if (fileFd !== null) closeSync(fileFd);
-    closeSync(parentFd);
-  }
-}
-
-/** Remove a run artifact from its retained parent directory without following it. */
-export function removeRunFileNoFollow(path: string): void {
-  const parentFd = openDirectoryNoFollow(dirname(path));
-  try {
-    unlinkSync(procFdChild(parentFd, basename(path)));
-  } finally {
-    closeSync(parentFd);
-  }
-}
-
-/** Publish staged bytes through one retained parent descriptor. Both names are
- * resolved inside that directory even if an ancestor is replaced concurrently. */
-export function publishStagedRunFile(stagedPath: string, finalPath: string): void {
-  if (resolve(dirname(stagedPath)) !== resolve(dirname(finalPath))) {
-    throw new Error("staged and final panel artifacts must share one run directory");
-  }
-  const parentFd = openDirectoryNoFollow(dirname(stagedPath));
-  try {
-    renameSync(
-      procFdChild(parentFd, basename(stagedPath)),
-      procFdChild(parentFd, basename(finalPath)),
-    );
-  } finally {
-    closeSync(parentFd);
-  }
-}
+export {
+  openDirectoryNoFollow,
+  procFdChild,
+  publishStagedRunFile,
+  readRunFileNoFollow,
+  removeRunFileNoFollow,
+  writeRunFileExclusiveNoFollow,
+  writeRunFileNoFollow,
+} from "../../orchestration/no-follow-fs";
 
 /**
  * Delete the artifacts in an item directory that the caller is not about to
