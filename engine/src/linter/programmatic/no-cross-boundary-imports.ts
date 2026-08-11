@@ -120,7 +120,13 @@ export function extractImports(
   const imports: { line: number; specifier: string; text: string }[] = [];
 
   // TS/JS: import/require with quoted specifier
-  const tsImportRe = /(?:from|import|require)\s*\(?["']([^"']+)["']\)?/;
+  // The keyword must start a token. Without the leading guard, the bare word
+  // `from` INSIDE a string literal matches — a union like
+  // `"renamed-from" | "renamed-to"` yielded the phantom specifier `" | "` and
+  // reported it as a cross-boundary import. A real `from`/`import`/`require`
+  // is always at the start of a line or preceded by whitespace or one of
+  // `}`, `)`, `*` (as in `} from`, `* as ns from`, `= require(`).
+  const tsImportRe = /(?:^|[\s})*;,=])(?:from|import|require)\s*\(?["']([^"']+)["']\)?/;
   // Java: import com.example.Foo; or import static com.example.Foo.bar; or import java.util.*;
   const javaImportRe = /^\s*import\s+(?:static\s+)?([\w.*]+)\s*;/;
 

@@ -79,6 +79,35 @@ describe("no-cross-boundary-imports", () => {
       const content = `const x = 42;\nconst y = x + 1;`;
       expect(extractImports(content)).toHaveLength(0);
     });
+
+    it("ignores the word 'from' inside a string literal", () => {
+      // A union of domain terms is not an import. Matching the bare word
+      // yielded the phantom specifier " | " and reported it as a
+      // cross-boundary violation.
+      const content = `type Change = "renamed-from" | "renamed-to" | "deleted";`;
+      expect(extractImports(content)).toHaveLength(0);
+    });
+
+    it("ignores 'import' and 'require' inside string literals", () => {
+      const content = `const message = "cannot import \\"x\\"";\nconst other = "require(\\"y\\") is banned";`;
+      expect(extractImports(content)).toHaveLength(0);
+    });
+
+    it("still finds imports in every real form", () => {
+      const content = [
+        `import "./side-effect";`,
+        `import { a } from "./named";`,
+        `import * as ns from "./namespace";`,
+        `const b = require("./required");`,
+      ].join("\n");
+
+      expect(extractImports(content).map((entry) => entry.specifier)).toEqual([
+        "./side-effect",
+        "./named",
+        "./namespace",
+        "./required",
+      ]);
+    });
   });
 
   describe("checkBoundaryViolation", () => {
