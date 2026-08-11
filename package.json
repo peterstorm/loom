@@ -9,7 +9,9 @@
     "extensions": ["./pi/extension.ts"]
   },
   "dependencies": {
-    "ts-pattern": "^5.9.0"
+    "@fuguejs/framework": "0.4.0",
+    "ts-pattern": "^5.9.0",
+    "zod": "4.3.6"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
