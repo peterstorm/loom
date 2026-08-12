@@ -107,6 +107,44 @@ describe("fugue-generated-integrity", () => {
     }
   });
 
+  // LINE-ANCHORED probe regression (round-42): the corruption probe must match
+  // the marker prefix only at the START of a line. A real banner always begins
+  // its own line; a marker quoted MID-line — inside a JSDoc block explaining
+  // the format, as this rule's own doc comment does — is documentation, not a
+  // corrupted stamp. An unanchored probe reported the rule's own doc comment
+  // as a malformed banner (commit ad22225 fixed it with the anchored
+  // INTEGRITY_MARKER_PREFIX_RE); pin both halves of the fix.
+  it("ignores a marker prefix quoted mid-line (doc comment) — only line-started prefixes are corrupted stamps", () => {
+    // The corruption probe must match the prefix only at the START of a line.
+    // A marker quoted mid-line — inside a JSDoc block explaining the format, as
+    // this rule's own doc comment does — is documentation, not a corrupted
+    // stamp. The unanchored probe reported such files as malformed banners
+    // (commit ad22225 anchored it); pin that regression directly: a doc-only
+    // file spelled the mid-line way must be N/A, not flagged.
+    const midLineJsdocs = [
+      " * the banner reads `// @fugue-integrity sha256:<hex>` — see below\n",
+      " * // @fugue-integrity sha256:not-a-stamp\n",
+      " * marked with // @fugue-integrity sha256: and two @fugue-body strings\n",
+    ];
+    for (const doc of midLineJsdocs) {
+      expect(handler(doc, "dags/team/x/doc.ts")).toEqual([]);
+    }
+    // A mid-line prefix INSIDE the generated body is hashed content, never a
+    // second stamp — the projected body carries it, the top banner governs, and
+    // the file still verifies.
+    const bodyWithDocLine = BODY.replace(
+      "export const dag = defineDag({ nodes: [] });",
+      "export const dag = defineDag({ nodes: [] });\n" +
+        "// doc: format is `// @fugue-integrity sha256:<hex>` — see README\n",
+    );
+    expect(handler(stamp(bodyWithDocLine), "dags/team/x/dag.ts")).toEqual([]);
+    // Control: a malformed stamp on its OWN line (column 0) still fails closed.
+    const malformedOnOwnLine = stamp(BODY).replace("// @fugue-integrity sha256:", "// @fugue-integrity sha256:/");
+    const v = handler(malformedOnOwnLine, "dags/team/x/dag.ts");
+    expect(v).toHaveLength(1);
+    expect(v[0].fixHint).toContain("Malformed");
+  });
+
   // TWO regions with structure between them: the shape that kills the
   // projection mutants a single-region body cannot. Greedy (`[\s\S]*` instead
   // of lazy `*?`) would collapse from the FIRST start to the LAST end,

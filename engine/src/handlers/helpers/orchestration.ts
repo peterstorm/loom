@@ -89,7 +89,7 @@ import {
   startStandaloneFacade,
   startWaveGateFacade,
   waveAdvisoryDecisionRequestId,
-} from "./orchestration-programs";
+} from "./programs";
 
 const OPERATIONS = ["status", "start", "restart", "resume", "submit", "correlate", "complete", "decide"] as const;
 type Operation = (typeof OPERATIONS)[number];

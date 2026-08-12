@@ -19,7 +19,7 @@ import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
 // Both harnesses share ONE protected-state read seam, so a Pi gate and a
 // Claude gate cannot disagree about what "no active plan" means.
 import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate-phase-order";
-import { classifyTaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
+import { classifyTaskExecutionSpawn, type TaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
 import { validateTaskExecutionBatch } from "../engine/src/handlers/task-execution";
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { classifyPiSpawnItems, expectedSpawnModel } from "../engine/src/core/model-profiles";
@@ -479,8 +479,11 @@ type PiSpawnReservation = Readonly<{
     agentType: string;
     rosterId: AgentId;
     taskId: string | null;
-    implementation: boolean;
-    standalone: boolean;
+    /** The closed lifecycle union, not an independent boolean pair: two
+     *  booleans admitted the impossible {implementation: true, standalone:
+     *  true} and left the third lifecycle state nameless. The source union's
+     *  exhaustiveness carries through the adapter. */
+    kind: TaskExecutionSpawn["kind"];
   }>[];
 }>;
 
@@ -548,8 +551,7 @@ function recoverPiSpawnReservation(
           agentType: item.agentType,
           rosterId: item.rosterId,
           taskId: null,
-          implementation: false,
-          standalone: true,
+          kind: "standalone" as const,
         });
       })),
     }));
@@ -914,8 +916,7 @@ export default function (pi: ExtensionAPI) {
             agentType: item.agent,
             rosterId: rosterIds[index]!,
             taskId: extractTaskId(item.task),
-            implementation: taskExecutionSpawns[index]?.kind === "implementation",
-            standalone: taskExecutionSpawns[index]?.kind === "standalone",
+            kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
           })),
         });
       }
@@ -1211,7 +1212,7 @@ export default function (pi: ExtensionAPI) {
     const finalizeReservedImplementations = async (
       rawResults: readonly unknown[],
     ): Promise<readonly string[]> => {
-      if (!reservation || !reservation.items.some((item) => item.implementation)) return [];
+      if (!reservation || !reservation.items.some((item) => item.kind === "implementation")) return [];
       const manager = StateManager.fromSession(reservation.sessionId);
       if (!manager) {
         const diagnostic = `cannot finalize reserved implementation attempts for session ${reservation.sessionId} — task graph unavailable`;
@@ -1223,7 +1224,7 @@ export default function (pi: ExtensionAPI) {
         await manager.update((initial) => {
           let state = initial;
           for (const [index, item] of reservation.items.entries()) {
-            if (!item.implementation || item.taskId === null) continue;
+            if (item.kind !== "implementation" || item.taskId === null) continue;
             const raw = rawResults[index];
             const envelope = typeof raw === "object" && raw !== null && !Array.isArray(raw)
               ? raw as Record<string, unknown>
@@ -1321,14 +1322,14 @@ export default function (pi: ExtensionAPI) {
       const missingReviews = reservation.orchestrationRunBinding !== null
         ? []
         : reservation.items.flatMap((item, index) =>
-            item.standalone || item.taskId === null || !isReviewAgent(item.agentType) ||
+            item.kind === "standalone" || item.taskId === null || !isReviewAgent(item.agentType) ||
               returnedAgentAt(index) === item.agentType
               ? []
               : [{ item, index }]);
       const missingSpecChecks = reservation.orchestrationRunBinding !== null
         ? []
         : reservation.items.flatMap((item, index) =>
-            item.standalone || item.agentType !== "spec-check-invoker" ||
+            item.kind === "standalone" || item.agentType !== "spec-check-invoker" ||
               returnedAgentAt(index) === item.agentType
               ? []
               : [{ item, index }]);
@@ -1506,7 +1507,7 @@ export default function (pi: ExtensionAPI) {
       // active, however, capture is mandatory evidence: a rejection or missing
       // correlator must be surfaced rather than disguised as a harmless
       // task-state short-circuit.
-      if (runBound || reservedItem?.standalone === true || hasStandaloneReviewContext(result.task ?? "")) {
+      if (runBound || reservedItem?.kind === "standalone" || hasStandaloneReviewContext(result.task ?? "")) {
         if (runBound && captureOutcome.kind !== "captured") {
           const detail = captureOutcome.kind === "rejected"
             ? `${captureOutcome.reason}: ${captureOutcome.message}`

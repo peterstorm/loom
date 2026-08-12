@@ -1,785 +1,31 @@
-import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { devNull } from "node:os";
-import { extname, join } from "node:path";
-import { spawnSync } from "node:child_process";
-import {
-  createAtomicInitialPublicationClaimPort,
-  createInitialBatchPublicationReconciler,
-  createInitialPublicationEffectPort,
-  createPublicationAuthorityResolver,
-  parseAgentRequestAuthority,
-  canonicalStructuralEquals,
-  parseArtifactDigest,
-  parseBatchPublishedReceipt,
-  parseEffectId,
-  parseIssuedSpawnRequest,
-  parseOrchestrationRunId,
-  parseRequestId,
-  parseSlotId,
-  prepareInitialBatchPublicationIntent,
-  spawnBatchAction,
-  AGENT_REQUIRED_SKILLS,
-  type AgentRequestAuthority,
-  type EffectId,
-  type InitialSpawnRequestInput,
-  type PublicationAuthorityResolver,
-  type SpawnRequest,
-} from "../../core/orchestration-contract";
-import {
-  aggregateStandaloneReview,
-  bindStandaloneCaptureAuthority,
-  captureStandaloneReviewerBytes,
-  canonicalStandaloneResultArtifact,
-  completeStandaloneReviewerCapture,
-  prepareFreshStandaloneReview,
-  parseStandaloneReviewAuthority,
-  proveStandaloneRosterCompletion,
-  selectStandaloneReviewers,
-  serializeStandaloneReviewAuthority,
-  serializeAdjudicatedStandaloneReview,
-  standaloneTranscriptProblems,
-  type FrozenStandaloneReviewAuthority,
-  type StandaloneReviewKind,
-  type StandaloneReviewMetadata,
-} from "../../core/standalone-review";
-import {
-  parseStandaloneReviewMachineState,
-  reduceStandaloneReviewMachine,
-  freezeStandaloneRefutationPanelAuthority,
-  parseStandaloneRefutationCompletion,
-  serializeStandaloneReviewMachineState,
-  startStandaloneReviewMachine,
-  type StandaloneReviewMachineState,
-} from "../../core/standalone-review-machine";
-import {
-  buildStandaloneFindingBrief,
-  defaultRefutationThreshold,
-  reviewSignals,
-  selectReviewLenses,
-} from "../../core/review-panel";
-import {
-  completePersistentRefutationPanel,
-  deriveRefutationVerifierBinding,
-  panelRequestIdentity,
-  parseRefutationPanelAuthority,
-  refutationPanelCheckpoint,
-  startPersistentRefutationPanel,
-  submitRefutationVerdict,
-  type PersistentRefutationPanelEvent,
-} from "../../core/panel-program";
-import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../orchestration/context-packets";
-import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from "../../orchestration/no-follow-fs";
-import { captureKey } from "../../core/harness-capture";
-import { openRunDirectory, type RunDirHandle } from "../../orchestration/run-directory-handle";
-import { TASK_GRAPH_PATH } from "../../config";
-import { StateManager } from "../../state-manager";
-import {
-  commitWaveGateCompletion,
-  deriveWaveReadiness,
-  deriveWaveRefutationPlan,
-  WAVE_REVIEW_AGENTS,
-} from "../../core/wave-gate-machine";
-import { loadPlanModelsSource } from "./complete-wave-gate";
-import { applyFindingOutcomes, preserveAcceptedReviewRunFindings } from "../../core/findings";
-import {
-  applyReviewResolution,
-  constrainReviewResolutionToScope,
-  resolveTaskReviewFindings,
-} from "../../core/review-output";
-import type { Task, TaskGraph } from "../../types";
-import { parseSpecCheckOutput, reconcileSpecCheck } from "../../core/spec-check";
-import { resolveModelProfile, lowerModelProfile } from "../../core/model-profiles";
-import {
-  auditRemediationPaths,
-  isExcludedRemediationPath,
-  parseCanonicalRepositoryRelativePath,
-  parseRepositorySnapshotWitness,
-  prepareLiteralGitPathspec,
-  prepareVerifiedIndexInstallation,
-  reduceRemediation,
-  stageTemporaryIndex,
-  startRemediation,
-  verifyTemporaryIndex,
-  type RemediationState,
-} from "../../core/remediation-machine";
-import {
-  createTemporaryIndex,
-  digestTemporaryIndex,
-  installVerifiedIndex,
-  observeDirtyPaths,
-  observeStagedPaths,
-  openGitRepository,
-  readStagedPaths,
-  snapshotRepositoryWitness,
-  stageAuditedPaths,
-} from "../../orchestration/git-remediation";
-
-export type RegisteredStandaloneProgram = Readonly<{
-  schemaVersion: 1;
-  kind: "standalone-review";
-  input: Readonly<{ kind: StandaloneReviewKind; files: readonly string[] | null; dryRun: boolean }>;
-  authority: unknown;
-}>;
-
-type WaveGateRestartAudit = Readonly<{
-  previousRunId: string;
-  exhaustedSlots: readonly string[];
-}>;
-
-export type RegisteredWaveGateProgram = Readonly<{
-  schemaVersion: 1;
-  kind: "wave-gate";
-  input: Readonly<{ wave: number | null }>;
-  taskIds: readonly string[];
-  authorityDigest: string;
-  restart?: WaveGateRestartAudit;
-}>;
-
-export type RegisteredRemediationProgram = Readonly<{
-  schemaVersion: 1;
-  kind: "remediation";
-  input: Readonly<{ sourceRunsRoot: string; sourceRun: string; supportPaths: readonly string[] }>;
-}>;
-
-export type RegisteredFacadeProgram = RegisteredStandaloneProgram | RegisteredRemediationProgram | RegisteredWaveGateProgram;
-
-export type FacadeDriveResult =
-  | Readonly<{ ok: true; action: unknown }>
-  | Readonly<{ ok: false; message: string }>;
-
-const failed = (message: string): FacadeDriveResult => ({ ok: false, message });
-
-function exactObject(raw: unknown, keys: readonly string[]): raw is Record<string, unknown> {
-  return typeof raw === "object" && raw !== null && !Array.isArray(raw) &&
-    Object.keys(raw).length === keys.length && keys.every((key) => Object.hasOwn(raw, key));
-}
-
-export function parseStandaloneStartInput(raw: unknown): Readonly<{
-  ok: true;
-  value: RegisteredStandaloneProgram["input"];
-}> | Readonly<{ ok: false; message: string }> {
-  if (!exactObject(raw, ["kind", "files", "dryRun"])) {
-    return { ok: false, message: "standalone-review input must contain exactly kind, files, and dryRun" };
-  }
-  const kinds = ["code", "errors", "tests", "types", "comments", "architecture", "simplify", "all"];
-  if (typeof raw.kind !== "string" || !kinds.includes(raw.kind)) {
-    return { ok: false, message: "standalone-review kind is invalid" };
-  }
-  if (raw.files !== null && (!Array.isArray(raw.files) || raw.files.length === 0 ||
-      raw.files.some((path) => typeof path !== "string" || path.length === 0))) {
-    return { ok: false, message: "standalone-review files must be null or a non-empty string array" };
-  }
-  if (typeof raw.dryRun !== "boolean") return { ok: false, message: "standalone-review dryRun must be boolean" };
-  return { ok: true, value: Object.freeze({
-    kind: raw.kind as StandaloneReviewKind,
-    files: raw.files === null ? null : Object.freeze([...(raw.files as string[])]),
-    dryRun: raw.dryRun,
-  }) };
-}
-
-function gitPaths(args: readonly string[]): readonly string[] {
-  const result = spawnSync("git", args, { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 });
-  if (result.status !== 0) throw new Error((result.stderr ?? Buffer.alloc(0)).toString("utf8").trim() || `git ${args[0]} failed`);
-  return Object.freeze((result.stdout ?? Buffer.alloc(0)).toString("utf8").split("\0").filter(Boolean).sort());
-}
-
-function gitText(args: readonly string[]): string {
-  const result = spawnSync("git", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-  if (result.status !== 0) throw new Error((result.stderr ?? "").trim() || `git ${args[0]} failed`);
-  return (result.stdout ?? "").trim();
-}
-
-type CanonicalChangedPaths = Readonly<{
-  /** Worktree paths not represented by HEAD, including untracked non-ignored files. */
-  unstaged: readonly string[];
-  staged: readonly string[];
-  committed: readonly string[];
-  base_revision: string | null;
-  head_revision: string;
-}>;
-
-type DerivedChangedPaths = Readonly<{
-  authority: CanonicalChangedPaths;
-  /** Kept separately so diff statistics can add new files exactly once. */
-  untracked: readonly string[];
-}>;
-
-function reviewablePath(path: string): boolean {
-  const parsed = parseCanonicalRepositoryRelativePath(path, "standalone review scope path");
-  return !parsed.ok || !isExcludedRemediationPath(parsed.value);
-}
-
-function deriveChangedPaths(): DerivedChangedPaths {
-  const head = gitText(["rev-parse", "HEAD"]);
-  let base: string | null = null;
-  for (const candidate of ["origin/main", "origin/master", "main", "master"]) {
-    const probe = spawnSync("git", ["merge-base", candidate, "HEAD"], { encoding: "utf8" });
-    if (probe.status === 0 && probe.stdout.trim() !== "") { base = probe.stdout.trim(); break; }
-  }
-  const untracked = gitPaths(["ls-files", "--others", "--exclude-standard", "-z", "--"]).filter(reviewablePath);
-  const trackedUnstaged = gitPaths(["diff", "--name-only", "-z", "--"]).filter(reviewablePath);
-  return Object.freeze({
-    authority: Object.freeze({
-      unstaged: Object.freeze([...new Set([...trackedUnstaged, ...untracked])].sort()),
-      staged: gitPaths(["diff", "--cached", "--name-only", "-z", "--"]).filter(reviewablePath),
-      committed: base === null ? Object.freeze([]) : gitPaths(["diff", "--name-only", "-z", `${base}...HEAD`, "--"]).filter(reviewablePath),
-      base_revision: base,
-      head_revision: head,
-    }),
-    untracked,
-  });
-}
-
-const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".java", ".rs", ".py", ".go", ".c", ".cpp"]);
-const TYPE_EXTENSIONS = new Set([".ts", ".tsx", ".d.ts", ".java", ".rs"]);
-
-function parseNumstatAdditions(output: string): number {
-  return output.split("\n").reduce((sum, line) => {
-    const additions = Number.parseInt(line.split("\t", 1)[0] ?? "", 10);
-    return sum + (Number.isFinite(additions) ? additions : 0);
-  }, 0);
-}
-
-function trackedAdditions(baseline: string, paths: readonly string[]): number {
-  if (paths.length === 0) return 0;
-  const result = spawnSync("git", ["diff", "--numstat", baseline, "--", ...paths], { encoding: "utf8" });
-  if (result.status !== 0) throw new Error((result.stderr ?? "").trim() || "git diff --numstat failed");
-  return parseNumstatAdditions(result.stdout ?? "");
-}
-
-function untrackedAdditions(paths: readonly string[]): number {
-  return paths.reduce((sum, path) => {
-    const result = spawnSync("git", ["diff", "--no-index", "--numstat", "--", devNull, path], { encoding: "utf8" });
-    const diagnostic = (result.stderr ?? "").trim();
-    if ((result.status !== 0 && result.status !== 1) || diagnostic !== "") {
-      throw new Error(diagnostic || `cannot measure untracked additions for ${path}`);
-    }
-    return sum + parseNumstatAdditions(result.stdout ?? "");
-  }, 0);
-}
-
-function metadata(
-  kind: StandaloneReviewKind,
-  scope: readonly string[],
-  changed: DerivedChangedPaths,
-): StandaloneReviewMetadata {
-  const extensions = scope.map((path) => extname(path).toLowerCase());
-  const docsOnly = scope.every((path) => /(^|\/)(docs?|README)|\.(md|mdx|txt)$/.test(path));
-  const languages = [...new Set(extensions.filter(Boolean).map((extension) => extension.slice(1)))].sort();
-  const scopedUntracked = new Set(changed.untracked.filter((path) => scope.includes(path)));
-  const trackedScope = scope.filter((path) => !scopedUntracked.has(path));
-  const baseline = changed.authority.base_revision ?? changed.authority.head_revision;
-  const additions = trackedAdditions(baseline, trackedScope) + untrackedAdditions([...scopedUntracked].sort());
-  return Object.freeze({
-    requestedKinds: Object.freeze([kind]) as readonly [StandaloneReviewKind],
-    docsOnly,
-    sourceOrTestChanged: scope.some((path, index) => SOURCE_EXTENSIONS.has(extensions[index]!) || /(^|\/)(test|tests|__tests__)(\/|$)/.test(path)),
-    typesChanged: scope.some((_, index) => TYPE_EXTENSIONS.has(extensions[index]!)),
-    commentsChanged: docsOnly || scope.some((path) => /\.(md|mdx)$/.test(path)),
-    additions,
-    fileCount: scope.length,
-    newStructure: scope.some((path) => path.split("/").length >= 4),
-    languages: Object.freeze(languages),
-  });
-}
-
-function safeScope(scope: readonly string[]): readonly Readonly<{ path: string; status: "safe" | "absent" }>[] {
-  return Object.freeze(scope.map((path) => {
-    try {
-      readRunBytesNoFollow(path);
-      return Object.freeze({ path, status: "safe" as const });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.freeze({ path, status: "absent" as const });
-      throw error;
-    }
-  }));
-}
-
-function standaloneRequestId(runId: string, role: string, attempt: 1 | 2): string {
-  return `request:${createHash("sha256").update(`${runId}\u0000${role}\u0000${attempt}`).digest("hex")}`;
-}
-
-function frozenScopeSection(scope: readonly string[]) {
-  const files = scope.map((path) => {
-    try {
-      const bytes = readRunBytesNoFollow(path);
-      const digest = createHash("sha256").update(bytes).digest("hex");
-      try {
-        return Object.freeze({
-          path,
-          kind: "text" as const,
-          digest,
-          byteLength: bytes.length,
-          content: new TextDecoder("utf8", { fatal: true }).decode(bytes),
-        });
-      } catch {
-        return Object.freeze({
-          path,
-          kind: "binary" as const,
-          digest,
-          byteLength: bytes.length,
-          contentBase64: Buffer.from(bytes).toString("base64"),
-        });
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return Object.freeze({ path, kind: "absent" as const, digest: null, byteLength: 0 });
-      }
-      throw error;
-    }
-  });
-  const section = encodeByteSection("standalone-frozen-source", JSON.stringify({ schemaVersion: 1, files }));
-  if (!section.ok) throw new Error(section.error.message);
-  return section.value;
-}
-
-function standalonePackets(
-  runId: string,
-  reviewMetadata: StandaloneReviewMetadata,
-  scope: readonly string[],
-): Readonly<{ contexts: readonly Readonly<{ attempts: readonly [string, string] }>[]; packets: readonly ContextPacket[] }> {
-  const reviewers = selectStandaloneReviewers(reviewMetadata);
-  const sourceSection = frozenScopeSection(scope);
-  const packets: ContextPacket[] = [];
-  const contexts = reviewers.map((role) => {
-    const attempts = ([1, 2] as const).map((attempt) => {
-      const requestId = standaloneRequestId(runId, role, attempt);
-      const section = encodeByteSection("standalone-review-authority", JSON.stringify({ runId, scope, role, attempt }));
-      if (!section.ok) throw new Error(section.error.message);
-      const packet = buildContextPacket({
-        requestId: requestId as never,
-        role,
-        requiredSkill: AGENT_REQUIRED_SKILLS[role] ?? "none",
-        outputContract: "Review the exact frozen scope. Return the Loom Machine Summary and findings contract for your reviewer role.",
-        fixedContext: Object.freeze([section.value, sourceSection]),
-        variableContext: Object.freeze([]),
-      });
-      if (!packet.ok) throw new Error(packet.error.message);
-      packets.push(packet.value);
-      return packet.value.digest;
-    });
-    return Object.freeze({ attempts: Object.freeze(attempts) as unknown as readonly [string, string] });
-  });
-  return Object.freeze({ contexts: Object.freeze(contexts), packets: Object.freeze(packets) });
-}
-
-function publicationFile(effectId: string): string {
-  return `publications/${createHash("sha256").update(effectId).digest("hex")}.json`;
-}
-
-function publicationResolver(handle: RunDirHandle): PublicationAuthorityResolver {
-  return createPublicationAuthorityResolver((lookup) => {
-    try {
-      const bytes = readRunBytesNoFollow(`${handle.runDirectory}/artifacts/${publicationFile(lookup.effectId)}`);
-      return { ok: true, value: Object.freeze([...bytes]) };
-    } catch (error) {
-      return { ok: false, error: {
-        kind: "publication-authority-unavailable",
-        field: "registration",
-        message: error instanceof Error ? error.message : String(error),
-      } };
-    }
-  });
-}
-
-async function publishInitialBatch(
-  handle: RunDirHandle,
-  requests: readonly InitialSpawnRequestInput[],
-  packets: readonly ContextPacket[],
-  label: string,
-): Promise<Readonly<{ ok: true; requests: readonly SpawnRequest[]; action: unknown }> | Readonly<{ ok: false; message: string }>> {
-  const effectId = parseEffectId(`effect:${label}:${createHash("sha256").update(requests.map((entry) =>
-    (entry.authority as AgentRequestAuthority).requestId).join("|")).digest("hex")}`);
-  if (!effectId.ok) return { ok: false, message: effectId.error.message };
-  const intent = prepareInitialBatchPublicationIntent(handle.runId, effectId.value, requests);
-  if (!intent.ok) return { ok: false, message: intent.error.message };
-  for (const packet of packets) {
-    const published = await handle.publishContext(packet);
-    if (!published.ok) return { ok: false, message: published.error.message };
-  }
-  for (const request of intent.value.issuedRequests) {
-    const reserved = await handle.reserveRequest(request.authority);
-    if (!reserved.ok) return { ok: false, message: reserved.error.message };
-  }
-  const receipt = Object.freeze({
-    schemaVersion: 1 as const,
-    kind: "batch-published" as const,
-    effectId: intent.value.identity.effectId,
-    runId: intent.value.identity.runId,
-    requestIds: intent.value.requestIds,
-    contextDigests: intent.value.contextDigests,
-    issuedRequests: intent.value.issuedRequests,
-    publicationDigest: intent.value.identity.publicationDigest,
-  });
-  const receiptBytes = Buffer.from(JSON.stringify(receipt), "utf8");
-  const publishedReceipt = await handle.publishArtifactSet([{ relativePath: publicationFile(effectId.value), bytes: [...receiptBytes] }]);
-  if (!publishedReceipt.ok) return { ok: false, message: publishedReceipt.error.message };
-  const effectPort = createInitialPublicationEffectPort(() => ({ ok: true, value: Object.freeze([...receiptBytes]) }));
-  const claimPort = createAtomicInitialPublicationClaimPort((request) => ({ ok: true, value: Object.freeze({
-    schemaVersion: 1 as const,
-    kind: "initial-publication-claimed" as const,
-    key: request.key,
-    identity: request.identity,
-  }) }));
-  const issuance = createInitialBatchPublicationReconciler(effectPort, claimPort)(intent.value);
-  if (!issuance.ok) return { ok: false, message: issuance.error.message };
-  const action = spawnBatchAction(issuance.value, requests);
-  if (!action.ok) return { ok: false, message: action.error.message };
-  const standaloneMarker = label.startsWith("standalone") ? "LOOM_REVIEW_CONTEXT: standalone\n" : "";
-  return { ok: true, requests: action.value.requests, action: Object.freeze({
-    ...action.value,
-    requests: Object.freeze(action.value.requests.map((request) => Object.freeze({
-      ...request,
-      task: `${standaloneMarker}LOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.`,
-    }))),
-  }) };
-}
-
 /**
- * The deterministic per-task resolver for the frozen ContextPacket: the exact
- * absolute path to the immutable `contexts/<digest>.json` artifact, delivered
- * to the child as a LOOM_CONTEXT_PATH marker. A spawned reviewer must be able
- * to read the packet it is instructed to review without inferring run-directory
- * layout out of band.
+ * Façade program driver volume (A14): the imperative shell's program drivers
+ * were one 2,900-line module; this volume owns ONE program's driver (or, for
+ * helpers, the shared recovery/git/scope machinery). The public surface is
+ * re-exported by index.ts so all existing import sites are unchanged.
  */
-function contextPacketPathMarker(handle: RunDirHandle, digest: string): string {
-  return `LOOM_CONTEXT_PATH: ${join(handle.runDirectory, "contexts", `${digest}.json`)}\n`;
-}
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { parseAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
+import { defaultRefutationThreshold } from '../../../core/review-panel';
+import { completePersistentRefutationPanel, deriveRefutationVerifierBinding, panelRequestIdentity, parseRefutationPanelAuthority, startPersistentRefutationPanel, submitRefutationVerdict } from '../../../core/panel-program';
+import { buildContextPacket, encodeByteSection, type ContextPacket } from '../../../orchestration/context-packets';
+import { captureKey } from '../../../core/harness-capture';
+import { type RunDirHandle } from '../../../orchestration/run-directory-handle';
+import { TASK_GRAPH_PATH } from '../../../config';
+import { StateManager } from '../../../state-manager';
+import { commitWaveGateCompletion, deriveWaveReadiness, deriveWaveRefutationPlan, WAVE_REVIEW_AGENTS } from '../../../core/wave-gate-machine';
+import { loadPlanModelsSource } from '../complete-wave-gate';
+import { applyFindingOutcomes, preserveAcceptedReviewRunFindings } from '../../../core/findings';
+import { applyReviewResolution, constrainReviewResolutionToScope, resolveTaskReviewFindings } from '../../../core/review-output';
+import { Task, TaskGraph } from '../../../types';
+import { parseSpecCheckOutput, reconcileSpecCheck } from '../../../core/spec-check';
+import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
+import { contextPacketPathMarker, durableRequests, exactObject, failed, parseRegisteredFacadeProgram, publicationResolver, publishInitialBatch, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
+import { durableCaptureRejection, durableRefutationRequests, executableRefutationRequests, recoverOrPublishRefutationRetry } from './standalone';
 
-function parseRegistration(raw: unknown): RegisteredStandaloneProgram | null {
-  if (!exactObject(raw, ["schemaVersion", "kind", "input", "authority"]) || raw.schemaVersion !== 1 || raw.kind !== "standalone-review") return null;
-  const input = parseStandaloneStartInput(raw.input);
-  return input.ok ? Object.freeze({ schemaVersion: 1, kind: "standalone-review", input: input.value, authority: raw.authority }) : null;
-}
-
-export function parseWaveGateStartInput(raw: unknown): Readonly<{
-  ok: true;
-  value: RegisteredWaveGateProgram["input"];
-}> | Readonly<{ ok: false; message: string }> {
-  if (!exactObject(raw, ["wave"]) || (raw.wave !== null &&
-      (typeof raw.wave !== "number" || !Number.isSafeInteger(raw.wave) || raw.wave < 1))) {
-    return { ok: false, message: "wave-gate input must contain exactly wave (null or a positive integer)" };
-  }
-  return { ok: true, value: Object.freeze({ wave: raw.wave as number | null }) };
-}
-
-export function parseRemediationStartInput(raw: unknown): Readonly<{
-  ok: true;
-  value: RegisteredRemediationProgram["input"];
-}> | Readonly<{ ok: false; message: string }> {
-  if (!exactObject(raw, ["sourceRunsRoot", "sourceRun", "supportPaths"]) ||
-      typeof raw.sourceRunsRoot !== "string" || raw.sourceRunsRoot.length === 0 ||
-      typeof raw.sourceRun !== "string" || raw.sourceRun.length === 0 ||
-      !Array.isArray(raw.supportPaths) || raw.supportPaths.some((path) => typeof path !== "string" || path.length === 0)) {
-    return { ok: false, message: "remediation input must contain sourceRunsRoot, sourceRun, and supportPaths" };
-  }
-  return { ok: true, value: Object.freeze({
-    sourceRunsRoot: raw.sourceRunsRoot,
-    sourceRun: raw.sourceRun,
-    supportPaths: Object.freeze([...(raw.supportPaths as string[])]),
-  }) };
-}
-
-export function parseRegisteredFacadeProgram(raw: unknown): RegisteredFacadeProgram | null {
-  const standalone = parseRegistration(raw);
-  if (standalone !== null) return standalone;
-  if (exactObject(raw, ["schemaVersion", "kind", "input"]) && raw.schemaVersion === 1 && raw.kind === "remediation") {
-    const input = parseRemediationStartInput(raw.input);
-    return input.ok ? Object.freeze({ schemaVersion: 1, kind: "remediation", input: input.value }) : null;
-  }
-  const waveKeys = Object.hasOwn(raw as object, "restart")
-    ? ["schemaVersion", "kind", "input", "taskIds", "authorityDigest", "restart"]
-    : ["schemaVersion", "kind", "input", "taskIds", "authorityDigest"];
-  if (!exactObject(raw, waveKeys) || raw.schemaVersion !== 1 || raw.kind !== "wave-gate" || !Array.isArray(raw.taskIds) ||
-      raw.taskIds.some((id) => typeof id !== "string") || typeof raw.authorityDigest !== "string") return null;
-  let restart: WaveGateRestartAudit | undefined;
-  if (Object.hasOwn(raw, "restart")) {
-    if (!exactObject(raw.restart, ["previousRunId", "exhaustedSlots"]) ||
-        typeof raw.restart.previousRunId !== "string" || !Array.isArray(raw.restart.exhaustedSlots) ||
-        raw.restart.exhaustedSlots.length === 0 || raw.restart.exhaustedSlots.some((slot) => typeof slot !== "string" || slot.length === 0)) return null;
-    restart = Object.freeze({
-      previousRunId: raw.restart.previousRunId,
-      exhaustedSlots: Object.freeze([...(raw.restart.exhaustedSlots as string[])]),
-    });
-  }
-  const input = parseWaveGateStartInput(raw.input);
-  return input.ok ? Object.freeze({
-    schemaVersion: 1, kind: "wave-gate", input: input.value,
-    taskIds: Object.freeze([...(raw.taskIds as string[])]), authorityDigest: raw.authorityDigest,
-    ...(restart === undefined ? {} : { restart }),
-  }) : null;
-}
-
-function parsedAuthority(registration: RegisteredStandaloneProgram): Readonly<{ ok: true; value: FrozenStandaloneReviewAuthority }> | Readonly<{ ok: false; message: string }> {
-  const result = parseStandaloneReviewAuthority(registration.authority);
-  return result.ok ? { ok: true, value: result.value } : { ok: false, message: result.errors.join("; ") };
-}
-
-function standalonePublicationEffectId(authority: FrozenStandaloneReviewAuthority) {
-  return parseEffectId(`effect:standalone-review:${createHash("sha256").update(authority.roster.orderedSlots.map((entry) =>
-    entry.attempts[0].requestId).join("|")).digest("hex")}`);
-}
-
-type DurableRequestRecovery =
-  | Readonly<{ kind: "absent" }>
-  | Readonly<{ kind: "found"; requests: readonly SpawnRequest[] }>
-  | Readonly<{ kind: "corrupt"; message: string }>;
-
-function durablePublicationDigest(
-  handle: RunDirHandle,
-  effectId: EffectId,
-): Readonly<{ kind: "absent" }> | Readonly<{ kind: "found"; digest: string }> | Readonly<{ kind: "corrupt"; message: string }> {
-  const path = `${handle.runDirectory}/artifacts/${publicationFile(effectId)}`;
-  let bytes: Buffer;
-  try {
-    bytes = readRunBytesNoFollow(path);
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT"
-      ? { kind: "absent" }
-      : { kind: "corrupt", message: `cannot read durable publication receipt: ${error instanceof Error ? error.message : String(error)}` };
-  }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(bytes.toString("utf8")) as unknown;
-  } catch (error) {
-    return { kind: "corrupt", message: `durable publication receipt is invalid JSON: ${error instanceof Error ? error.message : String(error)}` };
-  }
-  const receipt = parseBatchPublishedReceipt(raw);
-  if (!receipt.ok) return { kind: "corrupt", message: `durable publication receipt is invalid: ${receipt.error.message}` };
-  if (receipt.value.runId !== handle.runId || receipt.value.effectId !== effectId) {
-    return { kind: "corrupt", message: "durable publication receipt does not match run/effect authority" };
-  }
-  return { kind: "found", digest: receipt.value.publicationDigest };
-}
-
-function durableRequests(
-  handle: RunDirHandle,
-  authority: FrozenStandaloneReviewAuthority,
-  resolver: PublicationAuthorityResolver,
-): DurableRequestRecovery {
-  const requests: SpawnRequest[] = [];
-  const effectId = standalonePublicationEffectId(authority);
-  if (!effectId.ok) return { kind: "corrupt", message: effectId.error.message };
-  const publication = durablePublicationDigest(handle, effectId.value);
-  if (publication.kind !== "found") return publication;
-  for (const slot of authority.roster.orderedSlots) {
-    const raw = slot.attempts[0];
-    const parsed = parseIssuedSpawnRequest(resolver, {
-      authority: raw,
-      context: {
-        digest: raw.contextDigest,
-        slot: { kind: "fixed-artifact-slot", path: `contexts/${raw.contextDigest}.json` },
-      },
-      issuance: {
-        schemaVersion: 1,
-        kind: "issued-spawn-request-proof",
-        runId: authority.runId,
-        effectId: effectId.value,
-        publicationDigest: publication.digest,
-        batchIndex: requests.length,
-      },
-    });
-    if (!parsed.ok) return { kind: "corrupt", message: `durable issued request is invalid: ${parsed.error.message}` };
-    requests.push(parsed.value);
-  }
-  return { kind: "found", requests: Object.freeze(requests) };
-}
-
-/**
- * One rejected reviewer slot's attempt-2 recovery identity.
- *
- * The retry batch is published under its own effect label (exactly like the
- * refutation panel's per-slot retry batches), so a crash between the semantic
- * rejection checkpoint and the retry spawn is recovered on the next resume by
- * reading the durable publication receipt — never by re-deriving request
- * authority from prose.
- */
-function standaloneRetryEffectId(slotId: string, requestId: string): Readonly<{ ok: true; value: EffectId }> | Readonly<{ ok: false; message: string }> {
-  const label = `standalone-review-retry:${slotId}`;
-  const parsed = parseEffectId(`effect:${label}:${createHash("sha256").update(requestId).digest("hex")}`);
-  return parsed.ok ? { ok: true, value: parsed.value } : { ok: false, message: parsed.error.message };
-}
-
-async function recoverOrPublishStandaloneRetry(
-  handle: RunDirHandle,
-  authority: FrozenStandaloneReviewAuthority,
-  slot: Readonly<{ slotId: string; attempts: readonly [AgentRequestAuthority, AgentRequestAuthority] }>,
-  resolver: PublicationAuthorityResolver,
-): Promise<Readonly<{ ok: true; request: SpawnRequest }> | Readonly<{ ok: false; message: string }>> {
-  const retryAuthority = slot.attempts[1];
-  if (retryAuthority.attempt !== 2 || retryAuthority.program !== "standalone-review") {
-    return { ok: false, message: `slot ${slot.slotId} has no canonical standalone attempt-2 authority` };
-  }
-  const input: InitialSpawnRequestInput = Object.freeze({
-    authority: retryAuthority,
-    context: Object.freeze({
-      digest: retryAuthority.contextDigest,
-      slot: Object.freeze({ kind: "fixed-artifact-slot" as const, path: `contexts/${retryAuthority.contextDigest}.json` }),
-    }),
-  });
-
-  let packet = handle.readContext(retryAuthority.contextDigest);
-  if (!packet.ok) {
-    // Runs started before the engine published attempt-2 packets up front need
-    // a deterministic fallback: the attempt-2 packet is rebuilt from the
-    // PERSISTED attempt-1 packet — the frozen-source section is re-read from
-    // the run directory rather than re-derived from worktree bytes, so the
-    // digest can never drift — and the rebuild is refused if its digest does
-    // not equal the digest the roster froze at start.
-    const attemptOne = handle.readContext(slot.attempts[0].contextDigest);
-    if (!attemptOne.ok) return { ok: false, message: attemptOne.error.message };
-    const frozenSource = attemptOne.value.fixedContext.find((section) => section.label === "standalone-frozen-source");
-    if (frozenSource === undefined) {
-      return { ok: false, message: "attempt-1 context packet lacks the standalone-frozen-source section" };
-    }
-    const authoritySection = encodeByteSection("standalone-review-authority", JSON.stringify({
-      runId: handle.runId,
-      scope: authority.scope,
-      role: retryAuthority.role,
-      attempt: 2,
-    }));
-    if (!authoritySection.ok) return { ok: false, message: authoritySection.error.message };
-    const rebuilt = buildContextPacket({
-      requestId: retryAuthority.requestId as never,
-      role: retryAuthority.role,
-      requiredSkill: attemptOne.value.requiredSkill,
-      outputContract: attemptOne.value.outputContract,
-      fixedContext: Object.freeze([authoritySection.value, frozenSource]),
-      variableContext: Object.freeze([]),
-    });
-    if (!rebuilt.ok) return { ok: false, message: rebuilt.error.message };
-    if (rebuilt.value.digest !== retryAuthority.contextDigest) {
-      return {
-        ok: false,
-        message: `rebuilt attempt-2 context digest ${rebuilt.value.digest} differs from the frozen roster digest ${retryAuthority.contextDigest}`,
-      };
-    }
-    const published = await handle.publishContext(rebuilt.value);
-    if (!published.ok) return { ok: false, message: published.error.message };
-    packet = rebuilt;
-  }
-  const effectId = standaloneRetryEffectId(slot.slotId, retryAuthority.requestId);
-  if (!effectId.ok) return { ok: false, message: effectId.message };
-  const publication = durablePublicationDigest(handle, effectId.value);
-  if (publication.kind === "corrupt") return { ok: false, message: publication.message };
-  if (publication.kind === "found") {
-    const parsed = parseIssuedSpawnRequest(resolver, {
-      authority: input.authority,
-      context: input.context,
-      issuance: {
-        schemaVersion: 1,
-        kind: "issued-spawn-request-proof",
-        runId: handle.runId,
-        effectId: effectId.value,
-        publicationDigest: publication.digest,
-        batchIndex: 0,
-      },
-    });
-    if (!parsed.ok) return { ok: false, message: `durable standalone retry request is invalid: ${parsed.error.message}` };
-    return { ok: true, request: parsed.value };
-  }
-  const publishedBatch = await publishInitialBatch(handle, [input], [packet.value], `standalone-review-retry:${slot.slotId}`);
-  return publishedBatch.ok
-    ? { ok: true, request: publishedBatch.requests[0]! }
-    : { ok: false, message: publishedBatch.message };
-}
-
-/** The frozen-scope validator's diagnostic, surfaced on the retry spawn task. */
-function standaloneRetryTask(task: string, diagnostic: string | null): string {
-  const marker = diagnostic === null
-    ? ["Your previous attempt was rejected by the engine's frozen-scope validator."]
-    : [`Your previous attempt was rejected by the engine's frozen-scope validator:`, "", diagnostic];
-  return `${task}\n\n${marker.join("\n")}\nRe-emit the exact required reviewer result with every structured finding strictly inside the frozen scope.`;
-}
-
-/**
- * Fatal UTF-8 decode like the engine's transcript boundary. A decode failure
- * yields a validator problem for the slot instead of crashing the resume — the
- * same refusal aggregation would produce, reachable through the same rejection
- * path rather than as an unhandled throw.
- */
-function reviewerText(bytes: Uint8Array, role: string): string {
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    return `${role}: transcript is not valid UTF-8`;
-  }
-}
-
-export async function startStandaloneFacade(
-  handle: RunDirHandle,
-  input: RegisteredStandaloneProgram["input"],
-): Promise<FacadeDriveResult> {
-  try {
-    const changed = deriveChangedPaths();
-    const union = [...new Set([
-      ...changed.authority.unstaged,
-      ...changed.authority.staged,
-      ...changed.authority.committed,
-    ])].sort();
-    const scope = input.files ?? union;
-    if (scope.length === 0) return failed("standalone review has no explicit or changed-path scope");
-    const reviewMetadata = metadata(input.kind, scope, changed);
-    const packetSet = standalonePackets(handle.runId, reviewMetadata, scope);
-    const prepared = prepareFreshStandaloneReview({
-      runId: handle.runId,
-      ...(input.files === null ? {} : { explicitScope: input.files }),
-      changedPaths: changed.authority,
-      reviewMetadata: {
-        requested_kinds: reviewMetadata.requestedKinds,
-        docs_only: reviewMetadata.docsOnly,
-        source_or_test_changed: reviewMetadata.sourceOrTestChanged,
-        types_changed: reviewMetadata.typesChanged,
-        comments_changed: reviewMetadata.commentsChanged,
-        additions: reviewMetadata.additions,
-        file_count: reviewMetadata.fileCount,
-        new_structure: reviewMetadata.newStructure,
-        languages: reviewMetadata.languages,
-      },
-      scopeSafety: safeScope(scope),
-      reviewerContexts: packetSet.contexts,
-    });
-    if (!prepared.ok) return failed(prepared.error.errors.join("; "));
-    const registration: RegisteredStandaloneProgram = Object.freeze({
-      schemaVersion: 1,
-      kind: "standalone-review",
-      input,
-      authority: JSON.parse(serializeStandaloneReviewAuthority(prepared.value.authority)),
-    });
-    const registered = await handle.registerProgram(registration);
-    if (!registered.ok) return failed(registered.error.message);
-    const initialRequests = prepared.value.initialRequests.map((authority) => Object.freeze({
-      authority,
-      context: Object.freeze({
-        digest: authority.contextDigest,
-        slot: Object.freeze({ kind: "fixed-artifact-slot" as const, path: `contexts/${authority.contextDigest}.json` }),
-      }),
-    }));
-    // Publish every attempt-1 AND attempt-2 context up front. Attempt 2 is the
-    // engine's only recovery path for a semantically rejected reviewer slot; a
-    // retry must find its frozen packet already content-addressed in the run
-    // directory, so the attempt-2 digest the roster froze at start can never
-    // drift from the bytes a later retry reads (the frozen-source section hashes
-    // worktree bytes at start time and must not be re-derived later).
-    for (const packet of packetSet.packets) {
-      const published = await handle.publishContext(packet);
-      if (!published.ok) return failed(published.error.message);
-    }
-    const batch = await publishInitialBatch(handle, initialRequests, packetSet.packets.filter((_, index) => index % 2 === 0), "standalone-review");
-    if (!batch.ok) return failed(batch.message);
-    const awaiting = reduceStandaloneReviewMachine(startStandaloneReviewMachine(prepared.value.authority), {
-      kind: "review-batch-published", runId: handle.runId,
-    });
-    if (!awaiting.ok) return failed(awaiting.error.message);
-    await handle.writeCheckpoint(serializeStandaloneReviewMachineState(awaiting.value));
-    return { ok: true, action: batch.action };
-  } catch (error) {
-    return failed(error instanceof Error ? error.message : String(error));
-  }
-}
-
-const waveGateDeps = Object.freeze({ loadPlanModels: loadPlanModelsSource, fileExists: existsSync });
+export const waveGateDeps = Object.freeze({ loadPlanModels: loadPlanModelsSource, fileExists: existsSync });
 
 export function waveAdvisoryDecisionRequestId(
   runId: string,
@@ -793,28 +39,28 @@ export function waveAdvisoryDecisionRequestId(
   return `wave-advisory:${runId}:${digest}`;
 }
 
-function waveBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {
+export function waveBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {
   return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: { kind: "wave-gate-blocked", message } } };
 }
 
-type WaveTaskRunAuthority = Readonly<{
+export type WaveTaskRunAuthority = Readonly<{
   taskId: string;
   generation: number;
   packetId: string;
   headSha: string;
 }>;
 
-function waveGateAuthorityDigest(wave: number, taskIds: readonly string[], graph: TaskGraph): string {
+export function waveGateAuthorityDigest(wave: number, taskIds: readonly string[], graph: TaskGraph): string {
   return createHash("sha256").update(JSON.stringify({ wave, taskIds, graph })).digest("hex");
 }
 
-type WaveGateRestartPreparation = Readonly<{
+export type WaveGateRestartPreparation = Readonly<{
   graph: TaskGraph;
   registration: RegisteredWaveGateProgram;
   exhaustedSlots: readonly string[];
 }>;
 
-type WaveGateRestartResult =
+export type WaveGateRestartResult =
   | Readonly<{ ok: true; value: WaveGateRestartPreparation }>
   | Readonly<{ ok: false; message: string }>;
 
@@ -824,7 +70,7 @@ type WaveGateRestartResult =
  * invalidated. Every Wave task receives a new review generation, so stale old
  * transcripts can never bind to the replacement run.
  */
-function prepareExhaustedWaveGateRestart(
+export function prepareExhaustedWaveGateRestart(
   graph: TaskGraph,
   previousRunId: string,
   previous: RegisteredWaveGateProgram,
@@ -936,14 +182,14 @@ function prepareExhaustedWaveGateRestart(
   };
 }
 
-type WaveRequestBatch = Readonly<{
+export type WaveRequestBatch = Readonly<{
   batchEpoch: string;
   requests: readonly InitialSpawnRequestInput[];
   packets: readonly ContextPacket[];
   taskRuns: readonly WaveTaskRunAuthority[];
 }>;
 
-function waveRequests(
+export function waveRequests(
   handle: RunDirHandle,
   registration: RegisteredWaveGateProgram,
   graph: ReturnType<StateManager["load"]>,
@@ -1060,7 +306,7 @@ function waveRequests(
   });
 }
 
-function resolveWaveReviewerTranscript(task: Task, agent: string, bytes: Uint8Array) {
+export function resolveWaveReviewerTranscript(task: Task, agent: string, bytes: Uint8Array) {
   return constrainReviewResolutionToScope(
     resolveTaskReviewFindings(
       Buffer.from(bytes).toString("utf8"),
@@ -1072,7 +318,7 @@ function resolveWaveReviewerTranscript(task: Task, agent: string, bytes: Uint8Ar
   );
 }
 
-function reviewerRejectionReason(task: Task, agent: string, bytes: Uint8Array): string | null {
+export function reviewerRejectionReason(task: Task, agent: string, bytes: Uint8Array): string | null {
   const resolution = resolveWaveReviewerTranscript(task, agent, bytes);
   if (resolution.kind === "evidence-failed" || resolution.kind === "ignored-stale") return resolution.message;
   const applied = applyReviewResolution(task, resolution);
@@ -1085,7 +331,7 @@ function reviewerRejectionReason(task: Task, agent: string, bytes: Uint8Array): 
   return applied.review_error ?? "attempt did not produce accepted packet evidence";
 }
 
-type WaveTaskReviewRetry = Readonly<{
+export type WaveTaskReviewRetry = Readonly<{
   taskId: string;
   packetId: string;
   agent: string;
@@ -1107,13 +353,13 @@ type WaveTaskReviewRetry = Readonly<{
  * trusting a section label (see parseWaveRetryDiagnosticSection).
  */
 
-const WAVE_RETRY_PREAMBLE = [
+export const WAVE_RETRY_PREAMBLE = [
   "YOUR PREVIOUS ATTEMPT WAS REJECTED. This is your final attempt.",
   "",
   "Parser rejection reason: ",
 ].join("\n");
 
-const WAVE_RETRY_FIXED_TAIL = [
+export const WAVE_RETRY_FIXED_TAIL = [
   "Emit the review_lifecycle block with these EXACT keys — the parser accepts",
   "`finding_id` (NOT `id`), `verdict` (NOT `status`), and `reason`. The only",
   "legal verdict values are `resolved_by_remediation` and `still_present`:",
@@ -1131,7 +377,7 @@ const WAVE_RETRY_FIXED_TAIL = [
   "once in packet order. Use an empty array when there are no prior findings.",
 ].join("\n");
 
-function waveRetryDiagnosticText(reason: string): string {
+export function waveRetryDiagnosticText(reason: string): string {
   return `${WAVE_RETRY_PREAMBLE}${reason}\n\n${WAVE_RETRY_FIXED_TAIL}`;
 }
 
@@ -1167,7 +413,7 @@ export function parseWaveRetryDiagnosticSection(
   return { ok: true, reason };
 }
 
-function deriveWaveAttemptTwo(
+export function deriveWaveAttemptTwo(
   handle: RunDirHandle,
   attemptOne: AgentRequestAuthority,
   retryDiagnostic: string | null = null,
@@ -1224,7 +470,7 @@ function deriveWaveAttemptTwo(
   });
 }
 
-async function currentWaveTaskReviewRetries(
+export async function currentWaveTaskReviewRetries(
   handle: RunDirHandle,
   registration: RegisteredWaveGateProgram,
   graph: ReturnType<StateManager["load"]>,
@@ -1279,7 +525,7 @@ async function currentWaveTaskReviewRetries(
     });
 }
 
-async function markWaveTaskReviewRetriesIssued(
+export async function markWaveTaskReviewRetriesIssued(
   manager: StateManager,
   retries: readonly WaveTaskReviewRetry[],
 ): Promise<void> {
@@ -1310,7 +556,7 @@ async function markWaveTaskReviewRetriesIssued(
   }));
 }
 
-async function installWaveReviewRuns(
+export async function installWaveReviewRuns(
   manager: StateManager,
   registration: RegisteredWaveGateProgram,
   batch: WaveRequestBatch,
@@ -1370,7 +616,7 @@ async function installWaveReviewRuns(
   }));
 }
 
-type WaveReviewContextRead =
+export type WaveReviewContextRead =
   | Readonly<{ kind: "absent" }>
   | Readonly<{ kind: "corrupt"; message: string }>
   | Readonly<{ kind: "loaded"; value: Readonly<{ wave?: number; batchEpoch?: string; taskRun?: WaveTaskRunAuthority | null }> }>;
@@ -1384,7 +630,7 @@ type WaveReviewContextRead =
  * caller must fail loudly instead of silently treating captured evidence as
  * not belonging to the current packet.
  */
-function handleWaveReviewContext(
+export function handleWaveReviewContext(
   packets: readonly ContextPacket[],
   digest: string,
 ): WaveReviewContextRead {
@@ -1400,11 +646,11 @@ function handleWaveReviewContext(
   }
 }
 
-function waveReviewContextTaskId(context: WaveReviewContextRead): string | null {
+export function waveReviewContextTaskId(context: WaveReviewContextRead): string | null {
   return context.kind === "loaded" ? (context.value.taskRun?.taskId ?? null) : null;
 }
 
-function waveRefutationPreparation(
+export function waveRefutationPreparation(
   handle: RunDirHandle,
   readiness: Extract<ReturnType<typeof deriveWaveReadiness>, { ok: true }>["value"],
 ) {
@@ -1506,7 +752,7 @@ export function persistedWaveAttemptTwoCompatibilityProblem(
   return null;
 }
 
-async function exhaustedWaveReviewerAttempts(
+export async function exhaustedWaveReviewerAttempts(
   handle: RunDirHandle,
   graph: TaskGraph,
   registration: RegisteredWaveGateProgram,
@@ -2264,653 +1510,3 @@ export async function resumeWaveGateFacade(
   }
 }
 
-function remediationBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {
-  return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: { kind: "remediation-blocked", message } } };
-}
-
-function witness(repository: Parameters<typeof snapshotRepositoryWitness>[0]):
-  | Readonly<{ ok: true; value: import("../../core/remediation-machine").RepositorySnapshotWitness }>
-  | Readonly<{ ok: false; message: string }> {
-  const observed = snapshotRepositoryWitness(repository);
-  if (!observed.ok) return { ok: false, message: observed.error.message };
-  const parsed = parseRepositorySnapshotWitness(observed.value);
-  return parsed.ok ? { ok: true, value: parsed.value } : { ok: false, message: parsed.error.message };
-}
-
-export async function startRemediationFacade(
-  handle: RunDirHandle,
-  input: RegisteredRemediationProgram["input"],
-): Promise<FacadeDriveResult> {
-  const registration: RegisteredRemediationProgram = Object.freeze({ schemaVersion: 1, kind: "remediation", input });
-  const registered = await handle.registerProgram(registration);
-  if (!registered.ok) return failed(registered.error.message);
-  return driveRemediationFacade(handle, registration);
-}
-
-export async function resumeRemediationFacade(
-  handle: RunDirHandle,
-  registration: RegisteredRemediationProgram,
-): Promise<FacadeDriveResult> {
-  const checkpoint = await handle.readCheckpoint();
-  if (checkpoint !== null) {
-    let raw: unknown;
-    try { raw = JSON.parse(checkpoint); }
-    catch { return failed("remediation checkpoint is invalid JSON"); }
-    if (typeof raw === "object" && raw !== null) {
-      const record = raw as { schemaVersion?: unknown; state?: { state?: unknown; receipt?: unknown } };
-      if (record.schemaVersion === 1 && typeof record.state === "object" && record.state !== null && record.state.state === "done") {
-        // Validate the stored receipt instead of fabricating one.
-        const receipt = record.state.receipt;
-        if (typeof receipt !== "object" || receipt === null ||
-            (receipt as { kind?: unknown }).kind !== "verified-index-installed" ||
-            typeof (receipt as { effectId?: unknown }).effectId !== "string" ||
-            typeof (receipt as { runId?: unknown }).runId !== "string" ||
-            typeof (receipt as { indexDigest?: unknown }).indexDigest !== "string" ||
-            typeof (receipt as { witnessDigest?: unknown }).witnessDigest !== "string") {
-          return failed("remediation checkpoint claims done but contains no valid verified-index-installed receipt");
-        }
-        return { ok: true, action: { kind: "done", runId: handle.runId, outcome: receipt } };
-      }
-    }
-  }
-  return driveRemediationFacade(handle, registration);
-}
-
-async function driveRemediationFacade(
-  handle: RunDirHandle,
-  registration: RegisteredRemediationProgram,
-): Promise<FacadeDriveResult> {
-  try {
-    const source = openRunDirectory(registration.input.sourceRunsRoot, registration.input.sourceRun);
-    if (!source.ok) return remediationBlocked(handle, source.error.message);
-    const sourceCheckpoint = await source.value.readCheckpoint();
-    if (sourceCheckpoint === null) return remediationBlocked(handle, "source standalone review checkpoint is missing");
-    const sourceStateRaw = JSON.parse(sourceCheckpoint) as unknown;
-    const sourceState = parseStandaloneReviewMachineState(sourceStateRaw, publicationResolver(source.value));
-    if (!sourceState.ok || sourceState.value.kind !== "done") {
-      return remediationBlocked(handle, sourceState.ok ? "source standalone review is not done" : sourceState.error.message);
-    }
-    let started = startRemediation({
-      standaloneResult: sourceState.value.result,
-      publicationReceipt: sourceState.value.publicationReceipt,
-    });
-    if (!started.ok) return remediationBlocked(handle, started.error.message);
-    let state: RemediationState = started.value;
-    for (const path of registration.input.supportPaths) {
-      const next = reduceRemediation(state, { kind: "support-path-registered", path });
-      if (!next.ok) return remediationBlocked(handle, next.error.message);
-      state = next.value;
-    }
-    const repository = openGitRepository(process.cwd());
-    if (!repository.ok) return remediationBlocked(handle, repository.error.message);
-    const dirty = observeDirtyPaths(repository.value);
-    const preexisting = observeStagedPaths(repository.value);
-    const initialWitness = witness(repository.value);
-    if (!dirty.ok) return remediationBlocked(handle, dirty.error.message);
-    if (!preexisting.ok) return remediationBlocked(handle, preexisting.error.message);
-    if (!initialWitness.ok) return remediationBlocked(handle, initialWitness.message);
-    const actualPaths = dirty.value.map(({ path }) => path);
-    const audited = auditRemediationPaths(state.authority, {
-      expectedDirtyPaths: actualPaths,
-      actualDirtyPaths: dirty.value,
-      preexistingStagedPaths: preexisting.value,
-      repositoryWitness: initialWitness.value,
-    });
-    if (!audited.ok) return remediationBlocked(handle, audited.error.message);
-    let next = reduceRemediation(state, { kind: "audit-succeeded", audited: audited.value });
-    if (!next.ok || next.value.state !== "audited") return remediationBlocked(handle, next.ok ? "audit transition failed" : next.error.message);
-    state = next.value;
-
-    const pathspec = prepareLiteralGitPathspec(state.audited);
-    if (!pathspec.ok) return remediationBlocked(handle, pathspec.error.message);
-    const temporary = createTemporaryIndex(repository.value);
-    if (!temporary.ok) return remediationBlocked(handle, temporary.error.message);
-    const stagedPaths = stageAuditedPaths(repository.value, temporary.value, pathspec.value);
-    if (!stagedPaths.ok) return remediationBlocked(handle, stagedPaths.error.message);
-    const indexDigest = digestTemporaryIndex(repository.value, temporary.value);
-    const stagingWitness = witness(repository.value);
-    if (!indexDigest.ok) return remediationBlocked(handle, indexDigest.error.message);
-    if (!stagingWitness.ok) return remediationBlocked(handle, stagingWitness.message);
-    const staged = stageTemporaryIndex(state.audited, indexDigest.value, stagingWitness.value);
-    if (!staged.ok) return remediationBlocked(handle, staged.error.message);
-    next = reduceRemediation(state, { kind: "temporary-index-staged", staged: staged.value });
-    if (!next.ok || next.value.state !== "staged-temporary-index") return remediationBlocked(handle, next.ok ? "staging transition failed" : next.error.message);
-    state = next.value;
-
-    const observedStaged = readStagedPaths(repository.value, temporary.value);
-    const verifiedDigest = digestTemporaryIndex(repository.value, temporary.value);
-    const verificationWitness = witness(repository.value);
-    if (!observedStaged.ok) return remediationBlocked(handle, observedStaged.error.message);
-    if (!verifiedDigest.ok) return remediationBlocked(handle, verifiedDigest.error.message);
-    if (!verificationWitness.ok) return remediationBlocked(handle, verificationWitness.message);
-    const verified = verifyTemporaryIndex(state.staged, {
-      actualTemporaryIndexStagedPaths: observedStaged.value,
-      actualIndexDigest: verifiedDigest.value,
-      currentRepositoryWitness: verificationWitness.value,
-    });
-    if (!verified.ok) return remediationBlocked(handle, verified.error.message);
-    next = reduceRemediation(state, { kind: "staged-set-verified", verified: verified.value });
-    if (!next.ok || next.value.state !== "verified") return remediationBlocked(handle, next.ok ? "verification transition failed" : next.error.message);
-    state = next.value;
-
-    const effectId = parseEffectId(`effect:remediation-install:${verified.value.digest}`);
-    if (!effectId.ok) return remediationBlocked(handle, effectId.error.message);
-    const installation = prepareVerifiedIndexInstallation(verified.value, effectId.value, verificationWitness.value);
-    if (!installation.ok) return remediationBlocked(handle, installation.error.message);
-    const installed = installVerifiedIndex(repository.value, temporary.value, verificationWitness.value);
-    if (!installed.ok) return remediationBlocked(handle, installed.error.message);
-    const receipt = {
-      kind: "verified-index-installed" as const,
-      effectId: installation.value.intent.effectId,
-      runId: installation.value.intent.runId,
-      indexDigest: installation.value.intent.indexDigest,
-      witnessDigest: installation.value.intent.witnessDigest,
-    };
-    next = reduceRemediation(state, { kind: "index-installed", installation: installation.value, receipt });
-    if (!next.ok || next.value.state !== "done") return remediationBlocked(handle, next.ok ? "installation transition failed" : next.error.message);
-    await handle.writeCheckpoint(JSON.stringify({ schemaVersion: 1, state: next.value }));
-    return { ok: true, action: { kind: "done", runId: handle.runId, outcome: receipt } };
-  } catch (error) {
-    return remediationBlocked(handle, error instanceof Error ? error.message : String(error));
-  }
-}
-
-function standaloneRefutationPreparation(
-  handle: RunDirHandle,
-  authority: FrozenStandaloneReviewAuthority,
-  aggregate: import("../../core/standalone-review").StandaloneReviewAggregate,
-) {
-  const brief = buildStandaloneFindingBrief(aggregate);
-  const selected = selectReviewLenses(reviewSignals(brief.findings), 3);
-  if (!selected.ok) throw new Error(selected.errors.join("; "));
-  const lenses = selected.value;
-  const slots = [];
-  const packets: ContextPacket[] = [];
-  const inputs: InitialSpawnRequestInput[] = [];
-  const retryInputs: Readonly<{ input: InitialSpawnRequestInput; packet: ContextPacket }>[] = [];
-  const profile = resolveModelProfile("refutation");
-  if (!profile.ok) throw new Error(profile.error.message);
-  for (let index = 0; index < lenses.length; index += 1) {
-    const lens = lenses[index]!;
-    const [firstFinding, ...otherFindings] = brief.findings;
-    if (firstFinding === undefined) throw new Error("standalone refutation requires a non-empty critical Finding set");
-    const binding = deriveRefutationVerifierBinding(
-      handle.runId,
-      lens,
-      [firstFinding.id, ...otherFindings.map(({ id }) => id)],
-    );
-    if (!binding.ok) throw new Error(binding.errors.join("; "));
-    const attempts = ([1, 2] as const).map((attempt) => {
-      const requestId = binding.value.requestIds[attempt - 1];
-      const section = encodeByteSection("refutation-authority", JSON.stringify({
-        runId: handle.runId, lens, findings: brief.findings, attempt,
-      }));
-      if (!section.ok) throw new Error(section.error.message);
-      const packet = buildContextPacket({
-        requestId,
-        role: "review-verifier-agent",
-        requiredSkill: "none",
-        outputContract: `Adjudicate every Finding through lens '${lens}' and emit the exact refutation verdict JSON contract.`,
-        fixedContext: Object.freeze([section.value]), variableContext: Object.freeze([]),
-      });
-      if (!packet.ok) throw new Error(packet.error.message);
-      if (attempt === 1) packets.push(packet.value);
-      const parsed = parseAgentRequestAuthority({
-        runId: handle.runId, requestId, slotId: binding.value.slotId,
-        program: "refutation-panel", role: "review-verifier-agent", attempt,
-        modelProfile: profile.value.id,
-        harnessBinding: { pi: lowerModelProfile(profile.value, "pi"), claude: lowerModelProfile(profile.value, "claude-code") },
-        requiredSkill: null, contextDigest: packet.value.digest,
-        outputSlot: `transcripts/${binding.value.slotId}/attempt-${attempt}.raw`,
-      });
-      if (!parsed.ok) throw new Error(parsed.error.violations.map(({ message }) => message).join("; "));
-      const input = { authority: parsed.value, context: {
-        digest: packet.value.digest,
-        slot: { kind: "fixed-artifact-slot" as const, path: `contexts/${packet.value.digest}.json` },
-      } };
-      if (attempt === 1) inputs.push(input);
-      else retryInputs.push(Object.freeze({ input: Object.freeze(input), packet: packet.value }));
-      return parsed.value;
-    });
-    slots.push({ slotId: binding.value.slotId, attempts });
-  }
-  const panel = parseRefutationPanelAuthority({ runId: handle.runId, findings: brief.findings, lenses, verifierSlots: slots });
-  if (!panel.ok) throw new Error(panel.error.message);
-  const threshold = defaultRefutationThreshold(lenses.length);
-  const frozen = freezeStandaloneRefutationPanelAuthority({ standaloneAuthority: authority, aggregate, panelAuthority: panel.value, threshold });
-  if (!frozen.ok) throw new Error(frozen.error.message);
-  return { brief, lenses, panel: panel.value, frozen: frozen.value, threshold, packets, inputs, retryInputs };
-}
-
-function executableRefutationRequests(
-  handle: RunDirHandle,
-  requests: readonly SpawnRequest[],
-  standalone: boolean,
-): readonly Readonly<SpawnRequest & { task: string }>[] {
-  const standaloneMarker = standalone ? "LOOM_REVIEW_CONTEXT: standalone\n" : "";
-  return requests.map((request) => Object.freeze({
-    ...request,
-    task: `${standaloneMarker}LOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH, then complete the exact pending Refutation Panel request.`,
-  }));
-}
-
-function durableRefutationRequests(
-  handle: RunDirHandle,
-  inputs: readonly InitialSpawnRequestInput[],
-  resolver: PublicationAuthorityResolver,
-  label = "standalone-refutation",
-): DurableRequestRecovery {
-  const effectId = parseEffectId(`effect:${label}:${createHash("sha256").update(inputs.map((input) =>
-    (input.authority as AgentRequestAuthority).requestId).join("|")).digest("hex")}`);
-  if (!effectId.ok) return { kind: "corrupt", message: effectId.error.message };
-  const publication = durablePublicationDigest(handle, effectId.value);
-  if (publication.kind !== "found") return publication;
-  const requests: SpawnRequest[] = [];
-  for (const [batchIndex, input] of inputs.entries()) {
-    const parsed = parseIssuedSpawnRequest(resolver, {
-      ...input,
-      issuance: { schemaVersion: 1, kind: "issued-spawn-request-proof", runId: handle.runId,
-        effectId: effectId.value, publicationDigest: publication.digest, batchIndex },
-    });
-    if (!parsed.ok) return { kind: "corrupt", message: `durable refutation request is invalid: ${parsed.error.message}` };
-    requests.push(parsed.value);
-  }
-  return { kind: "found", requests: Object.freeze(requests) };
-}
-
-async function durableCaptureRejection(
-  handle: RunDirHandle,
-  authority: AgentRequestAuthority,
-): Promise<string | null> {
-  const events = await handle.readEvents();
-  const rejected = events.find(({ event }) => {
-    if (typeof event !== "object" || event === null || Array.isArray(event)) return false;
-    const record = event as Record<string, unknown>;
-    return record.kind === "request-capture-rejected" && record.requestId === authority.requestId &&
-      record.slotId === authority.slotId && record.attempt === authority.attempt;
-  });
-  if (rejected !== undefined && typeof rejected.event === "object" && rejected.event !== null) {
-    const diagnostic = (rejected.event as Record<string, unknown>).diagnostic;
-    return typeof diagnostic === "string" ? diagnostic : "capture was rejected without a diagnostic";
-  }
-  const marker = handle.readCaptureRejection(authority);
-  if (!marker.ok) throw new Error(marker.error.message);
-  return marker.value;
-}
-
-async function recoverOrPublishRefutationRetry(
-  handle: RunDirHandle,
-  authority: AgentRequestAuthority,
-  retryInputs: readonly Readonly<{ input: InitialSpawnRequestInput; packet: ContextPacket }>[],
-  resolver: PublicationAuthorityResolver,
-  label: string,
-): Promise<Readonly<{ ok: true; request: SpawnRequest }> | Readonly<{ ok: false; message: string }>> {
-  const rejection = await durableCaptureRejection(handle, authority);
-  if (rejection !== null) {
-    return { ok: false, message: `refutation attempt 2 exhausted after capture rejection: ${rejection}` };
-  }
-  const prepared = retryInputs.find(({ input }) =>
-    (input.authority as AgentRequestAuthority).requestId === authority.requestId);
-  if (prepared === undefined || JSON.stringify(prepared.input.authority) !== JSON.stringify(authority)) {
-    return { ok: false, message: `refutation retry ${authority.requestId} is not exact prepared attempt-2 authority` };
-  }
-  const retryLabel = `${label}-retry:${authority.slotId}`;
-  const recovered = durableRefutationRequests(handle, [prepared.input], resolver, retryLabel);
-  if (recovered.kind === "corrupt") return { ok: false, message: recovered.message };
-  if (recovered.kind === "found") return { ok: true, request: recovered.requests[0]! };
-  const published = await publishInitialBatch(handle, [prepared.input], [prepared.packet], retryLabel);
-  return published.ok
-    ? { ok: true, request: published.requests[0]! }
-    : { ok: false, message: published.message };
-}
-
-async function finalizeStandaloneState(
-  handle: RunDirHandle,
-  ready: Extract<StandaloneReviewMachineState, { kind: "ready-to-finalize" }>,
-): Promise<FacadeDriveResult> {
-  const json = serializeAdjudicatedStandaloneReview(ready.result);
-  const artifact = canonicalStandaloneResultArtifact(ready.result);
-  if (!artifact.ok) return failed(artifact.error.message);
-  const resultBytes = Buffer.from(json, "utf8");
-  try { writeRunBytesExclusiveNoFollow(`${handle.runDirectory}/result.json`, resultBytes); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !readRunBytesNoFollow(`${handle.runDirectory}/result.json`).equals(resultBytes)) {
-      return failed(error instanceof Error ? error.message : String(error));
-    }
-  }
-  const receipt = { kind: "artifact-set-published" as const, effectId: ready.publicationIntent.effectId,
-    runId: handle.runId, artifacts: Object.freeze([artifact.value]) as readonly [typeof artifact.value] };
-  const recorded = await handle.recordReceipt(receipt);
-  if (!recorded.ok) return failed(`cannot durably record publication receipt: ${recorded.error.message}`);
-  const done = reduceStandaloneReviewMachine(ready, { kind: "result-published", result: JSON.parse(json), receipt });
-  if (!done.ok || done.value.kind !== "done") return failed(done.ok ? "standalone result did not reach done" : done.error.message);
-  await handle.writeCheckpoint(serializeStandaloneReviewMachineState(done.value));
-  return { ok: true, action: { kind: "done", runId: handle.runId, outcome: done.value.outcome } };
-}
-
-export async function resumeStandaloneFacade(
-  handle: RunDirHandle,
-  registration: RegisteredStandaloneProgram,
-): Promise<FacadeDriveResult> {
-  try {
-    const authorityResult = parsedAuthority(registration);
-    if (!authorityResult.ok) return failed(authorityResult.message);
-    const resolver = publicationResolver(handle);
-    const checkpoint = await handle.readCheckpoint();
-    let rawState: unknown;
-    if (checkpoint === null) {
-      // Initial-batch crash window: publishInitialBatch persists contexts,
-      // requests, and the publication receipt BEFORE the awaiting-results
-      // checkpoint is written. A crash inside that window leaves no checkpoint;
-      // reconstruct the exact awaiting-results state from the registered frozen
-      // authority (the same pure state start would have checkpointed) so
-      // reviewer evidence captured before the crash is not discarded.
-      const effectId = standalonePublicationEffectId(authorityResult.value);
-      if (!effectId.ok) return failed(effectId.error.message);
-      const publication = durablePublicationDigest(handle, effectId.value);
-      if (publication.kind === "corrupt") return failed(publication.message);
-      if (publication.kind === "found") {
-        const reconstructed = reduceStandaloneReviewMachine(
-          startStandaloneReviewMachine(authorityResult.value),
-          { kind: "review-batch-published", runId: handle.runId },
-        );
-        if (!reconstructed.ok || reconstructed.value.kind !== "awaiting-results") {
-          return failed(reconstructed.ok
-            ? "standalone recovery did not reach awaiting-results"
-            : reconstructed.error.message);
-        }
-        const serialized = serializeStandaloneReviewMachineState(reconstructed.value);
-        await handle.writeCheckpoint(serialized);
-        rawState = JSON.parse(serialized) as unknown;
-      } else {
-        return failed("standalone review checkpoint is missing and no durable batch publication exists");
-      }
-    } else {
-      try { rawState = JSON.parse(checkpoint); } catch { return failed("standalone review checkpoint is invalid JSON"); }
-    }
-    const state = parseStandaloneReviewMachineState(rawState, resolver);
-    if (!state.ok) return failed(state.error.message);
-    if (state.value.kind === "done") return { ok: true, action: { kind: "done", runId: handle.runId, outcome: state.value.outcome } };
-    if (state.value.kind === "terminal-blocked" || state.value.kind === "recoverable-blocked") {
-      return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: state.value } };
-    }
-    if (state.value.kind === "ready-to-finalize") return finalizeStandaloneState(handle, state.value);
-    if (state.value.kind === "awaiting-refutation") {
-      const preparation = standaloneRefutationPreparation(handle, state.value.authority, state.value.aggregate);
-      const recovered = durableRefutationRequests(handle, preparation.inputs, resolver);
-      if (recovered.kind === "corrupt") return failed(recovered.message);
-      if (recovered.kind === "absent") {
-        const published = await publishInitialBatch(handle, preparation.inputs, preparation.packets, "standalone-refutation");
-        return published.ok ? { ok: true, action: published.action } : failed(published.message);
-      }
-      const panelRequests = recovered.requests;
-      const captured = handle.readCapturedAttempts();
-      if (!captured.ok) return failed(captured.error.message);
-      const missing = panelRequests.filter((request) => !captured.value.has(captureKey(request.authority.slotId, request.authority.attempt)));
-      if (missing.length > 0) {
-        return {
-          ok: true,
-          action: { kind: "spawn-batch", runId: handle.runId, requests: executableRefutationRequests(handle, missing, true) },
-        };
-      }
-      let panelState = startPersistentRefutationPanel(preparation.panel).state;
-      // Collect the FULL immutable event prefix as the panel runs. The legacy
-      // completed-state projection records accepted verdicts only, so a slot
-      // accepted on attempt 2 (after an attempt-1 verdict was rejected) cannot
-      // be replayed from it — the durable restart would see the slot still
-      // awaiting attempt 1 and reject the :2 request. The canonical T2
-      // checkpoint below carries the rejection events and replay reaches the
-      // exact terminal state.
-      const panelEvents: PersistentRefutationPanelEvent[] = [];
-      for (const request of panelRequests) {
-        const bytes = handle.readTranscriptBytes(request.authority);
-        if (!bytes.ok) return failed(bytes.error.message);
-        let submitted = submitRefutationVerdict(panelState, resolver, panelRequestIdentity(request), Buffer.from(bytes.value).toString("utf8"));
-        if (!submitted.ok) return failed(submitted.error.message);
-        panelState = submitted.value.state;
-        if (submitted.value.recordedEvent !== undefined) panelEvents.push(submitted.value.recordedEvent);
-        if (submitted.value.action?.kind === "spawn-refutation-verifiers") {
-          const retryAuthority = submitted.value.action.requests[0];
-          const retry = await recoverOrPublishRefutationRetry(
-            handle, retryAuthority, preparation.retryInputs, resolver, "standalone-refutation",
-          );
-          if (!retry.ok) return failed(retry.message);
-          const attempts = handle.readCapturedAttempts();
-          if (!attempts.ok) return failed(attempts.error.message);
-          if (!attempts.value.has(captureKey(retry.request.authority.slotId, retry.request.authority.attempt))) {
-            return { ok: true, action: {
-              kind: "spawn-batch", runId: handle.runId,
-              requests: executableRefutationRequests(handle, [retry.request], true),
-            } };
-          }
-          const retryBytes = handle.readTranscriptBytes(retry.request.authority);
-          if (!retryBytes.ok) return failed(retryBytes.error.message);
-          submitted = submitRefutationVerdict(
-            panelState, resolver, panelRequestIdentity(retry.request), Buffer.from(retryBytes.value).toString("utf8"),
-          );
-          if (!submitted.ok) return failed(submitted.error.message);
-          panelState = submitted.value.state;
-          if (submitted.value.recordedEvent !== undefined) panelEvents.push(submitted.value.recordedEvent);
-          if (submitted.value.action?.kind === "refutation-blocked") {
-            return failed(submitted.value.action.diagnostic.message);
-          }
-        }
-      }
-      const completed = completePersistentRefutationPanel(panelState, resolver, preparation.threshold);
-      if (!completed.ok || completed.value.state.stage !== "done") return failed(completed.ok ? "refutation did not reach done" : completed.error.message);
-      if (completed.value.recordedEvent !== undefined) panelEvents.push(completed.value.recordedEvent);
-      const canonical = refutationPanelCheckpoint(completed.value.state, panelEvents, resolver);
-      if (!canonical.ok) return failed(canonical.error.message);
-      const completion = parseStandaloneRefutationCompletion({
-        panelAuthority: preparation.frozen,
-        aggregate: state.value.aggregate,
-        completedPanelState: completed.value.state,
-        completedPanelCheckpoint: canonical.value,
-        publicationResolver: resolver,
-      });
-      if (!completion.ok) return failed(completion.error.message);
-      const ready = reduceStandaloneReviewMachine(state.value, { kind: "refutation-completed", completion: completion.value });
-      if (!ready.ok || ready.value.kind !== "ready-to-finalize") return failed(ready.ok ? "refutation did not unlock finalization" : ready.error.message);
-      return finalizeStandaloneState(handle, ready.value);
-    }
-    if (state.value.kind !== "awaiting-results") return failed(`unsupported standalone resume state ${state.value.kind}`);
-
-    const activeAuthority = state.value.authority;
-    const recovered = durableRequests(handle, activeAuthority, resolver);
-    if (recovered.kind !== "found") {
-      return failed(recovered.kind === "absent"
-        ? "standalone publication authority is absent"
-        : recovered.message);
-    }
-    const attemptOneBySlot = new Map(recovered.requests.map((request) => [request.authority.slotId, request] as const));
-    const captured = handle.readCapturedAttempts();
-    if (!captured.ok) return failed(captured.error.message);
-    const pendingBySlot = new Map(state.value.pending.map(({ slotId, expectedAttempt }) => [slotId, expectedAttempt] as const));
-    const scope = activeAuthority.scope;
-
-    // Phase A — semantic admission check for every captured attempt-1 slot the
-    // machine still expects at attempt 1. A transcript the frozen-scope
-    // validator refuses is REJECTED here — where the LC-2 lifecycle can advance
-    // the slot to attempt 2 — instead of dead-ending the whole run at
-    // aggregation with no recovery path.
-    const rejected: Readonly<{ slot: AgentRequestAuthority; problems: readonly string[] }>[] = [];
-    for (const slot of activeAuthority.roster.orderedSlots) {
-      if ((pendingBySlot.get(slot.slotId) ?? 1) !== 1) continue;
-      const attemptOne = attemptOneBySlot.get(slot.slotId);
-      if (attemptOne === undefined) {
-        return failed(`standalone attempt-1 issuance authority is missing for ${slot.slotId}`);
-      }
-      if (!captured.value.has(captureKey(attemptOne.authority.slotId, 1))) continue;
-      const bytes = handle.readTranscriptBytes(attemptOne.authority);
-      if (!bytes.ok) return failed(bytes.error.message);
-      const problems = standaloneTranscriptProblems(scope, reviewerText(bytes.value, attemptOne.authority.role), attemptOne.authority.role);
-      if (problems.length > 0) rejected.push({ slot: attemptOne.authority, problems });
-    }
-    let machine: StandaloneReviewMachineState = state.value;
-    if (rejected.length > 0) {
-      for (const { slot, problems } of rejected) {
-        const reduced = reduceStandaloneReviewMachine(machine, {
-          kind: "result-rejected",
-          request: { runId: handle.runId, slotId: slot.slotId, requestId: slot.requestId, attempt: 1 },
-          message: problems.join("; "),
-        });
-        if (!reduced.ok || reduced.value.kind !== "awaiting-results") {
-          return failed(reduced.ok ? "standalone semantic rejection did not remain awaiting results" : reduced.error.message);
-        }
-        machine = reduced.value;
-      }
-      await handle.writeCheckpoint(serializeStandaloneReviewMachineState(machine));
-      for (const { slot, problems } of rejected) {
-        await handle.appendEvent({
-          schemaVersion: 1,
-          sequence: 0,
-          dedupKey: `standalone-result-rejected:${createHash("sha256").update(`${slot.requestId}:${slot.attempt}`).digest("hex")}`,
-          recordedAtMs: Date.now(),
-          event: {
-            kind: "standalone-result-rejected",
-            runId: handle.runId,
-            requestId: slot.requestId,
-            slotId: slot.slotId,
-            attempt: slot.attempt,
-            diagnostic: problems.join("; "),
-          },
-        });
-      }
-    }
-
-    // Phase B — assemble the issued-request set. Slots still expected at
-    // attempt 1 come from the original batch publication; slots at attempt 2
-    // (freshly rejected here or retried in an earlier resume) come from the
-    // per-slot retry batch, published now if a crash left it unpublished.
-    const rejectedSlotIds = new Set(rejected.map(({ slot }) => slot.slotId));
-    const rejectedDiagnostics = new Map(rejected.map(({ slot, problems }) => [slot.slotId, problems.join("; ")] as const));
-    const issued: SpawnRequest[] = [];
-    for (const slot of activeAuthority.roster.orderedSlots) {
-      const expected = rejectedSlotIds.has(slot.slotId) ? 2 : (pendingBySlot.get(slot.slotId) ?? 1);
-      if (expected === 1) {
-        const attemptOne = attemptOneBySlot.get(slot.slotId);
-        if (attemptOne === undefined) {
-          return failed(`standalone attempt-1 issuance authority is missing for ${slot.slotId}`);
-        }
-        issued.push(attemptOne);
-        continue;
-      }
-      const retry = await recoverOrPublishStandaloneRetry(handle, activeAuthority, slot, resolver);
-      if (!retry.ok) return failed(retry.message);
-      issued.push(retry.request);
-    }
-    const captureAuthority = bindStandaloneCaptureAuthority(activeAuthority, issued);
-    if (!captureAuthority.ok) return failed(captureAuthority.error.message);
-
-    // Phase C — accept captured expected attempts. A captured attempt 2 that
-    // STILL fails the frozen-scope validator terminal-blocks the run exactly as
-    // the LC-2 lifecycle prescribes for a second and final attempt.
-    const accepted = [];
-    const missing: SpawnRequest[] = [];
-    for (const request of issued) {
-      if (!captured.value.has(captureKey(request.authority.slotId, request.authority.attempt))) {
-        missing.push(request);
-        continue;
-      }
-      const bytes = handle.readTranscriptBytes(request.authority);
-      if (!bytes.ok) return failed(bytes.error.message);
-      if (request.authority.attempt === 2) {
-        const problems = standaloneTranscriptProblems(scope, reviewerText(bytes.value, request.authority.role), request.authority.role);
-        if (problems.length > 0) {
-          const terminal = reduceStandaloneReviewMachine(machine, {
-            kind: "result-rejected",
-            request: { runId: handle.runId, slotId: request.authority.slotId, requestId: request.authority.requestId, attempt: 2 },
-            message: problems.join("; "),
-          });
-          if (!terminal.ok || terminal.value.kind !== "terminal-blocked") {
-            return failed(terminal.ok ? "standalone attempt-2 rejection did not terminal-block" : terminal.error.message);
-          }
-          await handle.writeCheckpoint(serializeStandaloneReviewMachineState(terminal.value));
-          await handle.appendEvent({
-            schemaVersion: 1,
-            sequence: 0,
-            dedupKey: `standalone-result-rejected:${createHash("sha256").update(`${request.authority.requestId}:${request.authority.attempt}`).digest("hex")}`,
-            recordedAtMs: Date.now(),
-            event: {
-              kind: "standalone-result-rejected",
-              runId: handle.runId,
-              requestId: request.authority.requestId,
-              slotId: request.authority.slotId,
-              attempt: 2,
-              diagnostic: problems.join("; "),
-            },
-          });
-          return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: terminal.value } };
-        }
-      }
-      const prepared = captureStandaloneReviewerBytes(captureAuthority.value, request.authority.requestId, bytes.value);
-      if (!prepared.ok) return failed(prepared.error.message);
-      const completed = completeStandaloneReviewerCapture(prepared.value, {
-        kind: "raw-transcript-captured",
-        effectId: prepared.value.intent.effectId,
-        runId: handle.runId,
-        requestId: request.authority.requestId,
-        artifact: prepared.value.expectedArtifact,
-      });
-      if (!completed.ok) return failed(completed.error.message);
-      accepted.push(completed.value);
-    }
-    if (missing.length > 0) {
-      const effectId = standalonePublicationEffectId(activeAuthority);
-      if (!effectId.ok) return failed(effectId.error.message);
-      const receipt = JSON.parse(readRunBytesNoFollow(
-        `${handle.runDirectory}/artifacts/${publicationFile(effectId.value)}`,
-      ).toString("utf8")) as Record<string, unknown>;
-      return { ok: true, action: {
-        kind: "spawn-batch",
-        runId: handle.runId,
-        publicationIdentity: {
-          schemaVersion: 1,
-          kind: "batch-publication-identity",
-          runId: handle.runId,
-          effectId: effectId.value,
-          publicationDigest: receipt.publicationDigest,
-        },
-        idempotencyKey: { runId: handle.runId, effectId: effectId.value },
-        receipt,
-        requests: missing.map((request) => request.authority.attempt === 2
-          ? {
-              ...request,
-              task: standaloneRetryTask(
-                `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.`,
-                rejectedDiagnostics.get(request.authority.slotId) ?? null,
-              ),
-            }
-          : {
-              ...request,
-              task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.`,
-            }),
-      } };
-    }
-    const completion = proveStandaloneRosterCompletion(activeAuthority, resolver, accepted);
-    if (!completion.ok) return failed(completion.error.violations.map((entry) => JSON.stringify(entry)).join("; "));
-    let reduced = reduceStandaloneReviewMachine(machine, { kind: "complete-roster-proved", completion: completion.value });
-    if (!reduced.ok) return failed(reduced.error.message);
-    if (reduced.value.kind !== "aggregating") return failed("standalone roster did not reach aggregation");
-    const aggregate = aggregateStandaloneReview({ authority: activeAuthority, completion: completion.value });
-    if (!aggregate.ok) return failed(aggregate.errors.join("; "));
-    if (aggregate.value.kind !== "clean") {
-      const preparation = standaloneRefutationPreparation(handle, activeAuthority, aggregate.value.aggregate);
-      reduced = reduceStandaloneReviewMachine(reduced.value, {
-        kind: "aggregate-has-criticals",
-        aggregate: aggregate.value.aggregate,
-        panelAuthority: preparation.frozen,
-        refutationAuthority: preparation.panel,
-      });
-      if (!reduced.ok || reduced.value.kind !== "awaiting-refutation") return failed(reduced.ok ? "critical route did not reach refutation" : reduced.error.message);
-      await handle.writeCheckpoint(serializeStandaloneReviewMachineState(reduced.value));
-      const published = await publishInitialBatch(handle, preparation.inputs, preparation.packets, "standalone-refutation");
-      return published.ok ? { ok: true, action: published.action } : failed(published.message);
-    }
-    reduced = reduceStandaloneReviewMachine(reduced.value, { kind: "aggregate-clean", aggregate: aggregate.value.aggregate });
-    if (!reduced.ok || reduced.value.kind !== "ready-to-finalize") return failed(reduced.ok ? "standalone finalization did not become ready" : reduced.error.message);
-    return finalizeStandaloneState(handle, reduced.value);
-  } catch (error) {
-    return failed(error instanceof Error ? error.message : String(error));
-  }
-}

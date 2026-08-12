@@ -175,6 +175,41 @@ describe("no-cross-boundary-imports", () => {
       );
       expect(result).toBeNull();
     });
+
+    it("core grants node: builtins PER-MODULE, never blanket", () => {
+      // A listed core module may import exactly its granted subpaths.
+      const granted = checkBoundaryViolation(
+        "engine/src/core/validate-phase-order.ts",
+        "node:fs",
+        DEFAULT_BOUNDARIES
+      );
+      expect(granted).toBeNull();
+      const grantedHash = checkBoundaryViolation(
+        "engine/src/core/standalone-review.ts",
+        "node:crypto",
+        DEFAULT_BOUNDARIES
+      );
+      expect(grantedHash).toBeNull();
+      // A listed module reaching a NON-granted subpath is still refused:
+      // node:crypto is not on validate-phase-order's capability list.
+      const ungranted = checkBoundaryViolation(
+        "engine/src/core/validate-phase-order.ts",
+        "node:crypto",
+        DEFAULT_BOUNDARIES
+      );
+      expect(ungranted).not.toBeNull();
+      expect(ungranted).toContain("may only import from");
+      // An UNLISTED core module importing any node: builtin fails closed with
+      // the capability message — a future I/O import must earn an entry.
+      const unlisted = checkBoundaryViolation(
+        "engine/src/core/findings.ts",
+        "node:fs",
+        DEFAULT_BOUNDARIES
+      );
+      expect(unlisted).not.toBeNull();
+      expect(unlisted).toContain("per-module only");
+      expect(unlisted).toContain("engine/src/core/findings.ts");
+    });
   });
 
   describe("handler", () => {

@@ -246,9 +246,9 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
       wave: 1, run_at: "now", verdict: "PASSED", critical_count: 0, high_count: 0,
       critical_findings: [], high_findings: [], medium_findings: [],
     };
-    s.wave_gates["1"] = {
+    s.wave_gates = { ...s.wave_gates, "1": {
       impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false,
-    };
+    } };
     const retry: UntrustedStopResolution = {
       ...untrustedPass,
       filesModified: ["src/new.ts"],
@@ -274,9 +274,9 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
 
   it("a failed re-resolution clears a stale impl_complete bit atomically", () => {
     const stale = graph([task({ id: "T1", status: "implemented" })], ["T1"]);
-    stale.wave_gates["1"] = {
+    stale.wave_gates = { ...stale.wave_gates, "1": {
       impl_complete: true, tests_passed: true, reviews_complete: false, blocked: false,
-    };
+    } };
     const failedResolution: UntrustedStopResolution = {
       ...untrustedPass,
       newTestsWritten: false,

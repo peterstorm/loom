@@ -2,7 +2,6 @@
  * Core types for loom hook handlers
  */
 
-import { match } from "ts-pattern";
 import type { TaskProof } from "./core/proof-obligations";
 import type { DeclaredArtifactBaseline } from "./core/artifact-baseline";
 import type {
@@ -101,30 +100,16 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 export const REVIEW_STATUSES = ["pending", "passed", "blocked", "evidence_capture_failed"] as const;
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
 
-/**
- * Per-task test outcome with its trust provenance IN the data. Trusted
- * verdicts come from the evidence ledger (real exit status cross-checked
- * against a parsed report artifact) and need no qualifier; an untrusted
- * verdict carries what the low-trust source claimed (`passed`) and a label
- * naming exactly how weak that source is. An independent boolean pair
- * would permit the impossible {passed: true, trusted: false → "trusted"?}
- * drift — this shape does not.
- */
-export type TaskTestResult =
-  | { readonly verdict: "trusted-pass" }
-  | { readonly verdict: "trusted-fail" }
-  | { readonly verdict: "untrusted"; readonly passed: boolean; readonly label: string };
-
-/** Did the task's test evidence show a pass at ANY trust level? (Gate checks
- *  that need trust must match on `verdict` instead.) */
-export function testResultPassed(result: TaskTestResult | undefined): boolean {
-  if (result === undefined) return false;
-  return match(result)
-    .with({ verdict: "trusted-pass" }, () => true)
-    .with({ verdict: "trusted-fail" }, () => false)
-    .with({ verdict: "untrusted" }, ({ passed }) => passed)
-    .exhaustive();
-}
+// The wave-gate domain model (TaskTestResult, testResultPassed, WaveGate,
+// newWaveGate) lives in the PURE core module core/wave-gate-model — a
+// functional-core consumer must not import runtime values from this legacy
+// catch-all, which also declares outer-shell hook contracts. Re-exported here
+// (and imported for this module's own schema-root declarations) so the import
+// surface is unchanged; only the dependency arrow moved. See
+// core/wave-gate-model.ts.
+export { newWaveGate, testResultPassed } from "./core/wave-gate-model";
+import type { TaskTestResult, WaveGate } from "./core/wave-gate-model";
+export type { TaskTestResult, WaveGate } from "./core/wave-gate-model";
 
 /**
  * Pre-refactor task graphs stored `tests_passed: boolean` on the task; the
@@ -308,12 +293,16 @@ export interface RecoveredArtifactWriteEvidence {
 }
 
 export interface Task {
-  id: string;
-  description: string;
-  agent: string;
-  wave: number;
-  status: TaskStatus;
-  depends_on: readonly string[];
+  /** Base fields are `readonly` like the rest: every mutation flows through
+   *  StateManager.update's locked transform, which returns a NEW task object.
+   *  An in-place assignment on a loaded graph would bypass that transform and
+   *  the wave-gate/review invariants it protects. */
+  readonly id: string;
+  readonly description: string;
+  readonly agent: string;
+  readonly wave: number;
+  readonly status: TaskStatus;
+  readonly depends_on: readonly string[];
   spec_anchors?: readonly string[];
   new_tests_required?: boolean;
   /** Exact architecture context selected for this Task by decompose. */
@@ -433,19 +422,9 @@ export interface Task {
   retry_count?: number;
 }
 
-export interface WaveGate {
-  readonly impl_complete: boolean;
-  readonly tests_passed: boolean | null;
-  readonly reviews_complete: boolean;
-  readonly blocked: boolean;
-}
-
-/** The initial (nothing verified yet) wave gate — the one shape every
- *  writer must start from. A factory instead of a shared literal so adding
- *  a field to WaveGate updates every construction site at once. */
-export function newWaveGate(): WaveGate {
-  return { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false };
-}
+// WaveGate + newWaveGate moved to the pure core module core/wave-gate-model
+// (re-exported above); the functional core must not pull runtime values from
+// this legacy catch-all file.
 
 /**
  * Closed verdict union for spec-check runs, parsed at the store boundaries
@@ -706,7 +685,11 @@ export interface TaskGraph {
   tasks: readonly Task[];
   current_wave?: number;
   executing_tasks?: readonly string[];
-  wave_gates: Record<string, WaveGate>;
+  /** Readonly like `tasks`: wave gates are derived per wave and every writer
+   *  replaces the record (or a gate) with a fresh object through
+   *  StateManager.update's locked transform. A holder of the graph must not be
+   *  able to mutate a gate — or add a gate — in place and bypass that. */
+  wave_gates: Readonly<Record<string, WaveGate>>;
   github_issue?: number;
   github_repo?: string;
   spec_check?: SpecCheck;

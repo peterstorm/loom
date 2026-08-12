@@ -282,23 +282,25 @@ describe("reconcileTaskFromStoredEvidence", () => {
   });
 
   it("reopens an implemented task when deleted tests invalidate a previously satisfied proof", () => {
-    const stale = failedTask();
-    stale.status = "implemented";
-    stale.proof = evaluateTaskProof(
-      { newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
-      {
-        taskCompleted: true,
-        testResult,
-        filesModified: ["src/a.ts"],
-        newTestsWritten: true,
-        newTestEvidence: "1 new test method, 2 assertions",
-      },
-      PI_STRUCTURED_EVIDENCE_POLICY,
-    );
-    expect(stale.proof.state).toBe("satisfied");
+    const withProof = {
+      ...failedTask(),
+      status: "implemented" as const,
+      proof: evaluateTaskProof(
+        { newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
+        {
+          taskCompleted: true,
+          testResult,
+          filesModified: ["src/a.ts"],
+          newTestsWritten: true,
+          newTestEvidence: "1 new test method, 2 assertions",
+        },
+        PI_STRUCTURED_EVIDENCE_POLICY,
+      ),
+    };
+    expect(withProof.proof.state).toBe("satisfied");
 
     const reconciled = reconcileTaskFromStoredEvidence(
-      stale,
+      withProof,
       ["src/a.ts"],
       { written: false, evidence: "" },
     );

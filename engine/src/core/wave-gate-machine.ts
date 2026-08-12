@@ -22,7 +22,7 @@ import type {
   WaveGateNextAction,
   WaveGateProtectedSnapshotBinding,
 } from "../types";
-import { newWaveGate, testResultPassed } from "../types";
+import { newWaveGate, testResultPassed } from "./wave-gate-model";
 import type { ProofFailure } from "./proof-obligations";
 import {
   awaitUserAction,

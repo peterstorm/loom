@@ -8,7 +8,7 @@ import { renderStatus } from "../../../src/handlers/helpers/orchestration";
 import { WAVE_REVIEW_AGENTS, type GateDeps } from "../../../src/core/wave-gate-machine";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { parseAgentRequestAuthority, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
-import { persistedWaveAttemptTwoCompatibilityProblem } from "../../../src/handlers/helpers/orchestration-programs";
+import { persistedWaveAttemptTwoCompatibilityProblem } from "../../../src/handlers/helpers/programs";
 import { buildContextPacket, encodeByteSection } from "../../../src/orchestration/context-packets";
 import { openRunDirectory, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings } from "../../../src/orchestration/session-run-bindings";

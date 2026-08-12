@@ -35,7 +35,7 @@ import {
   parseOrchestrationRunId,
   parseSlotId,
 } from "./core/orchestration-contract";
-import { deriveProofObligations, parseTaskProof } from "./core/proof-obligations";
+import { deriveProofObligations, parseTaskProof, parseTaskTestResult } from "./core/proof-obligations";
 import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
 import { parseStoredSpecCheck } from "./core/spec-check";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
@@ -570,26 +570,26 @@ function taskStatusError(
   return null;
 }
 
-/** Test evidence. */
+/** Test evidence. The acceptance DECISION is delegated to parseTaskTestResult —
+ *  the ONE validator for the shared TaskTestResult/ProofTestResult union — so
+ *  the load boundary can never drift from the proof evaluator on what shape
+ *  the persisted field may have. Only the operator-facing message spelling is
+ *  re-derived here, preserving the diagnostics the load-guard suite pins. */
 function taskEvidenceError(
   t: Record<string, unknown>,
   index: number,
   id: string,
 ): string | null {
-  if (t.test_result !== undefined) {
-    if (typeof t.test_result !== "object" || t.test_result === null) {
-      return `tasks[${index}] ("${id}"): test_result must be an object`;
-    }
-    const r = t.test_result as Record<string, unknown>;
-    if (r.verdict === "untrusted") {
-      if (typeof r.passed !== "boolean" || typeof r.label !== "string" || r.label.trim() === "") {
-        return `tasks[${index}] ("${id}"): untrusted test_result requires a boolean passed and a non-empty label naming the weak source`;
-      }
-    } else if (r.verdict !== "trusted-pass" && r.verdict !== "trusted-fail") {
-      return `tasks[${index}] ("${id}"): test_result.verdict ${JSON.stringify(r.verdict)} is not one of trusted-pass, trusted-fail, untrusted`;
-    }
+  if (t.test_result === undefined) return null;
+  const prefix = `tasks[${index}] ("${id}")`;
+  const parsed = parseTaskTestResult(t.test_result, `${prefix}: test_result`);
+  if (parsed.ok) return null;
+  const r = t.test_result as Record<string, unknown>;
+  if (typeof r !== "object" || r === null) return `${prefix}: test_result must be an object`;
+  if (r.verdict === "untrusted") {
+    return `${prefix}: untrusted test_result requires a boolean passed and a non-empty label naming the weak source`;
   }
-  return null;
+  return `${prefix}: test_result.verdict ${JSON.stringify(r.verdict)} is not one of trusted-pass, trusted-fail, untrusted`;
 }
 
 /** Findings and every view derived from them. */
@@ -875,6 +875,26 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
   if (!registrations.ok) return parseErr(registrations.error);
   const { activeWaveGate, waveGateHistory } = registrations.value;
 
+  // Fresh frozen copies, never aliases of the parsed JSON: a caller holding
+  // the graph — or the raw object it came from — must not be able to mutate a
+  // task or a gate in place and bypass StateManager.update's locked transform.
+  // Shallow copies are sufficient: every nested array/record field is already
+  // parsed to a fresh readonly array/record by the validators above or by the
+  // blessed cast consumers, and freezing the container prevents in-place field
+  // assignment, which is the mutation the invariant forbids.
+  const frozenTasks = Object.freeze(tasks.map((task) => {
+    const proven = task as Record<string, unknown>;
+    return Object.freeze({ ...proven });
+  }));
+  const frozenWaveGates = Object.freeze(
+    Object.fromEntries(
+      Object.entries(waveGates as Record<string, unknown>).map(([wave, gate]) => [
+        wave,
+        Object.freeze({ ...(gate as Record<string, unknown>) }),
+      ]),
+    ),
+  );
+
   // The single blessed cast: every union field above is proven in place.
   return parseOk({
     ...obj,
@@ -882,72 +902,36 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
     skipped_phases: skippedPhases,
     spec_file: obj.spec_file ?? null,
     plan_file: obj.plan_file ?? null,
-    tasks,
-    wave_gates: waveGates,
+    tasks: frozenTasks,
+    wave_gates: frozenWaveGates,
     ...(specCheck.value === undefined ? {} : { spec_check: specCheck.value }),
     ...(activeWaveGate === undefined ? {} : { active_wave_gate: activeWaveGate }),
     ...(waveGateHistory === undefined ? {} : { wave_gate_history: waveGateHistory }),
   } as unknown as TaskGraph);
 }
 
-export type LegacyWaveGateCompatibilityAuthority = Readonly<{
-  schemaVersion: 1;
-  kind: "legacy-wave-gate-compatibility";
-  runId: OrchestrationRunId;
-  wave: number;
-  authorityDigest: import("./core/orchestration-contract").ArtifactDigest;
-}>;
-
-/** Format-detected legacy anti-corruption parser. It never defaults a Wave:
- * protected current_wave (and an explicit --wave when supplied) must agree. */
-export function deriveLegacyWaveGateCompatibilityAuthority(
-  graph: TaskGraph,
-  requestedWave: number | null,
-): DomainResult<LegacyWaveGateCompatibilityAuthority, Readonly<{ kind: "legacy-wave-gate-migration-rejected"; message: string }>> {
-  const reject = (message: string): DomainResult<never, Readonly<{ kind: "legacy-wave-gate-migration-rejected"; message: string }>> =>
-    Object.freeze({ ok: false, error: Object.freeze({ kind: "legacy-wave-gate-migration-rejected", message }) });
-  if (graph.active_wave_gate !== undefined) return reject("active Wave Gate authority already exists");
-  if (graph.current_phase !== "execute" || graph.current_wave === undefined) {
-    return reject("legacy Wave Gate migration requires explicit protected execute/current_wave authority");
-  }
-  if (requestedWave !== null && requestedWave !== graph.current_wave) {
-    return reject(`requested wave ${requestedWave} does not match protected current_wave ${graph.current_wave}`);
-  }
-  const wave = graph.current_wave;
-  if (graph.tasks.every((task) => task.wave !== wave)) return reject(`legacy Wave ${wave} has no protected Tasks`);
-  if (graph.wave_gates[String(wave)] === undefined) return reject(`legacy Wave ${wave} has no wave_gates registration`);
-  const serialized = JSON.stringify({
-    schemaVersion: 1,
-    kind: "legacy-wave-gate-compatibility-source",
-    wave,
-    // Completion mutates the gate booleans and Task statuses. Compatibility
-    // identity is therefore derived only from immutable Wave membership and
-    // plan authority so final-Wave replay resolves the original run exactly.
-    taskIds: graph.tasks.filter((task) => task.wave === wave).map(({ id }) => id),
-    planFile: graph.plan_file ?? graph.phase_artifacts.architecture ?? null,
-  });
-  const rawDigest = createHash("sha256").update(serialized).digest("hex");
-  const runId = parseOrchestrationRunId(`legacy-wave:${rawDigest.slice(0, 32)}`);
-  const digest = parseArtifactDigest(rawDigest);
-  if (!runId.ok || !digest.ok) return reject("derived legacy Wave Gate compatibility identity is invalid");
-  return Object.freeze({ ok: true, value: Object.freeze({
-    schemaVersion: 1,
-    kind: "legacy-wave-gate-compatibility",
-    runId: runId.value,
-    wave,
-    authorityDigest: digest.value,
-  }) });
-}
+/** @deprecated Legacy wave-gate compatibility migration — archived in
+ *  ./core/legacy-archive (Section C). New completions use the registered
+ *  Wave Gate authority (active_wave_gate); this type + derive path survive
+ *  only for graphs that predate registration. Deprecation horizon: retire
+ *  once no pre-registration graph can still be completed. */
+export {
+  deriveLegacyWaveGateCompatibilityAuthority,
+  type LegacyWaveGateCompatibilityAuthority,
+} from "./core/legacy-archive";
+// Local use inside state-manager itself: the re-export above does not bind
+// the names locally, so import them (aliased to avoid the TS duplicate-name
+// conflict with the re-export) for the completion-replay call site.
+import {
+  findLegacyWaveGateCompletionReplay,
+  type LegacyWaveGateCompatibilityAuthority as LegacyWaveGateCompatibilityAuthorityLocal,
+} from "./core/legacy-archive";
 
 export type RegisteredWaveGateCompletionReplayError = Readonly<{
   kind: "registered-wave-gate-completion-replay-rejected";
   message: string;
 }>;
 
-/** Reconcile a lock loser only against the exact active registration it read
- * before attempting completion. Terminal history is immutable and parser-
- * proven, so a matching run/wave/digest and successor revision is the original
- * committed receipt; any partial identity match is an authority conflict. */
 export function findRegisteredWaveGateCompletionReplay(
   graph: TaskGraph,
   authority: ActiveWaveGateRegistration,
@@ -983,50 +967,12 @@ export function findRegisteredWaveGateCompletionReplay(
   return Object.freeze({ ok: true, value: candidate });
 }
 
-export type LegacyWaveGateCompletionReplayError = Readonly<{
-  kind: "legacy-wave-gate-completion-replay-rejected";
-  message: string;
-}>;
-
-/** Pure terminal-history lookup used before compatibility migration and again
- * after lock races. Only the exact deterministic run/wave/digest plus the
- * completed protected graph shape is an idempotent replay. */
-export function findLegacyWaveGateCompletionReplay(
-  graph: TaskGraph,
-  authority: LegacyWaveGateCompatibilityAuthority,
-): DomainResult<CompletedWaveGateRegistration | null, LegacyWaveGateCompletionReplayError> {
-  const reject = (message: string): DomainResult<never, LegacyWaveGateCompletionReplayError> =>
-    Object.freeze({
-      ok: false,
-      error: Object.freeze({ kind: "legacy-wave-gate-completion-replay-rejected", message }),
-    });
-  const history = graph.wave_gate_history ?? [];
-  const sameWave = history.find((entry) => entry.wave === authority.wave);
-  const sameRun = history.find((entry) => entry.runId === authority.runId);
-  if (sameWave !== undefined) {
-    if (sameWave.runId !== authority.runId || sameWave.authorityDigest !== authority.authorityDigest) {
-      return reject(`Wave ${authority.wave} terminal history conflicts with compatibility replay ${authority.runId}`);
-    }
-    const gate = graph.wave_gates[String(authority.wave)];
-    const waveTasks = graph.tasks.filter((task) => task.wave === authority.wave);
-    const exactTerminalGraph = graph.current_phase === "execute" && graph.current_wave === authority.wave &&
-      !graph.tasks.some((task) => task.wave > authority.wave) && waveTasks.length > 0 &&
-      waveTasks.every((task) => task.status === "completed") && gate !== undefined &&
-      gate.impl_complete && gate.tests_passed === true && gate.reviews_complete && !gate.blocked;
-    if (!exactTerminalGraph) {
-      return reject(`Wave ${authority.wave} history matches run identity but protected terminal graph outcome is contradictory`);
-    }
-    return Object.freeze({ ok: true, value: sameWave });
-  }
-  if (sameRun !== undefined) {
-    return reject(`Compatibility run ${authority.runId} is terminal for conflicting Wave ${sameRun.wave}`);
-  }
-  const newer = history.find((entry) => entry.wave > authority.wave);
-  if (newer !== undefined) {
-    return reject(`Legacy Wave ${authority.wave} is older than completed terminal Wave ${newer.wave}`);
-  }
-  return Object.freeze({ ok: true, value: null });
-}
+/** @deprecated Legacy terminal-history replay — archived in ./core/legacy-archive
+ *  (Section C); findRegisteredWaveGateCompletionReplay is canonical. */
+export {
+  findLegacyWaveGateCompletionReplay,
+  type LegacyWaveGateCompletionReplayError,
+} from "./core/legacy-archive";
 
 export type StateFilePermissionPort = (path: string, mode: number) => void;
 
@@ -1168,7 +1114,7 @@ export class StateManager {
       revision: 0,
       terminalOutcome: null,
     });
-    const compatibility: LegacyWaveGateCompatibilityAuthority = Object.freeze({
+    const compatibility: LegacyWaveGateCompatibilityAuthorityLocal = Object.freeze({
       schemaVersion: 1,
       kind: "legacy-wave-gate-compatibility",
       runId: registration.runId,

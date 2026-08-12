@@ -39,7 +39,7 @@ import {
 } from "./model-profiles";
 import { attributeFindings, findingsUnionError, parseStoredFindings, type Finding, type RefutedFinding } from "./findings";
 import { fail, isRecord, ok, sanitizeProse, type ParseResult } from "./panel-kernel";
-import { resolveReviewFindings } from "./review-output";
+import { resolveReviewFindings, type ParsedFindings } from "./review-output";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
 
 export const STANDALONE_REVIEW_SCHEMA_VERSION = 1 as const;
@@ -129,7 +129,7 @@ type JsonValue = string | number | boolean | null | readonly JsonValue[] | JsonR
 const resultOk = <T, E = never>(value: T): DomainResult<T, E> => canonicalRecord({ ok: true, value });
 const resultFail = <T = never, E = never>(error: E): DomainResult<T, E> => canonicalRecord({ ok: false, error });
 
-function exactKeys(raw: Record<string, unknown>, allowed: readonly string[], label: string): string[] {
+export function exactKeys(raw: Record<string, unknown>, allowed: readonly string[], label: string): string[] {
   const unknown = Object.keys(raw).filter((key) => !allowed.includes(key)).sort();
   const missing = allowed.filter((key) => !Object.hasOwn(raw, key));
   return [
@@ -142,7 +142,7 @@ function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function uniqueNonEmpty(values: readonly string[], label: string): readonly string[] {
+export function uniqueNonEmpty(values: readonly string[], label: string): readonly string[] {
   const errors: string[] = [];
   if (values.length === 0) errors.push(`${label} must be non-empty`);
   if (values.some((value) => value.trim() === "")) errors.push(`${label} must not contain empty values`);
@@ -664,7 +664,7 @@ export function parseCapturedReviewerResult(raw: unknown): DomainResult<Captured
   return capturedReviewerResultFromBytes(raw.artifact, Buffer.from(encoded.value.data, "base64"));
 }
 
-function decodeCapturedReviewerText(captured: CapturedReviewerResult): DomainResult<string, SemanticPayloadParseError> {
+export function decodeCapturedReviewerText(captured: CapturedReviewerResult): DomainResult<string, SemanticPayloadParseError> {
   try {
     return resultOk(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(captured.rawBytes.data, "base64")));
   } catch {
@@ -1107,7 +1107,7 @@ export interface AdjudicatedStandaloneReview {
   readonly panel: ParsedPanelOutcomes | null;
 }
 
-function findingScopeErrors(scope: readonly string[], findings: readonly Pick<Finding, "file">[], label: string): readonly string[] {
+export function findingScopeErrors(scope: readonly string[], findings: readonly Pick<Finding, "file">[], label: string): readonly string[] {
   const allowed = new Set(scope);
   return findings.flatMap((finding, index) => {
     if (finding.file === null) return [];
@@ -1118,28 +1118,36 @@ function findingScopeErrors(scope: readonly string[], findings: readonly Pick<Fi
   });
 }
 
+export type StandaloneTranscriptAdmission =
+  | Readonly<{ ok: true; findings: ParsedFindings }>
+  | Readonly<{ ok: false; problems: readonly string[] }>;
+
 /**
- * Per-transcript semantic admission problems against the frozen scope.
- *
- * Aggregation and the orchestration façade share this ONE validator so a
- * reviewer slot the façade rejects for attempt 2 is exactly the slot
- * aggregation would have refused — the two can never drift apart on which
- * transcripts are admissible, and a retried transcript cannot fail aggregation
- * with a problem the rejection path never diagnosed.
+ * ONE parser, ONE admitted result. Per-transcript semantic admission against
+ * the frozen scope, returning the parsed findings with the admission: the
+ * orchestration façade and aggregation share this validator AND the findings
+ * it admits, so (1) a reviewer slot the façade rejects for attempt 2 is
+ * exactly the slot aggregation would have refused, and (2) aggregation never
+ * re-parses an admitted transcript — a second, independent parse is the exact
+ * divergence that could silently drop a reviewer's evidence with nothing to
+ * notice (the parse it admitted and the parse it trusted are the same call).
  */
-export function standaloneTranscriptProblems(
+export function admitStandaloneTranscript(
   scope: readonly string[],
   output: string,
   agent: string,
-): readonly string[] {
+): StandaloneTranscriptAdmission {
   const resolution = resolveReviewFindings(output, agent);
   if (resolution.kind === "evidence-failed") {
-    return Object.freeze([`${agent}: ${resolution.message}`]);
+    return Object.freeze({ ok: false, problems: Object.freeze([`${agent}: ${resolution.message}`]) });
   }
-  return findingScopeErrors(scope, resolution.findings.drafts, `${agent} findings`);
+  const problems = findingScopeErrors(scope, resolution.findings.drafts, `${agent} findings`);
+  return problems.length > 0
+    ? Object.freeze({ ok: false, problems: Object.freeze(problems) })
+    : Object.freeze({ ok: true, findings: resolution.findings });
 }
 
-function aggregateCanonicalTranscripts(
+export function aggregateCanonicalTranscripts(
   runId: string,
   scope: readonly string[],
   transcripts: readonly Readonly<{ agent: StandaloneReviewerRole; output: string; evidence: StandaloneReviewerEvidence }>[],
@@ -1147,14 +1155,12 @@ function aggregateCanonicalTranscripts(
   const errors: string[] = [];
   const findings: Finding[] = [];
   for (const transcript of transcripts) {
-    const problems = standaloneTranscriptProblems(scope, transcript.output, transcript.agent);
-    if (problems.length > 0) {
-      errors.push(...problems);
+    const admission = admitStandaloneTranscript(scope, transcript.output, transcript.agent);
+    if (!admission.ok) {
+      errors.push(...admission.problems);
       continue;
     }
-    const resolution = resolveReviewFindings(transcript.output, transcript.agent);
-    if (resolution.kind === "evidence-failed") continue; // unreachable: standaloneTranscriptProblems admitted it
-    findings.push(...attributeFindings(resolution.findings.drafts, transcript.agent));
+    findings.push(...attributeFindings(admission.findings.drafts, transcript.agent));
   }
   if (errors.length > 0) return fail(errors);
   const ids = findings.map(({ id }) => id);
@@ -1243,62 +1249,11 @@ export function aggregateStandaloneReview(input: {
   return aggregateCanonicalTranscripts(authority.runId, authority.scope, transcripts);
 }
 
-/** Historical CLI adapter only. New orchestration must use aggregateStandaloneReview. */
-export function aggregateLegacyStandaloneReview(input: {
-  readonly runId: string;
-  readonly scope: readonly string[];
-  readonly transcripts: readonly Readonly<{
-    agent: StandaloneReviewerRole;
-    output: string;
-    artifact?: ArtifactRef;
-  }>[];
-}): ParseResult<StandaloneReviewState> {
-  const runId = input.runId.trim();
-  const scope = parseStandaloneReviewScope(input.scope);
-  const errors = [
-    ...(runId === "" ? ["run id must be non-empty"] : []),
-    ...(scope.ok ? [] : scope.errors),
-    ...uniqueNonEmpty(input.transcripts.map(({ agent }) => agent), "review agents"),
-  ];
-  const parsedRun = parseOrchestrationRunId(runId);
-  if (!parsedRun.ok) errors.push(parsedRun.error.message);
-  const transcripts = input.transcripts.flatMap((transcript, index) => {
-    const bytes = Buffer.from(transcript.output, "utf-8");
-    const fallbackArtifact = parseArtifactRef({
-      runId,
-      slot: `reviewers/${index + 1}-${transcript.agent}.md`,
-      digest: createHash("sha256").update(bytes).digest("hex"),
-      byteLength: bytes.byteLength,
-    });
-    if (!fallbackArtifact.ok) {
-      errors.push(`${transcript.agent}: ${fallbackArtifact.error.message}`);
-      return [];
-    }
-    const captured = capturedReviewerResultFromText(transcript.artifact ?? fallbackArtifact.value, transcript.output);
-    if (!captured.ok) {
-      errors.push(`${transcript.agent}: ${captured.error.message}`);
-      return [];
-    }
-    const evidence: StandaloneReviewerEvidence = Object.freeze({
-      authorityKind: "legacy-slot-bound",
-      agent: transcript.agent,
-      slotId: `legacy-slot:${index + 1}`,
-      requestId: `legacy-request:${index + 1}`,
-      attempt: 1,
-      modelProfile: null,
-      contextDigest: null,
-      artifact: captured.value.artifact,
-    });
-    const output = decodeCapturedReviewerText(captured.value);
-    if (!output.ok) {
-      errors.push(`${transcript.agent}: ${output.error.message}`);
-      return [];
-    }
-    return [{ agent: transcript.agent, output: output.value, evidence }];
-  });
-  if (errors.length > 0 || !scope.ok) return fail(errors);
-  return aggregateCanonicalTranscripts(runId, scope.value, transcripts);
-}
+/** @deprecated Historical CLI adapter only — archived in ./legacy-archive (Section A).
+ *  New orchestration must use aggregateStandaloneReview; this entry point and
+ *  the re-export below survive only for historical run directories.
+ *  Deprecation horizon: retire with the manual standalone-review helper. */
+export { aggregateLegacyStandaloneReview } from "./legacy-archive";
 
 export function serializeStandaloneAggregate(aggregate: StandaloneReviewAggregate): string {
   return JSON.stringify({
@@ -1320,7 +1275,7 @@ export function serializeStandaloneAggregate(aggregate: StandaloneReviewAggregat
   }, null, 2);
 }
 
-function parseReviewerEvidence(raw: unknown, runId: string, label: string): ParseResult<readonly StandaloneReviewerEvidence[]> {
+export function parseReviewerEvidence(raw: unknown, runId: string, label: string): ParseResult<readonly StandaloneReviewerEvidence[]> {
   if (raw === undefined) return ok([]); // historical v1 aggregate compatibility
   if (!Array.isArray(raw)) return fail([`${label} must be an array`]);
   const errors: string[] = [];
@@ -1406,7 +1361,7 @@ function parseStringArray(raw: unknown, path: string, errors: string[]): readonl
 
 const UNUSABLE_PANEL_CLAIM = "(finding text was unusable after sanitization — see the task's critical_findings)";
 
-function canonicalStandalonePanelFindingAuthority(
+export function canonicalStandalonePanelFindingAuthority(
   criticals: readonly Finding[],
 ): readonly StandalonePanelFindingAuthority[] {
   return Object.freeze(criticals.map((finding) => Object.freeze({
@@ -1420,7 +1375,7 @@ function canonicalStandalonePanelFindingAuthority(
   })));
 }
 
-function canonicalStandalonePanelFindings(
+export function canonicalStandalonePanelFindings(
   criticals: readonly Finding[],
 ): readonly Readonly<{ id: string; claim: string }>[] {
   return Object.freeze(canonicalStandalonePanelFindingAuthority(criticals).map(({ id, claim }) =>
@@ -1429,7 +1384,7 @@ function canonicalStandalonePanelFindings(
 
 const frozenStandalonePanelAuthorities = new WeakSet<object>();
 
-function canonicalDigest(value: unknown): ArtifactDigest {
+export function canonicalDigest(value: unknown): ArtifactDigest {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex") as ArtifactDigest;
 }
 
@@ -1721,212 +1676,10 @@ export function canonicalStandaloneResultArtifact(
     : resultFail({ message: `canonical standalone result artifact is invalid: ${artifact.error.message}` });
 }
 
-function historicalPanelOutcomeValue(entry: Record<string, unknown>, snake: string, camel: string): unknown {
-  return Object.hasOwn(entry, snake) ? entry[snake] : entry[camel];
-}
-
-function normalizeHistoricalPanel(
-  rawPanel: Record<string, unknown>,
-  criticals: readonly Finding[],
-): Record<string, unknown> {
-  const rawOutcomes = Array.isArray(rawPanel.outcomes) ? rawPanel.outcomes : [];
-  const localIds = new Set(criticals.map(({ id }) => id));
-  const outcomes = rawOutcomes.map((rawOutcome) => {
-    if (!isRecord(rawOutcome)) return rawOutcome;
-    const rawId = historicalPanelOutcomeValue(rawOutcome, "finding_id", "findingId");
-    const findingId = typeof rawId === "string" && localIds.has(rawId)
-      ? `${STANDALONE_REVIEW_SUBJECT}:${rawId}`
-      : rawId;
-    const historicalTask = historicalPanelOutcomeValue(rawOutcome, "task_id", "taskId");
-    const taskId = historicalTask === undefined || historicalTask === "standalone" || historicalTask === STANDALONE_REVIEW_SUBJECT
-      ? STANDALONE_REVIEW_SUBJECT
-      : historicalTask;
-    return {
-      finding_id: findingId,
-      task_id: taskId,
-      claim: rawOutcome.claim,
-      survives: rawOutcome.survives,
-      refuted_by: historicalPanelOutcomeValue(rawOutcome, "refuted_by", "refutedBy"),
-      reasoning: rawOutcome.reasoning,
-      upheld_by: historicalPanelOutcomeValue(rawOutcome, "upheld_by", "upheldBy"),
-      uncertain_from: historicalPanelOutcomeValue(rawOutcome, "uncertain_from", "uncertainFrom"),
-    };
-  });
-  return {
-    lenses: rawPanel.lenses,
-    threshold: rawPanel.threshold,
-    surviving: outcomes.filter((outcome) => isRecord(outcome) && outcome.survives === true).length,
-    refuted: outcomes.filter((outcome) => isRecord(outcome) && outcome.survives === false).length,
-    outcomes,
-  };
-}
-
-export type HistoricalStandaloneReviewResult = AdjudicatedStandaloneReview & Readonly<{
-  authorityKind: "unauthenticated-historical";
-}>;
-
-/**
- * Compatibility parser for explicitly unversioned historical bytes only.
- * Schema-v1 results are accepted solely by the LC-2 authoritative publication
- * parser, which requires frozen run/roster/finalization intent and its receipt.
- */
-export function parseAdjudicatedStandaloneReview(
-  raw: unknown,
-  panelAuthority?: FrozenStandalonePanelAuthority,
-): ParseResult<HistoricalStandaloneReviewResult> {
-  if (!isRecord(raw)) return fail(["standalone review result must be an object"]);
-  const versioned = Object.hasOwn(raw, "schema_version");
-  if (versioned) return fail(["schema-v1 standalone results require authoritative LC-2 publication parsing"]);
-  const v1Fields = [
-    "schema_version", "run_id", "subject_id", "scope", "reviewer_evidence",
-    "surviving_critical_findings", "advisory_findings", "refuted_critical_findings", "panel",
-  ] as const;
-  const historicalFields = [
-    "run_id", "scope", "surviving_critical_findings", "advisory_findings", "refuted_critical_findings", "panel",
-  ] as const;
-  const errors = exactKeys(raw, versioned ? v1Fields : historicalFields, "result");
-  if (versioned && raw.schema_version !== 1) errors.push("result.schema_version must be 1");
-  if (versioned && raw.subject_id !== STANDALONE_REVIEW_SUBJECT) {
-    errors.push(`result.subject_id must be '${STANDALONE_REVIEW_SUBJECT}'`);
-  }
-  const runId = typeof raw.run_id === "string" ? raw.run_id.trim() : "";
-  if (runId === "") errors.push("result.run_id must be non-empty");
-  const scope = parseStandaloneReviewScope(raw.scope, "result.scope");
-  if (!scope.ok) errors.push(...scope.errors);
-
-  if (!Array.isArray(raw.surviving_critical_findings)) errors.push("result.surviving_critical_findings must be an array");
-  if (!Array.isArray(raw.advisory_findings)) errors.push("result.advisory_findings must be an array");
-  const activeError = findingsUnionError(raw.surviving_critical_findings, "result.surviving_critical_findings");
-  const advisoryError = findingsUnionError(raw.advisory_findings, "result.advisory_findings");
-  if (activeError !== null) errors.push(activeError);
-  if (advisoryError !== null) errors.push(advisoryError);
-  const survivingCriticals = parseStoredFindings(raw.surviving_critical_findings);
-  const advisories = parseStoredFindings(raw.advisory_findings);
-  if (survivingCriticals.some(({ severity }) => severity !== "critical")) errors.push("result surviving findings must all be critical");
-  if (advisories.some(({ severity }) => severity !== "advisory")) errors.push("result advisory findings must all be advisory");
-
-  if (!Array.isArray(raw.refuted_critical_findings)) errors.push("result.refuted_critical_findings must be an array");
-  const refutedCriticals: RefutedFinding[] = [];
-  if (Array.isArray(raw.refuted_critical_findings)) {
-    raw.refuted_critical_findings.forEach((entry, index) => {
-      if (!isRecord(entry) || !isRecord(entry.finding) || !Array.isArray(entry.refutations)) {
-        errors.push(`result.refuted_critical_findings[${index}] is malformed`);
-        return;
-      }
-      const parsedFinding = parseStoredFindings([entry.finding]);
-      if (parsedFinding.length !== 1 || parsedFinding[0]!.severity !== "critical") {
-        errors.push(`result.refuted_critical_findings[${index}].finding must be critical`);
-        return;
-      }
-      const refs = entry.refutations.flatMap((refutation, refutationIndex) => {
-        if (!isRecord(refutation) || typeof refutation.lens !== "string" || refutation.lens.trim() === "" ||
-            typeof refutation.reason !== "string" || refutation.reason.trim() === "") {
-          errors.push(`result.refuted_critical_findings[${index}].refutations[${refutationIndex}] is malformed`);
-          return [];
-        }
-        return [{ lens: refutation.lens.trim(), reason: refutation.reason.trim() }];
-      });
-      const [head, ...tail] = refs;
-      if (head === undefined) errors.push(`result.refuted_critical_findings[${index}].refutations must be non-empty`);
-      else refutedCriticals.push({ finding: parsedFinding[0]!, refutations: [head, ...tail] });
-    });
-  }
-
-  const allDispositionIds = [
-    ...survivingCriticals.map(({ id }) => id),
-    ...advisories.map(({ id }) => id),
-    ...refutedCriticals.map(({ finding }) => finding.id),
-  ];
-  if (new Set(allDispositionIds).size !== allDispositionIds.length) errors.push("result finding ids must be distinct across all dispositions");
-  if (scope.ok) {
-    errors.push(...findingScopeErrors(scope.value, survivingCriticals, "result.surviving_critical_findings"));
-    errors.push(...findingScopeErrors(scope.value, advisories, "result.advisory_findings"));
-    errors.push(...findingScopeErrors(scope.value, refutedCriticals.map(({ finding }) => finding), "result.refuted_critical_findings"));
-  }
-
-  const evidence = parseReviewerEvidence(versioned ? raw.reviewer_evidence : undefined, runId, "result.reviewer_evidence");
-  if (!evidence.ok) errors.push(...evidence.errors);
-  if (raw.panel !== null && !isRecord(raw.panel)) errors.push("result.panel must be null or an object");
-  let panel: ParsedPanelOutcomes | null = null;
-  const criticals = [...survivingCriticals, ...refutedCriticals.map(({ finding }) => finding)];
-  if (isRecord(raw.panel)) {
-    // Genuine unversioned compatibility is intentionally isolated here. Only
-    // that historical reader may derive an expectation from serialized lenses.
-    // Schema-v1 must receive independently frozen standalone panel authority.
-    const panelInput = versioned ? raw.panel : normalizeHistoricalPanel(raw.panel, criticals);
-    const historicalSerializedLenses = !versioned && Array.isArray(panelInput.lenses)
-      ? panelInput.lenses.filter((lens): lens is string => typeof lens === "string")
-      : [];
-    const trustedAuthority = versioned && panelAuthority !== undefined &&
-      isFrozenStandalonePanelAuthority(panelAuthority) && panelAuthority.standaloneRunId === runId
-      ? panelAuthority
-      : null;
-    if (versioned && trustedAuthority === null) {
-      errors.push("critical-bearing schema-v1 result requires independently frozen standalone panel authority");
-    }
-    const expectedLenses = trustedAuthority?.lenses ?? historicalSerializedLenses;
-    if (trustedAuthority !== null && panelInput.threshold !== trustedAuthority.threshold) {
-      errors.push("result.panel.threshold does not match independently frozen standalone panel authority");
-    }
-    const authorityCriticals = trustedAuthority === null
-      ? criticals
-      : trustedAuthority.findings.flatMap((expected) => {
-          const localId = expected.id.startsWith(`${STANDALONE_REVIEW_SUBJECT}:`)
-            ? expected.id.slice(STANDALONE_REVIEW_SUBJECT.length + 1)
-            : "";
-          const finding = criticals.find(({ id }) => id === localId);
-          return finding === undefined ? [] : [finding];
-        });
-    if (trustedAuthority !== null && (
-      authorityCriticals.length !== trustedAuthority.findings.length ||
-      canonicalDigest(canonicalStandalonePanelFindingAuthority(authorityCriticals)) !== trustedAuthority.findingBriefDigest
-    )) {
-      errors.push("result critical dispositions do not match independently frozen panel finding-brief authority");
-    }
-    const parsedPanel = parseStandalonePanelOutcomes(
-      panelInput,
-      authorityCriticals,
-      trustedAuthority?.findings.map(({ id, claim }) => ({ id, claim })) ?? canonicalStandalonePanelFindings(criticals),
-      expectedLenses,
-    );
-    if (!parsedPanel.ok) errors.push(...parsedPanel.errors.map((error) => `result.panel: ${error}`));
-    else {
-      const survivingIds = new Set<string>(survivingCriticals.map(({ id }) => `${STANDALONE_REVIEW_SUBJECT}:${id}`));
-      const refutedById = new Map<string, RefutedFinding>(refutedCriticals.map((record) =>
-        [`${STANDALONE_REVIEW_SUBJECT}:${record.finding.id}`, record] as const));
-      for (const outcome of parsedPanel.value.outcomes) {
-        if (outcome.survives !== survivingIds.has(outcome.findingId)) {
-          errors.push(`result.panel outcome ${outcome.findingId} disagrees with the final disposition`);
-        }
-        const refuted = refutedById.get(outcome.findingId);
-        if (!outcome.survives && (refuted === undefined ||
-            JSON.stringify(refuted.refutations) !== JSON.stringify(outcome.refutations))) {
-          errors.push(`result.panel refutation evidence for ${outcome.findingId} disagrees with the final disposition`);
-        }
-      }
-      panel = parsedPanel.value;
-    }
-  }
-  if (criticals.length === 0 && panel !== null) errors.push("clean result must not contain panel outcomes");
-  // Old serializers are read-only compatibility authority. Schema-v1 remains
-  // strict: every critical disposition requires its canonical panel evidence.
-  if (versioned && criticals.length > 0 && panel === null) {
-    errors.push("critical-bearing schema-v1 result must contain canonical panel outcomes");
-  }
-  return errors.length > 0 || !scope.ok || !evidence.ok
-    ? fail(errors)
-    : ok(Object.freeze({
-        authorityKind: "unauthenticated-historical" as const,
-        schemaVersion: 1,
-        runId,
-        scope: Object.freeze([...scope.value]),
-        reviewerEvidence: Object.freeze([...evidence.value]),
-        survivingCriticals: Object.freeze([...survivingCriticals]),
-        advisories: Object.freeze([...advisories]),
-        refutedCriticals: Object.freeze(refutedCriticals.map(({ finding, refutations }) => Object.freeze({
-          finding,
-          refutations: Object.freeze(refutations.map(({ lens, reason }) => Object.freeze({ lens, reason }))) as NonEmpty<PanelRefutation>,
-        }))),
-        panel,
-      }));
-}
+/** @deprecated Compatibility parser for explicitly unversioned historical bytes
+ *  only — archived in ./legacy-archive (Section B). Schema-v1 results are
+ *  accepted solely by the LC-2 authoritative publication parser, which
+ *  requires frozen run/roster/finalization intent and its receipt.
+ *  Deprecation horizon: retire once no run directory carries an unversioned
+ *  result.json. */
+export { parseAdjudicatedStandaloneReview, type HistoricalStandaloneReviewResult } from "./legacy-archive";

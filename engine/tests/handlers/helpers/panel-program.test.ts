@@ -210,11 +210,18 @@ describe("legacy panel journal compatibility", () => {
   it("returns a closed diagnostic instead of throwing on hostile legacy input", () => {
     const { proxy, revoke } = Proxy.revocable({}, {});
     revoke();
+    // The A1 contract: the rejection stays typed (never throws) AND carries the
+    // thrown cause, so a hostile/typo'd journal is diagnosable — the static
+    // message alone could not distinguish a proxy from a shape defect.
     expect(() => translateLegacyPanelJournal("architecture", proxy)).not.toThrow();
-    expect(translateLegacyPanelJournal("architecture", proxy)).toEqual({
-      ok: false,
-      error: "Panel program journal could not be safely inspected",
-    });
+    const result = translateLegacyPanelJournal("architecture", proxy);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("Panel program journal could not be safely inspected");
+      // The bound cause names the actual failure (revoked proxy) instead of a
+      // blanket "could not be inspected".
+      expect(result.error).toContain("Array.isArray");
+    }
   });
 
   it("makes cross-panel legacy journals impossible in types and rejects them during translation", () => {

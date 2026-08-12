@@ -5,6 +5,7 @@ import {
   REVIEW_LAYOUT,
   coverageErrors,
   ok,
+  parseCriteriaSet,
   parseRunManifest,
   parseVerdictEnvelope,
   requireEntry,
@@ -179,5 +180,58 @@ describe("requireEntry — the shared no-silent-default guard", () => {
 describe("sanitizeProse", () => {
   it("strips braces that would read as unsubstituted placeholders", () => {
     expect(sanitizeProse("  the {value} of {x}  ")).toBe("the value of x");
+  });
+});
+
+describe("parseCriteriaSet — the cross-verdict coverage rule", () => {
+  // The one rule in the kernel only a verdict SET can exercise: two verdicts
+  // sharing a criterion silently produce a wrong aggregate, and the
+  // per-verdict check (parseVerdictEnvelope) cannot see across verdicts.
+  it("accepts a set covering the expected criteria exactly once, in any order", () => {
+    expect(parseCriteriaSet(["intent", "reproduction"], ["intent", "reproduction"])).toEqual(ok(undefined));
+    expect(parseCriteriaSet(["reproduction", "intent"], ["intent", "reproduction"])).toEqual(ok(undefined));
+  });
+
+  it("rejects TWO verdicts sharing one criterion (the silent-wrong-aggregate case)", () => {
+    const result = parseCriteriaSet(["intent", "intent"], ["intent", "reproduction"]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join("; ")).toContain("duplicate verdict for criterion: intent");
+      // The duplicate consumed the slot the missing criterion needed.
+      expect(result.errors.join("; ")).toContain("missing verdict for criterion: reproduction");
+    }
+  });
+
+  it("rejects a verdict naming a criterion nothing collected", () => {
+    const result = parseCriteriaSet(["intent", "fabrication"], ["intent", "reproduction"]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join("; ")).toContain("unexpected verdict criterion: fabrication");
+      expect(result.errors.join("; ")).toContain("missing verdict for criterion: reproduction");
+    }
+  });
+
+  it("rejects a verdict-count mismatch (too few and too many)", () => {
+    const short = parseCriteriaSet(["intent"], ["intent", "reproduction"]);
+    expect(short.ok).toBe(false);
+    if (!short.ok) expect(short.errors.join("; ")).toContain("expected exactly 2 verdict(s); received 1");
+    const long = parseCriteriaSet(["a", "b", "c"], ["a", "b"]);
+    expect(long.ok).toBe(false);
+    if (!long.ok) expect(long.errors.join("; ")).toContain("expected exactly 2 verdict(s); received 3");
+  });
+
+  it("rejects an empty or non-distinct expected set (a config error, not a coverage gap)", () => {
+    const empty = parseCriteriaSet([], []);
+    expect(empty.ok).toBe(false);
+    if (!empty.ok) expect(empty.errors.join("; ")).toContain("criteria must be non-empty");
+    const duplicated = parseCriteriaSet(["intent"], ["intent", "intent"]);
+    expect(duplicated.ok).toBe(false);
+    if (!duplicated.ok) expect(duplicated.errors.join("; ")).toContain("criteria must be distinct");
+  });
+
+  it("rejects an empty verdict set against non-empty expectations", () => {
+    const result = parseCriteriaSet([], ["intent"]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.join("; ")).toContain("expected exactly 1 verdict(s); received 0");
   });
 });

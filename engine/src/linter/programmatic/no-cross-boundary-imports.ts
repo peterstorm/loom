@@ -27,6 +27,17 @@ export interface BoundaryRule {
   readonly allow: readonly string[];
   /** Denied import prefixes — checked first, overrides allow */
   readonly deny: readonly string[];
+  /**
+   * Per-FILE capability allowlist, keyed by repo-relative module path. When a
+   * file is listed here, an import matching one of its allowed prefixes is
+   * admitted even though the blanket `allow` would refuse it. This is the
+   * mechanism that makes I/O capability per-module rather than per-directory:
+   * `engine/src/core/` deliberately has NO blanket `node:` allowance, so every
+   * filesystem/byte import in the functional core is an explicit, reviewed
+   * exception named here — a future I/O import in an unlisted core module
+   * fails the lint gate until it earns an entry.
+   */
+  readonly perFileAllow?: Readonly<Record<string, readonly string[]>>;
 }
 
 /**
@@ -50,7 +61,10 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
     allow: [
       "./",
       "engine/src/core/",
-      "node:",
+      // NO blanket `node:` here — I/O capability in the functional core is
+      // per-module, an explicit reviewed exception for every byte/fs import
+      // (see perFileAllow below). The only core modules that may touch node
+      // builtins are exactly the ones enumerated there.
       "engine/src/types",
       "engine/src/config",
       // Pure machine-core modules only: identity brands (parseSessionId in
@@ -73,16 +87,44 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/utils/extract-task-id",
       "engine/src/utils/no-finding-sentinel",
       "engine/src/utils/strip-namespace",
-      // find-file imports only `node:fs` and `node:path`. Core already permits
-      // `node:` directly — several gate modules here read the filesystem by
-      // design — so refusing a dependency-free wrapper over the same calls
-      // would police the door rather than the capability. The capability that
-      // IS policed is protected-state WRITING: `engine/src/state-manager` stays
-      // unlisted, and `validate-phase-order` takes its state read as an
+      // find-file imports only `node:fs` and `node:path`. The core boundary's
+      // formerly blanket `node:` allowance is now per-module, and this
+      // dependency-free wrapper over the same calls is enumerated below — the
+      // capability policed is protected-state WRITING: `engine/src/state-manager`
+      // stays unlisted, and `validate-phase-order` takes its state read as an
       // injected dependency instead.
       "engine/src/utils/find-file",
       "ts-pattern",
     ],
+    // Every core module that touches a node builtin, and exactly the subpaths
+    // it uses. `node:crypto` is digest-only (pure hashing); `node:path` is
+    // pure path math; `node:fs` is the deliberately-sanctioned gate I/O;
+    // `node:util` is isDeepStrictEqual. A future I/O import in a module that
+    // is not listed here — or a listed module reaching a new subpath — fails
+    // the lint gate until it is reviewed and named.
+    perFileAllow: {
+      "engine/src/core/block-direct-edits.ts": ["node:fs"],
+      "engine/src/core/guard-state-file.ts": ["node:fs"],
+      "engine/src/core/harness-capture.ts": ["node:crypto"],
+      "engine/src/core/harness-resources.ts": ["node:crypto", "node:path"],
+      "engine/src/core/legacy-archive.ts": ["node:crypto"],
+      "engine/src/core/orchestration-contract/bytes.ts": ["node:crypto"],
+      "engine/src/core/orchestration-contract/effects.ts": ["node:path"],
+      "engine/src/core/orchestration-contract/identity.ts": ["node:crypto", "node:path"],
+      "engine/src/core/orchestration-contract/publication.ts": ["node:crypto"],
+      "engine/src/core/panel-kernel.ts": ["node:path"],
+      "engine/src/core/panel-program.ts": ["node:crypto"],
+      "engine/src/core/remediation-machine.ts": ["node:crypto"],
+      "engine/src/core/repository-path.ts": ["node:path"],
+      "engine/src/core/review-packet.ts": ["node:crypto"],
+      "engine/src/core/review-panel.ts": ["node:path"],
+      "engine/src/core/standalone-review.ts": ["node:crypto"],
+      "engine/src/core/standalone-review-machine.ts": ["node:crypto", "node:util"],
+      "engine/src/core/validate-phase-order.ts": ["node:fs"],
+      "engine/src/core/validate-template-substitution.ts": ["node:fs"],
+      "engine/src/core/wave-gate-machine.ts": ["node:crypto"],
+      "engine/src/utils/find-file.ts": ["node:fs", "node:path"],
+    },
     deny: [
       "engine/src/linter/",
       "engine/src/handlers/",
@@ -242,8 +284,11 @@ export function resolveImportPath(filePath: string, specifier: string): string {
  * Enforcement model:
  *   1. Find the boundary rule matching this file's path
  *   2. Check DENY list first — explicit denials always block
- *   3. Check ALLOW list — import must match at least one allow entry
- *   4. If neither deny nor allow matches — violation (fail-closed allowlist)
+ *   3. Check the per-file capability allowlist (perFileAllow) — a file named
+ *      there may import exactly its listed prefixes, whether or not the
+ *      directory allow would admit them
+ *   4. Check ALLOW list — import must match at least one allow entry
+ *   5. If none admits the import — violation (fail-closed allowlist)
  */
 /**
  * Does `path` fall under `prefix`? Directory prefixes (trailing `/`) and
@@ -280,6 +325,24 @@ export function checkBoundaryViolation(
   for (const denied of boundary.deny) {
     if (underPrefix(resolvedImport, denied)) {
       return `Module "${boundary.module}" must not import from "${denied}" — violates bounded context boundary`;
+    }
+  }
+
+  // Per-file capability allowlist, before the blanket allow: a file named here
+  // may import exactly its listed prefixes, whether or not the directory-level
+  // allow would admit them. This is how `node:` hardware is granted to named
+  // core modules instead of to the whole directory.
+  const perFile = boundary.perFileAllow?.[normalizedFile];
+  if (perFile !== undefined) {
+    if (perFile.some((allowed) => underPrefix(resolvedImport, allowed))) {
+      return null;
+    }
+  } else if (resolvedImport.startsWith("node:")) {
+    // Fail closed: a node: import in an unlisted file of a boundary that does
+    // not blanket-allow node: is refused with the explicit capability message.
+    const blanketNode = boundary.allow.some((allowed) => underPrefix(resolvedImport, allowed));
+    if (!blanketNode) {
+      return `Module "${boundary.module}" grants node: builtins per-module only; ${resolvedImport} is not on the capability list for ${normalizedFile}`;
     }
   }
 

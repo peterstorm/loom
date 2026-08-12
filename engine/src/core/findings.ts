@@ -223,6 +223,15 @@ function ordinalOf(id: string, safeAgent: string): number {
  * duplicate then makes `applyFindingOutcomes`' id filter delete two findings
  * where one was adjudicated, and attaches the panel's reasoning to the wrong
  * claim. Ids must come from a source that removal cannot rewind.
+ *
+ * `resolved` holds the same retired-ordinal invariant for the demotion {
+ * `applyFindingOutcomes`-style remediation side: a resolved (remediated)
+ * finding is also moved OUT of `task.findings` (into `resolved_findings`), so
+ * its id must keep counting toward the high-water mark exactly like a refuted
+ * one — otherwise a later re-review could remint an ordinal still held by a
+ * resolved record, re-attaching remediation history to a different claim. Every
+ * caller passes it; dropping it from the comment would invite the 'equivalent
+ * simplification' that reintroduces the duplicate-ordinal defect.
  */
 export function nextOrdinal(
   existing: readonly Finding[],
@@ -239,7 +248,10 @@ export function nextOrdinal(
   return Math.max(0, ...minted) + 1;
 }
 
-/** Derive identity for a reviewer's drafts. The ONLY constructor of `Finding`. */
+/** Derive identity for a reviewer's drafts. The ONLY place Finding identity is
+ *  MINTED. (`parseStoredFinding` also produces `Finding`s, but it reads back
+ *  identity already on disk rather than deriving a new one — the module header
+ *  draws the same distinction.) */
 export function attributeFindings(
   drafts: readonly DraftFinding[],
   agent: string,

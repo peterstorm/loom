@@ -47,7 +47,7 @@ import {
   serializeAdjudicatedStandaloneReview,
   serializeStandaloneAggregate,
   serializeStandaloneReviewAuthority,
-  standaloneTranscriptProblems,
+  admitStandaloneTranscript,
   parseStandaloneReviewAuthority,
   type CapturedReviewerResult,
   type FrozenStandalonePanelAuthority,
@@ -192,39 +192,50 @@ describe("standalone review aggregate", () => {
     );
   });
 
-  describe("standaloneTranscriptProblems", () => {
-    it("admits an in-scope transcript with no problems", () => {
-      expect(standaloneTranscriptProblems(["src/x.ts"], transcript(["blocker"]), "code-reviewer")).toEqual([]);
+  describe("admitStandaloneTranscript", () => {
+    it("admits an in-scope transcript carrying its parsed findings", () => {
+      const admission = admitStandaloneTranscript(["src/x.ts"], transcript(["blocker"]), "code-reviewer");
+      expect(admission.ok).toBe(true);
+      if (admission.ok) {
+        expect(admission.findings.drafts).toHaveLength(1);
+        expect(admission.findings.drafts[0]?.claim).toContain("blocker");
+      }
     });
 
     it("names every out-of-scope finding exactly as aggregation does", () => {
-      const problems = standaloneTranscriptProblems(["src/inside.ts"], transcript(["blocker"]), "code-reviewer");
-      expect(problems).toEqual([
-        "code-reviewer findings[0].file is outside the frozen review scope: src/x.ts",
-      ]);
+      const admission = admitStandaloneTranscript(["src/inside.ts"], transcript(["blocker"]), "code-reviewer");
+      expect(admission.ok).toBe(false);
+      if (!admission.ok) {
+        expect(admission.problems).toEqual([
+          "code-reviewer findings[0].file is outside the frozen review scope: src/x.ts",
+        ]);
+      }
     });
 
     it("reports evidence failure with the aggregation prefix", () => {
-      const problems = standaloneTranscriptProblems(["src/x.ts"], "not a machine summary", "code-reviewer");
-      expect(problems.length).toBe(1);
-      expect(problems[0]).toContain("code-reviewer: ");
+      const admission = admitStandaloneTranscript(["src/x.ts"], "not a machine summary", "code-reviewer");
+      expect(admission.ok).toBe(false);
+      if (!admission.ok) {
+        expect(admission.problems.length).toBe(1);
+        expect(admission.problems[0]).toContain("code-reviewer: ");
+      }
     });
 
     it("is the exact predicate aggregation uses", () => {
       // The façade rejects a slot for attempt 2 exactly when aggregation would
       // have refused the whole run: an aggregate that fails on a transcript
-      // with zero standaloneTranscriptProblems must be a GLOBAL (cross-agent)
-      // error, never a per-transcript one — otherwise the retry path and the
+      // with zero admission problems must be a GLOBAL (cross-agent) error,
+      // never a per-transcript one — otherwise the retry path and the
       // aggregate boundary could drift.
       const output = transcript(["in scope blocker"]);
       const scope = ["src/x.ts"];
-      const problems = standaloneTranscriptProblems(scope, output, "code-reviewer");
+      const admission = admitStandaloneTranscript(scope, output, "code-reviewer");
       const result = aggregateLegacyStandaloneReview({
         runId: "run.abc",
         scope,
         transcripts: [{ agent: "code-reviewer", output }],
       });
-      expect(problems).toEqual([]);
+      expect(admission.ok).toBe(true);
       expect(result.ok).toBe(true);
     });
   });
