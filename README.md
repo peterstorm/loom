@@ -214,7 +214,7 @@ Converts spec + plan into a concrete task graph:
 - **8–12 tasks max** • **4–5 waves max** • **4–6 parallel tasks per wave**
 - Each task is assigned to a specialized implementation agent
 - Dependencies flow backward only (a wave depends only on prior waves)
-- Each task records spec anchors (FR-XXX) it satisfies
+- Each task may record spec anchors (FR-XXX) it satisfies
 
 On user approval the plugin: validates the task-graph schema, creates a GitHub Issue for tracking, and populates the state file with tasks and wave schedule.
 

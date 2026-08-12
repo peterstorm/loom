@@ -4,12 +4,21 @@
  * (existsSync/statSync) and writes to stderr.
  */
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import type { HookResult } from "../types";
-import { TASK_GRAPH_PATH, SUBAGENT_DIR } from "../config";
+import { IMPL_AGENTS, TASK_GRAPH_PATH, SUBAGENT_DIR } from "../config";
 import { parseSessionId } from "../machine/evidence";
 
 const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "edit", "write", "multi_edit"]);
+
+/** Write-grant agent IDs are minted by the Pi write-grant system and carry
+ *  cryptographic proof of authorization. They bypass the IMPL_AGENTS check
+ *  because the grant itself is the capability — not the agent's declared role. */
+const PI_WRITE_GRANT_PREFIX = "pi-grant-";
+
+function isWriteAuthorizedAgent(agentId: string): boolean {
+  return IMPL_AGENTS.has(agentId) || agentId.startsWith(PI_WRITE_GRANT_PREFIX);
+}
 
 export function shouldBlockDirectEdit(
   toolName: string,
@@ -31,14 +40,22 @@ export function shouldBlockDirectEdit(
     };
   }
 
-  // Allow if a subagent is active. The interpolation below uses the BRANDED
-  // SessionId (path-safe by construction — same guarantee ledger.ts's
-  // sessionScopedPath provides; the fs shell is not imported here to keep
-  // the core light for the pi bridge).
+  // Allow if an IMPLEMENTATION subagent is active. Review agents and verifiers
+  // are read-only and must never receive write capability, even when active.
+  // The interpolation below uses the BRANDED SessionId (path-safe by
+  // construction — same guarantee ledger.ts's sessionScopedPath provides).
   const activeFile = `${SUBAGENT_DIR}/${parsed}.active`;
   try {
     if (existsSync(activeFile) && statSync(activeFile).size > 0) {
-      return { kind: "allow" };
+      const roster = readFileSync(activeFile, "utf-8")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      const hasImplAgent = roster.some((agentId) => isWriteAuthorizedAgent(agentId));
+      if (hasImplAgent) {
+        return { kind: "allow" };
+      }
+      // Only review/verifier agents active — fall through to block.
     }
   } catch (e) {
     // An unstatable .active flag cannot prove a subagent is running — fall

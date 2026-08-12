@@ -1501,12 +1501,25 @@ export async function resumeRemediationFacade(
 ): Promise<FacadeDriveResult> {
   const checkpoint = await handle.readCheckpoint();
   if (checkpoint !== null) {
-    try {
-      const raw = JSON.parse(checkpoint) as { state?: unknown };
-      if (typeof raw === "object" && raw !== null && (raw.state as { state?: unknown } | undefined)?.state === "done") {
-        return { ok: true, action: { kind: "done", runId: handle.runId, outcome: { kind: "verified-index-installed" } } };
+    let raw: unknown;
+    try { raw = JSON.parse(checkpoint); }
+    catch { return failed("remediation checkpoint is invalid JSON"); }
+    if (typeof raw === "object" && raw !== null) {
+      const record = raw as { schemaVersion?: unknown; state?: { state?: unknown; receipt?: unknown } };
+      if (record.schemaVersion === 1 && typeof record.state === "object" && record.state !== null && record.state.state === "done") {
+        // Validate the stored receipt instead of fabricating one.
+        const receipt = record.state.receipt;
+        if (typeof receipt !== "object" || receipt === null ||
+            (receipt as { kind?: unknown }).kind !== "verified-index-installed" ||
+            typeof (receipt as { effectId?: unknown }).effectId !== "string" ||
+            typeof (receipt as { runId?: unknown }).runId !== "string" ||
+            typeof (receipt as { indexDigest?: unknown }).indexDigest !== "string" ||
+            typeof (receipt as { witnessDigest?: unknown }).witnessDigest !== "string") {
+          return failed("remediation checkpoint claims done but contains no valid verified-index-installed receipt");
+        }
+        return { ok: true, action: { kind: "done", runId: handle.runId, outcome: receipt } };
       }
-    } catch { return failed("remediation checkpoint is invalid JSON"); }
+    }
   }
   return driveRemediationFacade(handle, registration);
 }
@@ -1770,7 +1783,8 @@ async function finalizeStandaloneState(
   }
   const receipt = { kind: "artifact-set-published" as const, effectId: ready.publicationIntent.effectId,
     runId: handle.runId, artifacts: Object.freeze([artifact.value]) as readonly [typeof artifact.value] };
-  await handle.recordReceipt(receipt);
+  const recorded = await handle.recordReceipt(receipt);
+  if (!recorded.ok) return failed(`cannot durably record publication receipt: ${recorded.error.message}`);
   const done = reduceStandaloneReviewMachine(ready, { kind: "result-published", result: JSON.parse(json), receipt });
   if (!done.ok || done.value.kind !== "done") return failed(done.ok ? "standalone result did not reach done" : done.error.message);
   await handle.writeCheckpoint(serializeStandaloneReviewMachineState(done.value));

@@ -32,8 +32,20 @@ describe("shouldBlockDirectEdit — session-id parse boundary", () => {
 
   it("active subagent → allow", () => {
     mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
-    writeFileSync(join(SUBAGENT_DIR, `${s}.active`), "a-1\n");
+    writeFileSync(join(SUBAGENT_DIR, `${s}.active`), "code-implementer-agent\n");
     expect(shouldBlockDirectEdit("Edit", s, orchestrating).kind).toBe("allow");
+  });
+
+  it("active write-grant agent → allow", () => {
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(join(SUBAGENT_DIR, `${s}.active`), "pi-grant-abcdef0123456789\n");
+    expect(shouldBlockDirectEdit("Edit", s, orchestrating).kind).toBe("allow");
+  });
+
+  it("active review agent → block (read-only role)", () => {
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(join(SUBAGENT_DIR, `${s}.active`), "code-reviewer\n");
+    expect(shouldBlockDirectEdit("Edit", s, orchestrating).kind).toBe("block");
   });
 
   it("a traversal session id fails CLOSED — block, no path outside SUBAGENT_DIR consulted", () => {

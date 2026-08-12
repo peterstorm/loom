@@ -86,13 +86,11 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
   }
 
-  // `tasks.map` over an id no task holds is a total no-op, and the log line
-  // below asserts the findings were stored regardless. `extractTaskId` falls
-  // back to any standalone `T\d+` in the transcript, so a reviewer quoting an
-  // unrelated task id resolves to a task the graph does not have — and that
-  // reviewer's criticals were discarded while stderr reported them recorded.
-  // The sibling helper (helpers/store-review-findings.ts) guards exactly this;
-  // the SubagentStop path did not.
+  // Guard: reject findings for task IDs not present in the graph.
+  // `extractTaskId` falls back to any standalone `T\d+` in the transcript,
+  // so a reviewer quoting an unrelated task id resolves to one the graph
+  // does not have — this lookup rejects that case explicitly rather than
+  // silently discarding the findings via a no-op map.
   let targetTask: ReturnType<typeof mgr.load>["tasks"][number] | undefined;
   try {
     targetTask = mgr.load().tasks.find((t) => t.id === taskId);

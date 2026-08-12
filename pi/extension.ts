@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { existsSync, unlinkSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, unlinkSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Engine core — harness-agnostic, no Claude Code dependency (these do fs I/O)
@@ -104,6 +104,25 @@ import {
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const PI_RESOURCE_CACHE = join(PI_AGENT_DIR, "cache", "loom-resources");
+
+/**
+ * Fail-closed path existence check. Returns `true` (assume active) for any
+ * access error other than ENOENT — prevents EACCES, ELOOP, and other
+ * non-absence errors from silently disabling orchestration guards.
+ */
+function pathExistsFailClosed(path: string): boolean {
+  try {
+    accessSync(path, fsConstants.F_OK);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    // Non-ENOENT error (EACCES, ELOOP, etc.): assume path exists → fail closed.
+    process.stderr.write(
+      `loom(pi): pathExistsFailClosed cannot access ${path}: ${(error as Error).message} — assuming active (fail closed)\n`,
+    );
+    return true;
+  }
+}
 
 const isLoomOwnedResultAgent = (agentType: string): boolean =>
   PHASE_AGENT_MAP[agentType] !== undefined ||
@@ -313,13 +332,28 @@ async function recordPiRequestCaptureRejection(
   diagnostic: string,
 ): Promise<void> {
   const opened = openRunDirectory(runBinding.runsRoot, runBinding.runDirectory);
-  if (!opened.ok) return;
+  if (!opened.ok) {
+    process.stderr.write(
+      `loom(pi): recordPiRequestCaptureRejection: cannot open run directory ${runBinding.runDirectory}: ${opened.error.message}\n`,
+    );
+    return;
+  }
   const correlator = opened.value.readHarnessCorrelator(
     "pi", piSpawnRosterId(toolCallId, resultIndex, agentType),
   );
-  if (!correlator.ok || correlator.value === null) return;
+  if (!correlator.ok || correlator.value === null) {
+    process.stderr.write(
+      `loom(pi): recordPiRequestCaptureRejection: cannot resolve correlator for ${agentType}[${resultIndex}]: ${correlator.ok ? "no binding found" : correlator.error.message}\n`,
+    );
+    return;
+  }
   const issued = opened.value.readIssuedRequests();
-  if (!issued.ok) return;
+  if (!issued.ok) {
+    process.stderr.write(
+      `loom(pi): recordPiRequestCaptureRejection: cannot read issued requests: ${issued.error.message}\n`,
+    );
+    return;
+  }
   const request = issued.value.find(({ requestId }) => requestId === correlator.value?.requestId);
   if (request === undefined) return;
   await opened.value.appendEvent({
@@ -579,9 +613,9 @@ export default function (pi: ExtensionAPI) {
     try {
       const sessionId = ctx.sessionManager.getSessionId() ?? "unknown";
       const safeSessionId = parseSessionId(sessionId);
-      const graphIsActive = existsSync(taskGraphPath()) ||
+      const graphIsActive = pathExistsFailClosed(taskGraphPath()) ||
         rejectedChildWriteGrantSessions.has(sessionId) ||
-        (safeSessionId !== null && existsSync(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`));
+        (safeSessionId !== null && pathExistsFailClosed(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`));
 
       // Block direct edits during orchestration
       if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "multi_edit") {
