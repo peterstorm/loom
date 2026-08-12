@@ -1,10 +1,17 @@
 /**
  * Fail-closed LLM-profile enforcement for every Loom-owned agent.
  *
- * Claude Code supplies the requested model on the Agent/Task call. Pi's
- * generic subagent tool obtains it from the selected agent definition, so the
- * Pi path reads that frontmatter instead. Neither path may inherit the parent
- * session's current model.
+ * Claude Code supplies the requested model on the Agent/Task call; it must
+ * match the agent's declared profile binding exactly. Inheritance is never a
+ * fallback on that path.
+ *
+ * On Pi the launcher (the machine's subagent tool plus its model-routing
+ * policy) decides the effective model at spawn. Loom's Pi agents are rendered
+ * with their declared binding, but the launcher may deliberately override it
+ * — for example inheriting the parent session's model when the parent runs a
+ * local model. This guard therefore proves the Pi definition is the synced
+ * render and the spawn scope is user-global; it does not veto the launcher's
+ * routing decision.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -93,7 +100,7 @@ const handler: HookHandler = async (stdin) => {
     if (!path) {
       return {
         kind: "block",
-        message: `BLOCKED: Pi agent '${agent}' has no generated definition. Run scripts/sync-pi-agents.sh; current-model inheritance is forbidden.`,
+        message: `BLOCKED: Pi agent '${agent}' has no generated definition. Run scripts/sync-pi-agents.sh; model routing cannot prove a binding without the synced render.`,
       };
     }
     const validation = validatePiAgentDefinitionFile(path, agent, LOOM_PACKAGE_ROOT);

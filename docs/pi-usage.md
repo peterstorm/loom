@@ -28,6 +28,12 @@ pi install npm:@peterstorm/loom@<version>
 After install or update, run `scripts/sync-pi-agents.sh` from that installed
 package root, then `/reload`. Loom agents require explicit Pi model bindings and
 are generated into `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/agents`.
+Loom's guard enforces a two-layer model contract: Claude Code spawns must match
+the agent's declared binding exactly, while on Pi the launcher's routing policy
+(`pi/model-routing.json`) decides the effective model at spawn — a machine
+running a local parent model may explicitly inherit it for every child, and
+the guard proves the synced render and user-global spawn scope rather than
+vetoing that routing decision.
 `PI_CODING_AGENT` is Pi's process identity marker. Loom selects Pi state/rule
 paths when either that marker or `PI_CODING_AGENT_DIR` is present, so explicit
 agent-directory configuration also works in processes that do not carry the
@@ -94,7 +100,7 @@ The package provides:
 | Review finding capture | Shared review-output core |
 | Prompt/skill root expansion | Content-addressed Pi resource rendering |
 | Agent root expansion | `model-profiles render-pi` |
-| Explicit agent models | Generated Pi agent frontmatter |
+| Explicit agent models | Generated Pi agent frontmatter (launcher routing may override) |
 
 Pi subagents are separate Pi processes. The generated agent definition already
 contains absolute package resource paths, so it does not depend on the parent

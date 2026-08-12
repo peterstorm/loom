@@ -4,7 +4,14 @@
  * This module is a functional core: it contains only immutable policy data and
  * total functions over caller-supplied values. In particular, resolution never
  * consults the current harness model. An absent agent, profile, or binding is a
- * typed failure rather than an instruction to inherit from the parent session.
+ * typed failure rather than an implicit instruction to inherit from the parent
+ * session.
+ *
+ * The pure core owns declarations only. Effective Pi spawn bindings are
+ * delegated to the machine's launcher routing policy (dotfiles
+ * `pi/model-routing.json`), which may explicitly inherit a local parent's
+ * model for every child. That override is a policy decision at the spawn
+ * boundary — this module never infers one.
  */
 
 export const LLM_PROFILE_IDS = [

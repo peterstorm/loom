@@ -371,7 +371,7 @@ Two additional bundled skills live alongside the commands rather than in `/skill
 
 ## Agents
 
-Agents live under `/agents/<name>.md`. Each is a markdown persona with optional `skills:` preloads and a mandatory semantic `model-profile`. Every profile maps to an explicit Claude Code model and an exact Pi `openai-codex` provider/model/thinking target. Parent-model inheritance is forbidden. `helper model-profiles validate` proves the source definitions; `scripts/sync-pi-agents.sh` renders Pi-specific definitions.
+Agents live under `/agents/<name>.md`. Each is a markdown persona with optional `skills:` preloads and a mandatory semantic `model-profile`. Every profile maps to an explicit Claude Code model and an exact Pi `openai-codex` provider/model/thinking target. Claude Code spawns must match the declared binding exactly — Loom never falls back to the parent model on that path. On Pi, the launcher's routing policy decides the effective binding at spawn; machines running a local parent model may inherit it for every child, while the guard still proves the rendered definition and spawn scope. `helper model-profiles validate` proves the source definitions; `scripts/sync-pi-agents.sh` renders Pi-specific definitions.
 
 ### Phase agents (sequential)
 

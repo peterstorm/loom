@@ -54,6 +54,8 @@ const GATES: ReadonlyArray<{
   readonly handler: HookHandler;
   readonly toolInput: Record<string, unknown>;
   readonly expect: string;
+  /** Optional per-spawn-tool expectation override (pi vs claude-code branches). */
+  readonly expectByTool?: Readonly<Record<string, string>>;
 }> = [
   {
     name: "validate-phase-order",
@@ -77,7 +79,13 @@ const GATES: ReadonlyArray<{
     name: "validate-agent-model",
     handler: validateAgentModel,
     toolInput: { subagent_type: "loom:code-implementer-agent", prompt: "Implement T9" },
-    expect: "inheritance is forbidden",
+    expect: "model routing cannot prove a binding",
+    // The pi path (subagent) and the claude-code path (Task/Agent) report
+    // different contract violations for the same missing definition.
+    expectByTool: {
+      Task: "parent-model inheritance is forbidden",
+      Agent: "parent-model inheritance is forbidden",
+    },
   },
   {
     name: "validate-agent-skill",
@@ -135,7 +143,8 @@ describe("spawn gates honour every SUBAGENT_SPAWN_TOOLS name", () => {
           [],
         );
         expect(result.kind, `${gate.name} did not gate tool_name "${tool}"`).toBe("block");
-        if (result.kind === "block") expect(result.message).toContain(gate.expect);
+        const expected = gate.expectByTool?.[tool] ?? gate.expect;
+        if (result.kind === "block") expect(result.message).toContain(expected);
       });
     }
 
