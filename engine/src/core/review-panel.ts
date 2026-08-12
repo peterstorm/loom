@@ -759,6 +759,37 @@ function parseRefutationEntry(
  * kernel envelope, a different payload, and NO crossCheck — findings have no
  * meaningful order, so there is no cross-entry rule to enforce.
  */
+function containsCompetingVerdictObject(text: string): boolean {
+  for (let start = 0; start < text.length; start += 1) {
+    if (text[start] !== "{") continue;
+    let depth = 0;
+    let quote: '"' | "'" | null = null;
+    let escaped = false;
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index]!;
+      if (quote !== null) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === quote) quote = null;
+        continue;
+      }
+      if (char === '"' || char === "'") { quote = char; continue; }
+      if (char === "{") depth += 1;
+      else if (char === "}") {
+        depth -= 1;
+        if (depth !== 0) continue;
+        try {
+          const candidate = JSON.parse(text.slice(start, index + 1)) as unknown;
+          if (typeof candidate === "object" && candidate !== null && !Array.isArray(candidate) &&
+              (Object.hasOwn(candidate, "criterion") || Object.hasOwn(candidate, "verdicts"))) return true;
+        } catch { /* code/prose braces are not a competing JSON payload */ }
+        break;
+      }
+    }
+  }
+  return false;
+}
+
 export function refutationVerdictJson(raw: string): ParseResult<string> {
   const trimmed = raw.trim();
   try {
@@ -777,10 +808,11 @@ export function refutationVerdictJson(raw: string): ParseResult<string> {
     }
     const candidate = fenced[0]![1]!.trim();
     const outside = `${trimmed.slice(0, fenced[0]!.index)}\n${trimmed.slice(fenced[0]!.index! + fenced[0]![0].length)}`;
-    // Ordinary analysis prose is tolerated, but braces outside the sole fence
-    // are an unambiguous competing structured payload signal (including keys
-    // hidden with JSON Unicode escapes). Do not guess which object was final.
-    if (/[{}]/.test(outside)) {
+    // Ordinary analysis/code prose (including `{ strict: true }`) is tolerated.
+    // A structurally valid outside JSON object claiming decoded `criterion` or
+    // `verdicts` authority is a competing payload, including Unicode-escaped
+    // key spellings. Do not guess which object was final.
+    if (containsCompetingVerdictObject(outside)) {
       return fail(["refutation verdict contains competing JSON-looking payload outside the json fence"]);
     }
     try {
