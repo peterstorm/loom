@@ -38,8 +38,9 @@ const failure = <T>(field: string, message: string): DomainResult<T, RunContextE
 
 /**
  * Lower a Loom run id into Fugue's id space. Injective: `.` → `:` is the only
- * substitution, and a run id already containing `:` keeps it, so two different
- * Loom ids cannot collide on one Fugue id.
+ * substitution; a run id already containing `:` is REJECTED by the LOOM_RUN_ID
+ * guard rather than lowered. Keeping the source alphabet colon-free is what
+ * makes two distinct Loom ids unable to collide on one Fugue id.
  */
 export function lowerRunId(runId: OrchestrationRunId): DomainResult<FugueRunId, RunContextError> {
   if (!LOOM_RUN_ID.test(runId)) {

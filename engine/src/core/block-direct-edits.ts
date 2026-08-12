@@ -6,7 +6,7 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import type { HookResult } from "../types";
-import { IMPL_AGENTS, TASK_GRAPH_PATH, SUBAGENT_DIR } from "../config";
+import { IMPL_AGENTS, TASK_GRAPH_PATH, SUBAGENT_DIR, pathExistsFailClosed } from "../config";
 import { parseSessionId } from "../machine/evidence";
 
 const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "edit", "write", "multi_edit"]);
@@ -20,10 +20,21 @@ function isWriteAuthorizedAgent(agentId: string): boolean {
   return IMPL_AGENTS.has(agentId) || agentId.startsWith(PI_WRITE_GRANT_PREFIX);
 }
 
+/**
+ * Default task-graph existence probe, FAIL-CLOSED. The historical default was
+ * bare `existsSync(TASK_GRAPH_PATH)`, which returns `false` for ANY error —
+ * EACCES, ELOOP, ENOTDIR, EIO all read as "no graph" and the gate silently
+ * returned allow while the operator believed it was blocked. ENOENT is the
+ * only absent answer; anything unreadable stays armed (`pathExistsFailClosed`
+ * reports the cause and assumes present). Pi passes its own override built on
+ * the same semantics; this default covers every other caller.
+ */
+const defaultTaskGraphExists = (): boolean => pathExistsFailClosed(TASK_GRAPH_PATH);
+
 export function shouldBlockDirectEdit(
   toolName: string,
   sessionId: string,
-  taskGraphExists: () => boolean = () => existsSync(TASK_GRAPH_PATH),
+  taskGraphExists: () => boolean = defaultTaskGraphExists,
 ): HookResult {
   if (!taskGraphExists()) return { kind: "allow" };
   if (!FILE_TOOLS.has(toolName)) return { kind: "allow" };

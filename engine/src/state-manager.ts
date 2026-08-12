@@ -857,6 +857,14 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
     return parseErr("wave_gates must be an object");
   }
   for (const [wave, gate] of Object.entries(waveGates as Record<string, unknown>)) {
+    // Wave numbers are written as String(wave) with wave >= 1 — canonical
+    // decimal, no leading zeros. A key outside that domain ("01", "abc",
+    // "-1", "1.0") would load here and persist, even though every writer
+    // and reader only ever uses String(wave); reject it at the boundary so
+    // the record-key domain matches the type's wave-number semantics.
+    if (!/^(0|[1-9]\d*)$/.test(wave) || Number(wave) < 1) {
+      return parseErr(`wave_gates key must be a canonical positive integer wave number, got ${JSON.stringify(wave)}`);
+    }
     const err = waveGateError(gate, wave);
     if (err !== null) return parseErr(err);
   }

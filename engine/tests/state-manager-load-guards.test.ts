@@ -232,3 +232,27 @@ describe("taskFindingsError slot_authority validation", () => {
     expect(parseTaskGraph(withSlots([{ ...first!, attempted: 2 }, second])).ok).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// wave_gates record-key domain (round-40: type-design-analyzer advisory)
+// ---------------------------------------------------------------------------
+
+const waveGateRecord = {
+  impl_complete: false,
+  tests_passed: null,
+  reviews_complete: false,
+  blocked: false,
+} as const;
+
+describe("parseTaskGraph wave_gates record-key validation", () => {
+  it("accepts canonical positive integer keys (String(wave))", () => {
+    expect(parseTaskGraph(graph({ wave_gates: { "1": waveGateRecord } })).ok).toBe(true);
+  });
+
+  it("rejects non-canonical wave_gates keys — even when the gate value is valid", () => {
+    for (const wave of ["01", "abc", "-1", "1.0", "0", "1e2"]) {
+      const err = errorOf(graph({ wave_gates: { [wave]: waveGateRecord } }));
+      expect(err).toContain("wave_gates key must be a canonical positive integer wave number");
+    }
+  });
+});

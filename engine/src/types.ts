@@ -434,10 +434,10 @@ export interface Task {
 }
 
 export interface WaveGate {
-  impl_complete: boolean;
-  tests_passed: boolean | null;
-  reviews_complete: boolean;
-  blocked: boolean;
+  readonly impl_complete: boolean;
+  readonly tests_passed: boolean | null;
+  readonly reviews_complete: boolean;
+  readonly blocked: boolean;
 }
 
 /** The initial (nothing verified yet) wave gate — the one shape every

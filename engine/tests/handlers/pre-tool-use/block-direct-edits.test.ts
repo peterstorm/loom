@@ -6,17 +6,22 @@
  */
 
 import { describe, it, expect, afterAll } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, symlinkSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { shouldBlockDirectEdit } from "../../../src/core/block-direct-edits";
 import blockDirectEdits from "../../../src/handlers/pre-tool-use/block-direct-edits";
-import { SUBAGENT_DIR } from "../../../src/config";
+import { SUBAGENT_DIR, TASK_GRAPH_PATH, pathExistsFailClosed } from "../../../src/config";
 
 const orchestrating = () => true;
 const s = `block-direct-${process.pid}-${Date.now()}`;
+// A session that never gets an .active file — used by the default-probe test
+// so a leftover active-file fixture from earlier cases cannot mask the gate.
+const sNoActive = `${s}-no-active`;
 
 afterAll(() => {
   rmSync(join(SUBAGENT_DIR, `${s}.active`), { force: true });
+  rmSync(join(SUBAGENT_DIR, `${sNoActive}.active`), { force: true });
 });
 
 describe("shouldBlockDirectEdit — session-id parse boundary", () => {
@@ -72,5 +77,38 @@ describe("block-direct-edits handler — malformed stdin fails CLOSED (round-11)
     if (result.kind === "block") {
       expect(result.message).toContain("malformed hook input");
     }
+  });
+});
+
+describe("pathExistsFailClosed — fail-closed existence probe (round-40 C1/C2)", () => {
+  const absent = join(tmpdir(), `loom-absent-${process.pid}-${Date.now()}`);
+
+  it("ENOENT is the only absent answer", () => {
+    expect(pathExistsFailClosed(absent)).toBe(false);
+  });
+
+  it("an existing path is present", () => {
+    expect(pathExistsFailClosed(process.cwd())).toBe(true);
+  });
+
+  it("a non-ENOENT access error (ELOOP symlink loop) assumes present — fail closed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loom-failclosed-"));
+    try {
+      const loop = join(dir, "loop");
+      symlinkSync(loop, loop); // self-referencing symlink → ELOOP on access
+      expect(pathExistsFailClosed(loop)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("shouldBlockDirectEdit — default task-graph probe fails CLOSED (round-40 C1)", () => {
+  it("the default probe is the fail-closed probe (unreadable paths stay armed)", () => {
+    // Wiring regression guard: the default must be pathExistsFailClosed, whose
+    // non-ENOENT branch keeps the gate armed (exercised above via ELOOP).
+    const viaDefault = shouldBlockDirectEdit("Edit", sNoActive);
+    const viaFailClosed = shouldBlockDirectEdit("Edit", sNoActive, () => pathExistsFailClosed(TASK_GRAPH_PATH));
+    expect(viaDefault.kind).toBe(viaFailClosed.kind);
   });
 });

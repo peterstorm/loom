@@ -10,7 +10,14 @@ function resolveRepoRoot(): string | undefined {
   if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR;
   try {
     return execSync("git rev-parse --show-toplevel", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim() || undefined;
-  } catch {
+  } catch (error) {
+    // Never silent: every downstream helper runs against cwd: undefined and
+    // its failures read as "no tests written" — the one indistinguishable
+    // lie this module must not tell without a trace.
+    process.stderr.write(
+      `loom: git rev-parse --show-toplevel failed at module load (${error instanceof Error ? error.message : String(error)}) — ` +
+        `remaining git helpers run against process.cwd and their failures will read as absent evidence\n`,
+    );
     return undefined;
   }
 }
@@ -66,7 +73,9 @@ function exec(cmd: string): string {
     return execSync(cmd, { encoding: "utf-8", cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] });
   } catch (e: unknown) {
     const stderr = e && typeof e === "object" && "stderr" in e ? String((e as { stderr: unknown }).stderr) : "";
-    if (stderr) process.stderr.write(`git warning: ${stderr.trim()}\n`);
+    // Warn even when stderr is empty: a failure without stderr (spawn ENOENT,
+    // killed process, permission error) must not be the silent one.
+    process.stderr.write(`git warning: ${stderr.trim() || (e instanceof Error ? e.message : String(e))}\n`);
     return "";
   }
 }
@@ -98,7 +107,12 @@ export function isGitRepo(): boolean {
   try {
     execSync("git rev-parse --git-dir", { cwd: repoRoot, stdio: "ignore" });
     return true;
-  } catch {
+  } catch (error) {
+    process.stderr.write(
+      `loom: isGitRepo could not verify a git repository` +
+        `${repoRoot === undefined ? " (repo root unresolved at module load)" : ` at ${repoRoot}`}: ` +
+        `${error instanceof Error ? error.message : String(error)} — new-test evidence will read as 'no tests written'\n`,
+    );
     return false;
   }
 }
@@ -178,10 +192,15 @@ export function diffUntracked(file: string): string {
       stdio: ["pipe", "pipe", "pipe"],
     });
   } catch (e: unknown) {
-    // git diff --no-index exits 1 when files differ (always for new files)
-    if (e && typeof e === "object" && "stdout" in e) {
+    // git diff --no-index exits 1 when files differ (always for new files) and
+    // carries the diff on stdout — that is the expected answer, not a failure.
+    if (e && typeof e === "object" && "status" in e && (e as { status?: unknown }).status === 1 &&
+        "stdout" in e) {
       return String((e as { stdout: unknown }).stdout ?? "");
     }
+    process.stderr.write(
+      `loom: git diff --no-index ${JSON.stringify(file)} failed: ${e instanceof Error ? e.message : String(e)}\n`,
+    );
     return "";
   }
 }

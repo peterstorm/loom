@@ -5,7 +5,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PHASES, type Phase } from "./types";
@@ -587,13 +587,38 @@ function taskGraphRelative(): string {
   return taskGraphRelatives()[0]!;
 }
 
+/**
+ * Fail-closed existence probe for orchestration state paths: ENOENT is the
+ * ONLY absent answer. `existsSync` returns `false` for ANY error — EACCES,
+ * ELOOP, ENOTDIR, EIO all read as "no file" — so an unreadable task-graph
+ * path would silently disarm the gates that arm on its presence. Non-ENOENT
+ * access errors therefore mean "cannot prove absence": assume present, say
+ * why, and let the gate fail closed. Mirrors pi/extension.ts
+ * `pathExistsFailClosed` so both harnesses hold the same semantics.
+ */
+export function pathExistsFailClosed(path: string): boolean {
+  try {
+    accessSync(path, fsConstants.F_OK);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    process.stderr.write(
+      `loom: cannot access ${path}: ${error instanceof Error ? error.message : String(error)} — assuming present (fail closed)\n`,
+    );
+    return true;
+  }
+}
+
 /** Find task graph by walking up from cwd to git root. */
 function findTaskGraphPath(): string {
   const relatives = taskGraphRelatives();
 
-  // Try cwd-relative candidates first (works when cwd = repo root).
+  // Try cwd-relative candidates first (works when cwd = repo root). A
+  // non-ENOENT-unreadable candidate is treated as PRESENT (fail closed):
+  // skipping it would point TASK_GRAPH_PATH at a creation path while the real
+  // graph sits unreadable, compounding the fail-open below.
   for (const relative of relatives) {
-    if (existsSync(relative)) return relative;
+    if (pathExistsFailClosed(relative)) return relative;
   }
 
   // Walk up via git rev-parse and preserve candidate priority at the root.
@@ -601,7 +626,7 @@ function findTaskGraphPath(): string {
     const root = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
     for (const relative of relatives) {
       const absolute = join(root, relative);
-      if (existsSync(absolute)) return absolute;
+      if (pathExistsFailClosed(absolute)) return absolute;
     }
   } catch (e) {
     // Not a git repo (or git missing): the walk-up is skipped and only the

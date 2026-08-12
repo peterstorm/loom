@@ -2,7 +2,9 @@
  * Advance current_phase when phase agents complete.
  * Extracts and stores phase artifacts from transcript.
  *
- * Phases: brainstorm → specify → clarify → architecture → plan-alignment → decompose → execute
+ * Canonical phase-agent chain (happy path; transitions may skip stages per
+ * config.VALID_TRANSITIONS — types.ts PHASES is the authoritative order,
+ * which includes init as the first phase).
  */
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";

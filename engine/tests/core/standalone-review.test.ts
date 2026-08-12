@@ -491,6 +491,11 @@ const reviewerBindings = {
     pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.5", thinking: "high" },
     claude: { harness: "claude-code", model: "sonnet" },
   },
+  "comment-analyzer": {
+    profile: "mechanical",
+    pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" },
+    claude: { harness: "claude-code", model: "haiku" },
+  },
 } as const;
 
 function rawStandaloneAuthority(role: keyof typeof reviewerBindings, slot: number, attempt: 1 | 2) {
@@ -2102,5 +2107,47 @@ describe("prepareStandaloneReview refuses a roster that diverges from the select
 
   it("refuses a roster missing a slot the selection requires", () => {
     expect(errorsOf(preparationInput({ roster: rawStandaloneRoster().slice(0, 1) })).length).toBeGreaterThan(0);
+  });
+});
+
+describe("parseReviewMetadata docs_only invariant (round-40: type-design-analyzer advisory)", () => {
+  // A docs-only scope selects exactly code-reviewer + comment-analyzer.
+  function docsOnlyInput(overrides: Readonly<Record<string, unknown>> = {}) {
+    return preparationInput({
+      explicitScope: ["docs/README.md"],
+      scopeSafety: [{ path: "docs/README.md", status: "safe" }],
+      roster: (["code-reviewer", "comment-analyzer"] as const).map((role, index) => ({
+        slotId: `slot:${index + 1}`,
+        attempts: [
+          rawStandaloneAuthority(role, index + 1, 1),
+          rawStandaloneAuthority(role, index + 1, 2),
+        ],
+      })),
+      reviewMetadata: {
+        requested_kinds: ["comments"], docs_only: true, source_or_test_changed: false,
+        types_changed: false, comments_changed: true, additions: 0, file_count: 1,
+        new_structure: false, languages: ["Markdown"],
+      },
+      ...overrides,
+    });
+  }
+
+  it("accepts a docs-only metadata record that also changes comments", () => {
+    const prepared = prepareStandaloneReview(docsOnlyInput());
+    expect(prepared.ok).toBe(true);
+  });
+
+  it("refuses docs_only without comments_changed — the contradiction that would silently drop comment-analyzer", () => {
+    const prepared = prepareStandaloneReview(docsOnlyInput({
+      reviewMetadata: {
+        requested_kinds: ["comments"], docs_only: true, source_or_test_changed: false,
+        types_changed: false, comments_changed: false, additions: 0, file_count: 1,
+        new_structure: false, languages: ["Markdown"],
+      },
+    }));
+    expect(prepared.ok).toBe(false);
+    if (!prepared.ok) {
+      expect(prepared.error.errors.join("; ")).toContain("comments_changed must be true when docs_only is true");
+    }
   });
 });
