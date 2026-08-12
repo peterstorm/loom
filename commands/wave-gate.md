@@ -64,3 +64,23 @@ Resume is idempotent. Pi and Claude persist exact native-id/request bindings and
 raw final bytes directly into engine-declared slots. Never write transcripts,
 build manifests, select models, tally findings, mutate the protected State File,
 or stage deterministic operation output in the parent.
+
+## Restarting an exhausted reviewer run
+
+Only when the blocked diagnostic says Wave reviewer **attempt 2 exhausted**, make
+a fresh direct-child Run Directory and invoke the engine-owned restart:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration restart \
+  --runs-root ".claude/reviews/wave-gate-runs" \
+  --run "<exhausted-run-directory>" \
+  --new-run "<fresh-replacement-run-directory>"
+```
+
+The restart refuses while any outstanding slot lacks a durably captured attempt-2
+rejection. On success it atomically retires the old active authority, preserves
+accepted findings as prior findings, clears rejected packet evidence, preserves
+the implementation review generation, installs a fresh run/epoch-bound Review Packet,
+and returns the replacement `spawn-batch`. Execute that exact batch normally.
+The old transcripts remain immutable audit evidence and cannot bind to the new
+generation. Never repair, copy, or delete exhausted transcripts by hand.

@@ -355,7 +355,20 @@ async function recordPiRequestCaptureRejection(
     return;
   }
   const request = issued.value.find(({ requestId }) => requestId === correlator.value?.requestId);
-  if (request === undefined) return;
+  if (request === undefined) {
+    process.stderr.write(
+      `loom(pi): recordPiRequestCaptureRejection: correlator request ${correlator.value.requestId} has no issued authority\n`,
+    );
+    return;
+  }
+  const existingEvents = await opened.value.readEvents();
+  const alreadyRecorded = existingEvents.some(({ event }) => {
+    if (typeof event !== "object" || event === null || Array.isArray(event)) return false;
+    const record = event as Record<string, unknown>;
+    return record.kind === "request-capture-rejected" && record.requestId === request.requestId &&
+      record.slotId === request.slotId && record.attempt === request.attempt;
+  });
+  if (alreadyRecorded) return;
   await opened.value.appendEvent({
     schemaVersion: 1,
     sequence: 0,

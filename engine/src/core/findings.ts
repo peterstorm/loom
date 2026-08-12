@@ -1149,6 +1149,40 @@ function sameFindingContent(left: DraftFinding, right: DraftFinding): boolean {
     left.line === right.line;
 }
 
+/**
+ * Materialize only the NEW findings from reviewer evidence already accepted by
+ * an incomplete packet. Prior-finding resolution still requires the complete
+ * roster and is therefore deliberately not applied here. Used when an
+ * exhausted packet is retired so accepted criticals remain auditable instead
+ * of disappearing with `review_run`.
+ */
+export function preserveAcceptedReviewRunFindings(task: Task): Task {
+  const run = task.review_run;
+  if (run === undefined || run.evidence.length === 0) return task;
+  const priorFindings = task.findings ?? [];
+  let active = [...priorFindings];
+  for (const agent of run.expected_agents) {
+    const evidence = run.evidence.find((candidate) => candidate.agent === agent);
+    if (evidence === undefined) continue;
+    const genuinelyNew = evidence.new_findings.filter((draft) =>
+      !priorFindings.some((finding) => sameFindingContent(finding, draft))
+    );
+    const attributed = attributeFindings(
+      genuinelyNew,
+      agent,
+      nextOrdinal(active, task.refuted_findings ?? [], agent, task.resolved_findings ?? []),
+      { generation: run.generation, packetId: run.packet_id },
+    );
+    active = [...active, ...attributed];
+  }
+  return {
+    ...task,
+    findings: active,
+    critical_findings: [...claimsOfSeverity(active, "critical")],
+    advisory_findings: [...claimsOfSeverity(active, "advisory")],
+  };
+}
+
 function finalizeReviewRun(task: Task, run: ReviewRun): Task {
   const prior = new Map((task.findings ?? []).map((finding) => [finding.id, finding]));
   const resolvedIds = new Set(run.prior_finding_ids.filter((id) => {

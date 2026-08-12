@@ -16,6 +16,7 @@
  * to observe an Agent's final payload, and what its own correlator is.
  */
 
+import { createHash } from "node:crypto";
 import {
   bindCapture,
   parseFinalPayload,
@@ -132,13 +133,36 @@ export async function captureHarnessResult(args: Readonly<{
     nativeId: correlator.value.nativeId,
   });
 
-  const payload = parseFinalPayload(args.candidates);
-  if (!payload.ok) {
-    return { kind: "rejected", reason: payload.error.reason, message: payload.error.message };
-  }
-
   const issued = handle.readIssuedRequests();
   if (!issued.ok) return { kind: "rejected", reason: "requests", message: issued.error.message };
+  const request = issued.value.find(({ requestId }) => requestId === identity.requestId);
+  if (request === undefined) {
+    return { kind: "rejected", reason: "unknown-request", message: "correlated request has no issued authority" };
+  }
+  const reject = async (reason: string, message: string): Promise<CaptureOutcome> => {
+    const terminal = await handle.rejectCapture(request, `${reason}: ${message}`);
+    if (!terminal.ok) {
+      return { kind: "rejected", reason: "rejection-persistence", message: terminal.error.message };
+    }
+    await handle.appendEvent({
+      schemaVersion: 1,
+      sequence: 0,
+      dedupKey: `capture-rejected:${createHash("sha256").update(`${request.requestId}:${request.attempt}`).digest("hex")}`,
+      recordedAtMs: Date.now(),
+      event: {
+        kind: "request-capture-rejected",
+        requestId: request.requestId,
+        slotId: request.slotId,
+        attempt: request.attempt,
+        diagnostic: `${reason}: ${message}`,
+      },
+    });
+    return { kind: "rejected", reason, message };
+  };
+
+  const payload = parseFinalPayload(args.candidates);
+  if (!payload.ok) return reject(payload.error.reason, payload.error.message);
+
   const captured = handle.readCapturedAttempts();
   if (!captured.ok) return { kind: "rejected", reason: "transcripts", message: captured.error.message };
   const bound = bindCapture({
@@ -149,10 +173,6 @@ export async function captureHarnessResult(args: Readonly<{
   });
   if (!bound.ok) return { kind: "rejected", reason: bound.error.reason, message: bound.error.message };
 
-  const request = issued.value.find(({ requestId }) => requestId === bound.value.requestId);
-  if (request === undefined) {
-    return { kind: "rejected", reason: "unknown-request", message: "issued request vanished between binding and capture" };
-  }
   if (correlator.value.role !== request.role) {
     return {
       kind: "rejected",

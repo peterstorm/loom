@@ -759,12 +759,47 @@ function parseRefutationEntry(
  * kernel envelope, a different payload, and NO crossCheck — findings have no
  * meaningful order, so there is no cross-entry rule to enforce.
  */
+export function refutationVerdictJson(raw: string): ParseResult<string> {
+  const trimmed = raw.trim();
+  try {
+    JSON.parse(trimmed);
+    return ok(trimmed);
+  } catch {
+    // Harnesses occasionally return analysis prose plus the exact requested
+    // JSON in a single fenced block. Preserve the immutable raw transcript,
+    // but normalize this one unambiguous transport wrapper before semantic
+    // validation. Multiple JSON fences remain ambiguous and fail closed.
+    const fenced = [...trimmed.matchAll(/```json[ \t]*\r?\n([\s\S]*?)\r?\n```/gi)];
+    if (fenced.length !== 1) {
+      return fail([fenced.length === 0
+        ? "refutation verdict is not valid JSON and contains no single json fence"
+        : "refutation verdict contains multiple json fences"]);
+    }
+    const candidate = fenced[0]![1]!.trim();
+    const outside = `${trimmed.slice(0, fenced[0]!.index)}\n${trimmed.slice(fenced[0]!.index! + fenced[0]![0].length)}`;
+    // Ordinary analysis prose is tolerated, but braces outside the sole fence
+    // are an unambiguous competing structured payload signal (including keys
+    // hidden with JSON Unicode escapes). Do not guess which object was final.
+    if (/[{}]/.test(outside)) {
+      return fail(["refutation verdict contains competing JSON-looking payload outside the json fence"]);
+    }
+    try {
+      JSON.parse(candidate);
+      return ok(candidate);
+    } catch {
+      return fail(["refutation verdict json fence is not valid JSON"]);
+    }
+  }
+}
+
 export function parseRefutationVerdict(
   rawJson: string,
   expectedLens: ReviewLens,
   expectedFindingIds: readonly WaveFindingId[],
 ): ParseResult<VerdictEnvelope<RefutationVerdict>> {
-  return parseVerdictEnvelope<RefutationVerdict, WaveFindingId>(rawJson, expectedLens, expectedFindingIds, {
+  const normalized = refutationVerdictJson(rawJson);
+  if (!normalized.ok) return normalized;
+  return parseVerdictEnvelope<RefutationVerdict, WaveFindingId>(normalized.value, expectedLens, expectedFindingIds, {
     label: "refutation verdict",
     entriesKey: "verdicts",
     itemIdKey: "finding_id",

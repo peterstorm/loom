@@ -5,6 +5,8 @@
  *   helper orchestration status [--json] [--wave N]
  *   helper orchestration start <architecture|refutation|standalone-review|wave-gate|remediation> --run <run-directory>
  *                              --runs-root <root> < program.json
+ *   helper orchestration restart --run <exhausted-wave-run> --new-run <fresh-run-directory>
+ *                                --runs-root <root>
  *   helper orchestration resume --run <run-directory> --runs-root <root>
  *   helper orchestration submit --run <run-directory> --runs-root <root>
  *                               --request <request-id> --slot <slot-id>
@@ -82,13 +84,14 @@ import {
   resumeRemediationFacade,
   resumeStandaloneFacade,
   resumeWaveGateFacade,
+  restartWaveGateFacade,
   startRemediationFacade,
   startStandaloneFacade,
   startWaveGateFacade,
   waveAdvisoryDecisionRequestId,
 } from "./orchestration-programs";
 
-const OPERATIONS = ["status", "start", "resume", "submit", "correlate", "complete", "decide"] as const;
+const OPERATIONS = ["status", "start", "restart", "resume", "submit", "correlate", "complete", "decide"] as const;
 type Operation = (typeof OPERATIONS)[number];
 
 const isOperation = (value: string | undefined): value is Operation =>
@@ -102,6 +105,7 @@ function usage(): HookResult {
       "",
       "  status  [--json] [--wave N]",
       "  start   <architecture|refutation|standalone-review|wave-gate|remediation> --runs-root <root> --run <run-directory> < program.json",
+      "  restart --runs-root <root> --run <exhausted-wave-run> --new-run <fresh-run-directory>",
       "  resume  --runs-root <root> --run <run-directory>",
       "  submit  --runs-root <root> --run <run-directory> --request <id> --slot <id> --attempt <1|2>",
       "  correlate --runs-root <root> --run <run-directory> --request <id> --harness <pi|claude> --native-id <id> --agent <role>",
@@ -543,6 +547,27 @@ async function startOperation(stdin: string, args: readonly string[]): Promise<H
   const driven = await driveRegisteredPanel(bound.value.handle, registration);
   if (!driven.ok) return { kind: "error", message: driven.message };
   return emitRunAction(bound.value.handle, driven.action);
+}
+
+async function restartOperation(args: readonly string[]): Promise<HookResult> {
+  const previous = bindRun(args);
+  if (!isBound(previous)) return previous;
+  const runsRoot = flag(args, "runs-root");
+  const nextRunDirectory = flag(args, "new-run");
+  if (runsRoot === null || nextRunDirectory === null) {
+    return { kind: "error", message: "restart requires --runs-root, --run, and --new-run" };
+  }
+  const next = openRunDirectory(runsRoot, nextRunDirectory);
+  if (!next.ok) return { kind: "error", message: `cannot bind replacement run directory: ${next.error.message}` };
+  const stored = previous.value.handle.readProgramRegistration();
+  if (!stored.ok) return { kind: "error", message: stored.error.message };
+  const registration = stored.value === null ? null : parseRegisteredFacadeProgram(stored.value);
+  if (registration === null || registration.kind !== "wave-gate") {
+    return { kind: "error", message: "restart currently requires a registered Wave Gate run" };
+  }
+  const driven = await restartWaveGateFacade(previous.value.handle, next.value, registration);
+  if (!driven.ok) return { kind: "error", message: driven.message };
+  return emitRunAction(next.value, driven.action);
 }
 
 /**
@@ -1124,6 +1149,8 @@ const handler: HookHandler = async (stdin, args) => {
       return statusOperation(rest);
     case "start":
       return startOperation(stdin, rest);
+    case "restart":
+      return restartOperation(rest);
     case "resume":
       return resumeOperation(rest);
     case "submit":

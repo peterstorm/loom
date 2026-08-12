@@ -429,6 +429,37 @@ describe("parseRefutationVerdict — the kernel envelope, a different payload", 
     expect(parseRefutationVerdict(input, "reproduction", IDS).ok).toBe(false);
   });
 
+  it("accepts one unambiguous json fence surrounded by model analysis prose", () => {
+    const fenced = [
+      "I checked each finding against the source.",
+      "```json",
+      raw(),
+      "```",
+      "All entries are covered above.",
+    ].join("\n");
+    expect(parseRefutationVerdict(fenced, "reproduction", IDS).ok).toBe(true);
+  });
+
+  it("rejects multiple json fences as ambiguous evidence", () => {
+    const fenced = `\`\`\`json\n${raw()}\n\`\`\`\n\`\`\`json\n${raw()}\n\`\`\``;
+    expect(parseRefutationVerdict(fenced, "reproduction", IDS).ok).toBe(false);
+  });
+
+  it("rejects a competing unfenced verdict envelope outside the single fence", () => {
+    const competing = `${"analysis"}\n\`\`\`json\n${raw()}\n\`\`\`\n${raw({ criterion: "intent" })}`;
+    expect(parseRefutationVerdict(competing, "reproduction", IDS).ok).toBe(false);
+  });
+
+  it("rejects escaped-key competing JSON outside the fence", () => {
+    const escaped = `analysis\n\`\`\`json\n${raw()}\n\`\`\`\n{"criteri\\u006fn":"intent","verdict\\u0073":[]}`;
+    expect(parseRefutationVerdict(escaped, "reproduction", IDS).ok).toBe(false);
+  });
+
+  it("still rejects a fenced payload with foreign finding authority", () => {
+    const foreign = raw({ verdicts: [{ ...JSON.parse(raw()).verdicts[0], finding_id: "T9:x-1" }, JSON.parse(raw()).verdicts[1]] });
+    expect(parseRefutationVerdict(`analysis\n\`\`\`json\n${foreign}\n\`\`\``, "reproduction", IDS).ok).toBe(false);
+  });
+
   it("imposes NO ordering rule — findings have no meaningful order", () => {
     const reversed = JSON.stringify({
       criterion: "reproduction",

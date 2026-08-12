@@ -371,24 +371,19 @@ describe("Pi and Claude reach the same result", () => {
         candidates: ambiguous.value,
       })).kind).toBe("rejected");
 
-      // A slot that already accepted a capture refuses the late duplicate.
-      expect((await captureHarnessResult({
+      // A semantically rejected attempt is terminal. Later bytes cannot
+      // overwrite the rejection; recovery must use exact attempt-2 authority.
+      const late = await captureHarnessResult({
         harness: "pi",
         runsRoot,
         runDirectory: directory,
         nativeId: "pi-native-1",
         candidates: piCandidates(AGENT_OUTPUT),
-      })).kind).toBe("captured");
-      const duplicate = await captureHarnessResult({
-        harness: "pi",
-        runsRoot,
-        runDirectory: directory,
-        nativeId: "pi-native-1",
-        candidates: piCandidates("a different answer"),
       });
-      expect(duplicate.kind).toBe("rejected");
-      if (duplicate.kind !== "rejected") return;
-      expect(duplicate.reason).toBe("duplicate-capture");
+      expect(late.kind).toBe("rejected");
+      if (late.kind !== "rejected") return;
+      expect(late.reason).toBe("transcript");
+      expect(late.message).toContain("terminally rejected");
     });
 
     it("is inert outside an orchestration run", async () => {

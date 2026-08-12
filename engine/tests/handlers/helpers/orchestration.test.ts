@@ -923,11 +923,46 @@ describe("orchestration CLI", () => {
     const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
 
     expect(resumed.status, resumed.stderr).toBe(0);
-    const recovery = JSON.parse(resumed.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    const recovery = JSON.parse(resumed.stdout) as {
+      kind: string;
+      requests: readonly { authority: AgentRequestAuthority; task: string }[];
+    };
     expect(recovery.kind, resumed.stdout).toBe("spawn-batch");
     expect(recovery.requests).toHaveLength(5);
     expect(recovery.requests.every(({ authority }) => authority.program === "wave-gate" && authority.attempt === 2)).toBe(true);
     expect(recovery.requests.some(({ authority }) => authority.role === "review-verifier-agent")).toBe(false);
+    for (const { authority } of recovery.requests) {
+      const retryPacket = opened.value.readContext(authority.contextDigest);
+      expect(retryPacket.ok).toBe(true);
+      if (!retryPacket.ok) continue;
+      const authoritySection = retryPacket.value.fixedContext.find(({ label }) => label === "wave-review-authority");
+      expect(authoritySection).toBeDefined();
+      const packetAuthority = JSON.parse(Buffer.from(authoritySection!.bytes).toString("utf8")) as {
+        packetId?: string;
+        task?: { reviewGeneration?: number; priorFindings?: readonly unknown[]; generation?: unknown; findings?: unknown };
+      };
+      expect(packetAuthority.packetId).toBeDefined();
+      expect(packetAuthority.task?.reviewGeneration).toBeDefined();
+      expect(packetAuthority.task?.priorFindings).toBeDefined();
+      expect(packetAuthority.task?.generation).toBeUndefined();
+      expect(packetAuthority.task?.findings).toBeUndefined();
+      const diagnostic = retryPacket.value.variableContext.find(({ label }) =>
+        label === "wave-review-attempt-1-rejection");
+      expect(diagnostic, `${authority.role} retry must explain why attempt 1 was rejected`).toBeDefined();
+      const text = Buffer.from(diagnostic!.bytes).toString("utf8");
+      expect(text).toContain("Parser rejection reason:");
+      expect(text).toContain("review output omitted REVIEW_PACKET_ID or REVIEW_GENERATION");
+      expect(text).toContain('"finding_id"');
+      expect(text).toContain('"verdict"');
+      expect(text).toContain("REVIEW_GENERATION");
+      expect(text).toContain("REVIEW_PACKET_ID");
+      const requestTask = recovery.requests.find(({ authority: candidate }) =>
+        candidate.requestId === authority.requestId)?.task ?? "";
+      expect(requestTask).toContain("YOUR PREVIOUS ATTEMPT WAS REJECTED");
+      expect(requestTask).toContain("review output omitted REVIEW_PACKET_ID or REVIEW_GENERATION");
+      expect(requestTask).toContain('"finding_id"');
+      expect(requestTask).toContain('"verdict"');
+    }
     const protectedGraph = JSON.parse(readFileSync(statePath, "utf8")) as { tasks: readonly { review_run?: { slot_authority?: readonly { attempted: number }[] } }[] };
     expect(protectedGraph.tasks[0]?.review_run?.slot_authority?.every(({ attempted }) => attempted === 2)).toBe(true);
 
@@ -1038,6 +1073,387 @@ describe("orchestration CLI", () => {
       kind: "blocked",
       diagnostic: { message: expect.stringContaining("attempt 2 exhausted after capture rejection") },
     });
+  }, 30_000);
+
+  it("advances a capture-rejected Wave reviewer attempt 1 to diagnostic-rich attempt 2", async () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
+        id: "T1", description: "attempt-one rejection", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        findings: [], critical_findings: [], advisory_findings: [],
+      }],
+    }));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-attempt-one-rejection-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-attempt-one-rejection");
+    mkdirSync(runDir);
+    const started = runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const initial = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const rejected = initial.requests.find(({ authority }) => authority.role === WAVE_REVIEW_AGENTS[0])!.authority;
+    await opened.value.appendEvent({
+      schemaVersion: 1,
+      sequence: 0,
+      dedupKey: `capture-rejected:${rejected.requestId}`,
+      recordedAtMs: Date.now(),
+      event: {
+        kind: "request-capture-rejected",
+        requestId: rejected.requestId,
+        slotId: rejected.slotId,
+        attempt: rejected.attempt,
+        diagnostic: "model exited without a final payload",
+      },
+    });
+    for (const { authority } of initial.requests.filter(({ authority }) => authority.requestId !== rejected.requestId)) {
+      const task = authority.role === "spec-check-invoker"
+        ? "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED"
+        : (() => {
+            const graph = JSON.parse(readFileSync(statePath, "utf8")) as { tasks: readonly { review_run?: { generation: number; packet_id: string } }[] };
+            const run = graph.tasks[0]!.review_run!;
+            return [
+              "### Machine Summary", `REVIEW_GENERATION: ${run.generation}`, `REVIEW_PACKET_ID: ${run.packet_id}`,
+              "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "CRITICAL:", "ADVISORY:",
+              "```findings", "[]", "```", "```review_lifecycle", '{"prior_findings":[]}', "```",
+            ].join("\n");
+          })();
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from(task)])).ok).toBe(true);
+    }
+
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const retry = JSON.parse(resumed.stdout) as {
+      kind: string;
+      requests: readonly { authority: AgentRequestAuthority; task: string }[];
+    };
+    expect(retry.kind).toBe("spawn-batch");
+    expect(retry.requests).toHaveLength(1);
+    expect(retry.requests[0]?.authority).toMatchObject({
+      role: rejected.role,
+      slotId: rejected.slotId,
+      attempt: 2,
+    });
+    expect(retry.requests[0]?.task).toContain("model exited without a final payload");
+    expect(retry.requests[0]?.task).toContain('"finding_id"');
+    const lateAttemptOne = await opened.value.captureTranscript(rejected, [...Buffer.from("late")]);
+    expect(lateAttemptOne.ok).toBe(false);
+    if (!lateAttemptOne.ok) expect(lateAttemptOne.error.message).toContain("terminally rejected");
+  }, 30_000);
+
+  it("atomically restarts an exhausted Wave reviewer run with new generations and authority", async () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    expect(proof.state).toBe("satisfied");
+    writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {},
+      tasks: [{
+        id: "T1", description: "restart target", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        findings: [], critical_findings: [], advisory_findings: [],
+      }],
+    }));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-restart-runs-"));
+    cleanup.push(runsRoot);
+    const previousRun = join(runsRoot, "run.wave-exhausted");
+    mkdirSync(previousRun);
+    const started = runCli([
+      "start", "wave-gate", "--runs-root", runsRoot, "--run", previousRun,
+    ], JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const initial = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const previous = openRunDirectory(runsRoot, previousRun);
+    if (!previous.ok) throw new Error(previous.error.message);
+    for (const { authority } of initial.requests) {
+      expect((await previous.value.captureTranscript(authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
+    }
+    const retryResult = runCli(["resume", "--runs-root", runsRoot, "--run", previousRun], "", root);
+    expect(retryResult.status, retryResult.stderr).toBe(0);
+    const retries = JSON.parse(retryResult.stdout) as {
+      kind: string;
+      requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(retries.kind).toBe("spawn-batch");
+    expect(retries.requests).toHaveLength(WAVE_REVIEW_AGENTS.length);
+
+    const forgedRun = join(runsRoot, "run.wave-forged-replacement");
+    mkdirSync(forgedRun);
+    writeFileSync(join(forgedRun, "checkpoint.json"), JSON.stringify({
+      kind: "wave-gate-done",
+      receipt: { kind: "forged" },
+    }));
+    const forged = runCli([
+      "restart", "--runs-root", runsRoot, "--run", previousRun, "--new-run", forgedRun,
+    ], "", root);
+    expect(forged.status).not.toBe(0);
+    expect(forged.stderr).toContain("must be pristine");
+
+    const prematureRun = join(runsRoot, "run.wave-premature");
+    mkdirSync(prematureRun);
+    const premature = runCli([
+      "restart", "--runs-root", runsRoot, "--run", previousRun, "--new-run", prematureRun,
+    ], "", root);
+    expect(premature.status).not.toBe(0);
+    expect(premature.stderr).toContain("restart refused before final-attempt rejection");
+
+    for (const { authority } of retries.requests) {
+      expect((await previous.value.captureTranscript(authority, [...Buffer.from("malformed attempt two")])).ok).toBe(true);
+    }
+    const blocked = runCli(["resume", "--runs-root", runsRoot, "--run", previousRun], "", root);
+    expect(blocked.status, blocked.stderr).toBe(0);
+    expect(JSON.parse(blocked.stdout)).toMatchObject({
+      kind: "blocked",
+      diagnostic: { message: expect.stringContaining("attempt 2 exhausted") },
+    });
+
+    const replacementRun = join(runsRoot, "run.wave-replacement");
+    mkdirSync(replacementRun);
+    const restarted = runCli([
+      "restart", "--runs-root", runsRoot, "--run", previousRun, "--new-run", replacementRun,
+    ], "", root);
+    expect(restarted.status, restarted.stderr).toBe(0);
+    const replacement = JSON.parse(restarted.stdout) as {
+      kind: string;
+      runId: string;
+      requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(replacement.kind).toBe("spawn-batch");
+    expect(replacement.runId).toBe("run.wave-replacement");
+    expect(replacement.requests).toHaveLength(1 + WAVE_REVIEW_AGENTS.length);
+    expect(replacement.requests.every(({ authority }) => authority.runId === "run.wave-replacement" && authority.attempt === 1)).toBe(true);
+
+    const restartedGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
+      active_wave_gate?: { runId: string; wave: number };
+      wave_review_epoch?: { runId: string };
+      tasks: readonly {
+        review_generation?: number;
+        review_status?: string;
+        review_error?: string;
+        review_evidence_failures?: readonly string[];
+        review_run?: { generation: number; prior_finding_ids: readonly string[] };
+      }[];
+    };
+    expect(restartedGraph.active_wave_gate).toMatchObject({ runId: "run.wave-replacement", wave: 1 });
+    expect(restartedGraph.wave_review_epoch).toMatchObject({ runId: "run.wave-replacement" });
+    expect(restartedGraph.tasks[0]).toMatchObject({
+      review_generation: 0,
+      review_status: "pending",
+      review_run: { generation: 0, prior_finding_ids: [] },
+    });
+    expect(restartedGraph.tasks[0]?.review_error).toBeUndefined();
+    expect(restartedGraph.tasks[0]?.review_evidence_failures).toBeUndefined();
+    const retirementCheckpoint = await previous.value.readCheckpoint();
+    expect(JSON.parse(retirementCheckpoint ?? "null")).toMatchObject({
+      kind: "wave-gate-retired",
+      previousRunId: "run.wave-exhausted",
+      replacementRunId: "run.wave-replacement",
+      exhaustedSlots: expect.arrayContaining(WAVE_REVIEW_AGENTS.map((agent) => `T1/${agent}`)),
+    });
+
+    // Simulate a crash after protected authority/review-run installation and a
+    // strict prefix of request reservations, before the replacement batch
+    // publication receipt becomes durable. Resume must complete the exact
+    // deterministic batch instead of treating partial issuance as corruption.
+    const replacementHandle = openRunDirectory(runsRoot, replacementRun);
+    if (!replacementHandle.ok) throw new Error(replacementHandle.error.message);
+    const publicationDir = join(replacementRun, "artifacts", "publications");
+    for (const name of readdirSync(publicationDir)) rmSync(join(publicationDir, name));
+    const requestsDir = join(replacementRun, "requests");
+    const requestFiles = readdirSync(requestsDir).sort();
+    for (const name of requestFiles.slice(1)) rmSync(join(requestsDir, name));
+    const recoveredReplacement = runCli([
+      "resume", "--runs-root", runsRoot, "--run", replacementRun,
+    ], "", root);
+    expect(recoveredReplacement.status, recoveredReplacement.stderr).toBe(0);
+    const recoveredBatch = JSON.parse(recoveredReplacement.stdout) as {
+      kind: string;
+      requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(recoveredBatch.kind, recoveredReplacement.stdout).toBe("spawn-batch");
+    expect(recoveredBatch.requests.map(({ authority }) => authority.requestId)).toEqual(
+      replacement.requests.map(({ authority }) => authority.requestId),
+    );
+
+    const replayedRestart = runCli([
+      "restart", "--runs-root", runsRoot, "--run", previousRun, "--new-run", replacementRun,
+    ], "", root);
+    expect(replayedRestart.status, replayedRestart.stderr).toBe(0);
+    const replayedBatch = JSON.parse(replayedRestart.stdout) as {
+      kind: string;
+      requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(replayedBatch.kind).toBe("spawn-batch");
+    expect(replayedBatch.requests.map(({ authority }) => authority.requestId)).toEqual(
+      replacement.requests.map(({ authority }) => authority.requestId),
+    );
+    expect(await previous.value.readCheckpoint()).toBe(retirementCheckpoint);
+
+    const oldResume = runCli(["resume", "--runs-root", runsRoot, "--run", previousRun], "", root);
+    expect(oldResume.status, oldResume.stderr).toBe(0);
+    expect(JSON.parse(oldResume.stdout)).toMatchObject({
+      kind: "blocked",
+      diagnostic: { message: expect.stringContaining("wave-gate-retired") },
+    });
+  }, 30_000);
+
+  it("preserves accepted partial findings and accepts durable capture rejection during restart", async () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
+        id: "T1", description: "partial restart", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        findings: [], critical_findings: [], advisory_findings: [],
+      }],
+    }));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-partial-restart-runs-"));
+    cleanup.push(runsRoot);
+    const previousRun = join(runsRoot, "run.wave-partial-exhausted");
+    mkdirSync(previousRun);
+    const started = runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", previousRun], JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const initial = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const graph = JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { review_run?: { generation: number; packet_id: string } }[];
+    };
+    const run = graph.tasks[0]!.review_run!;
+    const accepted = [
+      "### Machine Summary", `REVIEW_GENERATION: ${run.generation}`, `REVIEW_PACKET_ID: ${run.packet_id}`,
+      "CRITICAL_COUNT: 1", "ADVISORY_COUNT: 0", "CRITICAL: partial critical survives restart",
+      "```findings", JSON.stringify([{ severity: "critical", file: "src/x.ts", line: 1, claim: "partial critical survives restart" }]), "```",
+      "```review_lifecycle", '{"prior_findings":[]}', "```",
+    ].join("\n");
+    const reviewerRequests = initial.requests.filter(({ authority }) => authority.role !== "spec-check-invoker");
+    const first = reviewerRequests[0]!.authority;
+    const opened = openRunDirectory(runsRoot, previousRun);
+    if (!opened.ok) throw new Error(opened.error.message);
+    expect((await opened.value.captureTranscript(first, [...Buffer.from(accepted)])).ok).toBe(true);
+    for (const { authority } of initial.requests.filter(({ authority }) => authority.requestId !== first.requestId)) {
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
+    }
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", previousRun], "", root);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const retries = JSON.parse(resumed.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(retries.requests).toHaveLength(WAVE_REVIEW_AGENTS.length - 1);
+    for (const { authority } of retries.requests) {
+      await opened.value.appendEvent({
+        schemaVersion: 1,
+        sequence: 0,
+        dedupKey: `capture-rejected:${authority.requestId}`,
+        recordedAtMs: Date.now(),
+        event: {
+          kind: "request-capture-rejected",
+          requestId: authority.requestId,
+          slotId: authority.slotId,
+          attempt: authority.attempt,
+          diagnostic: "agent exited before a final payload",
+        },
+      });
+    }
+    const blocked = runCli(["resume", "--runs-root", runsRoot, "--run", previousRun], "", root);
+    expect(blocked.status, blocked.stderr).toBe(0);
+    expect(JSON.parse(blocked.stdout)).toMatchObject({ kind: "blocked" });
+
+    const replacementRun = join(runsRoot, "run.wave-partial-replacement");
+    mkdirSync(replacementRun);
+    const restarted = runCli([
+      "restart", "--runs-root", runsRoot, "--run", previousRun, "--new-run", replacementRun,
+    ], "", root);
+    expect(restarted.status, restarted.stderr).toBe(0);
+    const lateCapture = await opened.value.captureTranscript(retries.requests[0]!.authority, [...Buffer.from(accepted)]);
+    expect(lateCapture.ok).toBe(false);
+    if (!lateCapture.ok) expect(lateCapture.error.message).toContain("terminally rejected");
+    const restartedGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { findings?: readonly { claim: string }[]; review_run?: { prior_finding_ids: readonly string[] } }[];
+    };
+    expect(restartedGraph.tasks[0]?.findings?.map(({ claim }) => claim)).toContain("partial critical survives restart");
+    expect(restartedGraph.tasks[0]?.review_run?.prior_finding_ids).toHaveLength(1);
+  }, 30_000);
+
+  it("refuses restart when captured attempt 2 is valid but has not been applied", async () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
+        id: "T1", description: "valid retry", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        findings: [], critical_findings: [], advisory_findings: [],
+      }],
+    }));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-valid-retry-runs-"));
+    cleanup.push(runsRoot);
+    const previousRun = join(runsRoot, "run.wave-valid-retry");
+    mkdirSync(previousRun);
+    const started = runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", previousRun], JSON.stringify({ wave: 1 }), root);
+    const initial = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const opened = openRunDirectory(runsRoot, previousRun);
+    if (!opened.ok) throw new Error(opened.error.message);
+    for (const { authority } of initial.requests) {
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
+    }
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", previousRun], "", root);
+    const retries = JSON.parse(resumed.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const active = (JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { review_run?: { generation: number; packet_id: string; prior_finding_ids: readonly string[] } }[];
+    }).tasks[0]!.review_run!;
+    const valid = [
+      "### Machine Summary", `REVIEW_GENERATION: ${active.generation}`, `REVIEW_PACKET_ID: ${active.packet_id}`,
+      "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "CRITICAL:", "ADVISORY:",
+      "```findings", "[]", "```", "```review_lifecycle", '{"prior_findings":[]}', "```",
+    ].join("\n");
+    for (const { authority } of retries.requests.slice(0, -1)) {
+      const submitted = runCli([
+        "submit", "--runs-root", runsRoot, "--run", previousRun,
+        "--request", authority.requestId, "--slot", authority.slotId, "--attempt", "2",
+      ], valid, root);
+      expect(submitted.status, submitted.stderr).toBe(0);
+    }
+    const finalValid = retries.requests.at(-1)!.authority;
+    // Crash window: final valid bytes landed, but semantic application has not.
+    // Applying this slot would close the roster and remove review_run entirely.
+    expect((await opened.value.captureTranscript(finalValid, [...Buffer.from(valid)])).ok).toBe(true);
+    const replacementRun = join(runsRoot, "run.wave-valid-retry-replacement");
+    mkdirSync(replacementRun);
+    const restarted = runCli([
+      "restart", "--runs-root", runsRoot, "--run", previousRun, "--new-run", replacementRun,
+    ], "", root);
+    expect(restarted.status).not.toBe(0);
+    expect(restarted.stderr).toContain("valid captured attempt-2 evidence");
   }, 30_000);
 
   it("publishes standalone refutation attempt 2 after a malformed attempt-1 verdict", async () => {

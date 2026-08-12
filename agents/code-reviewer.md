@@ -111,6 +111,26 @@ Use an empty array when there are no prior findings. Never re-emit a prior findi
 as new. Missing, duplicate, unknown, stale, or malformed lifecycle evidence fails
 closed and cannot erase a finding.
 
+The EXACT wire schema — the parser accepts these key names and no synonyms. Each
+entry uses `finding_id` (NOT `id`), `verdict` (NOT `status`), and `reason`. The
+only legal `verdict` values are `resolved_by_remediation` and `still_present`:
+
+````
+REVIEW_GENERATION: {task.reviewGeneration}
+REVIEW_PACKET_ID: {packetId}
+
+```review_lifecycle
+{
+  "prior_findings": [
+    { "finding_id": "silent-failure-hunter-2", "verdict": "resolved_by_remediation", "reason": "catch block now rethrows with context at src/x.ts:42" },
+    { "finding_id": "code-reviewer-1", "verdict": "still_present", "reason": "the unguarded cast at src/y.ts:88 is unchanged" }
+  ]
+}
+```
+````
+
+When `task.priorFindings` is empty, still emit the block with `"prior_findings": []`.
+
 The fenced `findings` block is optional but strongly preferred. The engine
 derives stable identity from agent and emission order; the block adds preferred
 file/line metadata, and the panel can adjudicate an honest null location. Rules:

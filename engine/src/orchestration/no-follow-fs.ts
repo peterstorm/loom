@@ -54,6 +54,12 @@ export function listDirectoryNamesNoFollow(directoryFd: number): readonly string
   return Object.freeze(readdirSync(`/proc/self/fd/${directoryFd}`).sort());
 }
 
+/** Open one child directory relative to a retained directory descriptor. */
+export function openChildDirectoryNoFollow(directoryFd: number, name: string): number {
+  assertLeafName(name);
+  return openSync(procFdChild(directoryFd, name), fsConstants.O_RDONLY | directoryFlag() | noFollowFlag());
+}
+
 /** Read one leaf relative to a retained directory descriptor with O_NOFOLLOW. */
 export function readDirectoryFileNoFollow(directoryFd: number, name: string): Buffer {
   assertLeafName(name);

@@ -14,6 +14,7 @@ import { closeSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
 import {
   ensureDirectoryNoFollow,
   listDirectoryNamesNoFollow,
@@ -158,6 +159,25 @@ describe("anchored lock ownership", () => {
     ]);
 
     expect(maxActive).toBe(1);
+  });
+});
+
+describe("captured-attempt inspection fails closed", () => {
+  it("reports an unreadable transcript slot instead of treating it as empty", () => {
+    const root = workspace();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.capture-corrupt");
+    mkdirSync(runDir, { recursive: true });
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const outside = join(root, "outside-transcript-slot");
+    mkdirSync(outside);
+    symlinkSync(outside, join(runDir, "transcripts", "slot-corrupt"));
+
+    const captured = opened.value.readCapturedAttempts();
+
+    expect(captured.ok).toBe(false);
+    if (!captured.ok) expect(captured.error.message).toMatch(/slot-corrupt.*ELOOP|slot-corrupt.*ENOTDIR/i);
   });
 });
 
