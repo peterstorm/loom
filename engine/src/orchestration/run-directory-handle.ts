@@ -219,13 +219,17 @@ export function parseRunDirectoryIdentity(
   const reference = parseRunDirectoryReference(runsRoot, runDirectory);
   if (!reference.ok) return reference;
   const directory = reference.value.runDirectory;
-  const stats = ((): ReturnType<typeof statSync> | undefined => {
-    try {
-      return statSync(directory);
-    } catch {
-      return undefined;
-    }
-  })();
+  let stats: ReturnType<typeof statSync> | undefined;
+  try {
+    stats = statSync(directory);
+  } catch (error) {
+    // ENOENT is the one absent answer. EACCES, ELOOP (symlink cycle — the
+    // attack this module's no-follow discipline exists to refuse), ENOTDIR,
+    // and EIO must surface their REAL cause as a typed refusal: "does not
+    // exist" on a permission-broken or symlink-swapped run directory sends the
+    // operator to recreate a run instead of fixing the actual fault.
+    return failure("runDirectory", `cannot inspect run directory ${directory}: ${error instanceof Error ? error.message : String(error)}`);
+  }
   if (stats === undefined || !stats.isDirectory()) {
     return failure("runDirectory", `run directory does not exist: ${directory}`);
   }
@@ -243,7 +247,7 @@ export interface RunDirHandle extends ProgramJournal {
   readAuthority(): DomainResult<RunAuthority, RunDirectoryError>;
   registerProgram(registration: unknown): Promise<DomainResult<OrchestrationRunId, RunDirectoryError>>;
   readProgramRegistration(): DomainResult<unknown | null, RunDirectoryError>;
-  /** True only when authority, optional program, and empty canonical directories are the entire run. */
+  /** True only when authority, optional program, and otherwise-empty canonical directories are the entire run (`requests/` may contain only the empty `correlators/` child). */
   isPristine(): DomainResult<boolean, RunDirectoryError>;
   publishContext(packet: ContextPacket): Promise<DomainResult<ContextPublishedReceipt, RunDirectoryError>>;
   readContext(digest: ContextPacket["digest"]): DomainResult<ContextPacket, RunDirectoryError>;
@@ -970,43 +974,6 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
       }
     },
   };
-}
-
-function captureIntoSlot(
-  runId: OrchestrationRunId,
-  directory: string,
-  authority: AgentRequestAuthority,
-  bytes: readonly number[],
-): DomainResult<ArtifactRef, RunDirectoryError> {
-  const supplied = parseAgentRequestAuthority(authority);
-  if (!supplied.ok) {
-    return failure("request", `capture authority is malformed: ${supplied.error.violations.map(({ message }) => message).join("; ")}`);
-  }
-  if (supplied.value.runId !== runId) return failure("request", "capture authority belongs to a different run");
-  const reserved = readReservedAuthority(directory, supplied.value.requestId);
-  if (!reserved.ok) return reserved;
-  if (!canonicalStructuralEquals(reserved.value, supplied.value)) {
-    return failure("request", `request ${supplied.value.requestId} capture authority does not match its immutable reservation`);
-  }
-  try {
-    writeRunBytesExclusiveNoFollow(transcriptSlotPath(directory, supplied.value), Uint8Array.from(bytes));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      return failure("transcript", `attempt ${supplied.value.attempt} for slot ${supplied.value.slotId} is already captured`);
-    }
-    return failure("transcript", `cannot capture transcript: ${(error as Error).message}`);
-  }
-  const byteLength = parseArtifactByteLength(bytes.length);
-  if (!byteLength.ok) return failure("transcript", byteLength.error.message);
-  return success(canonicalRecord({
-    runId,
-    slot: canonicalRecord({
-      kind: "fixed-artifact-slot" as const,
-      path: `${TRANSCRIPTS}/${supplied.value.slotId}/attempt-${supplied.value.attempt}.raw`,
-    }),
-    digest: digestOf(bytes),
-    byteLength: byteLength.value,
-  }));
 }
 
 type StagedPair = Readonly<{ staged: string; final: string }>;

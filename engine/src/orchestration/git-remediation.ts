@@ -29,7 +29,7 @@
  * and the work tree byte-for-byte unchanged.
  */
 
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   closeSync,
@@ -104,6 +104,25 @@ type GitInvocation = Readonly<{
 }>;
 
 /**
+ * The minimal spawn result the Git boundary reads. Kept structural so tests can
+ * stub each failure arm ({error}, {signal}, {status}) without fabricating the
+ * full SpawnSyncReturns shape.
+ */
+export type GitSpawnResult = Readonly<{
+  error?: Error | null;
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: Buffer;
+  stderr: Buffer;
+}>;
+
+export type GitSpawn = (
+  command: string,
+  args: readonly string[],
+  options: Record<string, unknown>,
+) => GitSpawnResult;
+
+/**
  * Run one Git command. Every invocation goes through here so the fixed
  * executable, argument array, cwd, environment, and bounds cannot be bypassed
  * by an individual operation.
@@ -113,12 +132,16 @@ type GitInvocation = Readonly<{
  * Prepending it here rather than at each call site means no operation can
  * accidentally place it where Git would reject it — or, worse, omit it and
  * silently start interpreting paths as patterns.
+ *
+ * EXPORTED for tests: the `spawn` seam pins the process-level failure arms
+ * (git binary missing, killed by a signal) without forking a real process.
  */
-function runGit(
+export function runGit(
   repositoryRoot: string,
   invocation: GitInvocation,
+  spawn: GitSpawn = spawnSync,
 ): DomainResult<Buffer, GitBoundaryError> {
-  const result = spawnSync(GIT_EXECUTABLE, [LITERAL_PATHSPECS, ...invocation.args], {
+  const result = spawn(GIT_EXECUTABLE, [LITERAL_PATHSPECS, ...invocation.args], {
     cwd: repositoryRoot,
     env: allowlistedEnvironment(
       invocation.indexFile === undefined ? {} : { GIT_INDEX_FILE: invocation.indexFile },
@@ -129,7 +152,7 @@ function runGit(
     windowsHide: true,
   });
 
-  if (result.error !== undefined) {
+  if (result.error !== undefined && result.error !== null) {
     return failure(invocation.operation, `git could not be run: ${result.error.message}`);
   }
   if (result.signal !== null) {

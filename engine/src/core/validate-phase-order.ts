@@ -89,8 +89,8 @@ export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
 }
 
 export interface ArtifactState {
-  skipped_phases: Phase[];
-  phase_artifacts: Partial<Record<Phase, string>>;
+  skipped_phases: readonly Phase[];
+  phase_artifacts: Readonly<Partial<Record<Phase, string>>>;
   spec_file: string | null;
   plan_file: string | null;
   spec_dir?: string | null;

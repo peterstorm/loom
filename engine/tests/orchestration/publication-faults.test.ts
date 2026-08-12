@@ -387,6 +387,35 @@ describe("request reservation and transcript capture", () => {
     if (recorded.ok) return;
     expect(recorded.error.message).toContain("does not match");
   });
+
+  it("refuses a malformed or foreign capture-rejection marker on read", async () => {
+    const { handle, directory } = freshRun();
+    const request = authority();
+    await handle.reserveRequest(request);
+    const markerPath = join(directory, "transcripts", request.slotId, `attempt-${request.attempt}.rejected`);
+
+    let read = handle.readCaptureRejection(request);
+    expect(read.ok).toBe(true);
+    if (read.ok) expect(read.value).toBeNull();
+
+    // A marker that does not belong to the reserved request authority must be
+    // refused, never reported as a diagnostic for this slot.
+    writeFileSync(markerPath, JSON.stringify({ requestId: "request:other-agent", diagnostic: "foreign rejection" }));
+    read = handle.readCaptureRejection(request);
+    expect(read.ok).toBe(false);
+    if (!read.ok) expect(read.error.message).toContain("malformed or belongs to different authority");
+
+    // A marker with a non-string diagnostic is equally refused: the diagnostic
+    // is operator-facing prose and must not pass untyped.
+    writeFileSync(markerPath, JSON.stringify({ requestId: request.requestId, diagnostic: 42 }));
+    expect(handle.readCaptureRejection(request).ok).toBe(false);
+
+    // The canonical marker round-trips.
+    writeFileSync(markerPath, JSON.stringify({ requestId: request.requestId, diagnostic: "scope violation" }));
+    read = handle.readCaptureRejection(request);
+    expect(read.ok).toBe(true);
+    if (read.ok) expect(read.value).toBe("scope violation");
+  });
 });
 
 // --- Artifact-set atomicity -------------------------------------------------

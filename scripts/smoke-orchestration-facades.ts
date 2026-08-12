@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -237,6 +237,108 @@ function standaloneAndRemediationSmoke(): void {
   process.stdout.write("  ✓ remediation authoritative result → verified real Git index installation\n");
 }
 
+/**
+ * A standalone reviewer whose transcript violates the frozen scope must be
+ * rejected at the slot level and retried at attempt 2 — never allowed to
+ * dead-end the whole run at aggregation (the pre-retry engine behavior).
+ */
+function standaloneReviewerRetrySmoke(): void {
+  const cwd = repository("standalone-retry");
+  const changedPath = "src/target.ts";
+  mkdirSync(dirname(join(cwd, changedPath)), { recursive: true });
+  writeFileSync(join(cwd, changedPath), "export const value = 1;\n");
+  git(cwd, ["add", changedPath]);
+  git(cwd, ["commit", "-qm", "baseline"]);
+  writeFileSync(join(cwd, changedPath), "export const value = 2;\n");
+
+  const runsRoot = mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-"));
+  temporaryRoots.push(runsRoot);
+  const reviewRun = join(runsRoot, "run.standalone-retry");
+  mkdirSync(reviewRun, { recursive: true });
+  const initial = asSpawnBatch(run(cwd, [
+    "start", "standalone-review", "--runs-root", runsRoot, "--run", reviewRun,
+  ], JSON.stringify({ kind: "all", files: [changedPath], dryRun: false })), "standalone retry start");
+  check(initial.requests.length >= 2, "standalone retry start must spawn at least two reviewers");
+
+  // The first reviewer strays outside the frozen scope: its finding file is
+  // not among the review scope paths, so the engine's frozen-scope validator
+  // must reject that ONE slot and issue its attempt-2 retry instead of aborting
+  // the run at aggregation with no recovery path.
+  const first = initial.requests[0]!;
+  const retryBatch = asSpawnBatch(
+    submit(cwd, runsRoot, reviewRun, first, reviewerOutput("advisory", "src/outside.ts")),
+    "standalone retry batch after out-of-scope finding",
+  );
+  const retry = retryBatch.requests.find(({ authority }) => authority.slotId === first.authority.slotId);
+  check(retry !== undefined, "retry batch dropped the rejected reviewer slot");
+  check(retry!.authority.attempt === 2, "rejected reviewer slot did not advance to attempt 2");
+  check(typeof retry!.task === "string" && retry!.task.includes("rejected by the engine's frozen-scope validator"),
+    "retry task lacks the rejection diagnostic");
+  check(retryBatch.requests.some(({ authority }) =>
+    authority.slotId !== first.authority.slotId && authority.attempt === 1),
+  "retry batch must also carry the still-pending sibling attempt-1 requests");
+
+  // Answer every request (retried slot at attempt 2, siblings at attempt 1)
+  // with clean, in-scope reviewer output and require the run to reach done.
+  let next: unknown = retryBatch;
+  for (const request of retryBatch.requests) {
+    next = submit(cwd, runsRoot, reviewRun, request, reviewerOutput("clean", changedPath));
+  }
+  asDone(next, "standalone retry adjudication");
+  asDone(run(cwd, ["resume", "--runs-root", runsRoot, "--run", reviewRun]), "standalone retry terminal replay");
+
+  const result = record(JSON.parse(readFileSync(join(reviewRun, "result.json"), "utf8")) as unknown, "standalone retry result");
+  check(Array.isArray(result.surviving_critical_findings) && result.surviving_critical_findings.length === 0,
+    "standalone retry result retained criticals");
+  process.stdout.write("  ✓ standalone out-of-scope reviewer transcript → attempt-2 retry → clean adjudication\n");
+}
+
+/**
+ * A retried reviewer whose attempt-2 transcript STILL violates the frozen scope
+ * must terminal-block the run (LC-2: attempt 2 is final) with a durable
+ * blocked action — never loop or silently accept.
+ */
+function standaloneRetryTerminalBlockSmoke(): void {
+  const cwd = repository("standalone-retry-block");
+  const changedPath = "src/target.ts";
+  mkdirSync(dirname(join(cwd, changedPath)), { recursive: true });
+  writeFileSync(join(cwd, changedPath), "export const value = 1;\n");
+  git(cwd, ["add", changedPath]);
+  git(cwd, ["commit", "-qm", "baseline"]);
+  writeFileSync(join(cwd, changedPath), "export const value = 2;\n");
+
+  const runsRoot = mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-"));
+  temporaryRoots.push(runsRoot);
+  const reviewRun = join(runsRoot, "run.standalone-retry-block");
+  mkdirSync(reviewRun, { recursive: true });
+  const initial = asSpawnBatch(run(cwd, [
+    "start", "standalone-review", "--runs-root", runsRoot, "--run", reviewRun,
+  ], JSON.stringify({ kind: "all", files: [changedPath], dryRun: false })), "standalone retry-block start");
+
+  const first = initial.requests[0]!;
+  const retryBatch = asSpawnBatch(
+    submit(cwd, runsRoot, reviewRun, first, reviewerOutput("advisory", "src/outside.ts")),
+    "retry-block attempt-1 rejection",
+  );
+  const retry = retryBatch.requests.find(({ authority }) => authority.slotId === first.authority.slotId);
+  check(retry !== undefined && retry!.authority.attempt === 2, "retry-block slot did not advance to attempt 2");
+
+  // The retry repeats the same scope violation: the second and final attempt
+  // must terminal-block the run.
+  const blocked = record(
+    submit(cwd, runsRoot, reviewRun, retry!, reviewerOutput("advisory", "src/outside.ts")),
+    "retry-block final outcome",
+  );
+  check(blocked.kind === "blocked", `retry-block must block, got ${blocked.kind}`);
+  const replay = record(
+    run(cwd, ["resume", "--runs-root", runsRoot, "--run", reviewRun]),
+    "retry-block terminal replay",
+  );
+  check(replay.kind === "blocked", "retry-block terminal replay must stay blocked");
+  check(!existsSync(join(reviewRun, "result.json")), "retry-block must not publish a result");
+  process.stdout.write("  ✓ standalone attempt-2 scope violation → durable terminal block\n");
+}
+
 function waveState(): Record<string, unknown> {
   const proof = evaluateTaskProof(
     { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
@@ -377,6 +479,8 @@ function waveGateSmoke(): void {
 
 process.stdout.write("Orchestration façade smoke test (fresh CLI process at every boundary)\n");
 standaloneAndRemediationSmoke();
+standaloneReviewerRetrySmoke();
+standaloneRetryTerminalBlockSmoke();
 waveGateCriticalRefutationSmoke();
 waveGateSmoke();
 process.stdout.write("smoke-orchestration-facades: PASS\n");

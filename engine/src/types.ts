@@ -693,8 +693,9 @@ export interface WaveReviewEpochAuthority {
 
 export interface TaskGraph {
   current_phase: Phase;
-  phase_artifacts: Partial<Record<Phase, string>>;
-  skipped_phases: Phase[];
+  /** Readonly like `tasks`: every mutation must flow through StateManager.update's locked transform. */
+  phase_artifacts: Readonly<Partial<Record<Phase, string>>>;
+  skipped_phases: readonly Phase[];
   spec_dir?: string | null;
   spec_file: string | null;
   plan_file: string | null;

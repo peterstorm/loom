@@ -1279,11 +1279,41 @@ export function parseStandaloneReviewMachineState(
 
   const completion = parseStandaloneRosterCompletionProof(authority.value, publicationResolver, record.completion);
   if (!completion.ok) return failure(completion.error.violations.map((violation) => violation.kind).join("; "));
-  const aggregating = reduceStandaloneReviewMachine(awaiting.value, {
+  // A retried slot's accepted proof entry is at attempt 2. Replay the exact
+  // rejection that advanced it — derived from the persisted accepted
+  // projection, never from prose — so the checkpoint replays to the same
+  // aggregating state the live run checkpointed. Without this, replaying
+  // complete-roster-proved against a pristine pending (every slot at attempt
+  // 1) refuses the retried slot's attempt-2 entry as stale and the whole
+  // checkpoint becomes unrecoverable.
+  const progress = parsePersistedStandaloneProgress(authority.value, record.accepted, record.pending);
+  if (!progress.ok) return failure(progress.message);
+  let replayBase: StandaloneReviewMachineState = awaiting.value;
+  for (const entry of progress.accepted) {
+    if (entry.attempt !== 2) continue;
+    const slot = authority.value.roster.byId.get(entry.slotId);
+    const attemptOne = slot?.attempts[0];
+    if (attemptOne === undefined || attemptOne.requestId === entry.requestId) {
+      return failure("checkpoint accepted attempt-2 entry lacks a canonical attempt-1 predecessor");
+    }
+    const rejected = reduceStandaloneReviewMachine(replayBase, {
+      kind: "result-rejected",
+      request: { runId: authority.value.runId, slotId: entry.slotId, requestId: attemptOne.requestId, attempt: 1 },
+      message: "recovered from the persisted attempt-2 acceptance projection",
+    });
+    if (!rejected.ok || rejected.value.kind !== "awaiting-results") {
+      return failure(rejected.ok ? "checkpoint attempt-2 acceptance did not replay to awaiting results" : rejected.error.message);
+    }
+    replayBase = rejected.value;
+  }
+  const aggregating = reduceStandaloneReviewMachine(replayBase, {
     kind: "complete-roster-proved",
     completion: completion.value,
   });
   if (!aggregating.ok) return failure(aggregating.error.message);
+  if (!canonicalStructuralEquals(aggregating.value.accepted, progress.accepted)) {
+    return failure("checkpoint replayed accepted-slot progress differs from the persisted projection");
+  }
   if (record.kind === "aggregating") return canonicalRecord({ ok: true as const, value: aggregating.value });
 
   const aggregate = parseStandaloneAggregate(record.aggregate);

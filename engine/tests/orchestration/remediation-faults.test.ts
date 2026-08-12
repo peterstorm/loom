@@ -9,6 +9,7 @@ import {
   observeDirtyPaths,
   openGitRepository,
   readStagedPaths,
+  runGit,
   snapshotRepositoryWitness,
   stageAuditedPaths,
   type GitRepository,
@@ -305,5 +306,67 @@ describe("command construction", () => {
     expect(staged.ok).toBe(false);
     if (staged.ok) return;
     expect(staged.error.message).toContain("unexpected global arguments");
+  });
+});
+
+describe("runGit process-level failure arms", () => {
+  const invocation = { operation: "rev-parse", args: ["rev-parse", "--show-toplevel"] };
+
+  it("reports a git binary that cannot be run", () => {
+    const result = runGit("/repo", invocation, () => ({
+      error: new Error("spawn git ENOENT"),
+      status: null,
+      signal: null,
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+    }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toBe("git could not be run: spawn git ENOENT");
+    }
+  });
+
+  it("reports a git process terminated by a signal", () => {
+    const result = runGit("/repo", invocation, () => ({
+      error: undefined,
+      status: null,
+      signal: "SIGKILL",
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+    }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toBe("git terminated on signal SIGKILL");
+    }
+  });
+
+  it("reports a non-zero exit with its stderr verbatim", () => {
+    const result = runGit("/repo", invocation, () => ({
+      error: undefined,
+      status: 1,
+      signal: null,
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.from("fatal: not a git repository"),
+    }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toBe("git exited 1: fatal: not a git repository");
+    }
+  });
+
+  it("passes a zero exit's stdout through as the success value", () => {
+    const result = runGit("/repo", invocation, () => ({
+      error: undefined,
+      status: 0,
+      signal: null,
+      stdout: Buffer.from(".git\n"),
+      stderr: Buffer.alloc(0),
+    }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.toString("utf-8")).toBe(".git\n");
   });
 });

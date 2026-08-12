@@ -2068,6 +2068,47 @@ describe("protected active Wave Gate registration", () => {
     });
   });
 
+  it("rejects completion when the active run is already terminal in history", () => {
+    const graph = registeredGraph();
+    const readiness = authorityValue(deriveWaveReadiness(graph, statusDeps));
+    const committed = authorityValue(commitWaveGateCompletion(readiness));
+
+    // The same run re-enters the graph as the active gate with its own
+    // completed registration already archived — the duplicate-terminal shape
+    // the parse boundary refuses at load and the commit machine must also
+    // refuse in memory.
+    const rerun = registeredGraph({ wave_gate_history: [committed.completedRegistration] });
+    const rerunReadiness = authorityValue(deriveWaveReadiness(rerun, statusDeps));
+    expect(commitWaveGateCompletion(rerunReadiness)).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("already terminal in history") },
+    });
+  });
+
+  it("rejects a next-action whose runId differs from the lifecycle state BEFORE readiness derivation", () => {
+    // The pre-proof reject arm: a foreign-run action must be refused here, not
+    // first minted into a next-action proof that downstream readiness
+    // contradiction handling has to clean up.
+    const snapshot = lifecycleCompletionReadiness();
+    const state = lifecycleStates().find((candidate) => candidate.kind === "done")!;
+    const foreignRun = authorityValue(parseOrchestrationRunId("foreign-next-action-run"));
+    const done = authorityValue(doneAction(state.runId, {
+      runId: state.runId,
+      slot: "artifacts/wave-result.json",
+      digest: "9".repeat(64),
+      byteLength: 12,
+    }));
+    const foreign = { ...done, runId: foreignRun };
+
+    const proven = proveWaveGateNextAction(snapshot, state, foreign);
+
+    expect(proven.ok).toBe(false);
+    if (!proven.ok) {
+      expect(proven.error.kind).toBe("wave-gate-next-action-rejected");
+      expect(proven.error.message).toContain("different Wave Gate run");
+    }
+  });
+
   it("atomically archives terminal receipt with Task/Wave advancement and allows compatibility to start the next Wave", async () => {
     const root = mkdtempSync(join(tmpdir(), "loom-complete-wave-"));
     const path = join(root, "active_task_graph.json");

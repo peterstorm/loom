@@ -77,7 +77,7 @@ function fixMinimal(json: Record<string, unknown>): string {
     current_phase: VALID_PHASES.has(json.current_phase as string) ? json.current_phase : "init",
     phase_artifacts: typeof json.phase_artifacts === "object" && !Array.isArray(json.phase_artifacts)
       ? json.phase_artifacts : {},
-    skipped_phases: Array.isArray(json.skipped_phases) ? json.skipped_phases : [],
+    skipped_phases: Object.freeze(Array.isArray(json.skipped_phases) ? [...json.skipped_phases] : []),
     spec_file: "spec_file" in json ? json.spec_file : null,
     plan_file: "plan_file" in json ? json.plan_file : null,
   }, null, 2);

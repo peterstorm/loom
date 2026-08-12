@@ -38,6 +38,7 @@ import {
   selectStandaloneReviewers,
   serializeStandaloneReviewAuthority,
   serializeAdjudicatedStandaloneReview,
+  standaloneTranscriptProblems,
   type FrozenStandaloneReviewAuthority,
   type StandaloneReviewKind,
   type StandaloneReviewMetadata,
@@ -190,7 +191,7 @@ function gitText(args: readonly string[]): string {
 }
 
 type CanonicalChangedPaths = Readonly<{
-  /** Worktree paths not represented by HEAD, including untracked files. */
+  /** Worktree paths not represented by HEAD, including untracked non-ignored files. */
   unstaged: readonly string[];
   staged: readonly string[];
   committed: readonly string[];
@@ -585,6 +586,127 @@ function durableRequests(
   return { kind: "found", requests: Object.freeze(requests) };
 }
 
+/**
+ * One rejected reviewer slot's attempt-2 recovery identity.
+ *
+ * The retry batch is published under its own effect label (exactly like the
+ * refutation panel's per-slot retry batches), so a crash between the semantic
+ * rejection checkpoint and the retry spawn is recovered on the next resume by
+ * reading the durable publication receipt — never by re-deriving request
+ * authority from prose.
+ */
+function standaloneRetryEffectId(slotId: string, requestId: string): Readonly<{ ok: true; value: EffectId }> | Readonly<{ ok: false; message: string }> {
+  const label = `standalone-review-retry:${slotId}`;
+  const parsed = parseEffectId(`effect:${label}:${createHash("sha256").update(requestId).digest("hex")}`);
+  return parsed.ok ? { ok: true, value: parsed.value } : { ok: false, message: parsed.error.message };
+}
+
+async function recoverOrPublishStandaloneRetry(
+  handle: RunDirHandle,
+  authority: FrozenStandaloneReviewAuthority,
+  slot: Readonly<{ slotId: string; attempts: readonly [AgentRequestAuthority, AgentRequestAuthority] }>,
+  resolver: PublicationAuthorityResolver,
+): Promise<Readonly<{ ok: true; request: SpawnRequest }> | Readonly<{ ok: false; message: string }>> {
+  const retryAuthority = slot.attempts[1];
+  if (retryAuthority.attempt !== 2 || retryAuthority.program !== "standalone-review") {
+    return { ok: false, message: `slot ${slot.slotId} has no canonical standalone attempt-2 authority` };
+  }
+  const input: InitialSpawnRequestInput = Object.freeze({
+    authority: retryAuthority,
+    context: Object.freeze({
+      digest: retryAuthority.contextDigest,
+      slot: Object.freeze({ kind: "fixed-artifact-slot" as const, path: `contexts/${retryAuthority.contextDigest}.json` }),
+    }),
+  });
+
+  let packet = handle.readContext(retryAuthority.contextDigest);
+  if (!packet.ok) {
+    // Runs started before the engine published attempt-2 packets up front need
+    // a deterministic fallback: the attempt-2 packet is rebuilt from the
+    // PERSISTED attempt-1 packet — the frozen-source section is re-read from
+    // the run directory rather than re-derived from worktree bytes, so the
+    // digest can never drift — and the rebuild is refused if its digest does
+    // not equal the digest the roster froze at start.
+    const attemptOne = handle.readContext(slot.attempts[0].contextDigest);
+    if (!attemptOne.ok) return { ok: false, message: attemptOne.error.message };
+    const frozenSource = attemptOne.value.fixedContext.find((section) => section.label === "standalone-frozen-source");
+    if (frozenSource === undefined) {
+      return { ok: false, message: "attempt-1 context packet lacks the standalone-frozen-source section" };
+    }
+    const authoritySection = encodeByteSection("standalone-review-authority", JSON.stringify({
+      runId: handle.runId,
+      scope: authority.scope,
+      role: retryAuthority.role,
+      attempt: 2,
+    }));
+    if (!authoritySection.ok) return { ok: false, message: authoritySection.error.message };
+    const rebuilt = buildContextPacket({
+      requestId: retryAuthority.requestId as never,
+      role: retryAuthority.role,
+      requiredSkill: attemptOne.value.requiredSkill,
+      outputContract: attemptOne.value.outputContract,
+      fixedContext: Object.freeze([authoritySection.value, frozenSource]),
+      variableContext: Object.freeze([]),
+    });
+    if (!rebuilt.ok) return { ok: false, message: rebuilt.error.message };
+    if (rebuilt.value.digest !== retryAuthority.contextDigest) {
+      return {
+        ok: false,
+        message: `rebuilt attempt-2 context digest ${rebuilt.value.digest} differs from the frozen roster digest ${retryAuthority.contextDigest}`,
+      };
+    }
+    const published = await handle.publishContext(rebuilt.value);
+    if (!published.ok) return { ok: false, message: published.error.message };
+    packet = rebuilt;
+  }
+  const effectId = standaloneRetryEffectId(slot.slotId, retryAuthority.requestId);
+  if (!effectId.ok) return { ok: false, message: effectId.message };
+  const publication = durablePublicationDigest(handle, effectId.value);
+  if (publication.kind === "corrupt") return { ok: false, message: publication.message };
+  if (publication.kind === "found") {
+    const parsed = parseIssuedSpawnRequest(resolver, {
+      authority: input.authority,
+      context: input.context,
+      issuance: {
+        schemaVersion: 1,
+        kind: "issued-spawn-request-proof",
+        runId: handle.runId,
+        effectId: effectId.value,
+        publicationDigest: publication.digest,
+        batchIndex: 0,
+      },
+    });
+    if (!parsed.ok) return { ok: false, message: `durable standalone retry request is invalid: ${parsed.error.message}` };
+    return { ok: true, request: parsed.value };
+  }
+  const publishedBatch = await publishInitialBatch(handle, [input], [packet.value], `standalone-review-retry:${slot.slotId}`);
+  return publishedBatch.ok
+    ? { ok: true, request: publishedBatch.requests[0]! }
+    : { ok: false, message: publishedBatch.message };
+}
+
+/** The frozen-scope validator's diagnostic, surfaced on the retry spawn task. */
+function standaloneRetryTask(task: string, diagnostic: string | null): string {
+  const marker = diagnostic === null
+    ? ["Your previous attempt was rejected by the engine's frozen-scope validator."]
+    : [`Your previous attempt was rejected by the engine's frozen-scope validator:`, "", diagnostic];
+  return `${task}\n\n${marker.join("\n")}\nRe-emit the exact required reviewer result with every structured finding strictly inside the frozen scope.`;
+}
+
+/**
+ * Fatal UTF-8 decode like the engine's transcript boundary. A decode failure
+ * yields a validator problem for the slot instead of crashing the resume — the
+ * same refusal aggregation would produce, reachable through the same rejection
+ * path rather than as an unhandled throw.
+ */
+function reviewerText(bytes: Uint8Array, role: string): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return `${role}: transcript is not valid UTF-8`;
+  }
+}
+
 export async function startStandaloneFacade(
   handle: RunDirHandle,
   input: RegisteredStandaloneProgram["input"],
@@ -634,6 +756,16 @@ export async function startStandaloneFacade(
         slot: Object.freeze({ kind: "fixed-artifact-slot" as const, path: `contexts/${authority.contextDigest}.json` }),
       }),
     }));
+    // Publish every attempt-1 AND attempt-2 context up front. Attempt 2 is the
+    // engine's only recovery path for a semantically rejected reviewer slot; a
+    // retry must find its frozen packet already content-addressed in the run
+    // directory, so the attempt-2 digest the roster froze at start can never
+    // drift from the bytes a later retry reads (the frozen-source section hashes
+    // worktree bytes at start time and must not be re-derived later).
+    for (const packet of packetSet.packets) {
+      const published = await handle.publishContext(packet);
+      if (!published.ok) return failed(published.error.message);
+    }
     const batch = await publishInitialBatch(handle, initialRequests, packetSet.packets.filter((_, index) => index % 2 === 0), "standalone-review");
     if (!batch.ok) return failed(batch.message);
     const awaiting = reduceStandaloneReviewMachine(startStandaloneReviewMachine(prepared.value.authority), {
@@ -1201,8 +1333,11 @@ async function installWaveReviewRuns(
       }
       const authorities = reviewAuthorities.map(({ authority }) => authority as AgentRequestAuthority)
         .filter((authority) => {
-          const packet = handleWaveReviewContext(batch.packets, authority.contextDigest);
-          return packet?.taskRun?.taskId === task.id;
+          const context = handleWaveReviewContext(batch.packets, authority.contextDigest);
+          if (context.kind === "corrupt") {
+            throw new Error(`Task ${task.id} Review Packet corruption: ${context.message}`);
+          }
+          return waveReviewContextTaskId(context) === task.id;
         });
       if (authorities.length !== WAVE_REVIEW_AGENTS.length) {
         throw new Error(`Task ${task.id} current Review Packet lacks the exact reviewer roster`);
@@ -1235,22 +1370,38 @@ async function installWaveReviewRuns(
   }));
 }
 
+type WaveReviewContextRead =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "corrupt"; message: string }>
+  | Readonly<{ kind: "loaded"; value: Readonly<{ wave?: number; batchEpoch?: string; taskRun?: WaveTaskRunAuthority | null }> }>;
+
+/**
+ * Read one request's persisted wave-review-authority section as a tri-state.
+ *
+ * Absent and corrupt are OPPOSITE facts: absent means the packet legitimately
+ * carries no Wave authority (a foreign or stale request); corrupt means the
+ * engine-published packet bytes are damaged under a valid digest, and the
+ * caller must fail loudly instead of silently treating captured evidence as
+ * not belonging to the current packet.
+ */
 function handleWaveReviewContext(
   packets: readonly ContextPacket[],
   digest: string,
-): Readonly<{ wave?: number; batchEpoch?: string; taskRun?: WaveTaskRunAuthority | null }> | null {
+): WaveReviewContextRead {
   const packet = packets.find((candidate) => candidate.digest === digest);
   const section = packet?.fixedContext.find(({ label }) => label === "wave-review-authority");
-  if (section === undefined) return null;
+  if (section === undefined) return { kind: "absent" };
   try {
-    return JSON.parse(new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(section.bytes))) as {
-      wave?: number;
-      batchEpoch?: string;
-      taskRun?: WaveTaskRunAuthority | null;
-    };
-  } catch {
-    return null;
+    return { kind: "loaded", value: Object.freeze(JSON.parse(
+      new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(section.bytes)),
+    )) };
+  } catch (error) {
+    return { kind: "corrupt", message: `wave-review-authority section is not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
   }
+}
+
+function waveReviewContextTaskId(context: WaveReviewContextRead): string | null {
+  return context.kind === "loaded" ? (context.value.taskRun?.taskId ?? null) : null;
 }
 
 function waveRefutationPreparation(
@@ -1739,16 +1890,21 @@ export async function resumeWaveGateFacade(
       if (epoch?.runId !== handle.runId || epoch.wave !== registration.input.wave) {
         return waveBlocked(handle, "active Wave Review Packets lack exact persisted batch epoch authority");
       }
-      const candidates: { authority: AgentRequestAuthority; packet: ContextPacket; context: ReturnType<typeof handleWaveReviewContext> }[] = [];
+      const candidates: { authority: AgentRequestAuthority; packet: ContextPacket; context: WaveReviewContextRead }[] = [];
       for (const authority of issued.value.filter((request) => request.program === "wave-gate" && request.attempt === 1)) {
         const read = handle.readContext(authority.contextDigest);
         if (!read.ok) return waveBlocked(handle, read.error.message);
         const context = handleWaveReviewContext([read.value], authority.contextDigest);
-        if (context?.batchEpoch === epoch.batchEpoch) candidates.push({ authority, packet: read.value, context });
+        if (context.kind === "corrupt") {
+          return waveBlocked(handle, `${context.message} (request ${authority.requestId})`);
+        }
+        if (context.kind === "loaded" && context.value.batchEpoch === epoch.batchEpoch) {
+          candidates.push({ authority, packet: read.value, context });
+        }
       }
       const rank = (candidate: typeof candidates[number]): number => {
         if (candidate.authority.role === "spec-check-invoker") return 0;
-        const taskIndex = registration.taskIds.indexOf(candidate.context?.taskRun?.taskId ?? "");
+        const taskIndex = registration.taskIds.indexOf(waveReviewContextTaskId(candidate.context) ?? "");
         const reviewerIndex = WAVE_REVIEW_AGENTS.indexOf(candidate.authority.role as typeof WAVE_REVIEW_AGENTS[number]);
         return taskIndex < 0 || reviewerIndex < 0 ? Number.MAX_SAFE_INTEGER : 1 + taskIndex * WAVE_REVIEW_AGENTS.length + reviewerIndex;
       };
@@ -1794,18 +1950,33 @@ export async function resumeWaveGateFacade(
         request.contextDigest === undefined ? [] : [handle.readContext(request.contextDigest)].flatMap((read) => read.ok ? [read.value] : []),
         request.contextDigest,
       );
-      if (context === null) return false;
+      // Corruption is blocked by the pre-scan above; an absent section is the
+      // only legitimate "not one of ours" answer.
+      if (context.kind === "corrupt") throw new Error(context.message);
+      if (context.kind === "absent") return false;
       if (request.role === "spec-check-invoker") {
-        return currentRuns.length > 0 && typeof context.batchEpoch === "string" &&
-          currentRuns.every(({ review_run }) => review_run?.head_sha === context.batchEpoch);
+        return currentRuns.length > 0 && typeof context.value.batchEpoch === "string" &&
+          currentRuns.every(({ review_run }) => review_run?.head_sha === context.value.batchEpoch);
       }
-      const taskRun = context.taskRun;
+      const taskRun = context.value.taskRun;
       if (taskRun === null || taskRun === undefined) return false;
       const task = currentRuns.find(({ id }) => id === taskRun.taskId);
       return task?.review_run?.packet_id === taskRun.packetId && task.review_run.generation === taskRun.generation &&
         task.review_run.slot_authority?.some(({ agent, slot_id, attempted }) =>
           agent === request.role && slot_id === request.slotId && attempted === request.attempt) === true;
     };
+
+    // A corrupt wave-review-authority section under a valid digest is evidence
+    // damage, never a silent "not current packet": refuse the whole resume
+    // loudly before any captured transcript is skipped or applied.
+    for (const authority of currentIssued.filter((request) => request.program === "wave-gate")) {
+      const contextRead = handle.readContext(authority.contextDigest);
+      if (!contextRead.ok) return waveBlocked(handle, contextRead.error.message);
+      const context = handleWaveReviewContext([contextRead.value], authority.contextDigest);
+      if (context.kind === "corrupt") {
+        return waveBlocked(handle, `${context.message} (request ${authority.requestId})`);
+      }
+    }
 
     // Transcript capture is durable before semantic application. Reconcile the
     // crash window idempotently under exact current packet/slot authority.
@@ -1817,7 +1988,10 @@ export async function resumeWaveGateFacade(
       const contextRead = handle.readContext(request.contextDigest);
       if (!contextRead.ok) return waveBlocked(handle, contextRead.error.message);
       const context = handleWaveReviewContext([contextRead.value], request.contextDigest);
-      const taskId = context?.taskRun?.taskId;
+      if (context.kind === "corrupt") {
+        return waveBlocked(handle, `${context.message} (request ${request.requestId})`);
+      }
+      const taskId = context.kind === "loaded" ? context.value.taskRun?.taskId : undefined;
       if (request.role !== "spec-check-invoker") {
         const task = now.tasks.find(({ id }) => id === taskId);
         if (task?.review_run === undefined || task.review_run.evidence.some(({ agent }) => agent === request.role)) continue;
@@ -1841,13 +2015,16 @@ export async function resumeWaveGateFacade(
       const contextRead = handle.readContext(request.contextDigest);
       if (!contextRead.ok) return waveBlocked(handle, contextRead.error.message);
       const context = handleWaveReviewContext([contextRead.value], request.contextDigest);
+      if (context.kind === "corrupt") {
+        return waveBlocked(handle, `${context.message} (request ${request.requestId})`);
+      }
       if (request.role === "spec-check-invoker") {
-        const wave = context?.wave;
+        const wave = context.kind === "loaded" ? context.value.wave : undefined;
         if (typeof wave !== "number") return waveBlocked(handle, "rejected spec-check request lacks exact Wave authority");
         const resolution = reconcileSpecCheck(parseSpecCheckOutput(""), wave, new Date().toISOString());
         await manager.update((locked) => ({ ...locked, spec_check: resolution.specCheck }));
       } else {
-        const taskId = context?.taskRun?.taskId;
+        const taskId = context.kind === "loaded" ? context.value.taskRun?.taskId : undefined;
         if (taskId === undefined) return waveBlocked(handle, "rejected reviewer request lacks exact Task authority");
         await manager.update((locked) => ({
           ...locked,
@@ -2545,16 +2722,127 @@ export async function resumeStandaloneFacade(
         ? "standalone publication authority is absent"
         : recovered.message);
     }
-    const issued = recovered.requests;
+    const attemptOneBySlot = new Map(recovered.requests.map((request) => [request.authority.slotId, request] as const));
     const captured = handle.readCapturedAttempts();
     if (!captured.ok) return failed(captured.error.message);
+    const pendingBySlot = new Map(state.value.pending.map(({ slotId, expectedAttempt }) => [slotId, expectedAttempt] as const));
+    const scope = activeAuthority.scope;
+
+    // Phase A — semantic admission check for every captured attempt-1 slot the
+    // machine still expects at attempt 1. A transcript the frozen-scope
+    // validator refuses is REJECTED here — where the LC-2 lifecycle can advance
+    // the slot to attempt 2 — instead of dead-ending the whole run at
+    // aggregation with no recovery path.
+    const rejected: Readonly<{ slot: AgentRequestAuthority; problems: readonly string[] }>[] = [];
+    for (const slot of activeAuthority.roster.orderedSlots) {
+      if ((pendingBySlot.get(slot.slotId) ?? 1) !== 1) continue;
+      const attemptOne = attemptOneBySlot.get(slot.slotId);
+      if (attemptOne === undefined) {
+        return failed(`standalone attempt-1 issuance authority is missing for ${slot.slotId}`);
+      }
+      if (!captured.value.has(captureKey(attemptOne.authority.slotId, 1))) continue;
+      const bytes = handle.readTranscriptBytes(attemptOne.authority);
+      if (!bytes.ok) return failed(bytes.error.message);
+      const problems = standaloneTranscriptProblems(scope, reviewerText(bytes.value, attemptOne.authority.role), attemptOne.authority.role);
+      if (problems.length > 0) rejected.push({ slot: attemptOne.authority, problems });
+    }
+    let machine: StandaloneReviewMachineState = state.value;
+    if (rejected.length > 0) {
+      for (const { slot, problems } of rejected) {
+        const reduced = reduceStandaloneReviewMachine(machine, {
+          kind: "result-rejected",
+          request: { runId: handle.runId, slotId: slot.slotId, requestId: slot.requestId, attempt: 1 },
+          message: problems.join("; "),
+        });
+        if (!reduced.ok || reduced.value.kind !== "awaiting-results") {
+          return failed(reduced.ok ? "standalone semantic rejection did not remain awaiting results" : reduced.error.message);
+        }
+        machine = reduced.value;
+      }
+      await handle.writeCheckpoint(serializeStandaloneReviewMachineState(machine));
+      for (const { slot, problems } of rejected) {
+        await handle.appendEvent({
+          schemaVersion: 1,
+          sequence: 0,
+          dedupKey: `standalone-result-rejected:${createHash("sha256").update(`${slot.requestId}:${slot.attempt}`).digest("hex")}`,
+          recordedAtMs: Date.now(),
+          event: {
+            kind: "standalone-result-rejected",
+            runId: handle.runId,
+            requestId: slot.requestId,
+            slotId: slot.slotId,
+            attempt: slot.attempt,
+            diagnostic: problems.join("; "),
+          },
+        });
+      }
+    }
+
+    // Phase B — assemble the issued-request set. Slots still expected at
+    // attempt 1 come from the original batch publication; slots at attempt 2
+    // (freshly rejected here or retried in an earlier resume) come from the
+    // per-slot retry batch, published now if a crash left it unpublished.
+    const rejectedSlotIds = new Set(rejected.map(({ slot }) => slot.slotId));
+    const rejectedDiagnostics = new Map(rejected.map(({ slot, problems }) => [slot.slotId, problems.join("; ")] as const));
+    const issued: SpawnRequest[] = [];
+    for (const slot of activeAuthority.roster.orderedSlots) {
+      const expected = rejectedSlotIds.has(slot.slotId) ? 2 : (pendingBySlot.get(slot.slotId) ?? 1);
+      if (expected === 1) {
+        const attemptOne = attemptOneBySlot.get(slot.slotId);
+        if (attemptOne === undefined) {
+          return failed(`standalone attempt-1 issuance authority is missing for ${slot.slotId}`);
+        }
+        issued.push(attemptOne);
+        continue;
+      }
+      const retry = await recoverOrPublishStandaloneRetry(handle, activeAuthority, slot, resolver);
+      if (!retry.ok) return failed(retry.message);
+      issued.push(retry.request);
+    }
     const captureAuthority = bindStandaloneCaptureAuthority(activeAuthority, issued);
     if (!captureAuthority.ok) return failed(captureAuthority.error.message);
+
+    // Phase C — accept captured expected attempts. A captured attempt 2 that
+    // STILL fails the frozen-scope validator terminal-blocks the run exactly as
+    // the LC-2 lifecycle prescribes for a second and final attempt.
     const accepted = [];
+    const missing: SpawnRequest[] = [];
     for (const request of issued) {
-      if (!captured.value.has(captureKey(request.authority.slotId, request.authority.attempt))) continue;
+      if (!captured.value.has(captureKey(request.authority.slotId, request.authority.attempt))) {
+        missing.push(request);
+        continue;
+      }
       const bytes = handle.readTranscriptBytes(request.authority);
       if (!bytes.ok) return failed(bytes.error.message);
+      if (request.authority.attempt === 2) {
+        const problems = standaloneTranscriptProblems(scope, reviewerText(bytes.value, request.authority.role), request.authority.role);
+        if (problems.length > 0) {
+          const terminal = reduceStandaloneReviewMachine(machine, {
+            kind: "result-rejected",
+            request: { runId: handle.runId, slotId: request.authority.slotId, requestId: request.authority.requestId, attempt: 2 },
+            message: problems.join("; "),
+          });
+          if (!terminal.ok || terminal.value.kind !== "terminal-blocked") {
+            return failed(terminal.ok ? "standalone attempt-2 rejection did not terminal-block" : terminal.error.message);
+          }
+          await handle.writeCheckpoint(serializeStandaloneReviewMachineState(terminal.value));
+          await handle.appendEvent({
+            schemaVersion: 1,
+            sequence: 0,
+            dedupKey: `standalone-result-rejected:${createHash("sha256").update(`${request.authority.requestId}:${request.authority.attempt}`).digest("hex")}`,
+            recordedAtMs: Date.now(),
+            event: {
+              kind: "standalone-result-rejected",
+              runId: handle.runId,
+              requestId: request.authority.requestId,
+              slotId: request.authority.slotId,
+              attempt: 2,
+              diagnostic: problems.join("; "),
+            },
+          });
+          return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: terminal.value } };
+        }
+      }
       const prepared = captureStandaloneReviewerBytes(captureAuthority.value, request.authority.requestId, bytes.value);
       if (!prepared.ok) return failed(prepared.error.message);
       const completed = completeStandaloneReviewerCapture(prepared.value, {
@@ -2567,7 +2855,7 @@ export async function resumeStandaloneFacade(
       if (!completed.ok) return failed(completed.error.message);
       accepted.push(completed.value);
     }
-    if (accepted.length !== issued.length) {
+    if (missing.length > 0) {
       const effectId = standalonePublicationEffectId(activeAuthority);
       if (!effectId.ok) return failed(effectId.error.message);
       const receipt = JSON.parse(readRunBytesNoFollow(
@@ -2585,15 +2873,23 @@ export async function resumeStandaloneFacade(
         },
         idempotencyKey: { runId: handle.runId, effectId: effectId.value },
         receipt,
-        requests: issued.filter((request) => !captured.value.has(captureKey(request.authority.slotId, request.authority.attempt))).map((request) => ({
-          ...request,
-          task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.`,
-        })),
+        requests: missing.map((request) => request.authority.attempt === 2
+          ? {
+              ...request,
+              task: standaloneRetryTask(
+                `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.`,
+                rejectedDiagnostics.get(request.authority.slotId) ?? null,
+              ),
+            }
+          : {
+              ...request,
+              task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.`,
+            }),
       } };
     }
     const completion = proveStandaloneRosterCompletion(activeAuthority, resolver, accepted);
     if (!completion.ok) return failed(completion.error.violations.map((entry) => JSON.stringify(entry)).join("; "));
-    let reduced = reduceStandaloneReviewMachine(state.value, { kind: "complete-roster-proved", completion: completion.value });
+    let reduced = reduceStandaloneReviewMachine(machine, { kind: "complete-roster-proved", completion: completion.value });
     if (!reduced.ok) return failed(reduced.error.message);
     if (reduced.value.kind !== "aggregating") return failed("standalone roster did not reach aggregation");
     const aggregate = aggregateStandaloneReview({ authority: activeAuthority, completion: completion.value });

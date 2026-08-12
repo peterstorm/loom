@@ -256,3 +256,34 @@ describe("parseTaskGraph wave_gates record-key validation", () => {
     }
   });
 });
+
+describe("untrusted test_result label validation", () => {
+  const withTestResult = (label: unknown) => graph({
+    tasks: [{ ...validTask, test_result: { verdict: "untrusted", passed: true, label } }],
+  });
+
+  it("accepts an untrusted verdict that names its weak source", () => {
+    expect(parseTaskGraph(withTestResult("helper-reported (store-test-evidence stdin)")).ok).toBe(true);
+  });
+
+  it("refuses an empty untrusted label — the weak source would be unnamed", () => {
+    for (const empty of ["", "   "]) {
+      const err = errorOf(withTestResult(empty));
+      expect(err).toContain("non-empty label naming the weak source");
+    }
+  });
+
+  it("refuses a non-string untrusted label", () => {
+    expect(errorOf(withTestResult(42))).toContain("non-empty label naming the weak source");
+  });
+});
+
+describe("phase container immutability", () => {
+  it("hands out frozen phase_artifacts and skipped_phases so in-place mutation cannot bypass the locked transform", () => {
+    const parsed = parseTaskGraph(graph({ phase_artifacts: { architecture: "plans/x.md" }, skipped_phases: ["clarify"] }));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(Object.isFrozen(parsed.value.phase_artifacts)).toBe(true);
+    expect(Object.isFrozen(parsed.value.skipped_phases)).toBe(true);
+  });
+});

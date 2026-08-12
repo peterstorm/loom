@@ -47,6 +47,7 @@ import {
   serializeAdjudicatedStandaloneReview,
   serializeStandaloneAggregate,
   serializeStandaloneReviewAuthority,
+  standaloneTranscriptProblems,
   parseStandaloneReviewAuthority,
   type CapturedReviewerResult,
   type FrozenStandalonePanelAuthority,
@@ -189,6 +190,43 @@ describe("standalone review aggregate", () => {
     expect(!result.ok && result.errors.join("\n")).toContain(
       "code-reviewer findings[0].file is outside the frozen review scope: src/x.ts",
     );
+  });
+
+  describe("standaloneTranscriptProblems", () => {
+    it("admits an in-scope transcript with no problems", () => {
+      expect(standaloneTranscriptProblems(["src/x.ts"], transcript(["blocker"]), "code-reviewer")).toEqual([]);
+    });
+
+    it("names every out-of-scope finding exactly as aggregation does", () => {
+      const problems = standaloneTranscriptProblems(["src/inside.ts"], transcript(["blocker"]), "code-reviewer");
+      expect(problems).toEqual([
+        "code-reviewer findings[0].file is outside the frozen review scope: src/x.ts",
+      ]);
+    });
+
+    it("reports evidence failure with the aggregation prefix", () => {
+      const problems = standaloneTranscriptProblems(["src/x.ts"], "not a machine summary", "code-reviewer");
+      expect(problems.length).toBe(1);
+      expect(problems[0]).toContain("code-reviewer: ");
+    });
+
+    it("is the exact predicate aggregation uses", () => {
+      // The façade rejects a slot for attempt 2 exactly when aggregation would
+      // have refused the whole run: an aggregate that fails on a transcript
+      // with zero standaloneTranscriptProblems must be a GLOBAL (cross-agent)
+      // error, never a per-transcript one — otherwise the retry path and the
+      // aggregate boundary could drift.
+      const output = transcript(["in scope blocker"]);
+      const scope = ["src/x.ts"];
+      const problems = standaloneTranscriptProblems(scope, output, "code-reviewer");
+      const result = aggregateLegacyStandaloneReview({
+        runId: "run.abc",
+        scope,
+        transcripts: [{ agent: "code-reviewer", output }],
+      });
+      expect(problems).toEqual([]);
+      expect(result.ok).toBe(true);
+    });
   });
 
   it("preserves an honestly unlocated finding while enforcing scope on located findings", () => {
@@ -1753,6 +1791,158 @@ describe("LC-2 standalone lifecycle machine", () => {
       forged,
       createPublicationAuthorityResolver(() => ({ ok: true, value: [] })),
     ).ok).toBe(false);
+  });
+
+  it("replays a done checkpoint whose retried slot was accepted at attempt 2", () => {
+    const authority = preparedAuthority();
+    const slotOne = authority.roster.orderedSlots[0]!;
+    const slotTwo = authority.roster.orderedSlots[1]!;
+
+    // Original attempt-1 batch publication for every roster slot.
+    const batchIntent = prepareInitialBatchPublicationIntent(
+      authority.runId, "effect:review-batch",
+      authority.roster.orderedSlots.map((slot) => rawRequest(slot.attempts[0])),
+    );
+    expect(batchIntent.ok).toBe(true);
+    if (!batchIntent.ok) throw new Error(batchIntent.error.message);
+    const batchReceipt: BatchPublishedReceipt = {
+      schemaVersion: 1, kind: "batch-published",
+      effectId: batchIntent.value.identity.effectId,
+      runId: batchIntent.value.identity.runId,
+      requestIds: batchIntent.value.requestIds,
+      contextDigests: batchIntent.value.contextDigests,
+      issuedRequests: batchIntent.value.issuedRequests,
+      publicationDigest: batchIntent.value.identity.publicationDigest,
+    };
+    const batchBytes = [...new TextEncoder().encode(JSON.stringify(batchReceipt))];
+
+    // Per-slot retry batch publication for the rejected reviewer's attempt 2,
+    // exactly as the façade's recoverOrPublishStandaloneRetry creates it.
+    const retryIntent = prepareInitialBatchPublicationIntent(
+      authority.runId, "effect:standalone-review-retry:batch",
+      [rawRequest(slotOne.attempts[1])],
+    );
+    expect(retryIntent.ok).toBe(true);
+    if (!retryIntent.ok) throw new Error(retryIntent.error.message);
+    const retryReceipt: BatchPublishedReceipt = {
+      schemaVersion: 1, kind: "batch-published",
+      effectId: retryIntent.value.identity.effectId,
+      runId: retryIntent.value.identity.runId,
+      requestIds: retryIntent.value.requestIds,
+      contextDigests: retryIntent.value.contextDigests,
+      issuedRequests: retryIntent.value.issuedRequests,
+      publicationDigest: retryIntent.value.identity.publicationDigest,
+    };
+    const retryBytes = [...new TextEncoder().encode(JSON.stringify(retryReceipt))];
+    const resolver = createPublicationAuthorityResolver((claim) => ({
+      ok: true,
+      value: claim.effectId === retryIntent.value.identity.effectId ? retryBytes : batchBytes,
+    }));
+
+    const issuedBy = (intent: typeof batchIntent.value, bytes: readonly number[], requests: readonly ReturnType<typeof rawRequest>[]) => {
+      const reconciler = createInitialBatchPublicationReconciler(
+        createInitialPublicationEffectPort(() => ({ ok: true, value: bytes })),
+        createAtomicInitialPublicationClaimPort((claim) => ({
+          ok: true,
+          value: {
+            schemaVersion: 1,
+            kind: "initial-publication-claimed",
+            key: claim.key,
+            identity: claim.identity,
+          },
+        })),
+      );
+      const issuance = reconciler(intent);
+      expect(issuance.ok).toBe(true);
+      if (!issuance.ok) throw new Error(issuance.error.message);
+      const action = spawnBatchAction(issuance.value, requests);
+      expect(action.ok).toBe(true);
+      if (!action.ok) throw new Error(action.error.message);
+      return new Map(action.value.requests.map((request) => [request.authority.slotId, request] as const));
+    };
+    const batchIssued = issuedBy(batchIntent.value, batchBytes, authority.roster.orderedSlots.map((slot) => rawRequest(slot.attempts[0])));
+    const retryIssued = issuedBy(retryIntent.value, retryBytes, [rawRequest(slotOne.attempts[1])]);
+    const retryRequest = retryIssued.get(slotOne.slotId);
+    const siblingRequest = batchIssued.get(slotTwo.slotId);
+    if (retryRequest === undefined || siblingRequest === undefined) throw new Error("issued requests missing");
+
+    const capturedFor = (request: SpawnRequest, output: string): CapturedReviewerResult => {
+      const rawBytes = Buffer.from(output, "utf-8");
+      const artifact = parseArtifactRef({
+        runId: authority.runId,
+        slot: request.authority.outputSlot,
+        digest: createHash("sha256").update(rawBytes).digest("hex"),
+        byteLength: rawBytes.byteLength,
+      });
+      expect(artifact.ok).toBe(true);
+      if (!artifact.ok) throw new Error(artifact.error.message);
+      const captured = capturedReviewerResultFromText(artifact.value, output);
+      expect(captured.ok).toBe(true);
+      if (!captured.ok) throw new Error(captured.error.message);
+      return captured.value;
+    };
+    const acceptedRetry = acceptedAgentResult(retryRequest, capturedFor(retryRequest, transcript()));
+    const acceptedSibling = acceptedAgentResult(siblingRequest, capturedFor(siblingRequest, transcript()));
+    expect(acceptedRetry.ok && acceptedSibling.ok).toBe(true);
+    if (!acceptedRetry.ok || !acceptedSibling.ok) return;
+
+    const completion = proveStandaloneRosterCompletion(authority, resolver, [acceptedRetry.value, acceptedSibling.value]);
+    expect(completion.ok).toBe(true);
+    if (!completion.ok) throw new Error(completion.error.violations.map(({ kind }) => kind).join(","));
+
+    // Slot one's attempt 1 is rejected (out-of-scope findings), then the
+    // retried attempt-2 roster completes and finalizes exactly as the façade
+    // drives it.
+    const awaiting = reduceStandaloneReviewMachine(
+      startStandaloneReviewMachine(authority),
+      { kind: "review-batch-published", runId: authority.runId },
+    );
+    expect(awaiting.ok).toBe(true);
+    if (!awaiting.ok || awaiting.value.kind !== "awaiting-results") return;
+    const retried = reduceStandaloneReviewMachine(awaiting.value, {
+      kind: "result-rejected",
+      request: slotOne.attempts[0],
+      message: "code-reviewer findings[0].file is outside the frozen review scope: src/x.ts",
+    });
+    expect(retried.ok).toBe(true);
+    if (!retried.ok || retried.value.kind !== "awaiting-results") return;
+    expect(retried.value.pending.find(({ slotId }) => slotId === slotOne.slotId)?.expectedAttempt).toBe(2);
+    const aggregating = reduceStandaloneReviewMachine(retried.value, { kind: "complete-roster-proved", completion: completion.value });
+    expect(aggregating.ok, aggregating.ok ? "" : aggregating.error.message).toBe(true);
+    if (!aggregating.ok || aggregating.value.kind !== "aggregating") return;
+    const aggregate = aggregateStandaloneReview({ authority, completion: completion.value });
+    expect(aggregate.ok && aggregate.value.kind).toBe("clean");
+    if (!aggregate.ok) return;
+    const ready = reduceStandaloneReviewMachine(aggregating.value, { kind: "aggregate-clean", aggregate: aggregate.value.aggregate });
+    expect(ready.ok && ready.value.kind).toBe("ready-to-finalize");
+    if (!ready.ok || ready.value.kind !== "ready-to-finalize") return;
+    const done = reduceStandaloneReviewMachine(ready.value, {
+      kind: "result-published",
+      result: JSON.parse(serializeAdjudicatedStandaloneReview(ready.value.result)),
+      receipt: {
+        kind: "artifact-set-published" as const,
+        effectId: ready.value.publicationIntent.effectId,
+        runId: authority.runId,
+        artifacts: ready.value.publicationIntent.artifacts,
+      },
+    });
+    expect(done.ok && done.value.kind).toBe("done");
+    if (!done.ok || done.value.kind !== "done") return;
+
+    // The done checkpoint carries an attempt-2 acceptance; the parser must
+    // replay the rejection that advanced the slot and reach the same terminal
+    // state instead of refusing the attempt-2 proof entry as stale.
+    const serialized = serializeStandaloneReviewMachineState(done.value);
+    const reloaded = parseStandaloneReviewMachineState(JSON.parse(serialized), resolver);
+    expect(reloaded.ok, reloaded.ok ? "" : reloaded.error.message).toBe(true);
+    if (!reloaded.ok || reloaded.value.kind !== "done") return;
+    expect(reloaded.value.outcome).toEqual(done.value.outcome);
+
+    // The retry publication is load-bearing: without it the re-proof cannot
+    // resolve the attempt-2 request, so the checkpoint is refused rather than
+    // silently replayed from a partial registration.
+    const batchOnlyResolver = createPublicationAuthorityResolver(() => ({ ok: true, value: batchBytes }));
+    expect(parseStandaloneReviewMachineState(JSON.parse(serialized), batchOnlyResolver).ok).toBe(false);
   });
 
   it("restores the exact predecessor only from a matching recovery receipt", () => {

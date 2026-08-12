@@ -288,10 +288,18 @@ const handler: HookHandler = async (_stdin, args) => {
       execFileSync("git", ["merge-base", "--is-ancestor", recoveredBaselineSha, "HEAD"], {
         cwd: root, stdio: ["ignore", "ignore", "pipe"],
       });
-    } catch {
+    } catch (error) {
+      // The three failures this conflates are operator-distinguishable: an
+      // unknown revision (typo), a real but unrelated commit (not an ancestor),
+      // and git infrastructure failure (corrupt repo, missing binary). The
+      // corrective action differs per case, so the cause must not be thrown
+      // away.
+      const diagnostic = error instanceof Error
+        ? error.message.trim()
+        : String(error);
       return {
         kind: "error",
-        message: `--baseline-sha ${recoveredBaselineSha} must identify a commit that is an ancestor of HEAD`,
+        message: `--baseline-sha ${recoveredBaselineSha} must identify a commit that is an ancestor of HEAD${diagnostic === "" ? "" : `: ${diagnostic}`}`,
       };
     }
   }

@@ -1118,6 +1118,27 @@ function findingScopeErrors(scope: readonly string[], findings: readonly Pick<Fi
   });
 }
 
+/**
+ * Per-transcript semantic admission problems against the frozen scope.
+ *
+ * Aggregation and the orchestration façade share this ONE validator so a
+ * reviewer slot the façade rejects for attempt 2 is exactly the slot
+ * aggregation would have refused — the two can never drift apart on which
+ * transcripts are admissible, and a retried transcript cannot fail aggregation
+ * with a problem the rejection path never diagnosed.
+ */
+export function standaloneTranscriptProblems(
+  scope: readonly string[],
+  output: string,
+  agent: string,
+): readonly string[] {
+  const resolution = resolveReviewFindings(output, agent);
+  if (resolution.kind === "evidence-failed") {
+    return Object.freeze([`${agent}: ${resolution.message}`]);
+  }
+  return findingScopeErrors(scope, resolution.findings.drafts, `${agent} findings`);
+}
+
 function aggregateCanonicalTranscripts(
   runId: string,
   scope: readonly string[],
@@ -1126,16 +1147,13 @@ function aggregateCanonicalTranscripts(
   const errors: string[] = [];
   const findings: Finding[] = [];
   for (const transcript of transcripts) {
+    const problems = standaloneTranscriptProblems(scope, transcript.output, transcript.agent);
+    if (problems.length > 0) {
+      errors.push(...problems);
+      continue;
+    }
     const resolution = resolveReviewFindings(transcript.output, transcript.agent);
-    if (resolution.kind === "evidence-failed") {
-      errors.push(`${transcript.agent}: ${resolution.message}`);
-      continue;
-    }
-    const outsideScope = findingScopeErrors(scope, resolution.findings.drafts, `${transcript.agent} findings`);
-    if (outsideScope.length > 0) {
-      errors.push(...outsideScope);
-      continue;
-    }
+    if (resolution.kind === "evidence-failed") continue; // unreachable: standaloneTranscriptProblems admitted it
     findings.push(...attributeFindings(resolution.findings.drafts, transcript.agent));
   }
   if (errors.length > 0) return fail(errors);

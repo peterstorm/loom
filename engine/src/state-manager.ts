@@ -13,7 +13,7 @@ import { dirname } from "node:path";
 import { withLock } from "./utils/lock";
 import { KNOWN_AGENTS, PHASE_ORDER, REVIEW_SUB_AGENTS, taskGraphPath } from "./config";
 import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
-import { REVIEW_STATUSES, TASK_STATUSES } from "./types";
+import { REVIEW_STATUSES, TASK_STATUSES, type Phase } from "./types";
 import {
   findingIdCollisionError,
   findingsLockstepError,
@@ -582,8 +582,8 @@ function taskEvidenceError(
     }
     const r = t.test_result as Record<string, unknown>;
     if (r.verdict === "untrusted") {
-      if (typeof r.passed !== "boolean" || typeof r.label !== "string") {
-        return `tasks[${index}] ("${id}"): untrusted test_result requires a boolean passed and a string label`;
+      if (typeof r.passed !== "boolean" || typeof r.label !== "string" || r.label.trim() === "") {
+        return `tasks[${index}] ("${id}"): untrusted test_result requires a boolean passed and a non-empty label naming the weak source`;
       }
     } else if (r.verdict !== "trusted-pass" && r.verdict !== "trusted-fail") {
       return `tasks[${index}] ("${id}"): test_result.verdict ${JSON.stringify(r.verdict)} is not one of trusted-pass, trusted-fail, untrusted`;
@@ -813,8 +813,8 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
   const obj = raw as Record<string, unknown>;
   const lifecycleErrors = taskGraphLifecycleErrors(obj);
   if (lifecycleErrors[0] !== undefined) return parseErr(lifecycleErrors[0]);
-  const phaseArtifacts = obj.phase_artifacts as Record<string, string>;
-  const skippedPhases = (obj.skipped_phases ?? []) as string[];
+  const phaseArtifacts = Object.freeze({ ...(obj.phase_artifacts as Record<string, string>) });
+  const skippedPhases = Object.freeze([...(Array.isArray(obj.skipped_phases) ? obj.skipped_phases : [])] as Phase[]);
   for (const field of ["spec_dir", "spec_file", "plan_file"] as const) {
     if (obj[field] !== undefined && obj[field] !== null && typeof obj[field] !== "string") {
       return parseErr(`${field} must be a string or null when present, got ${JSON.stringify(obj[field])}`);
