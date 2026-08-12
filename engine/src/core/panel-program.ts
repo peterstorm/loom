@@ -14,6 +14,7 @@ import {
   REVIEW_LENSES,
   defaultRefutationThreshold,
   parseRefutationVerdict,
+  parseReviewLens,
   parseWaveFindingId,
   tallyRefutations,
   type BriefFinding,
@@ -1010,10 +1011,37 @@ function authorityMatches(left: AgentRequestAuthority, right: AgentRequestAuthor
  * does not actually hold, rather than indexing a parallel array and asserting
  * the result is present.
  */
-type CanonicalPanelSlotBinding = Readonly<{
+export type RefutationVerifierBinding = Readonly<{
   slotId: SlotId;
   requestIds: readonly [RequestId, RequestId];
 }>;
+
+/** Single source of truth for semantic refutation verifier request authority. */
+export function deriveRefutationVerifierBinding(
+  runId: OrchestrationRunId,
+  lens: ReviewLens,
+  findingIds: NonEmpty<WaveFindingId>,
+): ParseResult<RefutationVerifierBinding> {
+  const slotHash = createHash("sha256")
+    .update(JSON.stringify([runId, lens, findingIds]))
+    .digest("hex")
+    .slice(0, 32);
+  const slotId = parseSlotId(`refutation-slot:${slotHash}`);
+  const firstRequestId = parseRequestId(`refutation-request:${slotHash}:1`);
+  const secondRequestId = parseRequestId(`refutation-request:${slotHash}:2`);
+  const errors = [
+    slotId.ok ? null : slotId.error.message,
+    firstRequestId.ok ? null : firstRequestId.error.message,
+    secondRequestId.ok ? null : secondRequestId.error.message,
+  ].filter((message): message is string => message !== null);
+  if (!slotId.ok || !firstRequestId.ok || !secondRequestId.ok) return fail(errors);
+  return ok(Object.freeze({
+    slotId: slotId.value,
+    requestIds: Object.freeze([firstRequestId.value, secondRequestId.value] as const),
+  }));
+}
+
+type CanonicalPanelSlotBinding = RefutationVerifierBinding;
 
 function parseCanonicalPanelSlotBinding(
   runId: OrchestrationRunId,
@@ -1034,23 +1062,20 @@ function parseCanonicalPanelSlotBinding(
     });
   }
 
-  // Wave Gate derives refutation identities from the semantic lens and exact
-  // finding set rather than from a caller-selected ordinal. Recompute that
-  // production authority here so swapping two complete slots cannot silently
-  // relabel their captured verdicts.
-  const slotHash = createHash("sha256")
-    .update(`${runId}|${semanticEntry}|${findingIds.join("|")}`)
-    .digest("hex")
-    .slice(0, 32);
-  const slotId = parseSlotId(`refutation-slot:${slotHash}`);
-  const requestIds = ([1, 2] as const).map((attempt) =>
-    parseRequestId(`refutation-request:${slotHash}:${attempt}`));
-  return slotId.ok && requestIds[0].ok && requestIds[1].ok
-    ? Object.freeze({
-        slotId: slotId.value,
-        requestIds: Object.freeze([requestIds[0].value, requestIds[1].value]) as readonly [RequestId, RequestId],
-      })
-    : null;
+  // Refutation identities derive from the semantic lens and exact finding set
+  // rather than a caller-selected ordinal. Recompute the same authority used
+  // by every producer so swapping complete slots cannot relabel verdicts.
+  const lens = parseReviewLens(semanticEntry);
+  const parsedFindingIds = findingIds.map(parseWaveFindingId);
+  const [firstFindingId, ...otherFindingIds] = parsedFindingIds;
+  if (lens === null || firstFindingId === null || firstFindingId === undefined ||
+      otherFindingIds.some((findingId) => findingId === null)) return null;
+  const binding = deriveRefutationVerifierBinding(
+    runId,
+    lens,
+    [firstFindingId, ...(otherFindingIds as WaveFindingId[])],
+  );
+  return binding.ok ? binding.value : null;
 }
 
 function rosterAuthorityErrors(
@@ -1061,6 +1086,7 @@ function rosterAuthorityErrors(
   semanticEntries: readonly string[],
   stage: "candidate" | "judge" | "verifier",
   findingIds: readonly string[] = [],
+  semanticRunId: OrchestrationRunId = runId,
 ): readonly string[] {
   const errors: string[] = [];
   if (roster.runId !== runId) errors.push("roster run does not match panel run");
@@ -1075,7 +1101,7 @@ function rosterAuthorityErrors(
     }
     const semanticEntry = semanticEntries[index];
     if (semanticEntry === undefined) continue;
-    const expected = parseCanonicalPanelSlotBinding(runId, stage, index + 1, semanticEntry, findingIds);
+    const expected = parseCanonicalPanelSlotBinding(semanticRunId, stage, index + 1, semanticEntry, findingIds);
     if (expected === null) {
       errors.push(`${stage} slot ${index + 1} canonical identity could not be derived`);
       continue;
@@ -1264,6 +1290,8 @@ export type RefutationPanelAuthority = Readonly<{
   schemaVersion: 2;
   panel: "refutation";
   runId: OrchestrationRunId;
+  /** Semantic panel instance identity; Wave panels bind this to readiness. */
+  identityRunId: OrchestrationRunId;
   findings: readonly [BriefFinding, ...BriefFinding[]];
   lenses: readonly [ReviewLens, ...ReviewLens[]];
   verifierRoster: ExactRoster;
@@ -1271,6 +1299,7 @@ export type RefutationPanelAuthority = Readonly<{
 
 export type RefutationPanelAuthorityInput = Readonly<{
   runId: unknown;
+  identityRunId?: unknown;
   findings: unknown;
   lenses: unknown;
   verifierSlots: unknown;
@@ -1308,15 +1337,18 @@ function boundCandidateEntry(
 
 export function parseRefutationPanelAuthority(raw: RefutationPanelAuthorityInput): PersistentPanelResult<RefutationPanelAuthority> {
   try {
-    const input = safeRecord(raw, ["runId", "findings", "lenses", "verifierSlots"]);
+    const input = safeRecord(raw, ["runId", "identityRunId", "findings", "lenses", "verifierSlots"]) ??
+      safeRecord(raw, ["runId", "findings", "lenses", "verifierSlots"]);
     if (input === null) return persistentFailure(panelError("refutation", "invalid-authority", "refutation authority must be an exact data record"));
     const runId = parseOrchestrationRunId(input.runId);
+    const identityRunId = parseOrchestrationRunId(input.identityRunId ?? input.runId);
     const rawFindings = safeArray(input.findings);
     const lenses = nonEmptyDistinctStrings(input.lenses);
     const roster = parseExactRoster(input.verifierSlots);
     const findings: BriefFinding[] = [];
     const errors: string[] = [];
     if (!runId.ok) errors.push(runId.error.message);
+    if (!identityRunId.ok) errors.push(identityRunId.error.message);
     if (rawFindings === null || rawFindings.length === 0) {
       errors.push("refutation findings must be a non-empty canonical critical Finding list");
     } else {
@@ -1340,15 +1372,17 @@ export function parseRefutationPanelAuthority(raw: RefutationPanelAuthorityInput
         lenses,
         "verifier",
         findings.map(({ id }) => id),
+        identityRunId.ok ? identityRunId.value : runId.value,
       ));
     }
-    if (errors.length > 0 || !runId.ok || !roster.ok || parsedLenses.length === 0 || findings.length === 0) {
+    if (errors.length > 0 || !runId.ok || !identityRunId.ok || !roster.ok || parsedLenses.length === 0 || findings.length === 0) {
       return persistentFailure(panelError("refutation", "invalid-authority", errors.join("; ") || "refutation authority is invalid"));
     }
     return persistentSuccess(Object.freeze({
       schemaVersion: 2 as const,
       panel: "refutation" as const,
       runId: runId.value,
+      identityRunId: identityRunId.value,
       findings: Object.freeze(findings) as readonly [BriefFinding, ...BriefFinding[]],
       lenses: Object.freeze(parsedLenses) as readonly [ReviewLens, ...ReviewLens[]],
       verifierRoster: roster.value,
@@ -2441,7 +2475,13 @@ function architectureAuthorityJson(authority: ArchitecturePanelAuthority): Archi
   return Object.freeze({ runId: authority.runId, candidateLenses: authority.candidateLenses, judgeCriteria: authority.judgeCriteria, candidateSlots: authority.candidateRoster.orderedSlots, judgeSlots: authority.judgeRoster.orderedSlots });
 }
 function refutationAuthorityJson(authority: RefutationPanelAuthority): RefutationPanelAuthorityInput {
-  return Object.freeze({ runId: authority.runId, findings: authority.findings, lenses: authority.lenses, verifierSlots: authority.verifierRoster.orderedSlots });
+  return Object.freeze({
+    runId: authority.runId,
+    identityRunId: authority.identityRunId,
+    findings: authority.findings,
+    lenses: authority.lenses,
+    verifierSlots: authority.verifierRoster.orderedSlots,
+  });
 }
 
 export type ArchitecturePanelCheckpoint = Readonly<{ schemaVersion: 2; kind: "architecture-panel-checkpoint"; authority: ArchitecturePanelAuthorityInput; events: readonly PersistentArchitecturePanelEvent[]; state: unknown }>;

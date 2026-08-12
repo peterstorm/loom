@@ -130,7 +130,12 @@ const handler: HookHandler = async (stdin): Promise<HookResult> => {
       return null;
     }
   })();
-  if (input === null) return { kind: "passthrough" };
+  const hasAnyRunAuthority = process.env[RUNS_ROOT_ENV] !== undefined || process.env[RUN_DIR_ENV] !== undefined;
+  if (input === null) {
+    return hasAnyRunAuthority
+      ? { kind: "error", message: "request-bound capture rejected: malformed SubagentStop JSON" }
+      : { kind: "passthrough" };
+  }
 
   const outcome = await captureClaudeResult(
     input,
@@ -142,8 +147,7 @@ const handler: HookHandler = async (stdin): Promise<HookResult> => {
   // would look exactly like a run that had nothing to capture.
   const audit = captureAuditLine("capture-orchestration-result", outcome);
   if (audit !== null) process.stderr.write(audit);
-  if (outcome.kind === "rejected" &&
-      process.env[RUNS_ROOT_ENV] !== undefined && process.env[RUN_DIR_ENV] !== undefined) {
+  if (outcome.kind === "rejected" && hasAnyRunAuthority) {
     return {
       kind: "error",
       message: `request-bound capture rejected (${outcome.reason}): ${outcome.message}`,

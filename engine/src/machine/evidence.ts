@@ -81,6 +81,9 @@ export const MACHINE_SUFFIX = ".machine" as const;
  * its mtime is at/after the START of the tool call being judged). */
 export const CALL_START_SUFFIX = ".callstart.json" as const;
 
+/** Engine-issued Pi run bindings available to the parent session's spawn hook. */
+export const ORCHESTRATION_RUNS_SUFFIX = ".orchestration-runs.json" as const;
+
 /**
  * Every per-session file suffix written under SUBAGENT_DIR — the single
  * source of truth for the ledger's path helpers (ledger.ts) and the
@@ -95,6 +98,7 @@ export const SESSION_SUFFIXES = [
   ".cleanup",
   ".task_graph",
   CALL_START_SUFFIX,
+  ORCHESTRATION_RUNS_SUFFIX,
 ] as const;
 
 export type SessionFileSuffix = (typeof SESSION_SUFFIXES)[number];

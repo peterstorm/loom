@@ -19,6 +19,10 @@ export type ReviewArtifactKind = (typeof REVIEW_ARTIFACT_KINDS)[number];
 export const REVIEW_POSTIMAGE_ENCODINGS = ["utf8", "base64"] as const;
 export type ReviewPostimageEncoding = (typeof REVIEW_POSTIMAGE_ENCODINGS)[number];
 
+declare const REVIEW_PATH: unique symbol;
+/** Canonical repository-relative POSIX path produced only by parseReviewPath. */
+export type ReviewPath = string & { readonly [REVIEW_PATH]: true };
+
 export interface ReviewPacketArtifactInput {
   readonly path: string;
   readonly diff: string;
@@ -151,7 +155,7 @@ function parseJsonObject(raw: unknown, label: string): ParseResult<JsonObject> {
  * aliases instead of normalizing them: otherwise two spellings could name the
  * same file while producing different packet identities.
  */
-export function parseReviewPath(raw: unknown, label = "path"): ParseResult<string> {
+export function parseReviewPath(raw: unknown, label = "path"): ParseResult<ReviewPath> {
   if (typeof raw !== "string" || raw.length === 0) return fail([`${label} must be non-empty`]);
   if (raw.trim() !== raw) return fail([`${label} must not have surrounding whitespace`]);
   if (/[\r\n\0]/.test(raw)) return fail([`${label} must be a single line without NUL`]);
@@ -163,7 +167,7 @@ export function parseReviewPath(raw: unknown, label = "path"): ParseResult<strin
   if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
     return fail([`${label} must be canonical and must not contain traversal segments`]);
   }
-  return ok(raw);
+  return ok(raw as ReviewPath);
 }
 
 /** Parse the protected state authority that proves a packet was engine-issued. */

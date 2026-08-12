@@ -5,6 +5,7 @@
  * Delegates to engine/src/core/ for all business logic.
  */
 
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -79,6 +80,10 @@ import {
   type CaptureOutcome,
 } from "../engine/src/orchestration/harness-capture-runtime";
 import { openRunDirectory } from "../engine/src/orchestration/run-directory-handle";
+import {
+  readSessionRunBindings,
+  type SessionRunBinding,
+} from "../engine/src/orchestration/session-run-bindings";
 import { captureKey } from "../engine/src/core/harness-capture";
 import { materializePiResources } from "./resources";
 import { checkAgentSkillPrompt } from "../engine/src/core/agent-skills";
@@ -170,6 +175,67 @@ export const piSpawnRosterId = (
   agent,
 ]));
 
+type PiOrchestrationMarkers = Readonly<{
+  requestId: string;
+  contextDigest: string;
+}>;
+
+function orchestrationMarkers(task: string, item: string): PiOrchestrationMarkers | null {
+  const requestIds = [...task.matchAll(/^LOOM_REQUEST_ID:[ \t]*(\S+)[ \t]*$/gm)].map((match) => match[1]!);
+  const contextDigests = [...task.matchAll(/^LOOM_CONTEXT_DIGEST:[ \t]*(\S+)[ \t]*$/gm)].map((match) => match[1]!);
+  if (requestIds.length === 0 && contextDigests.length === 0) return null;
+  if (requestIds.length !== 1 || contextDigests.length !== 1) {
+    throw new Error(`${item} must carry exactly one LOOM_REQUEST_ID and one LOOM_CONTEXT_DIGEST authority marker`);
+  }
+  return Object.freeze({ requestId: requestIds[0]!, contextDigest: contextDigests[0]! });
+}
+
+function environmentRunBinding(): SessionRunBinding | null {
+  const runsRoot = process.env[RUNS_ROOT_ENV];
+  const runDirectory = process.env[RUN_DIR_ENV];
+  if (runsRoot === undefined && runDirectory === undefined) return null;
+  if (runsRoot === undefined || runDirectory === undefined) {
+    throw new Error("Pi orchestration requires both run-root and run-directory authority");
+  }
+  const opened = openRunDirectory(runsRoot, runDirectory);
+  if (!opened.ok) throw new Error(opened.error.message);
+  const issued = opened.value.readIssuedRequests();
+  if (!issued.ok) throw new Error(issued.error.message);
+  return Object.freeze({
+    ...opened.value.identity,
+    requestIds: Object.freeze(issued.value.map(({ requestId }) => requestId)),
+  });
+}
+
+function sessionRunBinding(
+  rawSessionId: string,
+  markers: readonly PiOrchestrationMarkers[],
+): SessionRunBinding {
+  const bindings = readSessionRunBindings(SUBAGENT_DIR, rawSessionId);
+  if (!bindings.ok) throw new Error(bindings.message);
+  const requestIds = new Set(markers.map(({ requestId }) => requestId));
+  const candidates = bindings.value.filter((binding) =>
+    [...requestIds].every((requestId) => binding.requestIds.some((candidate) => candidate === requestId))
+  );
+  const matches = candidates.filter((binding) => {
+    const opened = openRunDirectory(binding.runsRoot, binding.runDirectory);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const issued = opened.value.readIssuedRequests();
+    if (!issued.ok) throw new Error(issued.error.message);
+    return markers.every((marker) => issued.value.some((request) =>
+      request.requestId === marker.requestId && request.contextDigest === marker.contextDigest));
+  });
+  if (matches.length !== 1) {
+    const identities = markers.map(({ requestId, contextDigest }) => `${requestId}@${contextDigest}`).join(", ");
+    throw new Error(
+      matches.length === 0
+        ? `no Pi session run binding contains issued request/context authority ${identities}`
+        : `multiple Pi session run bindings contain issued request/context authority ${identities}`,
+    );
+  }
+  return matches[0]!;
+}
+
 /**
  * Capture one finished Pi subagent result into its reserved run-directory slot.
  *
@@ -186,16 +252,19 @@ export const piSpawnRosterId = (
 export async function recordPiSpawnCorrelators(
   items: readonly Readonly<{ agent: string; task: string }>[],
   rosterIds: readonly string[],
-): Promise<void> {
-  const runsRoot = process.env[RUNS_ROOT_ENV];
-  const runDirectory = process.env[RUN_DIR_ENV];
-  if (runsRoot === undefined && runDirectory === undefined) return;
-  if (runsRoot === undefined || runDirectory === undefined) {
-    throw new Error("Pi orchestration spawn requires both run-root and run-directory authority");
-  }
+  rawSessionId: string,
+): Promise<SessionRunBinding | null> {
   if (items.length !== rosterIds.length) throw new Error("Pi correlator roster length does not match spawn batch");
-
-  const opened = openRunDirectory(runsRoot, runDirectory);
+  const parsedMarkers = items.map((item, index) =>
+    orchestrationMarkers(item.task, `Pi spawn item ${index + 1}/${item.agent}`));
+  const marked = parsedMarkers.filter((markers): markers is PiOrchestrationMarkers => markers !== null);
+  const explicit = environmentRunBinding();
+  if (marked.length === 0 && explicit === null) return null;
+  if (marked.length !== items.length) {
+    throw new Error("Pi orchestration spawn batch must not mix request-bound and unbound items");
+  }
+  const runBinding = explicit ?? sessionRunBinding(rawSessionId, marked);
+  const opened = openRunDirectory(runBinding.runsRoot, runBinding.runDirectory);
   if (!opened.ok) throw new Error(opened.error.message);
   const issued = opened.value.readIssuedRequests();
   if (!issued.ok) throw new Error(issued.error.message);
@@ -207,17 +276,18 @@ export async function recordPiSpawnCorrelators(
   const consumed = new Set<string>();
 
   for (const [index, item] of items.entries()) {
-    const markers = [...item.task.matchAll(/^LOOM_REQUEST_ID:[ \t]*(\S+)[ \t]*$/gm)].map((match) => match[1]!);
-    if (markers.length !== 1) {
-      throw new Error(`Pi spawn item ${index + 1}/${item.agent} must carry exactly one LOOM_REQUEST_ID authority marker`);
-    }
-    const exactRequestId = markers[0]!;
+    const markers = parsedMarkers[index]!;
+    if (markers === null) throw new Error("Pi orchestration marker completeness invariant failed");
+    const exactRequestId = markers.requestId;
     const request = available.find((candidate) => candidate.requestId === exactRequestId);
     if (request === undefined || consumed.has(request.requestId)) {
       throw new Error(`issued request ${exactRequestId} is unavailable for Pi spawn item ${index + 1}/${item.agent}`);
     }
     if (request.role !== item.agent) {
       throw new Error(`issued request ${exactRequestId} belongs to ${request.role}, not Pi spawn item role ${item.agent}`);
+    }
+    if (request.contextDigest !== markers.contextDigest) {
+      throw new Error(`issued request ${exactRequestId} context digest does not match the Pi spawn marker`);
     }
     const nativeId = rosterIds[index];
     if (nativeId === undefined) throw new Error(`Pi spawn item ${index + 1} has no native correlator`);
@@ -232,6 +302,64 @@ export async function recordPiSpawnCorrelators(
     if (!recorded.ok) throw new Error(recorded.error.message);
     consumed.add(request.requestId);
   }
+  return runBinding;
+}
+
+async function recordPiRequestCaptureRejection(
+  runBinding: SessionRunBinding,
+  toolCallId: unknown,
+  resultIndex: number,
+  agentType: string,
+  diagnostic: string,
+): Promise<void> {
+  const opened = openRunDirectory(runBinding.runsRoot, runBinding.runDirectory);
+  if (!opened.ok) return;
+  const correlator = opened.value.readHarnessCorrelator(
+    "pi", piSpawnRosterId(toolCallId, resultIndex, agentType),
+  );
+  if (!correlator.ok || correlator.value === null) return;
+  const issued = opened.value.readIssuedRequests();
+  if (!issued.ok) return;
+  const request = issued.value.find(({ requestId }) => requestId === correlator.value?.requestId);
+  if (request === undefined) return;
+  await opened.value.appendEvent({
+    schemaVersion: 1,
+    sequence: 0,
+    dedupKey: `capture-rejected:${createHash("sha256").update(`${request.requestId}:${request.attempt}`).digest("hex")}`,
+    recordedAtMs: Date.now(),
+    event: {
+      kind: "request-capture-rejected",
+      requestId: request.requestId,
+      slotId: request.slotId,
+      attempt: request.attempt,
+      diagnostic,
+    },
+  });
+}
+
+function piResultAuthorityProblem(
+  runBinding: SessionRunBinding,
+  toolCallId: unknown,
+  resultIndex: number,
+  agentType: string,
+  markers: PiOrchestrationMarkers,
+): string | null {
+  const opened = openRunDirectory(runBinding.runsRoot, runBinding.runDirectory);
+  if (!opened.ok) return opened.error.message;
+  const nativeId = piSpawnRosterId(toolCallId, resultIndex, agentType);
+  const correlator = opened.value.readHarnessCorrelator("pi", nativeId);
+  if (!correlator.ok) return correlator.error.message;
+  if (correlator.value === null) return `no durable Pi correlator exists for result index ${resultIndex}`;
+  if (correlator.value.requestId !== markers.requestId) {
+    return `result marker ${markers.requestId} does not match correlated request ${correlator.value.requestId}`;
+  }
+  const issued = opened.value.readIssuedRequests();
+  if (!issued.ok) return issued.error.message;
+  const request = issued.value.find(({ requestId }) => requestId === correlator.value?.requestId);
+  if (request === undefined) return `correlated request ${correlator.value.requestId} is no longer issued`;
+  return request.contextDigest === markers.contextDigest
+    ? null
+    : `result context marker does not match correlated request ${request.requestId}`;
 }
 
 export async function capturePiSubagentResult(
@@ -239,13 +367,14 @@ export async function capturePiSubagentResult(
   resultIndex: number,
   agentType: string,
   messages: unknown,
+  runBinding: SessionRunBinding | null = null,
 ): Promise<CaptureOutcome> {
   try {
     const candidates = piResultFinalPayloadCandidates(messages ?? []);
     const outcome = await captureHarnessResult({
       harness: "pi",
-      runsRoot: process.env[RUNS_ROOT_ENV],
-      runDirectory: process.env[RUN_DIR_ENV],
+      runsRoot: runBinding?.runsRoot ?? process.env[RUNS_ROOT_ENV],
+      runDirectory: runBinding?.runDirectory ?? process.env[RUN_DIR_ENV],
       nativeId: piSpawnRosterId(toolCallId, resultIndex, agentType),
       // Malformed messages yield NO candidate rather than a guess, so the
       // ambiguity rules reject instead of accepting salvage — the same posture
@@ -298,6 +427,7 @@ type PiSessionId = NonNullable<ReturnType<typeof parseSessionId>>;
 type PiSpawnReservation = Readonly<{
   sessionId: PiSessionId;
   needsTaskGraphLifecycle: boolean;
+  orchestrationRunBinding: SessionRunBinding | null;
   items: readonly Readonly<{
     agentType: string;
     rosterId: AgentId;
@@ -306,6 +436,87 @@ type PiSpawnReservation = Readonly<{
     standalone: boolean;
   }>[];
 }>;
+
+const MAX_PI_ORCHESTRATION_BATCH_SIZE = 8;
+
+function recoverPiSpawnReservation(
+  rawSessionId: string,
+  toolCallId: string,
+): PiSpawnReservation | null {
+  const sessionId = parseSessionId(rawSessionId);
+  if (sessionId === null) throw new Error(`invalid Pi result session id ${JSON.stringify(rawSessionId)}`);
+  const bindings = readSessionRunBindings(SUBAGENT_DIR, sessionId);
+  if (!bindings.ok) throw new Error(bindings.message);
+  const recovered: PiSpawnReservation[] = [];
+  const inaccessibleBindings: string[] = [];
+
+  for (const binding of bindings.value) {
+    const opened = openRunDirectory(binding.runsRoot, binding.runDirectory);
+    if (!opened.ok) {
+      inaccessibleBindings.push(`${binding.runId}: ${opened.error.message}`);
+      continue;
+    }
+    const issued = opened.value.readIssuedRequests();
+    if (!issued.ok) {
+      inaccessibleBindings.push(`${binding.runId}: ${issued.error.message}`);
+      continue;
+    }
+    const eligible = issued.value.filter((request) =>
+      binding.requestIds.some((requestId) => requestId === request.requestId));
+    const byIndex = new Map<number, { agentType: string; rosterId: AgentId }>();
+    let correlatorFailure: string | null = null;
+    for (const request of eligible) {
+      for (let index = 0; index < MAX_PI_ORCHESTRATION_BATCH_SIZE; index += 1) {
+        const nativeId = piSpawnRosterId(toolCallId, index, request.role);
+        const correlator = opened.value.readHarnessCorrelator("pi", nativeId);
+        if (!correlator.ok) {
+          correlatorFailure = correlator.error.message;
+          break;
+        }
+        if (correlator.value?.requestId !== request.requestId) continue;
+        const previous = byIndex.get(index);
+        if (previous !== undefined && previous.rosterId !== nativeId) {
+          throw new Error(`Pi tool call ${toolCallId} has conflicting durable correlators at result index ${index}`);
+        }
+        byIndex.set(index, { agentType: request.role, rosterId: nativeId });
+      }
+      if (correlatorFailure !== null) break;
+    }
+    if (correlatorFailure !== null) {
+      inaccessibleBindings.push(`${binding.runId}: ${correlatorFailure}`);
+      continue;
+    }
+    if (byIndex.size === 0) continue;
+    const indexes = [...byIndex.keys()].sort((left, right) => left - right);
+    if (indexes.some((index, ordinal) => index !== ordinal)) {
+      throw new Error(`Pi tool call ${toolCallId} durable correlators do not form a contiguous result roster`);
+    }
+    recovered.push(Object.freeze({
+      sessionId,
+      needsTaskGraphLifecycle: false,
+      orchestrationRunBinding: binding,
+      items: Object.freeze(indexes.map((index) => {
+        const item = byIndex.get(index)!;
+        return Object.freeze({
+          agentType: item.agentType,
+          rosterId: item.rosterId,
+          taskId: null,
+          implementation: false,
+          standalone: true,
+        });
+      })),
+    }));
+  }
+  if (recovered.length > 1) {
+    throw new Error(`Pi tool call ${toolCallId} is bound to multiple orchestration runs`);
+  }
+  if (inaccessibleBindings.length > 0) {
+    throw new Error(
+      `Pi tool call ${toolCallId} could not be recovered unambiguously; inaccessible session bindings: ${inaccessibleBindings.join("; ")}`,
+    );
+  }
+  return recovered[0] ?? null;
+}
 
 interface PiParentSessionRuntime {
   readonly issuedWriteGrants: Map<string, readonly string[]>;
@@ -433,6 +644,12 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         const parsedItems = classifiedItems.value.items;
+        if (parsedItems.length > MAX_PI_ORCHESTRATION_BATCH_SIZE) {
+          return {
+            block: true,
+            reason: `Pi transport accepts at most ${MAX_PI_ORCHESTRATION_BATCH_SIZE} requests per subagent call; partition the engine-issued spawn-batch into ordered chunks without changing, dropping, or duplicating requests.`,
+          };
+        }
         const taskExecutionSpawns = parsedItems.map((item) => classifyTaskExecutionSpawn({
           agentType: item.agent,
           prompt: item.task,
@@ -533,6 +750,7 @@ export default function (pi: ExtensionAPI) {
         const reserved: Array<(typeof rosterIds)[number]> = [];
         const writeGrants: Array<{ index: number; token: string; task: string; originalTask: string; injected: boolean }> = [];
         let taskGraphPointerCreated = false;
+        let orchestrationRunBinding: SessionRunBinding | null = null;
         const rollbackLifecycle = async (): Promise<readonly string[]> => {
           const actions: PiCleanupAction[] = [];
           for (const grant of writeGrants) {
@@ -579,7 +797,7 @@ export default function (pi: ExtensionAPI) {
           // request before the harness can dispatch the batch. The durable run
           // directory, not the in-memory lifecycle map below, owns capture
           // authority for both Pi and Claude.
-          await recordPiSpawnCorrelators(parsedItems, rosterIds);
+          orchestrationRunBinding = await recordPiSpawnCorrelators(parsedItems, rosterIds, safeSessionId);
           for (const index of implementationIndexes) {
             const item = parsedItems[index]!;
             const taskId = extractTaskId(item.task);
@@ -644,6 +862,7 @@ export default function (pi: ExtensionAPI) {
         sessionRuntime.spawnReservations.set(toolCallId, {
           sessionId: safeSessionId,
           needsTaskGraphLifecycle,
+          orchestrationRunBinding,
           items: parsedItems.map((item, index) => ({
             agentType: item.agent,
             rosterId: rosterIds[index]!,
@@ -767,9 +986,14 @@ export default function (pi: ExtensionAPI) {
     }
 
     const cleanupErrors = await runPiCleanupActions(actions);
-    if (sessionId) parentSessionRuntimes.delete(sessionId);
-    activeChildWriteGrants.delete(rawSessionId);
-    rejectedChildWriteGrantSessions.delete(rawSessionId);
+    // Failed revocation/cleanup remains retryable on the next shutdown event.
+    // Dropping these maps after a failure would orphan the capability while
+    // erasing the only in-process record that can revoke it.
+    if (cleanupErrors.length === 0) {
+      if (sessionId) parentSessionRuntimes.delete(sessionId);
+      activeChildWriteGrants.delete(rawSessionId);
+      rejectedChildWriteGrantSessions.delete(rawSessionId);
+    }
     for (const cleanupError of cleanupErrors) {
       process.stderr.write(`loom(pi): shutdown cleanup failed: ${cleanupError}\n`);
     }
@@ -863,9 +1087,21 @@ export default function (pi: ExtensionAPI) {
     const sessionRuntime = resultSessionId === null
       ? undefined
       : parentSessionRuntimes.get(resultSessionId);
-    const reservation = typeof toolCallId === "string"
+    const inMemoryReservation = typeof toolCallId === "string"
       ? sessionRuntime?.spawnReservations.get(toolCallId)
       : undefined;
+    let reservation = inMemoryReservation;
+    let reservationRecoveryFailed = false;
+    if (reservation === undefined && typeof toolCallId === "string" && resultSessionId !== null) {
+      try {
+        reservation = recoverPiSpawnReservation(resultSessionId, toolCallId) ?? undefined;
+      } catch (error) {
+        reservationRecoveryFailed = true;
+        const diagnostic = `durable Pi orchestration reservation recovery failed: ${error instanceof Error ? error.message : String(error)}`;
+        processingErrors.push(diagnostic);
+        process.stderr.write(`loom(pi): ${diagnostic}\n`);
+      }
+    }
     const grantTokens = typeof toolCallId === "string"
       ? sessionRuntime?.issuedWriteGrants.get(toolCallId) ?? []
       : [];
@@ -905,6 +1141,7 @@ export default function (pi: ExtensionAPI) {
           }],
           isError: true,
         };
+    if (reservationRecoveryFailed) return processingErrorResponse();
     let parentPointerCleanupAttempted = false;
     const cleanupParentTaskGraphPointer = async (): Promise<void> => {
       if (parentPointerCleanupAttempted || !resultSessionId || !sessionRuntime?.taskGraphPointerOwned ||
@@ -1034,24 +1271,36 @@ export default function (pi: ExtensionAPI) {
         if (typeof raw !== "object" || raw === null || Array.isArray(raw) || !("agent" in raw)) return null;
         return typeof raw.agent === "string" ? stripNamespace(raw.agent) : null;
       };
-      const missingReviews = reservation.items.flatMap((item, index) =>
-        item.standalone || item.taskId === null || !isReviewAgent(item.agentType) ||
-          returnedAgentAt(index) === item.agentType
-          ? []
-          : [{ item, index }]
-      );
-      const missingSpecChecks = reservation.items.flatMap((item, index) =>
-        item.standalone || item.agentType !== "spec-check-invoker" ||
-          returnedAgentAt(index) === item.agentType
-          ? []
-          : [{ item, index }]
-      );
+      const missingReviews = reservation.orchestrationRunBinding !== null
+        ? []
+        : reservation.items.flatMap((item, index) =>
+            item.standalone || item.taskId === null || !isReviewAgent(item.agentType) ||
+              returnedAgentAt(index) === item.agentType
+              ? []
+              : [{ item, index }]);
+      const missingSpecChecks = reservation.orchestrationRunBinding !== null
+        ? []
+        : reservation.items.flatMap((item, index) =>
+            item.standalone || item.agentType !== "spec-check-invoker" ||
+              returnedAgentAt(index) === item.agentType
+              ? []
+              : [{ item, index }]);
+      const missingRunResults = reservation.orchestrationRunBinding === null
+        ? []
+        : reservation.items.flatMap((item, index) =>
+            returnedAgentAt(index) === item.agentType ? [] : [{ item, index }]);
+      for (const { item, index } of missingRunResults) {
+        const diagnostic = `request-bound result ${index + 1} for ${item.agentType} was missing or mismatched`;
+        processingErrors.push(diagnostic);
+        process.stderr.write(`loom(pi): ${diagnostic}; run transcript was not captured\n`);
+      }
       if (missingReviews.length > 0 || missingSpecChecks.length > 0) {
         const manager = StateManager.fromSession(reservation.sessionId);
         if (!manager) {
-          process.stderr.write(
-            `loom(pi): cannot persist ${missingReviews.length} missing reserved review result(s) and ${missingSpecChecks.length} missing reserved spec-check result(s) for session ${reservation.sessionId} — task graph unavailable\n`,
-          );
+          const diagnostic = `cannot persist ${missingReviews.length} missing reserved review result(s) and ` +
+            `${missingSpecChecks.length} missing reserved spec-check result(s) for session ${reservation.sessionId} — task graph unavailable`;
+          processingErrors.push(diagnostic);
+          process.stderr.write(`loom(pi): ${diagnostic}\n`);
         } else {
           const runAt = new Date().toISOString();
           await manager.update((state) => ({
@@ -1131,11 +1380,36 @@ export default function (pi: ExtensionAPI) {
       const agentType = stripNamespace(result.agent);
       const sessionId = _ctx.sessionManager.getSessionId() ?? "unknown";
       const reservedItem = reservation?.items[resultIndex];
+      const markers = orchestrationMarkers(
+        result.task ?? "",
+        `Pi result ${resultIndex + 1}/${agentType}`,
+      );
+      const durableRunBinding = reservation?.orchestrationRunBinding ??
+        (markers !== null && resultSessionId !== null
+          ? sessionRunBinding(resultSessionId, [markers])
+          : null);
+      const runBound = durableRunBinding !== null ||
+        process.env[RUNS_ROOT_ENV] !== undefined || process.env[RUN_DIR_ENV] !== undefined;
       if (reservedItem && agentType !== reservedItem.agentType) {
-        process.stderr.write(
-          `loom(pi): result ${resultIndex + 1} agent ${JSON.stringify(agentType)} does not match reserved ${JSON.stringify(reservedItem.agentType)} — evidence ignored\n`,
-        );
+        const diagnostic =
+          `result ${resultIndex + 1} agent ${JSON.stringify(agentType)} does not match reserved ${JSON.stringify(reservedItem.agentType)}`;
+        if (runBound) processingErrors.push(`request-bound ${diagnostic}`);
+        process.stderr.write(`loom(pi): ${diagnostic} — evidence ignored\n`);
         continue;
+      }
+      if (durableRunBinding !== null) {
+        const authorityProblem = markers === null
+          ? `request-bound result ${resultIndex + 1}/${agentType} has no request/context markers`
+          : piResultAuthorityProblem(durableRunBinding, toolCallId, resultIndex, agentType, markers);
+        if (authorityProblem !== null) {
+          const diagnostic = `request-bound result authority rejected for ${agentType}: ${authorityProblem}`;
+          processingErrors.push(diagnostic);
+          process.stderr.write(`loom(pi): ${diagnostic}; transcript was not captured\n`);
+          await recordPiRequestCaptureRejection(
+            durableRunBinding, toolCallId, resultIndex, agentType, diagnostic,
+          );
+          continue;
+        }
       }
 
       // Cleanup subagent flag. Parse the session id before interpolating it
@@ -1165,12 +1439,19 @@ export default function (pi: ExtensionAPI) {
       // path serves; and capture must record evidence before any handler acts
       // on it. It reads only the run directory it is pointed at, never a State
       // File, so a run beside an active wave cannot cross into it.
-      const captureOutcome = await capturePiSubagentResult(
-        toolCallId,
-        resultIndex,
-        agentType,
-        result.messages,
-      );
+      const captureOutcome: CaptureOutcome = piSubagentResultFailed(result) && runBound
+        ? {
+            kind: "rejected",
+            reason: "agent-failed",
+            message: `${agentType} exited without a successful result`,
+          }
+        : await capturePiSubagentResult(
+            toolCallId,
+            resultIndex,
+            agentType,
+            result.messages,
+            durableRunBinding,
+          );
 
       // Standalone review/refutation results are run artifacts. Short-circuit
       // before StateManager resolution so an unrelated local graph is neither
@@ -1178,8 +1459,7 @@ export default function (pi: ExtensionAPI) {
       // active, however, capture is mandatory evidence: a rejection or missing
       // correlator must be surfaced rather than disguised as a harmless
       // task-state short-circuit.
-      if (reservedItem?.standalone ?? hasStandaloneReviewContext(result.task ?? "")) {
-        const runBound = process.env[RUNS_ROOT_ENV] !== undefined && process.env[RUN_DIR_ENV] !== undefined;
+      if (runBound || reservedItem?.standalone === true || hasStandaloneReviewContext(result.task ?? "")) {
         if (runBound && captureOutcome.kind !== "captured") {
           const detail = captureOutcome.kind === "rejected"
             ? `${captureOutcome.reason}: ${captureOutcome.message}`
@@ -1189,6 +1469,11 @@ export default function (pi: ExtensionAPI) {
           const diagnostic = `standalone request-bound capture failed for ${agentType}: ${detail}`;
           processingErrors.push(diagnostic);
           process.stderr.write(`loom(pi): ${diagnostic}; task state untouched\n`);
+          if (durableRunBinding !== null) {
+            await recordPiRequestCaptureRejection(
+              durableRunBinding, toolCallId, resultIndex, agentType, diagnostic,
+            );
+          }
         } else {
           process.stderr.write(
             piSubagentResultFailed(result)
@@ -1203,7 +1488,6 @@ export default function (pi: ExtensionAPI) {
       // request-bound evidence before protected state can change. Only truly
       // unrelated legacy agents may retain the no-reservation compatibility
       // path.
-      const runBound = process.env[RUNS_ROOT_ENV] !== undefined && process.env[RUN_DIR_ENV] !== undefined;
       if (captureOutcome.kind === "rejected" ||
           (runBound && isLoomOwnedResultAgent(agentType) && captureOutcome.kind !== "captured")) {
         const detail = captureOutcome.kind === "rejected"
@@ -1220,9 +1504,9 @@ export default function (pi: ExtensionAPI) {
       const mgr = StateManager.fromSession(sessionId);
       if (!mgr) {
         if (isLoomOwnedResultAgent(agentType)) {
-          process.stderr.write(
-            `loom(pi): no task graph for session ${JSON.stringify(sessionId)}; ${agentType} completion was NOT applied\n`,
-          );
+          const diagnostic = `no task graph for session ${JSON.stringify(sessionId)}; ${agentType} completion was NOT applied`;
+          processingErrors.push(diagnostic);
+          process.stderr.write(`loom(pi): ${diagnostic}\n`);
         }
         continue;
       }

@@ -64,6 +64,7 @@ import {
   type ReviewLens,
 } from "./review-panel";
 import {
+  deriveRefutationVerifierBinding,
   parseRefutationPanelAuthority,
   type RefutationPanelAuthority,
 } from "./panel-program";
@@ -681,6 +682,7 @@ export function applyGateDecision(state: TaskGraph, decision: GateDecision): Tas
       }),
     },
     ...(decision.verdict.nextWave === null ? {} : { current_wave: decision.verdict.nextWave }),
+    wave_review_epoch: undefined,
   };
 }
 
@@ -1689,12 +1691,26 @@ export function deriveWaveRefutationPlan(
   snapshot: WaveReadinessSnapshot,
 ): DomainResult<WaveRefutationPlan, WavePreparationError> {
   if (!waveReadinessProofs.has(snapshot)) return preparationFailure("refutation preparation requires canonical readiness");
+  const collecting = snapshot.waveTasks.filter(({ review_run }) => review_run !== undefined);
+  if (collecting.length > 0) {
+    return preparationFailure(
+      `current Review Packet evidence must complete before refutation: ${collecting.map(({ id, review_run }) =>
+        `${id}/${review_run!.packet_id}`).join(", ")}`,
+    );
+  }
+  const unreviewed = snapshot.waveTasks.filter(({ review_status }) =>
+    review_status !== "passed" && review_status !== "blocked");
+  if (unreviewed.length > 0) {
+    return preparationFailure(
+      `current-generation review evidence must complete before refutation: ${unreviewed.map(({ id }) => id).join(", ")}`,
+    );
+  }
   const brief = buildFindingBrief(snapshot.wave, snapshot.graph.tasks);
   if (brief.findings.length === 0) return preparationFailure("an empty critical Finding set cannot start a Refutation Panel");
   const lenses = selectReviewLenses(reviewSignals(brief.findings), 3);
   if (!lenses.ok || lenses.value.length === 0) return preparationFailure(lenses.ok ? "no review lenses were derived" : lenses.errors.join("; "));
   const digest = createHash("sha256")
-    .update(`${snapshot.registration.runId}|${brief.findings.map(({ id }) => id).join("|")}|${lenses.value.join("|")}`)
+    .update(`${snapshot.registration.runId}|${snapshot.readinessDigest}|${brief.findings.map(({ id }) => id).join("|")}|${lenses.value.join("|")}`)
     .digest("hex");
   const panelRun = parseOrchestrationRunId(`wave-refutation:${digest.slice(0, 32)}`);
   if (!panelRun.ok) return preparationFailure(panelRun.error.message);
@@ -1718,21 +1734,19 @@ function deriveWaveRefutationVerifierSlots(plan: WaveRefutationPlan): DomainResu
   const slots: AgentRosterSlot[] = [];
   for (let index = 0; index < plan.lenses.length; index++) {
     const lens = plan.lenses[index]!;
-    const slotHash = createHash("sha256")
-      .update(`${plan.runId}|${lens}|${plan.findings.map(({ id }) => id).join("|")}`)
-      .digest("hex");
-    const slotId = parseSlotId(`refutation-slot:${slotHash.slice(0, 32)}`);
-    if (!slotId.ok) return preparationFailure(slotId.error.message);
+    const findingIds = [plan.findings[0].id, ...plan.findings.slice(1).map(({ id }) => id)] as const;
+    const binding = deriveRefutationVerifierBinding(plan.runId, lens, findingIds);
+    if (!binding.ok) return preparationFailure(binding.errors.join("; "));
     const attempts = ([1, 2] as const).map((attempt) => {
-      const requestId = parseRequestId(`refutation-request:${slotHash.slice(0, 32)}:${attempt}`);
+      const requestId = binding.value.requestIds[attempt - 1];
       const contextDigest = parseContextDigest(createHash("sha256")
-        .update(`${slotHash}|attempt:${attempt}`)
+        .update(JSON.stringify([binding.value.slotId, attempt]))
         .digest("hex"));
-      if (!requestId.ok || !contextDigest.ok) return null;
+      if (!contextDigest.ok) return null;
       const authority = parseAgentRequestAuthority({
         runId: plan.runId,
-        requestId: requestId.value,
-        slotId: slotId.value,
+        requestId,
+        slotId: binding.value.slotId,
         program: "refutation-panel",
         role: "review-verifier-agent",
         attempt,
@@ -1740,7 +1754,7 @@ function deriveWaveRefutationVerifierSlots(plan: WaveRefutationPlan): DomainResu
         harnessBinding: panelBindings,
         requiredSkill: null,
         contextDigest: contextDigest.value,
-        outputSlot: `transcripts/refutation-${slotHash.slice(0, 32)}/attempt-${attempt}.raw`,
+        outputSlot: `transcripts/${binding.value.slotId}/attempt-${attempt}.raw`,
       });
       return authority.ok ? authority.value : null;
     });

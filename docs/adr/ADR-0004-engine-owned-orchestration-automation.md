@@ -137,6 +137,7 @@ Eleven implementation slices across `engine/src/core/` and a new
 | Remediation Git boundary | `orchestration/git-remediation.ts` |
 | Façade and status | `handlers/helpers/orchestration.ts` |
 | Cross-harness capture | `core/harness-capture.ts`, `handlers/subagent-stop/capture-orchestration-result.ts` |
+| Pi façade-to-harness handoff | `orchestration/session-run-bindings.ts`; façade spawn actions publish session-scoped run/request authority that Pi binds to native tool-call identities before dispatch |
 
 Five findings from implementation are recorded because each contradicted an
 assumption in the plan and would otherwise be rediscovered:
@@ -185,10 +186,11 @@ characters, against mandated floors of 70% and 80%.
   This was the panel's central criticism (simplicity 4/10) and it stands.
 - A second execution substrate (Fugue) is now a hard dependency, pinned at
   exactly 0.4.0. Its conditional-edge and id constraints shape Loom's graphs.
-- Migration is incomplete by design: legacy helpers remain as adapters,
-  historical runs are never rewritten, and the spawn side still runs through
-  the old path — so the plan's five-scenario lifecycle benchmark cannot yet be
-  measured, and the reported benchmark covers the status path only.
+- Migration is incomplete by design: legacy helpers remain as adapters and
+  historical runs are never rewritten. Pi's spawn path now receives run
+  authority through a session-scoped façade handoff rather than impossible
+  child-to-parent environment mutation, but the plan's full five-scenario
+  lifecycle benchmark is still broader than the reported status benchmark.
 - The two orchestration layers must not import each other. This is enforced by
   a boundary rule that, until it was repaired during this work, had never
   actually run.

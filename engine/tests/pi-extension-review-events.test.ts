@@ -8,6 +8,7 @@ import { evaluateTaskProof } from "../src/core/proof-obligations";
 import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
 import { openRunDirectory, type RunDirHandle } from "../src/orchestration/run-directory-handle";
 import { buildContextPacket, encodeByteSection } from "../src/orchestration/context-packets";
+import { registerSessionRunBinding } from "../src/orchestration/session-run-bindings";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 
@@ -138,7 +139,7 @@ const reviewResult = (
   },
 });
 
-async function piCaptureRun(runSuffix: string): Promise<Readonly<{
+async function piCaptureRun(runSuffix: string, contextText = "Pi capture context"): Promise<Readonly<{
   runsRoot: string;
   runDir: string;
   request: AgentRequestAuthority;
@@ -150,7 +151,7 @@ async function piCaptureRun(runSuffix: string): Promise<Readonly<{
   const opened = openRunDirectory(runsRoot, runDir);
   if (!opened.ok) throw new Error(opened.error.message);
   const requestId = "request:reviewer:1" as AgentRequestAuthority["requestId"];
-  const section = encodeByteSection("test", "Pi capture context");
+  const section = encodeByteSection("test", contextText);
   if (!section.ok) throw new Error(section.error.message);
   const packet = buildContextPacket({
     requestId,
@@ -223,7 +224,7 @@ describe("Pi extension review tool_result integration", () => {
     });
 
     expect(readFileSync(join(staged.runDir, "transcripts", "slot-1", "attempt-1.raw"), "utf-8")).toBe(expected);
-    expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings).toEqual(["request-bound finding"]);
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings).toBeUndefined();
   });
 
   it("does not apply Pi review evidence after request-bound capture rejection", async () => {
@@ -259,7 +260,7 @@ describe("Pi extension review tool_result integration", () => {
     expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings ?? []).toEqual([]);
     expect(responses).toContainEqual(expect.objectContaining({
       isError: true,
-      content: [expect.objectContaining({ text: expect.stringContaining("request-bound capture rejected") })],
+      content: [expect.objectContaining({ text: expect.stringContaining("request-bound capture failed") })],
     }));
   });
 
@@ -622,6 +623,26 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("blocks oversized Pi transport calls with an exact lossless-partition diagnostic", async () => {
+    const pi = await extension();
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-oversized-pi-transport",
+      input: {
+        agentScope: "user",
+        tasks: Array.from({ length: 9 }, (_, index) => ({
+          agent: "code-reviewer",
+          task: `Review transport item ${index + 1}`,
+        })),
+      },
+    }, { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad444" } });
+
+    expect(call).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("partition the engine-issued spawn-batch into ordered chunks"),
+    }));
+  });
+
   it("records the durable Pi correlator before accepting an orchestration spawn", async () => {
     const pi = await extension();
     const extensionSpecifier = "../../pi/extension.ts";
@@ -641,7 +662,7 @@ describe("Pi extension review tool_result integration", () => {
         toolCallId,
         input: {
           agent: "code-reviewer",
-          task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${staged.request.requestId}\nReview the exact issued request`,
+          task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${staged.request.requestId}\nLOOM_CONTEXT_DIGEST: ${staged.request.contextDigest}\nReview the exact issued request`,
           agentScope: "user",
         },
       }, { sessionManager: { getSessionId: () => session } });
@@ -658,6 +679,419 @@ describe("Pi extension review tool_result integration", () => {
       rmSync(join(subagentDir, `${session}.active`), { force: true });
       renameSync(backup, statePath);
     }
+  });
+
+  it("captures the exact façade-issued Pi task through the CLI-published session binding", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad43c";
+    const toolCallId = "call-session-run-binding";
+    const runsRoot = join(temp, "cli-session-binding-runs");
+    const runDir = join(runsRoot, "run.cli-session-binding");
+    mkdirSync(runDir, { recursive: true });
+    const stdout = execFileSync("bun", [
+      join(ROOT, "engine", "src", "cli.ts"),
+      "helper", "orchestration", "start", "standalone-review",
+      "--runs-root", runsRoot, "--run", runDir,
+    ], {
+      cwd: ROOT,
+      encoding: "utf-8",
+      input: JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }),
+      env: {
+        ...process.env,
+        PI_CODING_AGENT: "true",
+        PI_SESSION_ID: session,
+        LOOM_SUBAGENT_DIR: subagentDir,
+      },
+    });
+    const action = JSON.parse(stdout) as {
+      kind: string;
+      requests: readonly {
+        authority: AgentRequestAuthority;
+        task: string;
+      }[];
+    };
+    expect(action.kind).toBe("spawn-batch");
+    expect(action.requests).toHaveLength(1);
+    const request = action.requests[0]!;
+    const before = readFileSync(statePath, "utf-8");
+
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: { agent: request.authority.role, task: request.task, agentScope: "user" },
+    }, { sessionManager: { getSessionId: () => session } });
+    expect(call).toEqual([undefined]);
+
+    const expected = [
+      "### Machine Summary",
+      "CRITICAL_COUNT: 0",
+      "ADVISORY_COUNT: 0",
+      "```findings",
+      "[]",
+      "```",
+    ].join("\n");
+    const responses = await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId,
+      isError: false,
+      input: {},
+      content: [],
+      details: { results: [{
+        agent: request.authority.role,
+        task: request.task,
+        exitCode: 0,
+        messages: [{ role: "assistant", content: [{ type: "text", text: expected }] }],
+      }] },
+    }, { sessionManager: { getSessionId: () => session } });
+
+    expect(responses.every((response) => response === undefined)).toBe(true);
+    expect(readFileSync(join(runDir, request.authority.outputSlot.path), "utf-8")).toBe(expected);
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+  });
+
+  it("reloads durable session authority when the Pi extension restarts between spawn and result", async () => {
+    const beforeReload = await extension();
+    const staged = await piCaptureRun("pi-session-binding-reload");
+    const session = "019fca39-f989-7510-8e62-50dadbcad43e";
+    const toolCallId = "call-session-binding-reload";
+    const prompt = [
+      "LOOM_REVIEW_CONTEXT: standalone",
+      `LOOM_REQUEST_ID: ${staged.request.requestId}`,
+      `LOOM_CONTEXT_DIGEST: ${staged.request.contextDigest}`,
+      "Review the exact issued request",
+    ].join("\n");
+    expect((await registerSessionRunBinding(subagentDir, session, {
+      runId: staged.request.runId,
+      runsRoot: staged.runsRoot,
+      runDirectory: staged.runDir,
+      requestIds: [staged.request.requestId],
+    })).ok).toBe(true);
+    expect(await beforeReload.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: { agent: "code-reviewer", task: prompt, agentScope: "user" },
+    }, { sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
+
+    const afterReload = await extension();
+    const result = reviewResult(prompt, "captured after extension reload");
+    const expected = (result.details.results[0].messages[0].content[0] as { text: string }).text;
+    const responses = await afterReload.emit("tool_result", { ...result, toolCallId }, {
+      sessionManager: { getSessionId: () => session },
+    });
+
+    expect(responses.every((response) => response === undefined)).toBe(true);
+    expect(readFileSync(join(staged.runDir, "transcripts", "slot-1", "attempt-1.raw"), "utf-8"))
+      .toBe(expected);
+  });
+
+  it("fails closed after reload when any same-session run binding is inaccessible", async () => {
+    const beforeReload = await extension();
+    const stale = await piCaptureRun("pi-session-binding-stale-unrelated", "stale unrelated context");
+    const current = await piCaptureRun("pi-session-binding-current-after-stale", "current recovery context");
+    const session = "019fca39-f989-7510-8e62-50dadbcad444";
+    const toolCallId = "call-session-binding-current-after-stale";
+    for (const staged of [stale, current]) {
+      expect((await registerSessionRunBinding(subagentDir, session, {
+        runId: staged.request.runId,
+        runsRoot: staged.runsRoot,
+        runDirectory: staged.runDir,
+        requestIds: [staged.request.requestId],
+      })).ok).toBe(true);
+    }
+    const prompt = [
+      "LOOM_REVIEW_CONTEXT: standalone",
+      `LOOM_REQUEST_ID: ${current.request.requestId}`,
+      `LOOM_CONTEXT_DIGEST: ${current.request.contextDigest}`,
+      "Review the current issued request",
+    ].join("\n");
+    expect(await beforeReload.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: { agent: "code-reviewer", task: prompt, agentScope: "user" },
+    }, { sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
+    rmSync(stale.runDir, { recursive: true, force: true });
+
+    const afterReload = await extension();
+    const result = reviewResult(prompt, "must not capture under ambiguous recovery authority");
+    const responses = await afterReload.emit("tool_result", { ...result, toolCallId }, {
+      sessionManager: { getSessionId: () => session },
+    });
+
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("could not be recovered unambiguously") })],
+    }));
+    expect(() => readFileSync(join(current.runDir, "transcripts", "slot-1", "attempt-1.raw"), "utf-8")).toThrow();
+  });
+
+  it("preserves same-role result index authority across a Pi extension reload", async () => {
+    const beforeReload = await extension();
+    const staged = await piCaptureRun("pi-session-binding-reload-same-role");
+    const secondRequestId = "request:reviewer:10" as AgentRequestAuthority["requestId"];
+    const section = encodeByteSection("test", "second same-role context");
+    if (!section.ok) throw new Error(section.error.message);
+    const packet = buildContextPacket({
+      requestId: secondRequestId, role: "code-reviewer", requiredSkill: "none", outputContract: "review output",
+      fixedContext: [section.value], variableContext: [],
+    });
+    if (!packet.ok) throw new Error(packet.error.message);
+    expect((await staged.handle.publishContext(packet.value)).ok).toBe(true);
+    const second = {
+      ...staged.request,
+      requestId: secondRequestId,
+      slotId: "slot-2",
+      contextDigest: packet.value.digest,
+      outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-2/attempt-1.raw" },
+    } as AgentRequestAuthority;
+    expect((await staged.handle.reserveRequest(second)).ok).toBe(true);
+    const session = "019fca39-f989-7510-8e62-50dadbcad445";
+    const toolCallId = "call-session-binding-reload-same-role";
+    expect((await registerSessionRunBinding(subagentDir, session, {
+      runId: staged.request.runId, runsRoot: staged.runsRoot, runDirectory: staged.runDir,
+      requestIds: [staged.request.requestId, second.requestId],
+    })).ok).toBe(true);
+    const prompts = [staged.request, second].map((request, index) => [
+      "LOOM_REVIEW_CONTEXT: standalone",
+      `LOOM_REQUEST_ID: ${request.requestId}`,
+      `LOOM_CONTEXT_DIGEST: ${request.contextDigest}`,
+      `Review same-role item ${index + 1}`,
+    ].join("\n"));
+    expect(await beforeReload.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: { agentScope: "user", tasks: prompts.map((task) => ({ agent: "code-reviewer", task })) },
+    }, { sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
+
+    const output = ["### Machine Summary", "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "```findings", "[]", "```"].join("\n");
+    const afterReload = await extension();
+    const responses = await afterReload.emit("tool_result", {
+      toolName: "subagent", toolCallId, isError: false, input: {}, content: [],
+      details: { results: prompts.map((task) => ({
+        agent: "code-reviewer", task, exitCode: 0,
+        messages: [{ role: "assistant", content: [{ type: "text", text: output }] }],
+      })) },
+    }, { sessionManager: { getSessionId: () => session } });
+
+    expect(responses.every((response) => response === undefined)).toBe(true);
+    expect(readFileSync(join(staged.runDir, "transcripts", "slot-1", "attempt-1.raw"), "utf8")).toBe(output);
+    expect(readFileSync(join(staged.runDir, "transcripts", "slot-2", "attempt-1.raw"), "utf8")).toBe(output);
+  });
+
+  it("reports missing request-bound results after Pi extension reload", async () => {
+    const beforeReload = await extension();
+    const staged = await piCaptureRun("pi-session-binding-reload-missing");
+    const session = "019fca39-f989-7510-8e62-50dadbcad443";
+    const toolCallId = "call-session-binding-reload-missing";
+    const prompt = [
+      "LOOM_REVIEW_CONTEXT: standalone",
+      `LOOM_REQUEST_ID: ${staged.request.requestId}`,
+      `LOOM_CONTEXT_DIGEST: ${staged.request.contextDigest}`,
+      "Review the exact issued request",
+    ].join("\n");
+    expect((await registerSessionRunBinding(subagentDir, session, {
+      runId: staged.request.runId,
+      runsRoot: staged.runsRoot,
+      runDirectory: staged.runDir,
+      requestIds: [staged.request.requestId],
+    })).ok).toBe(true);
+    expect(await beforeReload.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: { agent: "code-reviewer", task: prompt, agentScope: "user" },
+    }, { sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
+
+    const afterReload = await extension();
+    const responses = await afterReload.emit("tool_result", {
+      toolName: "subagent", toolCallId, isError: false, input: {}, content: [],
+      details: { results: [] },
+    }, { sessionManager: { getSessionId: () => session } });
+
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("request-bound result 1") })],
+    }));
+  });
+
+  it("does not publish a failed Pi child result as successful orchestration evidence", async () => {
+    const pi = await extension();
+    const staged = await piCaptureRun("pi-session-binding-failed-child");
+    const session = "019fca39-f989-7510-8e62-50dadbcad43f";
+    const toolCallId = "call-session-binding-failed-child";
+    const prompt = [
+      "LOOM_REVIEW_CONTEXT: standalone",
+      `LOOM_REQUEST_ID: ${staged.request.requestId}`,
+      `LOOM_CONTEXT_DIGEST: ${staged.request.contextDigest}`,
+      "Review the exact issued request",
+    ].join("\n");
+    expect((await registerSessionRunBinding(subagentDir, session, {
+      runId: staged.request.runId,
+      runsRoot: staged.runsRoot,
+      runDirectory: staged.runDir,
+      requestIds: [staged.request.requestId],
+    })).ok).toBe(true);
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: { agent: "code-reviewer", task: prompt, agentScope: "user" },
+    }, { sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
+
+    const responses = await pi.emit("tool_result", {
+      ...reviewResult(prompt, "must not become evidence", { exitCode: 1, stopReason: "error" }),
+      toolCallId,
+    }, { sessionManager: { getSessionId: () => session } });
+
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("agent-failed") })],
+    }));
+    expect(() => readFileSync(join(staged.runDir, "transcripts", "slot-1", "attempt-1.raw"), "utf-8"))
+      .toThrow();
+  });
+
+  it("reports a missing request-bound Pi result instead of silently leaving its transcript empty", async () => {
+    const pi = await extension();
+    const staged = await piCaptureRun("pi-session-binding-missing-result");
+    const session = "019fca39-f989-7510-8e62-50dadbcad440";
+    const toolCallId = "call-session-binding-missing-result";
+    const prompt = [
+      "LOOM_REVIEW_CONTEXT: standalone",
+      `LOOM_REQUEST_ID: ${staged.request.requestId}`,
+      `LOOM_CONTEXT_DIGEST: ${staged.request.contextDigest}`,
+      "Review the exact issued request",
+    ].join("\n");
+    expect((await registerSessionRunBinding(subagentDir, session, {
+      runId: staged.request.runId,
+      runsRoot: staged.runsRoot,
+      runDirectory: staged.runDir,
+      requestIds: [staged.request.requestId],
+    })).ok).toBe(true);
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: { agent: "code-reviewer", task: prompt, agentScope: "user" },
+    }, { sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
+
+    const responses = await pi.emit("tool_result", {
+      toolName: "subagent", toolCallId, isError: false, input: {}, content: [],
+      details: { results: [] },
+    }, { sessionManager: { getSessionId: () => session } });
+
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("request-bound result 1") })],
+    }));
+  });
+
+  it("does not mutate protected task state when a non-standalone run-bound result is missing", async () => {
+    const planPath = join(temp, "run-bound-missing-wave-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const staged = await piCaptureRun("pi-run-bound-missing-wave-result");
+    const session = "019fca39-f989-7510-8e62-50dadbcad442";
+    const toolCallId = "call-run-bound-missing-wave-result";
+    const prompt = [
+      "Task ID: T1",
+      `LOOM_REQUEST_ID: ${staged.request.requestId}`,
+      `LOOM_CONTEXT_DIGEST: ${staged.request.contextDigest}`,
+      "Review the exact issued Wave request",
+    ].join("\n");
+    expect((await registerSessionRunBinding(subagentDir, session, {
+      runId: staged.request.runId,
+      runsRoot: staged.runsRoot,
+      runDirectory: staged.runDir,
+      requestIds: [staged.request.requestId],
+    })).ok).toBe(true);
+    const before = readFileSync(statePath, "utf-8");
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: { agent: "code-reviewer", task: prompt, agentScope: "user" },
+    }, { sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
+
+    const responses = await pi.emit("tool_result", {
+      toolName: "subagent", toolCallId, isError: false, input: {}, content: [],
+      details: { results: [] },
+    }, { sessionManager: { getSessionId: () => session } });
+
+    expect(responses).toContainEqual(expect.objectContaining({ isError: true }));
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+  });
+
+  it("blocks request-bound Pi spawns whose context digest does not match issued authority", async () => {
+    const pi = await extension();
+    const staged = await piCaptureRun("pi-session-binding-wrong-context");
+    const session = "019fca39-f989-7510-8e62-50dadbcad43d";
+    const published = await registerSessionRunBinding(subagentDir, session, {
+      runId: staged.request.runId,
+      runsRoot: staged.runsRoot,
+      runDirectory: staged.runDir,
+      requestIds: [staged.request.requestId],
+    });
+    expect(published.ok).toBe(true);
+
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-session-binding-wrong-context",
+      input: {
+        agent: "code-reviewer",
+        task: [
+          "LOOM_REVIEW_CONTEXT: standalone",
+          `LOOM_REQUEST_ID: ${staged.request.requestId}`,
+          `LOOM_CONTEXT_DIGEST: ${"f".repeat(64)}`,
+          "Review the exact issued request",
+        ].join("\n"),
+        agentScope: "user",
+      },
+    }, { sessionManager: { getSessionId: () => session } });
+
+    expect(call).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("no Pi session run binding contains issued request/context authority"),
+    }));
+    expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
+  });
+
+  it("uses context authority to disambiguate identical request ids across active runs", async () => {
+    const pi = await extension();
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
+    };
+    const first = await piCaptureRun("pi-duplicate-request-first", "first context");
+    const second = await piCaptureRun("pi-duplicate-request-second", "second context");
+    const session = "019fca39-f989-7510-8e62-50dadbcad441";
+    const toolCallId = "call-duplicate-request-context";
+    for (const staged of [first, second]) {
+      expect((await registerSessionRunBinding(subagentDir, session, {
+        runId: staged.request.runId,
+        runsRoot: staged.runsRoot,
+        runDirectory: staged.runDir,
+        requestIds: [staged.request.requestId],
+      })).ok).toBe(true);
+    }
+    const prompt = [
+      "LOOM_REVIEW_CONTEXT: standalone",
+      `LOOM_REQUEST_ID: ${second.request.requestId}`,
+      `LOOM_CONTEXT_DIGEST: ${second.request.contextDigest}`,
+      "Review the second issued request",
+    ].join("\n");
+
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: { agent: "code-reviewer", task: prompt, agentScope: "user" },
+    }, { sessionManager: { getSessionId: () => session } });
+    expect(call).toEqual([undefined]);
+
+    const nativeId = module.piSpawnRosterId(toolCallId, 0, "code-reviewer");
+    expect(first.handle.readHarnessCorrelator("pi", nativeId)).toMatchObject({ ok: true, value: null });
+    expect(second.handle.readHarnessCorrelator("pi", nativeId)).toMatchObject({
+      ok: true,
+      value: expect.objectContaining({ requestId: second.request.requestId }),
+    });
+    rmSync(join(subagentDir, `${session}.active`), { force: true });
   });
 
   it("binds duplicate-role Pi batch items by exact request marker instead of lexical request order", async () => {
@@ -688,8 +1122,8 @@ describe("Pi extension review tool_result integration", () => {
         input: {
           agentScope: "user",
           tasks: [
-            { agent: "code-reviewer", task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${second.requestId}\nReview second` },
-            { agent: "code-reviewer", task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${staged.request.requestId}\nReview first` },
+            { agent: "code-reviewer", task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${second.requestId}\nLOOM_CONTEXT_DIGEST: ${second.contextDigest}\nReview second` },
+            { agent: "code-reviewer", task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${staged.request.requestId}\nLOOM_CONTEXT_DIGEST: ${staged.request.contextDigest}\nReview first` },
           ],
         },
       }, { sessionManager: { getSessionId: () => session } });
@@ -705,6 +1139,29 @@ describe("Pi extension review tool_result integration", () => {
       );
       expect(firstBinding.ok && firstBinding.value?.requestId).toBe(second.requestId);
       expect(secondBinding.ok && secondBinding.value?.requestId).toBe(staged.request.requestId);
+
+      const output = ["### Machine Summary", "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "```findings", "[]", "```"].join("\n");
+      const reordered = await pi.emit("tool_result", {
+        toolName: "subagent", toolCallId, isError: false, input: {}, content: [],
+        details: { results: [
+          {
+            agent: "code-reviewer", exitCode: 0,
+            task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${staged.request.requestId}\nLOOM_CONTEXT_DIGEST: ${staged.request.contextDigest}\nReview first`,
+            messages: [{ role: "assistant", content: [{ type: "text", text: output }] }],
+          },
+          {
+            agent: "code-reviewer", exitCode: 0,
+            task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${second.requestId}\nLOOM_CONTEXT_DIGEST: ${second.contextDigest}\nReview second`,
+            messages: [{ role: "assistant", content: [{ type: "text", text: output }] }],
+          },
+        ] },
+      }, { sessionManager: { getSessionId: () => session } });
+      expect(reordered).toContainEqual(expect.objectContaining({
+        isError: true,
+        content: [expect.objectContaining({ text: expect.stringContaining("does not match correlated request") })],
+      }));
+      expect(() => readFileSync(join(staged.runDir, "transcripts", "slot-1", "attempt-1.raw"))).toThrow();
+      expect(() => readFileSync(join(staged.runDir, "transcripts", "slot-2", "attempt-1.raw"))).toThrow();
     } finally {
       rmSync(join(subagentDir, `${session}.active`), { force: true });
       renameSync(backup, statePath);
@@ -903,6 +1360,7 @@ describe("Pi extension review tool_result integration", () => {
     expect(JSON.parse(readFileSync(statePath, "utf-8")).executing_tasks).toEqual([]);
     expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
     await pi.emit("session_shutdown", {}, context);
+    expect(readdirSync(grantDir).filter((name) => name.endsWith(".json"))).toEqual([]);
   });
 
   it("revokes every outstanding grant when its parent session shutdown roster cleanup fails", async () => {
@@ -964,6 +1422,16 @@ describe("Pi extension review tool_result integration", () => {
       message: expect.objectContaining({ customType: "loom-write-grant-error" }),
     }));
     expect(() => readFileSync(join(subagentDir, `${replaySession}.active`), "utf-8")).toThrow();
+    const retryStderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await pi.emit("session_shutdown", {}, {
+        cwd: ROOT, sessionManager: { getSessionId: () => parentSession },
+      });
+      expect(retryStderr.mock.calls.map(([text]) => String(text)).join(""))
+        .not.toContain("shutdown cleanup failed");
+    } finally {
+      retryStderr.mockRestore();
+    }
     await pi.emit("session_shutdown", {}, {
       cwd: ROOT, sessionManager: { getSessionId: () => childSession },
     });

@@ -714,6 +714,22 @@ describe("Claude capture against a real run directory", () => {
     expect(outcome.kind).toBe("not-an-orchestration-run");
   });
 
+  it("rejects partially configured run authority instead of silently treating it as unrelated", async () => {
+    const outcome = await captureHarnessResult({
+      harness: "pi",
+      runsRoot: "/tmp/loom-runs",
+      runDirectory: undefined,
+      nativeId: "pi-agent",
+      candidates: [],
+    });
+
+    expect(outcome).toEqual({
+      kind: "rejected",
+      reason: "run-authority",
+      message: "orchestration capture requires both runsRoot and runDirectory",
+    });
+  });
+
   it("refuses a second capture for a slot that already landed", async () => {
     const { runsRoot, runDir } = await stagedRun();
     const first = await captureClaudeResult(
@@ -791,6 +807,27 @@ describe("Claude capture against a real run directory", () => {
     expect(outcome.kind).toBe("rejected");
     if (outcome.kind !== "rejected") return;
     expect(outcome.reason).toBe("no-final-payload");
+  });
+
+  it("returns a hook error for partial or malformed Claude run authority", async () => {
+    const previousRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+    const previousRun = process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = "/tmp/loom-partial-run-root";
+    delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    try {
+      const partial = await captureOrchestrationResult(JSON.stringify({
+        session_id: "s1", agent_id: "agent-abc", agent_type: "code-reviewer",
+      }), []);
+      expect(partial).toMatchObject({ kind: "error", message: expect.stringContaining("requires both") });
+
+      const malformed = await captureOrchestrationResult("{broken", []);
+      expect(malformed).toMatchObject({ kind: "error", message: expect.stringContaining("malformed SubagentStop JSON") });
+    } finally {
+      if (previousRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+      else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;
+      if (previousRun === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+      else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousRun;
+    }
   });
 
   it("returns a hook error for rejected request-bound Claude capture", async () => {

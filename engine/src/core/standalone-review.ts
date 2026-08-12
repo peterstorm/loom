@@ -40,7 +40,7 @@ import {
 import { attributeFindings, findingsUnionError, parseStoredFindings, type Finding, type RefutedFinding } from "./findings";
 import { fail, isRecord, ok, sanitizeProse, type ParseResult } from "./panel-kernel";
 import { resolveReviewFindings } from "./review-output";
-import { parseReviewPath } from "./review-packet";
+import { parseReviewPath, type ReviewPath } from "./review-packet";
 
 export const STANDALONE_REVIEW_SCHEMA_VERSION = 1 as const;
 export const STANDALONE_REVIEW_SUBJECT = "standalone-review" as const;
@@ -74,6 +74,7 @@ export interface StandaloneReviewMetadata {
 }
 
 export interface StandaloneChangedPaths {
+  /** Worktree paths not represented by HEAD, including untracked non-ignored files. */
   readonly unstaged: readonly string[];
   readonly staged: readonly string[];
   readonly committed: readonly string[];
@@ -83,7 +84,7 @@ export interface StandaloneChangedPaths {
 
 export type StandaloneScopeSource = "explicit" | "changed-path-union";
 export type StandaloneScopeSafety = Readonly<{
-  path: string;
+  path: ReviewPath;
   status: "safe" | "absent";
 }>;
 
@@ -93,7 +94,7 @@ export interface FrozenStandaloneReviewAuthority {
   readonly kind: "standalone-review-authority";
   readonly runId: OrchestrationRunId;
   readonly scopeSource: StandaloneScopeSource;
-  readonly scope: NonEmpty<string>;
+  readonly scope: NonEmpty<ReviewPath>;
   readonly scopeSafety: NonEmpty<StandaloneScopeSafety>;
   readonly changedPaths: StandaloneChangedPaths;
   readonly reviewMetadata: StandaloneReviewMetadata;
@@ -150,10 +151,10 @@ function uniqueNonEmpty(values: readonly string[], label: string): readonly stri
 }
 
 /** Parse and freeze the exact repository-relative scope before it becomes authority. */
-export function parseStandaloneReviewScope(raw: unknown, label = "review scope"): ParseResult<NonEmpty<string>> {
+export function parseStandaloneReviewScope(raw: unknown, label = "review scope"): ParseResult<NonEmpty<ReviewPath>> {
   if (!Array.isArray(raw)) return fail([`${label} must be a non-empty string array`]);
   const errors: string[] = [];
-  const scope = raw.flatMap((entry, index): string[] => {
+  const scope = raw.flatMap((entry, index): ReviewPath[] => {
     const parsed = parseReviewPath(entry, `${label}[${index}]`);
     if (!parsed.ok) {
       errors.push(...parsed.errors);
@@ -166,12 +167,12 @@ export function parseStandaloneReviewScope(raw: unknown, label = "review scope")
   return errors.length > 0 || head === undefined ? fail(errors) : ok(Object.freeze([head, ...tail]));
 }
 
-function parsePathList(raw: unknown, label: string, errors: string[]): readonly string[] {
+function parsePathList(raw: unknown, label: string, errors: string[]): readonly ReviewPath[] {
   if (!Array.isArray(raw)) {
     errors.push(`${label} must be an array`);
     return [];
   }
-  const paths: string[] = [];
+  const paths: ReviewPath[] = [];
   raw.forEach((entry, index) => {
     const parsed = parseReviewPath(entry, `${label}[${index}]`);
     if (parsed.ok) paths.push(parsed.value);
@@ -337,7 +338,7 @@ export function prepareStandaloneReview(
   if (!roster.ok) errors.push(...roster.error.violations.map((violation) => `roster: ${violation.kind}`));
 
   let scopeSource: StandaloneScopeSource = "explicit";
-  let scopeResult: ParseResult<NonEmpty<string>>;
+  let scopeResult: ParseResult<NonEmpty<ReviewPath>>;
   if (input.explicitScope === undefined) {
     scopeSource = "changed-path-union";
     if (!changed.ok) {

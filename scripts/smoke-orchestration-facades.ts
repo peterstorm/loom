@@ -63,6 +63,18 @@ function run(cwd: string, args: readonly string[], stdin = ""): unknown {
   }
 }
 
+function runFailure(cwd: string, args: readonly string[], stdin = ""): CliResult {
+  const result = spawnSync("bun", [CLI, "helper", "orchestration", ...args], {
+    cwd,
+    input: stdin,
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+    env: { ...process.env, LOOM_STATE_PATH: join(cwd, ".claude", "state", "active_task_graph.json") },
+  }) as CliResult;
+  check(result.status !== 0, `CLI unexpectedly accepted invalid input (${args.join(" ")})`);
+  return result;
+}
+
 function git(cwd: string, args: readonly string[]): string {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
   check(result.status === 0, `git ${args.join(" ")} failed: ${result.stderr}`);
@@ -90,6 +102,10 @@ function asSpawnBatch(value: unknown, label: string): SpawnBatch {
     check(authority.attempt === 1 || authority.attempt === 2, `${label} attempt is invalid`);
     check(typeof authority.role === "string", `${label} role is missing`);
     check(typeof authority.contextDigest === "string", `${label} contextDigest is missing`);
+    check(typeof request.task === "string" && request.task.includes(`LOOM_REQUEST_ID: ${authority.requestId}`),
+      `${label} request task is missing its request marker`);
+    check(request.task.includes(`LOOM_CONTEXT_DIGEST: ${authority.contextDigest}`),
+      `${label} request task is missing its context marker`);
   }
   return action as unknown as SpawnBatch;
 }
@@ -257,6 +273,50 @@ function waveState(): Record<string, unknown> {
   };
 }
 
+function waveGateCriticalRefutationSmoke(): void {
+  const cwd = repository("wave-critical");
+  mkdirSync(join(cwd, "src"), { recursive: true });
+  writeFileSync(join(cwd, "src", "x.ts"), "export const x = 1;\n");
+  git(cwd, ["add", "src/x.ts"]);
+  git(cwd, ["commit", "-qm", "baseline"]);
+  const statePath = join(cwd, ".claude", "state", "active_task_graph.json");
+  mkdirSync(dirname(statePath), { recursive: true });
+  writeFileSync(statePath, JSON.stringify(waveState()));
+
+  const runsRoot = join(cwd, ".claude", "reviews", "facade-smoke-runs");
+  const runDir = join(runsRoot, "run.wave-critical");
+  mkdirSync(runDir, { recursive: true });
+  const initial = asSpawnBatch(run(cwd, [
+    "start", "wave-gate", "--runs-root", runsRoot, "--run", runDir,
+  ], JSON.stringify({ wave: 1 })), "critical Wave Gate start");
+  const registeredState = record(JSON.parse(readFileSync(statePath, "utf8")) as unknown, "critical Wave state");
+  check(Array.isArray(registeredState.tasks), "critical Wave state has no tasks");
+  const reviewRun = record(record(registeredState.tasks[0], "critical Wave task").review_run, "critical Wave review run");
+  check(typeof reviewRun.packet_id === "string" && typeof reviewRun.generation === "number",
+    "critical Wave review binding is incomplete");
+  const reviewBinding = { packetId: reviewRun.packet_id, generation: reviewRun.generation } as {
+    packetId: string;
+    generation: number;
+  };
+
+  let next: unknown = initial;
+  for (const request of initial.requests) {
+    const output = request.authority.role === "spec-check-invoker"
+      ? ["SPEC_CHECK_WAVE: 1", "SPEC_CHECK_CRITICAL_COUNT: 0", "SPEC_CHECK_HIGH_COUNT: 0", "SPEC_CHECK_VERDICT: PASSED"].join("\n")
+      : reviewerOutput("critical", "src/x.ts", reviewBinding);
+    next = submit(cwd, runsRoot, runDir, request, output);
+  }
+
+  const panel = asSpawnBatch(next, "automatic Wave refutation");
+  check(panel.requests.every(({ authority }) => authority.slotId.startsWith("refutation-slot:") &&
+    authority.requestId.startsWith("refutation-request:")), "Wave verifier authority is not canonical");
+  assertBatchReplay(cwd, runsRoot, runDir, panel, "Wave refutation batch");
+  for (const request of panel.requests) next = submit(cwd, runsRoot, runDir, request, refutationOutput(runDir, request));
+  asDone(next, "critical Wave adjudication");
+  asDone(run(cwd, ["resume", "--runs-root", runsRoot, "--run", runDir]), "critical Wave terminal replay");
+  process.stdout.write("  ✓ Wave Gate criticals → canonical refutation authority → atomic completion\n");
+}
+
 function waveGateSmoke(): void {
   const cwd = repository("wave");
   mkdirSync(join(cwd, "src"), { recursive: true });
@@ -295,6 +355,14 @@ function waveGateSmoke(): void {
   const suspended = asAwaitUser(next, "Wave Gate advisory suspension");
   const resumedSuspension = asAwaitUser(run(cwd, ["resume", "--runs-root", runsRoot, "--run", runDir]), "Wave Gate suspended replay");
   check(resumedSuspension.request.requestId === suspended.request.requestId, "Wave Gate resume changed advisory decision authority");
+  const staleDecision = runFailure(cwd, [
+    "decide", "--runs-root", runsRoot, "--run", runDir, "--request", `wave-advisory:${runDir}:stale`,
+  ], JSON.stringify({ kind: "approve" }));
+  check(staleDecision.stderr.includes("not the exact pending advisory request"), "Wave Gate accepted stale advisory authority");
+  const malformedDecision = runFailure(cwd, [
+    "decide", "--runs-root", runsRoot, "--run", runDir, "--request", suspended.request.requestId,
+  ], JSON.stringify({ kind: "approve", extra: true }));
+  check(malformedDecision.stderr.includes("must be exactly"), "Wave Gate accepted malformed advisory disposition");
   run(cwd, [
     "decide", "--runs-root", runsRoot, "--run", runDir, "--request", suspended.request.requestId,
   ], JSON.stringify({ kind: "approve" }));
@@ -309,5 +377,6 @@ function waveGateSmoke(): void {
 
 process.stdout.write("Orchestration façade smoke test (fresh CLI process at every boundary)\n");
 standaloneAndRemediationSmoke();
+waveGateCriticalRefutationSmoke();
 waveGateSmoke();
 process.stdout.write("smoke-orchestration-facades: PASS\n");

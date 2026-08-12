@@ -103,8 +103,15 @@ export async function captureHarnessResult(args: Readonly<{
   nativeId: string;
   candidates: readonly FinalPayloadCandidate[];
 }>): Promise<CaptureOutcome> {
-  if (args.runsRoot === undefined || args.runDirectory === undefined) {
+  if (args.runsRoot === undefined && args.runDirectory === undefined) {
     return { kind: "not-an-orchestration-run" };
+  }
+  if (args.runsRoot === undefined || args.runDirectory === undefined) {
+    return {
+      kind: "rejected",
+      reason: "run-authority",
+      message: "orchestration capture requires both runsRoot and runDirectory",
+    };
   }
 
   const opened = openRunDirectory(args.runsRoot, args.runDirectory);

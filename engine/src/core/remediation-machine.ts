@@ -206,7 +206,7 @@ export function parseCanonicalRepositoryRelativePath(
       message: parsed.errors.join("; "),
     }));
   }
-  return ok(parsed.value as CanonicalRepositoryRelativePath);
+  return ok(parsed.value as unknown as CanonicalRepositoryRelativePath);
 }
 
 export const parseRemediationPath = parseCanonicalRepositoryRelativePath;

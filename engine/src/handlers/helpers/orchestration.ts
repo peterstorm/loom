@@ -29,8 +29,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { TASK_GRAPH_PATH } from "../../config";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
 import { parseTaskGraph } from "../../state-manager";
 import type { HookHandler, HookResult } from "../../types";
 import {
@@ -41,7 +42,7 @@ import {
 } from "../../core/wave-gate-machine";
 import { loadPlanModelsSource } from "./complete-wave-gate";
 import { openRunDirectory, type RunDirHandle } from "../../orchestration/run-directory-handle";
-import { readFileSync } from "node:fs";
+import { registerSessionRunBinding } from "../../orchestration/session-run-bindings";
 import {
   AGENT_REQUIRED_SKILLS,
   parseAgentRequestAuthority,
@@ -84,6 +85,7 @@ import {
   startRemediationFacade,
   startStandaloneFacade,
   startWaveGateFacade,
+  waveAdvisoryDecisionRequestId,
 } from "./orchestration-programs";
 
 const OPERATIONS = ["status", "start", "resume", "submit", "correlate", "complete", "decide"] as const;
@@ -446,6 +448,49 @@ async function driveRegisteredPanel(
   return { ok: false, message: "panel emitted more deterministic operations than its closed operation vocabulary allows" };
 }
 
+async function emitRunAction(handle: RunDirHandle, action: unknown): Promise<HookResult> {
+  if (typeof action === "object" && action !== null &&
+      (action as Record<string, unknown>)["kind"] === "spawn-batch" &&
+      process.env.PI_CODING_AGENT === "true") {
+    const sessionId = process.env.PI_SESSION_ID;
+    if (sessionId === undefined) {
+      return { kind: "error", message: "Pi orchestration spawn publication requires PI_SESSION_ID" };
+    }
+    const requests = (action as Record<string, unknown>)["requests"];
+    if (!Array.isArray(requests) || requests.length === 0) {
+      return { kind: "error", message: "Pi orchestration spawn action has no request authority" };
+    }
+    const requestIds = [];
+    for (const [index, request] of requests.entries()) {
+      if (typeof request !== "object" || request === null) {
+        return { kind: "error", message: `Pi orchestration spawn request ${index} is malformed` };
+      }
+      const parsed = parseAgentRequestAuthority((request as Record<string, unknown>)["authority"]);
+      if (!parsed.ok) {
+        return {
+          kind: "error",
+          message: `Pi orchestration spawn request ${index}: ${parsed.error.violations.map(({ message }) => message).join("; ")}`,
+        };
+      }
+      if (parsed.value.runId !== handle.runId) {
+        return { kind: "error", message: `Pi orchestration spawn request ${index} belongs to another run` };
+      }
+      requestIds.push(parsed.value.requestId);
+    }
+    const registered = await registerSessionRunBinding(SUBAGENT_DIR, sessionId, Object.freeze({
+      runId: handle.runId,
+      runsRoot: dirname(handle.runDirectory),
+      runDirectory: handle.runDirectory,
+      requestIds: Object.freeze(requestIds),
+    }));
+    if (!registered.ok) {
+      return { kind: "error", message: `cannot publish Pi orchestration capture authority: ${registered.message}` };
+    }
+  }
+  process.stdout.write(`${JSON.stringify(action, null, 2)}\n`);
+  return { kind: "allow" };
+}
+
 async function startOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
   const program = args[0];
   if (program !== "architecture" && program !== "refutation" && program !== "standalone-review" &&
@@ -465,24 +510,21 @@ async function startOperation(stdin: string, args: readonly string[]): Promise<H
     if (!parsed.ok) return { kind: "error", message: parsed.message };
     const driven = await startStandaloneFacade(bound.value.handle, parsed.value);
     if (!driven.ok) return { kind: "error", message: driven.message };
-    process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
-    return { kind: "allow" };
+    return emitRunAction(bound.value.handle, driven.action);
   }
   if (program === "remediation") {
     const parsed = parseRemediationStartInput(raw);
     if (!parsed.ok) return { kind: "error", message: parsed.message };
     const driven = await startRemediationFacade(bound.value.handle, parsed.value);
     if (!driven.ok) return { kind: "error", message: driven.message };
-    process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
-    return { kind: "allow" };
+    return emitRunAction(bound.value.handle, driven.action);
   }
   if (program === "wave-gate") {
     const parsed = parseWaveGateStartInput(raw);
     if (!parsed.ok) return { kind: "error", message: parsed.message };
     const driven = await startWaveGateFacade(bound.value.handle, parsed.value);
     if (!driven.ok) return { kind: "error", message: driven.message };
-    process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
-    return { kind: "allow" };
+    return emitRunAction(bound.value.handle, driven.action);
   }
   const panel = program;
   const translated = translateLegacyPanelJournal(panel, raw);
@@ -500,8 +542,7 @@ async function startOperation(stdin: string, args: readonly string[]): Promise<H
   if (!registered.ok) return { kind: "error", message: registered.error.message };
   const driven = await driveRegisteredPanel(bound.value.handle, registration);
   if (!driven.ok) return { kind: "error", message: driven.message };
-  process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
-  return { kind: "allow" };
+  return emitRunAction(bound.value.handle, driven.action);
 }
 
 /**
@@ -573,8 +614,7 @@ async function resumeOperation(args: readonly string[]): Promise<HookResult> {
           ? await resumeRemediationFacade(bound.value.handle, facadeRegistration)
           : await resumeWaveGateFacade(bound.value.handle, facadeRegistration);
       if (!driven.ok) return { kind: "error", message: driven.message };
-      process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
-      return { kind: "allow" };
+      return emitRunAction(bound.value.handle, driven.action);
     }
     const registration = parseRegisteredPanelProgram(stored.value);
     if (registration === null) return { kind: "error", message: "registered orchestration program is malformed" };
@@ -582,8 +622,7 @@ async function resumeOperation(args: readonly string[]): Promise<HookResult> {
     if (!reconciled.ok) return { kind: "error", message: reconciled.message };
     const driven = await driveRegisteredPanel(bound.value.handle, registration);
     if (!driven.ok) return { kind: "error", message: driven.message };
-    process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
-    return { kind: "allow" };
+    return emitRunAction(bound.value.handle, driven.action);
   }
 
   // Historical run without a program registration: retain the read-only v1
@@ -752,8 +791,7 @@ async function submitOperation(stdin: string, args: readonly string[]): Promise<
   if (facadeRegistration?.kind === "standalone-review") {
     const driven = await resumeStandaloneFacade(bound.value.handle, facadeRegistration);
     if (!driven.ok) return { kind: "error", message: driven.message };
-    process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
-    return { kind: "allow" };
+    return emitRunAction(bound.value.handle, driven.action);
   }
   if (facadeRegistration?.kind === "wave-gate") {
     if (reserved.program === "wave-gate") {
@@ -762,8 +800,7 @@ async function submitOperation(stdin: string, args: readonly string[]): Promise<
     }
     const driven = await resumeWaveGateFacade(bound.value.handle, facadeRegistration);
     if (!driven.ok) return { kind: "error", message: driven.message };
-    process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
-    return { kind: "allow" };
+    return emitRunAction(bound.value.handle, driven.action);
   }
 
   if (registration !== null) {
@@ -785,8 +822,7 @@ async function submitOperation(stdin: string, args: readonly string[]): Promise<
     });
     const driven = await driveRegisteredPanel(bound.value.handle, registration);
     if (!driven.ok) return { kind: "error", message: driven.message };
-    process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
-    return { kind: "allow" };
+    return emitRunAction(bound.value.handle, driven.action);
   }
 
   process.stdout.write(`${JSON.stringify({
@@ -997,8 +1033,7 @@ async function completeOperation(args: readonly string[]): Promise<HookResult> {
   }
   const next = await driveRegisteredPanel(bound.value.handle, registration);
   if (!next.ok) return { kind: "error", message: next.message };
-  process.stdout.write(`${JSON.stringify(next.action, null, 2)}\n`);
-  return { kind: "allow" };
+  return emitRunAction(bound.value.handle, next.action);
 }
 
 /**
@@ -1020,6 +1055,25 @@ async function decideOperation(stdin: string, args: readonly string[]): Promise<
 
   const decisionId = flag(args, "request");
   if (decisionId === null) return { kind: "error", message: "--request <decision-id> is required" };
+  if (facadeRegistration?.kind === "wave-gate") {
+    let graphRaw: unknown;
+    try { graphRaw = JSON.parse(readFileSync(TASK_GRAPH_PATH, "utf8")) as unknown; }
+    catch (error) { return { kind: "error", message: `cannot read protected Wave authority: ${error instanceof Error ? error.message : String(error)}` }; }
+    const graph = parseTaskGraph(graphRaw);
+    if (!graph.ok) return { kind: "error", message: `protected Wave authority is invalid: ${graph.error}` };
+    if (graph.value.active_wave_gate?.runId !== bound.value.handle.runId ||
+        graph.value.active_wave_gate.wave !== facadeRegistration.input.wave ||
+        graph.value.active_wave_gate.authorityDigest !== facadeRegistration.authorityDigest) {
+      return { kind: "error", message: "protected active Wave Gate authority differs from this decision run" };
+    }
+    const expectedDecisionId = waveAdvisoryDecisionRequestId(
+      bound.value.handle.runId,
+      graph.value.tasks.filter(({ id }) => facadeRegistration.taskIds.includes(id)),
+    );
+    if (decisionId !== expectedDecisionId) {
+      return { kind: "error", message: `decision request ${decisionId} is not the exact pending advisory request ${expectedDecisionId}` };
+    }
+  }
   if (stdin.trim().length === 0) return { kind: "error", message: "a decision must be supplied on stdin" };
 
   const decision = ((): unknown => {
@@ -1029,9 +1083,14 @@ async function decideOperation(stdin: string, args: readonly string[]): Promise<
       return { __malformed: error instanceof Error ? error.message : String(error) };
     }
   })();
-  if (typeof decision !== "object" || decision === null ||
+  if (typeof decision !== "object" || decision === null || Array.isArray(decision) ||
       typeof (decision as Record<string, unknown>)["__malformed"] === "string") {
     return { kind: "error", message: "decision must be a JSON object" };
+  }
+  if (facadeRegistration?.kind === "wave-gate" && (
+    Object.keys(decision).length !== 1 || (decision as Record<string, unknown>).kind !== "approve"
+  )) {
+    return { kind: "error", message: "Wave advisory decision must be exactly {\"kind\":\"approve\"}" };
   }
 
   await bound.value.handle.appendEvent({
@@ -1045,8 +1104,7 @@ async function decideOperation(stdin: string, args: readonly string[]): Promise<
   if (facadeRegistration?.kind === "wave-gate") {
     const driven = await resumeWaveGateFacade(bound.value.handle, facadeRegistration);
     if (!driven.ok) return { kind: "error", message: driven.message };
-    process.stdout.write(`${JSON.stringify(driven.action, null, 2)}\n`);
-    return { kind: "allow" };
+    return emitRunAction(bound.value.handle, driven.action);
   }
   process.stdout.write(`${JSON.stringify({ kind: "decision-recorded", decisionId }, null, 2)}\n`);
   return { kind: "allow" };

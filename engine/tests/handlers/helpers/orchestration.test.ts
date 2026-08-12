@@ -1,13 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { renderStatus } from "../../../src/handlers/helpers/orchestration";
-import type { GateDeps } from "../../../src/core/wave-gate-machine";
+import { WAVE_REVIEW_AGENTS, type GateDeps } from "../../../src/core/wave-gate-machine";
+import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import type { AgentRequestAuthority } from "../../../src/core/orchestration-contract";
-import { openRunDirectory } from "../../../src/orchestration/run-directory-handle";
+import { openRunDirectory, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
+import { readSessionRunBindings } from "../../../src/orchestration/session-run-bindings";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const CLI = join(ENGINE, "src", "cli.ts");
@@ -49,12 +51,23 @@ function executeGraph(overrides: Record<string, unknown> = {}): Record<string, u
   };
 }
 
-function runCli(args: readonly string[], stdin = "", cwd = ENGINE) {
+function runCli(
+  args: readonly string[],
+  stdin = "",
+  cwd = ENGINE,
+  envOverrides: Readonly<Record<string, string | undefined>> = {},
+) {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    LOOM_STATE_PATH: join(cwd, ".claude", "state", "active_task_graph.json"),
+    ...envOverrides,
+  };
+  for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
   return spawnSync("bun", [CLI, "helper", "orchestration", ...args], {
     cwd,
     encoding: "utf-8",
     input: stdin,
-    env: { ...process.env, LOOM_STATE_PATH: join(cwd, ".claude", "state", "active_task_graph.json") },
+    env,
   });
 }
 
@@ -137,6 +150,47 @@ describe("orchestration CLI", () => {
     return root;
   }
 
+  function git(root: string, args: readonly string[]) {
+    const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    return result;
+  }
+
+  function repository(): string {
+    const root = project();
+    git(root, ["init", "-q", "-b", "main"]);
+    git(root, ["config", "user.email", "loom@example.test"]);
+    git(root, ["config", "user.name", "Loom Test"]);
+    writeFileSync(join(root, "README.md"), "fixture\n");
+    git(root, ["add", "README.md"]);
+    git(root, ["commit", "-qm", "initial"]);
+    return root;
+  }
+
+  function lines(count: number, prefix: string): string {
+    return `${Array.from({ length: count }, (_, index) => `${prefix}-${index}`).join("\n")}\n`;
+  }
+
+  function refutationOutput(handle: RunDirHandle, authority: AgentRequestAuthority): string {
+    const context = handle.readContext(authority.contextDigest);
+    if (!context.ok) throw new Error(context.error.message);
+    const section = context.value.fixedContext.find(({ label }) =>
+      label === "wave-refutation-authority" || label === "refutation-authority");
+    if (section === undefined) throw new Error("refutation context lacks semantic authority");
+    const semantic = JSON.parse(Buffer.from(section.bytes).toString("utf8")) as {
+      lens: string;
+      findings: readonly { id: string }[];
+    };
+    return JSON.stringify({
+      criterion: semantic.lens,
+      verdicts: semantic.findings.map(({ id }) => ({
+        finding_id: id,
+        verdict: "upheld",
+        reasoning: "The current immutable packet still exhibits the finding",
+      })),
+    });
+  }
+
   it("prints a status even when no state file exists", () => {
     const result = runCli(["status"], "", project());
 
@@ -180,6 +234,18 @@ describe("orchestration CLI", () => {
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("cannot bind run directory");
+  });
+
+  it("rejects a direct-child run directory whose basename is not a valid run identity", () => {
+    const root = project();
+    const runsRoot = join(root, "runs");
+    const invalid = join(runsRoot, "invalid run id");
+    mkdirSync(invalid, { recursive: true });
+
+    const result = runCli(["resume", "--runs-root", runsRoot, "--run", invalid], "", root);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("orchestration-run-id");
   });
 
   it("retries a malformed-but-JSON architecture candidate instead of minting success", () => {
@@ -361,6 +427,660 @@ describe("orchestration CLI", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout).kind).toBe("blocked");
   });
+
+  it("publishes Pi session capture authority before returning a spawn batch", () => {
+    const root = project();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.pi-handoff");
+    const bindingDir = join(root, "pi-session-bindings");
+    const sessionId = "019ff290-ffee-7e86-8ed0-c834c04b7f6e";
+    mkdirSync(runDir, { recursive: true });
+
+    const started = runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), ENGINE, {
+      PI_CODING_AGENT: "true",
+      PI_SESSION_ID: sessionId,
+      LOOM_SUBAGENT_DIR: bindingDir,
+    });
+
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as {
+      kind: string;
+      requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(action.kind).toBe("spawn-batch");
+    const bindings = readSessionRunBindings(bindingDir, sessionId);
+    expect(bindings.ok).toBe(true);
+    if (!bindings.ok) return;
+    expect(bindings.value).toEqual([expect.objectContaining({
+      runId: "run.pi-handoff",
+      runsRoot,
+      runDirectory: runDir,
+      requestIds: action.requests.map(({ authority }) => authority.requestId).sort(),
+    })]);
+  });
+
+  it("withholds a Pi spawn batch when PI_SESSION_ID is absent", () => {
+    const root = project();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.pi-missing-session");
+    mkdirSync(runDir, { recursive: true });
+
+    const started = runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), ENGINE, {
+      PI_CODING_AGENT: "true",
+      PI_SESSION_ID: undefined,
+      LOOM_SUBAGENT_DIR: join(root, "bindings"),
+    });
+
+    expect(started.status).not.toBe(0);
+    expect(started.stdout).not.toContain('"kind": "spawn-batch"');
+    expect(started.stderr).toContain("requires PI_SESSION_ID");
+  });
+
+  it("withholds a Pi spawn batch when session binding publication fails", () => {
+    const root = project();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.pi-binding-failure");
+    const bindingPath = join(root, "not-a-directory");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(bindingPath, "occupied\n");
+
+    const started = runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), ENGINE, {
+      PI_CODING_AGENT: "true",
+      PI_SESSION_ID: "019ff290-ffee-7e86-8ed0-c834c04b7f6f",
+      LOOM_SUBAGENT_DIR: bindingPath,
+    });
+
+    expect(started.status).not.toBe(0);
+    expect(started.stdout).not.toContain('"kind": "spawn-batch"');
+    expect(started.stderr).toContain("cannot publish Pi orchestration capture authority");
+  });
+
+  it("refuses to freeze scope bytes through a symlinked ancestor", () => {
+    const root = repository();
+    const outside = mkdtempSync(join(tmpdir(), "loom-frozen-scope-outside-"));
+    cleanup.push(outside);
+    writeFileSync(join(outside, "secret.ts"), "export const secret = true;\n");
+    mkdirSync(join(root, "linked"));
+    rmSync(join(root, "linked"), { recursive: true });
+    symlinkSync(outside, join(root, "linked"));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-frozen-scope-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.symlinked-frozen-scope");
+    mkdirSync(runDir);
+
+    const started = runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "code", files: ["linked/secret.ts"], dryRun: false }), root);
+
+    expect(started.status).not.toBe(0);
+    expect(started.stderr).toMatch(/ELOOP|too many symbolic|ENOTDIR/i);
+  });
+
+  it("freezes untracked files into default scope and accepts findings against them", async () => {
+    const root = repository();
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-orchestration-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.untracked-scope");
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "new-production.ts"), "export const fresh = 1;\n");
+    mkdirSync(join(root, ".claude", "specs", "x", "panel-runs", "run.evidence"), { recursive: true });
+    writeFileSync(join(root, ".claude", "specs", "x", "panel-runs", "run.evidence", "verdict.json"), "{}\n");
+    mkdirSync(runDir, { recursive: true });
+
+    const started = runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "all", files: null, dryRun: false }), root);
+
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as {
+      kind: string;
+      requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(action.kind).toBe("spawn-batch");
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const registration = opened.value.readProgramRegistration();
+    expect(registration.ok).toBe(true);
+    if (!registration.ok) return;
+    const authority = (registration.value as {
+      authority: {
+        scope: readonly string[];
+        changed_paths: { unstaged: readonly string[] };
+        review_metadata: { additions: number };
+      };
+    }).authority;
+    expect(authority.scope).toEqual(["src/new-production.ts"]);
+    expect(authority.changed_paths.unstaged).toEqual(["src/new-production.ts"]);
+    expect(authority.review_metadata.additions).toBe(1);
+    const frozenContext = opened.value.readContext(action.requests[0]!.authority.contextDigest);
+    expect(frozenContext.ok).toBe(true);
+    if (!frozenContext.ok) return;
+    const frozenSource = frozenContext.value.fixedContext.find(({ label }) => label === "standalone-frozen-source");
+    expect(frozenSource).toBeDefined();
+    const frozenPayload = JSON.parse(Buffer.from(frozenSource!.bytes).toString("utf8")) as {
+      files: readonly { path: string; kind: string; content?: string }[];
+    };
+    expect(frozenPayload.files).toContainEqual(expect.objectContaining({
+      path: "src/new-production.ts", kind: "text", content: "export const fresh = 1;\n",
+    }));
+    expect(frozenPayload.files.some(({ path }) => path.includes("panel-runs"))).toBe(false);
+    writeFileSync(join(root, "src", "new-production.ts"), "export const changed_after_freeze = true;\n");
+    expect(JSON.parse(Buffer.from(frozenSource!.bytes).toString("utf8"))).toEqual(frozenPayload);
+
+    const criticalTranscript = [
+      "### Machine Summary",
+      "CRITICAL_COUNT: 1",
+      "ADVISORY_COUNT: 0",
+      "CRITICAL: New production defect",
+      "ADVISORY:",
+      "",
+      "```findings",
+      JSON.stringify([{ severity: "critical", file: "src/new-production.ts", line: 1, claim: "New production defect" }]),
+      "```",
+    ].join("\n");
+    const cleanTranscript = [
+      "### Machine Summary", "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "CRITICAL:", "ADVISORY:",
+      "", "```findings", "[]", "```",
+    ].join("\n");
+    for (const [index, request] of action.requests.entries()) {
+      const transcript = index === 0 ? criticalTranscript : cleanTranscript;
+      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
+    }
+
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    expect(JSON.parse(resumed.stdout).kind).toBe("spawn-batch");
+  }, 15_000);
+
+  it("counts committed, staged, unstaged, and untracked additions once for reviewer selection", () => {
+    const root = repository();
+    writeFileSync(join(root, "layered.ts"), "");
+    writeFileSync(join(root, "working.ts"), "");
+    git(root, ["add", "layered.ts", "working.ts"]);
+    git(root, ["commit", "-qm", "add base files"]);
+    git(root, ["checkout", "-qb", "feature"]);
+    writeFileSync(join(root, "committed.ts"), lines(200, "committed"));
+    git(root, ["add", "committed.ts"]);
+    git(root, ["commit", "-qm", "feature commit"]);
+    writeFileSync(join(root, "layered.ts"), lines(50, "staged"));
+    git(root, ["add", "layered.ts"]);
+    writeFileSync(join(root, "layered.ts"), lines(75, "final"));
+    writeFileSync(join(root, "working.ts"), lines(100, "working"));
+    writeFileSync(join(root, "untracked.ts"), lines(150, "untracked"));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-orchestration-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.complete-additions");
+    mkdirSync(runDir, { recursive: true });
+
+    const started = runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "code", files: null, dryRun: false }), root);
+
+    expect(started.status, started.stderr).toBe(0);
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const registration = opened.value.readProgramRegistration();
+    expect(registration.ok).toBe(true);
+    if (!registration.ok) return;
+    const authority = (registration.value as {
+      authority: {
+        scope: readonly string[];
+        changed_paths: { unstaged: readonly string[]; staged: readonly string[]; committed: readonly string[] };
+        review_metadata: { additions: number; file_count: number };
+        reviewers: readonly string[];
+      };
+    }).authority;
+    expect(authority.scope).toEqual(["committed.ts", "layered.ts", "untracked.ts", "working.ts"]);
+    expect(authority.changed_paths.unstaged).toEqual(["layered.ts", "untracked.ts", "working.ts"]);
+    expect(authority.changed_paths.staged).toEqual(["layered.ts"]);
+    expect(authority.changed_paths.committed).toEqual(["committed.ts"]);
+    expect(authority.review_metadata).toMatchObject({ additions: 525, file_count: 4 });
+    expect(authority.reviewers).toContain("architecture-tech-lead");
+  });
+
+  it("blocks corrupt durable publication evidence instead of treating it as absent", () => {
+    const root = project();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.corrupt-publication");
+    mkdirSync(runDir, { recursive: true });
+    const started = runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), ENGINE);
+    expect(started.status, started.stderr).toBe(0);
+    const publicationDirectory = join(runDir, "artifacts", "publications");
+    const publication = readdirSync(publicationDirectory)[0];
+    expect(publication).toBeDefined();
+    writeFileSync(join(publicationDirectory, publication!), "{broken\n");
+
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", ENGINE);
+
+    expect(resumed.status).not.toBe(0);
+    expect(resumed.stdout).not.toContain('"kind": "spawn-batch"');
+    expect(resumed.stderr).toContain("invalid JSON");
+  });
+
+  it("rejects a Wave reviewer submission when its packet-bound task disappeared", () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    expect(proof.state).toBe("satisfied");
+    writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+    const graph = {
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {},
+      tasks: [{
+        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        critical_findings: [], advisory_findings: [],
+      }],
+    };
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify(graph));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-missing-task-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-missing-task");
+    mkdirSync(runDir);
+    const started = runCli([
+      "start", "wave-gate", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const reviewer = action.requests.find(({ authority }) => authority.role === "code-reviewer");
+    expect(reviewer).toBeDefined();
+    const registered = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
+    chmodSync(statePath, 0o644);
+    writeFileSync(statePath, JSON.stringify({ ...registered, tasks: [] }));
+
+    const submitted = runCli([
+      "submit", "--runs-root", runsRoot, "--run", runDir,
+      "--request", reviewer!.authority.requestId, "--slot", reviewer!.authority.slotId, "--attempt", "1",
+    ], "### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 0\n```findings\n[]\n```", root);
+
+    expect(submitted.status).not.toBe(0);
+    expect(submitted.stderr).toContain("is no longer in the protected task graph");
+  }, 15_000);
+
+  it("rejects a stale issued reviewer request after current Review Packet authority changes", () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {},
+      tasks: [{
+        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        findings: [], critical_findings: [], advisory_findings: [],
+      }],
+    }));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-stale-request-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-stale-request");
+    mkdirSync(runDir);
+    const started = runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const reviewer = action.requests.find(({ authority }) => authority.role === "code-reviewer")!.authority;
+    const protectedGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { review_run?: Record<string, unknown> }[];
+    };
+    chmodSync(statePath, 0o644);
+    writeFileSync(statePath, JSON.stringify({
+      ...protectedGraph,
+      tasks: protectedGraph.tasks.map((task) => ({
+        ...task,
+        review_run: { ...task.review_run, packet_id: "f".repeat(64), head_sha: "e".repeat(64) },
+      })),
+    }));
+    const submitted = runCli([
+      "submit", "--runs-root", runsRoot, "--run", runDir,
+      "--request", reviewer.requestId, "--slot", reviewer.slotId, "--attempt", "1",
+    ], [
+      "### Machine Summary", "REVIEW_GENERATION: 0", `REVIEW_PACKET_ID: ${"f".repeat(64)}`,
+      "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "```findings", "[]", "```",
+      "```review_lifecycle", '{"prior_findings":[]}', "```",
+    ].join("\n"), root);
+
+    expect(submitted.status).not.toBe(0);
+    expect(submitted.stderr).toContain("does not belong to Task T1's exact current Review Packet slot");
+  }, 15_000);
+
+  it("issues a fresh current packet batch after implementation invalidates a completed review generation", () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null, wave_gates: {},
+      tasks: [{
+        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1, status: "implemented", proof,
+        depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"], test_result: { verdict: "trusted-pass" },
+        test_evidence: "passed", new_tests_written: true, new_test_evidence: "present", review_status: "passed",
+        review_generation: 0, findings: [], critical_findings: [], advisory_findings: [],
+      }],
+    }));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-fresh-generation-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-fresh-generation");
+    mkdirSync(runDir);
+    const started = runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const initial = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const before = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown> & { tasks: readonly Record<string, unknown>[] };
+    chmodSync(statePath, 0o644);
+    writeFileSync(statePath, JSON.stringify({
+      ...before,
+      spec_check: undefined,
+      tasks: before.tasks.map((task) => ({
+        ...task, review_generation: 1, review_status: "pending", review_run: undefined,
+      })),
+    }));
+
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const fresh = JSON.parse(resumed.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(fresh.kind, resumed.stdout).toBe("spawn-batch");
+    expect(fresh.requests).toHaveLength(6);
+    expect(fresh.requests.map(({ authority }) => authority.requestId)).not.toEqual(
+      initial.requests.map(({ authority }) => authority.requestId),
+    );
+    const after = JSON.parse(readFileSync(statePath, "utf8")) as {
+      wave_review_epoch?: { batchEpoch: string };
+      tasks: readonly { review_run?: { generation: number; head_sha: string } }[];
+    };
+    expect(after.tasks[0]?.review_run?.generation).toBe(1);
+    expect(after.tasks[0]?.review_run?.head_sha).toBe(after.wave_review_epoch?.batchEpoch);
+
+    const staleSpec = initial.requests.find(({ authority }) => authority.role === "spec-check-invoker")!.authority;
+    const staleSubmission = runCli([
+      "submit", "--runs-root", runsRoot, "--run", runDir,
+      "--request", staleSpec.requestId, "--slot", staleSpec.slotId, "--attempt", "1",
+    ], "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED", root);
+    expect(staleSubmission.status).not.toBe(0);
+    expect(staleSubmission.stderr).toContain("does not belong to the exact current review epoch");
+    expect((JSON.parse(readFileSync(statePath, "utf8")) as { spec_check?: unknown }).spec_check).toBeUndefined();
+  }, 15_000);
+
+  it("keeps sibling packet recovery authority stable after one task finalizes new findings", () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+    const task = (id: string) => ({
+      id, description: `review ${id}`, agent: "code-implementer-agent", wave: 1, status: "implemented", proof,
+      depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"], test_result: { verdict: "trusted-pass" },
+      test_evidence: "passed", new_tests_written: true, new_test_evidence: "present", review_status: "passed",
+      review_generation: 0, findings: [], critical_findings: [], advisory_findings: [],
+    });
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {}, tasks: [task("T1"), task("T2")],
+    }));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-sibling-stability-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-sibling-stability");
+    mkdirSync(runDir);
+    const started = runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const initial = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const graph = JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { id: string; review_run?: { generation: number; packet_id: string } }[];
+    };
+    const run = graph.tasks.find(({ id }) => id === "T1")!.review_run!;
+    const transcript = (claim: string | null) => [
+      "### Machine Summary", `REVIEW_GENERATION: ${run.generation}`, `REVIEW_PACKET_ID: ${run.packet_id}`,
+      "CRITICAL_COUNT: 0", `ADVISORY_COUNT: ${claim === null ? 0 : 1}`,
+      ...(claim === null ? [] : [`ADVISORY: ${claim}`]),
+      "```findings", JSON.stringify(claim === null ? [] : [{ severity: "advisory", file: "src/x.ts", line: 1, claim }]), "```",
+      "```review_lifecycle", '{"prior_findings":[]}', "```",
+    ].join("\n");
+    for (const [index, request] of initial.requests.slice(1, 1 + WAVE_REVIEW_AGENTS.length).entries()) {
+      const submitted = runCli([
+        "submit", "--runs-root", runsRoot, "--run", runDir,
+        "--request", request.authority.requestId, "--slot", request.authority.slotId, "--attempt", "1",
+      ], transcript(index === 0 ? "new finding from completed sibling packet" : null), root);
+      expect(submitted.status, submitted.stderr).toBe(0);
+    }
+
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const action = JSON.parse(resumed.stdout) as { kind: string; requests?: readonly { authority: AgentRequestAuthority }[] };
+    expect(action.kind, resumed.stdout).toBe("spawn-batch");
+    expect(action.requests?.some(({ authority }) => authority.program === "wave-gate" && authority.attempt === 1)).toBe(true);
+    const after = JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { id: string; review_run?: unknown; advisory_findings?: readonly string[] }[];
+    };
+    expect(after.tasks.find(({ id }) => id === "T1")?.review_run).toBeUndefined();
+    expect(after.tasks.find(({ id }) => id === "T1")?.advisory_findings).toEqual(["new finding from completed sibling packet"]);
+    expect(after.tasks.find(({ id }) => id === "T2")?.review_run).toBeDefined();
+  }, 30_000);
+
+  it("recovers current Wave Review Packets with attempt 2 before stale criticals can start refutation", async () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    expect(proof.state).toBe("satisfied");
+    writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+    const finding = {
+      id: "silent-failure-hunter-15", agent: "silent-failure-hunter", severity: "critical" as const,
+      file: "src/x.ts", line: 1, claim: "current packet must finish before this finding is adjudicated",
+    };
+    const graph = {
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {},
+      tasks: [{
+        id: "T10", description: "review target", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "blocked", review_generation: 0,
+        findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
+      }],
+    };
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify(graph));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-review-recovery-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-review-recovery");
+    mkdirSync(runDir);
+    const started = runCli([
+      "start", "wave-gate", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const initial = JSON.parse(started.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(initial.kind).toBe("spawn-batch");
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    for (const { authority } of initial.requests) {
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
+    }
+
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const recovery = JSON.parse(resumed.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(recovery.kind, resumed.stdout).toBe("spawn-batch");
+    expect(recovery.requests).toHaveLength(5);
+    expect(recovery.requests.every(({ authority }) => authority.program === "wave-gate" && authority.attempt === 2)).toBe(true);
+    expect(recovery.requests.some(({ authority }) => authority.role === "review-verifier-agent")).toBe(false);
+    const protectedGraph = JSON.parse(readFileSync(statePath, "utf8")) as { tasks: readonly { review_run?: { slot_authority?: readonly { attempted: number }[] } }[] };
+    expect(protectedGraph.tasks[0]?.review_run?.slot_authority?.every(({ attempted }) => attempted === 2)).toBe(true);
+
+    // Simulate a crash after idempotent request reservation but before its
+    // publication receipt became durable. Resume must reconcile the complete
+    // per-slot intent instead of trusting the raw reservation.
+    const publications = join(runDir, "artifacts", "publications");
+    for (const name of readdirSync(publications)) {
+      const receipt = JSON.parse(readFileSync(join(publications, name), "utf8")) as { requestIds?: readonly string[] };
+      if (receipt.requestIds?.some((requestId) => recovery.requests.some(({ authority }) => authority.requestId === requestId))) {
+        rmSync(join(publications, name));
+      }
+    }
+    const replayed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(replayed.status, replayed.stderr).toBe(0);
+    const replay = JSON.parse(replayed.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(replay.kind, replayed.stdout).toBe("spawn-batch");
+    expect(replay.requests.map(({ authority }) => authority.requestId)).toEqual(
+      recovery.requests.map(({ authority }) => authority.requestId),
+    );
+
+    const active = (JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { review_run?: { generation: number; packet_id: string; prior_finding_ids: readonly string[] } }[];
+    }).tasks[0]?.review_run;
+    expect(active).toBeDefined();
+    const reviewerTranscript = [
+      "### Machine Summary",
+      `REVIEW_GENERATION: ${active!.generation}`,
+      `REVIEW_PACKET_ID: ${active!.packet_id}`,
+      "CRITICAL_COUNT: 0",
+      "ADVISORY_COUNT: 0",
+      "```findings",
+      "[]",
+      "```",
+      "```review_lifecycle",
+      JSON.stringify({ prior_findings: active!.prior_finding_ids.map((finding_id) => ({
+        finding_id, verdict: "still_present", reason: "The current packet still contains the behavior",
+      })) }),
+      "```",
+    ].join("\n");
+    // Simulate a crash after durable attempt-2 capture but before semantic
+    // application. Resume must reconcile that exact transcript, not exhaust it.
+    const crashWindow = recovery.requests[0]!.authority;
+    expect((await opened.value.captureTranscript(crashWindow, [...Buffer.from(reviewerTranscript)])).ok).toBe(true);
+    const reconciled = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(reconciled.status, reconciled.stderr).toBe(0);
+    const afterCrash = JSON.parse(reconciled.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(afterCrash.kind, reconciled.stdout).toBe("spawn-batch");
+    expect(afterCrash.requests).toHaveLength(4);
+    const afterCrashGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { review_run?: { evidence: readonly { agent: string }[] } }[];
+    };
+    expect(afterCrashGraph.tasks[0]?.review_run?.evidence.map(({ agent }) => agent)).toEqual([crashWindow.role]);
+
+    let afterReview: ReturnType<typeof runCli> | null = null;
+    for (const { authority } of recovery.requests.slice(1)) {
+      afterReview = runCli([
+        "submit", "--runs-root", runsRoot, "--run", runDir,
+        "--request", authority.requestId, "--slot", authority.slotId, "--attempt", "2",
+      ], reviewerTranscript, root);
+      expect(afterReview.status, afterReview.stderr).toBe(0);
+    }
+    const specRecovery = JSON.parse(afterReview!.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(specRecovery.kind).toBe("spawn-batch");
+    expect(specRecovery.requests).toHaveLength(1);
+    expect(specRecovery.requests[0]?.authority).toMatchObject({ role: "spec-check-invoker", attempt: 2, program: "wave-gate" });
+    const specAuthority = specRecovery.requests[0]!.authority;
+    const afterSpec = runCli([
+      "submit", "--runs-root", runsRoot, "--run", runDir,
+      "--request", specAuthority.requestId, "--slot", specAuthority.slotId, "--attempt", "2",
+    ], "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED", root);
+    expect(afterSpec.status, afterSpec.stderr).toBe(0);
+    const freshPanel = JSON.parse(afterSpec.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(freshPanel.kind, afterSpec.stdout).toBe("spawn-batch");
+    expect(freshPanel.requests.every(({ authority }) => authority.program === "refutation-panel" &&
+      authority.role === "review-verifier-agent")).toBe(true);
+    expect((JSON.parse(readFileSync(statePath, "utf8")) as { tasks: readonly { review_run?: unknown }[] }).tasks[0]?.review_run).toBeUndefined();
+    for (const [index, request] of freshPanel.requests.entries()) {
+      const raw = index === 0 ? "not valid refutation JSON" : refutationOutput(opened.value, request.authority);
+      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(raw)])).ok).toBe(true);
+    }
+    const retriedPanel = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(retriedPanel.status, retriedPanel.stderr).toBe(0);
+    const retryAction = JSON.parse(retriedPanel.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(retryAction.kind, retriedPanel.stdout).toBe("spawn-batch");
+    expect(retryAction.requests).toHaveLength(1);
+    expect(retryAction.requests[0]?.authority).toMatchObject({
+      role: "review-verifier-agent", program: "refutation-panel", attempt: 2,
+      slotId: freshPanel.requests[0]!.authority.slotId,
+    });
+    const rejectedRetry = retryAction.requests[0]!.authority;
+    await opened.value.appendEvent({
+      schemaVersion: 1,
+      sequence: 0,
+      dedupKey: `capture-rejected:${rejectedRetry.requestId}`,
+      recordedAtMs: Date.now(),
+      event: {
+        kind: "request-capture-rejected",
+        requestId: rejectedRetry.requestId,
+        slotId: rejectedRetry.slotId,
+        attempt: rejectedRetry.attempt,
+        diagnostic: "agent exited before final payload capture",
+      },
+    });
+    const exhausted = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(exhausted.status, exhausted.stderr).toBe(0);
+    expect(JSON.parse(exhausted.stdout)).toMatchObject({
+      kind: "blocked",
+      diagnostic: { message: expect.stringContaining("attempt 2 exhausted after capture rejection") },
+    });
+  }, 30_000);
+
+  it("publishes standalone refutation attempt 2 after a malformed attempt-1 verdict", async () => {
+    const root = repository();
+    writeFileSync(join(root, "a.txt"), "changed\n");
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-standalone-refutation-retry-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.standalone-refutation-retry");
+    mkdirSync(runDir);
+    const started = runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "all", files: ["a.txt"], dryRun: false }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const initial = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const critical = [
+      "### Machine Summary", "CRITICAL_COUNT: 1", "ADVISORY_COUNT: 0", "CRITICAL: retry finding",
+      "```findings", '[{"severity":"critical","file":"a.txt","line":1,"claim":"retry finding"}]', "```",
+    ].join("\n");
+    const clean = ["### Machine Summary", "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "```findings", "[]", "```"].join("\n");
+    for (const [index, request] of initial.requests.entries()) {
+      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
+    }
+    const panelResult = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(panelResult.status, panelResult.stderr).toBe(0);
+    const panel = JSON.parse(panelResult.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(panel.kind).toBe("spawn-batch");
+    for (const [index, request] of panel.requests.entries()) {
+      const raw = index === 0 ? "malformed" : refutationOutput(opened.value, request.authority);
+      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(raw)])).ok).toBe(true);
+    }
+
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const retry = JSON.parse(resumed.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(retry.kind, resumed.stdout).toBe("spawn-batch");
+    expect(retry.requests).toHaveLength(1);
+    expect(retry.requests[0]?.authority).toMatchObject({
+      attempt: 2, program: "refutation-panel", slotId: panel.requests[0]!.authority.slotId,
+    });
+  }, 30_000);
 
   it("drives a registered standalone review from spawn-batch to idempotent done", async () => {
     const root = project();

@@ -30,8 +30,12 @@ JSON
 
 Execute only the one typed action returned by `start`, `resume`, or `decide`:
 
-- `spawn-batch`: spawn every exact request in one message, preserving its
-  model, required Skill, task text, context reference, and `LOOM_REQUEST_ID`.
+- `spawn-batch`: spawn every exact request, preserving its model, required
+  Skill, task text, context reference, and `LOOM_REQUEST_ID`. Claude may send
+  the semantic batch in one message. Pi's native subagent transport accepts at
+  most eight requests per call, so partition larger batches into ordered
+  chunks of at most eight without changing, dropping, or duplicating any
+  request; resume only after every chunk finishes.
 - `await-user`: present the advisory disposition request exactly as supplied;
   send the resulting JSON object through `decide`.
 - `blocked`: stop and report the diagnostic. Do not bypass or reconstruct it.

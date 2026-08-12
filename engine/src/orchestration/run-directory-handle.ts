@@ -31,6 +31,7 @@ import {
   canonicalStructuralEquals,
   parseAgentRequestAuthority,
   parseArtifactByteLength,
+  parseOrchestrationRunId,
   type AgentRequestAuthority,
   type ArtifactDigest,
   type ArtifactRef,
@@ -172,6 +173,38 @@ export function createStagedArtifact(
 // Identity
 // ---------------------------------------------------------------------------
 
+declare const RUN_DIRECTORY_REFERENCE: unique symbol;
+declare const RUN_DIRECTORY_IDENTITY: unique symbol;
+export type RunDirectoryReference = Readonly<{
+  runsRoot: string;
+  runDirectory: string;
+  runId: OrchestrationRunId;
+  readonly [RUN_DIRECTORY_REFERENCE]: true;
+}>;
+export type RunDirectoryIdentity = Readonly<RunDirectoryReference & {
+  /** Present only after the referenced directory was observed to exist. */
+  readonly [RUN_DIRECTORY_IDENTITY]: true;
+}>;
+
+/** Parse the stable direct-child relation without requiring the run to remain live. */
+export function parseRunDirectoryReference(
+  runsRoot: string,
+  runDirectory: string,
+): DomainResult<RunDirectoryReference, RunDirectoryError> {
+  const root = resolve(runsRoot);
+  const directory = resolve(runDirectory);
+  if (join(root, basename(directory)) !== directory) {
+    return failure("runDirectory", `run directory must be a direct child of ${root}`);
+  }
+  const runId = parseOrchestrationRunId(basename(directory));
+  if (!runId.ok) return failure("runDirectory", runId.error.message);
+  return success(canonicalRecord({
+    runsRoot: root,
+    runDirectory: directory,
+    runId: runId.value,
+  }) as RunDirectoryReference);
+}
+
 /**
  * A run directory must be a direct child of its runs-root and must already
  * exist. Both are resolved and compared as strings, and every later access
@@ -181,12 +214,10 @@ export function createStagedArtifact(
 export function parseRunDirectoryIdentity(
   runsRoot: string,
   runDirectory: string,
-): DomainResult<Readonly<{ runsRoot: string; runDirectory: string; runId: OrchestrationRunId }>, RunDirectoryError> {
-  const root = resolve(runsRoot);
-  const directory = resolve(runDirectory);
-  if (join(root, basename(directory)) !== directory) {
-    return failure("runDirectory", `run directory must be a direct child of ${root}`);
-  }
+): DomainResult<RunDirectoryIdentity, RunDirectoryError> {
+  const reference = parseRunDirectoryReference(runsRoot, runDirectory);
+  if (!reference.ok) return reference;
+  const directory = reference.value.runDirectory;
   const stats = ((): ReturnType<typeof statSync> | undefined => {
     try {
       return statSync(directory);
@@ -197,11 +228,7 @@ export function parseRunDirectoryIdentity(
   if (stats === undefined || !stats.isDirectory()) {
     return failure("runDirectory", `run directory does not exist: ${directory}`);
   }
-  return success(canonicalRecord({
-    runsRoot: root,
-    runDirectory: directory,
-    runId: basename(directory) as OrchestrationRunId,
-  }));
+  return success(reference.value as RunDirectoryIdentity);
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +236,7 @@ export function parseRunDirectoryIdentity(
 // ---------------------------------------------------------------------------
 
 export interface RunDirHandle extends ProgramJournal {
+  readonly identity: RunDirectoryIdentity;
   readonly runId: OrchestrationRunId;
   readonly runDirectory: string;
   readAuthority(): DomainResult<RunAuthority, RunDirectoryError>;
@@ -392,7 +420,7 @@ export function openRunDirectory(
     if (!existing.ok) return existing;
   }
 
-  return success(buildHandle(authority, directory, authorityPath));
+  return success(buildHandle(identity.value, authority, directory, authorityPath));
 }
 
 /**
@@ -401,9 +429,15 @@ export function openRunDirectory(
  * run identity, so composition changes nothing about what the handle can do —
  * it only keeps each concern small enough to read on its own.
  */
-function buildHandle(authority: RunAuthority, directory: string, authorityPath: string): RunDirHandle {
+function buildHandle(
+  identity: RunDirectoryIdentity,
+  authority: RunAuthority,
+  directory: string,
+  authorityPath: string,
+): RunDirHandle {
   const { runId } = authority;
   return Object.freeze({
+    identity,
     runId,
     runDirectory: directory,
     readAuthority: (): DomainResult<RunAuthority, RunDirectoryError> =>

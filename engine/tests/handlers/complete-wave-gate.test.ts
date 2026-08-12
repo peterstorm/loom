@@ -1712,6 +1712,76 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
     });
   });
 
+  it("refuses refutation while a current Review Packet still owns the finding snapshot", () => {
+    const { snapshot, preparation } = preparationFixture();
+    const taskBindings = preparation.bindings.filter((binding) => binding.subject.kind === "task-review");
+    const packetAuthority = preparation.packets[0];
+    const collecting = authorityValue(deriveWaveReadiness({
+      ...snapshot.graph,
+      tasks: snapshot.graph.tasks.map((task) => ({
+        ...task,
+        review_run: {
+          generation: task.review_generation ?? 0,
+          packet_id: packetAuthority.packet_id,
+          head_sha: packetAuthority.head_sha,
+          expected_agents: WAVE_REVIEW_AGENTS,
+          prior_finding_ids: (task.findings ?? []).map(({ id }) => id),
+          evidence: [],
+          slot_authority: taskBindings.map((binding) => ({
+            agent: binding.subject.kind === "task-review" ? binding.subject.reviewer : "code-reviewer",
+            slot_id: (binding.attempts[0].authority as AgentRequestAuthority).slotId,
+            attempted: 1 as const,
+          })) as never,
+        },
+      })),
+    }, statusDeps));
+
+    expect(deriveWaveRefutationPlan(collecting)).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("Review Packet evidence must complete before refutation") },
+    });
+  });
+
+  it("refuses stale criticals on a pending generation that has no current Review Packet", () => {
+    const finding = {
+      id: "code-reviewer-1", agent: "code-reviewer", severity: "critical" as const,
+      file: "engine/src/core/wave-gate-machine.ts", line: 1, claim: "stale until current review completes",
+    };
+    const pending = authorityValue(deriveWaveReadiness(registeredGraph({
+      tasks: [{
+        ...baseTask,
+        review_status: "pending",
+        review_generation: 2,
+        review_run: undefined,
+        findings: [finding],
+        critical_findings: [finding.claim],
+        advisory_findings: [],
+      }],
+    }), statusDeps));
+
+    expect(deriveWaveRefutationPlan(pending)).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("current-generation review evidence must complete") },
+    });
+  });
+
+  it("binds Wave refutation identity to the exact readiness epoch", () => {
+    const finding = {
+      id: "code-reviewer-1", agent: "code-reviewer", severity: "critical" as const,
+      file: "engine/src/core/wave-gate-machine.ts", line: 1, claim: "completion can advance without authority",
+    };
+    const first = authorityValue(deriveWaveReadiness(registeredGraph({
+      tasks: [{ ...baseTask, findings: [finding], critical_findings: [finding.claim], advisory_findings: [] }],
+    }), statusDeps));
+    const second = authorityValue(deriveWaveReadiness({
+      ...first.graph,
+      tasks: first.graph.tasks.map((task) => ({ ...task, test_evidence: `${task.test_evidence} (re-observed)` })),
+    }, statusDeps));
+
+    expect(authorityValue(deriveWaveRefutationPlan(first)).runId)
+      .not.toBe(authorityValue(deriveWaveRefutationPlan(second)).runId);
+  });
+
   it("refuses an empty panel and derives non-empty idempotent panel authority only from canonical Findings", () => {
     const clean = authorityValue(deriveWaveReadiness(registeredGraph(), statusDeps));
     expect(deriveWaveRefutationPlan(clean)).toMatchObject({ ok: false });

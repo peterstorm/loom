@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  ensureDirectoryNoFollow,
   listDirectoryNamesNoFollow,
   openDirectoryNoFollow,
   procFdChild,
@@ -45,6 +46,19 @@ function secretOutsideTheRun(root: string): string {
   writeFileSync(secret, "authority for another run", "utf-8");
   return secret;
 }
+
+describe("directory creation refuses symlinked ancestors", () => {
+  it("does not create through a symlinked binding directory", () => {
+    const root = workspace();
+    const outside = join(root, "outside");
+    mkdirSync(outside);
+    symlinkSync(outside, join(root, "run", "bindings"));
+
+    expect(() => ensureDirectoryNoFollow(join(root, "run", "bindings", "session")))
+      .toThrow(/ELOOP|too many symbolic|ENOTDIR/i);
+    expect(() => readFileSync(join(outside, "session"))).toThrow();
+  });
+});
 
 describe("reads refuse to follow a planted symlink", () => {
   it("readRunFileNoFollow refuses a leaf symlink pointing outside the run", () => {

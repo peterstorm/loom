@@ -271,6 +271,18 @@ export function openDirectoryNoFollow(path: string): number {
   }
 }
 
+/** Create an absolute directory path without following any existing symlink. */
+export function ensureDirectoryNoFollow(path: string): void {
+  const absolute = resolve(path);
+  const root = parse(absolute).root;
+  const rootFd = openDirectoryNoFollow(root);
+  try {
+    ensureRelativeDirectoryNoFollow(rootFd, root, absolute);
+  } finally {
+    closeSync(rootFd);
+  }
+}
+
 /**
  * Create a run subdirectory one anchored component at a time. mkdir and open
  * both resolve relative to a retained parent descriptor, closing the parent

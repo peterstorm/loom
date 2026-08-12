@@ -685,6 +685,12 @@ export type LoomStatus = Readonly<{
   next: NextActionDecision;
 }>;
 
+export interface WaveReviewEpochAuthority {
+  readonly runId: string;
+  readonly wave: number;
+  readonly batchEpoch: string;
+}
+
 export interface TaskGraph {
   current_phase: Phase;
   phase_artifacts: Partial<Record<Phase, string>>;
@@ -703,6 +709,8 @@ export interface TaskGraph {
   github_issue?: number;
   github_repo?: string;
   spec_check?: SpecCheck;
+  /** Exact current Wave review batch epoch, shared by reviewer and spec-check slots. */
+  wave_review_epoch?: WaveReviewEpochAuthority;
   /** Parser-proven protected registration; absent until a Wave Gate is explicitly registered. */
   active_wave_gate?: ActiveWaveGateRegistration;
   /** Immutable terminal registrations, separate from authority for the next Wave. */

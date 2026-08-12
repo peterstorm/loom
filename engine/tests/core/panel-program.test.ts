@@ -6,6 +6,7 @@ import {
   architecturePanelCheckpoint,
   completePersistentArchitecturePanel,
   completePersistentRefutationPanel,
+  deriveRefutationVerifierBinding,
   isParallelSpawnBatch,
   panelRequestIdentity,
   parseArchitecturePanelAuthority,
@@ -1217,6 +1218,21 @@ describe("persistent architecture panel", () => {
 });
 
 describe("persistent refutation panel", () => {
+  it("structurally hashes verifier authority so delimiter-bearing finding sets cannot collide", () => {
+    const runId = parsed(parseOrchestrationRunId("run.refutation.structural-hash"));
+    const firstA = parseWaveFindingId("T:a|b");
+    const firstB = parseWaveFindingId("X:c");
+    const secondA = parseWaveFindingId("T:a");
+    const secondB = parseWaveFindingId("b|X:c");
+    if (firstA === null || firstB === null || secondA === null || secondB === null) throw new Error("fixture id parse failed");
+
+    const first = deriveRefutationVerifierBinding(runId, "reproduction", [firstA, firstB]);
+    const second = deriveRefutationVerifierBinding(runId, "reproduction", [secondA, secondB]);
+
+    expect(first.ok && second.ok).toBe(true);
+    if (first.ok && second.ok) expect(first.value.slotId).not.toBe(second.value.slotId);
+  });
+
   it("binds each lens to its canonical request slot and distinguishes binding mismatches from malformed submissions", () => {
     const fixture = refutationFixture("slot-binding");
     let step = startPersistentRefutationPanel(fixture.authority);
