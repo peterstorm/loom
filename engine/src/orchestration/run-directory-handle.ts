@@ -935,11 +935,12 @@ function stagedBytesMatch(stagedPath: string, occupied: Uint8Array): boolean {
  *
  * EXPORTED for tests. The rename loop's recovery arm handles the failures the
  * pre-checks cannot rule out — a concurrently removed parent, an EIO — which by
- * construction cannot be provoked through `publishArtifactSet` synchronously:
- * every failure reachable from outside is one the pre-checks turn into an
- * all-staged refusal first. Driving this function directly with explicit staged
- * pairs is therefore the only way to prove the partial-promotion arm behaves,
- * and an unproven recovery arm is how "all or none" quietly stops being true.
+ * construction cannot be provoked through the lock-protected
+ * `publishArtifactSet` path: every failure reachable from outside is one the
+ * pre-checks turn into an all-staged refusal first. Driving this function
+ * directly with explicit staged pairs is therefore the only way to prove the
+ * partial-promotion arm behaves, and an unproven recovery arm is how "all or
+ * none" quietly stops being true.
  */
 export function promoteArtifactSet(
   stagedPaths: readonly StagedPair[],

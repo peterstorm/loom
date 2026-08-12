@@ -135,9 +135,19 @@ export function parseProgramEventRecord(raw: unknown, source: string): ProgramEv
 }
 
 /**
- * Local run-directory journal. Events are immutable files whose names carry
- * both append order and dedup key, so duplicate detection needs no index and
- * survives a crash at any point.
+ * Local run-directory journal for tests, dry runs, and benchmarks.
+ *
+ * Production orchestration uses `RunDirHandle`'s `journalOperations`, which
+ * serializes appends through `withAnchoredDirectoryLock` and opens every path
+ * component with O_NOFOLLOW. This implementation uses `withLock` from
+ * `utils/lock.ts` (directory-based, no O_NOFOLLOW) and `mkdirSync` with
+ * `recursive: true` (follows symlinks), so it does NOT carry the same
+ * security guarantees — acceptable because it never runs against a production
+ * run directory.
+ *
+ * Events are immutable files whose names carry both append order and dedup
+ * key, so duplicate detection needs no index and survives a crash at any
+ * point.
  */
 export function createFileProgramJournal(directory: string): ProgramJournal {
   const eventsDirectory = join(directory, EVENTS_DIR);
