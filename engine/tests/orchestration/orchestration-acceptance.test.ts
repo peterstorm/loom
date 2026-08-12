@@ -560,6 +560,18 @@ describe("Pi and Claude reach the same result", () => {
       expect(none.value).toHaveLength(0);
     });
   });
+
+  it("surfaces an unreadable Claude transcript instead of returning no candidates", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-claude-loop-"));
+    cleanup.push(root);
+    const transcript = join(root, "loop.jsonl");
+    // A symlink loop makes the transcript ELOOP: the filesystem cause must
+    // surface (an existsSync pre-check would have turned it into silence).
+    symlinkSync(transcript, transcript);
+
+    expect(() => claudeFinalPayloadCandidates(transcript))
+      .toThrow(/cannot read Claude transcript/);
+  });
 });
 
 // --- Invalid evidence classes -----------------------------------------------

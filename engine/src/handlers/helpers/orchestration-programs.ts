@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { devNull } from "node:os";
-import { extname } from "node:path";
+import { extname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   createAtomicInitialPublicationClaimPort,
@@ -62,8 +62,10 @@ import {
   deriveRefutationVerifierBinding,
   panelRequestIdentity,
   parseRefutationPanelAuthority,
+  refutationPanelCheckpoint,
   startPersistentRefutationPanel,
   submitRefutationVerdict,
+  type PersistentRefutationPanelEvent,
 } from "../../core/panel-program";
 import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../orchestration/context-packets";
 import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from "../../orchestration/no-follow-fs";
@@ -428,9 +430,20 @@ async function publishInitialBatch(
     ...action.value,
     requests: Object.freeze(action.value.requests.map((request) => Object.freeze({
       ...request,
-      task: `${standaloneMarker}LOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\nReview the immutable context packet and emit only the required reviewer result.`,
+      task: `${standaloneMarker}LOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.`,
     }))),
   }) };
+}
+
+/**
+ * The deterministic per-task resolver for the frozen ContextPacket: the exact
+ * absolute path to the immutable `contexts/<digest>.json` artifact, delivered
+ * to the child as a LOOM_CONTEXT_PATH marker. A spawned reviewer must be able
+ * to read the packet it is instructed to review without inferring run-directory
+ * layout out of band.
+ */
+function contextPacketPathMarker(handle: RunDirHandle, digest: string): string {
+  return `LOOM_CONTEXT_PATH: ${join(handle.runDirectory, "contexts", `${digest}.json`)}\n`;
 }
 
 function parseRegistration(raw: unknown): RegisteredStandaloneProgram | null {
@@ -1862,7 +1875,7 @@ export async function resumeWaveGateFacade(
         requests: uncapturedInitialReviews.map((authority) => ({
           authority,
           context: { digest: authority.contextDigest, slot: { kind: "fixed-artifact-slot", path: `contexts/${authority.contextDigest}.json` } },
-          task: `LOOM_REQUEST_ID: ${authority.requestId}\nLOOM_CONTEXT_DIGEST: ${authority.contextDigest}\nComplete the exact Wave review request.`,
+          task: `LOOM_REQUEST_ID: ${authority.requestId}\nLOOM_CONTEXT_DIGEST: ${authority.contextDigest}\n${contextPacketPathMarker(handle, authority.contextDigest)}Read the immutable context packet at LOOM_CONTEXT_PATH and complete the exact Wave review request.`,
         })),
       } };
     }
@@ -1923,7 +1936,8 @@ export async function resumeWaveGateFacade(
             task: [
               `LOOM_REQUEST_ID: ${request.authority.requestId}`,
               `LOOM_CONTEXT_DIGEST: ${request.context.digest}`,
-              "Retry the exact current Wave Review Packet slot.",
+              `LOOM_CONTEXT_PATH: ${join(handle.runDirectory, "contexts", `${request.context.digest}.json`)}`,
+              "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave Review Packet slot.",
               retry?.retryDiagnostic ?? "Attempt 1 was rejected; correct the packet evidence contract.",
             ].join("\n"),
           };
@@ -1969,7 +1983,7 @@ export async function resumeWaveGateFacade(
         kind: "spawn-batch", runId: handle.runId,
         requests: [{
           ...durable,
-          task: `LOOM_REQUEST_ID: ${durable.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${durable.context.digest}\nRetry the exact current Wave spec-check slot.`,
+          task: `LOOM_REQUEST_ID: ${durable.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${durable.context.digest}\n${contextPacketPathMarker(handle, durable.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave spec-check slot.`,
         }],
       } };
     }
@@ -1992,7 +2006,7 @@ export async function resumeWaveGateFacade(
       if (missing.length > 0) {
         return {
           ok: true,
-          action: { kind: "spawn-batch", runId: handle.runId, requests: executableRefutationRequests(missing, false) },
+          action: { kind: "spawn-batch", runId: handle.runId, requests: executableRefutationRequests(handle, missing, false) },
         };
       }
       let panelState = startPersistentRefutationPanel(preparation.panel).state;
@@ -2013,7 +2027,7 @@ export async function resumeWaveGateFacade(
           if (!attempts.value.has(captureKey(retry.request.authority.slotId, retry.request.authority.attempt))) {
             return { ok: true, action: {
               kind: "spawn-batch", runId: handle.runId,
-              requests: executableRefutationRequests([retry.request], false),
+              requests: executableRefutationRequests(handle, [retry.request], false),
             } };
           }
           const retryBytes = handle.readTranscriptBytes(retry.request.authority);
@@ -2292,13 +2306,14 @@ function standaloneRefutationPreparation(
 }
 
 function executableRefutationRequests(
+  handle: RunDirHandle,
   requests: readonly SpawnRequest[],
   standalone: boolean,
 ): readonly Readonly<SpawnRequest & { task: string }>[] {
   const standaloneMarker = standalone ? "LOOM_REVIEW_CONTEXT: standalone\n" : "";
   return requests.map((request) => Object.freeze({
     ...request,
-    task: `${standaloneMarker}LOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\nComplete the exact pending Refutation Panel request.`,
+    task: `${standaloneMarker}LOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH, then complete the exact pending Refutation Panel request.`,
   }));
 }
 
@@ -2405,9 +2420,37 @@ export async function resumeStandaloneFacade(
     if (!authorityResult.ok) return failed(authorityResult.message);
     const resolver = publicationResolver(handle);
     const checkpoint = await handle.readCheckpoint();
-    if (checkpoint === null) return failed("standalone review checkpoint is missing");
     let rawState: unknown;
-    try { rawState = JSON.parse(checkpoint); } catch { return failed("standalone review checkpoint is invalid JSON"); }
+    if (checkpoint === null) {
+      // Initial-batch crash window: publishInitialBatch persists contexts,
+      // requests, and the publication receipt BEFORE the awaiting-results
+      // checkpoint is written. A crash inside that window leaves no checkpoint;
+      // reconstruct the exact awaiting-results state from the registered frozen
+      // authority (the same pure state start would have checkpointed) so
+      // reviewer evidence captured before the crash is not discarded.
+      const effectId = standalonePublicationEffectId(authorityResult.value);
+      if (!effectId.ok) return failed(effectId.error.message);
+      const publication = durablePublicationDigest(handle, effectId.value);
+      if (publication.kind === "corrupt") return failed(publication.message);
+      if (publication.kind === "found") {
+        const reconstructed = reduceStandaloneReviewMachine(
+          startStandaloneReviewMachine(authorityResult.value),
+          { kind: "review-batch-published", runId: handle.runId },
+        );
+        if (!reconstructed.ok || reconstructed.value.kind !== "awaiting-results") {
+          return failed(reconstructed.ok
+            ? "standalone recovery did not reach awaiting-results"
+            : reconstructed.error.message);
+        }
+        const serialized = serializeStandaloneReviewMachineState(reconstructed.value);
+        await handle.writeCheckpoint(serialized);
+        rawState = JSON.parse(serialized) as unknown;
+      } else {
+        return failed("standalone review checkpoint is missing and no durable batch publication exists");
+      }
+    } else {
+      try { rawState = JSON.parse(checkpoint); } catch { return failed("standalone review checkpoint is invalid JSON"); }
+    }
     const state = parseStandaloneReviewMachineState(rawState, resolver);
     if (!state.ok) return failed(state.error.message);
     if (state.value.kind === "done") return { ok: true, action: { kind: "done", runId: handle.runId, outcome: state.value.outcome } };
@@ -2430,16 +2473,25 @@ export async function resumeStandaloneFacade(
       if (missing.length > 0) {
         return {
           ok: true,
-          action: { kind: "spawn-batch", runId: handle.runId, requests: executableRefutationRequests(missing, true) },
+          action: { kind: "spawn-batch", runId: handle.runId, requests: executableRefutationRequests(handle, missing, true) },
         };
       }
       let panelState = startPersistentRefutationPanel(preparation.panel).state;
+      // Collect the FULL immutable event prefix as the panel runs. The legacy
+      // completed-state projection records accepted verdicts only, so a slot
+      // accepted on attempt 2 (after an attempt-1 verdict was rejected) cannot
+      // be replayed from it — the durable restart would see the slot still
+      // awaiting attempt 1 and reject the :2 request. The canonical T2
+      // checkpoint below carries the rejection events and replay reaches the
+      // exact terminal state.
+      const panelEvents: PersistentRefutationPanelEvent[] = [];
       for (const request of panelRequests) {
         const bytes = handle.readTranscriptBytes(request.authority);
         if (!bytes.ok) return failed(bytes.error.message);
         let submitted = submitRefutationVerdict(panelState, resolver, panelRequestIdentity(request), Buffer.from(bytes.value).toString("utf8"));
         if (!submitted.ok) return failed(submitted.error.message);
         panelState = submitted.value.state;
+        if (submitted.value.recordedEvent !== undefined) panelEvents.push(submitted.value.recordedEvent);
         if (submitted.value.action?.kind === "spawn-refutation-verifiers") {
           const retryAuthority = submitted.value.action.requests[0];
           const retry = await recoverOrPublishRefutationRetry(
@@ -2451,7 +2503,7 @@ export async function resumeStandaloneFacade(
           if (!attempts.value.has(captureKey(retry.request.authority.slotId, retry.request.authority.attempt))) {
             return { ok: true, action: {
               kind: "spawn-batch", runId: handle.runId,
-              requests: executableRefutationRequests([retry.request], true),
+              requests: executableRefutationRequests(handle, [retry.request], true),
             } };
           }
           const retryBytes = handle.readTranscriptBytes(retry.request.authority);
@@ -2461,6 +2513,7 @@ export async function resumeStandaloneFacade(
           );
           if (!submitted.ok) return failed(submitted.error.message);
           panelState = submitted.value.state;
+          if (submitted.value.recordedEvent !== undefined) panelEvents.push(submitted.value.recordedEvent);
           if (submitted.value.action?.kind === "refutation-blocked") {
             return failed(submitted.value.action.diagnostic.message);
           }
@@ -2468,10 +2521,15 @@ export async function resumeStandaloneFacade(
       }
       const completed = completePersistentRefutationPanel(panelState, resolver, preparation.threshold);
       if (!completed.ok || completed.value.state.stage !== "done") return failed(completed.ok ? "refutation did not reach done" : completed.error.message);
+      if (completed.value.recordedEvent !== undefined) panelEvents.push(completed.value.recordedEvent);
+      const canonical = refutationPanelCheckpoint(completed.value.state, panelEvents, resolver);
+      if (!canonical.ok) return failed(canonical.error.message);
       const completion = parseStandaloneRefutationCompletion({
         panelAuthority: preparation.frozen,
         aggregate: state.value.aggregate,
         completedPanelState: completed.value.state,
+        completedPanelCheckpoint: canonical.value,
+        publicationResolver: resolver,
       });
       if (!completion.ok) return failed(completion.error.message);
       const ready = reduceStandaloneReviewMachine(state.value, { kind: "refutation-completed", completion: completion.value });
@@ -2529,7 +2587,7 @@ export async function resumeStandaloneFacade(
         receipt,
         requests: issued.filter((request) => !captured.value.has(captureKey(request.authority.slotId, request.authority.attempt))).map((request) => ({
           ...request,
-          task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\nReview the immutable context packet and emit only the required reviewer result.`,
+          task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.`,
         })),
       } };
     }

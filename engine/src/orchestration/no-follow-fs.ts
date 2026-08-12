@@ -175,16 +175,27 @@ export function recoverStaleDirectoryLock(
     let tombOwner: string | null = null;
     try {
       tombOwner = readDirectoryFileNoFollow(directoryFd, tomb).toString("utf-8");
-    } catch {
-      tombOwner = null;
+    } catch (error) {
+      // Absent tombstone is the expected race (restore below). Anything else
+      // (EACCES/EPERM, EIO, ELOOP, ENOTDIR, corrupt contents) is damage an
+      // operator must see, not quiet contention.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") tombOwner = null;
+      else {
+        throw new Error(
+          `cannot verify tombstoned lock ${tomb}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
     if (tombOwner !== observedOwner || tombOwner === null || processIsAlive(tombOwner)) {
       try {
         renameSync(procFdChild(directoryFd, tomb), procFdChild(directoryFd, lockName));
-      } catch {
+      } catch (error) {
         // The recovery guard prevents a new legitimate owner from occupying
-        // the canonical name. Failure here is therefore corruption; preserve
-        // the tombstone as evidence and fail closed.
+        // the canonical name. Failure here is therefore corruption; surface it
+        // with the lock name instead of reporting mere contention.
+        throw new Error(
+          `cannot restore lock ${lockName} after failed tombstone verification: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
       return false;
     }

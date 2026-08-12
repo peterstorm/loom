@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { buildStandaloneFindingBrief, parseFindingBriefJson, serializeFindingBrief } from "../../src/core/review-panel";
+import { buildStandaloneFindingBrief, parseFindingBriefJson, serializeFindingBrief, type ReviewLens, type WaveFindingId } from "../../src/core/review-panel";
 import {
   acceptedAgentResult,
   createAtomicInitialPublicationClaimPort,
@@ -19,6 +19,7 @@ import {
   type AgentRequestAuthority,
   type BatchPublishedReceipt,
   type CompleteRoster,
+  type OrchestrationRunId,
   type PublicationAuthorityResolver,
   type SpawnRequest,
 } from "../../src/core/orchestration-contract";
@@ -69,6 +70,7 @@ import {
 import { prepareStandaloneReviewHarnessCapture } from "../../src/handlers/helpers/standalone-review";
 import {
   completePersistentRefutationPanel,
+  deriveRefutationVerifierBinding,
   panelRequestIdentity,
   parseRefutationPanelAuthority,
   refutationPanelCheckpoint,
@@ -78,6 +80,7 @@ import {
   type RefutationPanelAuthority,
   type RefutationPanelCheckpoint,
   type RefutationPanelState,
+  type NonEmpty,
 } from "../../src/core/panel-program";
 
 const transcript = (critical: string[] = [], advisory: string[] = []) => [
@@ -658,23 +661,30 @@ function completedRefutationPanel(
     claude: { harness: "claude-code", model: "opus" },
   } as const;
   const lenses = ["reproduction", "intent"] as const;
-  const verifierSlots = lenses.map((_, index) => ({
-    slotId: `panel-slot:${index + 1}`,
-    attempts: ([1, 2] as const).map((attempt) => ({
-      runId: panelRunId,
-      requestId: `panel-request:${index + 1}:${attempt}`,
-      slotId: `panel-slot:${index + 1}`,
-      program: "refutation-panel",
-      role: "review-verifier-agent",
-      attempt,
-      modelProfile: binding.profile,
-      harnessBinding: { pi: binding.pi, claude: binding.claude },
-      requiredSkill: null,
-      contextDigest: (900 + index * 10 + attempt).toString(16).padStart(64, "0"),
-      outputSlot: `transcripts/panel-${index + 1}/attempt-${attempt}.raw`,
-    })),
-  }));
   const brief = buildStandaloneFindingBrief(aggregate);
+  // Verifier roster identities are semantic: each slot derives from the run,
+  // its lens, and the exact finding set.
+  const findingIds = brief.findings.map(({ id }) => id) as unknown as NonEmpty<WaveFindingId>;
+  const verifierSlots = lenses.map((lens, index) => {
+    const derived = deriveRefutationVerifierBinding(panelRunId as OrchestrationRunId, lens as ReviewLens, findingIds);
+    if (!derived.ok) throw new Error(derived.errors.join("; "));
+    return {
+      slotId: derived.value.slotId,
+      attempts: ([1, 2] as const).map((attempt, attemptIndex) => ({
+        runId: panelRunId,
+        requestId: derived.value.requestIds[attemptIndex],
+        slotId: derived.value.slotId,
+        program: "refutation-panel",
+        role: "review-verifier-agent",
+        attempt,
+        modelProfile: binding.profile,
+        harnessBinding: { pi: binding.pi, claude: binding.claude },
+        requiredSkill: null,
+        contextDigest: (900 + index * 10 + attempt).toString(16).padStart(64, "0"),
+        outputSlot: `transcripts/panel-${index + 1}/attempt-${attempt}.raw`,
+      })),
+    };
+  });
   const parsedAuthority = parseRefutationPanelAuthority({
     runId: panelRunId,
     findings: brief.findings,

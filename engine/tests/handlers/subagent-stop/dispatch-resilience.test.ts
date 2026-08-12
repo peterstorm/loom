@@ -77,6 +77,28 @@ function pointSessionAt(session: string, statePath: string): void {
   sessionFiles.push(pointer);
 }
 
+describe("category handler errors propagate instead of passthrough (critical)", () => {
+  it("a storeReviewerFindings failure fails the SubagentStop hook", async () => {
+    const dir = tempDir();
+    const statePath = writeState(dir);
+    const session = sid("review-evidence-error");
+    pointSessionAt(session, statePath);
+
+    // The reviewer transcript is unreadable, so storeReviewerFindings returns
+    // kind error. dispatch must surface that as a failed SubagentStop — a
+    // swallowed error would make a wave look clean while evidence was lost.
+    const result = await dispatch(JSON.stringify({
+      session_id: session,
+      agent_id: "agent-review-error",
+      agent_type: "code-reviewer",
+      agent_transcript_path: join(dir, "missing-transcript.jsonl"),
+    }), []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("store-reviewer-findings");
+  });
+});
+
 describe("request-bound capture gates legacy dispatch", () => {
   it("runs cleanup but skips state mutation after Claude capture rejection", async () => {
     const dir = tempDir();

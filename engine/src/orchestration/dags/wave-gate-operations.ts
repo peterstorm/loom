@@ -76,8 +76,10 @@ export type DerivedPart =
   | Readonly<{ kind: "derived"; part: string; value: unknown }>
   | Readonly<{ kind: "undeliverable"; part: string; reason: string }>;
 
+export type PreparedPartValue = Readonly<{ kind: "derived"; part: string; value: unknown }>;
+
 export type PreparedBatch =
-  | Readonly<{ kind: "prepared"; parts: readonly DerivedPart[] }>
+  | Readonly<{ kind: "prepared"; parts: readonly PreparedPartValue[] }>
   | Readonly<{ kind: "blocked"; reasons: readonly string[] }>;
 
 const preparationInputSchema = z.object({
@@ -134,7 +136,7 @@ const joinNode = createTransformNode<Readonly<Record<string, DerivedPart>>, Prep
     const failed = ordered.filter((part) => part.kind === "undeliverable");
     return ok(failed.length > 0
       ? { kind: "blocked", reasons: failed.map((part) => part.reason) }
-      : { kind: "prepared", parts: ordered });
+      : { kind: "prepared", parts: ordered.filter((part): part is PreparedPartValue => part.kind === "derived") });
   },
 });
 

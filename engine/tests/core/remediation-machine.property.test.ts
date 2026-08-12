@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { buildStandaloneFindingBrief } from "../../src/core/review-panel";
+import { buildStandaloneFindingBrief, type ReviewLens, type WaveFindingId } from "../../src/core/review-panel";
 import {
   auditRemediationPaths,
   compareExactPathSets,
@@ -73,10 +73,12 @@ import {
 } from "../../src/core/standalone-review-machine";
 import {
   completePersistentRefutationPanel,
+  deriveRefutationVerifierBinding,
   panelRequestIdentity,
   parseRefutationPanelAuthority,
   startPersistentRefutationPanel,
   submitRefutationVerdict,
+  type NonEmpty,
   type RefutationPanelAuthority,
 } from "../../src/core/panel-program";
 
@@ -176,23 +178,34 @@ function upholdStandaloneCriticals(
     pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
     claude: { harness: "claude-code", model: "opus" },
   } as const;
-  const verifierSlots = lenses.map((_, index) => ({
-    slotId: `panel-slot:remediation:${index + 1}`,
-    attempts: ([1, 2] as const).map((attempt) => ({
-      runId: panelRunId,
-      requestId: `panel-request:remediation:${index + 1}:${attempt}`,
-      slotId: `panel-slot:remediation:${index + 1}`,
-      program: "refutation-panel",
-      role: "review-verifier-agent",
-      attempt,
-      modelProfile: binding.profile,
-      harnessBinding: { pi: binding.pi, claude: binding.claude },
-      requiredSkill: null,
-      contextDigest: (900 + index * 10 + attempt).toString(16).padStart(64, "0"),
-      outputSlot: `transcripts/remediation-panel-${index + 1}/attempt-${attempt}.raw`,
-    })),
-  }));
   const brief = buildStandaloneFindingBrief(aggregate);
+  // Verifier roster identities are semantic: each slot derives from the run,
+  // its lens, and the exact finding set.
+  const findingIds = brief.findings.map(({ id }) => id) as unknown as NonEmpty<WaveFindingId>;
+  const verifierSlots = lenses.map((lens, index) => {
+    const derived = deriveRefutationVerifierBinding(
+      panelRunId as import("../../src/core/orchestration-contract").OrchestrationRunId,
+      lens as ReviewLens,
+      findingIds,
+    );
+    if (!derived.ok) throw new Error(derived.errors.join("; "));
+    return {
+      slotId: derived.value.slotId,
+      attempts: ([1, 2] as const).map((attempt, attemptIndex) => ({
+        runId: panelRunId,
+        requestId: derived.value.requestIds[attemptIndex],
+        slotId: derived.value.slotId,
+        program: "refutation-panel",
+        role: "review-verifier-agent",
+        attempt,
+        modelProfile: binding.profile,
+        harnessBinding: { pi: binding.pi, claude: binding.claude },
+        requiredSkill: null,
+        contextDigest: (900 + index * 10 + attempt).toString(16).padStart(64, "0"),
+        outputSlot: `transcripts/remediation-panel-${index + 1}/attempt-${attempt}.raw`,
+      })),
+    };
+  });
   const parsedAuthority = parseRefutationPanelAuthority({
     runId: panelRunId,
     findings: brief.findings,

@@ -213,6 +213,28 @@ describe("context packets", () => {
     expect(parsed.error.message).toContain("digest must cover its exact identity");
   });
 
+  it("refuses a packet whose requestId is not a canonical authority id", () => {
+    // A structurally valid packet (digest recomputed over its exact identity)
+    // carrying a requestId that no request authority could hold: request
+    // identity is a branded authority, so this must not parse as a valid
+    // ContextPacket even though its digest is self-consistent.
+    const invalid = buildContextPacket({
+      requestId: "request:reviewer/1" as AgentRequestAuthority["requestId"],
+      role: "code-reviewer",
+      requiredSkill: "none",
+      outputContract: "machine-summary-v1",
+      fixedContext: packet("request:reviewer:1").fixedContext,
+      variableContext: packet("request:reviewer:1").variableContext,
+    });
+    if (!invalid.ok) throw new Error(invalid.error.message);
+
+    const parsed = parseContextPacket(JSON.parse(JSON.stringify(invalid.value)));
+
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error.message).toContain("requestId");
+  });
+
   it("gives two requests sharing fixed context the same fixed section digest", () => {
     const first = packet("request:reviewer:1", "task one");
     const second = packet("request:reviewer:2", "task two");

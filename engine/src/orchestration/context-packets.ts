@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import {
   canonicalRecord,
   parseArtifactByteLength,
+  parseRequestId,
   type ArtifactByteLength,
   type ArtifactDigest,
   type ContextDigest,
@@ -119,6 +120,21 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Cont
   const invalid = requiredFieldProblem(input);
   if (invalid !== null) return failure(invalid.field, invalid.message);
 
+  // Section identity must cover the exact bytes: a caller-supplied ByteSection
+  // whose digest/byteLength do not match its bytes would otherwise let a
+  // packet's content-addressed identity disagree with its content.
+  for (const [index, section] of [...input.fixedContext, ...input.variableContext].entries()) {
+    const parsedLength = parseArtifactByteLength(section.bytes.length);
+    const verified = parsedLength.ok && parsedLength.value === section.byteLength &&
+      digestBytes(section.bytes) === section.digest;
+    if (!verified) {
+      const field = index < input.fixedContext.length
+        ? `fixedContext[${index}]`
+        : `variableContext[${index - input.fixedContext.length}]`;
+      return failure(field, "a context section digest and length must cover its exact bytes");
+    }
+  }
+
   const withoutDigest = {
     schemaVersion: CONTEXT_PACKET_SCHEMA_VERSION,
     requestId: input.requestId,
@@ -210,8 +226,17 @@ export function parseContextPacket(raw: unknown): DomainResult<ContextPacket, Co
   const variableContext = parseSections(record["variableContext"], "variableContext");
   if (!variableContext.ok) return variableContext;
 
+  // Request identity is a branded authority, not a free string: parse it
+  // through the same parser every request authority uses, so a packet carrying
+  // a malformed request id cannot cross this untrusted boundary as a
+  // plausible RequestId (a later digest match would otherwise accept it).
+  const requestId = parseRequestId(record["requestId"]);
+  if (!requestId.ok) {
+    return failure("requestId", `a context packet requestId must be a canonical authority id: ${requestId.error.message}`);
+  }
+
   const built = buildContextPacket({
-    requestId: record["requestId"] as RequestId,
+    requestId: requestId.value,
     role: record["role"] as string,
     requiredSkill: record["requiredSkill"] as string,
     outputContract: record["outputContract"] as string,

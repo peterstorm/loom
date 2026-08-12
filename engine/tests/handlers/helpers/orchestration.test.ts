@@ -1670,6 +1670,24 @@ describe("orchestration CLI", () => {
     expect(retry.requests[0]?.authority).toMatchObject({
       attempt: 2, program: "refutation-panel", slotId: panel.requests[0]!.authority.slotId,
     });
+
+    // Complete the retry with a VALID verdict, then drive the run to done. The
+    // finalize must persist the canonical T2 refutation checkpoint (event
+    // prefix INCLUDING the attempt-1 rejection): re-resuming the done run
+    // replays the completion receipt, and a slot accepted on attempt 2 can
+    // only be reconstructed from the full event prefix, not from the
+    // accepted-only completed-state projection.
+    const retryRequest = retry.requests[0]!;
+    const valid = refutationOutput(opened.value, retryRequest.authority);
+    expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
+    const doneResult = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(doneResult.status, doneResult.stderr).toBe(0);
+    expect(JSON.parse(doneResult.stdout).kind).toBe("done");
+
+    // Idempotent done: the durable receipt must restore cleanly after restart.
+    const replay = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(replay.status, replay.stderr).toBe(0);
+    expect(JSON.parse(replay.stdout).kind).toBe("done");
   }, 30_000);
 
   it("drives a registered standalone review from spawn-batch to idempotent done", async () => {
@@ -1696,6 +1714,44 @@ describe("orchestration CLI", () => {
     expect(JSON.parse(resumed.stdout).kind).toBe("done");
     const replay = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", ENGINE);
     expect(JSON.parse(replay.stdout).kind).toBe("done");
+  });
+
+  it("heals a standalone crash after batch publication but before the checkpoint write", async () => {
+    const root = repository();
+    writeFileSync(join(root, "a.txt"), "changed\n");
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-standalone-crash-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.standalone-crash-window");
+    mkdirSync(runDir);
+    const started = runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "comments", files: ["a.txt"], dryRun: false }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+
+    // Simulate the crash window: publishInitialBatch durably wrote contexts,
+    // requests, and the publication receipt, but the awaiting-results
+    // checkpoint write never happened.
+    rmSync(join(runDir, "checkpoint.json"));
+
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const resumedAction = JSON.parse(resumed.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(resumedAction.kind).toBe("spawn-batch");
+    expect(resumedAction.requests).toHaveLength(action.requests.length);
+
+    // Reviewers complete cleanly; the run must finish as a normal run would.
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const transcript = [
+      "### Machine Summary", "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "", "```findings", "[]", "```",
+    ].join("\n");
+    for (const { authority } of resumedAction.requests) {
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from(transcript)])).ok).toBe(true);
+    }
+    const done = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(done.status, done.stderr).toBe(0);
+    expect(JSON.parse(done.stdout).kind).toBe("done");
   });
 
   it("installs only a standalone-authorized dirty set through the remediation façade", async () => {

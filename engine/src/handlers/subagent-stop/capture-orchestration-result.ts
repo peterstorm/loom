@@ -25,7 +25,7 @@
  * into admitting different results for the same run.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
 import type { FinalPayloadCandidate } from "../../core/harness-capture";
 import {
@@ -48,15 +48,16 @@ export type { CaptureOutcome };
  * a guess, so the ambiguity rules reject instead of accepting salvage.
  */
 export function claudeFinalPayloadCandidates(transcriptPath: string): readonly FinalPayloadCandidate[] {
-  if (!existsSync(transcriptPath)) return Object.freeze([]);
+  // One read, no pre-check: `existsSync` returns false for ELOOP/ENOTDIR too,
+  // which would turn an unreadable transcript into a silent "no candidates"
+  // before readFileSync could surface the cause. Absence (ENOENT) keeps the
+  // documented "no transcript → no candidate" meaning; every other read
+  // failure (EACCES, ELOOP, EISDIR, ENOTDIR, EIO, ...) is a real cause the
+  // operator must see instead of a generic missing-payload rejection.
   const lines = ((): readonly string[] => {
     try {
       return readFileSync(transcriptPath, "utf-8").split("\n").filter((line) => line.trim().length > 0);
     } catch (error) {
-      // Absence after the pre-check is a benign spawn-side race and keeps the
-      // documented "no transcript → no candidate" meaning. Every other read
-      // failure (EACCES, ELOOP, EISDIR, ENOTDIR, EIO, ...) is a real cause the
-      // operator must see instead of a generic missing-payload rejection.
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.freeze([]);
       throw new Error(
         `cannot read Claude transcript ${transcriptPath}: ${error instanceof Error ? error.message : String(error)}`,

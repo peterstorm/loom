@@ -55,8 +55,9 @@ import {
   type RefutationProgramEvent,
   type RefutationProgramState,
   type SpawnBatchAction,
+  type NonEmpty,
 } from "../../src/core/panel-program";
-import { parseWaveFindingId, type BriefFinding } from "../../src/core/review-panel";
+import { parseWaveFindingId, type BriefFinding, type ReviewLens, type WaveFindingId } from "../../src/core/review-panel";
 import {
   createAtomicInitialPublicationClaimPort,
   createInitialBatchPublicationReconciler,
@@ -73,6 +74,7 @@ import {
   prepareInitialBatchPublicationIntent,
   spawnBatchAction as issueSpawnBatchAction,
   type AgentRequestAuthority,
+  type AgentRosterSlot,
   type EffectId,
   type OrchestrationRunId,
   type SpawnRequest as IssuedSpawnRequest,
@@ -631,13 +633,43 @@ const findings: readonly [BriefFinding, BriefFinding] = [
 ];
 
 type RefutationFixture = Readonly<{ authority: RefutationPanelAuthority; requests: readonly IssuedSpawnRequest[] }>;
+function semanticVerifierSlots(
+  runId: OrchestrationRunId,
+  lenses: readonly string[],
+  findingIds: NonEmpty<WaveFindingId>,
+): AgentRosterSlot[] {
+  return lenses.map((lens) => {
+    const binding = parsed(deriveRefutationVerifierBinding(runId, lens as ReviewLens, findingIds));
+    const attempts = ([1, 2] as const).map((attempt, index) =>
+      parsed(parseAgentRequestAuthority({
+        runId,
+        requestId: binding.requestIds[index],
+        slotId: binding.slotId,
+        program: "refutation-panel",
+        role: "review-verifier-agent",
+        attempt,
+        modelProfile: "refutation",
+        harnessBinding: panelBindings,
+        requiredSkill: null,
+        contextDigest: parsed(parseContextDigest(hexDigest(`${runId}:${binding.slotId}:${attempt}:context`))),
+        outputSlot: `transcripts/${binding.slotId}-attempt-${attempt}.json`,
+      })));
+    return parsed(parseAgentRosterSlot(attempts[0], attempts[1]));
+  });
+}
+
 function refutationFixture(suffix: string): RefutationFixture {
   const runId = parsed(parseOrchestrationRunId(`run.refutation.${suffix}`));
-  const slots = [1, 2, 3].map((index) => rosterSlot(runId, "verifier", index, "refutation-panel", "review-verifier-agent"));
+  // Verifier roster identities are SEMANTIC: each slot is derived from the
+  // run, its lens, and the exact finding set (deriveRefutationVerifierBinding),
+  // so reordering lenses or findings cannot relabel issued verifier requests.
+  const lensList = ["reproduction", "intent", "blast-radius"] as const;
+  const findingIds = findings.map(({ id }) => id) as unknown as NonEmpty<WaveFindingId>;
+  const slots = semanticVerifierSlots(runId, lensList, findingIds);
   const authority = parsed(parseRefutationPanelAuthority({
     runId,
     findings,
-    lenses: ["reproduction", "intent", "blast-radius"],
+    lenses: lensList as readonly string[],
     verifierSlots: slots,
   }));
   return { authority, requests: issue(slots.map(({ attempts }) => attempts[0])) };
@@ -835,6 +867,27 @@ describe("persistent panel authority", () => {
     });
   });
 
+  it("refuses an ordinal-shaped verifier roster when semantics are derivable", () => {
+    const refutation = refutationFixture("ordinal-relabel");
+    const ordinalSlots = [1, 2, 3].map((index) =>
+      rosterSlot(refutation.authority.runId, "verifier", index, "refutation-panel", "review-verifier-agent"));
+    // An ordinal-shaped roster carries no anchor to the semantic lens/finding
+    // set, so a reordered (but internally distinct) lens list must NOT relabel
+    // it as authoritative evidence for different semantics.
+    const reordered = [
+      refutation.authority.lenses[1],
+      refutation.authority.lenses[0],
+      refutation.authority.lenses[2],
+    ] as const;
+
+    expect(parseRefutationPanelAuthority({
+      runId: refutation.authority.runId,
+      findings: refutation.authority.findings,
+      lenses: reordered,
+      verifierSlots: ordinalSlots,
+    })).toMatchObject({ ok: false, error: { kind: "invalid-authority" } });
+  });
+
   it("refuses a roster slot holding an attempt bound to a different slot", () => {
     const refutation = refutationFixture("cross-slot-attempt");
     const slots = refutation.authority.verifierRoster.orderedSlots;
@@ -857,11 +910,21 @@ describe("persistent panel authority", () => {
 
   it("uses shared identity/path/prose parsers and stores only canonical sanitized Findings", () => {
     const fixture = refutationFixture("sanitized-authority");
+    const only = [{ ...findings[0], agent: "code-reviewer", claim: " {claim} text ", file: "src/a.ts" }];
+    const onlyId = parseWaveFindingId(only[0]!.id);
+    if (onlyId === null) throw new Error("invalid test wave finding id");
+    // The roster must derive from the same (single) finding set passed below:
+    // semantic slot identities bind each lens to the exact findings parsed.
+    const slots = semanticVerifierSlots(
+      fixture.authority.runId,
+      fixture.authority.lenses,
+      [onlyId],
+    );
     const parsedAuthority = reduced(parseRefutationPanelAuthority({
       runId: fixture.authority.runId,
-      findings: [{ ...findings[0], agent: "code-reviewer", claim: " {claim} text ", file: "src/a.ts" }],
+      findings: only,
       lenses: fixture.authority.lenses,
-      verifierSlots: fixture.authority.verifierRoster.orderedSlots,
+      verifierSlots: slots,
     }));
     expect(parsedAuthority.findings[0]).toMatchObject({
       id: findings[0].id,

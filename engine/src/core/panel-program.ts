@@ -1103,28 +1103,39 @@ function rosterAuthorityErrors(
     if (semanticEntry === undefined) continue;
     const expected = parseCanonicalPanelSlotBinding(semanticRunId, stage, index + 1, semanticEntry, findingIds);
     if (expected === null) {
-      errors.push(`${stage} slot ${index + 1} canonical identity could not be derived`);
+      // The semantic entry cannot derive a canonical slot binding (e.g. a
+      // legacy lens no longer in the current table). Admit ONLY the exact
+      // run-bound legacy ordinal identity below; a weaker, shapeless ordinal
+      // match would re-pair this slot with whatever semantic entry now lives
+      // at its position.
+      const legacySlot = parseSlotId(`${stage}:${index + 1}`);
+      const legacyRequests = ([1, 2] as const).map((attempt) =>
+        parseRequestId(`${runId}:${stage}:${index + 1}:${attempt}`));
+      const legacy = legacySlot.ok && legacyRequests[0].ok && legacyRequests[1].ok
+        ? Object.freeze({
+            slotId: legacySlot.value,
+            requestIds: Object.freeze([legacyRequests[0].value, legacyRequests[1].value]) as readonly [RequestId, RequestId],
+          })
+        : null;
+      const legacyMatches = legacy !== null &&
+        slot.slotId === legacy.slotId &&
+        slot.attempts.every((request, attemptIndex) => request.requestId === legacy.requestIds[attemptIndex]);
+      if (!legacyMatches) {
+        errors.push(
+          `${stage} slot ${index + 1} for ${JSON.stringify(semanticEntry)} has non-canonical slot/request identity`,
+        );
+      }
       continue;
     }
     const bindingMatches = (binding: CanonicalPanelSlotBinding): boolean =>
       slot.slotId === binding.slotId &&
       slot.attempts.every((request, attemptIndex) => request.requestId === binding.requestIds[attemptIndex]);
-    const legacySlot = parseSlotId(`${stage}:${index + 1}`);
-    const legacyRequests = ([1, 2] as const).map((attempt) =>
-      parseRequestId(`${runId}:${stage}:${index + 1}:${attempt}`));
-    const legacy = legacySlot.ok && legacyRequests[0].ok && legacyRequests[1].ok
-      ? Object.freeze({
-          slotId: legacySlot.value,
-          requestIds: Object.freeze([legacyRequests[0].value, legacyRequests[1].value]) as readonly [RequestId, RequestId],
-        })
-      : null;
-    const ordinal = String(index + 1);
-    const slotParts = slot.slotId.split(":");
-    const ordinalBinding = slotParts.at(-1) === ordinal && slot.attempts.every((request, attemptIndex) => {
-      const parts = request.requestId.split(":");
-      return parts.at(-2) === ordinal && parts.at(-1) === String(attemptIndex + 1);
-    });
-    if (!bindingMatches(expected) && (legacy === null || !bindingMatches(legacy)) && !ordinalBinding) {
+    // The semantic slot binding is DERIVED from the semantic entry (and, for
+    // verifier slots, the exact finding set). Require it whenever it is
+    // derivable — ordering/labeling a roster by loose ordinal shape would let
+    // a reordered lens or finding list silently relabel previously issued
+    // requests as authoritative evidence for different semantics.
+    if (!bindingMatches(expected)) {
       errors.push(
         `${stage} slot ${index + 1} for ${JSON.stringify(semanticEntry)} has non-canonical slot/request identity`,
       );

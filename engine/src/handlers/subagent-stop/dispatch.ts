@@ -5,7 +5,7 @@
  */
 
 import { match, P } from "ts-pattern";
-import type { HookHandler, SubagentStopInput } from "../../types";
+import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
 import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
@@ -47,6 +47,24 @@ const handler: HookHandler = async (stdin, args) => {
       await fn();
     } catch (e) {
       process.stderr.write(`ERROR in ${name}: ${e instanceof Error ? e.message : String(e)}\n`);
+    }
+  };
+
+  // Category handlers are evidence boundaries, not best-effort side effects:
+  // a child that reports an error (e.g. storeReviewerFindings could not read
+  // the reviewer transcript) must surface as a failed SubagentStop, or a wave
+  // can look clean while review evidence was silently lost. Cleanup runs
+  // BEFORE the category handler, so propagating the failure still leaves the
+  // roster/session state consistent.
+  const runChild = async (name: string, fn: () => Promise<HookResult>): Promise<HookResult | null> => {
+    try {
+      const result = await fn();
+      if (result.kind === "error" || result.kind === "block") return result;
+      return null;
+    } catch (e) {
+      const message = `${name} crashed: ${e instanceof Error ? e.message : String(e)}`;
+      process.stderr.write(`ERROR in ${name}: ${message}\n`);
+      return { kind: "error", message };
     }
   };
 
@@ -106,26 +124,28 @@ const handler: HookHandler = async (stdin, args) => {
 
   const category = categorize(stripNamespace(input.agent_type ?? ""));
 
+  let childFailure: HookResult | null = null;
   await match(category)
     .with("phase", async () => {
-      await safeRun("advancePhase", () => advancePhase(stdin, args));
+      childFailure = await runChild("advancePhase", () => advancePhase(stdin, args));
     })
     .with("impl", async () => {
-      await safeRun("updateTaskStatus", () =>
+      childFailure = await runChild("updateTaskStatus", () =>
         runUpdateTaskStatus(stdin, args, evidenceSnapshot),
       );
     })
     .with("review", async () => {
-      await safeRun("storeReviewerFindings", () => storeReviewerFindings(stdin, args));
+      childFailure = await runChild("storeReviewerFindings", () => storeReviewerFindings(stdin, args));
     })
     .with("spec-check", async () => {
-      await safeRun("storeSpecCheckFindings", () => storeSpecCheckFindings(stdin, args));
+      childFailure = await runChild("storeSpecCheckFindings", () => storeSpecCheckFindings(stdin, args));
     })
     .with("unknown", async () => {
       // No orchestration hooks for unknown agents
     })
     .exhaustive();
 
+  if (childFailure !== null) return childFailure;
   return { kind: "passthrough" };
 };
 
