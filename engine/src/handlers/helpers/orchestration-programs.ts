@@ -955,29 +955,71 @@ type WaveTaskReviewRetry = Readonly<{
  * exact complaint AND restates the exact wire schema, because the failure this
  * exists to break is a model inferring `{id, status}` from prose and repeating
  * it on retry. Concrete keys, not description.
+ *
+ * The template is split into a FIXED preamble (through the reason separator)
+ * and a FIXED schema tail; only the parser rejection reason is variable, so
+ * persisted attempt-2 contexts can be re-validated byte-exactly instead of
+ * trusting a section label (see parseWaveRetryDiagnosticSection).
  */
+
+const WAVE_RETRY_PREAMBLE = [
+  "YOUR PREVIOUS ATTEMPT WAS REJECTED. This is your final attempt.",
+  "",
+  "Parser rejection reason: ",
+].join("\n");
+
+const WAVE_RETRY_FIXED_TAIL = [
+  "Emit the review_lifecycle block with these EXACT keys — the parser accepts",
+  "`finding_id` (NOT `id`), `verdict` (NOT `status`), and `reason`. The only",
+  "legal verdict values are `resolved_by_remediation` and `still_present`:",
+  "",
+  "```review_lifecycle",
+  "{",
+  '  "prior_findings": [',
+  '    { "finding_id": "<exact id from task.priorFindings>", "verdict": "still_present", "reason": "<concrete non-empty reason>" }',
+  "  ]",
+  "}",
+  "```",
+  "",
+  "Also emit the REVIEW_GENERATION and REVIEW_PACKET_ID marker lines copied",
+  "verbatim from the packet, and assess every task.priorFindings id exactly",
+  "once in packet order. Use an empty array when there are no prior findings.",
+].join("\n");
+
 function waveRetryDiagnosticText(reason: string): string {
-  return [
-    "YOUR PREVIOUS ATTEMPT WAS REJECTED. This is your final attempt.",
-    "",
-    `Parser rejection reason: ${reason}`,
-    "",
-    "Emit the review_lifecycle block with these EXACT keys — the parser accepts",
-    "`finding_id` (NOT `id`), `verdict` (NOT `status`), and `reason`. The only",
-    "legal verdict values are `resolved_by_remediation` and `still_present`:",
-    "",
-    "```review_lifecycle",
-    "{",
-    '  "prior_findings": [',
-    '    { "finding_id": "<exact id from task.priorFindings>", "verdict": "still_present", "reason": "<concrete non-empty reason>" }',
-    "  ]",
-    "}",
-    "```",
-    "",
-    "Also emit the REVIEW_GENERATION and REVIEW_PACKET_ID marker lines copied",
-    "verbatim from the packet, and assess every task.priorFindings id exactly",
-    "once in packet order. Use an empty array when there are no prior findings.",
-  ].join("\n");
+  return `${WAVE_RETRY_PREAMBLE}${reason}\n\n${WAVE_RETRY_FIXED_TAIL}`;
+}
+
+/**
+ * Parse the persisted `wave-review-attempt-1-rejection` section back into its
+ * canonical shape. The label alone is not authority — an attacker who can write
+ * to the run directory could reuse it — so compatibility with a persisted
+ * attempt-2 context requires the section bytes to be exactly
+ * `<fixed preamble><non-empty reason>\n\n<fixed schema tail>`.
+ */
+export function parseWaveRetryDiagnosticSection(
+  bytes: readonly number[],
+): Readonly<{ ok: true; reason: string }> | Readonly<{ ok: false; message: string }> {
+  let text: string;
+  try {
+    text = new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(bytes));
+  } catch {
+    return { ok: false, message: "wave attempt-1 rejection section is not valid UTF-8" };
+  }
+  if (!text.startsWith(WAVE_RETRY_PREAMBLE)) {
+    return { ok: false, message: "wave attempt-1 rejection section lacks the canonical retry preamble" };
+  }
+  const remainder = text.slice(WAVE_RETRY_PREAMBLE.length);
+  const tailMarker = `\n\n${WAVE_RETRY_FIXED_TAIL}`;
+  const markerIndex = remainder.indexOf(tailMarker);
+  if (markerIndex < 0 || remainder.slice(markerIndex + tailMarker.length) !== "") {
+    return { ok: false, message: "wave attempt-1 rejection section is not one canonical diagnostic-rich retry" };
+  }
+  const reason = remainder.slice(0, markerIndex);
+  if (reason.trim().length === 0) {
+    return { ok: false, message: "wave attempt-1 rejection section carries an empty parser rejection reason" };
+  }
+  return { ok: true, reason };
 }
 
 function deriveWaveAttemptTwo(
@@ -1287,11 +1329,15 @@ export function persistedWaveAttemptTwoCompatibilityProblem(
   }
 
   const unchangedLegacyContext = canonicalStructuralEquals(second.variableContext, first.variableContext);
-  const diagnosticContext = second.variableContext.length === first.variableContext.length + 1 &&
+  const diagnostic = second.variableContext.length === first.variableContext.length + 1 &&
     canonicalStructuralEquals(second.variableContext.slice(0, -1), first.variableContext) &&
-    second.variableContext.at(-1)?.label === "wave-review-attempt-1-rejection";
-  if (!unchangedLegacyContext && !diagnosticContext) {
-    return "persisted attempt-2 context is neither a legacy retry nor one diagnostic-rich retry";
+    second.variableContext.at(-1)?.label === "wave-review-attempt-1-rejection"
+    ? parseWaveRetryDiagnosticSection(second.variableContext.at(-1)!.bytes)
+    : ({ ok: false as const, message: "attempt-2 context carries no wave-review-attempt-1-rejection section" });
+  if (!unchangedLegacyContext) {
+    if (!diagnostic.ok) {
+      return `persisted attempt-2 context is neither a legacy retry nor one diagnostic-rich retry (${diagnostic.message})`;
+    }
   }
   return null;
 }
@@ -1602,6 +1648,24 @@ export async function resumeWaveGateFacade(
         return { ok: true, action: { kind: "done", runId: handle.runId, outcome: receipt } };
       }
       return waveBlocked(handle, `unknown or non-terminal Wave Gate checkpoint kind: ${String(record.kind ?? "missing")}`);
+    }
+    // Completion crash-window recovery: the graph commit is atomic and durable
+    // BEFORE the terminal checkpoint is written, so a crash between
+    // commitActiveWaveGateCompletion and writeCheckpoint leaves the run with a
+    // retired active authority, a completed wave_gate_history entry, and NO
+    // checkpoint. The history entry is the authoritative completion record —
+    // heal the missing checkpoint from it and report done instead of blocking
+    // forever on the already-retired active authority.
+    const completed = graph.wave_gate_history?.find((entry) =>
+      entry.runId === handle.runId && entry.wave === registration.input.wave &&
+      entry.authorityDigest === registration.authorityDigest);
+    if (completed !== undefined) {
+      await handle.writeCheckpoint(JSON.stringify({
+        schemaVersion: 1,
+        kind: "wave-gate-done",
+        receipt: completed.completionReceipt,
+      }));
+      return { ok: true, action: { kind: "done", runId: handle.runId, outcome: completed.completionReceipt } };
     }
     const active = graph.active_wave_gate;
     if (active === undefined || active.runId !== handle.runId || active.wave !== registration.input.wave ||

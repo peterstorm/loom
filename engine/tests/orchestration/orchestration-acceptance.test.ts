@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -315,6 +316,84 @@ describe("Pi and Claude reach the same result", () => {
 
       expect(outcome.kind).toBe("rejected");
       if (outcome.kind === "rejected") expect(outcome.reason).toBe("context");
+    });
+
+    it("rejects capture when the reserved context describes a different request role", async () => {
+      const runsRoot = mkdtempSync(join(tmpdir(), "loom-capture-binding-"));
+      cleanup.push(runsRoot);
+      const directory = join(runsRoot, "run.capture-binding");
+      mkdirSync(directory, { recursive: true });
+      const opened = openRunDirectory(runsRoot, directory);
+      if (!opened.ok) throw new Error(opened.error.message);
+      const base = authority({ runId: "run.capture-binding" as AgentRequestAuthority["runId"] });
+      const section = encodeByteSection("test", "capture parity context");
+      if (!section.ok) throw new Error(section.error.message);
+      // A legitimate packet whose identity is NOT the reserved request: the
+      // request is reserved against the foreign packet's digest. The capture
+      // boundary's explicit context-binding comparison is the only defense
+      // left, and it must refuse instead of accepting evidence whose context
+      // describes another request role.
+      const foreign = buildContextPacket({
+        requestId: base.requestId,
+        role: "silent-failure-hunter",
+        requiredSkill: "none",
+        outputContract: "test output",
+        fixedContext: [section.value],
+        variableContext: [],
+      });
+      if (!foreign.ok) throw new Error(foreign.error.message);
+      if (!(await opened.value.publishContext(foreign.value)).ok) {
+        throw new Error("context publication failed");
+      }
+      const request = authority({
+        runId: "run.capture-binding" as AgentRequestAuthority["runId"],
+        contextDigest: foreign.value.digest,
+      });
+      const reserved = await opened.value.reserveRequest(request);
+      if (!reserved.ok) throw new Error(reserved.error.message);
+      await correlate(runsRoot, directory, "pi", "pi-native-context-foreign", request);
+
+      const outcome = await captureHarnessResult({
+        harness: "pi",
+        runsRoot,
+        runDirectory: directory,
+        nativeId: "pi-native-context-foreign",
+        candidates: piCandidates(AGENT_OUTPUT),
+      });
+
+      expect(outcome.kind).toBe("rejected");
+      if (outcome.kind === "rejected") expect(outcome.reason).toBe("context-binding");
+    });
+
+    it("rejects capture when a stored correlator names a role the issued request does not have", async () => {
+      const { runsRoot, directory, request } = await stagedRun();
+      // A correlator planted directly into the run directory (bypassing the
+      // handle's record-time role check) is structurally valid; the capture
+      // boundary must still refuse it at read time.
+      const nativeId = "pi-native-wrong-role";
+      const digest = createHash("sha256").update(`pi\0${nativeId}`).digest("hex");
+      writeFileSync(
+        join(directory, "requests", "correlators", `${digest}.json`),
+        JSON.stringify({
+          schemaVersion: 1,
+          harness: "pi",
+          nativeId,
+          requestId: request.requestId,
+          role: "silent-failure-hunter",
+          attempt: request.attempt,
+        }),
+      );
+
+      const outcome = await captureHarnessResult({
+        harness: "pi",
+        runsRoot,
+        runDirectory: directory,
+        nativeId,
+        candidates: piCandidates(AGENT_OUTPUT),
+      });
+
+      expect(outcome.kind).toBe("rejected");
+      if (outcome.kind === "rejected") expect(outcome.reason).toBe("wrong-agent-role");
     });
 
     it("writes byte-identical transcripts from either harness", async () => {

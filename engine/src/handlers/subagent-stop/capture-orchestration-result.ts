@@ -52,8 +52,15 @@ export function claudeFinalPayloadCandidates(transcriptPath: string): readonly F
   const lines = ((): readonly string[] => {
     try {
       return readFileSync(transcriptPath, "utf-8").split("\n").filter((line) => line.trim().length > 0);
-    } catch {
-      return Object.freeze([]);
+    } catch (error) {
+      // Absence after the pre-check is a benign spawn-side race and keeps the
+      // documented "no transcript → no candidate" meaning. Every other read
+      // failure (EACCES, ELOOP, EISDIR, ENOTDIR, EIO, ...) is a real cause the
+      // operator must see instead of a generic missing-payload rejection.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.freeze([]);
+      throw new Error(
+        `cannot read Claude transcript ${transcriptPath}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   })();
 

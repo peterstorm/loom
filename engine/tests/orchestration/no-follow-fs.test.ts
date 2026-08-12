@@ -140,6 +140,22 @@ describe("anchored lock ownership", () => {
     }
   });
 
+  it("surfaces a corrupted lock instead of reporting false from the read", () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    // A directory occupying the lock name is a corrupted/attacked lock: the
+    // owner read cannot complete (EISDIR). Recovery must name the cause rather
+    // than collapsing it into "not recoverable" contention.
+    mkdirSync(join(directory, "corrupted.lock"));
+    const directoryFd = openDirectoryNoFollow(directory);
+    try {
+      expect(() => recoverStaleDirectoryLock(directoryFd, "corrupted.lock"))
+        .toThrow(/cannot inspect lock corrupted\.lock/);
+    } finally {
+      closeSync(directoryFd);
+    }
+  });
+
   it("never overlaps critical sections while the recorded owner is alive", async () => {
     const root = workspace();
     const directory = join(root, "run");

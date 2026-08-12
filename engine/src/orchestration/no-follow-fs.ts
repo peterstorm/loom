@@ -150,8 +150,14 @@ export function recoverStaleDirectoryLock(
     let observedOwner: string;
     try {
       observedOwner = readDirectoryFileNoFollow(directoryFd, lockName).toString("utf-8");
-    } catch {
-      return false;
+    } catch (error) {
+      // A vanished lock is the one expected race — recovery stands down. Any
+      // other read failure (EACCES/EPERM, ELOOP, ENOTDIR, EIO, corruption) is
+      // an attack or damage an operator must see, not contention.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw new Error(
+        `cannot inspect lock ${lockName}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     if (processIsAlive(observedOwner)) return false;
 
@@ -159,8 +165,11 @@ export function recoverStaleDirectoryLock(
     try {
       renameSync(procFdChild(directoryFd, lockName), procFdChild(directoryFd, tomb));
       afterTombstoned(tomb);
-    } catch {
-      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw new Error(
+        `cannot tombstone stale lock ${lockName}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
 
     let tombOwner: string | null = null;

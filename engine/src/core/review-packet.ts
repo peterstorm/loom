@@ -170,7 +170,7 @@ export function parseReviewPath(raw: unknown, label = "path"): ParseResult<Revie
   return ok(raw as ReviewPath);
 }
 
-/** Parse the protected state authority that proves a packet was engine-issued. */
+/** Parse and validate the stored issued-packet registration record. */
 export function parseIssuedReviewPacketRegistration(
   raw: unknown,
   label = "issued review packet",
@@ -400,7 +400,7 @@ export function createReviewPacket(input: ReviewPacketInput): ParseResult<Review
   return ok(freezeJson({ ...body, packetId: sha256Hex(canonicalJson(packetBodyJson(body))) }));
 }
 
-/** Serialize only the validated canonical domain shape. */
+/** Serialize the validated canonical domain shape. */
 export function serializeReviewPacket(packet: ReviewPacket): string {
   return `${JSON.stringify(packetJson(packet), null, 2)}\n`;
 }

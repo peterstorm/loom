@@ -2,14 +2,16 @@
  * Immutable, byte-aware context packets.
  *
  * A packet is the complete context one semantic Agent request receives,
- * addressed by digest. Parent actions carry only a reference, so the parent
- * model never copies packet bytes and the child cannot be handed a context its
- * request authority did not name.
+ * addressed by content digest. Parent actions carry only a digest reference;
+ * this module guarantees the packet bytes are immutable once published and
+ * that a digest names exactly one packet (re-hashing at parse time proves the
+ * stored bytes match the digest, and a packet whose identity/section bytes
+ * change gets a different digest).
  *
- * Bytes are encoded once as UTF-8 and never trimmed, joined, or reformatted
- * afterwards: the digest is taken over the exact encoded bytes, so re-hashing
- * at acceptance proves the child read what the engine published rather than
- * something a later normalisation step produced.
+ * What this module does NOT claim: it does not attest that a child actually
+ * read the bytes, and it does not by itself bind a packet to an external
+ * request authority — request/role binding to an issued AgentRequestAuthority
+ * is enforced at the capture boundary (see harness-capture-runtime.ts).
  */
 
 import { createHash } from "node:crypto";

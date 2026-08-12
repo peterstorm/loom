@@ -1243,6 +1243,37 @@ describe("orchestration CLI", () => {
         firstAuthority, forgedAuthority.value, firstContext.value, forgedContext.value,
       )).toContain("neither a legacy retry nor one diagnostic-rich retry");
 
+      // The engine-issued attempt-2 context is the canonical diagnostic-rich
+      // retry and must pass persisted compatibility byte-exactly.
+      const retryContext = previous.value.readContext(retry.authority.contextDigest);
+      if (!retryContext.ok) throw new Error(retryContext.error.message);
+      expect(persistedWaveAttemptTwoCompatibilityProblem(
+        firstAuthority, retry.authority, firstContext.value, retryContext.value,
+      )).toBeNull();
+
+      // An ATTACKER-reused diagnostic label with arbitrary bytes is not a
+      // canonical diagnostic-rich retry: the section bytes must parse as the
+      // engine's fixed preamble + non-empty reason + fixed schema tail.
+      const forgedDiagnosticSection = encodeByteSection(
+        "wave-review-attempt-1-rejection", "attacker-controlled retry instructions",
+      );
+      if (!forgedDiagnosticSection.ok) throw new Error(forgedDiagnosticSection.error.message);
+      const forgedDiagnosticContext = buildContextPacket({
+        ...legacyContext.value,
+        variableContext: [...legacyContext.value.variableContext, forgedDiagnosticSection.value],
+      });
+      if (!forgedDiagnosticContext.ok) throw new Error(forgedDiagnosticContext.error.message);
+      const forgedDiagnosticAuthority = parseAgentRequestAuthority({
+        ...legacyAuthority.value,
+        contextDigest: forgedDiagnosticContext.value.digest,
+      });
+      if (!forgedDiagnosticAuthority.ok) {
+        throw new Error(forgedDiagnosticAuthority.error.violations.map(({ message }) => message).join("; "));
+      }
+      expect(persistedWaveAttemptTwoCompatibilityProblem(
+        firstAuthority, forgedDiagnosticAuthority.value, firstContext.value, forgedDiagnosticContext.value,
+      )).toContain("neither a legacy retry nor one diagnostic-rich retry");
+
       rmSync(join(previousRun, "requests", `${retry.authority.requestId}.json`));
       writeFileSync(join(previousRun, "requests", `${retry.authority.requestId}.json`), JSON.stringify(legacyAuthority.value));
       historicalRequests.push({ authority: legacyAuthority.value });
@@ -1508,6 +1539,95 @@ describe("orchestration CLI", () => {
     ], "", root);
     expect(restarted.status).not.toBe(0);
     expect(restarted.stderr).toContain("valid captured attempt-2 evidence");
+  }, 30_000);
+
+  it("heals a Wave completion crash between the graph commit and the checkpoint write", async () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
+        id: "T1", description: "completion crash window", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        findings: [], critical_findings: [], advisory_findings: [],
+      }],
+    }));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-crash-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-crash-window");
+    mkdirSync(runDir);
+    const started = runCli([
+      "start", "wave-gate", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const active = (JSON.parse(readFileSync(statePath, "utf8")) as {
+      active_wave_gate: { runId: string; wave: number; authorityDigest: string };
+    }).active_wave_gate;
+    expect(active).toMatchObject({ runId: "run.wave-crash-window", wave: 1 });
+
+    // Simulate the exact completion crash window: commitActiveWaveGateCompletion
+    // durably wrote the retired graph with completion history, but the terminal
+    // checkpoint write never happened. The run directory has NO checkpoint.
+    const crashGraph = {
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null,
+      wave_gates: {
+        "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
+      },
+      tasks: [{
+        id: "T1", description: "completion crash window", agent: "code-implementer-agent", wave: 1,
+        status: "completed", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        findings: [], critical_findings: [], advisory_findings: [],
+      }],
+      wave_gate_history: [{
+        schemaVersion: 1,
+        kind: "completed-wave-gate",
+        runId: active.runId,
+        wave: 1,
+        authorityDigest: active.authorityDigest,
+        revision: 1,
+        completionReceipt: {
+          kind: "protected-wave-state-committed",
+          effectId: "effect:wave-completion:crash-window-test",
+          runId: active.runId,
+          committedRevision: 1,
+          stateDigest: "a".repeat(64),
+        },
+      }],
+    };
+    chmodSync(statePath, 0o644);
+    writeFileSync(statePath, JSON.stringify(crashGraph, null, 2));
+
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const outcome = JSON.parse(resumed.stdout) as { kind: string; outcome: { kind: string; runId: string } };
+    expect(outcome.kind).toBe("done");
+    expect(outcome.outcome).toMatchObject({
+      kind: "protected-wave-state-committed",
+      runId: active.runId,
+    });
+
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const checkpoint = await opened.value.readCheckpoint();
+    expect(JSON.parse(checkpoint ?? "null")).toMatchObject({
+      schemaVersion: 1,
+      kind: "wave-gate-done",
+      receipt: outcome.outcome,
+    });
+
+    const replay = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(replay.status, replay.stderr).toBe(0);
+    expect(JSON.parse(replay.stdout).kind).toBe("done");
   }, 30_000);
 
   it("publishes standalone refutation attempt 2 after a malformed attempt-1 verdict", async () => {
