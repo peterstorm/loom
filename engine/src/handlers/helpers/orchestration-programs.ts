@@ -1252,6 +1252,50 @@ function waveRefutationPreparation(
   return { panel: panel.value, inputs, packets, retryInputs, threshold: defaultRefutationThreshold(plan.value.lenses.length) };
 }
 
+export function persistedWaveAttemptTwoCompatibilityProblem(
+  attemptOne: AgentRequestAuthority,
+  attemptTwo: AgentRequestAuthority,
+  first: ContextPacket,
+  second: ContextPacket,
+): string | null {
+  const requestId = parseRequestId(attemptOne.requestId.replace(/:1$/, ":2"));
+  if (!requestId.ok || requestId.value === attemptOne.requestId) {
+    return `Wave request ${attemptOne.requestId} cannot derive canonical attempt-2 identity`;
+  }
+  const expectedAuthority = parseAgentRequestAuthority({
+    ...attemptOne,
+    requestId: requestId.value,
+    attempt: 2,
+    contextDigest: attemptTwo.contextDigest,
+    outputSlot: {
+      kind: "fixed-artifact-slot",
+      path: attemptOne.outputSlot.path.replace(/attempt-1\.raw$/, "attempt-2.raw"),
+    },
+  });
+  if (!expectedAuthority.ok || !canonicalStructuralEquals(expectedAuthority.value, attemptTwo)) {
+    return "persisted attempt-2 request envelope does not derive from attempt 1";
+  }
+
+  if (first.digest !== attemptOne.contextDigest || first.requestId !== attemptOne.requestId ||
+      first.role !== attemptOne.role || first.requiredSkill !== (attemptOne.requiredSkill ?? "none")) {
+    return "persisted attempt-1 context does not match its request authority";
+  }
+  if (second.digest !== attemptTwo.contextDigest || second.requestId !== attemptTwo.requestId || second.role !== first.role ||
+      second.requiredSkill !== first.requiredSkill || second.outputContract !== first.outputContract ||
+      !canonicalStructuralEquals(second.fixedContext, first.fixedContext)) {
+    return "persisted attempt-2 context changed fixed attempt-1 authority";
+  }
+
+  const unchangedLegacyContext = canonicalStructuralEquals(second.variableContext, first.variableContext);
+  const diagnosticContext = second.variableContext.length === first.variableContext.length + 1 &&
+    canonicalStructuralEquals(second.variableContext.slice(0, -1), first.variableContext) &&
+    second.variableContext.at(-1)?.label === "wave-review-attempt-1-rejection";
+  if (!unchangedLegacyContext && !diagnosticContext) {
+    return "persisted attempt-2 context is neither a legacy retry nor one diagnostic-rich retry";
+  }
+  return null;
+}
+
 async function exhaustedWaveReviewerAttempts(
   handle: RunDirHandle,
   graph: TaskGraph,
@@ -1278,14 +1322,18 @@ async function exhaustedWaveReviewerAttempts(
       const attemptOne = issued.value.find((candidate) => candidate.program === "wave-gate" && candidate.attempt === 1 &&
         candidate.slotId === slot.slot_id && candidate.role === slot.agent);
       if (attemptOne === undefined) return { ok: false, message: `Wave Gate restart lacks attempt-1 authority for ${task.id}/${slot.agent}` };
-      const attemptOneBytes = handle.readTranscriptBytes(attemptOne);
-      const retryReason = attemptOneBytes.ok
-        ? reviewerRejectionReason(task, slot.agent, attemptOneBytes.value) ??
-          "attempt 1 was accepted but did not close this outstanding slot"
-        : await durableCaptureRejection(handle, attemptOne) ?? task.review_error ?? attemptOneBytes.error.message;
-      const canonical = deriveWaveAttemptTwo(handle, attemptOne, retryReason);
-      if (!canonicalStructuralEquals(canonical.request.authority, authority)) {
-        return { ok: false, message: `Wave Gate restart attempt-2 authority drifted for ${task.id}/${slot.agent}` };
+      const firstContext = handle.readContext(attemptOne.contextDigest);
+      if (!firstContext.ok) return { ok: false, message: firstContext.error.message };
+      const secondContext = handle.readContext(authority.contextDigest);
+      if (!secondContext.ok) return { ok: false, message: secondContext.error.message };
+      const authorityProblem = persistedWaveAttemptTwoCompatibilityProblem(
+        attemptOne,
+        authority,
+        firstContext.value,
+        secondContext.value,
+      );
+      if (authorityProblem !== null) {
+        return { ok: false, message: `Wave Gate restart attempt-2 authority drifted for ${task.id}/${slot.agent}: ${authorityProblem}` };
       }
       const key = captureKey(slot.slot_id, 2);
       if (captured.value.has(key)) {

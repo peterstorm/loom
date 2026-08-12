@@ -7,7 +7,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { renderStatus } from "../../../src/handlers/helpers/orchestration";
 import { WAVE_REVIEW_AGENTS, type GateDeps } from "../../../src/core/wave-gate-machine";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
-import type { AgentRequestAuthority } from "../../../src/core/orchestration-contract";
+import { parseAgentRequestAuthority, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
+import { persistedWaveAttemptTwoCompatibilityProblem } from "../../../src/handlers/helpers/orchestration-programs";
+import { buildContextPacket, encodeByteSection } from "../../../src/orchestration/context-packets";
 import { openRunDirectory, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings } from "../../../src/orchestration/session-run-bindings";
 
@@ -1188,12 +1190,64 @@ describe("orchestration CLI", () => {
     }
     const retryResult = runCli(["resume", "--runs-root", runsRoot, "--run", previousRun], "", root);
     expect(retryResult.status, retryResult.stderr).toBe(0);
-    const retries = JSON.parse(retryResult.stdout) as {
+    let retries = JSON.parse(retryResult.stdout) as {
       kind: string;
       requests: readonly { authority: AgentRequestAuthority }[];
     };
     expect(retries.kind).toBe("spawn-batch");
     expect(retries.requests).toHaveLength(WAVE_REVIEW_AGENTS.length);
+
+    // Simulate a pre-diagnostic-prompt run: attempt 2 persisted the exact
+    // attempt-1 context under its new request identity. Restart compatibility
+    // must validate these immutable persisted bytes, not re-render today's
+    // richer retry prompt and demand its digest.
+    const historicalRequests: { authority: AgentRequestAuthority }[] = [];
+    for (const retry of retries.requests) {
+      const firstAuthority = initial.requests.find(({ authority }) =>
+        authority.slotId === retry.authority.slotId && authority.attempt === 1)!.authority;
+      const firstContext = previous.value.readContext(firstAuthority.contextDigest);
+      if (!firstContext.ok) throw new Error(firstContext.error.message);
+      const legacyContext = buildContextPacket({
+        requestId: retry.authority.requestId,
+        role: firstContext.value.role,
+        requiredSkill: firstContext.value.requiredSkill,
+        outputContract: firstContext.value.outputContract,
+        fixedContext: firstContext.value.fixedContext,
+        variableContext: firstContext.value.variableContext,
+      });
+      if (!legacyContext.ok) throw new Error(legacyContext.error.message);
+      const published = await previous.value.publishContext(legacyContext.value);
+      if (!published.ok) throw new Error(published.error.message);
+      const legacyAuthority = parseAgentRequestAuthority({
+        ...retry.authority,
+        contextDigest: legacyContext.value.digest,
+      });
+      if (!legacyAuthority.ok) throw new Error(legacyAuthority.error.violations.map(({ message }) => message).join("; "));
+      expect(persistedWaveAttemptTwoCompatibilityProblem(
+        firstAuthority, legacyAuthority.value, firstContext.value, legacyContext.value,
+      )).toBeNull();
+
+      const forgedSection = encodeByteSection("forged-retry-context", "untrusted bytes");
+      if (!forgedSection.ok) throw new Error(forgedSection.error.message);
+      const forgedContext = buildContextPacket({
+        ...legacyContext.value,
+        variableContext: [...legacyContext.value.variableContext, forgedSection.value],
+      });
+      if (!forgedContext.ok) throw new Error(forgedContext.error.message);
+      const forgedAuthority = parseAgentRequestAuthority({
+        ...legacyAuthority.value,
+        contextDigest: forgedContext.value.digest,
+      });
+      if (!forgedAuthority.ok) throw new Error(forgedAuthority.error.violations.map(({ message }) => message).join("; "));
+      expect(persistedWaveAttemptTwoCompatibilityProblem(
+        firstAuthority, forgedAuthority.value, firstContext.value, forgedContext.value,
+      )).toContain("neither a legacy retry nor one diagnostic-rich retry");
+
+      rmSync(join(previousRun, "requests", `${retry.authority.requestId}.json`));
+      writeFileSync(join(previousRun, "requests", `${retry.authority.requestId}.json`), JSON.stringify(legacyAuthority.value));
+      historicalRequests.push({ authority: legacyAuthority.value });
+    }
+    retries = { ...retries, requests: historicalRequests };
 
     const forgedRun = join(runsRoot, "run.wave-forged-replacement");
     mkdirSync(forgedRun);
