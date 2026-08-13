@@ -1300,9 +1300,9 @@ const waveReviewModelAuthority = Object.freeze({
     claude: Object.freeze({ harness: "claude-code", model: "sonnet" }),
   }),
   "comment-analyzer": Object.freeze({
-    profile: "mechanical",
-    pi: Object.freeze({ harness: "pi", provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" }),
-    claude: Object.freeze({ harness: "claude-code", model: "haiku" }),
+    profile: "focused-review",
+    pi: Object.freeze({ harness: "pi", provider: "openai-codex", model: "gpt-5.5", thinking: "high" }),
+    claude: Object.freeze({ harness: "claude-code", model: "sonnet" }),
   }),
 } as const);
 

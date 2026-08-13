@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { canonicalRecord, failure, parseArtifactDigest, parseContextDigest, parseEffectId, parseOrchestrationRunId, parseRequestId, success, type ArtifactDigest, type ContextDigest, type DomainResult, type EffectId, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 import { causedMessage, includes, readDenseDataArray, readExactDataRecord, type DataBoundaryError } from './bytes';
 import { parseFixedArtifactSlot, type FixedArtifactSlot } from './artifacts';
-import { AtomicInitialPublicationClaimPortMembership, InitialBatchPublicationIntentMembership, InitialPublicationEffectPortMembership, InitialPublicationIssuanceMembership, parseAgentRequestAuthority, sameHarnessBinding, type AgentRequestAuthority } from './roster';
+import { AtomicInitialPublicationClaimPortMembership, InitialBatchPublicationIntentMembership, InitialPublicationEffectPortMembership, InitialPublicationIssuanceMembership, parseStoredAgentRequestAuthority, sameHarnessBinding, type AgentRequestAuthority } from './roster';
 import { type AcceptedAgentResultError } from './completion';
 import { actionFailure, outputSlotCollision, type ExternalActionError } from './actions';
 
@@ -178,7 +178,7 @@ export function parsePublishedSpawnRequest(
       `${field}${request.error.field === null ? "" : `.${request.error.field}`}`,
     );
   }
-  const authority = parseAgentRequestAuthority(request.value.authority);
+  const authority = parseStoredAgentRequestAuthority(request.value.authority);
   if (!authority.ok) {
     return actionFailure(
       authority.error.violations.map(({ message }) => message).join("; "),

@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
+import { parseAgentRequestAuthority, parseStoredAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
 import { defaultRefutationThreshold } from '../../../core/review-panel';
 import { completePersistentRefutationPanel, deriveRefutationVerifierBinding, panelRequestIdentity, parseRefutationPanelAuthority, startPersistentRefutationPanel, submitRefutationVerdict } from '../../../core/panel-program';
 import type { FindingOutcome } from '../../../core/review-panel';
@@ -231,8 +231,8 @@ export function waveRequests(
     const requestId = parseRequestId(`wave-request:${hash.slice(0, 32)}:${attempt}`);
     if (!slotId.ok) throw new Error(slotId.error.message);
     if (!requestId.ok) throw new Error(requestId.error.message);
-    const profileId = subject.role === "comment-analyzer" ? "mechanical"
-      : subject.role === "code-reviewer" || subject.role === "spec-check-invoker" ? "general-review" : "focused-review";
+    const profileId = subject.role === "code-reviewer" || subject.role === "spec-check-invoker"
+      ? "general-review" : "focused-review";
     const profile = resolveModelProfile(profileId);
     if (!profile.ok) throw new Error(profile.error.message);
     const requiredSkill = AGENT_REQUIRED_SKILLS[subject.role] ?? null;
@@ -715,7 +715,7 @@ export function persistedWaveAttemptTwoCompatibilityProblem(
   if (!requestId.ok || requestId.value === attemptOne.requestId) {
     return `Wave request ${attemptOne.requestId} cannot derive canonical attempt-2 identity`;
   }
-  const expectedAuthority = parseAgentRequestAuthority({
+  const expectedAuthority = parseStoredAgentRequestAuthority({
     ...attemptOne,
     requestId: requestId.value,
     attempt: 2,

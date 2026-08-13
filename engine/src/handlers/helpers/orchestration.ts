@@ -48,6 +48,7 @@ import { registerSessionRunBinding } from "../../orchestration/session-run-bindi
 import {
   AGENT_REQUIRED_SKILLS,
   parseAgentRequestAuthority,
+  parseStoredAgentRequestAuthority,
   parseEffectId,
   parseFixedArtifactSlot,
   parseRequestId,
@@ -469,7 +470,7 @@ async function emitRunAction(handle: RunDirHandle, action: unknown): Promise<Hoo
       if (typeof request !== "object" || request === null) {
         return { kind: "error", message: `Pi orchestration spawn request ${index} is malformed` };
       }
-      const parsed = parseAgentRequestAuthority((request as Record<string, unknown>)["authority"]);
+      const parsed = parseStoredAgentRequestAuthority((request as Record<string, unknown>)["authority"]);
       if (!parsed.ok) {
         return {
           kind: "error",

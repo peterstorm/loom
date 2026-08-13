@@ -1,7 +1,7 @@
 ---
 name: comment-analyzer
-model-profile: mechanical
-model: haiku
+model-profile: focused-review
+model: sonnet
 description: Use this agent when you need to analyze code comments for accuracy, completeness, and long-term maintainability. Use after generating documentation, before finalizing PRs with comment changes, or when reviewing existing comments for technical debt.
 color: green
 ---

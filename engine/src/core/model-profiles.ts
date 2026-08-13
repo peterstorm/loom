@@ -138,7 +138,7 @@ export const AGENT_POLICIES = Object.freeze([
   agentPolicy("code-implementer-agent", "implementation"),
   agentPolicy("code-reviewer", "general-review"),
   agentPolicy("code-simplifier", "focused-review"),
-  agentPolicy("comment-analyzer", "mechanical"),
+  agentPolicy("comment-analyzer", "focused-review"),
   agentPolicy("decompose-agent", "focused-review"),
   agentPolicy("deepen-agent", "panel-design"),
   agentPolicy("frontend-agent", "implementation"),

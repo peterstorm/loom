@@ -1500,7 +1500,7 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
       "spec-check-invoker", "code-reviewer", "silent-failure-hunter", "pr-test-analyzer", "type-design-analyzer", "comment-analyzer",
     ]);
     expect(preparation.initialRequests.map((request) => (request.authority as AgentRequestAuthority).modelProfile)).toEqual([
-      "general-review", "general-review", "focused-review", "focused-review", "focused-review", "mechanical",
+      "general-review", "general-review", "focused-review", "focused-review", "focused-review", "focused-review",
     ]);
     const replay = authorityValue(prepareWaveReviewBatch(snapshot));
     expect(replay.publicationIntent).toEqual(preparation.publicationIntent);

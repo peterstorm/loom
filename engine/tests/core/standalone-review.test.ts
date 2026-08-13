@@ -541,9 +541,9 @@ const reviewerBindings = {
     claude: { harness: "claude-code", model: "sonnet" },
   },
   "comment-analyzer": {
-    profile: "mechanical",
-    pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" },
-    claude: { harness: "claude-code", model: "haiku" },
+    profile: "focused-review",
+    pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.5", thinking: "high" },
+    claude: { harness: "claude-code", model: "sonnet" },
   },
 } as const;
 

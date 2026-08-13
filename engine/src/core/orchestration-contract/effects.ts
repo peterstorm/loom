@@ -9,7 +9,7 @@ import { type RepositoryPath } from '../repository-path';
 import { posix } from 'node:path';
 import { canonicalRecord, describeUnknown, failure, parseArtifactDigest, parseEffectId, parseOrchestrationRunId, parseRequestId, success, type ArtifactDigest, type DomainResult, type EffectId, type NonEmpty, type OrchestrationRunId, type RequestId } from './identity';
 import { digestRawTranscriptBytes, parseRawTranscriptBytes, readDenseDataArray, readExactDataRecord } from './bytes';
-import { parseAgentRequestAuthority, parseArtifactRef, type AgentRequestAuthority, type ArtifactRef } from './roster';
+import { parseStoredAgentRequestAuthority, parseArtifactRef, type AgentRequestAuthority, type ArtifactRef } from './roster';
 
 export type PublishArtifactSet = Readonly<{
   kind: "publish-artifact-set";
@@ -274,7 +274,7 @@ export function parseEffectIntent(raw: unknown): DomainResult<EffectIntent, Reco
       }
       const requests: AgentRequestAuthority[] = [];
       for (let index = 0; index < entries.value.length; index++) {
-        const parsed = parseAgentRequestAuthority(entries.value[index]);
+        const parsed = parseStoredAgentRequestAuthority(entries.value[index]);
         if (!parsed.ok) return reconciliationFailure(`intent.requests[${index}]`, parsed.error.violations.map(({ message }) => message).join("; "));
         if (parsed.value.runId !== base.value.runId) return reconciliationFailure(`intent.requests[${index}].runId`, "request belongs to another run");
         requests.push(parsed.value);
@@ -285,7 +285,7 @@ export function parseEffectIntent(raw: unknown): DomainResult<EffectIntent, Reco
     case "capture-raw-transcript": {
       const intent = reconciliationRecord(envelope.value, ["kind", "effectId", "runId", "request", "bytes"], "intent");
       if (!intent.ok) return intent;
-      const request = parseAgentRequestAuthority(intent.value.request);
+      const request = parseStoredAgentRequestAuthority(intent.value.request);
       if (!request.ok) return reconciliationFailure("intent.request", request.error.violations.map(({ message }) => message).join("; "));
       if (request.value.runId !== base.value.runId) return reconciliationFailure("intent.request.runId", "request belongs to another run");
       const bytes = parseRawTranscriptBytes(intent.value.bytes);

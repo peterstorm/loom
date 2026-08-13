@@ -19,6 +19,7 @@ import {
   MAX_SEMANTIC_PAYLOAD_ARRAY_LENGTH,
   parseAgentRequestAuthority,
   parseAgentRequestAuthorityForAttempt,
+  parseStoredAgentRequestAuthority,
   parseAgentRosterSlot,
   parseArtifactByteLength,
   parseArtifactDigest,
@@ -492,6 +493,48 @@ describe("orchestration authority parsers", () => {
       expect(parseArtifactByteLength(invalid).ok).toBe(false);
     }
     expect(parseArtifactByteLength(0).ok).toBe(true);
+  });
+
+  it("grandfathers a stored authority whose Agent policy has since changed, but still catches tampering", () => {
+    // History, not policy: this authority was issued when code-implementer-agent
+    // mapped to a different profile. Re-checking it against today's AGENT_POLICIES
+    // would strand every run already on disk (the comment-analyzer promotion did
+    // exactly that to 5 wave-gate runs).
+    const drifted = rawAuthority(1, 1, {
+      modelProfile: "focused-review",
+      harnessBinding: focusedBindings,
+      requiredSkill: "code-implementer",
+    });
+
+    // Issuance stays strict — this is what keeps a NEW request bound to policy
+    // (and what keeps the Pi lowering honest).
+    expect(parseAgentRequestAuthority(drifted).ok).toBe(false);
+
+    // Reading it back succeeds, and returns the recorded facts verbatim.
+    const stored = valueOf(parseStoredAgentRequestAuthority(drifted));
+    expect(stored.modelProfile).toBe("focused-review");
+    expect(stored.requiredSkill).toBe("code-implementer");
+    expect(stored.harnessBinding.pi.model).toBe("gpt-5.5");
+    expect(stored.harnessBinding.claude.model).toBe("sonnet");
+
+    // A stored Skill that no longer matches today's table is likewise history.
+    const driftedSkill = rawAuthority(1, 1, { requiredSkill: "review-and-fix" });
+    expect(parseAgentRequestAuthority(driftedSkill).ok).toBe(false);
+    expect(valueOf(parseStoredAgentRequestAuthority(driftedSkill)).requiredSkill).toBe("review-and-fix");
+
+    // TAMPER CHECK — unchanged. The binding must still agree with the profile the
+    // record itself claims, so a rewritten harnessBinding cannot slip through.
+    expect(parseStoredAgentRequestAuthority(rawAuthority(1, 1, {
+      modelProfile: "focused-review",
+      harnessBinding: implementationBindings,
+    })).ok).toBe(false);
+    expect(parseStoredAgentRequestAuthority(rawAuthority(1, 1, {
+      harnessBinding: { ...implementationBindings, claude: { harness: "claude-code", model: "haiku" } },
+    })).ok).toBe(false);
+
+    // Structural parsing is not relaxed either.
+    expect(parseStoredAgentRequestAuthority(rawAuthority(1, 1, { attempt: 3 })).ok).toBe(false);
+    expect(parseStoredAgentRequestAuthority(rawAuthority(1, 1, { modelProfile: "no-such-profile" })).ok).toBe(false);
   });
 
   it("proves model and required Skill against resolved Agent policy", () => {

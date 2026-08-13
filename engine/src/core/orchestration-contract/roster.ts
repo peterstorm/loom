@@ -143,8 +143,24 @@ export const AGENT_REQUEST_KEYS = [
   "outputSlot",
 ] as const;
 
-export function parseAgentRequestAuthority(
+/**
+ * How a request authority reached this parser.
+ *
+ * "issue"  — the authority is being CONSTRUCTED now, from the live catalog. It
+ *            must satisfy today's AGENT_POLICIES exactly; this is the gate that
+ *            keeps a newly issued request bound to the model policy actually
+ *            says to use (and what keeps the Pi lowering honest).
+ * "stored" — the authority is being READ BACK from an immutable run artifact,
+ *            event, receipt, or publication record. It is HISTORY: "issued
+ *            under profile X, ran on model Y." Re-checking history against
+ *            today's policy is a category error — promoting an agent to a new
+ *            profile would otherwise strand every run already on disk.
+ */
+export type AgentRequestAuthorityOrigin = "issue" | "stored";
+
+function parseAgentRequestAuthorityInMode(
   raw: unknown,
+  origin: AgentRequestAuthorityOrigin,
 ): DomainResult<AgentRequestAuthority, AgentRequestAuthorityError> {
   const request = readExactDataRecord(raw, AGENT_REQUEST_KEYS, "agent request authority");
   if (!request.ok) {
@@ -189,8 +205,13 @@ export function parseAgentRequestAuthority(
     ));
   }
 
-  let policyResolved = false;
-  if (role.ok) {
+  // A stored authority carries its own profile and Skill as recorded facts, so
+  // neither role -> profile nor role -> Skill is re-derived from today's tables.
+  // The profile -> harnessBinding exactness check below still runs: it resolves
+  // the STORED profile id, so it stays a self-consistency (tamper) check rather
+  // than a drift check.
+  let policyResolved = origin === "stored";
+  if (origin === "issue" && role.ok) {
     const policy = resolveAgentPolicy(role.value);
     if (!policy.ok) {
       violations.push(violation(
@@ -278,17 +299,36 @@ export function parseAgentRequestAuthority(
     attempt: attempt.value,
     modelProfile: profileId.value,
     harnessBinding: canonicalHarnessBinding(expectedPi, expectedClaude),
-    requiredSkill: AGENT_REQUIRED_SKILLS[role.value],
+    requiredSkill: origin === "stored" ? skill.value : AGENT_REQUIRED_SKILLS[role.value],
     contextDigest: contextDigest.value,
     outputSlot: outputSlot.value,
   }));
 }
 
+/** Strict parse for an authority being issued now. */
+export function parseAgentRequestAuthority(
+  raw: unknown,
+): DomainResult<AgentRequestAuthority, AgentRequestAuthorityError> {
+  return parseAgentRequestAuthorityInMode(raw, "issue");
+}
+
+/**
+ * Parse an authority read back from an immutable artifact. Structural and
+ * self-consistency checks are identical to the strict parser; only the two
+ * drift-sensitive couplings against the CURRENT policy tables are skipped.
+ */
+export function parseStoredAgentRequestAuthority(
+  raw: unknown,
+): DomainResult<AgentRequestAuthority, AgentRequestAuthorityError> {
+  return parseAgentRequestAuthorityInMode(raw, "stored");
+}
+
 export function parseAgentRequestAuthorityForAttempt<Attempt extends SemanticAttempt>(
   raw: unknown,
   expectedAttempt: Attempt,
+  origin: AgentRequestAuthorityOrigin = "issue",
 ): DomainResult<AgentRequestAuthority<Attempt>, AgentRequestAuthorityError> {
-  const parsed = parseAgentRequestAuthority(raw);
+  const parsed = parseAgentRequestAuthorityInMode(raw, origin);
   if (!parsed.ok) return parsed;
   return parsed.value.attempt === expectedAttempt
     ? success(parsed.value as AgentRequestAuthority<Attempt>)

@@ -55,7 +55,7 @@ describe("quality-program helper boundaries", () => {
     expect(renderedReviewer).toContain(`${ROOT}/rules/architecture.md`);
     expect(renderedReviewer).not.toContain("CLAUDE_PLUGIN_ROOT");
     expect(readFileSync(join(output, "comment-analyzer.md"), "utf-8"))
-      .toContain("model: openai-codex/gpt-5.4-mini:medium");
+      .toContain("model: openai-codex/gpt-5.5:high");
     const specify = readFileSync(join(output, "specify-agent.md"), "utf-8");
     expect(specify).toContain("## Preloaded Loom Skill: specify");
     expect(specify).toContain("# Specify - Requirements Before Design");

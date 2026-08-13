@@ -6,7 +6,7 @@
  */
 import { canonicalRecord, failure, success, type DomainResult, type NonEmpty, type SlotId } from './identity';
 import { MAX_SEMANTIC_PAYLOAD_ARRAY_LENGTH, causedMessage, describeThrownCause, includes, readDenseDataArray, readExactDataRecord, type DataBoundaryReason } from './bytes';
-import { CompleteRosterMembership, completeRosterCache, exactRosterCache, immutableMap, parseAgentRequestAuthority, sameHarnessBinding, type AgentRequestAuthority, type ExactRoster, type RosterViolation, type UnissuedResultCause } from './roster';
+import { CompleteRosterMembership, completeRosterCache, exactRosterCache, immutableMap, parseStoredAgentRequestAuthority, sameHarnessBinding, type AgentRequestAuthority, type ExactRoster, type RosterViolation, type UnissuedResultCause } from './roster';
 import { authorityResolutionFailure, issuedRequestCache, parseIssuedSpawnRequestAgainstRegistration, parseIssuedSpawnRequestIdentity, resolveRegisteredPublicationAuthority, samePublicationIdentity, type PublicationAuthorityResolver, type RegisteredBatchPublicationAuthority, type SpawnRequest } from './publication';
 
 export type AcceptedAgentResult<T> = Readonly<{
@@ -325,7 +325,7 @@ export function parseCompleteRoster<T>(
       violations.push(canonicalRecord({ kind: "malformed-result", index }));
       return;
     }
-    const parsedAuthority = parseAgentRequestAuthority(result.value.authority);
+    const parsedAuthority = parseStoredAgentRequestAuthority(result.value.authority);
     if (!parsedAuthority.ok) {
       violations.push(canonicalRecord({ kind: "malformed-result", index, authorityViolations: parsedAuthority.error.violations }));
       return;

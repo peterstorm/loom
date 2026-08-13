@@ -29,7 +29,7 @@ import { basename, join, resolve } from "node:path";
 import {
   canonicalRecord,
   canonicalStructuralEquals,
-  parseAgentRequestAuthority,
+  parseStoredAgentRequestAuthority,
   parseArtifactByteLength,
   parseOrchestrationRunId,
   type AgentRequestAuthority,
@@ -645,7 +645,7 @@ function readReservedAuthority(
       ? failure("request", `request ${requestId} was never reserved`)
       : failure("request", `request ${requestId} authority is unreadable: ${(error as Error).message}`);
   }
-  const reserved = parseAgentRequestAuthority(rawReservation);
+  const reserved = parseStoredAgentRequestAuthority(rawReservation);
   return reserved.ok
     ? success(reserved.value)
     : failure("request", `request ${requestId} authority is malformed: ${reserved.error.violations.map(({ message }) => message).join("; ")}`);
@@ -660,7 +660,7 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
      * reservation of the same request cannot silently overwrite the first.
      */
     async reserveRequest(authority: AgentRequestAuthority): Promise<DomainResult<TranscriptReserved, RunDirectoryError>> {
-      const parsed = parseAgentRequestAuthority(authority);
+      const parsed = parseStoredAgentRequestAuthority(authority);
       if (!parsed.ok) {
         return failure("request", `request authority is malformed: ${parsed.error.violations.map(({ message }) => message).join("; ")}`);
       }
@@ -708,7 +708,7 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
           } catch (error) {
             return failure("request", `request authority ${name} is unreadable: ${(error as Error).message}`);
           }
-          const parsed = parseAgentRequestAuthority(raw);
+          const parsed = parseStoredAgentRequestAuthority(raw);
           if (!parsed.ok) {
             return failure("request", `request authority ${name} is malformed: ${parsed.error.violations.map(({ message }) => message).join("; ")}`);
           }
@@ -757,7 +757,7 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
     },
 
     async rejectCapture(authority: AgentRequestAuthority, diagnostic = "capture was rejected without a diagnostic"): Promise<DomainResult<CaptureKey, RunDirectoryError>> {
-      const supplied = parseAgentRequestAuthority(authority);
+      const supplied = parseStoredAgentRequestAuthority(authority);
       if (!supplied.ok) {
         return failure("request", `capture rejection authority is malformed: ${supplied.error.violations.map(({ message }) => message).join("; ")}`);
       }
@@ -802,7 +802,7 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
     },
 
     readCaptureRejection(authority: AgentRequestAuthority): DomainResult<string | null, RunDirectoryError> {
-      const supplied = parseAgentRequestAuthority(authority);
+      const supplied = parseStoredAgentRequestAuthority(authority);
       if (!supplied.ok) return failure("request", `capture rejection authority is malformed: ${supplied.error.violations.map(({ message }) => message).join("; ")}`);
       try {
         const raw = JSON.parse(readRunFileNoFollow(join(
@@ -904,7 +904,7 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
       authority: AgentRequestAuthority,
       bytes: readonly number[],
     ): Promise<DomainResult<ArtifactRef, RunDirectoryError>> {
-      const supplied = parseAgentRequestAuthority(authority);
+      const supplied = parseStoredAgentRequestAuthority(authority);
       if (!supplied.ok) {
         return failure("request", `capture authority is malformed: ${supplied.error.violations.map(({ message }) => message).join("; ")}`);
       }

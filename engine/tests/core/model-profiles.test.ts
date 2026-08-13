@@ -206,7 +206,7 @@ describe("exhaustive Loom agent policy", () => {
       "arch-judge-agent": "panel-judge",
       "review-verifier-agent": "refutation",
       "decompose-agent": "focused-review",
-      "comment-analyzer": "mechanical",
+      "comment-analyzer": "focused-review",
     });
   });
 
@@ -280,8 +280,8 @@ describe("typed harness lowering", () => {
       value: {
         harness: "pi",
         provider: "openai-codex",
-        model: "gpt-5.4-mini",
-        thinking: "medium",
+        model: "gpt-5.5",
+        thinking: "high",
       },
     });
   });
