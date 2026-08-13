@@ -21,6 +21,8 @@ import type {
   WaveGateCompletionEligibility,
   WaveGateNextAction,
   WaveGateProtectedSnapshotBinding,
+  WaveImplementationAction,
+  WaveImplementationRecovery,
 } from "../types";
 import { newWaveGate, testResultPassed } from "./wave-gate-model";
 import type { ProofFailure } from "./proof-obligations";
@@ -1855,6 +1857,31 @@ function invalidAuthorityBlockedAction(runId: OrchestrationRunId, message: strin
   return action.value;
 }
 
+/** Status-only projection for a healthy execute Wave that has not registered a
+ * Wave Gate run yet. No run exists to name, so the read carries the status
+ * authority id rather than inventing a run identity. */
+function waveImplementationAction(
+  message: string,
+  recovery: WaveImplementationRecovery,
+): WaveImplementationAction {
+  return canonicalRecord({
+    kind: "blocked",
+    runId: statusRunId,
+    diagnostic: canonicalRecord({
+      kind: "wave-gate-not-started",
+      category: "healthy-wave-unstarted",
+      runId: statusRunId,
+      message,
+      retry: canonicalRecord({
+        kind: "advance-wave-lifecycle",
+        eligible: true,
+        consumesSemanticAttempt: false,
+      }),
+      recovery,
+    }),
+  });
+}
+
 /** Status-only recovery projection for a healthy registered run whose durable
  * lifecycle must be replayed before its semantic external action is known. */
 function engineResumeAction(runId: OrchestrationRunId): EngineResumeAction {
@@ -2002,7 +2029,11 @@ function deriveNonExecuteLoomStatus(graph: TaskGraph): LoomStatus {
   });
 }
 
-function terminalStatusFacts(
+/** Wave-scoped fact inventory. Every helper it calls reads only the parsed
+ * graph, so this is derivable with or without an active Wave Gate
+ * registration — which is what lets an unstarted Wave report real facts
+ * instead of a blanket `unavailable`. */
+function waveScopedStatusFacts(
   graph: TaskGraph,
   wave: number,
   eligibility: WaveGateCompletionEligibility,
@@ -2028,7 +2059,7 @@ function persistedTerminalBlockedStatus(graph: TaskGraph): LoomStatus | null {
   const blockedReason = reason("blocked-diagnostic", registration.terminalOutcome.diagnostic.message);
   return canonicalRecord({
     schemaVersion: 1,
-    facts: terminalStatusFacts(graph, registration.wave, canonicalRecord({
+    facts: waveScopedStatusFacts(graph, registration.wave, canonicalRecord({
       kind: "ineligible",
       failedPrerequisites: Object.freeze([registration.terminalOutcome.diagnostic.message]) as NonEmpty<string>,
     })),
@@ -2063,10 +2094,64 @@ function committedTerminalStatus(graph: TaskGraph): LoomStatus | null {
   const completeReason = reason("run-complete", `Wave Gate run ${terminal.runId} completed with committed revision ${terminal.revision}`);
   return canonicalRecord({
     schemaVersion: 1,
-    facts: terminalStatusFacts(graph, wave, canonicalRecord({ kind: "eligible", failedPrerequisites: Object.freeze([]) as readonly [] })),
+    facts: waveScopedStatusFacts(graph, wave, canonicalRecord({ kind: "eligible", failedPrerequisites: Object.freeze([]) as readonly [] })),
     next: canonicalRecord({
       action: done.value,
       reasons: Object.freeze([completeReason]) as NonEmpty<StatusReason>,
+    }),
+  });
+}
+
+/**
+ * The implementation window: an execute Wave whose Wave Gate has not been
+ * registered yet.
+ *
+ * Completion retires the outgoing registration in the same commit that
+ * advances `current_wave`, and the next registration only appears when the
+ * gate is started — so every Wave spends its whole implementation span with
+ * `active_wave_gate === undefined`. Routing that through the readiness path
+ * reported a healthy graph as terminal invalid authority and blanked all eight
+ * fact categories. Here the facts are derivable and the owed move is known, so
+ * both are reported.
+ *
+ * Returns null for anything that is NOT this state, so genuinely contradictory
+ * authority (absent `current_wave`, a Wave with no tasks, terminal history that
+ * disagrees with the graph) still falls through and fails closed.
+ */
+function unstartedWaveStatus(graph: TaskGraph): LoomStatus | null {
+  if (graph.active_wave_gate !== undefined || graph.current_wave === undefined) return null;
+  const wave = graph.current_wave;
+  // A terminal receipt for the current Wave means this is not an unstarted
+  // Wave. committedTerminalStatus already accepted the exact terminal graph;
+  // reaching here with one is a contradiction, not an implementation window.
+  if ((graph.wave_gate_history ?? []).some((entry) => entry.wave === wave)) return null;
+  const waveTasks = graph.tasks.filter((task) => task.wave === wave);
+  if (waveTasks.length === 0) return null;
+
+  const outstanding = waveTasks.filter((task) => task.status !== "implemented" && task.status !== "completed");
+  const recovery: WaveImplementationRecovery = outstanding.length === 0
+    ? canonicalRecord({ kind: "start-wave-gate", wave })
+    : canonicalRecord({
+        kind: "spawn-wave-implementation",
+        wave,
+        pendingTaskIds: Object.freeze(outstanding.map((task) => task.id)) as NonEmpty<string>,
+      });
+  const message = outstanding.length === 0
+    ? `Wave ${wave} implementation is complete and no Wave Gate run is registered; start the Wave Gate`
+    : `Wave ${wave} implementation is in progress; ${outstanding.length} task(s) have not reached implemented`;
+  const reasons: StatusReason[] = outstanding.map((task) =>
+    reason("wave-implementation-pending", `${task.id} has not reached implemented`, task.id));
+  reasons.push(reason("wave-gate-not-started", message));
+
+  return canonicalRecord({
+    schemaVersion: 1,
+    facts: waveScopedStatusFacts(graph, wave, canonicalRecord({
+      kind: "ineligible",
+      failedPrerequisites: Object.freeze([message]) as NonEmpty<string>,
+    })),
+    next: canonicalRecord({
+      action: waveImplementationAction(message, recovery),
+      reasons: Object.freeze(reasons) as NonEmpty<StatusReason>,
     }),
   });
 }
@@ -2088,6 +2173,10 @@ export function deriveLoomStatusFromParsedGraph(
   if (persistedBlocked !== null) return persistedBlocked;
   const committed = committedTerminalStatus(parsed.value);
   if (committed !== null) return committed;
+  // Before the readiness path, which requires a registration: an execute Wave
+  // legitimately has none for its whole implementation span.
+  const unstarted = unstartedWaveStatus(parsed.value);
+  if (unstarted !== null) return unstarted;
   const readiness = deriveWaveReadiness(parsed.value, deps, nextActionAuthority, lifecycleCheckpoint);
   return readiness.ok
     ? deriveLoomStatus(readiness.value)

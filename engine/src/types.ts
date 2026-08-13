@@ -522,6 +522,8 @@ export type StatusReasonKind =
   | "review-spawn-required"
   | "blocked-diagnostic"
   | "engine-resume-required"
+  | "wave-implementation-pending"
+  | "wave-gate-not-started"
   | "run-complete"
   | "completion-prerequisite-failed"
   | "completion-eligible"
@@ -651,10 +653,49 @@ export type EngineResumeAction = Readonly<{
   diagnostic: EngineResumeDiagnostic;
 }>;
 
+/** What the orchestrator owes to leave the implementation window. Spawning the
+ * outstanding implementation agents and starting the Wave Gate are the two
+ * exhaustive moves, so the recovery names the one currently owed rather than
+ * leaving a caller to re-derive it from the task counts. */
+export type WaveImplementationRecovery =
+  | Readonly<{
+      kind: "spawn-wave-implementation";
+      wave: number;
+      pendingTaskIds: OrchestrationNonEmpty<string>;
+    }>
+  | Readonly<{ kind: "start-wave-gate"; wave: number }>;
+
+/** An execute Wave holds no Wave Gate registration between entering the Wave
+ * and starting its gate: completion retires the outgoing registration in the
+ * same commit that advances `current_wave`, so this implementation window is
+ * the ordinary state for most of a Wave's life rather than an authority
+ * failure. Like engine resume it keeps one of the fixed four transport tags
+ * (`blocked`) while refusing to pretend protected authority is malformed or
+ * the lifecycle terminal. */
+export type WaveImplementationDiagnostic = Readonly<{
+  kind: "wave-gate-not-started";
+  category: "healthy-wave-unstarted";
+  runId: OrchestrationRunId;
+  message: string;
+  retry: Readonly<{
+    kind: "advance-wave-lifecycle";
+    eligible: true;
+    consumesSemanticAttempt: false;
+  }>;
+  recovery: WaveImplementationRecovery;
+}>;
+
+export type WaveImplementationAction = Readonly<{
+  kind: "blocked";
+  runId: OrchestrationRunId;
+  diagnostic: WaveImplementationDiagnostic;
+}>;
+
 export type NextActionDecision = Readonly<{
-  /** Exactly one of the fixed four transport tags. Engine resume is a typed,
-   * retryable blocked action rather than terminal invalid authority. */
-  action: WaveGateNextAction["action"] | EngineResumeAction;
+  /** Exactly one of the fixed four transport tags. Engine resume and the
+   * implementation window are typed, retryable blocked actions rather than
+   * terminal invalid authority. */
+  action: WaveGateNextAction["action"] | EngineResumeAction | WaveImplementationAction;
   reasons: OrchestrationNonEmpty<StatusReason>;
 }>;
 

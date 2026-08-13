@@ -1340,21 +1340,158 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     expect(status.next.reasons[0].message).toContain("malformed");
   });
 
-  it("makes every status category unavailable for missing, stale, or mismatched active authority", () => {
+  it("makes every status category unavailable for contradictory active authority", () => {
     const base = registeredGraph();
-    const cases: TaskGraph[] = [
-      { ...base, current_wave: undefined },
-      (() => { const { active_wave_gate: _removed, ...missing } = base; return missing; })(),
-      { ...base, current_wave: 2 },
-    ];
-    for (const graph of cases) {
+    const terminalHistoryEntry = {
+      schemaVersion: 1 as const,
+      kind: "completed-wave-gate" as const,
+      runId: authorityValue(parseOrchestrationRunId("contradictory-history-run")),
+      wave: 1,
+      authorityDigest: authorityValue(parseArtifactDigest("f".repeat(64))),
+      revision: 1,
+      completionReceipt: {
+        kind: "protected-wave-state-committed" as const,
+        effectId: authorityValue(parseEffectId("contradictory-history-effect")),
+        runId: authorityValue(parseOrchestrationRunId("contradictory-history-run")),
+        committedRevision: 1,
+        stateDigest: authorityValue(parseArtifactDigest("e".repeat(64))),
+      },
+    };
+    const withoutRegistration = (graph: TaskGraph): TaskGraph => {
+      const { active_wave_gate: _removed, ...rest } = graph;
+      return rest;
+    };
+    const cases: Readonly<Record<string, TaskGraph>> = {
+      "absent current_wave": { ...base, current_wave: undefined },
+      "registration wave disagrees with current_wave": { ...base, current_wave: 2 },
+      // A missing registration is only healthy when the Wave actually owns
+      // Tasks; an empty Wave is a corrupt graph, not an implementation window.
+      "current Wave owns no Tasks": withoutRegistration(
+        registeredGraph({ tasks: [{ ...baseTask, wave: 2 }] }),
+      ),
+      // A terminal receipt for the current Wave that committedTerminalStatus
+      // refused (later Waves still exist) is a contradiction, not a fresh Wave.
+      "terminal history contradicts the graph": withoutRegistration(registeredGraph({
+        tasks: [{ ...baseTask, id: "T1", wave: 1, status: "completed" }, { ...baseTask, id: "T2", wave: 2 }],
+        wave_gate_history: [terminalHistoryEntry],
+      })),
+    };
+    for (const [label, graph] of Object.entries(cases)) {
       const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
-      expect(Object.values(status.facts).every((entry) => entry.kind === "unavailable")).toBe(true);
-      expect(status.next.action).toMatchObject({
+      expect(Object.values(status.facts).every((entry) => entry.kind === "unavailable"), label).toBe(true);
+      expect(status.next.action, label).toMatchObject({
         kind: "blocked",
         diagnostic: { kind: "terminal-blocked", retry: { eligible: false } },
       });
     }
+  });
+
+  // Completion retires the outgoing registration in the same commit that
+  // advances current_wave, so an execute Wave carries none for its entire
+  // implementation span. That window used to be reported as terminal invalid
+  // authority with all eight fact categories blanked.
+  describe("implementation window (execute Wave with no registered gate)", () => {
+    const unstarted = (overrides: Partial<TaskGraph> = {}): TaskGraph => {
+      const { active_wave_gate: _removed, ...rest } = registeredGraph(overrides);
+      return rest;
+    };
+
+    it("keeps every fact known and names the implementation still owed", () => {
+      const graph = unstarted({
+        tasks: [
+          { ...baseTask, id: "T1", wave: 1, status: "completed" },
+          { ...baseTask, id: "T2", wave: 1, status: "pending" },
+          { ...baseTask, id: "T3", wave: 1, status: "pending" },
+        ],
+      });
+
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+
+      expect(Object.values(status.facts).every((entry) => entry.kind === "known")).toBe(true);
+      expect(status.facts.location).toEqual({
+        kind: "known",
+        value: { activePhase: "execute", activeWave: 1 },
+      });
+      expect(status.facts.tasks).toMatchObject({
+        kind: "known",
+        value: { counts: { pending: 2, completed: 1 } },
+      });
+      expect(status.facts.waveGateCompletionEligibility).toMatchObject({
+        kind: "known",
+        value: { kind: "ineligible" },
+      });
+      expect(status.next.action).toMatchObject({
+        kind: "blocked",
+        diagnostic: {
+          kind: "wave-gate-not-started",
+          category: "healthy-wave-unstarted",
+          retry: { kind: "advance-wave-lifecycle", eligible: true, consumesSemanticAttempt: false },
+          recovery: { kind: "spawn-wave-implementation", wave: 1, pendingTaskIds: ["T2", "T3"] },
+        },
+      });
+      expect(status.next.reasons.filter((entry) => entry.kind === "wave-implementation-pending")
+        .map((entry) => entry.taskId)).toEqual(["T2", "T3"]);
+    });
+
+    it("asks for the Wave Gate once every Task in the Wave is implemented", () => {
+      const graph = unstarted({
+        tasks: [
+          { ...baseTask, id: "T1", wave: 1, status: "implemented" },
+          { ...baseTask, id: "T2", wave: 1, status: "completed" },
+        ],
+      });
+
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+
+      expect(Object.values(status.facts).every((entry) => entry.kind === "known")).toBe(true);
+      expect(status.next.action).toMatchObject({
+        kind: "blocked",
+        diagnostic: {
+          kind: "wave-gate-not-started",
+          recovery: { kind: "start-wave-gate", wave: 1 },
+        },
+      });
+      expect(status.next.reasons.some((entry) => entry.kind === "wave-implementation-pending")).toBe(false);
+      expect(status.next.reasons.at(-1)).toMatchObject({ kind: "wave-gate-not-started" });
+    });
+
+    it("scopes the owed implementation to the current Wave, ignoring later Waves", () => {
+      const graph = unstarted({
+        tasks: [
+          { ...baseTask, id: "T1", wave: 1, status: "implemented" },
+          { ...baseTask, id: "T2", wave: 2, status: "pending" },
+        ],
+      });
+
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+
+      expect(status.next.action).toMatchObject({
+        diagnostic: { recovery: { kind: "start-wave-gate", wave: 1 } },
+      });
+    });
+
+    it("renders as a status rather than an authority failure", () => {
+      const graph = unstarted({ tasks: [{ ...baseTask, id: "T1", wave: 1, status: "pending" }] });
+
+      const human = renderCoreLoomStatusHuman(
+        deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps),
+      );
+
+      expect(human).not.toContain("unavailable");
+      expect(human).toContain("wave-gate-not-started");
+      expect(human).toContain("T1 has not reached implemented");
+    });
+
+    // deriveWaveReadiness is the program/resume path; it must keep failing
+    // closed on a missing registration even though status no longer does.
+    it("leaves the readiness path failing closed on the same graph", () => {
+      const graph = unstarted({ tasks: [{ ...baseTask, id: "T1", wave: 1, status: "pending" }] });
+
+      expect(deriveWaveReadiness(graph, statusDeps)).toMatchObject({
+        ok: false,
+        error: { reasons: [{ kind: "authority-unavailable" }] },
+      });
+    });
   });
 
   it("reports terminal blocked from persisted terminal authority", () => {
