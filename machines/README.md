@@ -1,10 +1,11 @@
 # Guarded Skill Machines
 
-Deterministic phase machines that **drive** subagent runs — the runtime
-enforces phase order and tool availability; the agent's tool calls are the
-events that advance the machine. Prose skills stay for judgment; machines
-add hard gates. See the v2 convergence plan (vault:
-`reclaw/plans/deterministic-core-convergence-v2`) for the design rationale.
+Deterministic phase machines that **drive** subagent runs: the runtime
+enforces phase order and tool availability, while attributed tool calls are
+the events that advance a machine. Prose Skills stay responsible for judgment;
+machines add hard gates. For the surrounding engine architecture, see
+[`docs/architecture.md`](../docs/architecture.md); for the complete enforcement
+model, see [`docs/deterministic-core.md`](../docs/deterministic-core.md).
 
 ## How it works
 
@@ -21,7 +22,9 @@ add hard gates. See the v2 convergence plan (vault:
   `TestRun` carrying the real exit status plus a parsed report artifact
   (vitest/jest JSON via `--outputFile`/stdout, JUnit XML — JVM runners
   only). Judgments (`passed`/`trusted`) are derived from the facts at read
-  time, never stored. Transcript text is never evidence.
+  time, never stored. Transcript text never becomes **ledger** evidence; when
+  no trusted ledger verdict exists, completion may use a separately labeled,
+  explicitly untrusted transcript fallback.
 - **PreToolUse** (`enforce-phase-tools`) folds the agent's own epoch into
   the current phase and denies enforced tools the phase doesn't list —
   deny-by-default within the machine's declared `enforcedTools`
@@ -137,12 +140,10 @@ Known residual limits, on purpose and documented:
   the fold boundary drops duplicated deliveries of the same call, so a
   re-sent PostToolUse cannot double-count guard evidence.
 - A consistent forgery of ledger *facts* via Bash is blocked by the
-  guard-state-file hook (the ledger and binding paths are guarded state
-  files) — with a caveat: the engine guard arms only while the task graph
-  exists (the guard-state-file.sh shim runs in the binding-persists /
-  graph-removed mode, but the handler allows when the graph is absent), so
-  Bash ledger writes are possible in that window; full integrity (HMAC or
-  out-of-agent-reach storage) is a follow-up.
+  guard-state-file hook while protected orchestration authority is active
+  (the ledger and binding paths are guarded). The ledger is not a
+  cryptographic log outside that lifecycle; full integrity would require
+  HMACs or storage beyond Agent reach.
 - Multi-hop `cd` laundering: `cd .claude; cd state; rm *.json` never names
   a guarded literal anywhere on the command line (`.claude` alone matches
   no guarded pattern), so it is invisible to any raw-text gate by
@@ -177,5 +178,5 @@ SubagentStop resolver (update-task-status) folds the epoch's evidence
 through the machine and, when `missingRequirements` reports unmet terminal
 requirements, caps a trusted-pass verdict at untrusted with a
 `machine-incomplete` label naming what is missing. Hard-BLOCKING completion
-on unmet requirements (rather than demoting the verdict) remains the Phase
-A follow-up.
+on unmet requirements (rather than demoting the verdict) is not currently
+implemented.

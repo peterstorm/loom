@@ -61,7 +61,7 @@ A single committed perspective an agent argues from, assigned rather than chosen
 _Avoid_: Angle, viewpoint, role, persona
 
 **Candidate**:
-One architectural design produced by one designer through one **Lens** during `/loom --panel`. Judged against derived criteria; the winner becomes the **Plan**.
+One architectural design produced by one designer through one **Lens** during `/loom --panel`. Judges rank Candidates against derived criteria; the user selects a Candidate as the base for the **Plan**, and may reject the ranking recommendation.
 _Avoid_: Option, proposal, variant
 
 **Verdict**:
@@ -125,7 +125,7 @@ The shared vocabulary between developers and domain experts within a bounded con
 _Avoid_: Glossary (it's more than a glossary — it's the living language of the system)
 
 **Tier**:
-An execution scope that determines which lint rules apply. "Immediate" (PostEdit, regex-only, <50ms budget) or "full" (wave-gate boundary, all rules including programmatic structural analysis).
+An execution scope that determines which lint rules apply. "Immediate" (PostToolUse after edits, regex-only, cooperative 50ms per-file deadline) or "full" (Wave Gate/explicit scan, all rules including programmatic structural analysis).
 _Avoid_: Level, mode, severity
 
 **Aggregate**:
@@ -141,8 +141,8 @@ A sum type representing success (`Right`) or failure (`Left`). Used for error ha
 _Avoid_: Result (acceptable in Rust), Optional (different semantics)
 
 **LLM Profile**:
-A semantic policy assigning one Agent role to complete harness-specific model bindings: a Claude Code model and an exact Pi provider/model/thinking tuple. Missing bindings fail closed; an Agent never inherits the orchestrator's current model.
-_Avoid_: Model alias, Sonnet equivalent, current model, model fallback
+A semantic policy assigning one Agent role to complete harness-specific requested bindings: a Claude Code model and an exact Pi provider/model/thinking tuple. Missing bindings fail closed. Pi launcher policy may explicitly inherit a local parent model at the spawn boundary; the profile catalog never infers that override.
+_Avoid_: Model alias, Sonnet equivalent, current model, implicit model fallback
 
 **Proof Obligation**:
 An engine-authored requirement a Task must discharge before its status can become implemented: completion, required regression tests, required new tests, and declared artifacts changed. Evidence keeps its provenance; Pi structured evidence is never relabeled as ledger-trusted.
@@ -163,6 +163,22 @@ _Avoid_: Runbook sequence, workflow DSL, panel prompt
 **Scoped Write Grant**:
 A one-time Pi capability minted per spawn, scoped to prompt-derived artifact directories (`.claude/specs/`, `.claude/plans/`, panel-run dirs) for WRITER agents only: phase writers (brainstorm, specify, clarify, plan-alignment, architecture) and panel writers (interviewer, designers, finalizer). Issuance is role-driven — a read-only agent (judge, verifier, reviewer, decompose, spec-check) receives nothing even when its prompt names artifact paths.
 _Avoid_: Write permit, edit allowance, blanket phase write
+
+**Agent Request Authority**:
+An engine-issued immutable binding of Run, request, roster slot, semantic attempt, program, Agent role, LLM Profile, both harness bindings, required Skill, Context Packet digest, and fixed transcript slot. Harness-native ids correlate to it but never replace it.
+_Avoid_: Prompt metadata, spawn args, transcript filename
+
+**Context Packet**:
+A content-addressed immutable collection of fixed and variable byte sections published before an Agent request. Its digest is part of Agent Request Authority; children read it instead of relying on a parent model to reconstruct scope and protocol prose.
+_Avoid_: Prompt blob, context string, temporary instructions
+
+**Effect Receipt**:
+A typed durable record that an authorized orchestration side effect completed. Resume reconciles a matching receipt instead of executing the effect again.
+_Avoid_: Log line, success flag, checkpoint
+
+**Orchestration Façade**:
+The single parent-facing engine interface for status and registered architecture/refutation/standalone-review/Wave-Gate/remediation programs. It returns only spawn-batch, await-user, blocked, or done at external boundaries.
+_Avoid_: Helper collection, workflow script, shell runbook
 
 **Inline-Program Stdin Inheritance**:
 The guard-state-file residual class where an interpreter's `-c`/`-e` inline program inherits the command's stdin: if the program is itself a stdin-reading interpreter (`bash -c 'sh'`, `bash -c 'python3'`) or a reader+executor pair (`bash -c 'eval "$(cat)"'`), the heredoc body is a SCRIPT and is judged as full command text. An inline program with its own program source (`bash -c 'sh file.sh'`) or an inline DATA reader (`bash -c 'cat'`) reads the body as data.
@@ -185,14 +201,16 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - A **Phase** produces one or more artifacts consumed by subsequent **Phases**
 - A **Plan** is decomposed into **Tasks** grouped into **Waves**
 - A **Wave Gate** validates all **Tasks** in a **Wave** before the next **Wave** begins
-- A **Tier** determines which lint rules execute: "immediate" runs regex-only at PostEdit, "full" runs all rules at wave-gate boundaries
+- A **Tier** determines which lint rules execute: "immediate" runs regex-only after edits, "full" runs all rules at Wave Gate boundaries or explicit scans
 - An **Agent** executes exactly one **Task** or one **Phase**
-- Every Loom-owned **Agent** resolves one explicit **LLM Profile** before spawn
+- Every Loom-owned **Agent** resolves one explicit requested **LLM Profile** before spawn; Pi launcher overrides are explicit at the transport boundary
 - A **Task** becomes implemented only after all of its **Proof Obligations** are satisfied
 - Review Agents consume one immutable **Review Packet** per Task
 - A **Review Run** binds that Review Packet to one **Review Generation**, the expected review Agents, and all prior active Finding IDs
 - A **Resolved Finding** leaves the active set only when every Agent in its Review Run explicitly verifies remediation; any `still_present` assessment keeps it active
 - A **Panel Program** emits the exact Agent batches and engine operations for each panel
+- The **Orchestration Façade** materializes each batch as **Agent Request Authority** plus a **Context Packet**
+- An **Effect Receipt** makes an authorized side effect reconcilable and idempotent across resume
 - A **Standalone Review Run** feeds identified critical Findings through the same **Refutation Panel** without creating a Task or mutating the State File
 - A **Skill** is loaded into an **Agent** to provide domain expertise
 - **Hooks** enforce invariants on the **State File** — no other actor writes to it

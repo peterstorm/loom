@@ -1,12 +1,27 @@
 # Using Loom with Pi
 
-Loom ships as a native Pi package. The active package is identified from the
-loaded extension module's `import.meta.url`; Pi never discovers Loom through a
-Claude Code installation or the current working directory.
+Loom ships as a native Pi package. It uses the same deterministic engine as Claude Code, with a Pi extension for tool guards, lifecycle capture, resource rendering, and child write capabilities.
+
+## Support summary
+
+Supported through the shared engine:
+
+- commands and Skills rendered from the active package;
+- phase/Wave/task guards and protected `.pi/state`;
+- implementation proof and test-result adaptation;
+- immediate/full lint;
+- registered standalone review, Refutation Panel, Wave Gate, and remediation programs;
+- exact model/Skill request policy;
+- immutable Run Directories and exact-byte Agent-result capture;
+- scoped phase/panel artifact writes and Task-bound implementation writes.
+
+Current parity gap:
+
+- Pi subagents are headless and cannot relay interactive phase questionnaires to the parent TUI. Architecture-panel interviewer spawns fail fast. Standard specify/architecture questionnaire templates have the same transport limitation even where the role is not separately blocked. See [Pi phase-agent interviews](pi-phase-agent-interviews.md).
 
 ## Installation
 
-### Local checkout (development)
+### Local checkout
 
 ```bash
 pi install /absolute/path/to/loom
@@ -14,10 +29,9 @@ cd /absolute/path/to/loom
 bash scripts/sync-pi-agents.sh
 ```
 
-A local package is referenced in place, so edits to the checkout become active
-after `/reload`.
+A local package is referenced in place. After source or generated-Agent changes, run `/reload`.
 
-### Git or npm package
+### Git or npm
 
 ```bash
 pi install git:github.com/peterstorm/loom@<tag-or-commit>
@@ -25,99 +39,92 @@ pi install git:github.com/peterstorm/loom@<tag-or-commit>
 pi install npm:@peterstorm/loom@<version>
 ```
 
-After install or update, run `scripts/sync-pi-agents.sh` from that installed
-package root, then `/reload`. Loom agents require explicit Pi model bindings and
-are generated into `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/agents`.
-Loom's guard enforces a two-layer model contract: Claude Code spawns must match
-the agent's declared binding exactly, while on Pi the launcher's routing policy
-(`pi/model-routing.json`) decides the effective model at spawn — a machine
-running a local parent model may explicitly inherit it for every child, and
-the guard proves the synced render and user-global spawn scope rather than
-vetoing that routing decision.
-`PI_CODING_AGENT` is Pi's process identity marker. Loom selects Pi state/rule
-paths when either that marker or `PI_CODING_AGENT_DIR` is present, so explicit
-agent-directory configuration also works in processes that do not carry the
-marker. When set, `PI_CODING_AGENT_DIR` is the active base directory for
-generated Pi agents and rendered Loom resources; otherwise Loom falls back to
-`$HOME/.pi/agent`.
+Run `scripts/sync-pi-agents.sh` from the installed package root, then `/reload`.
 
-## Package-root contract
+Generated Agents are written to:
 
-The shared markdown source uses Claude Code's `${CLAUDE_PLUGIN_ROOT}` token.
-That token is correct only in Claude Code. Pi does not expand it.
+```text
+${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/agents
+```
 
-Loom's Pi adapter therefore performs harness lowering at resource discovery:
+## Verify the active package
 
-1. `pi/extension.ts` derives `PACKAGE_ROOT` from its own `import.meta.url`.
-2. `pi/resources.ts` renders commands, skills, references, and rules into a
-   content-addressed cache under the Pi agent directory.
-3. Every root token in rendered markdown becomes the active package's absolute
-   path.
-4. `scripts/sync-pi-agents.sh` applies the same lowering to generated Pi agent
-   definitions, inlines each declared skill (including command-backed phase
-   skills), and stamps package-root plus full-definition integrity metadata.
-5. Every Pi spawn byte-compares the generated definition with a fresh render
-   from the loaded package, rejects non-user agent scope and unresolved root
-   tokens, and enforces the source agent's required-skill prompt contract.
-6. The extension exports `LOOM_PLUGIN_ROOT` to child processes for diagnostics.
-
-This supports local checkouts, Pi git/npm installs, read-only package stores,
-and paths outside a Git repository. CWD and Claude's plugin cache are never
-package identity. Because one shared token appears in both shell snippets and
-Markdown/tool paths—and some historical snippets expand `LOOM_DIR` unquoted—
-roots containing whitespace, glob characters, quotes, dollar signs, backticks,
-backslashes, or control characters are rejected rather than interpolated
-unsafely.
-
-To verify the active root inside a Pi Bash tool call:
+Pi derives identity from the extension module’s `import.meta.url`, never cwd or a Claude installation. The extension exports that root:
 
 ```bash
 printf 'LOOM_PLUGIN_ROOT=%s\n' "$LOOM_PLUGIN_ROOT"
 test -f "$LOOM_PLUGIN_ROOT/engine/src/cli.ts"
+pi list
 ```
 
-## Resources
+`PI_CODING_AGENT_DIR`, when set, selects the Pi Agent/resource base directory. Otherwise Loom uses `$HOME/.pi/agent`. `PI_CODING_AGENT` is Pi’s process identity marker; Loom also treats explicit `PI_CODING_AGENT_DIR` as Pi context for state/rule path selection.
 
-`package.json` statically registers only `pi/extension.ts`. The extension's
-`resources_discover` handler contributes the rendered prompt and skill paths.
-This avoids Pi loading the unrendered Claude-facing markdown first.
+## Shared-resource rendering
 
-The package provides:
+Shared Markdown contains Claude Code’s `${CLAUDE_PLUGIN_ROOT}` token. Pi does not expand it.
 
-- commands such as `/loom`, `/wave-gate`, `/review-pr`, and `/review-and-fix`;
-- skills under `skills/`;
-- the full Loom extension and shared engine;
-- generated user-level subagent definitions produced by
-  `scripts/sync-pi-agents.sh`.
+At `resources_discover`:
+
+1. `pi/extension.ts` derives the package root.
+2. `pi/resources.ts` inventories commands, Skills, references, and rules.
+3. Root tokens are replaced with the active absolute package path.
+4. Rendered bytes and inventory are published into a content-addressed cache.
+5. Reuse verifies every expected file and its bytes.
+6. Corrupt cache entries are quarantined and rebuilt atomically.
+
+Source resource trees must contain regular readable files, not symbolic links. Package roots with unsafe interpolation characters are rejected rather than partially escaped.
+
+`package.json` statically registers only `pi/extension.ts`; rendered resources are contributed dynamically so Pi never loads unrendered Claude-facing Markdown first.
+
+## Agent sync and model policy
+
+Source Agents map to semantic profiles in `engine/src/core/model-profiles.ts`. The sync script:
+
+- emits exact Pi provider/model/thinking frontmatter;
+- expands package paths;
+- inlines declared Skill content;
+- stamps source/package/full-definition integrity metadata.
+
+Every Pi spawn byte-compares the selected user-global definition with a fresh render from the loaded package. Project-local Agent shadowing, stale definitions, unresolved root tokens, and missing required Skills are rejected.
+
+Pi launcher routing may explicitly inherit a local parent model for children. Loom validates request/source/render authority and allows that explicit launcher policy; the pure catalog never silently infers parent inheritance.
+
+## Pi write grants
+
+Pi children are separate processes, so Claude’s active-subagent write exemption cannot be reused.
+
+Before spawn, the parent mints a one-time cryptographic grant and injects its token into only that child’s task. The token is stored on disk only as a SHA-256 digest.
+
+Two grant shapes exist:
+
+- **Task-bound implementation grant** — bound to Agent, Task id, repository cwd, TaskGraph, and session; valid for the implementation session.
+- **Scoped artifact grant** — for writer roles only; target directories are derived from prompt authority (spec, plan, or panel-run directories).
+
+Read-only roles—reviewers, verifier, judge, decompose, and spec-check—receive no grant even if their prompts mention writable-looking paths.
+
+The child consumes the token before its first model turn. Replay, wrong Agent/Task/cwd, expiration, rejected spawn, or shutdown fails closed. Parent tool completion and rollback revoke outstanding grants. A fixed 24-hour ceiling only bounds a capability abandoned by a parent crash; it is not the normal lifetime.
+
+## Registered orchestration capture
+
+Registered `spawn-batch` requests contain `LOOM_REQUEST_ID`, Context Packet digest/path, and complete request authority. Before dispatch, the extension binds Pi’s native tool-call/item identity to that request. On result, it publishes the exact final bytes into the reserved immutable transcript slot and resumes program semantics from those bytes.
+
+Pi’s subagent tool accepts at most eight items per call. Large engine-issued batches may be partitioned into ordered chunks of at most eight, but requests must not be changed, dropped, or duplicated; resume only after every chunk completes.
 
 ## Harness behavior
 
 | Capability | Pi implementation |
 |---|---|
-| Tool guards | `pi/extension.ts` `tool_call` handlers |
-| Phase and task state | Shared engine and `StateManager` |
-| Subagent completion | `tool_result` dispatch in `pi/extension.ts` |
-| Review finding capture | Shared review-output core |
-| Prompt/skill root expansion | Content-addressed Pi resource rendering |
-| Agent root expansion | `model-profiles render-pi` |
-| Explicit agent models | Generated Pi agent frontmatter (launcher routing may override) |
+| Resource/package identity | `pi/resources.ts`, extension `import.meta.url` |
+| Tool guards | `pi/extension.ts` `tool_call` handlers + shared core |
+| Phase/task state | shared `StateManager` under `.pi/state/` |
+| Lint | shared linter from Pi tool results |
+| Task completion | shared proof/review/spec core with Pi transcript adaptation |
+| Agent writes | one-time Task or scoped grants |
+| Agent models/Skills | generated, integrity-checked user definitions |
+| Registered result capture | native correlator + shared capture runtime |
+| Run persistence | shared anchored Run Directory and orchestration runtime |
 
-Pi subagents are separate Pi processes. The generated agent definition already
-contains absolute package resource paths, so it does not depend on the parent
-process's CWD or on Claude-specific environment variables.
-
-For execute-phase implementation spawns, the parent adapter also issues one
-one-time write grant per child item (single, parallel, or chain). The grant is
-bound to agent, Task ID, repository CWD, and task graph; its raw token is
-injected only into that child's prompt and is stored on disk only as a SHA-256
-digest. The child consumes it before its first model turn and creates a
-session-local guarded-write binding. Pi exposes no per-child timeout, so queued
-grants use one fixed parent-session start window rather than estimating chain
-stages from unsupported input fields. Normal revocation is immediate on parent
-tool completion, rollback, or session shutdown; the 24-hour ceiling only bounds
-an abandoned capability after a parent crash. Mismatch, expiry, replay, failed
-spawn, or shutdown fails closed. This avoids incorrectly treating all parallel
-children as one shared active agent.
+`pi/loom-bridge.ts` is not loaded. It is an inert fail-closed compatibility stub.
 
 ## Development workflow
 
@@ -126,59 +133,68 @@ cd /absolute/path/to/loom
 bash scripts/sync-pi-agents.sh
 cd engine
 bun run typecheck
-bun test
+bun run test:unit
+bun run test:smoke
 ```
 
-Then run `/reload` in Pi. For UI changes, start a fresh Pi session from a project
-that has the local Loom package enabled and exercise the affected command.
+Then `/reload` Pi and exercise the affected command from a project that has the intended Loom package scope.
 
 ## Troubleshooting
 
 ### `CLAUDE_PLUGIN_ROOT` is unset
 
-Expected under Pi. Use `LOOM_PLUGIN_ROOT` for diagnostics. Markdown resources
-must have been rendered before the model sees them; an unresolved
-`CLAUDE_PLUGIN_ROOT` in a Pi prompt is a Loom packaging bug.
+Expected. Shared resources must be rendered before the model sees them. Use `LOOM_PLUGIN_ROOT` for diagnostics. An unresolved Claude token in a Pi prompt is a packaging bug.
 
-### A command points at the wrong checkout
-
-Run:
+### Command uses the wrong checkout
 
 ```bash
 printf '%s\n' "$LOOM_PLUGIN_ROOT"
 pi list
 ```
 
-Pi package scope deduplication makes the project package entry win over a global
-entry for the same package identity. Remove or disable an unintended package,
-then `/reload`.
+Project package scope wins over a global entry for the same package identity. Remove/disable the unintended package and `/reload`.
 
-### Agent model or resource paths are stale
-
-Run the sync script from the package root printed by `LOOM_PLUGIN_ROOT`:
+### Agent definitions are stale
 
 ```bash
 "$LOOM_PLUGIN_ROOT/scripts/sync-pi-agents.sh"
 ```
 
-Then `/reload`.
+Then `/reload`. Ensure you are writing to the `PI_CODING_AGENT_DIR` used by the active Pi process.
 
-### Resource rendering fails
+### Resource materialization fails
 
-Loom fails closed on symbolic links in source resource trees. On reuse it
-verifies the complete rendered inventory and every file's bytes, quarantining
-and atomically rebuilding a corrupted content-addressed root. Check that
-`skills/`, `commands/`, `references/`, and `rules/` in the active package are
-regular readable files and that the Pi agent directory is writable.
+Check that `commands/`, `skills/`, `references/`, and `rules/` contain only regular readable files and that the Pi Agent directory is writable. Loom rejects symlinked source files and corrupt cache reuse.
 
-### State or phase operations are blocked
+### A writer is blocked
 
-This is independent of package-root resolution. Inspect the shared task graph
-and follow `/wave-gate`; direct writes to guarded state remain prohibited.
+Read the diagnostic:
 
-## Legacy bridge
+- no grant for a reviewer/judge/verifier is expected;
+- a scoped writer can write only derived artifact roots;
+- an implementation grant must match its Task and repository;
+- state/evidence paths remain guarded regardless of grant.
 
-`pi/loom-bridge.ts` is retained only as a fail-closed compatibility entry point.
-It emits a diagnostic and dispatches nothing because its historical partial
-agent roster could lose review/spec evidence. The package manifest loads
-`pi/extension.ts`, the only supported adapter.
+Never broaden the grant manually.
+
+### Architecture panel is refused
+
+This is intentional until interactive child-to-parent question relay exists. Use Claude Code for the panel interview, or use non-panel architecture only when all required decisions are already explicit and the flow can honestly avoid live questions.
+
+### State or Wave operation is blocked
+
+Use canonical status and resume the registered program:
+
+```bash
+bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper orchestration status
+```
+
+Do not edit `.pi/state/active_task_graph.json` or Run Directory evidence.
+
+## Further reading
+
+- [Architecture](architecture.md)
+- [Workflows](workflows.md)
+- [Operations](operations.md)
+- [Claude Code and Pi integration guide](migration-claude-code-to-pi.md)
+- [Model profiles and calibration](model-profiles-and-calibration.md)

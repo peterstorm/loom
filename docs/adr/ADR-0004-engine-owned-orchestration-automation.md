@@ -130,10 +130,10 @@ Eleven implementation slices across `engine/src/core/` and a new
 
 | Slice | Landed as |
 |---|---|
-| Authority kernel, panel programs, LC-1..LC-3 machines | `core/orchestration-contract.ts`, `core/panel-program.ts`, `core/wave-gate-machine.ts`, `core/standalone-review-machine.ts`, `core/remediation-machine.ts` |
+| Authority kernel, panel programs, lifecycle machines | `core/orchestration-contract/`, `core/panel-program.ts`, `core/wave-gate-machine.ts`, `core/standalone-review-machine.ts`, `core/remediation-machine.ts` |
 | Fugue runtime | `orchestration/fugue-program-runtime.ts` |
 | Anchored run directory, context packets, effect receipts | `orchestration/run-directory-handle.ts`, `context-packets.ts`, `effect-runner.ts`, `no-follow-fs.ts` |
-| Four static operation DAGs | `orchestration/dags/*.ts` |
+| Four static operation DAG families + capability registry | `orchestration/dags/*-operations.ts`, `orchestration/dags/capabilities.ts` |
 | Remediation Git boundary | `orchestration/git-remediation.ts` |
 | Façade and status | `handlers/helpers/orchestration.ts` |
 | Cross-harness capture | `core/harness-capture.ts`, `handlers/subagent-stop/capture-orchestration-result.ts` |
@@ -186,8 +186,9 @@ characters, against mandated floors of 70% and 80%.
   This was the panel's central criticism (simplicity 4/10) and it stands.
 - A second execution substrate (Fugue) is now a hard dependency, pinned at
   exactly 0.4.0. Its conditional-edge and id constraints shape Loom's graphs.
-- Migration is incomplete by design: legacy helpers remain as adapters and
-  historical runs are never rewritten. Pi's spawn path now receives run
+- Migration retains read-only compatibility by design: historical helpers/formats
+  remain behind `core/legacy-archive.ts` and historical runs are never rewritten.
+  Pi's spawn path now receives run
   authority through a session-scoped façade handoff rather than impossible
   child-to-parent environment mutation, but the plan's full five-scenario
   lifecycle benchmark is still broader than the reported status benchmark.

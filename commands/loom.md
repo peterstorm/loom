@@ -50,8 +50,9 @@ bun {LOOM_DIR}/engine/src/cli.ts helper model-profiles agent --agent "<AGENT_NAM
   `pi.provider/pi.model:pi.thinking` model pattern. Run
   `{LOOM_DIR}/scripts/sync-pi-agents.sh` after install/update.
 
-Missing or mismatched bindings BLOCK. Never omit a model and never inherit the
-parent orchestrator's current model.
+Missing or mismatched requested bindings BLOCK. Never omit a model. Pi launcher
+routing may explicitly inherit a local parent model; that transport policy is
+validated at the Pi spawn seam and is never inferred by this runbook.
 
 ---
 
@@ -64,9 +65,9 @@ parent orchestrator's current model.
 - `/loom --skip-plan-alignment` - Skip plan-alignment phase (proceed directly to decompose)
 - `/loom --panel` - Architecture panel mode: N designer agents generate candidates in parallel (each with a lens), adversarial judges rank them against interview-derived criteria, and the finalizer presents the ranked approaches. `--panel=N` requires a decimal integer of at least `PANEL_DESIGNERS_MIN` (currently 2); malformed, fractional, duplicate, or smaller values are rejected. Values above the number of distinct lenses (5) are rejected. Bare `--panel` uses `PANEL_DESIGNERS_DEFAULT` (currently 3). Opt-in; only Phase 3 changes. See [panel-lenses.md](../references/panel-lenses.md) and [Phase 3 (panel mode)](#phase-3-panel-mode-loom---panel).
 - `/loom --status` - Show current status. Runs `bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration status` (add `--json` for the machine form). Both forms project ONE `LoomStatus` value, so they cannot disagree, and neither re-runs a gate check. When authority is unreadable every fact category is still reported as `unavailable` with its reasons and the next action is `blocked` — never a fabricated zero-or-ready value. Prefer this over the ad-hoc `jq` recipes in [Observability](#observability), which read raw fields and can contradict the engine.
-- Persistent architecture/refutation panel callers use `helper orchestration start`, then the returned engine-reserved request/context authorities. `correlate` binds a harness-native id, `submit` captures exact bytes and advances the reducer, `complete` records the currently authorized deterministic engine operation, and `resume` replays the immutable event prefix and returns the same single next action. Callers never construct panel event arrays or reserve transcript slots themselves.
-- `/loom --complete` - Finalize, clean up state *(planned — manually remove state file for now)*
-- `/loom --abort` - Cancel mid-execution, clean state *(planned — manually remove state file for now)*
+- The engine also exposes registered architecture/refutation panel dispatch through `helper orchestration start`. The detailed Phase 3 runbook below still owns interactive/template/file integration through the panel-contract helper chain; do not mix the two persistence protocols inside one panel run.
+- `/loom --complete` - Not implemented as a flag. After proving completion, use the guarded `helper cleanup-state` only with explicit operator intent.
+- `/loom --abort` - Not implemented as a flag. Use `helper cleanup-state` for deliberate teardown and preserve plan/spec/review audit artifacts.
 
 **Note:** All phases are MANDATORY by default. Skip flags allow explicit bypass with user acknowledgment.
 
@@ -516,7 +517,7 @@ For each wave:
 5. **RUN `/wave-gate` — MANDATORY, via subagents** (see below)
 6. If blocked (critical findings): spawn fix agents with the findings, re-run `/wave-gate`
 7. **Triage advisory findings and fix the RELEVANT ones** before advancing (see [Addressing Advisories](#addressing-advisories)). Advisories bypass refutation but pause the lifecycle at `awaiting-advisory-decision`; record an accept/defer disposition before completion.
-8. **Run the full-tier lint** (`/wave-gate` Step 4c) — the PostEdit `lint-file.sh` hook runs the *immediate* tier (regex rules) only, so the wave gate is the only place the programmatic rules (boundaries, purity, function length, generated-file integrity) ever run. Violations block; never silence one by editing the rule that caught it.
+8. **Run the full-tier lint** (`/wave-gate` Step 4c) — the PostToolUse `lint-file.sh` hook runs the *immediate* tier (regex rules) only, so the Wave Gate is the automatic place where programmatic rules (boundaries, purity, function length, generated-file integrity) run. Violations block; never silence one by editing the rule that caught it.
 9. Once the gate passes AND relevant advisories are addressed AND the full-tier lint is clean: advance to next wave
 
 ### Wave-Gate Enforcement (NON-NEGOTIABLE)
@@ -654,16 +655,19 @@ An `unavailable` category is a real answer, not a rendering gap: it means the
 authority behind that fact could not be parsed, and the action will be
 `blocked` with the reason attached.
 
-### On `/loom --complete`:
-1. Verify all tasks completed
-2. Optionally close GitHub Issue
-3. Remove state file
-4. Invoke `/finalize` for PR
+### Completion or abort teardown
 
-### On `/loom --abort`:
-1. Ask: close issue or leave open?
-2. Remove state file
-3. Hooks deactivate
+`/loom --complete` and `/loom --abort` are not implemented argument handlers.
+After verifying completion—or after explicit user confirmation to abandon the
+run—use the guarded cleanup operation rather than direct file removal:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper cleanup-state
+```
+
+Optionally close or retain the GitHub Issue. Preserve specs, plans, and review
+Run Directories as audit/recovery evidence. Hooks deactivate when the protected
+TaskGraph is removed.
 
 ---
 

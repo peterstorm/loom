@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-The loom project needs a PostEdit linter that catches bad code patterns immediately after file edits. The linter requires access to several engine-provided services: CLI routing (`cli.ts`), configuration (`config.ts`), shared type definitions (`types.ts`), state management (`state-manager.ts`), and hook handler infrastructure (`handlers/`). It also shares the bun runtime, build tooling, and test harness with the rest of the engine.
+The loom project needs a PostToolUse linter that catches bad code patterns immediately after file edits. The linter requires access to several engine-provided services: CLI routing (`cli.ts`), configuration (`config.ts`), shared type definitions (`types.ts`), state management (`state-manager.ts`), and hook handler infrastructure (`handlers/`). It also shares the bun runtime, build tooling, and test harness with the rest of the engine.
 
 The question is where this linter code should live. The engine already follows a modular directory structure with sibling modules (`core/`, `parsers/`, `handlers/`, `utils/`), each representing a distinct bounded context with its own types and responsibilities. The linter is consumed by two adapters — a Claude Code PostToolUse hook and a Pi extension — both of which already import from `engine/src/`.
 
@@ -36,7 +36,7 @@ The module is structured as a sibling to `engine/src/core/`, `engine/src/parsers
 ```
 engine/src/linter/
 ├── types.ts          # Domain types: Rule, Violation, LintResult, LintOutput
-├── safety.ts         # ReDoS static analysis + runtime timeout
+├── safety.ts         # ReDoS static analysis + cooperative deadline
 ├── loader.ts         # Rule loading, JSON parsing, merge semantics
 ├── executor.ts       # Rule execution, line-by-line regex matching
 ├── formatter.ts      # Violation formatting: JSON + block messages

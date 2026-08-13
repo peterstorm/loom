@@ -4,7 +4,7 @@
 
 ## Problem
 
-Loom's current evaluators all operate by **reading code**:
+At the time this unimplemented proposal was written, Loom's evaluators operated by **reading code**:
 - `spec-check` verifies FR alignment by reading source files
 - `code-reviewer` checks quality/patterns by reading source files
 - `silent-failure-hunter`, `pr-test-analyzer`, `type-design-analyzer`, `comment-analyzer` — all static
