@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { parseAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
 import { defaultRefutationThreshold } from '../../../core/review-panel';
 import { completePersistentRefutationPanel, deriveRefutationVerifierBinding, panelRequestIdentity, parseRefutationPanelAuthority, startPersistentRefutationPanel, submitRefutationVerdict } from '../../../core/panel-program';
+import type { FindingOutcome } from '../../../core/review-panel';
 import { buildContextPacket, encodeByteSection, type ContextPacket } from '../../../orchestration/context-packets';
 import { captureKey } from '../../../core/harness-capture';
 import { type RunDirHandle } from '../../../orchestration/run-directory-handle';
@@ -1030,11 +1031,25 @@ export async function applyWaveFacadeSubmission(
   }
 }
 
+/**
+ * Upper bound on same-invocation re-derivations of the Wave Gate reducer.
+ * Every legitimate recursion consumes durable progress (a captured retry
+ * applied, an accepted spec-check retry, a tally that retired a finding), each
+ * at most once per resume invocation, so a depth beyond this is a reducer
+ * defect, not a large run. The bound converts a hypothetical spin back into a
+ * loud blocked diagnostic instead of an engine hang.
+ */
+const MAX_WAVE_GATE_REDERIVATIONS = 64;
+
 export async function resumeWaveGateFacade(
   handle: RunDirHandle,
   registration: RegisteredWaveGateProgram,
+  depth = 0,
 ): Promise<FacadeDriveResult> {
   try {
+    if (depth > MAX_WAVE_GATE_REDERIVATIONS) {
+      return waveBlocked(handle, `Wave Gate resume exceeded ${MAX_WAVE_GATE_REDERIVATIONS} re-derivations without durable progress; refusing to spin`);
+    }
     const manager = new StateManager(TASK_GRAPH_PATH);
     const graph = manager.load();
     const terminal = await handle.readCheckpoint();
@@ -1348,7 +1363,7 @@ export async function resumeWaveGateFacade(
         if (rejected.length > 0) {
           return waveBlocked(handle, `Wave reviewer attempt 2 exhausted without accepted packet evidence: ${rejected.map(({ authority }) => authority.role).join(", ")}`);
         }
-        return resumeWaveGateFacade(handle, registration);
+        return resumeWaveGateFacade(handle, registration, depth + 1);
       }
       return { ok: true, action: {
         kind: "spawn-batch", runId: handle.runId,
@@ -1400,7 +1415,7 @@ export async function resumeWaveGateFacade(
         if (accepted?.wave !== registration.input.wave || accepted.verdict === "EVIDENCE_CAPTURE_FAILED") {
           return waveBlocked(handle, "Wave spec-check attempt 2 exhausted without accepted current-wave evidence");
         }
-        return resumeWaveGateFacade(handle, registration);
+        return resumeWaveGateFacade(handle, registration, depth + 1);
       }
       return { ok: true, action: {
         kind: "spawn-batch", runId: handle.runId,
@@ -1470,11 +1485,25 @@ export async function resumeWaveGateFacade(
         return waveBlocked(handle, completed.ok ? "Wave Refutation Panel did not reach done" : completed.error.message);
       }
       const donePanel = completed.value.state;
-      await manager.update((locked) => ({
-        ...locked,
-        tasks: locked.tasks.map((task) => applyFindingOutcomes(task, donePanel.decision.outcomes)),
-      }));
-      return resumeWaveGateFacade(handle, registration);
+      const refutingOutcomes = donePanel.decision.outcomes.filter(
+        (outcome): outcome is Extract<FindingOutcome, { survives: false }> => !outcome.survives,
+      );
+      if (refutingOutcomes.length > 0) {
+        await manager.update((locked) => ({
+          ...locked,
+          tasks: locked.tasks.map((task) => applyFindingOutcomes(task, donePanel.decision.outcomes)),
+        }));
+        // The tally retired at least one finding, so the derived snapshot
+        // changed: re-derive readiness under it (the wave gate may now pass).
+        return resumeWaveGateFacade(handle, registration, depth + 1);
+      }
+      // Every adjudicated critical was UPHELD. `applyFindingOutcomes` records
+      // only refutations, so re-deriving now would reproduce the identical
+      // readiness snapshot, the identical deterministic tally, and recurse
+      // forever at ~100% CPU (loom#20 Finding 4) — a surviving critical is
+      // exactly the `checkCriticalFindings` failure the gate must surface as
+      // blocked until remediation retires it. Fall through to the advisory and
+      // gate-decision steps below with the unchanged snapshot.
     }
     const advisoryCount = current.value.facts.findingCounts.kind === "known" ? current.value.facts.findingCounts.value.advisory : 0;
     const advisoryRequestId = waveAdvisoryDecisionRequestId(handle.runId, current.value.waveTasks);

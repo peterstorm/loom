@@ -193,6 +193,29 @@ describe("orchestration CLI", () => {
     });
   }
 
+  /** A refutation verdict transcript with a caller-chosen vote direction. */
+  function refutationVerdicts(handle: RunDirHandle, authority: AgentRequestAuthority, verdict: "upheld" | "refuted"): string {
+    const context = handle.readContext(authority.contextDigest);
+    if (!context.ok) throw new Error(context.error.message);
+    const section = context.value.fixedContext.find(({ label }) =>
+      label === "wave-refutation-authority" || label === "refutation-authority");
+    if (section === undefined) throw new Error("refutation context lacks semantic authority");
+    const semantic = JSON.parse(Buffer.from(section.bytes).toString("utf8")) as {
+      lens: string;
+      findings: readonly { id: string }[];
+    };
+    return JSON.stringify({
+      criterion: semantic.lens,
+      verdicts: semantic.findings.map(({ id }) => ({
+        finding_id: id,
+        verdict,
+        reasoning: verdict === "upheld"
+          ? "The current immutable packet still exhibits the finding"
+          : "The current immutable packet does not exhibit the finding",
+      })),
+    });
+  }
+
   it("prints a status even when no state file exists", () => {
     const result = runCli(["status"], "", project());
 
@@ -1627,6 +1650,162 @@ describe("orchestration CLI", () => {
 
     const replay = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
     expect(replay.status, replay.stderr).toBe(0);
+    expect(JSON.parse(replay.stdout).kind).toBe("done");
+  }, 30_000);
+
+  it("blocks instead of spinning when a Wave refutation tally upholds every critical (loom#20 Finding 4)", async () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    expect(proof.state).toBe("satisfied");
+    const finding = {
+      id: "code-reviewer-7", agent: "code-reviewer", severity: "critical" as const,
+      file: "src/x.ts", line: 1, claim: "relative imports bypass the check-imports boundary",
+    };
+    const graph = {
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {},
+      wave_review_epoch: { runId: "run.wave-upheld-tally", wave: 1, batchEpoch: "a".repeat(64) },
+      spec_check: {
+        wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+      tasks: [{
+        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "blocked", review_generation: 0,
+        findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
+      }],
+    };
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify(graph));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-upheld-tally-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-upheld-tally");
+    mkdirSync(runDir);
+
+    // Start: the seeded closed review state skips the 21-transcript review
+    // batch and lands directly on the refutation stage (the reducer stages
+    // before the tally are exercised by the review-recovery tests above).
+    const started = runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir],
+      JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as {
+      kind: string; requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(action.kind).toBe("spawn-batch");
+    expect(action.requests).toHaveLength(3);
+    expect(action.requests.every(({ authority }) =>
+      authority.program === "refutation-panel" && authority.attempt === 1)).toBe(true);
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    for (const { authority } of action.requests) {
+      const raw = refutationVerdicts(opened.value, authority, "upheld");
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from(raw)])).ok).toBe(true);
+    }
+
+    // The reducer used to recurse after the tally no matter what: an all-upheld
+    // decision changes nothing, so it re-derived the identical snapshot and
+    // identical tally forever (~113% CPU, exit 124 at 240s). It must now fall
+    // through to the gate decision and report the surviving critical as a
+    // blocked Wave Gate.
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const outcome = JSON.parse(resumed.stdout) as {
+      kind: string;
+      diagnostic: { kind: string; message: string };
+    };
+    expect(outcome.kind, resumed.stdout).toBe("blocked");
+    expect(outcome.diagnostic.kind).toBe("wave-gate-blocked");
+    expect(outcome.diagnostic.message).toContain("1 critical code review findings");
+    expect(outcome.diagnostic.message).toContain(finding.claim);
+
+    // The upheld critical must still be live and un-refuted in the graph.
+    const protectedGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { findings: readonly { id: string; severity: string; claim: string }[];
+        critical_findings: readonly string[]; refuted_findings?: readonly unknown[] }[];
+    };
+    expect(protectedGraph.tasks[0]?.findings).toHaveLength(1);
+    expect(protectedGraph.tasks[0]?.findings?.[0]).toMatchObject({ id: finding.id, severity: "critical" });
+    expect(protectedGraph.tasks[0]?.critical_findings).toEqual([finding.claim]);
+    expect(protectedGraph.tasks[0]?.refuted_findings ?? []).toHaveLength(0);
+
+    // Idempotent termination: a further resume replays the same captured
+    // verdicts and must also return blocked, never spin.
+    const again = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(again.status, again.stderr).toBe(0);
+    expect(JSON.parse(again.stdout).kind).toBe("blocked");
+  }, 30_000);
+
+  it("passes a Wave whose refutation tally refutes every critical", async () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    expect(proof.state).toBe("satisfied");
+    const finding = {
+      id: "code-reviewer-7", agent: "code-reviewer", severity: "critical" as const,
+      file: "src/x.ts", line: 1, claim: "relative imports bypass the check-imports boundary",
+    };
+    const graph = {
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {},
+      wave_review_epoch: { runId: "run.wave-refuted-tally", wave: 1, batchEpoch: "b".repeat(64) },
+      spec_check: {
+        wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+      tasks: [{
+        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "blocked", review_generation: 0,
+        findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
+      }],
+    };
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify(graph));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-refuted-tally-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-refuted-tally");
+    mkdirSync(runDir);
+
+    const started = runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir],
+      JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as {
+      kind: string; requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(action.kind).toBe("spawn-batch");
+    expect(action.requests).toHaveLength(3);
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    for (const { authority } of action.requests) {
+      const raw = refutationVerdicts(opened.value, authority, "refuted");
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from(raw)])).ok).toBe(true);
+    }
+
+    // A refuting tally retires the critical and promotes the blocked task:
+    // the reducer must still re-derive under the changed snapshot and drive
+    // the wave to done.
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const outcome = JSON.parse(resumed.stdout) as { kind: string; outcome: { kind: string; runId: string } };
+    expect(outcome.kind, resumed.stdout).toBe("done");
+    expect(outcome.outcome.kind).toBe("protected-wave-state-committed");
+    const protectedGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { findings: readonly unknown[]; critical_findings: readonly string[];
+        refuted_findings: readonly unknown[]; review_status: string }[];
+    };
+    expect(protectedGraph.tasks[0]?.findings).toHaveLength(0);
+    expect(protectedGraph.tasks[0]?.critical_findings).toHaveLength(0);
+    expect(protectedGraph.tasks[0]?.refuted_findings).toHaveLength(1);
+    expect(protectedGraph.tasks[0]?.review_status).toBe("passed");
+    const replay = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
     expect(JSON.parse(replay.stdout).kind).toBe("done");
   }, 30_000);
 
