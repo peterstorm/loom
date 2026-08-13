@@ -448,7 +448,13 @@ export function deriveWaveAttemptTwo(
     variableContext,
   });
   if (!packet.ok) throw new Error(packet.error.message);
-  const authority = parseAgentRequestAuthority({
+  // Stored mode: attemptOne was read back from this run's durable artifacts, so
+  // its role->profile/skill couplings belong to the policy tables in force when
+  // it was ISSUED. Re-checking them against today's tables strands every run on
+  // disk across an agent's profile promotion, and would also disagree with
+  // persistedWaveAttemptTwoCompatibilityProblem, which derives this same
+  // attempt-2 in stored mode.
+  const authority = parseStoredAgentRequestAuthority({
     ...attemptOne,
     requestId: requestId.value,
     attempt: 2,
