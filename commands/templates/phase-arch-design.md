@@ -22,7 +22,7 @@ You are ONE of several parallel designers. Produce **exactly one** candidate, vi
 
 ## CRITICAL: You CAN Write Files
 
-You are a subagent — Write/Edit is allowed. Do NOT read `.claude/hooks/` or `.claude/state/`. Do NOT use `AskUserQuestion` — you are headless.
+You are a subagent — Write/Edit is allowed, scoped to this phase's artifact directory (your `{candidate_output_path}` and the panel-run dir under `.claude/specs/`). Do NOT read `.claude/hooks/` or `.claude/state/`. Do NOT use `AskUserQuestion` — you are headless.
 
 ## Process
 

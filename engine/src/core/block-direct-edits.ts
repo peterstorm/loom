@@ -6,7 +6,7 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import type { HookResult } from "../types";
-import { IMPL_AGENTS, TASK_GRAPH_PATH, SUBAGENT_DIR, pathExistsFailClosed } from "../config";
+import { IMPL_AGENTS, TASK_GRAPH_PATH, subagentDir, pathExistsFailClosed } from "../config";
 import { parseSessionId } from "../machine/evidence";
 
 const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "edit", "write", "multi_edit"]);
@@ -55,7 +55,7 @@ export function shouldBlockDirectEdit(
   // are read-only and must never receive write capability, even when active.
   // The interpolation below uses the BRANDED SessionId (path-safe by
   // construction — same guarantee ledger.ts's sessionScopedPath provides).
-  const activeFile = `${SUBAGENT_DIR}/${parsed}.active`;
+  const activeFile = `${subagentDir()}/${parsed}.active`;
   try {
     if (existsSync(activeFile) && statSync(activeFile).size > 0) {
       const roster = readFileSync(activeFile, "utf-8")

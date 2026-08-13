@@ -871,6 +871,289 @@ describe("guard-state-file — edge cases", () => {
   });
 });
 
+describe("guard-state-file — heredoc bodies are data, not command text (issue-20)", () => {
+  it("quoted-delimiter heredoc bodies are opaque: inert prose never blocks (issue-20 repro)", () => {
+    // The exact issue-20 minimal repro: double-quoted backtick pair inside a
+    // quoted heredoc body; both writes target /tmp only.
+    expect(guardDecision(
+      "cat > /tmp/x.ts << 'EOF'\nconst lines = [\n  \"echo no `bullmq`/`ioredis` here\",\n];\nEOF",
+    )).toBe("allow");
+    // Guarded-path substrings in body prose are data, not references.
+    expect(guardDecision(
+      "cat > /tmp/x.py << 'PYEOF'\nmsg = 'path: .pi/state/active_task_graph.json'\nprint(msg)\nPYEOF",
+    )).toBe("allow");
+    expect(guardDecision(
+      "cat > /tmp/spec.md << 'MDEOF'\nThe state lives in .claude/state/active_task_graph.json.\nMDEOF",
+    )).toBe("allow");
+    expect(guardDecision(
+      "cat > /tmp/spec.md << 'MDEOF'\nInstall `bullmq`/`ioredis`.\nMDEOF",
+    )).toBe("allow");
+    expect(guardDecision(
+      "cat <<- 'TEOF'\n\tprose mentioning .claude/state/active_task_graph.json\n\tTEOF",
+    )).toBe("allow");
+    // The very same text OUTSIDE a heredoc is a live command substitution and
+    // stays fail-closed.
+    expect(guardDecision("echo \"check `active_task_graph.json` path\"")).toBe("block");
+  });
+
+  it("an unquoted delimiter makes body substitutions LIVE commands (fail-closed)", () => {
+    expect(guardDecision(
+      "cat > /tmp/x << EOF\n$(rm .claude/state/active_task_graph.json)\nEOF",
+    )).toBe("block");
+    expect(guardDecision(
+      "cat > /tmp/x << EOF\n`rm .claude/state/active_task_graph.json`\nEOF",
+    )).toBe("block");
+    expect(guardDecision(
+      "cat > /tmp/x << EOF\necho \"$(mv .claude/state/active_task_graph.json /tmp/)\"\nEOF",
+    )).toBe("block");
+    // Quote characters are literal data in an unquoted body: they do not
+    // suppress the substitution (verified against bash).
+    expect(guardDecision(
+      "cat > /tmp/x << EOF\n'$(rm .claude/state/active_task_graph.json)'\nEOF",
+    )).toBe("block");
+    // Escaped dollar is literal and harmless.
+    expect(guardDecision(
+      "cat > /tmp/x << EOF\n\\$(echo .claude/state prose)\nEOF",
+    )).toBe("allow");
+    // The same destructive text in a QUOTED body is data and must allow.
+    expect(guardDecision(
+      "cat > /tmp/x << 'EOF'\n$(rm .claude/state/active_task_graph.json)\nEOF",
+    )).toBe("allow");
+  });
+
+  it("redirect targets on the opener line stay guarded", () => {
+    expect(guardDecision(
+      "cat > .claude/state/active_task_graph.json << 'EOF'\nprose\nEOF",
+    )).toBe("block");
+    expect(guardDecision(
+      "cat > .claude/state/active_task_graph.json << EOF\n$(echo hi)\nEOF",
+    )).toBe("block");
+    // Unterminated heredoc with a live substitution still blocks.
+    expect(guardDecision(
+      "cat > /tmp/x << EOF\n$(rm .claude/state/active_task_graph.json)\n",
+    )).toBe("block");
+  });
+
+  it("compound commands with heredocs keep chain scoping", () => {
+    expect(guardDecision(
+      "cat << 'A' && echo hi\nbody\nA",
+    )).toBe("allow");
+    expect(guardDecision(
+      "cat << 'A' && rm .claude/state/active_task_graph.json\nbody\nA",
+    )).toBe("block");
+    // Two heredocs on one opener line.
+    expect(guardDecision(
+      "cat << A << B\nx `a`/`b`\nA\ny\nB",
+    )).toBe("allow");
+  });
+
+  it("script heredocs (interpreter stdin) stay fully judged even when quoted", () => {
+    // A QUOTED delimiter does not make the body inert when it feeds a code
+    // interpreter: the inner interpreter still executes it as a script.
+    expect(guardDecision(
+      "bash << 'EOF'\nrm .claude/state/active_task_graph.json\nEOF",
+    )).toBe("block");
+    expect(guardDecision(
+      "sh << 'EOF'\ncat > .claude/state/active_task_graph.json << X\nY\nX\nEOF",
+    )).toBe("block");
+    expect(guardDecision(
+      "cat << 'EOF' | bash\nrm .claude/state/active_task_graph.json\nEOF",
+    )).toBe("block");
+    expect(guardDecision(
+      "python3 - << 'PY'\nprint('.claude/state prose')\nPY",
+    )).toBe("block");
+    expect(guardDecision(
+      "env X=y bash << 'EOF'\nrm .claude/state/active_task_graph.json\nEOF",
+    )).toBe("block");
+    // Two heredocs on one line split by `&&`: only the interpreter-fed one
+    // is a script.
+    expect(guardDecision(
+      "cat << A && bash << B\nrm .claude/state/active_task_graph.json\nA\nrm .claude/state/active_task_graph.json\nB",
+    )).toBe("block");
+    // awk/sed read stdin as DATA — not script context.
+    expect(guardDecision(
+      "awk << 'EOF'\nrm .claude/state/active_task_graph.json\nEOF",
+    )).toBe("allow");
+    // An interpreter on the OTHER side of `&&` (no pipe) does not make this
+    // heredoc a script.
+    expect(guardDecision(
+      "bash -c 'true' && cat << 'EOF'\nrm .claude/state/active_task_graph.json\nEOF",
+    )).toBe("allow");
+    // The same inert text in a DATA heredoc must allow.
+    expect(guardDecision(
+      "cat > /tmp/x << 'EOF'\nrm .claude/state/active_task_graph.json\nEOF",
+    )).toBe("allow");
+  });
+
+  it("block messages name the offending segment and its pipe-chain (issue-20 addendum)", () => {
+    const result = guardStateFileDecision("npm install && rm .claude/state/active_task_graph.json");
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") {
+      expect(result.message).toContain("Offending segment: \"rm .claude/state/active_task_graph.json\"");
+    }
+    const piped = guardStateFileDecision("echo x | rm .claude/state/active_task_graph.json");
+    expect(piped.kind).toBe("block");
+    if (piped.kind === "block") {
+      expect(piped.message).toContain("In chain:");
+    }
+  });
+
+  it("property: random quoted-heredoc body prose never blocks", () => {
+    fc.assert(
+      fc.property(fc.string({ minLength: 1, maxLength: 120 }), (prose) => {
+        const cmd = `cat > /tmp/out << 'EOF'\n${prose.replace(/\n/g, " ")}\nEOF`;
+        expect(guardDecision(cmd)).toBe("allow");
+      }),
+      { numRuns: 100 },
+    );
+  });
+});
+
+describe("guard-state-file — heredoc script-body detection stays fail-closed (C1/C2/C3, wrappers)", () => {
+  const G = ".claude/state/active_task_graph.json";
+  const guardedWrite = `rm ${G}`;
+  const prose = `this prose mentions ${G} but is data`;
+
+  it("brace-grouped pipelines execute the body: { cat << 'EOF'; } | bash blocks", () => {
+    expect(guardDecision(`{ cat << 'EOF' ; } | bash\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`{ tee x << 'EOF' ; } | bash\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`{ cat << 'EOF' && cat ; } | bash\n${guardedWrite}\nEOF`)).toBe("block");
+  });
+
+  it("paren-grouped, if/then/fi, and case pipelines keep the script head in the group", () => {
+    expect(guardDecision(`(cat << 'EOF'; cat) | bash\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`if true; then cat << 'EOF'; fi | bash\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`case x in a) cat << 'EOF';; esac | bash\n${guardedWrite}\nEOF`)).toBe("block");
+  });
+
+  it("reader+executor compounds (while read … eval) execute the body and block", () => {
+    expect(guardDecision(`while read -r l; do eval "$l"; done << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`while read l; do sh -c "$l"; done << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`while read l; do . "$l"; done << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`cat << 'EOF' | while read l; do eval "$l"; done\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`eval "$(cat)" << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`sh -c "$(sed -n 1p)" << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+  });
+
+  it("reader-only and executor-only compounds stay data", () => {
+    expect(guardDecision(`while read l; do echo "$l"; done << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+    expect(guardDecision(`while read l; do sh -c 'echo hi'; done << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+    expect(guardDecision(`read x; eval "$x" << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+    expect(guardDecision(`echo "$(cat)" << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+    expect(guardDecision(`eval "$(printf 'x')" << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+  });
+
+  it("a `<<` inside ${…} word text is not a heredoc opener (concealment fails closed)", () => {
+    expect(guardDecision(`echo ${'${x:-<<\'EOF\'}'}; rm ${G}\n`)).toBe("block");
+    expect(guardDecision(`echo "${'${x:-<<EOF}'}"; rm ${G}\n`)).toBe("block");
+  });
+
+  it("wrapped interpreters are unwrapped: sudo/command/timeout/env … << blocks", () => {
+    expect(guardDecision(`sudo bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`command bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`timeout 5 bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`env -u FOO bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`sudo -u root -- bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`nice -n 5 bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+  });
+
+  it("xargs turns body lines into command arguments: the body is judged", () => {
+    expect(guardDecision(`cat << 'EOF' | xargs rm\n${G}\nEOF`)).toBe("block");
+    expect(guardDecision(`cat << 'EOF' | xargs -I{} sh -c '{}'\n${guardedWrite}\nEOF`)).toBe("block");
+  });
+
+  it("interpreter stdin DATA stays data: file/inline/module program sources", () => {
+    expect(guardDecision(`bash script.sh << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+    expect(guardDecision(`bash -c 'echo hi' << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+    expect(guardDecision(`python3 -c 'print(1)' << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+    expect(guardDecision(`python3 -m json.tool << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+    expect(guardDecision(`python3 script.py << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+    expect(guardDecision(`cat << 'EOF' | grep -c bash\n${prose}\nEOF`)).toBe("allow");
+  });
+
+  it("inline programs that read the body as THEIR program are scripts (bash -c 'sh' class)", () => {
+    // The inline program inherits the command's stdin and reads it as its
+    // own program source — the heredoc body is EXECUTED (verified against
+    // real bash), so it must be judged as a script even with a quoted
+    // delimiter. HEAD regressed these to allow; the recursion restores block.
+    expect(guardDecision(`bash -c 'sh' << 'BODY'\n${guardedWrite}\nBODY`)).toBe("block");
+    expect(guardDecision(`bash -c 'python3' << 'PY'\n${guardedWrite}\nPY`)).toBe("block");
+    expect(guardDecision(`sh -c 'sh' << 'BODY'\n${guardedWrite}\nBODY`)).toBe("block");
+    expect(guardDecision(`python3 -c 'bash' << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    // A wrapper around the outer interpreter changes nothing: the inner
+    // program still inherits stdin (env -S re-splits the command line).
+    expect(guardDecision(`env -S 'bash -c "sh"' << 'BODY'\n${guardedWrite}\nBODY`)).toBe("block");
+    // Nested inline programs: `bash -c 'bash -c sh'` — the innermost sh
+    // reads the body.
+    expect(guardDecision(`bash -c 'bash -c sh' << 'BODY'\n${guardedWrite}\nBODY`)).toBe("block");
+    // A WRAPPER front must not hide the interpreter the stdin reaches:
+    // the inline-program checks bind to the RESOLVED interpreter, so a
+    // variable-fed program under sudo still joins the reader+executor pair.
+    expect(guardDecision(`while read l; do sudo sh -c "$l"; done << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`while read l; do sudo sh -c 'echo hi'; done << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+  });
+
+  it("inline reader+executor pairs execute the body: bash -c 'eval \"$(cat)\"' blocks", () => {
+    expect(guardDecision(`bash -c 'eval "$(cat)"' << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`sh -c 'eval "$(cat)"' << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`bash -c 'eval "$(sed -n 1p)"' << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    // A reader WITHOUT an executor inside the program stays data.
+    expect(guardDecision(`bash -c 'echo "$(cat)"' << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+    // An inline program that merely reads its own stdin as DATA stays data.
+    expect(guardDecision(`bash -c 'cat' << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+    expect(guardDecision(`bash -c 'sh file.sh' << 'BODY'\n${prose}\nBODY`)).toBe("allow");
+    expect(guardDecision(`bash -c 'python3 script.py' << 'PY'\n${prose}\nPY`)).toBe("allow");
+    // A script body is LIVE command text: inert prose that mentions a
+    // guarded path in it still blocks, exactly like any other script feed.
+    expect(guardDecision(`bash -c 'sh' << 'BODY'\n${prose}\nBODY`)).toBe("block");
+  });
+
+  it("redirect constructs never read as interpreter or file arguments", () => {
+    expect(guardDecision(`sudo bash > /tmp/log << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`bash 2>&1 << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+  });
+
+  it("F1: fused heredoc spelling — redirect fused into/before the head — stays a script", () => {
+    expect(guardDecision(`bash<<'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`sh<<EOF\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`python3<<'PY'\n${guardedWrite}\nPY`)).toBe("block");
+    expect(guardDecision(`sudo bash<<'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`env X=y bash<<'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`timeout 5 bash<<'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`2>/dev/null bash<<'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`>log sh<<'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    // A fused DATA heredoc stays data: the body is opaque, not a script.
+    expect(guardDecision(`cat<<'EOF'\n${prose}\nEOF`)).toBe("allow");
+    expect(guardDecision(`cat<<'EOF'|grep -c bash\n${prose}\nEOF`)).toBe("allow");
+  });
+
+  it("F2: subshell-wrapped interpreter heredocs with the close on the opener line stay scripts", () => {
+    expect(guardDecision(`( bash << 'EOF' )\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`( bash -x << 'EOF' )\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`( bash<<'EOF' )\n${guardedWrite}\nEOF`)).toBe("block");
+    // The heredoc redirect attaches to the subshell's stdin: still a script.
+    expect(guardDecision(`( bash ) << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    // A DATA heredoc inside a subshell stays data.
+    expect(guardDecision(`( cat << 'EOF' )\n${prose}\nEOF`)).toBe("allow");
+    expect(guardDecision(`( cat ) << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+  });
+
+  it("F3: case-clause interpreter heredocs stay scripts (patterns are not heads)", () => {
+    expect(guardDecision(`case x in x) bash << 'EOF'\n${guardedWrite}\nEOF\n;; esac`)).toBe("block");
+    expect(guardDecision(`case x in *|y) bash << 'EOF'\n${guardedWrite}\nEOF\n;; esac`)).toBe("block");
+    expect(guardDecision(`case x in (x) bash << 'EOF'\n${guardedWrite}\nEOF\n;; esac`)).toBe("block");
+    expect(guardDecision(`case $x in $y) bash << 'EOF'\n${guardedWrite}\nEOF\n;; esac`)).toBe("block");
+    // A case-clause DATA heredoc stays data.
+    expect(guardDecision(`case x in x) cat << 'EOF'\n${prose}\nEOF\n;; esac`)).toBe("allow");
+  });
+
+  it("data/script group split is preserved: cat << 'A' && bash << 'B'", () => {
+    expect(guardDecision(`cat << 'A' && bash << 'B'\n${prose}\nA\nrm ${G}\nB\n`)).toBe("block");
+    // The data body A stays data even though the sibling group B is a script.
+    expect(guardDecision(`cat << 'A' && bash << 'B'\n${prose}\nA\necho hi\nB\n`)).toBe("allow");
+  });
+});
+
 describe("guard-state-file — guarded-path patterns resolve machinesDir() at decision time (round-15)", () => {
   afterEach(() => {
     delete process.env.LOOM_MACHINES_DIR;

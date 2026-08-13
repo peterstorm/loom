@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -78,6 +78,12 @@ beforeEach(() => {
   writeState(initialGraph());
   delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
   delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+  // Re-assert the fixture env per test: under `bun test` multiple files share
+  // one process, and another file's per-test env mutation can leave these
+  // pointing elsewhere between this file's tests.
+  process.env.LOOM_STATE_PATH = statePath;
+  process.env.PI_CODING_AGENT_DIR = piAgentDir;
+  process.env.LOOM_SUBAGENT_DIR = subagentDir;
 });
 
 afterAll(() => {
@@ -1308,6 +1314,194 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("issues a SCOPED write grant to a phase agent and enforces its artifact scope", async () => {
+    writeState({
+      ...initialGraph(),
+      current_phase: "brainstorm",
+      skipped_phases: ["brainstorm"],
+      phase_artifacts: {},
+      spec_file: null,
+      plan_file: null,
+    });
+    const pi = await extension();
+    const parentSession = "019fca39-f989-7510-8e62-50dadbcad430";
+    const childSession = "019fca39-f989-7510-8e62-50dadbcad431";
+    const input = {
+      agentScope: "user",
+      agent: "specify-agent",
+      task: "## Specify: F6 fugue panel\nOutput location: `.claude/specs/2026-08-12-foo/spec.md`",
+    };
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-scoped-specify",
+      input,
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => parentSession } })).toEqual([undefined]);
+    expect(input.task).toMatch(/LOOM_PI_WRITE_GRANT:[0-9a-f]{64}/);
+
+    // The grant carries a phase binding and a prompt-derived artifact scope.
+    const grantsDir = join(subagentDir, "pi-write-grants");
+    const stored = JSON.parse(readFileSync(join(grantsDir, readdirSync(grantsDir)[0]!), "utf-8"));
+    expect(stored.taskId).toBe("phase:specify");
+    expect(stored.scopeDirs).toEqual([join(ROOT, ".claude", "specs", "2026-08-12-foo") + "/"]);
+
+    const started = await pi.emit("before_agent_start", {
+      prompt: input.task,
+      systemPrompt: "<!-- LOOM_PI_AGENT_ID:specify-agent -->",
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+    // Multiple before_agent_start handlers may be registered; the grant
+    // consumer is one of them and must not block the child start.
+    expect(started).not.toContainEqual(expect.objectContaining({ message: expect.anything() }));
+    expect(readFileSync(join(subagentDir, `${childSession}.active`), "utf-8").trim())
+      .toMatch(/^pi-grant-[0-9a-f]{16}$/);
+
+    // The spec file — the artifact the template mandates — is writable.
+    const inScope = await pi.emit("tool_call", {
+      toolName: "write",
+      input: { path: ".claude/specs/2026-08-12-foo/spec.md", content: "# Spec" },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+    expect(inScope).toEqual([undefined]);
+    // Sibling file directly under specs/ (not the run slug) is out of scope.
+    const sibling = await pi.emit("tool_call", {
+      toolName: "write",
+      input: { path: ".claude/specs/other.md", content: "x" },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+    expect(sibling).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("outside the granted artifact scope"),
+    }));
+    expect(sibling).toContainEqual(expect.objectContaining({
+      reason: expect.stringContaining(".claude/specs/2026-08-12-foo"),
+    }));
+    // The repo root and the other artifact tree stay out of scope.
+    const rootHit = await pi.emit("tool_call", {
+      toolName: "edit",
+      input: { path: "README.md" },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+    expect(rootHit).toContainEqual(expect.objectContaining({ block: true }));
+    const plansHit = await pi.emit("tool_call", {
+      toolName: "write",
+      input: { path: ".claude/plans/2026-08-12-foo.md", content: "# Plan" },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+    expect(plansHit).toContainEqual(expect.objectContaining({ block: true }));
+    // The state file itself is doubly protected (edit guard + scope).
+    const stateHit = await pi.emit("tool_call", {
+      toolName: "write",
+      input: { path: ".claude/state/active_task_graph.json", content: "{}" },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+    expect(stateHit).toContainEqual(expect.objectContaining({ block: true }));
+
+    await pi.emit("session_shutdown", {}, {
+      cwd: ROOT, sessionManager: { getSessionId: () => childSession },
+    });
+    expect(() => readFileSync(join(subagentDir, `${childSession}.active`), "utf-8")).toThrow();
+  });
+
+  it("gives no write grant to read-only spawns (reviewers, decompose, panel judges)", async () => {
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: join(temp, "no-grant-plan.md") },
+      skipped_phases: ["plan-alignment"],
+      plan_file: join(temp, "no-grant-plan.md"),
+    });
+    writeFileSync(join(temp, "no-grant-plan.md"), "# Plan\n");
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad432";
+    for (const [agent, task] of [
+      // A REALISTIC judge prompt: the manifest and interview paths it must
+      // READ are under .claude/specs/ — path mentions alone must never mint
+      // a write grant for a read-only role.
+      ["arch-judge-agent", "Candidate manifest: .claude/specs/2026-08-12-foo/panel-runs/run.abc/manifest.json\nValidated interview digest: .claude/specs/2026-08-12-foo/panel-runs/run.abc/interview.json\nScore the candidates. Return pure JSON."],
+      ["decompose-agent", "Decompose the plan at .claude/plans/2026-08-12-foo.md into a task graph."],
+      ["code-reviewer", "Task: T1\nReview the implementation."],
+    ] as const) {
+      // arch-judge and decompose run during the architecture phase; the
+      // reviewer runs during execute.
+      writeState({
+        ...initialGraph(),
+        current_phase: agent === "code-reviewer" ? "execute" : "architecture",
+        phase_artifacts: {
+          architecture: join(temp, "no-grant-plan.md"),
+          ...(agent === "code-reviewer" ? {} : { specify: join(temp, "no-grant-spec.md") }),
+        },
+        skipped_phases: ["plan-alignment"],
+        spec_file: agent === "code-reviewer" ? null : join(temp, "no-grant-spec.md"),
+        plan_file: join(temp, "no-grant-plan.md"),
+      });
+      writeFileSync(join(temp, "no-grant-spec.md"), "# Spec\n");
+      const input = { agentScope: "user", agent, task };
+      const call = await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId: `call-no-grant-${agent}`,
+        input,
+      }, { cwd: ROOT, sessionManager: { getSessionId: () => session } });
+      expect(call, agent).toEqual([undefined]);
+      expect(input.task, agent).not.toMatch(/LOOM_PI_WRITE_GRANT:/);
+    }
+
+    // Positive control: a WRITER role (designer) with the same run-scoped
+    // paths DOES receive a scoped grant — the policy is role-driven, not
+    // path-absence-driven.
+    writeState({
+      ...initialGraph(),
+      current_phase: "architecture",
+      phase_artifacts: { architecture: join(temp, "no-grant-plan.md") },
+      skipped_phases: ["plan-alignment"],
+      spec_file: join(temp, "no-grant-spec.md"),
+      plan_file: join(temp, "no-grant-plan.md"),
+    });
+    const designerInput = {
+      agentScope: "user",
+      agent: "arch-designer-agent",
+      task: "Use the architecture-tech-lead skill.\nWrite your candidate to .claude/specs/2026-08-12-foo/panel-runs/run.abc/candidates/candidate-simplicity-first.md",
+    };
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-grant-designer",
+      input: designerInput,
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
+    expect(designerInput.task).toMatch(/LOOM_PI_WRITE_GRANT:[0-9a-f]{64}/);
+    // The real flow revokes outstanding grants when the parent subagent call
+    // completes (tool_result) or the parent session ends — clean up so the
+    // unconsumed designer grant cannot leak into sibling tests.
+    await pi.emit("session_shutdown", {}, { cwd: ROOT, sessionManager: { getSessionId: () => session } });
+  });
+
+  it("blocks the panel interview stage under pi with an actionable diagnostic", async () => {
+    writeState({
+      ...initialGraph(),
+      current_phase: "architecture",
+      phase_artifacts: { architecture: join(temp, "no-grant-plan.md") },
+      skipped_phases: ["plan-alignment"],
+      spec_file: join(temp, "no-grant-spec.md"),
+      plan_file: join(temp, "no-grant-plan.md"),
+    });
+    writeFileSync(join(temp, "no-grant-spec.md"), "# Spec\n");
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad437";
+    const input = {
+      agentScope: "user",
+      agent: "arch-interviewer-agent",
+      task: "Run the full questionnaire and write the digest to .claude/specs/x/panel-runs/run.y/interview.md",
+    };
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-panel-interview",
+      input,
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => session } });
+    expect(call).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("interview stage cannot run under pi"),
+    }));
+    expect(call).toContainEqual(expect.objectContaining({
+      reason: expect.stringContaining("docs/pi-phase-agent-interviews.md"),
+    }));
+    // The spawn is refused up front: no grant, no roster entry, no pointer.
+    // No grant was ever minted: the grants dir does not even exist.
+    const grantDir = join(subagentDir, "pi-write-grants");
+    expect(existsSync(grantDir) ? readdirSync(grantDir) : []).toEqual([]);
+    expect(input.task).not.toMatch(/LOOM_PI_WRITE_GRANT:/);
+  });
+
   it("continues result reconciliation when write-grant revocation fails", async () => {
     const planPath = join(temp, "result-revocation-failure-plan.md");
     writeFileSync(planPath, "# Plan\n");
@@ -2041,11 +2235,77 @@ describe("Pi extension review tool_result integration", () => {
     });
   });
 
+  it("mints pi-structured evidence from a real-shaped green Bash test run", async () => {
+    // LIVE-captured payload shapes (pi 0.83 --mode json child, 2026-08-12):
+    // assistant message_end carries the bash toolCall block with
+    // id/name/arguments; the toolResult arrives as a message_end with role
+    // toolResult + toolCallId/toolName/isError and the runner output text.
+    writeState({
+      ...initialGraph(),
+      executing_tasks: ["T1"],
+      tasks: [{
+        ...initialGraph().tasks[0],
+        file_list: [],
+        files_modified: ["packages/framework/src/__tests__/file-atomic.test.ts"],
+        artifact_baseline: [],
+        attempt_artifact_baseline: [{
+          artifact: "packages/framework/src/__tests__/file-atomic.test.ts",
+          snapshot: { kind: "missing" },
+        }],
+        new_tests_required: false,
+      }],
+    });
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad42e" } };
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      content: [],
+      details: {
+        results: [{
+          agent: "code-implementer-agent",
+          task: "Task ID: T1",
+          exitCode: 0,
+          messages: [
+            {
+              role: "assistant",
+              content: [{
+                type: "toolCall",
+                id: "chatcmpl-tool-structured-repro",
+                name: "bash",
+                arguments: {
+                  command: "cd /home/peterstorm/dev/agentic/fugue && bun test packages/framework/src/__tests__/file-atomic.test.ts 2>&1 | tail -n 40",
+                },
+              }],
+            },
+            {
+              role: "toolResult",
+              toolCallId: "chatcmpl-tool-structured-repro",
+              toolName: "bash",
+              isError: false,
+              content: [{
+                type: "text",
+                text: "bun test v1.3.13 (bf2e2cec)\n\nfile-atomic.test.ts:\n(pass) atomic commit\n\n 2142 pass\n 0 fail\n 1 expect() calls\nRan 1 test across 1 file. [11.00ms]\n",
+              }],
+            },
+          ],
+        }],
+      },
+    }, context);
+
+    const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+    expect(task.test_result).toMatchObject({
+      verdict: "untrusted",
+      passed: true,
+      label: expect.stringMatching(/^pi-structured: /),
+    });
+    expect(task.proof.state).toBe("satisfied");
+  });
+
   it.each([
-    "printf 'bun test\\n654 pass\\n'",
-    "bun test || true",
-    "bun test | tee out.log",
-  ])("keeps transcript fallback untrusted for test-looking command: %s", async (command) => {
+    ["printf 'bun test\\n654 pass\\n'", "654 pass\n0 fail\n"],
+    ["bun test | grep -v fail", "654 pass\n"],
+    ["cd engine && bun test | grep -v fail", "654 pass\n"],
+  ] as const)("keeps transcript fallback untrusted for test-looking command: %s", async (command, output) => {
     writeState({
       ...initialGraph(),
       executing_tasks: ["T1"],
@@ -2073,7 +2333,7 @@ describe("Pi extension review tool_result integration", () => {
           exitCode: 0,
           messages: [
             { role: "assistant", content: [{ type: "toolCall", id: "call-test", name: "bash", arguments: { command } }] },
-            { role: "toolResult", toolCallId: "call-test", toolName: "bash", content: [{ type: "text", text: "654 pass\n0 fail\n" }] },
+            { role: "toolResult", toolCallId: "call-test", toolName: "bash", content: [{ type: "text", text: output }] },
           ],
         }],
       },

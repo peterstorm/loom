@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import {
   PANEL_LENSES,
   aggregateVerdicts,
+  architectureCriterion,
   candidateFilename,
   parseJudgeVerdict,
+  type ArchitectureCriterion,
   type CandidateFilename,
   type CandidateRanking,
   type JudgeVerdict,
@@ -41,6 +43,7 @@ import {
   type AgentRequestAuthority,
   type ArtifactDigest,
   type BlockedDiagnostic,
+  type AgentRosterSlot,
   type CompleteRoster,
   type DomainResult,
   type EffectId,
@@ -1181,9 +1184,6 @@ function crossRosterErrors(left: ExactRoster, right: ExactRoster): readonly stri
   return errors;
 }
 
-declare const ARCHITECTURE_CRITERION: unique symbol;
-export type ArchitectureCriterion = string & { readonly [ARCHITECTURE_CRITERION]: true };
-
 export type ArchitecturePanelAuthority = Readonly<{
   schemaVersion: 2;
   panel: "architecture";
@@ -1218,6 +1218,18 @@ export function parseArchitecturePanelAuthority(raw: ArchitecturePanelAuthorityI
     if (criteria === null) errors.push("judge criteria must be a non-empty distinct ordered list");
     const parsedLenses = lenses?.filter((lens): lens is PanelLens => (PANEL_LENSES as readonly string[]).includes(lens)) ?? [];
     if (lenses !== null && parsedLenses.length !== lenses.length) errors.push("candidate lenses contain an unknown architecture lens");
+    // Criteria are minted through the closed vocabulary, not asserted into
+    // the brand: a checkpoint criterion outside deriveJudgeCriteria's
+    // vocabulary cannot come from a validated digest and is rejected.
+    const mintedCriteria = criteria === null
+      ? []
+      : criteria.flatMap((criterion) => {
+          const minted = architectureCriterion(criterion);
+          return minted === null ? [] : [minted];
+        });
+    if (criteria !== null && mintedCriteria.length !== criteria.length) {
+      errors.push("judge criteria contain a criterion outside the validated interview vocabulary");
+    }
     if (!candidateRoster.ok) errors.push(...candidateRoster.error.violations.map(({ kind }) => `candidate roster: ${kind}`));
     if (!judgeRoster.ok) errors.push(...judgeRoster.error.violations.map(({ kind }) => `judge roster: ${kind}`));
     if (runId.ok && lenses !== null && candidateRoster.ok) {
@@ -1245,13 +1257,14 @@ export function parseArchitecturePanelAuthority(raw: ArchitecturePanelAuthorityI
       return persistentFailure(panelError("architecture", "invalid-authority", errors.join("; ") || "architecture authority is invalid"));
     }
     const canonicalLenses = Object.freeze(parsedLenses) as readonly [PanelLens, ...PanelLens[]];
+    const canonicalCriteria = Object.freeze(mintedCriteria) as unknown as readonly [ArchitectureCriterion, ...ArchitectureCriterion[]];
     return persistentSuccess(Object.freeze({
       schemaVersion: 2 as const,
       panel: "architecture" as const,
       runId: runId.value,
       candidateLenses: canonicalLenses,
       candidateIds: Object.freeze(canonicalLenses.map(candidateFilename)) as readonly [CandidateFilename, ...CandidateFilename[]],
-      judgeCriteria: Object.freeze([...criteria]) as unknown as readonly [ArchitectureCriterion, ...ArchitectureCriterion[]],
+      judgeCriteria: canonicalCriteria,
       candidateRoster: candidateRoster.value,
       judgeRoster: judgeRoster.value,
     }));
@@ -1588,7 +1601,7 @@ function initialSlots<Result>(roster: ExactRoster): NonEmpty<OpenSlot<Result>> {
 }
 
 function pendingAuthorities<Result>(roster: ExactRoster, slots: NonEmpty<OpenSlot<Result>>): NonEmpty<AgentRequestAuthority> | null {
-  const requests = slots.flatMap((progress) => progress.status === "accepted" ? [] : [roster.byId.get(progress.slotId)!.attempts[progress.nextAttempt - 1]]);
+  const requests = slots.flatMap((progress) => progress.status === "accepted" ? [] : [requireRosterAttempt(roster, progress.slotId, progress.nextAttempt)]);
   return requests.length === 0 ? null : Object.freeze(requests) as unknown as NonEmpty<AgentRequestAuthority>;
 }
 
@@ -1651,6 +1664,37 @@ function findRosterRequest(roster: ExactRoster, requestId: string): AgentRequest
   return null;
 }
 
+/** Proven roster access, the kernel's `requireEntry` analogue. The parser
+ *  builds `byId` from the same `orderedSlots` it validates, so every slot has
+ *  an entry — the compiler cannot see the link. A miss here is a broken
+ *  invariant (never a degraded input): throw with an invariant message, which
+ *  the reducers' try/catch converts into a fail-closed malformed-event rather
+ *  than a non-null assertion passing a lie downstream. */
+function requireRosterEntry(roster: ExactRoster, slotId: SlotId): AgentRosterSlot {
+  const slot = roster.byId.get(slotId);
+  if (slot === undefined) throw new Error(`panel program invariant: roster has no slot '${slotId}' after parse`);
+  return slot;
+}
+
+/** Proven attempt access: parseExactRoster enforces exactly two attempts per
+ *  slot, so attempt 1|2 always resolves. Miss = broken invariant, thrown. */
+function requireRosterAttempt(roster: ExactRoster, slotId: SlotId, attempt: number): AgentRequestAuthority {
+  const request = requireRosterEntry(roster, slotId).attempts[attempt - 1];
+  if (request === undefined) {
+    throw new Error(`panel program invariant: slot '${slotId}' has no attempt ${attempt} after parse`);
+  }
+  return request;
+}
+
+/** Proven request lookup: the caller has already located this request (a
+ *  settled outcome), so absence would be a broken invariant, not a degraded
+ *  input — throw instead of asserting. */
+function requireRosterRequest(roster: ExactRoster, requestId: string): AgentRequestAuthority {
+  const found = findRosterRequest(roster, requestId);
+  if (found === null) throw new Error(`panel program invariant: request '${requestId}' is not in the roster`);
+  return found;
+}
+
 function locateProgress<Result>(
   roster: ExactRoster,
   slots: NonEmpty<OpenSlot<Result>>,
@@ -1663,7 +1707,7 @@ function locateProgress<Result>(
   if (index < 0) return persistentFailure(panelError(panel, "unknown-request", `request ${requestId} does not belong to the active panel stage`, { requestId, slotId: authority.slotId }));
   const progress = slots[index]!;
   if (progress.status === "accepted") return persistentFailure(panelError(panel, "duplicate-result", `slot ${progress.slotId} already has an accepted result`, { requestId, slotId: progress.slotId }));
-  const expected = roster.byId.get(progress.slotId)!.attempts[progress.nextAttempt - 1];
+  const expected = requireRosterAttempt(roster, progress.slotId, progress.nextAttempt);
   if (expected.requestId !== requestId) return persistentFailure(panelError(panel, "stale-request", `slot ${progress.slotId} expects attempt ${progress.nextAttempt}, not request ${requestId}`, { requestId, slotId: progress.slotId }));
   return persistentSuccess(Object.freeze({ index, slot: progress, expected }));
 }
@@ -2079,7 +2123,7 @@ export function reducePersistentArchitecturePanel(state: ArchitecturePanelState,
         return persistentSuccess(Object.freeze({ state: next, action: architectureAction(next) }));
       }
       const next = architectureState(Object.freeze({ ...state, slots: settled.value.slots! }));
-      const retry = state.authority.candidateRoster.byId.get(findRosterRequest(state.authority.candidateRoster, event.request.requestId)!.slotId)!.attempts[1];
+      const retry = requireRosterAttempt(state.authority.candidateRoster, requireRosterRequest(state.authority.candidateRoster, event.request.requestId).slotId, 2);
       return persistentSuccess(Object.freeze({ state: next, action: Object.freeze({ kind: "spawn-architecture-candidates" as const, runId: state.authority.runId, requests: Object.freeze([retry]) as NonEmpty<AgentRequestAuthority> }) }));
     }
     if (event.type === "architecture-judge-accepted") {
@@ -2116,7 +2160,7 @@ export function reducePersistentArchitecturePanel(state: ArchitecturePanelState,
         return persistentSuccess(Object.freeze({ state: next, action: architectureAction(next) }));
       }
       const next = architectureState(Object.freeze({ ...state, slots: settled.value.slots! }));
-      const retry = state.authority.judgeRoster.byId.get(findRosterRequest(state.authority.judgeRoster, event.request.requestId)!.slotId)!.attempts[1];
+      const retry = requireRosterAttempt(state.authority.judgeRoster, requireRosterRequest(state.authority.judgeRoster, event.request.requestId).slotId, 2);
       return persistentSuccess(Object.freeze({ state: next, action: Object.freeze({ kind: "spawn-architecture-judges" as const, runId: state.authority.runId, requests: Object.freeze([retry]) as NonEmpty<AgentRequestAuthority> }) }));
     }
     if (state.stage !== "ready-to-aggregate") return persistentFailure(panelError("architecture", "unexpected-event", `ranking is not available during ${state.stage}`));
@@ -2158,7 +2202,7 @@ export function reducePersistentRefutationPanel(state: RefutationPanelState, eve
         return persistentSuccess(Object.freeze({ state: next, action: refutationAction(next) }));
       }
       const next = refutationState(Object.freeze({ ...state, slots: settled.value.slots! }));
-      const retry = state.authority.verifierRoster.byId.get(findRosterRequest(state.authority.verifierRoster, event.request.requestId)!.slotId)!.attempts[1];
+      const retry = requireRosterAttempt(state.authority.verifierRoster, requireRosterRequest(state.authority.verifierRoster, event.request.requestId).slotId, 2);
       return persistentSuccess(Object.freeze({ state: next, action: Object.freeze({ kind: "spawn-refutation-verifiers" as const, runId: state.authority.runId, requests: Object.freeze([retry]) as NonEmpty<AgentRequestAuthority> }) }));
     }
     if (state.stage !== "ready-to-tally") return persistentFailure(panelError("refutation", "unexpected-event", `tally is not available during ${state.stage}`));

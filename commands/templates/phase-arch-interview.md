@@ -14,7 +14,7 @@ You are the **interviewer** for a panel-mode architecture run. You run the inter
 
 ## CRITICAL: You CAN Write Files
 
-You are a subagent — the block-direct-edits hook allows your Write/Edit. Do NOT read `.claude/hooks/` or `.claude/state/`. Just write the digest when the interview is done.
+You are a subagent — the block-direct-edits hook allows your Write/Edit, scoped to this phase's artifact directory (the run's `.claude/specs/` panel dir). Do NOT read `.claude/hooks/` or `.claude/state/`. Just write the digest when the interview is done.
 
 ## Process
 

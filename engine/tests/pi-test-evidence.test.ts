@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { messagesToClaudeJsonl, parsePiMessages, piStructuredTestResult, type PiMessage } from "../../pi/transcript-adapter";
+import { messagesToClaudeJsonl, parsePiMessages, piStructuredTestDiagnostics, piStructuredTestResult, type PiMessage } from "../../pi/transcript-adapter";
 import { parseBashTestOutput } from "../src/parsers/parse-bash-test-output";
 import { extractTestEvidence } from "../src/handlers/subagent-stop/update-task-status";
 
@@ -77,13 +77,63 @@ describe("Pi test-evidence transcript adapter", () => {
     });
   });
 
-  it("requires the classified test segment to own the Bash result", () => {
-    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "bun test || true"))).toEqual({ ok: true, value: null });
-    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "bun test | tee out.log"))).toEqual({ ok: true, value: null });
+  it("requires the classified test segment to own the Bash result — unless the output summary is the verdict", () => {
+    // Standard refusal: the line exit is not provably the test's.
     expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "bun test &"))).toEqual({ ok: true, value: null });
+    // A red run laundered through a line-stripping pipe loses the pipeline
+    // exit AND the zero-fail line: strict-summary guard refuses it.
+    expect(piStructuredTestResult(testRun("654 pass\n", "bun test | grep -v fail"))).toEqual({ ok: true, value: null });
+    // Exit-0 `;`/`&&` chains with the test LAST ran it green by construction
+    // (a red chain would exit nonzero) — standard attribution applies.
+    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "echo skip; bun test"))).toEqual({
+      ok: true,
+      value: { passed: true, evidence: "bun: 654 pass" },
+    });
+    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "git stash && bun test"))).toEqual({
+      ok: true,
+      value: { passed: true, evidence: "bun: 654 pass" },
+    });
+    // A NONZERO exit after `&&` is the guard's, with the test never run:
+    // standard attribution refuses, and the errored line never mints green.
+    const guarded = testRun("654 pass\n0 fail\n", "git stash && bun test");
+    guarded[1] = { ...guarded[1], isError: true };
+    expect(piStructuredTestResult(guarded)).toEqual({ ok: true, value: null });
+    // An errored attributable line (sole test run) resolves to a structured FAIL.
+    const errored = testRun("654 pass\n0 fail\n", "bun test");
+    errored[1] = { ...errored[1], isError: true };
+    expect(piStructuredTestResult(errored)).toEqual({
+      ok: true,
+      value: { passed: false, evidence: "bun: 654 pass" },
+    });
+    // IsLast + `&&` compositions keep the standard attribution.
     expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test"))).toEqual({
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
+    });
+    // The PI-path relax: a test headed by only a `cd` preamble, with later
+    // segments (pipes, `; echo`), is attributable because the paired output's
+    // own summary is present — and the zero-fail line is explicit.
+    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -n 40"))).toEqual({
+      ok: true,
+      value: { passed: true, evidence: "bun: 654 pass" },
+    });
+    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test --no-color 2>&1 | tee /tmp/out.log"))).toEqual({
+      ok: true,
+      value: { passed: true, evidence: "bun: 654 pass" },
+    });
+    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "bun test; echo EXIT:$?"))).toEqual({
+      ok: true,
+      value: { passed: true, evidence: "bun: 654 pass" },
+    });
+    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "bun test || true"))).toEqual({
+      ok: true,
+      value: { passed: true, evidence: "bun: 654 pass" },
+    });
+    // A relaxed composition whose summary shows failures still resolves to a
+    // structured FAIL — the gate rejects it either way, but it is not silent.
+    expect(piStructuredTestResult(testRun("600 pass\n54 fail\n", "cd engine && bun test | tail -n 40"))).toEqual({
+      ok: true,
+      value: { passed: false, evidence: "" },
     });
   });
 
@@ -215,6 +265,34 @@ describe("Pi test-evidence transcript adapter", () => {
 
     expect(messagesToClaudeJsonl([unknownMessage])).toEqual({ ok: true, value: "" });
     expect(piStructuredTestResult([testRun("")[0], unknownMessage])).toEqual({ ok: true, value: null });
+  });
+
+  it("diagnoses why structured capture did not mint (wave-gate blocker forensics)", () => {
+    // No test command at all → no-test-command.
+    expect(piStructuredTestDiagnostics(testRun("654 pass\n0 fail\n", "git status"))).toEqual({
+      ok: true,
+      value: { classifiedCommands: [], attributedPairs: 0, verdict: "no-test-command" },
+    });
+    // Classified but never attributable (backgrounded) → exit-not-attributable.
+    expect(piStructuredTestDiagnostics(testRun("654 pass\n0 fail\n", "bun test &"))).toMatchObject({
+      ok: true,
+      value: expect.objectContaining({ attributedPairs: 0, verdict: "exit-not-attributable" }),
+    });
+    // Laundered summary (zero-fail line stripped) → strict-summary-refused.
+    expect(piStructuredTestDiagnostics(testRun("654 pass\n", "bun test | grep -v fail"))).toMatchObject({
+      ok: true,
+      value: expect.objectContaining({ attributedPairs: 1, verdict: "strict-summary-refused" }),
+    });
+    // Genuine structured mint → structured.
+    expect(piStructuredTestDiagnostics(testRun("654 pass\n0 fail\n", "bun test"))).toMatchObject({
+      ok: true,
+      value: expect.objectContaining({ attributedPairs: 1, verdict: "structured" }),
+    });
+    // Relaxed-but-valid pipe → relaxed.
+    expect(piStructuredTestDiagnostics(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -n 40"))).toMatchObject({
+      ok: true,
+      value: expect.objectContaining({ attributedPairs: 1, verdict: "relaxed" }),
+    });
   });
 
   it("pairs a string-form tool result with its real Bash call for structured evidence", () => {

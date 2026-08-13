@@ -786,6 +786,22 @@ describe("persistent panel authority", () => {
       judgeSlots: architecture.authority.candidateRoster.orderedSlots,
     })).toMatchObject({ ok: false, error: { kind: "invalid-authority" } });
 
+    // A criterion outside the closed interview vocabulary is not a criterion:
+    // the brand is minted by lookup, not asserted (see architectureCriterion).
+    expect(parseArchitecturePanelAuthority({
+      runId: architecture.authority.runId,
+      candidateLenses: architecture.authority.candidateLenses,
+      judgeCriteria: [...architecture.authority.judgeCriteria.slice(0, -1), "my own taste"],
+      candidateSlots: architecture.authority.candidateRoster.orderedSlots,
+      judgeSlots: architecture.authority.judgeRoster.orderedSlots,
+    })).toMatchObject({
+      ok: false,
+      error: {
+        kind: "invalid-authority",
+        message: expect.stringContaining("outside the validated interview vocabulary"),
+      },
+    });
+
     expect(parseRefutationPanelAuthority({
       runId: refutation.authority.runId,
       findings: [findings[0], { ...findings[1], id: findings[0].id, taskId: findings[0].taskId }],

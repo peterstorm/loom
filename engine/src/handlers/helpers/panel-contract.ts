@@ -134,7 +134,7 @@ const handler: HookHandler = async (stdin, args) => {
       // Reject a criterion that is not one this run's digest derives, so a
       // typo'd or stale --criterion cannot produce a verdict that aggregation
       // will later reject as "unexpected" with no way to tell which step lied.
-      if (!criteria.includes(criterion)) {
+      if (!(criteria as readonly string[]).includes(criterion)) {
         return contractError("judge verdict", [
           `criterion must be one of the derived criteria: ${criteria.join(", ")}; received: ${criterion}`,
         ]);

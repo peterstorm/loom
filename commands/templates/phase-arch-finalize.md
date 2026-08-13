@@ -22,7 +22,7 @@ The interview digest at {interview_file_path} already captures the user's priori
 
 ## CRITICAL: You CAN Write Files
 
-You are a subagent — Write/Edit is allowed. Do NOT read `.claude/hooks/` or `.claude/state/`. Write the plan only after the gate is resolved.
+You are a subagent — Write/Edit is allowed, scoped to this phase's artifact directory (`.claude/plans/`, and panel-run dirs under `.claude/specs/{date_slug}/panel-runs/`). Do NOT read `.claude/hooks/` or `.claude/state/`. Write the plan only after the gate is resolved.
 
 ## Validated judge verdicts
 

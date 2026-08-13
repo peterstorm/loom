@@ -219,8 +219,11 @@ describe("legacy panel journal compatibility", () => {
     if (!result.ok) {
       expect(result.error).toContain("Panel program journal could not be safely inspected");
       // The bound cause names the actual failure (revoked proxy) instead of a
-      // blanket "could not be inspected".
-      expect(result.error).toContain("Array.isArray");
+      // blanket "could not be inspected". V8 wordings differ across runtimes
+      // ("Cannot perform 'IsArray' on a proxy that has been revoked" vs the
+      // older "Array.isArray called on a proxy..."); both prove the cause is
+      // bound, which is the contract under test.
+      expect(result.error).toMatch(/Array\.isArray|revoked/);
     }
   });
 

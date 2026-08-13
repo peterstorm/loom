@@ -193,6 +193,8 @@ Opt-in upgrade to the approach gate. Instead of one agent inventing 2–3 approa
 
 Defaults: **3 designers, 3 judges**. `--panel=N` requires an integer from 2 upward; values above 5 lenses are rejected. The panel's ranking is a recommendation—the user still picks. Panel mode stays opt-in until an A/B shows it beats single-agent plans. Plan-alignment loop-backs never re-panel; the phase gate enforces standard single-agent mode.
 
+**Pi note:** panel mode's interview stage is currently **Claude Code only**. Pi children are headless and cannot run the interviewer's `AskUserQuestion` questionnaire; the pi extension refuses the `arch-interviewer-agent` spawn with an explicit diagnostic rather than letting a fabricated digest drive lens/judge selection. See `docs/pi-phase-agent-interviews.md` for the relay/headless-interview design that would lift this.
+
 ### Phase 3.5 — Plan Alignment
 
 | | |
@@ -662,7 +664,13 @@ output.
 ### Protection model
 
 1. **File permissions** — `chmod 444` at rest. Only `StateManager` can write by temporarily toggling to 644.
-2. **Hook guard** — `guard-state-file` is deny-by-default: a bash command referencing guarded state passes only as a read-only command (allowlisted head, no output redirect) or a whitelisted helper; substitution bodies are judged recursively.
+2. **Hook guard** — `guard-state-file` is deny-by-default: a bash command referencing guarded state passes only as a read-only command (allowlisted head, no output redirect) or a whitelisted helper; substitution bodies are judged recursively. Here-document BODIES are data, not command text: a quoted-delimiter body (`<< 'EOF'`) is opaque, an unquoted body's substitutions are judged as live commands, and the redirect target on the opener line stays guarded — so prose mentioning the state dirs inside a heredoc never blocks a command whose actual writes are unguarded. The exception: a heredoc body that gets EXECUTED is a SCRIPT, judged as full command text even when the delimiter is quoted:
+   - fed to a code interpreter reading stdin as its program (`bash << 'EOF'`, `cat << 'EOF' | sh`, `python3 -`) — an interpreter with its own program source (`bash script.sh`, `bash -c '…'`, `python3 -m json.tool`) reads the body as DATA;
+   - piped through compound groups that defer the interpreter (`{ cat << 'EOF'; } | bash`, `if …; then cat << 'EOF'; fi | sh`, `case …;; esac | sh`);
+   - passed to `xargs` (body lines become command arguments);
+   - read into a variable and then executed (`while read l; do eval "$l"; done << 'EOF'`, `sh -c "$l"`, `eval "$(cat)"`);
+   - read as an INLINE program's own program source — the `-c`/`-e` argument inherits the command's stdin, so an inline program that is itself a stdin-reading interpreter (`bash -c 'sh'`, `bash -c 'python3'`, nested `bash -c 'bash -c sh'`) or a reader+executor pair (`bash -c 'eval "$(cat)"'`) executes the body; an inline program with its OWN program source (`bash -c 'sh file.sh'`), an inline DATA reader (`bash -c 'cat'`, `python3 -c 'print(1)'`), or a reader without an executor (`bash -c 'echo "$(cat)"'`) reads the body as data.
+   Common wrappers (`sudo`, `command`, `timeout`, `nice`, `env`, …) are unwrapped before judging, so `sudo bash << 'EOF'` is still a script — and the inline-program checks bind to the RESOLVED interpreter, so `sudo bash -c 'sh'`, `env -S 'bash -c "sh"'`, and `while read l; do sudo sh -c "$l"; done` all execute the body as a script. Fused spellings are normalized to the same judgment: a redirect fused into the interpreter word (`bash<<'EOF'`, `python3<<'PY'`, `sudo bash<<'EOF'`), an interpreter heredoc wrapped in a subshell with the close on the opener line (`( bash << 'EOF' )`), and a `case` clause feeding an interpreter (`case x in x) bash << 'EOF' ;; esac`) all stay scripts; compound-closing `)`/`}` tokens are never read as script-file arguments. Block messages name the offending segment and its pipe-chain. Residuals (deliberately narrow): an unknown wrapper around an interpreter, and a `read`-consumed body whose executor appears after the terminator on a later line.
 3. **Atomic writes** — File-based mutex + tmp-file-then-rename for crash safety.
 4. **Subagent isolation** — Subagents cannot edit the state file directly; only hooks running in the parent process can.
 
@@ -879,6 +887,23 @@ a fresh render from the active package before execution.
 - `LOOM_PLUGIN_ROOT` exposes the active root to Pi child processes for diagnostics.
 - Everything in `engine/src/core/` remains harness-neutral.
 - `pi/loom-bridge.ts` is legacy compatibility code; the package does not load it.
+
+### Pi write grants
+
+Pi subagents are separate processes, so the Claude Code "subagent PID" exemption
+has no analogue. Instead, the parent mints a one-time cryptographic write grant
+per spawn and injects it into the child's task; the child consumes it at
+`before_agent_start`, binding its session to a `pi-grant-*` roster identity that
+`block-direct-edits` trusts. Implementation items get a whole-session
+capability bound to their task-graph Task ID. Writers — the phase agents
+(brainstorm, specify, clarify, plan-alignment, architecture) and the panel
+writer agents (interviewer, designers, finalizer) — get a SCOPED capability:
+the artifact directories derived from their prompt (`.claude/specs/{slug}/`,
+`.claude/plans/`, panel-run dirs), enforced on every Edit/Write target and
+refusing scopes that reach into guarded state. Scope issuance is role-driven:
+a read-only spawn (reviewer, verifier, judge, decompose, spec-check) receives
+nothing even when its prompt names artifact paths — a judge's candidate paths
+are reads, not write scope.
 
 See `docs/pi-usage.md` and `docs/migration-claude-code-to-pi.md` for details.
 

@@ -10,8 +10,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
-import { SUBAGENT_DIR } from "../engine/src/config";
+import { basename, dirname, join, resolve } from "node:path";
+import { guardedDirs, subagentDir } from "../engine/src/config";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 
 const GRANT_VERSION = 1 as const;
@@ -26,7 +26,7 @@ const GRANT_VERSION = 1 as const;
 export const PI_WRITE_GRANT_START_WINDOW_MS = 24 * 60 * 60_000;
 const TOKEN = /^[0-9a-f]{64}$/;
 const MARKER = /<!-- LOOM_PI_WRITE_GRANT:([0-9a-f]{64}) -->/g;
-const grantDirectory = (): string => join(process.env.LOOM_SUBAGENT_DIR ?? SUBAGENT_DIR, "pi-write-grants");
+const grantDirectory = (): string => join(subagentDir(), "pi-write-grants");
 
 interface StoredWriteGrant {
   readonly version: typeof GRANT_VERSION;
@@ -37,6 +37,11 @@ interface StoredWriteGrant {
   readonly cwd: string;
   readonly taskGraphPath: string;
   readonly expiresAt: number;
+  /** Optional artifact write scope for phase/panel agents: absolute dirs
+   *  (trailing-slash normalized) the child may target with Edit/Write.
+   *  Absent on implementation-item grants, which stay whole-session like
+   *  the original model. Backward compatible: old records lack the key. */
+  readonly scopeDirs?: readonly string[];
 }
 
 export interface IssuedWriteGrant {
@@ -49,6 +54,11 @@ export interface ConsumedWriteGrant {
   readonly taskId: string;
   readonly taskGraphPath: string;
   readonly agentId: string;
+  /** The spawn cwd the grant was resolved against: scoped-target checks must
+   *  resolve relative targets against THIS base (the authorizing one), not
+   *  whatever cwd the enforcement site happens to report. */
+  readonly cwd: string;
+  readonly scopeDirs?: readonly string[];
 }
 
 const tokenDigest = (token: string): string => createHash("sha256").update(token).digest("hex");
@@ -61,6 +71,12 @@ function canonicalDirectory(path: string): string {
 function parseStoredGrant(raw: unknown): StoredWriteGrant | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
   const grant = raw as Record<string, unknown>;
+  const scopeDirs = grant.scopeDirs;
+  if (scopeDirs !== undefined &&
+      (!Array.isArray(scopeDirs) ||
+       scopeDirs.some((d) => typeof d !== "string" || d === ""))) {
+    return null;
+  }
   return grant.version === GRANT_VERSION &&
     typeof grant.tokenSha256 === "string" && /^[0-9a-f]{64}$/.test(grant.tokenSha256) &&
     typeof grant.bindingMac === "string" && /^[0-9a-f]{64}$/.test(grant.bindingMac) &&
@@ -83,8 +99,47 @@ function bindingMac(token: string, grant: Omit<StoredWriteGrant, "bindingMac">):
       cwd: grant.cwd,
       taskGraphPath: grant.taskGraphPath,
       expiresAt: grant.expiresAt,
+      scopeDirs: grant.scopeDirs,
     }))
     .digest("hex");
+}
+
+/** Phase-agent grants are bound to the agent identity + one-time token, not
+ *  to a task-graph Task ID (phase prompts carry none). Task IDs are
+ *  `T\d+`, so the `phase:` prefix cannot collide with a real binding. */
+export const PHASE_GRANT_TASK_ID_PREFIX = "phase:" as const;
+
+export const isPhaseGrantTaskId = (taskId: string): boolean =>
+  taskId.startsWith(PHASE_GRANT_TASK_ID_PREFIX);
+
+/** Normalize a scope dir to an absolute trailing-slash path so a prefix test
+ *  cannot match a sibling (`…/specs-other/` vs `…/specs/`). */
+function normalizeScopeDir(dir: string, cwd: string): string {
+  const abs = resolve(cwd, dir);
+  return abs.endsWith("/") ? abs : `${abs}/`;
+}
+
+/** Reject scope dirs that reach INTO or ENCOMPASS loom-guarded state: a
+ *  phase-agent grant must never authorize a write to the task graph, ledger,
+ *  machines, or subagent evidence — and a scope that CONTAINS a guarded dir
+ *  (e.g. the repo root or `.claude/`) would authorize writes into it.
+ *  Prompt-derived scopes only ever name `.claude/specs/…` / `.claude/plans/…`
+ *  dirs, so this is defense-in-depth at the capability boundary. */
+function scopeDirTouchesGuarded(dir: string): boolean {
+  const normalized = dir.endsWith("/") ? dir : `${dir}/`;
+  return guardedDirs().some((guarded) => {
+    const guardedNorm = resolve(guarded);
+    const g = guardedNorm.endsWith("/") ? guardedNorm : `${guardedNorm}/`;
+    return normalized.startsWith(g) || g.startsWith(normalized);
+  });
+}
+
+/** A scope dir that is the grant cwd itself or one of its parents is
+ *  equivalent to no scope at all — reject it. */
+function scopeIsCwdOrAncestor(dir: string, cwd: string): boolean {
+  const resolvedCwd = canonicalDirectory(cwd);
+  return resolvedCwd.startsWith(dir) || dir === `${resolvedCwd}/` ||
+    resolve(dir) === resolvedCwd;
 }
 
 export function issuePiWriteGrant(input: {
@@ -95,10 +150,30 @@ export function issuePiWriteGrant(input: {
   readonly now?: number;
   /** Test seam and explicit bounded lifetime override. */
   readonly ttlMs?: number;
+  /** Optional artifact write scope (relative paths resolve against `cwd`).
+   *  Absent → whole-session capability (implementation items). */
+  readonly scopeDirs?: readonly string[];
 }): IssuedWriteGrant {
   const token = randomBytes(32).toString("hex");
   const ttlMs = input.ttlMs ?? PI_WRITE_GRANT_START_WINDOW_MS;
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) throw new Error("Pi write grant TTL must be a positive integer");
+  let scopeDirs: readonly string[] | undefined;
+  if (input.scopeDirs !== undefined && input.scopeDirs.length > 0) {
+    const seen = new Set<string>();
+    scopeDirs = Object.freeze(input.scopeDirs.map((dir) => {
+      if (typeof dir !== "string" || dir === "") throw new Error("Pi write grant scope dirs must be non-empty strings");
+      const normalized = normalizeScopeDir(dir, input.cwd);
+      if (scopeDirTouchesGuarded(normalized)) {
+        throw new Error(`Pi write grant scope dir ${normalized} overlaps loom-guarded state; refusing scoped grant`);
+      }
+      if (scopeIsCwdOrAncestor(normalized, input.cwd)) {
+        throw new Error(`Pi write grant scope dir ${normalized} is the spawn cwd or an ancestor; refusing scoped grant`);
+      }
+      if (seen.has(normalized)) return normalized;
+      seen.add(normalized);
+      return normalized;
+    }));
+  }
   const unsigned: Omit<StoredWriteGrant, "bindingMac"> = {
     version: GRANT_VERSION,
     tokenSha256: tokenDigest(token),
@@ -107,6 +182,7 @@ export function issuePiWriteGrant(input: {
     cwd: canonicalDirectory(input.cwd),
     taskGraphPath: resolve(input.taskGraphPath),
     expiresAt: (input.now ?? Date.now()) + ttlMs,
+    scopeDirs,
   };
   const grant: StoredWriteGrant = Object.freeze({
     ...unsigned,
@@ -161,7 +237,12 @@ export function consumePiWriteGrant(
   }
   if (grant.expiresAt < now) throw new Error("write grant expired");
   if (grant.agent !== expectedAgent) throw new Error("write grant agent does not match child agent identity");
-  if (extractTaskId(prompt) !== grant.taskId) throw new Error("write grant Task ID does not match child prompt");
+  // Phase grants bind to the agent identity + cwd + one-time token, not to a
+  // task-graph Task ID (phase prompts carry none). Everything else must match
+  // the exact Task ID extracted from the child prompt.
+  if (!isPhaseGrantTaskId(grant.taskId) && extractTaskId(prompt) !== grant.taskId) {
+    throw new Error("write grant Task ID does not match child prompt");
+  }
   if (canonicalDirectory(cwd) !== grant.cwd) throw new Error("write grant cwd does not match child process cwd");
   if (!existsSync(grant.taskGraphPath)) throw new Error("write grant task graph no longer exists");
   return Object.freeze({
@@ -169,7 +250,48 @@ export function consumePiWriteGrant(
     taskId: grant.taskId,
     taskGraphPath: grant.taskGraphPath,
     agentId: `pi-grant-${token.slice(0, 16)}`,
+    cwd: grant.cwd,
+    scopeDirs: grant.scopeDirs,
   });
+}
+
+/** Resolve a path and canonicalize it THROUGH symlinks: realpath the deepest
+ *  EXISTING ancestor (the target itself may not exist yet — it is about to
+ *  be written), then re-append the missing tail. A symlinked directory
+ *  inside a scope dir can no longer resolve to a path outside it. */
+function canonicalTarget(path: string): string {
+  const abs = resolve(path);
+  let existing = abs;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return join(realpathSync(existing), ...tail.reverse());
+    } catch {
+      const parent = dirname(existing);
+      if (parent === existing) return abs;
+      tail.push(basename(existing));
+      existing = parent;
+    }
+  }
+}
+
+/** Pure scope enforcement for a scoped (phase-agent) write grant: is the
+ *  absolute target path inside at least one scope dir? Returns a description
+ *  of the violation (for the block reason) or null when the write may
+ *  proceed. Both sides are canonicalized through symlinks; prefix matching
+ *  is on trailing-slash dirs, so `…/specs/` never admits `…/specs-other/x`
+ *  or `…/specs2/x`. */
+export function writeTargetViolatesScope(
+  targetPath: string,
+  scopeDirs: readonly string[],
+  baseCwd: string = process.cwd(),
+): string | null {
+  const target = canonicalTarget(resolve(baseCwd, targetPath));
+  for (const dir of scopeDirs) {
+    const dirNorm = canonicalTarget(dir);
+    if (target.startsWith(dirNorm.endsWith("/") ? dirNorm : `${dirNorm}/`)) return null;
+  }
+  return `write target ${target} is outside the granted artifact scope`;
 }
 
 export function sweepExpiredPiWriteGrants(now: number = Date.now()): void {

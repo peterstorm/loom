@@ -415,8 +415,16 @@ export const WHITELISTED_HELPERS: readonly string[] = [
   "cleanup-state",
 ];
 
-/** Subagent tracking directory */
+/** Subagent tracking directory — resolved once at import (consumers that
+ *  never re-point LOOM_SUBAGENT_DIR at runtime). */
 export const SUBAGENT_DIR = process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
+
+/** Subagent tracking directory, resolved LAZILY — like machinesDir(), reads
+ *  LOOM_SUBAGENT_DIR at call time so pi-path consumers (write-grant
+ *  directors, session registries, direct-edit guards) observe per-test or
+ *  per-harness re-pointing without a module reload. Production behavior is
+ *  identical to SUBAGENT_DIR (the env never changes mid-process there). */
+export const subagentDir = (): string => process.env.LOOM_SUBAGENT_DIR ?? "/tmp/claude-subagents";
 
 /**
  * One TTL for every liveness judgment about subagent tracking files: the
@@ -448,7 +456,7 @@ export const MACHINES_DIR = machinesDir();
  * additionally PROTECTED (never helper-writable — see protectedDirs). */
 export const guardedDirs = (): readonly string[] => [
   ...new Set(taskGraphRelatives().map((path) => dirname(path))),
-  SUBAGENT_DIR,
+  subagentDir(),
   machinesDir(),
 ];
 
@@ -457,7 +465,7 @@ export const guardedDirs = (): readonly string[] => [
  * (`.evidence.jsonl`), fakes attribution (`.active`), or disarms the gate
  * (`.machine`), and a write into the machine-definitions dir deletes/rewrites
  * the gate's rules. guard-state-file checks these BEFORE the helper allow. */
-export const protectedDirs = (): readonly string[] => [SUBAGENT_DIR, machinesDir()];
+export const protectedDirs = (): readonly string[] => [subagentDir(), machinesDir()];
 
 const toSegments = (dir: string): string[] => dir.split("/").filter((s) => s !== "");
 

@@ -55,7 +55,7 @@ import { newWaveGate } from "../engine/src/types";
 // with it — every hook below, not just review capture. `tests/pi-imports.test.ts`
 // resolves every engine import in this file against the real exports so the next
 // move of a shared symbol fails a test instead of silently disarming Pi.
-import { isReviewAgent, taskGraphPath, SUBAGENT_DIR, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
+import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { fsSessionRegistry, parseAgentId, parseSessionId, rosterAgentId } from "../engine/src/machine";
@@ -68,7 +68,7 @@ import * as git from "../engine/src/utils/git";
 // Linter integration (PostEdit lint via tool_result)
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
 import { lintFile } from "../engine/src/linter/index";
-import { messagesToClaudeJsonl, parsePiMessages, piResultFinalPayloadCandidates, piStructuredTestResult } from "./transcript-adapter";
+import { messagesToClaudeJsonl, parsePiMessages, piResultFinalPayloadCandidates, piStructuredTestDiagnostics, piStructuredTestResult } from "./transcript-adapter";
 // FR-033: Pi and Claude Code capture each completed reviewer/verifier output
 // into the SAME engine-declared slot under the same refusals. Both drive this
 // one runtime; only the native correlator and the payload observation differ.
@@ -93,12 +93,14 @@ import {
   changedDeclaredArtifactsSince,
   changedRepositoryArtifactsSince,
 } from "../engine/src/utils/artifact-baseline";
+import { deriveArtifactWriteScope } from "../engine/src/core/artifact-write-scope";
 import {
   consumePiWriteGrant,
   injectPiWriteGrant,
   issuePiWriteGrant,
   revokePiWriteGrant,
   sweepExpiredPiWriteGrants,
+  writeTargetViolatesScope,
 } from "./write-grant";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -176,6 +178,25 @@ export function piSpawnCwd(raw: unknown, index: number, defaultCwd: string): str
   return resolve(defaultCwd, cwd);
 }
 
+/** Extract the file path(s) a Pi Edit/Write/multi_edit call targets. Returns
+ *  [] when the shape is unrecognized — scoped grants then fail closed. */
+export function piWriteTargetPaths(raw: unknown): readonly string[] {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return [];
+  const input = raw as Record<string, unknown>;
+  const direct = input.path ?? input.file_path ?? input.filePath;
+  if (typeof direct === "string" && direct !== "") return [direct];
+  if (Array.isArray(input.edits)) {
+    const paths: string[] = [];
+    for (const edit of input.edits) {
+      if (typeof edit !== "object" || edit === null || Array.isArray(edit)) continue;
+      const p = (edit as Record<string, unknown>).path ?? (edit as Record<string, unknown>).file_path;
+      if (typeof p === "string" && p !== "" && !paths.includes(p)) paths.push(p);
+    }
+    return paths;
+  }
+  return [];
+}
+
 export function replacePiSpawnTask(raw: unknown, index: number, task: string): void {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new Error("Pi subagent input must be an object before write-grant injection");
@@ -230,7 +251,7 @@ function sessionRunBinding(
   rawSessionId: string,
   markers: readonly PiOrchestrationMarkers[],
 ): SessionRunBinding {
-  const bindings = readSessionRunBindings(SUBAGENT_DIR, rawSessionId);
+  const bindings = readSessionRunBindings(subagentDir(), rawSessionId);
   if (!bindings.ok) throw new Error(bindings.message);
   const requestIds = new Set(markers.map(({ requestId }) => requestId));
   const candidates = bindings.value.filter((binding) =>
@@ -495,7 +516,7 @@ function recoverPiSpawnReservation(
 ): PiSpawnReservation | null {
   const sessionId = parseSessionId(rawSessionId);
   if (sessionId === null) throw new Error(`invalid Pi result session id ${JSON.stringify(rawSessionId)}`);
-  const bindings = readSessionRunBindings(SUBAGENT_DIR, sessionId);
+  const bindings = readSessionRunBindings(subagentDir(), sessionId);
   if (!bindings.ok) throw new Error(bindings.message);
   const recovered: PiSpawnReservation[] = [];
   const inaccessibleBindings: string[] = [];
@@ -597,7 +618,16 @@ export default function (pi: ExtensionAPI) {
       parentSessionRuntimes.delete(sessionId);
     }
   };
-  const activeChildWriteGrants = new Map<string, { agentId: AgentId; pointerCreated: boolean }>();
+  const activeChildWriteGrants = new Map<string, {
+    agentId: AgentId;
+    pointerCreated: boolean;
+    /** Present only on scoped (phase/panel) grants: Edit/Write targets must
+     *  fall inside one of these artifact dirs. Scopes resolve against
+     *  `grantCwd` (the spawn cwd), which is also the base relative targets
+     *  are judged against. */
+    scopeDirs?: readonly string[];
+    grantCwd?: string;
+  }>();
   const rejectedChildWriteGrantSessions = new Set<string>();
 
   // ─── Resource Discovery ───────────────────────────────────────────────
@@ -630,7 +660,7 @@ export default function (pi: ExtensionAPI) {
       const safeSessionId = parseSessionId(sessionId);
       const graphIsActive = pathExistsFailClosed(taskGraphPath()) ||
         rejectedChildWriteGrantSessions.has(sessionId) ||
-        (safeSessionId !== null && pathExistsFailClosed(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`));
+        (safeSessionId !== null && pathExistsFailClosed(`${subagentDir()}/${safeSessionId}.task_graph`));
 
       // Block direct edits during orchestration
       if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "multi_edit") {
@@ -640,6 +670,29 @@ export default function (pi: ExtensionAPI) {
         const result = shouldBlockDirectEdit(event.toolName, sessionId, () => graphIsActive);
         if (result.kind === "block") {
           return { block: true, reason: result.message };
+        }
+        // Phase/panel agents hold SCOPED grants: Edit/Write may target only the
+        // artifact dirs the grant names. Unscoped (implementation) grants and
+        // ungranted sessions are untouched. A scoped session whose target
+        // cannot be verified fails closed.
+        const granted = activeChildWriteGrants.get(sessionId);
+        if (granted !== undefined && granted.scopeDirs !== undefined && granted.scopeDirs.length > 0) {
+          const targets = piWriteTargetPaths(event.input);
+          if (targets.length === 0) {
+            return {
+              block: true,
+              reason: "BLOCKED: cannot verify the write target for a scoped phase-agent write grant; refusing the edit.",
+            };
+          }
+          for (const target of targets) {
+            const violation = writeTargetViolatesScope(target, granted.scopeDirs, granted.grantCwd ?? ctx.cwd);
+            if (violation !== null) {
+              return {
+                block: true,
+                reason: `BLOCKED: ${violation}.\nAllowed write scope: ${granted.scopeDirs.join(", ")}`,
+              };
+            }
+          }
         }
       }
 
@@ -705,6 +758,26 @@ export default function (pi: ExtensionAPI) {
           description: "",
         }));
         const needsTaskGraphLifecycle = taskExecutionSpawns.some((spawn) => spawn.kind !== "standalone");
+
+        // Panel mode's interview stage requires interactive AskUserQuestion: an
+        // arch-interviewer-agent must question the USER before writing the
+        // digest that drives lens/judge selection. Pi children are headless
+        // (no TUI, no question relay — see docs/pi-phase-agent-interviews.md),
+        // so the agent can neither ask nor honestly answer. Refuse with an
+        // actionable diagnostic instead of letting a fabricated digest drive
+        // the panel (or a confusing retry/terminal-block loop).
+        const interviewSpawns = parsedItems.filter((item) =>
+          stripNamespace(item.agent) === "arch-interviewer-agent");
+        if (interviewSpawns.length > 0) {
+          return {
+            block: true,
+            reason: "BLOCKED: `/loom --panel` interview stage cannot run under pi: " +
+              "arch-interviewer-agent needs interactive AskUserQuestion, which pi " +
+              "children do not support (docs/pi-phase-agent-interviews.md). " +
+              "Panel mode currently requires Claude Code for the interview; a " +
+              "headless interview path or a question relay is not yet implemented.",
+          };
+        }
 
         const requestedScope = (event.input as { agentScope?: unknown }).agentScope ?? "user";
         if (requestedScope !== "user") {
@@ -776,9 +849,6 @@ export default function (pi: ExtensionAPI) {
           };
         }
         const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
-        const implementationIndexes = taskExecutionSpawns.flatMap((spawn, index) =>
-          spawn.kind === "implementation" ? [index] : []
-        );
         if (typeof toolCallId !== "string" || toolCallId === "") {
           return {
             block: true,
@@ -823,20 +893,20 @@ export default function (pi: ExtensionAPI) {
           if (taskGraphPointerCreated) {
             actions.push({
               label: "remove task-graph pointer",
-              run: () => unlinkSync(`${SUBAGENT_DIR}/${safeSessionId}.task_graph`),
+              run: () => unlinkSync(`${subagentDir()}/${safeSessionId}.task_graph`),
             });
           }
           return runPiCleanupActions(actions);
         };
         try {
-          mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+          mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
           for (const agentId of rosterIds) {
             await fsSessionRegistry.markActive(safeSessionId, agentId);
             reserved.push(agentId);
           }
           const activeTaskGraphPath = taskGraphPath();
           if (needsTaskGraphLifecycle && existsSync(activeTaskGraphPath)) {
-            const taskGraphFile = `${SUBAGENT_DIR}/${safeSessionId}.task_graph`;
+            const taskGraphFile = `${subagentDir()}/${safeSessionId}.task_graph`;
             if (!existsSync(taskGraphFile)) {
               writeFileSync(taskGraphFile, resolve(activeTaskGraphPath));
               taskGraphPointerCreated = true;
@@ -847,15 +917,55 @@ export default function (pi: ExtensionAPI) {
           // directory, not the in-memory lifecycle map below, owns capture
           // authority for both Pi and Claude.
           orchestrationRunBinding = await recordPiSpawnCorrelators(parsedItems, rosterIds, safeSessionId);
-          for (const index of implementationIndexes) {
+          // Implementation items get the classic whole-session capability bound
+          // to their task-graph Task ID. Phase/panel agents (non-implementation)
+          // get a SCOPED capability bound to their prompt-derived artifact dirs
+          // (".claude/specs/{slug}/", ".claude/plans/", panel candidate dirs) —
+          // the Pi analogue of the phase-agent write exemption Claude Code gets
+          // via subagent PIDs, and the capability the phase templates promise.
+          for (let index = 0; index < parsedItems.length; index++) {
             const item = parsedItems[index]!;
-            const taskId = extractTaskId(item.task);
-            if (!taskId) throw new Error(`implementation item ${index + 1} has no Task ID for write-grant binding`);
+            const spawn = taskExecutionSpawns[index];
+            if (spawn?.kind === "implementation") {
+              const taskId = extractTaskId(item.task);
+              if (!taskId) throw new Error(`implementation item ${index + 1} has no Task ID for write-grant binding`);
+              const grant = issuePiWriteGrant({
+                agent: item.agent,
+                taskId,
+                cwd: piSpawnCwd(event.input, index, ctx.cwd),
+                taskGraphPath: taskGraphPath(),
+              });
+              try {
+                writeGrants.push({
+                  index,
+                  token: grant.token,
+                  task: injectPiWriteGrant(item.task, grant),
+                  originalTask: item.task,
+                  injected: false,
+                });
+              } catch (error) {
+                revokePiWriteGrant(grant.token);
+                throw error;
+              }
+              continue;
+            }
+            // Role-driven scoped grants: phase writers and the panel writer
+            // agents (interviewer, designer) may write their prompt-derived
+            // artifact dirs. Read-only spawns (standalone reviews, verifiers,
+            // panel judges, decompose, spec-check) get nothing even when their
+            // prompts NAME artifact paths — a judge's candidate paths are
+            // reads, not write scope.
+            if (spawn?.kind !== "non-implementation") continue;
+            const scopeDirs = deriveArtifactWriteScope(item.agent, item.task);
+            if (scopeDirs === null) continue;
+            const phaseGrantCwd = piSpawnCwd(event.input, index, ctx.cwd);
+            const phase = PHASE_AGENT_MAP[stripNamespace(item.agent)];
             const grant = issuePiWriteGrant({
               agent: item.agent,
-              taskId,
-              cwd: piSpawnCwd(event.input, index, ctx.cwd),
+              taskId: `phase:${phase ?? "artifact"}`,
+              cwd: phaseGrantCwd,
               taskGraphPath: taskGraphPath(),
+              scopeDirs,
             });
             try {
               writeGrants.push({
@@ -940,7 +1050,7 @@ export default function (pi: ExtensionAPI) {
     // the session's files), and the TTL is the shared STALE_SUBAGENT_TTL_MS,
     // so a live session's roster/ledger can't be reaped out from under a
     // fresh `.machine` anchor.
-    sweepStaleSessions(SUBAGENT_DIR, Date.now() - STALE_SUBAGENT_TTL_MS);
+    sweepStaleSessions(subagentDir(), Date.now() - STALE_SUBAGENT_TTL_MS);
     sweepExpiredPiWriteGrants();
   });
 
@@ -960,10 +1070,10 @@ export default function (pi: ExtensionAPI) {
       if (!sessionId || !agentId) throw new Error("child session or grant agent identity is invalid");
       await fsSessionRegistry.markActive(sessionId, agentId);
       partialBinding = { sessionId, agentId };
-      const pointer = `${SUBAGENT_DIR}/${sessionId}.task_graph`;
+      const pointer = `${subagentDir()}/${sessionId}.task_graph`;
       const pointerCreated = !existsSync(pointer);
       if (pointerCreated) writeFileSync(pointer, grant.taskGraphPath, { mode: 0o600 });
-      activeChildWriteGrants.set(sessionId, { agentId, pointerCreated });
+      activeChildWriteGrants.set(sessionId, { agentId, pointerCreated, scopeDirs: grant.scopeDirs, grantCwd: grant.cwd });
       partialBinding = null;
       process.stderr.write(`loom(pi): activated child write grant for ${grant.taskId}/${sessionId}\n`);
     } catch (error) {
@@ -1014,7 +1124,7 @@ export default function (pi: ExtensionAPI) {
       if (binding.pointerCreated) {
         actions.push({
           label: `remove child task-graph pointer for ${sessionId}`,
-          run: () => rmSync(`${SUBAGENT_DIR}/${sessionId}.task_graph`, { force: true }),
+          run: () => rmSync(`${subagentDir()}/${sessionId}.task_graph`, { force: true }),
         });
       }
     }
@@ -1029,7 +1139,7 @@ export default function (pi: ExtensionAPI) {
     if (sessionId && parentRuntime?.taskGraphPointerOwned) {
       actions.push({
         label: `remove parent task-graph pointer for ${sessionId}`,
-        run: () => rmSync(`${SUBAGENT_DIR}/${sessionId}.task_graph`, { force: true }),
+        run: () => rmSync(`${subagentDir()}/${sessionId}.task_graph`, { force: true }),
       });
     }
 
@@ -1200,7 +1310,7 @@ export default function (pi: ExtensionAPI) {
       const errors = await runPiCleanupActions([{
         label: `remove parent task-graph pointer for ${resultSessionId}`,
         run: () => {
-          rmSync(`${SUBAGENT_DIR}/${resultSessionId}.task_graph`, { force: true });
+          rmSync(`${subagentDir()}/${resultSessionId}.task_graph`, { force: true });
           sessionRuntime.taskGraphPointerOwned = false;
         },
       }]);
@@ -1744,6 +1854,20 @@ export default function (pi: ExtensionAPI) {
         const structuredEvidence = parsedMessages.ok
           ? piStructuredTestResult(parsedMessages.value)
           : parsedMessages;
+        if (structuredEvidence.ok && structuredEvidence.value === null) {
+          // The wave gate rejects the transcript fallback, so a null structured
+          // verdict is a latent blocker: say exactly why, instead of letting the
+          // next gate run surface a bare "untrusted-regression-pass" mystery.
+          const trace = piStructuredTestDiagnostics(result.messages ?? []);
+          if (trace.ok) {
+            const summary = trace.value.classifiedCommands.length === 0
+              ? "no Bash call was classified as a test run"
+              : `verdict=${trace.value.verdict}, classified=[${trace.value.classifiedCommands.join(" | ")}]`;
+            process.stderr.write(
+              `loom(pi): ${taskId} produced no structured test evidence (${summary}) — transcript fallback used; the wave gate will reject it\n`,
+            );
+          }
+        }
         if (!adaptedTranscript.ok || !structuredEvidence.ok || !parsedMessages.ok) {
           const errors = !parsedMessages.ok
             ? parsedMessages.errors

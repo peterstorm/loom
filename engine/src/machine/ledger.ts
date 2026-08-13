@@ -51,7 +51,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../config";
+import { STALE_SUBAGENT_TTL_MS, subagentDir } from "../config";
 import { withLock } from "../utils/lock";
 import { parseMachineJson } from "./parse-machine";
 import {
@@ -87,7 +87,7 @@ import type { Epoch, Evidence, EvidenceRecord, MachineDef } from "./types";
  * at its own boundary (fail-closed there) and threads SessionId inward.
  */
 function sessionFilePath(sessionId: SessionId, suffix: string): string {
-  return `${SUBAGENT_DIR}/${sessionId}${suffix}`;
+  return `${subagentDir()}/${sessionId}${suffix}`;
 }
 
 export const ledgerPath = (sessionId: SessionId): string =>
@@ -278,7 +278,7 @@ export function rosterAgentId(raw: string): AgentId {
  * 2 ≠ 1), silently disarming the recorder and the gate's evidence fold.
  */
 export async function markAgentActive(sessionId: SessionId, agentId: AgentId): Promise<void> {
-  mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+  mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
   await withLock(bindingLock(sessionId), () => {
     const path = activeFlagPath(sessionId);
     if (existsSync(path)) {
@@ -336,7 +336,7 @@ export async function bindMachineAgent(
   agentId: AgentId,
   nowMs: number = Date.now(),
 ): Promise<void> {
-  mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+  mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
   await withLock(bindingLock(sessionId), () => {
     const lines = classifyBindingLines(sessionId, nowMs);
     const kept = lines.filter((l) => l.kind !== "stale");
@@ -422,7 +422,7 @@ export function appendEvidence(
   callId?: string,
 ): void {
   if (events.length === 0) return;
-  mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+  mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
   const lines =
     events
       .map((event) =>
@@ -453,7 +453,7 @@ export async function recordCallStart(
   toolUseId: string,
   startMs: number,
 ): Promise<void> {
-  mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+  mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
   await withLock(bindingLock(sessionId), () => {
     const path = callStartPath(sessionId);
     let current: readonly CallStartEntry[] = [];

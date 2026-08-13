@@ -160,6 +160,14 @@ _Avoid_: Packet hash, packet signature, inferred provenance
 The executable event-sourced dispatch policy for an architecture panel or Refutation Panel. Emits exact spawn batches, LLM Profiles, retry actions, engine operations, and terminal outcomes; Markdown explains execution but does not own ordering.
 _Avoid_: Runbook sequence, workflow DSL, panel prompt
 
+**Scoped Write Grant**:
+A one-time Pi capability minted per spawn, scoped to prompt-derived artifact directories (`.claude/specs/`, `.claude/plans/`, panel-run dirs) for WRITER agents only: phase writers (brainstorm, specify, clarify, plan-alignment, architecture) and panel writers (interviewer, designers, finalizer). Issuance is role-driven — a read-only agent (judge, verifier, reviewer, decompose, spec-check) receives nothing even when its prompt names artifact paths.
+_Avoid_: Write permit, edit allowance, blanket phase write
+
+**Inline-Program Stdin Inheritance**:
+The guard-state-file residual class where an interpreter's `-c`/`-e` inline program inherits the command's stdin: if the program is itself a stdin-reading interpreter (`bash -c 'sh'`, `bash -c 'python3'`) or a reader+executor pair (`bash -c 'eval "$(cat)"'`), the heredoc body is a SCRIPT and is judged as full command text. An inline program with its own program source (`bash -c 'sh file.sh'`) or an inline DATA reader (`bash -c 'cat'`) reads the body as data.
+_Avoid_: Nested interpreter, double interpreter, inner shell
+
 **Executable Model**:
 A model the system imports, runs, or enforces — a lifecycle machine, an AuthoredDag, or a lint rule. The only kind of model loom permits: a model either executes or it doesn't exist (`references/executable-models.md`).
 _Avoid_: Behavioral model, descriptive model, structural diff (these name the forbidden alternative)

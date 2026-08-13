@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,8 +9,9 @@ import {
   PI_WRITE_GRANT_START_WINDOW_MS,
   revokePiWriteGrant,
   sweepExpiredPiWriteGrants,
+  writeTargetViolatesScope,
 } from "../../pi/write-grant";
-
+import { SUBAGENT_DIR as CONFIG_SUBAGENT_DIR } from "../src/config";
 let root: string;
 let priorSubagentDir: string | undefined;
 
@@ -34,7 +35,146 @@ function fixture() {
   return { cwd, graph };
 }
 
-describe("Pi child write grants", () => {
+describe("Pi child write grants (incl. scoped phase-agent grants)", () => {
+  let priorStatePath: string | undefined;
+  beforeEach(() => {
+    // Point the guarded-state resolution at THIS test's project so the
+    // scope-vs-guarded overlap check resolves real paths.
+    priorStatePath = process.env.LOOM_STATE_PATH;
+    process.env.LOOM_STATE_PATH = join(root, "project", ".claude", "state", "active_task_graph.json");
+  });
+  afterEach(() => {
+    if (priorStatePath === undefined) delete process.env.LOOM_STATE_PATH;
+    else process.env.LOOM_STATE_PATH = priorStatePath;
+  });
+
+  it("issues, consumes, and returns a prompt-derived artifact scope", () => {
+    const { cwd, graph } = fixture();
+    const issued = issuePiWriteGrant({
+      agent: "specify-agent",
+      taskId: "phase:specify",
+      cwd,
+      taskGraphPath: graph,
+      scopeDirs: [".claude/specs/2026-08-12-foo"],
+    });
+    const consumed = consumePiWriteGrant(
+      injectPiWriteGrant("Write the spec.\n", issued),
+      cwd,
+      "specify-agent",
+    )!;
+    expect(consumed.taskId).toBe("phase:specify");
+    expect(consumed.scopeDirs).toHaveLength(1);
+    expect(consumed.scopeDirs![0]).toBe(join(cwd, ".claude", "specs", "2026-08-12-foo") + "/");
+  });
+
+  it("enforces scope on write targets with trailing-slash prefix semantics", () => {
+    const { cwd } = fixture();
+    const scope = [join(cwd, ".claude", "specs", "2026-08-12-foo") + "/"];
+    expect(writeTargetViolatesScope(join(cwd, ".claude", "specs", "2026-08-12-foo", "spec.md"), scope)).toBeNull();
+    expect(writeTargetViolatesScope(join(cwd, ".claude", "specs", "2026-08-12-foo", "nested", "x.md"), scope)).toBeNull();
+    // Sibling dirs must not match.
+    expect(writeTargetViolatesScope(join(cwd, ".claude", "specs", "2026-08-12-foo-other", "x.md"), scope)).not.toBeNull();
+    expect(writeTargetViolatesScope(join(cwd, ".claude", "specs2", "x.md"), scope)).not.toBeNull();
+    expect(writeTargetViolatesScope(join(cwd, "README.md"), scope)).not.toBeNull();
+    expect(writeTargetViolatesScope(join(cwd, ".claude", "state", "active_task_graph.json"), scope)).not.toBeNull();
+  });
+
+  it("canonicalizes through symlinks: a scoped symlink cannot escape the scope", () => {
+    const { cwd } = fixture();
+    const outside = join(root, "outside");
+    mkdirSync(outside);
+    const scope = [join(cwd, ".claude", "specs", "2026-08-12-foo") + "/"];
+    mkdirSync(join(cwd, ".claude", "specs", "2026-08-12-foo"), { recursive: true });
+    // A symlink INSIDE the scope dir pointing outside: writing through it
+    // must be refused even though the raw path is under the scope prefix.
+    symlinkSync(outside, join(cwd, ".claude", "specs", "2026-08-12-foo", "escape"));
+    expect(writeTargetViolatesScope(join(cwd, ".claude", "specs", "2026-08-12-foo", "escape", "x.md"), scope)).not.toBeNull();
+    // A symlink OUTSIDE the scope pointing INSIDE: writes through it stay
+    // inside the real artifact tree and are admitted.
+    symlinkSync(join(cwd, ".claude", "specs", "2026-08-12-foo"), join(outside, "link-in"));
+    expect(writeTargetViolatesScope(join(outside, "link-in", "spec.md"), scope)).toBeNull();
+  });
+
+  it("refuses scope dirs that reach into loom-guarded state", () => {
+    const { cwd, graph } = fixture();
+    expect(() => issuePiWriteGrant({
+      agent: "specify-agent",
+      taskId: "phase:specify",
+      cwd,
+      taskGraphPath: graph,
+      scopeDirs: [".claude/state"],
+    })).toThrow(/loom-guarded state/);
+    expect(() => issuePiWriteGrant({
+      agent: "specify-agent",
+      taskId: "phase:specify",
+      cwd,
+      taskGraphPath: graph,
+      scopeDirs: [".claude/state/subdir"],
+    })).toThrow(/loom-guarded state/);
+    expect(() => issuePiWriteGrant({
+      agent: "specify-agent",
+      taskId: "phase:specify",
+      cwd,
+      taskGraphPath: graph,
+      scopeDirs: [process.env.LOOM_SUBAGENT_DIR!],
+    })).toThrow(/loom-guarded state/);
+    // A scope that CONTAINS guarded state, or the cwd/ancestor itself, is
+    // equivalent to no scope at all and is refused.
+    expect(() => issuePiWriteGrant({
+      agent: "specify-agent",
+      taskId: "phase:specify",
+      cwd,
+      taskGraphPath: graph,
+      scopeDirs: [".claude"],
+    })).toThrow(/loom-guarded state/);
+    // The repo root / cwd is refused by whichever check fires first: it both
+    // CONTAINS the guarded state dir and is the cwd/ancestor itself.
+    expect(() => issuePiWriteGrant({
+      agent: "specify-agent",
+      taskId: "phase:specify",
+      cwd,
+      taskGraphPath: graph,
+      scopeDirs: ["."],
+    })).toThrow(/loom-guarded state|cwd or an ancestor/);
+    expect(() => issuePiWriteGrant({
+      agent: "specify-agent",
+      taskId: "phase:specify",
+      cwd,
+      taskGraphPath: graph,
+      scopeDirs: [".."],
+    })).toThrow(/loom-guarded state|cwd or an ancestor/);
+  });
+
+  it("phase grants do not require a Task ID in the child prompt", () => {
+    const { cwd, graph } = fixture();
+    const issued = issuePiWriteGrant({
+      agent: "architecture-agent",
+      taskId: "phase:architecture",
+      cwd,
+      taskGraphPath: graph,
+      scopeDirs: [".claude/plans"],
+    });
+    expect(() => consumePiWriteGrant(
+      injectPiWriteGrant("Write the plan.", issued),
+      cwd,
+      "architecture-agent",
+    )).not.toThrow();
+    // A smuggled implementation-style prompt cannot consume a phase grant:
+    // the agent identity mismatch still burns it.
+    const other = issuePiWriteGrant({
+      agent: "architecture-agent",
+      taskId: "phase:architecture",
+      cwd,
+      taskGraphPath: graph,
+      scopeDirs: [".claude/plans"],
+    });
+    expect(() => consumePiWriteGrant(
+      injectPiWriteGrant("Task ID: T7\nWrite the plan.", other),
+      cwd,
+      "code-implementer-agent",
+    )).toThrow(/agent/);
+  });
+
   it("hands one bound capability to one child without storing the raw token", () => {
     const { cwd, graph } = fixture();
     const issued = issuePiWriteGrant({

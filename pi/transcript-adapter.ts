@@ -1,6 +1,7 @@
 /** Pi subagent messages adapted to the Claude-compatible JSONL parsers. */
 
 import { attributeExit, classifyTestCommandDetailed, type ClassifiedTestCommand } from "../engine/src/machine";
+import { splitCommandSegmentsWithOps, stripComment, stripEnvPrefix } from "../engine/src/machine/extract-evidence";
 import { extractTestEvidence } from "../engine/src/handlers/subagent-stop/update-task-status";
 
 const TOOL_NAME_MAP: Readonly<Record<string, string>> = Object.freeze({
@@ -154,12 +155,147 @@ export function parsePiMessages(messages: unknown): PiTranscriptResult<readonly 
 
 /** Pair only parser-proven test commands with their exact Pi tool result.
  * The classified test segment must own the Bash call's exit status. */
+/** An explicit zero-failure marker from the common runner summaries. The
+ *  anti-stripping guard for relaxed (non-attributable) compositions: a green
+ *  verdict may only be minted when the paired output itself still contains
+ *  the runner's zero-failure line, so laundering pipelines that STRIP the
+ *  failure counter (`bun test 2>&1 | grep -v fail`) stay fail-closed.
+ *  Deliberately NARROW: it matches only runners whose GREEN summary prints
+ *  a zero counter (`0 fail` — bun/cargo; `Failures: 0`/`Errors: 0` —
+ *  surefire). vitest/pytest/jest green output has no such token, so the
+ *  relax is inert for them — the standard attribution path (sole/last
+ *  `&&`-attributable segment) still covers the canonical `cd x && runner`
+ *  shape there, and anything the relax refuses fails closed (the extension
+ *  logs a diagnostic naming exactly why). */
+const ZERO_FAILURE_MARKER = /\b0 fail(?:ed|ing)?\b|\bFailures: 0\b|\bErrors: 0\b/;
+
+/** Is every segment before `classified.segment` a pure `cd` preamble?
+ *  `cd X && bun test …` is the canonical documented shape; `cd` cannot alter
+ *  the test outcome, so the composition stays relaxable. Any other prior
+ *  command (`false && bun test`, `git stash && bun test`) means the test may
+ *  never have run — never relax. */
+function onlyCdPreamble(command: string, classified: ClassifiedTestCommand): boolean {
+  const segments = splitCommandSegmentsWithOps(command)
+    .map((s) => stripEnvPrefix(stripComment(s.text).trim()))
+    .filter((t) => t !== "");
+  const ownIndex = segments.findIndex((segment) => segment === classified.segment);
+  if (ownIndex <= 0) return true; // first segment (or not found — treat as safe)
+  return segments.slice(0, ownIndex).every((segment) => {
+    const head = segment.split(/\s+/, 1)[0] ?? "";
+    return head === "cd" || /^cd\//.test(head);
+  });
+}
+
+/**
+ * PI-path exit attribution: the standard rule first (a test segment can own
+ * the line's exit only in provable compositions); when it refuses, a relax
+ * only for the structured path — where the paired OUTPUT is present and its
+ * own summary is the verdict — not for the Claude/ledger paths. The relax
+ * requires: the line was not backgrounded, the Bash result was not an error,
+ * and every prior segment is a `cd` preamble (the test actually headed the
+ * work). The verdict itself is then governed by the output summary, and the
+ * strict zero-failure marker (caller side) closes line-stripping laundering.
+ */
+function attributeExitForStructuredEvidence(
+  exit: number | null,
+  classified: ClassifiedTestCommand,
+  command: string,
+): { attributed: number | null; relaxed: boolean } {
+  const standard = attributeExit(exit, classified);
+  if (standard !== null) return { attributed: standard, relaxed: false };
+  if (exit !== 0) return { attributed: null, relaxed: false };
+  if (classified.isBackgrounded) return { attributed: null, relaxed: false };
+  if (!onlyCdPreamble(command, classified)) return { attributed: null, relaxed: false };
+  return { attributed: 0, relaxed: true };
+}
+
+/**
+ * Diagnosable structured-capture trace: what the pairing saw, and why the
+ * last classified test pair did not mint structured evidence. Logged by the
+ * extension whenever the transcript fallback is used, so a future "why is
+ * the wave gate blocked" stops being a forensic mystery.
+ */
+export interface PiStructuredTestDiagnostics {
+  readonly classifiedCommands: readonly string[];
+  readonly attributedPairs: number;
+  readonly verdict: "structured" | "relaxed" | "no-test-command" | "exit-not-attributable" | "strict-summary-refused" | "no-paired-result";
+}
+
+export function piStructuredTestDiagnostics(
+  input: unknown,
+): PiTranscriptResult<PiStructuredTestDiagnostics> {
+  const parsed = parsePiMessages(input);
+  if (!parsed.ok) return parsed;
+  const testCalls = new Map<string, Readonly<{ command: string; classified: ClassifiedTestCommand }>>();
+  let classifiedCommands: string[] = [];
+  let attributedPairs = 0;
+  let verdict: PiStructuredTestDiagnostics["verdict"] = "no-test-command";
+  let sawClassified = false;
+  let sawAttributionRefusal = false;
+  for (const message of parsed.value) {
+    if (message.role === "assistant") {
+      for (const block of message.content ?? []) {
+        if (block.type !== "toolCall" || block.name?.toLowerCase() !== "bash" || !block.id) continue;
+        const command = typeof block.arguments?.command === "string" ? block.arguments.command : "";
+        const classified = classifyTestCommandDetailed(command);
+        if (classified !== null) {
+          sawClassified = true;
+          testCalls.set(block.id, { command, classified });
+          if (!classifiedCommands.includes(command)) classifiedCommands.push(command);
+        }
+      }
+      continue;
+    }
+    if (message.role !== "toolResult" || !message.toolCallId) continue;
+    const entry = testCalls.get(message.toolCallId);
+    if (entry === undefined) continue;
+    const attributed = attributeExitForStructuredEvidence(
+      message.isError === true ? 1 : 0,
+      entry.classified,
+      entry.command,
+    );
+    if (attributed.attributed === null) {
+      sawAttributionRefusal = true;
+      continue;
+    }
+    attributedPairs++;
+    const text = (message.content ?? [])
+      .filter((block) => block.type === "text")
+      .map((block) => block.text ?? "")
+      .join("\n");
+    const evidence = extractTestEvidence(text);
+    if (!evidence.passed) {
+      verdict = "structured"; // a genuine structured FAIL also resolves the trace
+      continue;
+    }
+    if (attributed.relaxed && !ZERO_FAILURE_MARKER.test(text)) {
+      verdict = "strict-summary-refused";
+      continue;
+    }
+    verdict = attributed.relaxed ? "relaxed" : "structured";
+  }
+  return {
+    ok: true,
+    value: Object.freeze({
+      classifiedCommands: Object.freeze(classifiedCommands),
+      attributedPairs,
+      verdict: attributedPairs > 0
+        ? verdict
+        : sawClassified
+          ? sawAttributionRefusal
+            ? "exit-not-attributable"
+            : "no-paired-result"
+          : "no-test-command",
+    }),
+  };
+}
+
 export function piStructuredTestResult(
   input: unknown,
 ): PiTranscriptResult<{ passed: boolean; evidence: string } | null> {
   const parsed = parsePiMessages(input);
   if (!parsed.ok) return parsed;
-  const testCalls = new Map<string, ClassifiedTestCommand>();
+  const testCalls = new Map<string, Readonly<{ command: string; classified: ClassifiedTestCommand }>>();
   let latest: { passed: boolean; evidence: string } | null = null;
   for (const message of parsed.value) {
     if (message.role === "assistant") {
@@ -167,21 +303,32 @@ export function piStructuredTestResult(
         if (block.type !== "toolCall" || block.name?.toLowerCase() !== "bash" || !block.id) continue;
         const command = typeof block.arguments?.command === "string" ? block.arguments.command : "";
         const classified = classifyTestCommandDetailed(command);
-        if (classified !== null) testCalls.set(block.id, classified);
+        if (classified !== null) testCalls.set(block.id, { command, classified });
       }
       continue;
     }
     if (message.role !== "toolResult" || !message.toolCallId) continue;
-    const classified = testCalls.get(message.toolCallId);
-    if (classified === undefined) continue;
-    const attributedExit = attributeExit(message.isError === true ? 1 : 0, classified);
-    if (attributedExit === null) continue;
+    const entry = testCalls.get(message.toolCallId);
+    if (entry === undefined) continue;
+    const attributed = attributeExitForStructuredEvidence(
+      message.isError === true ? 1 : 0,
+      entry.classified,
+      entry.command,
+    );
+    if (attributed.attributed === null) continue;
     const text = (message.content ?? [])
       .filter((block) => block.type === "text")
       .map((block) => block.text ?? "")
       .join("\n");
-    const parsed = extractTestEvidence(text);
-    latest = { passed: attributedExit === 0 && parsed.passed, evidence: parsed.evidence };
+    const parsedEvidence = extractTestEvidence(text);
+    // A relaxed (non-attributable) composition may only mint a GREEN verdict
+    // when the output still carries the runner's explicit zero-failure line;
+    // a structured FAIL is always taken (the gate rejects it either way).
+    if (parsedEvidence.passed && attributed.relaxed && !ZERO_FAILURE_MARKER.test(text)) continue;
+    latest = {
+      passed: attributed.attributed === 0 && parsedEvidence.passed,
+      evidence: parsedEvidence.evidence,
+    };
   }
   return { ok: true, value: latest };
 }

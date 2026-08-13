@@ -13,7 +13,7 @@ You are running inside `/loom`. Your plan feeds into the decompose phase, which 
 
 ## CRITICAL: You CAN Write Files
 
-**You are a subagent. The block-direct-edits hook detects subagents and allows Edit/Write.**
+**You are a subagent. The block-direct-edits hook detects subagents and allows Edit/Write — scoped to this phase's artifact directory** (`.claude/specs/{date_slug}/` or `.claude/plans/`); write only there.
 - You MUST use Write/Edit tools to create the plan file — this WILL work
 - Do NOT read `.claude/hooks/` or `.claude/state/` files — they are irrelevant to you
 - Do NOT check if you are "allowed" to write — you are. Just write.

@@ -331,6 +331,13 @@ UserPromptSubmit                →   pi.on("input", ...) for transform/intercep
                                     pi.on("before_agent_start", ...) for context injection
 SubagentStart                   →   Custom tool + pi.exec() or tmux spawn
 SubagentStop                    →   Custom tool result handler
+AskUserQuestion                 →   ctx.ui.select/confirm/input/editor (in-session);
+                                    ctx.ui.custom() for full TUI pickers.
+                                    Headless children: no UI (ctx.hasUI=false in
+                                    print/json mode); see
+                                    docs/pi-phase-agent-interviews.md for the
+                                    RPC-relay design that restores the
+                                    Claude Code subagent-interview UX.
 ```
 
 ---

@@ -1100,6 +1100,240 @@ describe("orchestration CLI", () => {
     });
   }, 30_000);
 
+  it("derives the spec-check retry from the CURRENT epoch when the journal holds an older epoch's spec-check attempt 1 (loom#20 Finding 5)", async () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+    const finding = {
+      id: "finding-1", agent: "silent-failure-hunter", severity: "critical" as const,
+      file: "src/x.ts", line: 1, claim: "a critical spec gap claim",
+    };
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
+        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "pending", review_generation: 0,
+        findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
+      }],
+    }));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-spec-retry-epoch-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-spec-retry-epoch");
+    mkdirSync(runDir);
+    const started = runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const initial = JSON.parse(started.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(initial.kind).toBe("spawn-batch");
+    expect(initial.requests.some(({ authority }) => authority.role === "spec-check-invoker" && authority.attempt === 1)).toBe(true);
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+
+    const batchEpochOf = (authority: AgentRequestAuthority): string => {
+      const read = opened.value.readContext(authority.contextDigest);
+      expect(read.ok).toBe(true);
+      if (!read.ok) throw new Error(read.error.message);
+      const section = read.value.fixedContext.find(({ label }) => label === "wave-review-authority");
+      expect(section).toBeDefined();
+      const authoritySection = JSON.parse(Buffer.from(section!.bytes).toString("utf8")) as { batchEpoch?: unknown };
+      expect(typeof authoritySection.batchEpoch).toBe("string");
+      return authoritySection.batchEpoch as string;
+    };
+
+    const reviewersOf = (batch: readonly { authority: AgentRequestAuthority }[]) =>
+      batch.filter(({ authority }) => authority.role !== "spec-check-invoker");
+    const specCheckOf = (batch: readonly { authority: AgentRequestAuthority }[]) =>
+      batch.find(({ authority }) => authority.role === "spec-check-invoker")!.authority;
+    const acceptedReviewerTranscript = (run: { generation: number; packet_id: string; prior_finding_ids: readonly string[] }): string => [
+      "### Machine Summary",
+      `REVIEW_GENERATION: ${run.generation}`,
+      `REVIEW_PACKET_ID: ${run.packet_id}`,
+      "CRITICAL_COUNT: 0",
+      "ADVISORY_COUNT: 0",
+      "```findings",
+      "[]",
+      "```",
+      "```review_lifecycle",
+      JSON.stringify({ prior_findings: run.prior_finding_ids.map((finding_id) => ({
+        finding_id, verdict: "resolved_by_remediation", reason: "verified fixed in this packet",
+      })) }),
+      "```",
+    ].join("\n");
+    const specFailureOutput = [
+      "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "HIGH: a spec gap claim that breaks count reconciliation",
+      "SPEC_CHECK_VERDICT: BLOCKED",
+    ].join("\n");
+    const specPassOutput = "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED";
+
+    // --- epoch 1: every attempt-1 transcript is captured but unusable, so the
+    // gate issues attempt-2 retries for the reviewers. Applying those captured
+    // retries closes the packets, and the recursion that follows derives the
+    // spec-check retry from epoch 1's own attempt-1 (the only one in the
+    // journal at this point) — the single-epoch happy path.
+    for (const { authority } of reviewersOf(initial.requests)) {
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
+    }
+    expect((await opened.value.captureTranscript(specCheckOf(initial.requests), [...Buffer.from(specFailureOutput)])).ok).toBe(true);
+    const epochOneRetries = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(epochOneRetries.status, epochOneRetries.stderr).toBe(0);
+    const epochOneRetryBatch = JSON.parse(epochOneRetries.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(epochOneRetryBatch.kind, epochOneRetries.stdout).toBe("spawn-batch");
+    expect(epochOneRetryBatch.requests.length).toBeGreaterThan(0);
+    expect(epochOneRetryBatch.requests.every(({ authority }) => authority.attempt === 2)).toBe(true);
+    expect(epochOneRetryBatch.requests.every(({ authority }) => authority.role !== "spec-check-invoker")).toBe(true);
+    const epochOneRun = (JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { review_run?: { generation: number; packet_id: string; prior_finding_ids: readonly string[] } }[];
+    }).tasks[0]?.review_run;
+    expect(epochOneRun).toBeDefined();
+    for (const { authority } of reviewersOf(epochOneRetryBatch.requests)) {
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from(acceptedReviewerTranscript(epochOneRun!))])).ok).toBe(true);
+    }
+    const firstEpochSpecRetry = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(firstEpochSpecRetry.status, firstEpochSpecRetry.stderr).toBe(0);
+    const epochOneSpecSpawn = JSON.parse(firstEpochSpecRetry.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(epochOneSpecSpawn.kind, firstEpochSpecRetry.stdout).toBe("spawn-batch");
+    expect(epochOneSpecSpawn.requests).toHaveLength(1);
+    expect(epochOneSpecSpawn.requests[0]?.authority).toMatchObject({ role: "spec-check-invoker", attempt: 2, program: "wave-gate" });
+    // Leave the epoch-1 spec retry uncaptured: the run is about to install a
+    // SECOND epoch, which is exactly the state that used to poison the lookup.
+
+    // --- epoch 2: an implementation write invalidates the review while the
+    // epoch-1 spec retry is still outstanding, so a fresh packet batch (and a
+    // fresh review epoch) installs in the SAME run. The journal now holds TWO
+    // spec-check attempt-1 authorities from DIFFERENT batch epochs.
+    const invalidated = JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { review_status: string; review_generation: number }[];
+    };
+    invalidated.tasks = [{
+      ...invalidated.tasks[0]!, review_status: "pending", review_generation: 1,
+    }];
+    chmodSync(statePath, 0o644);
+    writeFileSync(statePath, JSON.stringify(invalidated));
+    const epochTwoStart = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(epochTwoStart.status, epochTwoStart.stderr).toBe(0);
+    const epochTwoBatch = JSON.parse(epochTwoStart.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(epochTwoBatch.kind, epochTwoStart.stdout).toBe("spawn-batch");
+    expect(epochTwoBatch.requests).toHaveLength(initial.requests.length);
+    expect(epochTwoBatch.requests.some(({ authority }) => authority.role === "spec-check-invoker" && authority.attempt === 1)).toBe(true);
+    const epochTwoEpoch = (JSON.parse(readFileSync(statePath, "utf8")) as {
+      wave_review_epoch?: { batchEpoch?: string };
+    }).wave_review_epoch?.batchEpoch;
+    expect(typeof epochTwoEpoch).toBe("string");
+    expect(epochTwoEpoch).not.toBe(batchEpochOf(specCheckOf(initial.requests)));
+
+    const epochTwoRun = (JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { review_run?: { generation: number; packet_id: string; prior_finding_ids: readonly string[] } }[];
+    }).tasks[0]?.review_run;
+    expect(epochTwoRun).toBeDefined();
+    // Epoch-1 review closed before the invalidation, so the prior finding was
+    // already retired; the fresh packet has no remaining prior findings.
+    for (const { authority } of reviewersOf(epochTwoBatch.requests)) {
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
+    }
+    expect((await opened.value.captureTranscript(specCheckOf(epochTwoBatch.requests), [...Buffer.from(specFailureOutput)])).ok).toBe(true);
+    const epochTwoRetries = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(epochTwoRetries.status, epochTwoRetries.stderr).toBe(0);
+    const epochTwoRetryBatch = JSON.parse(epochTwoRetries.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(epochTwoRetryBatch.kind, epochTwoRetries.stdout).toBe("spawn-batch");
+    expect(epochTwoRetryBatch.requests.length).toBeGreaterThan(0);
+    expect(epochTwoRetryBatch.requests.every(({ authority }) => authority.attempt === 2 && authority.role !== "spec-check-invoker")).toBe(true);
+    for (const { authority } of reviewersOf(epochTwoRetryBatch.requests)) {
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from(acceptedReviewerTranscript(epochTwoRun!))])).ok).toBe(true);
+    }
+
+    // --- the regression: applying those captured epoch-2 reviewer retries
+    // closes the packets, and the recursion re-enters the facade with NO
+    // collecting packet — so currentIssued is the UNFILTERED issued journal.
+    // That journal contains epoch-1's spec-check attempt-1 (and its uncaptured
+    // attempt-2) BEFORE epoch-2's attempt-1, and a role-only lookup picks the
+    // stale one; the retry derived from it binds the OLD batchEpoch and the
+    // captured transcript fails the exact-epoch gate as a durable terminal
+    // block. The retry must instead derive from epoch-2's attempt-1 — the
+    // exact epoch the graph persists.
+    const epochTwoSpecRetry = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(epochTwoSpecRetry.status, epochTwoSpecRetry.stderr).toBe(0);
+    const specRetry = JSON.parse(epochTwoSpecRetry.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(specRetry.kind, epochTwoSpecRetry.stdout).toBe("spawn-batch");
+    expect(specRetry.requests).toHaveLength(1);
+    expect(specRetry.requests[0]?.authority).toMatchObject({ role: "spec-check-invoker", attempt: 2, program: "wave-gate" });
+    expect(specRetry.requests[0]?.authority.requestId).not.toBe(epochOneSpecSpawn.requests[0]?.authority.requestId);
+    expect(batchEpochOf(specRetry.requests[0]!.authority)).toBe(epochTwoEpoch);
+
+    // Capturing the CURRENT-epoch retry with a passing alignment result must
+    // reconcile and let the gate complete instead of blocking on the stale
+    // epoch authority.
+    const retryAuthority = specRetry.requests[0]!.authority;
+    const afterSpec = runCli([
+      "submit", "--runs-root", runsRoot, "--run", runDir,
+      "--request", retryAuthority.requestId, "--slot", retryAuthority.slotId, "--attempt", "2",
+    ], specPassOutput, root);
+    expect(afterSpec.status, afterSpec.stderr).toBe(0);
+    expect(afterSpec.stdout).not.toContain("could not be reconciled");
+    const finalAction = JSON.parse(afterSpec.stdout) as { kind: string };
+    expect(finalAction.kind, afterSpec.stdout).toBe("done");
+  }, 30_000);
+
+  it("degrades to a wave-blocked verdict when the spec-check attempt-1 context is unreadable (never throws)", async () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+    const finding = {
+      id: "finding-1", agent: "silent-failure-hunter", severity: "critical" as const,
+      file: "src/x.ts", line: 1, claim: "a critical spec gap claim",
+    };
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
+        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "pending", review_generation: 0,
+        findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
+      }],
+    }));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-spec-retry-lost-context-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-spec-retry-lost-context");
+    mkdirSync(runDir);
+    const started = runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const initial = JSON.parse(started.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(initial.kind).toBe("spawn-batch");
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const specCheck = initial.requests.find(({ authority }) => authority.role === "spec-check-invoker" && authority.attempt === 1)!.authority;
+    const reviewers = initial.requests.filter(({ authority }) => authority !== specCheck);
+    for (const { authority } of reviewers) {
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
+    }
+    expect((await opened.value.captureTranscript(specCheck, [...Buffer.from(
+      "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: BLOCKED")])).ok).toBe(true);
+    // The reviewer attempt-2 derivation reads every attempt-1 context before
+    // the spec retry derivation does — remove them ALL so whichever scan hits
+    // the gap first must degrade to a verdict, not throw out of the facade.
+    for (const { authority } of initial.requests) {
+      rmSync(join(runDir, "contexts", `${authority.contextDigest}.json`), { force: true });
+    }
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const verdict = JSON.parse(resumed.stdout) as { kind: string; diagnostic?: { kind: string; message: string } };
+    expect(verdict.kind).toBe("blocked");
+    expect(verdict.diagnostic?.kind).toBe("wave-gate-blocked");
+    expect(verdict.diagnostic?.message.length).toBeGreaterThan(0);
+  }, 30_000);
+
   it("advances a capture-rejected Wave reviewer attempt 1 to diagnostic-rich attempt 2", async () => {
     const root = repository();
     const proof = evaluateTaskProof(

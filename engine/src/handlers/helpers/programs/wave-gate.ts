@@ -985,13 +985,15 @@ export async function applyWaveFacadeSubmission(
       if (typeof wave !== "number" || typeof context.batchEpoch !== "string") {
         return { ok: false, message: "Wave spec-check request lacks exact review epoch authority" };
       }
+      const batchEpoch = context.batchEpoch;
       const resolution = reconcileSpecCheck(parsed, wave, new Date().toISOString());
       await manager.update((locked) => {
         const epoch = locked.wave_review_epoch;
         if (locked.current_wave !== wave || locked.active_wave_gate?.runId !== authority.runId ||
             locked.active_wave_gate.authorityDigest !== context.authorityDigest ||
-            epoch?.runId !== authority.runId || epoch.wave !== wave || epoch.batchEpoch !== context.batchEpoch) {
-          throw new Error(`Wave spec-check request ${authority.requestId} does not belong to the exact current review epoch`);
+            epoch?.runId !== authority.runId || epoch.wave !== wave || epoch.batchEpoch !== batchEpoch) {
+          const expected = `${locked.current_wave}/${locked.active_wave_gate?.runId ?? "none"}/${locked.active_wave_gate?.authorityDigest ?? "none"}/${epoch?.runId ?? "none"}/${epoch?.wave ?? "none"}/${(epoch?.batchEpoch ?? "none").slice(0, 12)}`;
+          throw new Error(`Wave spec-check request ${authority.requestId} does not belong to the exact current review epoch (expected current_wave/runId/digest/epoch-runId/epoch-wave/epoch-batch: ${expected}; request wave ${wave}, digest ${context.authorityDigest}, runId ${authority.runId}, batch ${batchEpoch.slice(0, 12)})`);
         }
         return { ...locked, spec_check: resolution.specCheck };
       });
@@ -1387,8 +1389,41 @@ export async function resumeWaveGateFacade(
     const specAccepted = refreshed.spec_check?.wave === registration.input.wave &&
       refreshed.spec_check.verdict !== "EVIDENCE_CAPTURE_FAILED";
     if (!specAccepted) {
-      const attemptOne = currentIssued.find((authority) => authority.program === "wave-gate" && authority.attempt === 1 &&
-        authority.role === "spec-check-invoker");
+      // Attempt-2 must derive from the CURRENT epoch's attempt-1, never the
+      // first spec-check authority in the issued journal. The journal spans
+      // every batch epoch a run has installed, and in this non-collecting
+      // phase currentIssued is the unfiltered journal: a role-only find picks
+      // an OLD epoch's authority whose fixed packet binds an older batchEpoch,
+      // and the captured retry then fails the exact-epoch gate in
+      // applyWaveFacadeSubmission as a durable terminal block (loom#20 Finding
+      // 5). Reviewer retries are immune because their attempt-1 lookup is keyed
+      // by current-packet slot identity; mirror that binding here by matching
+      // the persisted epoch's batchEpoch before deriving the attempt-2 context.
+      const epoch = refreshed.wave_review_epoch;
+      // Linear scan so an unreadable/corrupt context can DEGRADE to a wave
+      // verdict (like the sibling candidate scan above) instead of throwing
+      // out of the facade: a pruned context packet must not hard-fail resume.
+      // Fail-closed note: the batchEpoch lives INSIDE the context, so the
+      // epoch cannot be filtered before reading — every attempt-1 context is
+      // read, and a corrupt context for ANY candidate attempt-1 (even a stale
+      // one from an older epoch) blocks resume rather than risking a retry
+      // derived from an identity that cannot be proven current. That is the
+      // same judgment applyWaveFacadeSubmission would make on the retry
+      // packet, surfaced earlier with a better diagnostic.
+      let attemptOne: AgentRequestAuthority | undefined;
+      if (epoch !== undefined) {
+        for (const authority of currentIssued) {
+          if (authority.program !== "wave-gate" || authority.attempt !== 1 || authority.role !== "spec-check-invoker") continue;
+          const contextRead = handle.readContext(authority.contextDigest);
+          if (!contextRead.ok) return waveBlocked(handle, contextRead.error.message);
+          const context = handleWaveReviewContext([contextRead.value], authority.contextDigest);
+          if (context.kind === "corrupt") return waveBlocked(handle, context.message);
+          if (context.kind === "loaded" && context.value.batchEpoch === epoch.batchEpoch) {
+            attemptOne = authority;
+            break;
+          }
+        }
+      }
       if (attemptOne === undefined) return waveBlocked(handle, "current Wave spec-check has no issued attempt-1 authority");
       const retry = deriveWaveAttemptTwo(handle, attemptOne);
       const recovered = durableRefutationRequests(

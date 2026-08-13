@@ -211,6 +211,43 @@ export function parseInterviewDigestJson(raw: unknown): ParseResult<InterviewDig
 export const CODEBASE_FIT_CRITERION = "codebase fit + effort";
 
 /**
+ * The closed judge-criterion vocabulary: exactly what deriveJudgeCriteria can
+ *  produce — the primary axes, the testability bars, and the fixed
+ *  codebase-fit literal. The three vocabularies are pairwise disjoint
+ *  (asserted in panel-contract.test.ts), so no two criteria can collide and
+ *  aggregateVerdicts' distinctness precondition holds for every valid digest.
+ *  A checkpoint file's criteria were produced by the same derivation when
+ *  written, so lookup is the mint: a criterion outside this set cannot come
+ *  from a validated digest and is rejected rather than asserted into the
+ *  brand.
+ */
+const ARCHITECTURE_CRITERIA_VOCAB: readonly string[] = [
+  ...PRIMARY_AXES,
+  ...TESTABILITY_BARS,
+  CODEBASE_FIT_CRITERION,
+];
+
+declare const ARCHITECTURE_CRITERION: unique symbol;
+export type ArchitectureCriterion = string & { readonly [ARCHITECTURE_CRITERION]: true };
+
+/** The ONLY constructor of `ArchitectureCriterion` — membership in the closed
+ *  vocabulary. A free-text string is not a criterion; checkpoints are
+ *  untrusted input and were produced by the same derivation when written. */
+export function architectureCriterion(raw: string): ArchitectureCriterion | null {
+  return ARCHITECTURE_CRITERIA_VOCAB.includes(raw) ? raw as ArchitectureCriterion : null;
+}
+
+/** Total on the validated enum union: every primary axis, testability bar,
+ *  and the fixed literal is a vocabulary member by construction, so the brand
+ *  is claimed from the ARGUMENT TYPE rather than an unproven assertion.
+ *  Untrusted strings must go through `architectureCriterion` (nullable). */
+export function criterionOf(
+  value: PrimaryAxis | TestabilityBar | typeof CODEBASE_FIT_CRITERION,
+): ArchitectureCriterion {
+  return value as ArchitectureCriterion;
+}
+
+/**
  * The exact ordered judge criteria for a run, derived from the validated
  * digest. Previously this derivation lived only in commands/loom.md prose, so
  * the orchestrator's criteria and the finalizer's positional tie-break had to
@@ -221,8 +258,12 @@ export const CODEBASE_FIT_CRITERION = "codebase fit + effort";
  * are pairwise disjoint vocabularies (asserted in panel-contract.test.ts), so
  * aggregateVerdicts' distinctness precondition holds for every valid digest.
  */
-export function deriveJudgeCriteria(digest: InterviewDigest): readonly string[] {
-  return [digest.primaryAxis, digest.testabilityBar, CODEBASE_FIT_CRITERION];
+export function deriveJudgeCriteria(digest: InterviewDigest): readonly ArchitectureCriterion[] {
+  return [
+    criterionOf(digest.primaryAxis),
+    criterionOf(digest.testabilityBar),
+    criterionOf(CODEBASE_FIT_CRITERION),
+  ];
 }
 
 /** Always designed, whatever the interview said. Also the minimum panel size —
