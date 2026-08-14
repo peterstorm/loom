@@ -13,8 +13,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   deriveAgentTranscriptPath,
+  deriveAgentType,
   projectSlug,
   resolveAgentTranscriptPath,
+  resolveAgentType,
 } from "../../src/utils/agent-transcript-path";
 
 const created: string[] = [];
@@ -200,5 +202,86 @@ describe("resolveAgentTranscriptPath — precedence", () => {
     setEnv("CLAUDE_PROJECT_DIR", "/nonexistent/project/dir");
     expect(resolveAgentTranscriptPath({ session_id: "s", agent_id: "a" })).toBeNull();
     expect(resolveAgentTranscriptPath({})).toBeNull();
+  });
+});
+
+/**
+ * Every SubagentStop route gates on agent_type, and Claude Code does not send
+ * it — so an implementation run categorises "unknown" and its entire result
+ * (task status, test evidence, files_modified) is discarded in silence. The
+ * harness records the role in `agent-<id>.meta.json` beside the transcript.
+ */
+describe("resolveAgentType", () => {
+  /** Build the harness metadata file the way the harness writes it. */
+  function plantedSession(body: string): { session: string; agentId: string } {
+    const configDir = tmp("loom-config");
+    const projectDir = tmp("loom-project");
+    setEnv("CLAUDE_CONFIG_DIR", configDir);
+    setEnv("CLAUDE_PROJECT_DIR", projectDir);
+    const dir = join(configDir, "projects", projectSlug(projectDir), "sess-type", "subagents");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "agent-agenttype1.meta.json"), body);
+    return { session: "sess-type", agentId: "agenttype1" };
+  }
+
+  it("derives the namespaced agent type the harness recorded", () => {
+    const { session, agentId } = plantedSession(JSON.stringify({
+      agentType: "loom:code-implementer-agent",
+      description: "Implement T8",
+      model: "opus",
+    }));
+
+    expect(deriveAgentType(session, agentId)).toBe("loom:code-implementer-agent");
+    expect(resolveAgentType({ session_id: session, agent_id: agentId }))
+      .toBe("loom:code-implementer-agent");
+  });
+
+  it("believes a supplied agent_type over the metadata", () => {
+    // Pi supplies the field; the fallback must never override a harness that
+    // still sends it.
+    const { session, agentId } = plantedSession(JSON.stringify({ agentType: "loom:code-implementer-agent" }));
+
+    expect(resolveAgentType({ session_id: session, agent_id: agentId, agent_type: "code-reviewer" }))
+      .toBe("code-reviewer");
+  });
+
+  it("ignores a blank supplied agent_type and falls back", () => {
+    const { session, agentId } = plantedSession(JSON.stringify({ agentType: "loom:ts-test-agent" }));
+
+    expect(resolveAgentType({ session_id: session, agent_id: agentId, agent_type: "   " }))
+      .toBe("loom:ts-test-agent");
+  });
+
+  it("reports an empty type when no metadata exists", () => {
+    setEnv("CLAUDE_CONFIG_DIR", join(tmpdir(), "loom-no-such-config-dir-ever"));
+    setEnv("CLAUDE_PROJECT_DIR", "/nonexistent/project/dir");
+
+    expect(deriveAgentType("s", "a")).toBeNull();
+    expect(resolveAgentType({ session_id: "s", agent_id: "a" })).toBe("");
+    expect(resolveAgentType({})).toBe("");
+  });
+
+  it("says so when the metadata cannot be parsed", () => {
+    const { session, agentId } = plantedSession("{ not json");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(resolveAgentType({ session_id: session, agent_id: agentId })).toBe("");
+      expect(stderr.mock.calls.map(([t]) => String(t)).join("")).toContain("cannot read agent metadata");
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("reports an empty type for metadata with no usable agentType", () => {
+    for (const body of [JSON.stringify({}), JSON.stringify({ agentType: "" }), JSON.stringify({ agentType: 7 })]) {
+      const { session, agentId } = plantedSession(body);
+      expect(resolveAgentType({ session_id: session, agent_id: agentId }), body).toBe("");
+    }
+  });
+
+  it("refuses ids that would address a file outside the session directory", () => {
+    // Same parse boundary the transcript lookup uses — these name paths.
+    expect(deriveAgentType("../../etc", "agent1")).toBeNull();
+    expect(deriveAgentType("sess", "../../etc/passwd")).toBeNull();
   });
 });

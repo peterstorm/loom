@@ -28,7 +28,7 @@
  * had, never crash a lifecycle hook.
  */
 
-import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseAgentId, parseSessionId } from "../machine/evidence";
@@ -145,4 +145,69 @@ export function resolveAgentTranscriptPath(input: TranscriptLocator): string | n
     }
   }
   return deriveAgentTranscriptPath(input.session_id ?? "", input.agent_id ?? "");
+}
+
+/** The fields of a SubagentStop payload that can name an agent's role. */
+export interface AgentTypeLocator {
+  readonly session_id?: string;
+  readonly agent_id?: string;
+  readonly agent_type?: string;
+}
+
+/**
+ * The agent type recorded beside the transcript, or null.
+ *
+ * The harness writes `agent-<agentId>.meta.json` next to the transcript, and
+ * its `agentType` is the same namespaced value the payload would carry
+ * (`loom:code-implementer-agent`). Unlike the `.active` roster — deleted by
+ * cleanupSubagentFlag before the dispatcher's routing gates run — and unlike
+ * the `.machine` binding, which exists only for machine-gated types, this file
+ * survives and covers every agent.
+ */
+export function deriveAgentType(sessionIdRaw: string, agentIdRaw: string): string | null {
+  const sessionId = parseSessionId(sessionIdRaw);
+  const agentId = parseAgentId(agentIdRaw);
+  if (!sessionId || !agentId) return null;
+
+  const root = projectsRoot();
+  for (const dir of candidateProjectDirs()) {
+    for (const projectDir of projectDirCandidates(root, projectSlug(dir))) {
+      const path = join(projectDir, sessionId, "subagents", `agent-${agentId}.meta.json`);
+      if (!existsSync(path)) continue;
+      try {
+        const meta: unknown = JSON.parse(readFileSync(path, "utf-8"));
+        const agentType = typeof meta === "object" && meta !== null && "agentType" in meta
+          ? (meta as { agentType: unknown }).agentType
+          : null;
+        if (typeof agentType === "string" && agentType.trim() !== "") return agentType.trim();
+      } catch (error) {
+        // A metadata file we cannot parse names no role — say so, then keep
+        // looking. Silence here reproduces the very defect this closes.
+        process.stderr.write(
+          `loom: cannot read agent metadata at ${path}: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * The agent type this SubagentStop is about, or "" when none can be found.
+ *
+ * Same precedence — and same reason — as `resolveAgentTranscriptPath`: a
+ * supplied value WINS, derivation is consulted only when the harness sent
+ * nothing. Claude Code stopped sending `agent_transcript_path`; it also does
+ * not send `agent_type`, and EVERY SubagentStop route gates on that field.
+ * Absent, the dispatcher categorises the run "unknown" and does nothing: an
+ * implementation subagent's whole result — task status, test evidence,
+ * files_modified — is discarded without a word, and the wave gate then reports
+ * a finished task as never having run.
+ *
+ * Pi supplies the field and is therefore untouched by the fallback.
+ */
+export function resolveAgentType(input: AgentTypeLocator): string {
+  const supplied = input.agent_type?.trim() ?? "";
+  if (supplied) return supplied;
+  return deriveAgentType(input.session_id ?? "", input.agent_id ?? "") ?? "";
 }

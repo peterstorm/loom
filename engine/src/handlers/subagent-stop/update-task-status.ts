@@ -16,7 +16,7 @@ import { IMPL_AGENTS, machinesDir } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { extractTaskId } from "../../utils/extract-task-id";
-import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
+import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { canonicalRepositoryPaths } from "../../utils/repository-path";
 import {
   changedDeclaredArtifactsSince,
@@ -552,7 +552,11 @@ export const runUpdateTaskStatus = async (
       message: `update-task-status: malformed SubagentStop input — task status and test evidence NOT updated: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
-  const agentType = stripNamespace(input.agent_type ?? "");
+  // Claude Code does not send agent_type; fall back to the metadata the
+  // harness writes beside the transcript. This handler is also registered
+  // standalone (KNOWN_HANDLERS), so it cannot assume the dispatcher already
+  // resolved it.
+  const agentType = stripNamespace(resolveAgentType(input));
 
   // Skip non-impl agents
   if (!IMPL_AGENTS.has(agentType)) return { kind: "passthrough" };

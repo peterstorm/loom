@@ -9,6 +9,7 @@ import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
 import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
+import { resolveAgentType } from "../../utils/agent-transcript-path";
 import { parseSessionId, readEvidence } from "../../machine";
 
 import captureOrchestrationResult from "./capture-orchestration-result";
@@ -120,9 +121,21 @@ const handler: HookHandler = async (stdin, args) => {
 
   // No task graph → no orchestration hooks
   const mgr = StateManager.fromSession(input.session_id);
-  if (!mgr) return { kind: "passthrough" };
+  if (!mgr) {
+    // Silence here is indistinguishable from "nothing to do", and it costs the
+    // whole record: status, evidence and findings are all downstream of this.
+    process.stderr.write(
+      `[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")} — ` +
+        `SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)\n`,
+    );
+    return { kind: "passthrough" };
+  }
 
-  const category = categorize(stripNamespace(input.agent_type ?? ""));
+  // Claude Code does not send agent_type. resolveAgentType falls back to the
+  // metadata the harness writes beside the transcript; without it EVERY
+  // implementation run categorises "unknown" and is discarded.
+  const resolvedAgentType = resolveAgentType(input);
+  const category = categorize(stripNamespace(resolvedAgentType));
 
   let childFailure: HookResult | null = null;
   await match(category)
@@ -141,7 +154,17 @@ const handler: HookHandler = async (stdin, args) => {
       childFailure = await runChild("storeSpecCheckFindings", () => storeSpecCheckFindings(stdin, args));
     })
     .with("unknown", async () => {
-      // No orchestration hooks for unknown agents
+      // Genuinely-unknown agents (a user's own subagent) legitimately have no
+      // orchestration hooks. An UNNAMEABLE one does not: it means neither the
+      // payload nor the harness metadata could say what ran, so a loom agent
+      // may have just been discarded. Name which case this is.
+      process.stderr.write(
+        resolvedAgentType === ""
+          ? `[loom] dispatch: SubagentStop carried no agent_type and none could be derived for ` +
+            `session ${JSON.stringify(input.session_id ?? "")} / agent ${JSON.stringify(input.agent_id ?? "")} — ` +
+            `nothing was recorded; if this was a loom agent its result is LOST\n`
+          : `[loom] dispatch: no orchestration route for agent type ${JSON.stringify(resolvedAgentType)} — nothing recorded\n`,
+      );
     })
     .exhaustive();
 
