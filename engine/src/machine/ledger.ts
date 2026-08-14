@@ -40,6 +40,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import {
   appendFileSync,
   existsSync,
@@ -236,19 +237,26 @@ export function countActiveAgents(sessionId: SessionId): number {
 }
 
 /**
- * Is ANY subagent active, in any session?
+ * Is any subagent active FOR THIS TASK GRAPH?
  *
- * FAIL-CLOSED: only a readable directory with no non-empty `.active` roster
- * proves nothing is running. ENOENT means the dir was never created, which is
- * the same proof; every other error (EACCES, ENOTDIR, EIO) leaves the answer
- * unknown, and unknown must read as "something may be running" so callers that
- * release state on this answer stay conservative.
+ * SUBAGENT_DIR is global and shared by every project on the machine, while a
+ * reservation belongs to one task graph. A project-blind answer therefore lets
+ * a live agent in project A veto reservation recovery in project B — and lets
+ * any stray `.active` file veto it everywhere, forever. Scope the question with
+ * the `<session>.task_graph` pointer mark-subagent-active already writes.
  *
- * Deliberately session-wide and agent-blind: the roster is keyed by session
- * and holds agent ids, so it cannot say WHICH task an agent is serving. "No
- * agent is running anywhere" is the strongest claim this evidence supports.
+ * Per roster, by the pointer beside it:
+ *   - resolves to THIS graph  → active (proven to be serving this project)
+ *   - resolves elsewhere      → not ours
+ *   - absent (ENOENT)         → not ours; "bound to no graph" is a real answer,
+ *                               which is what stops stray rosters vetoing
+ *   - unreadable (any other)  → active (fail closed: cannot disprove it's ours)
+ *
+ * The ENOENT-vs-error split is load-bearing: absence is evidence, failure is
+ * not. A directory that cannot be read at all is likewise fail-closed.
  */
-export function anyActiveSubagent(): boolean {
+export function anyActiveSubagent(taskGraphPath: string): boolean {
+  const wanted = resolve(taskGraphPath);
   let entries: readonly string[];
   try {
     entries = readdirSync(subagentDir());
@@ -260,11 +268,22 @@ export function anyActiveSubagent(): boolean {
     return true;
   }
   return entries.filter((name) => name.endsWith(".active")).some((name) => {
+    const session = name.slice(0, -".active".length);
     try {
-      return statSync(`${subagentDir()}/${name}`).size > 0;
+      if (statSync(`${subagentDir()}/${name}`).size === 0) return false;
     } catch (e) {
-      // Same discipline per entry: a roster we cannot stat may be a live agent.
-      return (e as NodeJS.ErrnoException).code !== "ENOENT";
+      // A roster we cannot stat may be a live agent.
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") return true;
+      return false;
+    }
+    try {
+      return resolve(readFileSync(`${subagentDir()}/${session}.task_graph`, "utf-8").trim()) === wanted;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+      process.stderr.write(
+        `anyActiveSubagent: cannot read the task-graph pointer for ${session} (${e instanceof Error ? e.message : String(e)}) — assuming it serves this graph (fail closed)\n`,
+      );
+      return true;
     }
   });
 }

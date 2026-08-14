@@ -32,13 +32,17 @@ import type { TaskGraph } from "../types";
  * down with it.
  *
  * A reservation is provably abandoned only when its task never left `pending`
- * AND no subagent is active anywhere. Both halves matter: a task past
+ * AND no subagent is active FOR THIS GRAPH. Both halves matter: a task past
  * `pending` has really run, and `anyActiveSubagent` fails closed, so an
- * unreadable roster or any live agent releases nothing.
+ * unreadable roster or any live agent on this graph releases nothing.
+ *
+ * The graph scope is not a detail. SUBAGENT_DIR is shared by every project on
+ * the machine, so a project-blind probe lets another repo's live agent — or
+ * any stray roster file — veto recovery here indefinitely.
  */
-function staleTaskReservations(state: TaskGraph): ReadonlySet<string> {
+function staleTaskReservations(state: TaskGraph, taskGraphPath: string): ReadonlySet<string> {
   const reserved = state.executing_tasks ?? [];
-  if (reserved.length === 0 || anyActiveSubagent()) return new Set();
+  if (reserved.length === 0 || anyActiveSubagent(taskGraphPath)) return new Set();
   return new Set(reserved.filter((taskId) =>
     state.tasks.find((candidate) => candidate.id === taskId)?.status === "pending"));
 }
@@ -70,7 +74,7 @@ export async function validateTaskExecutionBatch(
   const taskIds = bindings.taskIds;
   // Resolved once and reused under the lock: a second probe could observe a
   // newly-started agent and disagree with the preflight it already passed.
-  const staleReservations = staleTaskReservations(state);
+  const staleReservations = staleTaskReservations(state, statePath);
   const ownershipError = taskExecutionOwnershipError(state, taskIds, mode, staleReservations);
   if (ownershipError !== null) return { kind: "block", message: `BLOCKED: ${ownershipError}` };
 

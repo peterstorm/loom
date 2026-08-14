@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readdirSync, rmSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Evidence } from "../../src/machine/types";
@@ -16,17 +16,24 @@ const run = `ledger-test-${process.pid}-${Date.now()}`;
 const sid = (name: string) => ledger.parseSessionId(`${run}-${name}`)!;
 const sessions = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "never-seen"].map(sid);
 
+// Sweep by run prefix, NOT by a hand-maintained session list. The list rotted
+// once already: sessions added by a later test leaked `.active` files into the
+// shared SUBAGENT_DIR, and a stray roster there makes anyActiveSubagent report
+// a live agent — disabling stale-reservation recovery for every project using
+// that directory. The failure is far too quiet to police by hand, so cleanup
+// derives from the unique run prefix every session id here already carries.
 afterAll(() => {
-  for (const s of sessions) {
-    for (const path of [
-      ledger.ledgerPath(s),
-      ledger.machineBindingPath(s),
-      `${SUBAGENT_DIR}/${s}.active`,
-    ]) {
-      try {
-        unlinkSync(path);
-      } catch {}
-    }
+  let entries: readonly string[];
+  try {
+    entries = readdirSync(SUBAGENT_DIR);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (!name.startsWith(run)) continue;
+    try {
+      unlinkSync(`${SUBAGENT_DIR}/${name}`);
+    } catch {}
   }
 });
 
