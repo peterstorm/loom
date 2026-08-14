@@ -367,6 +367,72 @@ describe("machine registry", () => {
   });
 });
 
+// The roster stored identity alone because its original job was COUNTING.
+// Authorization needs the ROLE, and on Claude Code `agent_id` is an opaque
+// handle no agent-type name can match — so the line carries an optional
+// second column. Counting and attribution must be unchanged by it.
+describe("roster records the agent role alongside its identity", () => {
+  it("round-trips the recorded role without disturbing identity or count", async () => {
+    const s = sid("roster-role-1");
+    await ledger.markAgentActive(s, agentId("a339f6fd51d78b179"), agentType("code-implementer-agent"));
+
+    expect(ledger.readActiveAgentRoles(s)).toEqual([
+      { agentId: "a339f6fd51d78b179", agentType: "code-implementer-agent" },
+    ]);
+    expect(ledger.countActiveAgents(s)).toBe(1);
+  });
+
+  it("keeps a single-column line readable with an unknown role", async () => {
+    // Pi passes no type, and rosters written before the column existed must
+    // keep parsing rather than being dropped from the count.
+    const s = sid("roster-role-2");
+    await ledger.markAgentActive(s, agentId("pi-grant-abcdef0123456789"));
+
+    expect(ledger.readActiveAgentRoles(s)).toEqual([
+      { agentId: "pi-grant-abcdef0123456789", agentType: null },
+    ]);
+    expect(ledger.countActiveAgents(s)).toBe(1);
+  });
+
+  it("treats identity as column 0 for duplicate detection", async () => {
+    const s = sid("roster-role-3");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await ledger.markAgentActive(s, agentId("a-dup"), agentType("code-implementer-agent"));
+      // Same identity, redelivered without a type — still a duplicate.
+      await ledger.markAgentActive(s, agentId("a-dup"));
+      expect(ledger.countActiveAgents(s)).toBe(1);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("removes a role-carrying entry by identity alone", async () => {
+    // markAgentActive/removeActiveAgent must stay symmetric across the
+    // agent's start and stop hooks, which only know the id.
+    const s = sid("roster-role-4");
+    await ledger.markAgentActive(s, agentId("a-keep"), agentType("code-implementer-agent"));
+    await ledger.markAgentActive(s, agentId("a-drop"), agentType("code-reviewer"));
+
+    await ledger.removeActiveAgent(s, agentId("a-drop"));
+
+    expect(ledger.readActiveAgentRoles(s)).toEqual([
+      { agentId: "a-keep", agentType: "code-implementer-agent" },
+    ]);
+    expect(ledger.countActiveAgents(s)).toBe(1);
+  });
+
+  it("keeps sole-active attribution keyed on identity", async () => {
+    // soleActiveBinding compares the roster to the machine binding brand-to-
+    // brand; the added column must not break that comparison.
+    const s = sid("roster-role-5");
+    await bind(s, "code-implementer-agent", "a339f6fd51d78b179");
+    await ledger.markAgentActive(s, agentId("a339f6fd51d78b179"), agentType("code-implementer-agent"));
+
+    expect(ledger.soleActiveBinding(s)?.agentId).toBe("a339f6fd51d78b179");
+  });
+});
+
 describe("duplicate SubagentStart events are idempotent (round-10 Fix 4)", () => {
   it("markAgentActive is a set keyed by agentId — the duplicate never disarms soleActiveBinding", async () => {
     const s = sid("s9");

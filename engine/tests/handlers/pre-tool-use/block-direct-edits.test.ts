@@ -53,6 +53,57 @@ describe("shouldBlockDirectEdit — session-id parse boundary", () => {
     expect(shouldBlockDirectEdit("Edit", s, orchestrating).kind).toBe("block");
   });
 
+  // On Claude Code `agent_id` is an opaque handle, so identity alone can never
+  // match IMPL_AGENTS (which holds agent-type NAMES) and every implementation
+  // subagent was blocked by the guard meant to let it through. The roster's
+  // type column is what answers "may this agent write?".
+  describe("authorization by recorded role", () => {
+    const rosterLine = (line: string) => {
+      mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+      writeFileSync(join(SUBAGENT_DIR, `${s}.active`), line);
+    };
+
+    it("allows an opaque Claude agent id carrying an implementation role", () => {
+      rosterLine("a339f6fd51d78b179\tcode-implementer-agent\n");
+      expect(shouldBlockDirectEdit("Edit", s, orchestrating).kind).toBe("allow");
+    });
+
+    it("allows every implementation role, not just the machine-gated one", () => {
+      // Only code-implementer-agent ships a .machine definition, so a
+      // binding-based lookup would still strand these.
+      for (const role of ["adr-writer-agent", "ts-test-agent", "frontend-agent"]) {
+        rosterLine(`opaque${role.length}\t${role}\n`);
+        expect(shouldBlockDirectEdit("Edit", s, orchestrating).kind, role).toBe("allow");
+      }
+    });
+
+    it("still blocks an opaque id carrying a read-only role", () => {
+      rosterLine("b448e7fe62e89c280\tcode-reviewer\n");
+      expect(shouldBlockDirectEdit("Edit", s, orchestrating).kind).toBe("block");
+    });
+
+    it("blocks an opaque id with no recorded role", () => {
+      // Unknown role must not be guessed into authorization.
+      rosterLine("c559f80f73f90d391\n");
+      expect(shouldBlockDirectEdit("Edit", s, orchestrating).kind).toBe("block");
+    });
+
+    it("authorizes on any active entry, not only the first", () => {
+      rosterLine("d66a091084a01e4a2\tcode-reviewer\ne77b1a2195b12f5b3\tcode-implementer-agent\n");
+      expect(shouldBlockDirectEdit("Edit", s, orchestrating).kind).toBe("allow");
+    });
+
+    // Pi writes single-column lines (it passes no type) and authorizes via the
+    // `pi-grant-` capability prefix. Both must keep working untouched.
+    it("keeps Pi write-grant and legacy single-column rosters working", () => {
+      rosterLine("pi-grant-abcdef0123456789\n");
+      expect(shouldBlockDirectEdit("Edit", s, orchestrating).kind).toBe("allow");
+
+      rosterLine("code-implementer-agent\n");
+      expect(shouldBlockDirectEdit("Edit", s, orchestrating).kind).toBe("allow");
+    });
+  });
+
   it("a traversal session id fails CLOSED — block, no path outside SUBAGENT_DIR consulted", () => {
     for (const evil of ["../../etc", "a/b", "..", "a b", ""]) {
       const result = shouldBlockDirectEdit("Write", evil, orchestrating);

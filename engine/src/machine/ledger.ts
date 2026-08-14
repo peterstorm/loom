@@ -72,6 +72,7 @@ import {
   formatBindingLine,
   isBindingFresh,
   parseAgentId,
+  parseAgentType,
   parseBindingLine,
   parseEvidenceLine,
   parseSessionId,
@@ -177,20 +178,56 @@ export function readBindings(sessionId: SessionId, nowMs: number = Date.now()): 
   return lines.flatMap((l) => (l.kind === "fresh" ? [l.persisted.binding] : []));
 }
 
-function readActiveAgents(sessionId: SessionId): AgentId[] {
+/**
+ * One roster entry. A line is `<agentId>` or `<agentId>\t<agentType>`; the
+ * type column is optional because not every producer knows the type (Pi's
+ * write-grant children mark the roster with a `pi-grant-` id and no type) and
+ * because rosters written before the column existed must keep parsing.
+ */
+export type ActiveAgent = Readonly<{ agentId: AgentId; agentType: AgentType | null }>;
+
+/** Column 0 of a roster line — the identity every existing reader means. */
+const rosterLineAgentId = (line: string): AgentId => rosterAgentId(line.split("\t")[0]!.trim());
+
+function readActiveAgentEntries(sessionId: SessionId): ActiveAgent[] {
   const path = activeFlagPath(sessionId);
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf-8")
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l !== "")
-    // Re-parse through the SAME producer that wrote the roster (rosterAgentId),
-    // so the read-back carries the AgentId brand instead of a raw string and
-    // the sole-active comparison in resolveSoleActiveBinding stays brand-to-
-    // brand. Mapping (not dropping) preserves the count: rosterAgentId is
-    // total and idempotent on already-written lines, so a corrupt line can
-    // never silently shrink the roster into a false 2→1 attribution.
-    .map((l) => rosterAgentId(l));
+    .map((line) => {
+      const [, rawType] = line.split("\t");
+      const trimmedType = rawType?.trim() ?? "";
+      return Object.freeze({
+        // Re-parse through the SAME producer that wrote the roster
+        // (rosterAgentId), so the read-back carries the AgentId brand instead
+        // of a raw string and the sole-active comparison in
+        // resolveSoleActiveBinding stays brand-to-brand. Mapping (not
+        // dropping) preserves the count: rosterAgentId is total and idempotent
+        // on already-written lines, so a corrupt line can never silently
+        // shrink the roster into a false 2→1 attribution.
+        agentId: rosterLineAgentId(line),
+        // An absent or unparseable type is null, never a guess: callers that
+        // authorize on type must fall back rather than trust a repaired value.
+        agentType: trimmedType === "" ? null : parseAgentType(trimmedType),
+      });
+    });
+}
+
+/**
+ * Active agents with the role each is serving.
+ *
+ * The roster's original job was to COUNT agents, so it stored identity alone.
+ * Authorization needs the ROLE: on Claude Code `agent_id` is an opaque handle
+ * (`a339f6fd51d78b179`), which no set of agent-type names can ever match.
+ */
+export function readActiveAgentRoles(sessionId: SessionId): readonly ActiveAgent[] {
+  return Object.freeze(readActiveAgentEntries(sessionId));
+}
+
+function readActiveAgents(sessionId: SessionId): AgentId[] {
+  return readActiveAgentEntries(sessionId).map(({ agentId }) => agentId);
 }
 
 /** Number of agents currently on the session's `.active` roster. */
@@ -312,14 +349,21 @@ export function rosterAgentId(raw: string): AgentId {
  * makes soleActiveBinding stand down for the rest of the run (roster count
  * 2 ≠ 1), silently disarming the recorder and the gate's evidence fold.
  */
-export async function markAgentActive(sessionId: SessionId, agentId: AgentId): Promise<void> {
+export async function markAgentActive(
+  sessionId: SessionId,
+  agentId: AgentId,
+  agentType: AgentType | null = null,
+): Promise<void> {
   mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
   await withLock(bindingLock(sessionId), () => {
     const path = activeFlagPath(sessionId);
     if (existsSync(path)) {
+      // Identity is column 0: a re-marked agent must be recognised as a
+      // duplicate whether or not the earlier line recorded a type.
       const already = readFileSync(path, "utf-8")
         .split("\n")
-        .some((l) => l.trim() === `${agentId}`);
+        .filter((l) => l.trim() !== "")
+        .some((l) => rosterLineAgentId(l) === agentId);
       if (already) {
         process.stderr.write(
           `markAgentActive: ${agentId} already on the roster for ${sessionId} — duplicate SubagentStart ignored\n`,
@@ -327,7 +371,10 @@ export async function markAgentActive(sessionId: SessionId, agentId: AgentId): P
         return;
       }
     }
-    appendFileSync(path, `${agentId}\n`);
+    // The type column is what lets PreToolUse authorize by ROLE. Omitting it
+    // (unknown type) is safe but downgrades the agent to identity-only
+    // authorization, which only the `pi-grant-` prefix satisfies.
+    appendFileSync(path, agentType === null ? `${agentId}\n` : `${agentId}\t${agentType}\n`);
   });
 }
 
@@ -341,9 +388,12 @@ export async function removeActiveAgent(sessionId: SessionId, agentId: AgentId):
   if (!existsSync(path)) return;
   await withLock(bindingLock(sessionId), () => {
     try {
+      // Match on column 0 so an entry that recorded a type is still removed by
+      // its id alone — markAgentActive/removeActiveAgent must stay symmetric
+      // across the agent's start and stop hooks.
       const remaining = readFileSync(path, "utf-8")
         .split("\n")
-        .filter((line) => line.trim() !== "" && line.trim() !== agentId)
+        .filter((line) => line.trim() !== "" && rosterLineAgentId(line) !== agentId)
         .join("\n");
       if (remaining.trim() === "") {
         unlinkSync(path);

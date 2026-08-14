@@ -81,6 +81,8 @@ export {
   soleActiveBinding,
   countActiveAgents,
   anyActiveSubagent,
+  readActiveAgentRoles,
+  type ActiveAgent,
   refreshBindingActivity,
   rosterAgentId,
   markAgentActive,

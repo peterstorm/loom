@@ -4,10 +4,11 @@
  * (existsSync/statSync) and writes to stderr.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import type { HookResult } from "../types";
 import { IMPL_AGENTS, TASK_GRAPH_PATH, subagentDir, pathExistsFailClosed } from "../config";
 import { parseSessionId } from "../machine/evidence";
+import { readActiveAgentRoles } from "../machine/ledger";
 
 const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "edit", "write", "multi_edit"]);
 
@@ -58,11 +59,17 @@ export function shouldBlockDirectEdit(
   const activeFile = `${subagentDir()}/${parsed}.active`;
   try {
     if (existsSync(activeFile) && statSync(activeFile).size > 0) {
-      const roster = readFileSync(activeFile, "utf-8")
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0);
-      const hasImplAgent = roster.some((agentId) => isWriteAuthorizedAgent(agentId));
+      // Authorize by ROLE first. On Claude Code `agent_id` is an opaque
+      // handle (`a339f6fd51d78b179`), so testing it against IMPL_AGENTS —
+      // which holds agent-type NAMES — could never match, and every
+      // implementation subagent was blocked by the guard that exists to let
+      // it through. The roster's type column is the role it is serving.
+      const roster = readActiveAgentRoles(parsed);
+      const hasImplAgent = roster.some(({ agentId, agentType }) =>
+        // agentType covers Claude Code; the id fallback covers Pi's
+        // `pi-grant-` capability tokens and any roster written before the
+        // type column existed.
+        (agentType !== null && IMPL_AGENTS.has(agentType)) || isWriteAuthorizedAgent(agentId));
       if (hasImplAgent) {
         return { kind: "allow" };
       }

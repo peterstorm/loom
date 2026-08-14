@@ -86,10 +86,17 @@ const handler: HookHandler = async (stdin) => {
   // its tool calls into whatever binding exists. An unsound roster must not
   // coexist with an armed binding — skip the machine bind, but still write
   // the .task_graph path below (SubagentStop needs it regardless).
+  //
+  // The roster line also records the agent TYPE. PreToolUse authorizes writes
+  // by ROLE, and on Claude Code `agent_id` is an opaque handle that no
+  // agent-type name can match — identity alone cannot answer "may this agent
+  // write?". Parsed here (not below) because the roster is written first.
+  const rosterAgentTypeRaw = stripNamespace(input.agent_type ?? "");
+  const rosterAgentType = rosterAgentTypeRaw ? parseAgentType(rosterAgentTypeRaw) : null;
   let rosterSound = true;
   if (agent_id) {
     try {
-      await markAgentActive(sessionId, rosterAgentId(agent_id));
+      await markAgentActive(sessionId, rosterAgentId(agent_id), rosterAgentType);
     } catch (e) {
       rosterSound = false;
       process.stderr.write(
@@ -107,8 +114,8 @@ const handler: HookHandler = async (stdin) => {
   // epoch key). machinesDir() is resolved at CALL time — the same
   // resolution the PreToolUse gate uses, so bind and gate can never see
   // different dirs.
-  const agentTypeRaw = stripNamespace(input.agent_type ?? "");
-  const agentType = agentTypeRaw ? parseAgentType(agentTypeRaw) : null;
+  const agentTypeRaw = rosterAgentTypeRaw;
+  const agentType = rosterAgentType;
   if (agentTypeRaw && agentType === null && rosterSound) {
     process.stderr.write(
       `mark-subagent-active: agent_type ${JSON.stringify(agentTypeRaw)} contains reserved or path-unsafe characters (whitespace/colon/slash/'..') — no machine looked up or bound; it will run UNGATED\n`,
