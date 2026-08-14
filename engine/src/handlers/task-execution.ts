@@ -18,11 +18,37 @@ import {
   captureRepositoryChangeBaseline,
 } from "../utils/artifact-baseline";
 import { repositoryContext } from "../utils/git";
+import { anyActiveSubagent } from "../machine";
+import type { TaskGraph } from "../types";
+
+/**
+ * Reservations no agent can still be serving.
+ *
+ * This registration commits `executing_tasks` during PreToolUse — before the
+ * sibling PreToolUse gates (template substitution, agent model, agent skill)
+ * have voted. When one of them denies the spawn, SubagentStart never fires, so
+ * no SubagentStop ever arrives to clear the entry: the task is deadlocked
+ * `pending` while owning its declared paths, taking every path-sharing sibling
+ * down with it.
+ *
+ * A reservation is provably abandoned only when its task never left `pending`
+ * AND no subagent is active anywhere. Both halves matter: a task past
+ * `pending` has really run, and `anyActiveSubagent` fails closed, so an
+ * unreadable roster or any live agent releases nothing.
+ */
+function staleTaskReservations(state: TaskGraph): ReadonlySet<string> {
+  const reserved = state.executing_tasks ?? [];
+  if (reserved.length === 0 || anyActiveSubagent()) return new Set();
+  return new Set(reserved.filter((taskId) =>
+    state.tasks.find((candidate) => candidate.id === taskId)?.status === "pending"));
+}
 
 /**
  * Imperative shell: preflight every input against one state snapshot, capture
  * every baseline, then register the accepted batch in one locked update. A
- * blocked sibling therefore leaves no ghost execution state behind.
+ * blocked sibling therefore leaves no ghost execution state behind — and a
+ * spawn denied by a SIBLING HOOK, which this registration cannot observe, is
+ * reclaimed by `staleTaskReservations` on the next attempt.
  */
 export async function validateTaskExecutionBatch(
   spawns: readonly TaskExecutionSpawn[],
@@ -42,7 +68,10 @@ export async function validateTaskExecutionBatch(
   const bindings = parseImplementationTaskBindings(state, inputs);
   if (!bindings.ok) return { kind: "block", message: `BLOCKED: ${bindings.error}` };
   const taskIds = bindings.taskIds;
-  const ownershipError = taskExecutionOwnershipError(state, taskIds, mode);
+  // Resolved once and reused under the lock: a second probe could observe a
+  // newly-started agent and disagree with the preflight it already passed.
+  const staleReservations = staleTaskReservations(state);
+  const ownershipError = taskExecutionOwnershipError(state, taskIds, mode, staleReservations);
   if (ownershipError !== null) return { kind: "block", message: `BLOCKED: ${ownershipError}` };
 
   for (const taskId of taskIds) {
@@ -99,11 +128,19 @@ export async function validateTaskExecutionBatch(
 
   let lockedRegistrationError: string | null = null;
   await manager.update((current) => {
-    lockedRegistrationError = taskExecutionRegistrationError(current, inputs, taskIds, mode, baselines);
+    lockedRegistrationError = taskExecutionRegistrationError(
+      current, inputs, taskIds, mode, baselines, staleReservations,
+    );
     if (lockedRegistrationError !== null) return current;
     return {
       ...current,
-      executing_tasks: [...new Set([...(current.executing_tasks ?? []), ...baselines.keys()])],
+      // Released reservations are dropped rather than carried forward, so a
+      // reclaimed task is registered once instead of accumulating a duplicate
+      // entry that would survive its own SubagentStop cleanup.
+      executing_tasks: [...new Set([
+        ...(current.executing_tasks ?? []).filter((taskId) => !staleReservations.has(taskId)),
+        ...baselines.keys(),
+      ])],
       tasks: current.tasks.map((task) => {
         const artifactBaselines = baselines.get(task.id);
         return artifactBaselines === undefined

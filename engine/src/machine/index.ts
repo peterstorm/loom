@@ -80,6 +80,7 @@ export {
   readBindings,
   soleActiveBinding,
   countActiveAgents,
+  anyActiveSubagent,
   refreshBindingActivity,
   rosterAgentId,
   markAgentActive,

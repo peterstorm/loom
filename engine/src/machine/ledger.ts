@@ -45,6 +45,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -195,6 +196,40 @@ function readActiveAgents(sessionId: SessionId): AgentId[] {
 /** Number of agents currently on the session's `.active` roster. */
 export function countActiveAgents(sessionId: SessionId): number {
   return readActiveAgents(sessionId).length;
+}
+
+/**
+ * Is ANY subagent active, in any session?
+ *
+ * FAIL-CLOSED: only a readable directory with no non-empty `.active` roster
+ * proves nothing is running. ENOENT means the dir was never created, which is
+ * the same proof; every other error (EACCES, ENOTDIR, EIO) leaves the answer
+ * unknown, and unknown must read as "something may be running" so callers that
+ * release state on this answer stay conservative.
+ *
+ * Deliberately session-wide and agent-blind: the roster is keyed by session
+ * and holds agent ids, so it cannot say WHICH task an agent is serving. "No
+ * agent is running anywhere" is the strongest claim this evidence supports.
+ */
+export function anyActiveSubagent(): boolean {
+  let entries: readonly string[];
+  try {
+    entries = readdirSync(subagentDir());
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+    process.stderr.write(
+      `anyActiveSubagent: cannot read ${subagentDir()} (${e instanceof Error ? e.message : String(e)}) — assuming a subagent is active (fail closed)\n`,
+    );
+    return true;
+  }
+  return entries.filter((name) => name.endsWith(".active")).some((name) => {
+    try {
+      return statSync(`${subagentDir()}/${name}`).size > 0;
+    } catch (e) {
+      // Same discipline per entry: a roster we cannot stat may be a live agent.
+      return (e as NodeJS.ErrnoException).code !== "ENOENT";
+    }
+  });
 }
 
 /**

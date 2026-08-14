@@ -103,14 +103,27 @@ export type ExecutionBatchMode = "parallel" | "sequential";
  * their declared paths until stop cleanup. One reservation captures all task
  * baselines before dispatch, so even sequential siblings must be disjoint;
  * path handoff requires separate calls so each task gets a fresh baseline.
+ *
+ * `staleReservations` names reservations the shell has PROVEN abandoned. The
+ * reservation is committed during PreToolUse, before the sibling PreToolUse
+ * gates have voted, so a spawn any one of them then denies leaves an entry in
+ * `executing_tasks` that no SubagentStop will ever clear — permanently
+ * deadlocking the task and every task sharing a declared path with it.
+ * Releasing those entries here keeps the invariant honest (a reservation only
+ * owns paths while its agent can still be running) without weakening it: the
+ * shell only ever proves staleness fail-closed, so an unproven reservation
+ * still owns its paths.
  */
 export function taskExecutionOwnershipError(
   state: TaskGraph,
   taskIds: readonly string[],
   mode: ExecutionBatchMode,
+  staleReservations: ReadonlySet<string> = new Set(),
 ): string | null {
   const requested = new Set(taskIds);
-  const active = new Set(state.executing_tasks ?? []);
+  const active = new Set(
+    (state.executing_tasks ?? []).filter((taskId) => !staleReservations.has(taskId)),
+  );
   for (const taskId of taskIds) {
     if (active.has(taskId)) return `Task ${taskId} is already executing.`;
   }
@@ -185,13 +198,17 @@ export function taskExecutionRegistrationError(
   expectedTaskIds: readonly string[],
   mode: ExecutionBatchMode,
   baselines: TaskExecutionBaselines,
+  staleReservations: ReadonlySet<string> = new Set(),
 ): string | null {
   const rebound = parseImplementationTaskBindings(current, inputs);
   if (!rebound.ok) return rebound.error;
   if (!samePaths(rebound.taskIds, expectedTaskIds)) {
     return "Implementation task bindings changed before execution registration.";
   }
-  const ownership = taskExecutionOwnershipError(current, expectedTaskIds, mode);
+  // Same stale set as preflight: if the locked re-check re-applied a released
+  // reservation the two would disagree and the spawn would block under lock
+  // after passing preflight.
+  const ownership = taskExecutionOwnershipError(current, expectedTaskIds, mode, staleReservations);
   if (ownership !== null) return ownership;
   for (const taskId of expectedTaskIds) {
     const decision = taskExecutionDecision(current, taskId);

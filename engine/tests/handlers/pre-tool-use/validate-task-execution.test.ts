@@ -200,6 +200,63 @@ describe("validate-task-execution — exclusive ownership", () => {
       .toContain("T1 owns declared path src/a.ts");
   });
 
+  // A reservation commits during PreToolUse, before the sibling PreToolUse
+  // gates vote. On Claude Code those gates are separate processes with no
+  // shared rollback, so a spawn one of them denies strands `executing_tasks`
+  // with no SubagentStop ever coming to clear it.
+  describe("reservations abandoned by a vetoed spawn", () => {
+    it("lets a proven-stale reservation re-claim its own task", () => {
+      const state = mkState([scoped("T1", "src/a.ts")], { executing_tasks: ["T1"] });
+
+      expect(taskExecutionOwnershipError(state, ["T1"], "parallel")).toContain("already executing");
+      expect(taskExecutionOwnershipError(state, ["T1"], "parallel", new Set(["T1"]))).toBeNull();
+    });
+
+    it("releases the declared paths a stale reservation was holding hostage", () => {
+      const state = mkState(
+        [scoped("T1", "src/a.ts"), scoped("T2", "src/a.ts")],
+        { executing_tasks: ["T1"] },
+      );
+
+      expect(taskExecutionOwnershipError(state, ["T2"], "parallel"))
+        .toContain("T1 owns declared path src/a.ts");
+      expect(taskExecutionOwnershipError(state, ["T2"], "parallel", new Set(["T1"]))).toBeNull();
+    });
+
+    it("releases only the proven reservations, never the rest of the roster", () => {
+      const state = mkState(
+        [scoped("T1", "src/a.ts"), scoped("T2", "src/b.ts"), scoped("T3", "src/b.ts")],
+        { executing_tasks: ["T1", "T2"] },
+      );
+
+      // T1 proven stale; T2 is not, so it still owns src/b.ts.
+      expect(taskExecutionOwnershipError(state, ["T3"], "parallel", new Set(["T1"])))
+        .toContain("T2 owns declared path src/b.ts");
+      expect(taskExecutionOwnershipError(state, ["T1"], "parallel", new Set(["T1"]))).toBeNull();
+    });
+
+    it("keeps preflight and the locked re-check on the same stale set", () => {
+      const input = [{ kind: "implementation" as const, prompt: "Task ID: T1", description: "" }];
+      const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
+      const baselines = new Map([[
+        "T1",
+        { proof: baseline, attempt: baseline, repositoryAttempt: [] },
+      ]]);
+      const state = mkState([scoped("T1", "src/a.ts")], {
+        current_wave: 1,
+        executing_tasks: ["T1"],
+      });
+
+      // Without the stale set the locked re-check would reject a spawn that
+      // preflight had already accepted.
+      expect(taskExecutionRegistrationError(state, input, ["T1"], "parallel", baselines))
+        .toContain("already executing");
+      expect(taskExecutionRegistrationError(
+        state, input, ["T1"], "parallel", baselines, new Set(["T1"]),
+      )).toBeNull();
+    });
+  });
+
   it("rejects sequential overlap until each child can receive a fresh baseline", () => {
     const state = mkState([scoped("T1", "src/a.ts"), scoped("T2", "src/a.ts")]);
     expect(taskExecutionOwnershipError(state, ["T1", "T2"], "sequential"))
