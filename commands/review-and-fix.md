@@ -21,10 +21,12 @@ In particular:
   (`brief --standalone` → `manifest` → `lenses` → Panel Program verifier batch
   → `verdict` → `tally`); the tally atomically publishes `result.json`;
 - for a zero-critical run, run `helper standalone-review finalize`; otherwise
-  use the tally-authored result, and plan/fix only
-  `result.json.surviving_critical_findings` plus accepted advisories;
+  use the tally-authored result, always plan/fix every
+  `result.json.surviving_critical_findings`, and autonomously decide which
+  advisories to accept by default;
 - retain and report every `refuted_critical_findings` entry with its evidence;
-- when the adjudicated result contains advisories but no surviving criticals,
-  ask the user which advisories to accept before planning or editing;
+- disposition every advisory as accepted, deferred, or dismissed with a reason;
+  do not ask the user to choose advisory IDs unless the user explicitly requests
+  control of a specific advisory;
 - stop before editing on any evidence or panel failure;
 - for `--dry-run`, stop after adjudication and the remediation plan.

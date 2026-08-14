@@ -1,10 +1,10 @@
 /**
  * Report discovery — the imperative shell around test-report.ts.
  *
- * Finds machine-readable report artifacts on disk (explicit --outputFile,
- * JSON on stdout, conventional JUnit dirs) and hands their contents to the
- * pure parsers. All node:fs usage of the report pipeline lives HERE, so
- * test-report.ts (and the reducer that imports its judgment) stays pure.
+ * Finds machine-readable report artifacts on disk (explicit Vitest/Jest or
+ * Bun JUnit output files, JSON on stdout, conventional JUnit dirs) and hands
+ * their contents to the pure parsers. All node:fs usage of the report pipeline
+ * lives HERE, keeping test-report.ts (and its reducer consumers) pure.
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -17,6 +17,126 @@ export function outputFileFromCommand(command: string): string | null {
   const m = command.match(/--outputFile[=\s]+("([^"]+)"|'([^']+)'|(\S+))/);
   if (!m) return null;
   return m[2] ?? m[3] ?? m[4] ?? null;
+}
+
+/**
+ * Split the already-classified simple command into literal shell words.
+ * Dynamic expansions are deliberately rejected: report discovery cannot know
+ * their runtime value, and guessing a trust-bearing artifact path would fail
+ * open. Quoting and backslash escapes are normalized only far enough to
+ * support Bun's explicit reporter options.
+ */
+type LiteralShellWord = Readonly<{
+  value: string;
+  /** The leading `-` was literal and unquoted, so this may be a CLI option. */
+  optionEligible: boolean;
+}>;
+
+function literalShellWords(command: string): readonly LiteralShellWord[] | null {
+  const words: LiteralShellWord[] = [];
+  let word = "";
+  let wordStarted = false;
+  let optionEligible = false;
+  let quote: "'" | '"' | null = null;
+  const startWord = (literalUnquoted: boolean): void => {
+    if (!wordStarted) optionEligible = literalUnquoted;
+    wordStarted = true;
+  };
+  const pushWord = (): void => {
+    words.push({ value: word, optionEligible: optionEligible && word.startsWith("--") });
+    word = "";
+    wordStarted = false;
+    optionEligible = false;
+  };
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i];
+    if (quote === "'") {
+      if (char === "'") quote = null;
+      else word += char;
+      startWord(false);
+      continue;
+    }
+    if (quote === '"') {
+      if (char === '"') {
+        quote = null;
+      } else if (char === "\\") {
+        const next = command[i + 1];
+        if (next === undefined) return null;
+        if ('$`"\\\n'.includes(next)) {
+          if (next !== "\n") word += next;
+          i++;
+        } else {
+          word += char;
+        }
+      } else if (char === "$" || char === "`") {
+        return null;
+      } else {
+        word += char;
+      }
+      startWord(false);
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      startWord(false);
+      quote = char;
+      continue;
+    }
+    if (char === "$" || char === "`") return null;
+    if (char === "\\") {
+      const next = command[i + 1];
+      if (next === undefined) return null;
+      startWord(false);
+      if (next !== "\n") word += next;
+      i++;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (wordStarted) pushWord();
+      continue;
+    }
+    startWord(true);
+    word += char;
+  }
+
+  if (quote !== null) return null;
+  if (wordStarted) pushWord();
+  return words;
+}
+
+function optionValues(words: readonly LiteralShellWord[], option: string): readonly string[] {
+  const values: string[] = [];
+  for (let i = 2; i < words.length; i++) {
+    const word = words[i];
+    if (word.value === "--") break;
+    if (!word.optionEligible) continue;
+    if (word.value === option) {
+      const value = words[i + 1];
+      if (value !== undefined && !(value.optionEligible && value.value.startsWith("--"))) {
+        values.push(value.value);
+        i++;
+      }
+    } else if (word.value.startsWith(`${option}=`)) {
+      values.push(word.value.slice(option.length + 1));
+    }
+  }
+  return values;
+}
+
+/**
+ * Parse the only Bun artifact shape Loom trusts: an exact `bun test`
+ * invocation with an explicit JUnit reporter and one explicit output path.
+ * Requiring both options prevents an unrelated file from vouching for a Bun
+ * run whose output format is unknown.
+ */
+export function bunJunitOutputFileFromCommand(command: string): string | null {
+  const words = literalShellWords(command);
+  if (words === null || words[0]?.value !== "bun" || words[1]?.value !== "test") return null;
+
+  const reporters = optionValues(words, "--reporter");
+  const outfiles = optionValues(words, "--reporter-outfile");
+  if (!reporters.includes("junit") || outfiles.length !== 1 || outfiles[0] === "") return null;
+  return outfiles[0];
 }
 
 const JUNIT_REPORT_DIRS = [
@@ -53,7 +173,19 @@ const errMessage = (e: unknown): string => (e instanceof Error ? e.message : Str
 function isFresh(path: string, nowMs: number, callStartMs: number): boolean {
   try {
     const mtimeMs = statSync(path).mtimeMs;
-    return mtimeMs >= callStartMs - CALL_START_SLACK_MS && nowMs - mtimeMs <= FRESHNESS_MS;
+    if (mtimeMs < callStartMs - CALL_START_SLACK_MS) {
+      process.stderr.write(
+        `findReport: stale report '${path}' — artifact predates this tool call\n`,
+      );
+      return false;
+    }
+    if (nowMs - mtimeMs > FRESHNESS_MS) {
+      process.stderr.write(
+        `findReport: stale report '${path}' — artifact exceeds the freshness window\n`,
+      );
+      return false;
+    }
+    return true;
   } catch (e) {
     // Unstatable report → treated as stale (fail closed), but say so: a
     // silently-ignored artifact looks identical to "no report was written".
@@ -100,12 +232,12 @@ const JVM_RUNNER_PREFIXES = ["mvn", "mvnw", "./mvnw", "gradle", "./gradlew"];
  * SEGMENT (the head-matched simple command from classifyTestCommand — never
  * the whole prose command line). Sources, scoped to the runner family so an
  * artifact can't vouch for an unrelated command:
- * 1. Explicit `--outputFile` path on the segment (vitest/jest JSON) —
- *    unless `vetoExplicitPath` rejects it (the recorder vetoes paths the
- *    agent itself wrote earlier this epoch: an agent-authored artifact
- *    must not mint a trusted pass)
- * 2. JSON on stdout when the segment asked for a JSON reporter
- * 3. Fresh JUnit XML in conventional dirs — JVM runners only
+ * 1. Explicit Bun `--reporter=junit --reporter-outfile=<path>` JUnit XML
+ * 2. Explicit `--outputFile` path on the segment (vitest/jest JSON) —
+ *    explicit paths are rejected when `vetoExplicitPath` says the agent wrote
+ *    them earlier this epoch (an agent-authored artifact must not mint a pass)
+ * 3. JSON on stdout when the segment asked for a JSON reporter
+ * 4. Fresh JUnit XML in conventional dirs — JVM runners only
  *
  * `times` is a named-args object on purpose: `nowMs` and `callStartMs` are
  * two same-typed epoch-ms values whose positional swap would silently
@@ -113,12 +245,12 @@ const JVM_RUNNER_PREFIXES = ["mvn", "mvnw", "./mvnw", "gradle", "./gradlew"];
  * compiler-checked.
  *
  * `times.callStartMs` is the PreToolUse call-start stamp for THIS tool call.
- * Artifact-backed sources (1 and 3) require it: an on-disk artifact may
+ * Artifact-backed sources (1, 2, and 4) require it: an on-disk artifact may
  * vouch only when its mtime is at/after the call start, so a command that
  * ran no tests cannot re-vouch a stale sibling artifact still inside the
  * recency window. When null (no stamp: missing tool_use_id, stamp hook not
  * wired, stamp pruned) the artifact sources are REJECTED loudly — fail
- * closed, matching the trust-minting doctrine. Source 2 (stdout JSON) is
+ * closed, matching the trust-minting doctrine. Source 3 (stdout JSON) is
  * inherently call-scoped (the command printed it during THIS call) and
  * stays allowed without a stamp.
  */
@@ -135,6 +267,30 @@ export function findReport(
       `findReport: no call-start stamp for this tool call — ${source} cannot vouch (disk artifacts require proof they postdate the call; failing closed)\n`,
     );
   };
+
+  const bunJunit = bunJunitOutputFileFromCommand(segment);
+  if (bunJunit) {
+    const path = isAbsolute(bunJunit) ? bunJunit : resolve(cwd, bunJunit);
+    if (vetoExplicitPath(path)) {
+      process.stderr.write(
+        `findReport: rejecting --reporter-outfile '${path}' — the path was written by the agent this epoch; an agent-authored artifact cannot vouch as a report\n`,
+      );
+    } else if (callStartMs === null) {
+      noStamp(`--reporter-outfile '${path}'`);
+    } else if (!existsSync(path)) {
+      process.stderr.write(`findReport: Bun JUnit report '${path}' does not exist\n`);
+    } else if (isFresh(path, nowMs, callStartMs)) {
+      try {
+        const parsed = parseJunitXml(readFileSync(path, "utf-8"));
+        if (parsed) return parsed;
+        process.stderr.write(`findReport: malformed Bun JUnit report '${path}'\n`);
+      } catch (e) {
+        process.stderr.write(
+          `findReport: cannot read Bun JUnit report '${path}': ${errMessage(e)}\n`,
+        );
+      }
+    }
+  }
 
   const explicit = outputFileFromCommand(segment);
   if (explicit) {

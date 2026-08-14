@@ -2,10 +2,13 @@
  * Orchestration façade — one deep interface for the parent.
  *
  * Usage:
- *   helper orchestration status [--json] [--wave N]
+ *   helper orchestration status [--json] [--wave N] [--runs-root <wave-gate-runs-root>]
  *   helper orchestration start <architecture|refutation|standalone-review|wave-gate|remediation> --run <run-directory>
  *                              --runs-root <root> < program.json
  *   helper orchestration restart --run <exhausted-wave-run> --new-run <fresh-run-directory>
+ *                                --runs-root <root>
+ *   helper orchestration recover-orphan --run-id <missing-wave-run-id> --wave <N>
+ *                                --digest <authority-digest> --new-run <fresh-run-directory>
  *                                --runs-root <root>
  *   helper orchestration resume --run <run-directory> --runs-root <root>
  *   helper orchestration submit --run <run-directory> --runs-root <root>
@@ -32,7 +35,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
 import { parseTaskGraph } from "../../state-manager";
 import type { HookHandler, HookResult } from "../../types";
@@ -40,10 +43,11 @@ import {
   deriveLoomStatusFromParsedGraph,
   renderLoomStatusHuman,
   renderLoomStatusJson,
+  type ActiveRunDirectoryObservation,
   type GateDeps,
 } from "../../core/wave-gate-machine";
 import { loadPlanModelsSource } from "./complete-wave-gate";
-import { openRunDirectory, type RunDirHandle } from "../../orchestration/run-directory-handle";
+import { inspectRunDirectoryEntry, openRunDirectory, type RunDirHandle } from "../../orchestration/run-directory-handle";
 import { registerSessionRunBinding } from "../../orchestration/session-run-bindings";
 import {
   AGENT_REQUIRED_SKILLS,
@@ -85,6 +89,7 @@ import {
   resumeRemediationFacade,
   resumeStandaloneFacade,
   resumeWaveGateFacade,
+  recoverOrphanedWaveGateFacade,
   restartWaveGateFacade,
   startRemediationFacade,
   startStandaloneFacade,
@@ -92,7 +97,7 @@ import {
   waveAdvisoryDecisionRequestId,
 } from "./programs";
 
-const OPERATIONS = ["status", "start", "restart", "resume", "submit", "correlate", "complete", "decide"] as const;
+const OPERATIONS = ["status", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide"] as const;
 type Operation = (typeof OPERATIONS)[number];
 
 const isOperation = (value: string | undefined): value is Operation =>
@@ -104,9 +109,10 @@ function usage(): HookResult {
     message: [
       "Usage: bun cli.ts helper orchestration <operation> [flags]",
       "",
-      "  status  [--json] [--wave N]",
+      "  status  [--json] [--wave N] [--runs-root <wave-gate-runs-root>]",
       "  start   <architecture|refutation|standalone-review|wave-gate|remediation> --runs-root <root> --run <run-directory> < program.json",
       "  restart --runs-root <root> --run <exhausted-wave-run> --new-run <fresh-run-directory>",
+      "  recover-orphan --runs-root <root> --run-id <missing-run-id> --wave <N> --digest <sha256> --new-run <fresh-run-directory>",
       "  resume  --runs-root <root> --run <run-directory>",
       "  submit  --runs-root <root> --run <run-directory> --request <id> --slot <id> --attempt <1|2>",
       "  correlate --runs-root <root> --run <run-directory> --request <id> --harness <pi|claude> --native-id <id> --agent <role>",
@@ -147,9 +153,10 @@ export function renderStatus(
   rawGraph: unknown,
   deps: GateDeps,
   asJson: boolean,
+  runDirectory: ActiveRunDirectoryObservation = Object.freeze({ kind: "unverified" }),
 ): string {
   const parsed = parseTaskGraph(rawGraph);
-  const status = deriveLoomStatusFromParsedGraph(parsed, deps);
+  const status = deriveLoomStatusFromParsedGraph(parsed, deps, null, null, runDirectory);
   return asJson ? renderLoomStatusJson(status) : renderLoomStatusHuman(status);
 }
 
@@ -163,8 +170,54 @@ function readGraph(path: string): unknown {
   }
 }
 
+function canonicalWaveGateRunsRoot(): string {
+  return join(dirname(dirname(resolve(TASK_GRAPH_PATH))), "reviews", "wave-gate-runs");
+}
+
+function statusRunDirectoryObservation(rawGraph: unknown, args: readonly string[]): ActiveRunDirectoryObservation {
+  const parsed = parseTaskGraph(rawGraph);
+  if (!parsed.ok || parsed.value.active_wave_gate === undefined ||
+      parsed.value.active_wave_gate.terminalOutcome !== null) return Object.freeze({ kind: "unverified" });
+  const active = parsed.value.active_wave_gate;
+  const runId = active.runId;
+  const requestedRoot = flag(args, "runs-root");
+  const runsRoot = active.runsRoot ?? resolve(requestedRoot ?? canonicalWaveGateRunsRoot());
+  if (active.runsRoot !== undefined && requestedRoot !== null && resolve(requestedRoot) !== active.runsRoot) {
+    return Object.freeze({
+      kind: "invalid",
+      runId,
+      path: join(active.runsRoot, runId),
+      message: `requested runs root ${resolve(requestedRoot)} does not match protected root ${active.runsRoot}`,
+    });
+  }
+  const expectedPath = join(runsRoot, runId);
+  const inspected = inspectRunDirectoryEntry(runsRoot, expectedPath);
+  if (!inspected.ok) {
+    return Object.freeze({
+      kind: "invalid",
+      runId,
+      path: resolve(expectedPath),
+      message: inspected.error.message,
+    });
+  }
+  if (inspected.value.kind === "absent") {
+    return Object.freeze({ kind: "absent", runId, path: inspected.value.reference.runDirectory });
+  }
+  if (inspected.value.kind === "directory") {
+    return Object.freeze({ kind: "present", runId, path: inspected.value.reference.runDirectory });
+  }
+  return Object.freeze({
+    kind: "invalid",
+    runId,
+    path: inspected.value.reference.runDirectory,
+    message: `expected a directory but found ${inspected.value.entryKind}`,
+  });
+}
+
 function statusOperation(args: readonly string[]): HookResult {
-  const output = renderStatus(readGraph(TASK_GRAPH_PATH), productionGateDeps, hasFlag(args, "json"));
+  const rawGraph = readGraph(TASK_GRAPH_PATH);
+  const observation = statusRunDirectoryObservation(rawGraph, args);
+  const output = renderStatus(rawGraph, productionGateDeps, hasFlag(args, "json"), observation);
   process.stdout.write(`${output}\n`);
   return { kind: "allow" };
 }
@@ -548,6 +601,32 @@ async function startOperation(stdin: string, args: readonly string[]): Promise<H
   const driven = await driveRegisteredPanel(bound.value.handle, registration);
   if (!driven.ok) return { kind: "error", message: driven.message };
   return emitRunAction(bound.value.handle, driven.action);
+}
+
+async function recoverOrphanOperation(args: readonly string[]): Promise<HookResult> {
+  const runsRoot = flag(args, "runs-root");
+  const runId = flag(args, "run-id");
+  const waveRaw = flag(args, "wave");
+  const authorityDigest = flag(args, "digest");
+  const nextRunDirectory = flag(args, "new-run");
+  if (runsRoot === null || runId === null || waveRaw === null || authorityDigest === null || nextRunDirectory === null) {
+    return {
+      kind: "error",
+      message: "recover-orphan requires --runs-root, --run-id, --wave, --digest, and --new-run",
+    };
+  }
+  if (!/^\d+$/.test(waveRaw) || !Number.isSafeInteger(Number(waveRaw)) || Number(waveRaw) < 1) {
+    return { kind: "error", message: "recover-orphan --wave must be a positive safe integer" };
+  }
+  const next = openRunDirectory(runsRoot, nextRunDirectory);
+  if (!next.ok) return { kind: "error", message: `cannot bind replacement run directory: ${next.error.message}` };
+  const driven = await recoverOrphanedWaveGateFacade(runsRoot, {
+    runId,
+    wave: Number(waveRaw),
+    authorityDigest,
+  }, next.value);
+  if (!driven.ok) return { kind: "error", message: driven.message };
+  return emitRunAction(next.value, driven.action);
 }
 
 async function restartOperation(args: readonly string[]): Promise<HookResult> {
@@ -1152,6 +1231,8 @@ const handler: HookHandler = async (stdin, args) => {
       return startOperation(stdin, rest);
     case "restart":
       return restartOperation(rest);
+    case "recover-orphan":
+      return recoverOrphanOperation(rest);
     case "resume":
       return resumeOperation(rest);
     case "submit":

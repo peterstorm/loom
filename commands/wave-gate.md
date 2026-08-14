@@ -84,3 +84,32 @@ the implementation review generation, installs a fresh run/epoch-bound Review Pa
 and returns the replacement `spawn-batch`. Execute that exact batch normally.
 The old transcripts remain immutable audit evidence and cannot bind to the new
 generation. Never repair, copy, or delete exhausted transcripts by hand.
+
+## Recovering an orphaned active run
+
+If `orchestration status --json --runs-root ".claude/reviews/wave-gate-runs"`
+reports that the protected active Run Directory is missing, use the dedicated
+engine operation. Read the exact `runId`, `wave`, and `authorityDigest` from
+`active_wave_gate`; create one fresh direct-child replacement directory; then run:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration recover-orphan \
+  --runs-root ".claude/reviews/wave-gate-runs" \
+  --run-id "<exact-missing-active-run-id>" \
+  --wave "<exact-active-wave>" \
+  --digest "<exact-active-authority-digest>" \
+  --new-run "<fresh-replacement-run-directory>"
+```
+
+Recovery refuses unless the requested authority and runs root exactly match protected state,
+the old direct-child entry is genuinely absent, the replacement is pristine, and
+no review or implementation subagent is active for this Task Graph. In one locked
+State File transaction it materializes accepted partial findings, preserves all
+Findings/Refutations/Resolutions and Review Generations, clears stale packet/spec
+evidence, appends an orphan-retirement audit record, and installs replacement
+active authority. It then returns the exact fresh `spawn-batch`; execute only that
+batch. The operation is idempotent after a committed recovery.
+
+Do not recreate an empty old directory, copy another run's artifacts, remove
+`active_wave_gate` manually, delete failed replacement directories, or use
+`cleanup-state` unless you explicitly intend to discard orchestration history.

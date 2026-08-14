@@ -16,8 +16,10 @@ Run commands from the repository being orchestrated unless a command explicitly 
 Prefer the engine-derived status over hand-written `jq` readiness checks:
 
 ```bash
-bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper orchestration status
-bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper orchestration status --json
+bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper orchestration status \
+  --runs-root ".claude/reviews/wave-gate-runs"
+bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper orchestration status --json \
+  --runs-root ".claude/reviews/wave-gate-runs"
 ```
 
 Under Claude Code, command source uses `${CLAUDE_PLUGIN_ROOT}`; under Pi, rendered resources replace that token and export `LOOM_PLUGIN_ROOT` for diagnostics.
@@ -34,7 +36,7 @@ Both renderers project one `LoomStatus` value. Status reports:
 - Wave Gate completion eligibility;
 - exactly one next action and all reasons.
 
-Unreadable or malformed authority is represented as `unavailable` and leads to `blocked`; status never fabricates empty/ready values.
+Unreadable or malformed authority is represented as `unavailable` and leads to `blocked`; status never fabricates empty/ready values. Status probes the conventional Wave Gate runs root by default; pass `--runs-root` when the active run was started under a different root. A missing active directory is reported as orphaned, never as a healthy suspended run.
 
 Raw state inspection remains useful for diagnosis, but it is not gate logic:
 
@@ -117,6 +119,25 @@ Do not use `mark-tests-passed` to fabricate evidence. It is an evidence/status o
 Registered programs derive the exact missing slots and issue retry requests. Resume the program; do not re-run the whole roster or manually write a transcript.
 
 A malformed semantic output gets one retry. Attempt-2 rejection is terminal for that run. Wave reviewer exhaustion has an explicit `orchestration restart` path; standalone runs should remain blocked audit evidence rather than be edited.
+
+### Active Wave Gate Run Directory is missing
+
+Do not recreate the old directory or edit `active_wave_gate`. Create a pristine
+replacement direct child, copy the exact run ID/wave/digest from protected state,
+and use the atomic recovery operation:
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration recover-orphan \
+  --runs-root ".claude/reviews/wave-gate-runs" \
+  --run-id "<active-run-id>" --wave "<active-wave>" \
+  --digest "<active-authority-digest>" \
+  --new-run "<fresh-replacement-run-directory>"
+```
+
+It refuses if the old entry exists or any subagent is active, preserves review
+history and generations, records the retirement, installs replacement authority
+atomically, and returns the exact new spawn batch. `cleanup-state` remains a
+history-discarding last resort, not normal recovery.
 
 ### Wave Gate reports critical Findings
 

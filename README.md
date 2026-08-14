@@ -163,7 +163,7 @@ Each Task is reviewed by:
 
 Findings have engine-derived identity. Implementation changes increment a Task’s Review Generation and require a new immutable Review Packet. Every reviewer in the exact roster must assess every prior Finding before it can be resolved.
 
-Critical Findings are adjudicated by a Refutation Panel. **Default panel size is 3.** Every verifier applies one assigned lens to every critical. The refutation-lens catalog is `reproduction`, `intent`, `blast-radius`, `security`, and `test-coverage`; baseline selection always includes reproduction and intent. A strict majority must refute; ties keep the Finding. Refuted Findings retain votes and reasoning as audit data. Advisories bypass refutation and require an explicit operator disposition.
+Critical Findings are adjudicated by a Refutation Panel. **Default panel size is 3.** Every verifier applies one assigned lens to every critical. The refutation-lens catalog is `reproduction`, `intent`, `blast-radius`, `security`, and `test-coverage`; baseline selection always includes reproduction and intent. A strict majority must refute; ties keep the Finding. Refuted Findings retain votes and reasoning as audit data. In a Wave Gate, advisories bypass refutation and require an explicit operator disposition.
 
 A clean rerun cannot erase an old blocker by omission.
 
@@ -177,7 +177,7 @@ Aspects: `code`, `errors`, `tests`, `types`, `comments`, `architecture`, `simpli
 
 ### `/review-and-fix`
 
-Runs adjudicated standalone review, writes a remediation plan, applies surviving criticals and accepted advisories, validates the code, and opens a registered remediation run. The engine audits dirty paths, excludes Loom evidence, stages literal paths in a temporary Git index, proves the staged set, rechecks repository witnesses, and atomically installs the verified index before commit. Push is optional; force-push is forbidden.
+Runs adjudicated standalone review, writes a remediation plan, applies every surviving critical, and validates the code before opening a registered remediation run. By default, the parent autonomously dispositions each advisory as accepted, deferred, or dismissed from the evidence and fixes accepted advisories; it does not ask the operator to choose IDs unless explicitly requested. The engine audits dirty paths, excludes Loom evidence, stages literal paths in a temporary Git index, proves the staged set, rechecks repository witnesses, and atomically installs the verified index before commit. Push is optional; force-push is forbidden.
 
 ### Requirements and drift
 

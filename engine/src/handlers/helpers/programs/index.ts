@@ -7,5 +7,5 @@
 
 export { parseRegisteredFacadeProgram, parseRemediationStartInput, parseStandaloneStartInput, parseWaveGateStartInput, type FacadeDriveResult, type RegisteredFacadeProgram, type RegisteredRemediationProgram, type RegisteredStandaloneProgram, type RegisteredWaveGateProgram } from './helpers';
 export { resumeStandaloneFacade, startStandaloneFacade } from './standalone';
-export { applyWaveFacadeSubmission, parseWaveRetryDiagnosticSection, persistedWaveAttemptTwoCompatibilityProblem, restartWaveGateFacade, resumeWaveGateFacade, startWaveGateFacade, waveAdvisoryDecisionRequestId } from './wave-gate';
+export { applyWaveFacadeSubmission, parseWaveRetryDiagnosticSection, persistedWaveAttemptTwoCompatibilityProblem, prepareOrphanedWaveGateRecovery, recoverOrphanedWaveGateFacade, restartWaveGateFacade, resumeWaveGateFacade, startWaveGateFacade, waveAdvisoryDecisionRequestId } from './wave-gate';
 export { resumeRemediationFacade, startRemediationFacade } from './remediation';

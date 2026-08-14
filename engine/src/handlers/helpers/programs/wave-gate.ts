@@ -6,14 +6,14 @@
  */
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { parseAgentRequestAuthority, parseStoredAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
 import { defaultRefutationThreshold } from '../../../core/review-panel';
 import { completePersistentRefutationPanel, deriveRefutationVerifierBinding, panelRequestIdentity, parseRefutationPanelAuthority, startPersistentRefutationPanel, submitRefutationVerdict } from '../../../core/panel-program';
 import type { FindingOutcome } from '../../../core/review-panel';
 import { buildContextPacket, encodeByteSection, type ContextPacket } from '../../../orchestration/context-packets';
 import { captureKey } from '../../../core/harness-capture';
-import { type RunDirHandle } from '../../../orchestration/run-directory-handle';
+import { inspectRunDirectoryEntry, type RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { TASK_GRAPH_PATH } from '../../../config';
 import { StateManager } from '../../../state-manager';
 import { commitWaveGateCompletion, deriveWaveReadiness, deriveWaveRefutationPlan, WAVE_REVIEW_AGENTS } from '../../../core/wave-gate-machine';
@@ -21,6 +21,7 @@ import { loadPlanModelsSource } from '../complete-wave-gate';
 import { applyFindingOutcomes, preserveAcceptedReviewRunFindings } from '../../../core/findings';
 import { applyReviewResolution, constrainReviewResolutionToScope, resolveTaskReviewFindings } from '../../../core/review-output';
 import { Task, TaskGraph } from '../../../types';
+import { anyActiveSubagent } from '../../../machine';
 import { parseSpecCheckOutput, reconcileSpecCheck } from '../../../core/spec-check';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
 import { contextPacketPathMarker, durableRequests, exactObject, failed, parseRegisteredFacadeProgram, publicationResolver, publishInitialBatch, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
@@ -76,6 +77,7 @@ export function prepareExhaustedWaveGateRestart(
   previousRunId: string,
   previous: RegisteredWaveGateProgram,
   nextRunId: string,
+  nextRunsRoot: string,
   exhaustedAttempts: ReadonlySet<string>,
 ): WaveGateRestartResult {
   const wave = previous.input.wave;
@@ -170,6 +172,7 @@ export function prepareExhaustedWaveGateRestart(
       wave,
       authorityDigest: parsedAuthorityDigest.value,
       revision: 0,
+      runsRoot: nextRunsRoot,
       terminalOutcome: null,
     },
   };
@@ -180,6 +183,117 @@ export function prepareExhaustedWaveGateRestart(
       registration,
       exhaustedSlots,
     }),
+  };
+}
+
+export type OrphanedWaveGateRecoveryExpectation = Readonly<{
+  runId: string;
+  wave: number;
+  authorityDigest: string;
+}>;
+
+export type OrphanedWaveGateRecoveryPreparation = Readonly<{
+  graph: TaskGraph;
+  registration: RegisteredWaveGateProgram;
+}>;
+
+export type OrphanedWaveGateRecoveryResult =
+  | Readonly<{ ok: true; value: OrphanedWaveGateRecoveryPreparation }>
+  | Readonly<{ ok: false; message: string }>;
+
+/** Pure state transition for replacing an active Wave Gate whose authoritative
+ * Run Directory has been proven absent by the shell. Packet-bound evidence is
+ * retired, accepted findings are materialized, and every durable finding,
+ * refutation, resolution, and review generation survives unchanged. */
+export function prepareOrphanedWaveGateRecovery(
+  graph: TaskGraph,
+  expected: OrphanedWaveGateRecoveryExpectation,
+  authoritativeRunsRoot: string,
+  nextRunId: string,
+  nextRunsRoot: string,
+): OrphanedWaveGateRecoveryResult {
+  const active = graph.active_wave_gate;
+  if (graph.current_phase !== "execute" || graph.current_wave !== expected.wave ||
+      active === undefined || active.terminalOutcome !== null || active.runId !== expected.runId ||
+      active.wave !== expected.wave || active.authorityDigest !== expected.authorityDigest ||
+      (active.runsRoot !== undefined && active.runsRoot !== authoritativeRunsRoot)) {
+    return { ok: false, message: "orphan recovery requires the exact protected active run ID, wave, authority digest, and runs root" };
+  }
+  if (nextRunId === expected.runId) {
+    return { ok: false, message: "orphan recovery requires a distinct replacement run identity" };
+  }
+  if ((graph.orphaned_wave_gate_history ?? []).some(({ runId }) => runId === active.runId)) {
+    return { ok: false, message: `active Wave Gate run ${active.runId} already has a retirement audit record` };
+  }
+  const taskIds = Object.freeze(graph.tasks.filter(({ wave }) => wave === expected.wave).map(({ id }) => id));
+  if (taskIds.length === 0) return { ok: false, message: `active Wave ${expected.wave} has no protected tasks` };
+
+  const resetTask = (task: Task): Task => {
+    if (!taskIds.includes(task.id) || task.review_run === undefined) return task;
+    const preserved = preserveAcceptedReviewRunFindings(task);
+    return {
+      ...preserved,
+      review_status: "pending",
+      review_generation: task.review_generation,
+      review_run: undefined,
+      review_error: undefined,
+      review_evidence_failures: undefined,
+    };
+  };
+  const resetGraph: TaskGraph = {
+    ...graph,
+    tasks: graph.tasks.map(resetTask),
+    spec_check: undefined,
+    wave_review_epoch: undefined,
+    active_wave_gate: undefined,
+  };
+  const authorityDigest = waveGateAuthorityDigest(expected.wave, taskIds, resetGraph);
+  const parsedNextRunId = parseOrchestrationRunId(nextRunId);
+  const parsedAuthorityDigest = parseArtifactDigest(authorityDigest);
+  if (!parsedNextRunId.ok) return { ok: false, message: parsedNextRunId.error.message };
+  if (!parsedAuthorityDigest.ok) return { ok: false, message: parsedAuthorityDigest.error.message };
+
+  const retirement = Object.freeze({
+    schemaVersion: 1 as const,
+    kind: "orphaned-wave-gate-retirement" as const,
+    runId: active.runId,
+    wave: active.wave,
+    authorityDigest: active.authorityDigest,
+    revision: active.revision,
+    reason: "authoritative-run-directory-missing" as const,
+    runsRoot: authoritativeRunsRoot,
+    runDirectory: join(authoritativeRunsRoot, active.runId),
+    replacementRunId: parsedNextRunId.value,
+    replacementAuthorityDigest: parsedAuthorityDigest.value,
+  });
+  const registration: RegisteredWaveGateProgram = Object.freeze({
+    schemaVersion: 1,
+    kind: "wave-gate",
+    input: Object.freeze({ wave: expected.wave }),
+    taskIds,
+    authorityDigest,
+    orphanRecovery: Object.freeze({
+      previousRunId: active.runId,
+      previousAuthorityDigest: active.authorityDigest,
+    }),
+  });
+  const nextGraph: TaskGraph = {
+    ...resetGraph,
+    orphaned_wave_gate_history: Object.freeze([...(graph.orphaned_wave_gate_history ?? []), retirement]),
+    active_wave_gate: Object.freeze({
+      schemaVersion: 1,
+      kind: "active-wave-gate",
+      runId: parsedNextRunId.value,
+      wave: expected.wave,
+      authorityDigest: parsedAuthorityDigest.value,
+      revision: 0,
+      runsRoot: nextRunsRoot,
+      terminalOutcome: null,
+    }),
+  };
+  return {
+    ok: true,
+    value: Object.freeze({ graph: nextGraph, registration }),
   };
 }
 
@@ -885,6 +999,7 @@ export async function restartWaveGateFacade(
         previousHandle.runId,
         previousRegistration,
         nextHandle.runId,
+        nextHandle.identity.runsRoot,
         exhausted!.value,
       );
       if (!candidate.ok) return failed(candidate.message);
@@ -903,6 +1018,7 @@ export async function restartWaveGateFacade(
           previousHandle.runId,
           previousRegistration,
           nextHandle.runId,
+          nextHandle.identity.runsRoot,
           exhausted!.value,
         );
         if (!transition.ok) throw new Error(transition.message);
@@ -929,6 +1045,123 @@ export async function restartWaveGateFacade(
   }
 }
 
+function sameOrphanRecoveryRegistration(
+  left: RegisteredWaveGateProgram,
+  right: RegisteredWaveGateProgram,
+): boolean {
+  return left.input.wave === right.input.wave && left.authorityDigest === right.authorityDigest &&
+    left.taskIds.length === right.taskIds.length && left.taskIds.every((taskId, index) => taskId === right.taskIds[index]) &&
+    left.orphanRecovery?.previousRunId === right.orphanRecovery?.previousRunId &&
+    left.orphanRecovery?.previousAuthorityDigest === right.orphanRecovery?.previousAuthorityDigest;
+}
+
+/** Engine-owned recovery for a protected active run whose Run Directory is
+ * gone. The shell proves filesystem/subagent facts; the pure transition is
+ * re-derived under the state lock before retirement audit + replacement
+ * authority are committed together. */
+export async function recoverOrphanedWaveGateFacade(
+  runsRoot: string,
+  expected: OrphanedWaveGateRecoveryExpectation,
+  nextHandle: RunDirHandle,
+): Promise<FacadeDriveResult> {
+  try {
+    const parsedRunId = parseOrchestrationRunId(expected.runId);
+    const parsedDigest = parseArtifactDigest(expected.authorityDigest);
+    if (!parsedRunId.ok) return failed(parsedRunId.error.message);
+    if (!parsedDigest.ok) return failed(parsedDigest.error.message);
+    if (!Number.isSafeInteger(expected.wave) || expected.wave < 1) {
+      return failed("orphan recovery wave must be a positive safe integer");
+    }
+    if (nextHandle.runId === parsedRunId.value) {
+      return failed("orphan recovery requires a distinct replacement run identity");
+    }
+    const requestedRunsRoot = resolve(runsRoot);
+    const legacyCanonicalRunsRoot = join(dirname(dirname(resolve(TASK_GRAPH_PATH))), "reviews", "wave-gate-runs");
+    const manager = new StateManager(TASK_GRAPH_PATH);
+    const before = manager.load();
+    const authoritativeRunsRoot = before.active_wave_gate?.runsRoot ?? legacyCanonicalRunsRoot;
+    if (requestedRunsRoot !== authoritativeRunsRoot) {
+      return failed(`orphan recovery runs root ${requestedRunsRoot} does not match authoritative root ${authoritativeRunsRoot}`);
+    }
+    if (nextHandle.identity.runsRoot !== authoritativeRunsRoot) {
+      return failed("replacement run must be a direct child of the authoritative Wave Gate runs root");
+    }
+    const inspectOrphan = () => inspectRunDirectoryEntry(
+      authoritativeRunsRoot,
+      join(authoritativeRunsRoot, parsedRunId.value),
+    );
+    const absent = inspectOrphan();
+    if (!absent.ok) return failed(absent.error.message);
+    if (absent.value.kind !== "absent") {
+      return failed(`orphan recovery refused: authoritative Run Directory ${absent.value.reference.runDirectory} still exists`);
+    }
+    if (anyActiveSubagent(TASK_GRAPH_PATH)) {
+      return failed("orphan recovery refused while a review or implementation subagent is active for this task graph");
+    }
+
+    const storedRaw = nextHandle.readProgramRegistration();
+    if (!storedRaw.ok) return failed(storedRaw.error.message);
+    const stored = storedRaw.value === null ? null : parseRegisteredFacadeProgram(storedRaw.value);
+    const replayAudit = before.orphaned_wave_gate_history?.find((audit) =>
+      audit.runId === parsedRunId.value && audit.wave === expected.wave && audit.authorityDigest === parsedDigest.value &&
+      audit.runsRoot === authoritativeRunsRoot && audit.runDirectory === join(authoritativeRunsRoot, parsedRunId.value) &&
+      audit.replacementRunId === nextHandle.runId);
+    if (before.active_wave_gate?.runId === nextHandle.runId) {
+      const active = before.active_wave_gate;
+      if (replayAudit === undefined || stored === null || stored.kind !== "wave-gate" ||
+          stored.orphanRecovery?.previousRunId !== parsedRunId.value ||
+          stored.orphanRecovery.previousAuthorityDigest !== parsedDigest.value ||
+          active.wave !== expected.wave || active.authorityDigest !== stored.authorityDigest ||
+          active.runsRoot !== nextHandle.identity.runsRoot ||
+          replayAudit.replacementAuthorityDigest !== active.authorityDigest || active.terminalOutcome !== null) {
+        return failed("replacement run lacks exact committed orphan-recovery authority");
+      }
+      return resumeWaveGateFacade(nextHandle, stored);
+    }
+
+    const pristine = nextHandle.isPristine();
+    if (!pristine.ok) return failed(pristine.error.message);
+    if (!pristine.value) return failed("replacement Wave Gate run must be pristine before orphan recovery");
+    const candidate = prepareOrphanedWaveGateRecovery(before, {
+      runId: parsedRunId.value,
+      wave: expected.wave,
+      authorityDigest: parsedDigest.value,
+    }, authoritativeRunsRoot, nextHandle.runId, nextHandle.identity.runsRoot);
+    if (!candidate.ok) return failed(candidate.message);
+    if (storedRaw.value === null) {
+      const registered = await nextHandle.registerProgram(candidate.value.registration);
+      if (!registered.ok) return failed(registered.error.message);
+    } else if (stored === null || stored.kind !== "wave-gate" ||
+        !sameOrphanRecoveryRegistration(stored, candidate.value.registration)) {
+      return failed("replacement Wave Gate run is already registered under different authority");
+    }
+
+    const committed = await manager.updateAndReturn((locked) => {
+      const lockedAbsence = inspectOrphan();
+      if (!lockedAbsence.ok) throw new Error(lockedAbsence.error.message);
+      if (lockedAbsence.value.kind !== "absent") {
+        throw new Error("authoritative Run Directory reappeared before orphan recovery could commit");
+      }
+      if (anyActiveSubagent(TASK_GRAPH_PATH)) {
+        throw new Error("a review or implementation subagent became active before orphan recovery could commit");
+      }
+      const transition = prepareOrphanedWaveGateRecovery(locked, {
+        runId: parsedRunId.value,
+        wave: expected.wave,
+        authorityDigest: parsedDigest.value,
+      }, authoritativeRunsRoot, nextHandle.runId, nextHandle.identity.runsRoot);
+      if (!transition.ok) throw new Error(transition.message);
+      if (!sameOrphanRecoveryRegistration(transition.value.registration, candidate.value.registration)) {
+        throw new Error("protected Wave authority changed while orphan recovery was being installed");
+      }
+      return { state: transition.value.graph, value: transition.value };
+    });
+    return resumeWaveGateFacade(nextHandle, committed.registration);
+  } catch (error) {
+    return failed(error instanceof Error ? error.message : String(error));
+  }
+}
+
 export async function startWaveGateFacade(
   handle: RunDirHandle,
   input: RegisteredWaveGateProgram["input"],
@@ -950,6 +1183,7 @@ export async function startWaveGateFacade(
       wave,
       authorityDigest,
       revision: 0,
+      runsRoot: handle.identity.runsRoot,
       terminalOutcome: null,
     });
     const registration: RegisteredWaveGateProgram = Object.freeze({
@@ -1346,36 +1580,9 @@ export async function resumeWaveGateFacade(
         durableRequests.push(...published.requests);
       }
       await markWaveTaskReviewRetriesIssued(manager, retries);
-      for (const { authority } of durableRequests) {
-        const rejection = await durableCaptureRejection(handle, authority);
-        if (rejection !== null) {
-          return waveBlocked(handle, `Wave reviewer attempt 2 exhausted after capture rejection: ${rejection}`);
-        }
-      }
-      const capturedRetries = durableRequests.filter(({ authority }) =>
-        captured.value.has(captureKey(authority.slotId, authority.attempt)));
-      for (const request of capturedRetries) {
-        const bytes = handle.readTranscriptBytes(request.authority);
-        if (!bytes.ok) return waveBlocked(handle, bytes.error.message);
-        const applied = await applyWaveFacadeSubmission(handle, request.authority, Buffer.from(bytes.value).toString("utf8"));
-        if (!applied.ok) return waveBlocked(handle, `captured Wave retry could not be reconciled: ${applied.message}`);
-      }
-      if (capturedRetries.length > 0) {
-        const afterReplay = manager.load();
-        const rejected = capturedRetries.filter(({ authority }) => {
-          const retry = retries.find(({ slotId }) => slotId === authority.slotId);
-          const task = retry === undefined ? undefined : afterReplay.tasks.find(({ id }) => id === retry.taskId);
-          return retry === undefined || (task?.review_run !== undefined &&
-            !task.review_run.evidence.some(({ agent }) => agent === retry.agent));
-        });
-        if (rejected.length > 0) {
-          return waveBlocked(handle, `Wave reviewer attempt 2 exhausted without accepted packet evidence: ${rejected.map(({ authority }) => authority.role).join(", ")}`);
-        }
-        return resumeWaveGateFacade(handle, registration, depth + 1);
-      }
-      return { ok: true, action: {
+      const spawnRetries = (requests: readonly SpawnRequest[]): FacadeDriveResult => ({ ok: true, action: {
         kind: "spawn-batch", runId: handle.runId,
-        requests: durableRequests.map((request) => {
+        requests: requests.map((request) => {
           const retry = retries.find(({ slotId }) => slotId === request.authority.slotId);
           return {
             ...request,
@@ -1388,7 +1595,44 @@ export async function resumeWaveGateFacade(
             ].join("\n"),
           };
         }),
-      } };
+      } });
+      const captureRejected: { request: SpawnRequest; rejection: string }[] = [];
+      for (const request of durableRequests) {
+        const rejection = await durableCaptureRejection(handle, request.authority);
+        if (rejection !== null) captureRejected.push({ request, rejection });
+      }
+      const capturedRetries = durableRequests.filter(({ authority }) =>
+        captured.value.has(captureKey(authority.slotId, authority.attempt)));
+      for (const request of capturedRetries) {
+        const bytes = handle.readTranscriptBytes(request.authority);
+        if (!bytes.ok) return waveBlocked(handle, bytes.error.message);
+        const applied = await applyWaveFacadeSubmission(handle, request.authority, Buffer.from(bytes.value).toString("utf8"));
+        if (!applied.ok) return waveBlocked(handle, `captured Wave retry could not be reconciled: ${applied.message}`);
+      }
+      const afterReplay = manager.load();
+      const packetRejected = capturedRetries.filter(({ authority }) => {
+        const retry = retries.find(({ slotId }) => slotId === authority.slotId);
+        const task = retry === undefined ? undefined : afterReplay.tasks.find(({ id }) => id === retry.taskId);
+        return retry === undefined || (task?.review_run !== undefined &&
+          !task.review_run.evidence.some(({ agent }) => agent === retry.agent));
+      });
+      const rejectedRequestIds = new Set(captureRejected.map(({ request }) => request.authority.requestId));
+      const pendingRetries = durableRequests.filter(({ authority }) =>
+        !captured.value.has(captureKey(authority.slotId, authority.attempt)) &&
+        !rejectedRequestIds.has(authority.requestId));
+      // A terminal retry in one slot must not hide exact attempt-2 authority
+      // that is still safely spawnable in another. Drain every pending slot
+      // before reporting exhaustion, so restart sees one coherent terminal
+      // reviewer generation rather than a mixed exhausted/pending state.
+      if (pendingRetries.length > 0) return spawnRetries(pendingRetries);
+      if (captureRejected.length > 0) {
+        return waveBlocked(handle, `Wave reviewer attempt 2 exhausted after capture rejection: ${captureRejected[0]!.rejection}`);
+      }
+      if (packetRejected.length > 0) {
+        return waveBlocked(handle, `Wave reviewer attempt 2 exhausted without accepted packet evidence: ${packetRejected.map(({ authority }) => authority.role).join(", ")}`);
+      }
+      if (capturedRetries.length > 0) return resumeWaveGateFacade(handle, registration, depth + 1);
+      return waveBlocked(handle, "active Wave Review Packets have no recoverable attempt-2 reviewer slots");
     }
 
     refreshed = manager.load();

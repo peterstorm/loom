@@ -9,7 +9,7 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, chmodSync, existsSync, renameSync, unlinkSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { withLock } from "./utils/lock";
 import { KNOWN_AGENTS, PHASE_ORDER, REVIEW_SUB_AGENTS, taskGraphPath } from "./config";
 import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
@@ -24,7 +24,7 @@ import {
   resolutionsUnionError,
   reviewRunError,
 } from "./core/findings";
-import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, SpecCheck, TaskGraph } from "./types";
+import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, OrphanedWaveGateRetirement, SpecCheck, TaskGraph } from "./types";
 import type { DomainResult, OrchestrationRunId } from "./core/orchestration-contract";
 import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
 import {
@@ -144,6 +144,7 @@ function parseSpecCheckField(v: unknown):
 const ACTIVE_WAVE_GATE_FIELDS = [
   "schemaVersion", "kind", "runId", "wave", "authorityDigest", "revision", "terminalOutcome",
 ] as const;
+const ACTIVE_WAVE_GATE_OPTIONAL_FIELDS = ["runsRoot"] as const;
 
 /** Parse and re-prove the protected active-run anchor from unknown JSON. */
 export function parseActiveWaveGateRegistration(raw: unknown): ParseResult<ActiveWaveGateRegistration> {
@@ -151,7 +152,9 @@ export function parseActiveWaveGateRegistration(raw: unknown): ParseResult<Activ
     return parseErr("active_wave_gate must be an object");
   }
   const record = raw as Record<string, unknown>;
-  const unknownFields = Object.keys(record).filter((field) => !(ACTIVE_WAVE_GATE_FIELDS as readonly string[]).includes(field));
+  const unknownFields = Object.keys(record).filter((field) =>
+    !(ACTIVE_WAVE_GATE_FIELDS as readonly string[]).includes(field) &&
+    !(ACTIVE_WAVE_GATE_OPTIONAL_FIELDS as readonly string[]).includes(field));
   const missingFields = ACTIVE_WAVE_GATE_FIELDS.filter((field) => !(field in record));
   if (unknownFields.length > 0) return parseErr(`active_wave_gate contains unknown field(s): ${unknownFields.sort().join(", ")}`);
   if (missingFields.length > 0) return parseErr(`active_wave_gate is missing field(s): ${missingFields.join(", ")}`);
@@ -166,6 +169,10 @@ export function parseActiveWaveGateRegistration(raw: unknown): ParseResult<Activ
   }
   if (typeof record.revision !== "number" || !Number.isSafeInteger(record.revision) || record.revision < 0) {
     return parseErr("active_wave_gate.revision must be a non-negative safe integer");
+  }
+  if (record.runsRoot !== undefined &&
+      (typeof record.runsRoot !== "string" || !isAbsolute(record.runsRoot) || resolve(record.runsRoot) !== record.runsRoot)) {
+    return parseErr("active_wave_gate.runsRoot must be an absolute normalized path when present");
   }
 
   let terminalOutcome: ActiveWaveGateRegistration["terminalOutcome"] = null;
@@ -207,6 +214,7 @@ export function parseActiveWaveGateRegistration(raw: unknown): ParseResult<Activ
     wave: record.wave,
     authorityDigest: authorityDigest.value,
     revision: record.revision,
+    ...(record.runsRoot === undefined ? {} : { runsRoot: record.runsRoot as string }),
     terminalOutcome,
   }));
 }
@@ -273,6 +281,84 @@ export function parseCompletedWaveGateRegistration(raw: unknown): ParseResult<Co
       stateDigest: stateDigest.value,
     }),
   }));
+}
+
+const ORPHANED_WAVE_GATE_RETIREMENT_FIELDS = [
+  "schemaVersion", "kind", "runId", "wave", "authorityDigest", "revision", "reason", "runsRoot", "runDirectory",
+  "replacementRunId", "replacementAuthorityDigest",
+] as const;
+
+/** Parse one immutable nonterminal retirement audit entry. */
+export function parseOrphanedWaveGateRetirement(raw: unknown): ParseResult<OrphanedWaveGateRetirement> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return parseErr("orphaned_wave_gate_history entry must be an object");
+  }
+  const record = raw as Record<string, unknown>;
+  const unknownFields = Object.keys(record).filter((field) =>
+    !(ORPHANED_WAVE_GATE_RETIREMENT_FIELDS as readonly string[]).includes(field));
+  const missingFields = ORPHANED_WAVE_GATE_RETIREMENT_FIELDS.filter((field) => !(field in record));
+  if (unknownFields.length > 0) {
+    return parseErr(`orphaned_wave_gate_history entry contains unknown field(s): ${unknownFields.sort().join(", ")}`);
+  }
+  if (missingFields.length > 0) {
+    return parseErr(`orphaned_wave_gate_history entry is missing field(s): ${missingFields.join(", ")}`);
+  }
+  if (record.schemaVersion !== 1 || record.kind !== "orphaned-wave-gate-retirement" ||
+      record.reason !== "authoritative-run-directory-missing") {
+    return parseErr("orphaned_wave_gate_history entry has invalid schema, kind, or reason");
+  }
+  const runId = parseOrchestrationRunId(record.runId);
+  const replacementRunId = parseOrchestrationRunId(record.replacementRunId);
+  const authorityDigest = parseArtifactDigest(record.authorityDigest);
+  const replacementAuthorityDigest = parseArtifactDigest(record.replacementAuthorityDigest);
+  if (!runId.ok) return parseErr(`orphaned_wave_gate_history.runId: ${runId.error.message}`);
+  if (!replacementRunId.ok) return parseErr(`orphaned_wave_gate_history.replacementRunId: ${replacementRunId.error.message}`);
+  if (runId.value === replacementRunId.value) {
+    return parseErr("orphaned_wave_gate_history replacement run must differ from retired run");
+  }
+  if (!authorityDigest.ok) return parseErr(`orphaned_wave_gate_history.authorityDigest: ${authorityDigest.error.message}`);
+  if (!replacementAuthorityDigest.ok) {
+    return parseErr(`orphaned_wave_gate_history.replacementAuthorityDigest: ${replacementAuthorityDigest.error.message}`);
+  }
+  if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
+    return parseErr("orphaned_wave_gate_history.wave must be an integer >= 1");
+  }
+  if (typeof record.revision !== "number" || !Number.isSafeInteger(record.revision) || record.revision < 0) {
+    return parseErr("orphaned_wave_gate_history.revision must be a non-negative safe integer");
+  }
+  if (typeof record.runsRoot !== "string" || !isAbsolute(record.runsRoot) || resolve(record.runsRoot) !== record.runsRoot ||
+      typeof record.runDirectory !== "string" || record.runDirectory !== join(record.runsRoot, runId.value)) {
+    return parseErr("orphaned_wave_gate_history must carry the exact normalized authoritative runsRoot/runDirectory");
+  }
+  return parseOk(Object.freeze({
+    schemaVersion: 1,
+    kind: "orphaned-wave-gate-retirement",
+    runId: runId.value,
+    wave: record.wave,
+    authorityDigest: authorityDigest.value,
+    revision: record.revision,
+    reason: "authoritative-run-directory-missing",
+    runsRoot: record.runsRoot,
+    runDirectory: record.runDirectory,
+    replacementRunId: replacementRunId.value,
+    replacementAuthorityDigest: replacementAuthorityDigest.value,
+  }));
+}
+
+function parseOrphanedWaveGateHistory(raw: unknown): ParseResult<readonly OrphanedWaveGateRetirement[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr("orphaned_wave_gate_history must be an array when present");
+  const history: OrphanedWaveGateRetirement[] = [];
+  for (let index = 0; index < raw.length; index += 1) {
+    const parsed = parseOrphanedWaveGateRetirement(raw[index]);
+    if (!parsed.ok) return parseErr(`orphaned_wave_gate_history[${index}]: ${parsed.error}`);
+    history.push(parsed.value);
+  }
+  const retiredRunIds = history.map(({ runId }) => runId);
+  if (new Set(retiredRunIds).size !== retiredRunIds.length) {
+    return parseErr("orphaned_wave_gate_history contains duplicate retired run identities");
+  }
+  return parseOk(Object.freeze(history));
 }
 
 export const TASK_ID_PATTERN = /^T\d+$/;
@@ -874,6 +960,23 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
   const registrations = parseWaveGateRegistrations(obj);
   if (!registrations.ok) return parseErr(registrations.error);
   const { activeWaveGate, waveGateHistory } = registrations.value;
+  const orphanedHistory = parseOrphanedWaveGateHistory(obj.orphaned_wave_gate_history);
+  if (!orphanedHistory.ok) return parseErr(orphanedHistory.error);
+  if (activeWaveGate !== undefined && orphanedHistory.value?.some(({ runId }) => runId === activeWaveGate.runId)) {
+    return parseErr(`active_wave_gate run ${activeWaveGate.runId} is already retired in orphaned_wave_gate_history`);
+  }
+  if (activeWaveGate !== undefined) {
+    const installedBy = orphanedHistory.value?.filter(({ replacementRunId }) => replacementRunId === activeWaveGate.runId) ?? [];
+    if (installedBy.length > 1) {
+      return parseErr(`active_wave_gate run ${activeWaveGate.runId} has multiple orphan-recovery installation audits`);
+    }
+    const audit = installedBy[0];
+    if (audit !== undefined && (audit.wave !== activeWaveGate.wave ||
+        audit.replacementAuthorityDigest !== activeWaveGate.authorityDigest ||
+        activeWaveGate.runsRoot !== audit.runsRoot)) {
+      return parseErr(`active_wave_gate run ${activeWaveGate.runId} contradicts its orphan-recovery installation audit`);
+    }
+  }
 
   // Fresh frozen copies, never aliases of the parsed JSON: a caller holding
   // the graph — or the raw object it came from — must not be able to mutate a
@@ -907,6 +1010,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
     ...(specCheck.value === undefined ? {} : { spec_check: specCheck.value }),
     ...(activeWaveGate === undefined ? {} : { active_wave_gate: activeWaveGate }),
     ...(waveGateHistory === undefined ? {} : { wave_gate_history: waveGateHistory }),
+    ...(orphanedHistory.value === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory.value }),
   } as unknown as TaskGraph);
 }
 
@@ -1069,7 +1173,7 @@ export class StateManager {
       if (existing !== undefined) {
         const exactReplay = existing.runId === registration.runId &&
           existing.wave === registration.wave &&
-          existing.authorityDigest === registration.authorityDigest &&
+          existing.authorityDigest === registration.authorityDigest && existing.runsRoot === registration.runsRoot &&
           existing.revision === registration.revision && existing.terminalOutcome === null;
         if (exactReplay) return { state, value: existing };
         if (existing.terminalOutcome === null) {

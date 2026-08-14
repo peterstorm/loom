@@ -112,6 +112,25 @@ describe("orchestration status", () => {
     for (const category of FACT_CATEGORIES) expect(human).toContain(category);
   });
 
+  it("never calls an unverified registered run healthy and reports proven directory absence as orphaned", () => {
+    const active = executeGraph({
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.status-orphan", wave: 1,
+        authorityDigest: "a".repeat(64), revision: 0, terminalOutcome: null,
+      },
+    });
+    const unverified = renderStatus(active, deps, true);
+    expect(unverified).not.toContain("healthy");
+    expect(unverified).toContain("registered-run-suspended");
+
+    const orphaned = renderStatus(active, deps, true, {
+      kind: "absent", runId: "run.status-orphan", path: "/runs/run.status-orphan",
+    });
+    expect(orphaned).not.toContain("healthy");
+    expect(orphaned).toContain("orphaned active Wave Gate run run.status-orphan");
+    expect(orphaned).toContain("authoritative Run Directory does not exist");
+  });
+
   it("keeps every category present as unavailable when authority is malformed", () => {
     const parsed = JSON.parse(renderStatus({ not: "a task graph" }, deps, true)) as {
       facts: Record<string, { kind: string }>;
@@ -1409,6 +1428,284 @@ describe("orchestration CLI", () => {
     const lateAttemptOne = await opened.value.captureTranscript(rejected, [...Buffer.from("late")]);
     expect(lateAttemptOne.ok).toBe(false);
     if (!lateAttemptOne.ok) expect(lateAttemptOne.error.message).toContain("terminally rejected");
+  }, 30_000);
+
+  it("drains safe sibling retries before blocking an exhausted Wave reviewer generation", async () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
+        id: "T1", description: "mixed retry target", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        findings: [], critical_findings: [], advisory_findings: [],
+      }],
+    }));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-mixed-retry-runs-"));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-mixed-retry");
+    mkdirSync(runDir);
+    const started = runCli([
+      "start", "wave-gate", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const initial = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    for (const { authority } of initial.requests) {
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
+    }
+    const retryResult = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(retryResult.status, retryResult.stderr).toBe(0);
+    const retries = JSON.parse(retryResult.stdout) as {
+      kind: string;
+      requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(retries.kind).toBe("spawn-batch");
+    expect(retries.requests).toHaveLength(WAVE_REVIEW_AGENTS.length);
+
+    const [exhausted, ...pending] = retries.requests;
+    expect((await opened.value.captureTranscript(
+      exhausted!.authority,
+      [...Buffer.from("malformed attempt two")],
+    )).ok).toBe(true);
+    const draining = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(draining.status, draining.stderr).toBe(0);
+    const drainBatch = JSON.parse(draining.stdout) as {
+      kind: string;
+      requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(drainBatch.kind).toBe("spawn-batch");
+    expect(drainBatch.requests.map(({ authority }) => authority.requestId)).toEqual(
+      pending.map(({ authority }) => authority.requestId),
+    );
+    for (const { authority } of drainBatch.requests) {
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from("malformed attempt two")])).ok).toBe(true);
+    }
+    const blocked = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(blocked.status, blocked.stderr).toBe(0);
+    expect(JSON.parse(blocked.stdout)).toMatchObject({
+      kind: "blocked",
+      diagnostic: { message: expect.stringContaining("attempt 2 exhausted") },
+    });
+
+    const replacementRun = join(runsRoot, "run.wave-mixed-replacement");
+    mkdirSync(replacementRun);
+    const restarted = runCli([
+      "restart", "--runs-root", runsRoot, "--run", runDir, "--new-run", replacementRun,
+    ], "", root);
+    expect(restarted.status, restarted.stderr).toBe(0);
+    expect(JSON.parse(restarted.stdout)).toMatchObject({ kind: "spawn-batch", runId: "run.wave-mixed-replacement" });
+  }, 30_000);
+
+  it("atomically recovers an orphaned active Wave Gate without losing review history", async () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+    const activeFinding = {
+      id: "code-reviewer-7", agent: "code-reviewer", severity: "critical" as const,
+      file: "src/x.ts", line: 1, claim: "preserve active finding",
+    };
+    const refutedFinding = {
+      id: "silent-failure-hunter-3", agent: "silent-failure-hunter", severity: "critical" as const,
+      file: "src/x.ts", line: 2, claim: "preserve refuted finding",
+    };
+    const resolvedFinding = {
+      id: "type-design-analyzer-2", agent: "type-design-analyzer", severity: "critical" as const,
+      file: "src/x.ts", line: 3, claim: "preserve resolved finding",
+    };
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
+        id: "T1", description: "orphan recovery target", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "blocked", review_generation: 7,
+        findings: [activeFinding], critical_findings: [activeFinding.claim], advisory_findings: [],
+        refuted_findings: [{
+          finding: refutedFinding,
+          refutations: [{ lens: "intent", reason: "not applicable to the protected behavior" }],
+        }],
+        resolved_findings: [{
+          finding: resolvedFinding,
+          resolution: {
+            kind: "resolved_by_remediation", generation: 6, packet_id: "d".repeat(64), head_sha: "e".repeat(40),
+            expected_agents: ["code-reviewer"],
+            assessments: [{
+              agent: "code-reviewer", finding_id: resolvedFinding.id,
+              verdict: "resolved_by_remediation", reason: "fixed in the prior generation",
+            }],
+          },
+        }],
+      }],
+    }));
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-orphan-runs-"));
+    cleanup.push(runsRoot);
+    const oldRun = join(runsRoot, "run.wave-orphaned");
+    mkdirSync(oldRun);
+    const started = runCli([
+      "start", "wave-gate", "--runs-root", runsRoot, "--run", oldRun,
+    ], JSON.stringify({ wave: 1 }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const initial = JSON.parse(started.stdout) as {
+      kind: string; requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(initial.kind, started.stdout).toBe("spawn-batch");
+
+    const startedGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
+      active_wave_gate: { runId: string; wave: number; authorityDigest: string; runsRoot: string };
+      wave_review_epoch: { runId: string; batchEpoch: string };
+      tasks: readonly (Record<string, unknown> & {
+        review_generation: number;
+        review_run: Record<string, unknown> & { packet_id: string };
+      })[];
+    };
+    const oldPacketId = startedGraph.tasks[0]!.review_run.packet_id;
+    expect(startedGraph.active_wave_gate.runsRoot).toBe(runsRoot);
+    const acceptedPartialClaim = "preserve accepted partial packet finding";
+    chmodSync(statePath, 0o644);
+    writeFileSync(statePath, JSON.stringify({
+      ...startedGraph,
+      tasks: startedGraph.tasks.map((task) => ({
+        ...task,
+        review_run: {
+          ...task.review_run,
+          evidence: [{
+            agent: "code-reviewer",
+            prior_assessments: [{
+              finding_id: activeFinding.id, verdict: "still_present", reason: "still present in partial evidence",
+            }],
+            new_findings: [{ severity: "advisory", file: "src/x.ts", line: 4, claim: acceptedPartialClaim }],
+          }],
+        },
+      })),
+      spec_check: {
+        wave: 1, run_at: "stale", verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+    }));
+    chmodSync(statePath, 0o444);
+
+    const replacementRun = join(runsRoot, "run.wave-orphan-replacement");
+    mkdirSync(replacementRun);
+    const recoveryArgs = [
+      "recover-orphan", "--runs-root", runsRoot,
+      "--run-id", startedGraph.active_wave_gate.runId,
+      "--wave", String(startedGraph.active_wave_gate.wave),
+      "--digest", startedGraph.active_wave_gate.authorityDigest,
+      "--new-run", replacementRun,
+    ] as const;
+
+    const foreignRoot = mkdtempSync(join(tmpdir(), "loom-wave-foreign-root-"));
+    cleanup.push(foreignRoot);
+    const foreignReplacement = join(foreignRoot, "run.wave-orphan-replacement");
+    mkdirSync(foreignReplacement);
+    const foreignRootArgs = recoveryArgs.map((value, index) =>
+      recoveryArgs[index - 1] === "--runs-root" ? foreignRoot
+        : recoveryArgs[index - 1] === "--new-run" ? foreignReplacement
+          : value);
+    const wrongRoot = runCli(foreignRootArgs, "", root);
+    expect(wrongRoot.status).not.toBe(0);
+    expect(wrongRoot.stderr).toContain("does not match authoritative root");
+
+    const stillPresent = runCli(recoveryArgs, "", root);
+    expect(stillPresent.status).not.toBe(0);
+    expect(stillPresent.stderr).toContain("still exists");
+    rmSync(oldRun, { recursive: true });
+
+    const wrongRun = runCli(recoveryArgs.map((value, index) =>
+      recoveryArgs[index - 1] === "--run-id" ? "run.not-the-owner" : value), "", root);
+    expect(wrongRun.status).not.toBe(0);
+    expect(wrongRun.stderr).toContain("exact protected active run ID, wave, authority digest");
+    const wrongWave = runCli(recoveryArgs.map((value, index) =>
+      recoveryArgs[index - 1] === "--wave" ? "2" : value), "", root);
+    expect(wrongWave.status).not.toBe(0);
+    expect(wrongWave.stderr).toContain("exact protected active run ID, wave, authority digest");
+    const wrongDigest = runCli(recoveryArgs.map((value, index) =>
+      recoveryArgs[index - 1] === "--digest" ? "f".repeat(64) : value), "", root);
+    expect(wrongDigest.status).not.toBe(0);
+    expect(wrongDigest.stderr).toContain("exact protected active run ID, wave, authority digest");
+
+    const status = runCli(["status", "--json", "--runs-root", runsRoot], "", root);
+    expect(status.status, status.stderr).toBe(0);
+    expect(status.stdout).toContain("orphaned active Wave Gate run run.wave-orphaned");
+    expect(status.stdout).not.toContain("healthy-run-suspended");
+
+    const subagentDir = join(root, "subagents");
+    mkdirSync(subagentDir);
+    writeFileSync(join(subagentDir, "live.active"), "reviewer\tcode-reviewer\n");
+    writeFileSync(join(subagentDir, "live.task_graph"), statePath);
+    const activeRefusal = runCli(recoveryArgs, "", root, { LOOM_SUBAGENT_DIR: subagentDir });
+    expect(activeRefusal.status).not.toBe(0);
+    expect(activeRefusal.stderr).toContain("subagent is active");
+    rmSync(join(subagentDir, "live.active"));
+
+    const recovered = runCli(recoveryArgs, "", root, { LOOM_SUBAGENT_DIR: subagentDir });
+    expect(recovered.status, recovered.stderr).toBe(0);
+    const batch = JSON.parse(recovered.stdout) as {
+      kind: string; runId: string; requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(batch.kind).toBe("spawn-batch");
+    expect(batch.runId).toBe("run.wave-orphan-replacement");
+    expect(batch.requests).toHaveLength(1 + WAVE_REVIEW_AGENTS.length);
+    expect(batch.requests.every(({ authority }) =>
+      authority.runId === "run.wave-orphan-replacement" && authority.attempt === 1)).toBe(true);
+
+    const after = JSON.parse(readFileSync(statePath, "utf8")) as {
+      spec_check?: unknown;
+      active_wave_gate: { runId: string; wave: number; authorityDigest: string };
+      wave_review_epoch: { runId: string; batchEpoch: string };
+      orphaned_wave_gate_history: readonly {
+        kind: string; runId: string; wave: number; authorityDigest: string; reason: string;
+        runsRoot: string; runDirectory: string;
+        replacementRunId: string; replacementAuthorityDigest: string;
+      }[];
+      tasks: readonly {
+        review_generation: number; review_run: { packet_id: string; generation: number };
+        findings: readonly unknown[]; refuted_findings: readonly unknown[]; resolved_findings: readonly unknown[];
+      }[];
+    };
+    expect(after.spec_check).toBeUndefined();
+    expect(after.active_wave_gate).toMatchObject({ runId: "run.wave-orphan-replacement", wave: 1 });
+    expect(after.wave_review_epoch.runId).toBe("run.wave-orphan-replacement");
+    expect(after.wave_review_epoch.batchEpoch).not.toBe(startedGraph.wave_review_epoch.batchEpoch);
+    expect(after.tasks[0]).toMatchObject({ review_generation: 7, review_run: { generation: 7 } });
+    expect(after.tasks[0]!.review_run.packet_id).not.toBe(oldPacketId);
+    expect(after.tasks[0]!.findings).toEqual([
+      activeFinding,
+      expect.objectContaining({ agent: "code-reviewer", severity: "advisory", claim: acceptedPartialClaim }),
+    ]);
+    expect(after.tasks[0]!.refuted_findings).toHaveLength(1);
+    expect(after.tasks[0]!.resolved_findings).toHaveLength(1);
+    expect(after.orphaned_wave_gate_history).toEqual([expect.objectContaining({
+      kind: "orphaned-wave-gate-retirement",
+      runId: "run.wave-orphaned",
+      wave: 1,
+      authorityDigest: startedGraph.active_wave_gate.authorityDigest,
+      reason: "authoritative-run-directory-missing",
+      runsRoot: runsRoot,
+      runDirectory: oldRun,
+      replacementRunId: "run.wave-orphan-replacement",
+      replacementAuthorityDigest: after.active_wave_gate.authorityDigest,
+    })]);
+
+    const replay = runCli(recoveryArgs, "", root, { LOOM_SUBAGENT_DIR: subagentDir });
+    expect(replay.status, replay.stderr).toBe(0);
+    const replayBatch = JSON.parse(replay.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(replayBatch.requests.map(({ authority }) => authority.requestId)).toEqual(
+      batch.requests.map(({ authority }) => authority.requestId),
+    );
   }, 30_000);
 
   it("atomically restarts an exhausted Wave reviewer run with new generations and authority", async () => {

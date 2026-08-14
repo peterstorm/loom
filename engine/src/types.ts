@@ -496,6 +496,9 @@ export type ActiveWaveGateRegistration = Readonly<{
   wave: number;
   authorityDigest: ArtifactDigest;
   revision: number;
+  /** Absolute authoritative parent of this run. Absent only on registrations
+   * created before directory authority was persisted. */
+  runsRoot?: string;
   /** Non-null only while reading a legacy terminal registration. New
    * completions archive it in wave_gate_history and clear active authority. */
   terminalOutcome: ActiveWaveGateTerminalOutcome | null;
@@ -510,6 +513,23 @@ export type CompletedWaveGateRegistration = Readonly<{
   authorityDigest: ArtifactDigest;
   revision: number;
   completionReceipt: ProtectedWaveStateCommitted;
+}>;
+
+/** Immutable audit evidence for an active authority whose authoritative Run
+ * Directory was proven absent before a replacement was installed. This is not
+ * terminal Wave history: the replacement still owns the same active Wave. */
+export type OrphanedWaveGateRetirement = Readonly<{
+  schemaVersion: 1;
+  kind: "orphaned-wave-gate-retirement";
+  runId: OrchestrationRunId;
+  wave: number;
+  authorityDigest: ArtifactDigest;
+  revision: number;
+  reason: "authoritative-run-directory-missing";
+  runsRoot: string;
+  runDirectory: string;
+  replacementRunId: OrchestrationRunId;
+  replacementAuthorityDigest: ArtifactDigest;
 }>;
 
 export type StatusFact<T> =
@@ -634,13 +654,13 @@ export type WaveGateNextAction =
   | Readonly<{ kind: "blocked"; lifecycle: "recoverable-blocked" | "terminal-blocked" | "authority-blocked"; action: BlockedAction; binding: WaveGateProtectedSnapshotBinding }>
   | Readonly<{ kind: "completed"; lifecycle: "done"; action: DoneAction; binding: WaveGateProtectedSnapshotBinding }>;
 
-/** A healthy registered program can be temporarily unable to expose its next
- * semantic action until the engine replays its checkpoint. This remains one of
- * the fixed four external action tags (`blocked`) without pretending malformed
- * authority or a terminal lifecycle failure. */
+/** A registered program can be temporarily unable to expose its next semantic
+ * action until the engine replays its checkpoint. Status calls it registered,
+ * not healthy: health additionally requires a shell proof that the authoritative
+ * Run Directory still exists. */
 export type EngineResumeDiagnostic = Readonly<{
   kind: "engine-resume-required";
-  category: "healthy-run-suspended";
+  category: "registered-run-suspended";
   runId: OrchestrationRunId;
   message: string;
   retry: Readonly<{
@@ -747,6 +767,8 @@ export interface TaskGraph {
   active_wave_gate?: ActiveWaveGateRegistration;
   /** Immutable terminal registrations, separate from authority for the next Wave. */
   wave_gate_history?: readonly CompletedWaveGateRegistration[];
+  /** Nonterminal retirement audit for missing Run Directories replaced in-place. */
+  orphaned_wave_gate_history?: readonly OrphanedWaveGateRetirement[];
   updated_at?: string;
 }
 

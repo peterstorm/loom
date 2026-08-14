@@ -27,6 +27,11 @@ export type WaveGateRestartAudit = Readonly<{
   exhaustedSlots: readonly string[];
 }>;
 
+export type OrphanedWaveGateRecoveryAudit = Readonly<{
+  previousRunId: string;
+  previousAuthorityDigest: string;
+}>;
+
 export type RegisteredWaveGateProgram = Readonly<{
   schemaVersion: 1;
   kind: "wave-gate";
@@ -34,6 +39,7 @@ export type RegisteredWaveGateProgram = Readonly<{
   taskIds: readonly string[];
   authorityDigest: string;
   restart?: WaveGateRestartAudit;
+  orphanRecovery?: OrphanedWaveGateRecoveryAudit;
 }>;
 
 export type RegisteredRemediationProgram = Readonly<{
@@ -390,7 +396,9 @@ export function parseRegisteredFacadeProgram(raw: unknown): RegisteredFacadeProg
   }
   const waveKeys = Object.hasOwn(raw as object, "restart")
     ? ["schemaVersion", "kind", "input", "taskIds", "authorityDigest", "restart"]
-    : ["schemaVersion", "kind", "input", "taskIds", "authorityDigest"];
+    : Object.hasOwn(raw as object, "orphanRecovery")
+      ? ["schemaVersion", "kind", "input", "taskIds", "authorityDigest", "orphanRecovery"]
+      : ["schemaVersion", "kind", "input", "taskIds", "authorityDigest"];
   if (!exactObject(raw, waveKeys) || raw.schemaVersion !== 1 || raw.kind !== "wave-gate" || !Array.isArray(raw.taskIds) ||
       raw.taskIds.some((id) => typeof id !== "string") || typeof raw.authorityDigest !== "string") return null;
   let restart: WaveGateRestartAudit | undefined;
@@ -403,11 +411,22 @@ export function parseRegisteredFacadeProgram(raw: unknown): RegisteredFacadeProg
       exhaustedSlots: Object.freeze([...(raw.restart.exhaustedSlots as string[])]),
     });
   }
+  let orphanRecovery: OrphanedWaveGateRecoveryAudit | undefined;
+  if (Object.hasOwn(raw, "orphanRecovery")) {
+    if (!exactObject(raw.orphanRecovery, ["previousRunId", "previousAuthorityDigest"]) ||
+        typeof raw.orphanRecovery.previousRunId !== "string" ||
+        typeof raw.orphanRecovery.previousAuthorityDigest !== "string") return null;
+    orphanRecovery = Object.freeze({
+      previousRunId: raw.orphanRecovery.previousRunId,
+      previousAuthorityDigest: raw.orphanRecovery.previousAuthorityDigest,
+    });
+  }
   const input = parseWaveGateStartInput(raw.input);
   return input.ok ? Object.freeze({
     schemaVersion: 1, kind: "wave-gate", input: input.value,
     taskIds: Object.freeze([...(raw.taskIds as string[])]), authorityDigest: raw.authorityDigest,
     ...(restart === undefined ? {} : { restart }),
+    ...(orphanRecovery === undefined ? {} : { orphanRecovery }),
   }) : null;
 }
 

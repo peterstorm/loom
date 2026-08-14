@@ -201,6 +201,47 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it("parses immutable orphaned Wave Gate retirement audit and rejects contradictory reuse", () => {
+    const retirement = {
+      schemaVersion: 1, kind: "orphaned-wave-gate-retirement", runId: "run.orphaned", wave: 1,
+      authorityDigest: "a".repeat(64), revision: 0,
+      reason: "authoritative-run-directory-missing",
+      runsRoot: "/runs", runDirectory: "/runs/run.orphaned",
+      replacementRunId: "run.replacement", replacementAuthorityDigest: "b".repeat(64),
+    };
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      current_wave: 1,
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.replacement", wave: 1,
+        authorityDigest: "b".repeat(64), revision: 0, runsRoot: "/runs", terminalOutcome: null,
+      },
+      orphaned_wave_gate_history: [retirement],
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.value.orphaned_wave_gate_history).toEqual([retirement]);
+      expect(Object.isFrozen(parsed.value.orphaned_wave_gate_history)).toBe(true);
+      expect(Object.isFrozen(parsed.value.orphaned_wave_gate_history?.[0])).toBe(true);
+    }
+
+    const duplicate = parseTaskGraph({ ...validGraph, orphaned_wave_gate_history: [retirement, retirement] });
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) expect(duplicate.error).toContain("duplicate retired run identities");
+
+    const contradictory = parseTaskGraph({
+      ...validGraph,
+      current_wave: 1,
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.orphaned", wave: 1,
+        authorityDigest: "a".repeat(64), revision: 0, terminalOutcome: null,
+      },
+      orphaned_wave_gate_history: [retirement],
+    });
+    expect(contradictory.ok).toBe(false);
+    if (!contradictory.ok) expect(contradictory.error).toContain("already retired");
+  });
+
   it("shares task-agent authority with validate-task-graph", () => {
     const unknown = parseTaskGraph({
       ...validGraph,

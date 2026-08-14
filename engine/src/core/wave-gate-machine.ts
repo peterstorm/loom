@@ -588,6 +588,15 @@ export interface GateDeps {
   readonly fileExists: (path: string) => boolean;
 }
 
+/** Shell-supplied observation of the active registration's authoritative Run
+ * Directory. Core never performs filesystem I/O; status consumes this proof
+ * before it describes a registered run as resumable. */
+export type ActiveRunDirectoryObservation =
+  | Readonly<{ kind: "unverified" }>
+  | Readonly<{ kind: "present"; runId: string; path: string }>
+  | Readonly<{ kind: "absent"; runId: string; path: string }>
+  | Readonly<{ kind: "invalid"; runId: string; path: string; message: string }>;
+
 export interface GateDecision {
   readonly wave: number;
   readonly checks: readonly GateCheck[];
@@ -1882,17 +1891,18 @@ function waveImplementationAction(
   });
 }
 
-/** Status-only recovery projection for a healthy registered run whose durable
- * lifecycle must be replayed before its semantic external action is known. */
+/** Status-only recovery projection for a registered run whose durable lifecycle
+ * must be replayed before its semantic external action is known. Directory
+ * health is established separately by the shell observation. */
 function engineResumeAction(runId: OrchestrationRunId): EngineResumeAction {
   return canonicalRecord({
     kind: "blocked",
     runId,
     diagnostic: canonicalRecord({
       kind: "engine-resume-required",
-      category: "healthy-run-suspended",
+      category: "registered-run-suspended",
       runId,
-      message: `Wave Gate run ${runId} is healthy and requires engine resume to derive its next external action`,
+      message: `Wave Gate run ${runId} is registered and requires engine resume to derive its next external action`,
       retry: canonicalRecord({
         kind: "engine-resume",
         eligible: true,
@@ -2162,6 +2172,7 @@ export function deriveLoomStatusFromParsedGraph(
   deps: GateDeps,
   nextActionAuthority: WaveGateNextAction | null = null,
   lifecycleCheckpoint: WaveGateState | null = null,
+  runDirectory: ActiveRunDirectoryObservation = canonicalRecord({ kind: "unverified" }),
 ): LoomStatus {
   if (!parsed.ok) {
     return deriveUnavailableLoomStatus(Object.freeze([
@@ -2169,6 +2180,27 @@ export function deriveLoomStatusFromParsedGraph(
     ]) as NonEmpty<StatusReason>);
   }
   if (parsed.value.current_phase !== "execute") return deriveNonExecuteLoomStatus(parsed.value);
+  const active = parsed.value.active_wave_gate;
+  if (active?.terminalOutcome === null && runDirectory.kind !== "unverified") {
+    if (runDirectory.runId !== active.runId) {
+      return deriveUnavailableLoomStatus(Object.freeze([
+        unavailableStatusReason(`Run Directory observation belongs to ${runDirectory.runId}, not active run ${active.runId}`),
+      ]) as NonEmpty<StatusReason>);
+    }
+    if (runDirectory.kind === "absent") {
+      return deriveUnavailableLoomStatus(Object.freeze([
+        unavailableStatusReason(
+          `orphaned active Wave Gate run ${active.runId}: authoritative Run Directory does not exist at ${runDirectory.path}; ` +
+          `recover with exact wave ${active.wave} and authority digest ${active.authorityDigest}`,
+        ),
+      ]) as NonEmpty<StatusReason>);
+    }
+    if (runDirectory.kind === "invalid") {
+      return deriveUnavailableLoomStatus(Object.freeze([
+        unavailableStatusReason(`cannot verify authoritative Run Directory ${runDirectory.path}: ${runDirectory.message}`),
+      ]) as NonEmpty<StatusReason>);
+    }
+  }
   const persistedBlocked = persistedTerminalBlockedStatus(parsed.value);
   if (persistedBlocked !== null) return persistedBlocked;
   const committed = committedTerminalStatus(parsed.value);

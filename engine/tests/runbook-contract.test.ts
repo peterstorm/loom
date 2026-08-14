@@ -206,6 +206,17 @@ describe("engine-owned orchestration runbook contract", () => {
       "git add -A",
     ]) expect(prose, `parent recipe survived: ${forbidden}`).not.toContain(forbidden);
   });
+
+  it("makes critical remediation mandatory and advisory selection autonomous by default", () => {
+    const skill = read("skills", "review-and-fix", "SKILL.md");
+    const command = read("commands", "review-and-fix.md");
+
+    expect(skill).toContain("Every surviving critical Finding is mandatory");
+    expect(skill).toContain("do not ask the operator to choose advisory IDs");
+    expect(command).toContain("always plan/fix every");
+    expect(command).toContain("autonomously decide which");
+    expect(command).not.toContain("ask the user which advisories");
+  });
 });
 
 describe("the smoke scripts this file's own header cites are actually run", () => {

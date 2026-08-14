@@ -24,7 +24,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, linkSync, statSync, unlinkSync } from "node:fs";
+import { closeSync, linkSync, lstatSync, statSync, unlinkSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import {
   canonicalRecord,
@@ -187,6 +187,11 @@ export type RunDirectoryIdentity = Readonly<RunDirectoryReference & {
   readonly [RUN_DIRECTORY_IDENTITY]: true;
 }>;
 
+export type RunDirectoryEntryInspection =
+  | Readonly<{ kind: "absent"; reference: RunDirectoryReference }>
+  | Readonly<{ kind: "directory"; reference: RunDirectoryReference }>
+  | Readonly<{ kind: "occupied"; reference: RunDirectoryReference; entryKind: "symlink" | "other" }>;
+
 /** Parse the stable direct-child relation without requiring the run to remain live. */
 export function parseRunDirectoryReference(
   runsRoot: string,
@@ -204,6 +209,35 @@ export function parseRunDirectoryReference(
     runDirectory: directory,
     runId: runId.value,
   }) as RunDirectoryReference);
+}
+
+/** Inspect one lexical direct-child entry without following its leaf. ENOENT is
+ * the only absent result; permission, I/O, and malformed-path failures remain
+ * typed refusals. Recovery uses this proof so a symlink or non-directory can
+ * never masquerade as an orphaned Run Directory. */
+export function inspectRunDirectoryEntry(
+  runsRoot: string,
+  runDirectory: string,
+): DomainResult<RunDirectoryEntryInspection, RunDirectoryError> {
+  const reference = parseRunDirectoryReference(runsRoot, runDirectory);
+  if (!reference.ok) return reference;
+  try {
+    const stat = lstatSync(reference.value.runDirectory);
+    if (stat.isSymbolicLink()) {
+      return success(canonicalRecord({ kind: "occupied", reference: reference.value, entryKind: "symlink" }));
+    }
+    return success(stat.isDirectory()
+      ? canonicalRecord({ kind: "directory", reference: reference.value })
+      : canonicalRecord({ kind: "occupied", reference: reference.value, entryKind: "other" }));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return success(canonicalRecord({ kind: "absent", reference: reference.value }));
+    }
+    return failure(
+      "runDirectory",
+      `cannot inspect run directory entry ${reference.value.runDirectory}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 /**

@@ -1,6 +1,6 @@
 ---
 name: review-and-fix
-version: "3.0.0"
+version: "3.1.0"
 description: "Review a PR, adjudicate critical findings, remediate, validate, and install an exact verified Git index."
 ---
 
@@ -26,8 +26,10 @@ plan → remediation → validation → verified index installation → commit/p
 - Execute only `spawn-batch`, `await-user`, `blocked`, or `done` actions.
 - Never hand-build findings, verdicts, manifests, transcript files, Git
   pathspecs, or protected-state mutations.
-- Refuted criticals are audited and never fixed. Advisories require explicit
-  operator disposition. Validation must pass before remediation installation.
+- Refuted criticals are audited and never fixed. Every surviving critical is
+  mandatory. By default, the parent autonomously dispositions each advisory as
+  accepted, deferred, or dismissed; it does not ask the operator to choose IDs.
+  Validation must pass before remediation installation.
 - Never force-push.
 
 ## Phase 1 — Registered standalone review
@@ -56,18 +58,26 @@ critical sets through its registered Refutation Panel and publishes canonical
 `result.json`. Read remediation inputs only from that authoritative result:
 
 - `surviving_critical_findings` — mandatory fixes
-- `advisory_findings` — explicit triage
+- `advisory_findings` — autonomous parent triage by default
 - `refuted_critical_findings` — report, never fix
 
 ## Phase 2 — Plan
 
-If nothing survives, report a clean adjudicated review and stop. If only
-advisories survive, ask whether to remediate them.
+Every surviving critical Finding is mandatory. Independently disposition every
+advisory as `accepted`, `deferred`, or `dismissed`. By default, make this choice
+autonomously from the evidence, correctness impact, risk, and reviewed scope;
+do not ask the operator to choose advisory IDs. Accept an advisory when its
+claim is sound and a complete in-scope fix is practical. Defer or dismiss only
+with a concrete evidence-based reason. An explicit user instruction about a
+specific advisory overrides this default.
+
+If neither criticals nor accepted advisories survive, report the clean review
+or advisory dispositions and stop.
 
 Write `.claude/plans/YYYY-MM-DD-pr-remediation.md` containing branch, exact
-scope, review Run Directory, each surviving finding and concrete fix, accepted
-advisories, refuted-finding audit, and validation commands. `--dry-run` stops
-here.
+scope, review Run Directory, every surviving critical and concrete fix, every
+advisory disposition and reason, accepted advisory fixes, refuted-finding
+audit, and validation commands. `--dry-run` stops here.
 
 ## Phase 3 — Implement and validate
 
@@ -104,6 +114,7 @@ the valid local commit intact and is reported with its SHA.
 
 ## Phase 5 — Report
 
-Report found/refuted/surviving/fixed/advisory counts, both Run Directories,
-plan, changed files, validation evidence, installation receipt, commit SHA,
-branch, and push status. Include every refuted finding with panel reasoning.
+Report found/refuted/surviving/fixed/advisory counts, every advisory disposition
+and reason, both Run Directories, plan, changed files, validation evidence,
+installation receipt, commit SHA, branch, and push status. Include every
+refuted finding with panel reasoning.
