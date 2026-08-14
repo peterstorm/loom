@@ -30,6 +30,13 @@ Architecture Decision Records preserve why the system has its current shape:
 - [Claude Code to Pi integration guide](migration-claude-code-to-pi.md) explains how the two adapters map onto one engine.
 - [Pi phase-agent interviews](pi-phase-agent-interviews.md) records the unresolved interactive-child limitation and the implemented fail-fast behavior.
 
+## Design proposals
+
+These documents evaluate possible future changes. They are not descriptions of shipped behavior or executable runbooks:
+
+- [`/loom` prompt decomposition](loom-prompt-decomposition.md) — analysis and migration design for replacing the monolithic eager prompt with a compact dispatcher and mandatory just-in-time runbook references.
+- [Deterministic implementation and verification](deterministic-implementation.md) — determinism ladder for replacing LLM review findings with machine-checkable gates (AST rules, architecture conformance, mutation testing, contracts, model checking) and for making the implementation phase itself deterministic (scaffolding, frozen types, compiler-in-the-loop, red-green proof obligations, SubagentStop gating).
+
 ## Historical design records
 
 These explain how shipped architecture was derived; they are not current runbooks:
