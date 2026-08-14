@@ -242,6 +242,94 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     if (!contradictory.ok) expect(contradictory.error).toContain("already retired");
   });
 
+  it("refuses every malformed orphaned Wave Gate retirement audit entry with a named reason", () => {
+    const base = {
+      schemaVersion: 1, kind: "orphaned-wave-gate-retirement", runId: "run.orphaned", wave: 1,
+      authorityDigest: "a".repeat(64), revision: 0,
+      reason: "authoritative-run-directory-missing",
+      runsRoot: "/runs", runDirectory: "/runs/run.orphaned",
+      replacementRunId: "run.replacement", replacementAuthorityDigest: "b".repeat(64),
+    };
+    const cases: ReadonlyArray<Readonly<{ label: string; entry: unknown; expects: string }>> = [
+      { label: "non-object", entry: 42, expects: "must be an object" },
+      { label: "unknown field", entry: { ...base, stray: true }, expects: "unknown field" },
+      { label: "missing field", entry: Object.fromEntries(Object.entries(base).filter(([k]) => k !== "wave")), expects: "missing field" },
+      { label: "bad kind", entry: { ...base, kind: "completed-wave-gate" }, expects: "invalid schema, kind, or reason" },
+      { label: "bad reason", entry: { ...base, reason: "operator-requested" }, expects: "invalid schema, kind, or reason" },
+      { label: "unparseable runId", entry: { ...base, runId: "has space" }, expects: "runId" },
+      { label: "unparseable digest", entry: { ...base, authorityDigest: "short" }, expects: "authorityDigest" },
+      { label: "replacement equals retired", entry: { ...base, replacementRunId: "run.orphaned" }, expects: "replacement run must differ" },
+      { label: "wave below 1", entry: { ...base, wave: 0 }, expects: "wave must be an integer >= 1" },
+      { label: "fractional revision", entry: { ...base, revision: 1.5 }, expects: "revision must be a non-negative safe integer" },
+      { label: "relative runsRoot", entry: { ...base, runsRoot: "runs" }, expects: "exact normalized authoritative runsRoot/runDirectory" },
+      { label: "runDirectory not under runsRoot", entry: { ...base, runDirectory: "/elsewhere/run.orphaned" }, expects: "exact normalized authoritative runsRoot/runDirectory" },
+      { label: "runDirectory mismatch", entry: { ...base, runDirectory: "/runs/run.different" }, expects: "exact normalized authoritative runsRoot/runDirectory" },
+    ];
+    for (const { label, entry, expects } of cases) {
+      const parsed = parseTaskGraph({ ...validGraph, orphaned_wave_gate_history: [entry] });
+      expect(parsed.ok, label).toBe(false);
+      if (!parsed.ok) expect(parsed.error, label).toContain(expects);
+    }
+  });
+
+  it("refuses multiple installation audits for one active run and any audit that contradicts it", () => {
+    const retirement = (runId: string, digest: string) => ({
+      schemaVersion: 1, kind: "orphaned-wave-gate-retirement", runId, wave: 1,
+      authorityDigest: digest, revision: 0,
+      reason: "authoritative-run-directory-missing",
+      runsRoot: "/runs", runDirectory: "/runs/" + runId,
+      replacementRunId: "run.installed", replacementAuthorityDigest: "c".repeat(64),
+    });
+    const activeGate = (authorityDigest: string, wave = 1, runsRoot = "/runs") => ({
+      schemaVersion: 1, kind: "active-wave-gate", runId: "run.installed", wave,
+      authorityDigest, revision: 0, runsRoot, terminalOutcome: null,
+    });
+
+    // Two retirements both claiming to have INSTALLED the same active run —
+    // at most one installation audit may name a given replacement.
+    const multi = parseTaskGraph({
+      ...validGraph,
+      current_wave: 1,
+      active_wave_gate: activeGate("c".repeat(64)),
+      orphaned_wave_gate_history: [
+        retirement("run.first", "a".repeat(64)),
+        retirement("run.second", "b".repeat(64)),
+      ],
+    });
+    expect(multi.ok).toBe(false);
+    if (!multi.ok) expect(multi.error).toContain("multiple orphan-recovery installation audits");
+
+    // A single installation audit whose runsRoot does not match the active
+    // run's protected root.
+    const wrongRoot = parseTaskGraph({
+      ...validGraph,
+      current_wave: 1,
+      active_wave_gate: activeGate("c".repeat(64), 1, "/elsewhere"),
+      orphaned_wave_gate_history: [retirement("run.first", "a".repeat(64))],
+    });
+    expect(wrongRoot.ok).toBe(false);
+    if (!wrongRoot.ok) expect(wrongRoot.error).toContain("contradicts its orphan-recovery installation audit");
+
+    // A single installation audit whose replacement digest does not match.
+    const wrongDigest = parseTaskGraph({
+      ...validGraph,
+      current_wave: 1,
+      active_wave_gate: activeGate("d".repeat(64)),
+      orphaned_wave_gate_history: [retirement("run.first", "a".repeat(64))],
+    });
+    expect(wrongDigest.ok).toBe(false);
+    if (!wrongDigest.ok) expect(wrongDigest.error).toContain("contradicts its orphan-recovery installation audit");
+
+    // Baseline: one matching audit + matching active run parses.
+    const matching = parseTaskGraph({
+      ...validGraph,
+      current_wave: 1,
+      active_wave_gate: activeGate("c".repeat(64)),
+      orphaned_wave_gate_history: [retirement("run.first", "a".repeat(64))],
+    });
+    expect(matching.ok).toBe(true);
+  });
+
   it("shares task-agent authority with validate-task-graph", () => {
     const unknown = parseTaskGraph({
       ...validGraph,
@@ -420,8 +508,16 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     if (!parsed.ok) expect(parsed.error).toContain('"vibing"');
   });
 
-  it.each([null, [], "artifact", 42])("rejects non-object phase_artifacts: %j", (phase_artifacts) => {
-    const parsed = parseTaskGraph({ ...validGraph, phase_artifacts });
+  it.each([
+    { label: "null", value: null },
+    { label: "array", value: ["x"] },
+    { label: "string", value: "artifact" },
+    { label: "number", value: 42 },
+  ])("rejects non-object phase_artifacts: $label", ({ value }) => {
+    // Object cases, not bare values: vitest's it.each spreads ARRAY cases as
+    // argument tuples, so a bare `[]` case silently arrived as undefined — and
+    // the empty-array case itself hung the runner's %j name formatting.
+    const parsed = parseTaskGraph({ ...validGraph, phase_artifacts: value });
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.error).toContain("phase_artifacts must be an object");
   });

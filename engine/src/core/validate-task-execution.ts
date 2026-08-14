@@ -76,7 +76,11 @@ export function taskExecutionDecision(state: TaskGraph, taskId: string): HookRes
       const lines = [`BLOCKED: Wave ${prevWave} review gate not passed.`, ""];
       if (gate.blocked) {
         lines.push(`Wave ${prevWave} is BLOCKED due to:`);
-        if (gate.tests_passed === false) lines.push("  - Integration tests failed");
+        // `tests_passed` is typed `true | null` and no writer ever produces
+        // `false` (failing runs are judged by test_result evidence), so there
+        // is no "Integration tests failed" branch here to mint — the gate's
+        // blocked flag has exactly two causes: critical spec-check findings
+        // and critical review findings. Both are counted below.
         const critCount = state.tasks
           .filter((candidate) => candidate.wave === currentWave - 1)
           .reduce((sum, candidate) => sum + (candidate.critical_findings?.length ?? 0), 0);

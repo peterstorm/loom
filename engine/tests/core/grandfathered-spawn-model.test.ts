@@ -4,10 +4,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   engineIssuedClaudeModel,
-  engineIssuedClaudeModelFromRunDir,
   loomMarkerValue,
   runDirectoryFromContextPath,
 } from "../../src/core/grandfathered-spawn-model";
+// The fs-reading shell function moved to the pre-tool-use handler (the core
+// module is pure; the no-cross-boundary-imports linter denies node:fs there).
+import { engineIssuedClaudeModelFromRunDir } from "../../src/handlers/pre-tool-use/validate-agent-model";
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 

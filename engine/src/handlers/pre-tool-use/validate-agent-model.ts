@@ -14,7 +14,7 @@
  * routing decision.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
@@ -25,10 +25,11 @@ import {
   validateAgentPolicyFrontmatter,
 } from "../../core/model-profiles";
 import {
-  engineIssuedClaudeModelFromRunDir,
+  engineIssuedClaudeModel,
   loomMarkerValue,
   runDirectoryFromContextPath,
 } from "../../core/grandfathered-spawn-model";
+import { parseStoredAgentRequestAuthority, type AgentRequestAuthority } from "../../core/orchestration-contract/roster";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
 import { resolveClaudeAgentDefinitionPath } from "../../utils/agent-definition";
@@ -159,6 +160,42 @@ const handler: HookHandler = async (stdin) => {
         message: `BLOCKED: Claude Code model policy failed for '${rawAgent}' (${path}):\n${errors.map((e) => `  - ${e}`).join("\n")}`,
       };
 };
+
+/**
+ * The Claude Code model the engine issued for `requestId` in a run directory,
+ * read directly from `<runDir>/requests/*.json`. Returns null on ANY failure —
+ * unreadable directory, a corrupt/unreadable authority file, or no matching
+ * request — so a caller can only ever use a positive, proven answer. Does not
+ * open a run-directory handle (that mutates the run); it only reads the
+ * engine-written, guarded authority artifacts. Lives in the SHELL (this
+ * handler), not the grandfathered-spawn-model core: the core module is pure
+ * by its own header, and the no-cross-boundary-imports linter denies
+ * `node:fs` there (per-file capability list).
+ */
+export function engineIssuedClaudeModelFromRunDir(
+  runDirectory: string,
+  requestId: string,
+): string | null {
+  let names: readonly string[];
+  try {
+    names = readdirSync(join(runDirectory, "requests"));
+  } catch {
+    return null;
+  }
+  const issued: AgentRequestAuthority[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(join(runDirectory, "requests", name), "utf-8")) as unknown;
+    } catch {
+      return null; // a corrupt authority file → prove nothing (fail closed)
+    }
+    const parsed = parseStoredAgentRequestAuthority(raw);
+    if (parsed.ok) issued.push(parsed.value);
+  }
+  return engineIssuedClaudeModel(issued, requestId);
+}
 
 /**
  * Did the engine itself issue `requestedModel` for the request this spawn

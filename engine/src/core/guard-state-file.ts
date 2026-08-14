@@ -214,30 +214,56 @@ function collapseVariants(text: string): string[] {
  *  unparseable (fail closed). 8 two-option groups = 256 views. */
 const MAX_BRACE_VIEWS = 256;
 
-/** Options of a `{…}` sequence body (`a..c`, `1..3`, `3..1`), or null when the
- *  body is not a sequence. Alpha and signed-integer ranges only (the forms bash
- *  expands); step is inferred from direction. */
+/** Options of a `{…}` sequence body (`a..c`, `1..3`, `3..1`, `a..y..4`,
+ *  `10..1..-3`), or null when the body is not a sequence. Covers the forms
+ *  bash expands: alpha and signed-integer endpoints, optionally stepped
+ *  (`{x..y..s}`). Direction is taken from the ENDPOINTS (bash ignores the
+ *  step's sign — `{1..5..-1}` ascends, `{10..1..3}` descends); the step's
+ *  MAGNITUDE is used, and a zero step means a full step-1 enumeration
+ *  (verified against real bash). A body whose endpoints mix alpha and
+ *  numeric types, or carry any other shape, is literal in bash and returns
+ *  null. Numeric step-1 ranges whose enumeration would exceed
+ *  MAX_BRACE_VIEWS return null so the caller's bound (expandBraces → null →
+ *  fail closed) still engages instead of materializing unbounded views. */
 function sequenceOptions(content: string): string[] | null {
-  const alpha = content.match(/^([A-Za-z])\.\.([A-Za-z])$/);
-  if (alpha) {
-    const a = alpha[1].charCodeAt(0), b = alpha[2].charCodeAt(0);
-    const step = a <= b ? 1 : -1;
-    const out: string[] = [];
-    for (let c = a; step > 0 ? c <= b : c >= b; c += step) out.push(String.fromCharCode(c));
-    return out;
-  }
-  const num = content.match(/^(-?\d+)\.\.(-?\d+)$/);
-  if (num) {
-    const a = parseInt(num[1], 10), b = parseInt(num[2], 10);
-    const step = a <= b ? 1 : -1;
-    const out: string[] = [];
-    for (let c = a; step > 0 ? c <= b : c >= b; c += step) {
-      out.push(String(c));
-      if (out.length > MAX_BRACE_VIEWS) return null;
+  const seq = content.match(/^([A-Za-z]|[+-]?\d+)\.\.([A-Za-z]|[+-]?\d+)(?:\.\.([+-]?\d+))?$/);
+  if (seq === null) return null;
+  const first = seq[1]!, second = seq[2]!, stepText = seq[3];
+  const firstIsAlpha = /^[A-Za-z]$/.test(first);
+  const secondIsAlpha = /^[A-Za-z]$/.test(second);
+  if (firstIsAlpha !== secondIsAlpha) return null; // `{a..10..2}` stays literal in bash
+  const magnitude = Math.max(1, Math.abs(parseInt(stepText ?? "1", 10)));
+  const out: string[] = [];
+  if (firstIsAlpha) {
+    const a = first.charCodeAt(0), b = second.charCodeAt(0);
+    const direction = a <= b ? 1 : -1;
+    for (let c = a; direction > 0 ? c <= b : c >= b; c += direction * magnitude) {
+      out.push(String.fromCharCode(c));
     }
     return out;
   }
-  return null;
+  const a = parseInt(first, 10), b = parseInt(second, 10);
+  const direction = a <= b ? 1 : -1;
+  // Zero-padding fidelity (verified against real bash): when either
+  // endpoint's digits start with `0`, every produced integer is rendered
+  // left-padded so its TOTAL length (sign included) equals the longer RAW
+  // endpoint string, exactly as bash does (`{01..100}` → `001 … 100`;
+  // `{-5..-01}` → `-05 … -01`). `{0..0}` stays unpadded: a lone `0`
+  // endpoint is not a padded form.
+  const digits = (s: string): string => s.replace(/^[+-]/, "");
+  const padWidth = Math.max(first.length, second.length);
+  const padded = padWidth > 1 && [first, second].some((s) => digits(s).startsWith("0"));
+  const render = (c: number): string => {
+    if (!padded) return String(c);
+    const negative = c < 0;
+    const body = String(Math.abs(c)).padStart(padWidth - (negative ? 1 : 0), "0");
+    return (negative ? "-" : "") + body;
+  };
+  for (let c = a; direction > 0 ? c <= b : c >= b; c += direction * magnitude) {
+    out.push(render(c));
+    if (out.length > MAX_BRACE_VIEWS) return null;
+  }
+  return out;
 }
 
 interface BraceGroup { readonly start: number; readonly end: number; readonly options: readonly string[]; }

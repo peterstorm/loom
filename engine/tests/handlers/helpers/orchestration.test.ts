@@ -8,10 +8,11 @@ import { renderStatus } from "../../../src/handlers/helpers/orchestration";
 import { WAVE_REVIEW_AGENTS, type GateDeps } from "../../../src/core/wave-gate-machine";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { parseAgentRequestAuthority, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
-import { persistedWaveAttemptTwoCompatibilityProblem } from "../../../src/handlers/helpers/programs";
+import { persistedWaveAttemptTwoCompatibilityProblem, prepareOrphanedWaveGateRecovery } from "../../../src/handlers/helpers/programs";
 import { buildContextPacket, encodeByteSection } from "../../../src/orchestration/context-packets";
-import { openRunDirectory, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
+import { openRunDirectory, inspectRunDirectoryEntry, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings } from "../../../src/orchestration/session-run-bindings";
+import type { Task, TaskGraph } from "../../../src/types";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const CLI = join(ENGINE, "src", "cli.ts");
@@ -159,6 +160,225 @@ describe("orchestration status", () => {
       expect(parsed.next.action.kind).toBe("blocked");
     }
   });
+
+  it("treats a Run Directory observation for a DIFFERENT run as unavailable, never healthy (round-29 fail-closed status)", () => {
+    const active = executeGraph({
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.status-owner", wave: 1,
+        authorityDigest: "a".repeat(64), revision: 0, terminalOutcome: null,
+      },
+    });
+    // A "present" observation for the wrong run id — even a perfectly healthy
+    // directory — must not be conflated with THIS run's authority.
+    const mismatched = renderStatus(active, deps, true, {
+      kind: "present", runId: "run.stranger", path: "/runs/run.stranger",
+    });
+    expect(mismatched).toContain("run.stranger, not active run run.status-owner");
+    expect(JSON.parse(mismatched).next.action.kind).toBe("blocked");
+
+    const absentWrongRun = renderStatus(active, deps, true, {
+      kind: "absent", runId: "run.stranger", path: "/runs/run.stranger",
+    });
+    expect(JSON.parse(absentWrongRun).next.action.kind).toBe("blocked");
+    expect(absentWrongRun).not.toContain("orphaned active Wave Gate run run.status-owner");
+  });
+
+  it("reports an INVALID run-directory observation (symlinked entry) as unavailable, never healthy", () => {
+    const active = executeGraph({
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.status-invalid", wave: 1,
+        authorityDigest: "a".repeat(64), revision: 0, terminalOutcome: null,
+      },
+    });
+    const invalid = renderStatus(active, deps, true, {
+      kind: "invalid", runId: "run.status-invalid", path: "/runs/run.status-invalid",
+      message: "expected a directory but found symlink",
+    });
+    expect(invalid).toContain("cannot verify authoritative Run Directory");
+    expect(invalid).toContain("expected a directory but found symlink");
+    expect(JSON.parse(invalid).next.action.kind).toBe("blocked");
+  });
+});
+
+// --- inspectRunDirectoryEntry (round-29: symlink/non-directory occupied proofs) ---
+
+describe("inspectRunDirectoryEntry", () => {
+  it("classifies a symlink at the run path as occupied, never as a usable directory", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-inspect-"));
+    cleanup.push(root);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
+    symlinkSync("/nonexistent", join(runsRoot, "run.symlink"));
+
+    const inspected = inspectRunDirectoryEntry(runsRoot, join(runsRoot, "run.symlink"));
+    expect(inspected.ok).toBe(true);
+    if (!inspected.ok) throw new Error(inspected.error.message);
+    expect(inspected.value).toEqual({
+      kind: "occupied",
+      reference: { runsRoot, runDirectory: join(runsRoot, "run.symlink"), runId: "run.symlink" },
+      entryKind: "symlink",
+    });
+  });
+
+  it("classifies a non-directory entry (file) as occupied, never as a usable directory", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-inspect-"));
+    cleanup.push(root);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot, { recursive: true });
+    writeFileSync(join(runsRoot, "run.notadir"), "not a directory\n");
+
+    const inspected = inspectRunDirectoryEntry(runsRoot, join(runsRoot, "run.notadir"));
+    expect(inspected.ok).toBe(true);
+    if (!inspected.ok) throw new Error(inspected.error.message);
+    expect(inspected.value).toEqual({
+      kind: "occupied",
+      reference: { runsRoot, runDirectory: join(runsRoot, "run.notadir"), runId: "run.notadir" },
+      entryKind: "other",
+    });
+  });
+
+  it("classifies a missing entry as absent and a real directory as a directory", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-inspect-"));
+    cleanup.push(root);
+    const runsRoot = join(root, "runs");
+    mkdirSync(join(runsRoot, "run.real"), { recursive: true });
+
+    const absent = inspectRunDirectoryEntry(runsRoot, join(runsRoot, "run.gone"));
+    expect(absent.ok).toBe(true);
+    if (!absent.ok) throw new Error(absent.error.message);
+    expect(absent.value.kind).toBe("absent");
+
+    const present = inspectRunDirectoryEntry(runsRoot, join(runsRoot, "run.real"));
+    expect(present.ok).toBe(true);
+    if (!present.ok) throw new Error(present.error.message);
+    expect(present.value.kind).toBe("directory");
+  });
+});
+
+// --- orphan recovery pure transition (round-29: direct unit coverage) ---
+
+describe("prepareOrphanedWaveGateRecovery", () => {
+  const activeRunId = "run.orphan-unit";
+  const authorityDigest = "a".repeat(64);
+
+  function graph(): TaskGraph {
+    return {
+      current_phase: "execute",
+      current_wave: 1,
+      spec_dir: ".claude/specs/x",
+      phase_artifacts: {},
+      skipped_phases: [],
+      wave_gates: {},
+      spec_check: undefined,
+      wave_review_epoch: { runId: activeRunId, batchEpoch: "old-epoch" },
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: activeRunId, wave: 1,
+        authorityDigest, revision: 0, terminalOutcome: null, runsRoot: "/runs",
+      },
+      tasks: [
+        {
+          id: "T1", description: "wave-1 with review run", agent: "code-implementer-agent",
+          wave: 1, status: "implemented", depends_on: [],
+          review_run: {
+            packet_id: "d".repeat(64), generation: 2, expected_agents: ["code-reviewer"],
+            evidence: [{
+              agent: "code-reviewer", prior_assessments: [],
+              new_findings: [{ severity: "advisory", file: "f.ts", line: 1, claim: "preserve me" }],
+            }],
+            prior_finding_ids: [],
+          },
+          review_status: "blocked", review_generation: 7,
+        } as unknown as Task,
+        {
+          id: "T2", description: "wave-1 without review run", agent: "code-implementer-agent",
+          wave: 1, status: "implemented", depends_on: [],
+        } as unknown as Task,
+        {
+          id: "T3", description: "wave-2 with review run", agent: "architecture-tech-lead",
+          wave: 2, status: "implemented", depends_on: [],
+          review_run: {
+            packet_id: "e".repeat(64), generation: 4, expected_agents: ["architecture-tech-lead"],
+            evidence: [], prior_finding_ids: [],
+          },
+          review_status: "blocked", review_generation: 9,
+        } as unknown as Task,
+      ],
+    } as unknown as TaskGraph;
+  }
+
+  it("refuses a replacement with the same run identity", () => {
+    const prepared = prepareOrphanedWaveGateRecovery(
+      graph(),
+      { runId: activeRunId, wave: 1, authorityDigest },
+      "/runs",
+      activeRunId,
+      "/runs",
+    );
+    expect(prepared.ok).toBe(false);
+    if (!prepared.ok) expect(prepared.message).toContain("distinct replacement");
+  });
+
+  it("refuses when the protected authority (wave, run id, digest) is not exact", () => {
+    const g = graph();
+    for (const expected of [
+      { runId: "run.other", wave: 1, authorityDigest },
+      { runId: activeRunId, wave: 2, authorityDigest },
+      { runId: activeRunId, wave: 1, authorityDigest: "b".repeat(64) },
+    ]) {
+      const prepared = prepareOrphanedWaveGateRecovery(g, expected, "/runs", "run.orphan-replacement", "/runs");
+      expect(prepared.ok).toBe(false);
+      if (!prepared.ok) expect(prepared.message).toContain("exact protected active run ID");
+    }
+  });
+
+  it("resets only the protected wave's review runs, preserving accepted findings and every other task", () => {
+    const g = graph();
+    const t2 = g.tasks[1]!;
+    const t3 = g.tasks[2]!;
+    const prepared = prepareOrphanedWaveGateRecovery(
+      g,
+      { runId: activeRunId, wave: 1, authorityDigest },
+      "/runs",
+      "run.orphan-replacement",
+      "/runs",
+    );
+    if (!prepared.ok) throw new Error(prepared.message);
+    const next = prepared.value.graph;
+
+    expect(next.active_wave_gate).toMatchObject({
+      runId: "run.orphan-replacement", wave: 1, runsRoot: "/runs", terminalOutcome: null,
+    });
+    expect(next.spec_check).toBeUndefined();
+    expect(next.wave_review_epoch).toBeUndefined();
+
+    // T1: review run reset, findings preserved, generation kept.
+    const t1 = next.tasks.find((task) => task.id === "T1")!;
+    expect(t1.review_run).toBeUndefined();
+    expect(t1.review_status).toBe("pending");
+    expect(t1.review_generation).toBe(7);
+    expect(t1.findings).toHaveLength(1);
+    expect(t1.findings![0]).toMatchObject({ agent: "code-reviewer", severity: "advisory", claim: "preserve me" });
+    expect(t1.critical_findings).toEqual([]);
+
+    // T2 (same wave, no review run) and T3 (other wave) are byte-identical.
+    expect(next.tasks.find((task) => task.id === "T2")).toBe(t2);
+    expect(next.tasks.find((task) => task.id === "T3")).toBe(t3);
+
+    expect(next.orphaned_wave_gate_history).toEqual([expect.objectContaining({
+      kind: "orphaned-wave-gate-retirement",
+      runId: activeRunId,
+      wave: 1,
+      authorityDigest,
+      reason: "authoritative-run-directory-missing",
+      runsRoot: "/runs",
+      runDirectory: "/runs/run.orphan-unit",
+      replacementRunId: "run.orphan-replacement",
+    })]);
+    expect(prepared.value.registration).toMatchObject({
+      schemaVersion: 1, kind: "wave-gate", input: { wave: 1 },
+      orphanRecovery: { previousRunId: activeRunId, previousAuthorityDigest: authorityDigest },
+    });
+  });
 });
 
 // --- CLI --------------------------------------------------------------------
@@ -290,6 +510,45 @@ describe("orchestration CLI", () => {
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("orchestration-run-id");
+  });
+
+  it("refuses a status --runs-root that does not match the graph's protected runs root", () => {
+    const root = project();
+    const protectedRoot = join(root, ".claude", "reviews", "wave-gate-runs");
+    mkdirSync(protectedRoot, { recursive: true });
+    writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(executeGraph({
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.status-root", wave: 1,
+        authorityDigest: "a".repeat(64), revision: 0, terminalOutcome: null,
+        runsRoot: protectedRoot,
+      },
+    })));
+
+    const result = runCli(["status", "--json", "--runs-root", join(root, "elsewhere")], "", root);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("does not match protected root");
+    expect(JSON.parse(result.stdout).next.action.kind).toBe("blocked");
+  });
+
+  it("reports a SYMLINKED run-directory entry as an invalid observation, never a healthy one", () => {
+    const root = project();
+    const runsRoot = join(root, ".claude", "reviews", "wave-gate-runs");
+    mkdirSync(runsRoot, { recursive: true });
+    symlinkSync("/nonexistent-orphan-target", join(runsRoot, "run.status-symlink"));
+    writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(executeGraph({
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.status-symlink", wave: 1,
+        authorityDigest: "a".repeat(64), revision: 0, terminalOutcome: null,
+      },
+    })));
+
+    const result = runCli(["status", "--json"], "", root);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("cannot verify authoritative Run Directory");
+    expect(result.stdout).toContain("symlink");
+    expect(JSON.parse(result.stdout).next.action.kind).toBe("blocked");
   });
 
   it("retries a malformed-but-JSON architecture candidate instead of minting success", () => {
@@ -1622,7 +1881,40 @@ describe("orchestration CLI", () => {
     const stillPresent = runCli(recoveryArgs, "", root);
     expect(stillPresent.status).not.toBe(0);
     expect(stillPresent.stderr).toContain("still exists");
+
+    // Refusal: the replacement must be a DISTINCT run identity — pointing the
+    // recovery at the orphan run itself is refused before any fs proof.
+    const sameRun = runCli(recoveryArgs.map((value, index) =>
+      recoveryArgs[index - 1] === "--new-run" ? oldRun : value), "", root);
+    expect(sameRun.status).not.toBe(0);
+    expect(sameRun.stderr).toContain("distinct replacement");
     rmSync(oldRun, { recursive: true });
+
+    // Refusal: a replacement that is not pristine (stray bytes beyond
+    // authority/program) must not be clobbered by recovery.
+    writeFileSync(join(replacementRun, "stray.txt"), "not pristine");
+    const nonPristine = runCli(recoveryArgs, "", root);
+    expect(nonPristine.status).not.toBe(0);
+    expect(nonPristine.stderr).toContain("must be pristine");
+    rmSync(replacementRun, { recursive: true });
+    mkdirSync(replacementRun);
+
+    // Refusal: a replacement already registered under DIFFERENT authority must
+    // not be silently re-registered by recovery.
+    {
+      const opened = openRunDirectory(runsRoot, replacementRun);
+      if (!opened.ok) throw new Error(opened.error.message);
+      const registered = await opened.value.registerProgram({
+        schemaVersion: 1, kind: "wave-gate", input: Object.freeze({ wave: 9 }),
+        taskIds: Object.freeze([]), authorityDigest: "b".repeat(64),
+      });
+      if (!registered.ok) throw new Error(registered.error.message);
+      const preRegistered = runCli(recoveryArgs, "", root);
+      expect(preRegistered.status).not.toBe(0);
+      expect(preRegistered.stderr).toContain("already registered under different authority");
+      rmSync(replacementRun, { recursive: true });
+      mkdirSync(replacementRun);
+    }
 
     const wrongRun = runCli(recoveryArgs.map((value, index) =>
       recoveryArgs[index - 1] === "--run-id" ? "run.not-the-owner" : value), "", root);

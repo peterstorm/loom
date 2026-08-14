@@ -32,7 +32,20 @@ type LiteralShellWord = Readonly<{
   optionEligible: boolean;
 }>;
 
-function literalShellWords(command: string): readonly LiteralShellWord[] | null {
+/**
+ * Literal words of a command: quote-collapsed, backslash-escapes resolved,
+ * `\`-line-continuation dropped — with NO parameter/command/process expansion
+ * and NO globbing. Returns null when the command carries a construct that is
+ * NOT statically literal: `$…`, backticks, an unterminated quote, or a
+ * trailing backslash. A caller can therefore only ever use a positive,
+ * fully-literal parse to NAME a report path; anything dynamic is refused.
+ *
+ * EXPORTED for direct branch coverage (the `outputFileFromCommand` alias
+ * would otherwise fold every refusal into a single null). The refusal
+ * branches are contract: a command that names its report through a variable
+ * or substitution must never mint an artifact path for trust.
+ */
+export function literalShellWords(command: string): readonly LiteralShellWord[] | null {
   const words: LiteralShellWord[] = [];
   let word = "";
   let wordStarted = false;
@@ -201,7 +214,16 @@ function readJunitDir(dir: string, nowMs: number, callStartMs: number): TestRepo
       .filter((f) => f.endsWith(".xml"))
       .map((f) => join(dir, f))
       .filter((p) => isFresh(p, nowMs, callStartMs))
-      .map((p) => parseJunitXml(readFileSync(p, "utf-8")))
+      .map((p) => {
+        const parsed = parseJunitXml(readFileSync(p, "utf-8"));
+        if (parsed === null) {
+          // A malformed report is indistinguishable from no report unless it
+          // is named — the trust verdict stays untrusted either way, but the
+          // operator gets the lead this file's doctrine promises.
+          process.stderr.write(`findReport: malformed JUnit report '${p}' (ignored for trust)\n`);
+        }
+        return parsed;
+      })
       .filter((s): s is TestReportSummary => s !== null);
   } catch (e) {
     // Unreadable report dir → no reports (fail closed), logged so a
@@ -307,18 +329,27 @@ export function findReport(
       try {
         const parsed = parseVitestJson(readFileSync(path, "utf-8"));
         if (parsed) return parsed;
+        process.stderr.write(`findReport: malformed --outputFile report '${path}'\n`);
       } catch (e) {
         // Unreadable explicit report (permissions, race, path is a dir):
         // fall through to the next report source — the TestRun fact must
         // survive with report: null instead of crashing the recorder.
         process.stderr.write(`findReport: cannot read --outputFile '${path}': ${errMessage(e)}\n`);
       }
+    } else if (!existsSync(path)) {
+      // Sibling sources log the missing-artifact class loudly; the explicit
+      // --outputFile branch must not be the one silent member of the family
+      // (a typo'd or never-written report looks identical to no report).
+      process.stderr.write(`findReport: --outputFile report '${path}' does not exist\n`);
     }
   }
 
   if (/--reporter[= ]json|--json\b/.test(segment)) {
     const parsed = parseVitestJson(stdout.trim());
     if (parsed) return parsed;
+    process.stderr.write(
+      "findReport: --reporter=json requested but stdout carried no parseable summary\n",
+    );
   }
 
   const lower = segment.toLowerCase();

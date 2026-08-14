@@ -23,13 +23,13 @@
  * the engine never issued (the orchestrator cannot forge an authority into
  * guarded state, and the match is keyed on the request id the spawn carries).
  *
- * The functional core here is pure: it takes already-read authority records and
- * decides. The fs read that finds them lives in the shell (the hook).
+ * The functional core here is pure: it takes already-read authority records
+ * and decides. The fs read that finds them lives in the shell —
+ * `handlers/pre-tool-use/validate-agent-model.ts` (which is where the
+ * per-file capability linter lets it be).
  */
 
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { parseStoredAgentRequestAuthority, type AgentRequestAuthority } from "./orchestration-contract/roster";
+import type { AgentRequestAuthority } from "./orchestration-contract/roster";
 
 /** Extract a `LOOM_<NAME>: <value>` marker line's value from a spawn prompt, or
  *  null when the marker is absent. Markers are engine-authored, one per line. */
@@ -59,37 +59,4 @@ export function engineIssuedClaudeModel(
 ): string | null {
   const authority = issued.find((candidate) => candidate.requestId === requestId);
   return authority?.harnessBinding.claude.model ?? null;
-}
-
-/**
- * The Claude Code model the engine issued for `requestId` in a run directory,
- * read directly from `<runDir>/requests/*.json`. Returns null on ANY failure —
- * unreadable directory, a corrupt/unreadable authority file, or no matching
- * request — so a caller can only ever use a positive, proven answer. Does not
- * open a run-directory handle (that mutates the run); it only reads the
- * engine-written, guarded authority artifacts.
- */
-export function engineIssuedClaudeModelFromRunDir(
-  runDirectory: string,
-  requestId: string,
-): string | null {
-  let names: readonly string[];
-  try {
-    names = readdirSync(join(runDirectory, "requests"));
-  } catch {
-    return null;
-  }
-  const issued: AgentRequestAuthority[] = [];
-  for (const name of names) {
-    if (!name.endsWith(".json")) continue;
-    let raw: unknown;
-    try {
-      raw = JSON.parse(readFileSync(join(runDirectory, "requests", name), "utf-8")) as unknown;
-    } catch {
-      return null; // a corrupt authority file → prove nothing (fail closed)
-    }
-    const parsed = parseStoredAgentRequestAuthority(raw);
-    if (parsed.ok) issued.push(parsed.value);
-  }
-  return engineIssuedClaudeModel(issued, requestId);
 }

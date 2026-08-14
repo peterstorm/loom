@@ -47,7 +47,12 @@ export function testResultPassed(result: TaskTestResult | undefined): boolean {
 
 export interface WaveGate {
   readonly impl_complete: boolean;
-  readonly tests_passed: boolean | null;
+  /** True after the wave's tests passed; null while not yet judged. `false`
+   *  is deliberately UNREPRESENTABLE: no writer in the engine ever produces
+   *  it (a failing run is judged by the test_result evidence, not by this
+   *  gate flag), and the load boundary rejects a stored `false` so a drifted
+   *  graph cannot mint a "Integration tests failed" branch that nothing writes. */
+  readonly tests_passed: true | null;
   readonly reviews_complete: boolean;
   readonly blocked: boolean;
 }

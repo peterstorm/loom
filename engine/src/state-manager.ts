@@ -79,8 +79,6 @@ export function resolveTaskGraph(sessionId?: string): string | null {
 
 // --- Parse, don't validate: disk JSON → TaskGraph ---
 
-/** Pure: the union-typed fields of one raw task, proven or precisely refused.
- *  Returns an error string, or null when the task's unions all parse. */
 /**
  * Prove one wave gate's shape, for the reason every `Task` union field is proven.
  *
@@ -89,8 +87,10 @@ export function resolveTaskGraph(sessionId?: string): string | null {
  * logic as booleans: `validate-task-execution` blocks on `!gate.reviews_complete`,
  * so `{ reviews_complete: "no" }` loaded clean and read as TRUTHY — the
  * previous-wave review gate silently stopped blocking, which is the failure this
- * boundary exists to make impossible. `tests_passed` is the one tri-state, and
- * `null` there means "not yet judged", not "absent".
+ * boundary exists to make impossible. `tests_passed` is the one two-state
+ * "judged / not yet judged" field (`true | null`), and `false` is refused
+ * outright — no writer produces it, and a drifted graph carrying it would
+ * otherwise mint a failure message nothing in the engine ever wrote.
  */
 function waveGateError(v: unknown, wave: string): string | null {
   if (typeof v !== "object" || v === null || Array.isArray(v)) {
@@ -112,6 +112,13 @@ function waveGateError(v: unknown, wave: string): string | null {
     return (
       `wave_gates["${wave}"]: tests_passed must be a boolean or null, ` +
       `got ${JSON.stringify(gate.tests_passed)}`
+    );
+  }
+  if ("tests_passed" in gate && gate.tests_passed === false) {
+    return (
+      `wave_gates["${wave}"]: tests_passed: false is not a representable gate state ` +
+      `(no writer produces it; failing runs are judged by test_result evidence) — ` +
+      `set null (not yet judged) or true (passed)`
     );
   }
   for (const field of booleanFields) {

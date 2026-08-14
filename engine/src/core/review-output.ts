@@ -283,41 +283,6 @@ export function parseMachineSummary(output: string): ParsedFindings | null {
 }
 
 /**
- * Decide between the structured block and the scraped marker lines.
- *
- * The block carries file/line the scraper cannot recover, so it is preferred —
- * but only when it accounts for at least as many findings OF EACH SEVERITY as
- * the marker lines do (and, for criticals, as the reviewer's own
- * `CRITICAL_COUNT`). Below that bar the block is discarding claims the reviewer
- * demonstrably made, and no amount of location metadata is worth a lost finding.
- *
- * The advisory half of that bar is not decoration. Gating on criticals alone
- * let a criticals-only block win outright and delete every `ADVISORY:` marker
- * line, while `blockStatus` still reported `used` so no degradation note was
- * printed. `/wave-gate` Step 4b must triage every advisory to
- * fixed/deferred/dismissed; it cannot triage what it never sees. (Every agent
- * file in `REVIEW_SUB_AGENTS` requires the block to account for advisories too
- * — `tests/review-agent-contract.test.ts` proves that claim rather than
- * asserting it — but the arbitration must hold for output that does not honour
- * its prompt, which is the only output worth arbitrating.)
- *
- * Counting is necessary and NOT sufficient. Arbitration stays cardinal on
- * purpose — demanding that the block reproduce marker text verbatim would
- * reject every reworded block and permanently cost the file/line the block
- * exists to carry — so a block that names two claims can clear a bar of two
- * while naming neither of the reviewer's actual claims. That is the one path
- * here that DESTROYED a finding rather than degrading it: the count matched, so
- * `reconcileFindings` stayed quiet; `blockStatus` said `used`, so no note was
- * printed; and the views were internally consistent, so the lockstep check
- * passed. The winner is therefore reconciled by VALUE as well: any marker claim
- * the block does not name is carried over beside it as a location-less draft,
- * and the operator is told through `partial`. Nothing is lost, and nothing the
- * reviewer did not say is invented.
- *
- * `CRITICAL_COUNT` always comes from the markers: the count is the reviewer's
- * own tally and is what distinguishes "zero findings" from "the parse failed".
- */
-/**
  * Take one occurrence of `claim` out of `pool`, reporting whether it was there.
  * Mutates, because the pool is a multiset being drawn down across a whole
  * arbitration: a claim the block names twice must consume two marker slots, not
@@ -361,6 +326,41 @@ function alignStructuredSeverity(
   });
 }
 
+/**
+ * Decide between the structured block and the scraped marker lines.
+ *
+ * The block carries file/line the scraper cannot recover, so it is preferred —
+ * but only when it accounts for at least as many findings OF EACH SEVERITY as
+ * the marker lines do (and, for criticals, as the reviewer's own
+ * `CRITICAL_COUNT`). Below that bar the block is discarding claims the reviewer
+ * demonstrably made, and no amount of location metadata is worth a lost finding.
+ *
+ * The advisory half of that bar is not decoration. Gating on criticals alone
+ * let a criticals-only block win outright and delete every `ADVISORY:` marker
+ * line, while `blockStatus` still reported `used` so no degradation note was
+ * printed. `/wave-gate` Step 4b must triage every advisory to
+ * fixed/deferred/dismissed; it cannot triage what it never sees. (Every agent
+ * file in `REVIEW_SUB_AGENTS` requires the block to account for advisories too
+ * — `tests/review-agent-contract.test.ts` proves that claim rather than
+ * asserting it — but the arbitration must hold for output that does not honour
+ * its prompt, which is the only output worth arbitrating.)
+ *
+ * Counting is necessary and NOT sufficient. Arbitration stays cardinal on
+ * purpose — demanding that the block reproduce marker text verbatim would
+ * reject every reworded block and permanently cost the file/line the block
+ * exists to carry — so a block that names two claims can clear a bar of two
+ * while naming neither of the reviewer's actual claims. That is the one path
+ * here that DESTROYED a finding rather than degrading it: the count matched, so
+ * `reconcileFindings` stayed quiet; `blockStatus` said `used`, so no note was
+ * printed; and the views were internally consistent, so the lockstep check
+ * passed. The winner is therefore reconciled by VALUE as well: any marker claim
+ * the block does not name is carried over beside it as a location-less draft,
+ * and the operator is told through `partial`. Nothing is lost, and nothing the
+ * reviewer did not say is invented.
+ *
+ * `CRITICAL_COUNT` always comes from the markers: the count is the reviewer's
+ * own tally and is what distinguishes "zero findings" from "the parse failed".
+ */
 function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
   const counts = { criticalCount: scraped.criticalCount, advisoryCount: scraped.advisoryCount };
   const parsedBlock = parseFindingsBlock(block);

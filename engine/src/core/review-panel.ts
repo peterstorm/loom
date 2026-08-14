@@ -908,7 +908,8 @@ export function defaultRefutationThreshold(lensCount: number): number {
 //
 // These lived in `handlers/helpers/review-panel.ts`, inline in the I/O
 // function. Each one is a pure comparison over already-parsed values — two
-// integers, two integers, a set difference — and each carries a long comment
+// integer comparisons, an equality, a floor comparison, and a set difference
+// — and each carries a long comment
 // naming a real bug it prevents: a shrunken panel adjudicating under a lower
 // absolute bar, one lens killing a critical alone, a re-tally re-adjudicating a
 // closed decision, a brief for a wave the graph has closed. Rules that

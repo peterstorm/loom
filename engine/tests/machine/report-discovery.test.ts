@@ -6,8 +6,72 @@ import {
   CALL_START_SLACK_MS,
   bunJunitOutputFileFromCommand,
   findReport,
+  literalShellWords,
   outputFileFromCommand,
 } from "../../src/machine/report-discovery";
+
+describe("literalShellWords — refusal and quote/escape branches (round-29)", () => {
+  it("parses plain words with quoted parts collapsed and escapes resolved", () => {
+    expect(literalShellWords('bun test --reporter=junit --out="my report.xml"')).toEqual([
+      { value: "bun", optionEligible: false },
+      { value: "test", optionEligible: false },
+      { value: "--reporter=junit", optionEligible: true },
+      { value: "--out=my report.xml", optionEligible: true },
+    ]);
+    expect(literalShellWords("bun test --out=it\\'s.xml")).toEqual([
+      { value: "bun", optionEligible: false },
+      { value: "test", optionEligible: false },
+      { value: "--out=it's.xml", optionEligible: true },
+    ]);
+    expect(literalShellWords("bun test --out=a\\\nb.xml")).toEqual([
+      { value: "bun", optionEligible: false },
+      { value: "test", optionEligible: false },
+      { value: "--out=ab.xml", optionEligible: true },
+    ]);
+    expect(literalShellWords('bun test --reporter "junit" --out "a\\"b".xml')).toEqual([
+      { value: "bun", optionEligible: false },
+      { value: "test", optionEligible: false },
+      { value: "--reporter", optionEligible: true },
+      { value: "junit", optionEligible: false },
+      { value: "--out", optionEligible: true },
+      { value: "a\"b.xml", optionEligible: false },
+    ]);
+  });
+
+  it("refuses dynamic expansions and substitutions outright", () => {
+    for (const command of [
+      "bun test --out=$FILE.xml",
+      "bun test --out=${FILE}.xml",
+      "bun test --out=$(printf x).xml",
+      "bun test --out=`printf x`.xml",
+      'bun test --reporter "--out=$FILE.xml"',
+      'bun test --reporter "--out=`printf x`.xml"',
+      'bun test --reporter "$(printf x)"',
+    ]) {
+      expect(literalShellWords(command), command).toBeNull();
+    }
+  });
+
+  it("refuses unterminated quotes and a trailing backslash", () => {
+    for (const command of [
+      "bun test --out='unterminated",
+      'bun test --out="unterminated',
+      "bun test --out=trailing\\",
+      'bun test --out="trailing backslash\\',
+      'bun test --out="under \\',
+    ]) {
+      expect(literalShellWords(command), command).toBeNull();
+    }
+  });
+
+  it("keeps a $ inside single quotes literal (no expansion there)", () => {
+    expect(literalShellWords("bun test --out='$FILE.xml'")).toEqual([
+      { value: "bun", optionEligible: false },
+      { value: "test", optionEligible: false },
+      { value: "--out=$FILE.xml", optionEligible: true },
+    ]);
+  });
+});
 
 describe("outputFileFromCommand", () => {
   it("extracts --outputFile=path", () => {

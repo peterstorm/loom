@@ -394,7 +394,21 @@ export function applyUntrustedStopResolution(
         [String(wave)]: {
           ...(resolved.wave_gates[String(wave)] ?? newWaveGate()),
           impl_complete: isWaveComplete(resolved, wave),
-          ...(codeChanged ? { tests_passed: null, reviews_complete: false } : {}),
+          ...(codeChanged
+            ? {
+                tests_passed: null,
+                reviews_complete: false,
+                // A code change clears the only two blocked causes that can
+                // outlive their evidence: the wave's critical spec-check (the
+                // record is dropped below) and review status (invalidateTaskReview
+                // re-opens the review above). Leaving `blocked: true` here used
+                // to print "BLOCKED due to:" with no listed reason and withhold
+                // terminal status until an unrelated later pass — the flag now
+                // tracks its causes, exactly like the load boundary's
+                // cross-field proof.
+                ...(resolved.spec_check?.wave === wave ? { blocked: false } : {}),
+              }
+            : {}),
         },
       },
     },
@@ -763,11 +777,9 @@ export const runUpdateTaskStatus = async (
     }
   }
 
-  // Section 2/3: Atomic state write. Cumulative attribution and new-test
+  // Section 3: Atomic state write. Cumulative attribution and new-test
   // evidence are derived from the locked Task snapshot below, not the stale
-  // pre-lock task read.
-
-  // Section 3: Atomic state write. The preserve-evidence guards run INSIDE
+  // pre-lock task read; the preserve-evidence guards also run INSIDE
   // the locked update (a pre-lock read can be outdated by a concurrent
   // writer before this write lands — TOCTOU) and are TRUST-aware ON BOTH
   // SIDES: an existing trusted failure is preserved against an UNTRUSTED
@@ -851,7 +863,17 @@ export const runUpdateTaskStatus = async (
         [String(wave)]: {
           ...(resolved.wave_gates[String(wave)] ?? newWaveGate()),
           impl_complete: isWaveComplete(resolved, wave),
-          ...(codeChanged ? { tests_passed: null, reviews_complete: false } : {}),
+          ...(codeChanged
+            ? {
+                tests_passed: null,
+                reviews_complete: false,
+                // Mirror of the Claude-side reset above: a code change drops
+                // the wave's critical spec-check record, and the blocked flag
+                // must not outlive its cause (see the note on the sibling
+                // reset path).
+                ...(resolved.spec_check?.wave === wave ? { blocked: false } : {}),
+              }
+            : {}),
         },
       },
     };

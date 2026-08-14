@@ -506,6 +506,29 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("cat .claude/st{a,a}te/active_task_graph.json")).toBe("allow");
   });
 
+  it("stepped brace sequences match bash expansion (`{a..y..4}` → …state — round-29 fail-open)", () => {
+    // sequenceOptions originally covered only unstepped `{x..y}`; bash also
+    // expands stepped ranges, and the step can land on the guarded literal:
+    // `{a..y..4}` → a e i m q u y, so `.claude/stat{a..y..4}` → `.claude/state`.
+    // Pinned against real bash (differential sweep in the review remediation):
+    expect(guardDecision("rm -rf .claude/stat{a..y..4}")).toBe("block");
+    // Descending endpoints with a positive step land on the same member:
+    expect(guardDecision("rm -rf .claude/stat{y..a..4}")).toBe("block");
+    // The step's SIGN is ignored (endpoints set direction; `{1..5..-1}` ascends
+    // in bash) and a zero step means a full step-1 enumeration:
+    expect(guardDecision("rm -rf .claude/stat{a..y..-4}")).toBe("block");
+    expect(guardDecision("rm -rf .claude/stat{a..y..0}")).toBe("block");
+    // `+`-signed steps and endpoints parse (bash expands both forms):
+    expect(guardDecision("rm -rf .claude/stat{a..z..+2}")).toBe("block");
+    // Mixed-type bodies stay literal in bash — no expansion to guard:
+    expect(guardDecision("rm -rf .claude/stat{a..10..2}")).toBe("allow");
+    expect(guardDecision("rm -rf .claude/stat{1..z..2}")).toBe("allow");
+    // Numeric stepped sequences never reach an alpha guarded literal:
+    expect(guardDecision("ls src/file{1..10..3}.ts")).toBe("allow");
+    // Zero-padded numeric stepped forms still expand to digits only:
+    expect(guardDecision("ls src/file{01..100..3}.ts")).toBe("allow");
+  });
+
   it("parameter expansion `$x`/`${x}` deletes to its unset→empty value, reassembling a fragmented guarded literal (round-19 bypass)", () => {
     // normalizeShellSpan modeled quotes/backslash/ANSI-C but passed a bare
     // `$x`/`${x}` through as a literal `$`/`{`/`}` run, so fragmenting BOTH the

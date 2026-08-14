@@ -243,10 +243,10 @@ function parseReviewMetadata(raw: unknown): ParseResult<StandaloneReviewMetadata
   const typesChanged = bool("types_changed");
   const commentsChanged = bool("comments_changed");
   // A docs-only scope always changes comments — comment analysis is the only
-  // role that reads docs, so the producer's invariant (orchestration-programs
-  // metadata: commentsChanged = docsOnly || scope has .md/.mdx) must hold at
-  // the boundary too. Without it, a contradictory persisted record silently
-  // drops comment-analyzer from a docs-only review.
+  // role that reads docs, so the producer's invariant (`metadata` in
+  // handlers/helpers/programs/helpers.ts: commentsChanged = docsOnly || scope
+  // has .md/.mdx) must hold at the boundary too. Without it, a contradictory
+  // persisted record silently drops comment-analyzer from a docs-only review.
   if (docsOnly && !commentsChanged) {
     errors.push("review_metadata.comments_changed must be true when docs_only is true (a docs-only scope always changes comments)");
   }
