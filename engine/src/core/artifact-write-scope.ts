@@ -73,6 +73,10 @@ function scopeFromPathTokens(task: string): readonly string[] {
   const derived: string[] = [];
   for (const m of task.matchAll(ARTIFACT_PATH_TOKEN)) {
     let token = m[1]!;
+    // A `..` segment would let the resolved scope escape its `.claude/specs|plans`
+    // confinement into a non-guarded sibling. Legitimate artifact paths never
+    // traverse upward, so drop any token that does before it becomes a scope.
+    if (token.split("/").includes("..")) continue;
     const lastSlash = token.lastIndexOf("/");
     const name = lastSlash === -1 ? token : token.slice(lastSlash + 1);
     if (name !== "" && !name.endsWith("/") && /\.[A-Za-z0-9]+$/.test(name)) {

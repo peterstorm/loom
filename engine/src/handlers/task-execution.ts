@@ -6,6 +6,7 @@ import {
   classifyTaskExecutionSpawn,
   parseImplementationTaskBindings,
   registerTaskExecutionBaseline,
+  staleReservationsFromState,
   taskExecutionDecision,
   taskExecutionOwnershipError,
   taskExecutionRegistrationError,
@@ -31,20 +32,22 @@ import type { TaskGraph } from "../types";
  * `pending` while owning its declared paths, taking every path-sharing sibling
  * down with it.
  *
- * A reservation is provably abandoned only when its task never left `pending`
- * AND no subagent is active FOR THIS GRAPH. Both halves matter: a task past
- * `pending` has really run, and `anyActiveSubagent` fails closed, so an
- * unreadable roster or any live agent on this graph releases nothing.
+ * A reservation is provably abandoned only when its task never left `pending`,
+ * no subagent is active FOR THIS GRAPH, AND it has aged past the grace window.
+ * All three matter: a task past `pending` has really run; `anyActiveSubagent`
+ * fails closed, so an unreadable roster or any live agent on this graph
+ * releases nothing; and the grace window shields a freshly committed
+ * reservation whose agent has not yet reached its SubagentStart roster mark —
+ * without it, a parallel wave batch reclaims a live sibling that is merely
+ * mid-startup (it is `pending` with no roster entry, indistinguishable from a
+ * vetoed spawn on that instant alone). See staleReservationsFromState.
  *
  * The graph scope is not a detail. SUBAGENT_DIR is shared by every project on
  * the machine, so a project-blind probe lets another repo's live agent — or
  * any stray roster file — veto recovery here indefinitely.
  */
-function staleTaskReservations(state: TaskGraph, taskGraphPath: string): ReadonlySet<string> {
-  const reserved = state.executing_tasks ?? [];
-  if (reserved.length === 0 || anyActiveSubagent(taskGraphPath)) return new Set();
-  return new Set(reserved.filter((taskId) =>
-    state.tasks.find((candidate) => candidate.id === taskId)?.status === "pending"));
+function activeSubagentForGraph(taskGraphPath: string): boolean {
+  return anyActiveSubagent(taskGraphPath);
 }
 
 /**
@@ -72,9 +75,15 @@ export async function validateTaskExecutionBatch(
   const bindings = parseImplementationTaskBindings(state, inputs);
   if (!bindings.ok) return { kind: "block", message: `BLOCKED: ${bindings.error}` };
   const taskIds = bindings.taskIds;
-  // Resolved once and reused under the lock: a second probe could observe a
-  // newly-started agent and disagree with the preflight it already passed.
-  const staleReservations = staleTaskReservations(state, statePath);
+  // The roster fact (fs read) and the clock are resolved ONCE in the shell; the
+  // pure staleness predicate is re-derived under the lock against the graph the
+  // lock actually holds. Reusing `anyActive` under the lock is sound because
+  // the grace window — not the roster flag — is what shields a live agent
+  // during its startup gap: an agent that went active between this read and the
+  // lock also carries a fresh `reserved_at`, so grace protects it regardless.
+  const now = Date.now();
+  const anyActive = activeSubagentForGraph(statePath);
+  const staleReservations = staleReservationsFromState(state, anyActive, now);
   const ownershipError = taskExecutionOwnershipError(state, taskIds, mode, staleReservations);
   if (ownershipError !== null) return { kind: "block", message: `BLOCKED: ${ownershipError}` };
 
@@ -130,10 +139,16 @@ export async function validateTaskExecutionBatch(
     };
   }
 
+  const reservedAt = new Date(now).toISOString();
   let lockedRegistrationError: string | null = null;
   await manager.update((current) => {
+    // Re-derive staleness against the LOCKED graph (pure — same clock and
+    // roster fact). If a racing sibling already committed one of these
+    // reservations, its `reserved_at` is now young and it is no longer stale,
+    // so this batch will not reclaim a live registration out from under it.
+    const lockedStale = staleReservationsFromState(current, anyActive, now);
     lockedRegistrationError = taskExecutionRegistrationError(
-      current, inputs, taskIds, mode, baselines, staleReservations,
+      current, inputs, taskIds, mode, baselines, lockedStale,
     );
     if (lockedRegistrationError !== null) return current;
     return {
@@ -142,20 +157,25 @@ export async function validateTaskExecutionBatch(
       // reclaimed task is registered once instead of accumulating a duplicate
       // entry that would survive its own SubagentStop cleanup.
       executing_tasks: [...new Set([
-        ...(current.executing_tasks ?? []).filter((taskId) => !staleReservations.has(taskId)),
+        ...(current.executing_tasks ?? []).filter((taskId) => !lockedStale.has(taskId)),
         ...baselines.keys(),
       ])],
       tasks: current.tasks.map((task) => {
         const artifactBaselines = baselines.get(task.id);
         return artifactBaselines === undefined
           ? task
-          : registerTaskExecutionBaseline(
-              task,
-              repository.headSha,
-              artifactBaselines.proof,
-              artifactBaselines.attempt,
-              artifactBaselines.repositoryAttempt,
-            );
+          : {
+              ...registerTaskExecutionBaseline(
+                task,
+                repository.headSha,
+                artifactBaselines.proof,
+                artifactBaselines.attempt,
+                artifactBaselines.repositoryAttempt,
+              ),
+              // Stamp the reservation instant so the grace window can shield
+              // this task while its agent starts. Refreshed every attempt.
+              reserved_at: reservedAt,
+            };
       }),
     };
   });

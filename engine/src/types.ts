@@ -418,6 +418,13 @@ export interface Task {
    * attribution after a legacy retry replaced files_modified. */
   recovered_artifact_writes?: readonly RecoveredArtifactWriteEvidence[];
   start_sha?: string;
+  /** ISO-8601 instant this task's execution reservation was committed (task
+   * added to `executing_tasks` during PreToolUse). Refreshed on every spawn
+   * attempt. Reservation reclamation shields any reservation younger than the
+   * grace window (see RESERVATION_GRACE_MS) so a live agent that has not yet
+   * reached its SubagentStart roster mark is never mistaken for one stranded by
+   * a vetoed spawn. */
+  reserved_at?: string;
   failure_reason?: string;
   retry_count?: number;
 }

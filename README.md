@@ -61,7 +61,7 @@ Then run `/reload` in Pi. Git and npm install forms are documented in [Using Loo
 
 /wave-gate
 /review-pr
-/review-pr tests types
+/review-pr tests
 /review-and-fix --no-push
 
 /brainstorming

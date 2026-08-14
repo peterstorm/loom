@@ -116,10 +116,13 @@ success.
 
 ## Examples
 
+One review kind per invocation (the orchestration input carries exactly one
+`kind`); omit it for `all`.
+
 ```text
 /review-pr
-/review-pr code errors
-/review-pr tests types
+/review-pr code
+/review-pr tests
 /review-pr architecture
 /review-pr comments --files README.md,docs/architecture.md
 /review-pr all --dry-run

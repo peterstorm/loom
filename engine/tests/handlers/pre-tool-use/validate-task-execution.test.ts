@@ -6,6 +6,8 @@ import {
   classifyTaskExecutionSpawn,
   parseImplementationTaskBindings,
   registerTaskExecutionBaseline,
+  RESERVATION_GRACE_MS,
+  staleReservationsFromState,
   taskExecutionDecision,
   taskExecutionOwnershipError,
   taskExecutionRegistrationError,
@@ -302,6 +304,62 @@ describe("validate-task-execution — exclusive ownership", () => {
       mkState([{ ...pending, file_list: ["src/changed.ts"] }], { current_wave: 1 }),
       input, ["T1"], "parallel", baselines,
     )).toContain("artifact scope changed");
+  });
+});
+
+describe("validate-task-execution — reservation grace window (startup-race safety)", () => {
+  const T0 = Date.parse("2026-01-01T00:00:00.000Z");
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const reserved = (id: string, at: number | undefined) =>
+    mkTask({ id, wave: 1, file_list: [`src/${id}.ts`], ...(at === undefined ? {} : { reserved_at: iso(at) }) });
+
+  it("shields a freshly committed reservation from reclamation (scenario A: live sibling mid-startup)", () => {
+    // T1 was reserved an instant ago and its agent has not reached SubagentStart
+    // yet (no roster entry → anyActive false). A parallel sibling's probe must
+    // NOT treat T1 as stale, or it would drop a live reservation.
+    const state = mkState([reserved("T1", T0)], { executing_tasks: ["T1"] });
+    expect(staleReservationsFromState(state, false, T0 + 5_000)).toEqual(new Set());
+  });
+
+  it("reclaims a reservation only after it ages past the grace window (vetoed spawn)", () => {
+    const state = mkState([reserved("T1", T0)], { executing_tasks: ["T1"] });
+    // Within grace: shielded.
+    expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS)).toEqual(new Set());
+    // Past grace with still no active agent: proven stranded → reclaimable.
+    expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS + 1)).toEqual(new Set(["T1"]));
+  });
+
+  it("never reclaims while an agent is active for the graph, at any age", () => {
+    const state = mkState([reserved("T1", T0)], { executing_tasks: ["T1"] });
+    expect(staleReservationsFromState(state, true, T0 + RESERVATION_GRACE_MS * 100)).toEqual(new Set());
+  });
+
+  it("never reclaims a task that has left pending, even aged and inactive", () => {
+    const done = { ...reserved("T1", T0), status: "implemented" as const };
+    const state = mkState([done], { executing_tasks: ["T1"] });
+    expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS * 100)).toEqual(new Set());
+  });
+
+  it("treats a legacy (timestamp-less) reservation as eligible so pre-upgrade strandings still recover", () => {
+    const state = mkState([reserved("T1", undefined)], { executing_tasks: ["T1"] });
+    expect(staleReservationsFromState(state, false, T0)).toEqual(new Set(["T1"]));
+  });
+
+  it("closes the double-registration race (scenario B): a fresh reservation is not re-reclaimed under the lock", () => {
+    // Two concurrent retries of a genuinely stranded T1 (reserved long ago).
+    const strandedAt = T0 - RESERVATION_GRACE_MS - 60_000;
+    const preflight = mkState([reserved("T1", strandedAt)], { executing_tasks: ["T1"] });
+    // Both preflights (same aged snapshot) see T1 stale.
+    expect(staleReservationsFromState(preflight, false, T0)).toEqual(new Set(["T1"]));
+
+    // Spawn A wins the lock and re-stamps reserved_at to ~now. Spawn B then
+    // re-derives staleness against THIS locked graph and must see T1 as young.
+    const afterA = mkState([reserved("T1", T0)], { executing_tasks: ["T1"] });
+    const lockedStaleForB = staleReservationsFromState(afterA, false, T0 + 10);
+    expect(lockedStaleForB).toEqual(new Set());
+    // So B's locked ownership re-check blocks the double execution.
+    expect(taskExecutionOwnershipError(afterA, ["T1"], "parallel", lockedStaleForB))
+      .toContain("already executing");
   });
 });
 

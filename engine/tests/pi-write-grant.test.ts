@@ -142,7 +142,17 @@ describe("Pi child write grants (incl. scoped phase-agent grants)", () => {
       cwd,
       taskGraphPath: graph,
       scopeDirs: [".."],
-    })).toThrow(/loom-guarded state|cwd or an ancestor/);
+    })).toThrow(/loom-guarded state|cwd or an ancestor|traversal segment/);
+    // An embedded `..` that would resolve to a non-guarded sibling (escaping the
+    // .claude confinement without touching guarded state or the cwd ancestors)
+    // is refused by the traversal guard.
+    expect(() => issuePiWriteGrant({
+      agent: "specify-agent",
+      taskId: "phase:specify",
+      cwd,
+      taskGraphPath: graph,
+      scopeDirs: [".claude/specs/../../sibling"],
+    })).toThrow(/traversal segment/);
   });
 
   it("phase grants do not require a Task ID in the child prompt", () => {

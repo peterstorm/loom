@@ -110,22 +110,14 @@ describe("Pi test-evidence transcript adapter", () => {
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
     });
-    // The PI-path relax: a test headed by only a `cd` preamble, with later
-    // segments (pipes, `; echo`), is attributable because the paired output's
-    // own summary is present — and the zero-fail line is explicit.
+    // The PI-path relax: a test headed by only a `cd` preamble and trailed
+    // only by PIPE stages (`| tail`, `| tee`) is attributable — the paired
+    // output is the runner's own, merely viewed through a filter.
     expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -n 40"))).toEqual({
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
     });
     expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test --no-color 2>&1 | tee /tmp/out.log"))).toEqual({
-      ok: true,
-      value: { passed: true, evidence: "bun: 654 pass" },
-    });
-    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "bun test; echo EXIT:$?"))).toEqual({
-      ok: true,
-      value: { passed: true, evidence: "bun: 654 pass" },
-    });
-    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "bun test || true"))).toEqual({
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
     });
@@ -135,6 +127,24 @@ describe("Pi test-evidence transcript adapter", () => {
       ok: true,
       value: { passed: false, evidence: "" },
     });
+    // A `;`/`&&`/`||`/`&`-sequenced command AFTER the test can inject stdout
+    // into the paired output and fabricate the verdict — the relax no longer
+    // fires for it. These fall to null (transcript fallback → the gate decides
+    // fail-closed) rather than minting a structured pass.
+    for (const injected of [
+      "bun test 2>/dev/null; echo ' 1 pass'; echo ' 0 fail'", // real output discarded, fake counters injected
+      "bun test; echo ' 5 pass'; echo ' 0 fail'",             // appended counters beat the real red summary
+      "bun test 2>/dev/null && echo ' 0 fail'",               // && injection
+      "bun test; echo EXIT:$?",                                // benign trailer, still not trustable
+      "bun test || true",                                      // trailing `|| true`
+    ]) {
+      expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", injected))).toEqual({ ok: true, value: null });
+    }
+    // The fabrication is caught even when the runner genuinely FAILED: a red
+    // run whose output is overwritten by injected green counters must NOT mint
+    // a pass.
+    expect(piStructuredTestResult(testRun(" 2 pass\n 3 fail\n 5 pass\n 0 fail\n", "bun test; echo ' 5 pass'; echo ' 0 fail'")))
+      .toEqual({ ok: true, value: null });
   });
 
   it.each([

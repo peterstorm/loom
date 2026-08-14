@@ -7,7 +7,7 @@
  * 3. Persist the task_graph absolute path for cross-repo SubagentStop access.
  */
 
-import { existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import type { HookHandler, SubagentStartInput } from "../../types";
 import { SUBAGENT_DIR, machinesDir, taskGraphPath } from "../../config";
@@ -150,9 +150,24 @@ const handler: HookHandler = async (stdin) => {
   // path this handler persists can never drift from what the env says now.
   const taskGraph = taskGraphPath();
   const taskGraphFile = sessionScopedPath(sessionId, ".task_graph");
-  if (existsSync(taskGraph) && !existsSync(taskGraphFile)) {
+  // Refresh the pointer whenever it is ABSENT or names a DIFFERENT graph than
+  // the one this SubagentStart is serving. A write-once pointer went stale when
+  // a single session served a second graph (cross-repo reuse): every later
+  // agent resolved to the FIRST graph, and reservation reclamation probed the
+  // wrong roster. Overwriting only on a real change is safe: concurrent agents
+  // of one session always share one orchestration graph, so they write the
+  // identical value and never clobber each other; only a genuine graph switch
+  // (sequential across repos) rewrites it.
+  const currentGraph = existsSync(taskGraph) ? resolve(taskGraph) : null;
+  let storedGraph: string | null = null;
+  try {
+    storedGraph = existsSync(taskGraphFile) ? readFileSync(taskGraphFile, "utf-8").trim() : null;
+  } catch {
+    storedGraph = null; // unreadable → treat as absent and rewrite below
+  }
+  if (currentGraph !== null && storedGraph !== currentGraph) {
     try {
-      writeFileSync(taskGraphFile, resolve(taskGraph));
+      writeFileSync(taskGraphFile, currentGraph);
     } catch (e) {
       // Name the degradation: without the pointer, a cross-repo
       // SubagentStop resolves to the LOCAL task graph — task status and

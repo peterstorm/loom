@@ -99,6 +99,58 @@ export type ImplementationTaskBindings =
 export type ExecutionBatchMode = "parallel" | "sequential";
 
 /**
+ * How long a committed reservation is shielded from reclamation.
+ *
+ * A reservation is committed at PreToolUse; the agent's roster mark is written
+ * later, at SubagentStart. Between those two points a LIVE reservation is
+ * indistinguishable from one STRANDED by a vetoed spawn — both are `pending`
+ * with no active agent for the graph — so reclamation must wait out that
+ * window. The grace is deliberately far larger than any plausible
+ * dispatch/queue latency (a roster mark follows dispatch in well under a
+ * second; even a heavily queued spawn starts in seconds) so a live-but-not-yet
+ * rostered sibling is never reclaimed. A reservation stranded by a veto simply
+ * ages past the window and is reclaimed on the first spawn attempt after it.
+ * A long-RUNNING task is protected independently: its agent is roster-active,
+ * so `anyActive` shields it regardless of age.
+ */
+export const RESERVATION_GRACE_MS = 10 * 60_000;
+
+/**
+ * Pure staleness predicate: which committed reservations are provably
+ * abandoned, given the roster fact the shell already resolved (`anyActive`)
+ * and the current clock. A reservation is abandoned only when ALL hold:
+ * its task never left `pending`; no agent is active for this graph; and it has
+ * aged past `graceMs`. A reservation whose `reserved_at` is missing or
+ * unparseable predates the timestamp (or is corrupt) and stays eligible so
+ * legacy stranded entries still recover — the fail-closed direction is to keep
+ * recovering deadlocks, which the grace only ever DELAYS.
+ *
+ * Keeping this pure (the fs `anyActive` read is hoisted to the shell) lets the
+ * locked registration re-derive staleness against the graph held under the
+ * lock: once one spawn commits a reservation with a fresh `reserved_at`, a
+ * racing sibling's locked re-check sees it as young and refuses to reclaim it,
+ * closing the double-registration window.
+ */
+export function staleReservationsFromState(
+  state: TaskGraph,
+  anyActive: boolean,
+  nowMs: number,
+  graceMs: number = RESERVATION_GRACE_MS,
+): ReadonlySet<string> {
+  const reserved = state.executing_tasks ?? [];
+  if (reserved.length === 0 || anyActive) return new Set();
+  return new Set(
+    reserved.filter((taskId) => {
+      const task = state.tasks.find((candidate) => candidate.id === taskId);
+      if (task?.status !== "pending") return false;
+      const reservedAt = task.reserved_at === undefined ? Number.NaN : Date.parse(task.reserved_at);
+      if (Number.isNaN(reservedAt)) return true; // legacy / corrupt timestamp → eligible
+      return nowMs - reservedAt > graceMs;
+    }),
+  );
+}
+
+/**
  * Pure ownership invariant for one execution reservation. Active tasks own
  * their declared paths until stop cleanup. One reservation captures all task
  * baselines before dispatch, so even sequential siblings must be disjoint;

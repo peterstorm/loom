@@ -162,6 +162,13 @@ export function issuePiWriteGrant(input: {
     const seen = new Set<string>();
     scopeDirs = Object.freeze(input.scopeDirs.map((dir) => {
       if (typeof dir !== "string" || dir === "") throw new Error("Pi write grant scope dirs must be non-empty strings");
+      // A `..` segment lets a prompt-derived scope resolve OUTSIDE its intended
+      // `.claude/specs|plans` confinement into a non-guarded sibling that the
+      // guarded/cwd overlap checks below would not catch. Legitimate artifact
+      // scopes never traverse upward, so reject any `..` before resolution.
+      if (dir.split(/[/\\]/).includes("..")) {
+        throw new Error(`Pi write grant scope dir ${dir} contains a '..' traversal segment; refusing scoped grant`);
+      }
       const normalized = normalizeScopeDir(dir, input.cwd);
       if (scopeDirTouchesGuarded(normalized)) {
         throw new Error(`Pi write grant scope dir ${normalized} overlaps loom-guarded state; refusing scoped grant`);

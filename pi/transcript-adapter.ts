@@ -169,21 +169,36 @@ export function parsePiMessages(messages: unknown): PiTranscriptResult<readonly 
  *  logs a diagnostic naming exactly why). */
 const ZERO_FAILURE_MARKER = /\b0 fail(?:ed|ing)?\b|\bFailures: 0\b|\bErrors: 0\b/;
 
-/** Is every segment before `classified.segment` a pure `cd` preamble?
- *  `cd X && bun test …` is the canonical documented shape; `cd` cannot alter
- *  the test outcome, so the composition stays relaxable. Any other prior
- *  command (`false && bun test`, `git stash && bun test`) means the test may
- *  never have run — never relax. */
-function onlyCdPreamble(command: string, classified: ClassifiedTestCommand): boolean {
+/** May a non-attributable composition be relaxed — i.e. is the paired output
+ *  provably the test runner's OWN, uncontaminated by any other command's
+ *  stdout? Two conditions, both structural:
+ *
+ *  - every segment BEFORE the test is a pure `cd` preamble (`cd X && bun test`
+ *    is the canonical shape; `cd` cannot change the outcome). Any other prior
+ *    (`false && bun test`, `git stash && bun test`) means the test may never
+ *    have run.
+ *  - every segment AFTER the test is a PIPE stage (`| tail`, `| tee`) that only
+ *    transforms the runner's own output. A `;`/`&&`/`||`/`&`-sequenced command
+ *    after the test runs NEW code whose stdout is concatenated into the paired
+ *    output and would be read as the verdict — the confirmed fabrication vector
+ *    (`bun test 2>/dev/null; echo ' 1 pass'; echo ' 0 fail'` mints a green pass
+ *    for a failed run). Sequenced trailers fail closed to the transcript
+ *    fallback; only pipe pass-through keeps the relax.
+ *
+ *  A segment that cannot be located fails closed (previously it was treated as
+ *  safe — a fail-open default guarding a relaxation). */
+function relaxableComposition(command: string, classified: ClassifiedTestCommand): boolean {
   const segments = splitCommandSegmentsWithOps(command)
-    .map((s) => stripEnvPrefix(stripComment(s.text).trim()))
-    .filter((t) => t !== "");
-  const ownIndex = segments.findIndex((segment) => segment === classified.segment);
-  if (ownIndex <= 0) return true; // first segment (or not found — treat as safe)
-  return segments.slice(0, ownIndex).every((segment) => {
-    const head = segment.split(/\s+/, 1)[0] ?? "";
+    .map((s) => ({ text: stripEnvPrefix(stripComment(s.text).trim()), opBefore: s.opBefore }))
+    .filter((s) => s.text !== "");
+  const ownIndex = segments.findIndex((s) => s.text === classified.segment);
+  if (ownIndex === -1) return false;
+  const priorsAreCd = segments.slice(0, ownIndex).every((s) => {
+    const head = s.text.split(/\s+/, 1)[0] ?? "";
     return head === "cd" || /^cd\//.test(head);
   });
+  if (!priorsAreCd) return false;
+  return segments.slice(ownIndex + 1).every((s) => s.opBefore === "|");
 }
 
 /**
@@ -192,9 +207,10 @@ function onlyCdPreamble(command: string, classified: ClassifiedTestCommand): boo
  * only for the structured path — where the paired OUTPUT is present and its
  * own summary is the verdict — not for the Claude/ledger paths. The relax
  * requires: the line was not backgrounded, the Bash result was not an error,
- * and every prior segment is a `cd` preamble (the test actually headed the
- * work). The verdict itself is then governed by the output summary, and the
- * strict zero-failure marker (caller side) closes line-stripping laundering.
+ * and the composition is relaxable (see relaxableComposition — the test is
+ * headed only by `cd` and trailed only by pipe stages, so the paired output is
+ * the runner's own). The verdict is then governed by the output summary, and
+ * the strict zero-failure marker (caller side) closes line-stripping laundering.
  */
 function attributeExitForStructuredEvidence(
   exit: number | null,
@@ -205,7 +221,7 @@ function attributeExitForStructuredEvidence(
   if (standard !== null) return { attributed: standard, relaxed: false };
   if (exit !== 0) return { attributed: null, relaxed: false };
   if (classified.isBackgrounded) return { attributed: null, relaxed: false };
-  if (!onlyCdPreamble(command, classified)) return { attributed: null, relaxed: false };
+  if (!relaxableComposition(command, classified)) return { attributed: null, relaxed: false };
   return { attributed: 0, relaxed: true };
 }
 

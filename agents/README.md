@@ -39,7 +39,7 @@ The finalizer is the normal `architecture-agent`; only its completion advances t
 | `security-agent` | Authentication/authorization/application security work | `security-expert` |
 | `adr-writer-agent` | Expand architecture decisions into ADRs | — |
 
-Implementation Agents are the only TaskGraph Agent values accepted by decompose validation. Under Pi they receive Task-bound write grants; phase/panel writers receive narrower artifact grants.
+Implementation Agents are the only TaskGraph Agent values that actually execute a task: decompose emits them, and the SubagentStop dispatch applies completion only for them. (Task-graph validation accepts any known agent name, so a graph naming a non-implementation agent as a task validates but then strands rather than running.) Under Pi they receive Task-bound write grants; phase/panel writers receive narrower artifact grants.
 
 ## Review and quality Agents
 

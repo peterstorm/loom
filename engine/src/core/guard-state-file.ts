@@ -805,19 +805,40 @@ const MODULE_PROGRAM_FLAGS: Readonly<Record<string, readonly string[]>> = {
   python: ["-m"], python3: ["-m"], ruby: ["-S"],
 };
 
+/** Paths that resolve to an inherited file descriptor. A heredoc (like any
+ *  redirect) binds a descriptor, so an interpreter reading its PROGRAM from
+ *  one of these — or `source`/`.` reading commands from one — executes the
+ *  redirected body even though the argument LOOKS like a named file.
+ *  `/dev/stdin` and fd 0 are the default heredoc channel; `/dev/fd/N` and
+ *  `/proc/{self,thread-self,<pid>}/fd/N` cover an explicitly numbered heredoc
+ *  (`bash 3<<'EOF' … ` then `source /dev/fd/3`). Matching any descriptor path
+ *  (not only fd 0) only ever errs fail-closed: a rare legitimate
+ *  `python3 /dev/fd/5` reading real data is judged a script and blocked, which
+ *  is the safe direction for a read-only guard. */
+const FD_DEVICE_PATH =
+  /^\/dev\/stdin$|^\/dev\/fd\/\d+$|^\/proc\/(?:self|thread-self|\d+)\/fd\/\d+$/;
+
+const isFdDevicePath = (word: string): boolean => FD_DEVICE_PATH.test(unquote(word));
+
 /** Shell-family program-source scan: `-c` takes the program inline (stdin
  *  = data), `-s` forces stdin as the program, a bare word is a script FILE
- *  (stdin = data). With no program source the shell reads its commands from
- *  stdin — the heredoc body is the script. */
+ *  (stdin = data) UNLESS that word is a bound descriptor (`bash /dev/stdin`),
+ *  in which case the descriptor's content — the heredoc body — is the program.
+ *  With no program source the shell reads its commands from stdin — the
+ *  heredoc body is the script. */
 function shFamilyExecutesStdin(args: readonly string[]): boolean {
   for (let i = 0; i < args.length; i++) {
     const a = unquote(args[i]!);
     if (a === "-s") return true;
     if (a === "-c") return false;
-    if (a === "--") return i === args.length - 1; // `bash -- file` = file; `bash --` = stdin
+    if (a === "--") {
+      // `bash -- file` = file; `bash -- /dev/stdin` = the bound body; `bash --` = stdin.
+      if (i === args.length - 1) return true;
+      return isFdDevicePath(args[i + 1]!);
+    }
     if (a === "-") return true;
     if (a.startsWith("-")) continue;
-    return false; // a script file argument
+    return isFdDevicePath(a); // script-file word — unless it is a bound descriptor
   }
   return true;
 }
@@ -852,11 +873,16 @@ function interpreterExecutesStdin(head: string, args: readonly string[]): boolea
     const a = unquote(args[i]!);
     if (a === "-") return true;
     if (inline.includes(a)) return false;
-    if (file.includes(a)) return false;
-    if (programFlags.includes(a)) { i++; return false; }
+    // A file/module program supplied via a bound descriptor (`node -e` aside,
+    // `python3 --file /dev/stdin`) reads the heredoc body as its program.
+    if (file.includes(a)) return isFdDevicePath(args[i + 1] ?? "");
+    if (programFlags.includes(a)) {
+      if (isFdDevicePath(args[i + 1] ?? "")) return true;
+      i++; return false;
+    }
     if (continueFlags.includes(a)) { i++; continue; }
     if (a.startsWith("-")) continue;
-    return false; // a bare script-file word
+    return isFdDevicePath(a); // bare script-file word — unless a bound descriptor
   }
   return true;
 }
@@ -1341,7 +1367,17 @@ function commandsExecuteStdin(text: string, depth: number): boolean {
     if (analyzed === null) continue;
     const { head, args } = analyzed;
     if (READER_HEADS.has(head)) { readsStdin = true; continue; }
-    if (EXECUTOR_HEADS.has(head)) { executesVar = true; continue; }
+    if (EXECUTOR_HEADS.has(head)) {
+      // `source`/`.` reading commands from a bound descriptor (`source
+      // /dev/stdin` under a heredoc) read AND execute the body in one command,
+      // so the pair's readsStdin/executesVar handshake never applies — it is a
+      // script feed on its own. (`eval` takes a string argument, not a file,
+      // and reaches stdin only through the substitution path handled above.)
+      if ((head === "source" || head === ".") && args.some((a) => isFdDevicePath(a))) {
+        return true;
+      }
+      executesVar = true; continue;
+    }
     const verdict = headExecutesStdinVerdict(head, args);
     if (verdict === "script") return true;
     if (verdict === "data") {

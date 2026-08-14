@@ -24,6 +24,11 @@ import {
   validateExplicitSpawnModel,
   validateAgentPolicyFrontmatter,
 } from "../../core/model-profiles";
+import {
+  engineIssuedClaudeModelFromRunDir,
+  loomMarkerValue,
+  runDirectoryFromContextPath,
+} from "../../core/grandfathered-spawn-model";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
 import { resolveClaudeAgentDefinitionPath } from "../../utils/agent-definition";
@@ -127,7 +132,22 @@ const handler: HookHandler = async (stdin) => {
     };
   }
   const frontmatter = validateAgentPolicyFrontmatter(fields.value);
-  const requested = validateExplicitSpawnModel(agent, "claude-code", input.tool_input?.model);
+  const requestedModel = input.tool_input?.model;
+  const requested = validateExplicitSpawnModel(agent, "claude-code", requestedModel);
+  // A current-policy MISMATCH (the orchestrator supplied a model, just not
+  // today's) may be a grandfathered wave-reviewer retry: the engine issued
+  // attempt-2 from a stored attempt-1 whose profile predates a promotion. If
+  // the engine's own issued authority for THIS request authorizes exactly the
+  // supplied model, honor it. A missing model (inheritance) or a frontmatter
+  // fault is never grandfathered — only a mismatch against a proven authority.
+  if (
+    frontmatter.ok &&
+    !requested.ok &&
+    typeof requestedModel === "string" &&
+    spawnModelIsEngineAuthorized(input, requestedModel)
+  ) {
+    return { kind: "allow" };
+  }
   const errors = [
     ...(frontmatter.ok ? [] : frontmatter.errors),
     ...(requested.ok ? [] : requested.errors),
@@ -139,5 +159,24 @@ const handler: HookHandler = async (stdin) => {
         message: `BLOCKED: Claude Code model policy failed for '${rawAgent}' (${path}):\n${errors.map((e) => `  - ${e}`).join("\n")}`,
       };
 };
+
+/**
+ * Did the engine itself issue `requestedModel` for the request this spawn
+ * carries? Reads the issued authorities directly from the run directory the
+ * spawn self-identifies (LOOM_CONTEXT_PATH), keyed on its LOOM_REQUEST_ID.
+ * Every failure — no markers, unreadable dir, no matching authority — returns
+ * false so the caller keeps the original block: the rescue can only ADD an
+ * allow when a real, guarded, tamper-evident authority proves the model, never
+ * remove one.
+ */
+function spawnModelIsEngineAuthorized(input: PreToolUseInput, requestedModel: string): boolean {
+  const prompt = typeof input.tool_input?.prompt === "string" ? input.tool_input.prompt : "";
+  const requestId = loomMarkerValue(prompt, "REQUEST_ID");
+  const contextPath = loomMarkerValue(prompt, "CONTEXT_PATH");
+  if (requestId === null || contextPath === null) return false;
+  const runDirectory = runDirectoryFromContextPath(contextPath);
+  if (runDirectory === null) return false;
+  return engineIssuedClaudeModelFromRunDir(runDirectory, requestId) === requestedModel;
+}
 
 export default handler;

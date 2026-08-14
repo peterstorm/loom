@@ -1152,6 +1152,39 @@ describe("guard-state-file — heredoc script-body detection stays fail-closed (
     // The data body A stays data even though the sibling group B is a script.
     expect(guardDecision(`cat << 'A' && bash << 'B'\n${prose}\nA\necho hi\nB\n`)).toBe("allow");
   });
+
+  // A `source`/`.` reading commands from a bound descriptor, or an interpreter
+  // reading its PROGRAM from one, executes the heredoc body even though the
+  // argument looks like a named file — the descriptor IS the heredoc. This
+  // whole class read `allow` before the fd-device-path fix (the executor
+  // read+executed in one command, so the reader/executor handshake never
+  // tripped; the interpreter treated the path as a plain script file).
+  it("source/. reading a bound descriptor executes the body and blocks", () => {
+    for (const fd of ["/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"]) {
+      expect(guardDecision(`source ${fd} << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+      expect(guardDecision(`. ${fd} << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    }
+    // Numbered-fd spelling resolves the same way (`source` is a builtin, so
+    // it is never wrapped by sudo/env — no wrapper spelling exists for it).
+    expect(guardDecision(`source /dev/fd/3 3<< 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+  });
+
+  it("interpreter reading its program from a bound descriptor blocks", () => {
+    for (const head of ["bash", "sh", "python3"]) {
+      for (const fd of ["/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"]) {
+        expect(guardDecision(`${head} ${fd} << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+      }
+    }
+    expect(guardDecision(`sudo bash /dev/stdin << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`bash -- /dev/stdin << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+  });
+
+  it("a NAMED file argument that merely resembles a descriptor path stays data", () => {
+    // Not fd 0/N device paths: a real file whose name contains "stdin" or "fd".
+    expect(guardDecision(`bash /home/me/dev/stdin.sh << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+    expect(guardDecision(`source ./config/fd0 << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+    expect(guardDecision(`bash script.sh << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+  });
 });
 
 describe("guard-state-file — guarded-path patterns resolve machinesDir() at decision time (round-15)", () => {
