@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { DAG_INPUT, createTransformNode, defineDag, ok, runDag, type NodeContext } from "@fuguejs/framework";
 import { z } from "zod";
-import { createStandaloneResultPublicationAuthorityResolver } from "../../src/core/remediation-machine";
+import {
+  createStandaloneResultPublicationAuthorityResolver,
+  freezePathAuthority,
+  parseRepositorySnapshotWitness,
+  registerSupportPath,
+} from "../../src/core/remediation-machine";
+import {
+  standaloneInput,
+  standalonePublicationResolver,
+} from "../fixtures/standalone-remediation-authority";
 import type { OrchestrationRunId } from "../../src/core/orchestration-contract";
 import { createOperationContext, lowerRunId } from "../../src/orchestration/dags/run-context";
 import {
@@ -683,5 +692,143 @@ describe("defineDag soundness", () => {
       ],
       outputNodeId: "b",
     })).toThrow(/unsound/);
+  });
+});
+
+// --- Remediation success path: the audited → install-intent edge ------------
+
+/**
+ * The remediation DAGs' SUCCESS path, driven with real authority.
+ *
+ * `remediation-operations.ts` states its safety property in its own header:
+ * "the only edge reaching the installation intent is conditional on the
+ * equality check passing." Every existing test drove a `blocked` outcome, so
+ * the conditional edge was proven only in the direction that never installs —
+ * an edge that had been rewired to reach `EMIT_INTENT` unconditionally would
+ * have passed the whole suite. Building genuine authority (rather than the
+ * `{forged: true}` stubs those tests use) is what makes the audited arm
+ * reachable at all.
+ */
+describe("remediation operation DAGs — the audited install path", () => {
+  const SCOPE = ["src/main.ts", "src/deleted.ts"] as const;
+  const SUPPORT_PATH = "engine/tests/regression.test.ts";
+  const OBSERVATIONS = Object.freeze([
+    { path: SUPPORT_PATH, change: "added", nodeKind: "file" },
+    { path: "src/deleted.ts", change: "deleted", nodeKind: "missing" },
+    { path: "src/main.ts", change: "modified", nodeKind: "file" },
+  ]);
+  const EXPECTED_PATHS = Object.freeze([SUPPORT_PATH, "src/deleted.ts", "src/main.ts"]);
+
+  const witness = () => {
+    const parsed = parseRepositorySnapshotWitness({
+      baseTreeDigest: "1".repeat(64),
+      indexDigest: "2".repeat(64),
+      worktreeDigest: "3".repeat(64),
+    });
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    return parsed.value;
+  };
+
+  const registeredAuthority = () => {
+    const frozen = freezePathAuthority(standaloneInput([...SCOPE]));
+    if (!frozen.ok) throw new Error(frozen.error.message);
+    const registered = registerSupportPath(frozen.value, SUPPORT_PATH);
+    if (!registered.ok) throw new Error(registered.error.message);
+    return registered.value;
+  };
+
+  const auditDagWithAuthority = () =>
+    createRemediationAuditDag(standalonePublicationResolver([...SCOPE]));
+  const stagedDagWithAuthority = () =>
+    createRemediationStagedSetDag(standalonePublicationResolver([...SCOPE]));
+
+  it("reaches the audited outcome and reports the authorized path count", async () => {
+    const dag = auditDagWithAuthority();
+
+    const result = await runDag<unknown, RemediationAuditOutcome>(dag, {
+      authority: registeredAuthority(),
+      expectedDirtyPaths: EXPECTED_PATHS,
+      actualDirtyPaths: OBSERVATIONS,
+      preexistingStagedPaths: [],
+      repositoryWitness: witness(),
+    }, context(dag.id));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.kind).toBe("audited");
+    if (result.value.kind !== "audited") return;
+    expect(result.value.pathCount).toBe(EXPECTED_PATHS.length);
+  });
+
+  it("takes the conditional edge into EMIT_INTENT when audited == staged", async () => {
+    const auditDag = auditDagWithAuthority();
+    const audit = await runDag<unknown, RemediationAuditOutcome>(auditDag, {
+      authority: registeredAuthority(),
+      expectedDirtyPaths: EXPECTED_PATHS,
+      actualDirtyPaths: OBSERVATIONS,
+      preexistingStagedPaths: [],
+      repositoryWitness: witness(),
+    }, context(auditDag.id));
+    expect(audit.ok && audit.value.kind === "audited").toBe(true);
+    if (!audit.ok || audit.value.kind !== "audited") return;
+
+    const stagedDag = stagedDagWithAuthority();
+    const decision = await runDag<unknown, InstallationDecision>(stagedDag, {
+      auditedPathSet: audit.value.auditedPathSet,
+      stagedPaths: [...EXPECTED_PATHS],
+    }, context(stagedDag.id));
+
+    expect(decision.ok).toBe(true);
+    if (!decision.ok) return;
+    expect(decision.value.kind).toBe("install-intent");
+    if (decision.value.kind !== "install-intent") return;
+    expect([...decision.value.paths].sort()).toEqual([...EXPECTED_PATHS].sort());
+    expect(decision.value.digest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it.each([
+    ["a staged path nobody authorized", [...EXPECTED_PATHS, "src/smuggled.ts"]],
+    ["an authorized path left unstaged", EXPECTED_PATHS.slice(1)],
+    ["an entirely different set", ["src/other.ts"]],
+    ["nothing staged at all", []],
+  ])("blocks instead of installing when the staged set differs: %s", async (_label, stagedPaths) => {
+    // The same real audited set, so the ONLY difference from the passing case
+    // is the equality check — which is precisely the edge under test.
+    const auditDag = auditDagWithAuthority();
+    const audit = await runDag<unknown, RemediationAuditOutcome>(auditDag, {
+      authority: registeredAuthority(),
+      expectedDirtyPaths: EXPECTED_PATHS,
+      actualDirtyPaths: OBSERVATIONS,
+      preexistingStagedPaths: [],
+      repositoryWitness: witness(),
+    }, context(auditDag.id));
+    if (!audit.ok || audit.value.kind !== "audited") throw new Error("audited fixture required");
+
+    const stagedDag = stagedDagWithAuthority();
+    const decision = await runDag<unknown, InstallationDecision>(stagedDag, {
+      auditedPathSet: audit.value.auditedPathSet,
+      stagedPaths: [...stagedPaths],
+    }, context(stagedDag.id));
+
+    expect(decision.ok).toBe(true);
+    if (!decision.ok) return;
+    expect(decision.value.kind).toBe("blocked");
+  });
+
+  it("blocks when the observed dirty set does not match the frozen authority", async () => {
+    const dag = auditDagWithAuthority();
+
+    const result = await runDag<unknown, RemediationAuditOutcome>(dag, {
+      authority: registeredAuthority(),
+      expectedDirtyPaths: EXPECTED_PATHS,
+      // A file changed that no reviewed scope or support registration covers.
+      actualDirtyPaths: [...OBSERVATIONS, { path: "src/unauthorized.ts", change: "modified", nodeKind: "file" }],
+      preexistingStagedPaths: [],
+      repositoryWitness: witness(),
+    }, context(dag.id));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.kind).toBe("blocked");
   });
 });

@@ -5,7 +5,7 @@
  */
 
 import type { HookHandler, ReviewStatus, Task } from "../../types";
-import { newWaveGate } from "../../types";
+import { reconcileWaveBlock } from "../../core/wave-gate-model";
 import { TASK_GRAPH_PATH } from "../../config";
 import {
   attributeFindings,
@@ -193,23 +193,31 @@ const handler: HookHandler = async (stdin, args) => {
   // One locked transform, not two. Splitting the findings write from the gate
   // write released the lock between them, leaving a window where a concurrent
   // writer sees a stored critical on an unblocked wave.
-  const blocking = critical.length > 0;
   const dismissAll = args.includes("--dismiss-all");
-  await mgr.update((s) => ({
-    ...s,
-    tasks: s.tasks.map((t) => (
+  await mgr.update((s) => {
+    const tasks = s.tasks.map((t) => (
       t.id === taskId ? updateTaskFindings(t, critical, advisory, !dismissAll) : t
-    )),
-    wave_gates: blocking
-      ? {
-          ...s.wave_gates,
-          [String(target.wave)]: {
-            ...(s.wave_gates[String(target.wave)] ?? newWaveGate()),
-            blocked: true,
-          },
-        }
-      : s.wave_gates,
-  }));
+    ));
+    // `blocked` tracks its causes in BOTH directions, computed from the state
+    // this transform is about to write.
+    //
+    // Only the set direction existed: an override that downgraded the last
+    // critical to advisory (or `--dismiss-all`) emptied `critical_findings` and
+    // passed the task's review, but left `blocked: true` behind. The wave then
+    // sat blocked with NO cause — `validate-task-execution` printed
+    // "Wave N is BLOCKED due to:" with nothing under it, and no rerun of
+    // `/wave-gate` could clear a block whose cause it could not find. The
+    // operator's override landed on the task and died at the gate.
+    //
+    // The other cause (a wave-scoped critical spec-check) is deliberately still
+    // honored here: clearing a review block must not silently drop a spec-check
+    // block that this command never adjudicated.
+    return {
+      ...s,
+      tasks,
+      wave_gates: reconcileWaveBlock(s.wave_gates, tasks, s.spec_check, target.wave),
+    };
+  });
 
   // A dismissal and a two-finding override used to print the same shape of
   // line, differing only in a zero. Named, because this one passed a review.

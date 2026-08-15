@@ -303,25 +303,25 @@ export interface Task {
   readonly wave: number;
   readonly status: TaskStatus;
   readonly depends_on: readonly string[];
-  spec_anchors?: readonly string[];
-  new_tests_required?: boolean;
+  readonly spec_anchors?: readonly string[];
+  readonly new_tests_required?: boolean;
   /** Exact architecture context selected for this Task by decompose. */
-  plan_context?: string;
+  readonly plan_context?: string;
   /** Engine-authored proof aggregate. New graphs always carry it. */
-  proof?: TaskProof;
+  readonly proof?: TaskProof;
   /** Files this task creates/modifies (decompose contract); older graphs may lack it */
-  file_list?: readonly string[];
+  readonly file_list?: readonly string[];
   /** Test outcome + trust provenance; absent until an impl agent completes. */
-  test_result?: TaskTestResult;
-  test_evidence?: string;
-  new_tests_written?: boolean;
-  new_test_evidence?: string;
-  files_modified?: readonly string[];
-  review_status?: ReviewStatus;
+  readonly test_result?: TaskTestResult;
+  readonly test_evidence?: string;
+  readonly new_tests_written?: boolean;
+  readonly new_test_evidence?: string;
+  readonly files_modified?: readonly string[];
+  readonly review_status?: ReviewStatus;
   /** Monotonic implementation generation; incremented whenever task bytes change. */
-  review_generation?: number;
+  readonly review_generation?: number;
   /** Packet-bound reviewer batch currently collecting evidence. */
-  review_run?: ReviewRun;
+  readonly review_run?: ReviewRun;
   /**
    * Why evidence capture failed. Meaningful ONLY alongside
    * `review_status: "evidence_capture_failed"` — every writer that moves the
@@ -329,7 +329,7 @@ export interface Task {
    * survive the transition, so a task could sit at `passed` carrying
    * "CRITICAL_COUNT marker not found…" from a run two reviewers ago.
    */
-  review_error?: string;
+  readonly review_error?: string;
   /**
    * The reviewers whose transcript could not be parsed, still outstanding.
    *
@@ -350,7 +350,7 @@ export interface Task {
    * the whole review record — unreviewed also blocks the gate, so the repair
    * fails closed rather than guessing which reviewer broke.
    */
-  review_evidence_failures?: readonly string[];
+  readonly review_evidence_failures?: readonly string[];
   /**
    * Authoritative review findings: each with a derived id, its emitting agent,
    * and (when the reviewer supplied one) a file/line. This is the field the
@@ -381,52 +381,52 @@ export interface Task {
    * repair path all exist to protect. Every producer already returns a fresh
    * array, so nothing had to change but the type.
    */
-  findings?: readonly Finding[];
-  critical_findings?: readonly string[];
-  advisory_findings?: readonly string[];
+  readonly findings?: readonly Finding[];
+  readonly critical_findings?: readonly string[];
+  readonly advisory_findings?: readonly string[];
   /**
    * Findings a refutation panel killed, kept with the verifiers' reasoning
    * instead of deleted. A wrong refutation must stay auditable — a silently
    * dropped critical is indistinguishable from one that was never found.
    */
-  refuted_findings?: readonly RefutedFinding[];
+  readonly refuted_findings?: readonly RefutedFinding[];
   /** Findings that held before code changed and were explicitly verified fixed. */
-  resolved_findings?: readonly ResolvedFinding[];
+  readonly resolved_findings?: readonly ResolvedFinding[];
   /** Exact declared-artifact state captured before the implementation agent
    *  starts. Proof compares current bytes to this baseline; transcript tool
    *  calls remain lint targets and cannot vouch that a change occurred. */
-  artifact_baseline?: readonly DeclaredArtifactBaseline[];
+  readonly artifact_baseline?: readonly DeclaredArtifactBaseline[];
   /** Exact declared and previously-attributed artifact state captured
    * immediately before the current implementation attempt. Unlike
    * artifact_baseline, this advances on every accepted retry so byte changes
    * from that attempt invalidate older evidence even when current transcript
    * tool attribution is missing. */
-  attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
+  readonly attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
   /** Compact snapshot of every Git-visible dirty path immediately before the
    * current implementation attempt. Comparing this boundary with the later
    * dirty set detects writes outside declared/previously-attributed scope. */
-  attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
+  readonly attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
   /** Engine-issued packet authority retained after a review run closes. A
    * self-hashed packet is integrity evidence, not provenance; historical write
    * recovery accepts a packet only when every registration field matches. */
-  issued_review_packets?: readonly IssuedReviewPacketRegistration[];
+  readonly issued_review_packets?: readonly IssuedReviewPacketRegistration[];
   /** Historical commit explicitly supplied to the sanctioned recovery helper
    * after a legacy retry overwrote the original baseline. Persisted so the
    * exceptional evidence source remains auditable. */
-  artifact_baseline_recovered_from?: string;
+  readonly artifact_baseline_recovered_from?: string;
   /** Audited immutable Review Packets used to recover cumulative write
    * attribution after a legacy retry replaced files_modified. */
-  recovered_artifact_writes?: readonly RecoveredArtifactWriteEvidence[];
-  start_sha?: string;
+  readonly recovered_artifact_writes?: readonly RecoveredArtifactWriteEvidence[];
+  readonly start_sha?: string;
   /** ISO-8601 instant this task's execution reservation was committed (task
    * added to `executing_tasks` during PreToolUse). Refreshed on every spawn
    * attempt. Reservation reclamation shields any reservation younger than the
    * grace window (see RESERVATION_GRACE_MS) so a live agent that has not yet
    * reached its SubagentStart roster mark is never mistaken for one stranded by
    * a vetoed spawn. */
-  reserved_at?: string;
-  failure_reason?: string;
-  retry_count?: number;
+  readonly reserved_at?: string;
+  readonly failure_reason?: string;
+  readonly retry_count?: number;
 }
 
 // WaveGate + newWaveGate moved to the pure core module core/wave-gate-model

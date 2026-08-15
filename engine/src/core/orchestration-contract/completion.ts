@@ -7,7 +7,7 @@
 import { canonicalRecord, failure, success, type DomainResult, type NonEmpty, type SlotId } from './identity';
 import { MAX_SEMANTIC_PAYLOAD_ARRAY_LENGTH, causedMessage, describeThrownCause, includes, readDenseDataArray, readExactDataRecord, type DataBoundaryReason } from './bytes';
 import { CompleteRosterMembership, completeRosterCache, exactRosterCache, immutableMap, parseStoredAgentRequestAuthority, sameHarnessBinding, type AgentRequestAuthority, type ExactRoster, type RosterViolation, type UnissuedResultCause } from './roster';
-import { authorityResolutionFailure, issuedRequestCache, parseIssuedSpawnRequestAgainstRegistration, parseIssuedSpawnRequestIdentity, resolveRegisteredPublicationAuthority, samePublicationIdentity, type PublicationAuthorityResolver, type RegisteredBatchPublicationAuthority, type SpawnRequest } from './publication';
+import { authorityResolutionFailure, issuedSpawnRequestFor, parseIssuedSpawnRequestAgainstRegistration, parseIssuedSpawnRequestIdentity, resolveRegisteredPublicationAuthority, samePublicationIdentity, type PublicationAuthorityResolver, type RegisteredBatchPublicationAuthority, type SpawnRequest } from './publication';
 
 export type AcceptedAgentResult<T> = Readonly<{
   kind: "accepted-agent-result";
@@ -28,7 +28,7 @@ export function acceptedAgentResult<T>(
   value: T,
 ): DomainResult<AcceptedAgentResult<T>, AcceptedAgentResultError> {
   const issued = typeof request === "object" && request !== null
-    ? issuedRequestCache.get(request)
+    ? issuedSpawnRequestFor(request)
     : undefined;
   if (issued === undefined || issued !== request) {
     return failure(authorityResolutionFailure(
@@ -48,14 +48,34 @@ export type CompleteRoster<R> = CompleteRosterMembership & Readonly<{
   bySlot: ReadonlyMap<SlotId, R>;
 }>;
 
+/**
+ * The four causes carrying nothing but a message.
+ *
+ * `issued-request-authority-mismatch` is deliberately NOT reachable here: it
+ * is the one cause with a required `fields` list, and folding it in behind an
+ * optional parameter forced the return through `as UnissuedResultCause` — a
+ * cast that would have silently minted a `fields`-less mismatch cause (a union
+ * member the type says cannot exist) the moment a caller passed that kind
+ * without them. Splitting the constructors makes that call unwritable instead
+ * of unchecked, and both arms now type without a cast.
+ */
 export function unissuedResultCause(
-  kind: UnissuedResultCause["kind"],
+  kind: Exclude<UnissuedResultCause["kind"], "issued-request-authority-mismatch">,
   message: string,
-  fields?: NonEmpty<string>,
 ): UnissuedResultCause {
-  return kind === "issued-request-authority-mismatch" && fields !== undefined
-    ? canonicalRecord({ kind, fields: Object.freeze([...fields]) as NonEmpty<string>, message })
-    : canonicalRecord({ kind, message }) as UnissuedResultCause;
+  return canonicalRecord({ kind, message });
+}
+
+/** The mismatch cause — `fields` is a parameter, so it can never be absent. */
+export function issuedRequestAuthorityMismatchCause(
+  fields: NonEmpty<string>,
+  message: string,
+): UnissuedResultCause {
+  return canonicalRecord({
+    kind: "issued-request-authority-mismatch",
+    fields: Object.freeze([...fields]) as NonEmpty<string>,
+    message,
+  });
 }
 
 export type CompleteRosterError = Readonly<{
@@ -385,10 +405,9 @@ export function parseCompleteRoster<T>(
         kind: "unissued-result",
         index,
         requestId: authority.requestId,
-        cause: unissuedResultCause(
-          "issued-request-authority-mismatch",
-          `accepted result authority differs from issued request authority in: ${fields.join(", ")}`,
+        cause: issuedRequestAuthorityMismatchCause(
           fields,
+          `accepted result authority differs from issued request authority in: ${fields.join(", ")}`,
         ),
       }));
       return;

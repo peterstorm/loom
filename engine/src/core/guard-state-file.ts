@@ -1,7 +1,8 @@
 /**
  * Core: Guard state files from direct modification via Bash.
  * Harness-agnostic — no stdin parsing. Not pure: guardStateFile reads the
- * filesystem (existsSync); the decision core (guardStateFileDecision) is pure.
+ * filesystem (a fail-closed existence probe); the decision core
+ * (guardStateFileDecision) is pure.
  *
  * DENY-BY-DEFAULT (round 14, replacing the WRITE_PATTERNS denylist): a line
  * that never references a guarded path (state files, state dir, subagent dir,
@@ -79,7 +80,6 @@
  * in the heredoc and edge-case describes below.
  */
 
-import { existsSync } from "node:fs";
 import type { HookResult } from "../types";
 import { normalizeShellSpan } from "./shell-normalize";
 import {
@@ -91,6 +91,7 @@ import {
   protectedDirSegments,
   guardedDirSegments,
   SUBAGENT_DIR,
+  pathExistsFailClosed,
 } from "../config";
 import {
   classifyFdDupWord,
@@ -252,7 +253,15 @@ function sequenceOptions(content: string): string[] | null {
   // endpoint is not a padded form.
   const digits = (s: string): string => s.replace(/^[+-]/, "");
   const padWidth = Math.max(first.length, second.length);
-  const padded = padWidth > 1 && [first, second].some((s) => digits(s).startsWith("0"));
+  // An endpoint is a PADDED form only when its own digit run is longer than one
+  // AND starts with `0`. Testing `startsWith("0")` alone made a lone `0`
+  // endpoint padded whenever its partner was wider: `{0..10}` rendered
+  // `00 01 … 10` where bash renders `0 1 … 10`. (`{0..0}` was right by accident
+  // — `padWidth > 1` alone caught it — which is why the existing single
+  // padded fixture, asserted as `allow`, could never fail.) Pinned by the
+  // differential sweep against real bash in
+  // `tests/core/guard-state-file-coverage.test.ts`.
+  const padded = [first, second].some((s) => digits(s).length > 1 && digits(s).startsWith("0"));
   const render = (c: number): string => {
     if (!padded) return String(c);
     const negative = c < 0;
@@ -308,7 +317,7 @@ function firstBraceGroup(text: string): BraceGroup | null {
  * expansion on a guarded-shaped line is nobody's real command; the caller
  * fails closed.
  */
-function expandBraces(text: string): string[] | null {
+export function expandBraces(text: string): string[] | null {
   const results: string[] = [];
   const stack: string[] = [text];
   while (stack.length > 0) {
@@ -1838,7 +1847,21 @@ function decide(command: string, depth: number): HookResult {
   return { kind: "allow" };
 }
 
-export function guardStateFile(command: string): HookResult {
-  if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
+/**
+ * Default task-graph existence probe, FAIL-CLOSED. The historical default was
+ * bare `existsSync(TASK_GRAPH_PATH)`, which returns `false` for ANY error —
+ * EACCES, ELOOP, ENOTDIR, EIO all read as "no graph" — so one unreadable path
+ * silently disarmed the whole state-file forgery guard while the operator
+ * believed Bash writes were blocked. ENOENT is the only absent answer; anything
+ * unreadable stays armed. Identical semantics to `block-direct-edits.ts`, which
+ * fixed this same probe first.
+ */
+const defaultTaskGraphExists = (): boolean => pathExistsFailClosed(TASK_GRAPH_PATH);
+
+export function guardStateFile(
+  command: string,
+  taskGraphExists: () => boolean = defaultTaskGraphExists,
+): HookResult {
+  if (!taskGraphExists()) return { kind: "allow" };
   return guardStateFileDecision(command);
 }

@@ -90,8 +90,7 @@ import { checkAgentSkillPrompt } from "../engine/src/core/agent-skills";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
 import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
 import {
-  changedDeclaredArtifactsSince,
-  changedRepositoryArtifactsSince,
+  compareAttemptBaseline,
 } from "../engine/src/utils/artifact-baseline";
 import { deriveArtifactWriteScope } from "../engine/src/core/artifact-write-scope";
 import {
@@ -186,6 +185,21 @@ export function piSpawnCwd(raw: unknown, index: number, defaultCwd: string): str
       ? input.cwd
       : defaultCwd;
   return resolve(defaultCwd, cwd);
+}
+
+/**
+ * The `command` a Pi bash call carries, or `""`.
+ *
+ * The harness types a tool call's `input` as an opaque record, so reading
+ * `.command` off it is an unchecked assumption about a value that arrives from
+ * outside. An absent or non-string command must read as the empty string (which
+ * the guard judges as an empty command line) rather than as `undefined` flowing
+ * into a function that expects text.
+ */
+export function piBashCommand(raw: unknown): string {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return "";
+  const command = (raw as Record<string, unknown>).command;
+  return typeof command === "string" ? command : "";
 }
 
 /** Extract the file path(s) a Pi Edit/Write/multi_edit call targets. Returns
@@ -727,7 +741,7 @@ export default function (pi: ExtensionAPI) {
       if (event.toolName === "bash") {
         currentGuard = "guard-state-file";
         const result = graphIsActive
-          ? guardStateFileDecision(event.input.command ?? "")
+          ? guardStateFileDecision(piBashCommand(event.input))
           : { kind: "allow" as const };
         // Call-start stamp (PRODUCER only — pi has no PostToolUse evidence
         // recorder yet, so nothing on the pi side consumes these stamps;
@@ -1106,10 +1120,15 @@ export default function (pi: ExtensionAPI) {
     } catch (error) {
       const rejectedSession = ctx.sessionManager.getSessionId() ?? "";
       if (parseSessionId(rejectedSession)) rejectedChildWriteGrantSessions.add(rejectedSession);
-      if (partialBinding) {
+      // Bound to a const before the closure captures it: `partialBinding` is a
+      // mutable outer `let`, so the narrowing from the `if` does not survive
+      // into the deferred `run`, and the cleanup would dereference whatever the
+      // variable held when it finally ran rather than what was checked.
+      const orphanedBinding = partialBinding;
+      if (orphanedBinding !== null) {
         const cleanupErrors = await runPiCleanupActions([{
-          label: `remove partial child roster entry ${partialBinding.agentId}`,
-          run: () => fsSessionRegistry.removeActive(partialBinding.sessionId, partialBinding.agentId),
+          label: `remove partial child roster entry ${orphanedBinding.agentId}`,
+          run: () => fsSessionRegistry.removeActive(orphanedBinding.sessionId, orphanedBinding.agentId),
         }]);
         for (const cleanupError of cleanupErrors) {
           process.stderr.write(`loom(pi): child write-grant cleanup failed: ${cleanupError}\n`);
@@ -1301,11 +1320,18 @@ export default function (pi: ExtensionAPI) {
       label: `revoke write grant ${index + 1}`,
       run: () => revokePiWriteGrant(token),
     }));
-    for (const item of reservation?.items ?? []) {
-      cleanupActions.push({
-        label: `remove reserved roster entry for ${item.agentType}`,
-        run: () => fsSessionRegistry.removeActive(reservation.sessionId, item.rosterId),
-      });
+    // Same reason as the write-grant cleanup above: `reservation` is a mutable
+    // `let`, so the optional-chain guard on the loop header does not narrow it
+    // inside the deferred `run`. Capture the checked value.
+    const cleanedReservation = reservation;
+    if (cleanedReservation !== undefined) {
+      const { sessionId: reservedSessionId } = cleanedReservation;
+      for (const item of cleanedReservation.items) {
+        cleanupActions.push({
+          label: `remove reserved roster entry for ${item.agentType}`,
+          run: () => fsSessionRegistry.removeActive(reservedSessionId, item.rosterId),
+        });
+      }
     }
     const cleanupErrors = await runPiCleanupActions(cleanupActions);
     processingErrors.push(...cleanupErrors);
@@ -1384,22 +1410,15 @@ export default function (pi: ExtensionAPI) {
               continue;
             }
 
-            let changedDeclaredArtifacts: readonly string[] = [];
-            let changedRepositoryArtifacts: readonly string[] = [];
-            let bytesChangedSinceAttempt = true;
-            try {
-              changedDeclaredArtifacts = changedDeclaredArtifactsSince(root, task.artifact_baseline);
-              changedRepositoryArtifacts = changedRepositoryArtifactsSince(
-                root,
-                task.attempt_repository_baseline,
-              );
-              bytesChangedSinceAttempt = changedRepositoryArtifacts.length > 0;
-            } catch (error) {
+            const comparison = compareAttemptBaseline(root, task, { kind: "repository" });
+            const { changedDeclaredArtifacts, bytesChangedSinceAttempt } = comparison;
+            if (comparison.failure !== null) {
               // Comparison failure cannot prove the old evidence still matches
-              // current bytes. Fail closed by invalidating it and retain the
-              // concrete diagnostic for the operator.
+              // current bytes. The shared helper already failed closed
+              // (bytesChangedSinceAttempt: true); retain the concrete
+              // diagnostic for the operator.
               process.stderr.write(
-                `loom(pi): failed-attempt baseline comparison failed for ${item.taskId}: ${error instanceof Error ? error.message : String(error)} — invalidating stale evidence\n`,
+                `loom(pi): failed-attempt baseline comparison failed for ${item.taskId}: ${comparison.failure} — invalidating stale evidence\n`,
               );
             }
 
@@ -1913,26 +1932,12 @@ export default function (pi: ExtensionAPI) {
                 executing_tasks: (current.executing_tasks ?? []).filter((id) => id !== taskId),
               };
             }
-            let changedArtifacts: readonly string[];
-            let changedRepositoryArtifacts: readonly string[] = [];
-            let bytesChangedSinceAttempt: boolean;
-            try {
-              changedArtifacts = changedDeclaredArtifactsSince(root, currentTarget.artifact_baseline);
-              if (currentTarget.attempt_repository_baseline === undefined) {
-                bytesChangedSinceAttempt = currentTarget.attempt_artifact_baseline === undefined ||
-                  changedDeclaredArtifactsSince(root, currentTarget.attempt_artifact_baseline).length > 0;
-              } else {
-                changedRepositoryArtifacts = changedRepositoryArtifactsSince(
-                  root,
-                  currentTarget.attempt_repository_baseline,
-                );
-                bytesChangedSinceAttempt = changedRepositoryArtifacts.length > 0;
-              }
-            } catch (error) {
-              changedArtifacts = currentTarget.file_list ?? [];
-              bytesChangedSinceAttempt = true;
+            const comparison = compareAttemptBaseline(root, currentTarget, { kind: "repository-or-declared" });
+            const changedArtifacts = comparison.changedDeclaredArtifacts;
+            const bytesChangedSinceAttempt = comparison.bytesChangedSinceAttempt;
+            if (comparison.failure !== null) {
               process.stderr.write(
-                `loom(pi): cannot compare malformed-transcript attempt baseline for ${taskId}: ${error instanceof Error ? error.message : String(error)} — invalidating stale evidence\n`,
+                `loom(pi): cannot compare malformed-transcript attempt baseline for ${taskId}: ${comparison.failure} — invalidating stale evidence\n`,
               );
             }
             if (!bytesChangedSinceAttempt) {
@@ -1996,27 +2001,25 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
 
-        let changedArtifacts: readonly string[];
-        let bytesChangedSinceAttempt: boolean;
-        try {
-          const root = git.repositoryRoot() ?? process.cwd();
-          changedArtifacts = changedDeclaredArtifactsSince(root, task.artifact_baseline);
-          bytesChangedSinceAttempt = task.attempt_repository_baseline === undefined
-            ? task.attempt_artifact_baseline === undefined ||
-              changedDeclaredArtifactsSince(root, task.attempt_artifact_baseline).length > 0 ||
-              filesModified.some((path) =>
-                !task.attempt_artifact_baseline?.some(({ artifact }) => artifact === path)
-              )
-            : changedRepositoryArtifactsSince(root, task.attempt_repository_baseline).length > 0;
-        } catch (error) {
-          await mgr.update((s) => ({
-            ...s,
-            executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
-          }));
+        // The SAME comparison and the SAME fail-closed contract as the other
+        // two sites. This one used to catch by dropping the task from
+        // executing_tasks and `continue`-ing — no resolution recorded, so an
+        // identical comparison failure left the task pending forever here while
+        // the sibling paths invalidated its evidence and re-judged it. The
+        // helper fails closed (`bytesChangedSinceAttempt: true`, declared
+        // artifacts from `file_list`) and this path now falls through to the
+        // untrusted resolution below, exactly as the others do.
+        const comparison = compareAttemptBaseline(
+          git.repositoryRoot() ?? process.cwd(),
+          task,
+          { kind: "repository-or-declared", extraModifiedPaths: filesModified },
+        );
+        const changedArtifacts = comparison.changedDeclaredArtifacts;
+        const bytesChangedSinceAttempt = comparison.bytesChangedSinceAttempt;
+        if (comparison.failure !== null) {
           process.stderr.write(
-            `loom(pi): cannot compare declared-artifact baseline for ${taskId}: ${error instanceof Error ? error.message : String(error)} — task left pending\n`,
+            `loom(pi): cannot compare declared-artifact baseline for ${taskId}: ${comparison.failure} — invalidating stale evidence\n`,
           );
-          continue;
         }
 
         // Atomic state write. The completed/trusted-verdict guards above ran

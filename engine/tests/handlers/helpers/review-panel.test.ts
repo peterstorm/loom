@@ -494,6 +494,11 @@ describe("review-panel helper CLI", () => {
       writeState((graph) => {
         graph.tasks[0]!.findings = graph.tasks[0]!.findings.filter((f) => f.severity !== "critical");
         graph.tasks[0]!.critical_findings = [];
+        // Removing the wave's last critical removes the gate's only cause, so
+        // the flag comes down with it — that is what every writer now does, and
+        // the load boundary rejects the causeless gate this fixture used to
+        // hand-build.
+        graph.wave_gates["1"]!.blocked = false;
       });
       const result = buildBrief();
       expect(result.status).toBe(1);

@@ -244,8 +244,20 @@ function releaseDirectoryLock(directoryFd: number, lockName: string, ownerToken:
   try {
     if (readDirectoryFileNoFollow(directoryFd, lockName).toString("utf-8").trim() !== ownerToken) return;
     unlinkSync(procFdChild(directoryFd, lockName));
-  } catch {
-    // Missing/foreign lock: this process no longer owns it.
+  } catch (error) {
+    // ENOENT is the ONLY benign outcome: the lock is already gone, so this
+    // process no longer owns it and there is nothing to release. Every other
+    // code (EACCES, EIO, EPERM) means the unlink genuinely failed and the lock
+    // file is STILL THERE — stranded until a stale-lock recovery notices it,
+    // with every waiter blocked in the meantime. Swallowing them all made that
+    // outcome indistinguishable from a clean release; the sibling catches in
+    // this module already discriminate, and now so does this one.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    process.stderr.write(
+      `loom: could not release anchored lock ${lockName}: ` +
+      `${error instanceof Error ? error.message : String(error)} — the lock file remains and ` +
+      `blocks other holders until stale-lock recovery reclaims it\n`,
+    );
   }
 }
 

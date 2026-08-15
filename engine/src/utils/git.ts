@@ -5,8 +5,20 @@
 
 import { execSync, execFileSync } from "node:child_process";
 
-/** Resolve git repo root: CLAUDE_PROJECT_DIR > git rev-parse > cwd */
-function resolveRepoRoot(): string | undefined {
+/**
+ * Resolve the git repository root FRESH: CLAUDE_PROJECT_DIR > git rev-parse >
+ * undefined (caller falls back to cwd).
+ *
+ * The single resolver every caller shares. It was previously duplicated in
+ * `utils/agent-definition.ts` with a bare `catch {}`, so the same failure was
+ * loud here and invisible there — and an unresolved root there silently drops
+ * repository-relative agent-definition candidates. One implementation, one
+ * diagnostic.
+ *
+ * `context` names the caller so a stderr line identifies which resolution
+ * failed, not just that one did.
+ */
+export function resolveRepositoryRoot(context = "module load"): string | undefined {
   if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR;
   try {
     return execSync("git rev-parse --show-toplevel", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim() || undefined;
@@ -15,14 +27,14 @@ function resolveRepoRoot(): string | undefined {
     // its failures read as "no tests written" — the one indistinguishable
     // lie this module must not tell without a trace.
     process.stderr.write(
-      `loom: git rev-parse --show-toplevel failed at module load (${error instanceof Error ? error.message : String(error)}) — ` +
+      `loom: git rev-parse --show-toplevel failed at ${context} (${error instanceof Error ? error.message : String(error)}) — ` +
         `remaining git helpers run against process.cwd and their failures will read as absent evidence\n`,
     );
     return undefined;
   }
 }
 
-const repoRoot = resolveRepoRoot();
+const repoRoot = resolveRepositoryRoot();
 
 export type GitRepositoryContext =
   | Readonly<{ ok: true; root: string; headSha: string }>

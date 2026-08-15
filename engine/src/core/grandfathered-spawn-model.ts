@@ -30,6 +30,9 @@
  */
 
 import type { AgentRequestAuthority } from "./orchestration-contract/roster";
+import { parseOrchestrationRunId } from "./orchestration-contract/identity";
+import { RUN_LAYOUT_COMPONENTS } from "./remediation-machine";
+import { parseRepositoryPath } from "./repository-path";
 
 /** Extract a `LOOM_<NAME>: <value>` marker line's value from a spawn prompt, or
  *  null when the marker is absent. Markers are engine-authored, one per line. */
@@ -48,6 +51,48 @@ export function runDirectoryFromContextPath(contextPath: string): string | null 
   const match = normalized.match(/^(.*)\/contexts\/[^/]+$/);
   const runDir = match?.[1];
   return runDir !== undefined && runDir !== "" ? runDir : null;
+}
+
+/**
+ * The run directory a spawn belongs to, ANCHORED — the only form a caller may
+ * read authority from.
+ *
+ * `runDirectoryFromContextPath` is pure string math over a marker the SPAWNING
+ * AGENT writes, so on its own it names any path the caller likes. Reading
+ * `<thatPath>/requests/*.json` and trusting the result made the model-policy
+ * gate forgeable: `parseStoredAgentRequestAuthority` proves only that a record
+ * is internally self-consistent (its `harnessBinding` is what
+ * `lowerModelProfile(modelProfile)` would produce — a pure, publicly derivable
+ * function), never that the engine wrote it. A hand-written authority under any
+ * writable directory therefore "proved" an arbitrary model.
+ *
+ * Anchoring restores the module header's claim that the authority lives in
+ * "guarded, tamper-evident run-directory state". A path qualifies only when all
+ * four hold:
+ *
+ *   1. it is lexically inside the repository (no `/tmp`, no `..` escape);
+ *   2. it sits under `.claude/`;
+ *   3. its PARENT is a canonical run-layout root (`RUN_LAYOUT_COMPONENTS`) —
+ *      the same set that marks a path as run evidence for remediation; and
+ *   4. its own name parses as an Orchestration Run Id.
+ *
+ * Those are exactly the directories the engine itself creates and guards.
+ * Returns the canonical absolute path, or null — and null always means the
+ * caller keeps its original block.
+ */
+export function anchoredRunDirectoryFromContextPath(
+  repositoryRoot: string,
+  contextPath: string,
+): string | null {
+  const candidate = runDirectoryFromContextPath(contextPath);
+  if (candidate === null) return null;
+  const contained = parseRepositoryPath(repositoryRoot, candidate, "spawn run directory");
+  if (!contained.ok) return null;
+  const components = contained.value.relative.split("/");
+  if (components.length < 3 || components[0] !== ".claude") return null;
+  if (!RUN_LAYOUT_COMPONENTS.has(components[components.length - 2]!)) return null;
+  if (!parseOrchestrationRunId(components[components.length - 1]!).ok) return null;
+  return contained.value.absolute;
 }
 
 /** The Claude Code model the engine issued for `requestId`, from the run's

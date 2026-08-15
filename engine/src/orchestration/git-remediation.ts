@@ -546,7 +546,23 @@ export function installVerifiedIndex(
   } finally {
     if (lockFd !== null) closeSync(lockFd);
     if (lockOwned && !installed) {
-      try { unlinkSync(lockPath); } catch { /* already removed */ }
+      // This is the REAL repository's `.git/index.lock`. ENOENT means it is
+      // already gone (the success path renamed it into place); anything else
+      // means the unlink failed and the lock is still sitting on the operator's
+      // repository, where it blocks every subsequent `git add`/`commit` with
+      // "Another git process seems to be running". Reporting the cause is the
+      // difference between a one-line fix and a mystery.
+      try {
+        unlinkSync(lockPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          process.stderr.write(
+            `loom: could not remove ${lockPath} after a failed index installation: ` +
+            `${error instanceof Error ? error.message : String(error)} — remove it manually before ` +
+            `running git again\n`,
+          );
+        }
+      }
     }
     discardTemporaryIndex(temporary);
   }

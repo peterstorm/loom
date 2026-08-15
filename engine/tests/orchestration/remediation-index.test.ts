@@ -9,6 +9,7 @@ import {
   discardTemporaryIndex,
   installVerifiedIndex,
   observeDirtyPaths,
+  observeStagedPaths,
   openGitRepository,
   readRepositoryBytes,
   readStagedPaths,
@@ -404,5 +405,121 @@ describe("index digests", () => {
     // A discarded index must not read back as "nothing staged" — that is
     // indistinguishable from a legitimately empty set.
     expect(staged.ok).toBe(false);
+  });
+});
+
+// --- observeStagedPaths: the dirty-index refusal probe -----------------------
+
+/**
+ * `observeStagedPaths` is the guard that refuses remediation when the real Git
+ * index already holds staged work. Its ONE caller is the remediation driver,
+ * and it had no test anywhere in the suite — so the check standing between
+ * "install a verified index" and "silently overwrite an operator's staged
+ * commit" was completely unexercised. A regression that returned `[]`
+ * unconditionally would have read as "index is clean" every time.
+ */
+describe("observing the real index before remediation", () => {
+  it("reports an empty set for a clean index", () => {
+    const repository = fixtureRepository();
+
+    const staged = observeStagedPaths(repository);
+
+    expect(staged.ok).toBe(true);
+    if (!staged.ok) return;
+    expect(staged.value).toEqual([]);
+  });
+
+  it("reports staged additions and modifications, sorted", () => {
+    const repository = fixtureRepository();
+    write(repository.root, "src/edited.ts", "export const edited = 2;\n");
+    write(repository.root, "src/added.ts", "export const added = 1;\n");
+    git(repository.root, ["add", "--", "src/edited.ts", "src/added.ts"]);
+
+    const staged = observeStagedPaths(repository);
+
+    expect(staged.ok).toBe(true);
+    if (!staged.ok) return;
+    expect(staged.value).toEqual(["src/added.ts", "src/edited.ts"]);
+  });
+
+  it("reports a staged deletion", () => {
+    const repository = fixtureRepository();
+    git(repository.root, ["rm", "--quiet", "--", "src/removed.ts"]);
+
+    const staged = observeStagedPaths(repository);
+
+    expect(staged.ok).toBe(true);
+    if (!staged.ok) return;
+    expect(staged.value).toEqual(["src/removed.ts"]);
+  });
+
+  it("reports both halves of a staged rename", () => {
+    const repository = fixtureRepository();
+    git(repository.root, ["mv", "src/renamed.ts", "src/renamed-to.ts"]);
+
+    const staged = observeStagedPaths(repository);
+
+    expect(staged.ok).toBe(true);
+    if (!staged.ok) return;
+    // A rename is a pair, not one edit: the driver must see the path that left
+    // as well as the one that arrived, or it authorizes only half the change.
+    expect(staged.value).toEqual(["src/renamed-to.ts", "src/renamed.ts"]);
+  });
+
+  it("keeps a path containing a newline intact", () => {
+    // The whole reason for `-z`: porcelain's default quoting would corrupt
+    // exactly the paths most worth getting right, and a corrupted path silently
+    // fails the later audit comparison instead of refusing here.
+    const repository = fixtureRepository();
+    const awkward = "src/awk\nward.ts";
+    write(repository.root, awkward, "export const awkward = 1;\n");
+    git(repository.root, ["add", "--", awkward]);
+
+    const staged = observeStagedPaths(repository);
+
+    expect(staged.ok).toBe(true);
+    if (!staged.ok) return;
+    expect(staged.value).toEqual([awkward]);
+  });
+
+  it("reports a typed failure instead of an empty set when git cannot run", () => {
+    const repository = fixtureRepository();
+    rmSync(join(repository.root, ".git"), { recursive: true, force: true });
+
+    const staged = observeStagedPaths(repository);
+
+    // Fail closed: "cannot tell" must never read as "nothing staged".
+    expect(staged.ok).toBe(false);
+  });
+});
+
+// --- installVerifiedIndex: concurrent index.lock ----------------------------
+
+describe("installing against a concurrently held index lock", () => {
+  it("refuses rather than stealing another process's index.lock", () => {
+    // The O_EXCL open is what makes installation exclusive. Only the
+    // witness-drift refusal had a test, so this branch — the one that keeps two
+    // installers from interleaving writes into the same index — was untested.
+    const repository = fixtureRepository();
+    write(repository.root, "src/edited.ts", "export const edited = 2;\n");
+    const { temporary, staged } = stageInto(repository, ["src/edited.ts"]);
+    expect(staged.ok).toBe(true);
+    const witness = snapshotRepositoryWitness(repository);
+    if (!witness.ok) throw new Error(witness.error.message);
+
+    // Another process holds the lock.
+    const lockPath = join(repository.root, ".git", "index.lock");
+    writeFileSync(lockPath, "");
+    cleanup.push(lockPath);
+
+    const installed = installVerifiedIndex(repository, temporary, witness.value);
+
+    expect(installed.ok).toBe(false);
+    if (installed.ok) return;
+    expect(installed.error.message).toContain("cannot atomically install verified index");
+    // The other holder's lock is left exactly where it was: this installer
+    // never owned it, so the failure path must not remove it.
+    expect(statSync(lockPath).isFile()).toBe(true);
+    expect(gitResult(repository.root, ["diff", "--cached", "--name-only"]).stdout.trim()).toBe("");
   });
 });

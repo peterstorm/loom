@@ -7,7 +7,7 @@
 import { canonicalRecord, failure, parseEffectId, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 import { includes, readDenseDataArray, readExactDataRecord } from './bytes';
 import { parseArtifactRef, type ArtifactRef } from './roster';
-import { batchPublicationIdentity, initialPublicationClaimKey, initialPublicationIssuanceCache, issuancePublicationIdentity, issuedSpawnRequest, parseContextReference, parseIssuedSpawnRequestAgainstRegistration, parseIssuedSpawnRequestProof, parsePublishedSpawnRequest, registeredBatchPublicationAuthority, resolveRegisteredPublicationAuthority, samePublicationIdentity, samePublishedRequest, type BatchPublicationIdentity, type BatchPublishedReceipt, type InitialPublicationClaimKey, type InitialPublicationIssuanceAuthority, type PublicationAuthorityResolver, type SpawnRequest } from './publication';
+import { batchPublicationIdentity, clearInitialPublicationIssuance, initialPublicationClaimKey, issuancePublicationIdentity, readInitialPublicationIssuance, issuedSpawnRequest, parseContextReference, parseIssuedSpawnRequestAgainstRegistration, parseIssuedSpawnRequestProof, parsePublishedSpawnRequest, registeredBatchPublicationAuthority, resolveRegisteredPublicationAuthority, samePublicationIdentity, samePublishedRequest, type BatchPublicationIdentity, type BatchPublishedReceipt, type InitialPublicationClaimKey, type InitialPublicationIssuanceAuthority, type PublicationAuthorityResolver, type SpawnRequest } from './publication';
 import { EXHAUSTED_RESULT_CATEGORIES, REQUEST_TERMINAL_CATEGORIES, RUN_TERMINAL_CATEGORIES, diagnosticFailure, parseDiagnosticMessage, parseSemanticAttemptPairAuthority, terminalBlockedDiagnostic, type BlockedDiagnostic, type DiagnosticConstructionError, type UserDecisionRequest } from './diagnostics';
 
 export type SpawnBatchAction = Readonly<{
@@ -83,7 +83,7 @@ export function inspectInitialPublicationIssuanceAuthority(
   if (typeof raw !== "object" || raw === null) {
     return actionFailure("initial issuance requires a fresh initial publication capability", "publicationAuthority");
   }
-  const state = initialPublicationIssuanceCache.get(raw);
+  const state = readInitialPublicationIssuance(raw);
   if (state === undefined) {
     return actionFailure(
       "initial publication capability is forged, incompatible with restart authority, or already consumed",
@@ -105,7 +105,7 @@ export function consumeInitialPublicationIssuanceAuthority(
   if (current.value !== expectedReceipt) {
     return actionFailure("initial publication capability changed during request construction", "publicationAuthority");
   }
-  initialPublicationIssuanceCache.delete(raw);
+  clearInitialPublicationIssuance(raw);
   return success(current.value);
 }
 

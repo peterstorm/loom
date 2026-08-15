@@ -39,6 +39,7 @@ import {
 import { deriveProofObligations, parseTaskProof, parseTaskTestResult } from "./core/proof-obligations";
 import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
 import { parseStoredSpecCheck } from "./core/spec-check";
+import { waveHasBlockCause } from "./core/wave-gate-model";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
 import { assertPiCliMutationCompatible, captureLoomRuntimeIdentity } from "./runtime-compatibility";
 
@@ -150,6 +151,60 @@ function parseSpecCheckField(v: unknown):
   if (v === undefined) return { ok: true, value: undefined };
   const parsed = parseStoredSpecCheck(v);
   return parsed.ok ? { ok: true, value: parsed.value } : { ok: false, error: parsed.errors.join("; ") };
+}
+
+/**
+ * Prove every `blocked: true` gate has a CAUSE.
+ *
+ * `blocked` is an orthogonal veto — it legitimately coexists with
+ * `impl_complete`/`reviews_complete` (see `WaveGate`), so no combination of the
+ * flags is contradictory on its own. What IS meaningless is a veto with no
+ * reason behind it: the flag has exactly two causes, and `update-task-status`
+ * already clears it when the last one dies, with a comment promising "the flag
+ * now tracks its causes, exactly like the load boundary's cross-field proof" —
+ * a proof that did not exist. Its absence is not cosmetic:
+ * `validate-task-execution` renders a causeless gate as
+ *
+ *     BLOCKED: Wave N review gate not passed.
+ *     Wave N is BLOCKED due to:
+ *     Run: /wave-gate
+ *
+ * — a refusal with an empty reason list, and `/wave-gate` cannot clear a block
+ * whose cause it cannot find. The wave dead-ends. Proving the cause at load
+ * means a drifted or hand-edited graph is rejected with a diagnostic instead of
+ * reaching that state, exactly as the `tests_passed: false` rule above does.
+ *
+ * The two causes, verbatim from the writers:
+ *   1. `store-review-findings` / the Pi mirror set `blocked: true` when a task
+ *      in that wave stores critical review findings.
+ *   2. `store-spec-check-findings` / the Pi mirror set it when the wave's
+ *      spec-check reports `critical_count > 0`.
+ */
+function blockedGateCauseError(
+  waveGates: Record<string, unknown>,
+  tasks: readonly Record<string, unknown>[],
+  specCheck: SpecCheck | undefined,
+): string | null {
+  const causeTasks = tasks.map((task) => ({
+    wave: typeof task.wave === "number" ? task.wave : Number.NaN,
+    critical_findings: Array.isArray(task.critical_findings)
+      ? (task.critical_findings as readonly string[])
+      : undefined,
+  }));
+  for (const [wave, gate] of Object.entries(waveGates)) {
+    if ((gate as Record<string, unknown>).blocked !== true) continue;
+    // The SAME predicate the writers use to set and clear the flag
+    // (`core/wave-gate-model`), so the boundary can never disagree with them
+    // about what counts as a cause.
+    if (waveHasBlockCause(causeTasks, specCheck, Number(wave))) continue;
+    return (
+      `wave_gates["${wave}"]: blocked: true has no cause — no task in wave ${wave} carries ` +
+      `critical review findings and spec_check does not report a critical finding for it. ` +
+      `A causeless block withholds the wave with an empty "BLOCKED due to:" reason list; ` +
+      `clear the flag or restore the findings that justify it (\`--fix\` clears it)`
+    );
+  }
+  return null;
 }
 
 const ACTIVE_WAVE_GATE_FIELDS = [
@@ -967,6 +1022,13 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
   }
   const specCheck = parseSpecCheckField(obj.spec_check);
   if (!specCheck.ok) return parseErr(specCheck.error);
+
+  const blockedCauseError = blockedGateCauseError(
+    waveGates as Record<string, unknown>,
+    tasks as Record<string, unknown>[],
+    specCheck.value,
+  );
+  if (blockedCauseError !== null) return parseErr(blockedCauseError);
 
   const registrations = parseWaveGateRegistrations(obj);
   if (!registrations.ok) return parseErr(registrations.error);

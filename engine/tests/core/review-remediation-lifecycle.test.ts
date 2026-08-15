@@ -382,10 +382,15 @@ describe("packet-bound remediation review runs", () => {
   });
 
   it("does not mint a duplicate when a reviewer re-emits an unchanged prior finding", () => {
-    const original = reviewedTask();
-    original.findings = original.findings?.map((finding, index) =>
-      index === 0 ? { ...finding, line: 2 } : finding
-    );
+    const base = reviewedTask();
+    // A Task is fully readonly: produce a NEW task instead of assigning into
+    // the loaded one — the invariant the type now enforces at compile time.
+    const original: Task = {
+      ...base,
+      findings: base.findings?.map((finding, index) =>
+        index === 0 ? { ...finding, line: 2 } : finding
+      ),
+    };
     let task = start(original);
     task = applyAgent(task, AGENTS[0], ["still_present", "still_present"], [
       { severity: "critical", claim: "null result is silently accepted" },
@@ -397,10 +402,15 @@ describe("packet-bound remediation review runs", () => {
   });
 
   it("fails evidence capture when one reviewer resolves and identically re-emits a prior finding", () => {
-    const original = reviewedTask();
-    original.findings = original.findings?.map((finding, index) =>
-      index === 0 ? { ...finding, line: 2 } : finding
-    );
+    const base = reviewedTask();
+    // A Task is fully readonly: produce a NEW task instead of assigning into
+    // the loaded one — the invariant the type now enforces at compile time.
+    const original: Task = {
+      ...base,
+      findings: base.findings?.map((finding, index) =>
+        index === 0 ? { ...finding, line: 2 } : finding
+      ),
+    };
     const task = applyAgent(
       start(original),
       AGENTS[0],

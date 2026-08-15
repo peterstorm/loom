@@ -25,10 +25,11 @@ import {
   validateAgentPolicyFrontmatter,
 } from "../../core/model-profiles";
 import {
+  anchoredRunDirectoryFromContextPath,
   engineIssuedClaudeModel,
   loomMarkerValue,
-  runDirectoryFromContextPath,
 } from "../../core/grandfathered-spawn-model";
+import { resolveRepositoryRoot } from "../../utils/git";
 import { parseStoredAgentRequestAuthority, type AgentRequestAuthority } from "../../core/orchestration-contract/roster";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
@@ -199,19 +200,30 @@ export function engineIssuedClaudeModelFromRunDir(
 
 /**
  * Did the engine itself issue `requestedModel` for the request this spawn
- * carries? Reads the issued authorities directly from the run directory the
- * spawn self-identifies (LOOM_CONTEXT_PATH), keyed on its LOOM_REQUEST_ID.
- * Every failure — no markers, unreadable dir, no matching authority — returns
- * false so the caller keeps the original block: the rescue can only ADD an
- * allow when a real, guarded, tamper-evident authority proves the model, never
- * remove one.
+ * carries? Keyed on the spawn's LOOM_REQUEST_ID, read from the run directory
+ * its LOOM_CONTEXT_PATH names — but only after that directory is ANCHORED to a
+ * canonical, in-repository Run Directory (`anchoredRunDirectoryFromContextPath`).
+ *
+ * The anchor is the whole security property. Both markers are written by the
+ * spawning agent, and a stored authority proves only internal self-consistency,
+ * never authorship; without anchoring, a self-consistent authority JSON under
+ * ANY writable path (`/tmp/x/requests/a.json`) let a spawn name whatever model
+ * it liked. Anchoring confines the read to directories the engine creates and
+ * guards.
+ *
+ * Every failure — no markers, an unanchored path, an unreadable dir, no
+ * matching authority — returns false so the caller keeps the original block:
+ * the rescue can only ADD an allow when a real, guarded authority proves the
+ * model, never remove one.
  */
-function spawnModelIsEngineAuthorized(input: PreToolUseInput, requestedModel: string): boolean {
+export function spawnModelIsEngineAuthorized(input: PreToolUseInput, requestedModel: string): boolean {
   const prompt = typeof input.tool_input?.prompt === "string" ? input.tool_input.prompt : "";
   const requestId = loomMarkerValue(prompt, "REQUEST_ID");
   const contextPath = loomMarkerValue(prompt, "CONTEXT_PATH");
   if (requestId === null || contextPath === null) return false;
-  const runDirectory = runDirectoryFromContextPath(contextPath);
+  const repositoryRoot = resolveRepositoryRoot();
+  if (repositoryRoot === undefined) return false;
+  const runDirectory = anchoredRunDirectoryFromContextPath(repositoryRoot, contextPath);
   if (runDirectory === null) return false;
   return engineIssuedClaudeModelFromRunDir(runDirectory, requestId) === requestedModel;
 }

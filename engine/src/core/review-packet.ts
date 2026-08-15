@@ -23,6 +23,33 @@ declare const REVIEW_PATH: unique symbol;
 /** Canonical repository-relative POSIX path produced only by parseReviewPath. */
 export type ReviewPath = string & { readonly [REVIEW_PATH]: true };
 
+declare const BASE_SHA: unique symbol;
+declare const HEAD_SHA: unique symbol;
+/**
+ * The packet's two git revisions, branded SEPARATELY.
+ *
+ * They were adjacent, identically-typed plain strings validated by the same
+ * `parseGitSha`, so `{ baseSha: head, headSha: base }` type-checked perfectly
+ * and produced a packet whose diff endpoints are reversed — a packet that
+ * hashes, stores, and verifies cleanly while describing the inverse change
+ * set. Distinct brands make the transposition a compile error at the
+ * construction site, which is the only place it can be caught.
+ */
+export type BaseSha = string & { readonly [BASE_SHA]: true };
+export type HeadSha = string & { readonly [HEAD_SHA]: true };
+
+/** Smart constructor for the packet's BASE revision. */
+export function parseBaseSha(raw: unknown, label = "baseSha"): ParseResult<BaseSha> {
+  const parsed = parseGitSha(raw, label);
+  return parsed.ok ? ok(parsed.value as BaseSha) : parsed;
+}
+
+/** Smart constructor for the packet's HEAD revision. */
+export function parseHeadSha(raw: unknown, label = "headSha"): ParseResult<HeadSha> {
+  const parsed = parseGitSha(raw, label);
+  return parsed.ok ? ok(parsed.value as HeadSha) : parsed;
+}
+
 export interface ReviewPacketArtifactInput {
   readonly path: string;
   readonly diff: string;
@@ -32,8 +59,8 @@ export interface ReviewPacketArtifactInput {
 
 export interface ReviewPacketInput {
   readonly task: JsonObject;
-  readonly baseSha: string;
-  readonly headSha: string;
+  readonly baseSha: BaseSha;
+  readonly headSha: HeadSha;
   readonly declaredPaths: readonly string[];
   readonly modifiedPaths: readonly string[];
   readonly artifacts: readonly ReviewPacketArtifactInput[];
@@ -62,8 +89,8 @@ export interface ReviewPacket {
   readonly schemaVersion: typeof REVIEW_PACKET_SCHEMA_VERSION;
   readonly packetId: string;
   readonly task: JsonObject;
-  readonly baseSha: string;
-  readonly headSha: string;
+  readonly baseSha: BaseSha;
+  readonly headSha: HeadSha;
   readonly declaredPaths: readonly string[];
   readonly modifiedPaths: readonly string[];
   readonly artifacts: readonly ReviewPacketArtifact[];
@@ -82,8 +109,8 @@ export interface VerifiedReviewPacketRecovery {
   readonly schemaVersion: 1 | typeof REVIEW_PACKET_SCHEMA_VERSION;
   readonly packetId: string;
   readonly taskId: string;
-  readonly baseSha: string;
-  readonly headSha: string;
+  readonly baseSha: BaseSha;
+  readonly headSha: HeadSha;
   readonly declaredPaths: readonly string[];
   readonly modifiedPaths: readonly string[];
   readonly artifacts: readonly Readonly<{
@@ -378,8 +405,8 @@ export function createReviewPacket(input: ReviewPacketInput): ParseResult<Review
   const task = parseJsonObject(input.task, "task");
   const planContext = parseJsonValue(input.planContext, "planContext");
   const proofObligations = parseJsonValue(input.proofObligations, "proofObligations");
-  const baseSha = parseGitSha(input.baseSha, "baseSha");
-  const headSha = parseGitSha(input.headSha, "headSha");
+  const baseSha = parseBaseSha(input.baseSha);
+  const headSha = parseHeadSha(input.headSha);
   const declaredPaths = parsePathSet(input.declaredPaths, "declaredPaths");
   const modifiedPaths = parsePathSet(input.modifiedPaths, "modifiedPaths");
   const parsed = [task, planContext, proofObligations, baseSha, headSha, declaredPaths, modifiedPaths];
@@ -464,7 +491,7 @@ export function parseReviewPacket(raw: unknown): ParseResult<ReviewPacket> {
   const artifacts = parseHashedArtifacts(value.artifacts);
   if (!artifacts.ok) return artifacts;
   const rebuilt = createReviewPacket({
-    task: value.task as JsonObject, baseSha: value.baseSha as string, headSha: value.headSha as string,
+    task: value.task as JsonObject, baseSha: value.baseSha as BaseSha, headSha: value.headSha as HeadSha,
     declaredPaths: value.declaredPaths as readonly string[], modifiedPaths: value.modifiedPaths as readonly string[],
     artifacts: artifacts.value, planContext: value.planContext as JsonValue,
     proofObligations: value.proofObligations as readonly JsonValue[],
@@ -494,8 +521,8 @@ function parseLegacyRecoveryPacket(value: Record<string, unknown>): ParseResult<
   const task = parseJsonObject(value.task, "task");
   const planContext = parseJsonValue(value.planContext, "planContext");
   const proofObligations = parseJsonValue(value.proofObligations, "proofObligations");
-  const baseSha = parseGitSha(value.baseSha, "baseSha");
-  const headSha = parseGitSha(value.headSha, "headSha");
+  const baseSha = parseBaseSha(value.baseSha);
+  const headSha = parseHeadSha(value.headSha);
   const declaredPaths = parsePathSet(value.declaredPaths, "declaredPaths");
   const modifiedPaths = parsePathSet(value.modifiedPaths, "modifiedPaths");
   const errors = [task, planContext, proofObligations, baseSha, headSha, declaredPaths, modifiedPaths]

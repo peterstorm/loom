@@ -70,7 +70,7 @@ import {
 } from "../../core/panel-program";
 import { resolveModelProfile, lowerModelProfile } from "../../core/model-profiles";
 import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../orchestration/context-packets";
-import { parseRefutationVerdict, type RefutationVerdict } from "../../core/review-panel";
+import { countRefutationVotes, defaultRefutationThreshold, parseRefutationVerdict, type RefutationVerdict } from "../../core/review-panel";
 import { aggregateVerdicts, candidateFilename, parseJudgeVerdict, type JudgeVerdict } from "../../core/panel-contract";
 import type { VerdictEnvelope } from "../../core/panel-kernel";
 import { createEffectRunner } from "../../orchestration/effect-runner";
@@ -1031,18 +1031,23 @@ function executeDeterministicPanelOperation(
       if (!parsed.ok) return { ok: false, message: parsed.errors.join("; ") };
       verdicts.push(parsed.value);
     }
-    const threshold = Math.floor(input.lenses.length / 2) + 1;
+    // The threshold formula and the k-of-n rule are DOMAIN rules and live in
+    // the core (`defaultRefutationThreshold` / `countRefutationVotes`), which
+    // the persistent panel path already delegates to. This branch used to
+    // reimplement both inline, so the same votes could be adjudicated two ways
+    // by two code paths with nothing to keep them in step.
+    const threshold = defaultRefutationThreshold(input.lenses.length);
     const outcomes = input.criticalFindingIds.map((findingId) => {
-      const votes = verdicts.map((verdict, index) => Object.freeze({
+      const judgements = verdicts.map((verdict, index) => Object.freeze({
         lens: input.lenses[index]!,
-        vote: verdict.entries.find((entry) => entry.findingId === findingId)!,
+        entry: verdict.entries.find((entry) => entry.findingId === findingId)!,
       }));
-      const refutations = votes.filter(({ vote }) => vote.verdict === "refuted");
+      const tallied = countRefutationVotes(judgements, threshold);
       return Object.freeze({
         finding_id: findingId,
-        survives: refutations.length < threshold,
-        refuted_by: Object.freeze(refutations.map(({ lens }) => lens)),
-        votes: Object.freeze(votes),
+        survives: tallied.survives,
+        refuted_by: Object.freeze(tallied.refutations.map(({ lens }) => lens)),
+        votes: Object.freeze(judgements.map(({ lens, entry }) => Object.freeze({ lens, vote: entry }))),
       });
     });
     const result = Object.freeze({

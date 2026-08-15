@@ -19,8 +19,7 @@ import { extractTaskId } from "../../utils/extract-task-id";
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { canonicalRepositoryPaths } from "../../utils/repository-path";
 import {
-  changedDeclaredArtifactsSince,
-  changedRepositoryArtifactsSince,
+  compareAttemptBaseline,
 } from "../../utils/artifact-baseline";
 import { attributedChangedArtifacts } from "../../core/artifact-baseline";
 import { invalidateTaskReview } from "../../core/review-output";
@@ -674,29 +673,27 @@ export const runUpdateTaskStatus = async (
     };
   }
 
-  let changedDeclaredArtifacts: readonly string[];
-  let bytesChangedSinceAttempt: boolean;
-  try {
-    const root = git.repositoryRoot() ?? process.cwd();
-    changedDeclaredArtifacts = changedDeclaredArtifactsSince(root, task.artifact_baseline);
-    // The compact repository boundary detects declared and undeclared writes,
-    // including paths that became clean again. A missing legacy boundary fails
-    // closed through changedRepositoryArtifactsSince.
-    bytesChangedSinceAttempt = task.attempt_repository_baseline === undefined
-      ? task.attempt_artifact_baseline === undefined ||
-        changedDeclaredArtifactsSince(root, task.attempt_artifact_baseline).length > 0 ||
-        filesModified.some((path) =>
-          !task.attempt_artifact_baseline?.some(({ artifact }) => artifact === path)
-        )
-      : changedRepositoryArtifactsSince(root, task.attempt_repository_baseline).length > 0;
-  } catch (error) {
+  // The compact repository boundary detects declared and undeclared writes,
+  // including paths that became clean again; a missing legacy boundary falls
+  // back to the declared-artifact baseline. Shared with the three Pi call sites
+  // through `compareAttemptBaseline` — this was a fourth hand-written copy of
+  // the same comparison, and four copies of one rule are four chances to
+  // disagree about what "the bytes changed" means.
+  const comparison = compareAttemptBaseline(
+    git.repositoryRoot() ?? process.cwd(),
+    task,
+    { kind: "repository-or-declared", extraModifiedPaths: filesModified },
+  );
+  const changedDeclaredArtifacts = comparison.changedDeclaredArtifacts;
+  const bytesChangedSinceAttempt = comparison.bytesChangedSinceAttempt;
+  if (comparison.failure !== null) {
     await mgr.update((s) => ({
       ...s,
       executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
     }));
     return {
       kind: "error",
-      message: `update-task-status: cannot compare declared-artifact baseline for ${taskId}: ${error instanceof Error ? error.message : String(error)}`,
+      message: `update-task-status: cannot compare declared-artifact baseline for ${taskId}: ${comparison.failure}`,
     };
   }
 

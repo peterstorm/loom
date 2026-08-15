@@ -54,6 +54,22 @@ export interface WaveGate {
    *  graph cannot mint a "Integration tests failed" branch that nothing writes. */
   readonly tests_passed: true | null;
   readonly reviews_complete: boolean;
+  /**
+   * An ORTHOGONAL VETO, not a phase. `blocked` deliberately coexists with
+   * `impl_complete`/`reviews_complete`: every reader computes completion as
+   * `impl_complete && tests_passed === true && reviews_complete && !blocked`,
+   * so a finished-but-vetoed wave is a real, intended state — two independent
+   * reviewers read the trio as a contradictory tri-state, which it is not.
+   *
+   * What the flag may NOT be is causeless. It has exactly two causes —
+   * critical review findings on a task in this wave, and a wave-scoped
+   * spec-check with `critical_count > 0` — and `validate-task-execution`
+   * enumerates them verbatim when it refuses to run the next wave. A
+   * `blocked: true` with neither prints "BLOCKED due to:" followed by nothing
+   * and withholds the wave with no reason the operator can act on. The load
+   * boundary proves the cause (`blockedGateCauseError`), so a drifted or
+   * hand-edited graph cannot mint that dead end.
+   */
   readonly blocked: boolean;
 }
 
@@ -62,4 +78,66 @@ export interface WaveGate {
  *  a field to WaveGate updates every construction site at once. */
 export function newWaveGate(): WaveGate {
   return { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false };
+}
+
+// ---------------------------------------------------------------------------
+// `blocked` and its causes — ONE definition, shared by writers and the boundary
+// ---------------------------------------------------------------------------
+
+/** The minimum a task must expose for the cause rule to read it. */
+export interface WaveBlockCauseTask {
+  readonly wave: number;
+  readonly critical_findings?: readonly string[];
+}
+
+/** The minimum a spec-check record must expose for the cause rule to read it. */
+export interface WaveBlockCauseSpecCheck {
+  readonly wave: number;
+  readonly verdict: string;
+  readonly critical_count?: number;
+}
+
+/**
+ * Does wave `wave` have a CAUSE to be blocked, right now?
+ *
+ * `blocked` has exactly two causes — a task in the wave carrying critical
+ * review findings, and a wave-scoped spec-check reporting a critical — and
+ * `validate-task-execution` enumerates precisely those two when it refuses to
+ * start the next wave. This predicate is that rule, and it is deliberately the
+ * ONLY copy: every writer that sets or clears the flag computes it from here,
+ * and the load boundary proves the stored flag against it. When the rule lived
+ * only in the setters, both clearers were simply missing — `store-review-findings`
+ * downgrading the last critical, and the refutation tally refuting every
+ * finding, each left `blocked: true` standing over an empty cause set, and the
+ * wave dead-ended behind a "BLOCKED due to:" list with nothing in it.
+ */
+export function waveHasBlockCause(
+  tasks: readonly WaveBlockCauseTask[],
+  specCheck: WaveBlockCauseSpecCheck | undefined,
+  wave: number,
+): boolean {
+  if (tasks.some((task) => task.wave === wave && (task.critical_findings?.length ?? 0) > 0)) return true;
+  return specCheck !== undefined &&
+    specCheck.wave === wave &&
+    specCheck.verdict !== "EVIDENCE_CAPTURE_FAILED" &&
+    (specCheck.critical_count ?? 0) > 0;
+}
+
+/**
+ * The wave-gate record with `blocked` re-derived from the causes present in
+ * `tasks`/`specCheck`. Returns the SAME record object when nothing changes, so
+ * a caller can leave `wave_gates` untouched on a no-op.
+ */
+export function reconcileWaveBlock<Gates extends Readonly<Record<string, WaveGate>>>(
+  gates: Gates,
+  tasks: readonly WaveBlockCauseTask[],
+  specCheck: WaveBlockCauseSpecCheck | undefined,
+  wave: number,
+): Gates {
+  const key = String(wave);
+  const existing = gates[key] ?? newWaveGate();
+  const blocked = waveHasBlockCause(tasks, specCheck, wave);
+  return existing.blocked === blocked && gates[key] !== undefined
+    ? gates
+    : ({ ...gates, [key]: { ...existing, blocked } } as Gates);
 }

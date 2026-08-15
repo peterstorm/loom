@@ -3078,3 +3078,135 @@ describe("legacy Pi bridge", () => {
     }
   });
 });
+
+/**
+ * The Pi extension's fail-closed BACKSTOPS.
+ *
+ * Three refusals sit at the top of `tool_call` and had no test between them:
+ * the outer catch that blocks the call when any loom guard throws, the
+ * invalid-session-id spawn refusal, and the duplicate-`toolCallId` spawn
+ * refusal. Each is the last thing standing between a malformed event and an
+ * unguarded action, and each fails in the direction that matters only if it
+ * actually runs — a regression turning any of them into a pass-through would
+ * have been invisible.
+ */
+describe("Pi extension tool_call fail-closed backstops", () => {
+  const extension = async () => {
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      default: (pi: unknown) => void;
+    };
+    const pi = new FakePi();
+    module.default(pi as never);
+    return pi;
+  };
+
+  const SESSION = "019fca39-f989-7510-8e62-50dadbcad4a1";
+
+  it("BLOCKS the call when a guard throws, naming the guard", async () => {
+    const pi = await extension();
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      // A bash event whose `input.command` throws on read: the guard runs, the
+      // read explodes inside it, and the outer catch must convert that into a
+      // BLOCK. Returning allow — or letting the throw escape — would let an
+      // unjudged bash command through while the operator believed the
+      // state-file guard was armed.
+      const results = await pi.emit("tool_call", {
+        toolName: "bash",
+        toolCallId: "call-guard-crash",
+        input: new Proxy({}, {
+          get(_target, property) {
+            if (property === "command") throw new Error("synthetic guard fault");
+            return undefined;
+          },
+        }),
+      }, { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } });
+
+      expect(results).toContainEqual(expect.objectContaining({
+        block: true,
+        reason: expect.stringContaining("crashed (failing closed)"),
+      }));
+      expect(results).toContainEqual(expect.objectContaining({
+        reason: expect.stringContaining("guard-state-file"),
+      }));
+      expect(results).toContainEqual(expect.objectContaining({
+        reason: expect.stringContaining("synthetic guard fault"),
+      }));
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toContain("blocking the call (fail-closed)");
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("REFUSES a subagent spawn whose session id cannot be parsed", async () => {
+    const pi = await extension();
+    // Lifecycle evidence is keyed by session id and names files under the
+    // subagent directory. An unparseable id cannot be recorded safely, so the
+    // spawn is refused rather than started with no lifecycle binding — a
+    // subagent nothing can later attribute or clean up.
+    const results = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-invalid-session",
+      input: {
+        agent: "code-reviewer",
+        task: "LOOM_REVIEW_CONTEXT: standalone\nReview the exact frozen scope.",
+        agentScope: "user",
+      },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => "../../etc/passwd" } });
+
+    expect(results).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("invalid session id"),
+    }));
+    expect(results).toContainEqual(expect.objectContaining({
+      reason: expect.stringContaining("refusing spawn"),
+    }));
+  });
+
+  it("REFUSES a second spawn that reuses a live toolCallId in the same session", async () => {
+    const pi = await extension();
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } };
+    const input = {
+      agent: "code-reviewer",
+      task: "LOOM_REVIEW_CONTEXT: standalone\nReview the exact frozen scope.",
+      agentScope: "user",
+    };
+
+    // The first spawn reserves lifecycle identity under this toolCallId.
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId: "call-duplicate", input,
+    }, context)).toEqual([undefined]);
+
+    // The second must be refused: cleanup and result correlation are keyed by
+    // toolCallId, so two live spawns sharing one would have their reservations
+    // and write grants collide — the second silently inheriting or destroying
+    // the first's bindings.
+    const repeated = await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId: "call-duplicate", input,
+    }, context);
+
+    expect(repeated).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("Duplicate Pi subagent toolCallId"),
+    }));
+  });
+
+  it("REFUSES a spawn with no toolCallId at all", async () => {
+    const pi = await extension();
+    const results = await pi.emit("tool_call", {
+      toolName: "subagent",
+      input: {
+        agent: "code-reviewer",
+        task: "LOOM_REVIEW_CONTEXT: standalone\nReview the exact frozen scope.",
+        agentScope: "user",
+      },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } });
+
+    expect(results).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("without a subagent toolCallId"),
+    }));
+  });
+});

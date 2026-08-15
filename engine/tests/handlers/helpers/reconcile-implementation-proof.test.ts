@@ -6,7 +6,18 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { evaluateTaskProof, PI_STRUCTURED_EVIDENCE_POLICY } from "../../../src/core/proof-obligations";
-import { createReviewPacket, serializeReviewPacket } from "../../../src/core/review-packet";
+import { createReviewPacket, parseBaseSha, parseHeadSha, serializeReviewPacket, type BaseSha, type HeadSha } from "../../../src/core/review-packet";
+
+const base = (hex: string): BaseSha => {
+  const parsed = parseBaseSha(hex);
+  if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+  return parsed.value;
+};
+const head = (hex: string): HeadSha => {
+  const parsed = parseHeadSha(hex);
+  if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+  return parsed.value;
+};
 import {
   parseRecoveredBaselineSha,
   parseRecoveryPacketBindings,
@@ -105,8 +116,8 @@ describe("historical baseline recovery CLI", () => {
     );
     const packet = createReviewPacket({
       task: { id: "T5", description: "implementation" },
-      baseSha: historical,
-      headSha: poisonedStart,
+      baseSha: base(historical),
+      headSha: head(poisonedStart),
       declaredPaths: ["src/a.ts"],
       modifiedPaths: ["src/a.ts"],
       artifacts: [{ path: "src/a.ts", diff: "+implemented\n", postimage: Buffer.from(implemented) }],
@@ -189,8 +200,8 @@ describe("historical baseline recovery CLI", () => {
     const invalidPacketRelative = ".claude/reviews/T6-bound-as-T5.json";
     const wrongTaskPacket = createReviewPacket({
       task: { id: "T6", description: "wrong task" },
-      baseSha: historical,
-      headSha: poisonedStart,
+      baseSha: base(historical),
+      headSha: head(poisonedStart),
       declaredPaths: ["src/a.ts"],
       modifiedPaths: ["src/a.ts"],
       artifacts: [{ path: "src/a.ts", diff: "+implemented\n", postimage: Buffer.from(implemented) }],

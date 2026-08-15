@@ -484,3 +484,131 @@ describe("program job", () => {
     expect(codec.decode(stored).ok).toBe(true);
   });
 });
+
+// --- onRejected: the illegal-event landing state ----------------------------
+
+/**
+ * `onRejected` is the adapter's explicit landing state for a REJECTED event.
+ *
+ * Domain reducers refuse illegal events rather than throwing, so without an
+ * explicit landing the kernel would keep the prior state — and a rejected event
+ * would appear in the audit log as a successful self-loop, indistinguishable
+ * from a transition that legitimately did nothing. Every existing test drove
+ * `onRejected` only through the raw `transition` seam, never through
+ * `runProgram`, so the behaviour that actually reaches the journal and the
+ * checkpoint was unverified.
+ */
+describe("illegal events land in the rejection state through runProgram", () => {
+  it("drives an illegal event to the rejection landing rather than a self-loop", async () => {
+    const journal = createInMemoryProgramJournal();
+    // `committed` is legal only from `ready`; the genesis stage is `preparing`.
+    // The reducer REJECTS it, `onRejected` lands in the failed state, and a
+    // failed terminal is a runtime failure — never a quiet return to the prior
+    // state, which is what would make a rejection look like a successful no-op.
+    const result = await drive(journal, genesis, [{ kind: "committed" }]);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.message).toContain("failed terminal state");
+  });
+
+  it("never checkpoints the rejection landing, because it is terminal-failed", async () => {
+    const journal = createInMemoryProgramJournal();
+    await drive(journal, genesis, [{ kind: "committed" }]);
+
+    // The same rule the clean terminal-failed case pins: a failed state is not
+    // a resumption point, so nothing durable may point at it.
+    expect(await journal.readCheckpoint()).toBeNull();
+  });
+
+  it("leaves NOTHING durable behind, so a resume replays from the last good state", async () => {
+    const journal = createInMemoryProgramJournal();
+    await drive(journal, genesis, [{ kind: "committed" }]);
+
+    // A rejected event is not history: it never happened as far as the run is
+    // concerned, so neither the log nor the checkpoint may record it. Were it
+    // appended, every later replay would re-derive the failed landing and the
+    // run could never be resumed at all.
+    expect(await journal.readEvents()).toEqual([]);
+    expect(await journal.readCheckpoint()).toBeNull();
+
+    const replayed = replayProgram(machine, genesis, await journal.readEvents());
+    expect(replayed.state.stage).toBe("preparing");
+  });
+
+  it("reaches the rejection landing through the machine seam itself", () => {
+    // The landing state is what the adapter substitutes for the refusal, and it
+    // carries the diagnostic into context rather than discarding it.
+    const landed = machine.transition(
+      { stage: "preparing", accepted: 0 },
+      { kind: "committed" },
+      { runId: "run.test-1", seen: new Set<string>() },
+    );
+
+    expect(landed.state.stage).toBe("failed");
+    expect([...landed.context.seen].some((entry) =>
+      entry.startsWith("rejected:") && entry.includes("committed is not accepted during preparing"),
+    )).toBe(true);
+  });
+
+  it("an executor that throws mid-run lands through errorEventOf, not as an exception", async () => {
+    const journal = createInMemoryProgramJournal();
+    // An empty script: the scripted executor throws "script exhausted", which
+    // the runtime must classify into a domain event rather than propagate.
+    const result = await drive(journal, genesis, []);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.message).toContain("failed terminal state");
+    // The throw was classified into a domain `fail` event, not propagated: the
+    // outcome is a typed runtime failure, and nothing durable claims progress.
+    expect(await journal.readCheckpoint()).toBeNull();
+  });
+});
+
+// --- resumeProgram against a corrupt checkpoint -----------------------------
+
+/**
+ * `resumeProgram` with a corrupt checkpoint.
+ *
+ * The corruption cases were tested only against the raw codec. Whether
+ * `resumeProgram` — the function an actual resume calls — propagates that
+ * refusal or quietly falls back to the replayed prefix was never checked, and
+ * a fallback would resume a run from a state its own checkpoint contradicts.
+ */
+describe("resuming against a corrupt checkpoint", () => {
+  it("refuses rather than silently trusting the replayed prefix", () => {
+    const resumed = resumeProgram({
+      machine,
+      codec,
+      genesis,
+      records: [],
+      checkpoint: "{not json",
+    });
+
+    expect(resumed.ok).toBe(false);
+  });
+
+  it("refuses a structurally valid checkpoint whose stage is unknown", () => {
+    const resumed = resumeProgram({
+      machine,
+      codec,
+      genesis,
+      records: [],
+      checkpoint: JSON.stringify({
+        schemaVersion: 1,
+        data: { state: { stage: "not-a-stage", accepted: 0 }, context: { runId: "run.test-1", seen: [] } },
+      }),
+    });
+
+    expect(resumed.ok).toBe(false);
+  });
+
+  it("accepts a null checkpoint as 'nothing persisted yet' and returns the replay", () => {
+    const resumed = resumeProgram({ machine, codec, genesis, records: [], checkpoint: null });
+
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(resumed.value.state.stage).toBe("preparing");
+  });
+});

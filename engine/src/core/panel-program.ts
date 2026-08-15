@@ -509,12 +509,23 @@ export function startRefutationDispatchProgram(
 /** Alias that emphasizes parse-don't-validate construction. */
 export const parseRefutationProgram = startRefutationProgram;
 
-interface SlotSettlement<Request extends SpawnRequest> {
-  readonly slots: NonEmpty<PendingSlot<Request>>;
-  readonly outcome: "waiting" | "retry" | "complete" | "blocked";
-  readonly retry?: Request;
-  readonly reason?: string;
-}
+/**
+ * How one settled slot leaves the panel — a DISCRIMINATED UNION.
+ *
+ * `retry` and `reason` are each meaningful for exactly one outcome, but they
+ * used to hang off the record as independently-optional fields alongside a
+ * plain `outcome` string. The type then said nothing the readers needed, so
+ * all five call sites recovered the coupling by hand: `result.reason!` on the
+ * blocked arm (five non-null assertions, each one a place the union could be
+ * wrong with no compile error) and an `if (retry?.interaction !== ...)` dance
+ * on the retry arm. Discriminating on `outcome` puts the payload where it
+ * belongs and the assertions disappear.
+ */
+type SlotSettlement<Request extends SpawnRequest> =
+  | Readonly<{ slots: NonEmpty<PendingSlot<Request>>; outcome: "waiting" }>
+  | Readonly<{ slots: NonEmpty<PendingSlot<Request>>; outcome: "complete" }>
+  | Readonly<{ slots: NonEmpty<PendingSlot<Request>>; outcome: "retry"; retry: Request }>
+  | Readonly<{ slots: NonEmpty<PendingSlot<Request>>; outcome: "blocked"; reason: string }>;
 
 function settleSlots<Request extends SpawnRequest>(
   slots: NonEmpty<PendingSlot<Request>>,
@@ -611,11 +622,11 @@ export function reduceArchitectureProgram(
       const result = settled.value;
       if (result.outcome === "retry") {
         const retry = result.retry;
-        if (retry?.interaction !== "interactive") return unexpected("architecture", state.stage);
+        if (retry.interaction !== "interactive") return unexpected("architecture", state.stage);
         return success({ state: { ...state, slot: result.slots[0] as InteractiveSlot }, action: awaitUser(retry) });
       }
       if (result.outcome === "blocked") {
-        const reason = result.reason!;
+        const reason = result.reason;
         return success({ state: { ...state, stage: "blocked", reason }, action: blocked("architecture", "interview", reason) });
       }
       if (result.outcome === "waiting") return success({ state, action: null });
@@ -660,11 +671,11 @@ export function reduceArchitectureProgram(
       const result = settled.value;
       if (result.outcome === "retry") {
         const retry = result.retry;
-        if (retry?.interaction !== "headless") return unexpected("architecture", state.stage);
+        if (retry.interaction !== "headless") return unexpected("architecture", state.stage);
         return success({ state: { ...state, slots: result.slots }, action: batch([retry]) });
       }
       if (result.outcome === "blocked") {
-        const reason = result.reason!;
+        const reason = result.reason;
         return success({ state: { ...state, stage: "blocked", reason }, action: blocked("architecture", "candidates", reason) });
       }
       if (result.outcome === "waiting") return success({ state: { ...state, slots: result.slots }, action: null });
@@ -709,11 +720,11 @@ export function reduceArchitectureProgram(
       const result = settled.value;
       if (result.outcome === "retry") {
         const retry = result.retry;
-        if (retry?.interaction !== "headless") return unexpected("architecture", state.stage);
+        if (retry.interaction !== "headless") return unexpected("architecture", state.stage);
         return success({ state: { ...state, slots: result.slots }, action: batch([retry]) });
       }
       if (result.outcome === "blocked") {
-        const reason = result.reason!;
+        const reason = result.reason;
         return success({ state: { ...state, stage: "blocked", reason }, action: blocked("architecture", "judges", reason) });
       }
       if (result.outcome === "waiting") return success({ state: { ...state, slots: result.slots }, action: null });
@@ -758,11 +769,11 @@ export function reduceArchitectureProgram(
       const result = settled.value;
       if (result.outcome === "retry") {
         const retry = result.retry;
-        if (retry?.interaction !== "interactive") return unexpected("architecture", state.stage);
+        if (retry.interaction !== "interactive") return unexpected("architecture", state.stage);
         return success({ state: { ...state, slot: result.slots[0] as InteractiveSlot }, action: awaitUser(retry) });
       }
       if (result.outcome === "blocked") {
-        const reason = result.reason!;
+        const reason = result.reason;
         return success({ state: { ...state, stage: "blocked", reason }, action: blocked("architecture", "finalize", reason) });
       }
       if (result.outcome === "waiting") return success({ state, action: null });
@@ -826,11 +837,11 @@ export function reduceRefutationProgram(
       const result = settled.value;
       if (result.outcome === "retry") {
         const retry = result.retry;
-        if (retry?.interaction !== "headless") return unexpected("refutation", state.stage);
+        if (retry.interaction !== "headless") return unexpected("refutation", state.stage);
         return success({ state: { ...state, slots: result.slots }, action: batch([retry]) });
       }
       if (result.outcome === "blocked") {
-        const reason = result.reason!;
+        const reason = result.reason;
         return success({ state: { ...state, stage: "blocked", reason }, action: blocked("refutation", "verifiers", reason) });
       }
       if (result.outcome === "waiting") return success({ state: { ...state, slots: result.slots }, action: null });

@@ -8,6 +8,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { relative, resolve, sep } from "node:path";
 import { match } from "ts-pattern";
 import type { HookHandler, SubagentStopInput, Phase, TaskGraph } from "../../types";
 import { PHASE_AGENT_MAP, PHASE_ORDER, CLARIFY_THRESHOLD } from "../../config";
@@ -16,6 +17,22 @@ import { parsePhaseArtifacts } from "../../parsers/parse-phase-artifacts";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { findFile } from "../../utils/find-file";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
+
+/**
+ * Does `candidate` RESOLVE inside `directory` (both taken relative to cwd)?
+ *
+ * Lexical containment after `resolve`, so `..` segments are collapsed before
+ * the comparison rather than being carried along inside a string that still
+ * "contains" the directory name. Equality with the directory itself is not
+ * containment — an artifact must be a file under it, not the directory.
+ */
+export function resolvesWithin(candidate: string, directory: string): boolean {
+  const fromDirectory = relative(resolve(directory), resolve(candidate));
+  return fromDirectory !== "" &&
+    fromDirectory !== ".." &&
+    !fromDirectory.startsWith(`..${sep}`) &&
+    !fromDirectory.startsWith("/");
+}
 
 /** Count NEEDS CLARIFICATION markers in a file */
 export function countMarkers(filePath: string): number {
@@ -167,12 +184,19 @@ const handler: HookHandler = async (stdin) => {
       await mgr.update((s) => {
         const updates: Partial<TaskGraph> = {};
 
+        // RESOLVED containment, not substring containment. These paths come
+        // from an agent's transcript and become the authoritative
+        // `spec_file`/`plan_file` every downstream phase transition reads, so
+        // `String.includes(".claude/specs/")` was the wrong test: a path like
+        // `.claude/specs/../../../../tmp/evil/spec.md` contains the substring
+        // while resolving well outside the tree, and both this check and the
+        // parser's used the same weak form.
         if (artifacts.spec_file && existsSync(artifacts.spec_file)
-            && artifacts.spec_file.includes(".claude/specs/")) {
+            && resolvesWithin(artifacts.spec_file, ".claude/specs")) {
           updates.spec_file = artifacts.spec_file;
         }
         if (!s.plan_file && artifacts.plan_file && existsSync(artifacts.plan_file)
-            && artifacts.plan_file.includes(".claude/plans/")) {
+            && resolvesWithin(artifacts.plan_file, ".claude/plans")) {
           updates.plan_file = artifacts.plan_file;
         }
 

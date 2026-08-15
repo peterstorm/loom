@@ -28,6 +28,7 @@ import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
 import type { ParseResult } from "../../core/panel-kernel";
 import { applyFindingOutcomes } from "../../core/findings";
+import { reconcileWaveBlock } from "../../core/wave-gate-model";
 import {
   briefCompletenessErrors,
   briefFindingFilename,
@@ -309,7 +310,20 @@ export async function applyWaveTallyState(
   await updater.update((state) => {
     const raced = replayedOutcomes(outcomes, refutedIdsOf(state.tasks));
     if (raced.length > 0) throw new Error(replayError(raced));
-    return { ...state, tasks: state.tasks.map((task) => applyFindingOutcomes(task, outcomes)) };
+    const tasks = state.tasks.map((task) => applyFindingOutcomes(task, outcomes));
+    // A tally that refutes a wave's LAST critical removes the only cause its
+    // gate was blocked for, so the flag has to come down with it. It did not:
+    // `applyFindingOutcomes` emptied `critical_findings` and passed the task's
+    // review while `blocked: true` stayed, and the wave then refused to advance
+    // behind a "BLOCKED due to:" list with nothing in it — a block no rerun of
+    // the panel could clear, because the panel had already refuted everything.
+    // Re-derived through the shared rule so setter and clearer cannot disagree.
+    const waves = [...new Set(tasks.map((task) => task.wave))];
+    const wave_gates = waves.reduce(
+      (gates, wave) => reconcileWaveBlock(gates, tasks, state.spec_check, wave),
+      state.wave_gates,
+    );
+    return { ...state, tasks, wave_gates };
   });
 }
 

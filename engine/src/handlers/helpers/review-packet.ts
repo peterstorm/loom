@@ -12,8 +12,12 @@ import { StateManager } from "../../state-manager";
 import { taskGraphPath, WAVE_REVIEW_AGENTS } from "../../config";
 import {
   createReviewPacket,
+  parseBaseSha,
+  parseHeadSha,
   parseReviewPacket,
   serializeReviewPacket,
+  type BaseSha,
+  type HeadSha,
   type ReviewPacketArtifactInput,
 } from "../../core/review-packet";
 import { reviewRunPriorFindings, startReviewRun } from "../../core/findings";
@@ -106,7 +110,7 @@ function repoRoot(): string {
   return git(["rev-parse", "--show-toplevel"], process.cwd()).trim();
 }
 
-function artifact(root: string, baseSha: string, path: string): ReviewPacketArtifactInput {
+function artifact(root: string, baseSha: BaseSha, path: string): ReviewPacketArtifactInput {
   const inspected = inspectRepositoryPath(root, path, "review packet path", { mustBeFile: true });
   const absolute = inspected.absolute;
   const present = existsSync(absolute);
@@ -130,7 +134,7 @@ function artifact(root: string, baseSha: string, path: string): ReviewPacketArti
 /** Build the complete task-derived packet authority. Rebuilding this under the
  * state lock makes one packet id the comparison for metadata, findings, scope,
  * proof context, git head, diffs, and artifact bytes. */
-function prepareTaskReviewPacket(root: string, task: Task, baseSha: string, headSha: string) {
+function prepareTaskReviewPacket(root: string, task: Task, baseSha: BaseSha, headSha: HeadSha) {
   const priorFindings = reviewRunPriorFindings(task);
   const declaredPaths = [...canonicalRepositoryPaths(root, task.file_list ?? [], "task.file_list")];
   const modifiedPaths = [...canonicalRepositoryPaths(root, task.files_modified ?? [], "task.files_modified")];
@@ -209,15 +213,25 @@ const handler: HookHandler = async (_stdin, args) => {
       root,
       [1],
     ) !== null;
-    const baseSha = task.start_sha ?? (
+    // Each revision is parsed through its OWN smart constructor: base and head
+    // carry distinct brands precisely so the two cannot be transposed here.
+    const rawBaseSha = task.start_sha ?? (
       hasRemoteBranch
         ? git(["merge-base", "HEAD", remoteBranch], root).trim()
         : git(["rev-parse", "HEAD^"], root).trim()
     );
-    if (!baseSha || !headSha) throw new Error("could not resolve packet base/head SHA");
+    const parsedBaseSha = parseBaseSha(rawBaseSha);
+    const parsedHeadSha = parseHeadSha(headSha);
+    if (!parsedBaseSha.ok || !parsedHeadSha.ok) {
+      return {
+        kind: "error",
+        message: `could not resolve packet base/head SHA:\n${[...(parsedBaseSha.ok ? [] : parsedBaseSha.errors), ...(parsedHeadSha.ok ? [] : parsedHeadSha.errors)].map((e) => `  - ${e}`).join("\n")}`,
+      };
+    }
+    const baseSha = parsedBaseSha.value;
     // Transcript APIs commonly report absolute paths. Canonicalization and
     // packet identity are rebuilt under the lock before this packet is bound.
-    const prepared = prepareTaskReviewPacket(root, task, baseSha, headSha);
+    const prepared = prepareTaskReviewPacket(root, task, baseSha, parsedHeadSha.value);
     const { packet, scope } = prepared;
     if (!packet.ok) return { kind: "error", message: `Review packet creation failed:\n${packet.errors.map((e) => `  - ${e}`).join("\n")}` };
     const outputPath = inspectRepositoryPath(root, output, "review packet output");
@@ -237,8 +251,9 @@ const handler: HookHandler = async (_stdin, args) => {
       async () => manager.update((current) => {
         const currentTask = current.tasks.find((candidate) => candidate.id === taskId);
         if (currentTask === undefined) throw new Error(`Task ${taskId} disappeared before review run start`);
-        const lockedHeadSha = git(["rev-parse", "HEAD"], root).trim();
-        const currentPrepared = prepareTaskReviewPacket(root, currentTask, baseSha, lockedHeadSha);
+        const lockedHeadSha = parseHeadSha(git(["rev-parse", "HEAD"], root).trim());
+        if (!lockedHeadSha.ok) throw new Error(`Task ${taskId} head SHA became unparseable under the state lock`);
+        const currentPrepared = prepareTaskReviewPacket(root, currentTask, baseSha, lockedHeadSha.value);
         if (!currentPrepared.packet.ok) {
           throw new Error(`Task ${taskId} became invalid while its Review Packet was being created`);
         }

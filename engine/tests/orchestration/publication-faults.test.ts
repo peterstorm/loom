@@ -68,7 +68,7 @@ function packet(requestId: string, body = "task context"): ContextPacket {
   return built.value;
 }
 
-function authority(overrides: Partial<AgentRequestAuthority> = {}): AgentRequestAuthority {
+function authority(overrides: Record<string, unknown> = {}): AgentRequestAuthority {
   return {
     runId: RUN_ID,
     requestId: "request:reviewer:1",
@@ -923,5 +923,100 @@ describe("promoteArtifactSet partial-promotion recovery", () => {
     // published until its receipt is recorded, and no receipt is written here.
     expect(readFileSync(join(artifacts, "first.json"), "utf-8")).toBe("first");
     expect(readdirSync(artifacts).some((name) => name.endsWith(".staged"))).toBe(false);
+  });
+});
+
+// --- reserve-agent-requests: partial failure --------------------------------
+
+/**
+ * `runReserveAgentRequests` reserves each request in turn and returns on the
+ * FIRST failure — with every earlier reservation already written to disk. That
+ * partial-success semantic (no rollback, by design: reservations are the
+ * durable identity later attempts are proven against) was never driven
+ * end-to-end. Only `reconcileEffectReceipt` and the machine reducers mentioned
+ * the intent; nothing put a failing member behind a succeeding one and looked
+ * at what survived.
+ *
+ * The behaviour worth pinning is precisely that the failure is REPORTED (so no
+ * receipt is recorded and the effect stays unfinished) while the earlier
+ * reservation REMAINS (so a retry reconciles against the same identity rather
+ * than minting a second one).
+ */
+describe("reserving a batch of agent requests", () => {
+  const reserveIntent = (requests: readonly AgentRequestAuthority[]): EffectIntent => ({
+    kind: "reserve-agent-requests",
+    effectId: "effect:reserve-1",
+    runId: RUN_ID,
+    requests,
+  } as EffectIntent);
+
+  it("reserves every member of a well-formed batch", async () => {
+    const { directory, handle } = freshRun();
+    const runner = createEffectRunner({ handle, ports: ports(), resolveArtifacts: () => [] });
+
+    const result = await runner(reserveIntent([
+      authority({ requestId: "request:reviewer:1", slotId: "slot-1" }),
+      authority({
+        requestId: "request:reviewer:2",
+        slotId: "slot-2",
+        outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-2/attempt-1.raw" },
+      } as Partial<AgentRequestAuthority>),
+    ]));
+
+    expect(result.ok).toBe(true);
+    expect(readdirSync(join(directory, "requests")).filter((name) => name.endsWith(".json")))
+      .toHaveLength(2);
+  });
+
+  it("reports the failure and KEEPS the reservations that already landed", async () => {
+    const { directory, handle } = freshRun();
+    const first = authority({ requestId: "request:reviewer:1", slotId: "slot-1" });
+    // The second member re-uses the first member's request id with different
+    // authority, so its reservation is refused AFTER the first has been written.
+    const conflicting = authority({
+      requestId: "request:reviewer:1",
+      slotId: "slot-2",
+      outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-2/attempt-1.raw" },
+    });
+    const runner = createEffectRunner({ handle, ports: ports(), resolveArtifacts: () => [] });
+
+    const result = await runner(reserveIntent([first, conflicting]));
+
+    expect(result.ok).toBe(false);
+    // No receipt: the effect is unfinished, so a resume re-runs it rather than
+    // replaying a success that never happened.
+    const receipt = handle.readReceipt("effect:reserve-1" as EffectIntent["effectId"]);
+    expect(receipt.ok).toBe(true);
+    if (!receipt.ok) return;
+    expect(receipt.value).toBeNull();
+    // The first reservation stands — deliberately not rolled back.
+    const reserved = readdirSync(join(directory, "requests")).filter((name) => name.endsWith(".json"));
+    expect(reserved).toHaveLength(1);
+  });
+
+  it("re-running after a partial failure reconciles the surviving reservation instead of duplicating it", async () => {
+    const { directory, handle } = freshRun();
+    const first = authority({ requestId: "request:reviewer:1", slotId: "slot-1" });
+    const conflicting = authority({
+      requestId: "request:reviewer:1",
+      slotId: "slot-2",
+      outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-2/attempt-1.raw" },
+    });
+    const runner = createEffectRunner({ handle, ports: ports(), resolveArtifacts: () => [] });
+    expect((await runner(reserveIntent([first, conflicting]))).ok).toBe(false);
+
+    // The retry that a real resume performs: same batch, corrected second
+    // member. The already-reserved first member must be accepted as itself.
+    const corrected = authority({
+      requestId: "request:reviewer:2",
+      slotId: "slot-2",
+      outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-2/attempt-1.raw" },
+    });
+
+    const retried = await runner(reserveIntent([first, corrected]));
+
+    expect(retried.ok).toBe(true);
+    expect(readdirSync(join(directory, "requests")).filter((name) => name.endsWith(".json")))
+      .toHaveLength(2);
   });
 });

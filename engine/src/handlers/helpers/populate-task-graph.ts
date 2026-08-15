@@ -189,7 +189,20 @@ const handler: HookHandler = async (stdin, args) => {
     };
   }
 
-  await mgr.update((existing) => {
+  const populate = async (): Promise<void> => mgr.update((existing) => {
+    // Re-check the guard INSIDE the locked transform. The check above ran on a
+    // snapshot loaded before the lock, and this callback receives a freshly
+    // reloaded graph — so a task that left "pending" in between (an agent
+    // starting, a wave completing) had its real status silently overwritten by
+    // the unconditional `tasks:` assignment below. The pre-lock check stays: it
+    // gives the operator the clean CLI error in the common case; this one makes
+    // the overwrite impossible in the racing case.
+    if (!force && existing.tasks.some((t) => t.status !== "pending")) {
+      throw new Error(
+        "Cannot overwrite task graph with non-pending tasks: a task left \"pending\" while this " +
+        "population was being prepared. Use --force to override.",
+      );
+    }
     const merged: TaskGraph = {
       ...existing,
       plan_title: decompose.plan_title,
@@ -206,6 +219,15 @@ const handler: HookHandler = async (stdin, args) => {
 
     return merged;
   });
+
+  try {
+    await populate();
+  } catch (error) {
+    // The locked re-check refuses by throwing (the only way out of a transform);
+    // surface it as the same clean CLI error the pre-lock check produces rather
+    // than as an unhandled rejection.
+    return { kind: "error", message: error instanceof Error ? error.message : String(error) };
+  }
 
   const taskCount = decompose.tasks.length;
   const waves = [...new Set(decompose.tasks.map((t) => t.wave))].sort((a, b) => a - b);

@@ -8,11 +8,25 @@ import {
   serializeReviewPacket,
   sha256Bytes,
   sha256Hex,
+  parseBaseSha,
+  parseHeadSha,
+  type BaseSha,
+  type HeadSha,
   type ReviewPacketInput,
 } from "../../src/core/review-packet";
 
-const BASE_SHA = "a".repeat(40);
-const HEAD_SHA = "b".repeat(40);
+const base = (hex: string): BaseSha => {
+  const parsed = parseBaseSha(hex);
+  if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+  return parsed.value;
+};
+const head = (hex: string): HeadSha => {
+  const parsed = parseHeadSha(hex);
+  if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+  return parsed.value;
+};
+const BASE_SHA = base("a".repeat(40));
+const HEAD_SHA = head("b".repeat(40));
 const bytes = (text: string): Uint8Array => Buffer.from(text, "utf-8");
 
 function input(overrides: Partial<ReviewPacketInput> = {}): ReviewPacketInput {
@@ -73,8 +87,8 @@ describe("Review Packet", () => {
     if (!baseline.ok) return;
     const mutations: ReviewPacketInput[] = [
       input({ task: { ...input().task, description: "Changed" } }),
-      input({ baseSha: "c".repeat(40) }),
-      input({ headSha: "d".repeat(40) }),
+      input({ baseSha: base("c".repeat(40)) }),
+      input({ headSha: head("d".repeat(40)) }),
       input({
         declaredPaths: [...input().declaredPaths, "README.md"],
         artifacts: [...input().artifacts, { path: "README.md", diff: "readme diff", postimage: bytes("readme") }],

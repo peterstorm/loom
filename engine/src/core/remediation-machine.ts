@@ -155,13 +155,21 @@ function pathIsWithin(path: CanonicalRepositoryRelativePath, root: string): bool
   return path === root || path.startsWith(`${root}/`);
 }
 
-const RUN_LAYOUT_COMPONENTS = new Set([
+/**
+ * The canonical directory names that hold Run Directories. ONE definition,
+ * shared by every consumer: remediation exclusion policy uses it to keep run
+ * evidence out of a staged set, and `grandfathered-spawn-model` uses it to
+ * anchor a spawn-declared run directory. A second copy in either place is a
+ * silent divergence between "this path is run evidence" and "this path may be
+ * trusted as run evidence".
+ */
+export const RUN_LAYOUT_COMPONENTS: ReadonlySet<string> = Object.freeze(new Set([
   "panel-runs",
   "review-runs",
   "review-and-fix-runs",
   "wave-gate-runs",
   "orchestration-runs",
-]);
+])) as ReadonlySet<string>;
 
 /** Canonical policy predicate shared by freeze, registration, audit, and replay parsers. */
 export function isExcludedRemediationPath(path: CanonicalRepositoryRelativePath): boolean {

@@ -1,8 +1,8 @@
-import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { extractNamespace } from "./strip-namespace";
 import { LOOM_PACKAGE_ROOT } from "./loom-package-root";
+import { resolveRepositoryRoot } from "./git";
 
 /**
  * One Claude agent-definition resolver shared by model and skill policy gates.
@@ -22,12 +22,12 @@ export function resolveClaudeAgentDefinitionPath(
     if (namespace === "loom") candidates.push(join(LOOM_PACKAGE_ROOT, "agents", `${agentName}.md`));
   }
 
-  let repositoryRoot: string | null = null;
-  try {
-    repositoryRoot = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
-  } catch {
-    // A non-repository install can still resolve package, home, or cwd agents.
-  }
+  // A non-repository install can still resolve package, home, or cwd agents —
+  // but the failure is REPORTED, not swallowed: an unresolved root silently
+  // drops the repository-relative candidates below, so a definition that
+  // exists at `<repo>/agents/<name>.md` reads as "cannot locate agent
+  // definition" and the policy gate blocks with a misleading cause.
+  const repositoryRoot = resolveRepositoryRoot("Claude agent-definition resolution") ?? null;
 
   if (!namespace) {
     if (repositoryRoot) candidates.push(join(repositoryRoot, ".claude", "agents", `${agentName}.md`));

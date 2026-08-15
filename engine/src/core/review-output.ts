@@ -227,10 +227,16 @@ function extractFindings(block: string): ParsedFindings {
   const critical: string[] = [];
   const advisory: string[] = [];
 
+  // The marker must END at the keyword — `(?![A-Z0-9_])` — not merely "not be
+  // followed by _COUNT". The old `(?!_COUNT)` lookahead excluded exactly one
+  // continuation, so any line opening with a LONGER word on the same stem
+  // (`CRITICALITY: high`, `ADVISORYNOTES: …`) matched as a genuine finding
+  // marker and pushed a garbled claim (`ITY: high`) straight into adjudication.
+  // A reviewer's prose becomes a critical finding that nothing wrote.
   for (const line of cleaned.split("\n")) {
-    const critMatch = line.match(/^[\s\-*]*\*{0,2}CRITICAL(?!_COUNT):?\*{0,2}\s*(.*)/);
+    const critMatch = line.match(/^[\s\-*]*\*{0,2}CRITICAL(?![A-Z0-9_]):?\*{0,2}\s*(.*)/);
     if (critMatch) critical.push(critMatch[1].trim());
-    const advMatch = line.match(/^[\s\-*]*\*{0,2}ADVISORY(?!_COUNT):?\*{0,2}\s*(.*)/);
+    const advMatch = line.match(/^[\s\-*]*\*{0,2}ADVISORY(?![A-Z0-9_]):?\*{0,2}\s*(.*)/);
     if (advMatch) advisory.push(advMatch[1].trim());
   }
 

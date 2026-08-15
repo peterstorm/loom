@@ -339,4 +339,60 @@ describe("Pi write grants fail closed when their bound task graph disappears", (
     expect(consumePiWriteGrant(grantFor(cwd, graph), cwd, "code-implementer-agent"))
       .toMatchObject({ agent: "code-implementer-agent", taskId: "T1", taskGraphPath: graph });
   });
+
+  /**
+   * `parseStoredGrant`'s SCHEMA checks at CONSUME time.
+   *
+   * The tamper test above mutates `agent`, which leaves the record structurally
+   * valid — so it trips the binding MAC, never the shape gate. The only test
+   * that fed `consumePiWriteGrant` a structurally broken record was the sweep
+   * test, and the sweep is a different function. That left the consume-time
+   * fail-closed backstop — the one that stands between a schema-drifted or
+   * hand-written record and a live write capability — with no coverage at all:
+   * a regression that made `parseStoredGrant` accept a wrong-`version` record
+   * would have shipped silently.
+   *
+   * Each case must ALSO burn the record: a rejected claim is still a claim, and
+   * a malformed grant that survives its own rejection can be retried forever.
+   */
+  const storedGrantPath = (): string => {
+    const grantDir = join(process.env.LOOM_SUBAGENT_DIR!, "pi-write-grants");
+    return join(grantDir, readdirSync(grantDir)[0]!);
+  };
+
+  it("refuses a stored grant whose version is not the current schema, and burns it", () => {
+    const { cwd, graph } = fixture();
+    const prompt = grantFor(cwd, graph);
+    const path = storedGrantPath();
+    const record = JSON.parse(readFileSync(path, "utf-8"));
+    expect(record.version, "the fixture must start at the current schema").toBe(1);
+    writeFileSync(path, JSON.stringify({ ...record, version: 0 }));
+
+    expect(() => consumePiWriteGrant(prompt, cwd, "code-implementer-agent"))
+      .toThrow(/write grant is malformed/);
+    expect(readdirSync(join(process.env.LOOM_SUBAGENT_DIR!, "pi-write-grants")))
+      .toEqual([]);
+  });
+
+  it.each([
+    ["a missing required field", (record: Record<string, unknown>) => {
+      const { taskGraphPath: _dropped, ...rest } = record;
+      return rest;
+    }],
+    ["a wrong-typed expiry", (record: Record<string, unknown>) => ({ ...record, expiresAt: "soon" })],
+    ["a non-hex token digest", (record: Record<string, unknown>) => ({ ...record, tokenSha256: "not-a-digest" })],
+    ["a scopeDirs entry that is not a string", (record: Record<string, unknown>) => ({ ...record, scopeDirs: [""] })],
+    ["an array instead of a record", () => [] as unknown],
+  ])("refuses a stored grant with %s, and burns it", (_label, corrupt) => {
+    const { cwd, graph } = fixture();
+    const prompt = grantFor(cwd, graph);
+    const path = storedGrantPath();
+    const record = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    writeFileSync(path, JSON.stringify(corrupt(record)));
+
+    expect(() => consumePiWriteGrant(prompt, cwd, "code-implementer-agent"))
+      .toThrow(/write grant is malformed/);
+    expect(readdirSync(join(process.env.LOOM_SUBAGENT_DIR!, "pi-write-grants")))
+      .toEqual([]);
+  });
 });

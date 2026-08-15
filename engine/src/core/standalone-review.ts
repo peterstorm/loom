@@ -250,6 +250,18 @@ function parseReviewMetadata(raw: unknown): ParseResult<StandaloneReviewMetadata
   if (docsOnly && !commentsChanged) {
     errors.push("review_metadata.comments_changed must be true when docs_only is true (a docs-only scope always changes comments)");
   }
+  // The producer's OTHER docs-only invariant, and the more dangerous one to
+  // leave unproven. `docs_only` is by definition "no source or test file
+  // changed", so the pair is mutually exclusive — yet only the comments half
+  // was checked, leaving `docs_only && source_or_test_changed` representable.
+  // `selectStandaloneReviewers` reads exactly those two fields independently:
+  // such a record claims real source changed AND silently drops
+  // silent-failure-hunter (gated on `!docsOnly`) while admitting
+  // pr-test-analyzer (gated on `sourceOrTestChanged`) — a scope reviewed by a
+  // roster no policy would ever select.
+  if (docsOnly && sourceOrTestChanged) {
+    errors.push("review_metadata.source_or_test_changed must be false when docs_only is true (a docs-only scope changes no source or test file)");
+  }
   const additions = integer("additions");
   const fileCount = integer("file_count");
   const newStructure = bool("new_structure");

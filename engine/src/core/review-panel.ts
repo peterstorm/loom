@@ -1095,37 +1095,82 @@ export function tallyRefutations(
   if (errors.length > 0) return fail(errors);
 
   const outcomes = findings.map((finding): FindingOutcome => {
-    const refutations: Refutation[] = [];
-    const upheldBy: ReviewLens[] = [];
-    const uncertainFrom: ReviewLens[] = [];
-
-    for (const lens of lensesInOrder) {
-      // No `if (!entry) continue`: coverage above proves every lens judged
-      // every finding, and skipping a missing entry would silently score it as
-      // an abstention — the one default that changes whether a finding lives.
-      const entry = requireEntry(byLens, lens, finding.id, (e) => e.findingId);
-      if (entry.verdict === "refuted") {
-        refutations.push({ lens, reason: entry.reasoning });
-      } else if (entry.verdict === "upheld") {
-        upheldBy.push(lens);
-      } else {
-        uncertainFrom.push(lens);
-      }
-    }
-
-    // `head !== undefined` is redundant with `length >= threshold` — the
-    // threshold is validated to be >= 1 above, so a finding that met the bar
-    // has at least one refutation. It is written out anyway because that is
-    // what PROVES the non-empty tuple to the compiler, turning the invariant
-    // `applyFindingOutcomes` used to assert at runtime into one established
-    // here, once, where the votes are actually counted.
-    const [head, ...tail] = refutations;
-    return head !== undefined && refutations.length >= threshold
-      ? { finding, upheldBy, uncertainFrom, survives: false, refutations: [head, ...tail] }
-      : { finding, upheldBy, uncertainFrom, survives: true, refutations };
+    const tallied = countRefutationVotes(
+      lensesInOrder.map((lens) => Object.freeze({
+        lens,
+        // No `if (!entry) continue`: coverage above proves every lens judged
+        // every finding, and skipping a missing entry would silently score it
+        // as an abstention — the one default that changes whether a finding
+        // lives.
+        entry: requireEntry(byLens, lens, finding.id, (e) => e.findingId),
+      })),
+      threshold,
+    );
+    return tallied.survives
+      ? { finding, ...tallied.votes, survives: true, refutations: tallied.refutations }
+      : { finding, ...tallied.votes, survives: false, refutations: tallied.refutations };
   });
 
   return ok(outcomes);
+}
+
+/** One lens's judgement of one finding, paired with the lens that cast it. */
+export interface LensJudgement {
+  readonly lens: ReviewLens;
+  readonly entry: RefutationVerdict;
+}
+
+export type RefutationCount =
+  | Readonly<{
+      survives: true;
+      votes: Readonly<{ upheldBy: readonly ReviewLens[]; uncertainFrom: readonly ReviewLens[] }>;
+      refutations: readonly Refutation[];
+    }>
+  | Readonly<{
+      survives: false;
+      votes: Readonly<{ upheldBy: readonly ReviewLens[]; uncertainFrom: readonly ReviewLens[] }>;
+      refutations: NonEmptyRefutations;
+    }>;
+
+/**
+ * THE k-of-n refutation rule. One implementation, for every caller.
+ *
+ * "A finding dies when at least `threshold` lenses refute it; uncertainty
+ * counts toward neither side" is a domain rule, and it was written twice: once
+ * here for the persistent panel and once inline in the imperative shell
+ * (`handlers/helpers/orchestration.ts`, the legacy refutation-tally operation),
+ * along with a second copy of the `floor(n/2) + 1` threshold formula. Two
+ * hand-maintained copies of the rule that decides whether a critical finding
+ * survives can drift silently, and the drift is invisible until the two panels
+ * disagree about the same votes.
+ *
+ * `head !== undefined` is redundant with `length >= threshold` — threshold is
+ * validated `>= 1` by every caller — but it is what PROVES the non-empty tuple
+ * to the compiler, turning an invariant `applyFindingOutcomes` used to assert
+ * at runtime into one established here, once, where the votes are counted.
+ */
+export function countRefutationVotes(
+  judgements: readonly LensJudgement[],
+  threshold: number,
+): RefutationCount {
+  const refutations: Refutation[] = [];
+  const upheldBy: ReviewLens[] = [];
+  const uncertainFrom: ReviewLens[] = [];
+
+  for (const { lens, entry } of judgements) {
+    if (entry.verdict === "refuted") refutations.push({ lens, reason: entry.reasoning });
+    else if (entry.verdict === "upheld") upheldBy.push(lens);
+    else uncertainFrom.push(lens);
+  }
+
+  const votes = Object.freeze({
+    upheldBy: Object.freeze(upheldBy),
+    uncertainFrom: Object.freeze(uncertainFrom),
+  });
+  const [head, ...tail] = refutations;
+  return head !== undefined && refutations.length >= threshold
+    ? Object.freeze({ survives: false as const, votes, refutations: [head, ...tail] as NonEmptyRefutations })
+    : Object.freeze({ survives: true as const, votes, refutations: Object.freeze(refutations) });
 }
 
 /** Serialize the tally for the gate summary and the operator. The external

@@ -2850,4 +2850,214 @@ describe("orchestration CLI", () => {
 
     expect(result.status).not.toBe(0);
   });
+
+  /**
+   * The user-approval gate — `decide` and `complete`.
+   *
+   * `decide` is how an operator's advisory approval enters a Wave Gate run, and
+   * every one of its refusals guards an authority boundary: a decision for a
+   * different Wave, for a different run, for a decision id that is not the
+   * pending one, or a payload that is not the exact approval shape. `complete`
+   * likewise refuses a caller-attested outcome, because a deterministic engine
+   * operation's result is derived, never asserted by whoever invokes the CLI.
+   *
+   * Every existing test drove `decide` against a run with NO registered program
+   * — the branch that just records the decision and returns. The whole
+   * wave-gate branch (authority match, expected decision id, approval shape)
+   * and every `complete` refusal were unexercised, so an approval for the wrong
+   * wave, or a hand-supplied "succeeded", had nothing standing in its way but
+   * unproven code.
+   */
+  describe("the user-approval gate", () => {
+    /** A Wave-Gate run whose registration is live, so `decide` takes its wave branch. */
+    function startedWaveRun(label: string) {
+      const root = repository();
+      const proof = evaluateTaskProof(
+        { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+        { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+      );
+      writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+      const statePath = join(root, ".claude", "state", "active_task_graph.json");
+      writeFileSync(statePath, JSON.stringify({
+        current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+        spec_file: null, plan_file: null, wave_gates: {},
+        tasks: [{
+          id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
+          status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+          test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+          new_test_evidence: "present", review_status: "passed", review_generation: 0,
+          findings: [], critical_findings: [], advisory_findings: [],
+        }],
+      }));
+      const runsRoot = mkdtempSync(join(tmpdir(), `loom-${label}-runs-`));
+      cleanup.push(runsRoot);
+      const runDir = join(runsRoot, `run.${label}`);
+      mkdirSync(runDir);
+      const started = runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root);
+      expect(started.status, started.stderr).toBe(0);
+      return { root, runsRoot, runDir, statePath };
+    }
+
+    it("refuses a decision id that is not the exact pending advisory request", () => {
+      const { root, runsRoot, runDir } = startedWaveRun("decide-wrong-id");
+
+      const result = runCli(
+        ["decide", "--runs-root", runsRoot, "--run", runDir, "--request", "advisory-not-the-pending-one"],
+        JSON.stringify({ kind: "approve" }),
+        root,
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("is not the exact pending advisory request");
+    });
+
+    it("refuses a decision when the protected Wave authority no longer describes this run", () => {
+      const { root, runsRoot, runDir, statePath } = startedWaveRun("decide-authority-drift");
+      // The graph's active Wave Gate is re-pointed at another run: an approval
+      // recorded here would advance a gate this run does not own.
+      const graph = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
+      const active = graph["active_wave_gate"] as Record<string, unknown>;
+      chmodSync(statePath, 0o644);
+      writeFileSync(statePath, JSON.stringify({
+        ...graph,
+        active_wave_gate: { ...active, runId: "run.some-other-wave" },
+      }));
+
+      const result = runCli(
+        ["decide", "--runs-root", runsRoot, "--run", runDir, "--request", "advisory-1"],
+        JSON.stringify({ kind: "approve" }),
+        root,
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("protected active Wave Gate authority differs from this decision run");
+    });
+
+    it("refuses a decision when the protected Wave authority cannot be read at all", () => {
+      const { root, runsRoot, runDir, statePath } = startedWaveRun("decide-authority-unreadable");
+      chmodSync(statePath, 0o644);
+      writeFileSync(statePath, "{not json");
+
+      const result = runCli(
+        ["decide", "--runs-root", runsRoot, "--run", runDir, "--request", "advisory-1"],
+        JSON.stringify({ kind: "approve" }),
+        root,
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("cannot read protected Wave authority");
+    });
+
+    it("refuses a decision payload that is not exactly an approval", () => {
+      const { root, runsRoot, runDir, statePath } = startedWaveRun("decide-shape");
+      // Reach the shape check with an authority-matching, correctly-named
+      // decision id, so the refusal can only come from the payload.
+      const graph = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
+      const active = graph["active_wave_gate"] as Record<string, unknown>;
+      expect(active["runId"]).toBe(`run.decide-shape`);
+
+      for (const payload of [
+        { kind: "reject" },
+        { kind: "approve", extra: true },
+        { approve: true },
+        {},
+      ]) {
+        const result = runCli(
+          ["decide", "--runs-root", runsRoot, "--run", runDir, "--request", "advisory-1"],
+          JSON.stringify(payload),
+          root,
+        );
+        // Either the decision-id check or the shape check refuses; what matters
+        // is that no non-approval payload is ever recorded.
+        expect(result.status, JSON.stringify(payload)).not.toBe(0);
+      }
+    });
+
+    it("refuses a decision against a program that does not accept user decisions", () => {
+      const root = repository();
+      const runsRoot = mkdtempSync(join(tmpdir(), "loom-decide-wrong-program-runs-"));
+      cleanup.push(runsRoot);
+      const runDir = join(runsRoot, "run.decide-wrong-program");
+      mkdirSync(runDir);
+      writeFileSync(join(root, "a.txt"), "one\n");
+      const started = runCli(
+        ["start", "standalone-review", "--runs-root", runsRoot, "--run", runDir],
+        JSON.stringify({ kind: "all", files: ["a.txt"], dryRun: false }),
+        root,
+      );
+      expect(started.status, started.stderr).toBe(0);
+
+      const result = runCli(
+        ["decide", "--runs-root", runsRoot, "--run", runDir, "--request", "advisory-1"],
+        JSON.stringify({ kind: "approve" }),
+        root,
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("does not accept user decisions");
+    });
+
+    it("refuses a decision with no --request at all", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      const runDir = join(runsRoot, "run.decide-no-request");
+      mkdirSync(runDir, { recursive: true });
+
+      const result = runCli(
+        ["decide", "--runs-root", runsRoot, "--run", runDir],
+        JSON.stringify({ kind: "approve" }),
+        root,
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("--request");
+    });
+
+    it("refuses a caller-attested outcome on `complete`", () => {
+      const { root, runsRoot, runDir } = startedWaveRun("complete-forged-outcome");
+
+      for (const forged of [["--outcome", "succeeded"], ["--error", "it failed"]]) {
+        const result = runCli(
+          ["complete", "--runs-root", runsRoot, "--run", runDir, "--operation", "refutation-tally", ...forged],
+          "",
+          root,
+        );
+
+        expect(result.status, forged.join(" ")).not.toBe(0);
+        expect(result.stderr).toContain("do not accept caller-attested outcomes");
+      }
+    });
+
+    it("refuses `complete` without a registered panel program", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      const runDir = join(runsRoot, "run.complete-unregistered");
+      mkdirSync(runDir, { recursive: true });
+
+      const result = runCli(
+        ["complete", "--runs-root", runsRoot, "--run", runDir, "--operation", "refutation-tally"],
+        "",
+        root,
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("registered panel program");
+    });
+
+    it("refuses `complete` with no --operation", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      const runDir = join(runsRoot, "run.complete-no-operation");
+      mkdirSync(runDir, { recursive: true });
+
+      const result = runCli(
+        ["complete", "--runs-root", runsRoot, "--run", runDir],
+        "",
+        root,
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("--operation is required");
+    });
+  });
 });

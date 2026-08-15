@@ -499,13 +499,23 @@ function readRunAuthority(
   expected: RunAuthority,
   authorityPath: string,
 ): DomainResult<RunAuthority, RunDirectoryError> {
-  const raw = ((): unknown => {
+  // The read cause is CARRIED, not discarded. It used to be captured into
+  // `{ __unreadable: message }` and then dropped: a sentinel object reaches the
+  // schema comparison below, fails it, and the caller is told the authority
+  // "does not describe this run" — so EACCES on the run directory, an ELOOP
+  // from a symlink swapped under the O_NOFOLLOW read, and genuinely corrupt
+  // JSON all report as the same content mismatch. Those need different
+  // responses from an operator, and the one that matters most (a symlink race)
+  // is the one the generic message hides.
+  const read = ((): Readonly<{ ok: true; value: unknown }> | Readonly<{ ok: false; cause: string }> => {
     try {
-      return readJsonNoFollow(authorityPath);
+      return { ok: true, value: readJsonNoFollow(authorityPath) };
     } catch (error) {
-      return { __unreadable: (error as Error).message };
+      return { ok: false, cause: error instanceof Error ? error.message : String(error) };
     }
   })();
+  if (!read.ok) return failure("authority", `run authority is unreadable: ${read.cause}`);
+  const raw = read.value;
   if (typeof raw !== "object" || raw === null) return failure("authority", "run authority is unreadable");
   const record = raw as Record<string, unknown>;
   if (record["schemaVersion"] !== RUN_DIRECTORY_SCHEMA_VERSION ||
@@ -651,14 +661,18 @@ function contextOperations(runId: OrchestrationRunId, directory: string) {
     },
 
     readContext(digest: ContextPacket["digest"]): DomainResult<ContextPacket, RunDirectoryError> {
-      const raw = ((): unknown => {
+      // Same rule as `readRunAuthority`: report WHY the read failed instead of
+      // handing the parser a sentinel and letting a permission or symlink-race
+      // failure surface as a packet-schema complaint.
+      const read = ((): Readonly<{ ok: true; value: unknown }> | Readonly<{ ok: false; cause: string }> => {
         try {
-          return readJsonNoFollow(join(directory, CONTEXTS, `${digest}.json`));
+          return { ok: true, value: readJsonNoFollow(join(directory, CONTEXTS, `${digest}.json`)) };
         } catch (error) {
-          return { __unreadable: (error as Error).message };
+          return { ok: false, cause: error instanceof Error ? error.message : String(error) };
         }
       })();
-      const parsed = parseContextPacket(raw);
+      if (!read.ok) return failure("context", `context packet ${digest} is unreadable: ${read.cause}`);
+      const parsed = parseContextPacket(read.value);
       if (!parsed.ok) return failure("context", parsed.error.message);
       if (parsed.value.digest !== digest) return failure("context", "stored context packet digest does not match its slot");
       return success(parsed.value);

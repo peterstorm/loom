@@ -14,12 +14,47 @@ import { actionFailure, outputSlotCollision, type ExternalActionError } from './
 
 export const REGISTERED_PUBLICATION_PROOF: unique symbol = Symbol("RegisteredBatchPublicationAuthority");
 export const ISSUED_REQUEST_PROOF: unique symbol = Symbol("IssuedRequest");
-export const initialBatchPublicationIntentCache = new WeakMap<object, BatchPublishedReceipt>();
-export const initialPublicationIssuanceCache = new WeakMap<object, Readonly<{ receipt: BatchPublishedReceipt }>>();
-export const initialPublicationEffectPortCache = new WeakMap<object, InitialPublicationEffectExecutor>();
-export const atomicInitialPublicationClaimPortCache = new WeakMap<object, AtomicInitialPublicationClaim>();
-export const registeredPublicationCache = new WeakSet<object>();
-export const issuedRequestCache = new WeakMap<object, SpawnRequest>();
+
+/**
+ * The proof caches. These are the trust root of the whole contract: an object's
+ * MEMBERSHIP here — not any field it carries — is what makes a publication
+ * "registered" or a request "issued". They are therefore module-private.
+ *
+ * They used to be `export const`, which handed every importer the capability
+ * they exist to withhold: `registeredPublicationCache.add(x)` or
+ * `issuedRequestCache.set(x, x)` from any sibling volume minted an accepted
+ * result out of a hand-built object, and direct sub-module imports that bypass
+ * the index.ts facade are an established pattern in this repo, so nothing
+ * stopped it. The two genuine cross-volume needs are served by the narrow
+ * accessors below — reads and one scoped delete, never a write.
+ */
+const initialBatchPublicationIntentCache = new WeakMap<object, BatchPublishedReceipt>();
+const initialPublicationIssuanceCache = new WeakMap<object, Readonly<{ receipt: BatchPublishedReceipt }>>();
+const initialPublicationEffectPortCache = new WeakMap<object, InitialPublicationEffectExecutor>();
+const atomicInitialPublicationClaimPortCache = new WeakMap<object, AtomicInitialPublicationClaim>();
+const registeredPublicationCache = new WeakSet<object>();
+const issuedRequestCache = new WeakMap<object, SpawnRequest>();
+
+/** Read-only view of the initial-issuance capability held by `raw`, for
+ *  `actions.ts`. Grants no way to create one. */
+export function readInitialPublicationIssuance(
+  raw: object,
+): Readonly<{ receipt: BatchPublishedReceipt }> | undefined {
+  return initialPublicationIssuanceCache.get(raw);
+}
+
+/** Consume (burn) the initial-issuance capability held by `raw`, for
+ *  `actions.ts`. Delete only — a caller can spend a capability, never mint one. */
+export function clearInitialPublicationIssuance(raw: object): void {
+  initialPublicationIssuanceCache.delete(raw);
+}
+
+/** The canonical issued request `raw` IS, or undefined. The identity check
+ *  `issued === request` stays with the caller (`completion.ts`); this exposes
+ *  the lookup without exposing the `set`. */
+export function issuedSpawnRequestFor(raw: object): SpawnRequest | undefined {
+  return issuedRequestCache.get(raw);
+}
 
 export type ContextReference = Readonly<{
   digest: ContextDigest;
@@ -40,9 +75,6 @@ export type InitialSpawnRequestInput = Readonly<{
   authority: unknown;
   context: unknown;
 }>;
-
-/** @deprecated Use InitialSpawnRequestInput for publication-time issuance. */
-export type SpawnRequestInput = InitialSpawnRequestInput;
 
 export type PublishedSpawnRequestAuthority = Readonly<{
   authority: AgentRequestAuthority;
