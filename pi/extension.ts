@@ -92,7 +92,7 @@ import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
 import {
   compareAttemptBaseline,
 } from "../engine/src/utils/artifact-baseline";
-import { deriveArtifactWriteScope } from "../engine/src/core/artifact-write-scope";
+import { planPiWriteGrants } from "../engine/src/core/pi-write-grant-plan";
 import {
   consumePiWriteGrant,
   injectPiWriteGrant,
@@ -964,49 +964,24 @@ export default function (pi: ExtensionAPI) {
           // (".claude/specs/{slug}/", ".claude/plans/", panel candidate dirs) —
           // the Pi analogue of the phase-agent write exemption Claude Code gets
           // via subagent PIDs, and the capability the phase templates promise.
-          for (let index = 0; index < parsedItems.length; index++) {
+          // Read-only spawns (standalone reviews, verifiers, panel judges,
+          // decompose, spec-check) get nothing even when their prompts NAME
+          // artifact paths — a judge's candidate paths are reads, not write
+          // scope. And OUTSIDE orchestration nobody gets one at all:
+          // block-direct-edits allows every edit when no task graph exists, so
+          // a grant would authorize nothing that was not already permitted,
+          // while its Task ID requirement refused the spawn outright.
+          const grantPlan = planPiWriteGrants(parsedItems, taskExecutionSpawns, graphIsActive);
+          if (!grantPlan.ok) throw new Error(grantPlan.error);
+          for (const [index, requirement] of grantPlan.requirements.entries()) {
+            if (requirement.kind === "none") continue;
             const item = parsedItems[index]!;
-            const spawn = taskExecutionSpawns[index];
-            if (spawn?.kind === "implementation") {
-              const taskId = extractTaskId(item.task);
-              if (!taskId) throw new Error(`implementation item ${index + 1} has no Task ID for write-grant binding`);
-              const grant = issuePiWriteGrant({
-                agent: item.agent,
-                taskId,
-                cwd: piSpawnCwd(event.input, index, ctx.cwd),
-                taskGraphPath: taskGraphPath(),
-              });
-              try {
-                writeGrants.push({
-                  index,
-                  token: grant.token,
-                  task: injectPiWriteGrant(item.task, grant),
-                  originalTask: item.task,
-                  injected: false,
-                });
-              } catch (error) {
-                revokePiWriteGrant(grant.token);
-                throw error;
-              }
-              continue;
-            }
-            // Role-driven scoped grants: phase writers and the panel writer
-            // agents (interviewer, designer) may write their prompt-derived
-            // artifact dirs. Read-only spawns (standalone reviews, verifiers,
-            // panel judges, decompose, spec-check) get nothing even when their
-            // prompts NAME artifact paths — a judge's candidate paths are
-            // reads, not write scope.
-            if (spawn?.kind !== "non-implementation") continue;
-            const scopeDirs = deriveArtifactWriteScope(item.agent, item.task);
-            if (scopeDirs === null) continue;
-            const phaseGrantCwd = piSpawnCwd(event.input, index, ctx.cwd);
-            const phase = PHASE_AGENT_MAP[stripNamespace(item.agent)];
             const grant = issuePiWriteGrant({
               agent: item.agent,
-              taskId: `phase:${phase ?? "artifact"}`,
-              cwd: phaseGrantCwd,
+              taskId: requirement.taskId,
+              cwd: piSpawnCwd(event.input, index, ctx.cwd),
               taskGraphPath: taskGraphPath(),
-              scopeDirs,
+              ...(requirement.kind === "scoped" ? { scopeDirs: requirement.scopeDirs } : {}),
             });
             try {
               writeGrants.push({

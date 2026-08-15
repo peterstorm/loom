@@ -104,6 +104,8 @@ Two grant shapes exist:
 
 Read-only roles—reviewers, verifier, judge, decompose, and spec-check—receive no grant even if their prompts mention writable-looking paths.
 
+Outside orchestration—no active TaskGraph for the session—no role receives a grant, including implementation agents. Direct edits are ungated when no TaskGraph exists, so a capability there would authorize nothing already forbidden, while its Task id binding would refuse a spawn that has no Task id to give. This is what makes a Loom agent usable ad hoc on Pi, matching Claude Code, whose hook shims already exit before any gate when no TaskGraph is present. `engine/src/core/pi-write-grant-plan.ts` owns the decision.
+
 The child consumes the token before its first model turn. Replay, wrong Agent/Task/cwd, expiration, rejected spawn, or shutdown fails closed. Parent tool completion and rollback revoke outstanding grants. A fixed 24-hour ceiling only bounds a capability abandoned by a parent crash; it is not the normal lifetime.
 
 ## Registered orchestration capture
@@ -173,6 +175,7 @@ Check that `commands/`, `skills/`, `references/`, and `rules/` contain only regu
 Read the diagnostic:
 
 - no grant for a reviewer/judge/verifier is expected;
+- no grant for anyone outside orchestration is expected;
 - a scoped writer can write only derived artifact roots;
 - an implementation grant must match its Task and repository;
 - state/evidence paths remain guarded regardless of grant.
