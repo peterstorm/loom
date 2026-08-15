@@ -519,6 +519,18 @@ type PiSessionId = NonNullable<ReturnType<typeof parseSessionId>>;
 type PiSpawnReservation = Readonly<{
   sessionId: PiSessionId;
   needsTaskGraphLifecycle: boolean;
+  /**
+   * Was a Loom task graph active for this session when the batch was spawned?
+   *
+   * Recorded at spawn because the RESULT side cannot infer it: "no task graph
+   * now" is both the ad-hoc case (there was never one, so there is nothing to
+   * apply) and the corruption case (one existed and vanished mid-run, so real
+   * completion evidence is being dropped). Collapsing them made every ad-hoc
+   * spawn report `completion was NOT applied` as a failure. Keeping the spawn
+   * instant's answer lets the result side stay silent for the first and keep
+   * failing loudly for the second.
+   */
+  graphActiveAtSpawn: boolean;
   orchestrationRunBinding: SessionRunBinding | null;
   items: readonly Readonly<{
     agentType: string;
@@ -533,6 +545,18 @@ type PiSpawnReservation = Readonly<{
 }>;
 
 const MAX_PI_ORCHESTRATION_BATCH_SIZE = 8;
+
+/**
+ * Did this batch run outside orchestration entirely?
+ *
+ * True only when a reservation PROVES no task graph was active at spawn. An
+ * absent reservation (unknown provenance, legacy call, recovery failure)
+ * answers false, so every existing missing-state diagnostic keeps firing —
+ * this predicate can only silence a case it can positively account for.
+ */
+function spawnedWithoutTaskGraph(reservation: PiSpawnReservation | undefined): boolean {
+  return reservation !== undefined && !reservation.graphActiveAtSpawn;
+}
 
 function recoverPiSpawnReservation(
   rawSessionId: string,
@@ -589,6 +613,12 @@ function recoverPiSpawnReservation(
     recovered.push(Object.freeze({
       sessionId,
       needsTaskGraphLifecycle: false,
+      // A durably recovered reservation exists because a run directory issued
+      // it, so it is orchestration work by construction. The spawn instant is
+      // unrecoverable here, and `true` is the fail-closed answer: it keeps
+      // every missing-state diagnostic loud rather than silencing one on a
+      // guess.
+      graphActiveAtSpawn: true,
       orchestrationRunBinding: binding,
       items: Object.freeze(indexes.map((index) => {
         const item = byIndex.get(index)!;
@@ -1037,6 +1067,7 @@ export default function (pi: ExtensionAPI) {
         sessionRuntime.spawnReservations.set(toolCallId, {
           sessionId: safeSessionId,
           needsTaskGraphLifecycle,
+          graphActiveAtSpawn: graphIsActive,
           orchestrationRunBinding,
           items: parsedItems.map((item, index) => ({
             agentType: item.agent,
@@ -1353,6 +1384,14 @@ export default function (pi: ExtensionAPI) {
       if (!reservation || !reservation.items.some((item) => item.kind === "implementation")) return [];
       const manager = StateManager.fromSession(reservation.sessionId);
       if (!manager) {
+        // Ad-hoc: no graph existed at spawn, so there is no attempt record to
+        // finalize and nothing was lost.
+        if (spawnedWithoutTaskGraph(reservation)) {
+          process.stderr.write(
+            `loom(pi): ad-hoc implementation spawn for session ${reservation.sessionId} — no task graph to finalize\n`,
+          );
+          return [];
+        }
         const diagnostic = `cannot finalize reserved implementation attempts for session ${reservation.sessionId} — task graph unavailable`;
         process.stderr.write(`loom(pi): ${diagnostic}\n`);
         return [diagnostic];
@@ -1475,7 +1514,15 @@ export default function (pi: ExtensionAPI) {
       }
       if (missingReviews.length > 0 || missingSpecChecks.length > 0) {
         const manager = StateManager.fromSession(reservation.sessionId);
-        if (!manager) {
+        if (!manager && spawnedWithoutTaskGraph(reservation)) {
+          // Ad-hoc: the missing result is still worth naming, but there is no
+          // protected state to record an evidence failure against, so it is
+          // not an orchestration processing error.
+          process.stderr.write(
+            `loom(pi): ad-hoc spawn for session ${reservation.sessionId} returned ${missingReviews.length} missing ` +
+            `review result(s) and ${missingSpecChecks.length} missing spec-check result(s) — no task graph to record them against\n`,
+          );
+        } else if (!manager) {
           const diagnostic = `cannot persist ${missingReviews.length} missing reserved review result(s) and ` +
             `${missingSpecChecks.length} missing reserved spec-check result(s) for session ${reservation.sessionId} — task graph unavailable`;
           processingErrors.push(diagnostic);
@@ -1682,7 +1729,16 @@ export default function (pi: ExtensionAPI) {
 
       const mgr = StateManager.fromSession(sessionId);
       if (!mgr) {
-        if (isLoomOwnedResultAgent(agentType)) {
+        // An ad-hoc spawn had no task graph to begin with, so "completion was
+        // NOT applied" describes nothing that was lost: the agent's answer is
+        // its return value, and there is no protected state it was ever going
+        // to update. Reporting it as an evidence-processing failure made every
+        // graphless Loom agent look broken to the caller.
+        if (spawnedWithoutTaskGraph(reservation)) {
+          process.stderr.write(
+            `loom(pi): ad-hoc ${agentType} completion — no task graph for session ${JSON.stringify(sessionId)}, nothing to apply\n`,
+          );
+        } else if (isLoomOwnedResultAgent(agentType)) {
           const diagnostic = `no task graph for session ${JSON.stringify(sessionId)}; ${agentType} completion was NOT applied`;
           processingErrors.push(diagnostic);
           process.stderr.write(`loom(pi): ${diagnostic}\n`);

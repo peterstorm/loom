@@ -498,6 +498,77 @@ describe("Pi extension review tool_result integration", () => {
     expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
   });
 
+  it("completes an unmarked ad-hoc spawn with no task graph instead of reporting lost evidence", async () => {
+    // The reported failure: architecture-tech-lead ran fine graphlessly, then
+    // its completion was reported as `no task graph for session ...; ... was
+    // NOT applied`. There was never a graph to apply anything to.
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad420";
+    const context = { sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-ad-hoc-no-graph";
+    const taskPrompt = "Consult on the launch profile. Do not modify files.";
+    // The graph file is shared fixture state; restore it even on failure so a
+    // concurrently running test file never observes it missing.
+    rmSync(statePath, { force: true });
+    try {
+      const call = await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: { agent: "architecture-tech-lead", task: taskPrompt, agentScope: "user" },
+      }, context);
+      expect(call).toEqual([undefined]);
+
+      const responses = await pi.emit("tool_result", {
+        ...reviewResult(taskPrompt, "ad-hoc consultation", { agent: "architecture-tech-lead" }),
+        toolCallId,
+      }, context);
+
+      expect(responses).not.toContainEqual(expect.objectContaining({ isError: true }));
+      expect(JSON.stringify(responses)).not.toContain("was NOT applied");
+      expect(existsSync(statePath)).toBe(false);
+    } finally {
+      writeState(initialGraph());
+    }
+  });
+
+  it("still reports a completion as unapplied when the graph vanished mid-run", async () => {
+    // The case the diagnostic exists for: a graph WAS active at spawn, so the
+    // agent's completion really was going to update protected state.
+    const planPath = join(temp, "graph-vanished-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad421";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-graph-vanished";
+    const taskPrompt = "Task: T1\nReview the implementation.";
+
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: { agent: "code-reviewer", task: taskPrompt, agentScope: "user" },
+    }, context);
+    expect(call).toEqual([undefined]);
+
+    rmSync(statePath, { force: true });
+    rmSync(join(subagentDir, `${session}.task_graph`), { force: true });
+    try {
+      const responses = await pi.emit("tool_result", {
+        ...reviewResult(taskPrompt, "must be reported as unapplied"),
+        toolCallId,
+      }, context);
+
+      expect(JSON.stringify(responses)).toContain("was NOT applied");
+    } finally {
+      writeState(initialGraph());
+    }
+  });
+
   it("uses the reserved standalone classification when result-time task text loses the marker", async () => {
     const pi = await extension();
     const session = "019fca39-f989-7510-8e62-50dadbcad414";
