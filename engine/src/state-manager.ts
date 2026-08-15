@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, chmodSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { withLock } from "./utils/lock";
 import { KNOWN_AGENTS, PHASE_ORDER, REVIEW_SUB_AGENTS, taskGraphPath } from "./config";
 import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
@@ -39,6 +40,9 @@ import { deriveProofObligations, parseTaskProof, parseTaskTestResult } from "./c
 import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
 import { parseStoredSpecCheck } from "./core/spec-check";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
+import { assertPiCliMutationCompatible, captureLoomRuntimeIdentity } from "./runtime-compatibility";
+
+const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
 /** Resolve task graph path for cross-repo access. The session id comes from
  *  hook input, so it is PARSED before naming a file under SUBAGENT_DIR — an
@@ -1301,6 +1305,10 @@ export class StateManager {
 
   /** lock → chmod 644 → produce/parse → write tmp → rename → chmod 444 → unlock */
   private async atomicWrite<T>(produce: () => Readonly<{ state: TaskGraph; value: T }>): Promise<T> {
+    // This is the final shared write boundary, including replacement/repair
+    // paths. Check before lock creation or chmod so a skewed fresh CLI leaves
+    // the protected graph byte-for-byte and metadata-for-metadata untouched.
+    assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentity(PACKAGE_ROOT));
     const lockFile = `${dirname(this.path)}/.task_graph`;
     const tmp = `${this.path}.tmp`;
     return withLock(lockFile, () => {

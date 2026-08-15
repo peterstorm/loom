@@ -9,6 +9,11 @@ import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
 import { openRunDirectory, type RunDirHandle } from "../src/orchestration/run-directory-handle";
 import { buildContextPacket, encodeByteSection } from "../src/orchestration/context-packets";
 import { registerSessionRunBinding } from "../src/orchestration/session-run-bindings";
+import {
+  captureLoomRuntimeIdentity,
+  PI_EXTENSION_RUNTIME_REVISION_ENV,
+  PI_EXTENSION_RUNTIME_ROOT_ENV,
+} from "../src/runtime-compatibility";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 
@@ -38,6 +43,8 @@ const previousPiDir = process.env.PI_CODING_AGENT_DIR;
 const previousSubagentDir = process.env.LOOM_SUBAGENT_DIR;
 const previousOrchestrationRunsRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
 const previousOrchestrationRunDir = process.env.LOOM_ORCHESTRATION_RUN_DIR;
+const previousRuntimeRoot = process.env[PI_EXTENSION_RUNTIME_ROOT_ENV];
+const previousRuntimeRevision = process.env[PI_EXTENSION_RUNTIME_REVISION_ENV];
 process.env.LOOM_STATE_PATH = statePath;
 process.env.PI_CODING_AGENT_DIR = piAgentDir;
 process.env.LOOM_SUBAGENT_DIR = subagentDir;
@@ -97,6 +104,10 @@ afterAll(() => {
   else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousOrchestrationRunsRoot;
   if (previousOrchestrationRunDir === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
   else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousOrchestrationRunDir;
+  if (previousRuntimeRoot === undefined) delete process.env[PI_EXTENSION_RUNTIME_ROOT_ENV];
+  else process.env[PI_EXTENSION_RUNTIME_ROOT_ENV] = previousRuntimeRoot;
+  if (previousRuntimeRevision === undefined) delete process.env[PI_EXTENSION_RUNTIME_REVISION_ENV];
+  else process.env[PI_EXTENSION_RUNTIME_REVISION_ENV] = previousRuntimeRevision;
   rmSync(temp, { recursive: true, force: true });
 });
 
@@ -201,6 +212,14 @@ describe("Pi extension review tool_result integration", () => {
     module.default(pi as never);
     return pi;
   };
+
+  it("publishes the exact loaded runtime identity for fresh CLI mutation handshakes", async () => {
+    await extension();
+    const expected = captureLoomRuntimeIdentity(ROOT);
+
+    expect(process.env[PI_EXTENSION_RUNTIME_ROOT_ENV]).toBe(expected.packageRoot);
+    expect(process.env[PI_EXTENSION_RUNTIME_REVISION_ENV]).toBe(expected.revision);
+  });
 
   it("captures Pi tool_result bytes through request-bound run authority", async () => {
     const pi = await extension();

@@ -102,8 +102,18 @@ import {
   sweepExpiredPiWriteGrants,
   writeTargetViolatesScope,
 } from "./write-grant";
+import {
+  captureLoomRuntimeIdentity,
+  loadedRuntimeCompatibility,
+  PI_EXTENSION_RUNTIME_REVISION_ENV,
+  PI_EXTENSION_RUNTIME_ROOT_ENV,
+} from "../engine/src/runtime-compatibility";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+// Capture once, while this extension module is loaded. Fresh CLI processes
+// hash the checkout again before mutation; a changed checkout therefore cannot
+// write a schema this in-memory runtime may not parse.
+const LOADED_RUNTIME_IDENTITY = captureLoomRuntimeIdentity(PACKAGE_ROOT);
 const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const PI_RESOURCE_CACHE = join(PI_AGENT_DIR, "cache", "loom-resources");
 
@@ -638,7 +648,12 @@ export default function (pi: ExtensionAPI) {
   // Pi does not expand Claude Code's CLAUDE_PLUGIN_ROOT token in markdown.
   // Render package-owned prompts and skills from THIS extension's import URL;
   // cwd and the Claude plugin cache are never package identity.
-  process.env.LOOM_PLUGIN_ROOT = PACKAGE_ROOT;
+  process.env.LOOM_PLUGIN_ROOT = LOADED_RUNTIME_IDENTITY.packageRoot;
+  // Commands executed by Pi's Bash tool inherit process environment. This
+  // handshake binds every fresh mutating CLI process to the exact source bytes
+  // this extension loaded, preventing mutable-checkout split brain.
+  process.env[PI_EXTENSION_RUNTIME_ROOT_ENV] = LOADED_RUNTIME_IDENTITY.packageRoot;
+  process.env[PI_EXTENSION_RUNTIME_REVISION_ENV] = LOADED_RUNTIME_IDENTITY.revision;
   pi.on("resources_discover", () => {
     const resources = materializePiResources(PACKAGE_ROOT, PI_RESOURCE_CACHE);
     return {
@@ -656,6 +671,18 @@ export default function (pi: ExtensionAPI) {
     // crash in e.g. guardStateFile silently waves state-file writes through.
     let currentGuard = "session-id";
     try {
+      // Re-hash only before a spawn, where stale parser/policy code matters.
+      // Ordinary read/edit tools stay cheap. A future source update is caught
+      // here even before the agent asks a fresh CLI mutator to run.
+      if (event.toolName === "subagent") {
+        currentGuard = "runtime-compatibility";
+        const compatibility = loadedRuntimeCompatibility(
+          LOADED_RUNTIME_IDENTITY,
+          captureLoomRuntimeIdentity(PACKAGE_ROOT),
+        );
+        if (!compatibility.ok) return { block: true, reason: compatibility.message };
+      }
+
       const sessionId = ctx.sessionManager.getSessionId() ?? "unknown";
       const safeSessionId = parseSessionId(sessionId);
       const graphIsActive = pathExistsFailClosed(taskGraphPath()) ||

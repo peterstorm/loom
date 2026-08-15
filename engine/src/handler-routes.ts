@@ -55,6 +55,54 @@ export const FAIL_CLOSED_ROUTES: ReadonlySet<string> = new Set([
   "pre-tool-use/validate-agent-skill",
 ]);
 
+/**
+ * CLI routes that can mutate protected TaskGraph, lifecycle, evidence, or Run
+ * Directory state. A Pi-launched fresh process must prove it matches the
+ * extension runtime before importing or executing one of these routes.
+ *
+ * Package-maintenance routes such as model-profiles/render-pi are deliberately
+ * absent: operators must be able to regenerate Agents before `/reload`.
+ */
+export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
+  "pre-tool-use/validate-task-execution",
+  "subagent-stop/dispatch",
+  "subagent-stop/advance-phase",
+  "subagent-stop/update-task-status",
+  "subagent-stop/store-reviewer-findings",
+  "subagent-stop/store-spec-check-findings",
+  "subagent-stop/cleanup-subagent-flag",
+  "subagent-stop/capture-orchestration-result",
+  "post-tool-use/record-evidence",
+  "post-tool-use/record-orchestration-spawn",
+  "subagent-start/mark-subagent-active",
+  "session-start/cleanup-stale-subagents",
+  "helper/complete-wave-gate",
+  "helper/populate-task-graph",
+  "helper/repair-task-graph",
+  "helper/store-review-findings",
+  "helper/store-spec-check",
+  "helper/mark-tests-passed",
+  "helper/store-test-evidence",
+  "helper/reconcile-implementation-proof",
+  "helper/set-phase",
+  "helper/cleanup-state",
+  "helper/review-packet",
+  "helper/review-panel",
+  "helper/standalone-review",
+  "helper/orchestration",
+]);
+
+/** Status is intentionally available during skew so recovery stays diagnosable. */
+export function piRuntimeHandshakeRequired(
+  hookType: string | undefined,
+  handlerName: string | undefined,
+  extraArgs: readonly string[] = [],
+): boolean {
+  if (hookType === "init-state") return true;
+  if (!PI_RUNTIME_HANDSHAKE_ROUTES.has(`${hookType}/${handlerName}`)) return false;
+  return !(hookType === "helper" && handlerName === "orchestration" && extraArgs[0] === "status");
+}
+
 /** Exit code for a crash outside the handler, derived from the route. */
 export function failureExitCode(hookType: string | undefined, handlerName: string | undefined): 1 | 2 {
   return FAIL_CLOSED_ROUTES.has(`${hookType}/${handlerName}`) ? 2 : 1;

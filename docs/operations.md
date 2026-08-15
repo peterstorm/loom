@@ -94,9 +94,10 @@ Protection is layered:
 
 1. TaskGraph mode is `0444` at rest.
 2. `guard-state-file` denies Bash segments that may write guarded paths.
-3. `StateManager` serializes writes with a lock and atomic rename.
-4. Only hooks and narrowly allowlisted helpers receive write authority.
-5. Run-scoped programs publish immutable evidence outside the protected graph and commit protected state only through typed effects.
+3. Under Pi, a content-addressed Runtime Revision handshake rejects stale-extension/fresh-CLI mutations before dynamic import; `StateManager` repeats the check before chmod or lock creation.
+4. `StateManager` serializes writes with a lock and atomic rename.
+5. Only hooks and narrowly allowlisted helpers receive write authority.
+6. Run-scoped programs publish immutable evidence outside the protected graph and commit protected state only through typed effects.
 
 If a helper says a direct write is blocked, use the named canonical operation; do not use `chmod`, output redirection, an interpreter, or path obfuscation to bypass it.
 
@@ -146,6 +147,12 @@ Fix surviving criticals through implementation Agents, which increments Review G
 ### Wave Gate awaits advisory disposition
 
 Present the engine’s request and return exactly one disposition/reason object through `decide`. Do not classify advisories silently in parent reasoning.
+
+### Pi reports runtime version skew
+
+Do not repair state. The mutating CLI route compared the Runtime Revision published by Pi's loaded extension with the current checkout and refused before writing. Run `/reload` (or fully restart Pi while preserving the session), then retry the same idempotent operation. Canonical `orchestration status` remains available during skew.
+
+A missing handshake means the Pi session predates this protocol or did not load Loom; it is also resolved by reload/restart, not by deleting fields from the TaskGraph.
 
 ### State is malformed
 

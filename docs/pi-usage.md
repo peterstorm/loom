@@ -29,7 +29,9 @@ cd /absolute/path/to/loom
 bash scripts/sync-pi-agents.sh
 ```
 
-A local package is referenced in place. After source or generated-Agent changes, run `/reload`.
+A local package is referenced in place. After source changes, run `/reload`; after generated-Agent inputs change, run `scripts/sync-pi-agents.sh` and then `/reload`.
+
+Loom binds the in-memory extension and fresh CLI processes with a content-addressed Runtime Revision. A mutating CLI command launched by a Pi process whose extension predates or differs from the checkout is refused before any TaskGraph or Run Directory write. Read-only orchestration status remains available.
 
 ### Git or npm
 
@@ -180,6 +182,18 @@ Never broaden the grant manually.
 ### Architecture panel is refused
 
 This is intentional until interactive child-to-parent question relay exists. Use Claude Code for the panel interview, or use non-panel architecture only when all required decisions are already explicit and the flow can honestly avoid live questions.
+
+### Runtime version skew / restart required
+
+A diagnostic beginning `Loom runtime version skew detected` means the checkout changed after Pi loaded the extension. The TaskGraph is not corrupt, and the refused CLI command performed no mutation.
+
+Run:
+
+```text
+/reload
+```
+
+If reload is unavailable or fails, fully exit and restart Pi, preserving the session. Then retry the exact idempotent orchestration command. Do not remove newly valid fields, edit the TaskGraph, or recreate a Run Directory.
 
 ### State or Wave operation is blocked
 

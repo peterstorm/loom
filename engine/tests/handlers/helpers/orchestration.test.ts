@@ -13,13 +13,24 @@ import { buildContextPacket, encodeByteSection } from "../../../src/orchestratio
 import { openRunDirectory, inspectRunDirectoryEntry, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings } from "../../../src/orchestration/session-run-bindings";
 import type { Task, TaskGraph } from "../../../src/types";
+import {
+  captureLoomRuntimeIdentity,
+  PI_EXTENSION_RUNTIME_REVISION_ENV,
+  PI_EXTENSION_RUNTIME_ROOT_ENV,
+} from "../../../src/runtime-compatibility";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
+const PACKAGE_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
+const CURRENT_RUNTIME = captureLoomRuntimeIdentity(PACKAGE_ROOT);
 const CLI = join(ENGINE, "src", "cli.ts");
 const cleanup: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
+  // This file intentionally drives many synchronous child CLIs. Yield between
+  // cases so Vitest can acknowledge task-update RPCs instead of timing out
+  // while the worker remains continuously occupied by spawnSync calls.
+  await new Promise<void>((resolve) => setImmediate(resolve));
 });
 
 const deps: GateDeps = {
@@ -66,6 +77,10 @@ function runCli(
     ...envOverrides,
   };
   for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
+  if (env.PI_CODING_AGENT === "true") {
+    env[PI_EXTENSION_RUNTIME_ROOT_ENV] ??= CURRENT_RUNTIME.packageRoot;
+    env[PI_EXTENSION_RUNTIME_REVISION_ENV] ??= CURRENT_RUNTIME.revision;
+  }
   return spawnSync("bun", [CLI, "helper", "orchestration", ...args], {
     cwd,
     encoding: "utf-8",

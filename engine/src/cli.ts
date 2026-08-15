@@ -9,10 +9,12 @@
 import { match } from "ts-pattern";
 import { writeFileSync, chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { HookResult, HookHandler } from "./types";
 import { nonEmptyMessage } from "./types";
 import { resolveInitialState } from "./phase-init";
-import { KNOWN_HANDLERS, failureExitCode } from "./handler-routes";
+import { KNOWN_HANDLERS, failureExitCode, piRuntimeHandshakeRequired } from "./handler-routes";
+import { captureLoomRuntimeIdentity, piCliMutationCompatibility } from "./runtime-compatibility";
 
 /**
  * Failure polarity for the top-level catch, derived from argv BEFORE
@@ -21,6 +23,7 @@ import { KNOWN_HANDLERS, failureExitCode } from "./handler-routes";
  * FAIL_CLOSED_ROUTES. Every other route keeps exit 1.
  */
 const FAILURE_EXIT_CODE = failureExitCode(process.argv[2], process.argv[3]);
+const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
 // Eagerly buffer stdin before any async work (bun drains piped data during dynamic imports)
 const stdinPromise: Promise<string> = process.stdin.isTTY
@@ -76,38 +79,48 @@ function parseInitStateArgs(args: string[]): { skipBrainstorm: boolean; skipClar
   return { skipBrainstorm, skipClarify, skipSpecify, skipPlanAlignment, specDir, output };
 }
 
+function enforcePiRuntimeHandshake(
+  hookType: string | undefined,
+  handlerName: string | undefined,
+  extraArgs: readonly string[],
+): void {
+  // Run before dynamic imports and before every state/run-directory side
+  // effect. An old in-memory Pi extension therefore cannot launch a fresh CLI
+  // writer whose schema or policy it may be unable to parse.
+  if (!piRuntimeHandshakeRequired(hookType, handlerName, extraArgs)) return;
+  const compatibility = piCliMutationCompatibility(
+    process.env,
+    captureLoomRuntimeIdentity(PACKAGE_ROOT),
+  );
+  if (compatibility.ok) return;
+  process.stderr.write(`${compatibility.message}\n`);
+  process.exit(FAILURE_EXIT_CODE);
+}
+
+function initializeState(args: string[]): never {
+  const opts = parseInitStateArgs(args);
+  const state = resolveInitialState(
+    { skipBrainstorm: opts.skipBrainstorm, skipClarify: opts.skipClarify, skipSpecify: opts.skipSpecify, skipPlanAlignment: opts.skipPlanAlignment },
+    opts.specDir,
+  );
+  mkdirSync(dirname(opts.output), { recursive: true });
+  writeFileSync(opts.output, JSON.stringify(state, null, 2));
+  chmodSync(opts.output, 0o444);
+  process.exit(0);
+}
+
 async function main() {
   const [hookType, handlerName, ...extraArgs] = process.argv.slice(2);
+  enforcePiRuntimeHandshake(hookType, handlerName, extraArgs);
 
   if (!hookType || !handlerName) {
-    // Check for standalone commands
-    if (hookType === "init-state") {
-      const opts = parseInitStateArgs(process.argv.slice(3));
-      const state = resolveInitialState(
-        { skipBrainstorm: opts.skipBrainstorm, skipClarify: opts.skipClarify, skipSpecify: opts.skipSpecify, skipPlanAlignment: opts.skipPlanAlignment },
-        opts.specDir,
-      );
-      mkdirSync(dirname(opts.output), { recursive: true });
-      writeFileSync(opts.output, JSON.stringify(state, null, 2));
-      chmodSync(opts.output, 0o444);
-      process.exit(0);
-    }
+    if (hookType === "init-state") initializeState(process.argv.slice(3));
     process.stderr.write("Usage: bun cli.ts <hook-type> <handler-name> [extra-args...]\n");
     process.exit(1);
   }
 
   // Handle init-state even when parsed as hookType
-  if (hookType === "init-state") {
-    const opts = parseInitStateArgs([handlerName, ...extraArgs]);
-    const state = resolveInitialState(
-      { skipBrainstorm: opts.skipBrainstorm, skipClarify: opts.skipClarify, skipSpecify: opts.skipSpecify, skipPlanAlignment: opts.skipPlanAlignment },
-      opts.specDir,
-    );
-    mkdirSync(dirname(opts.output), { recursive: true });
-    writeFileSync(opts.output, JSON.stringify(state, null, 2));
-    chmodSync(opts.output, 0o444);
-    process.exit(0);
-  }
+  if (hookType === "init-state") initializeState([handlerName, ...extraArgs]);
 
   const typeSet = KNOWN_HANDLERS[hookType];
   if (!typeSet) {

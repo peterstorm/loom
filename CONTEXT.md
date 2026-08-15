@@ -144,6 +144,10 @@ _Avoid_: Result (acceptable in Rust), Optional (different semantics)
 A semantic policy assigning one Agent role to complete harness-specific requested bindings: a Claude Code model and an exact Pi provider/model/thinking tuple. Missing bindings fail closed. Pi launcher policy may explicitly inherit a local parent model at the spawn boundary; the profile catalog never infers that override.
 _Avoid_: Model alias, Sonnet equivalent, current model, implicit model fallback
 
+**Runtime Revision**:
+A content-addressed identity over Loom's extension, engine, and runtime package bytes. Pi captures it when the extension loads; every fresh Pi-launched CLI mutator must present the same identity before changing a TaskGraph or Run Directory.
+_Avoid_: Package version, schema version, commit hash, current checkout
+
 **Proof Obligation**:
 An engine-authored requirement a Task must discharge before its status can become implemented: completion, required regression tests, required new tests, and declared artifacts changed. Evidence keeps its provenance; Pi structured evidence is never relabeled as ledger-trusted.
 _Avoid_: Checklist item, self-report, completion claim
@@ -204,6 +208,7 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - A **Tier** determines which lint rules execute: "immediate" runs regex-only after edits, "full" runs all rules at Wave Gate boundaries or explicit scans
 - An **Agent** executes exactly one **Task** or one **Phase**
 - Every Loom-owned **Agent** resolves one explicit requested **LLM Profile** before spawn; Pi launcher overrides are explicit at the transport boundary
+- A Pi-launched mutating CLI process must match the in-memory extension's **Runtime Revision** before changing protected or run-scoped state
 - A **Task** becomes implemented only after all of its **Proof Obligations** are satisfied
 - Review Agents consume one immutable **Review Packet** per Task
 - A **Review Run** binds that Review Packet to one **Review Generation**, the expected review Agents, and all prior active Finding IDs

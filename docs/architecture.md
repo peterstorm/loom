@@ -70,6 +70,7 @@ Claude Code lifecycle coverage:
 `pi/extension.ts` maps Pi `tool_call`, `tool_result`, Agent lifecycle, and resource discovery events to the same core decisions. It also owns Pi-specific concerns:
 
 - deriving package identity from `import.meta.url`;
+- capturing a content-addressed **Runtime Revision** and publishing it to child CLI processes;
 - rendering resources through `pi/resources.ts`;
 - adapting Pi messages through `pi/transcript-adapter.ts`;
 - minting and consuming scoped write grants through `pi/write-grant.ts`;
@@ -84,6 +85,7 @@ Claude Code lifecycle coverage:
 
 Important parser boundaries include:
 
+- `runtime-compatibility.ts` — binds fresh Pi-launched CLI mutators to the exact extension/engine bytes loaded in memory;
 - `state-manager.ts` — parses the complete protected TaskGraph before use;
 - `parsers/parse-phase-artifacts.ts` — derives phase artifacts from completed Agent output;
 - `parsers/parse-plan-models.ts` — parses exact lifecycle, pipeline, and invariant declarations;
@@ -178,6 +180,8 @@ The active feature lifecycle lives at:
 
 `StateManager` is the only general writer. It uses a lock, temporary-file/rename publication, and mode `0444` at rest. Hooks and a narrow helper allowlist mediate changes. The graph contains phase artifacts, skipped phases, Tasks/Waves, proof results, review generations/runs, Findings, Wave Gate records, and GitHub tracking metadata.
 
+Under Pi, the extension hashes `engine/src/`, `pi/`, and runtime package metadata when it loads. Mutating CLI routes hash the checkout again before dynamic import, while `StateManager` repeats the check immediately before any chmod/lock/write. A missing or unequal Runtime Revision refuses the operation with a `/reload`/restart diagnostic. Status remains available during skew. This prevents a fresh CLI writer from emitting state that the stale in-memory extension cannot parse.
+
 This graph is mutable protected state because a feature progresses over time.
 
 ### Immutable Run Directories
@@ -237,6 +241,7 @@ Every expected reviewer must assess every prior Finding exactly once before fina
 Loom’s default is refusal when authority is incomplete or ambiguous:
 
 - guarded spawn routes fail closed on handler crashes;
+- Pi runtime/CLI version skew is rejected before Run Directory or TaskGraph mutation;
 - state and evidence paths are denied to arbitrary Bash writers;
 - Run Directory paths must be direct children and are accessed no-follow;
 - model and Skill bindings are explicit;
