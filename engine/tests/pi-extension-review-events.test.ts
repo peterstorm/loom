@@ -1,9 +1,9 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { evaluateTaskProof } from "../src/core/proof-obligations";
 import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
 import { openRunDirectory, type RunDirHandle } from "../src/orchestration/run-directory-handle";
@@ -219,6 +219,61 @@ describe("Pi extension review tool_result integration", () => {
 
     expect(process.env[PI_EXTENSION_RUNTIME_ROOT_ENV]).toBe(expected.packageRoot);
     expect(process.env[PI_EXTENSION_RUNTIME_REVISION_ENV]).toBe(expected.revision);
+  });
+
+  it("BLOCKS a subagent spawn when the checkout drifts from the loaded extension runtime", async () => {
+    // The earliest of the three skew guards, and the only one whose blocking arm
+    // had no test: the CLI-entry and state-write backstops are exercised against
+    // a real mismatch, but every `tool_call` case ran with the extension's own
+    // freshly-computed identity, so this branch never fired.
+    //
+    // Driving it needs a checkout that can change AFTER module load, so the
+    // extension is imported from a disposable copy of the runtime source. The
+    // copy lives beside the repo with node_modules symlinked in, because
+    // `captureLoomRuntimeIdentity` walks `engine/src` and `pi` only — a symlink
+    // outside those roots is never visited, and one inside them is refused.
+    const skewRoot = mkdtempSync(join(tmpdir(), "loom-runtime-skew-"));
+    const savedRuntimeRoot = process.env[PI_EXTENSION_RUNTIME_ROOT_ENV];
+    const savedRuntimeRevision = process.env[PI_EXTENSION_RUNTIME_REVISION_ENV];
+    try {
+      for (const entry of ["engine/src", "pi", "package.json", "engine/package.json", "engine/bun.lock"]) {
+        cpSync(join(ROOT, entry), join(skewRoot, entry), { recursive: true });
+      }
+      symlinkSync(join(ROOT, "node_modules"), join(skewRoot, "node_modules"), "dir");
+      symlinkSync(join(ROOT, "engine", "node_modules"), join(skewRoot, "engine", "node_modules"), "dir");
+
+      const module = await import(pathToFileURL(join(skewRoot, "pi", "extension.ts")).href) as {
+        default: (pi: unknown) => void;
+      };
+      const pi = new FakePi();
+      module.default(pi as never);
+
+      // Same package root, different bytes — a `revision-mismatch`, which is the
+      // skew an operator actually hits after pulling while Pi stays running.
+      const drifted = join(skewRoot, "pi", "extension.ts");
+      writeFileSync(drifted, `${readFileSync(drifted, "utf-8")}\n// drift\n`);
+
+      const blocked = await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId: "call-runtime-skew",
+        input: { agent: "code-reviewer", task: "Task: T1\nReview it.", agentScope: "user" },
+      }, { cwd: skewRoot, sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad480" } });
+
+      expect(blocked).toContainEqual({
+        block: true,
+        reason: expect.stringContaining("Loom runtime version skew detected"),
+      });
+      expect(blocked).toContainEqual({
+        block: true,
+        reason: expect.stringContaining("Run /reload in Pi"),
+      });
+    } finally {
+      if (savedRuntimeRoot === undefined) delete process.env[PI_EXTENSION_RUNTIME_ROOT_ENV];
+      else process.env[PI_EXTENSION_RUNTIME_ROOT_ENV] = savedRuntimeRoot;
+      if (savedRuntimeRevision === undefined) delete process.env[PI_EXTENSION_RUNTIME_REVISION_ENV];
+      else process.env[PI_EXTENSION_RUNTIME_REVISION_ENV] = savedRuntimeRevision;
+      rmSync(skewRoot, { recursive: true, force: true });
+    }
   });
 
   it("captures Pi tool_result bytes through request-bound run authority", async () => {
@@ -527,6 +582,87 @@ describe("Pi extension review tool_result integration", () => {
       expect(JSON.stringify(responses)).not.toContain("was NOT applied");
       expect(existsSync(statePath)).toBe(false);
     } finally {
+      writeState(initialGraph());
+    }
+  });
+
+  it("treats a graphless implementation spawn as a no-op instead of a finalization failure", async () => {
+    // The result-side site the two-commit sequence exists for: an ad-hoc
+    // code-implementer-agent spawned with no task graph has no attempt record to
+    // finalize, so nothing was lost and there is nothing to report. Before, it
+    // produced "cannot finalize reserved implementation attempts ... task graph
+    // unavailable" and surfaced as an orchestration error to the caller.
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad470";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-ad-hoc-impl-no-graph";
+    const taskPrompt = "Use the code-implementer skill. Refactor the parser. No task graph here.";
+    rmSync(statePath, { force: true });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: { agent: "code-implementer-agent", task: taskPrompt, agentScope: "user" },
+      }, context)).toEqual([undefined]);
+
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId,
+        isError: false,
+        input: {},
+        content: [],
+        // A FAILED result: this is the arm that would otherwise try to record an
+        // untrusted stop resolution against a graph that does not exist.
+        details: { results: [{ agent: "code-implementer-agent", task: taskPrompt, exitCode: 1, messages: [] }] },
+      }, context);
+
+      const written = stderr.mock.calls.map(([text]) => String(text)).join("");
+      expect(written).toContain("no task graph to finalize");
+      expect(written).not.toContain("cannot finalize reserved implementation attempts");
+      expect(responses).not.toContainEqual(expect.objectContaining({ isError: true }));
+      expect(existsSync(statePath)).toBe(false);
+    } finally {
+      stderr.mockRestore();
+      writeState(initialGraph());
+    }
+  });
+
+  it("names a graphless spawn's missing review result without calling it an orchestration failure", async () => {
+    // The other result-side site: the reservation expected a reviewer result
+    // that Pi did not return. Worth SAYING, but there is no protected state to
+    // record an evidence failure against, so it is not a processing error.
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad471";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-ad-hoc-review-missing";
+    const taskPrompt = "Task: T1\nReview it.";
+    rmSync(statePath, { force: true });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: { agent: "code-reviewer", task: taskPrompt, agentScope: "user" },
+      }, context)).toEqual([undefined]);
+
+      // The reserved reviewer slot comes back as a DIFFERENT agent, which is
+      // exactly the "missing or mismatched" reconciliation case.
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId,
+        isError: false,
+        input: {},
+        content: [],
+        details: { results: [{ agent: "architecture-tech-lead", task: taskPrompt, exitCode: 0, messages: [] }] },
+      }, context);
+
+      const written = stderr.mock.calls.map(([text]) => String(text)).join("");
+      expect(written).toContain("no task graph to record them against");
+      expect(written).not.toContain("cannot persist");
+      expect(existsSync(statePath)).toBe(false);
+    } finally {
+      stderr.mockRestore();
       writeState(initialGraph());
     }
   });

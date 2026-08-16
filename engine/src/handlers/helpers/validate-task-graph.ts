@@ -377,8 +377,7 @@ function salvageAndRecoverFindings(
   const recoveredFindings = recoverViewOnlyClaims(
     identified,
     refuted,
-    viewClaims(t.critical_findings),
-    viewClaims(t.advisory_findings),
+    { critical: viewClaims(t.critical_findings), advisory: viewClaims(t.advisory_findings) },
     resolved,
   );
   return {

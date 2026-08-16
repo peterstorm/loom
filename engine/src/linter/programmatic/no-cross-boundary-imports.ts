@@ -102,6 +102,12 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
     // `node:util` is isDeepStrictEqual. A future I/O import in a module that
     // is not listed here — or a listed module reaching a new subpath — fails
     // the lint gate until it is reviewed and named.
+    //
+    // The map grants; it does not certify. An entry for a module that has since
+    // dropped the import is stale permission, not a lint failure — this list is
+    // fail-closed on ADDING capability, so nothing catches a grant going unused.
+    // `identity.ts` sat here for `node:crypto`/`node:path` after it had lost
+    // every import statement; it is now off the list.
     perFileAllow: {
       "engine/src/core/block-direct-edits.ts": ["node:fs"],
       // guard-state-file and validate-template-substitution no longer appear
@@ -113,9 +119,9 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/legacy-archive.ts": ["node:crypto"],
       "engine/src/core/orchestration-contract/bytes.ts": ["node:crypto"],
       "engine/src/core/orchestration-contract/effects.ts": ["node:path"],
-      "engine/src/core/orchestration-contract/identity.ts": ["node:crypto", "node:path"],
       "engine/src/core/orchestration-contract/publication.ts": ["node:crypto"],
       "engine/src/core/panel-kernel.ts": ["node:path"],
+      "engine/src/core/phase-artifact-paths.ts": ["node:path"],
       "engine/src/core/panel-program.ts": ["node:crypto"],
       "engine/src/core/remediation-machine.ts": ["node:crypto"],
       "engine/src/core/repository-path.ts": ["node:path"],

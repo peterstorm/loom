@@ -662,12 +662,12 @@ describe("recoverViewOnlyClaims", () => {
       id: "code-reviewer-1", agent: "code-reviewer", severity: "critical",
       file: null, line: null, claim: "already identified",
     };
-    const recovered = recoverViewOnlyClaims([held], [], ["already identified", "orphan"], ["a nit"]);
+    const recovered = recoverViewOnlyClaims([held], [], { critical: ["already identified", "orphan"], advisory: ["a nit"] });
     expect(recovered.map((f) => f.claim)).toEqual(["orphan", "a nit"]);
     expect(recovered.every((f) => f.agent === "recovered-view")).toBe(true);
   });
 
   it("recovers nothing when the views are already in step", () => {
-    expect(recoverViewOnlyClaims([], [], [], [])).toEqual([]);
+    expect(recoverViewOnlyClaims([], [], { critical: [], advisory: [] })).toEqual([]);
   });
 });

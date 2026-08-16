@@ -517,8 +517,28 @@ export declare class InitialPublicationEffectPortMembership {
 export declare class AtomicInitialPublicationClaimPortMembership {
   private readonly atomicInitialPublicationClaimPortMembership: true;
 }
-export const exactRosterCache = new WeakSet<object>();
-export const completeRosterCache = new WeakSet<object>();
+/**
+ * The `ExactRoster` proof cache. Membership here — not any field the value
+ * carries — is what makes a roster trusted, so it is module-private for exactly
+ * the reason `publication.ts` gives for its own caches: an exported `WeakSet`
+ * hands every importer `.add(handBuiltObject)`, which is the one capability the
+ * cache exists to withhold, and direct sub-module imports that bypass the
+ * index.ts facade are an established pattern in this repo. `completion.ts` — the
+ * only cross-volume reader — is served by the narrow read-only accessor below.
+ *
+ * The sibling `completeRosterCache` is NOT here: `completion.ts` is its sole
+ * minter and sole reader, so it lives private to that volume rather than being
+ * exported out of this one.
+ */
+const exactRosterCache = new WeakSet<object>();
+
+/**
+ * Was `value` minted by `parseExactRoster`? Read-only view of the proof cache,
+ * granting no way to create one.
+ */
+export function isRegisteredExactRoster(value: unknown): boolean {
+  return typeof value === "object" && value !== null && exactRosterCache.has(value);
+}
 export type ExactRoster<S extends AgentRosterSlot = AgentRosterSlot> = ExactRosterMembership & Readonly<{
   runId: OrchestrationRunId;
   program: OrchestrationProgram;
@@ -531,23 +551,50 @@ export type ExactRosterError = Readonly<{
   violations: NonEmpty<RosterViolation>;
 }>;
 
+/**
+ * A real `Map` that refuses every mutator, rather than a record that merely
+ * looks like one.
+ *
+ * The previous view was a `canonicalRecord` carrying `get`/`has`/`entries`/
+ * `forEach` as own enumerable FUNCTION properties. It typed as `ReadonlyMap`
+ * and read like one, but it was not `instanceof Map`, and both of the contract's
+ * value-level operations quietly did the wrong thing with it:
+ * `canonicalStructuralEquals` fell past its `Map` arm into `recordsEqual`, which
+ * compares those function fields with `Object.is` — so two independently built
+ * views of the SAME entries were never equal, which is exactly the checkpoint
+ * agreement `canonicalStructuralEquals` exists to decide; and `JSON.stringify`
+ * drops function-valued keys, so a roster serialized to `{"size":N}` — a
+ * plausible-looking document with the entries silently gone.
+ *
+ * Subclassing `Map` fixes both at the root: `structurallyEqual` takes its `Map`
+ * arm and compares by content, and `JSON.stringify` produces `{}` — the honest
+ * "a Map does not serialize" answer that makes the existing projections
+ * (`serializableRefutationAuthority` and friends, which project `orderedSlots`
+ * instead) obviously necessary rather than accidentally load-bearing.
+ *
+ * `Map`'s constructor invokes `this.set` for each entry of an iterable argument,
+ * which a throwing override would break — so entries are installed through
+ * `Map.prototype.set` directly, before the instance is frozen.
+ */
+class ImmutableMap<K, V> extends Map<K, V> {
+  constructor(entries: readonly (readonly [K, V])[]) {
+    super();
+    for (const [key, value] of entries) Map.prototype.set.call(this, key, value);
+    Object.freeze(this);
+  }
+  override set(): never {
+    throw new TypeError("roster map is immutable");
+  }
+  override delete(): never {
+    throw new TypeError("roster map is immutable");
+  }
+  override clear(): never {
+    throw new TypeError("roster map is immutable");
+  }
+}
+
 export function immutableMap<K, V>(entries: readonly (readonly [K, V])[]): ReadonlyMap<K, V> {
-  const map = new Map<K, V>(entries);
-  let readonlyView: ReadonlyMap<K, V>;
-  readonlyView = canonicalRecord({
-    get size(): number { return map.size; },
-    get: (key: K) => map.get(key),
-    has: (key: K) => map.has(key),
-    entries: () => map.entries(),
-    keys: () => map.keys(),
-    values: () => map.values(),
-    forEach: (callback: (value: V, key: K, source: ReadonlyMap<K, V>) => void, thisArg?: unknown) => {
-      map.forEach((value, key) => callback.call(thisArg, value, key, readonlyView));
-    },
-    [Symbol.iterator]: () => map[Symbol.iterator](),
-    [Symbol.toStringTag]: "ReadonlyMap",
-  });
-  return readonlyView;
+  return new ImmutableMap<K, V>(entries);
 }
 
 export function parseExactRoster(

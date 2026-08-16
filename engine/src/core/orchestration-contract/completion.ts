@@ -6,8 +6,25 @@
  */
 import { canonicalRecord, failure, success, type DomainResult, type NonEmpty, type SlotId } from './identity';
 import { MAX_SEMANTIC_PAYLOAD_ARRAY_LENGTH, causedMessage, describeThrownCause, includes, readDenseDataArray, readExactDataRecord, type DataBoundaryReason } from './bytes';
-import { CompleteRosterMembership, completeRosterCache, exactRosterCache, immutableMap, parseStoredAgentRequestAuthority, sameHarnessBinding, type AgentRequestAuthority, type ExactRoster, type RosterViolation, type UnissuedResultCause } from './roster';
+import { CompleteRosterMembership, immutableMap, isRegisteredExactRoster, parseStoredAgentRequestAuthority, sameHarnessBinding, type AgentRequestAuthority, type ExactRoster, type RosterViolation, type UnissuedResultCause } from './roster';
 import { authorityResolutionFailure, issuedSpawnRequestFor, parseIssuedSpawnRequestAgainstRegistration, parseIssuedSpawnRequestIdentity, resolveRegisteredPublicationAuthority, samePublicationIdentity, type PublicationAuthorityResolver, type RegisteredBatchPublicationAuthority, type SpawnRequest } from './publication';
+
+/**
+ * The `CompleteRoster` proof cache. This volume is its only minter, so it lives
+ * here and is module-private — the same rule `publication.ts` states for its own
+ * caches, and the reason `roster.ts` no longer exports it: an exported `WeakSet`
+ * hands every importer the `.add(handBuiltObject)` capability the cache exists
+ * to withhold.
+ */
+const completeRosterCache = new WeakSet<object>();
+
+/**
+ * Was `value` minted by `parseCompleteRoster`? Read-only view of the proof
+ * cache, granting no way to create one.
+ */
+export function isRegisteredCompleteRoster(value: unknown): boolean {
+  return typeof value === "object" && value !== null && completeRosterCache.has(value);
+}
 
 export type AcceptedAgentResult<T> = Readonly<{
   kind: "accepted-agent-result";
@@ -308,7 +325,7 @@ export function parseCompleteRoster<T>(
   parsePayload: SemanticPayloadParser<T>,
 ): DomainResult<CompleteRoster<AcceptedAgentResult<T>>, CompleteRosterError> {
   const violations: RosterViolation[] = [];
-  if (typeof exactRoster !== "object" || exactRoster === null || !exactRosterCache.has(exactRoster)) {
+  if (!isRegisteredExactRoster(exactRoster)) {
     return failure(canonicalRecord({
       kind: "incomplete-or-invalid-roster",
       violations: Object.freeze([canonicalRecord({

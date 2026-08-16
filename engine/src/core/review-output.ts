@@ -281,7 +281,11 @@ export function parseMachineSummary(output: string): ParsedFindings | null {
   if (!lastMatch) return null;
 
   let block = output.slice(lastMatch.index);
-  // Trim at next heading of same or higher level (if any)
+  // Trim at the next level-2..4 heading, whatever its level relative to the
+  // Machine Summary's own — the pattern does not compare depths. Any \n##..####
+  // heading ends the block, which is the conservative reading: a deeper
+  // subsection under the summary would end it early rather than swallow a
+  // sibling section's prose into the findings.
   const nextHeading = block.match(/\n#{2,4}\s+[^#]/);
   if (nextHeading && nextHeading.index! > 0) block = block.slice(0, nextHeading.index!);
 

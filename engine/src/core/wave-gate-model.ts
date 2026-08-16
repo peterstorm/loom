@@ -110,13 +110,23 @@ export interface WaveBlockCauseSpecCheck {
  * downgrading the last critical, and the refutation tally refuting every
  * finding, each left `blocked: true` standing over an empty cause set, and the
  * wave dead-ended behind a "BLOCKED due to:" list with nothing in it.
+ *
+ * A BLANK finding string is not a cause. `wave-gate-machine`'s
+ * `checkCriticalFindings` — the check that actually withholds the gate — counts
+ * only `finding.trim() !== ""` entries, and `findingsViewError` admits
+ * whitespace-only view entries, so counting raw array length here made the
+ * "only copy" claim false in the one direction that matters: a wave whose sole
+ * critical finding was whitespace passed the gate and then re-blocked against
+ * this predicate. Same filter, same answer, one rule.
  */
 export function waveHasBlockCause(
   tasks: readonly WaveBlockCauseTask[],
   specCheck: WaveBlockCauseSpecCheck | undefined,
   wave: number,
 ): boolean {
-  if (tasks.some((task) => task.wave === wave && (task.critical_findings?.length ?? 0) > 0)) return true;
+  const substantive = (findings: readonly string[] | undefined): number =>
+    findings?.filter((finding) => finding.trim() !== "").length ?? 0;
+  if (tasks.some((task) => task.wave === wave && substantive(task.critical_findings) > 0)) return true;
   return specCheck !== undefined &&
     specCheck.wave === wave &&
     specCheck.verdict !== "EVIDENCE_CAPTURE_FAILED" &&

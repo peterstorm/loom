@@ -42,8 +42,7 @@ export type CaptureRejectionReason =
   | "unknown-request"
   | "identity-mismatch"
   | "attempt-mismatch"
-  | "duplicate-capture"
-  | "run-mismatch";
+  | "duplicate-capture";
 
 export type CaptureRejection = Readonly<{
   kind: "capture-rejected";
@@ -165,11 +164,18 @@ export type CaptureReceipt = Readonly<{
 /**
  * Bind one observed result to the exact issued request it claims to answer.
  *
- * Wrong run, unknown request, wrong attempt, or a slot that already accepted a
- * capture are all refusals. They are refusals rather than warnings because the
- * accepted transcript becomes the evidence a roster proof is built from: a
- * result admitted under the wrong identity would be indistinguishable from the
- * genuine one it displaced.
+ * Four refusals, in the order they are checked: a request this run never issued
+ * (`unknown-request`), the right request at the wrong attempt
+ * (`attempt-mismatch`), a semantic attempt that already accepted a capture
+ * (`duplicate-capture`), and a result carrying no harness-native correlator to
+ * bind by (`identity-mismatch`). The run itself is NOT among them and the
+ * function takes no run id: the caller already resolved `issued` from one
+ * anchored run directory, so a foreign request cannot appear in it — it fails as
+ * `unknown-request` instead.
+ *
+ * They are refusals rather than warnings because the accepted transcript becomes
+ * the evidence a roster proof is built from: a result admitted under the wrong
+ * identity would be indistinguishable from the genuine one it displaced.
  */
 export function bindCapture(input: Readonly<{
   issued: readonly AgentRequestAuthority[];

@@ -68,13 +68,32 @@ export interface ReviewPacketInput {
   readonly proofObligations: readonly JsonValue[];
 }
 
+declare const PACKET_ID: unique symbol;
+declare const DIFF_DIGEST: unique symbol;
+declare const POSTIMAGE_DIGEST: unique symbol;
+/**
+ * The packet's three SHA-256 domains, branded SEPARATELY — the same rule, and
+ * the same reason, as `BaseSha`/`HeadSha` above.
+ *
+ * All three are 64 lowercase hex characters over completely different inputs:
+ * `PacketId` hashes the canonical packet body, `DiffDigest` hashes an artifact's
+ * diff text, `PostimageDigest` hashes an artifact's original bytes. As plain
+ * strings, `{ sha256: packet.packetId, content: diffText }` type-checked as a
+ * valid `HashedReviewArtifactContent` — a packet that re-hashes cleanly against
+ * the wrong thing. Today every constructor happens to compute its digest inline;
+ * the brands are what keep that true when one of them stops.
+ */
+export type PacketId = string & { readonly [PACKET_ID]: true };
+export type DiffDigest = string & { readonly [DIFF_DIGEST]: true };
+export type PostimageDigest = string & { readonly [POSTIMAGE_DIGEST]: true };
+
 export interface HashedReviewArtifactContent {
-  readonly sha256: string;
+  readonly sha256: DiffDigest;
   readonly content: string;
 }
 
 export interface HashedReviewPostimage {
-  readonly sha256: string;
+  readonly sha256: PostimageDigest;
   readonly encoding: ReviewPostimageEncoding;
   readonly content: string;
 }
@@ -87,7 +106,7 @@ export interface ReviewPacketArtifact {
 
 export interface ReviewPacket {
   readonly schemaVersion: typeof REVIEW_PACKET_SCHEMA_VERSION;
-  readonly packetId: string;
+  readonly packetId: PacketId;
   readonly task: JsonObject;
   readonly baseSha: BaseSha;
   readonly headSha: HeadSha;
@@ -107,7 +126,7 @@ type PacketBody = Omit<ReviewPacket, "packetId">;
  * allowing legitimate edits made after the packet was captured. */
 export interface VerifiedReviewPacketRecovery {
   readonly schemaVersion: 1 | typeof REVIEW_PACKET_SCHEMA_VERSION;
-  readonly packetId: string;
+  readonly packetId: PacketId;
   readonly taskId: string;
   readonly baseSha: BaseSha;
   readonly headSha: HeadSha;
@@ -115,7 +134,7 @@ export interface VerifiedReviewPacketRecovery {
   readonly modifiedPaths: readonly string[];
   readonly artifacts: readonly Readonly<{
     path: string;
-    postimageSha256: string | null;
+    postimageSha256: PostimageDigest | null;
   }>[];
 }
 
@@ -208,8 +227,8 @@ export function parseIssuedReviewPacketRegistration(
     ? raw.task_id
     : null;
   if (taskId === null) errors.push(`${label}.task_id must be a non-empty string without surrounding whitespace`);
-  const packetId = typeof raw.packet_id === "string" && SHA256_HEX.test(raw.packet_id)
-    ? raw.packet_id
+  const packetId = typeof raw.packet_id === "string"
+    ? parsePacketId(raw.packet_id)
     : null;
   if (packetId === null) errors.push(`${label}.packet_id must be a lowercase SHA-256 digest`);
   const packetPath = parseReviewPath(raw.packet_path, `${label}.packet_path`);
@@ -257,7 +276,7 @@ function parseGitSha(raw: unknown, label: string): ParseResult<string> {
   return ok(raw);
 }
 
-function hashedContentJson(content: HashedReviewArtifactContent): JsonObject {
+function hashedContentJson(content: Readonly<{ sha256: string; content: string }>): JsonObject {
   return { sha256: content.sha256, content: content.content };
 }
 
@@ -312,6 +331,27 @@ export function sha256Hex(text: string): string {
   return sha256Bytes(Buffer.from(text, "utf-8"));
 }
 
+/**
+ * The three hash brands' only constructors.
+ *
+ * The `*Of` minters take the domain's OWN input and hash it here, so a brand
+ * can never be claimed for a digest computed over something else. The `parse*`
+ * pair is for untrusted documents, where the digest arrives already computed and
+ * only its shape can be checked — every caller re-verifies the value against the
+ * content it claims to cover immediately afterwards.
+ */
+export const packetIdOf = (canonicalBody: string): PacketId => sha256Hex(canonicalBody) as PacketId;
+export const diffDigestOf = (diff: string): DiffDigest => sha256Hex(diff) as DiffDigest;
+export const postimageDigestOf = (bytes: Uint8Array): PostimageDigest =>
+  sha256Bytes(bytes) as PostimageDigest;
+
+export const parsePacketId = (raw: unknown): PacketId | null =>
+  typeof raw === "string" && SHA256_HEX.test(raw) ? raw as PacketId : null;
+export const parseDiffDigest = (raw: unknown): DiffDigest | null =>
+  typeof raw === "string" && SHA256_HEX.test(raw) ? raw as DiffDigest : null;
+export const parsePostimageDigest = (raw: unknown): PostimageDigest | null =>
+  typeof raw === "string" && SHA256_HEX.test(raw) ? raw as PostimageDigest : null;
+
 function freezeJson<T>(value: T): T {
   if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
     Object.freeze(value);
@@ -328,7 +368,7 @@ function encodePostimage(bytes: Uint8Array): HashedReviewPostimage {
   const utf8 = original.toString("utf-8");
   const losslessUtf8 = Buffer.from(utf8, "utf-8").equals(original);
   return {
-    sha256: sha256Bytes(original),
+    sha256: postimageDigestOf(original),
     encoding: losslessUtf8 ? "utf8" : "base64",
     content: losslessUtf8 ? utf8 : original.toString("base64"),
   };
@@ -379,7 +419,7 @@ function parseArtifactInputs(raw: unknown): ParsedArtifacts {
     if (typeof artifact.diff === "string" && (artifact.postimage === null || artifact.postimage instanceof Uint8Array)) {
       artifacts.push({
         path: path.value,
-        diff: { content: artifact.diff, sha256: sha256Hex(artifact.diff) },
+        diff: { content: artifact.diff, sha256: diffDigestOf(artifact.diff) },
         postimage: artifact.postimage === null ? null : encodePostimage(artifact.postimage),
       });
     }
@@ -424,7 +464,7 @@ export function createReviewPacket(input: ReviewPacketInput): ParseResult<Review
     artifacts: [...artifactResult.artifacts].sort((left, right) => compareStrings(left.path, right.path)),
     planContext: planContext.value, proofObligations: proofObligations.value,
   };
-  return ok(freezeJson({ ...body, packetId: sha256Hex(canonicalJson(packetBodyJson(body))) }));
+  return ok(freezeJson({ ...body, packetId: packetIdOf(canonicalJson(packetBodyJson(body))) }));
 }
 
 /** Serialize the validated canonical domain shape. */
@@ -497,8 +537,9 @@ export function parseReviewPacket(raw: unknown): ParseResult<ReviewPacket> {
     proofObligations: value.proofObligations as readonly JsonValue[],
   });
   if (!rebuilt.ok) return rebuilt;
-  if (typeof value.packetId !== "string" || !SHA256_HEX.test(value.packetId)) return fail(["packetId must be a lowercase SHA-256 digest"]);
-  return value.packetId === rebuilt.value.packetId ? rebuilt : fail(["packetId does not match canonical packet content"]);
+  const declared = parsePacketId(value.packetId);
+  if (declared === null) return fail(["packetId must be a lowercase SHA-256 digest"]);
+  return declared === rebuilt.value.packetId ? rebuilt : fail(["packetId does not match canonical packet content"]);
 }
 
 function recoveryProjection(packet: ReviewPacket): VerifiedReviewPacketRecovery {
@@ -537,7 +578,9 @@ function parseLegacyRecoveryPacket(value: Record<string, unknown>): ParseResult<
   const artifacts: Array<{
     path: string;
     diff: HashedReviewArtifactContent;
-    postimage: HashedReviewArtifactContent | null;
+    // v1 stored postimages as UTF-8 text only, so its digest covers exactly the
+    // bytes of `content` — the same domain `PostimageDigest` brands in v2.
+    postimage: Readonly<{ content: string; sha256: PostimageDigest }> | null;
   }> = [];
   const artifactPaths = new Set<string>();
   if (!Array.isArray(value.artifacts)) errors.push("artifacts must be an array");
@@ -555,7 +598,7 @@ function parseLegacyRecoveryPacket(value: Record<string, unknown>): ParseResult<
       errors.push(`artifacts[${index}].diff must contain UTF-8 content and its lowercase SHA-256 digest`);
       return;
     }
-    let postimage: HashedReviewArtifactContent | null = null;
+    let postimage: Readonly<{ content: string; sha256: PostimageDigest }> | null = null;
     if (raw.postimage !== null) {
       if (!isRecord(raw.postimage) || typeof raw.postimage.content !== "string" ||
           typeof raw.postimage.sha256 !== "string" || !SHA256_HEX.test(raw.postimage.sha256) ||
@@ -563,11 +606,11 @@ function parseLegacyRecoveryPacket(value: Record<string, unknown>): ParseResult<
         errors.push(`artifacts[${index}].postimage must contain UTF-8 content and its lowercase SHA-256 digest`);
         return;
       }
-      postimage = { content: raw.postimage.content, sha256: raw.postimage.sha256 };
+      postimage = { content: raw.postimage.content, sha256: raw.postimage.sha256 as PostimageDigest };
     }
     artifacts.push({
       path: path.value,
-      diff: { content: raw.diff.content, sha256: raw.diff.sha256 },
+      diff: { content: raw.diff.content, sha256: raw.diff.sha256 as DiffDigest },
       postimage,
     });
   });
@@ -595,15 +638,16 @@ function parseLegacyRecoveryPacket(value: Record<string, unknown>): ParseResult<
     planContext: planContext.value,
     proofObligations: proofObligations.value,
   };
-  if (typeof value.packetId !== "string" || !SHA256_HEX.test(value.packetId)) {
+  const packetId = parsePacketId(value.packetId);
+  if (packetId === null) {
     return fail(["packetId must be a lowercase SHA-256 digest"]);
   }
-  if (value.packetId !== sha256Hex(canonicalJson(body))) {
+  if (packetId !== packetIdOf(canonicalJson(body))) {
     return fail(["packetId does not match canonical packet content"]);
   }
   return ok(freezeJson({
     schemaVersion: 1 as const,
-    packetId: value.packetId,
+    packetId,
     taskId: task.value.id as string,
     baseSha: baseSha.value,
     headSha: headSha.value,

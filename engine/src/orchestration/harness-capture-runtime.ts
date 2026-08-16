@@ -89,9 +89,19 @@ export function readCorrelatorIdentity(
  * Capture one finished Agent's result into its reserved slot.
  *
  * Pure with respect to decisions: every refusal is returned as a typed outcome
- * the caller audits, and only an accepted capture writes anything. The adapter
- * supplies the two harness-native facts — the native correlator and every
- * candidate final payload it observed — and nothing else differs between them.
+ * the caller audits rather than thrown or guessed at. What is written differs
+ * by outcome, not whether anything is written at all — a refusal that reached a
+ * real reservation is itself durably recorded (`rejectCapture` tombstones the
+ * attempt and a `request-capture-rejected` event lands in the journal), because
+ * a rejected attempt that left no trace is indistinguishable from an attempt
+ * that never happened. Only the refusals that never resolved a reservation —
+ * `not-an-orchestration-run`, `no-reservation`, and the run-authority/
+ * run-directory/correlator rejections above it — write nothing, having nothing
+ * to write against.
+ *
+ * The adapter supplies the two harness-native facts — the native correlator and
+ * every candidate final payload it observed — and nothing else differs between
+ * them.
  *
  * Candidates are handed over in full rather than pre-selected: pre-selection is
  * exactly where "pick the last text block" hides an ambiguity the engine should

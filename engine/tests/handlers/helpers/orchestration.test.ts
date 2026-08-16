@@ -573,7 +573,7 @@ describe("orchestration CLI", () => {
     mkdirSync(runDir, { recursive: true });
     const started = runCli([
       "start", "architecture", "--runs-root", runsRoot, "--run", runDir,
-    ], JSON.stringify({ input: { candidateLenses: ["simplicity-first"], judgeCriteria: ["fit"] }, events: [] }), root);
+    ], JSON.stringify({ input: { candidateLenses: ["simplicity-first"], judgeCriteria: ["codebase fit + effort"] }, events: [] }), root);
     expect(started.status).toBe(0);
     const request = (JSON.parse(started.stdout) as {
       requests: readonly Readonly<{ authority: AgentRequestAuthority }>[];

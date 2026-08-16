@@ -85,8 +85,7 @@ export function updateTaskFindings(
     ...recoverViewOnlyClaims(
       task.findings ?? [],
       task.refuted_findings ?? [],
-      task.critical_findings,
-      task.advisory_findings,
+      { critical: task.critical_findings, advisory: task.advisory_findings },
       task.resolved_findings ?? [],
     ),
   ];

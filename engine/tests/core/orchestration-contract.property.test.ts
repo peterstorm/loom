@@ -1078,7 +1078,16 @@ describe("ExactRoster and CompleteRoster conservation", () => {
         expect(complete.bySlot.size).toBe(size);
         expect(Object.isFrozen(complete)).toBe(true);
         expect(Object.isFrozen(complete.ordered)).toBe(true);
-        expect("set" in complete.bySlot).toBe(false);
+        // Immutability asserted by BEHAVIOUR, not by the absence of a key. The
+        // view is a real `Map` subclass now — so that structural equality and
+        // serialization see its entries instead of a bag of function properties
+        // — which means `set`/`delete`/`clear` are inherited names. Each refuses.
+        for (const mutator of ["set", "delete", "clear"] as const) {
+          expect(mutator in complete.bySlot).toBe(true);
+          expect(() => (complete.bySlot as unknown as Record<string, () => void>)[mutator]!())
+            .toThrow(/immutable/);
+        }
+        expect(complete.bySlot.size).toBe(size);
       },
     ));
   });

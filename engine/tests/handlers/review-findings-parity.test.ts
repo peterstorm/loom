@@ -15,7 +15,18 @@ import {
 } from "../../src/core/review-output";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const PI_EXTENSION = readFileSync(join(REPO_ROOT, "pi", "extension.ts"), "utf-8");
+/**
+ * The Pi review shell is TWO files since the `tool_result` god-handler was split:
+ * `extension.ts` still owns the standalone-run bypass and the missing-result
+ * reconciliation, `subagent-result.ts` owns the transcript → task sequence. The
+ * parity property is about the HARNESS, not about which file holds which half,
+ * so the structural assertions read both — concatenated in dispatch order, so
+ * the "checked before written" orderings below still mean what they say.
+ */
+const PI_EXTENSION = [
+  readFileSync(join(REPO_ROOT, "pi", "extension.ts"), "utf-8"),
+  readFileSync(join(REPO_ROOT, "pi", "subagent-result.ts"), "utf-8"),
+].join("\n");
 
 const baseTask: Task = {
   id: "T1",

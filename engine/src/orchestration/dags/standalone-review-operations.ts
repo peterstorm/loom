@@ -4,8 +4,9 @@
  * Two static graphs, both about routing.
  *
  * Scope resolution: an explicit scope is used as given; an absent scope
- * becomes the canonical changed-path union. Empty, ambiguous, external, or
- * unsafe scope blocks. The derived branch is a DEFAULT edge rather than a
+ * becomes the canonical changed-path union. An empty scope blocks, and so does
+ * an unsafe one — a leading `/` or any `..` segment, the two forms that escape
+ * the repository. The derived branch is a DEFAULT edge rather than a
  * second predicate, so "no explicit scope" cannot fall through unhandled — a
  * review that silently scoped itself to nothing would report a clean result
  * having read no code.

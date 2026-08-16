@@ -755,9 +755,10 @@ function parseRefutationEntry(
 }
 
 /**
- * Parse one verifier's untrusted output. Sibling of parseJudgeVerdict: the same
- * kernel envelope, a different payload, and NO crossCheck — findings have no
- * meaningful order, so there is no cross-entry rule to enforce.
+ * Does `text` contain a structurally valid JSON object that claims `criterion`
+ * or `verdicts` authority? A brace scanner, not a parser: it decides only
+ * whether a SECOND payload is competing with the fenced one, so that the caller
+ * can refuse rather than guess which object was final.
  */
 function containsCompetingVerdictObject(text: string): boolean {
   for (let start = 0; start < text.length; start += 1) {
@@ -824,6 +825,11 @@ export function refutationVerdictJson(raw: string): ParseResult<string> {
   }
 }
 
+/**
+ * Parse one verifier's untrusted output. Sibling of parseJudgeVerdict: the same
+ * kernel envelope, a different payload, and NO crossCheck — findings have no
+ * meaningful order, so there is no cross-entry rule to enforce.
+ */
 export function parseRefutationVerdict(
   rawJson: string,
   expectedLens: ReviewLens,

@@ -282,23 +282,49 @@ function canonicalTarget(path: string): string {
   }
 }
 
-/** Pure scope enforcement for a scoped (phase-agent) write grant: is the
- *  absolute target path inside at least one scope dir? Returns a description
- *  of the violation (for the block reason) or null when the write may
- *  proceed. Both sides are canonicalized through symlinks; prefix matching
- *  is on trailing-slash dirs, so `…/specs/` never admits `…/specs-other/x`
- *  or `…/specs2/x`. */
+/**
+ * The genuinely PURE half of scope enforcement: is an ALREADY-CANONICAL target
+ * inside at least one already-canonical scope dir?
+ *
+ * Prefix matching is on trailing-slash dirs, so `…/specs/` never admits
+ * `…/specs-other/x` or `…/specs2/x`. String math only — no filesystem, no
+ * `process.cwd()` — so the rule can be exercised with plain path fixtures
+ * instead of a working tree full of real directories and symlinks.
+ */
+export function canonicalPathViolatesScope(
+  canonicalTargetPath: string,
+  canonicalScopeDirs: readonly string[],
+): string | null {
+  for (const dir of canonicalScopeDirs) {
+    if (canonicalTargetPath.startsWith(dir.endsWith("/") ? dir : `${dir}/`)) return null;
+  }
+  return `write target ${canonicalTargetPath} is outside the granted artifact scope`;
+}
+
+/**
+ * Scope enforcement for a scoped (phase-agent) write grant: is the target path
+ * inside at least one scope dir?
+ *
+ * NOT pure, and it used to say it was. `canonicalTarget` calls `realpathSync`,
+ * so the answer depends on live filesystem state — which is the point (a
+ * symlinked directory inside a scope dir must not resolve outside it), but it
+ * made a security-critical predicate untestable without real directories and
+ * hid an I/O boundary inside something labelled pure. The I/O now happens here,
+ * once, up front, for the target and every scope dir together; the decision is
+ * `canonicalPathViolatesScope` above, which touches nothing.
+ *
+ * Returns a description of the violation (for the block reason), or null when
+ * the write may proceed.
+ */
 export function writeTargetViolatesScope(
   targetPath: string,
   scopeDirs: readonly string[],
   baseCwd: string = process.cwd(),
 ): string | null {
-  const target = canonicalTarget(resolve(baseCwd, targetPath));
-  for (const dir of scopeDirs) {
-    const dirNorm = canonicalTarget(dir);
-    if (target.startsWith(dirNorm.endsWith("/") ? dirNorm : `${dirNorm}/`)) return null;
-  }
-  return `write target ${target} is outside the granted artifact scope`;
+  return canonicalPathViolatesScope(
+    canonicalTarget(resolve(baseCwd, targetPath)),
+    scopeDirs.map(canonicalTarget),
+  );
 }
 
 export function sweepExpiredPiWriteGrants(now: number = Date.now()): void {

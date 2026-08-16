@@ -965,14 +965,27 @@ export const RECOVERED_AGENT = "recovered-view";
  * handlers/helpers/store-review-findings) — so none of them can disagree about
  * what recovery means. Changing the semantics here changes all three.
  */
+/**
+ * The two `string[]` views a task carries, as a LABELLED PAIR.
+ *
+ * They were adjacent same-typed positional parameters, and a transposed call at
+ * any of the four production sites compiled cleanly while reattributing every
+ * recovered claim to the wrong severity — silently turning a critical that
+ * blocks the wave gate into an advisory that does not. `CriterionScore` in
+ * `panel-contract` is a pair for exactly this reason.
+ */
+export type SeverityViews = Readonly<{
+  critical: readonly string[] | undefined;
+  advisory: readonly string[] | undefined;
+}>;
+
 export function recoverViewOnlyClaims(
   findings: readonly Finding[],
   refuted: readonly RefutedFinding[],
-  criticalView: readonly string[] | undefined,
-  advisoryView: readonly string[] | undefined,
+  views: SeverityViews,
   resolved: readonly ResolvedFinding[] = [],
 ): readonly Finding[] {
-  const { critical, advisory } = viewOnlyClaims(findings, criticalView, advisoryView);
+  const { critical, advisory } = viewOnlyClaims(findings, views.critical, views.advisory);
   const drafts = draftsFromClaims(critical, advisory);
   return drafts.length === 0
     ? []
@@ -1100,8 +1113,7 @@ export function reviewRunPriorFindings(task: Task): readonly Finding[] {
     ...recoverViewOnlyClaims(
       stored,
       task.refuted_findings ?? [],
-      task.critical_findings,
-      task.advisory_findings,
+      { critical: task.critical_findings, advisory: task.advisory_findings },
       task.resolved_findings ?? [],
     ),
   ];
@@ -1347,8 +1359,7 @@ export function mergeFindings(
     ...recoverViewOnlyClaims(
       task.findings ?? [],
       refuted,
-      task.critical_findings,
-      task.advisory_findings,
+      { critical: task.critical_findings, advisory: task.advisory_findings },
       task.resolved_findings ?? [],
     ),
   ];

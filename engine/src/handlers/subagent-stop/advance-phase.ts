@@ -8,7 +8,6 @@
  */
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { relative, resolve, sep } from "node:path";
 import { match } from "ts-pattern";
 import type { HookHandler, SubagentStopInput, Phase, TaskGraph } from "../../types";
 import { PHASE_AGENT_MAP, PHASE_ORDER, CLARIFY_THRESHOLD } from "../../config";
@@ -17,22 +16,15 @@ import { parsePhaseArtifacts } from "../../parsers/parse-phase-artifacts";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { findFile } from "../../utils/find-file";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
+import {
+  PLAN_ARTIFACT_DIR,
+  SPEC_ARTIFACT_DIR,
+  resolvesWithin,
+} from "../../core/phase-artifact-paths";
 
-/**
- * Does `candidate` RESOLVE inside `directory` (both taken relative to cwd)?
- *
- * Lexical containment after `resolve`, so `..` segments are collapsed before
- * the comparison rather than being carried along inside a string that still
- * "contains" the directory name. Equality with the directory itself is not
- * containment — an artifact must be a file under it, not the directory.
- */
-export function resolvesWithin(candidate: string, directory: string): boolean {
-  const fromDirectory = relative(resolve(directory), resolve(candidate));
-  return fromDirectory !== "" &&
-    fromDirectory !== ".." &&
-    !fromDirectory.startsWith(`..${sep}`) &&
-    !fromDirectory.startsWith("/");
-}
+// Re-exported because this module's own containment rule moved to the pure core
+// so the Pi shell could share it verbatim; the name stays importable from here.
+export { resolvesWithin };
 
 /** Count NEEDS CLARIFICATION markers in a file */
 export function countMarkers(filePath: string): number {
@@ -58,9 +50,14 @@ export function resolveTransition(
       return { nextPhase: "specify" as Phase, artifact: file };
     })
     .with("specify", () => {
-      // Try state.spec_file first, fall back to finding spec.md on disk
+      // Try state.spec_file first, fall back to finding spec.md on disk.
+      // RESOLVED containment, not `String.includes`: the substring form admits
+      // `.claude/specs/../../../../tmp/evil/spec.md`, which is the exact test
+      // the artifact write path below (and `core/phase-artifact-paths`) was
+      // written to replace. A read site that keeps the weak form re-opens the
+      // hole the writer closed.
       let spec = state.spec_file;
-      if (spec && !spec.includes(".claude/specs/")) {
+      if (spec && !resolvesWithin(spec, SPEC_ARTIFACT_DIR)) {
         // spec_file set but not in expected location — reject and try fallback
         spec = null;
       }
@@ -77,8 +74,13 @@ export function resolveTransition(
       return { nextPhase: "architecture" as Phase, artifact: spec, skipClarify: true };
     })
     .with("clarify", () => {
-      // Try state.spec_file first, fall back to finding spec.md on disk
+      // Try state.spec_file first, fall back to finding spec.md on disk.
+      // The containment check is NOT optional here just because this branch
+      // only counts markers: the accepted path is also what lands in
+      // `phase_artifacts.clarify`, so an out-of-tree file read here becomes the
+      // run's authoritative spec artifact. Same rule as `specify` below/above.
       let spec = state.spec_file;
+      if (spec && !resolvesWithin(spec, SPEC_ARTIFACT_DIR)) spec = null;
       if (!spec || !existsSync(spec)) {
         if (state.spec_dir) {
           spec = findFile(state.spec_dir, "spec.md");
@@ -92,8 +94,10 @@ export function resolveTransition(
     .with("architecture", () => {
       // Try state.plan_file first, fall back to deriving plan path from spec_dir slug
       let plan = state.plan_file;
-      if (plan && !plan.includes(".claude/plans/")) {
-        // plan_file set but not in expected location — reject
+      if (plan && !resolvesWithin(plan, PLAN_ARTIFACT_DIR)) {
+        // plan_file set but not in expected location — reject. Resolved
+        // containment for the same reason as the spec branches: substring
+        // containment carries `..` segments through unharmed.
         return null;
       }
       if (!plan || !existsSync(plan)) {
@@ -192,11 +196,11 @@ const handler: HookHandler = async (stdin) => {
         // while resolving well outside the tree, and both this check and the
         // parser's used the same weak form.
         if (artifacts.spec_file && existsSync(artifacts.spec_file)
-            && resolvesWithin(artifacts.spec_file, ".claude/specs")) {
+            && resolvesWithin(artifacts.spec_file, SPEC_ARTIFACT_DIR)) {
           updates.spec_file = artifacts.spec_file;
         }
         if (!s.plan_file && artifacts.plan_file && existsSync(artifacts.plan_file)
-            && resolvesWithin(artifacts.plan_file, ".claude/plans")) {
+            && resolvesWithin(artifacts.plan_file, PLAN_ARTIFACT_DIR)) {
           updates.plan_file = artifacts.plan_file;
         }
 

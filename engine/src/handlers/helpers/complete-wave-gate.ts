@@ -64,7 +64,16 @@ import { parseWaveArg } from "./wave-args";
 
 export type GateCheck = CoreGateCheck;
 
-/** Pure status renderers; T10 may wire them to CLI routes. */
+/**
+ * Pure status renderers, re-exported as part of this module's facade over
+ * `core/wave-gate-machine`.
+ *
+ * The CLI wiring they once anticipated has SHIPPED, but not through here:
+ * `helpers/orchestration`'s status route imports the core renderers directly.
+ * These stay because the facade is the surface this module's tests pin — the
+ * parity case asserts each delegates to its core original, so a future divergence
+ * between the two import paths fails a test rather than splitting the rendering.
+ */
 export const renderLoomStatusHuman = (status: LoomStatus): string => renderCoreLoomStatusHuman(status);
 export const renderLoomStatusJson = (status: LoomStatus): string => renderCoreLoomStatusJson(status);
 

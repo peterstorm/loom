@@ -74,7 +74,14 @@ export function repositoryContext(): GitRepositoryContext {
   }
 }
 
-/** Canonical repository root used by every git/path boundary in this process. */
+/**
+ * The repository root this module's own git commands run from — the `cwd` for
+ * `exec`/`execArgs` and the base every path helper here resolves against.
+ *
+ * NOT every git boundary in the process: `repositoryContext` above deliberately
+ * re-resolves its own root and HEAD in one `execFileSync` pass, because it is a
+ * proof boundary that must not inherit a root captured at module load.
+ */
 export function repositoryRoot(): string | undefined {
   return repoRoot;
 }

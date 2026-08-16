@@ -24,7 +24,7 @@ import type {
   WaveImplementationAction,
   WaveImplementationRecovery,
 } from "../types";
-import { newWaveGate, testResultPassed } from "./wave-gate-model";
+import { newWaveGate, reconcileWaveBlock, testResultPassed } from "./wave-gate-model";
 import type { ProofFailure } from "./proof-obligations";
 import {
   awaitUserAction,
@@ -674,24 +674,36 @@ export function applyGateDecision(state: TaskGraph, decision: GateDecision): Tas
     state.active_wave_gate.terminalOutcome !== null
   ) return state;
   const defaultGate = newWaveGate();
-  return {
-    ...state,
-    tasks: state.tasks.map((task) => task.wave === decision.wave
-      ? { ...task, status: "completed" as const, review_status: "passed" as const }
-      : task),
-    wave_gates: {
+  const clearedTasks = state.tasks.map((task) => task.wave === decision.wave
+    ? { ...task, status: "completed" as const, review_status: "passed" as const }
+    : task);
+  // `blocked` is DERIVED, never asserted. `wave-gate-model`'s `waveHasBlockCause`
+  // is documented as the only copy of the rule every writer computes from, and a
+  // literal `blocked: false` here was the writer that made that false. On a pass
+  // verdict `checkCriticalFindings` and `checkSpecAlignment` have already proven
+  // there is no cause, so re-deriving cannot change the outcome — it removes the
+  // second, drifting copy of the rule rather than the behaviour.
+  const gatesAfterDecision = reconcileWaveBlock(
+    {
       ...state.wave_gates,
       [String(decision.wave)]: {
         ...(state.wave_gates[String(decision.wave)] ?? defaultGate),
         impl_complete: true,
         tests_passed: true,
         reviews_complete: true,
-        blocked: false,
       },
       ...(decision.verdict.nextWave === null ? {} : {
         [String(decision.verdict.nextWave)]: { ...(state.wave_gates[String(decision.verdict.nextWave)] ?? defaultGate) },
       }),
     },
+    clearedTasks,
+    state.spec_check,
+    decision.wave,
+  );
+  return {
+    ...state,
+    tasks: clearedTasks,
+    wave_gates: gatesAfterDecision,
     ...(decision.verdict.nextWave === null ? {} : { current_wave: decision.verdict.nextWave }),
     wave_review_epoch: undefined,
   };

@@ -145,7 +145,7 @@ describe("quality-program helper boundaries", () => {
     const input = {
       input: {
         candidateLenses: ["simplicity-first", "type-driven-fp"],
-        judgeCriteria: ["simplicity", "testability"],
+        judgeCriteria: ["simplicity", "pure functional core"],
       },
       events: [],
     };

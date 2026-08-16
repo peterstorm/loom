@@ -25,28 +25,27 @@ import { validateTemplateSubstitution } from "../engine/src/core/validate-templa
 import { classifyPiSpawnItems, expectedSpawnModel } from "../engine/src/core/model-profiles";
 
 
-// Engine parsers (format-aware)
-import { parseFilesModified } from "../engine/src/parsers/parse-files-modified";
-import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-output";
-
 // Engine SubagentStop logic (harness-agnostic functions already exported)
 import {
-  extractTestEvidence,
-  collectNewTestEvidence,
-  cumulativeModifiedPaths,
   applyUntrustedStopResolution,
 } from "../engine/src/handlers/subagent-stop/update-task-status";
-import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
   applyReviewResolution,
-  constrainReviewResolutionToScope,
   hasStandaloneReviewContext,
-  resolveTaskReviewFindings,
-  reviewResolutionLog,
-  type ReviewResolution,
 } from "../engine/src/core/review-output";
-import { parseSpecCheckOutput, reconcileSpecCheck } from "../engine/src/core/spec-check";
-import { newWaveGate } from "../engine/src/types";
+
+// The per-result appliers. Each concern the `tool_result` handler used to hold
+// inline is one named, port-injected function there; this file dispatches.
+import {
+  applyFailedPiResult,
+  applyImplementationPiResult,
+  applyPhaseAgentPiResult,
+  applyReviewPiResult,
+  applySpecCheckPiResult,
+  type PiResultOutcome,
+  type RepositoryProbe,
+  type TaskGraphStore,
+} from "./subagent-result";
 
 // `isReviewAgent` lives in `config`, NOT in `core/review-output` beside the three
 // functions above it: it reads the review-agent roster, and `core/review-output`
@@ -55,7 +54,7 @@ import { newWaveGate } from "../engine/src/types";
 // with it — every hook below, not just review capture. `tests/pi-imports.test.ts`
 // resolves every engine import in this file against the real exports so the next
 // move of a shared symbol fails a test instead of silently disarming Pi.
-import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PHASE_ORDER, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
+import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { fsSessionRegistry, parseAgentId, parseSessionId, rosterAgentId } from "../engine/src/machine";
@@ -68,7 +67,7 @@ import * as git from "../engine/src/utils/git";
 // Linter integration (PostEdit lint via tool_result)
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
 import { lintFile } from "../engine/src/linter/index";
-import { messagesToClaudeJsonl, parsePiMessages, piResultFinalPayloadCandidates, piStructuredTestDiagnostics, piStructuredTestResult } from "./transcript-adapter";
+import { piResultFinalPayloadCandidates } from "./transcript-adapter";
 // FR-033: Pi and Claude Code capture each completed reviewer/verifier output
 // into the SAME engine-declared slot under the same refusals. Both drive this
 // one runtime; only the native correlator and the payload observation differ.
@@ -88,7 +87,6 @@ import { captureKey } from "../engine/src/core/harness-capture";
 import { materializePiResources } from "./resources";
 import { checkAgentSkillPrompt } from "../engine/src/core/agent-skills";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
-import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
 import {
   compareAttemptBaseline,
 } from "../engine/src/utils/artifact-baseline";
@@ -1746,507 +1744,80 @@ export default function (pi: ExtensionAPI) {
         continue;
       }
 
+      // Each concern below is one named applier in `pi/subagent-result`, taking
+      // the state store and the repository as ports. They decide and persist;
+      // this dispatcher owns stderr and owns which of their diagnostics count as
+      // orchestration processing errors.
+      const store: TaskGraphStore = mgr;
+      const repository: RepositoryProbe = {
+        root: () => git.repositoryRoot() ?? process.cwd(),
+        isRepo: () => git.isGitRepo(),
+      };
+      const parentPrompt = event.content
+        .filter((c: { type: string }) => c.type === "text")
+        .map((c: { type: string; text?: string }) => c.text ?? "")
+        .join("\n");
+      const emit = (applied: PiResultOutcome): void => {
+        processingErrors.push(...applied.processingErrors);
+        for (const line of applied.log) process.stderr.write(`${line}\n`);
+      };
+
       // A failed process may retain valid-looking assistant text. Never parse
       // that text as completion/review/spec evidence, but do persist the
       // failed CAPTURE for gate-owned agents so a healthy sibling or stale pass
       // cannot make the missing evidence disappear.
       if (piSubagentResultFailed(result)) {
-        const failure = `${agentType} failed before evidence capture completed (exitCode=${String(result.exitCode)}, stopReason=${String(result.stopReason ?? "unset")})`;
-        if (isReviewAgent(agentType)) {
-          const failedTaskId = reservedItem?.taskId ?? extractTaskId(result.task ?? "");
-          if (failedTaskId === null || !mgr.load().tasks.some((task) => task.id === failedTaskId)) {
-            process.stderr.write(
-              `loom(pi): ${failure}; trusted task binding is missing or unknown — review evidence NOT stored\n`,
-            );
-            continue;
-          }
-          const resolution = { kind: "evidence-failed" as const, agent: agentType, message: failure };
-          await mgr.update((s) => ({
-            ...s,
-            tasks: s.tasks.map((task) =>
-              task.id === failedTaskId ? applyReviewResolution(task, resolution) : task
-            ),
-          }));
-          process.stderr.write(reviewResolutionLog(failedTaskId, resolution) + "\n");
-          continue;
-        }
-        if (agentType === "spec-check-invoker") {
-          const runAt = new Date().toISOString();
-          await mgr.update((s) => ({
-            ...s,
-            spec_check: {
-              wave: s.current_wave ?? 1,
-              run_at: runAt,
-              verdict: "EVIDENCE_CAPTURE_FAILED" as const,
-              error: failure,
-            },
-          }));
-          process.stderr.write(`loom(pi): ${failure} — marking spec-check evidence_capture_failed\n`);
-          continue;
-        }
-        if (IMPL_AGENTS.has(agentType) && !reservedItem) {
-          const failedTaskId = extractTaskId(result.task ?? "");
-          if (failedTaskId !== null) {
-            await mgr.update((s) => ({
-              ...s,
-              executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== failedTaskId),
-            }));
-          }
-        }
-        process.stderr.write(`loom(pi): ${failure} — completion evidence ignored\n`);
+        emit(await applyFailedPiResult({
+          store,
+          agentType,
+          result,
+          reservedSlot: reservedItem,
+          now: new Date().toISOString(),
+        }));
         continue;
       }
 
       // --- Phase agent → advance phase ---
       const completedPhase = PHASE_AGENT_MAP[agentType];
       if (completedPhase) {
-        // Parse the untrusted Pi envelope before artifact extraction. A valid
-        // envelope with no write calls may still use the documented filesystem
-        // fallback; a malformed envelope cannot authorize phase advancement.
-        const parsedPhaseMessages = parsePiMessages(result.messages ?? []);
-        if (!parsedPhaseMessages.ok) {
-          const diagnostic = `${agentType} phase artifact extraction failed: ${parsedPhaseMessages.errors.join("; ")}`;
-          processingErrors.push(diagnostic);
-          process.stderr.write(`loom(pi): ${diagnostic} — phase was not advanced\n`);
-          continue;
-        }
-        try {
-          const specDir = mgr.load().spec_dir ?? ".claude/specs";
-          for (const msg of parsedPhaseMessages.value) {
-            if (msg.role !== "assistant") continue;
-            for (const block of msg.content ?? []) {
-              if (block.type !== "toolCall" || (block.name !== "write" && block.name !== "Write")) continue;
-              const filePath = (block.arguments as Record<string, unknown>)?.path as string
-                ?? (block.arguments as Record<string, unknown>)?.file_path as string;
-              if (!filePath) continue;
-              if (filePath.includes(specDir) && filePath.endsWith("/spec.md")) {
-                await mgr.update((s) => ({ ...s, spec_file: filePath }));
-              }
-              if (filePath.includes(".claude/plans/") && filePath.endsWith(".md")) {
-                await mgr.update((s) => ({ ...s, plan_file: filePath }));
-              }
-            }
-          }
-        } catch (err) {
-          const diagnostic = `${agentType} phase artifact extraction failed: ${err instanceof Error ? err.message : String(err)}`;
-          processingErrors.push(diagnostic);
-          process.stderr.write(`loom(pi): ${diagnostic} — phase was not advanced\n`);
-          continue;
-        }
-
-        const state = mgr.load();
-        const currentIdx = PHASE_ORDER.indexOf(state.current_phase);
-        const completedIdx = PHASE_ORDER.indexOf(completedPhase);
-
-        if (!(completedIdx >= 0 && currentIdx > completedIdx)) {
-          const transition = resolveTransition(completedPhase, state);
-          if (transition) {
-            try {
-              await mgr.update((s) => ({
-                ...s,
-                current_phase: transition.nextPhase,
-                phase_artifacts: { ...s.phase_artifacts, [completedPhase]: transition.artifact },
-                // Also persist spec_file/plan_file if transition found them
-                ...(transition.artifact.endsWith("/spec.md") ? { spec_file: transition.artifact } : {}),
-                ...(transition.artifact.includes(".claude/plans/") ? { plan_file: transition.artifact } : {}),
-                skipped_phases: transition.skipClarify
-                  ? ([...new Set([...s.skipped_phases, "clarify" as const])])
-                  : s.skipped_phases,
-                updated_at: new Date().toISOString(),
-              }));
-            } catch (err) {
-              const diagnostic = `phase advancement failed: ${err instanceof Error ? err.message : String(err)}`;
-              processingErrors.push(diagnostic);
-              process.stderr.write(`loom: ${diagnostic}\n`);
-            }
-          }
-        }
+        emit(await applyPhaseAgentPiResult({
+          store,
+          agentType,
+          completedPhase,
+          result,
+          now: new Date().toISOString(),
+        }));
         continue;
       }
 
       // --- Impl agent → update task status ---
       if (IMPL_AGENTS.has(agentType)) {
-        // Extract task ID from the original task prompt (works in parallel mode)
-        // Then get transcript from per-result messages for test evidence
-        let taskId = reservedItem?.taskId ?? extractTaskId(result.task ?? "") ?? extractTaskId(
-          event.content.filter((c: { type: string }) => c.type === "text").map((c: { type: string; text?: string }) => c.text ?? "").join("\n")
-        );
-        // Parse per-result messages at the untrusted harness boundary before
-        // any consumer dereferences their content.
-        const parsedMessages = parsePiMessages(result.messages ?? []);
-
-        // Mirrors the engine's update-task-status: an unextractable task ID
-        // must not vanish silently. Exactly one executing task → infer it;
-        // ambiguous/empty → warn and clear executing_tasks (never mark tasks
-        // failed — that cascades into evidence overwrites downstream).
-        if (!taskId) {
-          const st = mgr.load();
-          const executing = st.executing_tasks ?? [];
-          if (executing.length === 1) {
-            process.stderr.write(
-              `WARNING: ${agentType} task ID extraction failed, inferred task ${executing[0]} from executing_tasks\n`,
-            );
-            taskId = executing[0];
-          } else {
-            if (executing.length > 0) {
-              process.stderr.write(
-                `WARNING: ${agentType} completed without task ID, ${executing.length} tasks executing (ambiguous)\n`,
-              );
-            } else {
-              process.stderr.write(
-                `WARNING: ${agentType} completed without task ID and executing_tasks is empty — task status was NOT recorded\n`,
-              );
-            }
-            await mgr.update((s) => ({ ...s, executing_tasks: [] }));
-            continue;
-          }
-        }
-
-        // Pre-lock snapshot: needed for start_sha / new_tests_required in the
-        // evidence collection below. The skip guards here are only a cheap
-        // fast path — the authoritative re-check runs INSIDE the locked
-        // update (TOCTOU, see below).
-        const state = mgr.load();
-        const task = state.tasks.find((t) => t.id === taskId);
-        // Evidence collection below needs a live unresolved task. A stopped
-        // missing/completed/trusted task still needs locked execution cleanup;
-        // skipping it outright leaves a ghost marker forever.
-        if (!task || task.status === "completed") {
-          await mgr.update((s) => ({
-            ...s,
-            executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
-          }));
-          process.stderr.write(
-            `loom(pi): ${taskId} stopped; preserved completed/missing state and cleared executing_tasks\n`,
-          );
-          continue;
-        }
-
-        // parseBashTestOutput deliberately accepts only paired Bash tool calls
-        // and results in Claude-compatible JSONL. Passing flattened prose here
-        // silently discards every Pi test run as spoofable free text.
-        const adaptedTranscript = parsedMessages.ok
-          ? messagesToClaudeJsonl(parsedMessages.value)
-          : parsedMessages;
-        const structuredEvidence = parsedMessages.ok
-          ? piStructuredTestResult(parsedMessages.value)
-          : parsedMessages;
-        if (structuredEvidence.ok && structuredEvidence.value === null) {
-          // The wave gate rejects the transcript fallback, so a null structured
-          // verdict is a latent blocker: say exactly why, instead of letting the
-          // next gate run surface a bare "untrusted-regression-pass" mystery.
-          const trace = piStructuredTestDiagnostics(result.messages ?? []);
-          if (trace.ok) {
-            const summary = trace.value.classifiedCommands.length === 0
-              ? "no Bash call was classified as a test run"
-              : `verdict=${trace.value.verdict}, classified=[${trace.value.classifiedCommands.join(" | ")}]`;
-            process.stderr.write(
-              `loom(pi): ${taskId} produced no structured test evidence (${summary}) — transcript fallback used; the wave gate will reject it\n`,
-            );
-          }
-        }
-        if (!adaptedTranscript.ok || !structuredEvidence.ok || !parsedMessages.ok) {
-          const errors = !parsedMessages.ok
-            ? parsedMessages.errors
-            : !adaptedTranscript.ok
-              ? adaptedTranscript.errors
-              : !structuredEvidence.ok
-                ? structuredEvidence.errors
-                : [];
-          const failureReason = `Pi transcript evidence capture failed: ${errors.join("; ")}`;
-          const root = git.repositoryRoot() ?? process.cwd();
-          await mgr.update((current) => {
-            const currentTarget = current.tasks.find((candidate) => candidate.id === taskId);
-            if (currentTarget === undefined || currentTarget.status === "completed") {
-              return {
-                ...current,
-                executing_tasks: (current.executing_tasks ?? []).filter((id) => id !== taskId),
-              };
-            }
-            const comparison = compareAttemptBaseline(root, currentTarget, { kind: "repository-or-declared" });
-            const changedArtifacts = comparison.changedDeclaredArtifacts;
-            const bytesChangedSinceAttempt = comparison.bytesChangedSinceAttempt;
-            if (comparison.failure !== null) {
-              process.stderr.write(
-                `loom(pi): cannot compare malformed-transcript attempt baseline for ${taskId}: ${comparison.failure} — invalidating stale evidence\n`,
-              );
-            }
-            if (!bytesChangedSinceAttempt) {
-              return {
-                ...current,
-                executing_tasks: (current.executing_tasks ?? []).filter((id) => id !== taskId),
-                tasks: current.tasks.map((candidate) =>
-                  candidate.id === taskId && candidate.status === "pending"
-                    ? { ...candidate, failure_reason: failureReason }
-                    : candidate
-                ),
-              };
-            }
-            return applyUntrustedStopResolution(current, taskId, {
-              taskCompleted: false,
-              testResult: { verdict: "untrusted", passed: false, label: "pi-transcript-capture-failed" },
-              testEvidence: failureReason,
-              // Malformed messages provide no task-attributed path evidence.
-              // The batch-wide repository delta is invalidation-only.
-              filesModified: [],
-              changedDeclaredArtifacts: changedArtifacts,
-              bytesChangedSinceAttempt,
-              newTestsWritten: false,
-              newTestEvidence: "",
-            }).state;
-          });
-          process.stderr.write(`loom(pi): ${failureReason} — ${taskId} evidence was not accepted\n`);
-          continue;
-        }
-        const resultMessages = parsedMessages.value;
-        const bashOutput = parseBashTestOutput(adaptedTranscript.value);
-        const transcriptEvidence = extractTestEvidence(bashOutput);
-        const structuredTestEvidence = structuredEvidence.value;
-        const testEvidence = structuredTestEvidence ?? transcriptEvidence;
-
-        // files_modified feeds lint-wave-gate's target collection (it
-        // collects lint targets EXCLUSIVELY from tasks' files_modified) —
-        // parse it from the per-result messages, re-encoded as the pi-format
-        // JSONL parseFilesModified's pi branch reads, so the pi path
-        // persists the same field the engine path does (round-16 fix: the
-        // omission made every wave-gate lint under pi run over an empty set).
-        const piJsonl = resultMessages
-          .map((m) => JSON.stringify({ type: "message", message: m }))
-          .join("\n");
-        const rawFilesModified = parseFilesModified(piJsonl, "pi");
-        let filesModified: readonly string[];
-        try {
-          filesModified = canonicalRepositoryPaths(
-            git.repositoryRoot() ?? process.cwd(),
-            rawFilesModified,
-            "Pi transcript files_modified",
-          );
-        } catch (error) {
-          await mgr.update((s) => ({
-            ...s,
-            executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
-          }));
-          process.stderr.write(
-            `loom(pi): unsafe modified-file evidence for ${taskId}: ${error instanceof Error ? error.message : String(error)} — task left pending\n`,
-          );
-          continue;
-        }
-
-        // The SAME comparison and the SAME fail-closed contract as the other
-        // two sites. This one used to catch by dropping the task from
-        // executing_tasks and `continue`-ing — no resolution recorded, so an
-        // identical comparison failure left the task pending forever here while
-        // the sibling paths invalidated its evidence and re-judged it. The
-        // helper fails closed (`bytesChangedSinceAttempt: true`, declared
-        // artifacts from `file_list`) and this path now falls through to the
-        // untrusted resolution below, exactly as the others do.
-        const comparison = compareAttemptBaseline(
-          git.repositoryRoot() ?? process.cwd(),
-          task,
-          { kind: "repository-or-declared", extraModifiedPaths: filesModified },
-        );
-        const changedArtifacts = comparison.changedDeclaredArtifacts;
-        const bytesChangedSinceAttempt = comparison.bytesChangedSinceAttempt;
-        if (comparison.failure !== null) {
-          process.stderr.write(
-            `loom(pi): cannot compare declared-artifact baseline for ${taskId}: ${comparison.failure} — invalidating stale evidence\n`,
-          );
-        }
-
-        // Atomic state write. The completed/trusted-verdict guards above ran
-        // on a PRE-LOCK snapshot that a concurrent writer can outdate before
-        // this write lands (TOCTOU) — so the decision runs INSIDE the locked
-        // update via the shared pure applyUntrustedStopResolution (engine's
-        // update-task-status module), which re-finds and re-checks the target.
-        // The incoming resolution is ALWAYS untrusted here, so an existing
-        // trusted verdict (or a completed task) always stands.
-        const resolvedTaskId = taskId;
-        let skippedExistingVerdict = false;
-        await mgr.update((s) => {
-          const currentTarget = s.tasks.find((candidate) => candidate.id === resolvedTaskId);
-          const cumulativeFiles = cumulativeModifiedPaths(currentTarget?.files_modified, filesModified);
-          const newTestEvidence = git.isGitRepo()
-            ? collectNewTestEvidence(
-                cumulativeFiles,
-                currentTarget?.new_tests_required,
-                currentTarget?.start_sha,
-              )
-            : { written: false, evidence: "" };
-          const applied = applyUntrustedStopResolution(s, resolvedTaskId, {
-            taskCompleted: true,
-            // Pi has no Loom evidence ledger. Preserve the real provenance:
-            // paired tool-result evidence may discharge Pi's structured proof
-            // policy; flattened transcript output may not.
-            testResult: {
-              verdict: "untrusted" as const,
-              passed: testEvidence.passed,
-              label: structuredTestEvidence !== null
-                ? `pi-structured: ${structuredTestEvidence.evidence || "test tool result"}`
-                : "transcript-regex (fallback)",
-            },
-            testEvidence: testEvidence.evidence,
-            filesModified,
-            changedDeclaredArtifacts: changedArtifacts,
-            bytesChangedSinceAttempt,
-            newTestsWritten: newTestEvidence.written,
-            newTestEvidence: newTestEvidence.evidence,
-          });
-          skippedExistingVerdict = applied.skipped;
-          // applyUntrustedStopResolution reconciles impl_complete in both
-          // directions in the same locked state transition as the proof.
-          return applied.state;
-        });
-
-        if (skippedExistingVerdict) {
-          process.stderr.write(
-            `loom(pi): ${taskId} is completed or carries a trusted verdict this untrusted resolution cannot supersede — leaving it untouched\n`,
-          );
-        }
+        emit(await applyImplementationPiResult({
+          store,
+          repository,
+          agentType,
+          result,
+          reservedSlot: reservedItem,
+          parentPrompt,
+        }));
         continue;
       }
 
       // --- Review agent → store findings ---
       if (isReviewAgent(agentType)) {
-        const taskId = reservedItem?.taskId ?? extractTaskId(result.task ?? "") ?? extractTaskId(
-          event.content.filter((c: { type: string }) => c.type === "text").map((c: { type: string; text?: string }) => c.text ?? "").join("\n")
-        );
-        if (!taskId) {
-          // A review whose task ID is unextractable stores nothing — its
-          // findings silently never gate the wave. Say so instead of
-          // vanishing (review agents don't sit in executing_tasks, so there
-          // is no inference to fall back on).
-          process.stderr.write(
-            `WARNING: ${agentType} review completed without an extractable task ID — findings NOT stored\n`,
-          );
-          continue;
-        }
-
-        // `tasks.map` over an id no task holds is a total no-op, and the log
-        // below asserts the findings were stored regardless. `extractTaskId`
-        // falls back to any standalone `T\d+` in the transcript, so a reviewer
-        // quoting an unrelated id resolves to a task the graph does not have —
-        // and that reviewer's criticals were discarded while stderr reported
-        // them recorded. Both harnesses guard it, or they drift.
-        const reviewTask = mgr.load().tasks.find((t: { id: string }) => t.id === taskId);
-        if (!reviewTask) {
-          process.stderr.write(
-            `WARNING: ${agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored\n`,
-          );
-          continue;
-        }
-
-        const parsedMessages = parsePiMessages(result.messages ?? []);
-        if (!parsedMessages.ok) {
-          const message = `Pi review messages are malformed: ${parsedMessages.errors.join("; ")}`;
-          const resolution = { kind: "evidence-failed" as const, agent: agentType, message };
-          let appliedTask = reviewTask;
-          await mgr.update((state) => ({
-            ...state,
-            tasks: state.tasks.map((task) => {
-              if (task.id !== taskId) return task;
-              appliedTask = applyReviewResolution(task, resolution);
-              return appliedTask;
-            }),
-          }));
-          process.stderr.write(reviewResolutionLog(taskId, resolution, appliedTask, true) + "\n");
-          continue;
-        }
-        const transcriptText = parsedMessages.value
-          .filter((message) => message.role === "assistant" || message.role === "toolResult")
-          .flatMap((message) => message.content.filter((block) => block.type === "text").map((block) => block.text ?? ""))
-          .join("\n");
-
-        // Transcript bytes are captured outside the lock; packet generation and
-        // scope authority are resolved against the current task INSIDE it. The
-        // Claude Code shell uses the same state-ownership boundary.
-        let resolution: ReviewResolution = {
-          kind: "evidence-failed",
-          agent: agentType,
-          message: "review task disappeared before evidence could be applied",
-        };
-        let appliedTask = reviewTask;
-        let applicationChanged = false;
-        let taskFound = false;
-        await mgr.update((s) => ({
-          ...s,
-          tasks: s.tasks.map((t) => {
-            if (t.id !== taskId) return t;
-            taskFound = true;
-            resolution = constrainReviewResolutionToScope(
-              resolveTaskReviewFindings(
-                transcriptText,
-                agentType,
-                t.review_run,
-                t.review_generation,
-              ),
-              [...(t.file_list ?? []), ...(t.files_modified ?? [])],
-            );
-            appliedTask = applyReviewResolution(t, resolution);
-            applicationChanged = appliedTask !== t;
-            return appliedTask;
-          }),
+        emit(await applyReviewPiResult({
+          store,
+          agentType,
+          result,
+          reservedSlot: reservedItem,
+          parentPrompt,
         }));
-        if (!taskFound) {
-          process.stderr.write(
-            `WARNING: ${agentType} review task ${taskId} disappeared before evidence application — findings NOT stored\n`,
-          );
-          continue;
-        }
-        process.stderr.write(
-          reviewResolutionLog(taskId, resolution, appliedTask, applicationChanged) + "\n",
-        );
         continue;
       }
 
       // --- Spec-check invoker → store spec-check findings ---
       if (agentType === "spec-check-invoker") {
-        const parsedMessages = parsePiMessages(result.messages ?? []);
-        if (!parsedMessages.ok) {
-          const error = `spec-check-invoker messages are malformed: ${parsedMessages.errors.join("; ")}`;
-          await mgr.update((s) => ({
-            ...s,
-            spec_check: {
-              wave: s.current_wave ?? 1,
-              run_at: new Date().toISOString(),
-              verdict: "EVIDENCE_CAPTURE_FAILED" as const,
-              error,
-            },
-          }));
-          process.stderr.write(`loom(pi): ${error} — marking spec-check evidence_capture_failed\n`);
-          continue;
-        }
-        const transcriptText = parsedMessages.value
-          .filter((message) => message.role === "assistant" || message.role === "toolResult")
-          .flatMap((message) => message.content.filter((block) => block.type === "text").map((block) => block.text ?? ""))
-          .join("\n");
-
-        const findings = parseSpecCheckOutput(transcriptText);
-        const state = mgr.load();
-        const wave = findings.wave ?? state.current_wave ?? 1;
-
-        const resolution = reconcileSpecCheck(findings, wave, new Date().toISOString());
-        if (resolution.kind === "evidence-failed") {
-          process.stderr.write(
-            `loom(pi): ${resolution.specCheck.error} — marking spec-check evidence_capture_failed\n`,
-          );
-          await mgr.update((s) => ({ ...s, spec_check: resolution.specCheck }));
-          continue;
-        }
-
-        await mgr.update((s) => {
-          const updated = { ...s, spec_check: resolution.specCheck };
-          if (resolution.specCheck.critical_count > 0) {
-            const waveKey = String(wave);
-            updated.wave_gates = {
-              ...s.wave_gates,
-              [waveKey]: {
-                ...(s.wave_gates[waveKey] ?? newWaveGate()),
-                blocked: true,
-              },
-            };
-          }
-          return updated;
-        });
+        emit(await applySpecCheckPiResult({ store, result, now: new Date().toISOString() }));
         continue;
       }
       } catch (err) {

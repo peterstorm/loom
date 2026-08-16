@@ -385,11 +385,21 @@ export function startArchitectureProgram(
   const unknownLenses = lenses.ok
     ? lenses.value.filter((lens) => !(PANEL_LENSES as readonly string[]).includes(lens))
     : [];
-  if (!lenses.ok || !criteria.ok || unknownLenses.length > 0) {
+  // Criteria are checked against the CLOSED vocabulary, exactly as lenses are
+  // against `PANEL_LENSES`. Distinct-and-non-blank was the whole bar here while
+  // the v2 persistent path minted every criterion through `architectureCriterion`
+  // — and this entry point is not legacy-only: `startArchitectureDispatchProgram`
+  // calls it while rehydrating a persisted journal, which is untrusted input by
+  // the same argument `architectureCriterion`'s own doc gives for checkpoints.
+  const unknownCriteria = criteria.ok
+    ? criteria.value.filter((criterion) => architectureCriterion(criterion) === null)
+    : [];
+  if (!lenses.ok || !criteria.ok || unknownLenses.length > 0 || unknownCriteria.length > 0) {
     return fail([
       ...(lenses.ok ? [] : lenses.errors),
       ...(criteria.ok ? [] : criteria.errors),
       ...unknownLenses.map((lens) => `unknown architecture design lens: ${lens}`),
+      ...unknownCriteria.map((criterion) => `unknown architecture judge criterion: ${criterion}`),
     ]);
   }
 
@@ -1016,14 +1026,8 @@ function authorityMatches(left: AgentRequestAuthority, right: AgentRequestAuthor
 }
 
 /**
- * `expectedLength` is the length of the ordered list this roster is paired
- * with — `candidateLenses`, `judgeCriteria`, or the refutation `lenses`. The
- * pairing is POSITIONAL: slot `i` answers for entry `i`, and the roster carries
- * nothing that independently names its entry, so equal cardinality is the whole
- * of what can be proven here. Everything downstream must therefore resolve its
- * entry through `boundEntryForSlot`, which fails closed on a slot the roster
- * does not actually hold, rather than indexing a parallel array and asserting
- * the result is present.
+ * The two request identities a refutation verifier slot owns — attempt 1 and its
+ * single retry — derived from the run, the lens, and the finding set.
  */
 export type RefutationVerifierBinding = Readonly<{
   slotId: SlotId;
@@ -1161,6 +1165,12 @@ function rosterAuthorityErrors(
 /**
  * The ordered entry slot `slotId` answers for, or `null` when the roster holds
  * no such slot.
+ *
+ * A roster is paired POSITIONALLY with an ordered list — `candidateLenses`,
+ * `judgeCriteria`, or the refutation `lenses`. Slot `i` answers for entry `i`,
+ * and the roster carries nothing that independently names its entry, so equal
+ * cardinality is the whole of what the pairing itself can prove. This function is
+ * therefore the only sanctioned way to cross from a slot to its entry.
  *
  * `orderedSlots.findIndex(...)` returns -1 for an unknown slot, and indexing a
  * parallel array with -1 yields `undefined` — which a `!` assertion then passes
@@ -1971,8 +1981,33 @@ function parseRejection<Result>(
   return persistentSuccess(Object.freeze({ request: resolved.value.identity, attempt, category, message }));
 }
 
+/**
+ * The roster's DERIVED lookup views. `ExactRoster.byId` and `CompleteRoster.bySlot`
+ * are built by the roster parser from `orderedSlots`/`ordered` and by nothing
+ * else, so they carry no information a comparison of those arrays does not
+ * already have.
+ */
+const DERIVED_ROSTER_VIEWS: ReadonlySet<string> = new Set(["byId", "bySlot"]);
+
+/**
+ * Structural equality for a durable panel checkpoint's state.
+ *
+ * The derived roster views are dropped from BOTH sides, because including them
+ * made the comparison depend on how a `Map` happens to serialize — and it did,
+ * silently and wrongly. A checkpoint written before the roster view became a
+ * real `Map` holds the literal text `"byId":{"size":3}`: `JSON.stringify` had
+ * dropped every function-valued key of the old fake-`ReadonlyMap` record and
+ * left only its size, so this check was proving that two rosters had the same
+ * NUMBER of slots and nothing whatsoever about which slots they were.
+ *
+ * Dropping the derived keys compares the arrays they are projected from, which
+ * is strictly stronger, and makes the check independent of any serialization
+ * choice for `Map` — including the correct one.
+ */
 function jsonEqual(left: unknown, right: unknown): boolean {
-  try { return JSON.stringify(left) === JSON.stringify(right); } catch { return false; }
+  const withoutDerivedViews = (value: unknown): string | undefined =>
+    JSON.stringify(value, (key, entry: unknown) => (DERIVED_ROSTER_VIEWS.has(key) ? undefined : entry));
+  try { return withoutDerivedViews(left) === withoutDerivedViews(right); } catch { return false; }
 }
 
 export function parsePersistentArchitecturePanelEvent(
@@ -2177,8 +2212,18 @@ export function reducePersistentArchitecturePanel(state: ArchitecturePanelState,
     if (state.stage !== "ready-to-aggregate") return persistentFailure(panelError("architecture", "unexpected-event", `ranking is not available during ${state.stage}`));
     const next = architectureState(Object.freeze({ ...state, stage: "done" as const, ranking: event.ranking }));
     return persistentSuccess(Object.freeze({ state: next, action: architectureAction(next) }));
-  } catch {
-    return persistentFailure(panelError("architecture", "malformed-event", "architecture event could not be safely reduced"));
+  } catch (error) {
+    // The message is KEPT. `requireRosterEntry`/`requireRosterAttempt` throw a
+    // specific invariant violation naming the slot and attempt, and a bare
+    // `catch {}` collapsed that into the same sentence a genuinely malformed
+    // event produces — an operator could not tell a code regression from bad
+    // input. Fail-closed is unchanged; only the diagnostic survives, exactly as
+    // `panel-kernel`’s analogous catch already does.
+    return persistentFailure(panelError(
+      "architecture",
+      "malformed-event",
+      `architecture event could not be safely reduced: ${error instanceof Error ? error.message : String(error)}`,
+    ));
   }
 }
 
@@ -2219,8 +2264,15 @@ export function reducePersistentRefutationPanel(state: RefutationPanelState, eve
     if (state.stage !== "ready-to-tally") return persistentFailure(panelError("refutation", "unexpected-event", `tally is not available during ${state.stage}`));
     const next = refutationState(Object.freeze({ ...state, stage: "done" as const, decision: event.decision }));
     return persistentSuccess(Object.freeze({ state: next, action: refutationAction(next) }));
-  } catch {
-    return persistentFailure(panelError("refutation", "malformed-event", "refutation event could not be safely reduced"));
+  } catch (error) {
+    // Same reason as the architecture reducer above: the thrown invariant names
+    // the slot and attempt, and discarding it made a regression indistinguishable
+    // from malformed input.
+    return persistentFailure(panelError(
+      "refutation",
+      "malformed-event",
+      `refutation event could not be safely reduced: ${error instanceof Error ? error.message : String(error)}`,
+    ));
   }
 }
 

@@ -394,6 +394,20 @@ export function samePath(left: RepositoryPath, right: RepositoryPath): boolean {
   return left.relative === right.relative && left.absolute === right.absolute;
 }
 
+/**
+ * Does `receipt` fail to answer `intent`? `null` means it answers exactly.
+ *
+ * The `default` arm is not dead code waiting for a bug — it is the arm a NEW
+ * `EffectIntent` variant lands in before anyone writes its case. `strict` alone
+ * does not catch the omission (`noImplicitReturns` is off), so without it this
+ * function would return `undefined`, and `reconcileEffectReceipt` — which reads
+ * `.field`/`.message` off any non-null answer — would throw a `TypeError`
+ * instead of producing the domain-level mismatch it exists to produce. The
+ * `never` binding makes the omission a compile error; the returned mismatch is
+ * the fail-closed answer if one ever reaches it at runtime, matching the
+ * `default: return reconciliationFailure(...)` its sibling parsers in this file
+ * already end with.
+ */
 export function receiptPayloadMismatch(intent: EffectIntent, receipt: EffectReceipt): ReconciliationParseError | null {
   switch (intent.kind) {
     case "publish-artifact-set":
@@ -442,6 +456,13 @@ export function receiptPayloadMismatch(intent: EffectIntent, receipt: EffectRece
       if (receipt.indexDigest !== intent.indexDigest) return { field: "receipt.indexDigest", message: "installed index digest mismatch" };
       if (receipt.witnessDigest !== intent.witnessDigest) return { field: "receipt.witnessDigest", message: "installed witness digest mismatch" };
       return null;
+    default: {
+      const unhandled: never = intent;
+      return {
+        field: "intent.kind",
+        message: `no reconciliation rule for effect intent ${String((unhandled as { kind?: unknown }).kind)}`,
+      };
+    }
   }
 }
 

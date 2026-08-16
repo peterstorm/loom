@@ -372,12 +372,12 @@ describe("view claims are normalized before the orphan comparison", () => {
     // from disk does not, and `removeOnce` compares verbatim — so `--fix` minted
     // a SECOND finding and one critical became two the panel must each refute.
     const identified = attributeFindings([draft("critical", "foo bar")], "code-reviewer");
-    const recovered = recoverViewOnlyClaims(identified, [], ["foo  bar"], []);
+    const recovered = recoverViewOnlyClaims(identified, [], { critical: ["foo  bar"], advisory: [] });
     expect(recovered).toEqual([]);
   });
 
   it("a genuinely orphaned claim is still recovered", () => {
-    const recovered = recoverViewOnlyClaims([], [], ["a real orphan"], []);
+    const recovered = recoverViewOnlyClaims([], [], { critical: ["a real orphan"], advisory: [] });
     expect(recovered.map((f) => f.claim)).toEqual(["a real orphan"]);
   });
 
@@ -387,7 +387,7 @@ describe("view claims are normalized before the orphan comparison", () => {
         const finding = makeDraftFinding({ severity: "critical", claim: raw });
         if (finding === null) return true;
         const identified = attributeFindings([finding], "code-reviewer");
-        return recoverViewOnlyClaims(identified, [], [raw], []).length === 0;
+        return recoverViewOnlyClaims(identified, [], { critical: [raw], advisory: [] }).length === 0;
       }),
     );
   });

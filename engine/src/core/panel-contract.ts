@@ -491,11 +491,13 @@ export function serializeJudgeVerdict(verdict: JudgeVerdict): string {
 // ---------------------------------------------------------------------------
 
 /** One criterion's score for one candidate. A PAIR, not a positional slot in a
- *  `number[]` aligned to the criteria order by comment: `serializeRankings`
- *  re-zips the scores against a criteria array it takes as a SEPARATE
- *  parameter, so a caller passing the criteria in a different order than the
- *  one aggregation used would silently mislabel every score in the artifact
- *  that decides which architecture ships. Same reason `Refutation` is a pair. */
+ *  `number[]` aligned to the criteria order by comment. The score used to be
+ *  re-zipped against a criteria array passed separately to `serializeRankings`,
+ *  so a caller handing it the criteria in a different order than aggregation
+ *  used silently mislabeled every score in the artifact that decides which
+ *  architecture ships. Carrying the criterion ON the score is what removed that
+ *  coupling — see `serializeRankings`, which now only names the criteria set for
+ *  the reader. Same reason `Refutation` is a pair. */
 export type CriterionScore = Readonly<{ criterion: string; score: number }>;
 
 export type CandidateRanking = Readonly<{

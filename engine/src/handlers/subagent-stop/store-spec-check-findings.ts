@@ -5,7 +5,7 @@
  */
 
 import type { HookHandler, SubagentStopInput } from "../../types";
-import { newWaveGate } from "../../types";
+import { reconcileWaveBlock } from "../../core/wave-gate-model";
 import { parseSpecCheckOutput, reconcileSpecCheck } from "../../core/spec-check";
 export { parseSpecCheckOutput } from "../../core/spec-check";
 import { StateManager } from "../../state-manager";
@@ -71,20 +71,15 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "passthrough" };
   }
 
-  await mgr.update((s) => {
-    const updated = { ...s, spec_check: resolution.specCheck };
-    if (resolution.specCheck.critical_count > 0) {
-      const waveKey = String(wave);
-      updated.wave_gates = {
-        ...s.wave_gates,
-        [waveKey]: {
-          ...(s.wave_gates[waveKey] ?? newWaveGate()),
-          blocked: true,
-        },
-      };
-    }
-    return updated;
-  });
+  // `blocked` is DERIVED from the freshly stored spec-check, never asserted:
+  // `wave-gate-model.waveHasBlockCause` is documented as the only copy of the
+  // rule, and a literal `blocked: true` here was a second copy that could not
+  // clear the flag when the cause went away.
+  await mgr.update((s) => ({
+    ...s,
+    spec_check: resolution.specCheck,
+    wave_gates: reconcileWaveBlock(s.wave_gates, s.tasks, resolution.specCheck, wave),
+  }));
 
   process.stderr.write(
     `Spec-check: ${resolution.specCheck.critical_count} critical, ${resolution.specCheck.high_count} high\n`,

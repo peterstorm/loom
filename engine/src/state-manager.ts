@@ -487,7 +487,8 @@ export function taskUnionError(v: unknown, index: number): string | null {
   const identityError = taskIdError(t.id, `tasks[${index}]`);
   if (identityError !== null) return identityError;
   const id = t.id as string;
-  // Structural fields the cast below asserts — proven, not assumed: a
+  // Every validator below proves one family of the Task cast; each documents
+  // its own. The first failure wins, so the operator sees the outermost cause.
   return taskShapeError(t, index, id)
     ?? taskBaselineError(t, index, id)
     ?? taskPacketError(t, index, id)
@@ -869,16 +870,6 @@ export function taskGraphLifecycleErrors(obj: Record<string, unknown>): readonly
   return errors;
 }
 
-/**
- * Parse raw disk JSON into a TaskGraph, mirroring parseMachine: every
- * union-typed field (current_phase, task status / review_status /
- * test_result.verdict) is PROVEN in the union before the cast, so a
- * drifted or hand-edited value fails loudly at the load boundary instead
- * of exploding later inside an `.exhaustive()` match (testResultPassed) or
- * silently flowing through typed gate logic. Unknown extra fields pass
- * through untouched (legacyTestsPassedNote still fires downstream);
- * missing tasks/wave_gates default for early phases (populated in Phase 4).
- */
 type ParsedWaveGateRegistrations = Readonly<{
   activeWaveGate: ActiveWaveGateRegistration | undefined;
   waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined;
@@ -958,6 +949,16 @@ function nonterminalActiveGateConflict(
   return null;
 }
 
+/**
+ * Parse raw disk JSON into a TaskGraph, mirroring parseMachine: every
+ * union-typed field (current_phase, task status / review_status /
+ * test_result.verdict) is PROVEN in the union before the cast, so a
+ * drifted or hand-edited value fails loudly at the load boundary instead
+ * of exploding later inside an `.exhaustive()` match (testResultPassed) or
+ * silently flowing through typed gate logic. Unknown extra fields pass
+ * through untouched (legacyTestsPassedNote still fires downstream);
+ * missing tasks/wave_gates default for early phases (populated in Phase 4).
+ */
 export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return parseErr("not an object");

@@ -109,11 +109,9 @@ function processIsAlive(rawOwner: string): boolean {
 }
 
 /**
- * Recover one stale descriptor-relative lock without ever removing a lock that
- * may still have a live owner. The owner is inspected while the canonical lock
- * name remains occupied; only a proven-dead owner may be moved aside. The
- * tombstone is then re-read to close the release/reacquire race between the
- * first observation and the rename.
+ * Does `name` exist as a directory entry under `directoryFd`, without following
+ * a symlink? ENOENT is the ONE absent answer; every other errno is rethrown, so
+ * an unreadable entry never reads as a missing one.
  */
 function directoryEntryExistsNoFollow(directoryFd: number, name: string): boolean {
   try {
@@ -126,6 +124,12 @@ function directoryEntryExistsNoFollow(directoryFd: number, name: string): boolea
 }
 
 /**
+ * Recover one stale descriptor-relative lock without ever removing a lock that
+ * may still have a live owner. The owner is inspected while the canonical lock
+ * name remains occupied; only a proven-dead owner may be moved aside. The
+ * tombstone is then re-read to close the release/reacquire race between the
+ * first observation and the rename.
+ *
  * Stale recovery is serialized by a second exclusive name. Every normal
  * acquirer checks that guard both before and after publishing its owner token,
  * so a contender created just as recovery begins withdraws before entering its

@@ -257,11 +257,17 @@ export function parseRunDirectoryIdentity(
   try {
     stats = statSync(directory);
   } catch (error) {
-    // ENOENT is the one absent answer. EACCES, ELOOP (symlink cycle — the
-    // attack this module's no-follow discipline exists to refuse), ENOTDIR,
-    // and EIO must surface their REAL cause as a typed refusal: "does not
-    // exist" on a permission-broken or symlink-swapped run directory sends the
-    // operator to recreate a run instead of fixing the actual fault.
+    // ENOENT is the one absent answer, and it says so — the same sentence the
+    // not-a-directory branch below uses, because both mean "there is no run
+    // here". EACCES, ELOOP (symlink cycle — the attack this module's no-follow
+    // discipline exists to refuse), ENOTDIR, and EIO surface their REAL cause
+    // instead: "does not exist" on a permission-broken or symlink-swapped run
+    // directory sends the operator to recreate a run rather than fix the actual
+    // fault. The discrimination was documented here before it was implemented;
+    // every errno used to produce the generic message.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return failure("runDirectory", `run directory does not exist: ${directory}`);
+    }
     return failure("runDirectory", `cannot inspect run directory ${directory}: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (stats === undefined || !stats.isDirectory()) {

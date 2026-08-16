@@ -20,7 +20,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -76,7 +76,18 @@ function engineImports(file: string): readonly EngineImport[] {
   return found;
 }
 
-const PI_FILES = ["extension.ts", "loom-bridge.ts"];
+/**
+ * Every `.ts` in `pi/`, discovered rather than listed.
+ *
+ * A hardcoded roster is the same bug class this file exists to catch: when the
+ * `tool_result` handler was split out into `subagent-result.ts`, most of the
+ * engine imports moved with it, and a fixed list would have kept passing while
+ * checking the file they LEFT. Discovery cannot go stale; the anti-vacuity
+ * assertions below keep an empty directory from turning this into a no-op.
+ */
+const PI_FILES = readdirSync(PI_DIR)
+  .filter((name) => name.endsWith(".ts") && !name.endsWith(".d.ts"))
+  .sort();
 const IMPORTS = PI_FILES.flatMap(engineImports);
 
 describe("pi package manifest", () => {
@@ -108,6 +119,52 @@ function modulePath(specifier: string): string {
     }
   }
   throw new Error(`no engine module on disk for ${specifier}`);
+}
+
+/**
+ * Is `name` a type this module offers — declared here, or re-exported from a
+ * module that declares it?
+ *
+ * Barrels are the normal shape in `engine/src`: `machine/index.ts` says
+ * `export { type ClassifiedTestCommand } from "./extract-evidence"`, and a
+ * checker that only looked for `export type X` in the named file called that a
+ * missing declaration. Following the re-export is what makes the assertion mean
+ * "pi can import this" rather than "this file happens to spell it out".
+ *
+ * `seen` terminates re-export cycles; an unresolvable hop answers false, so the
+ * failure is still reported against the import that could not be satisfied.
+ */
+function declaresType(modulePathOnDisk: string, name: string, seen = new Set<string>()): boolean {
+  if (seen.has(modulePathOnDisk)) return false;
+  seen.add(modulePathOnDisk);
+  const source = readFileSync(modulePathOnDisk, "utf-8");
+  if (new RegExp(`export\\s+(type|interface)\\s+${name}\\b`).test(source)) return true;
+
+  const reExport = /export\s+(type\s+)?\{([^}]*)\}\s*from\s*["']([^"']+)["']/g;
+  for (const match of source.matchAll(reExport)) {
+    const statementIsTypeOnly = match[1] !== undefined;
+    const names = match[2]!.split(",").map((raw) => {
+      const trimmed = raw.trim();
+      const inlineType = trimmed.startsWith("type ");
+      const local = (inlineType ? trimmed.slice(5) : trimmed).trim().split(/\s+as\s+/);
+      return { exported: (local[1] ?? local[0] ?? "").trim(), source: (local[0] ?? "").trim(), inlineType };
+    });
+    const hit = names.find((entry) => entry.exported === name && (statementIsTypeOnly || entry.inlineType));
+    if (hit === undefined) continue;
+    const resolved = relativeModulePath(modulePathOnDisk, match[3]!);
+    if (resolved !== null && declaresType(resolved, hit.source, seen)) return true;
+  }
+  return false;
+}
+
+/** Resolve one relative specifier against the module that wrote it. */
+function relativeModulePath(fromModule: string, specifier: string): string | null {
+  if (!specifier.startsWith(".")) return null;
+  const base = resolve(dirname(fromModule), specifier);
+  for (const candidate of [`${base}.ts`, join(base, "index.ts")]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 describe("pi/ imports resolve against the engine that has to satisfy them", () => {
@@ -143,9 +200,9 @@ describe("pi/ imports resolve against the engine that has to satisfy them", () =
   it("every type imported from an engine module is declared there", () => {
     for (const entry of IMPORTS) {
       if (entry.types.length === 0) continue;
-      const source = readFileSync(modulePath(entry.specifier), "utf-8");
+      const target = modulePath(entry.specifier);
       for (const name of entry.types) {
-        const declared = new RegExp(`export\\s+(type|interface)\\s+${name}\\b`).test(source);
+        const declared = declaresType(target, name);
         expect(
           declared,
           `${entry.file} imports type { ${name} } from "${entry.specifier}", which does not declare it`,
