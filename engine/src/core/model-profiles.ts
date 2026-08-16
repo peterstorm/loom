@@ -442,13 +442,29 @@ export function parsePiSpawnItems(raw: unknown): PolicyResult<readonly PiSpawnIt
   return success(classified.value.items);
 }
 
+/**
+ * The model-bearing frontmatter of one Agent, parsed into a SELF-CONSISTENT
+ * value: `model` is always the Claude Code model of `modelProfile`. The two
+ * fields name the same catalog entry from two directions, so a value where
+ * they disagree describes no real Agent — `parseAgentFrontmatter` refuses it
+ * rather than returning it for a later caller to notice.
+ */
 export type AgentFrontmatter = Readonly<{
   name: string;
   modelProfile: LlmProfileId;
   model: ClaudeCodeModel;
 }>;
 
-/** Parse the model-bearing subset of YAML frontmatter after a shell decodes it. */
+/**
+ * Parse the model-bearing subset of YAML frontmatter after a shell decodes it.
+ *
+ * The internal `modelProfile` ⇄ `model` agreement is enforced HERE, not by the
+ * caller: this is the only producer of `AgentFrontmatter`, so folding the
+ * check in is what makes the type's invariant true by construction. It answers
+ * a different question from `validateAgentPolicyFrontmatter`, which compares
+ * the frontmatter against the policy assigned to that agent NAME — a document
+ * can be internally coherent and still name the wrong profile for its agent.
+ */
 export function parseAgentFrontmatter(raw: unknown): PolicyResult<AgentFrontmatter> {
   if (!isRecord(raw)) {
     return failure({ kind: "invalid-frontmatter", message: "agent frontmatter must be an object" });
@@ -467,6 +483,16 @@ export function parseAgentFrontmatter(raw: unknown): PolicyResult<AgentFrontmatt
     return failure({
       kind: "invalid-frontmatter",
       message: `agent '${raw.name}' model must be haiku, sonnet, or opus`,
+    });
+  }
+  const profile = resolveModelProfile(selectedProfile.value);
+  if (!profile.ok) return profile;
+  if (raw.model !== profile.value.claudeCode.model) {
+    return failure({
+      kind: "invalid-frontmatter",
+      message:
+        `agent '${raw.name}' frontmatter is self-contradictory: model-profile ` +
+        `'${selectedProfile.value}' binds Claude model '${profile.value.claudeCode.model}', not '${raw.model}'`,
     });
   }
   return success(Object.freeze({

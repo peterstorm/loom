@@ -179,7 +179,7 @@ describe("no-cross-boundary-imports", () => {
     it("core grants node: builtins PER-MODULE, never blanket", () => {
       // A listed core module may import exactly its granted subpaths.
       const granted = checkBoundaryViolation(
-        "engine/src/core/validate-phase-order.ts",
+        "engine/src/core/block-direct-edits.ts",
         "node:fs",
         DEFAULT_BOUNDARIES
       );
@@ -191,14 +191,23 @@ describe("no-cross-boundary-imports", () => {
       );
       expect(grantedHash).toBeNull();
       // A listed module reaching a NON-granted subpath is still refused:
-      // node:crypto is not on validate-phase-order's capability list.
+      // node:crypto is not on block-direct-edits's capability list.
       const ungranted = checkBoundaryViolation(
-        "engine/src/core/validate-phase-order.ts",
+        "engine/src/core/block-direct-edits.ts",
         "node:crypto",
         DEFAULT_BOUNDARIES
       );
       expect(ungranted).not.toBeNull();
       expect(ungranted).toContain("may only import from");
+      // validate-phase-order's node:fs grant was WITHDRAWN when its artifact
+      // reads became the injected ArtifactProbe port. Re-adding an fs import
+      // there must fail the lint gate until the grant is re-reviewed.
+      const withdrawn = checkBoundaryViolation(
+        "engine/src/core/validate-phase-order.ts",
+        "node:fs",
+        DEFAULT_BOUNDARIES
+      );
+      expect(withdrawn).not.toBeNull();
       // An UNLISTED core module importing any node: builtin fails closed with
       // the capability message — a future I/O import must earn an entry.
       const unlisted = checkBoundaryViolation(

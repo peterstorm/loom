@@ -401,11 +401,32 @@ describe("validateFull (pure)", () => {
 });
 
 describe("handler routes — fixMinimal and the file-arg path (round-10 gap 23)", () => {
-  it("--minimal --fix with invalid JSON stdin emits a valid default minimal graph on stdout", async () => {
+  // Round 42: this branch used to write `fixMinimal({})` to stdout and return
+  // `passthrough` (exit 0), so a corrupt graph produced a clean success and a
+  // plausible default — with the parse error discarded and the dataLoss
+  // refusal structurally unable to fire, because the "repair" was diffed
+  // against an empty stub instead of the real bytes.
+  it("--minimal --fix REFUSES invalid JSON instead of fabricating a default graph", async () => {
     const handler = (await import("../../src/handlers/helpers/validate-task-graph")).default;
     const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     try {
       const result = await handler("{definitely not json", ["--minimal", "--fix"]);
+      expect(result.kind).toBe("error");
+      // The real parse error is preserved, not flattened to "Invalid JSON".
+      expect(result.kind === "error" && result.message).toMatch(/^Invalid JSON: .+/);
+      expect(stdoutSpy).not.toHaveBeenCalled();
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+  });
+
+  it("--minimal --fix still emits the canonical template for an empty object", async () => {
+    // The capability the refusal above must not cost: `{}` is valid-but-empty
+    // JSON, so callers that want a blank minimal graph still get one.
+    const handler = (await import("../../src/handlers/helpers/validate-task-graph")).default;
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      const result = await handler("{}", ["--minimal", "--fix"]);
       expect(result.kind).toBe("passthrough");
       const out = stdoutSpy.mock.calls.map((c) => String(c[0])).join("");
       const fixed = JSON.parse(out);

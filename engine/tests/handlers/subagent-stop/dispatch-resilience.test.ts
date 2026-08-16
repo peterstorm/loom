@@ -371,6 +371,7 @@ describe("a FAILED evidence snapshot is never laundered into 'genuinely empty' (
       verdict: "untrusted",
       passed: false,
       label: "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)",
+      provenance: "unverified",
     });
     expect(state.tasks[0].test_result.label).not.toContain("degraded");
   }, 30000);

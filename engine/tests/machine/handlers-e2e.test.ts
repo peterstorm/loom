@@ -14,6 +14,7 @@ import enforce from "../../src/handlers/pre-tool-use/enforce-phase-tools";
 import cleanup from "../../src/handlers/subagent-stop/cleanup-subagent-flag";
 import {
   countActiveAgents,
+  readActiveAgentRoles,
   ledgerPath,
   machineBindingPath,
   readEvidence,
@@ -127,7 +128,7 @@ describe("guarded machine — full hook lifecycle", () => {
       // ':' in the id would make the recorded epoch ambiguous with epochOf
       await markActive(start(s, "evil:id"), []);
       const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
-      expect(text).toContain("reserved or path-unsafe characters");
+      expect(text).toContain("is reserved or path-unsafe");
       expect(text).toContain("UNGATED");
     } finally {
       stderrSpy.mockRestore();
@@ -140,6 +141,35 @@ describe("guarded machine — full hook lifecycle", () => {
     expect(countActiveAgents(s)).toBe(1);
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
     await cleanup(stop(s, "evil:id"), []);
+    expect(countActiveAgents(s)).toBe(0); // stop removes the same placeholder
+  });
+
+  it("a self-reported agent_id in the write-grant namespace never reaches the roster", async () => {
+    // The write gate authorizes Edit/Write on a `pi-grant-` identity because
+    // the grant record is burnt at consume time and cannot be re-checked. That
+    // recognition is only sound while the namespace is unreachable from
+    // harness-reported input — this is the boundary that makes it so.
+    const s = sid("e2e-6b");
+    const forged = "pi-grant-0123456789abcdef";
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await markActive(start(s, forged), []);
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("write-grant namespace");
+      expect(text).toContain("UNGATED");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    // Counted (attribution must still see it) but under a placeholder, so the
+    // roster's identity column carries no capability.
+    expect(countActiveAgents(s)).toBe(1);
+    expect(readActiveAgentRoles(s).some(({ agentId }) => agentId === forged)).toBe(false);
+    expect(readActiveAgentRoles(s).every(({ agentId }) => agentId.startsWith("unparseable-"))).toBe(true);
+    // No machine binding, and the direct-edit gate is not opened by it.
+    expect(existsSync(machineBindingPath(s))).toBe(false);
+
+    await cleanup(stop(s, forged), []);
     expect(countActiveAgents(s)).toBe(0); // stop removes the same placeholder
   });
 

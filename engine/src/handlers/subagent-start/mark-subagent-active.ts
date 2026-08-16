@@ -16,11 +16,12 @@ import {
   bindMachineAgent,
   loadMachine,
   markAgentActive,
-  parseAgentId,
   parseAgentType,
+  parseReportedAgentId,
   parseSessionId,
-  rosterAgentId,
+  reportedRosterAgentId,
   sessionScopedPath,
+  WRITE_GRANT_AGENT_NAMESPACE,
 } from "../../machine";
 
 const handler: HookHandler = async (stdin) => {
@@ -62,22 +63,29 @@ const handler: HookHandler = async (stdin) => {
     );
   }
 
-  // Parse identity at the boundary: an agent_id containing a reserved or
-  // path-unsafe character (whitespace / colon / slash / `..`) would desync
-  // the binding file and the epoch key, silently degrading evidence
-  // attribution. Refuse the machine BINDING loudly — with no binding the
-  // gate stays unarmed, which the existing fail-closed handling covers.
-  const agentId = agent_id ? parseAgentId(agent_id) : null;
+  // Parse identity at the boundary. `agent_id` is HARNESS-REPORTED, so it goes
+  // through the reported-id constructor, which refuses two classes:
+  //   - reserved or path-unsafe characters (whitespace / colon / slash / `..`),
+  //     which would desync the binding file and the epoch key and silently
+  //     degrade evidence attribution; and
+  //   - the reserved write-grant namespace, which the write gate reads as a
+  //     capability — a reported id shaped like one would be granted Edit/Write
+  //     with no grant ever consumed.
+  // Refuse the machine BINDING loudly — with no binding the gate stays
+  // unarmed, which the existing fail-closed handling covers. The SAME
+  // constructor governs the roster entry below, so binding and roster identity
+  // can never disagree about which id an agent is.
+  const agentId = agent_id ? parseReportedAgentId(agent_id) : null;
   if (agent_id && agentId === null) {
     process.stderr.write(
-      `mark-subagent-active: agent_id ${JSON.stringify(agent_id)} contains reserved or path-unsafe characters (whitespace/colon/slash/'..') — machine NOT bound, it will run UNGATED; tracked on the roster as ${rosterAgentId(agent_id)} for contention counting\n`,
+      `mark-subagent-active: agent_id ${JSON.stringify(agent_id)} is reserved or path-unsafe (whitespace/colon/slash/'..', or the ${WRITE_GRANT_AGENT_NAMESPACE} write-grant namespace) — machine NOT bound, it will run UNGATED; tracked on the roster as ${reportedRosterAgentId(agent_id)} for contention counting\n`,
     );
   }
 
   // Track active agent for cleanup AND contention counting — appended under
   // the same per-session lock cleanup uses to rewrite the roster
   // (append-vs-cleanup race). An UNPARSEABLE id is still tracked, via a
-  // sanitized placeholder (rosterAgentId): the roster only needs to COUNT
+  // sanitized placeholder (reportedRosterAgentId): the roster only needs to COUNT
   // agents, and an invisible agent alongside a validly-bound one would let
   // soleActiveBinding cross-credit its tool calls into the bound epoch.
   //
@@ -96,7 +104,7 @@ const handler: HookHandler = async (stdin) => {
   let rosterSound = true;
   if (agent_id) {
     try {
-      await markAgentActive(sessionId, rosterAgentId(agent_id), rosterAgentType);
+      await markAgentActive(sessionId, reportedRosterAgentId(agent_id), rosterAgentType);
     } catch (e) {
       rosterSound = false;
       process.stderr.write(

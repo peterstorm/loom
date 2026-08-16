@@ -417,7 +417,12 @@ export async function applyImplementationPiResult(args: Readonly<{
       }
       return applyUntrustedStopResolution(current, taskId, {
         taskCompleted: false,
-        testResult: { verdict: "untrusted", passed: false, label: "pi-transcript-capture-failed" },
+        testResult: {
+          verdict: "untrusted",
+          passed: false,
+          label: "pi-transcript-capture-failed",
+          provenance: "unverified",
+        },
         testEvidence: failureReason,
         // Malformed messages provide no task-attributed path evidence. The
         // batch-wide repository delta is invalidation-only.
@@ -489,13 +494,24 @@ export async function applyImplementationPiResult(args: Readonly<{
       // Pi has no Loom evidence ledger. Preserve the real provenance: paired
       // tool-result evidence may discharge Pi's structured proof policy;
       // flattened transcript output may not.
-      testResult: {
-        verdict: "untrusted" as const,
-        passed: testEvidence.passed,
-        label: structuredTestEvidence !== null
-          ? `pi-structured: ${structuredTestEvidence.evidence || "test tool result"}`
-          : "transcript-regex (fallback)",
-      },
+      // `provenance` — not the label's spelling — is what the structured
+      // evidence policy reads. This is the ONE site that may claim
+      // `pi-structured`, and only when paired tool-result evidence was
+      // actually recovered; the flattened-transcript fallback stays
+      // `unverified` and can never discharge the regression obligation.
+      testResult: structuredTestEvidence !== null
+        ? {
+            verdict: "untrusted" as const,
+            passed: testEvidence.passed,
+            label: `pi-structured: ${structuredTestEvidence.evidence || "test tool result"}`,
+            provenance: "pi-structured" as const,
+          }
+        : {
+            verdict: "untrusted" as const,
+            passed: testEvidence.passed,
+            label: "transcript-regex (fallback)",
+            provenance: "unverified" as const,
+          },
       testEvidence: testEvidence.evidence,
       filesModified,
       changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,

@@ -1449,7 +1449,12 @@ export default function (pi: ExtensionAPI) {
                 : `${item.agentType} failed before implementation evidence completed`;
             state = applyUntrustedStopResolution(state, item.taskId, {
               taskCompleted: false,
-              testResult: { verdict: "untrusted", passed: false, label: "pi-implementation-failed" },
+              testResult: {
+                verdict: "untrusted",
+                passed: false,
+                label: "pi-implementation-failed",
+                provenance: "unverified",
+              },
               testEvidence: failure,
               // The repository attempt baseline is shared by a parallel batch.
               // Its delta proves stale evidence must be invalidated, but cannot

@@ -7,7 +7,7 @@
 export { shouldBlockDirectEdit } from "./block-direct-edits";
 export { guardStateFile } from "./guard-state-file";
 export { validatePhaseOrder, detectPhase, checkArtifacts } from "./validate-phase-order";
-export type { ValidatePhaseOrderInput, ArtifactState } from "./validate-phase-order";
+export type { ValidatePhaseOrderInput, ArtifactProbe, ArtifactState } from "./validate-phase-order";
 export type { ValidateTaskExecutionInput } from "./validate-task-execution";
 export { validateTemplateSubstitution } from "./validate-template-substitution";
 export { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "./tool-vocabulary";

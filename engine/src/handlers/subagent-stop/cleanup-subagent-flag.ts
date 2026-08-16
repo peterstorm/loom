@@ -10,7 +10,7 @@ import {
   parseAgentId,
   parseAgentType,
   parseSessionId,
-  rosterAgentId,
+  reportedRosterAgentId,
   type SessionRegistry,
 } from "../../machine";
 
@@ -65,9 +65,10 @@ export const runCleanupSubagentFlag = async (
   // removeActive locks internally (same per-session lock) and logs its own
   // rewrite failures; a lock-acquisition failure propagates to the
   // dispatcher's safeRun, which reports it without aborting the pipeline.
-  // rosterAgentId mirrors SubagentStart: an unparseable id was tracked
-  // under its sanitized placeholder, so remove that same placeholder.
-  await registry.removeActive(sessionId, rosterAgentId(agent_id));
+  // reportedRosterAgentId mirrors SubagentStart: an id that constructor
+  // refused — unparseable, or inside the reserved write-grant namespace — was
+  // tracked under its sanitized placeholder, so remove that same placeholder.
+  await registry.removeActive(sessionId, reportedRosterAgentId(agent_id));
 
   return { kind: "passthrough" as const };
 };

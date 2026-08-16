@@ -328,12 +328,45 @@ describe("catalog and frontmatter validators", () => {
     });
     expect(errorsOf(wrongProfile).some((error) => error.includes("model-profile mismatch"))).toBe(true);
 
-    const wrongModel = validateAgentPolicyFrontmatter({
+    // A frontmatter whose model contradicts its OWN model-profile no longer
+    // reaches the policy comparison: parseAgentFrontmatter refuses it, so no
+    // self-contradictory AgentFrontmatter value exists to be compared.
+    const selfContradictory = validateAgentPolicyFrontmatter({
       name: "code-reviewer",
       "model-profile": "general-review",
       model: "opus",
     });
+    expect(errorsOf(selfContradictory).some((error) => error.includes("self-contradictory"))).toBe(true);
+
+    // Policy-side Claude-model drift is still reported: `implementation` binds
+    // opus, `general-review` binds sonnet, so a coherent implementation
+    // frontmatter on a sonnet-policy agent trips BOTH catalog links.
+    const wrongModel = validateAgentPolicyFrontmatter({
+      name: "code-reviewer",
+      "model-profile": "implementation",
+      model: "opus",
+    });
     expect(errorsOf(wrongModel).some((error) => error.includes("Claude model mismatch"))).toBe(true);
+  });
+
+  it("refuses frontmatter whose model contradicts its own model-profile", () => {
+    const parsed = parseAgentFrontmatter({
+      name: "code-reviewer",
+      "model-profile": "general-review",
+      model: "opus",
+    });
+    expect(parsed.ok).toBe(false);
+    expect(parsed.ok === false && parsed.error.message).toContain("self-contradictory");
+
+    // The coherent pairing still parses.
+    expect(parseAgentFrontmatter({
+      name: "code-reviewer",
+      "model-profile": "general-review",
+      model: "sonnet",
+    })).toEqual({
+      ok: true,
+      value: { name: "code-reviewer", modelProfile: "general-review", model: "sonnet" },
+    });
   });
 
   it("fails closed on missing declarations and unknown frontmatter agents", () => {

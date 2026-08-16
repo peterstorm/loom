@@ -230,6 +230,7 @@ describe("resolveTestEvidence — stale trusted failure vs later untrusted run (
       verdict: "untrusted",
       passed: true,
       label: "low-trust (exit 0, no report artifact; transcript-regex)",
+      provenance: "unverified",
     });
     expect(resolved.evidence).toContain("low-trust");
   });
@@ -263,6 +264,7 @@ describe("resolveTestEvidence — a trusted pass goes stale when files change af
       verdict: "untrusted",
       passed: true,
       label: "low-trust (files modified after last trusted pass; transcript-regex)",
+      provenance: "unverified",
     });
     expect(resolved.evidence).toContain("files modified after last trusted pass");
   });
@@ -273,6 +275,7 @@ describe("resolveTestEvidence — a trusted pass goes stale when files change af
       verdict: "untrusted",
       passed: false,
       label: "low-trust (files modified after last trusted pass; transcript-regex)",
+      provenance: "unverified",
     });
   });
 
@@ -327,6 +330,7 @@ describe("resolveTestEvidence — snapshot-read-failed labeling (pure)", () => {
       verdict: "untrusted",
       passed: true,
       label: "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)",
+      provenance: "unverified",
     });
     expect(resolved.evidence).toContain("snapshot-read-failed");
   });
@@ -337,6 +341,7 @@ describe("resolveTestEvidence — snapshot-read-failed labeling (pure)", () => {
       verdict: "untrusted",
       passed: false,
       label: "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)",
+      provenance: "unverified",
     });
   });
 

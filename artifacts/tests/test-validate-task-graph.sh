@@ -5,7 +5,11 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLI="$SCRIPT_DIR/../hooks/loom/src/cli.ts"
+# Repo-relative engine entrypoint. This pointed at `../hooks/loom/src/cli.ts`
+# — a path from a pre-restructure layout that has not existed since the initial
+# commit — so every case in this file failed on a missing file rather than on
+# the behaviour it names.
+CLI="$SCRIPT_DIR/../../engine/src/cli.ts"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -134,12 +138,24 @@ else
   fail "fix preserves existing valid fields" "architecture,/path,clarify" "$CP,$PA,$SP"
 fi
 
-# Fix from garbage JSON
-FIXED3=$(echo "not json at all" | bun "$CLI" helper validate-task-graph --minimal --fix 2>/dev/null)
-if echo "$FIXED3" | jq -e '.current_phase == "init"' >/dev/null 2>&1; then
-  pass "fix recovers from invalid JSON with canonical template"
+# Garbage JSON is REFUSED, not repaired into a fabricated default graph:
+# a corrupt input that exits 0 with a plausible-looking graph is the silent
+# failure this branch used to have.
+# `set -e` is active, so the expected nonzero exit is captured rather than fatal.
+FIXED3_EXIT=0
+FIXED3=$(echo "not json at all" | bun "$CLI" helper validate-task-graph --minimal --fix 2>/dev/null) || FIXED3_EXIT=$?
+if [[ $FIXED3_EXIT -ne 0 ]] && [[ -z "$FIXED3" ]]; then
+  pass "fix refuses invalid JSON instead of fabricating a graph"
 else
-  fail "fix recovers from invalid JSON" "canonical template" "$FIXED3"
+  fail "fix refuses invalid JSON" "nonzero exit, no stdout" "exit $FIXED3_EXIT, stdout: $FIXED3"
+fi
+
+# The canonical template is still reachable from valid-but-empty JSON.
+TEMPLATE=$(echo '{}' | bun "$CLI" helper validate-task-graph --minimal --fix 2>/dev/null)
+if echo "$TEMPLATE" | jq -e '.current_phase == "init"' >/dev/null 2>&1; then
+  pass "fix emits the canonical template for an empty object"
+else
+  fail "fix emits the canonical template for an empty object" "canonical template" "$TEMPLATE"
 fi
 
 # ===== --FIX FULL =====
@@ -205,6 +221,13 @@ GOOD_DECOMPOSE='{
     {"id": "T1", "description": "Impl", "agent": "code-implementer-agent", "wave": 1, "depends_on": []}
   ]
 }'
+# The plan_file named by the decompose payload must EXIST: populate-task-graph
+# fails closed through checkPlanModelBindings when it cannot read the plan, so a
+# fixture that names a file it never creates is rejected before any merge. An
+# empty plan declares no models and therefore produces zero binding checks.
+mkdir -p "$PTEST_DIR/.claude/plans"
+: > "$PTEST_DIR/.claude/plans/test.md"
+
 # Reset state (may be chmod 444 after previous write)
 chmod 644 "$PTEST_DIR/.claude/state/active_task_graph.json" 2>/dev/null || true
 rm -rf "$PTEST_DIR/.claude/state/.task_graph.lock" 2>/dev/null || true

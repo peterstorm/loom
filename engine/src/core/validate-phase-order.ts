@@ -1,13 +1,14 @@
 /**
  * Core: Enforce phase ordering during loom orchestration.
- * Harness-agnostic — no stdin parsing. Not pure: reads the filesystem
- * (existsSync/readFileSync).
+ * Harness-agnostic — no stdin parsing, and no filesystem imports: BOTH
+ * categories of I/O this gate needs (the protected-state read and the phase
+ * artifact probes) arrive as injected ports, so the decision logic is data-in /
+ * data-out and can be exercised with in-memory fixtures.
  *
  * Re-exports detectPhase and checkArtifacts from the original handler
  * for backwards compatibility.
  */
 
-import { existsSync, readFileSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookResult, Phase, TaskGraph } from "../types";
 import {
@@ -16,8 +17,27 @@ import {
   ARCH_PANEL_AGENTS, ARCH_PANEL_PHASE, isStandaloneReviewAgent,
 } from "../config";
 import { stripNamespace } from "../utils/strip-namespace";
-import { findFile } from "../utils/find-file";
 import { hasStandaloneReviewContext } from "./review-output";
+
+/**
+ * The phase-artifact reads this gate needs, injected rather than imported.
+ *
+ * The state read was already a seam (`PhaseOrderDeps.loadState`) so the gate
+ * could not acquire `StateManager`'s write capability. Artifact existence and
+ * content were not, which left `existsSync`/`readFileSync` in the middle of the
+ * decision logic: the rule that decides which artifact a phase transition
+ * requires could only be observed by writing real files into a real temp
+ * directory. Both categories are now ports; the shell supplies the real
+ * implementations.
+ */
+export interface ArtifactProbe {
+  /** True when the path names a readable artifact. */
+  readonly exists: (path: string) => boolean;
+  /** Artifact contents as UTF-8. Throws like `readFileSync` when unreadable. */
+  readonly readText: (path: string) => string;
+  /** Locate `filename` beneath `dir`, or null when absent. */
+  readonly findFile: (dir: string, filename: string) => string | null;
+}
 
 /**
  * Resolves an artifact reference to an existing file path.
@@ -28,13 +48,17 @@ import { hasStandaloneReviewContext } from "./review-output";
  * Falls back to the explicit file field (spec_file/plan_file) when the artifact
  * isn't a valid path.
  */
-function resolveArtifact(artifact: string | undefined, fallback: string | null): string | null {
+function resolveArtifact(
+  artifact: string | undefined,
+  fallback: string | null,
+  probe: ArtifactProbe,
+): string | null {
   // If artifact is a real file path that exists, use it
-  if (artifact && artifact !== "completed" && existsSync(artifact)) {
+  if (artifact && artifact !== "completed" && probe.exists(artifact)) {
     return artifact;
   }
   // Fall back to the explicit field
-  if (fallback && existsSync(fallback)) {
+  if (fallback && probe.exists(fallback)) {
     return fallback;
   }
   return null;
@@ -96,51 +120,55 @@ export interface ArtifactState {
   spec_dir?: string | null;
 }
 
-function checkPlanAlignmentGate(state: ArtifactState): string | null {
-  const plan = resolveArtifact(state.phase_artifacts.architecture, state.plan_file);
+function checkPlanAlignmentGate(state: ArtifactState, probe: ArtifactProbe): string | null {
+  const plan = resolveArtifact(state.phase_artifacts.architecture, state.plan_file, probe);
   if (!plan) return "architecture (no plan.md found)";
   if (!state.skipped_phases.includes("plan-alignment")) {
     const specDir = state.spec_dir ?? ".claude/specs";
-    if (!findFile(specDir, "plan-alignment.md")) {
+    if (!probe.findFile(specDir, "plan-alignment.md")) {
       return "plan-alignment (no plan-alignment.md found)";
     }
   }
   return null;
 }
 
-export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string | null {
+export function checkArtifacts(
+  targetPhase: Phase,
+  state: ArtifactState,
+  probe: ArtifactProbe,
+): string | null {
   return match(targetPhase)
     .with("specify", () => {
       if (state.skipped_phases.includes("brainstorm")) return null;
       const specDir = state.spec_dir ?? ".claude/specs";
-      if (!findFile(specDir, "brainstorm.md")) {
+      if (!probe.findFile(specDir, "brainstorm.md")) {
         return `brainstorm (no brainstorm.md found in ${specDir})`;
       }
       return null;
     })
     .with("clarify", () => {
-      let spec = resolveArtifact(state.phase_artifacts.specify, state.spec_file);
+      let spec = resolveArtifact(state.phase_artifacts.specify, state.spec_file, probe);
       if (!spec) {
         // Only fall back to disk search if spec_dir is explicitly set
         if (state.spec_dir) {
-          spec = findFile(state.spec_dir, "spec.md");
+          spec = probe.findFile(state.spec_dir, "spec.md");
         }
       }
-      if (!spec || !existsSync(spec)) return "specify (no spec.md found)";
+      if (!spec || !probe.exists(spec)) return "specify (no spec.md found)";
       return null;
     })
     .with("architecture", () => {
-      let spec = resolveArtifact(state.phase_artifacts.specify, state.spec_file);
+      let spec = resolveArtifact(state.phase_artifacts.specify, state.spec_file, probe);
       if (!spec) {
         // Only fall back to disk search if spec_dir is explicitly set
         if (state.spec_dir) {
-          spec = findFile(state.spec_dir, "spec.md");
+          spec = probe.findFile(state.spec_dir, "spec.md");
         }
       }
-      if (!spec || !existsSync(spec)) return "specify (no spec.md found)";
+      if (!spec || !probe.exists(spec)) return "specify (no spec.md found)";
       if (!state.skipped_phases.includes("clarify")) {
         try {
-          const content = readFileSync(spec, "utf-8");
+          const content = probe.readText(spec);
           const markers = (content.match(/NEEDS CLARIFICATION/g) ?? []).length;
           if (markers > CLARIFY_THRESHOLD) return `clarify (${markers} markers > ${CLARIFY_THRESHOLD})`;
         } catch (e) {
@@ -150,12 +178,12 @@ export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string
       return null;
     })
     .with("plan-alignment", () => {
-      const plan = resolveArtifact(state.phase_artifacts.architecture, state.plan_file);
+      const plan = resolveArtifact(state.phase_artifacts.architecture, state.plan_file, probe);
       if (!plan) return "architecture (no plan.md found)";
       return null;
     })
-    .with("decompose", () => checkPlanAlignmentGate(state))
-    .with("execute", () => checkPlanAlignmentGate(state))
+    .with("decompose", () => checkPlanAlignmentGate(state, probe))
+    .with("execute", () => checkPlanAlignmentGate(state, probe))
     .with("init", () => null)
     .with("brainstorm", () => null)
     .exhaustive();
@@ -171,8 +199,16 @@ export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string
  * supplies `realPhaseOrderDeps`; nothing else may.
  */
 export interface PhaseOrderDeps {
-  /** Loaded protected graph, or null when there is no active plan. */
+  /**
+   * Loaded protected graph, or null when there is no active plan.
+   *
+   * `null` is the ALLOW answer, so the shell must return it only when absence
+   * is proven (ENOENT). An unreadable-but-present graph must raise, never
+   * report "no plan" — see `realPhaseOrderDeps`.
+   */
   readonly loadState: () => TaskGraph | null;
+  /** Phase-artifact existence and content reads. */
+  readonly artifacts: ArtifactProbe;
 }
 
 export function validatePhaseOrder(
@@ -261,7 +297,7 @@ export function validatePhaseOrder(
   }
 
   // Check artifact requirements
-  const missing = checkArtifacts(targetPhase, state);
+  const missing = checkArtifacts(targetPhase, state, deps.artifacts);
   if (missing) {
     return {
       kind: "block",

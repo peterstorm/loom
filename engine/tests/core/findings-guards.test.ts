@@ -10,10 +10,15 @@
 
 import { describe, expect, it } from "vitest";
 import { findingIdCollisionError, startReviewRun, type Finding } from "../../src/core/findings";
+import type { HeadSha, PacketId } from "../../src/core/review-packet";
 import type { Task } from "../../src/types";
 
-const PACKET = "a".repeat(64);
-const HEAD = "b".repeat(40);
+// Branded as the smart constructors would mint them. The malformed cases below
+// cast deliberately: they exercise startReviewRun's fail-closed checks against a
+// value that reached the binding WITHOUT going through parsePacketId/parseHeadSha
+// — the one gap a compile-time brand cannot close.
+const PACKET = "a".repeat(64) as PacketId;
+const HEAD = "b".repeat(40) as HeadSha;
 
 const finding = (id: string, agent: string, claim: string): Finding => ({
   id,
@@ -65,7 +70,7 @@ describe("startReviewRun refuses a malformed run binding", () => {
       ["non-hex characters", "z".repeat(64)],
       ["empty", ""],
     ])("refuses a packet id that is %s", (_label, packetId) => {
-      const transition = runWith({ packetId });
+      const transition = runWith({ packetId: packetId as PacketId });
       expect(transition.ok).toBe(false);
       if (transition.ok) return;
       expect(transition.error).toContain("review packet id is invalid");
@@ -80,15 +85,15 @@ describe("startReviewRun refuses a malformed run binding", () => {
       ["not lowercase hex", "B".repeat(40)],
       ["empty", ""],
     ])("refuses a head SHA that is %s", (_label, headSha) => {
-      const transition = runWith({ headSha });
+      const transition = runWith({ headSha: headSha as HeadSha });
       expect(transition.ok).toBe(false);
       if (transition.ok) return;
       expect(transition.error).toContain("review head SHA is invalid");
     });
 
     it("accepts the abbreviated 40-char and full 64-char forms", () => {
-      expect(runWith({ headSha: "b".repeat(40) }).ok).toBe(true);
-      expect(runWith({ headSha: "b".repeat(64) }).ok).toBe(true);
+      expect(runWith({ headSha: "b".repeat(40) as HeadSha }).ok).toBe(true);
+      expect(runWith({ headSha: "b".repeat(64) as HeadSha }).ok).toBe(true);
     });
   });
 

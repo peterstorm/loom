@@ -37,7 +37,7 @@ const graph = (tasks: Task[], executing: string[]): TaskGraph => ({
 
 const untrustedPass: UntrustedStopResolution = {
   taskCompleted: true,
-  testResult: { verdict: "untrusted", passed: true, label: "pi-structured: bun: 5 pass" },
+  testResult: { verdict: "untrusted", passed: true, label: "pi-structured: bun: 5 pass", provenance: "pi-structured" },
   testEvidence: "pi-structured: bun: 5 pass",
   filesModified: ["src/a.ts", "tests/a.test.ts"],
   changedDeclaredArtifacts: ["src/a.ts", "tests/a.test.ts"],
@@ -69,7 +69,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     })], ["T1"]);
     const latestFailure: UntrustedStopResolution = {
       ...untrustedPass,
-      testResult: { verdict: "untrusted", passed: false, label: "pi-structured: bun: 1 fail" },
+      testResult: { verdict: "untrusted", passed: false, label: "pi-structured: bun: 1 fail", provenance: "pi-structured" },
       testEvidence: "pi-structured: bun: 1 fail",
       newTestsWritten: false,
       newTestEvidence: "",
@@ -98,7 +98,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     const failedChild: UntrustedStopResolution = {
       ...untrustedPass,
       taskCompleted: false,
-      testResult: { verdict: "untrusted", passed: false, label: "pi-implementation-failed" },
+      testResult: { verdict: "untrusted", passed: false, label: "pi-implementation-failed", provenance: "unverified" },
       testEvidence: "implementation process failed",
       filesModified: [],
       changedDeclaredArtifacts: ["src/a.ts"],
@@ -129,7 +129,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     })], ["T1"]);
     const noWriteFailure: UntrustedStopResolution = {
       ...untrustedPass,
-      testResult: { verdict: "untrusted", passed: false, label: "no new run" },
+      testResult: { verdict: "untrusted", passed: false, label: "no new run", provenance: "unverified" },
       testEvidence: "",
       filesModified: [],
       changedDeclaredArtifacts: [],
@@ -160,7 +160,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     };
     const unobservedChange: UntrustedStopResolution = {
       ...untrustedPass,
-      testResult: { verdict: "untrusted", passed: false, label: "no test run" },
+      testResult: { verdict: "untrusted", passed: false, label: "no test run", provenance: "unverified" },
       testEvidence: "",
       filesModified: [],
       changedDeclaredArtifacts: [],
@@ -292,7 +292,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
   });
 
   it("an existing UNTRUSTED verdict is superseded (only trusted verdicts stand)", () => {
-    const prior: TaskTestResult = { verdict: "untrusted", passed: false, label: "transcript-regex (fallback)" };
+    const prior: TaskTestResult = { verdict: "untrusted", passed: false, label: "transcript-regex (fallback)", provenance: "unverified" };
     const s = graph([task({ id: "T1", status: "implemented", test_result: prior })], ["T1"]);
 
     const applied = applyUntrustedStopResolution(s, "T1", untrustedPass);

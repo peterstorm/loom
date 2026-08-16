@@ -33,10 +33,29 @@ export interface ProofObligationInput {
   readonly declaredArtifacts: readonly string[];
 }
 
+/**
+ * Where an untrusted regression verdict came from.
+ *
+ * `pi-structured` is the ONE provenance the Pi structured-evidence policy may
+ * upgrade into a satisfied obligation, and it is a field rather than a
+ * convention on `label` because `label` is free operator-facing text: a
+ * `pi-structured:` prefix on it was a trust decision any producer could obtain
+ * by spelling a string, and no reader could tell a real structured verdict from
+ * a transcript-regex one that happened to be labelled that way. Everything else
+ * is `unverified`, which is also what an older record with no provenance reads
+ * as — absent evidence never upgrades.
+ */
+export type UntrustedTestProvenance = "pi-structured" | "unverified";
+
 export type ProofTestResult =
   | { readonly verdict: "trusted-pass" }
   | { readonly verdict: "trusted-fail" }
-  | { readonly verdict: "untrusted"; readonly passed: boolean; readonly label: string };
+  | {
+      readonly verdict: "untrusted";
+      readonly passed: boolean;
+      readonly label: string;
+      readonly provenance: UntrustedTestProvenance;
+    };
 
 /** Observations collected by the imperative shell and consumed by this pure core. */
 export interface ObservedProofEvidence {
@@ -210,7 +229,7 @@ const evaluateRegression = (
       failure: Object.freeze({ kind: "untrusted-regression-tests-failed", label: result.label }),
     });
   }
-  if (policy.untrustedPass === "accept-pi-structured" && result.label.startsWith("pi-structured:")) {
+  if (policy.untrustedPass === "accept-pi-structured" && result.provenance === "pi-structured") {
     return Object.freeze({
       state: "satisfied",
       obligation,
@@ -415,9 +434,21 @@ export function parseTaskTestResult(raw: unknown, path = "testResult"): ProofPar
     if (typeof raw.passed !== "boolean") errors.push(`${path}.passed must be a boolean`);
     const label = parseNonEmptyString(raw.label, `${path}.label`);
     if (!label.ok) errors.push(...label.errors);
+    // Absent provenance reads as `unverified`, never as structured evidence:
+    // records written before the field existed must not acquire a trust
+    // upgrade by omission. An unrecognized value is a refusal, not a default.
+    if (raw.provenance !== undefined && raw.provenance !== "pi-structured" && raw.provenance !== "unverified") {
+      errors.push(`${path}.provenance must be pi-structured or unverified`);
+    }
+    const provenance: UntrustedTestProvenance = raw.provenance === "pi-structured" ? "pi-structured" : "unverified";
     return errors.length > 0
       ? fail(errors)
-      : ok(Object.freeze({ verdict: "untrusted", passed: raw.passed === true, label: label.ok ? label.value : "" }));
+      : ok(Object.freeze({
+          verdict: "untrusted",
+          passed: raw.passed === true,
+          label: label.ok ? label.value : "",
+          provenance,
+        }));
   }
   return fail([`${path}.verdict must be trusted-pass, trusted-fail, or untrusted`]);
 }

@@ -105,7 +105,7 @@ describe("capVerdictForMachineCompletion (pure)", () => {
     expect(capped.result).toEqual({
       verdict: "untrusted",
       passed: true,
-      label: "machine-incomplete: TestRunPassed ≥ 2",
+      label: "machine-incomplete: TestRunPassed ≥ 2", provenance: "unverified" as const,
     });
     expect(capped.evidence).toContain("machine-incomplete: TestRunPassed ≥ 2");
     expect(capped.evidence).toContain("ledger: exit 0");
@@ -122,7 +122,7 @@ describe("capVerdictForMachineCompletion (pure)", () => {
 
   it("untrusted resolutions are already at the floor — untouched", () => {
     const untrusted = {
-      result: { verdict: "untrusted" as const, passed: true, label: "transcript-regex (fallback)" },
+      result: { verdict: "untrusted" as const, passed: true, label: "transcript-regex (fallback)", provenance: "unverified" as const },
       evidence: "vitest: Tests 5 passed",
     };
     expect(capVerdictForMachineCompletion(untrusted, missing)).toBe(untrusted);
@@ -157,7 +157,7 @@ describe("machine terminal requirements gate the persisted verdict (Fix 7)", () 
     expect(state.tasks[0].test_result).toEqual({
       verdict: "untrusted",
       passed: true,
-      label: "machine-incomplete: TestRunPassed ≥ 2",
+      label: "machine-incomplete: TestRunPassed ≥ 2", provenance: "unverified" as const,
     });
   }, 30000);
 

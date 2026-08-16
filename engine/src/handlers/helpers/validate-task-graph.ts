@@ -691,12 +691,20 @@ const handler: HookHandler = async (stdin, args) => {
   let json: Record<string, unknown>;
   try {
     json = JSON.parse(raw);
-  } catch {
-    if (isFix && isMinimal) {
-      process.stdout.write(fixMinimal({}));
-      return { kind: "passthrough" };
-    }
-    return { kind: "error", message: "Invalid JSON" };
+  } catch (e) {
+    // Unparseable input is a refusal on EVERY path, including `--fix --minimal`.
+    // That branch used to write `fixMinimal({})` and return `passthrough`
+    // (exit 0), so a corrupt graph produced a clean success and a plausible
+    // default graph — with the parse error discarded and the `repair.dataLoss`
+    // refusal structurally unable to fire, because the "repair" was diffed
+    // against an empty stub rather than the real bytes. `--fix` repairs
+    // valid-but-incomplete JSON; `{}` is still a legal input for callers that
+    // want the canonical template. The caught message is preserved: every
+    // sibling catch in this file reports the real cause.
+    return {
+      kind: "error",
+      message: `Invalid JSON: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 
   if (isFix) {

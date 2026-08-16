@@ -75,6 +75,7 @@ import {
   parseAgentId,
   parseAgentType,
   parseBindingLine,
+  parseReportedAgentId,
   parseEvidenceLine,
   parseSessionId,
   resolveSoleActiveBinding,
@@ -347,12 +348,37 @@ export async function refreshBindingActivity(sessionId: SessionId, nowMs: number
  * deterministic `unparseable-<hex digest>` placeholder that itself
  * satisfies the roster line format, keeping markAgentActive /
  * removeActiveAgent symmetric for the agent's start and stop hooks.
+ *
+ * This is the roster LINE codec — total, idempotent on already-written lines,
+ * and deliberately namespace-preserving, because it also reads back the
+ * `pi-grant-` identities the write-grant flow legitimately wrote. Untrusted,
+ * harness-reported ids must go through `reportedRosterAgentId` instead.
  */
 export function rosterAgentId(raw: string): AgentId {
-  const parsed = parseAgentId(raw);
+  return placeholderOnNull(raw, parseAgentId(raw));
+}
+
+/**
+ * Roster identity for a HARNESS-REPORTED `agent_id` — one that arrives as hook
+ * input from SubagentStart/SubagentStop and was never proved to carry anything.
+ *
+ * Identical to `rosterAgentId` except that the reserved write-grant namespace
+ * is refused along with binding-unsafe ids. The write gate authorizes on the
+ * roster's identity column, so a reported id merely SHAPED like a grant
+ * identity landing there verbatim would hand out Edit/Write with no grant ever
+ * consumed. The placeholder absorbs it: the agent is still COUNTED — all the
+ * roster owes attribution — under an id that authorizes nothing. Start and stop
+ * derive the same placeholder from the same raw id, so removal stays symmetric.
+ */
+export function reportedRosterAgentId(raw: string): AgentId {
+  return placeholderOnNull(raw, parseReportedAgentId(raw));
+}
+
+/** Deterministic, binding-safe stand-in for an id its constructor refused. */
+function placeholderOnNull(raw: string, parsed: AgentId | null): AgentId {
   if (parsed !== null) return parsed;
   const digest = createHash("sha256").update(raw).digest("hex").slice(0, 16);
-  const placeholder = parseAgentId(`unparseable-${digest}`);
+  const placeholder = parseReportedAgentId(`unparseable-${digest}`);
   if (placeholder === null) {
     throw new Error("unreachable: hex placeholder is binding-safe by construction");
   }

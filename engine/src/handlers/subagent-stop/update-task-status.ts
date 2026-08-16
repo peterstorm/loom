@@ -185,10 +185,10 @@ export function resolveTestEvidence(
     const label = "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)";
     const fromTranscript = extractTestEvidence(bashOutput);
     if (!fromTranscript.passed) {
-      return { result: { verdict: "untrusted", passed: false, label }, evidence: "" };
+      return { result: { verdict: "untrusted", passed: false, label, provenance: "unverified" }, evidence: "" };
     }
     return {
-      result: { verdict: "untrusted", passed: true, label },
+      result: { verdict: "untrusted", passed: true, label, provenance: "unverified" },
       evidence: `${label}: ${fromTranscript.evidence}`,
     };
   }
@@ -244,10 +244,10 @@ export function resolveTestEvidence(
         : "transcript-regex (fallback)");
   const fallback = extractTestEvidence(bashOutput);
   if (!fallback.passed) {
-    return { result: { verdict: "untrusted", passed: false, label }, evidence: "" };
+    return { result: { verdict: "untrusted", passed: false, label, provenance: "unverified" }, evidence: "" };
   }
   return {
-    result: { verdict: "untrusted", passed: true, label },
+    result: { verdict: "untrusted", passed: true, label, provenance: "unverified" },
     evidence: `${label}: ${fallback.evidence}`,
   };
 }
@@ -270,7 +270,7 @@ export function capVerdictForMachineCompletion(
   const reqs = missing.map((r) => `${r.event} ≥ ${r.min}`).join(", ");
   const label = `machine-incomplete: ${reqs}`;
   return {
-    result: { verdict: "untrusted", passed: true, label },
+    result: { verdict: "untrusted", passed: true, label, provenance: "unverified" },
     evidence: `${label} — ${resolved.evidence}`,
   };
 }

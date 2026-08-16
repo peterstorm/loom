@@ -28,8 +28,30 @@ import { parseReportSummary } from "./test-report";
  */
 declare const AGENT_ID: unique symbol;
 declare const AGENT_TYPE: unique symbol;
+declare const GRANTED_AGENT_ID: unique symbol;
 export type AgentId = string & { readonly [AGENT_ID]: true };
 export type AgentType = string & { readonly [AGENT_TYPE]: true };
+
+/**
+ * The reserved namespace for write-grant capability identities.
+ *
+ * `AgentId` proves binding-encoding and path safety — NOT authorization. The
+ * write gate nonetheless has to recognise the one identity that carries a
+ * capability, because the grant record is burnt at consume time
+ * (`consumePiWriteGrant` renames and deletes it) and cannot be re-checked
+ * afterwards. Recognition is therefore only as trustworthy as the namespace is
+ * exclusive: it is enforced at BOTH ends — `parseGrantedAgentId` is the sole
+ * producer the gate accepts, and `parseReportedAgentId` is the sole
+ * constructor for harness-reported ids, which refuses the namespace outright.
+ */
+export const WRITE_GRANT_AGENT_NAMESPACE = "pi-grant-";
+
+/**
+ * An agent identity inside the write-grant namespace. Distinct from `AgentId`
+ * so "self-reported identity" and "identity that carries a write capability"
+ * are different types at every call site that decides between them.
+ */
+export type GrantedAgentId = AgentId & { readonly [GRANTED_AGENT_ID]: true };
 
 /**
  * Characters reserved by the binding-file and epoch encodings (whitespace,
@@ -41,6 +63,34 @@ const BINDING_UNSAFE = /[\s:/\\]/;
 /** Smart constructor: null when the raw id cannot be safely bound/attributed. */
 export function parseAgentId(raw: string): AgentId | null {
   return raw !== "" && !BINDING_UNSAFE.test(raw) && !raw.includes("..") ? (raw as AgentId) : null;
+}
+
+/**
+ * Smart constructor for a HARNESS-REPORTED agent id — one that arrives as hook
+ * input and was never proved to carry anything.
+ *
+ * Null for the reserved write-grant namespace, on top of the binding/path
+ * rules. Both harnesses report an opaque `agent_id`, and the write gate reads
+ * that id back off the `.active` roster; without this refusal a reported id
+ * merely SHAPED like a grant identity would be indistinguishable from one the
+ * grant flow minted, and would be granted Edit/Write with no grant ever having
+ * been verified. Callers map the null to a non-authorizing placeholder — see
+ * `rosterAgentId`.
+ */
+export function parseReportedAgentId(raw: string): AgentId | null {
+  return raw.startsWith(WRITE_GRANT_AGENT_NAMESPACE) ? null : parseAgentId(raw);
+}
+
+/**
+ * Smart constructor for a write-grant capability identity: null unless the id
+ * is binding-safe AND inside the reserved namespace. The only legitimate
+ * producer is the Pi write-grant consume path; the write gate accepts a write
+ * capability on no other evidence.
+ */
+export function parseGrantedAgentId(raw: string): GrantedAgentId | null {
+  if (!raw.startsWith(WRITE_GRANT_AGENT_NAMESPACE)) return null;
+  const parsed = parseAgentId(raw);
+  return parsed === null ? null : (parsed as GrantedAgentId);
 }
 
 /** Smart constructor: null when the raw type cannot be safely bound/attributed

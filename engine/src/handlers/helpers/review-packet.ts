@@ -266,7 +266,10 @@ const handler: HookHandler = async (_stdin, args) => {
         const transition = startReviewRun(currentTask, {
           generation: task.review_generation ?? 0,
           packetId: packet.value.packetId,
-          headSha,
+          // The PARSED head revision, not the raw `rev-parse` string: the
+          // binding carries the HeadSha brand so a base/head transposition
+          // here is a compile error rather than an inverted review run.
+          headSha: parsedHeadSha.value,
           expectedAgents: WAVE_REVIEW_AGENTS,
         });
         if (!transition.ok) throw new Error(transition.error);

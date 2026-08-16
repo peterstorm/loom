@@ -10,9 +10,10 @@
  *
  * Pure core (`validateModelBindings`) with filesystem access injected via
  * `ModelBindingDeps`; `checkPlanModelBindings` is the shared fail-closed
- * entry point used by both the validate-task-graph handler and
- * populate-task-graph (the only whitelisted helper that populates tasks
- * into state), so neither path can skip enforcement.
+ * entry point used by the validate-task-graph handler, populate-task-graph,
+ * and repair-task-graph — the whitelisted helpers that populate tasks into
+ * state (repair-task-graph installs through `StateManager.replace`, see its
+ * own header) — so none of them can skip enforcement.
  */
 
 import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../parsers/parse-plan-models";

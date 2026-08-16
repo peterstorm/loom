@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { TaskGraph } from "../../src/types";
 import {
   applyFailedPiResult,
+  applyImplementationPiResult,
   applyPhaseAgentPiResult,
   applyReviewPiResult,
   applySpecCheckPiResult,
@@ -299,5 +300,99 @@ describe("applySpecCheckPiResult", () => {
     });
 
     expect(store.current().spec_check).toMatchObject({ verdict: "EVIDENCE_CAPTURE_FAILED" });
+  });
+});
+
+describe("applyImplementationPiResult", () => {
+  /** A repository probe pointed at a root, with `isRepo` under test control. */
+  const repositoryAt = (root: string, isRepo = true) => ({ root: () => root, isRepo: () => isRepo });
+
+  const implementationGraph = (taskOverrides: Record<string, unknown> = {}): TaskGraph => {
+    const base = graph({ executing_tasks: ["T1"] });
+    return {
+      ...base,
+      tasks: [{ ...base.tasks[0]!, ...taskOverrides }],
+    } as TaskGraph;
+  };
+
+  /**
+   * The malformed-transcript branch has TWO exits keyed on whether bytes moved
+   * since the attempt started. Only the `true` exit (full invalidation through
+   * applyUntrustedStopResolution) was covered; this is the `false` one, where
+   * the task must stay pending with the failure stamped on it.
+   */
+  it("stamps failure_reason and preserves pending when a malformed transcript changed no bytes", async () => {
+    // A defined-but-empty attempt baseline compares clean, so nothing moved.
+    const store = fakeStore(implementationGraph({ attempt_artifact_baseline: [] }));
+    const outcome = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", messages: "not a message array" }),
+      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    const task = store.current().tasks[0]!;
+    expect(task.status).toBe("pending");
+    expect(task.failure_reason).toContain("Pi transcript evidence capture failed");
+    // Not routed through the untrusted resolution: no verdict was minted.
+    expect(task.test_result).toBeUndefined();
+    expect(store.current().executing_tasks).toEqual([]);
+    // Reported on the log, not as a processing error: the capture failed but
+    // the orchestration step itself completed and left the task retryable.
+    expect(outcome.processingErrors).toEqual([]);
+    expect(outcome.log.join("\n")).toContain("evidence was not accepted");
+  });
+
+  /**
+   * `compareAttemptBaseline` failing is a documented fail-closed contract, but
+   * nothing pinned the Pi bridge's WIRING to it — only the pure comparator was
+   * tested. A dropped `comparisonFailures.push` would have been invisible.
+   */
+  it("reports the baseline comparison failure on the malformed-transcript path", async () => {
+    const store = fakeStore(implementationGraph({
+      // A baseline naming an artifact under a root that does not exist makes
+      // the comparator throw, which it reports as a failure rather than "no
+      // change" — the fail-closed direction.
+      attempt_artifact_baseline: [{ artifact: "engine/src/x.ts", sha256: "a".repeat(64) }],
+    }));
+    const outcome = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt("/nonexistent/loom-repo-root"),
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", messages: "not a message array" }),
+      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    expect(outcome.log.join("\n")).toContain("cannot compare malformed-transcript attempt baseline for T1");
+    // Fail-closed: an uncomparable baseline is treated as "bytes moved", so the
+    // stale evidence is invalidated rather than preserved.
+    expect(store.current().tasks[0]!.status).not.toBe("completed");
+  });
+
+  /**
+   * The wave gate rejects the transcript fallback, so a null structured verdict
+   * is a latent blocker the operator should hear about at the point it happens.
+   */
+  it("explains a well-formed transcript that produced no structured test evidence", async () => {
+    const store = fakeStore(implementationGraph({ attempt_artifact_baseline: [] }));
+    const outcome = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd(), false),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        messages: assistantText("I made the change but ran no tests."),
+      }),
+      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    const logged = outcome.log.join("\n");
+    expect(logged).toContain("produced no structured test evidence");
+    expect(logged).toContain("no Bash call was classified as a test run");
+    expect(logged).toContain("the wave gate will reject it");
   });
 });

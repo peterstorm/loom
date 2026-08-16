@@ -110,10 +110,13 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
     // every import statement; it is now off the list.
     perFileAllow: {
       "engine/src/core/block-direct-edits.ts": ["node:fs"],
-      // guard-state-file and validate-template-substitution no longer appear
-      // here: both dropped `node:fs` when their bare `existsSync` probes became
-      // the injectable, fail-closed `pathExistsFailClosed` default from
-      // `engine/src/config`. Re-adding an fs import there must be re-reviewed.
+      // guard-state-file, validate-template-substitution, and
+      // validate-phase-order no longer appear here: the first two dropped
+      // `node:fs` when their bare `existsSync` probes became the injectable,
+      // fail-closed `pathExistsFailClosed` default from `engine/src/config`,
+      // and validate-phase-order dropped it (along with `utils/find-file`) when
+      // its phase-artifact reads became the injected `ArtifactProbe` port.
+      // Re-adding an fs import in any of them must be re-reviewed.
       "engine/src/core/harness-capture.ts": ["node:crypto"],
       "engine/src/core/harness-resources.ts": ["node:crypto", "node:path"],
       "engine/src/core/legacy-archive.ts": ["node:crypto"],
@@ -129,7 +132,6 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/review-panel.ts": ["node:path"],
       "engine/src/core/standalone-review.ts": ["node:crypto"],
       "engine/src/core/standalone-review-machine.ts": ["node:crypto", "node:util"],
-      "engine/src/core/validate-phase-order.ts": ["node:fs"],
       "engine/src/core/wave-gate-machine.ts": ["node:crypto"],
       "engine/src/utils/find-file.ts": ["node:fs", "node:path"],
     },

@@ -35,7 +35,7 @@ afterEach(() => {
 const testResult = {
   verdict: "untrusted" as const,
   passed: true,
-  label: "pi-structured: bun: 25 pass",
+  label: "pi-structured: bun: 25 pass", provenance: "pi-structured" as const,
 };
 
 function failedTask(taskCompleted = true): Task {

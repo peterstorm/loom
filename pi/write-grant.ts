@@ -12,6 +12,11 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { guardedDirs, subagentDir } from "../engine/src/config";
+import {
+  parseGrantedAgentId,
+  WRITE_GRANT_AGENT_NAMESPACE,
+  type GrantedAgentId,
+} from "../engine/src/machine/evidence";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 
 const GRANT_VERSION = 1 as const;
@@ -53,7 +58,12 @@ export interface ConsumedWriteGrant {
   readonly agent: string;
   readonly taskId: string;
   readonly taskGraphPath: string;
-  readonly agentId: string;
+  /**
+   * The capability identity, typed so it cannot be confused with a
+   * harness-reported one. Produced only by `parseGrantedAgentId`, and only
+   * after every check in `consumePiWriteGrant` has passed.
+   */
+  readonly agentId: GrantedAgentId;
   /** The spawn cwd the grant was resolved against: scoped-target checks must
    *  resolve relative targets against THIS base (the authorizing one), not
    *  whatever cwd the enforcement site happens to report. */
@@ -252,20 +262,41 @@ export function consumePiWriteGrant(
   }
   if (canonicalDirectory(cwd) !== grant.cwd) throw new Error("write grant cwd does not match child process cwd");
   if (!existsSync(grant.taskGraphPath)) throw new Error("write grant task graph no longer exists");
+  // Mint through the capability constructor rather than string concatenation:
+  // this is the ONE producer the write gate accepts, so the id it hands back
+  // must be proven to be in the reserved namespace and binding-safe, not merely
+  // spelled that way.
+  const agentId = parseGrantedAgentId(`${WRITE_GRANT_AGENT_NAMESPACE}${token.slice(0, 16)}`);
+  if (agentId === null) throw new Error("write grant minted an invalid capability identity");
   return Object.freeze({
     agent: grant.agent,
     taskId: grant.taskId,
     taskGraphPath: grant.taskGraphPath,
-    agentId: `pi-grant-${token.slice(0, 16)}`,
+    agentId,
     cwd: grant.cwd,
     scopeDirs: grant.scopeDirs,
   });
 }
 
+/** Errors that genuinely mean "this component does not exist yet" and so are
+ *  answered by walking one level up. ENOENT is the ordinary case (the target is
+ *  about to be written); ENOTDIR is its sibling when a component of the tail
+ *  names an existing FILE. Every other errno — EACCES, ELOOP, ENAMETOOLONG,
+ *  EIO — means the resolution could not be performed, which is NOT the same
+ *  answer and must not be absorbed into it. */
+const ABSENT_COMPONENT_CODES: ReadonlySet<string> = new Set(["ENOENT", "ENOTDIR"]);
+
 /** Resolve a path and canonicalize it THROUGH symlinks: realpath the deepest
  *  EXISTING ancestor (the target itself may not exist yet — it is about to
  *  be written), then re-append the missing tail. A symlinked directory
- *  inside a scope dir can no longer resolve to a path outside it. */
+ *  inside a scope dir can no longer resolve to a path outside it.
+ *
+ *  This is the sole basis for `writeTargetViolatesScope`, so an unresolvable
+ *  ancestor must not read as "not there yet": a blanket catch turned EACCES and
+ *  ELOOP into a re-appended tail whose "canonical" path did not describe what
+ *  the filesystem would do on write. Non-absence errors propagate; the Pi
+ *  tool-call guard wraps every check in a fail-closed catch, so a throw blocks
+ *  the edit instead of widening the scope. */
 function canonicalTarget(path: string): string {
   const abs = resolve(path);
   let existing = abs;
@@ -273,7 +304,9 @@ function canonicalTarget(path: string): string {
   for (;;) {
     try {
       return join(realpathSync(existing), ...tail.reverse());
-    } catch {
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === undefined || !ABSENT_COMPONENT_CODES.has(code)) throw error;
       const parent = dirname(existing);
       if (parent === existing) return abs;
       tail.push(basename(existing));

@@ -125,6 +125,7 @@ describe("R2 — the spoofs the review found are dead", () => {
       verdict: "untrusted",
       passed: true, // documented residual: reporterless fallback
       label: "degraded (machine bound, no ledger evidence; transcript-regex)",
+      provenance: "unverified",
     });
     expect(resolved.evidence).toContain("degraded (machine bound, no ledger evidence");
   });
@@ -137,7 +138,12 @@ describe("R2 — the spoofs the review found are dead", () => {
 
   it("unbound runs keep the plain fallback label", () => {
     const resolved = resolveTestEvidence([], "12 passing", false);
-    expect(resolved.result).toEqual({ verdict: "untrusted", passed: true, label: "transcript-regex (fallback)" });
+    expect(resolved.result).toEqual({
+      verdict: "untrusted",
+      passed: true,
+      label: "transcript-regex (fallback)",
+      provenance: "unverified",
+    });
     expect(resolved.evidence).toContain("transcript-regex (fallback)");
   });
 });

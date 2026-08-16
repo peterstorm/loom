@@ -2571,6 +2571,7 @@ describe("Pi extension review tool_result integration", () => {
       verdict: "untrusted",
       passed: true,
       label: "transcript-regex (fallback)",
+      provenance: "unverified",
     });
     expect(task.proof.state).not.toBe("satisfied");
   });

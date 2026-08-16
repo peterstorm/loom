@@ -7,18 +7,25 @@
 import { existsSync, statSync } from "node:fs";
 import type { HookResult } from "../types";
 import { IMPL_AGENTS, TASK_GRAPH_PATH, subagentDir, pathExistsFailClosed } from "../config";
-import { parseSessionId } from "../machine/evidence";
+import { parseGrantedAgentId, parseSessionId } from "../machine/evidence";
 import { readActiveAgentRoles } from "../machine/ledger";
 
 const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "edit", "write", "multi_edit"]);
 
-/** Write-grant agent IDs are minted by the Pi write-grant system and carry
- *  cryptographic proof of authorization. They bypass the IMPL_AGENTS check
- *  because the grant itself is the capability — not the agent's declared role. */
-const PI_WRITE_GRANT_PREFIX = "pi-grant-";
-
+/**
+ * Write-grant agent IDs are minted by the Pi write-grant system, which verifies
+ * the grant's token digest, binding MAC, expiry, agent identity, Task ID, and
+ * cwd before minting — then BURNS the record, so nothing downstream can re-run
+ * that verification. The identity is therefore recognised by namespace, and the
+ * namespace is what has to be exclusive: `parseGrantedAgentId` is the only
+ * constructor that admits it, and `parseReportedAgentId` — the only constructor
+ * applied to harness-reported ids on their way onto the `.active` roster this
+ * function reads — refuses it. A self-reported id shaped like a grant identity
+ * therefore never reaches here. The prefix test that used to stand in for this
+ * had no such boundary: it accepted whatever the roster's identity column held.
+ */
 function isWriteAuthorizedAgent(agentId: string): boolean {
-  return IMPL_AGENTS.has(agentId) || agentId.startsWith(PI_WRITE_GRANT_PREFIX);
+  return IMPL_AGENTS.has(agentId) || parseGrantedAgentId(agentId) !== null;
 }
 
 /**

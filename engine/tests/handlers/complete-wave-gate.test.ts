@@ -244,14 +244,14 @@ describe("checkTestEvidence (pure)", () => {
 
   it("fails on an untrusted result that did not claim a pass", () => {
     const result = checkTestEvidence([
-      { ...baseTask, test_result: { verdict: "untrusted", passed: false, label: "transcript-regex (fallback)" } },
+      { ...baseTask, test_result: { verdict: "untrusted", passed: false, label: "transcript-regex (fallback)", provenance: "unverified" } },
     ]);
     expect(result.passed).toBe(false);
   });
 
   it("passes on a labeled untrusted pass (honest tiering — trust gating is separate)", () => {
     const result = checkTestEvidence([
-      { ...baseTask, test_result: { verdict: "untrusted", passed: true, label: "transcript-regex (fallback)" } },
+      { ...baseTask, test_result: { verdict: "untrusted", passed: true, label: "transcript-regex (fallback)", provenance: "unverified" } },
     ]);
     expect(result.passed).toBe(true);
   });

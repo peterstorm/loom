@@ -107,8 +107,13 @@ const handler: HookHandler = async (stdin, args) => {
   let decompose: DecomposeInput;
   try {
     decompose = JSON.parse(stdin) as DecomposeInput;
-  } catch {
-    return { kind: "error", message: "Invalid JSON on stdin" };
+  } catch (e) {
+    // Preserve the parse error: "Invalid JSON on stdin" alone left the operator
+    // with no position or malformed token to look for.
+    return {
+      kind: "error",
+      message: `Invalid JSON on stdin: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 
   if (!Array.isArray(decompose.tasks) || decompose.tasks.length === 0) {

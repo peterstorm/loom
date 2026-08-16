@@ -81,7 +81,7 @@ describe("mark-tests-passed — error polarity", () => {
       JSON.stringify(
         graph([
           task("T1", { test_result: { verdict: "trusted-pass" }, new_tests_written: true }),
-          task("T2", { test_result: { verdict: "untrusted", passed: true, label: "transcript-regex (fallback)" }, new_tests_required: false }),
+          task("T2", { test_result: { verdict: "untrusted", passed: true, label: "transcript-regex (fallback)", provenance: "unverified" }, new_tests_required: false }),
         ]),
       ),
     );

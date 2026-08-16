@@ -46,6 +46,7 @@ const handler: HookHandler = async (stdin, args) => {
           verdict: "untrusted" as const,
           passed,
           label: "helper-reported (store-test-evidence stdin)",
+          provenance: "unverified" as const,
         },
         test_evidence: evidenceMatch?.[1] ?? "",
         new_tests_written: newWritten,

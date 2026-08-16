@@ -128,7 +128,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     expect(task.test_result).toEqual({
       verdict: "untrusted",
       passed: true,
-      label: "helper-reported (store-test-evidence stdin)",
+      label: "helper-reported (store-test-evidence stdin)", provenance: "unverified",
     });
     expect(task.test_evidence).toBe("12 passing");
     expect(task.new_tests_written).toBe(true);
@@ -152,7 +152,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
       JSON.stringify(
         graphWith({
           status: "implemented",
-          test_result: { verdict: "untrusted", passed: false, label: "transcript-regex (fallback)" },
+          test_result: { verdict: "untrusted", passed: false, label: "transcript-regex (fallback)", provenance: "unverified" },
         }),
         null,
         2,
@@ -166,7 +166,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     expect(task.test_result).toEqual({
       verdict: "untrusted",
       passed: true,
-      label: "helper-reported (store-test-evidence stdin)",
+      label: "helper-reported (store-test-evidence stdin)", provenance: "unverified",
     });
   });
 });

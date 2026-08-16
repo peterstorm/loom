@@ -14,6 +14,7 @@ import {
   parseProofEvaluationPolicy,
   parseProofObligationInput,
   parseTaskProof,
+  parseTaskTestResult,
   reevaluateTaskProof,
   type ObservedProofEvidence,
   type ProofObligationInput,
@@ -108,7 +109,7 @@ describe("proof evaluation", () => {
   it("rejects an untrusted claimed pass by default as a typed failure", () => {
     const proof = evaluateTaskProof(input, {
       ...completeEvidence,
-      testResult: { verdict: "untrusted", passed: true, label: "transcript-regex (fallback)" },
+      testResult: { verdict: "untrusted", passed: true, label: "transcript-regex (fallback)", provenance: "unverified" },
     });
 
     expect(DEFAULT_PROOF_POLICY.untrustedPass).toBe("reject");
@@ -126,7 +127,12 @@ describe("proof evaluation", () => {
       input,
       {
         ...completeEvidence,
-        testResult: { verdict: "untrusted", passed: true, label: "pi-structured: tool-result" },
+        testResult: {
+          verdict: "untrusted",
+          passed: true,
+          label: "pi-structured: tool-result",
+          provenance: "pi-structured",
+        },
       },
       PI_STRUCTURED_EVIDENCE_POLICY,
     );
@@ -148,7 +154,12 @@ describe("proof evaluation", () => {
       input,
       {
         ...completeEvidence,
-        testResult: { verdict: "untrusted", passed: false, label: "pi-structured: tool-result" },
+        testResult: {
+          verdict: "untrusted",
+          passed: false,
+          label: "pi-structured: tool-result",
+          provenance: "pi-structured",
+        },
       },
       PI_STRUCTURED_EVIDENCE_POLICY,
     );
@@ -160,6 +171,60 @@ describe("proof evaluation", () => {
         label: "pi-structured: tool-result",
       });
     }
+  });
+
+  // The trust upgrade reads `provenance`, never the label's spelling: a
+  // transcript-regex verdict labelled to look structured must not be accepted.
+  it("refuses a pi-structured LABEL that carries unverified provenance", () => {
+    const proof = evaluateTaskProof(
+      input,
+      {
+        ...completeEvidence,
+        testResult: {
+          verdict: "untrusted",
+          passed: true,
+          label: "pi-structured: forged by a producer that knows the string",
+          provenance: "unverified",
+        },
+      },
+      PI_STRUCTURED_EVIDENCE_POLICY,
+    );
+
+    expect(proof.state).toBe("failed");
+    if (proof.state === "failed") {
+      expect(proof.failures).toContainEqual({
+        kind: "untrusted-regression-pass",
+        label: "pi-structured: forged by a producer that knows the string",
+      });
+    }
+  });
+
+  it("parses a stored result with no provenance as unverified, never as structured", () => {
+    const parsed = parseTaskTestResult({
+      verdict: "untrusted",
+      passed: true,
+      label: "pi-structured: legacy record written before the field existed",
+    });
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.ok && parsed.value).toEqual({
+      verdict: "untrusted",
+      passed: true,
+      label: "pi-structured: legacy record written before the field existed",
+      provenance: "unverified",
+    });
+  });
+
+  it("refuses a stored result whose provenance is unrecognized", () => {
+    const parsed = parseTaskTestResult({
+      verdict: "untrusted",
+      passed: true,
+      label: "some run",
+      provenance: "evidence-ledger",
+    });
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.ok === false && parsed.errors.join(" ")).toContain("provenance");
   });
 
   it("evaluates every obligation exactly once even when several fail", () => {

@@ -60,6 +60,7 @@ import type {
   ReviewRun,
   ReviewRunEvidence,
 } from "../types";
+import type { HeadSha, PacketId } from "./review-packet";
 import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
 
 // The shapes live in types.ts (the schema root, with `Task`); this module owns
@@ -1094,10 +1095,21 @@ export type ReviewRunTransition =
   | { readonly ok: true; readonly task: Task; readonly completed: boolean }
   | { readonly ok: false; readonly error: string };
 
+/**
+ * What binds one reviewer batch to the packet it must assess.
+ *
+ * `packetId` and `headSha` keep the nominal brands their smart constructors
+ * mint. They were plain `string` here, which discarded — at exactly the
+ * boundary where a run is created — the separation `review-packet.ts` exists
+ * to provide: two adjacent hex strings that a transposed call would have
+ * type-checked straight through. The brands mean the format is now proven by
+ * construction rather than re-asserted with a regex that could drift from the
+ * parsers'.
+ */
 export interface ReviewRunBinding {
   readonly generation: number;
-  readonly packetId: string;
-  readonly headSha: string;
+  readonly packetId: PacketId;
+  readonly headSha: HeadSha;
   readonly expectedAgents: readonly string[];
 }
 
@@ -1133,6 +1145,9 @@ export function startReviewRun(task: Task, binding: ReviewRunBinding): ReviewRun
       error: `task ${task.id} review generation changed from ${binding.generation} to ${task.review_generation ?? 0}`,
     };
   }
+  // The brands make a TRANSPOSITION a compile error; these checks remain for
+  // the one thing a compile-time brand cannot cover — a value smuggled in by
+  // an `as` cast rather than through `parsePacketId`/`parseHeadSha`.
   if (!/^[0-9a-f]{64}$/.test(binding.packetId)) return { ok: false, error: "review packet id is invalid" };
   if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(binding.headSha)) return { ok: false, error: "review head SHA is invalid" };
   if (binding.expectedAgents.length === 0 || new Set(binding.expectedAgents).size !== binding.expectedAgents.length ||
