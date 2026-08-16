@@ -236,7 +236,10 @@ describe("agent-authored --outputFile artifacts cannot vouch (epoch FileWrite ve
   });
 
   it("a RELATIVE staged target is vetoed against the call's cwd (mint-time resolution, round-10 Fix 8)", async () => {
-    const s = sid("one-call-forge");
+    // Distinct session id: a bind no longer unlinks the ledger (that delete
+    // raced unlocked appendEvidence writers), so sharing the previous test's
+    // session would let its FileWrite leak into this one's lookup.
+    const s = sid("relative-forge");
     const dir = mkdtempSync(join(tmpdir(), "loom-relative-forge-"));
     const reportPath = join(dir, "r.json");
     await bind(s, "code-implementer-agent", "a-1");

@@ -334,10 +334,42 @@ describe("validate-task-execution — reservation grace window (startup-race saf
     expect(staleReservationsFromState(state, true, T0 + RESERVATION_GRACE_MS * 100)).toEqual(new Set());
   });
 
-  it("never reclaims a task that has left pending, even aged and inactive", () => {
+  it("reclaims a stranded reservation on an implemented task (veto after the task already ran)", () => {
+    // Wave remediation re-spawns against an already-implemented task; a sibling
+    // gate vetoes it AFTER this registration committed. No stop hook will ever
+    // clear the entry, so past grace with no active agent it must be reclaimed.
     const done = { ...reserved("T1", T0), status: "implemented" as const };
     const state = mkState([done], { executing_tasks: ["T1"] });
+    expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS + 1)).toEqual(new Set(["T1"]));
+  });
+
+  it("reclaims a stranded reservation on a failed task", () => {
+    const failed = { ...reserved("T1", T0), status: "failed" as const };
+    const state = mkState([failed], { executing_tasks: ["T1"] });
+    expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS + 1)).toEqual(new Set(["T1"]));
+  });
+
+  it("never reclaims a completed task, which can no longer be executed at all", () => {
+    const done = { ...reserved("T1", T0), status: "completed" as const };
+    const state = mkState([done], { executing_tasks: ["T1"] });
     expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS * 100)).toEqual(new Set());
+  });
+
+  it("reclaims a reservation naming a task absent from the graph", () => {
+    const state = mkState([reserved("T1", T0)], { executing_tasks: ["T1", "T404"] });
+    expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS + 1)).toEqual(new Set(["T1", "T404"]));
+  });
+
+  it("still shields an implemented task's reservation inside the grace window", () => {
+    const done = { ...reserved("T1", T0), status: "implemented" as const };
+    const state = mkState([done], { executing_tasks: ["T1"] });
+    expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS)).toEqual(new Set());
+  });
+
+  it("still shields an aged implemented reservation while an agent is active for the graph", () => {
+    const done = { ...reserved("T1", T0), status: "implemented" as const };
+    const state = mkState([done], { executing_tasks: ["T1"] });
+    expect(staleReservationsFromState(state, true, T0 + RESERVATION_GRACE_MS * 100)).toEqual(new Set());
   });
 
   it("treats a legacy (timestamp-less) reservation as eligible so pre-upgrade strandings still recover", () => {

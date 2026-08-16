@@ -29,17 +29,19 @@ import type { TaskGraph } from "../types";
  * sibling PreToolUse gates (template substitution, agent model, agent skill)
  * have voted. When one of them denies the spawn, SubagentStart never fires, so
  * no SubagentStop ever arrives to clear the entry: the task is deadlocked
- * `pending` while owning its declared paths, taking every path-sharing sibling
- * down with it.
+ * while owning its declared paths, taking every path-sharing sibling down with
+ * it. A veto strands the reservation whatever the task's status was — wave
+ * remediation re-spawns against `implemented` and `failed` tasks routinely —
+ * so recovery cannot be limited to tasks still `pending`.
  *
- * A reservation is provably abandoned only when its task never left `pending`,
+ * A reservation is provably abandoned only when its task is not `completed`,
  * no subagent is active FOR THIS GRAPH, AND it has aged past the grace window.
- * All three matter: a task past `pending` has really run; `anyActiveSubagent`
- * fails closed, so an unreadable roster or any live agent on this graph
- * releases nothing; and the grace window shields a freshly committed
- * reservation whose agent has not yet reached its SubagentStart roster mark —
- * without it, a parallel wave batch reclaims a live sibling that is merely
- * mid-startup (it is `pending` with no roster entry, indistinguishable from a
+ * All three matter: a `completed` task can never be re-executed;
+ * `anyActiveSubagent` fails closed, so an unreadable roster or any live agent
+ * on this graph releases nothing; and the grace window shields a freshly
+ * committed reservation whose agent has not yet reached its SubagentStart
+ * roster mark — without it, a parallel wave batch reclaims a live sibling that
+ * is merely mid-startup (it has no roster entry, indistinguishable from a
  * vetoed spawn on that instant alone). See staleReservationsFromState.
  *
  * The graph scope is not a detail. SUBAGENT_DIR is shared by every project on

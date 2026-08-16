@@ -456,9 +456,24 @@ export async function removeActiveAgent(sessionId: SessionId, agentId: AgentId):
  * Takes BRANDED identity — callers must go through parseAgentId /
  * parseAgentType at the boundary, so a reserved character can never be
  * appended into the `\t`-separated binding line. Stale lines are reaped in
- * the same write. When no fresh binding is currently active, the previous
- * ledger is best-effort truncated — epoch filtering already makes stale
- * lines inert, so a failed truncate is logged, never fatal.
+ * the same write.
+ *
+ * This bind deliberately does NOT truncate the evidence ledger. It used to,
+ * whenever no fresh binding was active — but `appendEvidence` writes WITHOUT
+ * the binding lock this function holds, so that delete raced every concurrent
+ * writer: a parallel batch of subagents could have a sibling's already-written
+ * TestRun records unlinked out from under it, and the sibling's SubagentStop
+ * then judged its own epoch as having no trusted evidence. The observable
+ * symptom was a task whose tests demonstrably passed being recorded
+ * `untrusted-regression-pass` and blocked at the Wave Gate, while re-running
+ * the SAME agent alone succeeded.
+ *
+ * Truncation was only ever a growth optimization, never a correctness
+ * requirement: `eventsForEpoch` already makes another epoch's lines inert, and
+ * the SessionStart stale sweep deletes `.evidence.jsonl` with the rest of its
+ * session group (it is a `SESSION_SUFFIXES` member), so the file stays bounded
+ * without a mid-session delete. Growth is therefore bounded by session
+ * lifetime rather than by racing live writers.
  */
 export async function bindMachineAgent(
   sessionId: SessionId,
@@ -487,15 +502,6 @@ export async function bindMachineAgent(
         `bindMachineAgent: ${agentId}/${agentType} already bound for ${sessionId} — duplicate SubagentStart ignored\n`,
       );
       return;
-    }
-    if (!kept.some((l) => l.kind === "fresh")) {
-      try {
-        unlinkSync(ledgerPath(sessionId));
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-          process.stderr.write(`bindMachineAgent: ledger truncate failed for ${sessionId}: ${e}\n`);
-        }
-      }
     }
     const binding: MachineBinding = { agentId, agentType, epoch: epochOf(agentId, agentType) };
     const content =

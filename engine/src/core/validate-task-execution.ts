@@ -123,11 +123,21 @@ export const RESERVATION_GRACE_MS = 10 * 60_000;
  * Pure staleness predicate: which committed reservations are provably
  * abandoned, given the roster fact the shell already resolved (`anyActive`)
  * and the current clock. A reservation is abandoned only when ALL hold:
- * its task never left `pending`; no agent is active for this graph; and it has
+ * its task is not `completed`; no agent is active for this graph; and it has
  * aged past `graceMs`. A reservation whose `reserved_at` is missing or
  * unparseable predates the timestamp (or is corrupt) and stays eligible so
  * legacy stranded entries still recover — the fail-closed direction is to keep
  * recovering deadlocks, which the grace only ever DELAYS.
+ *
+ * Status is deliberately NOT narrowed to `pending`. A spawn vetoed by a
+ * sibling PreToolUse gate strands its reservation whatever the task's status
+ * was, and re-spawning against an `implemented` or `failed` task is exactly
+ * what wave remediation does — so restricting recovery to `pending` left those
+ * strandings with no in-band recovery path at all. Liveness is protected by
+ * the two guards that do not depend on status: `anyActive` (fails closed, so
+ * any live agent or unreadable roster reclaims nothing) and `graceMs` (shields
+ * a reservation whose agent has not yet written its SubagentStart roster
+ * mark). `completed` is excluded because such a task can never be re-executed.
  *
  * Keeping this pure (the fs `anyActive` read is hoisted to the shell) lets the
  * locked registration re-derive staleness against the graph held under the
@@ -146,7 +156,10 @@ export function staleReservationsFromState(
   return new Set(
     reserved.filter((taskId) => {
       const task = state.tasks.find((candidate) => candidate.id === taskId);
-      if (task?.status !== "pending") return false;
+      // A reservation naming no task at all can never be cleared by a stop
+      // hook, so it is unconditionally abandoned.
+      if (task === undefined) return true;
+      if (task.status === "completed") return false;
       const reservedAt = task.reserved_at === undefined ? Number.NaN : Date.parse(task.reserved_at);
       if (Number.isNaN(reservedAt)) return true; // legacy / corrupt timestamp → eligible
       return nowMs - reservedAt > graceMs;

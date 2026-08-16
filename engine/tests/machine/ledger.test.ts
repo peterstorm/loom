@@ -165,17 +165,58 @@ describe("machine binding lifecycle", () => {
     expect(existsSync(ledger.machineBindingPath(s))).toBe(false);
   });
 
-  it("a fresh bind truncates the previous run's ledger (epochs make leftovers inert anyway)", async () => {
+  it("a fresh bind leaves the previous run's ledger intact; epochs make leftovers inert", async () => {
     const s = sid("s3");
     await bind(s, "code-implementer-agent", "a-1");
     ledger.appendEvidence(s, ep("a-1:code-implementer-agent"), [read("/old.ts")]);
     await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("a-1"));
 
     await bind(s, "code-implementer-agent", "a-2");
-    expect(ledger.readEvidence(s)).toEqual([]);
-    // Even if truncation had failed, the new epoch sees nothing:
+    // The bind no longer unlinks the ledger — that delete raced unlocked
+    // appendEvidence writers. The leftover record survives...
+    expect(ledger.readEvidence(s)).toHaveLength(1);
+    // ...and is inert for the new epoch, which is what actually matters.
     expect(ledger.eventsForEpoch(ledger.readEvidence(s), ep("a-2:code-implementer-agent"))).toEqual([]);
     await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("a-2"));
+  });
+
+  it("a sibling's bind never destroys a concurrent agent's already-written evidence", async () => {
+    // Regression: bindMachineAgent used to unlink the ledger whenever no fresh
+    // binding was active. appendEvidence takes no lock, so a parallel batch
+    // could lose a still-running sibling's TestRun records, and that sibling's
+    // SubagentStop then saw no trusted evidence for its own epoch.
+    const s = sid("s3-race");
+    await bind(s, "code-implementer-agent", "a-1");
+    ledger.appendEvidence(s, ep("a-1:code-implementer-agent"), [read("/a1-first.ts")]);
+
+    // A sibling binds while a-1 is still running and still appending.
+    await bind(s, "ts-test-agent", "b-1");
+    ledger.appendEvidence(s, ep("a-1:code-implementer-agent"), [read("/a1-second.ts")]);
+    ledger.appendEvidence(s, ep("b-1:ts-test-agent"), [read("/b1.ts")]);
+
+    // Each epoch still sees exactly its own evidence.
+    expect(ledger.eventsForEpoch(ledger.readEvidence(s), ep("a-1:code-implementer-agent")))
+      .toEqual([read("/a1-first.ts"), read("/a1-second.ts")]);
+    expect(ledger.eventsForEpoch(ledger.readEvidence(s), ep("b-1:ts-test-agent")))
+      .toEqual([read("/b1.ts")]);
+
+    await ledger.unbindMachineAgent(s, agentType("ts-test-agent"), agentId("b-1"));
+    await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("a-1"));
+  });
+
+  it("a bind after every sibling unbound still preserves the unjudged epoch's evidence", async () => {
+    // The exact shape that bit a real run: the fast sibling finishes and
+    // unbinds, leaving zero fresh bindings; the next spawn's bind must not
+    // delete the slow sibling's records before its SubagentStop reads them.
+    const s = sid("s3-unbound");
+    await bind(s, "code-implementer-agent", "a-1");
+    ledger.appendEvidence(s, ep("a-1:code-implementer-agent"), [read("/slow.ts")]);
+    await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("a-1"));
+
+    await bind(s, "ts-test-agent", "c-1");
+    expect(ledger.eventsForEpoch(ledger.readEvidence(s), ep("a-1:code-implementer-agent")))
+      .toEqual([read("/slow.ts")]);
+    await ledger.unbindMachineAgent(s, agentType("ts-test-agent"), agentId("c-1"));
   });
 
   it("logs skipped malformed binding lines instead of silently dropping them", () => {
