@@ -272,8 +272,22 @@ function standaloneReviewerRetrySmoke(): void {
   const retry = retryBatch.requests.find(({ authority }) => authority.slotId === first.authority.slotId);
   check(retry !== undefined, "retry batch dropped the rejected reviewer slot");
   check(retry!.authority.attempt === 2, "rejected reviewer slot did not advance to attempt 2");
-  check(typeof retry!.task === "string" && retry!.task.includes("rejected by the engine's frozen-scope validator"),
+  check(typeof retry!.task === "string" && retry!.task.includes("rejected by the engine's admission check"),
     "retry task lacks the rejection diagnostic");
+  check(retry!.task.includes("outside the frozen review scope") || retry!.task.includes("src/outside.ts"),
+    "retry task must quote the engine's own diagnostic, not a generic reminder");
+
+  // Regression: the diagnostic used to live only in the pass-local rejected set,
+  // so a LATER resume re-issued this same retry with a generic message that
+  // named the wrong admission rule. It must be durable across resumes.
+  const replayedRetry = asSpawnBatch(
+    run(cwd, ["resume", "--runs-root", runsRoot, "--run", reviewRun]),
+    "standalone retry resume replay",
+  ).requests.find(({ authority }) => authority.slotId === first.authority.slotId);
+  check(replayedRetry !== undefined && replayedRetry.authority.attempt === 2,
+    "resume replay dropped the retried reviewer slot");
+  check(replayedRetry!.task === retry!.task,
+    "resume replay lost the durable rejection diagnostic from the attempt-2 task");
   check(retryBatch.requests.some(({ authority }) =>
     authority.slotId !== first.authority.slotId && authority.attempt === 1),
   "retry batch must also carry the still-pending sibling attempt-1 requests");

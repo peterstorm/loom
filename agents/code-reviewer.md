@@ -160,4 +160,7 @@ from a substituted one — and then reconciles the winner by VALUE: any marker
 claim the block does not name is carried over beside it, without a location, and
 the operator is told the two disagreed. So a renamed claim is no longer lost,
 but it does arrive TWICE, once from each side, and a verifier then spends a vote
-on a duplicate. Write the same claim text in both places.
+on a duplicate. Each `CRITICAL:`/`ADVISORY:` marker line MUST be BYTE-IDENTICAL
+to the matching `claim` in the fenced `findings` block — same words, same
+punctuation, same capitalization. Rewording between the two is the single most
+common cause of duplicate findings with null locations.

@@ -1804,6 +1804,85 @@ describe("LC-2 standalone lifecycle machine", () => {
     ).ok).toBe(false);
   });
 
+  /**
+   * Regression: a rejected slot's diagnostic used to live only in the pass-local
+   * `rejected` set of `resumeStandaloneFacade`. Any LATER resume re-issued the
+   * attempt-2 prompt with no diagnostic, so the reviewer was told to fix its
+   * frozen scope when the real defect was a missing Machine Summary block. It is
+   * now durable on the pending record and must survive a checkpoint round trip.
+   */
+  describe("pending rejection diagnostic durability", () => {
+    const resolver = () => createPublicationAuthorityResolver(() => ({ ok: true, value: [] }));
+    const rejectedAtAttemptOne = (message: string) => {
+      const authority = preparedAuthority();
+      const slot = authority.roster.orderedSlots[1]!;
+      const awaiting = reduceStandaloneReviewMachine(
+        startStandaloneReviewMachine(authority),
+        { kind: "review-batch-published", runId: authority.runId },
+      );
+      if (!awaiting.ok || awaiting.value.kind !== "awaiting-results") throw new Error("awaiting results required");
+      const retry = reduceStandaloneReviewMachine(awaiting.value, {
+        kind: "result-rejected", request: slot.attempts[0], message,
+      });
+      if (!retry.ok || retry.value.kind !== "awaiting-results") throw new Error("attempt-2 expectation required");
+      return { slot, state: retry.value };
+    };
+
+    it("carries the rejection diagnostic on the retried slot and leaves siblings null", () => {
+      const { slot, state } = rejectedAtAttemptOne("CRITICAL_COUNT marker not found");
+      const retried = state.pending.find(({ slotId }) => slotId === slot.slotId);
+      expect(retried?.expectedAttempt).toBe(2);
+      expect(retried?.rejectionDiagnostic).toBe("CRITICAL_COUNT marker not found");
+      for (const entry of state.pending) {
+        if (entry.slotId === slot.slotId) continue;
+        expect(entry.expectedAttempt).toBe(1);
+        expect(entry.rejectionDiagnostic).toBeNull();
+      }
+    });
+
+    it("survives the checkpoint round trip a later resume replays from", () => {
+      const { slot, state } = rejectedAtAttemptOne("ADVISORY_COUNT marker not found");
+      const restored = parseStandaloneReviewMachineState(
+        JSON.parse(serializeStandaloneReviewMachineState(state)), resolver(),
+      );
+      expect(restored.ok).toBe(true);
+      if (!restored.ok) return;
+      expect(restored.value.pending.find(({ slotId }) => slotId === slot.slotId)?.rejectionDiagnostic)
+        .toBe("ADVISORY_COUNT marker not found");
+      expect(restored.value.pending).toEqual(state.pending);
+    });
+
+    it("replays a legacy checkpoint that predates the field as a null diagnostic", () => {
+      const { slot, state } = rejectedAtAttemptOne("marker not found");
+      const legacy = JSON.parse(serializeStandaloneReviewMachineState(state));
+      legacy.pending = legacy.pending.map((entry: Record<string, unknown>) => {
+        const { rejectionDiagnostic: _dropped, ...rest } = entry;
+        return rest;
+      });
+      const restored = parseStandaloneReviewMachineState(legacy, resolver());
+      expect(restored.ok).toBe(true);
+      if (!restored.ok) return;
+      const retried = restored.value.pending.find(({ slotId }) => slotId === slot.slotId);
+      expect(retried?.expectedAttempt).toBe(2);
+      expect(retried?.rejectionDiagnostic).toBeNull();
+    });
+
+    it("fails closed on a non-string diagnostic and on one attached to an attempt-1 slot", () => {
+      const { slot, state } = rejectedAtAttemptOne("marker not found");
+      const illTyped = JSON.parse(serializeStandaloneReviewMachineState(state));
+      illTyped.pending = illTyped.pending.map((entry: Record<string, unknown>) =>
+        entry.slotId === slot.slotId ? { ...entry, rejectionDiagnostic: { message: "nope" } } : entry);
+      expect(parseStandaloneReviewMachineState(illTyped, resolver()).ok).toBe(false);
+
+      const misplaced = JSON.parse(serializeStandaloneReviewMachineState(state));
+      misplaced.pending = misplaced.pending.map((entry: Record<string, unknown>) =>
+        entry.slotId === slot.slotId
+          ? { ...entry, rejectionDiagnostic: null }
+          : { ...entry, rejectionDiagnostic: "smuggled onto an attempt-1 slot" });
+      expect(parseStandaloneReviewMachineState(misplaced, resolver()).ok).toBe(false);
+    });
+  });
+
   it("replays a done checkpoint whose retried slot was accepted at attempt 2", () => {
     const authority = preparedAuthority();
     const slotOne = authority.roster.orderedSlots[0]!;

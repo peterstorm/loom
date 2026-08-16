@@ -2671,7 +2671,9 @@ describe("orchestration CLI", () => {
     }
     const panelResult = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
     expect(panelResult.status, panelResult.stderr).toBe(0);
-    const panel = JSON.parse(panelResult.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    const panel = JSON.parse(panelResult.stdout) as {
+      kind: string; requests: readonly { authority: AgentRequestAuthority; task: string }[];
+    };
     expect(panel.kind).toBe("spawn-batch");
     for (const [index, request] of panel.requests.entries()) {
       const raw = index === 0 ? "malformed" : refutationOutput(opened.value, request.authority);
@@ -2681,12 +2683,23 @@ describe("orchestration CLI", () => {
     const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
 
     expect(resumed.status, resumed.stderr).toBe(0);
-    const retry = JSON.parse(resumed.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    const retry = JSON.parse(resumed.stdout) as {
+      kind: string; requests: readonly { authority: AgentRequestAuthority; task: string }[];
+    };
     expect(retry.kind, resumed.stdout).toBe("spawn-batch");
     expect(retry.requests).toHaveLength(1);
     expect(retry.requests[0]?.authority).toMatchObject({
       attempt: 2, program: "refutation-panel", slotId: panel.requests[0]!.authority.slotId,
     });
+    // Regression: this prompt used to be BYTE-IDENTICAL to attempt 1 — the
+    // engine re-asked the identical question and got the identical malformed
+    // shape back, exhausting the slot. It must name what was refused and
+    // restate the one-JSON-object contract.
+    const retryTask = retry.requests[0]!.task;
+    expect(retryTask).toContain("Your previous attempt was rejected:");
+    expect(retryTask).toContain("refutation verdict is not valid JSON");
+    expect(retryTask).toContain("exactly one JSON object and nothing else");
+    expect(retryTask).not.toBe(panel.requests[0]!.task);
 
     // Complete the retry with a VALID verdict, then drive the run to done. The
     // finalize must persist the canonical T2 refutation checkpoint (event

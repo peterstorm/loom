@@ -16,7 +16,7 @@ import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from '../../../o
 import { captureKey } from '../../../core/harness-capture';
 import { type RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
-import { contextPacketPathMarker, decodeReviewerTranscript, deriveChangedPaths, durablePublicationDigest, durableRequests, failed, metadata, parsedAuthority, publicationFile, publicationResolver, publishInitialBatch, recoverOrPublishStandaloneRetry, safeScope, standalonePackets, standalonePublicationEffectId, standaloneRetryTask, type DurableRequestRecovery, type FacadeDriveResult, type RegisteredStandaloneProgram } from './helpers';
+import { contextPacketPathMarker, decodeReviewerTranscript, deriveChangedPaths, durablePublicationDigest, durableRequests, failed, metadata, parsedAuthority, publicationFile, publicationResolver, publishInitialBatch, recoverOrPublishStandaloneRetry, refutationRetryTask, safeScope, standalonePackets, standalonePublicationEffectId, standaloneRetryTask, type DurableRequestRecovery, type FacadeDriveResult, type RegisteredStandaloneProgram } from './helpers';
 
 export async function startStandaloneFacade(
   handle: RunDirHandle,
@@ -157,16 +157,32 @@ export function standaloneRefutationPreparation(
   return { brief, lenses, panel: panel.value, frozen: frozen.value, threshold, packets, inputs, retryInputs };
 }
 
+/**
+ * The verdict-parse diagnostic that refused this verifier's attempt 1, or null
+ * when the step recorded something else. The panel re-derives its whole event
+ * prefix from the durable transcripts on every resume, so the rejection message
+ * is regenerated deterministically — it needs no checkpoint field of its own.
+ */
+export function refutationRejectionDiagnostic(event: PersistentRefutationPanelEvent | undefined): string | null {
+  return event !== undefined && event.type === "refutation-verdict-rejected" ? event.message : null;
+}
+
 export function executableRefutationRequests(
   handle: RunDirHandle,
   requests: readonly SpawnRequest[],
   standalone: boolean,
+  retryDiagnostic: string | null = null,
 ): readonly Readonly<SpawnRequest & { task: string }>[] {
   const standaloneMarker = standalone ? "LOOM_REVIEW_CONTEXT: standalone\n" : "";
-  return requests.map((request) => Object.freeze({
-    ...request,
-    task: `${standaloneMarker}LOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH, then complete the exact pending Refutation Panel request.`,
-  }));
+  return requests.map((request) => {
+    const task = `${standaloneMarker}LOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH, then complete the exact pending Refutation Panel request.`;
+    return Object.freeze({
+      ...request,
+      // Attempt 2 exists only because attempt 1 was refused. Re-asking the
+      // identical question is what made the flake fatal.
+      task: request.authority.attempt === 2 ? refutationRetryTask(task, retryDiagnostic) : task,
+    });
+  });
 }
 
 export function durableRefutationRequests(
@@ -355,7 +371,9 @@ export async function resumeStandaloneFacade(
           if (!attempts.value.has(captureKey(retry.request.authority.slotId, retry.request.authority.attempt))) {
             return { ok: true, action: {
               kind: "spawn-batch", runId: handle.runId,
-              requests: executableRefutationRequests(handle, [retry.request], true),
+              requests: executableRefutationRequests(
+                handle, [retry.request], true, refutationRejectionDiagnostic(submitted.value.recordedEvent),
+              ),
             } };
           }
           const retryBytes = handle.readTranscriptBytes(retry.request.authority);
@@ -461,7 +479,12 @@ export async function resumeStandaloneFacade(
     // (freshly rejected here or retried in an earlier resume) come from the
     // per-slot retry batch, published now if a crash left it unpublished.
     const rejectedSlotIds = new Set(rejected.map(({ slot }) => slot.slotId));
-    const rejectedDiagnostics = new Map(rejected.map(({ slot, problems }) => [slot.slotId, problems.join("; ")] as const));
+    // Read the diagnostic off the REDUCED machine, not off this pass's `rejected`
+    // set: a resume that merely re-issues an already-recorded retry has an empty
+    // `rejected` set, and reading from it there silently degraded the attempt-2
+    // prompt to the generic fallback.
+    const rejectedDiagnostics = new Map(machine.pending.flatMap(({ slotId, rejectionDiagnostic }) =>
+      rejectionDiagnostic === null ? [] : [[slotId, rejectionDiagnostic] as const]));
     const issued: SpawnRequest[] = [];
     for (const slot of activeAuthority.roster.orderedSlots) {
       const expected = rejectedSlotIds.has(slot.slotId) ? 2 : (pendingBySlot.get(slot.slotId) ?? 1);

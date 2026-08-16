@@ -445,6 +445,59 @@ describe("parseRefutationVerdict — the kernel envelope, a different payload", 
     expect(parseRefutationVerdict(fenced, "reproduction", IDS).ok).toBe(false);
   });
 
+  /**
+   * Regression: high-thinking harnesses emit prose plus a BARE verdict object
+   * with no fence at all. Refusing that shape exhausted a verifier slot twice
+   * and terminal-blocked two whole runs. One unambiguous candidate is accepted;
+   * anything that would require guessing which object was final is not.
+   */
+  describe("unfenced prose wrapping exactly one verdict object", () => {
+    it("accepts prose before and after a single bare verdict object", () => {
+      const bare = [
+        "I examined each finding against the frozen source.",
+        raw(),
+        "That is my verdict for the reproduction lens.",
+      ].join("\n\n");
+      const parsed = parseRefutationVerdict(bare, "reproduction", IDS);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.value.entries).toHaveLength(IDS.length);
+    });
+
+    it("does not count a verdict object's own nested entries as competitors", () => {
+      // The single object carries a `verdicts` array of entry objects. If span
+      // extraction re-scanned nested members this would read as ambiguous.
+      const parsed = parseRefutationVerdict(`Analysis follows.\n${raw()}`, "reproduction", IDS);
+      expect(parsed.ok).toBe(true);
+    });
+
+    it("rejects two bare verdict objects as ambiguous", () => {
+      const competing = `First pass:\n${raw()}\nOn reflection:\n${raw({ criterion: "intent" })}`;
+      const parsed = parseRefutationVerdict(competing, "reproduction", IDS);
+      expect(parsed.ok).toBe(false);
+      if (parsed.ok) return;
+      expect(parsed.errors.join(" ")).toContain("competing");
+    });
+
+    it("rejects an escaped-key bare competitor alongside the real object", () => {
+      const escaped = `analysis\n${raw()}\n{"criteri\\u006fn":"intent","verdict\\u0073":[]}`;
+      expect(parseRefutationVerdict(escaped, "reproduction", IDS).ok).toBe(false);
+    });
+
+    it("still rejects prose whose braces claim no verdict authority", () => {
+      const parsed = parseRefutationVerdict("I ran it with { strict: true } and found nothing.", "reproduction", IDS);
+      expect(parsed.ok).toBe(false);
+      if (parsed.ok) return;
+      expect(parsed.errors.join(" ")).toContain("no single json fence");
+    });
+
+    it("still enforces lens and finding authority on the extracted object", () => {
+      expect(parseRefutationVerdict(`analysis\n${raw({ criterion: "intent" })}`, "reproduction", IDS).ok).toBe(false);
+      const foreign = raw({ verdicts: [{ ...JSON.parse(raw()).verdicts[0], finding_id: "T9:x-1" }, JSON.parse(raw()).verdicts[1]] });
+      expect(parseRefutationVerdict(`analysis\n${foreign}`, "reproduction", IDS).ok).toBe(false);
+    });
+  });
+
   it("rejects a competing unfenced verdict envelope outside the single fence", () => {
     const competing = `${"analysis"}\n\`\`\`json\n${raw()}\n\`\`\`\n${raw({ criterion: "intent" })}`;
     expect(parseRefutationVerdict(competing, "reproduction", IDS).ok).toBe(false);

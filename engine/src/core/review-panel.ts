@@ -755,12 +755,22 @@ function parseRefutationEntry(
 }
 
 /**
- * Does `text` contain a structurally valid JSON object that claims `criterion`
- * or `verdicts` authority? A brace scanner, not a parser: it decides only
- * whether a SECOND payload is competing with the fenced one, so that the caller
- * can refuse rather than guess which object was final.
+ * Every structurally valid JSON object in `text` that claims `criterion` or
+ * `verdicts` authority, as `[start, endExclusive)` spans in source order.
+ *
+ * A brace scanner, not a parser. Two callers depend on it and neither may guess
+ * which object was final: the fenced branch refuses when a SECOND payload
+ * competes with the fence, and the bare branch accepts only when there is
+ * EXACTLY one candidate in the whole payload.
+ *
+ * Nested objects cannot double-count: a candidate's own span is skipped past
+ * once matched, so `{"criterion":…,"verdicts":[{…}]}` yields one span. That is
+ * also why entries are safe — they carry `finding_id`, never `criterion`.
  */
-function containsCompetingVerdictObject(text: string): boolean {
+type VerdictObjectSpan = Readonly<{ start: number; end: number }>;
+
+function findTopLevelVerdictObjects(text: string): readonly VerdictObjectSpan[] {
+  const spans: VerdictObjectSpan[] = [];
   for (let start = 0; start < text.length; start += 1) {
     if (text[start] !== "{") continue;
     let depth = 0;
@@ -782,14 +792,21 @@ function containsCompetingVerdictObject(text: string): boolean {
         try {
           const candidate = JSON.parse(text.slice(start, index + 1)) as unknown;
           if (typeof candidate === "object" && candidate !== null && !Array.isArray(candidate) &&
-              (Object.hasOwn(candidate, "criterion") || Object.hasOwn(candidate, "verdicts"))) return true;
+              (Object.hasOwn(candidate, "criterion") || Object.hasOwn(candidate, "verdicts"))) {
+            spans.push(Object.freeze({ start, end: index + 1 }));
+            // Resume AFTER this object so its nested members are never counted
+            // as separate candidates. `start` is incremented by the outer loop.
+            start = index;
+          }
         } catch { /* code/prose braces are not a competing JSON payload */ }
         break;
       }
     }
   }
-  return false;
+  return Object.freeze(spans);
 }
+
+const containsCompetingVerdictObject = (text: string): boolean => findTopLevelVerdictObjects(text).length > 0;
 
 export function refutationVerdictJson(raw: string): ParseResult<string> {
   const trimmed = raw.trim();
@@ -797,15 +814,28 @@ export function refutationVerdictJson(raw: string): ParseResult<string> {
     JSON.parse(trimmed);
     return ok(trimmed);
   } catch {
-    // Harnesses occasionally return analysis prose plus the exact requested
-    // JSON in a single fenced block. Preserve the immutable raw transcript,
-    // but normalize this one unambiguous transport wrapper before semantic
-    // validation. Multiple JSON fences remain ambiguous and fail closed.
+    // Harnesses occasionally wrap the exact requested JSON in analysis prose —
+    // fenced, or bare. Preserve the immutable raw transcript, but normalize
+    // both unambiguous transport wrappers before semantic validation. Anything
+    // that would require GUESSING which object was final — multiple fences,
+    // competing objects — stays a refusal.
     const fenced = [...trimmed.matchAll(/```json[ \t]*\r?\n([\s\S]*?)\r?\n```/gi)];
-    if (fenced.length !== 1) {
-      return fail([fenced.length === 0
-        ? "refutation verdict is not valid JSON and contains no single json fence"
-        : "refutation verdict contains multiple json fences"]);
+    if (fenced.length > 1) return fail(["refutation verdict contains multiple json fences"]);
+    if (fenced.length === 0) {
+      // Unfenced prose wrapping the requested object. High-thinking harnesses
+      // emit this shape often enough that refusing it burned two whole runs:
+      // the retried verifier repeats the shape and the slot exhausts. Accept it
+      // ONLY when the payload is unambiguous — exactly one object claiming
+      // verdict authority anywhere in the transcript. Zero or two or more stays
+      // a refusal, because picking one would be a guess.
+      const candidates = findTopLevelVerdictObjects(trimmed);
+      if (candidates.length !== 1) {
+        return fail([candidates.length === 0
+          ? "refutation verdict is not valid JSON and contains no single json fence"
+          : "refutation verdict contains competing JSON-looking payloads and no json fence"]);
+      }
+      const only = candidates[0]!;
+      return ok(trimmed.slice(only.start, only.end));
     }
     const candidate = fenced[0]![1]!.trim();
     const outside = `${trimmed.slice(0, fenced[0]!.index)}\n${trimmed.slice(fenced[0]!.index! + fenced[0]![0].length)}`;

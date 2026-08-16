@@ -25,7 +25,7 @@ import { anyActiveSubagent } from '../../../machine';
 import { parseSpecCheckOutput, reconcileSpecCheck } from '../../../core/spec-check';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
 import { contextPacketPathMarker, durableRequests, exactObject, failed, parseRegisteredFacadeProgram, publicationResolver, publishInitialBatch, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
-import { durableCaptureRejection, durableRefutationRequests, executableRefutationRequests, recoverOrPublishRefutationRetry } from './standalone';
+import { durableCaptureRejection, durableRefutationRequests, executableRefutationRequests, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic } from './standalone';
 
 export const waveGateDeps = Object.freeze({ loadPlanModels: loadPlanModelsSource, fileExists: existsSync });
 
@@ -1750,7 +1750,9 @@ export async function resumeWaveGateFacade(
           if (!attempts.value.has(captureKey(retry.request.authority.slotId, retry.request.authority.attempt))) {
             return { ok: true, action: {
               kind: "spawn-batch", runId: handle.runId,
-              requests: executableRefutationRequests(handle, [retry.request], false),
+              requests: executableRefutationRequests(
+                handle, [retry.request], false, refutationRejectionDiagnostic(submitted.value.recordedEvent),
+              ),
             } };
           }
           const retryBytes = handle.readTranscriptBytes(retry.request.authority);

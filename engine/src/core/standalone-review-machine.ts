@@ -365,6 +365,16 @@ export type AcceptedStandaloneSlot = Readonly<{
 export type PendingStandaloneSlot = Readonly<{
   slotId: SlotId;
   expectedAttempt: 1 | 2;
+  /**
+   * Why attempt 1 was refused, carried durably so the attempt-2 spawn prompt can
+   * name the ACTUAL defect. The rejection diagnostic used to live only in the
+   * pass-local `rejected` set of `resumeStandaloneFacade`, so a resume that
+   * merely re-issued an already-recorded retry lost it and fell back to a
+   * generic message — telling the reviewer to fix its scope when the real defect
+   * was a missing Machine Summary block. Always null while `expectedAttempt` is
+   * 1; non-empty on a rejected slot unless a legacy checkpoint predates it.
+   */
+  rejectionDiagnostic: string | null;
 }>;
 
 interface StandaloneStateBase {
@@ -666,6 +676,7 @@ function stateBase(authority: FrozenStandaloneReviewAuthority): StandaloneStateB
     pending: Object.freeze(authority.roster.orderedSlots.map((slot) => canonicalRecord({
       slotId: slot.slotId,
       expectedAttempt: 1 as const,
+      rejectionDiagnostic: null,
     }))),
   });
 }
@@ -787,8 +798,15 @@ function withRejected(
   }
   return success(canonicalRecord({
     ...state,
-    pending: Object.freeze(state.pending.map((entry, index) =>
-      index === pendingIndex ? canonicalRecord({ slotId: entry.slotId, expectedAttempt: 2 as const }) : entry)),
+    pending: Object.freeze(state.pending.map((entry, index) => index === pendingIndex
+      ? canonicalRecord({
+          slotId: entry.slotId,
+          expectedAttempt: 2 as const,
+          // Durable so EVERY later resume that re-issues this retry can name the
+          // real defect, not just the pass that recorded the rejection.
+          rejectionDiagnostic: message || null,
+        })
+      : entry)),
   }));
 }
 
@@ -1152,8 +1170,23 @@ function parsePersistedStandaloneProgress(
     if (slot === undefined || (record.expectedAttempt !== 1 && record.expectedAttempt !== 2) || observed.has(slot.slotId)) {
       return { ok: false, message: "checkpoint pending slot does not match frozen roster authority" };
     }
+    // A pre-existing checkpoint has no `rejectionDiagnostic` at all; it replays
+    // as null (the retry prompt then falls back to the generic contract
+    // reminder). Any other shape is a corrupt projection, not a legacy one.
+    const rawDiagnostic = record.rejectionDiagnostic;
+    if (rawDiagnostic !== undefined && rawDiagnostic !== null && typeof rawDiagnostic !== "string") {
+      return { ok: false, message: "checkpoint pending slot rejection diagnostic must be a string or null" };
+    }
+    const rejectionDiagnostic = typeof rawDiagnostic === "string" ? rawDiagnostic.trim() : "";
+    if (rejectionDiagnostic !== "" && record.expectedAttempt !== 2) {
+      return { ok: false, message: "checkpoint pending slot carries a rejection diagnostic without an attempt-2 expectation" };
+    }
     observed.add(slot.slotId);
-    pending.push(canonicalRecord({ slotId: slot.slotId, expectedAttempt: record.expectedAttempt }));
+    pending.push(canonicalRecord({
+      slotId: slot.slotId,
+      expectedAttempt: record.expectedAttempt,
+      rejectionDiagnostic: rejectionDiagnostic === "" ? null : rejectionDiagnostic,
+    }));
   }
   if (observed.size !== authority.roster.orderedSlots.length) {
     return { ok: false, message: "checkpoint slot projections do not exactly cover the frozen roster" };

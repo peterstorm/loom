@@ -175,6 +175,7 @@ block with the matching `"severity"`. A block that lists fewer findings of
 EITHER severity than your marker lines loses to them; every claim survives, and
 the only locations lost are those of the claims the marker lines named — a block
 entry the markers did not name is carried over with its file and line intact.
-Write the same claim text in both places — the engine
-reconciles by value, and a reworded claim arrives twice and burns a verifier
-vote on a duplicate.
+Each `CRITICAL:`/`ADVISORY:` marker line MUST be BYTE-IDENTICAL to the matching
+`claim` in the fenced `findings` block — same words, same punctuation, same
+capitalization. The engine reconciles by value, so a reworded claim arrives
+twice and burns a verifier vote on a duplicate.

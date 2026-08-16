@@ -125,6 +125,17 @@ heading and append the lifecycle block described below. Emit one `CRITICAL:` or
 `ADVISORY:` line per new finding and account for every line in the JSON block.
 Never invent an id; the engine derives identity from your agent name and order.
 
+Each `CRITICAL:`/`ADVISORY:` marker line MUST be BYTE-IDENTICAL to the matching
+`claim` in the fenced `findings` block — same words, same punctuation, same
+capitalization. The engine reconciles the two by VALUE, so a claim you reword
+between them survives TWICE: once from the block with its file and line, once
+from the marker line with `file: null, line: null`. That inflates the panel's
+work and the operator's triage with a finding you only meant to report once.
+
+Emit the block even when both counts are zero. A review that ends in prose with
+no `### Machine Summary` is not a clean review — it is unreadable evidence, and
+the engine rejects it and retries you.
+
 ````
 ### Machine Summary
 CRITICAL_COUNT: {number of critical findings}

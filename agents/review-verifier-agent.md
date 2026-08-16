@@ -49,10 +49,19 @@ negative ships a bug. When in doubt, `uncertain`. Do not vote `refuted` to seem
 decisive, and never vote `refuted` on a finding you merely find unimportant —
 importance is the human's call, not yours.
 
-## Output — pure JSON only
+## Output — one JSON object, nothing else
 
-Output ONLY valid JSON to stdout. No markdown, no prose outside JSON, no code
-fences:
+**Your FINAL message must be exactly one JSON object and nothing else. No
+preamble, no postscript, no code fences, no second object.**
+
+This is the single most common way a verifier fails. Do not narrate your
+analysis, do not summarize your reasoning above the object, and do not close
+with a sentence about what you concluded — every word of that belongs in the
+`reasoning` fields. A transcript that wraps the object in prose costs the panel
+a retry; a second object in the same transcript is unrecoverable, because the
+engine will not guess which one was final.
+
+The exact shape:
 
 ```json
 {
@@ -80,7 +89,8 @@ Malformed or mismatched output is rejected and this verifier is retried.
 
 ## Constraints
 
-- Output ONLY valid JSON — no markdown, prose outside JSON, or code fences.
+- Your FINAL message is exactly one JSON object and nothing else — no preamble,
+  no postscript, no code fences, no second object.
 - Judge on YOUR lens alone; other verifiers cover the rest.
 - Write no files. Modify no code. You adjudicate; you do not fix.
 - Do NOT read `.claude/hooks/` or `.claude/state/`.

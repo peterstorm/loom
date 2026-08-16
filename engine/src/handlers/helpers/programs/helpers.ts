@@ -604,12 +604,53 @@ export async function recoverOrPublishStandaloneRetry(
     : { ok: false, message: publishedBatch.message };
 }
 
-/** The frozen-scope validator's diagnostic, surfaced on the retry spawn task. */
+/**
+ * The verdict-parse diagnostic, surfaced on a Refutation Panel retry task.
+ *
+ * A verifier's attempt-2 prompt used to be BYTE-IDENTICAL to attempt 1 — no
+ * notice that anything was refused, no reason. The engine re-asked the identical
+ * question and got the identical malformed shape back, exhausting the slot and
+ * terminal-blocking whole runs. Naming the defect is what makes the retry worth
+ * spending.
+ */
+export function refutationRetryTask(task: string, diagnostic: string | null): string {
+  return [
+    task,
+    "",
+    ...(diagnostic === null
+      ? ["Your previous attempt was rejected: its verdict payload could not be parsed."]
+      : ["Your previous attempt was rejected:", "", diagnostic]),
+    "",
+    "Your FINAL message must be exactly one JSON object and nothing else — no preamble,",
+    "no postscript, no code fences, no second object. Re-emit the verdict for the same",
+    "criterion covering every finding id you were given.",
+  ].join("\n");
+}
+
+/**
+ * The admission diagnostic, surfaced on the retry spawn task.
+ *
+ * The text must NOT presume which admission rule failed. It used to name the
+ * frozen-scope validator unconditionally, so a transcript refused for a missing
+ * `### Machine Summary` block told the reviewer to fix its scope — the retried
+ * agent then re-emitted the same unparseable shape and exhausted the slot. Both
+ * failure classes are now stated, with the engine's own diagnostic first
+ * whenever one survived to here.
+ */
 export function standaloneRetryTask(task: string, diagnostic: string | null): string {
   const marker = diagnostic === null
-    ? ["Your previous attempt was rejected by the engine's frozen-scope validator."]
-    : [`Your previous attempt was rejected by the engine's frozen-scope validator:`, "", diagnostic];
-  return `${task}\n\n${marker.join("\n")}\nRe-emit the exact required reviewer result with every structured finding strictly inside the frozen scope.`;
+    ? ["Your previous attempt was rejected by the engine's admission check."]
+    : ["Your previous attempt was rejected by the engine's admission check:", "", diagnostic];
+  return [
+    task,
+    "",
+    ...marker,
+    "",
+    "Re-emit the exact required reviewer result. It must satisfy BOTH admission rules:",
+    "1. End with a `### Machine Summary` block carrying literal `CRITICAL_COUNT:` and",
+    "   `ADVISORY_COUNT:` lines and a fenced ```findings``` block — even when both counts are 0.",
+    "2. Every structured finding must name a path strictly inside the frozen scope.",
+  ].join("\n");
 }
 
 /**
