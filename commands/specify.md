@@ -2,6 +2,7 @@
 name: specify
 version: "1.0.0"
 description: "This skill should be used when the user asks to 'specify a feature', 'write requirements', 'define what we're building', 'capture requirements', 'document the spec', or before invoking the architecture-tech-lead skill (`/skill:architecture-tech-lead` in Pi) for non-trivial features. Produces formal specifications (WHAT/WHY) that feed into architecture and planning phases."
+argument-hint: "[$feature description] [--update] [--status]"
 ---
 
 # Specify - Requirements Before Design
@@ -9,6 +10,8 @@ description: "This skill should be used when the user asks to 'specify a feature
 Formalize requirements into structured specifications before architecture/planning. Focus exclusively on WHAT and WHY - never HOW.
 
 **Position in flow:** `/brainstorming` → `/specify` → `/clarify` (auto) → architecture-tech-lead skill (`/skill:architecture-tech-lead` in Pi) → `/loom`
+
+**Arguments:** "$ARGUMENTS"
 
 ---
 

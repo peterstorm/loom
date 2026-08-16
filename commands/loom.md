@@ -2,6 +2,7 @@
 name: loom
 version: "3.2.0"
 description: "This skill should be used when the user asks to 'plan this', 'orchestrate', 'break down', 'split into phases', 'coordinate tasks', 'create a plan', 'multi-step feature', or has complex tasks needing structured decomposition. Decomposes work into wave-based parallel tasks, assigns specialized agents, creates GitHub Issue for tracking, and manages execution through automated hooks."
+argument-hint: "[$description] [--skip-brainstorm] [--skip-clarify] [--skip-specify] [--skip-plan-alignment] [--panel[=N]] [--status]"
 ---
 
 # Loom - Full Orchestration Skill
@@ -9,6 +10,8 @@ description: "This skill should be used when the user asks to 'plan this', 'orch
 Orchestrates the COMPLETE feature lifecycle: brainstorm → specify → clarify → architecture → plan-alignment → decompose → execute.
 
 **This is the SINGLE ENTRY POINT** for multi-step features. Spawns specialized agents for each phase.
+
+**Arguments:** "$ARGUMENTS"
 
 ## Prerequisites
 

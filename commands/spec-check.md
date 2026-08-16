@@ -2,11 +2,14 @@
 name: spec-check
 version: "2.0.0"
 description: "This skill should be used when the user asks to 'check spec alignment', 'verify requirements coverage', 'detect drift', 'spec audit', or automatically at wave gates. Verifies implementation aligns with specification - different from code review which checks quality."
+argument-hint: "[scope or instructions]"
 ---
 
 # Spec-Check - Drift Detection
 
 Read-only verification that implementation aligns with specification. Mechanically extracts requirements, forces per-FR verdicts, detects coverage gaps and scope creep.
+
+**Arguments:** "$ARGUMENTS"
 
 **Not what this does:** Check code quality, style, security (that's code-reviewer's job).
 

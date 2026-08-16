@@ -11,6 +11,8 @@ The engine owns protected-state verification, test readiness, Review Packets,
 reviewer/model/Skill selection, exact request authority, retries, aggregation,
 Refutation Panel routing, advisory suspension, and atomic Wave advancement.
 
+**Arguments:** "$ARGUMENTS"
+
 Resolve the active Loom package once:
 
 ```bash
