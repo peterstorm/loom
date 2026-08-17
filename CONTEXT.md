@@ -20,6 +20,10 @@ _Avoid_: Job, ticket, story
 A specialized AI subagent spawned to perform one phase or task. Defined by a markdown persona with preloaded skills.
 _Avoid_: Worker, bot, assistant
 
+**Agent Catalog**:
+The single declarative registry defining every Agent's identity: its kind (phase, architecture-panel, implementation, reviewer, review-verifier, utility), model profile, and required Skill — one record per Agent, keyed by name so a duplicate or double-kinded Agent is unrepresentable. Every agent set, phase map, and policy table is a derived projection of the catalog, never a second source.
+_Avoid_: Agent list, agent config, roster (a roster is an ordered per-run selection drawn from the catalog, not identity)
+
 **Skill**:
 A reusable knowledge module loaded into an agent. Contains domain expertise, process instructions, and reference material.
 _Avoid_: Plugin, module, prompt
@@ -27,6 +31,14 @@ _Avoid_: Plugin, module, prompt
 **Hook**:
 An event-driven handler that fires on tool use (PreToolUse) or agent completion (SubagentStop). Enforces invariants and mutates state.
 _Avoid_: Trigger, callback, listener
+
+**Spawn Admission**:
+The pure decision that accepts or blocks one subagent spawn batch before any state mutation, taking pre-gathered inputs (batch items, Agent Catalog entries, agent definitions, graph state) and returning either an allow or a block naming the exact guard that decided. The Hook is the shell that gathers inputs and applies the decision; the decision itself never performs I/O.
+_Avoid_: Spawn gate (that is the Hook applying the decision), spawn validation
+
+**Wire Contract**:
+The exact machine-readable output shape a review Agent must emit — Machine Summary counts and marker lines, the fenced findings block, and the review_lifecycle assessment schema. Owned by the parser that consumes it; the copy in each reviewer Agent file is stamped from one shared fragment, never hand-edited, and the contract tests execute that fragment against the real parser.
+_Avoid_: Output format, response template, Machine Summary (that is one section of the contract, not the whole)
 
 **Wave Gate**:
 A quality checkpoint between waves. Requires test evidence, spec alignment, code review, and — whenever the wave holds critical **Findings** — the adjudication of a **Refutation Panel** before advancing.
