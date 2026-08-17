@@ -347,7 +347,8 @@ export async function publishInitialBatch(
  * empty string when the role has none. Load-bearing for Pi: its spawn gate
  * (`checkAgentSkillPrompt`) refuses any loom-agent spawn whose task never
  * names a frontmatter-declared Skill, and the generic packet task otherwise
- * never would (code-simplifier → distill, spec-check-invoker → spec-check).
+ * never would (code-simplifier → distill, architecture-tech-lead → deepen,
+ * spec-check-invoker → spec-check).
  */
 export function requiredSkillMarker(requiredSkill: string | null): string {
   return requiredSkill === null ? "" : `LOOM_REQUIRED_SKILL: ${requiredSkill}\n`;

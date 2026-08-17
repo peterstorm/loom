@@ -561,7 +561,9 @@ describe("Pi extension review tool_result integration", () => {
     const session = "019fca39-f989-7510-8e62-50dadbcad420";
     const context = { sessionManager: { getSessionId: () => session } };
     const toolCallId = "call-ad-hoc-no-graph";
-    const taskPrompt = "Consult on the launch profile. Do not modify files.";
+    // Names the declared deepen skill so the spawn passes the skill-prompt
+    // gate, exactly like the graphless code-implementer spawn below.
+    const taskPrompt = "Use the deepen skill in review mode. Consult on the launch profile. Do not modify files.";
     // The graph file is shared fixture state; restore it even on failure so a
     // concurrently running test file never observes it missing.
     rmSync(statePath, { force: true });

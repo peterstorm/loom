@@ -40,6 +40,11 @@ Accepted review kinds:
 skill) unconditionally; under `all` the engine adds it whenever the frozen
 scope changes source or test files.
 
+`architecture` selects the `architecture-tech-lead` reviewer (preloading the
+`deepen` skill in review mode) unconditionally; under `all` it always joins the
+roster, and it is auto-selected for >500 additions, >10 files, or new
+structure.
+
 `--files` is a comma-separated explicit scope. Without it, the engine freezes
 the canonical sorted union of branch-committed, staged, unstaged tracked, and
 untracked non-ignored paths, excluding Loom run/state evidence. Empty scope is a

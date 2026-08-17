@@ -87,6 +87,7 @@ After writing code, verify:
 - [ ] **Error paths typed**: Using Either/Result? No hidden throws?
 - [ ] **Testable without mocks**: Can test core logic with plain data?
 - [ ] **Distilled**: Run a `distill` apply-mode pass over the new code — reuse before rewrite, no dead/speculative code, no pass-throughs, right altitude. Tests stay green after each move.
+- [ ] **Deep enough**: Check the new modules with the `deepen` lens — deletion test on every wrapper, interfaces narrower than their implementations, no seam without two adapters (production + test). Interfaces you created in this task, fix now; shallowness in pre-existing interfaces, report as a recommended `deepen` session — never redesign it inline.
 
 ---
 

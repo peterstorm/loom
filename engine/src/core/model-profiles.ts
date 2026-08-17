@@ -165,7 +165,7 @@ export const AGENT_CATALOG = Object.freeze({
   "arch-designer-agent": traits("panel-design", plainKind("arch-panel"), "architecture-tech-lead"),
   "arch-interviewer-agent": traits("panel-design", plainKind("arch-panel")),
   "architecture-agent": traits("architecture-finalize", phaseKind("architecture"), "architecture-tech-lead"),
-  "architecture-tech-lead": traits("focused-review", plainKind("reviewer")),
+  "architecture-tech-lead": traits("focused-review", plainKind("reviewer"), "deepen"),
   "arch-judge-agent": traits("panel-judge", plainKind("arch-panel")),
   "brainstorm-agent": traits("panel-design", phaseKind("brainstorm"), "brainstorming"),
   "clarify-agent": traits("panel-design", phaseKind("clarify"), "clarify"),

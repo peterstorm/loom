@@ -50,7 +50,7 @@ Implementation Agents are the only TaskGraph Agent values that actually execute 
 | `pr-test-analyzer` | Test quality and regression gaps |
 | `type-design-analyzer` | Invariants, illegal states, encapsulation |
 | `comment-analyzer` | Comment/doc accuracy and rot |
-| `architecture-tech-lead` | FC/IS, coupling, boundaries, testability |
+| `architecture-tech-lead` | FC/IS, coupling, boundaries, testability (preloads `deepen`, review mode) |
 | `code-simplifier` | Post-correctness clarity and simplification (preloads `distill`, review mode) |
 | `spec-check-invoker` | One Wave-level spec-alignment result |
 | `review-verifier-agent` | One assigned refutation lens over every critical Finding |

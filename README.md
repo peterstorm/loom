@@ -177,6 +177,8 @@ Aspects: `code`, `errors`, `tests`, `types`, `comments`, `architecture`, `simpli
 
 `simplify` runs the `code-simplifier` reviewer (preloading the `distill` skill) on its own; under `all` it joins the roster automatically whenever the scope changes source or test files.
 
+`architecture` runs the `architecture-tech-lead` reviewer (preloading the `deepen` skill in review mode) on its own; under `all` it always joins the roster, and it is auto-selected for >500 additions, >10 files, or new structure.
+
 ### `/review-and-fix`
 
 Runs adjudicated standalone review, writes a remediation plan, applies every surviving critical, and validates the code before opening a registered remediation run. By default, the parent autonomously dispositions each advisory as accepted, deferred, or dismissed from the evidence and fixes accepted advisories; it does not ask the operator to choose IDs unless explicitly requested. The engine audits dirty paths, excludes Loom evidence, stages literal paths in a temporary Git index, proves the staged set, rechecks repository witnesses, and atomically installs the verified index before commit. Push is optional; force-push is forbidden.
