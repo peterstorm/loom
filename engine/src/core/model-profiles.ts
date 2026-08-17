@@ -298,7 +298,7 @@ export function parseAgentName(raw: unknown): PolicyResult<LoomAgentName> {
 }
 
 /** Resolve an untrusted agent name to its explicit policy. */
-export function resolveAgentPolicy(raw: unknown): PolicyResult<AgentPolicy> {
+export function resolveAgentPolicy(raw: unknown): PolicyResult<AgentPolicy<LoomAgentName>> {
   const parsed = parseAgentName(raw);
   if (!parsed.ok) return parsed;
   const resolved = AGENT_POLICIES.find(({ agent }) => agent === parsed.value);
@@ -387,27 +387,31 @@ export function validateAgentPolicyCatalog(
   policies: readonly AgentPolicy[] = AGENT_POLICIES,
   profiles: readonly LlmProfile[] = LLM_PROFILES,
 ): PolicyValidation {
-  const errors: string[] = [];
   const profileIds = profiles.map(({ id }) => id);
   const policyAgents = policies.map(({ agent }) => agent);
 
-  for (const id of LLM_PROFILE_IDS) {
-    const count = profileIds.filter((candidate) => candidate === id).length;
-    if (count === 0) errors.push(`missing model profile: ${id}`);
-    if (count > 1) errors.push(`duplicate model profile: ${id}`);
-  }
-  for (const id of profileIds) {
-    if (!includes(LLM_PROFILE_IDS, id)) errors.push(`unknown model profile: ${id}`);
-  }
+  // One multiset reconciliation for both columns; only the message vocabulary
+  // differs ("unknown" model profile vs "unexpected" agent policy).
+  const reconcile = (
+    expected: readonly string[],
+    actual: readonly string[],
+    label: string,
+    extraWord: string,
+  ): string[] => [
+    ...expected.flatMap((id) => {
+      const count = actual.filter((candidate) => candidate === id).length;
+      return [
+        ...(count === 0 ? [`missing ${label}: ${id}`] : []),
+        ...(count > 1 ? [`duplicate ${label}: ${id}`] : []),
+      ];
+    }),
+    ...actual.filter((id) => !expected.includes(id)).map((id) => `${extraWord} ${label}: ${id}`),
+  ];
 
-  for (const agent of expectedAgents) {
-    const count = policyAgents.filter((candidate) => candidate === agent).length;
-    if (count === 0) errors.push(`missing agent policy: ${agent}`);
-    if (count > 1) errors.push(`duplicate agent policy: ${agent}`);
-  }
-  for (const agent of policyAgents) {
-    if (!expectedAgents.includes(agent)) errors.push(`unexpected agent policy: ${agent}`);
-  }
+  const errors: string[] = [
+    ...reconcile(LLM_PROFILE_IDS, profileIds, "model profile", "unknown"),
+    ...reconcile(expectedAgents, policyAgents, "agent policy", "unexpected"),
+  ];
   for (const policy of policies) {
     if (!profileIds.includes(policy.profile)) {
       errors.push(`agent policy '${policy.agent}' references missing model profile: ${policy.profile}`);

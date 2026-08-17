@@ -74,7 +74,7 @@ export interface StandaloneReviewMetadata {
 }
 
 export interface StandaloneChangedPaths {
-  /** Worktree paths not represented by HEAD, including untracked non-ignored files. */
+  /** Tracked files whose worktree content differs from HEAD, plus untracked non-ignored files. */
   readonly unstaged: readonly string[];
   readonly staged: readonly string[];
   readonly committed: readonly string[];

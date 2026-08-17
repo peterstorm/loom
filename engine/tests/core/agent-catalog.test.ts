@@ -70,6 +70,16 @@ describe("Agent Catalog projections match the pre-catalog memberships", () => {
       expect(AGENT_REQUIRED_SKILLS[agent], agent).toBe(requiredSkill);
     }
   });
+
+  // Golden values, not just cross-file consistency: an internally-consistent
+  // rename of a reviewer's skill would pass every projection test while
+  // silently changing which skill Pi's spawn gate demands.
+  it("pins the reviewer/utility skill pairings by value", () => {
+    expect(AGENT_CATALOG["architecture-tech-lead"].requiredSkill).toBe("deepen");
+    expect(AGENT_CATALOG["code-simplifier"].requiredSkill).toBe("distill");
+    expect(AGENT_CATALOG["spec-check-invoker"].requiredSkill).toBe("spec-check");
+    expect(AGENT_CATALOG["deepen-agent"].requiredSkill).toBe("deepen");
+  });
 });
 
 describe("the wave review roster is a selection from the catalog", () => {

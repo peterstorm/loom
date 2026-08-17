@@ -79,6 +79,11 @@ function writeState(state: unknown): void {
   writeFileSync(statePath, JSON.stringify(state, null, 2));
 }
 
+function restoreEnv(key: string, previous: string | undefined): void {
+  if (previous === undefined) delete process.env[key];
+  else process.env[key] = previous;
+}
+
 mkdirSync(dirname(statePath), { recursive: true });
 writeState(initialGraph());
 beforeEach(() => {
@@ -94,20 +99,13 @@ beforeEach(() => {
 });
 
 afterAll(() => {
-  if (previousStatePath === undefined) delete process.env.LOOM_STATE_PATH;
-  else process.env.LOOM_STATE_PATH = previousStatePath;
-  if (previousPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-  else process.env.PI_CODING_AGENT_DIR = previousPiDir;
-  if (previousSubagentDir === undefined) delete process.env.LOOM_SUBAGENT_DIR;
-  else process.env.LOOM_SUBAGENT_DIR = previousSubagentDir;
-  if (previousOrchestrationRunsRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
-  else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousOrchestrationRunsRoot;
-  if (previousOrchestrationRunDir === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
-  else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousOrchestrationRunDir;
-  if (previousRuntimeRoot === undefined) delete process.env[PI_EXTENSION_RUNTIME_ROOT_ENV];
-  else process.env[PI_EXTENSION_RUNTIME_ROOT_ENV] = previousRuntimeRoot;
-  if (previousRuntimeRevision === undefined) delete process.env[PI_EXTENSION_RUNTIME_REVISION_ENV];
-  else process.env[PI_EXTENSION_RUNTIME_REVISION_ENV] = previousRuntimeRevision;
+  restoreEnv("LOOM_STATE_PATH", previousStatePath);
+  restoreEnv("PI_CODING_AGENT_DIR", previousPiDir);
+  restoreEnv("LOOM_SUBAGENT_DIR", previousSubagentDir);
+  restoreEnv("LOOM_ORCHESTRATION_RUNS_ROOT", previousOrchestrationRunsRoot);
+  restoreEnv("LOOM_ORCHESTRATION_RUN_DIR", previousOrchestrationRunDir);
+  restoreEnv(PI_EXTENSION_RUNTIME_ROOT_ENV, previousRuntimeRoot);
+  restoreEnv(PI_EXTENSION_RUNTIME_REVISION_ENV, previousRuntimeRevision);
   rmSync(temp, { recursive: true, force: true });
 });
 
@@ -268,10 +266,8 @@ describe("Pi extension review tool_result integration", () => {
         reason: expect.stringContaining("Run /reload in Pi"),
       });
     } finally {
-      if (savedRuntimeRoot === undefined) delete process.env[PI_EXTENSION_RUNTIME_ROOT_ENV];
-      else process.env[PI_EXTENSION_RUNTIME_ROOT_ENV] = savedRuntimeRoot;
-      if (savedRuntimeRevision === undefined) delete process.env[PI_EXTENSION_RUNTIME_REVISION_ENV];
-      else process.env[PI_EXTENSION_RUNTIME_REVISION_ENV] = savedRuntimeRevision;
+      restoreEnv(PI_EXTENSION_RUNTIME_ROOT_ENV, savedRuntimeRoot);
+      restoreEnv(PI_EXTENSION_RUNTIME_REVISION_ENV, savedRuntimeRevision);
       rmSync(skewRoot, { recursive: true, force: true });
     }
   });
@@ -824,8 +820,7 @@ describe("Pi extension review tool_result integration", () => {
         message: expect.objectContaining({ customType: "loom-context" }),
       }));
     } finally {
-      if (previous === undefined) delete process.env.LOOM_STATE_PATH;
-      else process.env.LOOM_STATE_PATH = previous;
+      restoreEnv("LOOM_STATE_PATH", previous);
       rmSync(latePath, { force: true });
     }
   });

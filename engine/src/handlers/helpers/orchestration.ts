@@ -642,7 +642,11 @@ async function restartOperation(args: readonly string[]): Promise<HookResult> {
   if (!next.ok) return { kind: "error", message: `cannot bind replacement run directory: ${next.error.message}` };
   const stored = previous.value.handle.readProgramRegistration();
   if (!stored.ok) return { kind: "error", message: stored.error.message };
-  const registration = stored.value === null ? null : parseRegisteredFacadeProgram(stored.value);
+  const storedParse = stored.value === null ? null : parseRegisteredFacadeProgram(stored.value);
+  if (storedParse?.kind === "invalid") {
+    return { kind: "error", message: `registered Wave Gate program is invalid: ${storedParse.message}` };
+  }
+  const registration = storedParse?.kind === "registered" ? storedParse.program : null;
   if (registration === null || registration.kind !== "wave-gate") {
     return { kind: "error", message: "restart currently requires a registered Wave Gate run" };
   }
@@ -712,8 +716,12 @@ async function resumeOperation(args: readonly string[]): Promise<HookResult> {
   const stored = bound.value.handle.readProgramRegistration();
   if (!stored.ok) return { kind: "error", message: stored.error.message };
   if (stored.value !== null) {
-    const facadeRegistration = parseRegisteredFacadeProgram(stored.value);
-    if (facadeRegistration !== null) {
+    const facadeParse = parseRegisteredFacadeProgram(stored.value);
+    if (facadeParse.kind === "invalid") {
+      return { kind: "error", message: `registered orchestration program is invalid: ${facadeParse.message}` };
+    }
+    if (facadeParse.kind === "registered") {
+      const facadeRegistration = facadeParse.program;
       const driven = facadeRegistration.kind === "standalone-review"
         ? await resumeStandaloneFacade(bound.value.handle, facadeRegistration)
         : facadeRegistration.kind === "remediation"
@@ -850,7 +858,11 @@ async function submitOperation(stdin: string, args: readonly string[]): Promise<
 
   const stored = bound.value.handle.readProgramRegistration();
   if (!stored.ok) return { kind: "error", message: stored.error.message };
-  const facadeRegistration = stored.value === null ? null : parseRegisteredFacadeProgram(stored.value);
+  const facadeParse = stored.value === null ? null : parseRegisteredFacadeProgram(stored.value);
+  if (facadeParse?.kind === "invalid") {
+    return { kind: "error", message: `registered orchestration program is invalid: ${facadeParse.message}` };
+  }
+  const facadeRegistration = facadeParse?.kind === "registered" ? facadeParse.program : null;
   const registration = stored.value === null ? null : parseRegisteredPanelProgram(stored.value);
   if (stored.value !== null && registration === null && facadeRegistration === null) {
     return { kind: "error", message: "registered orchestration program is malformed" };
@@ -1159,7 +1171,11 @@ async function decideOperation(stdin: string, args: readonly string[]): Promise<
 
   const registered = bound.value.handle.readProgramRegistration();
   if (!registered.ok) return { kind: "error", message: registered.error.message };
-  const facadeRegistration = registered.value === null ? null : parseRegisteredFacadeProgram(registered.value);
+  const registeredParse = registered.value === null ? null : parseRegisteredFacadeProgram(registered.value);
+  if (registeredParse?.kind === "invalid") {
+    return { kind: "error", message: `registered orchestration program is invalid: ${registeredParse.message}` };
+  }
+  const facadeRegistration = registeredParse?.kind === "registered" ? registeredParse.program : null;
   if (registered.value !== null && facadeRegistration?.kind !== "wave-gate") {
     return { kind: "error", message: "this registered program does not accept user decisions" };
   }

@@ -8,7 +8,7 @@ description: "This skill should be used when the user asks to 'implement', 'writ
 
 Expert implementation guidance ensuring code follows FP principles, DDD patterns, and is designed for maximum testability.
 
-**This is an IMPLEMENTATION skill** — write production code following the architectural patterns in the rules below. For design decisions and architectural review, use `/architecture-tech-lead` instead.
+**This is an IMPLEMENTATION skill** — write production code following the architectural patterns in the rules below. For design decisions and architectural review, use the `architecture-tech-lead` skill instead.
 
 ## Context Loading
 

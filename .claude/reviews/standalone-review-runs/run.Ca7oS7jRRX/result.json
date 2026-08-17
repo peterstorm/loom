@@ -1,0 +1,317 @@
+{
+  "schema_version": 1,
+  "run_id": "run.Ca7oS7jRRX",
+  "subject_id": "standalone-review",
+  "scope": [
+    "README.md",
+    "agents/README.md",
+    "agents/architecture-tech-lead.md",
+    "commands/review-pr.md",
+    "engine/src/core/model-profiles.ts",
+    "engine/src/handlers/helpers/programs/helpers.ts",
+    "engine/tests/pi-extension-review-events.test.ts",
+    "skills/code-implementer/SKILL.md",
+    "skills/deepen/SKILL.md"
+  ],
+  "reviewer_evidence": [
+    {
+      "authority_kind": "request-bound",
+      "agent": "code-reviewer",
+      "slot_id": "standalone-slot:1:code-reviewer",
+      "request_id": "request:5035856e186aa3333e0326cecfa1a06181dc6a58ff3531fb43f8e05dd95e64dd",
+      "attempt": 2,
+      "model_profile": "general-review",
+      "context_digest": "eb2d3f00b172cd1a13befd5cffdb8047f2071c194b0894b5345e763149dd6b61",
+      "artifact": {
+        "runId": "run.Ca7oS7jRRX",
+        "slot": {
+          "kind": "fixed-artifact-slot",
+          "path": "transcripts/standalone-slot:1:code-reviewer/attempt-2.raw"
+        },
+        "digest": "954f8197e4bd561f17ce2e825009d2ea303c7ffb94a6ec8e956efa4f3dd070f4",
+        "byteLength": 4030
+      }
+    },
+    {
+      "authority_kind": "request-bound",
+      "agent": "silent-failure-hunter",
+      "slot_id": "standalone-slot:2:silent-failure-hunter",
+      "request_id": "request:20aa309c12f5dc836d19785957914715751e31d5eac49ed0526592145927e136",
+      "attempt": 1,
+      "model_profile": "focused-review",
+      "context_digest": "8525d27043dbc9bb031a3dc2f87f0a822147a4c0894abf41d1c818ffbae6bcf6",
+      "artifact": {
+        "runId": "run.Ca7oS7jRRX",
+        "slot": {
+          "kind": "fixed-artifact-slot",
+          "path": "transcripts/standalone-slot:2:silent-failure-hunter/attempt-1.raw"
+        },
+        "digest": "5505e3db4f6bf360faaf54a30435c2a92278975c9556946bc15dd057238c0b09",
+        "byteLength": 5740
+      }
+    },
+    {
+      "authority_kind": "request-bound",
+      "agent": "pr-test-analyzer",
+      "slot_id": "standalone-slot:3:pr-test-analyzer",
+      "request_id": "request:2bdb45b0e39aad1f59d3d405f450d7b654ea28559b8f642a1b68eb65c83f943e",
+      "attempt": 1,
+      "model_profile": "focused-review",
+      "context_digest": "99f29788ee37a295f6d862ce6e0d85e556e4c53d85958cd1c9d71918e439bff4",
+      "artifact": {
+        "runId": "run.Ca7oS7jRRX",
+        "slot": {
+          "kind": "fixed-artifact-slot",
+          "path": "transcripts/standalone-slot:3:pr-test-analyzer/attempt-1.raw"
+        },
+        "digest": "b67a9697bb1e68a44a0438193e15a362f71c9eb199226c0ecc19e28b9489b278",
+        "byteLength": 3588
+      }
+    },
+    {
+      "authority_kind": "request-bound",
+      "agent": "type-design-analyzer",
+      "slot_id": "standalone-slot:4:type-design-analyzer",
+      "request_id": "request:26781d6b2fcaccd8a6e9cca96d3e9b3595b683a3b59a55f518680a19da56aa31",
+      "attempt": 1,
+      "model_profile": "focused-review",
+      "context_digest": "9c486773eab4951bfe20f0b6e6cd05ecf3f9861cc5ce46674e2060082c77b941",
+      "artifact": {
+        "runId": "run.Ca7oS7jRRX",
+        "slot": {
+          "kind": "fixed-artifact-slot",
+          "path": "transcripts/standalone-slot:4:type-design-analyzer/attempt-1.raw"
+        },
+        "digest": "2db86a170b65acab9011865caee982469df88008693654baec4c3656f6f08c91",
+        "byteLength": 9576
+      }
+    },
+    {
+      "authority_kind": "request-bound",
+      "agent": "comment-analyzer",
+      "slot_id": "standalone-slot:5:comment-analyzer",
+      "request_id": "request:cd404daebf18c0bda6e67b7e832a5861d135a37c3a14afa2704e4da0f65540a1",
+      "attempt": 1,
+      "model_profile": "focused-review",
+      "context_digest": "43d11cef0fa8d240a1b1697fed688d83390908472b0a0caccd1084b10884a61d",
+      "artifact": {
+        "runId": "run.Ca7oS7jRRX",
+        "slot": {
+          "kind": "fixed-artifact-slot",
+          "path": "transcripts/standalone-slot:5:comment-analyzer/attempt-1.raw"
+        },
+        "digest": "3e1670d2641ad5553cdbcfb348c7990e1b3ec71baa2a545a8a1f056ae3cb3875",
+        "byteLength": 3338
+      }
+    },
+    {
+      "authority_kind": "request-bound",
+      "agent": "architecture-tech-lead",
+      "slot_id": "standalone-slot:6:architecture-tech-lead",
+      "request_id": "request:8391f5d3c7d127f4826740172f5ad30bb4927129369ce849bc77680af59717b4",
+      "attempt": 1,
+      "model_profile": "focused-review",
+      "context_digest": "92c82106a9fbe7677fe9beceeb6161dc470270130d44569976de4f86c77d5f93",
+      "artifact": {
+        "runId": "run.Ca7oS7jRRX",
+        "slot": {
+          "kind": "fixed-artifact-slot",
+          "path": "transcripts/standalone-slot:6:architecture-tech-lead/attempt-1.raw"
+        },
+        "digest": "d8bb3d66ccb96eb81458e4fd66d61155b6c4ffb1bd6a6acf03929e990f904ef7",
+        "byteLength": 8627
+      }
+    },
+    {
+      "authority_kind": "request-bound",
+      "agent": "code-simplifier",
+      "slot_id": "standalone-slot:7:code-simplifier",
+      "request_id": "request:a1ad2accf627192f538d4c3d2fe4438c2abeb2a5f41f5633413aca6d4327cba4",
+      "attempt": 1,
+      "model_profile": "focused-review",
+      "context_digest": "a7c0ad1bd7cf558cdfd0f83b717e5bc821cd150258ecac02a59d0100f4b92c59",
+      "artifact": {
+        "runId": "run.Ca7oS7jRRX",
+        "slot": {
+          "kind": "fixed-artifact-slot",
+          "path": "transcripts/standalone-slot:7:code-simplifier/attempt-1.raw"
+        },
+        "digest": "d65689ff959df47288a2ee07f580679d24cced14f986968d773de159965c2e3d",
+        "byteLength": 3778
+      }
+    }
+  ],
+  "surviving_critical_findings": [
+    {
+      "severity": "critical",
+      "file": "engine/src/handlers/helpers/programs/helpers.ts",
+      "line": 174,
+      "claim": "The unanchored `docs?` branch in the `docsOnly` regex at engine/src/handlers/helpers/programs/helpers.ts:174 matches any path merely starting with the substring \"doc\" (e.g. `docker-compose.yml`, `src/docker/build.ts`, `documented-api.ts`), misclassifying real source-code changes as documentation-only and skewing reviewer-roster selection in `/review-pr`.",
+      "id": "code-reviewer-1",
+      "agent": "code-reviewer"
+    },
+    {
+      "severity": "critical",
+      "file": "engine/src/handlers/helpers/programs/helpers.ts",
+      "line": 420,
+      "claim": "parseRegisteredFacadeProgram discards parseRemediationStartInput/parseWaveGateStartInput/parseStandaloneStartInput's specific error message, collapsing every validation failure of an already-matched variant into a bare null",
+      "id": "silent-failure-hunter-1",
+      "agent": "silent-failure-hunter"
+    }
+  ],
+  "advisory_findings": [
+    {
+      "severity": "advisory",
+      "file": "engine/src/handlers/helpers/programs/helpers.ts",
+      "line": 89,
+      "claim": "gitPaths and gitText never check spawnSync's result.error, so a failed process spawn (e.g. missing git binary) throws a generic fallback message instead of the actual spawn failure reason",
+      "id": "silent-failure-hunter-2",
+      "agent": "silent-failure-hunter"
+    },
+    {
+      "severity": "advisory",
+      "file": "engine/src/core/model-profiles.ts",
+      "line": 168,
+      "claim": "No test directly pins that AGENT_CATALOG[\"architecture-tech-lead\"].requiredSkill equals \"deepen\" specifically (as opposed to any other internally-consistent skill name), relying entirely on cross-file consistency checks rather than a golden value assertion",
+      "id": "pr-test-analyzer-1",
+      "agent": "pr-test-analyzer"
+    },
+    {
+      "severity": "advisory",
+      "file": null,
+      "line": null,
+      "claim": "No test directly pins that `AGENT_CATALOG[\"architecture-tech-lead\"].requiredSkill` equals `\"deepen\"` specifically (as opposed to any other internally-consistent skill name), relying entirely on cross-file consistency checks rather than a golden value assertion",
+      "id": "pr-test-analyzer-2",
+      "agent": "pr-test-analyzer"
+    },
+    {
+      "severity": "advisory",
+      "file": "engine/src/handlers/helpers/programs/helpers.ts",
+      "line": 41,
+      "claim": "RegisteredWaveGateProgram's `restart` and `orphanRecovery` fields are independently optional, so the type permits a registration with both recovery contexts set even though every constructor and the untrusted-input parser only ever populate one.",
+      "id": "type-design-analyzer-1",
+      "agent": "type-design-analyzer"
+    },
+    {
+      "severity": "advisory",
+      "file": "engine/src/handlers/helpers/programs/helpers.ts",
+      "line": 64,
+      "claim": "helpers.ts repeats the ad-hoc union `Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; message: string }>` inline across many functions (e.g. parseStandaloneStartInput, parseWaveGateStartInput, parseRemediationStartInput, parsedAuthority, standaloneRetryEffectId) instead of a shared named generic, unlike PolicyResult<T>/ParseResult<T>/ProofParseResult<T> elsewhere in the codebase.",
+      "id": "type-design-analyzer-2",
+      "agent": "type-design-analyzer"
+    },
+    {
+      "severity": "advisory",
+      "file": "engine/src/core/model-profiles.ts",
+      "line": 301,
+      "claim": "resolveAgentPolicy in model-profiles.ts is annotated to return PolicyResult<AgentPolicy> (Agent defaulted to string), discarding the LoomAgentName narrowing that AGENT_POLICIES and parseAgentName already establish, even though the resolved value's agent field is always a LoomAgentName.",
+      "id": "type-design-analyzer-3",
+      "agent": "type-design-analyzer"
+    },
+    {
+      "severity": "advisory",
+      "file": "skills/code-implementer/SKILL.md",
+      "line": 11,
+      "claim": "skills/code-implementer/SKILL.md:11 tells the reader to use `/architecture-tech-lead` as a slash command, but no such command is registered — commands/ has no architecture-tech-lead.md, and skills/deepen/SKILL.md correctly refers to the same target without a leading slash as a Skill/Agent, not a command.",
+      "id": "comment-analyzer-1",
+      "agent": "comment-analyzer"
+    },
+    {
+      "severity": "advisory",
+      "file": "engine/src/handlers/helpers/programs/helpers.ts",
+      "line": 357,
+      "claim": "engine/src/handlers/helpers/programs/helpers.ts:357-366's doc comment for renderSpawnTask omits the optional `LOOM_REVIEW_CONTEXT: standalone` marker line the function actually prepends when `options.standalone` is true, and its claim that authority alone determines the task text ignores that `instruction` and `options.standalone` also shape the output.",
+      "id": "comment-analyzer-2",
+      "agent": "comment-analyzer"
+    },
+    {
+      "severity": "advisory",
+      "file": "engine/src/handlers/helpers/programs/helpers.ts",
+      "line": 100,
+      "claim": "engine/src/handlers/helpers/programs/helpers.ts:100's doc comment describes `CanonicalChangedPaths.unstaged` as paths \"not represented by HEAD,\" but the tracked-unstaged subset (from `git diff --name-only`) is paths whose HEAD entry exists and only differs in content, so the phrase only accurately describes the untracked half of the union.",
+      "id": "comment-analyzer-3",
+      "agent": "comment-analyzer"
+    },
+    {
+      "severity": "advisory",
+      "file": "engine/src/handlers/helpers/programs/helpers.ts",
+      "line": 168,
+      "claim": "metadata() in engine/src/handlers/helpers/programs/helpers.ts fuses pure scope classification (docsOnly, sourceOrTestChanged, newStructure, languages) with an I/O-bound additions fetch (trackedAdditions/untrackedAdditions spawning git), so the reviewer-auto-select classification cannot be unit-tested without a real git repo or subprocess mock.",
+      "id": "architecture-tech-lead-1",
+      "agent": "architecture-tech-lead"
+    },
+    {
+      "severity": "advisory",
+      "file": "engine/src/handlers/helpers/programs/helpers.ts",
+      "line": 188,
+      "claim": "The newStructure field in engine/src/handlers/helpers/programs/helpers.ts is computed as a bare path-depth check (>=4 segments), not a genuine new-service/package/migration detector, so its name and the architecture-tech-lead auto-select documentation promise a semantic the implementation does not verify.",
+      "id": "architecture-tech-lead-2",
+      "agent": "architecture-tech-lead"
+    },
+    {
+      "severity": "advisory",
+      "file": "engine/src/core/model-profiles.ts",
+      "line": 385,
+      "claim": "validateAgentPolicyCatalog (engine/src/core/model-profiles.ts:385-418) runs the same missing/duplicate/unexpected multiset-reconciliation logic twice — once for model profiles against LLM_PROFILE_IDS, once for agent policies against expectedAgents — differing only in message vocabulary ('unknown' vs 'unexpected'). Extracting a small reconcile(expected, actual, missingLabel, duplicateLabel, extraLabel) helper used by both blocks, preserving today's exact message text, removes the duplicated loop bodies without changing the function's signature, defaults, or return value.",
+      "id": "code-simplifier-1",
+      "agent": "code-simplifier"
+    },
+    {
+      "severity": "advisory",
+      "file": "engine/src/handlers/helpers/programs/helpers.ts",
+      "line": 422,
+      "claim": "parseRegisteredFacadeProgram (engine/src/handlers/helpers/programs/helpers.ts:415-456) rebuilds the same 5-element wave-gate key array ['schemaVersion','kind','input','taskIds','authorityDigest'] three times inside a nested ternary just to append one optional key name ('restart' or 'orphanRecovery'). Hoisting the shared array into a baseKeys constant and spreading it (waveKeys = hasRestart ? [...baseKeys,'restart'] : hasOrphanRecovery ? [...baseKeys,'orphanRecovery'] : baseKeys) removes the triplicated literal while validating the exact same key sets.",
+      "id": "code-simplifier-2",
+      "agent": "code-simplifier"
+    },
+    {
+      "severity": "advisory",
+      "file": "engine/tests/pi-extension-review-events.test.ts",
+      "line": 97,
+      "claim": "pi-extension-review-events.test.ts repeats the same env-restore idiom (if (previous === undefined) delete process.env.X; else process.env.X = previous;) inline at three separate sites — the afterAll block (lines 97-109, 7 variables), the runtime-skew test's finally block (lines 271-274), and the late-task-graph test's finally block (lines 827-828). A single module-scope restoreEnv(key, previous: string | undefined) helper used at all three call sites removes roughly 14 duplicated lines with no change to which env vars are restored or when.",
+      "id": "code-simplifier-3",
+      "agent": "code-simplifier"
+    }
+  ],
+  "refuted_critical_findings": [],
+  "panel": {
+    "lenses": [
+      "reproduction",
+      "intent",
+      "blast-radius"
+    ],
+    "threshold": 2,
+    "surviving": 2,
+    "refuted": 0,
+    "outcomes": [
+      {
+        "finding_id": "standalone-review:code-reviewer-1",
+        "task_id": "standalone-review",
+        "claim": "The unanchored `docs?` branch in the `docsOnly` regex at engine/src/handlers/helpers/programs/helpers.ts:174 matches any path merely starting with the substring \"doc\" (e.g. `docker-compose.yml`, `src/docker/build.ts`, `documented-api.ts`), misclassifying real source-code changes as documentation-only and skewing reviewer-roster selection in `/review-pr`.",
+        "survives": true,
+        "refuted_by": [],
+        "reasoning": [],
+        "upheld_by": [
+          "reproduction",
+          "intent",
+          "blast-radius"
+        ],
+        "uncertain_from": []
+      },
+      {
+        "finding_id": "standalone-review:silent-failure-hunter-1",
+        "task_id": "standalone-review",
+        "claim": "parseRegisteredFacadeProgram discards parseRemediationStartInput/parseWaveGateStartInput/parseStandaloneStartInput's specific error message, collapsing every validation failure of an already-matched variant into a bare null",
+        "survives": true,
+        "refuted_by": [],
+        "reasoning": [],
+        "upheld_by": [
+          "reproduction",
+          "intent",
+          "blast-radius"
+        ],
+        "uncertain_from": []
+      }
+    ]
+  }
+}

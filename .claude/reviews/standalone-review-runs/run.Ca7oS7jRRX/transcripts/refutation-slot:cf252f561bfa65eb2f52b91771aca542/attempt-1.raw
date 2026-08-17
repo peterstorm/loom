@@ -1,0 +1,15 @@
+{
+  "criterion": "intent",
+  "verdicts": [
+    {
+      "finding_id": "standalone-review:code-reviewer-1",
+      "verdict": "upheld",
+      "reasoning": "The intended meaning of docsOnly is stated explicitly in /home/peterstorm/dev/claude-plugins/loom/engine/src/core/standalone-review.ts:253-264 ('docs_only is by definition \"no source or test file changed\"') and :245-249 ('comment analysis is the only role that reads docs'), yet the regex at helpers.ts:174 has its first alternative unanchored at the end, so 'docker-compose.yml' or 'docker/entrypoint.sh' satisfy scope.every(...) and yield docsOnly=true (dropping silent-failure-hunter and adding comment-analyzer per selectStandaloneReviewers:293,298), while a scope of only 'src/docker/build.ts' produces the contradictory docsOnly && sourceOrTestChanged pair the parse boundary at :262 exists to reject; either outcome contradicts the documented intent, so I could not refute it."
+    },
+    {
+      "finding_id": "standalone-review:silent-failure-hunter-1",
+      "verdict": "upheld",
+      "reasoning": "My best refutation was that null is the deliberate 'shape did not match' discriminator contract needed by the resume fallback to parseRegisteredPanelProgram (orchestration.ts:715-726), but that only justifies null for unmatched shapes, not for the already-matched variants the finding names: once kind==='remediation'/'wave-gate' matched, the discarded message makes callers assert falsehoods ('restart currently requires a registered Wave Gate run' at orchestration.ts:646-647, 'this registered program does not accept user decisions' at :1163-1164) about a genuinely wave-gate-kinded but invalid registration, which contradicts the file's own stated design of typed, defect-naming diagnostics (durablePublicationDigest's 'corrupt' messages at helpers.ts:484-495 and the decodeReviewerTranscript docblock at :681-687)."
+    }
+  ]
+}

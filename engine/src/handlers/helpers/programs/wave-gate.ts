@@ -957,7 +957,11 @@ export async function restartWaveGateFacade(
     const completedRestart = before.wave_gate_history?.some((entry) => entry.runId === nextHandle.runId) === true;
     const existingProgram = nextHandle.readProgramRegistration();
     if (!existingProgram.ok) return failed(existingProgram.error.message);
-    const storedProgram = existingProgram.value === null ? null : parseRegisteredFacadeProgram(existingProgram.value);
+    const storedProgramParse = existingProgram.value === null ? null : parseRegisteredFacadeProgram(existingProgram.value);
+    if (storedProgramParse?.kind === "invalid") {
+      return failed(`replacement run's registered program is invalid: ${storedProgramParse.message}`);
+    }
+    const storedProgram = storedProgramParse?.kind === "registered" ? storedProgramParse.program : null;
     if (completedRestart) {
       if (storedProgram === null || storedProgram.kind !== "wave-gate" ||
           storedProgram.restart?.previousRunId !== previousHandle.runId) {
@@ -1101,7 +1105,11 @@ export async function recoverOrphanedWaveGateFacade(
 
     const storedRaw = nextHandle.readProgramRegistration();
     if (!storedRaw.ok) return failed(storedRaw.error.message);
-    const stored = storedRaw.value === null ? null : parseRegisteredFacadeProgram(storedRaw.value);
+    const storedParse = storedRaw.value === null ? null : parseRegisteredFacadeProgram(storedRaw.value);
+    if (storedParse?.kind === "invalid") {
+      return failed(`replacement run's registered program is invalid: ${storedParse.message}`);
+    }
+    const stored = storedParse?.kind === "registered" ? storedParse.program : null;
     const replayAudit = before.orphaned_wave_gate_history?.find((audit) =>
       audit.runId === parsedRunId.value && audit.wave === expected.wave && audit.authorityDigest === parsedDigest.value &&
       audit.runsRoot === authoritativeRunsRoot && audit.runDirectory === join(authoritativeRunsRoot, parsedRunId.value) &&

@@ -54,6 +54,15 @@ export type FacadeDriveResult =
   | Readonly<{ ok: true; action: unknown }>
   | Readonly<{ ok: false; message: string }>;
 
+/**
+ * The module's shared Either shape for parse/lookup boundaries — the same role
+ * PolicyResult/ParseResult play in the core modules. Success carries the
+ * parsed value; failure carries the exact operator-facing message.
+ */
+export type ProgramParse<T> =
+  | Readonly<{ ok: true; value: T }>
+  | Readonly<{ ok: false; message: string }>;
+
 export const failed = (message: string): FacadeDriveResult => ({ ok: false, message });
 
 export function exactObject(raw: unknown, keys: readonly string[]): raw is Record<string, unknown> {
@@ -61,10 +70,7 @@ export function exactObject(raw: unknown, keys: readonly string[]): raw is Recor
     Object.keys(raw).length === keys.length && keys.every((key) => Object.hasOwn(raw, key));
 }
 
-export function parseStandaloneStartInput(raw: unknown): Readonly<{
-  ok: true;
-  value: RegisteredStandaloneProgram["input"];
-}> | Readonly<{ ok: false; message: string }> {
+export function parseStandaloneStartInput(raw: unknown): ProgramParse<RegisteredStandaloneProgram["input"]> {
   if (!exactObject(raw, ["kind", "files", "dryRun"])) {
     return { ok: false, message: "standalone-review input must contain exactly kind, files, and dryRun" };
   }
@@ -86,18 +92,22 @@ export function parseStandaloneStartInput(raw: unknown): Readonly<{
 
 export function gitPaths(args: readonly string[]): readonly string[] {
   const result = spawnSync("git", args, { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 });
+  // status stays null when the process never ran (git missing from PATH,
+  // EACCES); result.error then holds the only real diagnostic.
+  if (result.error) throw new Error(`git ${args[0]} could not be spawned: ${result.error.message}`);
   if (result.status !== 0) throw new Error((result.stderr ?? Buffer.alloc(0)).toString("utf8").trim() || `git ${args[0]} failed`);
   return Object.freeze((result.stdout ?? Buffer.alloc(0)).toString("utf8").split("\0").filter(Boolean).sort());
 }
 
 export function gitText(args: readonly string[]): string {
   const result = spawnSync("git", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  if (result.error) throw new Error(`git ${args[0]} could not be spawned: ${result.error.message}`);
   if (result.status !== 0) throw new Error((result.stderr ?? "").trim() || `git ${args[0]} failed`);
   return (result.stdout ?? "").trim();
 }
 
 export type CanonicalChangedPaths = Readonly<{
-  /** Worktree paths not represented by HEAD, including untracked non-ignored files. */
+  /** Tracked files whose worktree content differs from HEAD, plus untracked non-ignored files. */
   unstaged: readonly string[];
   staged: readonly string[];
   committed: readonly string[];
@@ -109,6 +119,12 @@ export type DerivedChangedPaths = Readonly<{
   authority: CanonicalChangedPaths;
   /** Kept separately so diff statistics can add new files exactly once. */
   untracked: readonly string[];
+  /**
+   * Paths that did not exist before this change: untracked files plus files
+   * added (not modified) in the index or on the branch since the base
+   * revision. This is what makes `newStructure` mean "new", not "deep".
+   */
+  created: ReadonlySet<string>;
 }>;
 
 export function reviewablePath(path: string): boolean {
@@ -125,6 +141,10 @@ export function deriveChangedPaths(): DerivedChangedPaths {
   }
   const untracked = gitPaths(["ls-files", "--others", "--exclude-standard", "-z", "--"]).filter(reviewablePath);
   const trackedUnstaged = gitPaths(["diff", "--name-only", "-z", "--"]).filter(reviewablePath);
+  const stagedAdded = gitPaths(["diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--"]).filter(reviewablePath);
+  const committedAdded = base === null
+    ? []
+    : gitPaths(["diff", "--name-only", "--diff-filter=A", "-z", `${base}...HEAD`, "--"]).filter(reviewablePath);
   return Object.freeze({
     authority: Object.freeze({
       unstaged: Object.freeze([...new Set([...trackedUnstaged, ...untracked])].sort()),
@@ -134,6 +154,7 @@ export function deriveChangedPaths(): DerivedChangedPaths {
       head_revision: head,
     }),
     untracked,
+    created: Object.freeze(new Set([...untracked, ...stagedAdded, ...committedAdded])),
   });
 }
 
@@ -150,6 +171,7 @@ export function parseNumstatAdditions(output: string): number {
 export function trackedAdditions(baseline: string, paths: readonly string[]): number {
   if (paths.length === 0) return 0;
   const result = spawnSync("git", ["diff", "--numstat", baseline, "--", ...paths], { encoding: "utf8" });
+  if (result.error) throw new Error(`git diff could not be spawned: ${result.error.message}`);
   if (result.status !== 0) throw new Error((result.stderr ?? "").trim() || "git diff --numstat failed");
   return parseNumstatAdditions(result.stdout ?? "");
 }
@@ -157,6 +179,7 @@ export function trackedAdditions(baseline: string, paths: readonly string[]): nu
 export function untrackedAdditions(paths: readonly string[]): number {
   return paths.reduce((sum, path) => {
     const result = spawnSync("git", ["diff", "--no-index", "--numstat", "--", devNull, path], { encoding: "utf8" });
+    if (result.error) throw new Error(`git diff could not be spawned: ${result.error.message}`);
     const diagnostic = (result.stderr ?? "").trim();
     if ((result.status !== 0 && result.status !== 1) || diagnostic !== "") {
       throw new Error(diagnostic || `cannot measure untracked additions for ${path}`);
@@ -165,18 +188,23 @@ export function untrackedAdditions(paths: readonly string[]): number {
   }, 0);
 }
 
-export function metadata(
+/**
+ * Pure scope classification — the policy `selectStandaloneReviewers` consumes,
+ * separated from the git subprocess that measures `additions` so the rules are
+ * table-testable with plain data. Both regexes anchor their directory-name
+ * alternatives to a full path segment: `docs?`/`README` must be followed by a
+ * separator, an extension dot, or end-of-path, so `docker-compose.yml` and
+ * `src/docker/build.ts` are NOT documentation.
+ */
+export function classifyScope(
   kind: StandaloneReviewKind,
   scope: readonly string[],
-  changed: DerivedChangedPaths,
+  created: ReadonlySet<string>,
+  additions: number,
 ): StandaloneReviewMetadata {
   const extensions = scope.map((path) => extname(path).toLowerCase());
-  const docsOnly = scope.every((path) => /(^|\/)(docs?|README)|\.(md|mdx|txt)$/.test(path));
+  const docsOnly = scope.every((path) => /(^|\/)(docs?|README)(\/|\.|$)|\.(md|mdx|txt)$/.test(path));
   const languages = [...new Set(extensions.filter(Boolean).map((extension) => extension.slice(1)))].sort();
-  const scopedUntracked = new Set(changed.untracked.filter((path) => scope.includes(path)));
-  const trackedScope = scope.filter((path) => !scopedUntracked.has(path));
-  const baseline = changed.authority.base_revision ?? changed.authority.head_revision;
-  const additions = trackedAdditions(baseline, trackedScope) + untrackedAdditions([...scopedUntracked].sort());
   return Object.freeze({
     requestedKinds: Object.freeze([kind]) as readonly [StandaloneReviewKind],
     docsOnly,
@@ -185,9 +213,24 @@ export function metadata(
     commentsChanged: docsOnly || scope.some((path) => /\.(md|mdx)$/.test(path)),
     additions,
     fileCount: scope.length,
-    newStructure: scope.some((path) => path.split("/").length >= 4),
+    // "New structure" means a genuinely NEW deep path (a fresh service,
+    // package, or migration directory) — not an ordinary edit to an existing
+    // deeply nested file.
+    newStructure: scope.some((path) => created.has(path) && path.split("/").length >= 4),
     languages: Object.freeze(languages),
   });
+}
+
+export function metadata(
+  kind: StandaloneReviewKind,
+  scope: readonly string[],
+  changed: DerivedChangedPaths,
+): StandaloneReviewMetadata {
+  const scopedUntracked = new Set(changed.untracked.filter((path) => scope.includes(path)));
+  const trackedScope = scope.filter((path) => !scopedUntracked.has(path));
+  const baseline = changed.authority.base_revision ?? changed.authority.head_revision;
+  const additions = trackedAdditions(baseline, trackedScope) + untrackedAdditions([...scopedUntracked].sort());
+  return classifyScope(kind, scope, changed.created, additions);
 }
 
 export function safeScope(scope: readonly string[]): readonly Readonly<{ path: string; status: "safe" | "absent" }>[] {
@@ -355,14 +398,15 @@ export function requiredSkillMarker(requiredSkill: string | null): string {
 }
 
 /**
- * Every engine-issued spawn task shares one shape: the authority markers that
- * bind a harness batch item to its issued request, the packet path (the exact
- * absolute `contexts/<digest>.json` artifact, so a child never infers
- * run-directory layout out of band), the required-Skill marker, then the
- * program-specific instruction. The authority alone determines all of it —
- * `parsePublishedSpawnRequest` already proved
- * `context.digest === authority.contextDigest`, so call sites don't thread
- * the context through.
+ * Every engine-issued spawn task shares one shape: an optional
+ * `LOOM_REVIEW_CONTEXT: standalone` marker (when `options.standalone` is set),
+ * the authority markers that bind a harness batch item to its issued request,
+ * the packet path (the exact absolute `contexts/<digest>.json` artifact, so a
+ * child never infers run-directory layout out of band), the required-Skill
+ * marker, then the caller's program-specific `instruction`. The authority
+ * alone determines every marker line — `parsePublishedSpawnRequest` already
+ * proved `context.digest === authority.contextDigest`, so call sites don't
+ * thread the context through.
  */
 export function renderSpawnTask(
   handle: RunDirHandle,
@@ -378,16 +422,17 @@ export function renderSpawnTask(
     instruction;
 }
 
-export function parseRegistration(raw: unknown): RegisteredStandaloneProgram | null {
-  if (!exactObject(raw, ["schemaVersion", "kind", "input", "authority"]) || raw.schemaVersion !== 1 || raw.kind !== "standalone-review") return null;
+export function parseRegistration(raw: unknown): ProgramParse<RegisteredStandaloneProgram> {
+  if (!exactObject(raw, ["schemaVersion", "kind", "input", "authority"]) || raw.schemaVersion !== 1) {
+    return { ok: false, message: "standalone-review registration must contain exactly schemaVersion 1, kind, input, and authority" };
+  }
   const input = parseStandaloneStartInput(raw.input);
-  return input.ok ? Object.freeze({ schemaVersion: 1, kind: "standalone-review", input: input.value, authority: raw.authority }) : null;
+  return input.ok
+    ? { ok: true, value: Object.freeze({ schemaVersion: 1, kind: "standalone-review", input: input.value, authority: raw.authority }) }
+    : input;
 }
 
-export function parseWaveGateStartInput(raw: unknown): Readonly<{
-  ok: true;
-  value: RegisteredWaveGateProgram["input"];
-}> | Readonly<{ ok: false; message: string }> {
+export function parseWaveGateStartInput(raw: unknown): ProgramParse<RegisteredWaveGateProgram["input"]> {
   if (!exactObject(raw, ["wave"]) || (raw.wave !== null &&
       (typeof raw.wave !== "number" || !Number.isSafeInteger(raw.wave) || raw.wave < 1))) {
     return { ok: false, message: "wave-gate input must contain exactly wave (null or a positive integer)" };
@@ -395,10 +440,7 @@ export function parseWaveGateStartInput(raw: unknown): Readonly<{
   return { ok: true, value: Object.freeze({ wave: raw.wave as number | null }) };
 }
 
-export function parseRemediationStartInput(raw: unknown): Readonly<{
-  ok: true;
-  value: RegisteredRemediationProgram["input"];
-}> | Readonly<{ ok: false; message: string }> {
+export function parseRemediationStartInput(raw: unknown): ProgramParse<RegisteredRemediationProgram["input"]> {
   if (!exactObject(raw, ["sourceRunsRoot", "sourceRun", "supportPaths"]) ||
       typeof raw.sourceRunsRoot !== "string" || raw.sourceRunsRoot.length === 0 ||
       typeof raw.sourceRun !== "string" || raw.sourceRun.length === 0 ||
@@ -412,25 +454,72 @@ export function parseRemediationStartInput(raw: unknown): Readonly<{
   }) };
 }
 
-export function parseRegisteredFacadeProgram(raw: unknown): RegisteredFacadeProgram | null {
-  const standalone = parseRegistration(raw);
-  if (standalone !== null) return standalone;
-  if (exactObject(raw, ["schemaVersion", "kind", "input"]) && raw.schemaVersion === 1 && raw.kind === "remediation") {
-    const input = parseRemediationStartInput(raw.input);
-    return input.ok ? Object.freeze({ schemaVersion: 1, kind: "remediation", input: input.value }) : null;
+/**
+ * How a stored program registration parses against the facade programs.
+ *
+ * "unclaimed" — the record does not name a facade program at all (its `kind`
+ * is absent or foreign), so a caller may hand it to the panel parser.
+ * "invalid" — the record CLAIMS a facade kind but fails that variant's
+ * validation; the message is the exact defect. Collapsing this case to null
+ * used to launder "wave.wave must be a positive integer" into "registered
+ * orchestration program is malformed" — or worse, into a sibling caller's
+ * "restart currently requires a registered Wave Gate run" for a run that IS a
+ * wave-gate run.
+ */
+export type FacadeRegistrationParse =
+  | Readonly<{ kind: "registered"; program: RegisteredFacadeProgram }>
+  | Readonly<{ kind: "unclaimed" }>
+  | Readonly<{ kind: "invalid"; message: string }>;
+
+const invalidRegistration = (message: string): FacadeRegistrationParse => Object.freeze({ kind: "invalid", message });
+const registeredProgram = (program: RegisteredFacadeProgram): FacadeRegistrationParse => Object.freeze({ kind: "registered", program });
+
+export function parseRegisteredFacadeProgram(raw: unknown): FacadeRegistrationParse {
+  const record = typeof raw === "object" && raw !== null && !Array.isArray(raw)
+    ? raw as Readonly<Record<string, unknown>>
+    : null;
+  const kind = record?.kind;
+  if (kind !== "standalone-review" && kind !== "remediation" && kind !== "wave-gate") {
+    return Object.freeze({ kind: "unclaimed" });
   }
+
+  if (kind === "standalone-review") {
+    const standalone = parseRegistration(raw);
+    return standalone.ok ? registeredProgram(standalone.value) : invalidRegistration(standalone.message);
+  }
+
+  if (kind === "remediation") {
+    if (!exactObject(raw, ["schemaVersion", "kind", "input"]) || raw.schemaVersion !== 1) {
+      return invalidRegistration("remediation registration must contain exactly schemaVersion 1, kind, and input");
+    }
+    const input = parseRemediationStartInput(raw.input);
+    return input.ok
+      ? registeredProgram(Object.freeze({ schemaVersion: 1, kind: "remediation", input: input.value }))
+      : invalidRegistration(input.message);
+  }
+
+  const waveBaseKeys = ["schemaVersion", "kind", "input", "taskIds", "authorityDigest"] as const;
   const waveKeys = Object.hasOwn(raw as object, "restart")
-    ? ["schemaVersion", "kind", "input", "taskIds", "authorityDigest", "restart"]
+    ? [...waveBaseKeys, "restart"]
     : Object.hasOwn(raw as object, "orphanRecovery")
-      ? ["schemaVersion", "kind", "input", "taskIds", "authorityDigest", "orphanRecovery"]
-      : ["schemaVersion", "kind", "input", "taskIds", "authorityDigest"];
-  if (!exactObject(raw, waveKeys) || raw.schemaVersion !== 1 || raw.kind !== "wave-gate" || !Array.isArray(raw.taskIds) ||
-      raw.taskIds.some((id) => typeof id !== "string") || typeof raw.authorityDigest !== "string") return null;
+      ? [...waveBaseKeys, "orphanRecovery"]
+      : [...waveBaseKeys];
+  if (!exactObject(raw, waveKeys) || raw.schemaVersion !== 1) {
+    return invalidRegistration(`wave-gate registration must contain exactly schemaVersion 1, ${waveKeys.slice(1).join(", ")}`);
+  }
+  if (!Array.isArray(raw.taskIds) || raw.taskIds.some((id) => typeof id !== "string")) {
+    return invalidRegistration("wave-gate registration taskIds must be a string array");
+  }
+  if (typeof raw.authorityDigest !== "string") {
+    return invalidRegistration("wave-gate registration authorityDigest must be a string");
+  }
   let restart: WaveGateRestartAudit | undefined;
   if (Object.hasOwn(raw, "restart")) {
     if (!exactObject(raw.restart, ["previousRunId", "exhaustedSlots"]) ||
         typeof raw.restart.previousRunId !== "string" || !Array.isArray(raw.restart.exhaustedSlots) ||
-        raw.restart.exhaustedSlots.length === 0 || raw.restart.exhaustedSlots.some((slot) => typeof slot !== "string" || slot.length === 0)) return null;
+        raw.restart.exhaustedSlots.length === 0 || raw.restart.exhaustedSlots.some((slot) => typeof slot !== "string" || slot.length === 0)) {
+      return invalidRegistration("wave-gate registration restart audit must contain previousRunId and non-empty exhaustedSlots");
+    }
     restart = Object.freeze({
       previousRunId: raw.restart.previousRunId,
       exhaustedSlots: Object.freeze([...(raw.restart.exhaustedSlots as string[])]),
@@ -440,22 +529,26 @@ export function parseRegisteredFacadeProgram(raw: unknown): RegisteredFacadeProg
   if (Object.hasOwn(raw, "orphanRecovery")) {
     if (!exactObject(raw.orphanRecovery, ["previousRunId", "previousAuthorityDigest"]) ||
         typeof raw.orphanRecovery.previousRunId !== "string" ||
-        typeof raw.orphanRecovery.previousAuthorityDigest !== "string") return null;
+        typeof raw.orphanRecovery.previousAuthorityDigest !== "string") {
+      return invalidRegistration("wave-gate registration orphanRecovery audit must contain previousRunId and previousAuthorityDigest");
+    }
     orphanRecovery = Object.freeze({
       previousRunId: raw.orphanRecovery.previousRunId,
       previousAuthorityDigest: raw.orphanRecovery.previousAuthorityDigest,
     });
   }
   const input = parseWaveGateStartInput(raw.input);
-  return input.ok ? Object.freeze({
-    schemaVersion: 1, kind: "wave-gate", input: input.value,
-    taskIds: Object.freeze([...(raw.taskIds as string[])]), authorityDigest: raw.authorityDigest,
-    ...(restart === undefined ? {} : { restart }),
-    ...(orphanRecovery === undefined ? {} : { orphanRecovery }),
-  }) : null;
+  return input.ok
+    ? registeredProgram(Object.freeze({
+        schemaVersion: 1, kind: "wave-gate", input: input.value,
+        taskIds: Object.freeze([...(raw.taskIds as string[])]), authorityDigest: raw.authorityDigest,
+        ...(restart === undefined ? {} : { restart }),
+        ...(orphanRecovery === undefined ? {} : { orphanRecovery }),
+      }))
+    : invalidRegistration(input.message);
 }
 
-export function parsedAuthority(registration: RegisteredStandaloneProgram): Readonly<{ ok: true; value: FrozenStandaloneReviewAuthority }> | Readonly<{ ok: false; message: string }> {
+export function parsedAuthority(registration: RegisteredStandaloneProgram): ProgramParse<FrozenStandaloneReviewAuthority> {
   const result = parseStandaloneReviewAuthority(registration.authority);
   return result.ok ? { ok: true, value: result.value } : { ok: false, message: result.errors.join("; ") };
 }
@@ -539,7 +632,7 @@ export function durableRequests(
  * reading the durable publication receipt — never by re-deriving request
  * authority from prose.
  */
-export function standaloneRetryEffectId(slotId: string, requestId: string): Readonly<{ ok: true; value: EffectId }> | Readonly<{ ok: false; message: string }> {
+export function standaloneRetryEffectId(slotId: string, requestId: string): ProgramParse<EffectId> {
   const label = `standalone-review-retry:${slotId}`;
   const parsed = parseEffectId(`effect:${label}:${createHash("sha256").update(requestId).digest("hex")}`);
   return parsed.ok ? { ok: true, value: parsed.value } : { ok: false, message: parsed.error.message };

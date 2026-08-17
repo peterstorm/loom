@@ -1,0 +1,38 @@
+### Summary
+
+This is a small, well-scoped diff (commit `8fa7491`, "feat(deepen): wire the deepen skill into review and implementation, mirroring distill"): the frozen scope's only code change is one line in `engine/src/core/model-profiles.ts` (adding `"deepen"` as the required skill for `architecture-tech-lead` in `AGENT_CATALOG`), a doc-comment update in `helpers.ts`, and an existing test's fixture prompt updated to keep passing. The remaining files are prompt/doc content (README, agents/architecture-tech-lead.md, commands/review-pr.md, skills/*.md) with no directly-applicable unit tests.
+
+The single behavioral change is covered almost entirely for free by pre-existing drift-proof infrastructure:
+- `engine/tests/core/required-skill-policy.test.ts` iterates `AGENT_REQUIRED_SKILLS` data-driven (`it.each`), so the new `architecture-tech-lead → "deepen"` entry automatically gets three checks: the skill exists on disk, `agents/architecture-tech-lead.md` frontmatter declares it, and `requiredSkillMarker("deepen")` satisfies the real `checkAgentSkillPrompt` gate for both the marked (pass) and unmarked (fail) cases.
+- `engine/tests/core/agent-catalog.test.ts` proves `AGENT_REQUIRED_SKILLS` stays a faithful projection of `AGENT_POLICIES`.
+- `engine/tests/pi-extension-review-events.test.ts`'s updated graphless-spawn test exercises the real `pi/extension.ts` module end-to-end with `architecture-tech-lead`, so the wiring is proven through the actual spawn path, not just unit-level.
+
+I checked for stale fixtures elsewhere in the suite that hardcode `architecture-tech-lead`'s prior `requiredSkill: null` (which would now be silently wrong) — found none; every `requiredSkill: null` fixture I traced belongs to a different, unaffected role (`code-reviewer`, `type-design-analyzer`, `review-verifier-agent`, etc.).
+
+### Critical Gaps (rated 8-10)
+None.
+
+### Important Improvements (rated 5-7)
+None.
+
+### Test Quality Issues
+None — the reused data-driven tests are exactly the right shape (behavioral, DAMP, no excess mocking) and the fix reuses them rather than hand-rolling a parallel case.
+
+### Positive Observations
+- `required-skill-policy.test.ts` is genuinely excellent design: because it enumerates `AGENT_REQUIRED_SKILLS` at runtime rather than hardcoding role names, this one-line catalog change gets full coverage (existence, frontmatter agreement, and gate-satisfaction, both positive and negative) without any test edits at all.
+- The updated `pi-extension-review-events.test.ts` fixture routes through the real `pi/extension.ts`, so the fix is validated against production wiring, not a mock.
+- No stale fixtures elsewhere silently regressed by the catalog change.
+
+### Delegation Recommendation
+Not needed — no test quality issues found; existing TypeScript test infrastructure already provides correct, low-maintenance coverage for this change.
+
+### Machine Summary
+CRITICAL_COUNT: 0
+ADVISORY_COUNT: 1
+ADVISORY: No test directly pins that `AGENT_CATALOG["architecture-tech-lead"].requiredSkill` equals `"deepen"` specifically (as opposed to any other internally-consistent skill name), relying entirely on cross-file consistency checks rather than a golden value assertion
+
+```findings
+[
+  { "severity": "advisory", "file": "engine/src/core/model-profiles.ts", "line": 168, "claim": "No test directly pins that AGENT_CATALOG[\"architecture-tech-lead\"].requiredSkill equals \"deepen\" specifically (as opposed to any other internally-consistent skill name), relying entirely on cross-file consistency checks rather than a golden value assertion" }
+]
+```
