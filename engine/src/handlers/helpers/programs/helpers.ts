@@ -343,17 +343,6 @@ export async function publishInitialBatch(
 }
 
 /**
- * The deterministic per-task resolver for the frozen ContextPacket: the exact
- * absolute path to the immutable `contexts/<digest>.json` artifact, delivered
- * to the child as a LOOM_CONTEXT_PATH marker. A spawned reviewer must be able
- * to read the packet it is instructed to review without inferring run-directory
- * layout out of band.
- */
-export function contextPacketPathMarker(handle: RunDirHandle, digest: string): string {
-  return `LOOM_CONTEXT_PATH: ${join(handle.runDirectory, "contexts", `${digest}.json`)}\n`;
-}
-
-/**
  * One marker line naming the Skill the spawned role's policy requires, or the
  * empty string when the role has none. Load-bearing for Pi: its spawn gate
  * (`checkAgentSkillPrompt`) refuses any loom-agent spawn whose task never
@@ -366,9 +355,11 @@ export function requiredSkillMarker(requiredSkill: string | null): string {
 
 /**
  * Every engine-issued spawn task shares one shape: the authority markers that
- * bind a harness batch item to its issued request, the packet path, the
- * required-Skill marker, then the program-specific instruction. The authority
- * alone determines all of it — `parsePublishedSpawnRequest` already proved
+ * bind a harness batch item to its issued request, the packet path (the exact
+ * absolute `contexts/<digest>.json` artifact, so a child never infers
+ * run-directory layout out of band), the required-Skill marker, then the
+ * program-specific instruction. The authority alone determines all of it —
+ * `parsePublishedSpawnRequest` already proved
  * `context.digest === authority.contextDigest`, so call sites don't thread
  * the context through.
  */
@@ -381,7 +372,7 @@ export function renderSpawnTask(
   return (options.standalone === true ? "LOOM_REVIEW_CONTEXT: standalone\n" : "") +
     `LOOM_REQUEST_ID: ${authority.requestId}\n` +
     `LOOM_CONTEXT_DIGEST: ${authority.contextDigest}\n` +
-    contextPacketPathMarker(handle, authority.contextDigest) +
+    `LOOM_CONTEXT_PATH: ${join(handle.runDirectory, "contexts", `${authority.contextDigest}.json`)}\n` +
     requiredSkillMarker(authority.requiredSkill) +
     instruction;
 }

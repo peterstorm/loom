@@ -219,7 +219,6 @@ export const WAVE_REVIEW_AGENTS = Object.freeze([
   "comment-analyzer",
 ] as const satisfies readonly LoomAgentName[]);
 
-export const AGENT_POLICY_CATALOG = AGENT_POLICIES;
 export const LOOM_OWNED_AGENTS: readonly LoomAgentName[] = Object.freeze(
   AGENT_POLICIES.map(({ agent }) => agent),
 );
