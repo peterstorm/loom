@@ -101,10 +101,18 @@ describe("pi package manifest", () => {
   });
 
   it("binds Loom spawns to the same user agent file Pi executes", () => {
+    // The decision itself is the pure Spawn Admission core; the extension is
+    // the shell that must (a) run it and (b) implement its definition port
+    // over the exact user-scope agent file Pi executes.
     const extension = readFileSync(join(PI_DIR, "extension.ts"), "utf-8");
-    expect(extension).toContain('requestedScope !== "user"');
+    expect(extension).toContain("admitPiSpawnBatch(");
     expect(extension).toContain("validatePiAgentDefinitionFile(");
-    expect(extension).toContain('join(PI_AGENT_DIR, "agents", `${item.agent}.md`)');
+    expect(extension).toContain('join(PI_AGENT_DIR, "agents", `${agent}.md`)');
+    const admission = readFileSync(
+      join(PI_DIR, "..", "engine", "src", "core", "spawn-admission.ts"),
+      "utf-8",
+    );
+    expect(admission).toContain('requestedScope !== "user"');
   });
 });
 

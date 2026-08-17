@@ -19,10 +19,10 @@ import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
 // Both harnesses share ONE protected-state read seam, so a Pi gate and a
 // Claude gate cannot disagree about what "no active plan" means.
 import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate-phase-order";
-import { classifyTaskExecutionSpawn, type TaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
+import { type TaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
 import { validateTaskExecutionBatch } from "../engine/src/handlers/task-execution";
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
-import { classifyPiSpawnItems, expectedSpawnModel } from "../engine/src/core/model-profiles";
+import { admitPiSpawnBatch, MAX_PI_ORCHESTRATION_BATCH_SIZE } from "../engine/src/core/spawn-admission";
 
 
 // Engine SubagentStop logic (harness-agnostic functions already exported)
@@ -85,7 +85,6 @@ import {
 } from "../engine/src/orchestration/session-run-bindings";
 import { captureKey } from "../engine/src/core/harness-capture";
 import { materializePiResources } from "./resources";
-import { checkAgentSkillPrompt } from "../engine/src/core/agent-skills";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
 import {
   compareAttemptBaseline,
@@ -542,8 +541,6 @@ type PiSpawnReservation = Readonly<{
   }>[];
 }>;
 
-const MAX_PI_ORCHESTRATION_BATCH_SIZE = 8;
-
 /**
  * Did this batch run outside orchestration entirely?
  *
@@ -794,116 +791,49 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // Subagent tool → parse and preflight EVERY single/parallel/chain item
-      // before any tracking mutation. A malformed sibling blocks the whole
-      // batch; otherwise one parallel item could bypass the gates that the
-      // top-level `agent`/`task` fields never represented.
+      // Subagent tool → the pure Spawn Admission core decides; this shell only
+      // implements its ports over the real filesystem/state and applies the
+      // decision. A malformed sibling blocks the whole batch; otherwise one
+      // parallel item could bypass the gates that the top-level `agent`/`task`
+      // fields never represented. `currentGuard` tracks the executing gate for
+      // fail-closed attribution: the port wrappers stamp it before their I/O,
+      // and a block stamps the guard the core named.
       if (event.toolName === "subagent") {
         currentGuard = "parse-pi-subagent-batch";
-        const classifiedItems = classifyPiSpawnItems(event.input);
-        if (!classifiedItems.ok) return { block: true, reason: classifiedItems.error.message };
-        if (classifiedItems.value.kind === "external") {
-          // Loom owns only its catalog outside orchestration. During an active
-          // graph, an unknown agent would bypass phase/task/model gates; without
-          // one, it belongs to another Pi workflow and must pass through.
-          if (graphIsActive) {
-            return {
-              block: true,
-              reason: "External Pi subagents cannot run while a Loom task graph is active",
-            };
-          }
-          return;
+        const admission = admitPiSpawnBatch(event.input, {
+          graphActive: graphIsActive,
+          packageRoot: PACKAGE_ROOT,
+          validateDefinition: (agent) =>
+            validatePiAgentDefinitionFile(join(PI_AGENT_DIR, "agents", `${agent}.md`), agent, PACKAGE_ROOT),
+          readSourceAgent: (agent) => {
+            currentGuard = "validate-agent-skill";
+            const sourceAgentPath = join(PACKAGE_ROOT, "agents", `${agent}.md`);
+            try {
+              return { ok: true, content: readFileSync(sourceAgentPath, "utf-8") };
+            } catch (error) {
+              return {
+                ok: false,
+                error: `Cannot read active Loom agent definition ${sourceAgentPath}: ${error instanceof Error ? error.message : String(error)}`,
+              };
+            }
+          },
+          checkPhaseOrder: (agent, task) => {
+            currentGuard = "validate-phase-order";
+            return validatePhaseOrder({ agentType: agent, prompt: task }, realPhaseOrderDeps);
+          },
+          checkTemplateSubstitution: (task) => {
+            currentGuard = "validate-template-substitution";
+            return validateTemplateSubstitution(task);
+          },
+        });
+        if (admission.kind === "block") {
+          currentGuard = admission.guard;
+          return { block: true, reason: admission.reason };
         }
-        const parsedItems = classifiedItems.value.items;
-        if (parsedItems.length > MAX_PI_ORCHESTRATION_BATCH_SIZE) {
-          return {
-            block: true,
-            reason: `Pi transport accepts at most ${MAX_PI_ORCHESTRATION_BATCH_SIZE} requests per subagent call; partition the engine-issued spawn-batch into ordered chunks without changing, dropping, or duplicating requests.`,
-          };
-        }
-        const taskExecutionSpawns = parsedItems.map((item) => classifyTaskExecutionSpawn({
-          agentType: item.agent,
-          prompt: item.task,
-          description: "",
-        }));
-        const needsTaskGraphLifecycle = taskExecutionSpawns.some((spawn) => spawn.kind !== "standalone");
-
-        // Panel mode's interview stage requires interactive AskUserQuestion: an
-        // arch-interviewer-agent must question the USER before writing the
-        // digest that drives lens/judge selection. Pi children are headless
-        // (no TUI, no question relay — see docs/pi-phase-agent-interviews.md),
-        // so the agent can neither ask nor honestly answer. Refuse with an
-        // actionable diagnostic instead of letting a fabricated digest drive
-        // the panel (or a confusing retry/terminal-block loop).
-        const interviewSpawns = parsedItems.filter((item) =>
-          stripNamespace(item.agent) === "arch-interviewer-agent");
-        if (interviewSpawns.length > 0) {
-          return {
-            block: true,
-            reason: "BLOCKED: `/loom --panel` interview stage cannot run under pi: " +
-              "arch-interviewer-agent needs interactive AskUserQuestion, which pi " +
-              "children do not support (docs/pi-phase-agent-interviews.md). " +
-              "Panel mode currently requires Claude Code for the interview; a " +
-              "headless interview path or a question relay is not yet implemented.",
-          };
-        }
-
-        const requestedScope = (event.input as { agentScope?: unknown }).agentScope ?? "user";
-        if (requestedScope !== "user") {
-          return {
-            block: true,
-            reason: `Loom-owned Pi agents require agentScope='user' so the validated generated definition is exactly the definition Pi executes; got ${JSON.stringify(requestedScope)}.`,
-          };
-        }
-
-        for (const item of parsedItems) {
-          const expected = expectedSpawnModel(item.agent, "pi");
-          const definitionPath = join(PI_AGENT_DIR, "agents", `${item.agent}.md`);
-          const definition = validatePiAgentDefinitionFile(
-            definitionPath,
-            item.agent,
-            PACKAGE_ROOT,
-          );
-          if (!expected.ok || !definition.ok) {
-            return {
-              block: true,
-              reason: expected.ok
-                ? `Pi agent '${item.agent}' must be rendered from active Loom package ${PACKAGE_ROOT}: ${definition.ok ? "unknown definition mismatch" : definition.error}. Run \"${PACKAGE_ROOT}/scripts/sync-pi-agents.sh\" and /reload.`
-                : expected.error.message,
-            };
-          }
-
-          currentGuard = "validate-agent-skill";
-          const sourceAgentPath = join(PACKAGE_ROOT, "agents", `${item.agent}.md`);
-          let sourceAgent: string;
-          try {
-            sourceAgent = readFileSync(sourceAgentPath, "utf-8");
-          } catch (error) {
-            return {
-              block: true,
-              reason: `Cannot read active Loom agent definition ${sourceAgentPath}: ${error instanceof Error ? error.message : String(error)}`,
-            };
-          }
-          const skillCheck = checkAgentSkillPrompt(sourceAgent, item.task);
-          if (!skillCheck.ok) {
-            return {
-              block: true,
-              reason: `Pi agent '${item.agent}' skill policy failed: ${skillCheck.error}`,
-            };
-          }
-
-          currentGuard = "validate-phase-order";
-          const phaseResult = validatePhaseOrder(
-            { agentType: item.agent, prompt: item.task },
-            realPhaseOrderDeps,
-          );
-          if (phaseResult.kind === "block") return { block: true, reason: phaseResult.message };
-
-          currentGuard = "validate-template-substitution";
-          const templateResult = validateTemplateSubstitution(item.task);
-          if (templateResult.kind === "block") return { block: true, reason: templateResult.message };
-
-        }
+        if (admission.kind === "pass-through") return;
+        const parsedItems = admission.items;
+        const taskExecutionSpawns = admission.taskExecutionSpawns;
+        const needsTaskGraphLifecycle = admission.needsTaskGraphLifecycle;
 
         // Reserve every lifecycle identity before task-state mutation. A roster
         // failure can now refuse the spawn without leaving executing_tasks or
