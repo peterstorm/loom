@@ -7,7 +7,7 @@ import { findFile } from "../../../src/utils/find-file";
 import { CLARIFY_THRESHOLD, PHASE_AGENT_MAP, ARCH_PANEL_AGENTS } from "../../../src/config";
 import { stripNamespace } from "../../../src/utils/strip-namespace";
 import type { TaskGraph } from "../../../src/types";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -30,7 +30,7 @@ function mkState(overrides: Partial<TaskGraph> = {}): TaskGraph {
 describe("countMarkers", () => {
   let tmpDir: string;
 
-  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "loom-cm-")); });
+  beforeEach(() => { tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-cm-"))); });
   afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
 
   it("counts NEEDS CLARIFICATION markers", () => {
@@ -61,7 +61,7 @@ describe("countMarkers", () => {
 describe("findFile", () => {
   let tmpDir: string;
 
-  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "loom-ff-")); });
+  beforeEach(() => { tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-ff-"))); });
   afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
 
   it("finds file in top directory", () => {
@@ -92,7 +92,7 @@ describe("resolveTransition", () => {
   let origCwd: string;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "loom-rt-"));
+    tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-rt-")));
     origCwd = process.cwd();
     process.chdir(tmpDir);
   });
@@ -340,7 +340,7 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
   let origCwd: string;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "loom-panel-"));
+    tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-panel-")));
     origCwd = process.cwd();
     process.chdir(tmpDir);
   });

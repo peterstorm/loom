@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,9 +14,16 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+/**
+ * Run roots are the REAL temp path: production resolves the run BASE once
+ * (`realRunDir` / `ensureResolvedBaseDirectory`) so the strict no-symlink rule
+ * applies BELOW it, not to the operator's own path to it — on macOS `tmpdir()`
+ * sits behind the system `/var` → `/private/var` symlink. On Linux this is an
+ * identity.
+ */
 describe("panel run no-follow writes", () => {
   it("refuses a symlink swapped in after target preparation", () => {
-    const runDir = mkdtempSync(join(tmpdir(), "loom-panel-write-"));
+    const runDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-panel-write-")));
     roots.push(runDir);
     const outside = join(runDir, "outside.txt");
     const target = join(runDir, "brief.md");
@@ -31,7 +38,7 @@ describe("panel run no-follow writes", () => {
   });
 
   it("refuses a parent directory swapped to a symlink after preparation", () => {
-    const runDir = mkdtempSync(join(tmpdir(), "loom-panel-parent-write-"));
+    const runDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-panel-parent-write-")));
     roots.push(runDir);
     const outside = join(runDir, "outside");
     const verdicts = join(runDir, "verdicts");
@@ -49,7 +56,7 @@ describe("panel run no-follow writes", () => {
   });
 
   it("publishes a staged authority file without following a raced final symlink", () => {
-    const runDir = mkdtempSync(join(tmpdir(), "loom-panel-publish-"));
+    const runDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-panel-publish-")));
     roots.push(runDir);
     const outside = join(runDir, "outside.txt");
     const staged = join(runDir, ".result.pending.json");

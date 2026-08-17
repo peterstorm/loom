@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 function repository(): { root: string; revision: string } {
-  const root = mkdtempSync(join(tmpdir(), "loom-artifact-revision-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-artifact-revision-")));
   cleanup.push(root);
   execFileSync("git", ["init", "--quiet"], { cwd: root });
   execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import completeWaveGateHandler, {
@@ -110,7 +110,7 @@ const baseTask: Task = {
 
 describe("wave-gate durable summary fallback", () => {
   it("writes the documented fallback path", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-wave-summary-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-summary-")));
     try {
       const path = persistWaveGateSummaryFallback(3, "wave summary\n", root);
       expect(path).toBe(join(root, ".claude", "reviews", "wave-3-review.md"));
@@ -121,8 +121,8 @@ describe("wave-gate durable summary fallback", () => {
   });
 
   it("rejects a symlinked fallback leaf without modifying its target", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-wave-summary-root-"));
-    const outside = mkdtempSync(join(tmpdir(), "loom-wave-summary-outside-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-summary-root-")));
+    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-summary-outside-")));
     const sentinel = join(outside, "sentinel.md");
     writeFileSync(sentinel, "do not overwrite\n");
     mkdirSync(join(root, ".claude", "reviews"), { recursive: true });
@@ -188,7 +188,7 @@ describe("GitHub issue notification port", () => {
     expect(comments).toHaveLength(1);
     expect(comments[0]).toEqual([42, expect.stringContaining("Wave 1"), "owner/repo"]);
 
-    const root = mkdtempSync(join(tmpdir(), "loom-wave-summary-port-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-summary-port-")));
     const failure: GitHubIssuePort = {
       readBody: () => "",
       editBody: () => {},
@@ -2061,7 +2061,7 @@ describe("protected active Wave Gate registration", () => {
   });
 
   it("explicitly migrates legacy authority and never invents a default registration", async () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-legacy-wave-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-legacy-wave-")));
     const path = join(root, "active_task_graph.json");
     writeFileSync(path, JSON.stringify({
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
@@ -2088,7 +2088,7 @@ describe("protected active Wave Gate registration", () => {
   });
 
   it("registers atomically, replays idempotently, and refuses a competing active run", async () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-active-wave-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-active-wave-")));
     const path = join(root, "active_task_graph.json");
     writeFileSync(path, JSON.stringify({
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
@@ -2109,7 +2109,7 @@ describe("protected active Wave Gate registration", () => {
   });
 
   it("rejects registration for a Wave already present in terminal history", async () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-terminal-wave-registration-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-terminal-wave-registration-")));
     const path = join(root, "active_task_graph.json");
     writeFileSync(path, JSON.stringify(registeredGraph()));
     const manager = new StateManager(path);
@@ -2139,7 +2139,7 @@ describe("protected active Wave Gate registration", () => {
   });
 
   it("re-stats lifecycle artifacts inside the completion lock and rejects pre-lock deletion drift", async () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-wave-lock-drift-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-lock-drift-")));
     const path = join(root, "active_task_graph.json");
     const relativeArtifact = `tests/.wave-lock-drift-${process.pid}.ts`;
     const artifact = join(root, relativeArtifact);
@@ -2247,7 +2247,7 @@ describe("protected active Wave Gate registration", () => {
   });
 
   it("atomically archives terminal receipt with Task/Wave advancement and allows compatibility to start the next Wave", async () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-complete-wave-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-complete-wave-")));
     const path = join(root, "active_task_graph.json");
     const initial = registeredGraph({
       tasks: [baseTask, { ...baseTask, id: "T2", wave: 2 }],
@@ -2293,7 +2293,7 @@ describe("final-Wave compatibility completion replay", () => {
     run: (path: string) => Promise<T>,
     initial: TaskGraph = legacyFinalGraph(),
   ): Promise<T> {
-    const root = mkdtempSync(join(tmpdir(), "loom-final-wave-replay-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-final-wave-replay-")));
     const path = join(root, "active_task_graph.json");
     const previous = process.env.LOOM_STATE_PATH;
     writeFileSync(path, JSON.stringify(initial, null, 2));
@@ -2493,7 +2493,7 @@ describe("final-Wave compatibility completion replay", () => {
       error: { message: expect.stringContaining("older than completed terminal Wave 2") },
     });
 
-    const root = mkdtempSync(join(tmpdir(), "loom-older-wave-migration-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-older-wave-migration-")));
     const path = join(root, "active_task_graph.json");
     writeFileSync(path, JSON.stringify(older));
     try {

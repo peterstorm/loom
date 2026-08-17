@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, writeFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -28,11 +28,18 @@ function setEnv(key: string, value: string | undefined): void {
   else process.env[key] = value;
 }
 
+/**
+ * Fixture roots are the REAL temp path. `projectSlug` slugs whatever path it is
+ * given, and the module under test resolves symlinks before slugging — so a
+ * root that is itself reached through a symlink (macOS resolves `/var` to
+ * `/private/var`) would make the fixture and the module slug two different
+ * strings and prove nothing. On Linux this is an identity.
+ */
 function tmp(prefix: string): string {
   const dir = join(tmpdir(), `${prefix}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(dir, { recursive: true });
   created.push(dir);
-  return dir;
+  return realpathSync.native(dir);
 }
 
 /** Build the harness layout and return the transcript path it wrote. */

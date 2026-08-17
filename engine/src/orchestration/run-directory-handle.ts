@@ -24,7 +24,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, linkSync, lstatSync, statSync, unlinkSync } from "node:fs";
+import { closeSync, linkSync, lstatSync, realpathSync, statSync, unlinkSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import {
   canonicalRecord,
@@ -48,7 +48,9 @@ import {
   listDirectoryNamesNoFollow,
   openChildDirectoryNoFollow,
   openDirectoryNoFollow,
-  procFdChild,
+  anchoredChildPath,
+  closeAnchoredDirectory,
+  type AnchoredDirectory,
   readDirectoryFileNoFollow,
   publishStagedRunFile,
   readRunBytesNoFollow,
@@ -241,16 +243,48 @@ export function inspectRunDirectoryEntry(
 }
 
 /**
+ * Re-express a validated identity against the REAL path of its runs root.
+ *
+ * The runs root is the run BASE, and the operator's own path to it may
+ * legitimately traverse system symlinks — on macOS `/tmp` and `/var` are
+ * symlinks (`/tmp` → `/private/tmp`), so a rule that refused every symlink
+ * from the filesystem root down would refuse every real run. Resolving the
+ * base exactly once, here, is what lets everything BELOW it be held to the
+ * strict no-symlink rule the anchored primitives enforce.
+ *
+ * The direct-child relation is checked BEFORE rebasing, against the caller's
+ * original pair, so resolution can never launder an unrelated directory into
+ * looking like a child of the root.
+ *
+ * On Linux this is an identity: a runs root containing a symlink is already
+ * refused by the anchored walk, so any root that works keeps working.
+ */
+function rebasedOnRealRunsRoot(
+  reference: RunDirectoryReference,
+): DomainResult<RunDirectoryReference, RunDirectoryError> {
+  let realRoot: string;
+  try {
+    realRoot = realpathSync.native(reference.runsRoot);
+  } catch (error) {
+    return failure("runsRoot", `cannot resolve runs root ${reference.runsRoot}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (realRoot === reference.runsRoot) return success(reference);
+  return parseRunDirectoryReference(realRoot, join(realRoot, basename(reference.runDirectory)));
+}
+
+/**
  * A run directory must be a direct child of its runs-root and must already
  * exist. Both are resolved and compared as strings, and every later access
- * re-opens the path through `O_NOFOLLOW` descriptors, so a component swapped
- * to a symlink after this check still cannot be followed.
+ * re-opens the path with no component followed, so a component swapped to a
+ * symlink after this check still cannot be followed.
  */
 export function parseRunDirectoryIdentity(
   runsRoot: string,
   runDirectory: string,
 ): DomainResult<RunDirectoryIdentity, RunDirectoryError> {
-  const reference = parseRunDirectoryReference(runsRoot, runDirectory);
+  const lexical = parseRunDirectoryReference(runsRoot, runDirectory);
+  if (!lexical.ok) return lexical;
+  const reference = rebasedOnRealRunsRoot(lexical.value);
   if (!reference.ok) return reference;
   const directory = reference.value.runDirectory;
   let stats: ReturnType<typeof statSync> | undefined;
@@ -329,11 +363,11 @@ export interface RunDirHandle extends ProgramJournal {
  * to the same anchoring as every read and write here.
  */
 function ensureRunSubdirectories(runDirectory: string, targets: readonly string[]): void {
-  const rootFd = openDirectoryNoFollow(runDirectory);
+  const root = openDirectoryNoFollow(runDirectory);
   try {
-    for (const target of targets) ensureRelativeDirectoryNoFollow(rootFd, runDirectory, target);
+    for (const target of targets) ensureRelativeDirectoryNoFollow(root, runDirectory, target);
   } finally {
-    closeSync(rootFd);
+    closeAnchoredDirectory(root);
   }
 }
 
@@ -350,15 +384,15 @@ function readJsonNoFollow(path: string): unknown {
 }
 
 /** The event records only; the retained descriptor also contains the lock. */
-function eventFileNames(directoryFd: number): readonly string[] {
-  return listDirectoryNamesNoFollow(directoryFd).filter((name) => name.endsWith(".json"));
+function eventFileNames(events: AnchoredDirectory): readonly string[] {
+  return listDirectoryNamesNoFollow(events).filter((name) => name.endsWith(".json"));
 }
 
 const EVENT_FILE = /^(\d{6,})-([A-Za-z0-9:_-]{1,256})\.json$/;
 
-function readEventRecords(directoryFd: number): readonly ProgramEventRecord[] {
+function readEventRecords(events: AnchoredDirectory): readonly ProgramEventRecord[] {
   const seenDedup = new Set<string>();
-  return Object.freeze(eventFileNames(directoryFd).map((name, index) => {
+  return Object.freeze(eventFileNames(events).map((name, index) => {
     const match = EVENT_FILE.exec(name);
     if (match === null) throw new Error(`Corrupt program event filename ${name}`);
     const filenameSequence = Number(match[1]);
@@ -366,7 +400,7 @@ function readEventRecords(directoryFd: number): readonly ProgramEventRecord[] {
     if (!Number.isSafeInteger(filenameSequence) || filenameSequence !== index) {
       throw new Error(`Corrupt program event ${name}: sequence prefix is not contiguous from zero`);
     }
-    const raw = JSON.parse(readDirectoryFileNoFollow(directoryFd, name).toString("utf-8")) as unknown;
+    const raw = JSON.parse(readDirectoryFileNoFollow(events, name).toString("utf-8")) as unknown;
     const record = parseProgramEventRecord(raw, name);
     if (record.sequence !== filenameSequence || record.dedupKey !== filenameDedup) {
       throw new Error(`Corrupt program event ${name}: filename does not match record identity`);
@@ -447,7 +481,7 @@ export function openRunDirectory(
   // is pure path math and `statSync` follows links, so a symlinked run
   // directory would otherwise have the fixed layout built through it.
   try {
-    closeSync(openDirectoryNoFollow(directory));
+    closeAnchoredDirectory(openDirectoryNoFollow(directory));
   } catch (error) {
     return failure("runDirectory", `run directory is not safely reachable: ${(error as Error).message}`);
   }
@@ -589,13 +623,13 @@ function journalOperations(directory: string) {
      */
     async appendEvent(record: ProgramEventRecord): Promise<void> {
       const parsedInput = parseProgramEventRecord(record, "append input");
-      await withAnchoredDirectoryLock(join(directory, EVENTS), "append.lock", (eventsFd) => {
-        const events = readEventRecords(eventsFd);
+      await withAnchoredDirectoryLock(join(directory, EVENTS), "append.lock", (eventsDirectory) => {
+        const events = readEventRecords(eventsDirectory);
         if (events.some((event) => event.dedupKey === parsedInput.dedupKey)) return;
         const sequence = events.length;
         const sequenced = Object.freeze({ ...parsedInput, sequence });
         writeDirectoryFileExclusiveNoFollow(
-          eventsFd,
+          eventsDirectory,
           `${String(sequence).padStart(6, "0")}-${sequenced.dedupKey}.json`,
           JSON.stringify(sequenced),
         );
@@ -606,7 +640,7 @@ function journalOperations(directory: string) {
       return withAnchoredDirectoryLock(
         join(directory, EVENTS),
         "append.lock",
-        (eventsFd) => readEventRecords(eventsFd),
+        (eventsDirectory) => readEventRecords(eventsDirectory),
       );
     },
 
@@ -750,15 +784,15 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
     },
 
     readIssuedRequests(): DomainResult<readonly AgentRequestAuthority[], RunDirectoryError> {
-      let requestsFd: number | null = null;
+      let requests: AnchoredDirectory | null = null;
       try {
-        requestsFd = openDirectoryNoFollow(join(directory, REQUESTS));
+        requests = openDirectoryNoFollow(join(directory, REQUESTS));
         const issued: AgentRequestAuthority[] = [];
-        for (const name of listDirectoryNamesNoFollow(requestsFd)) {
+        for (const name of listDirectoryNamesNoFollow(requests)) {
           if (!name.endsWith(".json")) continue;
           let raw: unknown;
           try {
-            raw = JSON.parse(readDirectoryFileNoFollow(requestsFd, name).toString("utf-8")) as unknown;
+            raw = JSON.parse(readDirectoryFileNoFollow(requests, name).toString("utf-8")) as unknown;
           } catch (error) {
             return failure("request", `request authority ${name} is unreadable: ${(error as Error).message}`);
           }
@@ -775,21 +809,21 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
       } catch (error) {
         return failure("request", `cannot inspect issued requests safely: ${(error as Error).message}`);
       } finally {
-        if (requestsFd !== null) closeSync(requestsFd);
+        if (requests !== null) closeAnchoredDirectory(requests);
       }
     },
 
     readCapturedAttempts(): DomainResult<ReadonlySet<CaptureKey>, RunDirectoryError> {
-      let transcriptsFd: number | null = null;
+      let transcripts: AnchoredDirectory | null = null;
       try {
-        transcriptsFd = openDirectoryNoFollow(join(directory, TRANSCRIPTS));
+        transcripts = openDirectoryNoFollow(join(directory, TRANSCRIPTS));
         const captured = new Set<CaptureKey>();
-        for (const slot of listDirectoryNamesNoFollow(transcriptsFd)) {
+        for (const slot of listDirectoryNamesNoFollow(transcripts)) {
           if (slot === "capture.lock" || slot === "capture.lock.recovery" || slot.startsWith("capture.lock.tomb-")) continue;
-          let slotFd: number | null = null;
+          let slotDirectory: AnchoredDirectory | null = null;
           try {
-            slotFd = openChildDirectoryNoFollow(transcriptsFd, slot);
-            for (const name of listDirectoryNamesNoFollow(slotFd)) {
+            slotDirectory = openChildDirectoryNoFollow(transcripts, slot);
+            for (const name of listDirectoryNamesNoFollow(slotDirectory)) {
               const match = /^attempt-(1|2)\.raw$/.exec(name);
               if (match !== null) captured.add(captureKey(slot, Number(match[1]) as 1 | 2));
             }
@@ -799,14 +833,14 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
               `cannot inspect transcript slot ${slot} safely: ${error instanceof Error ? error.message : String(error)}`,
             );
           } finally {
-            if (slotFd !== null) closeSync(slotFd);
+            if (slotDirectory !== null) closeAnchoredDirectory(slotDirectory);
           }
         }
         return success(captured);
       } catch (error) {
         return failure("transcript", `cannot inspect captured attempts safely: ${(error as Error).message}`);
       } finally {
-        if (transcriptsFd !== null) closeSync(transcriptsFd);
+        if (transcripts !== null) closeAnchoredDirectory(transcripts);
       }
     },
 
@@ -823,30 +857,30 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
       }
       const key = captureKey(supplied.value.slotId, supplied.value.attempt);
       try {
-        await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsFd) => {
-          const slotFd = openChildDirectoryNoFollow(transcriptsFd, supplied.value.slotId);
+        await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsDirectory) => {
+          const slotDirectory = openChildDirectoryNoFollow(transcriptsDirectory, supplied.value.slotId);
           try {
             const rawName = `attempt-${supplied.value.attempt}.raw`;
             try {
-              readDirectoryFileNoFollow(slotFd, rawName);
+              readDirectoryFileNoFollow(slotDirectory, rawName);
               throw new Error(`attempt ${supplied.value.attempt} for slot ${supplied.value.slotId} is already captured`);
             } catch (error) {
               if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
             }
             const markerName = `attempt-${supplied.value.attempt}.rejected`;
             try {
-              writeDirectoryFileExclusiveNoFollow(slotFd, markerName, JSON.stringify({
+              writeDirectoryFileExclusiveNoFollow(slotDirectory, markerName, JSON.stringify({
                 requestId: supplied.value.requestId,
                 diagnostic,
               }));
             } catch (error) {
               if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-              const existing = JSON.parse(readDirectoryFileNoFollow(slotFd, markerName).toString("utf8")) as unknown;
+              const existing = JSON.parse(readDirectoryFileNoFollow(slotDirectory, markerName).toString("utf8")) as unknown;
               if (typeof existing !== "object" || existing === null ||
                   (existing as Record<string, unknown>).requestId !== supplied.value.requestId) throw error;
             }
           } finally {
-            closeSync(slotFd);
+            closeAnchoredDirectory(slotDirectory);
           }
         });
         return success(key);
@@ -876,27 +910,27 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
     },
 
     isPristine(): DomainResult<boolean, RunDirectoryError> {
-      let rootFd: number | null = null;
+      let root: AnchoredDirectory | null = null;
       try {
-        rootFd = openDirectoryNoFollow(directory);
+        root = openDirectoryNoFollow(directory);
         const allowedRoot = new Set([AUTHORITY_FILE, PROGRAM_FILE, ...FIXED_SUBDIRECTORIES.map((path) => path.split("/")[0]!) ]);
-        const rootEntries = listDirectoryNamesNoFollow(rootFd);
+        const rootEntries = listDirectoryNamesNoFollow(root);
         if (rootEntries.some((entry) => !allowedRoot.has(entry))) return success(false);
         for (const relative of FIXED_SUBDIRECTORIES) {
-          let fd: number | null = null;
+          let child: AnchoredDirectory | null = null;
           try {
-            fd = openDirectoryNoFollow(join(directory, relative));
+            child = openDirectoryNoFollow(join(directory, relative));
             const allowed = relative === REQUESTS ? new Set([CORRELATORS]) : new Set<string>();
-            if (listDirectoryNamesNoFollow(fd).some((entry) => !allowed.has(entry))) return success(false);
+            if (listDirectoryNamesNoFollow(child).some((entry) => !allowed.has(entry))) return success(false);
           } finally {
-            if (fd !== null) closeSync(fd);
+            if (child !== null) closeAnchoredDirectory(child);
           }
         }
         return success(true);
       } catch (error) {
         return failure("pristine", `cannot prove replacement run pristine: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
-        if (rootFd !== null) closeSync(rootFd);
+        if (root !== null) closeAnchoredDirectory(root);
       }
     },
 
@@ -969,12 +1003,12 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
         return failure("request", `request ${supplied.value.requestId} capture authority does not match its immutable reservation`);
       }
       try {
-        return await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsFd) => {
-          const slotFd = openChildDirectoryNoFollow(transcriptsFd, supplied.value.slotId);
+        return await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsDirectory) => {
+          const slotDirectory = openChildDirectoryNoFollow(transcriptsDirectory, supplied.value.slotId);
           try {
             const rejectionName = `attempt-${supplied.value.attempt}.rejected`;
             try {
-                const rejected = JSON.parse(readDirectoryFileNoFollow(slotFd, rejectionName).toString("utf8")) as unknown;
+                const rejected = JSON.parse(readDirectoryFileNoFollow(slotDirectory, rejectionName).toString("utf8")) as unknown;
               if (typeof rejected !== "object" || rejected === null ||
                   (rejected as Record<string, unknown>).requestId !== supplied.value.requestId) {
                 return failure("transcript", "capture rejection marker does not match immutable request authority");
@@ -988,14 +1022,14 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
             const rawName = `attempt-${supplied.value.attempt}.raw`;
             const stagedName = `${rawName}.staged-${process.pid}-${createHash("sha256").update(Uint8Array.from(bytes)).digest("hex").slice(0, 16)}`;
             try {
-              writeDirectoryFileExclusiveNoFollow(slotFd, stagedName, Uint8Array.from(bytes));
+              writeDirectoryFileExclusiveNoFollow(slotDirectory, stagedName, Uint8Array.from(bytes));
               // link(2) is the no-overwrite atomic publication point: the
               // fully-written staged inode becomes visible at rawName, while
               // EEXIST preserves the previously published attempt.
-              linkSync(procFdChild(slotFd, stagedName), procFdChild(slotFd, rawName));
-              unlinkSync(procFdChild(slotFd, stagedName));
+              linkSync(anchoredChildPath(slotDirectory, stagedName), anchoredChildPath(slotDirectory, rawName));
+              unlinkSync(anchoredChildPath(slotDirectory, stagedName));
             } catch (error) {
-              try { unlinkSync(procFdChild(slotFd, stagedName)); } catch { /* inert staged cleanup */ }
+              try { unlinkSync(anchoredChildPath(slotDirectory, stagedName)); } catch { /* inert staged cleanup */ }
               return failure("transcript", (error as NodeJS.ErrnoException).code === "EEXIST"
                 ? `attempt ${supplied.value.attempt} for slot ${supplied.value.slotId} is already captured`
                 : `cannot capture transcript: ${(error as Error).message}`);
@@ -1012,7 +1046,7 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
               byteLength: byteLength.value,
             }));
           } finally {
-            closeSync(slotFd);
+            closeAnchoredDirectory(slotDirectory);
           }
         });
       } catch (error) {
@@ -1259,4 +1293,4 @@ export const RUN_DIRECTORY_LAYOUT = Object.freeze({
 });
 
 /** Exposed for the handle's own use and for callers proving anchored access. */
-export { procFdChild };
+export { anchoredChildPath };

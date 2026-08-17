@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,7 +11,7 @@ afterEach(() => {
 });
 
 function repository(): string {
-  const root = mkdtempSync(join(tmpdir(), "loom-repository-path-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-repository-path-")));
   cleanup.push(root);
   mkdirSync(join(root, "src"));
   writeFileSync(join(root, "src", "a.ts"), "export {};\n");
@@ -55,7 +55,7 @@ describe("inspectRepositoryPath", () => {
 
   it("can permit a leaf symlink for no-follow callers while rejecting symlinked parents", () => {
     const root = repository();
-    const outside = mkdtempSync(join(tmpdir(), "loom-repository-path-outside-"));
+    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-repository-path-outside-")));
     cleanup.push(outside);
     writeFileSync(join(outside, "secret.ts"), "secret\n");
     symlinkSync(join(outside, "secret.ts"), join(root, "leaf.ts"));
@@ -73,7 +73,7 @@ describe("inspectRepositoryPath", () => {
 
   it("rejects both leaf symlinks and symlinked parent directories", () => {
     const root = repository();
-    const outside = mkdtempSync(join(tmpdir(), "loom-repository-path-outside-"));
+    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-repository-path-outside-")));
     cleanup.push(outside);
     writeFileSync(join(outside, "secret.ts"), "secret\n");
     symlinkSync(join(outside, "secret.ts"), join(root, "leaf.ts"));

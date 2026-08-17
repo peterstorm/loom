@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -44,7 +44,7 @@ describe("Pi harness detection", () => {
   });
 
   it("resumes legacy Claude state when Pi-native state is absent", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-pi-state-fallback-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-pi-state-fallback-")));
     try {
       execFileSync("git", ["init", "--quiet"], { cwd: root });
       const legacy = ".claude/state/active_task_graph.json";

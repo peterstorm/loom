@@ -95,12 +95,38 @@ describe("guard-state-file — module-preload flags keep stdin as the program so
  * brace syntax in at least one produced view, so an expansion that differs from
  * bash's is exactly an expansion that misses a real command.
  */
+/**
+ * The differential pin needs bash >= 4. Brace INCREMENTS (`{a..z..N}`) and
+ * zero-padded sequence semantics BOTH arrived in bash 4.0, and macOS still
+ * ships 3.2 as `/bin/bash`. Pinning against 3.2 would assert its
+ * NON-expansion as the contract — inverting exactly what these fixtures
+ * prove — so a newer bash is preferred, and when none exists the differential
+ * block is skipped rather than run against a shell that cannot express the
+ * syntax under test. The guard's own decisions stay covered unconditionally
+ * in the block below.
+ */
+function modernBashPath(): string | null {
+  for (const candidate of ["bash", "/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/bin/bash"]) {
+    try {
+      const major = Number(
+        execFileSync(candidate, ["-c", 'printf %s "${BASH_VERSINFO[0]}"'], { encoding: "utf-8" }).trim(),
+      );
+      if (Number.isInteger(major) && major >= 4) return candidate;
+    } catch {
+      // Candidate absent or not executable — try the next one.
+    }
+  }
+  return null;
+}
+
+const MODERN_BASH = modernBashPath();
+
 const bashExpand = (pattern: string): string[] =>
-  execFileSync("bash", ["-c", `printf '%s\\n' ${pattern}`], { encoding: "utf-8" })
+  execFileSync(MODERN_BASH ?? "bash", ["-c", `printf '%s\\n' ${pattern}`], { encoding: "utf-8" })
     .split("\n")
     .filter((line) => line !== "");
 
-describe("guard-state-file — brace sequence expansion matches real bash", () => {
+describe.skipIf(MODERN_BASH === null)("guard-state-file — brace sequence expansion matches real bash", () => {
   it.each([
     // Zero-padded ascending/descending, the case the comment claims and nothing checked.
     "{01..10}",
@@ -146,12 +172,22 @@ describe("guard-state-file — brace sequence expansion matches real bash", () =
     expect(expandBraces(pattern)).toEqual(bashExpand(pattern));
   });
 
-  it("a zero-padded sequence that REACHES a guarded path is blocked", () => {
-    // Padding is not decorative here: bash expands `{08..10}` to `08 09 10`,
-    // so this line names a real `.claude/state/08` … `10` sweep. Rendering it
+  it("pins the padded expansion the guard depends on against real bash", () => {
+    // Padding is not decorative: bash expands `{08..10}` to `08 09 10`, so
+    // such a line names a real `.claude/state/08` … `10` sweep. Rendering it
     // unpadded (`8 9 10`) would produce views that match nothing under the
     // guarded directory prefix and the write would be allowed.
     expect(bashExpand("{08..10}")).toEqual(["08", "09", "10"]);
+  });
+});
+
+/**
+ * The guard's OWN decisions over the same padded syntax. These assert the
+ * blocking behaviour rather than bash's output, so they run on every shell —
+ * including macOS's bash 3.2, where the differential block above is skipped.
+ */
+describe("guard-state-file — padded sequences reach guarded paths", () => {
+  it("a zero-padded sequence that REACHES a guarded path is blocked", () => {
     expect(guardDecision("rm -rf .claude/state/backup-{08..10}")).toBe("block");
     expect(guardDecision("rm -rf .claude/state/backup-{008..010..2}")).toBe("block");
   });

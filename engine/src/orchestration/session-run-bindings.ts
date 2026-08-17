@@ -1,11 +1,13 @@
-import { closeSync, renameSync, unlinkSync } from "node:fs";
+import { renameSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseOrchestrationRunId, parseRequestId, type RequestId } from "../core/orchestration-contract";
 import { ORCHESTRATION_RUNS_SUFFIX, parseSessionId, type SessionId } from "../machine/evidence";
 import {
-  ensureDirectoryNoFollow,
+  type AnchoredDirectory,
+  anchoredChildPath,
+  closeAnchoredDirectory,
+  ensureResolvedBaseDirectory,
   openDirectoryNoFollow,
-  procFdChild,
   readDirectoryFileNoFollow,
   withAnchoredDirectoryLock,
   writeDirectoryFileExclusiveNoFollow,
@@ -108,12 +110,12 @@ function registryFile(sessionId: SessionId): string {
 }
 
 function readRegistryFromDirectory(
-  directoryFd: number,
+  directory: AnchoredDirectory,
   sessionId: SessionId,
 ): BindingResult<SessionRunBindingRegistry> {
   let bytes: Buffer;
   try {
-    bytes = readDirectoryFileNoFollow(directoryFd, registryFile(sessionId));
+    bytes = readDirectoryFileNoFollow(directory, registryFile(sessionId));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return ok(Object.freeze({
@@ -140,24 +142,27 @@ export function readSessionRunBindings(
   const sessionId = parseSessionId(rawSessionId);
   if (sessionId === null) return failed(`invalid Pi session id ${JSON.stringify(rawSessionId)}`);
   try {
-    const directoryFd = openBindingDirectory(directory);
+    const anchored = openBindingDirectory(directory);
     try {
-      const registry = readRegistryFromDirectory(directoryFd, sessionId);
+      const registry = readRegistryFromDirectory(anchored, sessionId);
       return registry.ok ? ok(registry.value.bindings) : registry;
     } finally {
-      closeBindingDirectory(directoryFd);
+      closeAnchoredDirectory(anchored);
     }
   } catch (error) {
     return failed(`cannot open Pi session run binding directory: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
-const openBindingDirectory = (directory: string): number => {
-  ensureDirectoryNoFollow(directory);
-  return openDirectoryNoFollow(directory);
-};
-
-const closeBindingDirectory = closeSync;
+/**
+ * The binding directory is the run BASE, so it is resolved once here rather
+ * than walked strictly from the filesystem root: on macOS its configured path
+ * runs through the system's `/tmp` → `/private/tmp` symlink, which is layout
+ * rather than attack. Every path opened BELOW the resolved base is still held
+ * to the strict no-symlink rule by the anchored primitives.
+ */
+const openBindingDirectory = (directory: string): AnchoredDirectory =>
+  openDirectoryNoFollow(ensureResolvedBaseDirectory(directory));
 
 export async function registerSessionRunBinding(
   directory: string,
@@ -170,9 +175,9 @@ export async function registerSessionRunBinding(
   if (!parsedBinding.ok) return parsedBinding;
 
   try {
-    ensureDirectoryNoFollow(directory);
-    return await withAnchoredDirectoryLock(directory, `${sessionId}.orchestration-runs.lock`, (directoryFd) => {
-      const current = readRegistryFromDirectory(directoryFd, sessionId);
+    const base = ensureResolvedBaseDirectory(directory);
+    return await withAnchoredDirectoryLock(base, `${sessionId}.orchestration-runs.lock`, (anchored) => {
+      const current = readRegistryFromDirectory(anchored, sessionId);
       if (!current.ok) return current;
       const identity = `${parsedBinding.value.runsRoot}\0${parsedBinding.value.runDirectory}`;
       const previous = current.value.bindings.find(
@@ -201,10 +206,10 @@ export async function registerSessionRunBinding(
       const finalName = registryFile(sessionId);
       const stagedName = `${finalName}.staged-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
       try {
-        writeDirectoryFileExclusiveNoFollow(directoryFd, stagedName, `${JSON.stringify(next, null, 2)}\n`);
-        renameSync(procFdChild(directoryFd, stagedName), procFdChild(directoryFd, finalName));
+        writeDirectoryFileExclusiveNoFollow(anchored, stagedName, `${JSON.stringify(next, null, 2)}\n`);
+        renameSync(anchoredChildPath(anchored, stagedName), anchoredChildPath(anchored, finalName));
       } catch (error) {
-        try { unlinkSync(procFdChild(directoryFd, stagedName)); } catch { /* never published */ }
+        try { unlinkSync(anchoredChildPath(anchored, stagedName)); } catch { /* never published */ }
         throw error;
       }
       return ok(next);

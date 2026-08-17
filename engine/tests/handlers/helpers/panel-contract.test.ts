@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { chmodSync, closeSync, mkdtempSync, mkdirSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,7 +39,7 @@ describe("panel-contract helper CLI", () => {
   let manifestPath: string;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "loom-panel-contract-"));
+    tmp = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-panel-contract-")));
     runsRoot = join(tmp, "panel-runs");
     runDir = join(runsRoot, "run.1234567890");
     mkdirSync(join(runDir, "candidates"), { recursive: true });
@@ -362,7 +362,13 @@ describe("panel-contract helper CLI", () => {
   });
 
   it("returns failure when canonical stdout cannot be written", () => {
-    const full = openSync("/dev/full", "w");
+    // A stdout that rejects every write. `/dev/full` is the classic way to get
+    // one, but it is Linux-only; a READ-ONLY descriptor fails the child's
+    // writes just as hard (EBADF) and exists on every platform, so the
+    // contract is exercised rather than skipped off Linux.
+    const unwritable = join(tmp, "unwritable-stdout");
+    writeFileSync(unwritable, "");
+    const full = openSync(unwritable, "r");
     try {
       const result = spawnSync("bun", [CLI, "helper", "panel-contract", "interview"], {
         cwd: tmp,

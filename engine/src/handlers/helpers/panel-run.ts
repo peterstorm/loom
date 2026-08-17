@@ -24,9 +24,12 @@ import type { HookResult } from "../../types";
 import type { ParseResult, RunLayout } from "../../core/panel-kernel";
 import { fail, ok } from "../../core/panel-kernel";
 import {
+  type AnchoredDirectory,
+  anchoredChildPath,
+  closeAnchoredDirectory,
   ensureRelativeDirectoryNoFollow,
+  listDirectoryNamesNoFollow,
   openDirectoryNoFollow,
-  procFdChild,
 } from "../../orchestration/no-follow-fs";
 
 // `RunLayout` and the two layouts are pure data and live in the kernel, beside
@@ -267,20 +270,28 @@ export function requireRunDirectoriesNoFollow(
   runDir: string,
   directories: readonly string[],
 ): ParseResult<void> {
+  // The run directory is the BASE: the operator's path to it may traverse a
+  // system symlink (macOS resolves `/var` to `/private/var`), while nothing
+  // BELOW it may. Resolving it once here is what lets every anchored open
+  // below hold to the strict no-symlink rule — the same reason
+  // `runArtifactErrors` compares containment against `realRunDir`.
+  const resolvedRunDir = realRunDir(runDir);
+  if (!resolvedRunDir.ok) return fail([...resolvedRunDir.errors]);
+  const root = resolvedRunDir.value;
   const errors: string[] = [];
   for (const directory of directories) {
-    const path = join(runDir, directory);
-    let directoryFd: number | null = null;
+    const path = join(root, directory);
+    let anchored: AnchoredDirectory | null = null;
     try {
-      const fromRun = relative(resolve(runDir), resolve(path));
+      const fromRun = relative(root, resolve(path));
       if (fromRun === ".." || fromRun.startsWith(`..${sep}`) || isAbsolute(fromRun)) {
         throw new Error(`run subdirectory escapes run directory: ${path}`);
       }
-      directoryFd = openDirectoryNoFollow(path);
+      anchored = openDirectoryNoFollow(path);
     } catch (error) {
       errors.push(`cannot anchor existing run subdirectory ${path}: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
-      if (directoryFd !== null) closeSync(directoryFd);
+      if (anchored !== null) closeAnchoredDirectory(anchored);
     }
   }
   return errors.length > 0 ? fail(errors) : ok(undefined);
@@ -291,27 +302,33 @@ export function prepareWriteTargets(
   directories: readonly string[],
   files: readonly string[],
 ): ParseResult<void> {
+  // Resolve the run BASE once, for the reason documented on
+  // `requireRunDirectoriesNoFollow`; every path built below it is then held to
+  // the strict no-symlink rule.
+  const resolvedRunDir = realRunDir(runDir);
+  if (!resolvedRunDir.ok) return fail([...resolvedRunDir.errors]);
+  const root = resolvedRunDir.value;
   const errors: string[] = [];
-  let runDirectoryFd: number | null = null;
+  let runDirectory: AnchoredDirectory | null = null;
   try {
-    runDirectoryFd = openDirectoryNoFollow(runDir);
+    runDirectory = openDirectoryNoFollow(root);
   } catch (error) {
-    errors.push(`cannot anchor run directory ${runDir}: ${error instanceof Error ? error.message : String(error)}`);
+    errors.push(`cannot anchor run directory ${root}: ${error instanceof Error ? error.message : String(error)}`);
   }
   for (const directory of directories) {
-    const path = join(runDir, directory);
+    const path = join(root, directory);
     try {
-      if (runDirectoryFd === null) throw new Error("run directory descriptor is unavailable");
-      ensureRelativeDirectoryNoFollow(runDirectoryFd, runDir, path);
+      if (runDirectory === null) throw new Error("run directory anchor is unavailable");
+      ensureRelativeDirectoryNoFollow(runDirectory, root, path);
     } catch (error) {
       errors.push(`cannot create ${path}: ${error instanceof Error ? error.message : String(error)}`);
       continue;
     }
     errors.push(...entryErrors("run subdirectory", path, "directory"));
   }
-  if (runDirectoryFd !== null) closeSync(runDirectoryFd);
+  if (runDirectory !== null) closeAnchoredDirectory(runDirectory);
   for (const file of files) {
-    const path = join(runDir, file);
+    const path = join(root, file);
     try {
       // Absent is the expected state for a fresh run directory and is fine;
       // anything that EXISTS must be a plain file we are overwriting in place.
@@ -333,14 +350,15 @@ export function prepareWriteTargets(
 }
 
 /**
- * Descriptor-anchored run-artifact operations now live in the orchestration
- * layer so the anchored RunDirHandle and these helpers share one
- * implementation. Re-exported here because they are part of this module's
- * established public surface.
+ * Anchored run-artifact operations now live in the orchestration layer so the
+ * anchored RunDirHandle and these helpers share one implementation.
+ * Re-exported here because they are part of this module's established public
+ * surface.
  */
 export {
+  anchoredChildPath,
+  closeAnchoredDirectory,
   openDirectoryNoFollow,
-  procFdChild,
   publishStagedRunFile,
   readRunFileNoFollow,
   removeRunFileNoFollow,
@@ -371,15 +389,17 @@ export function pruneSurplusItems(
   itemDir: string,
   expected: readonly string[],
 ): ParseResult<readonly string[]> {
-  const directory = join(runDir, itemDir);
+  const resolvedRunDir = realRunDir(runDir);
+  if (!resolvedRunDir.ok) return fail([...resolvedRunDir.errors]);
+  const directory = join(resolvedRunDir.value, itemDir);
   const keep = new Set(expected);
-  let directoryFd: number | null = null;
+  let anchored: AnchoredDirectory | null = null;
   let entries: readonly string[];
   try {
-    directoryFd = openDirectoryNoFollow(directory);
-    entries = readdirSync(`/proc/self/fd/${directoryFd}`);
+    anchored = openDirectoryNoFollow(directory);
+    entries = listDirectoryNamesNoFollow(anchored);
   } catch (error) {
-    if (directoryFd !== null) closeSync(directoryFd);
+    if (anchored !== null) closeAnchoredDirectory(anchored);
     // A run directory that has never held items is the normal first-brief case.
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return ok([]);
     return fail([
@@ -393,7 +413,7 @@ export function pruneSurplusItems(
     for (const entry of entries) {
       if (keep.has(entry)) continue;
       const path = join(directory, entry);
-      const anchoredPath = procFdChild(directoryFd, entry);
+      const anchoredPath = anchoredChildPath(anchored, entry);
       try {
         const stat = lstatSync(anchoredPath);
         if (stat.isSymbolicLink()) {
@@ -413,7 +433,7 @@ export function pruneSurplusItems(
       }
     }
   } finally {
-    closeSync(directoryFd);
+    closeAnchoredDirectory(anchored);
   }
   return errors.length > 0 ? fail(errors) : ok(removed);
 }

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -35,7 +35,7 @@ afterEach(() => {
 const RUN_ID = "run.publication-1" as OrchestrationRunId;
 
 function runsRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "loom-publication-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-publication-")));
   cleanup.push(root);
   return root;
 }

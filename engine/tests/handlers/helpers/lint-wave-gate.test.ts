@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
@@ -139,7 +139,7 @@ describe("filterExistingFiles", () => {
 
 describe("resolveLintTargets", () => {
   it("canonicalizes absolute in-repo paths and skips deleted files", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-lint-targets-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-targets-")));
     try {
       mkdirSync(join(root, "src"));
       writeFileSync(join(root, "src", "a.ts"), "export {};\n");
@@ -151,8 +151,8 @@ describe("resolveLintTargets", () => {
   });
 
   it("rejects external and symlink-traversing transcript paths before lint reads", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-lint-root-"));
-    const outside = mkdtempSync(join(tmpdir(), "loom-lint-outside-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-root-")));
+    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-outside-")));
     try {
       writeFileSync(join(outside, "secret.ts"), "secret\n");
       symlinkSync(outside, join(root, "linked"));

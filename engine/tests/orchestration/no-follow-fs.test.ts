@@ -10,16 +10,18 @@
  * start following links out of the run directory.
  */
 
-import { closeSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
 import {
+  anchoredChildPath,
+  closeAnchoredDirectory,
   ensureDirectoryNoFollow,
+  ensureResolvedBaseDirectory,
   listDirectoryNamesNoFollow,
   openDirectoryNoFollow,
-  procFdChild,
   readRunBytesNoFollow,
   readRunFileNoFollow,
   recoverStaleDirectoryLock,
@@ -34,8 +36,15 @@ afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
+/**
+ * A workspace rooted at the REAL temp path. Production resolves its configured
+ * base once for the same reason (`ensureResolvedBaseDirectory`): on macOS
+ * `tmpdir()` sits behind the system `/var` → `/private/var` symlink, and the
+ * strict no-symlink rule these tests exercise applies BELOW the base, not to
+ * the operator's own path to it. On Linux this is an identity.
+ */
 function workspace(): string {
-  const root = mkdtempSync(join(tmpdir(), "loom-no-follow-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-no-follow-")));
   cleanup.push(root);
   mkdirSync(join(root, "run"), { recursive: true });
   return root;
@@ -126,17 +135,17 @@ describe("anchored lock ownership", () => {
     const root = workspace();
     const directory = join(root, "run");
     writeFileSync(join(directory, "changed.lock"), "999999999");
-    const directoryFd = openDirectoryNoFollow(directory);
+    const anchored = openDirectoryNoFollow(directory);
     try {
-      const recovered = recoverStaleDirectoryLock(directoryFd, "changed.lock", (tombName) => {
-        expect(listDirectoryNamesNoFollow(directoryFd)).toContain(tombName);
-        writeFileSync(procFdChild(directoryFd, tombName), `${process.pid}:new-live-owner`);
+      const recovered = recoverStaleDirectoryLock(anchored, "changed.lock", (tombName) => {
+        expect(listDirectoryNamesNoFollow(anchored)).toContain(tombName);
+        writeFileSync(anchoredChildPath(anchored, tombName), `${process.pid}:new-live-owner`);
       });
 
       expect(recovered).toBe(false);
       expect(readFileSync(join(directory, "changed.lock"), "utf-8")).toBe(`${process.pid}:new-live-owner`);
     } finally {
-      closeSync(directoryFd);
+      closeAnchoredDirectory(anchored);
     }
   });
 
@@ -147,12 +156,12 @@ describe("anchored lock ownership", () => {
     // owner read cannot complete (EISDIR). Recovery must name the cause rather
     // than collapsing it into "not recoverable" contention.
     mkdirSync(join(directory, "corrupted.lock"));
-    const directoryFd = openDirectoryNoFollow(directory);
+    const anchored = openDirectoryNoFollow(directory);
     try {
-      expect(() => recoverStaleDirectoryLock(directoryFd, "corrupted.lock"))
+      expect(() => recoverStaleDirectoryLock(anchored, "corrupted.lock"))
         .toThrow(/cannot inspect lock corrupted\.lock/);
     } finally {
-      closeSync(directoryFd);
+      closeAnchoredDirectory(anchored);
     }
   });
 
@@ -232,5 +241,62 @@ describe("removal refuses to follow a planted symlink", () => {
     removeRunFileNoFollow(path);
 
     expect(() => readRunFileNoFollow(path)).toThrow();
+  });
+});
+
+/**
+ * The two platforms reach the same guarantee by different means, and which
+ * mechanism is in play is exactly the thing a future edit could silently
+ * regress — a darwin-shaped change that quietly disabled Linux's descriptor
+ * anchoring would still pass every symlink test above, because the refusals
+ * would keep coming from the kernel either way.
+ */
+describe("platform anchoring", () => {
+  it("anchors to a descriptor on Linux and to a proven real path on macOS", () => {
+    const root = workspace();
+    const anchored = openDirectoryNoFollow(join(root, "run"));
+    try {
+      if (process.platform === "darwin") {
+        expect(anchored.anchor).toBe("real-path");
+        expect(anchoredChildPath(anchored, "x")).toBe(join(root, "run", "x"));
+      } else {
+        expect(anchored.anchor).toBe("descriptor");
+        expect(anchoredChildPath(anchored, "x")).toMatch(/^\/proc\/self\/fd\/\d+\/x$/);
+      }
+    } finally {
+      closeAnchoredDirectory(anchored);
+    }
+  });
+});
+
+/**
+ * The BASE is the one place a symlink is layout rather than attack: macOS
+ * reaches every real run directory through `/tmp` → `/private/tmp`. Resolving
+ * it once is what lets everything below it stay strict.
+ */
+describe("run base resolution", () => {
+  it("leaves a symlink-free base exactly as given", () => {
+    const root = workspace();
+    const base = join(root, "claude-subagents");
+
+    expect(ensureResolvedBaseDirectory(base)).toBe(base);
+  });
+
+  it("resolves a symlinked base to its real path rather than refusing it", () => {
+    const root = workspace();
+    const real = join(root, "real-base");
+    mkdirSync(real);
+    symlinkSync(real, join(root, "linked-base"));
+
+    expect(ensureResolvedBaseDirectory(join(root, "linked-base"))).toBe(real);
+  });
+
+  it("still refuses a symlink planted BELOW the resolved base", () => {
+    const root = workspace();
+    const base = ensureResolvedBaseDirectory(join(root, "base"));
+    const secret = secretOutsideTheRun(root);
+    symlinkSync(secret, join(base, "authority.json"));
+
+    expect(() => readRunFileNoFollow(join(base, "authority.json"))).toThrow(/ELOOP|too many symbolic/i);
   });
 });

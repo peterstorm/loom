@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 function fixture(): string {
-  const root = mkdtempSync(join(tmpdir(), "loom-artifact-baseline-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-artifact-baseline-")));
   roots.push(root);
   mkdirSync(join(root, "src"));
   writeFileSync(join(root, "src", "existing.ts"), "before\n");
