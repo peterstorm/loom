@@ -194,13 +194,34 @@ export type RunDirectoryEntryInspection =
   | Readonly<{ kind: "directory"; reference: RunDirectoryReference }>
   | Readonly<{ kind: "occupied"; reference: RunDirectoryReference; entryKind: "symlink" | "other" }>;
 
+/**
+ * Resolve a caller's run reference to an absolute path.
+ *
+ * A run reference always arrives beside the runs-root it belongs to — the
+ * `--run` flag beside `--runs-root`, the remediation payload's `sourceRun`
+ * beside its `sourceRunsRoot` — so the natural way to write one is the run's
+ * bare name. Resolving that against the process CWD, the only reading `resolve`
+ * has, turned every bare name into a path outside the root and then refused it
+ * as "not a direct child": a diagnostic about the RELATION, handed to a caller
+ * whose only omission was a prefix the root already carries.
+ *
+ * A canonical run id is separator-free by construction (`SAFE_AUTHORITY_ID`
+ * admits no `/`, and requires a leading alphanumeric, so neither `.` nor `..`
+ * can be one). Reading exactly that form as the child it names can therefore
+ * only ever produce a direct child of the root, and every other form keeps
+ * exact path semantics and is still held to the relation checked below.
+ */
+function resolveRunDirectoryPath(root: string, runDirectory: string): string {
+  return parseOrchestrationRunId(runDirectory).ok ? join(root, runDirectory) : resolve(runDirectory);
+}
+
 /** Parse the stable direct-child relation without requiring the run to remain live. */
 export function parseRunDirectoryReference(
   runsRoot: string,
   runDirectory: string,
 ): DomainResult<RunDirectoryReference, RunDirectoryError> {
   const root = resolve(runsRoot);
-  const directory = resolve(runDirectory);
+  const directory = resolveRunDirectoryPath(root, runDirectory);
   if (join(root, basename(directory)) !== directory) {
     return failure("runDirectory", `run directory must be a direct child of ${root}`);
   }
@@ -505,6 +526,46 @@ export function openRunDirectory(
   }
 
   return success(buildHandle(identity.value, authority, directory, authorityPath));
+}
+
+/**
+ * Create one fresh Run Directory under its runs-root, then open it.
+ *
+ * `openRunDirectory` requires the directory to already exist, and must keep
+ * requiring it: an operation that RESUMES a run has to fail closed when its
+ * evidence is gone, because an absent directory is the orphan case that
+ * recovery exists to adjudicate — never an invitation to start over silently.
+ * The three operations that CREATE a run carry the opposite obligation, and the
+ * engine is the only party that knows the fixed layout, so making the caller
+ * `mkdir` first was a step whose sole purpose was to satisfy a check the engine
+ * itself owns.
+ *
+ * The runs-root is never created. A run name is chosen fresh per run and a typo
+ * costs one empty directory, but a mistyped ROOT would silently grow a whole
+ * second tree of runs that no later command would look in, so it stays a loud
+ * failure. Creation is anchored exactly like every other write here: the single
+ * child component is made through a descriptor held on the root, and an entry
+ * already occupied by a symlink is refused rather than followed.
+ */
+export function createRunDirectory(
+  runsRoot: string,
+  runDirectory: string,
+): DomainResult<RunDirHandle, RunDirectoryError> {
+  const lexical = parseRunDirectoryReference(runsRoot, runDirectory);
+  if (!lexical.ok) return lexical;
+  const reference = rebasedOnRealRunsRoot(lexical.value);
+  if (!reference.ok) return reference;
+  const { runsRoot: root, runDirectory: directory } = reference.value;
+  let anchor: AnchoredDirectory | null = null;
+  try {
+    anchor = openDirectoryNoFollow(root);
+    ensureRelativeDirectoryNoFollow(anchor, root, directory);
+  } catch (error) {
+    return failure("runDirectory", `cannot create run directory ${directory}: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    if (anchor !== null) closeAnchoredDirectory(anchor);
+  }
+  return openRunDirectory(root, directory);
 }
 
 /**

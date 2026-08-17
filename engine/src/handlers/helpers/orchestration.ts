@@ -20,10 +20,21 @@
  *   helper orchestration decide --run <run-directory> --runs-root <root>
  *                               --request <decision-id>   (decision on stdin)
  *
+ * Every `--run`, `--new-run`, and remediation `sourceRun` accepts either the
+ * bare run id or a full path to that same direct child of its runs-root. The
+ * operations that create a run — `start`, `restart --new-run`, and
+ * `recover-orphan --new-run` — create the directory; the runs-root itself must
+ * already exist. Every other operation requires the run to exist, because an
+ * absent Run Directory is the orphan case recovery adjudicates.
+ *
  * Each mutating call parses authority, applies at most one event or receipt
  * reconciliation, persists it, and returns exactly one external action. The
  * parent therefore never assembles an action itself, and never has to know
  * which program produced it.
+ *
+ * `submit` is idempotent: an attempt whose bytes already landed keeps the
+ * stored evidence and re-emits the run's current action, which is the expected
+ * outcome on a harness that captures transcripts itself.
  *
  * `status` is a pure read: it derives ONE `LoomStatus` value and hands it to
  * a renderer. Both renderers project that same value, so the human and JSON
@@ -33,6 +44,7 @@
  * rather than fabricated zero-or-ready values.
  */
 
+import { match } from "ts-pattern";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -47,7 +59,7 @@ import {
   type GateDeps,
 } from "../../core/wave-gate-machine";
 import { loadPlanModelsSource } from "./complete-wave-gate";
-import { inspectRunDirectoryEntry, openRunDirectory, type RunDirHandle } from "../../orchestration/run-directory-handle";
+import { createRunDirectory, inspectRunDirectoryEntry, openRunDirectory, type RunDirHandle } from "../../orchestration/run-directory-handle";
 import { registerSessionRunBinding } from "../../orchestration/session-run-bindings";
 import {
   AGENT_REQUIRED_SKILLS,
@@ -96,6 +108,11 @@ import {
   startStandaloneFacade,
   startWaveGateFacade,
   waveAdvisoryDecisionRequestId,
+  type FacadeDriveResult,
+  type ProgramParse,
+  type RegisteredRemediationProgram,
+  type RegisteredStandaloneProgram,
+  type RegisteredWaveGateProgram,
 } from "./programs";
 
 const OPERATIONS = ["status", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide"] as const;
@@ -110,12 +127,16 @@ function usage(): HookResult {
     message: [
       "Usage: bun cli.ts helper orchestration <operation> [flags]",
       "",
+      "  <run-directory> is a bare run id or a full path to that direct child of",
+      "  --runs-root. start/restart/recover-orphan create it; the runs-root must exist.",
+      "",
       "  status  [--json] [--wave N] [--runs-root <wave-gate-runs-root>]",
       "  start   <architecture|refutation|standalone-review|wave-gate|remediation> --runs-root <root> --run <run-directory> < program.json",
       "  restart --runs-root <root> --run <exhausted-wave-run> --new-run <fresh-run-directory>",
       "  recover-orphan --runs-root <root> --run-id <missing-run-id> --wave <N> --digest <sha256> --new-run <fresh-run-directory>",
       "  resume  --runs-root <root> --run <run-directory>",
       "  submit  --runs-root <root> --run <run-directory> --request <id> --slot <id> --attempt <1|2>",
+      "          (idempotent: a repeat for a captured attempt keeps the stored bytes)",
       "  correlate --runs-root <root> --run <run-directory> --request <id> --harness <pi|claude> --native-id <id> --agent <role>",
       "  complete --runs-root <root> --run <run-directory> --operation <id>",
       "  decide  --runs-root <root> --run <run-directory> --request <decision-id>",
@@ -230,17 +251,28 @@ function statusOperation(args: readonly string[]): HookResult {
 type RunBinding = Readonly<{ handle: RunDirHandle }>;
 
 /**
+ * How a run-bound operation obtains its handle. The two adapters are the whole
+ * distinction between the operations that CREATE a run and the ones that resume
+ * an existing one: creating makes the directory, resuming fails closed when it
+ * is missing, and neither may be reached through the other's flag.
+ */
+type RunDirectoryBinder = typeof openRunDirectory;
+
+/**
  * Bind to one anchored run directory. Both the runs-root and the run
  * directory are required: the handle proves the run is a direct child of the
  * root it claims, which is what stops a caller naming an arbitrary path.
  */
-function bindRun(args: readonly string[]): Readonly<{ ok: true; value: RunBinding }> | HookResult {
+function bindRun(
+  args: readonly string[],
+  bind: RunDirectoryBinder = openRunDirectory,
+): Readonly<{ ok: true; value: RunBinding }> | HookResult {
   const runsRoot = flag(args, "runs-root");
   const runDirectory = flag(args, "run");
   if (runsRoot === null || runDirectory === null) {
     return { kind: "error", message: "both --runs-root and --run are required" };
   }
-  const opened = openRunDirectory(runsRoot, runDirectory);
+  const opened = bind(runsRoot, runDirectory);
   return opened.ok
     ? { ok: true, value: { handle: opened.value } }
     : { kind: "error", message: `cannot bind run directory: ${opened.error.message}` };
@@ -550,56 +582,86 @@ async function emitRunAction(handle: RunDirHandle, action: unknown): Promise<Hoo
   return { kind: "allow" };
 }
 
-async function startOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
-  const program = args[0];
-  if (program !== "architecture" && program !== "refutation" && program !== "standalone-review" &&
-      program !== "wave-gate" && program !== "remediation") {
-    return { kind: "error", message: "start requires architecture, refutation, standalone-review, wave-gate, or remediation" };
-  }
-  const bound = bindRun(args.slice(1));
-  if (!isBound(bound)) return bound;
+const START_PROGRAMS = ["architecture", "refutation", "standalone-review", "wave-gate", "remediation"] as const;
+type StartProgram = (typeof START_PROGRAMS)[number];
+
+const isStartProgram = (value: string | undefined): value is StartProgram =>
+  value !== undefined && (START_PROGRAMS as readonly string[]).includes(value);
+
+/**
+ * One fully-parsed start request, ready to drive against a Run Directory.
+ *
+ * Producing this BEFORE the run is bound is what keeps `start` from claiming a
+ * Run Directory it then refuses to use. Binding writes the fixed layout and an
+ * exclusive `authority.json`, so a payload rejected after that point left a
+ * claimed directory behind with no façade action to release it — and, because
+ * `registerProgram` admits only a byte-identical re-registration, the operator
+ * could not simply correct the payload and retry the same name. The ordering is
+ * now structural rather than remembered: the drive needs this value, and this
+ * value cannot be built by touching the filesystem.
+ */
+type StartRequest =
+  | Readonly<{ kind: "standalone-review"; input: RegisteredStandaloneProgram["input"] }>
+  | Readonly<{ kind: "remediation"; input: RegisteredRemediationProgram["input"] }>
+  | Readonly<{ kind: "wave-gate"; input: RegisteredWaveGateProgram["input"] }>
+  | Readonly<{ kind: "panel"; registration: RegisteredPanelProgram }>;
+
+function parseStartRequest(program: StartProgram, stdin: string): ProgramParse<StartRequest> {
   let raw: unknown;
   try {
     raw = JSON.parse(stdin) as unknown;
   } catch (error) {
-    return { kind: "error", message: `program input is invalid JSON: ${error instanceof Error ? error.message : String(error)}` };
+    return { ok: false, message: `program input is invalid JSON: ${error instanceof Error ? error.message : String(error)}` };
   }
   if (program === "standalone-review") {
     const parsed = parseStandaloneStartInput(raw);
-    if (!parsed.ok) return { kind: "error", message: parsed.message };
-    const driven = await startStandaloneFacade(bound.value.handle, parsed.value);
-    if (!driven.ok) return { kind: "error", message: driven.message };
-    return emitRunAction(bound.value.handle, driven.action);
+    return parsed.ok ? { ok: true, value: Object.freeze({ kind: program, input: parsed.value }) } : parsed;
   }
   if (program === "remediation") {
     const parsed = parseRemediationStartInput(raw);
-    if (!parsed.ok) return { kind: "error", message: parsed.message };
-    const driven = await startRemediationFacade(bound.value.handle, parsed.value);
-    if (!driven.ok) return { kind: "error", message: driven.message };
-    return emitRunAction(bound.value.handle, driven.action);
+    return parsed.ok ? { ok: true, value: Object.freeze({ kind: program, input: parsed.value }) } : parsed;
   }
   if (program === "wave-gate") {
     const parsed = parseWaveGateStartInput(raw);
-    if (!parsed.ok) return { kind: "error", message: parsed.message };
-    const driven = await startWaveGateFacade(bound.value.handle, parsed.value);
-    if (!driven.ok) return { kind: "error", message: driven.message };
-    return emitRunAction(bound.value.handle, driven.action);
+    return parsed.ok ? { ok: true, value: Object.freeze({ kind: program, input: parsed.value }) } : parsed;
   }
-  const panel = program;
-  const translated = translateLegacyPanelJournal(panel, raw);
-  if (!translated.ok) return { kind: "error", message: translated.error };
+  const translated = translateLegacyPanelJournal(program, raw);
+  if (!translated.ok) return { ok: false, message: translated.error };
   if (translated.value.events.length !== 0) {
-    return { kind: "error", message: "a fresh orchestration start cannot import pre-existing events" };
+    return { ok: false, message: "a fresh orchestration start cannot import pre-existing events" };
   }
   const registration: RegisteredPanelProgram = Object.freeze({
     schemaVersion: 1,
-    kind: panel,
+    kind: program,
     input: translated.value.input,
     context: raw,
   });
-  const registered = await bound.value.handle.registerProgram(registration);
-  if (!registered.ok) return { kind: "error", message: registered.error.message };
-  const driven = await driveRegisteredPanel(bound.value.handle, registration);
+  return { ok: true, value: Object.freeze({ kind: "panel", registration }) };
+}
+
+const driveStart = (handle: RunDirHandle, request: StartRequest): Promise<FacadeDriveResult> =>
+  match(request)
+    .with({ kind: "standalone-review" }, ({ input }) => startStandaloneFacade(handle, input))
+    .with({ kind: "remediation" }, ({ input }) => startRemediationFacade(handle, input))
+    .with({ kind: "wave-gate" }, ({ input }) => startWaveGateFacade(handle, input))
+    .with({ kind: "panel" }, async ({ registration }) => {
+      const registered = await handle.registerProgram(registration);
+      return registered.ok
+        ? driveRegisteredPanel(handle, registration)
+        : { ok: false as const, message: registered.error.message };
+    })
+    .exhaustive();
+
+async function startOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
+  const program = args[0];
+  if (!isStartProgram(program)) {
+    return { kind: "error", message: `start requires ${START_PROGRAMS.join(", ")}` };
+  }
+  const request = parseStartRequest(program, stdin);
+  if (!request.ok) return { kind: "error", message: request.message };
+  const bound = bindRun(args.slice(1), createRunDirectory);
+  if (!isBound(bound)) return bound;
+  const driven = await driveStart(bound.value.handle, request.value);
   if (!driven.ok) return { kind: "error", message: driven.message };
   return emitRunAction(bound.value.handle, driven.action);
 }
@@ -619,7 +681,7 @@ async function recoverOrphanOperation(args: readonly string[]): Promise<HookResu
   if (!/^\d+$/.test(waveRaw) || !Number.isSafeInteger(Number(waveRaw)) || Number(waveRaw) < 1) {
     return { kind: "error", message: "recover-orphan --wave must be a positive safe integer" };
   }
-  const next = openRunDirectory(runsRoot, nextRunDirectory);
+  const next = createRunDirectory(runsRoot, nextRunDirectory);
   if (!next.ok) return { kind: "error", message: `cannot bind replacement run directory: ${next.error.message}` };
   const driven = await recoverOrphanedWaveGateFacade(runsRoot, {
     runId,
@@ -638,7 +700,7 @@ async function restartOperation(args: readonly string[]): Promise<HookResult> {
   if (runsRoot === null || nextRunDirectory === null) {
     return { kind: "error", message: "restart requires --runs-root, --run, and --new-run" };
   }
-  const next = openRunDirectory(runsRoot, nextRunDirectory);
+  const next = createRunDirectory(runsRoot, nextRunDirectory);
   if (!next.ok) return { kind: "error", message: `cannot bind replacement run directory: ${next.error.message}` };
   const stored = previous.value.handle.readProgramRegistration();
   if (!stored.ok) return { kind: "error", message: stored.error.message };
@@ -826,8 +888,15 @@ function panelSubmissionProblem(
  * The bytes arrive on stdin and are written verbatim — never trimmed, joined,
  * or re-encoded — so the stored artifact is byte-identical to what the harness
  * produced. The slot is exclusive, so a duplicate or late submission for an
- * attempt that already landed is refused rather than allowed to overwrite
- * accepted evidence.
+ * attempt that already landed never overwrites accepted evidence.
+ *
+ * Submitting an attempt that is ALREADY captured is therefore not an error: it
+ * is the expected outcome on a harness that captures transcripts itself, where
+ * the parent's follow-up submit confirms what the extension already stored. The
+ * stored bytes stay authoritative and the run's current action is emitted, the
+ * same as any other submit — so an auto-capturing harness walks the one façade
+ * path whose happy-path output used to be a bare sentence on stderr and an
+ * exit code indistinguishable from a genuine failure.
  */
 async function submitOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
   const bound = bindRun(args);
@@ -874,7 +943,11 @@ async function submitOperation(stdin: string, args: readonly string[]): Promise<
   let semanticRaw = stdin;
   let capturedArtifact: unknown = null;
 
-  if (alreadyCaptured && registration !== null) {
+  // Every registration kind reads its semantics off the stored bytes when the
+  // slot already holds them. This branch was added for the legacy panel path
+  // alone, so a façade run — the only kind an auto-capturing harness produces —
+  // fell through to a capture that could only fail on its own exclusive write.
+  if (alreadyCaptured) {
     const existing = bound.value.handle.readTranscriptBytes(reserved);
     if (!existing.ok) return { kind: "error", message: existing.error.message };
     semanticRaw = Buffer.from(existing.value).toString("utf-8");
@@ -943,11 +1016,12 @@ async function submitOperation(stdin: string, args: readonly string[]): Promise<
     return emitRunAction(bound.value.handle, driven.action);
   }
 
-  process.stdout.write(`${JSON.stringify({
-    kind: "captured",
-    requestId,
-    artifact: capturedArtifact,
-  }, null, 2)}\n`);
+  // An unregistered run has no action to emit, so the confirmation IS the
+  // output — and it names which of the two outcomes happened rather than
+  // reporting a captured artifact that, on the idempotent path, is null.
+  process.stdout.write(`${JSON.stringify(alreadyCaptured
+    ? { kind: "already-captured", requestId, slotId: reserved.slotId, attempt: reserved.attempt }
+    : { kind: "captured", requestId, artifact: capturedArtifact }, null, 2)}\n`);
   return { kind: "allow" };
 }
 

@@ -81,7 +81,7 @@ One agent's complete judgment on one criterion or lens, covering every item exac
 _Avoid_: Score, vote (alone), opinion
 
 **Run Directory**:
-A uniquely-named directory under a panel's runs-root holding one panel run's artifacts: its context document, its item set, its manifest, and one verdict file per criterion. Bound to the working directory and rejected if any path component is a symlink.
+A uniquely-named directory under a panel's runs-root holding one panel run's artifacts: its context document, its item set, its manifest, and one verdict file per criterion. Bound to the working directory and rejected if any path component is a symlink. Named by its run id — bare or as a full path to that same direct child — and created by the engine on the operations that start a run; every other operation requires it to already exist, because an absent Run Directory is an orphaned run, not a fresh one.
 _Avoid_: Workspace, scratch dir, output dir
 
 **Standalone Review Run**:

@@ -20,12 +20,14 @@ LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"
 test -f "$LOOM_DIR/engine/src/cli.ts" || exit 1
 ```
 
-Create one fresh direct-child Run Directory, then start the registered program:
+Name one fresh Run Directory, then start the registered program. The engine
+creates it; `--run` takes either the bare run id or a full path to that same
+direct child of `--runs-root`:
 
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start wave-gate \
   --runs-root ".claude/reviews/wave-gate-runs" \
-  --run "<fresh-run-directory>" <<'JSON'
+  --run "<fresh-run-id>" <<'JSON'
 {"wave":null}
 JSON
 ```
@@ -48,7 +50,7 @@ After a harness batch finishes, resume the same run:
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration resume \
   --runs-root ".claude/reviews/wave-gate-runs" \
-  --run "<same-run-directory>"
+  --run "<same-run-id>"
 ```
 
 For an `await-user` action:
@@ -56,7 +58,7 @@ For an `await-user` action:
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration decide \
   --runs-root ".claude/reviews/wave-gate-runs" \
-  --run "<same-run-directory>" \
+  --run "<same-run-id>" \
   --request "<exact-decision-request-id>" <<'JSON'
 {"disposition":"defer","reason":"<operator reason>"}
 JSON
@@ -69,14 +71,14 @@ or stage deterministic operation output in the parent.
 
 ## Restarting an exhausted reviewer run
 
-Only when the blocked diagnostic says Wave reviewer **attempt 2 exhausted**, make
-a fresh direct-child Run Directory and invoke the engine-owned restart:
+Only when the blocked diagnostic says Wave reviewer **attempt 2 exhausted**, name
+a fresh replacement Run Directory and invoke the engine-owned restart:
 
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration restart \
   --runs-root ".claude/reviews/wave-gate-runs" \
-  --run "<exhausted-run-directory>" \
-  --new-run "<fresh-replacement-run-directory>"
+  --run "<exhausted-run-id>" \
+  --new-run "<fresh-replacement-run-id>"
 ```
 
 The restart refuses while any outstanding slot lacks a durably captured attempt-2
@@ -92,7 +94,7 @@ generation. Never repair, copy, or delete exhausted transcripts by hand.
 If `orchestration status --json --runs-root ".claude/reviews/wave-gate-runs"`
 reports that the protected active Run Directory is missing, use the dedicated
 engine operation. Read the exact `runId`, `wave`, and `authorityDigest` from
-`active_wave_gate`; create one fresh direct-child replacement directory; then run:
+`active_wave_gate`; name one fresh replacement Run Directory; then run:
 
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration recover-orphan \
@@ -100,7 +102,7 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration recover-orphan \
   --run-id "<exact-missing-active-run-id>" \
   --wave "<exact-active-wave>" \
   --digest "<exact-active-authority-digest>" \
-  --new-run "<fresh-replacement-run-directory>"
+  --new-run "<fresh-replacement-run-id>"
 ```
 
 Recovery refuses unless the requested authority and runs root exactly match protected state,

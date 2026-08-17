@@ -34,23 +34,37 @@ plan → remediation → validation → verified index installation → commit/p
 
 ## Phase 1 — Registered standalone review
 
-Create one fresh direct-child Run Directory and start the façade with user
-policy only:
+Name one fresh Run Directory and start the façade with user policy only. The
+engine creates the Run Directory; `--run` takes either its bare run id or a full
+path to that same direct child of `--runs-root`:
 
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start standalone-review \
   --runs-root ".claude/reviews/review-and-fix-runs" \
-  --run "<fresh-review-run-directory>" <<'JSON'
+  --run "<fresh-review-run-id>" <<'JSON'
 {"kind":"all","files":null,"dryRun":false}
 JSON
 ```
 
-Spawn the exact returned batch. After harness completion, resume until `done`:
+Spawn the exact returned batch. Each reviewer's exact raw bytes must then reach
+its reserved slot. On a harness that captures transcripts itself this already
+happened at spawn completion and a repeat submit is an idempotent confirmation;
+on any other harness the parent performs it, once per issued request:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration submit \
+  --runs-root ".claude/reviews/review-and-fix-runs" \
+  --run "<same-review-run-id>" \
+  --request "<exact-request-id>" --slot "<exact-slot-id>" --attempt 1 \
+  < "<reviewer-raw-output>"
+```
+
+Then resume until `done`:
 
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration resume \
   --runs-root ".claude/reviews/review-and-fix-runs" \
-  --run "<same-review-run-directory>"
+  --run "<same-review-run-id>"
 ```
 
 The registered Standalone Review Program automatically routes non-empty
@@ -88,20 +102,26 @@ Stop without staging or committing if validation cannot pass.
 
 ## Phase 4 — Registered remediation
 
-Create a fresh remediation Run Directory. The source review run remains
-immutable authority:
+Name a fresh remediation Run Directory. The source review run remains immutable
+authority, and `sourceRun` names it the same way `--run` does — bare run id or
+full path, resolved against `sourceRunsRoot`:
 
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start remediation \
   --runs-root ".claude/reviews/review-and-fix-runs" \
-  --run "<fresh-remediation-run-directory>" <<'JSON'
+  --run "<fresh-remediation-run-id>" <<'JSON'
 {
   "sourceRunsRoot":".claude/reviews/review-and-fix-runs",
-  "sourceRun":"<review-run-directory>",
+  "sourceRun":"<review-run-id>",
   "supportPaths":["<plan-or-regression-path-not-in-reviewed-scope>"]
 }
 JSON
 ```
+
+A `blocked` start reports the exact cause and leaves the run registered. Fix the
+cause it names — a source review that is not `done`, unrelated staged work, an
+unauthorized dirty path — and `resume` the SAME run. Never delete a run
+directory to retry: the run holds the evidence of why it blocked.
 
 Resume until `done`. The engine proves observed dirty paths are authorized,
 rejects excluded Run evidence and unrelated staged work, stages literal paths

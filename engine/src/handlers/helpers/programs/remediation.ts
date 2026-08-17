@@ -66,7 +66,11 @@ export async function driveRemediationFacade(
 ): Promise<FacadeDriveResult> {
   try {
     const source = openRunDirectory(registration.input.sourceRunsRoot, registration.input.sourceRun);
-    if (!source.ok) return remediationBlocked(handle, source.error.message);
+    // "source run: " is the only thing separating this from the byte-identical
+    // failure a malformed `--run` flag produces, and without it the operator
+    // re-checks the CLI flag that was never wrong. The sibling source checks
+    // below already carry the attribution; this one used to drop it.
+    if (!source.ok) return remediationBlocked(handle, `source run: ${source.error.message}`);
     const sourceCheckpoint = await source.value.readCheckpoint();
     if (sourceCheckpoint === null) return remediationBlocked(handle, "source standalone review checkpoint is missing");
     const sourceStateRaw = JSON.parse(sourceCheckpoint) as unknown;

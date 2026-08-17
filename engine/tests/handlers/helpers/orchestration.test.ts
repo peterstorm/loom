@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2931,6 +2931,235 @@ describe("orchestration CLI", () => {
     );
 
     expect(result.status).not.toBe(0);
+  });
+
+  /**
+   * Naming a fresh run, and the claim that naming it must not cost.
+   *
+   * `--run` and the remediation payload's `sourceRun` both arrive beside the
+   * runs-root they belong to, so the bare run name is the natural way to write
+   * either — and both used to fail with a diagnostic about the direct-child
+   * RELATION, which sent the operator to re-check a path that was never wrong.
+   * `start` additionally required the directory to already exist, so every run
+   * began with a `mkdir -p` whose only purpose was to satisfy a check the
+   * engine owns, and it claimed that directory BEFORE reading stdin — so a
+   * malformed payload burned a run name that `registerProgram` would then
+   * refuse to reuse under a corrected payload.
+   */
+  describe("naming a fresh run", () => {
+    it("creates a Run Directory named by its bare run id under --runs-root", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      mkdirSync(runsRoot, { recursive: true });
+
+      const started = runCli([
+        "start", "standalone-review", "--runs-root", runsRoot, "--run", "run.bare-name",
+      ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), ENGINE);
+
+      expect(started.status, started.stderr).toBe(0);
+      expect(JSON.parse(started.stdout).kind).toBe("spawn-batch");
+      expect(JSON.parse(started.stdout).runId).toBe("run.bare-name");
+      expect(existsSync(join(runsRoot, "run.bare-name", "authority.json"))).toBe(true);
+    });
+
+    it("resolves a full relative path to the same run as its bare name", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      mkdirSync(runsRoot, { recursive: true });
+      const input = JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false });
+
+      const started = runCli(["start", "standalone-review", "--runs-root", runsRoot, "--run", "run.same-run"], input, ENGINE);
+      const resumedByPath = runCli([
+        "resume", "--runs-root", runsRoot, "--run", join(runsRoot, "run.same-run"),
+      ], "", ENGINE);
+      const resumedByName = runCli(["resume", "--runs-root", runsRoot, "--run", "run.same-run"], "", ENGINE);
+
+      expect(started.status, started.stderr).toBe(0);
+      expect(resumedByPath.status, resumedByPath.stderr).toBe(0);
+      expect(JSON.parse(resumedByName.stdout)).toEqual(JSON.parse(resumedByPath.stdout));
+    });
+
+    it("still refuses a run directory that is not a direct child of its runs-root", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      mkdirSync(join(runsRoot, "nested"), { recursive: true });
+
+      const nested = runCli([
+        "start", "standalone-review", "--runs-root", runsRoot, "--run", join(runsRoot, "nested", "run.deep"),
+      ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), ENGINE);
+
+      expect(nested.status).not.toBe(0);
+      expect(nested.stderr).toContain("direct child");
+      expect(existsSync(join(runsRoot, "nested", "run.deep"))).toBe(false);
+    });
+
+    it("never creates the runs-root itself", () => {
+      const root = project();
+      const absentRoot = join(root, "runs-that-do-not-exist");
+
+      const started = runCli([
+        "start", "standalone-review", "--runs-root", absentRoot, "--run", "run.no-root",
+      ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), ENGINE);
+
+      expect(started.status).not.toBe(0);
+      expect(started.stderr).toContain("runs root");
+      expect(existsSync(absentRoot)).toBe(false);
+    });
+
+    it("refuses a malformed payload without claiming the run directory", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      mkdirSync(runsRoot, { recursive: true });
+
+      const invalidJson = runCli([
+        "start", "standalone-review", "--runs-root", runsRoot, "--run", "run.invalid-json",
+      ], "{not json", ENGINE);
+      const invalidShape = runCli([
+        "start", "standalone-review", "--runs-root", runsRoot, "--run", "run.invalid-shape",
+      ], JSON.stringify({ kind: "not-a-review-kind", files: null, dryRun: false }), ENGINE);
+
+      expect(invalidJson.status).not.toBe(0);
+      expect(invalidJson.stderr).toContain("invalid JSON");
+      expect(existsSync(join(runsRoot, "run.invalid-json"))).toBe(false);
+      expect(invalidShape.status).not.toBe(0);
+      expect(existsSync(join(runsRoot, "run.invalid-shape"))).toBe(false);
+    });
+
+    it("names sourceRun as the offender, before the remediation run is claimed", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      mkdirSync(join(runsRoot, "nested"), { recursive: true });
+
+      const started = runCli([
+        "start", "remediation", "--runs-root", runsRoot, "--run", "remediation.bad-source",
+      ], JSON.stringify({
+        sourceRunsRoot: runsRoot,
+        sourceRun: join("nested", "run.not-a-child"),
+        supportPaths: [],
+      }), root);
+
+      expect(started.status).not.toBe(0);
+      expect(started.stderr).toContain("sourceRun");
+      expect(existsSync(join(runsRoot, "remediation.bad-source"))).toBe(false);
+    });
+
+    it("accepts a bare sourceRun naming a run beside its own runs-root", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      mkdirSync(runsRoot, { recursive: true });
+
+      // The source review run does not exist yet, so the drive still blocks —
+      // but on the SOURCE's own state, with the attribution the relation
+      // failure used to swallow, rather than on the reference's shape.
+      const started = runCli([
+        "start", "remediation", "--runs-root", runsRoot, "--run", "remediation.bare-source",
+      ], JSON.stringify({
+        sourceRunsRoot: runsRoot,
+        sourceRun: "run.absent-review",
+        supportPaths: [],
+      }), root);
+
+      expect(started.status, started.stderr).toBe(0);
+      const action = JSON.parse(started.stdout) as { kind: string; diagnostic: { message: string } };
+      expect(action.kind).toBe("blocked");
+      expect(action.diagnostic.message).toContain("source run: ");
+      expect(action.diagnostic.message).toContain("does not exist");
+    });
+  });
+
+  /**
+   * Re-submitting an attempt that is already captured.
+   *
+   * This is the EXPECTED outcome on a harness that captures transcripts itself:
+   * the extension stores the raw bytes at spawn completion and the parent's
+   * follow-up submit merely confirms it. The confirmation used to arrive as a
+   * bare sentence on stderr with a failing exit code — byte-identical to a real
+   * error — because the short-circuit that reads stored bytes covered only the
+   * legacy panel registration, and a façade run fell through to a capture whose
+   * exclusive write could then only fail.
+   */
+  describe("idempotent submit", () => {
+    it("re-emits the run's action instead of failing on an already-captured attempt", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      mkdirSync(runsRoot, { recursive: true });
+      const started = runCli([
+        "start", "standalone-review", "--runs-root", runsRoot, "--run", "run.idempotent-submit",
+      ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), ENGINE);
+      expect(started.status, started.stderr).toBe(0);
+      const action = JSON.parse(started.stdout) as {
+        requests: readonly { authority: AgentRequestAuthority }[];
+      };
+      const request = action.requests[0]!.authority;
+      const transcript = [
+        "### Machine Summary", "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "CRITICAL:", "ADVISORY:",
+        "", "```findings", "[]", "```",
+      ].join("\n");
+      const submit = () => runCli([
+        "submit", "--runs-root", runsRoot, "--run", "run.idempotent-submit",
+        "--request", request.requestId, "--slot", request.slotId, "--attempt", "1",
+      ], transcript, ENGINE);
+
+      const first = submit();
+      const second = submit();
+
+      expect(first.status, first.stderr).toBe(0);
+      expect(second.status, second.stderr).toBe(0);
+      expect(JSON.parse(second.stdout)).toEqual(JSON.parse(first.stdout));
+      // The stored evidence stays authoritative — the repeat never overwrote it.
+      const stored = readFileSync(
+        join(runsRoot, "run.idempotent-submit", "transcripts", request.slotId, "attempt-1.raw"),
+        "utf-8",
+      );
+      expect(stored).toBe(transcript);
+    }, 15_000);
+
+    it("reports the idempotent outcome as JSON on a run with no registered program", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      const runDir = join(runsRoot, "run.unregistered-submit");
+      mkdirSync(runDir, { recursive: true });
+      const opened = openRunDirectory(runsRoot, runDir);
+      if (!opened.ok) throw new Error(opened.error.message);
+      const request = {
+        runId: "run.unregistered-submit",
+        requestId: "request:reviewer:1",
+        slotId: "slot-1",
+        program: "wave-gate",
+        role: "code-reviewer",
+        attempt: 1,
+        modelProfile: "general-review",
+        harnessBinding: {
+          pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+          claude: { harness: "claude-code", model: "sonnet" },
+        },
+        requiredSkill: null,
+        contextDigest: "a".repeat(64),
+        outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
+      } as AgentRequestAuthority;
+      const parsed = parseAgentRequestAuthority(request);
+      if (!parsed.ok) throw new Error("fixture authority is malformed");
+      const submit = () => runCli([
+        "submit", "--runs-root", runsRoot, "--run", runDir,
+        "--request", request.requestId, "--slot", request.slotId, "--attempt", "1",
+      ], "reviewer bytes", root);
+
+      return opened.value.reserveRequest(parsed.value).then((reserved) => {
+        expect(reserved.ok).toBe(true);
+        const first = submit();
+        const second = submit();
+
+        expect(first.status, first.stderr).toBe(0);
+        expect(JSON.parse(first.stdout).kind).toBe("captured");
+        expect(second.status, second.stderr).toBe(0);
+        expect(JSON.parse(second.stdout)).toEqual({
+          kind: "already-captured",
+          requestId: request.requestId,
+          slotId: request.slotId,
+          attempt: 1,
+        });
+      });
+    });
   });
 
   /**

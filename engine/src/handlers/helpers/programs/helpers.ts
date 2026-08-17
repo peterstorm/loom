@@ -12,7 +12,7 @@ import { createAtomicInitialPublicationClaimPort, createInitialBatchPublicationR
 import { parseStandaloneReviewAuthority, selectStandaloneReviewers, type FrozenStandaloneReviewAuthority, type StandaloneReviewKind, type StandaloneReviewMetadata } from '../../../core/standalone-review';
 import { buildContextPacket, encodeByteSection, type ContextPacket } from '../../../orchestration/context-packets';
 import { readRunBytesNoFollow } from '../../../orchestration/no-follow-fs';
-import { type RunDirHandle } from '../../../orchestration/run-directory-handle';
+import { parseRunDirectoryReference, type RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { isExcludedRemediationPath, parseCanonicalRepositoryRelativePath } from '../../../core/remediation-machine';
 
 export type RegisteredStandaloneProgram = Readonly<{
@@ -447,6 +447,14 @@ export function parseRemediationStartInput(raw: unknown): ProgramParse<Registere
       !Array.isArray(raw.supportPaths) || raw.supportPaths.some((path) => typeof path !== "string" || path.length === 0)) {
     return { ok: false, message: "remediation input must contain sourceRunsRoot, sourceRun, and supportPaths" };
   }
+  // The source pair names a real Run Directory relation, so hold it to that
+  // relation HERE rather than at drive time. Shape-only validation deferred the
+  // check until after the new remediation run had been claimed, which turned a
+  // one-character payload mistake into a directory the operator had to delete
+  // by hand. The strings are stored exactly as authored — resolution belongs to
+  // the drive, so a registration stays portable and re-readable.
+  const source = parseRunDirectoryReference(raw.sourceRunsRoot, raw.sourceRun);
+  if (!source.ok) return { ok: false, message: `remediation input sourceRun: ${source.error.message}` };
   return { ok: true, value: Object.freeze({
     sourceRunsRoot: raw.sourceRunsRoot,
     sourceRun: raw.sourceRun,

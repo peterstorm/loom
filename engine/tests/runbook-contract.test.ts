@@ -184,8 +184,15 @@ describe("interview digest vocabulary ↔ parseInterviewDigest", () => {
 });
 
 describe("engine-owned orchestration runbook contract", () => {
+  // The command file belongs here as much as the skill it defers to. It was
+  // outside this list, and its "In particular" bullets therefore kept
+  // describing the manual helper chain long after the registered façade
+  // replaced it — including a `standalone-review finalize` step that is a
+  // guaranteed contract error on exactly the runs it claimed to cover, because
+  // the registered program has already published `result.json` by then.
   const runbooks = [
     ["commands/wave-gate.md", read("commands", "wave-gate.md")],
+    ["commands/review-and-fix.md", read("commands", "review-and-fix.md")],
     ["skills/review-and-fix/SKILL.md", read("skills", "review-and-fix", "SKILL.md")],
   ] as const;
 

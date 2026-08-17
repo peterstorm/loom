@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -19,9 +19,11 @@ import {
 } from "../../src/orchestration/context-packets";
 import { createEffectRunner, type EffectPorts } from "../../src/orchestration/effect-runner";
 import {
+  createRunDirectory,
   createStagedArtifact,
   openRunDirectory,
   parseRunDirectoryIdentity,
+  parseRunDirectoryReference,
   promoteArtifactSet,
   type RunDirHandle,
 } from "../../src/orchestration/run-directory-handle";
@@ -162,6 +164,90 @@ describe("run directory identity", () => {
     expect(reopened.ok).toBe(false);
     if (reopened.ok) return;
     expect(reopened.error.message).toContain("does not match");
+  });
+
+  it("reads a canonical run id as the child of the root it was given", () => {
+    const root = runsRoot();
+
+    const bare = parseRunDirectoryReference(root, RUN_ID);
+    const full = parseRunDirectoryReference(root, join(root, RUN_ID));
+
+    expect(bare.ok).toBe(true);
+    if (!bare.ok) return;
+    expect(bare.value.runDirectory).toBe(join(root, RUN_ID));
+    expect(full.ok && full.value).toEqual(bare.value);
+  });
+
+  it("never reads a traversal or a nested path as a bare run name", () => {
+    const root = runsRoot();
+
+    // Neither is a canonical run id, so both keep exact path semantics and stay
+    // subject to the direct-child relation.
+    for (const reference of ["..", ".", "nested/run.x", "../run.x"]) {
+      const parsed = parseRunDirectoryReference(root, reference);
+      expect(parsed.ok, `${reference} must not resolve to a child of the root`).toBe(false);
+    }
+  });
+});
+
+describe("creating a run directory", () => {
+  it("creates one missing direct child and claims its authority", () => {
+    const root = runsRoot();
+
+    const created = createRunDirectory(root, RUN_ID);
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.value.runId).toBe(RUN_ID);
+    expect(created.value.runDirectory).toBe(join(root, RUN_ID));
+    expect(created.value.readAuthority().ok).toBe(true);
+  });
+
+  it("is idempotent over an existing run, preserving its claimed authority", () => {
+    const root = runsRoot();
+    const first = createRunDirectory(root, RUN_ID);
+    if (!first.ok) throw new Error(first.error.message);
+    const authority = first.value.readAuthority();
+
+    const second = createRunDirectory(root, RUN_ID);
+
+    expect(second.ok).toBe(true);
+    if (!second.ok || !authority.ok) return;
+    const reread = second.value.readAuthority();
+    expect(reread.ok && reread.value).toEqual(authority.value);
+  });
+
+  it("refuses an entry already occupied by a symlink rather than following it", () => {
+    const root = runsRoot();
+    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-publication-outside-")));
+    cleanup.push(outside);
+    symlinkSync(outside, join(root, RUN_ID));
+
+    const created = createRunDirectory(root, RUN_ID);
+
+    expect(created.ok).toBe(false);
+    expect(readdirSync(outside)).toHaveLength(0);
+  });
+
+  it("refuses a missing runs-root instead of growing one", () => {
+    const root = join(runsRoot(), "absent-root");
+
+    const created = createRunDirectory(root, RUN_ID);
+
+    expect(created.ok).toBe(false);
+    if (created.ok) return;
+    expect(created.error.message).toContain("runs root");
+    expect(existsSync(root)).toBe(false);
+  });
+
+  it("refuses a run that is not a direct child, creating nothing", () => {
+    const root = runsRoot();
+    const nested = join(root, "nested", "run.deep");
+
+    const created = createRunDirectory(root, nested);
+
+    expect(created.ok).toBe(false);
+    expect(existsSync(join(root, "nested"))).toBe(false);
   });
 });
 

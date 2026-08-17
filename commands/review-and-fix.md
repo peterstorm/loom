@@ -14,16 +14,17 @@ second workflow from this command file.
 
 In particular:
 
-- create a fresh Standalone Review Run;
-- aggregate every selected reviewer's raw transcript through
-  `helper standalone-review aggregate`;
-- when canonical critical findings exist, run the complete Refutation Panel
-  (`brief --standalone` → `manifest` → `lenses` → Panel Program verifier batch
-  → `verdict` → `tally`); the tally atomically publishes `result.json`;
-- for a zero-critical run, run `helper standalone-review finalize`; otherwise
-  use the tally-authored result, always plan/fix every
-  `result.json.surviving_critical_findings`, and autonomously decide which
-  advisories to accept by default;
+- start a fresh Standalone Review Run through `helper orchestration start
+  standalone-review`, naming the run by a fresh direct-child run id;
+- spawn the exact returned batch, then submit each reviewer's raw bytes into its
+  reserved slot (a no-op on a harness that captures transcripts itself);
+- drive `helper orchestration resume` until the run reports `done`. The
+  registered program aggregates evidence, routes any non-empty critical set
+  through its registered Refutation Panel, and atomically publishes the
+  canonical `result.json` — read every remediation input from that result and
+  build none of it by hand;
+- always plan/fix every `result.json.surviving_critical_findings`, and
+  autonomously decide which advisories to accept by default;
 - retain and report every `refuted_critical_findings` entry with its evidence;
 - disposition every advisory as accepted, deferred, or dismissed with a reason;
   do not ask the user to choose advisory IDs unless the user explicitly requests
