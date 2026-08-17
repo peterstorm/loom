@@ -16,7 +16,7 @@ import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from '../../../o
 import { captureKey } from '../../../core/harness-capture';
 import { type RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
-import { contextPacketPathMarker, decodeReviewerTranscript, deriveChangedPaths, durablePublicationDigest, durableRequests, failed, metadata, parsedAuthority, publicationFile, publicationResolver, publishInitialBatch, recoverOrPublishStandaloneRetry, refutationRetryTask, requiredSkillMarker, safeScope, standalonePackets, standalonePublicationEffectId, standaloneRetryTask, type DurableRequestRecovery, type FacadeDriveResult, type RegisteredStandaloneProgram } from './helpers';
+import { decodeReviewerTranscript, deriveChangedPaths, durablePublicationDigest, durableRequests, failed, metadata, parsedAuthority, publicationFile, publicationResolver, publishInitialBatch, recoverOrPublishStandaloneRetry, refutationRetryTask, renderSpawnTask, safeScope, standalonePackets, standalonePublicationEffectId, standaloneRetryTask, type DurableRequestRecovery, type FacadeDriveResult, type RegisteredStandaloneProgram } from './helpers';
 
 export async function startStandaloneFacade(
   handle: RunDirHandle,
@@ -173,9 +173,8 @@ export function executableRefutationRequests(
   standalone: boolean,
   retryDiagnostic: string | null = null,
 ): readonly Readonly<SpawnRequest & { task: string }>[] {
-  const standaloneMarker = standalone ? "LOOM_REVIEW_CONTEXT: standalone\n" : "";
   return requests.map((request) => {
-    const task = `${standaloneMarker}LOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}${requiredSkillMarker(request.authority.requiredSkill)}Read the immutable context packet at LOOM_CONTEXT_PATH, then complete the exact pending Refutation Panel request.`;
+    const task = renderSpawnTask(handle, request.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then complete the exact pending Refutation Panel request.", { standalone });
     return Object.freeze({
       ...request,
       // Attempt 2 exists only because attempt 1 was refused. Re-asking the
@@ -582,13 +581,13 @@ export async function resumeStandaloneFacade(
           ? {
               ...request,
               task: standaloneRetryTask(
-                `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}${requiredSkillMarker(request.authority.requiredSkill)}Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.`,
+                renderSpawnTask(handle, request.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.", { standalone: true }),
                 rejectedDiagnostics.get(request.authority.slotId) ?? null,
               ),
             }
           : {
               ...request,
-              task: `LOOM_REVIEW_CONTEXT: standalone\nLOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}${requiredSkillMarker(request.authority.requiredSkill)}Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.`,
+              task: renderSpawnTask(handle, request.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.", { standalone: true }),
             }),
       } };
     }

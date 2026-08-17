@@ -54,36 +54,26 @@ describe("every required Skill exists and is declared by its agent", () => {
  * exact task shape the engine renders.
  */
 describe("requiredSkillMarker satisfies the harness skill-prompt gate", () => {
-  it("renders nothing for roles without a required Skill", () => {
+  it("renders nothing without a required Skill and one marker line with one", () => {
     expect(requiredSkillMarker(null)).toBe("");
-    expect(requiredSkillMarker("none")).toBe("");
-  });
-
-  it("renders one marker line for a required Skill", () => {
     expect(requiredSkillMarker("distill")).toBe("LOOM_REQUIRED_SKILL: distill\n");
   });
 
+  // The blocks above already proved every skill-requiring role has an agent
+  // file that declares its Skill, so both gate outcomes can be asserted
+  // unconditionally: the generic task must FAIL the gate (the marker is
+  // load-bearing, not decorative) and the marked task must pass it.
   it.each(skillRequiringRoles)(
     "an engine-shaped task for %s passes checkAgentSkillPrompt only with the marker",
     (role, skill) => {
-      const agentPath = join(REPO_ROOT, "agents", `${role}.md`);
-      if (!existsSync(agentPath)) return; // roles without a plugin agent file (none today) have no gate to pass
-      const markdown = readFileSync(agentPath, "utf-8");
-      const bareTask =
-        "LOOM_REQUEST_ID: run-x:review:1\nLOOM_CONTEXT_DIGEST: 0f\nLOOM_CONTEXT_PATH: /tmp/contexts/0f.json\n" +
+      const markdown = readFileSync(join(REPO_ROOT, "agents", `${role}.md`), "utf-8");
+      const task = (marker: string): string =>
+        `LOOM_REQUEST_ID: run-x:review:1\nLOOM_CONTEXT_DIGEST: 0f\nLOOM_CONTEXT_PATH: /tmp/contexts/0f.json\n${marker}` +
         "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
-      const markedTask =
-        `LOOM_REQUEST_ID: run-x:review:1\nLOOM_CONTEXT_DIGEST: 0f\nLOOM_CONTEXT_PATH: /tmp/contexts/0f.json\n${requiredSkillMarker(skill)}` +
-        "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
-      const declared = parseDeclaredSkills(markdown);
-      if (declared.kind === "skills") {
-        // The generic task alone must not be what makes the spawn legal for a
-        // skill whose name never appears in it — the marker is load-bearing.
-        const bare = checkAgentSkillPrompt(markdown, bareTask);
-        const marked = checkAgentSkillPrompt(markdown, markedTask);
-        expect(marked.ok, `marker must satisfy the gate for ${role}`).toBe(true);
-        if (!bare.ok) expect(bare.missing).toContain(skill);
-      }
+      const bare = checkAgentSkillPrompt(markdown, task(""));
+      expect(bare.ok, `the generic task must not already satisfy the gate for ${role}`).toBe(false);
+      if (!bare.ok) expect(bare.missing).toContain(skill);
+      expect(checkAgentSkillPrompt(markdown, task(requiredSkillMarker(skill))).ok, `marker must satisfy the gate for ${role}`).toBe(true);
     },
   );
 });

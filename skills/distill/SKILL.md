@@ -6,7 +6,9 @@ description: "This skill should be used when the user asks to 'simplify this cod
 
 # Distill — Behavior-Preserving Simplification
 
-Remove **incidental complexity** — complexity that isn't paying for itself — while preserving exact behavior and existing interfaces. The goal is that the next reader spends their attention on the problem, not on the code.
+Remove **incidental complexity** — complexity that isn't paying for itself — while preserving exact behavior and existing interfaces. Simple is harder than long: a thousand lines is the path of least resistance, and this skill exists to resist it.
+
+**Complexity is measured in representable states and concepts, not lines.** The yardstick is the project's own architecture rules (`rules/architecture.md`): functional core / imperative shell, ADTs, DDD, parse-don't-validate, illegal states unrepresentable. The strongest simplification in this skill is not a shorter function — it is a branch **deleted because the state it guarded can no longer be written**. When you cannot decide whether something is simpler, count what a reader must hold: how many states can this represent, how many concepts must I know? Fewer wins.
 
 **Scope discipline:** distill works *within* interfaces; deepen *changes* them. If the fix requires moving a seam, changing a signature callers see, or merging modules, that is a deepening — name it, recommend the `deepen` skill, and move on. The two skills share vocabulary (see deepen's `references/LANGUAGE.md`); distill is the smaller knife.
 
@@ -32,9 +34,10 @@ Idiom is project-relative: code that matches the loaded patterns is already simp
 ## Vocabulary
 
 - **Essential complexity** — complexity the problem itself demands. Untouchable.
-- **Incidental complexity** — complexity the current *expression* of the solution added: duplication, dead branches, speculative generality, noise. This is what distill removes.
+- **Incidental complexity** — complexity the current *expression* of the solution added: extra representable states, duplication, dead branches, speculative generality, noise. This is what distill removes.
+- **State space** — the set of states a value or module can represent. The legal states are essential; every representable-but-illegal state is incidental complexity that some branch, check, or comment now has to pay for. Shrinking the state space to exactly the legal states is the highest form of simplification.
 - **Altitude** — the abstraction level a reader must hold to follow the code. Wrong altitude reads as either a wall of low-level detail inside high-level orchestration, or a stack of trivial wrappers hiding one real operation. Right altitude: each function reads as one coherent level.
-- **Semantic compression** — fewer *concepts*, not fewer lines. Removing a redundant concept is compression; golfing three statements into one expression is not.
+- **Semantic compression** — fewer *concepts* and fewer *representable states*, not fewer lines. Removing a redundant concept is compression; golfing three statements into one expression is not.
 - **The reader test** — would a maintainer seeing this file for the first time understand it faster after the change? If not, it is not a simplification, whatever the diff stat says.
 
 **Key asymmetry:** behavior is sacred, expression is not. Any change that could alter observable behavior — output, error modes, ordering, timing-sensitive effects — is out of scope, even if the current behavior looks accidental. Wrong-looking behavior is a *finding to report*, never a thing to silently "fix" mid-simplification.
@@ -46,12 +49,13 @@ Idiom is project-relative: code that matches the loaded patterns is already simp
 Concrete simplification moves, ordered by leverage, live in [references/CATALOG.md](./references/CATALOG.md). Highest-leverage first:
 
 1. **Reuse before rewrite** — replace hand-rolled logic with an existing helper, stdlib call, or established project utility
-2. **Delete dead and speculative code** — unreachable branches, unused parameters, configurability nothing configures
-3. **Collapse pass-throughs** — wrappers that add no invariant, no translation, no seam
-4. **Flatten control flow** — early returns over nesting, exhaustive switch/match over else-chains, never nested ternaries
-5. **Restore altitude** — inline trivial indirection, extract genuinely separate concerns
-6. **Apply FP shape** — extract pure functions from mixed code, immutable transformations, map/filter/reduce where they clarify
-7. **Cut comment noise** — comments restating code; keep only constraint-carrying comments
+2. **Compress with types** — make the illegal states unrepresentable (ADTs over flag combinations, one representation per concept, parse-don't-validate), then delete every branch that guarded them
+3. **Delete dead and speculative code** — unreachable branches, unused parameters, configurability nothing configures
+4. **Collapse pass-throughs** — wrappers that add no invariant, no translation, no seam
+5. **Flatten control flow** — early returns over nesting, exhaustive switch/match over else-chains, never nested ternaries
+6. **Restore altitude** — inline trivial indirection, extract genuinely separate concerns
+7. **Apply FP shape** — extract pure functions from mixed code, immutable transformations, map/filter/reduce where they clarify
+8. **Cut comment noise** — comments restating code; keep only constraint-carrying comments
 
 ---
 
