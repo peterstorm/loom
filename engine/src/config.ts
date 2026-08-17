@@ -13,6 +13,13 @@ import { PHASES, type Phase } from "./types";
 // restated. core/panel-contract depends only on core/panel-kernel, which
 // depends on nothing in src — so this import adds no cycle.
 import { PANEL_BASELINE_LENSES, PANEL_LENSES } from "./core/panel-contract";
+// The Agent Catalog is the single identity source for every Loom-owned agent
+// (kind, profile, required Skill). model-profiles is a pure leaf module — this
+// import adds no cycle. Every agent set and phase map below is a DERIVED
+// projection of the catalog, never a second source.
+import { AGENT_POLICIES, agentsOfKind, WAVE_REVIEW_AGENTS } from "./core/model-profiles";
+
+export { WAVE_REVIEW_AGENTS };
 
 /** Markers above this trigger mandatory clarify phase */
 export const CLARIFY_THRESHOLD = 3;
@@ -20,47 +27,18 @@ export const CLARIFY_THRESHOLD = 3;
 /** Valid phase ordering — re-exported from the single source tuple in types. */
 export const PHASE_ORDER: readonly Phase[] = PHASES;
 
-/**
- * Orchestration role of an agent.
- *
- * A UNION, not a record with a `role` beside a `phase` both branches carry.
- * `phase` identifies the phase a phase agent performs/completes; it is not the
- * transition target. Panel agents have no per-agent phase to declare — they all
- * run in ARCH_PANEL_PHASE by construction — and while the product form let them
- * declare one, `{ role: "panel", phase: "decompose" }` was representable and
- * ruled out only by a load-time throw that collected the distinct values and
- * asserted there was exactly one. The union deletes both the impossible state
- * and the throw that policed it.
- *
- * Normal phase-agent completion is handed to resolveTransition, while
- * panel-agent completion is intentionally ignored by advance-phase so the
- * architecture phase cannot advance mid-panel.
- */
-type AgentRole =
-  | { readonly role: "phase"; readonly phase: Phase }
-  | { readonly role: "panel" };
-
-/** Single source of truth for every architecture-orchestration agent and its
- *  role. PHASE_AGENT_MAP and ARCH_PANEL_AGENTS are DERIVED views over this map
- *  (below), so the panel/phase disjointness invariant is structural for the
- *  common case: an agent name is one object key with exactly one role, so the
- *  SAME name can never be listed as both phase and panel. (The runtime guard
- *  below is still required — it additionally catches suffix-variant collisions,
- *  e.g. a phase agent `arch-designer` vs a panel `arch-designer-agent`, which are
- *  distinct keys this structure does not rule out. See phaseLookupKeys.) */
-const ARCHITECTURE_AGENTS = {
-  "brainstorm-agent": { role: "phase", phase: "brainstorm" },
-  "specify-agent": { role: "phase", phase: "specify" },
-  "clarify-agent": { role: "phase", phase: "clarify" },
-  "architecture-agent": { role: "phase", phase: "architecture" },
-  "plan-alignment-agent": { role: "phase", phase: "plan-alignment" },
-  "decompose-agent": { role: "phase", phase: "decompose" },
-  "arch-interviewer-agent": { role: "panel" },
-  "arch-designer-agent": { role: "panel" },
-  "arch-judge-agent": { role: "panel" },
-} as const satisfies Record<string, AgentRole>;
-
-/** Phase agents → their phase. DERIVED from ARCHITECTURE_AGENTS (role `phase`).
+/** Phase agents → their phase. DERIVED from the Agent Catalog (kind `phase`).
+ *  The catalog's AgentKind is a union, not a record with a `role` beside a
+ *  `phase` both branches carry: panel agents have no per-agent phase to
+ *  declare — they all run in ARCH_PANEL_PHASE by construction — so
+ *  `{ kind: "arch-panel", phase: "decompose" }` is unrepresentable rather
+ *  than policed by a load-time throw. Normal phase-agent completion is handed
+ *  to resolveTransition, while panel-agent completion is intentionally
+ *  ignored by advance-phase so the architecture phase cannot advance
+ *  mid-panel. Exact-name phase/panel disjointness is structural (one catalog
+ *  key, one kind); the runtime guard below remains for suffix-variant
+ *  collisions, e.g. a phase agent `arch-designer` vs a panel
+ *  `arch-designer-agent`, which are distinct keys no record can rule out.
  *  Frozen so post-load mutation that could smuggle a panel agent in here — and
  *  break the "only architecture-agent advances the phase" contract that
  *  advance-phase.ts relies on — is impossible at runtime. Typed
@@ -85,12 +63,12 @@ export const PHASE_AGENT_MAP: Readonly<Record<string, Phase | undefined>> = Obje
   Object.assign(
     Object.create(null) as Record<string, Phase>,
     Object.fromEntries(
-      // `flatMap` rather than `filter().map()`: the role union narrows inside
+      // `flatMap` rather than `filter().map()`: the kind union narrows inside
       // the callback that reads `phase`, so only the branch that HAS a phase can
       // contribute one. `filter` leaves the value widened, which is what made
       // the panel branch's absent `phase` a compile error rather than a proof.
-      Object.entries(ARCHITECTURE_AGENTS).flatMap(([name, v]): [string, Phase][] =>
-        v.role === "phase" ? [[name, v.phase]] : [],
+      AGENT_POLICIES.flatMap(({ agent, kind }): [string, Phase][] =>
+        kind.kind === "phase" ? [[agent, kind.phase]] : [],
       ),
     ),
   ),
@@ -112,21 +90,17 @@ function frozenSet<T>(values: Iterable<T>): ReadonlySet<T> {
   return Object.freeze(s);
 }
 
-/** Architecture-panel agents (`/loom --panel`): DERIVED from ARCHITECTURE_AGENTS
- *  (role `panel`). Recognized by phase validation as architecture-phase work, but
- *  INVISIBLE to advance-phase — never in PHASE_AGENT_MAP so only
+/** Architecture-panel agents (`/loom --panel`): DERIVED from the Agent Catalog
+ *  (kind `arch-panel`). Recognized by phase validation as architecture-phase
+ *  work, but INVISIBLE to advance-phase — never in PHASE_AGENT_MAP so only
  *  architecture-agent's SubagentStop advances the phase. If a designer/judge were
  *  a phase agent, its completion would fire resolveTransition and the date-prefix
  *  plan fallback could advance the phase mid-panel. The disjointness is structural
- *  for exact names (one key, one role) AND enforced at module load (the guard
+ *  for exact names (one key, one kind) AND enforced at module load (the guard
  *  below throws on import) for suffix-variant collisions — belt and suspenders.
  *  Built via frozenSet so runtime mutation is blocked, symmetric with the frozen
  *  PHASE_AGENT_MAP. */
-export const ARCH_PANEL_AGENTS: ReadonlySet<string> = frozenSet(
-  Object.entries(ARCHITECTURE_AGENTS)
-    .filter(([, v]) => v.role === "panel")
-    .map(([name]) => name),
-);
+export const ARCH_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("arch-panel"));
 
 /**
  * The phase every panel agent is classified as for phase-order validation.
@@ -240,20 +214,12 @@ export const PANEL_JUDGES_DEFAULT = 3;
 // the enforced rule with no runtime consequence and no failing test. The two
 // constants above are the shared policy; `selectLenses` is the enforcement.
 
-/** Impl agents → all map to "execute" phase.
- *  Note: agent identifiers are intentionally `string` (no brand). Bun runs
- *  in transpile-only mode, so a TS brand would not enforce anything at
- *  runtime; the real boundary check lives in validate-task-graph.ts via
- *  KNOWN_AGENTS.has(agent). */
-export const IMPL_AGENTS: ReadonlySet<string> = frozenSet([
-  "code-implementer-agent",
-  "ts-test-agent",
-  "java-test-agent",
-  "test-engineer",
-  "frontend-agent",
-  "security-agent",
-  "adr-writer-agent",
-]);
+/** Impl agents → all map to "execute" phase. DERIVED from the Agent Catalog
+ *  (kind `impl`). Note: agent identifiers are intentionally `string` (no
+ *  brand). Bun runs in transpile-only mode, so a TS brand would not enforce
+ *  anything at runtime; the real boundary check lives in
+ *  validate-task-graph.ts via KNOWN_AGENTS.has(agent). */
+export const IMPL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("impl"));
 
 /** Known agents for task graph validation */
 export const KNOWN_AGENTS: ReadonlySet<string> = frozenSet([...IMPL_AGENTS, ...Object.keys(PHASE_AGENT_MAP)]);
@@ -261,21 +227,11 @@ export const KNOWN_AGENTS: ReadonlySet<string> = frozenSet([...IMPL_AGENTS, ...O
 /** Utility agents allowed through phase validation */
 export const UTILITY_AGENTS: ReadonlySet<string> = frozenSet(["Explore", "Plan", "haiku"]);
 
-/** Exact reviewer batch required for every wave-gate task review. */
-export const WAVE_REVIEW_AGENTS = Object.freeze([
-  "code-reviewer",
-  "silent-failure-hunter",
-  "pr-test-analyzer",
-  "type-design-analyzer",
-  "comment-analyzer",
-] as const);
-
-/** Review sub-agents that produce findings per task. */
-export const REVIEW_SUB_AGENTS: ReadonlySet<string> = frozenSet([
-  ...WAVE_REVIEW_AGENTS,
-  "code-simplifier",
-  "architecture-tech-lead",
-]);
+/** Review sub-agents that produce findings per task. DERIVED from the Agent
+ *  Catalog (kind `reviewer`) — membership only; the ordered wave roster is
+ *  WAVE_REVIEW_AGENTS (re-exported above from the catalog module, where its
+ *  index-binding order lives beside the identities it selects from). */
+export const REVIEW_SUB_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("reviewer"));
 
 /**
  * Is this agent type one whose output carries review findings?
@@ -295,7 +251,7 @@ export function isReviewAgent(agentType: string): boolean {
 /** All review-related agents (sub-agents + spec-check invoker) */
 export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
   ...REVIEW_SUB_AGENTS,
-  "spec-check-invoker",
+  ...agentsOfKind("spec-check"),
 ]);
 
 /** Refutation-panel verifiers (wave gate Step 3.5): execute-phase work like
@@ -309,7 +265,7 @@ export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
  *  agent that was there to unblock it. Kept as its own set for the same reason
  *  ARCH_PANEL_AGENTS is: recognized by phase validation, invisible to the
  *  SubagentStop dispatcher. Frozen, symmetric with ARCH_PANEL_AGENTS. */
-export const REVIEW_PANEL_AGENTS: ReadonlySet<string> = frozenSet(["review-verifier-agent"]);
+export const REVIEW_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("review-verifier"));
 
 /** Closed control-plane authority for the standalone review lifecycle marker.
  * Only Machine-Summary review producers and refutation verifiers create

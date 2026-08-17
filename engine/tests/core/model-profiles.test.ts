@@ -221,7 +221,12 @@ describe("exhaustive Loom agent policy", () => {
   it("resolves bare and loom-namespaced agents deterministically", () => {
     expect(resolveAgentPolicy("code-reviewer")).toEqual({
       ok: true,
-      value: { agent: "code-reviewer", profile: "general-review" },
+      value: {
+        agent: "code-reviewer",
+        profile: "general-review",
+        kind: { kind: "reviewer" },
+        requiredSkill: null,
+      },
     });
     expect(resolveAgentPolicy("loom:code-reviewer")).toEqual(resolveAgentPolicy("code-reviewer"));
     expect(resolveAgentProfile("code-reviewer")).toEqual(resolveModelProfile("general-review"));

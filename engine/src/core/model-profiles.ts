@@ -14,6 +14,8 @@
  * boundary — this module never infers one.
  */
 
+import type { Phase } from "../types";
+
 export const LLM_PROFILE_IDS = [
   "implementation",
   "architecture-finalize",
@@ -111,53 +113,111 @@ export const LLM_PROFILES: readonly LlmProfile[] = Object.freeze([
 /** Singular alias for callers that use the domain term "catalog". */
 export const MODEL_PROFILE_CATALOG = LLM_PROFILES;
 
+/**
+ * One Agent's dispatch classification — an ADT, so exactly one kind per Agent
+ * is expressible. Kinds map one-to-one onto how the engine routes the Agent:
+ * `phase` completion advances that phase; `arch-panel` and `review-verifier`
+ * are invisible to phase advancement; `impl` executes Tasks; `reviewer`
+ * transcripts route through the findings parser; `spec-check` produces the
+ * Wave-level alignment verdict; `utility` is user-invoked outside orchestration.
+ */
+export type AgentKind =
+  | Readonly<{ kind: "phase"; phase: Phase }>
+  | Readonly<{ kind: "arch-panel" }>
+  | Readonly<{ kind: "impl" }>
+  | Readonly<{ kind: "reviewer" }>
+  | Readonly<{ kind: "spec-check" }>
+  | Readonly<{ kind: "review-verifier" }>
+  | Readonly<{ kind: "utility" }>;
+
 export type AgentPolicy<Agent extends string = string> = Readonly<{
   agent: Agent;
   profile: LlmProfileId;
+  kind: AgentKind;
+  requiredSkill: string | null;
 }>;
 
-const agentPolicy = <Agent extends string>(
-  agent: Agent,
+type AgentTraits = Readonly<{
+  profile: LlmProfileId;
+  kind: AgentKind;
+  requiredSkill: string | null;
+}>;
+
+const phaseKind = (p: Phase): AgentKind => Object.freeze({ kind: "phase", phase: p });
+const plainKind = (k: Exclude<AgentKind["kind"], "phase">): AgentKind => Object.freeze({ kind: k });
+const traits = (
   selectedProfile: LlmProfileId,
-): AgentPolicy<Agent> => Object.freeze({ agent, profile: selectedProfile });
+  agentKind: AgentKind,
+  requiredSkill: string | null = null,
+): AgentTraits => Object.freeze({ profile: selectedProfile, kind: agentKind, requiredSkill });
 
 /**
- * Every Markdown agent definition owned by Loom, excluding agents/README.md.
- * Keep this catalog exhaustive; validateAgentPolicyCatalog is the pure drift
- * check used by a shell or test after it discovers the actual filenames.
+ * The Agent Catalog (see CONTEXT.md): the single declarative registry defining
+ * every Loom-owned Agent's identity — kind, model profile, and required Skill.
+ * Keyed by name, so a duplicate or double-kinded Agent is unrepresentable.
+ * Every agent set, phase map, and policy table elsewhere is a DERIVED
+ * projection of this record, never a second source. Keep it exhaustive over
+ * agents/*.md (excluding README.md); validateAgentPolicyCatalog is the pure
+ * drift check a shell or test runs after discovering the actual filenames.
  */
-export const AGENT_POLICIES = Object.freeze([
-  agentPolicy("adr-writer-agent", "implementation"),
-  agentPolicy("arch-designer-agent", "panel-design"),
-  agentPolicy("arch-interviewer-agent", "panel-design"),
-  agentPolicy("architecture-agent", "architecture-finalize"),
-  agentPolicy("architecture-tech-lead", "focused-review"),
-  agentPolicy("arch-judge-agent", "panel-judge"),
-  agentPolicy("brainstorm-agent", "panel-design"),
-  agentPolicy("clarify-agent", "panel-design"),
-  agentPolicy("code-implementer-agent", "implementation"),
-  agentPolicy("code-reviewer", "general-review"),
-  agentPolicy("code-simplifier", "focused-review"),
-  agentPolicy("comment-analyzer", "focused-review"),
-  agentPolicy("decompose-agent", "focused-review"),
-  agentPolicy("deepen-agent", "panel-design"),
-  agentPolicy("frontend-agent", "implementation"),
-  agentPolicy("grill-agent", "panel-design"),
-  agentPolicy("java-test-agent", "implementation"),
-  agentPolicy("plan-alignment-agent", "focused-review"),
-  agentPolicy("pr-test-analyzer", "focused-review"),
-  agentPolicy("review-verifier-agent", "refutation"),
-  agentPolicy("security-agent", "focused-review"),
-  agentPolicy("silent-failure-hunter", "focused-review"),
-  agentPolicy("skill-content-reviewer", "focused-review"),
-  agentPolicy("spec-check-invoker", "general-review"),
-  agentPolicy("specify-agent", "panel-design"),
-  agentPolicy("test-engineer", "implementation"),
-  agentPolicy("ts-test-agent", "implementation"),
-  agentPolicy("type-design-analyzer", "focused-review"),
-] as const satisfies readonly AgentPolicy[]);
+export const AGENT_CATALOG = Object.freeze({
+  "adr-writer-agent": traits("implementation", plainKind("impl")),
+  "arch-designer-agent": traits("panel-design", plainKind("arch-panel"), "architecture-tech-lead"),
+  "arch-interviewer-agent": traits("panel-design", plainKind("arch-panel")),
+  "architecture-agent": traits("architecture-finalize", phaseKind("architecture"), "architecture-tech-lead"),
+  "architecture-tech-lead": traits("focused-review", plainKind("reviewer")),
+  "arch-judge-agent": traits("panel-judge", plainKind("arch-panel")),
+  "brainstorm-agent": traits("panel-design", phaseKind("brainstorm"), "brainstorming"),
+  "clarify-agent": traits("panel-design", phaseKind("clarify"), "clarify"),
+  "code-implementer-agent": traits("implementation", plainKind("impl"), "code-implementer"),
+  "code-reviewer": traits("general-review", plainKind("reviewer")),
+  "code-simplifier": traits("focused-review", plainKind("reviewer"), "distill"),
+  "comment-analyzer": traits("focused-review", plainKind("reviewer")),
+  "decompose-agent": traits("focused-review", phaseKind("decompose")),
+  "deepen-agent": traits("panel-design", plainKind("utility"), "deepen"),
+  "frontend-agent": traits("implementation", plainKind("impl"), "nextjs-frontend-design"),
+  "grill-agent": traits("panel-design", plainKind("utility"), "grill"),
+  "java-test-agent": traits("implementation", plainKind("impl"), "java-test-engineer"),
+  "plan-alignment-agent": traits("focused-review", phaseKind("plan-alignment")),
+  "pr-test-analyzer": traits("focused-review", plainKind("reviewer")),
+  "review-verifier-agent": traits("refutation", plainKind("review-verifier")),
+  "security-agent": traits("focused-review", plainKind("impl"), "security-expert"),
+  "silent-failure-hunter": traits("focused-review", plainKind("reviewer")),
+  "skill-content-reviewer": traits("focused-review", plainKind("utility")),
+  "spec-check-invoker": traits("general-review", plainKind("spec-check"), "spec-check"),
+  "specify-agent": traits("panel-design", phaseKind("specify"), "specify"),
+  "test-engineer": traits("implementation", plainKind("impl")),
+  "ts-test-agent": traits("implementation", plainKind("impl"), "ts-test-engineer"),
+  "type-design-analyzer": traits("focused-review", plainKind("reviewer")),
+} satisfies Record<string, AgentTraits>);
 
-export type LoomAgentName = (typeof AGENT_POLICIES)[number]["agent"];
+export type LoomAgentName = keyof typeof AGENT_CATALOG;
+
+/** Row view of the catalog, in catalog order. */
+export const AGENT_POLICIES: readonly AgentPolicy<LoomAgentName>[] = Object.freeze(
+  (Object.entries(AGENT_CATALOG) as readonly [LoomAgentName, AgentTraits][]).map(
+    ([agent, agentTraits]) => Object.freeze({ agent, ...agentTraits }),
+  ),
+);
+
+/** Names of every catalog Agent with the given kind, in catalog order. */
+export function agentsOfKind(k: AgentKind["kind"]): readonly LoomAgentName[] {
+  return Object.freeze(
+    AGENT_POLICIES.filter(({ kind }) => kind.kind === k).map(({ agent }) => agent),
+  );
+}
+
+/** Ordered Wave review roster policy — a selection FROM the catalog, not a
+ *  second identity source. Ordering is load-bearing: wave-gate slot authority
+ *  binds reviewers by index. Lives beside the catalog (this module is a pure
+ *  leaf) so both config and the wave-gate machine can import it cycle-free. */
+export const WAVE_REVIEW_AGENTS = Object.freeze([
+  "code-reviewer",
+  "silent-failure-hunter",
+  "pr-test-analyzer",
+  "type-design-analyzer",
+  "comment-analyzer",
+] as const satisfies readonly LoomAgentName[]);
 
 export const AGENT_POLICY_CATALOG = AGENT_POLICIES;
 export const LOOM_OWNED_AGENTS: readonly LoomAgentName[] = Object.freeze(

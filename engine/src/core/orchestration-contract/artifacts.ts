@@ -4,7 +4,7 @@
  * kernel and exports its internals so sibling volumes can import them.
  * Pure module: no I/O, no clock, no randomness.
  */
-import { type ClaudeCodeBinding, type LoomAgentName, type PiBinding } from '../model-profiles';
+import { AGENT_POLICIES, type ClaudeCodeBinding, type LoomAgentName, type PiBinding } from '../model-profiles';
 import { parseReviewPath } from '../review-packet';
 import { canonicalRecord, failure, success, type DomainResult } from './identity';
 import { readExactDataRecord } from './bytes';
@@ -48,33 +48,11 @@ export type ExactHarnessBinding = Readonly<{
   claude: ClaudeCodeBinding;
 }>;
 
-export const AGENT_REQUIRED_SKILLS = canonicalRecord({
-  "adr-writer-agent": null,
-  "arch-designer-agent": "architecture-tech-lead",
-  "arch-interviewer-agent": null,
-  "architecture-agent": "architecture-tech-lead",
-  "architecture-tech-lead": null,
-  "arch-judge-agent": null,
-  "brainstorm-agent": "brainstorming",
-  "clarify-agent": "clarify",
-  "code-implementer-agent": "code-implementer",
-  "code-reviewer": null,
-  "code-simplifier": "distill",
-  "comment-analyzer": null,
-  "decompose-agent": null,
-  "deepen-agent": "deepen",
-  "frontend-agent": "nextjs-frontend-design",
-  "grill-agent": "grill",
-  "java-test-agent": "java-test-engineer",
-  "plan-alignment-agent": null,
-  "pr-test-analyzer": null,
-  "review-verifier-agent": null,
-  "security-agent": "security-expert",
-  "silent-failure-hunter": null,
-  "skill-content-reviewer": null,
-  "spec-check-invoker": "spec-check",
-  "specify-agent": "specify",
-  "test-engineer": null,
-  "ts-test-agent": "ts-test-engineer",
-  "type-design-analyzer": null,
-} satisfies Readonly<Record<LoomAgentName, string | null>>);
+/** Derived projection of the Agent Catalog (core/model-profiles.ts) — the
+ *  catalog is the single source for each role's required Skill; this record
+ *  only fixes the export shape the orchestration contract has always had. */
+export const AGENT_REQUIRED_SKILLS = canonicalRecord(
+  Object.fromEntries(
+    AGENT_POLICIES.map(({ agent, requiredSkill }) => [agent, requiredSkill]),
+  ) as Record<LoomAgentName, string | null>,
+);

@@ -1194,13 +1194,9 @@ export function commitWaveGateCompletion(
   });
 }
 
-export const WAVE_REVIEW_AGENTS = Object.freeze([
-  "code-reviewer",
-  "silent-failure-hunter",
-  "pr-test-analyzer",
-  "type-design-analyzer",
-  "comment-analyzer",
-] as const);
+import { WAVE_REVIEW_AGENTS } from "./model-profiles";
+
+export { WAVE_REVIEW_AGENTS };
 
 type WaveReviewAgent = (typeof WAVE_REVIEW_AGENTS)[number];
 
