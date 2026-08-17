@@ -100,6 +100,42 @@ export type VerifiedIndexInstalled = Readonly<{
   witnessDigest: ArtifactDigest;
 }>;
 
+/**
+ * Parse an untrusted verified-index-installed receipt — e.g. one read back
+ * from a remediation checkpoint — into the branded type, so downstream code
+ * carries the proof instead of re-checking field shapes.
+ */
+export function parseVerifiedIndexInstalled(
+  raw: unknown,
+): DomainResult<VerifiedIndexInstalled, Readonly<{ message: string }>> {
+  const record = readExactDataRecord(
+    raw,
+    ["kind", "effectId", "runId", "indexDigest", "witnessDigest"],
+    "verified-index-installed receipt",
+  );
+  if (!record.ok) return failure(canonicalRecord({ message: record.error.message }));
+  if (record.value.kind !== "verified-index-installed") {
+    return failure(canonicalRecord({
+      message: `receipt kind must be 'verified-index-installed'; received ${describeUnknown(record.value.kind)}`,
+    }));
+  }
+  const effectId = parseEffectId(record.value.effectId);
+  if (!effectId.ok) return failure(canonicalRecord({ message: effectId.error.message }));
+  const runId = parseOrchestrationRunId(record.value.runId);
+  if (!runId.ok) return failure(canonicalRecord({ message: runId.error.message }));
+  const indexDigest = parseArtifactDigest(record.value.indexDigest);
+  if (!indexDigest.ok) return failure(canonicalRecord({ message: indexDigest.error.message }));
+  const witnessDigest = parseArtifactDigest(record.value.witnessDigest);
+  if (!witnessDigest.ok) return failure(canonicalRecord({ message: witnessDigest.error.message }));
+  return success(canonicalRecord({
+    kind: "verified-index-installed" as const,
+    effectId: effectId.value,
+    runId: runId.value,
+    indexDigest: indexDigest.value,
+    witnessDigest: witnessDigest.value,
+  }));
+}
+
 export type EffectReceipt =
   | ArtifactSetPublished
   | ProtectedWaveStateCommitted

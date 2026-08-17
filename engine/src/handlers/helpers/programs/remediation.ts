@@ -4,7 +4,7 @@
  * helpers, the shared recovery/git/scope machinery). The public surface is
  * re-exported by index.ts so all existing import sites are unchanged.
  */
-import { parseEffectId } from '../../../core/orchestration-contract';
+import { parseEffectId, parseVerifiedIndexInstalled } from '../../../core/orchestration-contract';
 import { parseStandaloneReviewMachineState } from '../../../core/standalone-review-machine';
 import { openRunDirectory, type RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { auditRemediationPaths, parseRepositorySnapshotWitness, prepareLiteralGitPathspec, prepareVerifiedIndexInstallation, reduceRemediation, stageTemporaryIndex, startRemediation, verifyTemporaryIndex, type RemediationState } from '../../../core/remediation-machine';
@@ -46,17 +46,14 @@ export async function resumeRemediationFacade(
     if (typeof raw === "object" && raw !== null) {
       const record = raw as { schemaVersion?: unknown; state?: { state?: unknown; receipt?: unknown } };
       if (record.schemaVersion === 1 && typeof record.state === "object" && record.state !== null && record.state.state === "done") {
-        // Validate the stored receipt instead of fabricating one.
-        const receipt = record.state.receipt;
-        if (typeof receipt !== "object" || receipt === null ||
-            (receipt as { kind?: unknown }).kind !== "verified-index-installed" ||
-            typeof (receipt as { effectId?: unknown }).effectId !== "string" ||
-            typeof (receipt as { runId?: unknown }).runId !== "string" ||
-            typeof (receipt as { indexDigest?: unknown }).indexDigest !== "string" ||
-            typeof (receipt as { witnessDigest?: unknown }).witnessDigest !== "string") {
-          return failed("remediation checkpoint claims done but contains no valid verified-index-installed receipt");
+        // Parse the stored receipt into its branded type instead of shape-
+        // checking fields — a done claim rides on a receipt the contract
+        // itself vouches for, or it is not a done claim.
+        const receipt = parseVerifiedIndexInstalled(record.state.receipt);
+        if (!receipt.ok) {
+          return failed(`remediation checkpoint claims done but contains no valid verified-index-installed receipt: ${receipt.error.message}`);
         }
-        return { ok: true, action: { kind: "done", runId: handle.runId, outcome: receipt } };
+        return { ok: true, action: { kind: "done", runId: handle.runId, outcome: receipt.value } };
       }
     }
   }
