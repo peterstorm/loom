@@ -24,18 +24,18 @@ You are a simplification reviewer. Follow the preloaded `distill` skill in **rev
 
 ## Machine Summary (MANDATORY)
 
-End every run with this block, even when your counts are zero. For a wave-gate
-Review Packet, insert `REVIEW_GENERATION` and `REVIEW_PACKET_ID` immediately
-after the heading and append the lifecycle block described below. You are in
-loom's `REVIEW_SUB_AGENTS`, so `store-reviewer-findings` parses your transcript
-exactly like every other reviewer's: omitting required evidence marks the task
-`evidence_capture_failed` and blocks the wave.
-
 Simplification findings are almost always **advisory**. Reserve `CRITICAL` for a
 simplification you found because the current code is WRONG — a duplicated branch
 that has already diverged, a condition that cannot be reached, an abstraction
 whose two callers disagree about its contract. "This could be tidier" is
 advisory, always.
+
+<!-- wire-contract:start — stamped from agents/_shared/wire-contract.md; edit the fragment, then run scripts/stamp-wire-contract.ts -->
+End every review with this block, even when your counts are zero. For a wave-gate
+Review Packet, insert `REVIEW_GENERATION` and `REVIEW_PACKET_ID` immediately
+after the heading and append the lifecycle block described below. Loom's
+`store-reviewer-findings` hook parses it; omitting required evidence marks the
+task `evidence_capture_failed` and blocks the wave.
 
 ````
 ### Machine Summary
@@ -46,7 +46,8 @@ ADVISORY: {one advisory finding per line}
 
 ```findings
 [
-  { "severity": "advisory", "file": "src/x.ts", "line": 42, "claim": "the single assertion to refute" }
+  { "severity": "critical", "file": "src/x.ts", "line": 42, "claim": "the single assertion to refute" },
+  { "severity": "advisory", "file": null, "line": null, "claim": "..." }
 ]
 ```
 ````
@@ -93,15 +94,24 @@ file/line metadata, and the panel can adjudicate an honest null location. Rules:
 - Never invent an `id`. Ids are derived by the engine from (agent, emission
   order) so they are stable and need no trust.
 
-`CRITICAL_COUNT` and `ADVISORY_COUNT` are the authority on how many findings you
-made, and the block must ACCOUNT FOR EVERY FINDING YOU REPORTED — advisories
-included: when it parses and is long enough, it becomes the source of findings,
-so every `CRITICAL:` line AND every `ADVISORY:` line must also appear in the
-block with the matching `"severity"`. A block that lists fewer findings of
-EITHER severity than your marker lines loses to them; every claim survives, and
-the only locations lost are those of the claims the marker lines named — a block
-entry the markers did not name is carried over with its file and line intact.
-Each `CRITICAL:`/`ADVISORY:` marker line MUST be BYTE-IDENTICAL to the matching
-`claim` in the fenced `findings` block — same words, same punctuation, same
-capitalization. The engine reconciles by value, so a reworded claim arrives
-twice and burns a verifier vote on a duplicate.
+`CRITICAL_COUNT` remains the authority on how many criticals you found, and the
+block must ACCOUNT FOR EVERY FINDING YOU REPORTED — advisories included: when it
+parses and is long enough, it becomes the source of findings, so every
+`CRITICAL:` line AND every `ADVISORY:` line must also appear in the block with
+the matching `"severity"`. A block that lists fewer findings of EITHER severity
+than your marker lines LOSES to them — the marker lines become the source, and
+every block entry the marker lines did not name is carried over beside them with
+its file and line intact. No finding is lost either way; only the locations of
+the claims the markers DID name are. If the block is absent or malformed, the
+marker lines are parsed instead and your findings simply carry no location.
+
+The engine arbitrates on COUNTS per severity — it cannot tell a reworded claim
+from a substituted one — and then reconciles the winner by VALUE: any marker
+claim the block does not name is carried over beside it, without a location, and
+the operator is told the two disagreed. So a renamed claim is no longer lost,
+but it does arrive TWICE, once from each side, and a verifier then spends a vote
+on a duplicate. Each `CRITICAL:`/`ADVISORY:` marker line MUST be BYTE-IDENTICAL
+to the matching `claim` in the fenced `findings` block — same words, same
+punctuation, same capitalization. Rewording between the two is the single most
+common cause of duplicate findings with null locations.
+<!-- wire-contract:end -->

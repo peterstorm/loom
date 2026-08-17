@@ -96,6 +96,7 @@ If java-test-engineer or ts-test-engineer skill should be invoked, explain why
 
 ## Machine Summary (MANDATORY)
 
+<!-- wire-contract:start — stamped from agents/_shared/wire-contract.md; edit the fragment, then run scripts/stamp-wire-contract.ts -->
 End every review with this block, even when your counts are zero. For a wave-gate
 Review Packet, insert `REVIEW_GENERATION` and `REVIEW_PACKET_ID` immediately
 after the heading and append the lifecycle block described below. Loom's
@@ -179,3 +180,4 @@ on a duplicate. Each `CRITICAL:`/`ADVISORY:` marker line MUST be BYTE-IDENTICAL
 to the matching `claim` in the fenced `findings` block — same words, same
 punctuation, same capitalization. Rewording between the two is the single most
 common cause of duplicate findings with null locations.
+<!-- wire-contract:end -->
