@@ -59,7 +59,7 @@ export const AGENT_REQUIRED_SKILLS = canonicalRecord({
   "clarify-agent": "clarify",
   "code-implementer-agent": "code-implementer",
   "code-reviewer": null,
-  "code-simplifier": null,
+  "code-simplifier": "distill",
   "comment-analyzer": null,
   "decompose-agent": null,
   "deepen-agent": "deepen",

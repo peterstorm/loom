@@ -24,7 +24,7 @@ import { Task, TaskGraph } from '../../../types';
 import { anyActiveSubagent } from '../../../machine';
 import { parseSpecCheckOutput, reconcileSpecCheck } from '../../../core/spec-check';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
-import { contextPacketPathMarker, durableRequests, exactObject, failed, parseRegisteredFacadeProgram, publicationResolver, publishInitialBatch, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
+import { contextPacketPathMarker, durableRequests, exactObject, failed, parseRegisteredFacadeProgram, publicationResolver, publishInitialBatch, requiredSkillMarker, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
 import { durableCaptureRejection, durableRefutationRequests, executableRefutationRequests, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic } from './standalone';
 
 export const waveGateDeps = Object.freeze({ loadPlanModels: loadPlanModelsSource, fileExists: existsSync });
@@ -1555,7 +1555,7 @@ export async function resumeWaveGateFacade(
         requests: uncapturedInitialReviews.map((authority) => ({
           authority,
           context: { digest: authority.contextDigest, slot: { kind: "fixed-artifact-slot", path: `contexts/${authority.contextDigest}.json` } },
-          task: `LOOM_REQUEST_ID: ${authority.requestId}\nLOOM_CONTEXT_DIGEST: ${authority.contextDigest}\n${contextPacketPathMarker(handle, authority.contextDigest)}Read the immutable context packet at LOOM_CONTEXT_PATH and complete the exact Wave review request.`,
+          task: `LOOM_REQUEST_ID: ${authority.requestId}\nLOOM_CONTEXT_DIGEST: ${authority.contextDigest}\n${contextPacketPathMarker(handle, authority.contextDigest)}${requiredSkillMarker(authority.requiredSkill)}Read the immutable context packet at LOOM_CONTEXT_PATH and complete the exact Wave review request.`,
         })),
       } };
     }
@@ -1589,7 +1589,7 @@ export async function resumeWaveGateFacade(
             task: [
               `LOOM_REQUEST_ID: ${request.authority.requestId}`,
               `LOOM_CONTEXT_DIGEST: ${request.context.digest}`,
-              `LOOM_CONTEXT_PATH: ${join(handle.runDirectory, "contexts", `${request.context.digest}.json`)}`,
+              `${contextPacketPathMarker(handle, request.context.digest)}${requiredSkillMarker(request.authority.requiredSkill)}`.trimEnd(),
               "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave Review Packet slot.",
               retry?.retryDiagnostic ?? "Attempt 1 was rejected; correct the packet evidence contract.",
             ].join("\n"),
@@ -1706,7 +1706,7 @@ export async function resumeWaveGateFacade(
         kind: "spawn-batch", runId: handle.runId,
         requests: [{
           ...durable,
-          task: `LOOM_REQUEST_ID: ${durable.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${durable.context.digest}\n${contextPacketPathMarker(handle, durable.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave spec-check slot.`,
+          task: `LOOM_REQUEST_ID: ${durable.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${durable.context.digest}\n${contextPacketPathMarker(handle, durable.context.digest)}${requiredSkillMarker(durable.authority.requiredSkill)}Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave spec-check slot.`,
         }],
       } };
     }

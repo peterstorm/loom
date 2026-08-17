@@ -86,6 +86,7 @@ After writing code, verify:
 - [ ] **Invariants enforced**: Constructors validate? Invalid states unrepresentable?
 - [ ] **Error paths typed**: Using Either/Result? No hidden throws?
 - [ ] **Testable without mocks**: Can test core logic with plain data?
+- [ ] **Distilled**: Run a `distill` apply-mode pass over the new code — reuse before rewrite, no dead/speculative code, no pass-throughs, right altitude. Tests stay green after each move.
 
 ---
 

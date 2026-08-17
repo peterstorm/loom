@@ -36,6 +36,10 @@ Accepted review kinds:
 - `simplify`
 - `all` (default)
 
+`simplify` selects the `code-simplifier` reviewer (preloading the `distill`
+skill) unconditionally; under `all` the engine adds it whenever the frozen
+scope changes source or test files.
+
 `--files` is a comma-separated explicit scope. Without it, the engine freezes
 the canonical sorted union of branch-committed, staged, unstaged tracked, and
 untracked non-ignored paths, excluding Loom run/state evidence. Empty scope is a

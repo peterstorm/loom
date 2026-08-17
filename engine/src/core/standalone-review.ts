@@ -299,7 +299,10 @@ export function selectStandaloneReviewers(metadata: StandaloneReviewMetadata): N
   if (kinds.has("architecture") || all || metadata.additions > 500 || metadata.fileCount > 10 || metadata.newStructure) {
     selected.push("architecture-tech-lead");
   }
-  if (kinds.has("simplify")) selected.push("code-simplifier");
+  // Explicit `simplify` always selects the simplifier; under `all` it joins the
+  // roster only when source or tests actually changed — a docs-only or
+  // metadata-only scope has nothing for the distill catalog to act on.
+  if (kinds.has("simplify") || (all && metadata.sourceOrTestChanged)) selected.push("code-simplifier");
   return Object.freeze(selected) as NonEmpty<StandaloneReviewerRole>;
 }
 

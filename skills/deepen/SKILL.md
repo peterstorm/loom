@@ -8,7 +8,7 @@ description: "This skill should be used when the user asks to 'improve the archi
 
 Surface architectural friction and propose **deepening opportunities** — refactors that turn shallow modules into deep ones. The goal is testability, locality, and leverage.
 
-**This is a PROACTIVE skill** — you go looking for problems in existing code. For PR review use `/review-pr`. For new feature design use `architecture-tech-lead`.
+**This is a PROACTIVE skill** — you go looking for problems in existing code. For PR review use `/review-pr`. For new feature design use `architecture-tech-lead`. For behavior-preserving cleanup *within* existing interfaces — duplication, dead code, control-flow noise — use `distill`; deepen is for when the interface itself is the problem.
 
 ---
 

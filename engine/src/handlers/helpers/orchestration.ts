@@ -86,6 +86,7 @@ import {
   parseRemediationStartInput,
   parseStandaloneStartInput,
   parseWaveGateStartInput,
+  requiredSkillMarker,
   resumeRemediationFacade,
   resumeStandaloneFacade,
   resumeWaveGateFacade,
@@ -410,7 +411,7 @@ async function materializePanelAction(
     // Harness adapters execute this exact task text. The marker binds a Pi
     // batch item to one issued request without reconstructing authority from
     // role or lexical request ordering.
-    task: `LOOM_REQUEST_ID: ${authority.requestId}\nLOOM_CONTEXT_DIGEST: ${packet.digest}\nLOOM_CONTEXT_PATH: ${join(handle.runDirectory, "contexts", `${packet.digest}.json`)}\nRead the immutable context packet at LOOM_CONTEXT_PATH, then ${request.outputContract}`,
+    task: `LOOM_REQUEST_ID: ${authority.requestId}\nLOOM_CONTEXT_DIGEST: ${packet.digest}\nLOOM_CONTEXT_PATH: ${join(handle.runDirectory, "contexts", `${packet.digest}.json`)}\n${requiredSkillMarker(authority.requiredSkill)}Read the immutable context packet at LOOM_CONTEXT_PATH, then ${request.outputContract}`,
     context: Object.freeze({
       digest: packet.digest,
       slot: Object.freeze({ kind: "fixed-artifact-slot", path: `contexts/${packet.digest}.json` }),
@@ -483,7 +484,7 @@ async function driveRegisteredPanel(
             digest: authority.contextDigest,
             slot: Object.freeze({ kind: "fixed-artifact-slot", path: `contexts/${authority.contextDigest}.json` }),
           }),
-          task: `LOOM_REQUEST_ID: ${authority.requestId}\nLOOM_CONTEXT_DIGEST: ${authority.contextDigest}\nLOOM_CONTEXT_PATH: ${join(handle.runDirectory, "contexts", `${authority.contextDigest}.json`)}\nRead the immutable context packet at LOOM_CONTEXT_PATH, then complete the exact pending panel request.`,
+          task: `LOOM_REQUEST_ID: ${authority.requestId}\nLOOM_CONTEXT_DIGEST: ${authority.contextDigest}\nLOOM_CONTEXT_PATH: ${join(handle.runDirectory, "contexts", `${authority.contextDigest}.json`)}\n${requiredSkillMarker(authority.requiredSkill)}Read the immutable context packet at LOOM_CONTEXT_PATH, then complete the exact pending panel request.`,
         }))),
       }) };
     }

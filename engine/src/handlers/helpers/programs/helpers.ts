@@ -337,7 +337,7 @@ export async function publishInitialBatch(
     ...action.value,
     requests: Object.freeze(action.value.requests.map((request) => Object.freeze({
       ...request,
-      task: `${standaloneMarker}LOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.`,
+      task: `${standaloneMarker}LOOM_REQUEST_ID: ${request.authority.requestId}\nLOOM_CONTEXT_DIGEST: ${request.context.digest}\n${contextPacketPathMarker(handle, request.context.digest)}${requiredSkillMarker(request.authority.requiredSkill)}Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.`,
     }))),
   }) };
 }
@@ -351,6 +351,21 @@ export async function publishInitialBatch(
  */
 export function contextPacketPathMarker(handle: RunDirHandle, digest: string): string {
   return `LOOM_CONTEXT_PATH: ${join(handle.runDirectory, "contexts", `${digest}.json`)}\n`;
+}
+
+/**
+ * One marker line naming the Skill the spawned role's policy requires, or the
+ * empty string when the role has none. Every engine-issued task text must
+ * carry it: Pi's spawn gate (`checkAgentSkillPrompt`) blocks any loom-agent
+ * spawn whose task never names a frontmatter-declared Skill, so a
+ * skill-preloading reviewer (code-simplifier → distill, spec-check-invoker →
+ * spec-check) with the generic packet task would be refused before it ran.
+ * The marker also tells the child its required Skill without opening the
+ * packet. Accepts the packet-level "none" sentinel as well as authority-level
+ * null so every call site can pass its own representation.
+ */
+export function requiredSkillMarker(requiredSkill: string | null): string {
+  return requiredSkill === null || requiredSkill === "none" ? "" : `LOOM_REQUIRED_SKILL: ${requiredSkill}\n`;
 }
 
 export function parseRegistration(raw: unknown): RegisteredStandaloneProgram | null {
