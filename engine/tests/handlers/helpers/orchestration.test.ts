@@ -2746,6 +2746,75 @@ describe("orchestration CLI", () => {
     expect(JSON.parse(replay.stdout).kind).toBe("done");
   });
 
+  it("advances a capture-rejected standalone reviewer attempt 1 to diagnostic-rich attempt 2", async () => {
+    const root = repository();
+    writeFileSync(join(root, "a.txt"), "changed\n");
+    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-standalone-capture-rejection-runs-")));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.standalone-capture-rejection");
+    mkdirSync(runDir);
+    const started = runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "comments", files: ["a.txt"], dryRun: false }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const initial = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const rejected = initial.requests[0]!.authority;
+    // Reproduce the harness adapter's exact durable state for a child that
+    // exited without a final text payload: the capture runtime persistently
+    // rejects the attempt AND records the audited rejection event.
+    expect((await opened.value.rejectCapture(rejected, "no-final-payload: result carried no final text payload")).ok).toBe(true);
+    await opened.value.appendEvent({
+      schemaVersion: 1,
+      sequence: 0,
+      dedupKey: `capture-rejected:${rejected.requestId}`,
+      recordedAtMs: Date.now(),
+      event: {
+        kind: "request-capture-rejected",
+        requestId: rejected.requestId,
+        slotId: rejected.slotId,
+        attempt: rejected.attempt,
+        diagnostic: "no-final-payload: result carried no final text payload",
+      },
+    });
+    const cleanTranscript = ["### Machine Summary", "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "", "```findings", "[]", "```"].join("\n");
+    for (const { authority } of initial.requests.filter(({ authority }) => authority.requestId !== rejected.requestId)) {
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from(cleanTranscript)])).ok).toBe(true);
+    }
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const retry = JSON.parse(resumed.stdout) as {
+      kind: string;
+      requests: readonly { authority: AgentRequestAuthority; task: string }[];
+    };
+    // Exactly the frozen attempt-2 authority for the rejected slot — not the
+    // terminally rejected attempt-1 request again.
+    expect(retry.kind).toBe("spawn-batch");
+    expect(retry.requests).toHaveLength(1);
+    expect(retry.requests[0]?.authority).toMatchObject({
+      slotId: rejected.slotId,
+      role: rejected.role,
+      attempt: 2,
+    });
+    expect(retry.requests[0]?.task).toContain("no-final-payload: result carried no final text payload");
+    expect(retry.requests[0]?.task).toContain("### Machine Summary");
+
+    // The terminal rejection still binds: late bytes for attempt 1 cannot
+    // overwrite it, and only the exact attempt-2 authority closes the slot.
+    const lateAttemptOne = await opened.value.captureTranscript(rejected, [...Buffer.from("late")]);
+    expect(lateAttemptOne.ok).toBe(false);
+    if (!lateAttemptOne.ok) expect(lateAttemptOne.error.message).toContain("terminally rejected");
+
+    // The retry lands, the roster completes, and the run reaches idempotent done.
+    const retryRequest = retry.requests[0]!;
+    expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(cleanTranscript)])).ok).toBe(true);
+    const done = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(done.status, done.stderr).toBe(0);
+    expect(JSON.parse(done.stdout).kind).toBe("done");
+    const replay = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(JSON.parse(replay.stdout).kind).toBe("done");
+  }, 30_000);
   it("heals a standalone crash after batch publication but before the checkpoint write", async () => {
     const root = repository();
     writeFileSync(join(root, "a.txt"), "changed\n");

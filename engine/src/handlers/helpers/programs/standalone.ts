@@ -420,11 +420,16 @@ export async function resumeStandaloneFacade(
     const pendingBySlot = new Map(state.value.pending.map(({ slotId, expectedAttempt }) => [slotId, expectedAttempt] as const));
     const scope = activeAuthority.scope;
 
-    // Phase A — semantic admission check for every captured attempt-1 slot the
-    // machine still expects at attempt 1. A transcript the frozen-scope
-    // validator refuses is REJECTED here — where the LC-2 lifecycle can advance
-    // the slot to attempt 2 — instead of dead-ending the whole run at
-    // aggregation with no recovery path.
+    // Phase A — admission check for every attempt-1 slot the machine still
+    // expects at attempt 1. Two independent refusal classes both REJECT the
+    // slot HERE — where the LC-2 lifecycle can advance it to attempt 2 —
+    // instead of dead-ending the whole run with no recovery path:
+    //   1. captured transcript the frozen-scope validator refuses (semantic);
+    //   2. capture that was terminally rejected by the harness runtime (no
+    //      bytes landed at all, e.g. a child that exited without a final
+    //      payload). Without case 2 the façade re-issues the terminally
+    //      rejected attempt-1 request on every resume — the capture runtime
+    //      will never accept its bytes again — dead-locking the roster.
     const rejected: Readonly<{ slot: AgentRequestAuthority; problems: readonly string[] }>[] = [];
     for (const slot of activeAuthority.roster.orderedSlots) {
       if ((pendingBySlot.get(slot.slotId) ?? 1) !== 1) continue;
@@ -432,7 +437,13 @@ export async function resumeStandaloneFacade(
       if (attemptOne === undefined) {
         return failed(`standalone attempt-1 issuance authority is missing for ${slot.slotId}`);
       }
-      if (!captured.value.has(captureKey(attemptOne.authority.slotId, 1))) continue;
+      if (!captured.value.has(captureKey(attemptOne.authority.slotId, 1))) {
+        const captureRejection = await durableCaptureRejection(handle, attemptOne.authority);
+        if (captureRejection !== null) {
+          rejected.push({ slot: attemptOne.authority, problems: Object.freeze([captureRejection]) });
+        }
+        continue;
+      }
       const bytes = handle.readTranscriptBytes(attemptOne.authority);
       if (!bytes.ok) return failed(bytes.error.message);
       const decoded = decodeReviewerTranscript(bytes.value, attemptOne.authority.role);
