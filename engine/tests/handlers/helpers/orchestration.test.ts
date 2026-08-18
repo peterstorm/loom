@@ -3556,6 +3556,36 @@ describe("orchestration CLI", () => {
     });
 
     /**
+     * `bindLiveRun`'s docstring says an UNREADABLE marker refuses too, and that
+     * branch is the safety net for the whole feature: a marked run whose marker
+     * cannot be parsed may already have a successor holding its authority, so
+     * "advance it anyway" is least defensible exactly there. Nothing pinned it,
+     * so an inverted condition or a dropped branch would have gone green.
+     */
+    it("refuses to advance a run whose abandonment marker is unreadable", async () => {
+      const { root, runsRoot } = await reviewRun("run.abandon-corrupt");
+      writeFileSync(join(runsRoot, "run.abandon-corrupt", "abandoned.json"), "{ not json");
+
+      for (const operation of [
+        ["resume", "--runs-root", runsRoot, "--run", "run.abandon-corrupt"],
+        ["submit", "--runs-root", runsRoot, "--run", "run.abandon-corrupt",
+         "--request", "request:whatever", "--slot", "slot:whatever", "--attempt", "1"],
+        ["correlate", "--runs-root", runsRoot, "--run", "run.abandon-corrupt",
+         "--request", "request:whatever", "--harness", "claude", "--native-id", "x", "--agent", "code-reviewer"],
+        ["complete", "--runs-root", runsRoot, "--run", "run.abandon-corrupt", "--operation", "op"],
+        ["decide", "--runs-root", runsRoot, "--run", "run.abandon-corrupt", "--request", "decision:x"],
+      ]) {
+        const refused = runCli(operation, "", root);
+        expect(refused.status, `${operation[0]} must refuse an unreadable marker`).not.toBe(0);
+      }
+
+      // `inspect` is a pure read, so it still answers — that is the point of
+      // retaining a retired run at all.
+      const inspected = runCli(["inspect", "--runs-root", runsRoot, "--run", "run.abandon-corrupt"], "", root);
+      expect(inspected.status, inspected.stderr).toBe(0);
+    });
+
+    /**
      * The marker is immutable, so a typo'd or cross-root pointer would be
      * frozen into the run forever — worse than no pointer, because it reads as
      * authoritative.

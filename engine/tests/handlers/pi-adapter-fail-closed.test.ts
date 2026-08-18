@@ -1,32 +1,47 @@
 /**
- * Tests for the fail-closed try/catch pattern in the Pi extension tool_result handler.
+ * Fail-closed coverage for the Pi extension's `tool_result` lint path.
  *
- * The extension wraps processToolResult in a try/catch so that if it throws
- * (as opposed to returning an error LintResult), the error is caught and
- * an error response is returned — blocking the edit (fail-closed contract).
+ * There are TWO catches on this path, and they are not interchangeable:
  *
- * This test exercises the exact logic pattern used in pi/extension.ts lines 183-216.
+ *  1. `processToolResult`'s own catch (`src/handlers/pi-adapter.ts`) converts a
+ *     throwing `lintFn` into an `{ kind: "error" }` LintResult and RETURNS it.
+ *     It never rethrows.
+ *  2. The extension's outer `try/catch` (`pi/extension.ts`, the `tool_result`
+ *     handler registered for `edit`/`write`) catches anything the handler body
+ *     throws AROUND that call — project-root and rules-directory resolution,
+ *     and the response mapping.
+ *
+ * This file used to feed a throwing `lintFn` and claim it covered (2). It did
+ * not: (1) swallows that throw first, so every assertion passed through the
+ * normal return path while the outer wrapper was never entered. Both layers are
+ * covered below, each by an input that can only reach it.
  */
 
 import { describe, it, expect } from "vitest";
 import { processToolResult } from "../../src/handlers/pi-adapter";
 
 /**
- * Simulates the extension handler logic (the try/catch wrapper from pi/extension.ts).
- * This is a faithful replica of the handler body so we can unit-test the error path
- * without needing the full Pi runtime.
+ * A faithful replica of the extension's handler body, including the
+ * pre-`processToolResult` work that lives INSIDE its try block. `resolveRoot`
+ * stands in for `process.cwd()` + `existsSync(...)`: real, fallible I/O —
+ * `process.cwd()` throws `ENOENT` when the working directory has been removed
+ * out from under a long-lived process.
  */
 function simulateExtensionHandler(
   toolName: string,
   input: Record<string, unknown>,
   lintFn: Parameters<typeof processToolResult>[2],
+  resolveRoot: () => string = () => "/repo",
 ) {
   try {
     if (toolName !== "edit" && toolName !== "write") return undefined;
 
+    // Inside the try, exactly as in pi/extension.ts.
+    const projectRoot = resolveRoot();
+
     const response = processToolResult(
       toolName,
-      input,
+      { ...input, projectRoot },
       lintFn
     );
 
@@ -47,119 +62,141 @@ function simulateExtensionHandler(
   }
 }
 
-describe("Pi extension tool_result handler fail-closed (try/catch)", () => {
-  describe("when processToolResult throws an Error", () => {
-    it("catches the error and returns an error response", () => {
-      const throwingLint = () => { throw new Error("Catastrophic regex engine failure"); };
+describe("the extension's outer fail-closed wrapper", () => {
+  // These are the ONLY cases in this file that reach the outer catch: the
+  // throw happens before processToolResult is ever called, so its internal
+  // catch cannot intercept it.
+  it("blocks the edit when project-root resolution throws", () => {
+    const cwdGone = () => { throw new Error("ENOENT: uv_cwd"); };
+    const passingLint = () => ({ kind: "pass" as const });
 
-      const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, throwingLint);
+    const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, passingLint, cwdGone);
 
-      expect(result).toBeDefined();
-      expect(result!.isError).toBe(true);
-      expect(result!.content).toHaveLength(1);
-      expect(result!.content[0].type).toBe("text");
-      expect(result!.content[0].text).toContain("❌ LINT ENGINE ERROR");
-      expect(result!.content[0].text).toContain("Catastrophic regex engine failure");
-    });
-
-    it("blocks the edit (isError: true)", () => {
-      const throwingLint = () => { throw new Error("file system exploded"); };
-
-      const result = simulateExtensionHandler("write", { path: "/src/index.ts", content: "x" }, throwingLint);
-
-      expect(result!.isError).toBe(true);
-    });
+    expect(result).toBeDefined();
+    expect(result!.isError).toBe(true);
+    expect(result!.content[0].text).toContain("❌ LINT ENGINE ERROR");
+    expect(result!.content[0].text).toContain("ENOENT: uv_cwd");
   });
 
-  describe("when processToolResult throws a non-Error value", () => {
-    it("catches string throws and returns error response", () => {
-      const throwingLint = () => { throw "raw string error"; };
+  it("blocks the edit on a non-Error throw from the same step", () => {
+    const cwdGone = () => { throw "raw string error"; };
+    const passingLint = () => ({ kind: "pass" as const });
 
-      const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, throwingLint);
+    const result = simulateExtensionHandler("write", { path: "/src/index.ts", content: "x" }, passingLint, cwdGone);
 
-      expect(result).toBeDefined();
-      expect(result!.isError).toBe(true);
-      expect(result!.content[0].text).toContain("❌ LINT ENGINE ERROR");
-      expect(result!.content[0].text).toContain("raw string error");
-    });
-
-    it("catches number throws and returns error response", () => {
-      const throwingLint = () => { throw 42; };
-
-      const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, throwingLint);
-
-      expect(result).toBeDefined();
-      expect(result!.isError).toBe(true);
-      expect(result!.content[0].text).toContain("42");
-    });
-
-    it("catches null/undefined throws", () => {
-      const throwingNull = () => { throw null; };
-
-      const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, throwingNull);
-
-      expect(result).toBeDefined();
-      expect(result!.isError).toBe(true);
-      expect(result!.content[0].text).toContain("❌ LINT ENGINE ERROR");
-    });
+    expect(result!.isError).toBe(true);
+    expect(result!.content[0].text).toContain("raw string error");
   });
 
-  describe("normal flow still works correctly within try/catch", () => {
-    it("returns undefined for non-edit/write tools (early return unaffected)", () => {
-      const throwingLint = () => { throw new Error("should never reach lint"); };
+  it("does not fire for tools it does not gate, even when resolution would throw", () => {
+    const cwdGone = () => { throw new Error("should never be reached"); };
+    const passingLint = () => ({ kind: "pass" as const });
 
-      const result = simulateExtensionHandler("read", { path: "/src/app.ts" }, throwingLint);
+    // The early return precedes the resolution step, so nothing throws at all.
+    expect(simulateExtensionHandler("read", { path: "/src/app.ts" }, passingLint, cwdGone)).toBeUndefined();
+  });
+});
 
-      expect(result).toBeUndefined();
-    });
+describe("processToolResult's own fail-closed catch", () => {
+  // A throwing lintFn never escapes processToolResult, so these prove the
+  // INNER catch and its error formatting — not the wrapper above.
+  it("converts a thrown Error into a blocking error result", () => {
+    const throwingLint = () => { throw new Error("Catastrophic regex engine failure"); };
 
-    it("returns undefined when lint passes (no violations)", () => {
-      const passingLint = () => ({ kind: "pass" as const });
+    const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, throwingLint);
 
-      const result = simulateExtensionHandler("edit", { path: "/src/clean.ts" }, passingLint);
-
-      expect(result).toBeUndefined();
-    });
-
-    it("returns error response for violations (normal violation path)", () => {
-      const violationLint = () => ({
-        kind: "violations" as const,
-        violations: [{
-          rule: "no-console",
-          file: "/src/app.ts",
-          line: 5,
-          text: "console.log('x')",
-          fixHint: "Remove console.log",
-        }],
-      });
-
-      const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, violationLint);
-
-      expect(result).toBeDefined();
-      expect(result!.isError).toBe(true);
-      expect(result!.content[0].text).toContain("LINT VIOLATIONS");
-    });
+    expect(result).toBeDefined();
+    expect(result!.isError).toBe(true);
+    expect(result!.content).toHaveLength(1);
+    expect(result!.content[0].type).toBe("text");
+    expect(result!.content[0].text).toContain("Catastrophic regex engine failure");
   });
 
-  describe("error message formatting", () => {
-    it("includes the full error message for Error instances", () => {
-      const throwingLint = () => { throw new Error("ENOENT: no such file or directory"); };
+  it("blocks the edit for a write as well", () => {
+    const throwingLint = () => { throw new Error("file system exploded"); };
 
-      const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, throwingLint);
+    const result = simulateExtensionHandler("write", { path: "/src/index.ts", content: "x" }, throwingLint);
 
-      // processToolResult catches the throw and wraps it as a lint error result,
-      // which formatBlockMessage renders with the file path and error detail
-      expect(result!.content[0].text).toContain("ENOENT: no such file or directory");
-      expect(result!.isError).toBe(true);
+    expect(result!.isError).toBe(true);
+  });
+
+  it("never rethrows, so the outer wrapper is not what produced the result", () => {
+    const throwingLint = () => { throw new Error("boom"); };
+
+    // Called directly — no surrounding try/catch. A rethrow would fail this.
+    expect(() => processToolResult("edit", { path: "/src/app.ts" }, throwingLint)).not.toThrow();
+    const direct = processToolResult("edit", { path: "/src/app.ts" }, throwingLint);
+    expect(direct?.isError).toBe(true);
+    expect(direct?.content[0]!.text).toContain("boom");
+  });
+
+  it("stringifies a thrown string", () => {
+    const throwingLint = () => { throw "raw string error"; };
+
+    const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, throwingLint);
+
+    expect(result).toBeDefined();
+    expect(result!.isError).toBe(true);
+    expect(result!.content[0].text).toContain("raw string error");
+  });
+
+  it("stringifies a thrown number", () => {
+    const throwingLint = () => { throw 42; };
+
+    const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, throwingLint);
+
+    expect(result).toBeDefined();
+    expect(result!.isError).toBe(true);
+    expect(result!.content[0].text).toContain("42");
+  });
+
+  it("still blocks when the thrown value is null", () => {
+    const throwingNull = () => { throw null; };
+
+    const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, throwingNull);
+
+    expect(result).toBeDefined();
+    expect(result!.isError).toBe(true);
+  });
+
+  it("stringifies a thrown object", () => {
+    const throwingLint = () => { throw { code: "ERR_TIMEOUT", detail: "regex took too long" }; };
+
+    const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, throwingLint);
+
+    expect(result!.content[0].text).toContain("[object Object]");
+  });
+});
+
+describe("normal flow through both layers", () => {
+  it("returns undefined for non-edit/write tools", () => {
+    const throwingLint = () => { throw new Error("should never reach lint"); };
+
+    expect(simulateExtensionHandler("read", { path: "/src/app.ts" }, throwingLint)).toBeUndefined();
+  });
+
+  it("returns undefined when lint passes", () => {
+    const passingLint = () => ({ kind: "pass" as const });
+
+    expect(simulateExtensionHandler("edit", { path: "/src/clean.ts" }, passingLint)).toBeUndefined();
+  });
+
+  it("returns an error response for violations", () => {
+    const violationLint = () => ({
+      kind: "violations" as const,
+      violations: [{
+        rule: "no-console",
+        file: "/src/app.ts",
+        line: 5,
+        text: "console.log('x')",
+        fixHint: "Remove console.log",
+      }],
     });
 
-    it("stringifies non-Error throws", () => {
-      const throwingLint = () => { throw { code: "ERR_TIMEOUT", detail: "regex took too long" }; };
+    const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, violationLint);
 
-      const result = simulateExtensionHandler("edit", { path: "/src/app.ts" }, throwingLint);
-
-      expect(result!.content[0].text).toContain("LINT ENGINE ERROR");
-      expect(result!.content[0].text).toContain("[object Object]");
-    });
+    expect(result).toBeDefined();
+    expect(result!.isError).toBe(true);
+    expect(result!.content[0].text).toContain("LINT VIOLATIONS");
   });
 });

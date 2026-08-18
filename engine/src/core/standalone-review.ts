@@ -41,6 +41,7 @@ import { attributeFindings, findingsUnionError, parseStoredFindings, type Findin
 import { fail, isRecord, ok, sanitizeProse, type ParseResult } from "./panel-kernel";
 import { resolveReviewFindings, type ParsedFindings } from "./review-output";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
+import { compareStrings } from "./ordering";
 
 export const STANDALONE_REVIEW_SUBJECT = "standalone-review" as const;
 
@@ -122,8 +123,7 @@ export interface PrepareStandaloneReviewInput {
   readonly roster: unknown;
 }
 
-interface JsonRecord { readonly [key: string]: JsonValue }
-type JsonValue = string | number | boolean | null | readonly JsonValue[] | JsonRecord;
+
 
 const resultOk = <T, E = never>(value: T): DomainResult<T, E> => canonicalRecord({ ok: true, value });
 const resultFail = <T = never, E = never>(error: E): DomainResult<T, E> => canonicalRecord({ ok: false, error });
@@ -137,9 +137,6 @@ export function exactKeys(raw: Record<string, unknown>, allowed: readonly string
   ];
 }
 
-function compareStrings(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
 
 export function uniqueNonEmpty(values: readonly string[], label: string): readonly string[] {
   const errors: string[] = [];
@@ -1341,10 +1338,16 @@ export function parseReviewerEvidence(raw: unknown, runId: string, label: string
 
 export function parseStandaloneAggregate(raw: unknown): ParseResult<StandaloneReviewAggregate> {
   if (!isRecord(raw)) return fail(["standalone review aggregate must be an object"]);
-  const errors = exactKeys(raw, ["schema_version", "run_id", "subject_id", "scope", "findings"], "aggregate")
-    .filter((error) => !error.includes("reviewer_evidence"));
-  const unknown = Object.keys(raw).filter((key) => !["schema_version", "run_id", "subject_id", "scope", "reviewer_evidence", "findings"].includes(key));
-  errors.push(...unknown.map((key) => `aggregate contains unknown field '${key}'`));
+  // `reviewer_evidence` is ALLOWED but not REQUIRED, which is one exclusion,
+  // not two passes: this used to run exactKeys over the required-only list,
+  // strip every resulting error whose text merely CONTAINED
+  // "reviewer_evidence" by substring, and then recompute unknown fields
+  // against the correct list anyway.
+  const errors = exactKeys(
+    raw,
+    ["schema_version", "run_id", "subject_id", "scope", "reviewer_evidence", "findings"],
+    "aggregate",
+  ).filter((error) => error !== "aggregate.reviewer_evidence is required");
   if (raw.schema_version !== 1) errors.push("aggregate.schema_version must be 1");
   const runId = typeof raw.run_id === "string" ? raw.run_id.trim() : "";
   if (runId === "") errors.push("aggregate.run_id must be non-empty");

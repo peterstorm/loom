@@ -337,10 +337,6 @@ export function attributeExit(exit: number | null, classified: ClassifiedTestCom
   return classified.opBefore === ";" || classified.opBefore === "&" ? exit : null;
 }
 
-/** Backwards-compatible boolean view of classifyTestCommand. */
-export function isTestCommand(command: string): boolean {
-  return classifyTestCommand(command) !== null;
-}
 
 // --- Bash-authored file writes (redirects, tee) ---
 

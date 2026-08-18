@@ -43,8 +43,7 @@
 
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
-
-const EXCLUDE_PATTERNS: readonly string[] = [".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx"];
+import { isTestFile } from "./config";
 
 /** `const xs: T[] = [];` / `const xs = [];` / `let xs: T[] = []` */
 const ACCUMULATOR_DECL = /^\s*(?:const|let)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*\[\s*\]\s*;?\s*$/;
@@ -57,7 +56,7 @@ const pushInto = (name: string): RegExp =>
 const DISQUALIFYING = /\b(?:break|continue|return|await|yield)\b/;
 
 export function handler(content: string, filePath: string): readonly Violation[] {
-  if (EXCLUDE_PATTERNS.some((pattern) => filePath.endsWith(pattern))) return [];
+  if (isTestFile(filePath)) return [];
   const lines = content.split("\n");
   const violations: Violation[] = [];
 

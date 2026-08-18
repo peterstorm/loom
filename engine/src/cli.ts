@@ -47,7 +47,12 @@ function resultToExit(result: HookResult): never {
       if (systemMessage) process.stdout.write(JSON.stringify({ systemMessage }) + "\n");
       process.exit(0);
     })
-    .with({ kind: "passthrough" }, () => process.exit(0))
+    .with({ kind: "passthrough" }, ({ systemMessage }) => {
+      // Same channel and same reason as `allow` above: a passthrough hook also
+      // exits 0, so its stderr reaches nobody.
+      if (systemMessage) process.stdout.write(JSON.stringify({ systemMessage }) + "\n");
+      process.exit(0);
+    })
     .with({ kind: "block" }, ({ message }) => {
       process.stderr.write(nonEmptyMessage(message) + "\n");
       process.exit(2);

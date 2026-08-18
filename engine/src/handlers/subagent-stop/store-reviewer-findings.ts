@@ -15,7 +15,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import type { HookHandler, SubagentStopInput } from "../../types";
+import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
 import {
   applyReviewResolution,
   constrainReviewResolutionToScope,
@@ -30,7 +30,23 @@ import { extractTaskId } from "../../utils/extract-task-id";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import { parseFirstUserPrompt } from "../../parsers/parse-transcript";
+import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 
+/**
+ * A reviewer's output was discarded. Report it and let the stop proceed.
+ *
+ * On both channels, because either one alone is silent somewhere: stderr is
+ * swallowed on an exit-0 hook, and `systemMessage` is the harness's channel
+ * rather than the one a `--debug` run or a direct-call harness reads.
+ */
+const discarded = (message: string): HookResult =>
+  passthroughDiagnostic(`[loom] store-reviewer-findings: ${message}`);
+
+/**
+ * The same line for the paths that then FAIL the hook. `error` exits non-zero
+ * and its message is surfaced by the CLI, but these handlers are also called
+ * directly (pi, tests), where stderr is the only channel either way.
+ */
 const warn = (message: string): void => {
   process.stderr.write(`[loom] store-reviewer-findings: ${message}\n`);
 };
@@ -53,8 +69,7 @@ const handler: HookHandler = async (stdin) => {
 
   const mgr = StateManager.fromSession(input.session_id);
   if (!mgr) {
-    warn(`no task graph for session ${input.session_id ?? "<unset>"} — ${agentType} findings NOT stored`);
-    return { kind: "passthrough" };
+    return discarded(`no task graph for session ${input.session_id ?? "<unset>"} — ${agentType} findings NOT stored`);
   }
 
   // Resolved, not read off the payload: a harness that sends no
@@ -75,8 +90,7 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
   }
   if (hasStandaloneReviewContext(trustedPrompt)) {
-    process.stderr.write(`[loom] store-reviewer-findings: ${agentType} belongs to a standalone review run — task state untouched\n`);
-    return { kind: "passthrough" };
+    return passthroughDiagnostic(`[loom] store-reviewer-findings: ${agentType} belongs to a standalone review run — task state untouched\n`);
   }
 
   const taskId = extractTaskId(trustedPrompt);
@@ -103,8 +117,7 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
   }
   if (!targetTask) {
-    warn(`${agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored`);
-    return { kind: "passthrough" };
+    return discarded(`${agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored`);
   }
 
   const transcript = await readTranscriptWithRetry(rawPath, /\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*\d+/);
@@ -139,13 +152,9 @@ const handler: HookHandler = async (stdin) => {
   }));
 
   if (!taskFound) {
-    warn(`${agentType} review task ${taskId} disappeared before evidence application — findings NOT stored`);
-    return { kind: "passthrough" };
+    return discarded(`${agentType} review task ${taskId} disappeared before evidence application — findings NOT stored`);
   }
-  process.stderr.write(
-    reviewResolutionLog(taskId, resolution, appliedTask, applicationChanged) + "\n",
-  );
-  return { kind: "passthrough" };
+  return passthroughDiagnostic(reviewResolutionLog(taskId, resolution, appliedTask, applicationChanged) + "\n");
 };
 
 export default handler;

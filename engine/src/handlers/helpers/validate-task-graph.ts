@@ -43,8 +43,10 @@ export type ValidationResult =
   | { ok: true }
   | { ok: false; errors: readonly string[] };
 
-function ok(): ValidationResult { return { ok: true }; }
-function fail(errors: string[]): ValidationResult { return { ok: false, errors }; }
+/** Constructors for `ValidationResult`, exported beside the type they build so
+ *  a second validator does not hand-roll a second byte-identical pair. */
+export function ok(): ValidationResult { return { ok: true }; }
+export function fail(errors: string[]): ValidationResult { return { ok: false, errors }; }
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -310,40 +312,6 @@ interface FindingsRepair {
 }
 
 /**
- * Repair one task's findings and the two `string[]` views over them.
- *
- * Every path here CONSERVES claims, or SAYS that it could not. That is the
- * whole rule, and it used not to hold in two ways. A claim in
- * `critical_findings` with no counterpart in `findings` was deleted, silently,
- * by the repair the load-boundary diagnostic itself tells the operator to run —
- * and `complete-wave-gate` counts that view, so the deletion turned a blocking
- * wave into a passing one. A claim carried ONLY by a malformed `findings` entry
- * was deleted the same way, because conservation rested entirely on the views
- * still holding it and nothing reported the difference when they did not.
- *
- * Four repairs, in order:
- *
- *   1. Malformed `findings` entries lose their IDENTITY, not their claim. They
- *      are the items a refutation panel votes on, and a malformed one reaches a
- *      verifier as an un-votable item, so it cannot stay as it is — but
- *      `salvageMalformedFindings` re-mints whatever claim it still carries under
- *      RECOVERED_AGENT. Only an entry with no usable severity or claim is truly
- *      dropped, and that is COUNTED and reported, never silent.
- *   2. Claims present only in a view are given identity (`recoverViewOnlyClaims`).
- *      This is what makes a pre-identity task adjudicable, and what makes the
- *      repair idempotent: after one pass the views hold exactly what `findings`
- *      holds, so a second pass finds nothing to recover. Running it AFTER step 1
- *      is what stops a salvaged claim being minted twice.
- *   3. Colliding ids are re-minted, because the load boundary now rejects
- *      duplicates and a rejection with no working repair dead-ends the operator.
- *   4. Malformed refutation records lose their unusable audit decision, but a
- *      valid nested finding is returned to the active set before views are
- *      derived. The malformed record is still counted and reported.
- *
- * The views are then re-derived from the result, which is the lockstep
- * `findingsLockstepError` proves at load.
- */
-/**
  * Recover findings that survive only as malformed entries or as claims left in
  * a derived view.
  *
@@ -437,6 +405,40 @@ function readFindingContainers(t: Record<string, unknown>) {
   };
 }
 
+/**
+ * Repair one task's findings and the two `string[]` views over them.
+ *
+ * Every path here CONSERVES claims, or SAYS that it could not. That is the
+ * whole rule, and it used not to hold in two ways. A claim in
+ * `critical_findings` with no counterpart in `findings` was deleted, silently,
+ * by the repair the load-boundary diagnostic itself tells the operator to run —
+ * and `complete-wave-gate` counts that view, so the deletion turned a blocking
+ * wave into a passing one. A claim carried ONLY by a malformed `findings` entry
+ * was deleted the same way, because conservation rested entirely on the views
+ * still holding it and nothing reported the difference when they did not.
+ *
+ * Four repairs, in order:
+ *
+ *   1. Malformed `findings` entries lose their IDENTITY, not their claim. They
+ *      are the items a refutation panel votes on, and a malformed one reaches a
+ *      verifier as an un-votable item, so it cannot stay as it is — but
+ *      `salvageMalformedFindings` re-mints whatever claim it still carries under
+ *      RECOVERED_AGENT. Only an entry with no usable severity or claim is truly
+ *      dropped, and that is COUNTED and reported, never silent.
+ *   2. Claims present only in a view are given identity (`recoverViewOnlyClaims`).
+ *      This is what makes a pre-identity task adjudicable, and what makes the
+ *      repair idempotent: after one pass the views hold exactly what `findings`
+ *      holds, so a second pass finds nothing to recover. Running it AFTER step 1
+ *      is what stops a salvaged claim being minted twice.
+ *   3. Colliding ids are re-minted, because the load boundary now rejects
+ *      duplicates and a rejection with no working repair dead-ends the operator.
+ *   4. Malformed refutation records lose their unusable audit decision, but a
+ *      valid nested finding is returned to the active set before views are
+ *      derived. The malformed record is still counted and reported.
+ *
+ * The views are then re-derived from the result, which is the lockstep
+ * `findingsLockstepError` proves at load.
+ */
 function fixTaskFindings(t: Record<string, unknown>): FindingsRepair {
   const { rawFindings, refuted, resolved, stored, recoveredRefutationFindings,
     recoveredResolutionFindings, rawRefutedCount, rawResolvedCount, rawFindingCount } = readFindingContainers(t);
@@ -651,7 +653,7 @@ export function fixFull(json: Record<string, unknown>): FixReport {
   return { json: JSON.stringify(fixed, null, 2), notes, dataLoss };
 }
 
-/** Production filesystem port for model-binding checks; failures retain their cause. */
+/** The task records of a graph, or `[]` when `tasks` is absent or not an array. */
 function tasksOf(json: Record<string, unknown>): Record<string, unknown>[] {
   return Array.isArray(json.tasks) ? (json.tasks as Record<string, unknown>[]) : [];
 }

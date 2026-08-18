@@ -29,6 +29,7 @@ import {
   parseSessionId,
   type SessionRegistry,
 } from "../../machine";
+import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 
 interface RecordEvidenceInput {
   session_id?: string;
@@ -56,10 +57,7 @@ export const runRecordEvidence = async (
     // and stand down, exactly as the old in-ledger throw+catch did.
     const sessionId = parseSessionId(input.session_id);
     if (sessionId === null) {
-      process.stderr.write(
-        `record-evidence: invalid session id ${JSON.stringify(input.session_id)} — nothing recorded\n`,
-      );
-      return passthroughResult();
+      return passthroughDiagnostic(`record-evidence: invalid session id ${JSON.stringify(input.session_id)} — nothing recorded\n`);
     }
 
     // Recorder activity keeps a live binding fresh (and reaps expired ones)
@@ -138,10 +136,7 @@ export const runRecordEvidence = async (
     // programming error or an fs-write failure), NOT one of the expected
     // no-evidence stand-downs above. Flag it as such so a genuine bug is
     // distinguishable from benign "nothing recorded" in the logs.
-    process.stderr.write(
-      `record-evidence: UNEXPECTED handler exception — evidence for this call may be lost (failing open): ${e instanceof Error ? e.message : String(e)}\n`,
-    );
-    return passthroughResult();
+    return passthroughDiagnostic(`record-evidence: UNEXPECTED handler exception — evidence for this call may be lost (failing open): ${e instanceof Error ? e.message : String(e)}\n`);
   }
 };
 

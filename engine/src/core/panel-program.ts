@@ -2036,20 +2036,27 @@ export function parsePersistentArchitecturePanelEvent(
     if (!value.ok) return persistentFailure(panelError("architecture", "request-binding-mismatch", value.error.message, { requestId: resolved.value.expected.requestId, slotId: resolved.value.expected.slotId }));
     return persistentSuccess(architectureEvent(Object.freeze({ schemaVersion: 1, type: "architecture-judge-accepted", request: resolved.value.identity, value: value.value })));
   }
-  if (envelope.type === "architecture-candidate-rejected" || envelope.type === "architecture-judge-rejected") {
+  // One branch per rejection kind rather than a shared stage-guard prelude and
+  // a re-test of the same conditions below it: the paired form left a third
+  // "wrong stage" arm that the guards had already made unreachable, and the
+  // re-test was the only thing narrowing `state` for its own roster.
+  if (envelope.type === "architecture-candidate-rejected") {
     const exact = safeRecord(raw, ["schemaVersion", "type", "request", "attempt", "category", "message"]);
     if (exact === null) return persistentFailure(panelError("architecture", "malformed-event", "architecture rejection event contains unknown or missing fields"));
-    if (envelope.type === "architecture-candidate-rejected" && state.stage !== "awaiting-candidates") {
+    if (state.stage !== "awaiting-candidates") {
       return persistentFailure(panelError("architecture", "unexpected-event", `candidate rejection is not accepted during ${state.stage}`));
     }
-    if (envelope.type === "architecture-judge-rejected" && state.stage !== "awaiting-judges") {
+    const rejection = parseRejection(exact, "architecture", state.authority.candidateRoster, state.slots, resolver);
+    if (!rejection.ok) return rejection;
+    return persistentSuccess(architectureEvent(Object.freeze({ schemaVersion: 1, type: envelope.type, ...rejection.value })));
+  }
+  if (envelope.type === "architecture-judge-rejected") {
+    const exact = safeRecord(raw, ["schemaVersion", "type", "request", "attempt", "category", "message"]);
+    if (exact === null) return persistentFailure(panelError("architecture", "malformed-event", "architecture rejection event contains unknown or missing fields"));
+    if (state.stage !== "awaiting-judges") {
       return persistentFailure(panelError("architecture", "unexpected-event", `judge rejection is not accepted during ${state.stage}`));
     }
-    const rejection = envelope.type === "architecture-candidate-rejected" && state.stage === "awaiting-candidates"
-      ? parseRejection(exact, "architecture", state.authority.candidateRoster, state.slots, resolver)
-      : state.stage === "awaiting-judges"
-        ? parseRejection(exact, "architecture", state.authority.judgeRoster, state.slots, resolver)
-        : persistentFailure(panelError("architecture", "unexpected-event", `rejection is not accepted during ${state.stage}`));
+    const rejection = parseRejection(exact, "architecture", state.authority.judgeRoster, state.slots, resolver);
     if (!rejection.ok) return rejection;
     return persistentSuccess(architectureEvent(Object.freeze({ schemaVersion: 1, type: envelope.type, ...rejection.value })));
   }

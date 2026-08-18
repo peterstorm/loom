@@ -14,6 +14,7 @@ import { StateManager } from "../../state-manager";
 import { validateFull, fixFull } from "./validate-task-graph";
 import { checkPlanModelBindings, productionModelBindingDeps } from "./validate-model-bindings";
 import { derivePendingTaskProof } from "../../core/proof-obligations";
+import { argumentValue, hasFlag } from "./cli-args";
 
 interface DecomposeInput {
   plan_title: string;
@@ -22,20 +23,21 @@ interface DecomposeInput {
   tasks: Task[];
 }
 
+/**
+ * Through `cli-args`, not by hand: the hand-rolled loop this replaced accepted
+ * the NEXT FLAG as a value, so `--issue --fix` read as `issue = NaN` with
+ * `--fix` silently consumed — the exact divergence `argumentValue` exists to
+ * end.
+ */
 function parseArgs(args: string[]): { issue?: number; repo?: string; fix: boolean; force: boolean } {
-  let issue: number | undefined;
-  let repo: string | undefined;
-  let fix = false;
-  let force = false;
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--issue" && args[i + 1]) { issue = Number(args[++i]); continue; }
-    if (args[i] === "--repo" && args[i + 1]) { repo = args[++i]; continue; }
-    if (args[i] === "--fix") { fix = true; continue; }
-    if (args[i] === "--force") { force = true; continue; }
-  }
-
-  return { issue, repo, fix, force };
+  const rawIssue = argumentValue(args, "--issue");
+  const issue = rawIssue === null ? undefined : Number(rawIssue);
+  return {
+    ...(issue === undefined || Number.isNaN(issue) ? {} : { issue }),
+    ...(argumentValue(args, "--repo") === null ? {} : { repo: argumentValue(args, "--repo")! }),
+    fix: hasFlag(args, "--fix"),
+    force: hasFlag(args, "--force"),
+  };
 }
 
 /**

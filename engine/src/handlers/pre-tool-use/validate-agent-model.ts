@@ -31,7 +31,7 @@ import {
 } from "../../core/grandfathered-spawn-model";
 import { resolveRepositoryRoot } from "../../utils/git";
 import { parseFrontmatterFields } from "../../utils/frontmatter";
-import { parseStoredAgentRequestAuthority, type AgentRequestAuthority } from "../../core/orchestration-contract/roster";
+import { parseStoredAgentRequestAuthority, type AgentRequestAuthority } from "../../core/orchestration-contract";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
 import { resolveClaudeAgentDefinitionPath } from "../../utils/agent-definition";

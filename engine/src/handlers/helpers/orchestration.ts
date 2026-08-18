@@ -20,6 +20,8 @@
  *   helper orchestration correlate --run <run-directory> --runs-root <root>
  *                                  --request <request-id> --harness <pi|claude>
  *                                  --native-id <harness-native-id> --agent <role>
+ *   helper orchestration complete --run <run-directory> --runs-root <root>
+ *                                 --operation <operation-id>
  *   helper orchestration decide --run <run-directory> --runs-root <root>
  *                               --request <decision-id>   (decision on stdin)
  *

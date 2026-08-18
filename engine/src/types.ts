@@ -35,7 +35,20 @@ export type HookResult =
   | { kind: "allow"; systemMessage?: string }
   | { kind: "block"; message: string }
   | { kind: "error"; message: string }
-  | { kind: "passthrough" };
+  /**
+   * The hook declines to decide and the tool call proceeds untouched.
+   * `systemMessage` carries the same operator channel `allow` has, and for the
+   * same reason: `passthrough` also exits 0, so a handler that wrote its
+   * diagnostic to stderr immediately before returning here wrote it to nobody.
+   * A reviewer whose findings were discarded, a task graph that could not be
+   * read, an evidence write that did not land — every one of those was reported
+   * through a channel the harness swallows.
+   *
+   * Hook handlers populate this. CLI helpers under `handlers/helpers/` do NOT:
+   * their stderr does reach their caller, and several of them emit machine-read
+   * JSON on stdout that a second `systemMessage` object would corrupt.
+   */
+  | { kind: "passthrough"; systemMessage?: string };
 
 /** Defense-in-depth: collapse empty diagnostic messages to a sentinel so
  *  a silent error/block can never reach the user. Used at the cli exit boundary. */
@@ -45,7 +58,10 @@ export function nonEmptyMessage(s: string | undefined | null): string {
 
 /** Smart constructors — preferred over object literals so callers funnel through nonEmptyMessage. */
 export const allowResult = (): HookResult => ({ kind: "allow" });
-export const passthroughResult = (): HookResult => ({ kind: "passthrough" });
+export const passthroughResult = (systemMessage?: string): HookResult =>
+  systemMessage === undefined
+    ? { kind: "passthrough" }
+    : { kind: "passthrough", systemMessage: nonEmptyMessage(systemMessage) };
 export const errorResult = (message: string): HookResult => ({ kind: "error", message: nonEmptyMessage(message) });
 export const blockResult = (message: string): HookResult => ({ kind: "block", message: nonEmptyMessage(message) });
 

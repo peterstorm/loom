@@ -29,6 +29,7 @@ import {
   parseSessionId,
   type SessionRegistry,
 } from "../../machine";
+import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 
 function anyBindingExists(): boolean {
   try {
@@ -93,8 +94,7 @@ export const runEnforcePhaseTools = async (
     if (binding === null) {
       // Contended session: no per-agent attribution possible. Stand down
       // loudly rather than gate one agent on another's evidence.
-      process.stderr.write(`[loom machine] gate standing down for ${sessionId}: contended session\n`);
-      return passthroughResult();
+      return passthroughDiagnostic(`[loom machine] gate standing down for ${sessionId}: contended session\n`);
     }
 
     const loaded = loadMachine(machinesDir(), binding.agentType);

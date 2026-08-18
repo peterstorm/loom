@@ -46,6 +46,7 @@ import {
   TRUSTED_LEDGER_ONLY_POLICY,
   type ProofEvaluationPolicy,
 } from "../../core/proof-obligations";
+import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 
 /**
  * Is the agent's machine BOUND for evidence purposes? "invalid" counts as
@@ -97,8 +98,11 @@ export function extractTestEvidence(bashOutput: string): TestEvidence {
   // Vitest: "Tests  N passed" or "Test Files  N passed"
   const vitest = lastMatch(bashOutput, /Tests?\s+\d+ passed/);
   if (vitest) {
-    const vitestFailed = lastMatch(bashOutput, /Tests?\s+\d+ failed/);
-    if (!vitestFailed || vitestFailed.index < vitest.index) {
+    // The `=== "0"` guard every sibling branch carries: vitest prints
+    // "Tests  2 failed | 10 passed", failed FIRST, so the index comparison
+    // alone reads a genuinely failing run as passed.
+    const vitestFailed = lastMatch(bashOutput, /Tests?\s+(\d+) failed/);
+    if (!vitestFailed || vitestFailed[1] === "0" || vitestFailed.index < vitest.index) {
       return { passed: true, evidence: `vitest: ${vitest[0]}` };
     }
   }
@@ -871,10 +875,7 @@ export const runUpdateTaskStatus = async (
   });
 
   if (skippedExistingVerdict) {
-    process.stderr.write(
-      `update-task-status: ${taskId} is completed or missing — leaving task evidence untouched\n`,
-    );
-    return { kind: "passthrough" };
+    return passthroughDiagnostic(`update-task-status: ${taskId} is completed or missing — leaving task evidence untouched\n`);
   }
 
   const persistedTask = mgr.load().tasks.find((candidate) => candidate.id === taskId);

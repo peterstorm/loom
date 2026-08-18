@@ -447,11 +447,18 @@ describe("update-task-status — transcript path resolution", () => {
 
     const tmpDir = join(tmpdir(), `uts-${stamp}`);
     const configDir = join(tmpDir, "config");
-    const projectDir = join(tmpDir, "project");
-    mkdirSync(projectDir, { recursive: true });
-
+    mkdirSync(configDir, { recursive: true });
     const statePath = join(tmpDir, "graph.json");
     const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
+    // A case that plants a write into THIS repository must declare this
+    // repository as the project: the handler canonicalizes modified paths
+    // against the live `CLAUDE_PROJECT_DIR`, so a temp project dir plus a
+    // real-repo path is a combination production cannot produce, and it only
+    // used to pass because the git helpers answered from a root frozen at
+    // import time. Transcript isolation still comes from CLAUDE_CONFIG_DIR
+    // and the unique session id, not from the project dir.
+    const projectDir = opts.modifiedPath ? repoRoot : join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
     const artifactBaseline = opts.modifiedPath
       ? captureDeclaredArtifactBaseline(repoRoot, ["engine/src/types.ts"])
       : undefined;

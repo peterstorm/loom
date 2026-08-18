@@ -21,7 +21,7 @@ A specialized AI subagent spawned to perform one phase or task. Defined by a mar
 _Avoid_: Worker, bot, assistant
 
 **Agent Catalog**:
-The single declarative registry defining every Agent's identity: its kind (phase, architecture-panel, implementation, reviewer, review-verifier, utility), model profile, and required Skill — one record per Agent, keyed by name so a duplicate or double-kinded Agent is unrepresentable. Every agent set, phase map, and policy table is a derived projection of the catalog, never a second source.
+The single declarative registry defining every Agent's identity: its kind (phase, architecture-panel, implementation, reviewer, spec-check, review-verifier, utility), model profile, and required Skill — one record per Agent, keyed by name so a duplicate or double-kinded Agent is unrepresentable. Every agent set, phase map, and policy table is a derived projection of the catalog, never a second source.
 _Avoid_: Agent list, agent config, roster (a roster is an ordered per-run selection drawn from the catalog, not identity)
 
 **Skill**:

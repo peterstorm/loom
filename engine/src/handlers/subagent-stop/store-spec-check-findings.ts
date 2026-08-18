@@ -11,6 +11,7 @@ export { parseSpecCheckOutput } from "../../core/spec-check";
 import { StateManager } from "../../state-manager";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
+import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 
 const handler: HookHandler = async (stdin) => {
   // Guard the standalone CLI route: dispatch parses stdin before calling
@@ -81,10 +82,7 @@ const handler: HookHandler = async (stdin) => {
     wave_gates: reconcileWaveBlock(s.wave_gates, s.tasks, resolution.specCheck, wave),
   }));
 
-  process.stderr.write(
-    `Spec-check: ${resolution.specCheck.critical_count} critical, ${resolution.specCheck.high_count} high\n`,
-  );
-  return { kind: "passthrough" };
+  return passthroughDiagnostic(`Spec-check: ${resolution.specCheck.critical_count} critical, ${resolution.specCheck.high_count} high\n`);
 };
 
 export default handler;

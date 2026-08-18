@@ -28,6 +28,7 @@
 
 import type { Violation } from "../types";
 import { makeViolation } from "../types";
+import { isTestFile } from "./config";
 
 /** Branches on one tag at or above this count read as a switch, not a guard. */
 export const DEFAULT_MAX_DISCRIMINANT_BRANCHES = 3;
@@ -51,8 +52,6 @@ export const DEFAULT_DISCRIMINANT_TAGS: readonly string[] = [
   "severity",
   "type",
 ];
-
-const EXCLUDE_PATTERNS: readonly string[] = [".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx"];
 
 /** `if (` / `} else if (` — the line shapes that open a branch. */
 const BRANCH_LINE = /^\s*(?:\}\s*)?(?:else\s+)?if\s*\(/;
@@ -149,7 +148,7 @@ export function handler(
   maxBranches: number = DEFAULT_MAX_DISCRIMINANT_BRANCHES,
   tags: readonly string[] = DEFAULT_DISCRIMINANT_TAGS,
 ): readonly Violation[] {
-  if (EXCLUDE_PATTERNS.some((pattern) => filePath.endsWith(pattern))) return [];
+  if (isTestFile(filePath)) return [];
   const lines = content.split("\n");
   if (lines.some((line) => TOTALITY_PROOF.test(line))) return [];
 

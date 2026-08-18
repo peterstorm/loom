@@ -12,7 +12,7 @@
 import { match } from "ts-pattern";
 import type { HookResult, Phase, TaskGraph } from "../types";
 import {
-  PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
+  PHASE_AGENT_MAP, isImplAgent, REVIEW_AGENTS,
   REVIEW_PANEL_AGENTS, UTILITY_AGENTS, VALID_TRANSITIONS, CLARIFY_THRESHOLD,
   ARCH_PANEL_AGENTS, ARCH_PANEL_PHASE, isStandaloneReviewAgent,
 } from "../config";
@@ -94,7 +94,7 @@ export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   if (direct) return direct;
   const suffixed = PHASE_AGENT_MAP[agent + "-agent"];
   if (suffixed) return suffixed;
-  if (IMPL_AGENTS.has(agent) || IMPL_AGENTS.has(agent + "-agent") || REVIEW_AGENTS.has(agent) || REVIEW_AGENTS.has(agent + "-agent")) return "execute";
+  if (isImplAgent(agent) || REVIEW_AGENTS.has(agent) || REVIEW_AGENTS.has(agent + "-agent")) return "execute";
   if (isReviewPanelAgent(agent)) return "execute";
   // Architecture-panel agents (--panel) are architecture-phase work. Recognized
   // here so validate-phase-order allows them, but never added to PHASE_AGENT_MAP
@@ -132,6 +132,27 @@ function checkPlanAlignmentGate(state: ArtifactState, probe: ArtifactProbe): str
   return null;
 }
 
+/**
+ * The spec artifact, or the reason it is missing.
+ *
+ * `clarify` and `architecture` both gate on "specify produced a readable
+ * spec.md", and both used to spell out the same declared-artifact →
+ * spec_file → spec_dir search and the same failure string. One rule, one
+ * resolution: a change to where a spec may live cannot now reach one gate and
+ * not the other.
+ */
+function resolveSpecArtifact(
+  state: ArtifactState,
+  probe: ArtifactProbe,
+): Readonly<{ ok: true; spec: string }> | Readonly<{ ok: false; missing: string }> {
+  const declared = resolveArtifact(state.phase_artifacts.specify, state.spec_file, probe);
+  // Only fall back to disk search if spec_dir is explicitly set
+  const spec = declared ?? (state.spec_dir ? probe.findFile(state.spec_dir, "spec.md") : null);
+  return spec && probe.exists(spec)
+    ? { ok: true, spec }
+    : { ok: false, missing: "specify (no spec.md found)" };
+}
+
 export function checkArtifacts(
   targetPhase: Phase,
   state: ArtifactState,
@@ -147,28 +168,15 @@ export function checkArtifacts(
       return null;
     })
     .with("clarify", () => {
-      let spec = resolveArtifact(state.phase_artifacts.specify, state.spec_file, probe);
-      if (!spec) {
-        // Only fall back to disk search if spec_dir is explicitly set
-        if (state.spec_dir) {
-          spec = probe.findFile(state.spec_dir, "spec.md");
-        }
-      }
-      if (!spec || !probe.exists(spec)) return "specify (no spec.md found)";
-      return null;
+      const resolved = resolveSpecArtifact(state, probe);
+      return resolved.ok ? null : resolved.missing;
     })
     .with("architecture", () => {
-      let spec = resolveArtifact(state.phase_artifacts.specify, state.spec_file, probe);
-      if (!spec) {
-        // Only fall back to disk search if spec_dir is explicitly set
-        if (state.spec_dir) {
-          spec = probe.findFile(state.spec_dir, "spec.md");
-        }
-      }
-      if (!spec || !probe.exists(spec)) return "specify (no spec.md found)";
+      const resolved = resolveSpecArtifact(state, probe);
+      if (!resolved.ok) return resolved.missing;
       if (!state.skipped_phases.includes("clarify")) {
         try {
-          const content = probe.readText(spec);
+          const content = probe.readText(resolved.spec);
           const markers = (content.match(/NEEDS CLARIFICATION/g) ?? []).length;
           if (markers > CLARIFY_THRESHOLD) return `clarify (${markers} markers > ${CLARIFY_THRESHOLD})`;
         } catch (e) {

@@ -8,6 +8,7 @@
  */
 
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
+import { compareStrings } from "./ordering";
 
 export const CALIBRATION_SCHEMA_VERSION = 1 as const;
 export const CALIBRATION_CASE_STATES = ["vulnerable", "fixed"] as const;
@@ -135,9 +136,6 @@ export interface CalibrationScore {
 
 const GIT_REVISION = /^[0-9a-f]{7,64}$/;
 
-function compareStrings(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
 
 function parseRawJson(raw: unknown, label: string): ParseResult<Record<string, unknown>> {
   if (typeof raw !== "string") return isRecord(raw) ? ok(raw) : fail([`${label} must be a JSON object`]);

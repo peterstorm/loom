@@ -48,6 +48,7 @@ import {
   applyReviewPiResult,
   applySpecCheckPiResult,
   piAllSlotsFailedNote,
+  parsePiSubagentResults,
   piSubagentFailureSignals,
   piSubagentResultFailed,
   type PiResultOutcome,
@@ -1533,25 +1534,30 @@ export default function (pi: ExtensionAPI) {
       await cleanupParentTaskGraphPointer();
       return processingErrorResponse();
     }
-    const results = rawResults as Array<{
-      agent: string;
-      task: string;
-      exitCode: number;
-      stopReason?: string;
-      /** Harness-supplied cause line; absent on pi versions that do not emit it. */
-      errorMessage?: unknown;
-      messages: unknown;
-    }>;
-    if (reservation && results.length > reservation.items.length) {
+    // Per-element parse, not a cast: the array-shape guard above says nothing
+    // about any individual element, and `agent`/`task`/`exitCode` are read as
+    // guaranteed strings and numbers downstream.
+    const entries = parsePiSubagentResults(rawResults);
+    if (reservation && entries.length > reservation.items.length) {
       const diagnostic =
-        `subagent tool_result returned ${results.length} result(s) for ${reservation.items.length} reserved slot(s) — surplus evidence ignored`;
+        `subagent tool_result returned ${entries.length} result(s) for ${reservation.items.length} reserved slot(s) — surplus evidence ignored`;
       processingErrors.push(diagnostic);
       process.stderr.write(`loom(pi): ${diagnostic}\n`);
     }
-    const authorizedResults = reservation ? results.slice(0, reservation.items.length) : results;
-    const allSlotsFailed = piAllSlotsFailedNote(authorizedResults);
+    const authorizedEntries = reservation ? entries.slice(0, reservation.items.length) : entries;
+    const allSlotsFailed = piAllSlotsFailedNote(
+      authorizedEntries.flatMap((entry) => (entry.ok ? [entry.result] : [])),
+    );
     if (allSlotsFailed !== null) process.stderr.write(`loom(pi): ${allSlotsFailed}\n`);
-    for (const [resultIndex, result] of authorizedResults.entries()) {
+    for (const [resultIndex, entry] of authorizedEntries.entries()) {
+      // A malformed element keeps its slot rather than shifting the ones after
+      // it, and is reported as loudly as the array-level shape drift above.
+      if (!entry.ok) {
+        processingErrors.push(entry.problem);
+        process.stderr.write(`loom(pi): ${entry.problem}\n`);
+        continue;
+      }
+      const result = entry.result;
       // Per-result error isolation (mirrors dispatch.ts's safeRun): a throw
       // while processing result #1 must not abort results #2..N — that
       // leaves tasks stuck "executing" with zero diagnostics.

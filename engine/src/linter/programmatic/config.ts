@@ -30,6 +30,20 @@ export interface ProgrammaticConfig {
 /** Default config when no project config exists */
 export const EMPTY_CONFIG: ProgrammaticConfig = {};
 
+/** The suffixes that make a path a test file, for every rule that skips them. */
+const TEST_FILE_SUFFIXES: readonly string[] = [".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx"];
+
+/**
+ * Is this a test file, and therefore out of scope for the style rules?
+ *
+ * One definition for the whole programmatic tier. Three rules had each declared
+ * their own copy of the suffix list and the same `endsWith` guard over it, so
+ * "what counts as a test file" was answered three times — and a fourth rule
+ * adding a fifth suffix would have had to find and update all of them.
+ */
+export const isTestFile = (filePath: string): boolean =>
+  TEST_FILE_SUFFIXES.some((suffix) => filePath.endsWith(suffix));
+
 /**
  * Loads project-local programmatic config from the linter config directory.
  * Returns EMPTY_CONFIG if file doesn't exist (graceful default).

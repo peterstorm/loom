@@ -48,14 +48,6 @@ export function isBinaryBuffer(buffer: Buffer): boolean {
   return false;
 }
 
-/**
- * Detects if a file is binary by checking for null bytes.
- * Convenience wrapper that reads the file and delegates to isBinaryBuffer.
- */
-export function isBinaryFile(filePath: string): boolean {
-  const buffer = readFileSync(filePath);
-  return isBinaryBuffer(buffer);
-}
 
 /**
  * Lints a single file against all applicable rules for the given tier.
@@ -75,6 +67,43 @@ export function isBinaryFile(filePath: string): boolean {
  *   correctness test into a flaky one.
  * @returns LintResult: pass | violations | error
  */
+/**
+ * The per-file pipeline both entry points run: resolve → single atomic read →
+ * binary skip → decode → deadline → execute → fail-closed error.
+ *
+ * One copy, because two had already drifted: `lintFiles` hardcoded the hook's
+ * 50ms budget where `lintFile` honoured its caller's, so the same file could
+ * time out through one entry point and pass through the other.
+ */
+function lintLoadedFile(
+  rules: readonly Rule[],
+  filePath: string,
+  timeoutMs: number,
+): LintResult {
+  try {
+    const absolutePath = resolve(filePath);
+
+    // Single atomic read — eliminates TOCTOU race between binary check and content read
+    const buffer = readFileSync(absolutePath);
+
+    // FR-009 / SC-007: Skip binary files entirely
+    if (isBinaryBuffer(buffer)) return passResult();
+
+    // Decode to UTF-8 from the same buffer (no second read)
+    const content = buffer.toString("utf-8");
+
+    // The deadline checker is time-dependent, so the shell creates it.
+    // executeRules internally filters by extension — no match returns [].
+    const violations = executeRules(rules, absolutePath, content, createDeadlineChecker(timeoutMs));
+
+    // FR-008: No violations (including no rules matching extension) → pass
+    return violationsResult(violations);
+  } catch (error: unknown) {
+    // FR-007 / NFR-004 / SC-004: Fail closed on ANY error
+    return lintErrorResult(error instanceof Error ? error.message : String(error));
+  }
+}
+
 export function lintFile(
   filePath: string,
   tier: Tier,
@@ -82,38 +111,14 @@ export function lintFile(
   projectRulesDir: string | null,
   timeoutMs: number = DEFAULT_TIMEOUT_MS
 ): LintResult {
+  let rules: readonly Rule[];
   try {
-    // Resolve to absolute path
-    const absolutePath = resolve(filePath);
-
-    // Single atomic read — eliminates TOCTOU race between binary check and content read
-    const buffer = readFileSync(absolutePath);
-
-    // FR-009 / SC-007: Skip binary files entirely
-    if (isBinaryBuffer(buffer)) {
-      return passResult();
-    }
-
-    // Decode to UTF-8 from the same buffer (no second read)
-    const content = buffer.toString("utf-8");
-
-    // Load rules (stateless — fresh load every time per FR-010)
-    const rules = loadRules(defaultRulesDir, projectRulesDir, tier);
-
-    // Create deadline checker (imperative shell creates the time-dependent resource)
-    const checkDeadline = createDeadlineChecker(timeoutMs);
-
-    // Execute rules against file content
-    // executeRules internally filters by extension — if no rules match, returns []
-    const violations = executeRules(rules, absolutePath, content, checkDeadline);
-
-    // FR-008: No violations (including no rules matching extension) → pass
-    return violationsResult(violations);
+    // Stateless — fresh load every time per FR-010.
+    rules = loadRules(defaultRulesDir, projectRulesDir, tier);
   } catch (error: unknown) {
-    // FR-007 / NFR-004 / SC-004: Fail closed on ANY error
-    const message = error instanceof Error ? error.message : String(error);
-    return lintErrorResult(message);
+    return lintErrorResult(error instanceof Error ? error.message : String(error));
   }
+  return lintLoadedFile(rules, filePath, timeoutMs);
 }
 
 /**
@@ -130,7 +135,8 @@ export function lintFiles(
   filePaths: readonly string[],
   tier: Tier,
   defaultRulesDir: string,
-  projectRulesDir: string | null
+  projectRulesDir: string | null,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS
 ): ReadonlyMap<string, LintResult> {
   const results = new Map<string, LintResult>();
 
@@ -148,23 +154,7 @@ export function lintFiles(
   }
 
   for (const filePath of filePaths) {
-    try {
-      const absolutePath = resolve(filePath);
-      const buffer = readFileSync(absolutePath);
-
-      if (isBinaryBuffer(buffer)) {
-        results.set(filePath, passResult());
-        continue;
-      }
-
-      const content = buffer.toString("utf-8");
-      const checkDeadline = createDeadlineChecker(DEFAULT_TIMEOUT_MS);
-      const violations = executeRules(rules, absolutePath, content, checkDeadline);
-      results.set(filePath, violationsResult(violations));
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      results.set(filePath, lintErrorResult(message));
-    }
+    results.set(filePath, lintLoadedFile(rules, filePath, timeoutMs));
   }
 
   return results;

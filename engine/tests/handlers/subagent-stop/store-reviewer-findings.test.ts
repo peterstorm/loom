@@ -120,7 +120,13 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
         agent_type: "code-reviewer",
         agent_transcript_path: f.transcriptPath,
       });
-      expect(result).toEqual({ kind: "passthrough" });
+      // The same line reaches BOTH channels: stderr for a --debug/direct-call
+      // reader, and systemMessage because an exit-0 hook's stderr does not
+      // reach the operator at all.
+      expect(result).toEqual({
+        kind: "passthrough",
+        systemMessage: "[loom] store-reviewer-findings: code-reviewer belongs to a standalone review run — task state untouched",
+      });
       expect(readFileSync(f.statePath, "utf-8")).toBe(before);
       expect(stderr).toContain("standalone review run — task state untouched");
     } finally { f.cleanup(); }
@@ -403,7 +409,12 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
 
       const { result, stderr } = await pending;
 
-      expect(result).toEqual({ kind: "passthrough" });
+      // Discarded reviewer output must reach the operator, and on an exit-0
+      // hook only systemMessage does — so it carries the line stderr carries.
+      expect(result).toEqual({
+        kind: "passthrough",
+        systemMessage: "[loom] store-reviewer-findings: code-reviewer review task T1 disappeared before evidence application — findings NOT stored",
+      });
       expect(stderr).toContain("disappeared before evidence application");
       expect(stderr).toContain("findings NOT stored");
       // Nothing was invented for the surviving task either.

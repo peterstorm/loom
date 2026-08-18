@@ -176,8 +176,10 @@ export function isExcludedRemediationPath(path: CanonicalRepositoryRelativePath)
       pathIsWithin(path, ".claude/reviews")) return true;
   const components = path.split("/");
   if (components[0] !== ".claude") return false;
-  if (components.some((component, index) => index > 0 && RUN_LAYOUT_COMPONENTS.has(component))) return true;
-  return components.length >= 4 && components[1] === "specs" && components[3] === "panel-runs";
+  // `.some` already covers every component past the first, `panel-runs`
+  // included — a narrower `components[3] === "panel-runs"` tail below it could
+  // never be reached.
+  return components.some((component, index) => index > 0 && RUN_LAYOUT_COMPONENTS.has(component));
 }
 
 const EXCLUSION_POLICY_DIGEST = digestJson(REMEDIATION_EXCLUDED_LAYOUTS);

@@ -18,7 +18,7 @@
 
 import { readFileSync } from "node:fs";
 import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../parsers/parse-plan-models";
-import type { ValidationResult } from "./validate-task-graph";
+import { type ValidationResult, ok, fail } from "./validate-task-graph";
 
 export type ModelFileRead =
   | { readonly ok: true; readonly content: string }
@@ -45,12 +45,7 @@ export const productionModelBindingDeps: ModelBindingDeps = {
   },
 };
 
-function ok(): ValidationResult {
-  return { ok: true };
-}
-function fail(errors: string[]): ValidationResult {
-  return { ok: false, errors };
-}
+
 
 function normalizePath(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\.\//, "");

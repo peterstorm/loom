@@ -221,6 +221,18 @@ export const PANEL_JUDGES_DEFAULT = 3;
  *  validate-task-graph.ts via KNOWN_AGENTS.has(agent). */
 export const IMPL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("impl"));
 
+/**
+ * Is this agent name an implementation agent, with or without the `-agent`
+ * suffix the harness sometimes drops?
+ *
+ * One predicate rather than the `has(a) || has(`${a}-agent`)` pair written out
+ * at each gate: the pair IS the rule, and two gates deciding "may this spawn
+ * touch a task" from two copies of it is two chances to disagree about who
+ * counts as an implementer.
+ */
+export const isImplAgent = (agent: string): boolean =>
+  IMPL_AGENTS.has(agent) || IMPL_AGENTS.has(`${agent}-agent`);
+
 /** Known agents for task graph validation */
 export const KNOWN_AGENTS: ReadonlySet<string> = frozenSet([...IMPL_AGENTS, ...Object.keys(PHASE_AGENT_MAP)]);
 

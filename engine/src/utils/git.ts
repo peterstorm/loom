@@ -9,16 +9,23 @@ import { execSync, execFileSync } from "node:child_process";
  * Resolve the git repository root FRESH: CLAUDE_PROJECT_DIR > git rev-parse >
  * undefined (caller falls back to cwd).
  *
- * The single resolver every caller shares. It was previously duplicated in
- * `utils/agent-definition.ts` with a bare `catch {}`, so the same failure was
- * loud here and invisible there — and an unresolved root there silently drops
- * repository-relative agent-definition candidates. One implementation, one
- * diagnostic.
+ * The shared resolver for callers that need a repository ROOT. It was
+ * previously duplicated in `utils/agent-definition.ts` with a bare `catch {}`,
+ * so the same failure was loud here and invisible there — and an unresolved
+ * root there silently drops repository-relative agent-definition candidates.
+ * One implementation, one diagnostic.
+ *
+ * It is deliberately NOT the only path to `git` in the engine, and claiming
+ * otherwise would be false: `utils/artifact-baseline.ts` and several
+ * handlers/orchestration modules shell out directly because they need failures
+ * to THROW, where this module's `exec`/`execArgs` warn and return `""`. Two
+ * failure contracts, chosen per call site; a caller that wants the warning
+ * contract uses this module.
  *
  * `context` names the caller so a stderr line identifies which resolution
  * failed, not just that one did.
  */
-export function resolveRepositoryRoot(context = "module load"): string | undefined {
+export function resolveRepositoryRoot(context = "repository root"): string | undefined {
   if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR;
   try {
     return execSync("git rev-parse --show-toplevel", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim() || undefined;
@@ -34,7 +41,30 @@ export function resolveRepositoryRoot(context = "module load"): string | undefin
   }
 }
 
-const repoRoot = resolveRepositoryRoot();
+/**
+ * The resolution this module's own git commands run from, resolved FRESH.
+ *
+ * It used to be `const repoRoot = resolveRepositoryRoot()` — one resolution
+ * captured at import time, inherited by every helper here for the life of the
+ * process. `repositoryContext` below already refused to inherit such a root,
+ * and that refusal is the correct rule; it was simply not applied to the rest
+ * of the file. In a worktree-driven engine, whichever caller imports this
+ * module first decided the root for every later caller.
+ *
+ * Memoized on the resolution key (`CLAUDE_PROJECT_DIR`, else the cwd) rather
+ * than on nothing: repeat calls under an unchanged environment cost no extra
+ * `git rev-parse`, and a changed environment re-resolves instead of silently
+ * answering for the old one.
+ */
+let rootCache: Readonly<{ key: string; root: string | undefined }> | null = null;
+
+function currentRepoRoot(context = "git helper"): string | undefined {
+  const key = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+  if (rootCache !== null && rootCache.key === key) return rootCache.root;
+  const root = resolveRepositoryRoot(context);
+  rootCache = Object.freeze({ key, root });
+  return root;
+}
 
 export type GitRepositoryContext =
   | Readonly<{ ok: true; root: string; headSha: string }>
@@ -78,18 +108,20 @@ export function repositoryContext(): GitRepositoryContext {
  * The repository root this module's own git commands run from — the `cwd` for
  * `exec`/`execArgs` and the base every path helper here resolves against.
  *
- * NOT every git boundary in the process: `repositoryContext` above deliberately
- * re-resolves its own root and HEAD in one `execFileSync` pass, because it is a
- * proof boundary that must not inherit a root captured at module load.
+ * Still NOT the same boundary as `repositoryContext` above: that one resolves
+ * root AND exact HEAD together in one `execFileSync` pass, because a proof
+ * needs both to come from a single observation. This one answers only "where
+ * do my commands run", and both now resolve against the live environment
+ * rather than one captured at module load.
  */
 export function repositoryRoot(): string | undefined {
-  return repoRoot;
+  return currentRepoRoot("repositoryRoot");
 }
 
 /** Run a fixed git command (no user input in args) */
 function exec(cmd: string): string {
   try {
-    return execSync(cmd, { encoding: "utf-8", cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] });
+    return execSync(cmd, { encoding: "utf-8", cwd: currentRepoRoot("exec"), stdio: ["pipe", "pipe", "pipe"] });
   } catch (e: unknown) {
     const stderr = e && typeof e === "object" && "stderr" in e ? String((e as { stderr: unknown }).stderr) : "";
     // Warn even when stderr is empty: a failure without stderr (spawn ENOENT,
@@ -102,7 +134,7 @@ function exec(cmd: string): string {
 /** Run git with array args (safe against shell injection) */
 function execArgs(args: string[]): string {
   try {
-    return execFileSync("git", args, { encoding: "utf-8", cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] });
+    return execFileSync("git", args, { encoding: "utf-8", cwd: currentRepoRoot("execArgs"), stdio: ["pipe", "pipe", "pipe"] });
   } catch (error: unknown) {
     const detail = error && typeof error === "object" ? error as { stderr?: unknown; status?: unknown } : {};
     const stderr = detail.stderr === undefined ? "" : String(detail.stderr).trim();
@@ -123,13 +155,14 @@ export function headSha(): string | null {
 
 /** Check if in a git repo */
 export function isGitRepo(): boolean {
+  const root = currentRepoRoot("isGitRepo");
   try {
-    execSync("git rev-parse --git-dir", { cwd: repoRoot, stdio: "ignore" });
+    execSync("git rev-parse --git-dir", { cwd: root, stdio: "ignore" });
     return true;
   } catch (error) {
     process.stderr.write(
       `loom: isGitRepo could not verify a git repository` +
-        `${repoRoot === undefined ? " (repo root unresolved at module load)" : ` at ${repoRoot}`}: ` +
+        `${root === undefined ? " (repo root unresolved)" : ` at ${root}`}: ` +
         `${error instanceof Error ? error.message : String(error)} — new-test evidence will read as 'no tests written'\n`,
     );
     return false;
@@ -183,9 +216,10 @@ export type GitTrackedResult =
  * negative answer; every other failure leaves tracking authority unknown.
  */
 export function isTracked(file: string): GitTrackedResult {
-  if (repoRoot === undefined) return { ok: false, error: "cannot inspect tracking outside a Git repository" };
+  const root = currentRepoRoot("isTracked");
+  if (root === undefined) return { ok: false, error: "cannot inspect tracking outside a Git repository" };
   try {
-    execFileSync("git", ["ls-files", "--error-unmatch", "--", file], { cwd: repoRoot, stdio: "ignore" });
+    execFileSync("git", ["ls-files", "--error-unmatch", "--", file], { cwd: root, stdio: "ignore" });
     return { ok: true, tracked: true };
   } catch (error) {
     const status = typeof error === "object" && error !== null && "status" in error
@@ -202,7 +236,7 @@ export function diffUntracked(file: string): string {
   try {
     return execFileSync("git", ["diff", "--no-index", "/dev/null", file], {
       encoding: "utf-8",
-      cwd: repoRoot,
+      cwd: currentRepoRoot("diffUntracked"),
       stdio: ["pipe", "pipe", "pipe"],
     });
   } catch (e: unknown) {

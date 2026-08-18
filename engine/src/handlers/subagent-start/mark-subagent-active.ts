@@ -23,6 +23,7 @@ import {
   sessionScopedPath,
   WRITE_GRANT_AGENT_NAMESPACE,
 } from "../../machine";
+import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 
 const handler: HookHandler = async (stdin) => {
   let input: SubagentStartInput;
@@ -32,10 +33,7 @@ const handler: HookHandler = async (stdin) => {
     // Malformed hook input: nothing can be tracked or bound. Say so loudly —
     // an untracked agent means its SubagentStop cleanup is skipped and any
     // machine binding it should have had never arms.
-    process.stderr.write(
-      `mark-subagent-active: malformed SubagentStart input — agent not tracked, cleanup skipped, bindings may leak: ${e instanceof Error ? e.message : String(e)}\n`,
-    );
-    return { kind: "passthrough" };
+    return passthroughDiagnostic(`mark-subagent-active: malformed SubagentStart input — agent not tracked, cleanup skipped, bindings may leak: ${e instanceof Error ? e.message : String(e)}\n`);
   }
   const { agent_id } = input;
 
@@ -45,10 +43,7 @@ const handler: HookHandler = async (stdin) => {
   // Fail closed: no tracking, no binding, no pointer write.
   const sessionId = parseSessionId(input.session_id ?? "");
   if (sessionId === null) {
-    process.stderr.write(
-      `mark-subagent-active: invalid session_id ${JSON.stringify(input.session_id ?? "")} — refusing all session-file writes; agent not tracked, machine NOT bound, task_graph pointer not written\n`,
-    );
-    return { kind: "passthrough" };
+    return passthroughDiagnostic(`mark-subagent-active: invalid session_id ${JSON.stringify(input.session_id ?? "")} — refusing all session-file writes; agent not tracked, machine NOT bound, task_graph pointer not written\n`);
   }
 
   try {

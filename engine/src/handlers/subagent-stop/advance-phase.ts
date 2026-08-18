@@ -21,6 +21,7 @@ import {
   SPEC_ARTIFACT_DIR,
   resolvesWithin,
 } from "../../core/phase-artifact-paths";
+import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 
 // Re-exported because this module's own containment rule moved to the pure core
 // so the Pi shell could share it verbatim; the name stays importable from here.
@@ -150,8 +151,7 @@ const handler: HookHandler = async (stdin) => {
   try {
     input = JSON.parse(stdin);
   } catch (e) {
-    process.stderr.write(`advance-phase: failed to parse stdin: ${(e as Error).message}\n`);
-    return { kind: "passthrough" };
+    return passthroughDiagnostic(`advance-phase: failed to parse stdin: ${(e as Error).message}\n`);
   }
 
   const completedPhase = PHASE_AGENT_MAP[stripNamespace(input.agent_type ?? "")];
@@ -165,8 +165,7 @@ const handler: HookHandler = async (stdin) => {
   const currentIdx = PHASE_ORDER.indexOf(currentState.current_phase);
   const completedIdx = PHASE_ORDER.indexOf(completedPhase);
   if (completedIdx >= 0 && currentIdx > completedIdx) {
-    process.stderr.write(`Phase ${completedPhase} already past (current: ${currentState.current_phase}), skipping.\n`);
-    return { kind: "passthrough" };
+    return passthroughDiagnostic(`Phase ${completedPhase} already past (current: ${currentState.current_phase}), skipping.\n`);
   }
 
   // Extract artifacts from transcript before checking transition. Resolved,
@@ -179,8 +178,7 @@ const handler: HookHandler = async (stdin) => {
     try {
       transcriptContent = readFileSync(transcriptPath, "utf-8");
     } catch (e) {
-      process.stderr.write(`advance-phase: failed to read transcript at ${transcriptPath}: ${(e as Error).message}\n`);
-      return { kind: "passthrough" };
+      return passthroughDiagnostic(`advance-phase: failed to read transcript at ${transcriptPath}: ${(e as Error).message}\n`);
     }
     const artifacts = parsePhaseArtifacts(transcriptContent, currentState.spec_dir);
 
@@ -207,8 +205,7 @@ const handler: HookHandler = async (stdin) => {
         return Object.keys(updates).length > 0 ? { ...s, ...updates } : s;
       });
     } catch (e) {
-      process.stderr.write(`advance-phase: failed to persist artifacts: ${(e as Error).message}\n`);
-      return { kind: "passthrough" };
+      return passthroughDiagnostic(`advance-phase: failed to persist artifacts: ${(e as Error).message}\n`);
     }
   }
 
@@ -230,8 +227,7 @@ const handler: HookHandler = async (stdin) => {
       updated_at: new Date().toISOString(),
     }));
   } catch (e) {
-    process.stderr.write(`advance-phase: failed to write phase transition: ${(e as Error).message}\n`);
-    return { kind: "passthrough" };
+    return passthroughDiagnostic(`advance-phase: failed to write phase transition: ${(e as Error).message}\n`);
   }
 
   process.stderr.write(`Phase advanced: ${completedPhase} → ${nextPhase}\n`);

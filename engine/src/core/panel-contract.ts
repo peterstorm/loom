@@ -13,6 +13,7 @@ import {
   type RunLayout,
   type VerdictEnvelope,
 } from "./panel-kernel";
+import { compareStrings } from "./ordering";
 
 // The architecture panel is consumer 1 of the kernel. Everything below is what
 // is genuinely architecture-specific: the interview digest, lens selection, the
@@ -534,7 +535,7 @@ function compareRankings(a: CandidateRanking, b: CandidateRanking): number {
     const delta = (b.scores[index]?.score ?? 0) - (a.scores[index]?.score ?? 0);
     if (delta !== 0) return delta;
   }
-  return a.candidate < b.candidate ? -1 : a.candidate > b.candidate ? 1 : 0;
+  return compareStrings(a.candidate, b.candidate);
 }
 
 /**

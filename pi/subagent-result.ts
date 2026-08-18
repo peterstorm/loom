@@ -105,6 +105,57 @@ export type PiSubagentResult = Readonly<{
   messages: unknown;
 }>;
 
+/**
+ * One element of the harness's `details.results`, parsed rather than asserted.
+ *
+ * The batch was only ever checked with `Array.isArray` before being cast to
+ * `PiSubagentResult[]`, so the required `agent`/`task`/`exitCode` fields were a
+ * compile-time promise nothing established: a pi version that renamed or
+ * dropped one of them reached `stripNamespace(result.agent)` typed as a
+ * guaranteed string. That is the same per-element drift the array-level guard
+ * one layer up already treats as a loud no-op, and it gets the same treatment
+ * here.
+ *
+ * A rejected element keeps its INDEX rather than being filtered out: results
+ * are positionally bound to reserved slots, so dropping one would silently
+ * re-point every later result at the wrong slot.
+ */
+export type PiSubagentResultEntry =
+  | Readonly<{ ok: true; result: PiSubagentResult }>
+  | Readonly<{ ok: false; problem: string }>;
+
+/** `null` when the field is absent — pi versions differ on `stopReason`. */
+const optionalString = (value: unknown): string | null =>
+  value === undefined || typeof value === "string" ? null : `${typeof value}`;
+
+export function parsePiSubagentResults(raw: readonly unknown[]): readonly PiSubagentResultEntry[] {
+  return raw.map((entry, index): PiSubagentResultEntry => {
+    const reject = (problem: string): PiSubagentResultEntry =>
+      Object.freeze({
+        ok: false as const,
+        problem: `result ${index + 1} has an unrecognized shape (${problem}) — its evidence was not applied`,
+      });
+    if (entry === null || typeof entry !== "object") return reject(`expected an object, got ${entry === null ? "null" : typeof entry}`);
+    const record = entry as Record<string, unknown>;
+    if (typeof record.agent !== "string") return reject(`agent is ${typeof record.agent}, expected string`);
+    if (typeof record.task !== "string") return reject(`task is ${typeof record.task}, expected string`);
+    if (typeof record.exitCode !== "number") return reject(`exitCode is ${typeof record.exitCode}, expected number`);
+    const stopReasonProblem = optionalString(record.stopReason);
+    if (stopReasonProblem !== null) return reject(`stopReason is ${stopReasonProblem}, expected string or absent`);
+    return Object.freeze({
+      ok: true as const,
+      result: Object.freeze({
+        agent: record.agent,
+        task: record.task,
+        exitCode: record.exitCode,
+        ...(record.stopReason === undefined ? {} : { stopReason: record.stopReason as string }),
+        ...(record.errorMessage === undefined ? {} : { errorMessage: record.errorMessage }),
+        messages: record.messages,
+      }),
+    });
+  });
+}
+
 /** Pi result failure boundary. Missing/malformed exit codes fail closed. */
 export function piSubagentResultFailed(result: {
   readonly exitCode?: unknown;
@@ -437,14 +488,15 @@ export async function applyImplementationPiResult(args: Readonly<{
     }
   }
 
+  // `!parsedMessages.ok` is kept in the condition for NARROWING only — both
+  // derived values ARE `parsedMessages` when it failed, so it can never be the
+  // disjunct that fires, and there is no arm for it below.
   if (!adaptedTranscript.ok || !structuredEvidence.ok || !parsedMessages.ok) {
-    const errors = !parsedMessages.ok
-      ? parsedMessages.errors
-      : !adaptedTranscript.ok
-        ? adaptedTranscript.errors
-        : !structuredEvidence.ok
-          ? structuredEvidence.errors
-          : [];
+    const errors = !adaptedTranscript.ok
+      ? adaptedTranscript.errors
+      : !structuredEvidence.ok
+        ? structuredEvidence.errors
+        : [];
     const failureReason = `Pi transcript evidence capture failed: ${errors.join("; ")}`;
     const root = repository.root();
     const comparisonFailures: string[] = [];

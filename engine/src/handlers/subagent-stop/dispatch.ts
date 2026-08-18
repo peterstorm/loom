@@ -18,6 +18,7 @@ import advancePhase from "./advance-phase";
 import { runUpdateTaskStatus, type EvidenceSnapshot } from "./update-task-status";
 import storeReviewerFindings from "./store-reviewer-findings";
 import storeSpecCheckFindings from "./store-spec-check-findings";
+import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 
 type AgentCategory = "phase" | "impl" | "review" | "spec-check" | "unknown";
 
@@ -37,10 +38,7 @@ const handler: HookHandler = async (stdin, args) => {
     // Malformed stop input: no session to clean. Say exactly what breaks —
     // cleanup skipped means the .active roster and machine bindings may leak
     // until the SessionStart stale-sweep runs.
-    process.stderr.write(
-      `dispatch: malformed SubagentStop input — cleanup skipped, bindings may leak: ${e instanceof Error ? e.message : String(e)}\n`,
-    );
-    return { kind: "passthrough" };
+    return passthroughDiagnostic(`dispatch: malformed SubagentStop input — cleanup skipped, bindings may leak: ${e instanceof Error ? e.message : String(e)}\n`);
   }
 
   const safeRun = async (name: string, fn: () => Promise<unknown>) => {
@@ -124,11 +122,8 @@ const handler: HookHandler = async (stdin, args) => {
   if (!mgr) {
     // Silence here is indistinguishable from "nothing to do", and it costs the
     // whole record: status, evidence and findings are all downstream of this.
-    process.stderr.write(
-      `[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")} — ` +
-        `SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)\n`,
-    );
-    return { kind: "passthrough" };
+    return passthroughDiagnostic(`[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")} — ` +
+        `SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)\n`);
   }
 
   // Claude Code does not send agent_type. resolveAgentType falls back to the

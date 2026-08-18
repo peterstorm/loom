@@ -27,7 +27,7 @@ export {
   extractEvidence,
   extractBashOutcome,
   extractShellWriteTargets,
-  isTestCommand,
+
   isToolFailure,
   attributeExit,
   classifyTestCommand,

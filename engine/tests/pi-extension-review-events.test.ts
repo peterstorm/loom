@@ -2223,6 +2223,60 @@ describe("Pi extension review tool_result integration", () => {
     expect(taskState.review_error).toContain("failed before evidence capture completed");
   });
 
+  /**
+   * `piAllSlotsFailedNote` is thoroughly unit-tested in isolation, but nothing
+   * pinned its WIRING into the tool_result handler — and a note that is never
+   * written is indistinguishable from one that correctly stayed silent. Both
+   * directions are asserted here, because the silent direction is what the
+   * "one surviving sibling" case above already exercises and is exactly where
+   * a dropped call would hide.
+   */
+  it("reports a whole-batch failure as a shared-infrastructure signature", async () => {
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40b" } };
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const first = reviewResult("Task: T1", "first failed", { exitCode: 1 }).details.results[0];
+      const second = reviewResult("Task: T1", "second failed", { exitCode: 1 }).details.results[0];
+      second.agent = "silent-failure-hunter";
+
+      await pi.emit("tool_result", {
+        toolName: "subagent",
+        content: [],
+        details: { results: [first, second] },
+      }, context);
+
+      const written = stderr.mock.calls.map(([text]) => String(text)).join("");
+      expect(written).toContain("all 2 slots in this batch failed");
+      expect(written).toContain("shared-infrastructure fault");
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("stays silent about a shared fault when one slot in the batch survived", async () => {
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40c" } };
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const failed = reviewResult("Task: T1", "failed", { exitCode: 1 }).details.results[0];
+      const healthy = reviewResult("Task: T1", "healthy").details.results[0];
+      healthy.agent = "silent-failure-hunter";
+
+      await pi.emit("tool_result", {
+        toolName: "subagent",
+        content: [],
+        details: { results: [failed, healthy] },
+      }, context);
+
+      // A surviving sibling refutes the shared-fault reading outright.
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .not.toContain("slots in this batch failed");
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it("persists malformed successful reviewer messages and continues with a healthy sibling", async () => {
     const pi = await extension();
     const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad430" } };
@@ -3066,7 +3120,12 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
-  it("continues processing later Pi results when the first result throws", async () => {
+  it("rejects a malformed first result and still stores the second", async () => {
+    // `agent: null` never reaches the loop's own try/catch any more: the
+    // per-element parse rejects the element up front, which is the point —
+    // a harness shape drift is a named diagnostic rather than whatever
+    // `stripNamespace(null)` happened to throw. The isolation guarantee is
+    // unchanged, and is what this asserts.
     const pi = await extension();
     const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -3084,6 +3143,38 @@ describe("Pi extension review tool_result integration", () => {
       }, context);
 
       expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toContain("result 1 has an unrecognized shape (agent is object, expected string)");
+      expect(responses).toContainEqual(expect.objectContaining({
+        isError: true,
+        content: [expect.objectContaining({ text: expect.stringContaining("result 1") })],
+      }));
+      expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings)
+        .toEqual(["second result still stored"]);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("continues processing later Pi results when the first result throws", async () => {
+    // A well-formed element that throws DOWNSTREAM — the case the loop's own
+    // per-result try/catch exists for, and the one the malformed-shape test
+    // above no longer reaches.
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const { StateManager } = await import("../src/state-manager");
+    const update = vi.spyOn(StateManager.prototype, "update")
+      .mockRejectedValueOnce(new Error("injected first-result failure"));
+    try {
+      const first = reviewResult("Task: T1", "first result discarded").details.results[0];
+      const second = reviewResult("Task: T1", "second result still stored").details.results[0];
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent",
+        content: [],
+        details: { results: [first, second] },
+      }, context);
+
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
         .toContain("subagent-stop processing failed");
       expect(responses).toContainEqual(expect.objectContaining({
         isError: true,
@@ -3092,6 +3183,7 @@ describe("Pi extension review tool_result integration", () => {
       expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings)
         .toEqual(["second result still stored"]);
     } finally {
+      update.mockRestore();
       stderr.mockRestore();
     }
   });
