@@ -58,6 +58,18 @@ const EXCLUDE_PATTERNS: readonly string[] = [".test.ts", ".spec.ts", ".test.tsx"
 const BRANCH_LINE = /^\s*(?:\}\s*)?(?:else\s+)?if\s*\(/;
 
 /**
+ * A branch that is part of a switch-like chain, rather than a standalone guard.
+ *
+ * Either it continues a chain (`} else if`), or it exits on the same line
+ * (`if (x.kind === "a") return …`) — the shape a fall-through chain of returns
+ * takes. A bare `if (x.kind === "a") doSomething();` is neither, and three of
+ * those in three DIFFERENT functions are not a switch: this rule's first
+ * version reported exactly that for three sibling adapter methods that each
+ * guarded `client.status === "wait"` before connecting.
+ */
+const CHAIN_BRANCH = /^\s*\}\s*else\s+if\s*\(|\b(?:return|throw|continue|break)\b/;
+
+/**
  * A totality proof anywhere in the file exempts it.
  *
  * This is deliberately file-scoped rather than chain-scoped. A tighter scope
@@ -91,9 +103,11 @@ export function handler(
   let count = 0;
   let firstLine = 0;
   let lastLine = 0;
+  // Does this run look like a CHAIN rather than a row of standalone guards?
+  let chainEvidence = false;
 
   const settle = (): void => {
-    if (current !== null && count >= maxBranches) {
+    if (current !== null && count >= maxBranches && chainEvidence) {
       violations.push(makeViolation(
         "exhaustive-discriminant-branching",
         filePath,
@@ -104,6 +118,7 @@ export function handler(
     }
     current = null;
     count = 0;
+    chainEvidence = false;
   };
 
   for (let index = 0; index < lines.length; index++) {
@@ -111,16 +126,21 @@ export function handler(
     if (!BRANCH_LINE.test(line)) continue;
     const discriminant = discriminantOf(line, tags);
     if (discriminant === null) continue;
+    const isChainLine = CHAIN_BRANCH.test(line);
     if (discriminant === current && index + 1 - lastLine <= MAX_CHAIN_GAP) {
       count++;
       lastLine = index + 1;
+      if (isChainLine) chainEvidence = true;
       continue;
     }
+    // settle() FIRST: evidence from the line that starts a new run must not
+    // be credited to the run it just ended.
     settle();
     current = discriminant;
     count = 1;
     firstLine = index + 1;
     lastLine = index + 1;
+    chainEvidence = isChainLine;
   }
   settle();
   return Object.freeze(violations);

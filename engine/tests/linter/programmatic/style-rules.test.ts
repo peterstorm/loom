@@ -167,3 +167,41 @@ describe("prefer-array-methods", () => {
     expect(preferArrayMethods(source, FILE)).toEqual([]);
   });
 });
+
+describe("exhaustive-discriminant-branching — chain vs standalone guards", () => {
+  it("does not treat sibling functions guarding the same field as one chain", () => {
+    // Three adapter methods that each check connection state before acting.
+    // Same discriminant, close together, but three separate functions — this
+    // shape was the rule's first false positive.
+    const source = [
+      `const port = {`,
+      `  setUser: async (u) => {`,
+      `    if (client.status === "wait") await client.connect();`,
+      `    return ok(undefined);`,
+      `  },`,
+      `  delUser: async (u) => {`,
+      `    if (client.status === "wait") await client.connect();`,
+      `    return ok(undefined);`,
+      `  },`,
+      `  xAdd: async (k) => {`,
+      `    if (client.status === "wait") await client.connect();`,
+      `    return ok(undefined);`,
+      `  },`,
+      `};`,
+    ].join("\n");
+    expect(exhaustive(source, "engine/src/core/example.ts")).toEqual([]);
+  });
+
+  it("still flags an else-if chain", () => {
+    const source = [
+      `if (result.kind === "updated") {`,
+      `  onComplete();`,
+      `} else if (result.kind === "no-change") {`,
+      `  onNoChange();`,
+      `} else if (result.kind === "error") {`,
+      `  onError();`,
+      `}`,
+    ].join("\n");
+    expect(exhaustive(source, "engine/src/core/example.ts")).toHaveLength(1);
+  });
+});
