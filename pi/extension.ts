@@ -1015,6 +1015,8 @@ export default function (pi: ExtensionAPI) {
         reason: `loom guard '${currentGuard}' crashed (failing closed): ${message}`,
       };
     }
+    // Every guard passed: no opinion, let the call proceed.
+    return undefined;
   });
 
   // ─── Session Lifecycle ────────────────────────────────────────────────
@@ -1074,6 +1076,7 @@ export default function (pi: ExtensionAPI) {
         message: { customType: "loom-write-grant-error", content: message, display: false },
       };
     }
+    return undefined;
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -1209,6 +1212,7 @@ export default function (pi: ExtensionAPI) {
         isError: true,
       };
     }
+    return undefined;
   });
 
   // ─── SubagentStop Dispatch (tool_result event) ────────────────────────

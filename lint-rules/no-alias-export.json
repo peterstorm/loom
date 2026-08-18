@@ -1,0 +1,10 @@
+{
+  "kind": "regex",
+  "name": "no-alias-export",
+  "description": "An export that is only another name for an existing symbol — two names for one concept, and the compiler can never tell you when one dies",
+  "extensions": [".ts", ".tsx"],
+  "pattern": "^export (?:const|let) [A-Za-z_$][A-Za-z0-9_$]* = [A-Za-z_$][A-Za-z0-9_$]*;\\s*$",
+  "flags": "",
+  "fixHint": "Pick one name and update its callers. `tsc` cannot see a dead export (it assumes an external consumer), so an alias whose callers all moved to the real name stays forever. Derived values like `X.length` are not aliases and do not match this rule.",
+  "enabled": true
+}

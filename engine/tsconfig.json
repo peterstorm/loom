@@ -4,6 +4,12 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "strict": true,
+    // `strict` does NOT include these. Without noImplicitReturns a function
+    // whose switch/if-chain misses a union variant silently returns `undefined`
+    // instead of failing to compile — the exact gap the `never` binding in
+    // core/orchestration-contract/effects.ts was hand-written to cover.
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
     "noEmit": true,
     "skipLibCheck": true,
     "types": ["node"],

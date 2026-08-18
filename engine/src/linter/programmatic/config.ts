@@ -21,6 +21,10 @@ export interface ProgrammaticConfig {
   readonly maxFunctionLines?: number;
   /** File patterns to exclude from max-function-lines */
   readonly excludeFromMaxLines?: readonly string[];
+  /** Branches on one discriminant that read as a switch (for exhaustive-discriminant-branching) */
+  readonly maxDiscriminantBranches?: number;
+  /** Field names that tag a discriminated union (for exhaustive-discriminant-branching) */
+  readonly discriminantTags?: readonly string[];
 }
 
 /** Default config when no project config exists */

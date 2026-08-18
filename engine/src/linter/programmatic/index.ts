@@ -12,6 +12,13 @@ import { handler as crossBoundaryHandler, DEFAULT_BOUNDARIES } from "./no-cross-
 import { handler as ioInPureHandler, DEFAULT_PURE_MODULES } from "./no-io-in-pure-modules";
 import { handler as maxFunctionLinesHandler, DEFAULT_MAX_LINES, DEFAULT_EXCLUDE_PATTERNS } from "./max-function-lines";
 import { handler as fugueGeneratedIntegrityHandler } from "./fugue-generated-integrity";
+import {
+  handler as exhaustiveDiscriminantHandler,
+  DEFAULT_MAX_DISCRIMINANT_BRANCHES,
+  DEFAULT_DISCRIMINANT_TAGS,
+} from "./exhaustive-discriminant-branching";
+import { handler as nestedTernaryHandler } from "./no-nested-ternary";
+import { handler as preferArrayMethodsHandler } from "./prefer-array-methods";
 import { type ProgrammaticConfig, EMPTY_CONFIG } from "./config";
 
 /**
@@ -62,6 +69,41 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
       extensions: [".ts"],
       handler: (content, filePath) => fugueGeneratedIntegrityHandler(content, filePath),
       fixHint: "Do not hand-edit generated code — change the AuthoredDag sidecar and run `fugue new --from` to regenerate",
+      enabled: true,
+      source: "default",
+    },
+    {
+      kind: "programmatic",
+      name: "exhaustive-discriminant-branching",
+      description: `Branching ${DEFAULT_MAX_DISCRIMINANT_BRANCHES}+ times on one discriminant is a switch the compiler cannot check`,
+      extensions: [".ts", ".tsx"],
+      handler: (content, filePath) => exhaustiveDiscriminantHandler(
+        content,
+        filePath,
+        config.maxDiscriminantBranches ?? DEFAULT_MAX_DISCRIMINANT_BRANCHES,
+        config.discriminantTags ?? DEFAULT_DISCRIMINANT_TAGS,
+      ),
+      fixHint: "Use match(value).with(...).exhaustive() from ts-pattern, or a switch whose default binds the scrutinee to `never` — either makes a new union variant a compile error",
+      enabled: true,
+      source: "default",
+    },
+    {
+      kind: "programmatic",
+      name: "no-nested-ternary",
+      description: "A ternary whose else-branch opens another ternary — one level is the ceiling",
+      extensions: [".ts", ".tsx"],
+      handler: (content, filePath) => nestedTernaryHandler(content, filePath),
+      fixHint: "Use if with early returns, or match(...).exhaustive() when the branches are a discriminated union. Type-level conditionals are exempt.",
+      enabled: true,
+      source: "default",
+    },
+    {
+      kind: "programmatic",
+      name: "prefer-array-methods",
+      description: "A mutable accumulator whose loop only pushes into it is a map/filter written with extra state",
+      extensions: [".ts", ".tsx"],
+      handler: (content, filePath) => preferArrayMethodsHandler(content, filePath),
+      fixHint: "Use map/filter/flatMap and delete the mutable binding. Loops with break, continue, return, or await are exempt — the rewrite is not mechanical there.",
       enabled: true,
       source: "default",
     },

@@ -1551,10 +1551,7 @@ const literalManifestCache = new WeakSet<object>();
 const fixedGitPathspecCache = new WeakSet<object>();
 
 function literalManifest(paths: RemediationPathSet): LiteralNulPathManifest {
-  const bytes: number[] = [];
-  for (const path of paths.paths) {
-    bytes.push(...Buffer.from(path, "utf8"), 0);
-  }
+  const bytes = paths.paths.flatMap((path) => [...Buffer.from(path, "utf8"), 0]);
   const frozenBytes = immutableArray(bytes);
   const contentDigest = digestBytes(Uint8Array.from(frozenBytes));
   const manifest = canonicalRecord({

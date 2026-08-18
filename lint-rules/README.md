@@ -199,7 +199,20 @@ If no `config.json` exists, the programmatic rules use Loom's built-in defaults 
 | `no-any-type` | `:\s*any\b` | ✅ | Explicit `: any` type annotations |
 | `no-console-log` | `console\.log\(` | ✅ | `console.log()` calls |
 | `no-todo-fixme` | `//\s*(TODO\|FIXME)` | ✅ | `// TODO` and `// FIXME` comments |
+| `no-alias-export` | `^export (const\|let) X = Y;` | ✅ | An export that only renames another symbol |
 | `prefer-ts-pattern` | `switch\s*\(` | ❌ | `switch()` statements (opt-in) |
+
+`prefer-ts-pattern` stays **off**, and superseded rather than deleted. It matches
+only `switch (`, so it misses the if-chain form entirely, and it fires on
+exhaustive switches whose `default` binds the scrutinee to `never` — a totality
+proof, not a defect. `exhaustive-discriminant-branching` below covers both forms
+and accepts either proof.
+
+`no-alias-export` is the pattern that produced twelve dead aliases on one branch
+(`parseCorpus = parseCalibrationCorpus` and siblings). It matters because `tsc`
+**cannot** see a dead export — it assumes an external consumer — so an alias whose
+callers all moved to the real name lives forever. Derived values like
+`X.length` are not bare identifiers and do not match.
 
 ### Java Rules (Immediate Tier)
 
@@ -220,6 +233,35 @@ If no `config.json` exists, the programmatic rules use Loom's built-in defaults 
 | `no-io-in-pure-modules` | TS, Java | No filesystem/network/console/non-determinism in pure modules |
 | `max-function-lines` | TS, Java | Function bodies ≤ configured max (default: 50 lines) |
 | `fugue-generated-integrity` | TS | Structural projection of Fugue-generated files matches the stamped SHA-256 |
+| `exhaustive-discriminant-branching` | TS | 3+ branches on one discriminant without a totality proof |
+| `no-nested-ternary` | TS | A ternary whose else-branch opens another ternary |
+| `prefer-array-methods` | TS | A mutable accumulator whose loop only pushes into it |
+
+**These three encode judgement, so read what they deliberately do NOT flag.**
+A rule that fires on correct code teaches people the rule is wrong, and then it
+gets disabled — which is worse than not having it.
+
+- `exhaustive-discriminant-branching` ignores one- and two-branch guard clauses.
+  Guards are the *preferred* shape; only at three does an if-chain stop reading
+  as a guard and start reading as a switch. It accepts either
+  `match(…).exhaustive()` or a `never` binding as proof — it is about totality,
+  not about which library you reach for. Chains must be contiguous
+  (10-line max gap), so two unrelated guards on the same tag at opposite ends of
+  a file are not merged into a phantom chain.
+- `no-nested-ternary` exempts **type-level** conditionals. `S extends X ? A : …`
+  is the only way to express a mapped relation in the type system — there is no
+  `if` and no `match` there, so the chain is essential, not incidental.
+- `prefer-array-methods` fires only on the narrow accumulator shape: an array
+  declared immediately before a loop whose single statement pushes into it. Loops
+  with `break`, `continue`, `return`, or `await` are exempt, as are
+  multi-statement bodies — those are folds, and spelling a fold `reduce` is
+  frequently *harder* to read. The bar is that a mechanical rewrite exists AND it
+  deletes a mutable binding.
+
+Both lint tiers are **touch-scoped** — PostToolUse lints the file you edited, and
+the wave gate lints the wave's `files_modified` — so enabling a rule with an
+existing backlog does not turn the tree red. It acts as a ratchet: you cannot
+leave a file worse, and you fix the shape in the file you are already editing.
 
 ---
 
