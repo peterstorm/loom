@@ -8,4 +8,4 @@
 export { classifyScope, parseRegisteredFacadeProgram, parseRemediationStartInput, parseStandaloneStartInput, parseWaveGateStartInput, renderSpawnTask, type FacadeDriveResult, type FacadeRegistrationParse, type ProgramParse, type RegisteredFacadeProgram, type RegisteredRemediationProgram, type RegisteredStandaloneProgram, type RegisteredWaveGateProgram } from './helpers';
 export { resumeStandaloneFacade, startStandaloneFacade } from './standalone';
 export { applyWaveFacadeSubmission, parseWaveRetryDiagnosticSection, persistedWaveAttemptTwoCompatibilityProblem, prepareOrphanedWaveGateRecovery, recoverOrphanedWaveGateFacade, restartWaveGateFacade, resumeWaveGateFacade, startWaveGateFacade, waveAdvisoryDecisionRequestId } from './wave-gate';
-export { resumeRemediationFacade, startRemediationFacade } from './remediation';
+export { remediationAuditBlockMessage, resumeRemediationFacade, startRemediationFacade } from './remediation';

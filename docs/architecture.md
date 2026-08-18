@@ -193,6 +193,7 @@ Canonical layout:
 ```text
 run.<id>/
 ├── authority.json
+├── abandoned.json    # present only once an operator retires the run
 ├── program.json
 ├── checkpoint.json
 ├── progress.json
@@ -205,7 +206,9 @@ run.<id>/
 └── artifacts/
 ```
 
-Authority, request, context, transcript, event, and receipt slots are immutable/exclusive. The handle verifies the direct-child relation, rejects unsafe identity/path shapes, and reopens path components with no-follow filesystem operations. Checkpoints are projections; append-only events and immutable evidence remain the audit history.
+Authority, abandonment, request, context, transcript, event, and receipt slots are immutable/exclusive. The handle verifies the direct-child relation, rejects unsafe identity/path shapes, and reopens path components with no-follow filesystem operations. Checkpoints are projections; append-only events and immutable evidence remain the audit history.
+
+A Run Directory is never deleted, so `abandoned.json` is how a retired run says so: it records the operator's terminal decision and, optionally, the run that replaced it. It is written once and never removes anything. Afterwards `helper orchestration inspect` still reads the run's evidence, but every operation that would advance the run refuses it, and no recovery can adopt it as a pristine replacement. It is deliberately not a program event — the event log is folded by each program's machine on every replay, and this is metadata about the run rather than a transition within it.
 
 ## Request and evidence authority
 

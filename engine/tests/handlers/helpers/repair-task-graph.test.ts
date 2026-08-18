@@ -117,7 +117,12 @@ describe("prepareTaskGraphRepair", () => {
     expect(twice).toEqual({ ok: true, state: once.state, notes: [] });
   });
 
-  it.each([null, 42, "task", [], true])(
+  // Each case is WRAPPED in its own array because `it.each` spreads an array
+  // case into the callback's arguments. The `[]` case therefore used to call
+  // this with zero arguments, which makes the runner read the declared `entry`
+  // parameter as a `done` callback and time the case out after 5s — so the
+  // whole table failed for a reason unrelated to anything it asserts.
+  it.each([[null], [42], ["task"], [[]], [true]])(
     "returns a typed refusal instead of throwing for malformed task entry %j",
     (entry) => {
       const malformed = { ...graph(), tasks: [entry] };

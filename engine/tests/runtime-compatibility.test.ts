@@ -90,6 +90,18 @@ describe("Pi mutation route policy", () => {
     expect(piRuntimeHandshakeRequired("pre-tool-use", "validate-task-execution")).toBe(true);
   });
 
+  /**
+   * `inspect` is a pure read and is exactly what an operator reaches for WHILE
+   * diagnosing skew ("what state is this run in?"). Gating it would make the
+   * handshake failure undiagnosable from the session that hit it. `abandon`
+   * writes a durable terminal marker, so it stays gated like every mutation.
+   */
+  it("leaves the run-inspection read available during skew but not the abandonment marker", () => {
+    expect(piRuntimeHandshakeRequired("helper", "orchestration", ["inspect"])).toBe(false);
+    expect(piRuntimeHandshakeRequired("helper", "orchestration", ["abandon"])).toBe(true);
+    expect(piRuntimeHandshakeRequired("helper", "orchestration", [])).toBe(true);
+  });
+
   it("simulates pre-handshake and N-1 Pi extensions and rejects the N writer before any run mutation", () => {
     const root = mkdtempSync(join(tmpdir(), "loom-runtime-skew-cli-"));
     cleanup.push(root);

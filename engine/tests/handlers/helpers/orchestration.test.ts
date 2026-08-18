@@ -2886,6 +2886,74 @@ describe("orchestration CLI", () => {
     expect(git(["diff", "--cached", "--name-only"]).stdout.trim()).toBe("a.txt");
   });
 
+  /**
+   * The one blocked cause whose recovery is NOT "resume the same run".
+   *
+   * `supportPaths` arrive in the start input, `registerProgram` is O_EXCL and
+   * content-equal, so the authorized set is frozen at registration: a dirty
+   * path the remediation itself produced outside the frozen review scope — a
+   * plan file, a regression pin — can never be authorized by the run that
+   * refused it, however many times it resumes. The diagnostic used to name the
+   * offending paths and stop, leaving the operator to derive that immutability
+   * from `run-directory-handle.ts` and guess that a fresh run was the remedy.
+   */
+  it("tells an unauthorized dirty path to start a fresh run, not to resume this one", async () => {
+    const repository = project();
+    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-remediation-unauthorized-runs-")));
+    cleanup.push(runsRoot);
+    const git = (args: readonly string[]) => spawnSync("git", args, { cwd: repository, encoding: "utf8" });
+    expect(git(["init", "-q"]).status).toBe(0);
+    git(["config", "user.email", "loom@example.test"]);
+    git(["config", "user.name", "Loom Test"]);
+    writeFileSync(join(repository, "a.txt"), "old\n");
+    git(["add", "a.txt"]); git(["commit", "-qm", "initial"]);
+    writeFileSync(join(repository, "a.txt"), "new\n");
+    const sourceRun = join(runsRoot, "source");
+    const remediationRun = join(runsRoot, "remediation");
+    mkdirSync(sourceRun); mkdirSync(remediationRun);
+    const started = runCli(["start", "standalone-review", "--runs-root", runsRoot, "--run", sourceRun],
+      JSON.stringify({ kind: "comments", files: ["a.txt"], dryRun: false }), repository);
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as { requests: { authority: AgentRequestAuthority }[] };
+    const opened = openRunDirectory(runsRoot, sourceRun);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const transcript = ["### Machine Summary", "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "", "```findings", "[]", "```"].join("\n");
+    for (const request of action.requests) {
+      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
+    }
+    expect(runCli(["resume", "--runs-root", runsRoot, "--run", sourceRun], "", repository).status).toBe(0);
+
+    // A regression pin the remediation itself added: dirty, real, and outside
+    // the frozen review scope — so `supportPaths` is its only authorization.
+    writeFileSync(join(repository, "pin.test.ts"), "regression pin\n");
+    const blocked = runCli(["start", "remediation", "--runs-root", runsRoot, "--run", remediationRun], JSON.stringify({
+      sourceRunsRoot: runsRoot, sourceRun, supportPaths: [],
+    }), repository);
+
+    expect(blocked.status, blocked.stderr).toBe(0);
+    const diagnostic = (JSON.parse(blocked.stdout) as { kind: string; diagnostic: { message: string } });
+    expect(diagnostic.kind).toBe("blocked");
+    expect(diagnostic.diagnostic.message).toContain("unauthorized dirty paths: pin.test.ts");
+    expect(diagnostic.diagnostic.message).toContain("this run's start input is immutable");
+    expect(diagnostic.diagnostic.message).toContain("start a FRESH remediation run");
+
+    // And the advice is true: resuming the same run repeats the refusal, while
+    // a fresh run that registers the path as a supportPath installs it.
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", remediationRun], "", repository);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    expect(JSON.parse(resumed.stdout).kind).toBe("blocked");
+
+    const freshRun = join(runsRoot, "remediation-2");
+    mkdirSync(freshRun);
+    const fresh = runCli(["start", "remediation", "--runs-root", runsRoot, "--run", freshRun], JSON.stringify({
+      sourceRunsRoot: runsRoot, sourceRun, supportPaths: ["pin.test.ts"],
+    }), repository);
+    expect(fresh.status, fresh.stderr).toBe(0);
+    expect(JSON.parse(fresh.stdout).kind).toBe("done");
+    expect(git(["diff", "--cached", "--name-only"]).stdout.trim().split("\n").sort())
+      .toEqual(["a.txt", "pin.test.ts"]);
+  });
+
   it("records a user decision durably in the run's event log", () => {
     const root = project();
     const runsRoot = join(root, "runs");
@@ -3369,6 +3437,183 @@ describe("orchestration CLI", () => {
 
       expect(result.status).not.toBe(0);
       expect(result.stderr).toContain("--operation is required");
+    });
+  });
+
+  /**
+   * Orienting inside a run, and retiring one.
+   *
+   * Both operations exist because the answers used to live outside the engine.
+   * "What state is this run in, and is it recoverable or stale?" meant reading
+   * `checkpoint.json`, `program.json`, and `events/` by hand with `jq`, then
+   * cross-referencing each transcript slot for a rejection marker. "Which run
+   * replaced this one?" had no answer at all: run directories are never
+   * deleted, so a superseded run sits in a listing of dozens looking exactly
+   * like a live one, and the only record of the supersession was a parent
+   * session's notes — which the next operator does not have.
+   */
+  describe("inspecting and retiring a run", () => {
+    /** A standalone run with one captured slot and one rejected slot. */
+    async function reviewRun(label: string) {
+      const root = repository();
+      const runsRoot = join(root, "runs");
+      mkdirSync(runsRoot, { recursive: true });
+      // A docs scope selects code-reviewer AND comment-analyzer, so the run has
+      // two slots: one to capture and one to reject.
+      writeFileSync(join(root, "README.md"), "fixture, revised\n");
+      const started = runCli(
+        ["start", "standalone-review", "--runs-root", runsRoot, "--run", label],
+        JSON.stringify({ kind: "comments", files: ["README.md"], dryRun: false }),
+        root,
+      );
+      expect(started.status, started.stderr).toBe(0);
+      const action = JSON.parse(started.stdout) as { requests: { authority: AgentRequestAuthority }[] };
+      const opened = openRunDirectory(runsRoot, label);
+      if (!opened.ok) throw new Error(opened.error.message);
+      const [captured, rejected] = action.requests;
+      if (captured === undefined || rejected === undefined) throw new Error("expected at least two reviewer slots");
+      const transcript = [
+        "### Machine Summary", "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "", "```findings", "[]", "```",
+      ].join("\n");
+      expect((await opened.value.captureTranscript(captured.authority, [...Buffer.from(transcript)])).ok).toBe(true);
+      expect((await opened.value.rejectCapture(
+        rejected.authority,
+        'agent-failed: exited without a successful result (exitCode=0, stopReason=error, errorMessage="Connection error.")',
+      )).ok).toBe(true);
+      return { root, runsRoot, captured: captured.authority, rejected: rejected.authority };
+    }
+
+    it("answers program, state, per-slot capture, and the rejection diagnostic in one read", async () => {
+      const { root, runsRoot } = await reviewRun("run.inspect-mixed");
+
+      const inspected = runCli(["inspect", "--runs-root", runsRoot, "--run", "run.inspect-mixed"], "", root);
+
+      expect(inspected.status, inspected.stderr).toBe(0);
+      expect(inspected.stdout).toContain("run:       run.inspect-mixed");
+      expect(inspected.stdout).toContain("program:   standalone-review");
+      expect(inspected.stdout).toContain("state:     awaiting-results");
+      expect(inspected.stdout).toContain("1 captured, 1 rejected");
+      expect(inspected.stdout).toContain('stopReason=error, errorMessage="Connection error."');
+      expect(inspected.stdout).toContain("abandoned: no");
+    });
+
+    it("projects the same facts into the JSON form", async () => {
+      const { root, runsRoot, rejected } = await reviewRun("run.inspect-json");
+
+      const inspected = runCli(["inspect", "--runs-root", runsRoot, "--run", "run.inspect-json", "--json"], "", root);
+
+      expect(inspected.status, inspected.stderr).toBe(0);
+      const projection = JSON.parse(inspected.stdout) as {
+        kind: string;
+        program: { value: string };
+        slots: { value: { slotId: string; capture: string; diagnostic: string | null }[] };
+      };
+      expect(projection.kind).toBe("run-inspection");
+      expect(projection.program.value).toBe("standalone-review");
+      expect(projection.slots.value.find(({ slotId }) => slotId === rejected.slotId))
+        .toMatchObject({ capture: "rejected", diagnostic: expect.stringContaining("agent-failed") });
+    });
+
+    it("inspects a bare run directory without inventing a program or a state", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      mkdirSync(join(runsRoot, "run.inspect-bare"), { recursive: true });
+
+      const inspected = runCli(["inspect", "--runs-root", runsRoot, "--run", "run.inspect-bare"], "", root);
+
+      expect(inspected.status, inspected.stderr).toBe(0);
+      expect(inspected.stdout).toContain("program:   none registered");
+      expect(inspected.stdout).toContain("state:     no checkpoint written");
+      expect(inspected.stdout).toContain("0 issued");
+    });
+
+    it("records a supersession and then refuses every operation that would advance the run", async () => {
+      const { root, runsRoot } = await reviewRun("run.abandon-source");
+      mkdirSync(join(runsRoot, "run.abandon-replacement"), { recursive: true });
+
+      const abandoned = runCli([
+        "abandon", "--runs-root", runsRoot, "--run", "run.abandon-source",
+        "--superseded-by", "run.abandon-replacement",
+        "--reason", "every slot died on the shared endpoint",
+      ], "", root);
+
+      expect(abandoned.status, abandoned.stderr).toBe(0);
+      expect(JSON.parse(abandoned.stdout)).toMatchObject({
+        kind: "run-abandoned",
+        runId: "run.abandon-source",
+        supersededBy: "run.abandon-replacement",
+      });
+
+      // The retained run stays readable — that is why it was retained.
+      const inspected = runCli(["inspect", "--runs-root", runsRoot, "--run", "run.abandon-source"], "", root);
+      expect(inspected.status, inspected.stderr).toBe(0);
+      expect(inspected.stdout).toContain("abandoned: yes — superseded by run.abandon-replacement");
+
+      const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", "run.abandon-source"], "", root);
+      expect(resumed.status).not.toBe(0);
+      expect(resumed.stderr).toContain("was abandoned (superseded by run.abandon-replacement)");
+      expect(resumed.stderr).toContain("advance the run that replaced it instead");
+    });
+
+    /**
+     * The marker is immutable, so a typo'd or cross-root pointer would be
+     * frozen into the run forever — worse than no pointer, because it reads as
+     * authoritative.
+     */
+    it("refuses a replacement that is not an existing run under the same root", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      mkdirSync(join(runsRoot, "run.abandon-typo"), { recursive: true });
+
+      const abandoned = runCli([
+        "abandon", "--runs-root", runsRoot, "--run", "run.abandon-typo",
+        "--superseded-by", "run.does-not-exist", "--reason", "x",
+      ], "", root);
+
+      expect(abandoned.status).not.toBe(0);
+      expect(abandoned.stderr).toContain("is not an existing run directory under");
+      expect(existsSync(join(runsRoot, "run.abandon-typo", "abandoned.json"))).toBe(false);
+    });
+
+    it("refuses an abandonment with no reason, and one that names itself", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      mkdirSync(join(runsRoot, "run.abandon-invalid"), { recursive: true });
+
+      const noReason = runCli(
+        ["abandon", "--runs-root", runsRoot, "--run", "run.abandon-invalid"], "", root);
+      expect(noReason.status).not.toBe(0);
+      expect(noReason.stderr).toContain("--reason");
+
+      const itself = runCli([
+        "abandon", "--runs-root", runsRoot, "--run", "run.abandon-invalid",
+        "--superseded-by", "run.abandon-invalid", "--reason", "x",
+      ], "", root);
+      expect(itself.status).not.toBe(0);
+      expect(itself.stderr).toContain("a run cannot supersede itself");
+    });
+
+    it("stays idempotent on an identical repeat and refuses a conflicting one", () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      mkdirSync(join(runsRoot, "run.abandon-twice"), { recursive: true });
+      const abandon = (reason: string) => runCli(
+        ["abandon", "--runs-root", runsRoot, "--run", "run.abandon-twice", "--reason", reason], "", root);
+
+      expect(abandon("scope was dropped").status).toBe(0);
+      expect(abandon("scope was dropped").status).toBe(0);
+
+      const conflicting = abandon("a different story");
+      expect(conflicting.status).not.toBe(0);
+      expect(conflicting.stderr).toContain("already abandoned under a different marker");
+    });
+
+    it("lists both operations in the usage text so they are discoverable", () => {
+      const usage = runCli(["not-an-operation"], "", project());
+
+      expect(usage.status).not.toBe(0);
+      expect(usage.stderr).toContain("inspect --runs-root <root> --run <run-directory> [--json]");
+      expect(usage.stderr).toContain("abandon --runs-root <root> --run <run-directory> --reason <text>");
     });
   });
 });

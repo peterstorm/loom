@@ -6,6 +6,7 @@ import {
   applyPhaseAgentPiResult,
   applyReviewPiResult,
   applySpecCheckPiResult,
+  piSubagentFailureSignals,
   resolveImplementationTaskId,
   writtenPathsOf,
   type PiSubagentResult,
@@ -205,6 +206,45 @@ describe("applyFailedPiResult", () => {
     });
 
     expect(store.current().spec_check).toMatchObject({ verdict: "EVIDENCE_CAPTURE_FAILED", wave: 1 });
+  });
+
+  it("carries the harness failure signals into the stored diagnostic", async () => {
+    const store = fakeStore(graph());
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: { ...result({ exitCode: 0 }), stopReason: "error", errorMessage: "Connection error." },
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      now: NOW,
+    });
+
+    expect(applied.log.join("\n")).toContain('exitCode=0, stopReason=error, errorMessage="Connection error."');
+  });
+});
+
+/**
+ * An infrastructure fault and an agent-contract fault must not read alike. The
+ * fields that separate them are in scope wherever the diagnostic is composed;
+ * the whole point of this helper is that none of them get dropped.
+ */
+describe("piSubagentFailureSignals", () => {
+  it("reports the exit/stop pair and the harness cause line", () => {
+    expect(piSubagentFailureSignals({ exitCode: 0, stopReason: "error", errorMessage: "Connection error." }))
+      .toBe('exitCode=0, stopReason=error, errorMessage="Connection error."');
+  });
+
+  it("omits the cause line rather than printing an empty or absent one", () => {
+    expect(piSubagentFailureSignals({ exitCode: 1, stopReason: "aborted" }))
+      .toBe("exitCode=1, stopReason=aborted");
+    expect(piSubagentFailureSignals({ exitCode: 1, stopReason: "aborted", errorMessage: "   " }))
+      .toBe("exitCode=1, stopReason=aborted");
+    expect(piSubagentFailureSignals({ exitCode: 1, stopReason: "aborted", errorMessage: { not: "a string" } }))
+      .toBe("exitCode=1, stopReason=aborted");
+  });
+
+  it("degrades a malformed exit code or stop reason to n/a instead of undefined", () => {
+    expect(piSubagentFailureSignals({})).toBe("exitCode=n/a, stopReason=n/a");
+    expect(piSubagentFailureSignals({ exitCode: "1", stopReason: 7 })).toBe("exitCode=n/a, stopReason=n/a");
   });
 });
 

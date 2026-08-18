@@ -82,6 +82,30 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration decide \
 
 The façade also exposes `submit` and `correlate` for transport integration and compatibility. Normal Pi and Claude Code operation records native correlations and captures final bytes automatically. `complete` remains a compatibility adapter for historical panel callers; deterministic operations are executed internally in new façade runs.
 
+### Inspecting one run
+
+`status` answers “where is the graph”; `inspect` answers “what state is this run in, and is it recoverable or stale?”. It is a pure read — it advances nothing.
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration inspect \
+  --runs-root <root> --run <run-directory> [--json]
+```
+
+It reports the registered program, the machine state read through that program’s own checkpoint shape, every issued slot with its attempt, capture status and the diagnostic that refused it, the event tail, and any abandonment marker. Facts it cannot read are reported as `unavailable` with the cause, never defaulted — so an unreadable checkpoint is distinguishable from a run that never wrote one. Prefer it over hand-reading `authority.json`, `program.json`, `checkpoint.json`, and `events/`. Like `status`, it stays available during a Pi runtime-revision skew, because it is exactly what diagnosing that skew needs.
+
+### Retiring a superseded run
+
+Run directories are never deleted — they hold the evidence. When a newer run replaces one, record it so the directory listing stays honest:
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration abandon \
+  --runs-root <root> --run <retired-run> \
+  --superseded-by <replacement-run> \
+  --reason "<why this run was retired>"
+```
+
+The marker removes nothing. It is written once and is immutable: an identical repeat succeeds, a different one is refused, a run may not supersede itself, and the replacement must already exist as a direct child of the same runs root. Afterwards `inspect` still reads the run’s evidence, but every operation that would advance it — `resume`, `submit`, `correlate`, `decide`, `restart`, `complete` — refuses, and no recovery can adopt it as a pristine replacement. `--superseded-by` is optional; omit it when a run is retired without a successor.
+
 ### Pi batch limit
 
 Pi’s native subagent transport accepts at most eight requests per call. Partition a larger engine-issued batch into ordered chunks of at most eight without changing any request. Resume only after all chunks finish.

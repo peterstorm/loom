@@ -224,6 +224,23 @@ describe("engine-owned orchestration runbook contract", () => {
     expect(command).toContain("autonomously decide which");
     expect(command).not.toContain("ask the user which advisories");
   });
+
+  /**
+   * A blocked remediation start used to be described with ONE recovery —
+   * "fix the cause it names and resume the SAME run" — listing three causes it
+   * applied to. For one of them it is unreachable advice: `supportPaths` come
+   * from the start input, `registerProgram` admits only a byte-identical
+   * re-registration, so a dirty path belonging to the remediation can never be
+   * authorized by the run that refused it, no matter how many times it resumes.
+   * The operator had to derive that immutability from the handle's source.
+   */
+  it("splits blocked-start recovery by cause rather than promising the same run always resumes", () => {
+    const skill = read("skills", "review-and-fix", "SKILL.md").replace(/\s+/g, " ");
+
+    expect(skill).toContain("start a **fresh** remediation run whose start input adds the path to `supportPaths`");
+    expect(skill).toContain("a run cannot authorize a path its own start input never named");
+    expect(skill).toContain("The blocked run stays in place as evidence.");
+  });
 });
 
 describe("the smoke scripts this file's own header cites are actually run", () => {

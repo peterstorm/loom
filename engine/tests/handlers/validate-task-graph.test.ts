@@ -148,7 +148,11 @@ describe("validateFull (pure)", () => {
     expect(errorsOf(result)).toContain("'tasks' array is empty");
   });
 
-  it.each([null, 42, "task", []])("returns a validation error for malformed task entry %j", (entry) => {
+  // Wrapped cases: `it.each` spreads an array case into the callback, so the
+  // bare `[]` case called this with zero arguments and the runner read `entry`
+  // as a `done` callback it then waited 5s for. See the same note in
+  // repair-task-graph.test.ts.
+  it.each([[null], [42], ["task"], [[]]])("returns a validation error for malformed task entry %j", (entry) => {
     const result = validateFull({ plan_title: "x", plan_file: "x", spec_file: "x", tasks: [entry] });
     expect(result.ok).toBe(false);
     expect(errorsOf(result)).toContain("Task [0]: must be an object");

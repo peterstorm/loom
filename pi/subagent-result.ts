@@ -100,8 +100,68 @@ export type PiSubagentResult = Readonly<{
   task: string;
   exitCode: number;
   stopReason?: string;
+  /** Harness-supplied cause line; absent on pi versions that do not emit it. */
+  errorMessage?: unknown;
   messages: unknown;
 }>;
+
+/** Pi result failure boundary. Missing/malformed exit codes fail closed. */
+export function piSubagentResultFailed(result: {
+  readonly exitCode?: unknown;
+  readonly stopReason?: unknown;
+}): boolean {
+  return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+}
+
+/**
+ * A failure that hit EVERY slot at once is a shared-infrastructure signature,
+ * not N independent agent faults — and it is invisible from inside any single
+ * slot's rejection. Reported once per batch, beside the per-slot diagnostics,
+ * so the operator reads the pattern where the symptoms are. `null` below two
+ * results or when any slot survived: one slot is not a pattern, and a surviving
+ * sibling refutes the shared-fault reading outright.
+ */
+export function piAllSlotsFailedNote(
+  results: readonly {
+    readonly exitCode?: unknown;
+    readonly stopReason?: unknown;
+  }[],
+): string | null {
+  if (results.length < 2 || !results.every((result) => piSubagentResultFailed(result))) return null;
+  const stopReasons = [...new Set(results.map(({ stopReason }) =>
+    typeof stopReason === "string" ? stopReason : "n/a"))].sort();
+  return `all ${results.length} slots in this batch failed (stopReason=${stopReasons.join("|")}) — ` +
+    "a shared-infrastructure fault (endpoint, auth, memory) fits that signature better than " +
+    "independent agent faults; consider re-spawning serially before treating it as an agent defect";
+}
+
+/**
+ * The failure signals a diagnostic about a failed result must CARRY.
+ *
+ * "Exited without a successful result" is true of every failure mode there is:
+ * a model-server drop, an OOM, an auth expiry, and an agent that ignored its
+ * contract all read identically. Classifying them then costs a hand parse of
+ * the parent session JSONL — where these discriminating fields were in scope at
+ * the diagnostic site all along.
+ *
+ * `errorMessage` is typed `unknown` and read defensively rather than declared
+ * as a string: it is the harness's own cause line ("Connection error."), the
+ * single most diagnostic field when the transport is at fault, and a pi version
+ * that stops emitting it must degrade to the exit/stop pair rather than print
+ * `undefined`.
+ */
+export function piSubagentFailureSignals(result: {
+  readonly exitCode?: unknown;
+  readonly stopReason?: unknown;
+  readonly errorMessage?: unknown;
+}): string {
+  const errorMessage = typeof result.errorMessage === "string" ? result.errorMessage.trim() : "";
+  return [
+    `exitCode=${typeof result.exitCode === "number" ? String(result.exitCode) : "n/a"}`,
+    `stopReason=${typeof result.stopReason === "string" ? result.stopReason : "n/a"}`,
+    ...(errorMessage === "" ? [] : [`errorMessage=${JSON.stringify(errorMessage)}`]),
+  ].join(", ");
+}
 
 /** The reserved slot this result answers for, when the spawn reserved one. */
 export type ReservedSlot = Readonly<{ agentType: string; taskId: string | null }>;
@@ -136,8 +196,7 @@ export async function applyFailedPiResult(args: Readonly<{
 }>): Promise<PiResultOutcome> {
   const { store, agentType, result, reservedSlot } = args;
   const failure =
-    `${agentType} failed before evidence capture completed (exitCode=${String(result.exitCode)}, ` +
-    `stopReason=${String(result.stopReason ?? "unset")})`;
+    `${agentType} failed before evidence capture completed (${piSubagentFailureSignals(result)})`;
 
   if (isReviewAgent(agentType)) {
     const failedTaskId = reservedSlot?.taskId ?? extractTaskId(result.task ?? "");

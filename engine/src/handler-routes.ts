@@ -92,7 +92,19 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "helper/orchestration",
 ]);
 
-/** Status is intentionally available during skew so recovery stays diagnosable. */
+/**
+ * The orchestration reads that stay available during runtime skew.
+ *
+ * Both are pure projections that mutate nothing, and both are what an operator
+ * needs precisely WHILE recovering from skew: `status` answers "where is the
+ * graph", `inspect` answers "what state is this run in, and is it recoverable".
+ * Gating them would make the handshake failure undiagnosable from inside the
+ * session that hit it. Every other orchestration operation — `abandon`
+ * included, since its marker is durable and terminal — stays behind the
+ * handshake.
+ */
+const SKEW_SAFE_ORCHESTRATION_READS: ReadonlySet<string> = new Set(["status", "inspect"]);
+
 export function piRuntimeHandshakeRequired(
   hookType: string | undefined,
   handlerName: string | undefined,
@@ -100,7 +112,8 @@ export function piRuntimeHandshakeRequired(
 ): boolean {
   if (hookType === "init-state") return true;
   if (!PI_RUNTIME_HANDSHAKE_ROUTES.has(`${hookType}/${handlerName}`)) return false;
-  return !(hookType === "helper" && handlerName === "orchestration" && extraArgs[0] === "status");
+  return !(hookType === "helper" && handlerName === "orchestration" &&
+    extraArgs[0] !== undefined && SKEW_SAFE_ORCHESTRATION_READS.has(extraArgs[0]));
 }
 
 /** Exit code for a crash outside the handler, derived from the route. */

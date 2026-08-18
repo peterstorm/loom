@@ -1162,7 +1162,11 @@ describe("Pi extension review tool_result integration", () => {
     }, { sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
 
     const responses = await pi.emit("tool_result", {
-      ...reviewResult(prompt, "must not become evidence", { exitCode: 1, stopReason: "error" }),
+      ...reviewResult(prompt, "must not become evidence", {
+        exitCode: 0,
+        stopReason: "error",
+        errorMessage: "Connection error.",
+      }),
       toolCallId,
     }, { sessionManager: { getSessionId: () => session } });
 
@@ -1172,6 +1176,21 @@ describe("Pi extension review tool_result integration", () => {
     }));
     expect(() => readFileSync(join(staged.runDir, "transcripts", "slot-1", "attempt-1.raw"), "utf-8"))
       .toThrow();
+
+    // The recorded rejection is the run's OWN evidence for why the slot
+    // produced nothing, and an operator classifies infra-vs-agent from it
+    // alone. An `exitCode: 0` + `stopReason: "error"` child is exactly the
+    // shape a dropped model-server connection leaves behind — the case that
+    // used to be indistinguishable from a contract violation.
+    const rejections = readdirSync(join(staged.runDir, "events"))
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => JSON.parse(readFileSync(join(staged.runDir, "events", name), "utf-8")) as {
+        event: { kind?: string; diagnostic?: string };
+      })
+      .filter(({ event }) => event.kind === "request-capture-rejected");
+    expect(rejections).toHaveLength(1);
+    expect(rejections[0]!.event.diagnostic)
+      .toContain('exitCode=0, stopReason=error, errorMessage="Connection error."');
   });
 
   it("reports a missing request-bound Pi result instead of silently leaving its transcript empty", async () => {

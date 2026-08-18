@@ -118,10 +118,39 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start remediation \
 JSON
 ```
 
-A `blocked` start reports the exact cause and leaves the run registered. Fix the
-cause it names — a source review that is not `done`, unrelated staged work, an
-unauthorized dirty path — and `resume` the SAME run. Never delete a run
-directory to retry: the run holds the evidence of why it blocked.
+Every path the remediation touches that is NOT inside the frozen review scope —
+the plan file, a regression pin added for an accepted fix — must be named in
+`supportPaths` **here**, at start. The start input is registered exclusively and
+admits only a byte-identical re-registration, so a run cannot authorize a path
+its own start input never named.
+
+A `blocked` start reports the exact cause and leaves the run registered. Never
+delete a run directory to retry: the run holds the evidence of why it blocked.
+Recovery depends on the cause:
+
+- **source review is not `done`** — finish or fix the source run, then `resume`
+  the SAME run.
+- **unrelated staged work** — unstage it, then `resume` the SAME run.
+- **unauthorized dirty paths** — resume the same run only if the dirty state is
+  genuinely unrelated and can be reverted or committed away. If the path belongs
+  to the remediation (the case `supportPaths` exists for), the same run can
+  never authorize it: start a **fresh** remediation run whose start input adds
+  the path to `supportPaths`. The blocked run stays in place as evidence.
+
+When a fresh run supersedes a blocked one, say so in the retired run rather
+than only in this session, so the next operator reading the runs root can tell
+which of the two is live:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration abandon \
+  --runs-root ".claude/reviews/review-and-fix-runs" \
+  --run "<blocked-run-id>" --superseded-by "<fresh-run-id>" \
+  --reason "<why it was replaced>"
+```
+
+`helper orchestration inspect --runs-root <root> --run <run-id>` reads any
+run's program, state, per-slot capture, and rejection diagnostics in one
+command — use it instead of hand-reading `checkpoint.json` and `events/`.
 
 Resume until `done`. The engine proves observed dirty paths are authorized,
 rejects excluded Run evidence and unrelated staged work, stages literal paths

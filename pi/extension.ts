@@ -47,6 +47,9 @@ import {
   applyPhaseAgentPiResult,
   applyReviewPiResult,
   applySpecCheckPiResult,
+  piAllSlotsFailedNote,
+  piSubagentFailureSignals,
+  piSubagentResultFailed,
   type PiResultOutcome,
   type RepositoryProbe,
   type TaskGraphStore,
@@ -116,6 +119,14 @@ const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 // hash the checkout again before mutation; a changed checkout therefore cannot
 // write a schema this in-memory runtime may not parse.
 const LOADED_RUNTIME_IDENTITY = captureLoomRuntimeIdentity(PACKAGE_ROOT);
+// Also frozen at load. Correct under Pi, which sets the environment before it
+// loads any extension — but it makes the FIRST import of this module in a
+// process binding, which matters under `bun test`, where all files share one
+// process: a test file that imports this module before `pi-extension-review-
+// events.test.ts` sets `PI_CODING_AGENT_DIR` pins the real `~/.pi` for the
+// whole run and every agent-definition check there resolves the wrong catalog.
+// Keep unit tests of this file's pure helpers importing `pi/subagent-result`,
+// which reads no environment, rather than pulling this module in early.
 const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const PI_RESOURCE_CACHE = join(PI_AGENT_DIR, "cache", "loom-resources");
 
@@ -484,14 +495,6 @@ export async function capturePiSubagentResult(
     process.stderr.write(`loom(pi): capture-orchestration-result crashed for ${agentType}: ${message}\n`);
     return { kind: "rejected", reason: "capture-crashed", message };
   }
-}
-
-/** Pi result failure boundary. Missing/malformed exit codes fail closed. */
-export function piSubagentResultFailed(result: {
-  readonly exitCode?: unknown;
-  readonly stopReason?: unknown;
-}): boolean {
-  return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 }
 
 export interface PiCleanupAction {
@@ -1535,6 +1538,8 @@ export default function (pi: ExtensionAPI) {
       task: string;
       exitCode: number;
       stopReason?: string;
+      /** Harness-supplied cause line; absent on pi versions that do not emit it. */
+      errorMessage?: unknown;
       messages: unknown;
     }>;
     if (reservation && results.length > reservation.items.length) {
@@ -1544,6 +1549,8 @@ export default function (pi: ExtensionAPI) {
       process.stderr.write(`loom(pi): ${diagnostic}\n`);
     }
     const authorizedResults = reservation ? results.slice(0, reservation.items.length) : results;
+    const allSlotsFailed = piAllSlotsFailedNote(authorizedResults);
+    if (allSlotsFailed !== null) process.stderr.write(`loom(pi): ${allSlotsFailed}\n`);
     for (const [resultIndex, result] of authorizedResults.entries()) {
       // Per-result error isolation (mirrors dispatch.ts's safeRun): a throw
       // while processing result #1 must not abort results #2..N — that
@@ -1615,7 +1622,7 @@ export default function (pi: ExtensionAPI) {
         ? {
             kind: "rejected",
             reason: "agent-failed",
-            message: `${agentType} exited without a successful result`,
+            message: `${agentType} exited without a successful result (${piSubagentFailureSignals(result)})`,
           }
         : await capturePiSubagentResult(
             toolCallId,

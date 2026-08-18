@@ -9,6 +9,7 @@
  *
  * Layout:
  *   authority.json                     immutable run/roster/root authority
+ *   abandoned.json                     immutable operator retirement marker
  *   checkpoint.json                    atomic projection, not primary history
  *   events/<sequence>-<dedup>.json     immutable domain events
  *   requests/<request-id>.json         immutable request authority
@@ -81,6 +82,7 @@ const AUTHORITY_FILE = "authority.json";
 const PROGRAM_FILE = "program.json";
 const CHECKPOINT_FILE = "checkpoint.json";
 const PROGRESS_FILE = "progress.json";
+const ABANDONMENT_FILE = "abandoned.json";
 
 const FIXED_SUBDIRECTORIES: readonly string[] = [
   EVENTS,
@@ -109,6 +111,39 @@ export type RunAuthority = Readonly<{
   runId: OrchestrationRunId;
   runsRoot: string;
   runDirectory: string;
+}>;
+
+/**
+ * An operator's terminal decision that a run is finished with, and by what.
+ *
+ * A run directory is never deleted — it holds the evidence of why it ended the
+ * way it did — so a superseded run stays in the listing forever with nothing in
+ * it pointing at its replacement. The only record used to be the parent
+ * session's notes, which the next operator does not have.
+ *
+ * Written O_EXCL and compared byte-for-byte on re-write, so the marker is
+ * immutable once placed: abandonment is terminal, and a run that could be
+ * re-abandoned under a different replacement would make the pointer a guess.
+ * It carries no timestamp for the same reason — a clock reading would make two
+ * identical abandonments differ and turn the idempotent repeat into a conflict.
+ *
+ * It is deliberately NOT a program event. The event log is folded by each
+ * program's machine on every replay, and a record no machine has a transition
+ * for is a corruption risk in the one file the run cannot afford to lose. This
+ * is metadata ABOUT the run, so it sits beside the authority instead.
+ */
+export type RunAbandonment = Readonly<{
+  schemaVersion: typeof RUN_DIRECTORY_SCHEMA_VERSION;
+  kind: "run-abandoned";
+  runId: OrchestrationRunId;
+  /** The run that replaces this one, or `null` when nothing does. */
+  supersededBy: OrchestrationRunId | null;
+  reason: string;
+}>;
+
+export type RunAbandonmentInput = Readonly<{
+  supersededBy: string | null;
+  reason: string;
 }>;
 
 export type ContextPublishedReceipt = Readonly<{
@@ -342,6 +377,10 @@ export interface RunDirHandle extends ProgramJournal {
   readAuthority(): DomainResult<RunAuthority, RunDirectoryError>;
   registerProgram(registration: unknown): Promise<DomainResult<OrchestrationRunId, RunDirectoryError>>;
   readProgramRegistration(): DomainResult<unknown | null, RunDirectoryError>;
+  /** Terminal, immutable, and idempotent on identical input; never deletes anything. */
+  abandonRun(input: RunAbandonmentInput): Promise<DomainResult<RunAbandonment, RunDirectoryError>>;
+  /** `success(null)` = never abandoned; a failure = marked but unreadable. */
+  readAbandonment(): DomainResult<RunAbandonment | null, RunDirectoryError>;
   /** True only when authority, optional program, and otherwise-empty canonical directories are the entire run (`requests/` may contain only the empty `correlators/` child). */
   isPristine(): DomainResult<boolean, RunDirectoryError>;
   publishContext(packet: ContextPacket): Promise<DomainResult<ContextPublishedReceipt, RunDirectoryError>>;
@@ -588,6 +627,7 @@ function buildHandle(
     readAuthority: (): DomainResult<RunAuthority, RunDirectoryError> =>
       readRunAuthority(authority, authorityPath),
     ...programOperations(runId, directory),
+    ...abandonmentOperations(runId, directory),
     ...journalOperations(directory),
     ...contextOperations(runId, directory),
     ...requestOperations(runId, directory),
@@ -662,6 +702,99 @@ function programOperations(runId: OrchestrationRunId, directory: string) {
           ? success(null)
           : failure("program", `orchestration program registration is unreadable: ${(error as Error).message}`);
       }
+    },
+  };
+}
+
+const MAX_ABANDONMENT_REASON = 512;
+
+/**
+ * Parse an abandonment claim into the marker it may become.
+ *
+ * The self-reference refusal is the invariant that matters: a run naming itself
+ * as its own replacement is a pointer that reads as "look elsewhere" and sends
+ * the operator back to the run they are already standing in. The reason is
+ * required and bounded because an unexplained abandonment tells the next
+ * operator nothing the directory listing did not already say.
+ */
+export function parseRunAbandonment(
+  runId: OrchestrationRunId,
+  input: RunAbandonmentInput,
+): DomainResult<RunAbandonment, RunDirectoryError> {
+  const reason = input.reason.trim();
+  if (reason === "") return failure("abandonment", "an abandonment must carry a reason");
+  if (reason.length > MAX_ABANDONMENT_REASON) {
+    return failure("abandonment", `abandonment reason exceeds ${MAX_ABANDONMENT_REASON} characters`);
+  }
+  if (input.supersededBy === null) {
+    return success(canonicalRecord({
+      schemaVersion: RUN_DIRECTORY_SCHEMA_VERSION,
+      kind: "run-abandoned" as const,
+      runId,
+      supersededBy: null,
+      reason,
+    }));
+  }
+  const supersededBy = parseOrchestrationRunId(input.supersededBy);
+  if (!supersededBy.ok) return failure("abandonment", `superseding run id: ${supersededBy.error.message}`);
+  if (supersededBy.value === runId) {
+    return failure("abandonment", "a run cannot supersede itself");
+  }
+  return success(canonicalRecord({
+    schemaVersion: RUN_DIRECTORY_SCHEMA_VERSION,
+    kind: "run-abandoned" as const,
+    runId,
+    supersededBy: supersededBy.value,
+    reason,
+  }));
+}
+
+function abandonmentOperations(runId: OrchestrationRunId, directory: string) {
+  const path = join(directory, ABANDONMENT_FILE);
+  return {
+    async abandonRun(input: RunAbandonmentInput): Promise<DomainResult<RunAbandonment, RunDirectoryError>> {
+      const parsed = parseRunAbandonment(runId, input);
+      if (!parsed.ok) return parsed;
+      const body = JSON.stringify(parsed.value, null, 2);
+      try {
+        writeRunFileExclusiveNoFollow(path, body);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+          return failure("abandonment", `cannot record run abandonment: ${(error as Error).message}`);
+        }
+        // Exactly `registerProgram`'s rule: a byte-identical repeat is the
+        // idempotent retry of an interrupted command, and anything else is a
+        // second, different terminal claim on a run that already has one.
+        if (readRunFileNoFollow(path) !== body) {
+          return failure("abandonment", "run is already abandoned under a different marker");
+        }
+      }
+      return success(parsed.value);
+    },
+
+    readAbandonment(): DomainResult<RunAbandonment | null, RunDirectoryError> {
+      let raw: unknown;
+      try {
+        raw = readJsonNoFollow(path);
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ENOENT"
+          ? success(null)
+          : failure("abandonment", `run abandonment marker is unreadable: ${(error as Error).message}`);
+      }
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        return failure("abandonment", "run abandonment marker is malformed");
+      }
+      const record = raw as Record<string, unknown>;
+      if (record["schemaVersion"] !== RUN_DIRECTORY_SCHEMA_VERSION || record["kind"] !== "run-abandoned" ||
+          record["runId"] !== runId || typeof record["reason"] !== "string" ||
+          (record["supersededBy"] !== null && typeof record["supersededBy"] !== "string")) {
+        return failure("abandonment", "run abandonment marker does not describe this run");
+      }
+      const reparsed = parseRunAbandonment(runId, {
+        supersededBy: record["supersededBy"] as string | null,
+        reason: record["reason"],
+      });
+      return reparsed.ok ? reparsed : failure("abandonment", `stored abandonment is invalid: ${reparsed.error.message}`);
     },
   };
 }
@@ -974,6 +1107,9 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
       let root: AnchoredDirectory | null = null;
       try {
         root = openDirectoryNoFollow(directory);
+        // ABANDONMENT_FILE is deliberately absent from this set: an abandoned
+        // run is terminal by operator decision, so it must never qualify as the
+        // pristine replacement a restart or orphan recovery installs into.
         const allowedRoot = new Set([AUTHORITY_FILE, PROGRAM_FILE, ...FIXED_SUBDIRECTORIES.map((path) => path.split("/")[0]!) ]);
         const rootEntries = listDirectoryNamesNoFollow(root);
         if (rootEntries.some((entry) => !allowedRoot.has(entry))) return success(false);

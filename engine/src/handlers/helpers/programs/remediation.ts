@@ -7,12 +7,39 @@
 import { parseEffectId, parseVerifiedIndexInstalled } from '../../../core/orchestration-contract';
 import { parseStandaloneReviewMachineState } from '../../../core/standalone-review-machine';
 import { openRunDirectory, type RunDirHandle } from '../../../orchestration/run-directory-handle';
-import { auditRemediationPaths, parseRepositorySnapshotWitness, prepareLiteralGitPathspec, prepareVerifiedIndexInstallation, reduceRemediation, stageTemporaryIndex, startRemediation, verifyTemporaryIndex, type RemediationState } from '../../../core/remediation-machine';
+import { auditRemediationPaths, parseRepositorySnapshotWitness, prepareLiteralGitPathspec, prepareVerifiedIndexInstallation, reduceRemediation, stageTemporaryIndex, startRemediation, verifyTemporaryIndex, type RemediationAuditError, type RemediationState } from '../../../core/remediation-machine';
 import { createTemporaryIndex, digestTemporaryIndex, installVerifiedIndex, observeDirtyPaths, observeStagedPaths, openGitRepository, readStagedPaths, snapshotRepositoryWitness, stageAuditedPaths } from '../../../orchestration/git-remediation';
 import { failed, publicationResolver, type FacadeDriveResult, type RegisteredRemediationProgram } from './helpers';
 
 export function remediationBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {
   return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: { kind: "remediation-blocked", message } } };
+}
+
+/**
+ * Say which recovery an audit refusal actually has.
+ *
+ * Only the SHELL knows this, which is why it is said here and not in the audit
+ * itself: the authorized set comes from the run's `supportPaths`, and
+ * `registerProgram` admits a re-registration only when it is byte-identical, so
+ * a path the start input never named can never be authorized by the run that
+ * refused it. "Resume after fixing the cause" — the generic recovery every
+ * other blocked cause has — is therefore unreachable advice for exactly the
+ * case `supportPaths` exists to serve: a plan file or regression pin the
+ * remediation itself wrote, outside the frozen review scope. The operator was
+ * left to derive the immutability from the handle's source and guess that a
+ * fresh run was the intended path.
+ *
+ * Only the unauthorized-dirty branch gets the extra sentence. The other audit
+ * refusals (pre-existing staged work, excluded evidence paths, an expected/
+ * actual mismatch) name dirty state that IS removable in place, and telling
+ * those to start a fresh run would trade one wrong recovery for another.
+ */
+export function remediationAuditBlockMessage(error: RemediationAuditError): string {
+  return error.unauthorizedDirtyPaths.length === 0
+    ? error.message
+    : `${error.message} — this run's start input is immutable, so resuming it cannot authorize them: ` +
+      "start a FRESH remediation run whose start input registers each path that belongs to the " +
+      "remediation as a supportPath (this run stays as blocked evidence), or revert the paths that do not";
 }
 
 export function witness(repository: Parameters<typeof snapshotRepositoryWitness>[0]):
@@ -104,7 +131,7 @@ export async function driveRemediationFacade(
       preexistingStagedPaths: preexisting.value,
       repositoryWitness: initialWitness.value,
     });
-    if (!audited.ok) return remediationBlocked(handle, audited.error.message);
+    if (!audited.ok) return remediationBlocked(handle, remediationAuditBlockMessage(audited.error));
     let next = reduceRemediation(state, { kind: "audit-succeeded", audited: audited.value });
     if (!next.ok || next.value.state !== "audited") return remediationBlocked(handle, next.ok ? "audit transition failed" : next.error.message);
     state = next.value;

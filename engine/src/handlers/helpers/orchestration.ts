@@ -3,6 +3,9 @@
  *
  * Usage:
  *   helper orchestration status [--json] [--wave N] [--runs-root <wave-gate-runs-root>]
+ *   helper orchestration inspect --run <run-directory> --runs-root <root> [--json]
+ *   helper orchestration abandon --run <run-directory> --runs-root <root>
+ *                                --reason <text> [--superseded-by <run-directory>]
  *   helper orchestration start <architecture|refutation|standalone-review|wave-gate|remediation> --run <run-directory>
  *                              --runs-root <root> < program.json
  *   helper orchestration restart --run <exhausted-wave-run> --new-run <fresh-run-directory>
@@ -42,6 +45,23 @@
  * neither re-runs a gate check. If authority cannot be parsed, every fact
  * category is still present as `unavailable` and the sole action is `blocked`,
  * rather than fabricated zero-or-ready values.
+ *
+ * `inspect` is the same kind of read, aimed at ONE run rather than at the
+ * protected graph: run id, registered program, machine state, per-slot capture
+ * with the diagnostic that refused it, event tail, and any abandonment marker.
+ * It answers "what state is this run in, and is it recoverable or stale?" —
+ * which used to mean hand-reading `authority.json`, `program.json`,
+ * `checkpoint.json`, and `events/` with `jq` before every replace-or-resume
+ * decision. It decides nothing and advances nothing; `resume` remains the only
+ * operation that moves a program.
+ *
+ * `abandon` is the one terminal operation that is NOT a program transition: it
+ * records that an operator is finished with a run and, optionally, which run
+ * replaced it. Run directories are never deleted — they are the evidence — so
+ * without a marker a superseded run sits in the listing indistinguishable from
+ * a live one, and the only record of the supersession is a parent session's
+ * notes. The marker is immutable, refuses self-supersession, and blocks every
+ * operation that would advance the run; nothing is removed.
  */
 
 import { match } from "ts-pattern";
@@ -61,6 +81,16 @@ import {
 } from "../../core/wave-gate-machine";
 import { loadPlanModelsSource } from "./complete-wave-gate";
 import { createRunDirectory, inspectRunDirectoryEntry, openRunDirectory, type RunDirHandle } from "../../orchestration/run-directory-handle";
+import {
+  deriveRunInspection,
+  observed,
+  renderRunInspectionHuman,
+  renderRunInspectionJson,
+  unavailable,
+  type InspectedEvent,
+  type ObservedFact,
+  type RunInspectionObservation,
+} from "../../core/run-inspection";
 import { registerSessionRunBinding } from "../../orchestration/session-run-bindings";
 import {
   AGENT_REQUIRED_SKILLS,
@@ -117,7 +147,7 @@ import {
 } from "./programs";
 import { argumentValue, hasFlag } from "./cli-args";
 
-const OPERATIONS = ["status", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide"] as const;
+const OPERATIONS = ["status", "inspect", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide", "abandon"] as const;
 type Operation = (typeof OPERATIONS)[number];
 
 const isOperation = (value: string | undefined): value is Operation =>
@@ -133,6 +163,10 @@ function usage(): HookResult {
       "  --runs-root. start/restart/recover-orphan create it; the runs-root must exist.",
       "",
       "  status  [--json] [--wave N] [--runs-root <wave-gate-runs-root>]",
+      "  inspect --runs-root <root> --run <run-directory> [--json]",
+      "          (pure read: program, state, per-slot capture and rejection diagnostics, event tail)",
+      "  abandon --runs-root <root> --run <run-directory> --reason <text> [--superseded-by <run-directory>]",
+      "          (terminal marker; deletes nothing and refuses every operation that would advance the run)",
       "  start   <architecture|refutation|standalone-review|wave-gate|remediation> --runs-root <root> --run <run-directory> < program.json",
       "  restart --runs-root <root> --run <exhausted-wave-run> --new-run <fresh-run-directory>",
       "  recover-orphan --runs-root <root> --run-id <missing-run-id> --wave <N> --digest <sha256> --new-run <fresh-run-directory>",
@@ -313,6 +347,140 @@ function bindRun(
 const isBound = (
   value: Readonly<{ ok: true; value: RunBinding }> | HookResult,
 ): value is Readonly<{ ok: true; value: RunBinding }> => "ok" in value;
+
+/**
+ * Bind a run that an operation may still ADVANCE.
+ *
+ * Abandonment is the operator's terminal decision, so every operation that
+ * would move the run refuses one — otherwise a superseded run stays as
+ * resumable as its replacement, and the marker would be decoration rather than
+ * a state. `inspect` and `abandon` deliberately bind through `bindRun` instead:
+ * reading a retired run's evidence is the whole reason it was retained, and a
+ * repeat of the identical `abandon` has to stay idempotent.
+ *
+ * An UNREADABLE marker refuses too. A marked run whose marker cannot be parsed
+ * is the case where "advance it anyway" is least defensible — the run may
+ * already have a successor holding the same authority.
+ */
+function bindLiveRun(
+  args: readonly string[],
+  bind: RunDirectoryBinder = openRunDirectory,
+): Readonly<{ ok: true; value: RunBinding }> | HookResult {
+  const bound = bindRun(args, bind);
+  if (!isBound(bound)) return bound;
+  const abandonment = bound.value.handle.readAbandonment();
+  if (!abandonment.ok) return { kind: "error", message: abandonment.error.message };
+  if (abandonment.value === null) return bound;
+  const replacement = abandonment.value.supersededBy === null
+    ? "it was not superseded"
+    : `superseded by ${abandonment.value.supersededBy}`;
+  return {
+    kind: "error",
+    message: `run ${bound.value.handle.runId} was abandoned (${replacement}): ${abandonment.value.reason} — ` +
+      "`inspect` still reads its evidence; advance the run that replaced it instead",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// inspect / abandon
+// ---------------------------------------------------------------------------
+
+/** Run a throwing read into an `ObservedFact`, carrying the cause rather than a default. */
+async function observing<T>(read: () => Promise<T>, subject: string): Promise<ObservedFact<T>> {
+  try {
+    return observed(await read());
+  } catch (error) {
+    return unavailable(`${subject} is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+const factOf = <T>(
+  result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: Readonly<{ message: string }> }>,
+): ObservedFact<T> => result.ok ? observed(result.value) : unavailable(result.error.message);
+
+/**
+ * Read one run directory into the observation the projection folds.
+ *
+ * Every read is independent and every failure is carried, so a run with a
+ * corrupt event log still reports its program, state, and slots — the partial
+ * answer is exactly what an operator deciding "recoverable or stale?" needs,
+ * and a single throw would have withheld all of it.
+ */
+async function observeRun(handle: RunDirHandle): Promise<RunInspectionObservation> {
+  const authority = handle.readAuthority();
+  const requests = handle.readIssuedRequests();
+  const markerRejections: ObservedFact<ReadonlyMap<string, string>> = requests.ok
+    ? ((): ObservedFact<ReadonlyMap<string, string>> => {
+        const markers = new Map<string, string>();
+        for (const authority of requests.value) {
+          const rejection = handle.readCaptureRejection(authority);
+          if (!rejection.ok) return unavailable(rejection.error.message);
+          if (rejection.value !== null) markers.set(authority.requestId, rejection.value);
+        }
+        return observed(markers);
+      })()
+    : unavailable(requests.error.message);
+
+  return Object.freeze({
+    runId: handle.runId,
+    runsRoot: handle.identity.runsRoot,
+    runDirectory: handle.runDirectory,
+    // The authority's CONTENT is the identity already carried above; only its
+    // readability is news, so the fact's payload is deliberately empty.
+    authority: authority.ok ? observed<null>(null) : unavailable<null>(authority.error.message),
+    programRegistration: factOf(handle.readProgramRegistration()),
+    checkpoint: await observing(() => handle.readCheckpoint(), "checkpoint"),
+    requests: factOf(requests),
+    capturedAttempts: factOf(handle.readCapturedAttempts()),
+    markerRejections,
+    events: await observing<readonly InspectedEvent[]>(() => handle.readEvents(), "event log"),
+    abandonment: factOf(handle.readAbandonment()),
+  });
+}
+
+async function inspectOperation(args: readonly string[]): Promise<HookResult> {
+  const bound = bindRun(args);
+  if (!isBound(bound)) return bound;
+  const inspection = deriveRunInspection(await observeRun(bound.value.handle));
+  process.stdout.write(`${hasFlag(args, "--json")
+    ? renderRunInspectionJson(inspection)
+    : renderRunInspectionHuman(inspection)}\n`);
+  return { kind: "allow" };
+}
+
+/**
+ * Record that an operator is finished with a run, and by what it was replaced.
+ *
+ * The replacement is proven to exist as a real direct child of the SAME
+ * runs-root before the marker is written. The marker is immutable once placed,
+ * so a typo'd or cross-root pointer would be frozen into the run forever —
+ * worse than no pointer, because it reads as authoritative.
+ */
+async function abandonOperation(args: readonly string[]): Promise<HookResult> {
+  const bound = bindRun(args);
+  if (!isBound(bound)) return bound;
+  const reason = argumentValue(args, "--reason");
+  if (reason === null) return { kind: "error", message: "abandon requires --reason <text>" };
+  const runsRoot = argumentValue(args, "--runs-root");
+  const requested = argumentValue(args, "--superseded-by");
+  let supersededBy: string | null = null;
+  if (requested !== null) {
+    if (runsRoot === null) return { kind: "error", message: "both --runs-root and --run are required" };
+    const inspected = inspectRunDirectoryEntry(runsRoot, requested);
+    if (!inspected.ok) return { kind: "error", message: `superseding run: ${inspected.error.message}` };
+    if (inspected.value.kind !== "directory") {
+      return {
+        kind: "error",
+        message: `superseding run ${requested} is not an existing run directory under ${runsRoot}`,
+      };
+    }
+    supersededBy = inspected.value.reference.runId;
+  }
+  const abandoned = await bound.value.handle.abandonRun({ supersededBy, reason });
+  if (!abandoned.ok) return { kind: "error", message: abandoned.error.message };
+  process.stdout.write(`${JSON.stringify(abandoned.value, null, 2)}\n`);
+  return { kind: "allow" };
+}
 
 type RegisteredPanelProgram = Readonly<{
   schemaVersion: 1;
@@ -691,7 +859,7 @@ async function startOperation(stdin: string, args: readonly string[]): Promise<H
   }
   const request = parseStartRequest(program, stdin);
   if (!request.ok) return { kind: "error", message: request.message };
-  const bound = bindRun(args.slice(1), createRunDirectory);
+  const bound = bindLiveRun(args.slice(1), createRunDirectory);
   if (!isBound(bound)) return bound;
   const driven = await driveStart(bound.value.handle, request.value);
   if (!driven.ok) return { kind: "error", message: driven.message };
@@ -725,7 +893,7 @@ async function recoverOrphanOperation(args: readonly string[]): Promise<HookResu
 }
 
 async function restartOperation(args: readonly string[]): Promise<HookResult> {
-  const previous = bindRun(args);
+  const previous = bindLiveRun(args);
   if (!isBound(previous)) return previous;
   const runsRoot = argumentValue(args, "--runs-root");
   const nextRunDirectory = argumentValue(args, "--new-run");
@@ -802,7 +970,7 @@ async function reconcileCapturedPanelResults(
 }
 
 async function resumeOperation(args: readonly string[]): Promise<HookResult> {
-  const bound = bindRun(args);
+  const bound = bindLiveRun(args);
   if (!isBound(bound)) return bound;
 
   const authority = bound.value.handle.readAuthority();
@@ -931,7 +1099,7 @@ function panelSubmissionProblem(
  * exit code indistinguishable from a genuine failure.
  */
 async function submitOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
-  const bound = bindRun(args);
+  const bound = bindLiveRun(args);
   if (!isBound(bound)) return bound;
 
   const requestId = argumentValue(args, "--request");
@@ -1058,7 +1226,7 @@ async function submitOperation(stdin: string, args: readonly string[]): Promise<
 }
 
 async function correlateOperation(args: readonly string[]): Promise<HookResult> {
-  const bound = bindRun(args);
+  const bound = bindLiveRun(args);
   if (!isBound(bound)) return bound;
   const requestId = argumentValue(args, "--request");
   const harness = argumentValue(args, "--harness");
@@ -1237,7 +1405,7 @@ function executeDeterministicPanelOperation(
 }
 
 async function completeOperation(args: readonly string[]): Promise<HookResult> {
-  const bound = bindRun(args);
+  const bound = bindLiveRun(args);
   if (!isBound(bound)) return bound;
   const operationId = argumentValue(args, "--operation");
   if (operationId === null) {
@@ -1272,7 +1440,7 @@ async function completeOperation(args: readonly string[]): Promise<HookResult> {
  * resume instead of losing it.
  */
 async function decideOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
-  const bound = bindRun(args);
+  const bound = bindLiveRun(args);
   if (!isBound(bound)) return bound;
 
   const registered = bound.value.handle.readProgramRegistration();
@@ -1355,6 +1523,10 @@ const handler: HookHandler = async (stdin, args) => {
   switch (operation) {
     case "status":
       return statusOperation(rest);
+    case "inspect":
+      return inspectOperation(rest);
+    case "abandon":
+      return abandonOperation(rest);
     case "start":
       return startOperation(stdin, rest);
     case "restart":
