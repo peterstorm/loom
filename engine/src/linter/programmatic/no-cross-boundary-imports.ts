@@ -109,13 +109,15 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
     // `identity.ts` sat here for `node:crypto`/`node:path` after it had lost
     // every import statement; it is now off the list.
     perFileAllow: {
-      "engine/src/core/block-direct-edits.ts": ["node:fs"],
-      // guard-state-file, validate-template-substitution, and
-      // validate-phase-order no longer appear here: the first two dropped
+      // block-direct-edits, guard-state-file, validate-template-substitution,
+      // and validate-phase-order no longer appear here: the first two dropped
       // `node:fs` when their bare `existsSync` probes became the injectable,
       // fail-closed `pathExistsFailClosed` default from `engine/src/config`,
       // and validate-phase-order dropped it (along with `utils/find-file`) when
       // its phase-artifact reads became the injected `ArtifactProbe` port.
+      // block-direct-edits dropped `node:fs` AND its `machine/ledger` import
+      // together when the `.active` roster read became the injected
+      // `ActiveRosterProbe` port, whose adapter lives in the handler.
       // Re-adding an fs import in any of them must be re-reviewed.
       "engine/src/core/harness-capture.ts": ["node:crypto"],
       "engine/src/core/harness-resources.ts": ["node:crypto", "node:path"],
@@ -182,6 +184,12 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/types",
       "engine/src/config",
       "engine/src/state-manager",
+      // The same pure identity-brand module `core/` is allowed: `SessionId`,
+      // `RequestId` and the run-directory suffix vocabulary. The machine's fs
+      // shell (`machine/ledger`, `machine/report-discovery`) stays denied by
+      // omission — this allowlist is fail-closed, so naming the pure module
+      // individually cannot open a path into the shell.
+      "engine/src/machine/evidence",
       "node:",
       "@fuguejs/framework",
       "zod",

@@ -31,7 +31,14 @@ import { makeViolation } from "../types";
 
 const EXCLUDE_PATTERNS: readonly string[] = [".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx"];
 
-/** An else-branch line: `: <something>`, not `::` and not a type annotation. */
+/**
+ * An else-branch line: `: <something>`.
+ *
+ * Deliberately NOT an exclusion filter — it excludes neither `::` nor a type
+ * annotation, and the comment that claimed it did described a pattern this one
+ * is not. Type-level conditionals are filtered separately, by `TYPE_LEVEL`
+ * below.
+ */
 const ELSE_BRANCH = /^\s*:\s*\S/;
 /** A line that opens a ternary's then-branch. */
 const THEN_BRANCH = /^\s*\?\s*\S/;

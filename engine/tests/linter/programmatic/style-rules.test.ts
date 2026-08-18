@@ -192,6 +192,76 @@ describe("exhaustive-discriminant-branching — chain vs standalone guards", () 
     expect(exhaustive(source, "engine/src/core/example.ts")).toEqual([]);
   });
 
+  // The case above uses a CALL body. The guard shape people actually write
+  // exits on the same line, and for that shape the false positive survived the
+  // first fix: `return`/`throw`/`continue`/`break` anywhere on the line counted
+  // as chain evidence, with nothing asking whether the guards were even in the
+  // same scope. One case per exit keyword — each is a separate alternative in
+  // the regex, and a fix that only covers `return` is not a fix.
+  it("does not treat sibling functions whose guards RETURN as one chain", () => {
+    const source = [
+      `const port = {`,
+      `  setUser: async (u) => {`,
+      `    if (client.status === "wait") return null;`,
+      `    return ok(undefined);`,
+      `  },`,
+      `  delUser: async (u) => {`,
+      `    if (client.status === "wait") return null;`,
+      `    return ok(undefined);`,
+      `  },`,
+      `  xAdd: async (k) => {`,
+      `    if (client.status === "wait") return null;`,
+      `    return ok(undefined);`,
+      `  },`,
+      `};`,
+    ].join("\n");
+    expect(exhaustive(source, "engine/src/core/example.ts")).toEqual([]);
+  });
+
+  it("does not treat sibling functions whose guards THROW as one chain", () => {
+    const source = [
+      `function a(x) {`,
+      `  if (x.kind === "bad") throw new Error("a");`,
+      `}`,
+      `function b(x) {`,
+      `  if (x.kind === "bad") throw new Error("b");`,
+      `}`,
+      `function c(x) {`,
+      `  if (x.kind === "bad") throw new Error("c");`,
+      `}`,
+    ].join("\n");
+    expect(exhaustive(source, "engine/src/core/example.ts")).toEqual([]);
+  });
+
+  it("does not treat sibling loops whose guards CONTINUE as one chain", () => {
+    const source = [
+      `for (const a of xs) {`,
+      `  if (a.status === "skip") continue;`,
+      `}`,
+      `for (const b of ys) {`,
+      `  if (b.status === "skip") continue;`,
+      `}`,
+      `for (const c of zs) {`,
+      `  if (c.status === "skip") continue;`,
+      `}`,
+    ].join("\n");
+    expect(exhaustive(source, "engine/src/core/example.ts")).toEqual([]);
+  });
+
+  // Chain evidence is read from the branch BODY. Reading the whole line also
+  // read the CONDITION, so a discriminant literal that merely CONTAINS an exit
+  // keyword was chain evidence on a guard that exits nowhere.
+  it("does not read an exit keyword inside a discriminant literal as chain evidence", () => {
+    const source = [
+      `function f(mode) {`,
+      `  if (mode.kind === "break-glass") apply();`,
+      `  if (mode.kind === "continue-later") defer();`,
+      `  if (mode.kind === "normal") run();`,
+      `}`,
+    ].join("\n");
+    expect(exhaustive(source, "engine/src/core/example.ts")).toEqual([]);
+  });
+
   it("still flags an else-if chain", () => {
     const source = [
       `if (result.kind === "updated") {`,
@@ -200,6 +270,39 @@ describe("exhaustive-discriminant-branching — chain vs standalone guards", () 
       `  onNoChange();`,
       `} else if (result.kind === "error") {`,
       `  onError();`,
+      `}`,
+    ].join("\n");
+    expect(exhaustive(source, "engine/src/core/example.ts")).toHaveLength(1);
+  });
+
+  // The scope rule must not buy its way out of the false positives by going
+  // blind: a chain nested inside a function is still a chain, and `} else if`
+  // sits at the SAME indentation as the branch it continues rather than
+  // undercutting it.
+  it("still flags an else-if chain nested inside a function", () => {
+    const source = [
+      `function f(r) {`,
+      `  if (r.kind === "a") {`,
+      `    a();`,
+      `  } else if (r.kind === "b") {`,
+      `    b();`,
+      `  } else if (r.kind === "c") {`,
+      `    c();`,
+      `  }`,
+      `}`,
+    ].join("\n");
+    expect(exhaustive(source, "engine/src/core/example.ts")).toHaveLength(1);
+  });
+
+  // A fall-through row of same-line returns IS a switch when the branches share
+  // one scope — the shape the rule was written for. Distinguishing it from the
+  // sibling-guard cases above is the whole point of the scope rule.
+  it("still flags a fall-through chain of same-line returns in one function", () => {
+    const source = [
+      `function classify(x) {`,
+      `  if (x.kind === "a") return 1;`,
+      `  if (x.kind === "b") return 2;`,
+      `  if (x.kind === "c") return 3;`,
       `}`,
     ].join("\n");
     expect(exhaustive(source, "engine/src/core/example.ts")).toHaveLength(1);

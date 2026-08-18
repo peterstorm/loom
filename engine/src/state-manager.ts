@@ -838,7 +838,6 @@ function taskFindingsError(
     }
   }
   return evidenceFailureError(t, `tasks[${index}] ("${id}")`, REVIEW_SUB_AGENTS);
-  return null;
 }
 
 /** The persisted lifecycle fields shared by the loader and operator validator. */

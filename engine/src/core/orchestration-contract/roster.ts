@@ -63,8 +63,8 @@ export function parseAttempt(raw: unknown): DomainResult<SemanticAttempt, AgentR
     : failure(violation("invalid-agent-request-field", "attempt", "attempt must be 1 or 2"));
 }
 
-export const PI_BINDING_KEYS = ["harness", "provider", "model", "thinking"] as const;
-export const CLAUDE_BINDING_KEYS = ["harness", "model"] as const;
+export const PI_BINDING_KEYS = Object.freeze(["harness", "provider", "model", "thinking"] as const);
+export const CLAUDE_BINDING_KEYS = Object.freeze(["harness", "model"] as const);
 
 export function authorityBoundaryViolation(
   error: DataBoundaryError,

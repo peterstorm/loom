@@ -179,8 +179,8 @@ describe("no-cross-boundary-imports", () => {
     it("core grants node: builtins PER-MODULE, never blanket", () => {
       // A listed core module may import exactly its granted subpaths.
       const granted = checkBoundaryViolation(
-        "engine/src/core/block-direct-edits.ts",
-        "node:fs",
+        "engine/src/core/harness-resources.ts",
+        "node:path",
         DEFAULT_BOUNDARIES
       );
       expect(granted).toBeNull();
@@ -191,23 +191,28 @@ describe("no-cross-boundary-imports", () => {
       );
       expect(grantedHash).toBeNull();
       // A listed module reaching a NON-granted subpath is still refused:
-      // node:crypto is not on block-direct-edits's capability list.
+      // node:fs is not on harness-resources's capability list.
       const ungranted = checkBoundaryViolation(
-        "engine/src/core/block-direct-edits.ts",
-        "node:crypto",
+        "engine/src/core/harness-resources.ts",
+        "node:fs",
         DEFAULT_BOUNDARIES
       );
       expect(ungranted).not.toBeNull();
       expect(ungranted).toContain("may only import from");
       // validate-phase-order's node:fs grant was WITHDRAWN when its artifact
-      // reads became the injected ArtifactProbe port. Re-adding an fs import
-      // there must fail the lint gate until the grant is re-reviewed.
-      const withdrawn = checkBoundaryViolation(
+      // reads became the injected ArtifactProbe port, and block-direct-edits's
+      // went the same way when its `.active` roster read became the injected
+      // ActiveRosterProbe. Re-adding an fs import in either must fail the lint
+      // gate until the grant is re-reviewed.
+      for (const withdrawnFrom of [
         "engine/src/core/validate-phase-order.ts",
-        "node:fs",
-        DEFAULT_BOUNDARIES
-      );
-      expect(withdrawn).not.toBeNull();
+        "engine/src/core/block-direct-edits.ts",
+      ]) {
+        expect(
+          checkBoundaryViolation(withdrawnFrom, "node:fs", DEFAULT_BOUNDARIES),
+          withdrawnFrom,
+        ).not.toBeNull();
+      }
       // An UNLISTED core module importing any node: builtin fails closed with
       // the capability message — a future I/O import must earn an entry.
       const unlisted = checkBoundaryViolation(

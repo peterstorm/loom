@@ -30,8 +30,9 @@
  *   - `break` / `continue` / `return` — early exit; `some`/`find` may fit, but
  *     the transformation is not mechanical and the loop is not merely an
  *     accumulator
- *   - `await` — sequential asynchrony is a real choice, and `map` over an async
- *     function changes it to concurrent
+ *   - `await` / `yield` — sequential asynchrony is a real choice, and `map` over
+ *     an async function changes it to concurrent; a generator body has no
+ *     array-method equivalent at all
  *   - more than one statement, or pushes into more than one array — that is a
  *     fold, and spelling it `reduce` is frequently HARDER to read; the catalog
  *     says the named operation must clarify, not merely exist

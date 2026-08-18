@@ -76,10 +76,13 @@ export function updateTaskFindings(
   const reviewStatus: ReviewStatus = critical.length > 0 ? "blocked" : "passed";
 
   // A pre-identity task's claims live only in the views; give them identity
-  // through `recoverViewOnlyClaims` — the same primitive `mergeFindings` and
-  // `--fix` reach for, making this its third caller — so all six lockstep
-  // writers (enumerated on `Task.findings` in types.ts) agree on what a legacy
-  // task's findings ARE before any of them decides what to keep.
+  // through `recoverViewOnlyClaims` — the same primitive `mergeFindings`,
+  // `reviewRunPriorFindings` (reached from `review-packet`) and `--fix`
+  // (`validate-task-graph`) reach for — so all six lockstep writers
+  // (enumerated on `Task.findings` in types.ts) agree on what a legacy task's
+  // findings ARE before any of them decides what to keep. Named rather than
+  // counted: an ordinal in this comment is a fact about OTHER files, and it
+  // was already wrong (it said "third", omitting `reviewRunPriorFindings`).
   const existing: readonly Finding[] = [
     ...(task.findings ?? []),
     ...recoverViewOnlyClaims(

@@ -14,6 +14,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Engine core — harness-agnostic, no Claude Code dependency (these do fs I/O)
 import { shouldBlockDirectEdit } from "../engine/src/core/block-direct-edits";
+// The roster read the direct-edit gate needs. It lives in the handler rather
+// than in core/ because core may not import the machine's filesystem shell;
+// Pi passes the same adapter Claude Code's wrapper does, so both harnesses
+// authorize `pi-grant-` capability tokens off the SAME roster.
+import { activeRosterProbe } from "../engine/src/handlers/pre-tool-use/block-direct-edits";
 import { guardStateFileDecision } from "../engine/src/core/guard-state-file";
 import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
 // Both harnesses share ONE protected-state read seam, so a Pi gate and a
@@ -733,7 +738,7 @@ export default function (pi: ExtensionAPI) {
         currentGuard = "block-direct-edits";
         const rejectedGrant = rejectedChildWriteGrantBlock(rejectedChildWriteGrantSessions.has(sessionId));
         if (rejectedGrant !== null) return rejectedGrant;
-        const result = shouldBlockDirectEdit(event.toolName, sessionId, () => graphIsActive);
+        const result = shouldBlockDirectEdit(event.toolName, sessionId, () => graphIsActive, activeRosterProbe);
         if (result.kind === "block") {
           return { block: true, reason: result.message };
         }

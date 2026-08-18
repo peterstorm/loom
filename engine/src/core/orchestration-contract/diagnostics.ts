@@ -277,20 +277,20 @@ export type TerminalBlockedDiagnosticInput =
       message: string;
     }>;
 
-export const RUN_TERMINAL_CATEGORIES = ["invalid-authority", "roster-invalid"] as const;
-export const REQUEST_TERMINAL_CATEGORIES = [
+export const RUN_TERMINAL_CATEGORIES = Object.freeze(["invalid-authority", "roster-invalid"] as const);
+export const REQUEST_TERMINAL_CATEGORIES = Object.freeze([
   "duplicate-result",
   "stale-request",
   "surplus-result",
   "context-drift",
   "model-mismatch",
   "skill-mismatch",
-] as const;
-export const EXHAUSTED_RESULT_CATEGORIES = [
+] as const);
+export const EXHAUSTED_RESULT_CATEGORIES = Object.freeze([
   "missing-result",
   "malformed-result",
   "result-binding-mismatch",
-] as const;
+] as const);
 
 export function terminalBlockedDiagnostic(
   input: TerminalBlockedDiagnosticInput,

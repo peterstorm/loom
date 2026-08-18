@@ -177,6 +177,67 @@ describe("malformed hook input is caught, not crashed on (Advisory 4)", () => {
   });
 });
 
+/**
+ * Each of these three paths ends in `passthrough` — indistinguishable, from the
+ * hook's return value alone, from "nothing to do". The stderr line IS the
+ * record that something was discarded. Untested, a refactor could drop any of
+ * them and every assertion in this file would still pass, silently undoing the
+ * observability they were added for.
+ */
+describe("dispatch names what it discarded (audit diagnostics)", () => {
+  const stderrOf = async (payload: Record<string, unknown>): Promise<string> => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await dispatch(JSON.stringify(payload), []);
+      expect(result.kind).toBe("passthrough");
+      return stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  };
+
+  it("says the whole record was skipped when no task graph resolves", async () => {
+    // Session bound to nothing: StateManager.fromSession returns null, so
+    // status, evidence and findings are ALL skipped.
+    const text = await stderrOf({
+      session_id: sid("no-graph-at-all"),
+      agent_id: "agent-no-graph",
+      agent_type: "code-implementer-agent",
+    });
+    expect(text).toContain("no task graph resolvable");
+    expect(text).toContain("recorded NOTHING");
+  });
+
+  it("distinguishes an UNNAMEABLE agent from a merely unrouted one", async () => {
+    const dir = tempDir();
+    const session = sid("unnameable");
+    pointSessionAt(session, writeState(dir));
+
+    // Neither the payload nor the harness metadata can say what ran — a loom
+    // agent's result may have just been lost, which is not the same as a user's
+    // own subagent legitimately having no orchestration hooks.
+    const unnameable = await stderrOf({ session_id: session, agent_id: "agent-unnameable" });
+    expect(unnameable).toContain("carried no agent_type and none could be derived");
+    expect(unnameable).toContain("its result is LOST");
+  });
+
+  it("names an agent type that resolved but maps to no route", async () => {
+    const dir = tempDir();
+    const session = sid("unrouted");
+    pointSessionAt(session, writeState(dir));
+
+    const unrouted = await stderrOf({
+      session_id: session,
+      agent_id: "agent-unrouted",
+      agent_type: "some-users-own-agent",
+    });
+    expect(unrouted).toContain("no orchestration route for agent type");
+    expect(unrouted).toContain("some-users-own-agent");
+    // The louder "result is LOST" wording belongs to the unnameable case only.
+    expect(unrouted).not.toContain("its result is LOST");
+  });
+});
+
 describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)", () => {
   it("held cleanup lock crashes cleanup; T1 evidence is still recorded but untrusted proof stays pending", async () => {
     const s = sid("cleanup-crash");

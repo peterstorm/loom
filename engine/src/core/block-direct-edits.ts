@@ -1,16 +1,43 @@
 /**
- * Core: Block Edit/Write from the MAIN agent during loom orchestration.
- * Harness-agnostic — no stdin parsing. Not pure: reads the filesystem
- * (existsSync/statSync) and writes to stderr.
+ * Core: Block Edit/Write/MultiEdit from the MAIN agent during loom orchestration.
+ * Harness-agnostic — no stdin parsing. Pure GIVEN ITS PORTS: every read it needs
+ * (the task graph's existence, the session's active roster) arrives as an
+ * injected function, so the decision itself performs no I/O.
  */
 
-import { existsSync, statSync } from "node:fs";
 import type { HookResult } from "../types";
-import { IMPL_AGENTS, TASK_GRAPH_PATH, subagentDir, pathExistsFailClosed } from "../config";
-import { parseGrantedAgentId, parseSessionId } from "../machine/evidence";
-import { readActiveAgentRoles } from "../machine/ledger";
+import { IMPL_AGENTS, TASK_GRAPH_PATH, pathExistsFailClosed } from "../config";
+import {
+  parseGrantedAgentId,
+  parseSessionId,
+  type AgentId,
+  type AgentType,
+  type SessionId,
+} from "../machine/evidence";
 
 const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "edit", "write", "multi_edit"]);
+
+/** One row of a session's `.active` roster: who is running, and as what role. */
+export type ActiveRosterEntry = Readonly<{ agentId: AgentId; agentType: AgentType | null }>;
+
+/**
+ * Port: the session's active-subagent roster, or `null` when no active subagent
+ * can be PROVEN — an absent flag file and an unreadable one both answer `null`,
+ * because neither proves a subagent is running and this gate fails closed.
+ *
+ * A port rather than a direct read because the roster lives in the machine's
+ * filesystem shell (`machine/ledger`), and `engine/src/core/` may not import the
+ * shell — its allowlist denies `machine/ledger` by omission. Taking the read as
+ * a parameter is the same move `taskGraphExists` below, `SpawnAdmissionPorts`,
+ * and `validate-phase-order`'s `ArtifactProbe` already make; it also lets the
+ * roster-authorization branch be exercised with plain arrays instead of real
+ * files under SUBAGENT_DIR.
+ *
+ * The parameter is a BRANDED SessionId, parsed by this module before the port
+ * is ever called, so an adapter interpolating it into a path is path-safe by
+ * construction — the same guarantee `ledger.ts`'s `sessionScopedPath` provides.
+ */
+export type ActiveRosterProbe = (sessionId: SessionId) => readonly ActiveRosterEntry[] | null;
 
 /**
  * Write-grant agent IDs are minted by the Pi write-grant system, which verifies
@@ -39,16 +66,27 @@ function isWriteAuthorizedAgent(agentId: string): boolean {
  */
 const defaultTaskGraphExists = (): boolean => pathExistsFailClosed(TASK_GRAPH_PATH);
 
+/**
+ * No roster reader supplied — answer `null`, i.e. "cannot prove a subagent is
+ * running", which falls through to block. There is deliberately NO filesystem
+ * default here: a default that read the shell would put the import this port
+ * exists to remove straight back into the functional core. Callers that need
+ * the real roster pass `activeRosterProbe` from
+ * `handlers/pre-tool-use/block-direct-edits`.
+ */
+const noActiveRoster: ActiveRosterProbe = () => null;
+
 export function shouldBlockDirectEdit(
   toolName: string,
   sessionId: string,
   taskGraphExists: () => boolean = defaultTaskGraphExists,
+  readActiveRoster: ActiveRosterProbe = noActiveRoster,
 ): HookResult {
   if (!taskGraphExists()) return { kind: "allow" };
   if (!FILE_TOOLS.has(toolName)) return { kind: "allow" };
 
   // Session ids come from hook input and name files under SUBAGENT_DIR —
-  // parse before constructing any path. An unparseable id means the
+  // parse before the port is handed one. An unparseable id means the
   // subagent-active check cannot be made safely: fail closed (block),
   // since allowing would open direct edits on malformed input.
   const parsed = parseSessionId(sessionId);
@@ -61,35 +99,20 @@ export function shouldBlockDirectEdit(
 
   // Allow if an IMPLEMENTATION subagent is active. Review agents and verifiers
   // are read-only and must never receive write capability, even when active.
-  // The interpolation below uses the BRANDED SessionId (path-safe by
-  // construction — same guarantee ledger.ts's sessionScopedPath provides).
-  const activeFile = `${subagentDir()}/${parsed}.active`;
-  try {
-    if (existsSync(activeFile) && statSync(activeFile).size > 0) {
-      // Authorize by ROLE first. On Claude Code `agent_id` is an opaque
-      // handle (`a339f6fd51d78b179`), so testing it against IMPL_AGENTS —
-      // which holds agent-type NAMES — could never match, and every
-      // implementation subagent was blocked by the guard that exists to let
-      // it through. The roster's type column is the role it is serving.
-      const roster = readActiveAgentRoles(parsed);
-      const hasImplAgent = roster.some(({ agentId, agentType }) =>
-        // agentType covers Claude Code; the id fallback covers Pi's
-        // `pi-grant-` capability tokens and any roster written before the
-        // type column existed.
-        (agentType !== null && IMPL_AGENTS.has(agentType)) || isWriteAuthorizedAgent(agentId));
-      if (hasImplAgent) {
-        return { kind: "allow" };
-      }
-      // Only review/verifier agents active — fall through to block.
-    }
-  } catch (e) {
-    // An unstatable .active flag cannot prove a subagent is running — fall
-    // through to block (fail closed), but say why: silence here makes a
-    // permissions/race problem indistinguishable from "no subagent active".
-    process.stderr.write(
-      `block-direct-edits: cannot check ${activeFile}: ${e instanceof Error ? e.message : String(e)} — falling through to block\n`,
-    );
+  //
+  // Authorize by ROLE first. On Claude Code `agent_id` is an opaque handle
+  // (`a339f6fd51d78b179`), so testing it against IMPL_AGENTS — which holds
+  // agent-type NAMES — could never match, and every implementation subagent
+  // was blocked by the guard that exists to let it through. The roster's type
+  // column is the role it is serving.
+  const roster = readActiveRoster(parsed);
+  if (roster !== null && roster.some(({ agentId, agentType }) =>
+    // agentType covers Claude Code; the id fallback covers Pi's `pi-grant-`
+    // capability tokens and any roster written before the type column existed.
+    (agentType !== null && IMPL_AGENTS.has(agentType)) || isWriteAuthorizedAgent(agentId))) {
+    return { kind: "allow" };
   }
+  // No roster, or only review/verifier agents active — block.
 
   return {
     kind: "block",

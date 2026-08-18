@@ -109,6 +109,32 @@ function parseConfig(obj: Record<string, unknown>, filePath: string): Programmat
     config.excludeFromMaxLines = obj.excludeFromMaxLines as string[];
   }
 
+  // These two were DECLARED on ProgrammaticConfig and READ by
+  // `createProgrammaticRules`, but never parsed here — so a project that set
+  // either one got the built-in default with no throw and no log, the one
+  // failure mode this loader's "fail-closed" contract is supposed to exclude.
+  // Every field above rejects a bad value loudly; these now do too.
+  if (obj.maxDiscriminantBranches !== undefined) {
+    if (
+      typeof obj.maxDiscriminantBranches !== "number" ||
+      !Number.isInteger(obj.maxDiscriminantBranches) ||
+      obj.maxDiscriminantBranches < 1
+    ) {
+      throw new Error(`${filePath}: 'maxDiscriminantBranches' must be a positive integer`);
+    }
+    config.maxDiscriminantBranches = obj.maxDiscriminantBranches;
+  }
+
+  if (obj.discriminantTags !== undefined) {
+    if (!Array.isArray(obj.discriminantTags)) {
+      throw new Error(`${filePath}: 'discriminantTags' must be an array`);
+    }
+    if (!obj.discriminantTags.every((t: unknown) => typeof t === "string" && t.length > 0)) {
+      throw new Error(`${filePath}: 'discriminantTags' entries must be non-empty strings`);
+    }
+    config.discriminantTags = obj.discriminantTags as string[];
+  }
+
   return config as ProgrammaticConfig;
 }
 

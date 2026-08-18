@@ -94,6 +94,35 @@ describe("Pi child write grants (incl. scoped phase-agent grants)", () => {
     expect(writeTargetViolatesScope(join(outside, "link-in", "spec.md"), scope)).toBeNull();
   });
 
+  // `canonicalTarget` walks up on ENOENT/ENOTDIR only — "this component does not
+  // exist yet". Every OTHER errno means the resolution could not be PERFORMED,
+  // which is a different answer and must not be absorbed into it. The blanket
+  // catch this replaced re-appended the tail and returned a "canonical" path
+  // that did not describe what the filesystem would do on write, silently
+  // widening the granted scope. A real symlink loop reproduces ELOOP without
+  // mocking node:fs; the throw is what the Pi tool-call guard's fail-closed
+  // wrapper converts into a blocked edit.
+  it("propagates a non-absence errno (ELOOP) instead of widening the scope", () => {
+    const { cwd } = fixture();
+    const specs = join(cwd, ".claude", "specs", "2026-08-12-foo");
+    mkdirSync(specs, { recursive: true });
+    const scope = [specs + "/"];
+
+    // Two symlinks pointing at each other: resolving either throws ELOOP.
+    symlinkSync(join(specs, "b"), join(specs, "a"));
+    symlinkSync(join(specs, "a"), join(specs, "b"));
+
+    let thrown: NodeJS.ErrnoException | null = null;
+    try {
+      writeTargetViolatesScope(join(specs, "a", "spec.md"), scope);
+    } catch (e) {
+      thrown = e as NodeJS.ErrnoException;
+    }
+    // The point is that it did NOT quietly answer "inside the scope".
+    expect(thrown).not.toBeNull();
+    expect(thrown!.code).toBe("ELOOP");
+  });
+
   it("refuses scope dirs that reach into loom-guarded state", () => {
     const { cwd, graph } = fixture();
     expect(() => issuePiWriteGrant({

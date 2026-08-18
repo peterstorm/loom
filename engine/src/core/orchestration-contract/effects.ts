@@ -266,14 +266,14 @@ export function parseRepositoryPathArray(raw: unknown, prefix: string): DomainRe
   return success(Object.freeze(paths));
 }
 
-export const EFFECT_INTENT_FIELDS = [
+export const EFFECT_INTENT_FIELDS = Object.freeze([
   "kind", "effectId", "runId", "artifacts", "expectedRevision", "stateDigest", "requests",
   "request", "bytes", "paths", "indexDigest", "witnessDigest",
-] as const;
-export const EFFECT_RECEIPT_FIELDS = [
+] as const);
+export const EFFECT_RECEIPT_FIELDS = Object.freeze([
   "kind", "effectId", "runId", "artifacts", "committedRevision", "stateDigest", "requestIds",
   "requestId", "artifact", "witnessDigest", "paths", "indexDigest",
-] as const;
+] as const);
 
 export function parseEffectIntent(raw: unknown): DomainResult<EffectIntent, ReconciliationParseError> {
   const envelope = reconciliationRecord(raw, EFFECT_INTENT_FIELDS, "intent");
