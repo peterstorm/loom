@@ -60,6 +60,32 @@ src/ | lib/
 - Adapters: named after the system + role (`stripePaymentAdapter`, `pgOrderAdapter`)
 - Ports: named after the domain capability (`OrderRepository`, `PaymentGateway`)
 
+## Compiler Gates
+
+`strict: true` does **not** include the unused-code checks. Turn them on explicitly — dead imports, dead locals, and dead parameters accumulate silently otherwise, and every one of them is a reader paying attention to something that does not matter.
+
+```jsonc
+// tsconfig.json
+{
+  "compilerOptions": {
+    "strict": true,
+    "noUnusedLocals": true,       // dead imports, dead consts
+    "noUnusedParameters": true,   // dead params (prefix intentional ones with _)
+    "noImplicitReturns": true,    // every branch returns, or none does
+    "noFallthroughCasesInSwitch": true
+  }
+}
+```
+
+**When a dependency ships raw `.ts`** (rather than `.d.ts` behind a `types` field), TypeScript type-checks its sources too and `noUnusedLocals` will report *its* dead code. `skipLibCheck` does not help — it only covers declaration files. Keep the flags out of `tsconfig.json` in that case and gate them in a script scoped to your own paths:
+
+```jsonc
+"typecheck": "tsc --noEmit && npm run typecheck:unused",
+"typecheck:unused": "tsc --noEmit --noUnusedLocals --noUnusedParameters 2>&1 | grep -E '^(src|tests)/' && exit 1 || exit 0"
+```
+
+**These flags do not catch dead _exports_.** An exported symbol nothing imports is invisible to `tsc` — it assumes an external consumer. That is where the largest dead-code pools form: alias exports left behind by a rename, facade objects whose callers went direct, "for compat" re-exports with no consumer. Catch them with a dedicated pass (`knip`, `ts-prune`) or a grep that counts references outside the defining file. Run it whenever a module feels heavier than what it does.
+
 ## Discriminated Unions with ts-pattern
 ```typescript
 // Domain state modeling - exhaustive, type-safe

@@ -11,7 +11,6 @@ import {
   sweepExpiredPiWriteGrants,
   writeTargetViolatesScope,
 } from "../../pi/write-grant";
-import { SUBAGENT_DIR as CONFIG_SUBAGENT_DIR } from "../src/config";
 let root: string;
 let priorSubagentDir: string | undefined;
 

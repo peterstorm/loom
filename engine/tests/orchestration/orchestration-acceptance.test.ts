@@ -13,7 +13,7 @@ import {
 } from "../../src/core/harness-capture";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import captureOrchestrationResult, {
-  alreadyCapturedSlots,
+  alreadyCapturedAttempts,
   captureClaudeResult,
   claudeFinalPayloadCandidates,
   readIssuedRequests,
@@ -842,7 +842,7 @@ describe("Claude capture against a real run directory", () => {
     if (!opened.ok) throw new Error(opened.error.message);
 
     expect(readIssuedRequests(opened.value).map(({ requestId }) => requestId)).toEqual(["request:reviewer:1"]);
-    expect([...alreadyCapturedSlots(opened.value)]).toEqual([]);
+    expect([...alreadyCapturedAttempts(opened.value)]).toEqual([]);
   });
 
   it("refuses an ambiguous transcript rather than salvaging one block", async () => {

@@ -205,8 +205,12 @@ A model the system imports, runs, or enforces — a lifecycle machine, an Author
 _Avoid_: Behavioral model, descriptive model, structural diff (these name the forbidden alternative)
 
 **Lifecycle Machine**:
-A statechart or typed reducer bound to a plan's `LC-N` declaration. The single source of truth for a domain lifecycle; implementation code imports it and never re-implements its transitions.
-_Avoid_: State diagram, workflow doc, lifecycle description
+A statechart or typed reducer bound to a plan's `LC-N` declaration. The single source of truth for a domain lifecycle; implementation code imports it and never re-implements its transitions. "Imports it" means a production path reduces through it — a machine only a test drives is not a source of truth, it is a second opinion nobody consults. A machine reaches production either by **checkpoint** (its serialized state is the resume position, as LC-2 and LC-3 do) or by **projection** (a pure function reduces it over durable evidence the shell already reads, as LC-1 does through `projectWaveGateLifecycle`). Which one a machine uses is a property of where its truth lives: a program outside the State File must checkpoint; a program whose evidence is already durable elsewhere may project.
+_Avoid_: State diagram, workflow doc, lifecycle description, model that only tests drive
+
+**Public Surface**:
+The curated list of symbols a module publishes to callers outside it — for the orchestration shared kernel, exactly what `orchestration-contract/index.ts` re-exports. Deliberately NOT the union of what its parts export: a sub-module exports a symbol so sibling sub-modules above it can use it, which is an internal relationship and says nothing about what callers need. The distinction is enforced, because `tsc` cannot see it — an export with no importer is invisible to the compiler, so a barrel that re-exports everything makes dead exports indistinguishable from public ones.
+_Avoid_: Barrel, API surface, exports (bare), the index
 
 **Checkable Invariant**:
 A plan invariant (`INV-N`, tier `checkable`) expressed as a lint rule enforced fail-closed on every edit. Invariants that cannot be deterministically checked are tiered `advisory` and stay honest prose.
@@ -237,6 +241,8 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - **Domain Events** are returned by pure command functions; the **Imperative Shell** publishes them
 - A **Plan** may declare **Executable Models**; decompose validation blocks a declared model that no **Task** binds to an artifact
 - A **Lifecycle Machine** is implemented by a dedicated **Task** in the earliest wave; dependent **Tasks** import it
+- Every declared **Lifecycle Machine** reaches production by checkpoint or by projection; one that neither checkpoints nor projects is not an **Executable Model**
+- A module's **Public Surface** is curated, and every symbol on it has a consumer outside that module
 - A **Checkable Invariant** is written as a lint rule during the architecture **Phase** and enforced by **Hooks** on every edit thereafter
 
 ## Example Dialogue

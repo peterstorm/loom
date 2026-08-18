@@ -14,10 +14,10 @@ import {
   extractFilePath,
   handleLintResult,
   processToolResult,
-  type PiToolResultResponse,
+
 } from "../../src/handlers/pi-adapter";
 import type { LintResult, Violation } from "../../src/linter/types";
-import { passResult, violationsResult, lintErrorResult, makeViolation } from "../../src/linter/types";
+import { passResult, lintErrorResult, makeViolation } from "../../src/linter/types";
 
 // --- Test fixtures ---
 

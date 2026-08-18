@@ -60,5 +60,3 @@ export const ORCHESTRATION_CAPABILITIES = Object.freeze([
   "protectedStateCommit",
   "gitIndex",
 ] as const);
-
-export type OrchestrationCapability = (typeof ORCHESTRATION_CAPABILITIES)[number];

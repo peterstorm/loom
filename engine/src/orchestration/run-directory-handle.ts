@@ -24,7 +24,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, linkSync, lstatSync, realpathSync, statSync, unlinkSync } from "node:fs";
+import { linkSync, lstatSync, realpathSync, statSync, unlinkSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import {
   canonicalRecord,
@@ -1339,19 +1339,6 @@ function receiptOperations(directory: string) {
     },
   };
 }
-
-export const RUN_DIRECTORY_LAYOUT = Object.freeze({
-  events: EVENTS,
-  requests: REQUESTS,
-  correlators: join(REQUESTS, CORRELATORS),
-  contexts: CONTEXTS,
-  transcripts: TRANSCRIPTS,
-  receipts: RECEIPTS,
-  artifacts: ARTIFACTS,
-  authorityFile: AUTHORITY_FILE,
-  programFile: PROGRAM_FILE,
-  checkpointFile: CHECKPOINT_FILE,
-});
 
 /** Exposed for the handle's own use and for callers proving anchored access. */
 export { anchoredChildPath };

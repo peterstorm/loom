@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
@@ -113,7 +113,7 @@ describe("set-phase helper", () => {
     execSync("git init", { cwd: emptyDir, stdio: "ignore" });
 
     try {
-      const result = execSync(
+      execSync(
         `bun "${CLI_PATH}" helper set-phase --phase architecture`,
         { cwd: emptyDir, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
       );

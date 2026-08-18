@@ -4,8 +4,9 @@
  * kernel and exports its internals so sibling volumes can import them.
  * Pure module: no I/O, no clock, no randomness.
  */
-import { canonicalRecord, failure, parseEffectId, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
+import { canonicalRecord, parseEffectId, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SlotId } from './identity';
 import { includes, readDenseDataArray, readExactDataRecord } from './bytes';
+import { actionFailure, type ExternalActionError } from './errors';
 import { parseArtifactRef, type ArtifactRef } from './roster';
 import { batchPublicationIdentity, clearInitialPublicationIssuance, initialPublicationClaimKey, issuancePublicationIdentity, readInitialPublicationIssuance, issuedSpawnRequest, parseContextReference, parseIssuedSpawnRequestAgainstRegistration, parseIssuedSpawnRequestProof, parsePublishedSpawnRequest, registeredBatchPublicationAuthority, resolveRegisteredPublicationAuthority, samePublicationIdentity, samePublishedRequest, type BatchPublicationIdentity, type BatchPublishedReceipt, type InitialPublicationClaimKey, type InitialPublicationIssuanceAuthority, type PublicationAuthorityResolver, type SpawnRequest } from './publication';
 import { EXHAUSTED_RESULT_CATEGORIES, REQUEST_TERMINAL_CATEGORIES, RUN_TERMINAL_CATEGORIES, diagnosticFailure, parseDiagnosticMessage, parseSemanticAttemptPairAuthority, terminalBlockedDiagnostic, type BlockedDiagnostic, type DiagnosticConstructionError, type UserDecisionRequest } from './diagnostics';
@@ -22,60 +23,6 @@ export type AwaitUserAction = Readonly<{ kind: "await-user"; runId: Orchestratio
 export type BlockedAction = Readonly<{ kind: "blocked"; runId: OrchestrationRunId; diagnostic: BlockedDiagnostic }>;
 export type DoneAction = Readonly<{ kind: "done"; runId: OrchestrationRunId; outcome: ArtifactRef }>;
 export type ExternalAction = SpawnBatchAction | AwaitUserAction | BlockedAction | DoneAction;
-
-export type ExternalActionError =
-  | Readonly<{
-      kind: "invalid-external-action";
-      field: string;
-      message: string;
-    }>
-  | Readonly<{
-      kind: "spawn-output-slot-collision";
-      field: "requests.authority.outputSlot.path";
-      message: string;
-      path: string;
-      first: Readonly<{
-        index: number;
-        requestId: RequestId;
-        slotId: SlotId;
-        attempt: SemanticAttempt;
-      }>;
-      duplicate: Readonly<{
-        index: number;
-        requestId: RequestId;
-        slotId: SlotId;
-        attempt: SemanticAttempt;
-      }>;
-    }>;
-
-export function actionFailure<T = never>(message: string, field: string): DomainResult<T, ExternalActionError> {
-  return failure(canonicalRecord({ kind: "invalid-external-action", field, message }));
-}
-
-export function outputSlotCollision<T>(
-  path: string,
-  first: Readonly<{
-    index: number;
-    requestId: RequestId;
-    slotId: SlotId;
-    attempt: SemanticAttempt;
-  }>,
-  duplicate: Readonly<{
-    index: number;
-    requestId: RequestId;
-    slotId: SlotId;
-    attempt: SemanticAttempt;
-  }>,
-): DomainResult<T, ExternalActionError> {
-  return failure(canonicalRecord({
-    kind: "spawn-output-slot-collision",
-    field: "requests.authority.outputSlot.path",
-    message: `spawn output slot '${path}' is authorized by requests ${first.index} and ${duplicate.index}`,
-    path,
-    first: canonicalRecord(first),
-    duplicate: canonicalRecord(duplicate),
-  }));
-}
 
 export function inspectInitialPublicationIssuanceAuthority(
   raw: unknown,

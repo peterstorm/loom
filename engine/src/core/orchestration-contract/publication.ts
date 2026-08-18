@@ -6,11 +6,10 @@
  */
 import { createHash } from 'node:crypto';
 import { canonicalRecord, failure, parseArtifactDigest, parseContextDigest, parseEffectId, parseOrchestrationRunId, parseRequestId, success, type ArtifactDigest, type ContextDigest, type DomainResult, type EffectId, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
-import { causedMessage, includes, readDenseDataArray, readExactDataRecord, type DataBoundaryError } from './bytes';
+import { causedMessage, readDenseDataArray, readExactDataRecord, type DataBoundaryError } from './bytes';
 import { parseFixedArtifactSlot, type FixedArtifactSlot } from './artifacts';
 import { AtomicInitialPublicationClaimPortMembership, InitialBatchPublicationIntentMembership, InitialPublicationEffectPortMembership, InitialPublicationIssuanceMembership, parseStoredAgentRequestAuthority, sameHarnessBinding, type AgentRequestAuthority } from './roster';
-import { type AcceptedAgentResultError } from './completion';
-import { actionFailure, outputSlotCollision, type ExternalActionError } from './actions';
+import { type AcceptedAgentResultError, actionFailure, outputSlotCollision, type ExternalActionError } from './errors';
 
 export const REGISTERED_PUBLICATION_PROOF: unique symbol = Symbol("RegisteredBatchPublicationAuthority");
 export const ISSUED_REQUEST_PROOF: unique symbol = Symbol("IssuedRequest");

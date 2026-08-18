@@ -110,9 +110,6 @@ export const LLM_PROFILES: readonly LlmProfile[] = Object.freeze([
   profile("mechanical", "haiku", "gpt-5.4-mini", "medium"),
 ]);
 
-/** Singular alias for callers that use the domain term "catalog". */
-export const MODEL_PROFILE_CATALOG = LLM_PROFILES;
-
 /**
  * One Agent's dispatch classification — an ADT, so exactly one kind per Agent
  * is expressible. Kinds map one-to-one onto how the engine routes the Agent:

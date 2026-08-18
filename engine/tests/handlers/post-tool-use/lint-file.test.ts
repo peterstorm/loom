@@ -13,7 +13,7 @@ import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { extractFilePath } from "../../../src/handlers/post-tool-use/lint-file";
-import type { HookResult } from "../../../src/types";
+
 
 // --- Test helpers ---
 

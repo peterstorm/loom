@@ -19,7 +19,7 @@ import {
   findingsLockstepError,
   findingsViewError,
   makeDraftFinding,
-  mergeFindings,
+
   nextOrdinal,
   recoverViewOnlyClaims,
   refutationsUnionError,

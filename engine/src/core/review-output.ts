@@ -154,8 +154,6 @@ export function makeParsedFindings(input: {
   return Object.freeze(parsed);
 }
 
-export const EMPTY_FINDINGS: ParsedFindings = makeParsedFindings({});
-
 /** Pure: Build evidence_capture_failed error message, surfacing partial findings if any. */
 export function buildEvidenceFailureMessage(findings: ParsedFindings): string {
   const missing = [

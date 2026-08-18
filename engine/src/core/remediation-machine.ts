@@ -40,7 +40,6 @@ const PATH_CHANGES = [
 export type RemediationPathChange = (typeof PATH_CHANGES)[number];
 
 const PATH_NODE_KINDS = ["file", "missing", "symlink", "directory", "other"] as const;
-export type RemediationPathNodeKind = (typeof PATH_NODE_KINDS)[number];
 
 const PRESENT_CHANGES: readonly RemediationPathChange[] = ["added", "modified", "renamed-to"];
 const ABSENT_CHANGES: readonly RemediationPathChange[] = ["renamed-from", "deleted", "absent"];
@@ -217,8 +216,6 @@ export function parseCanonicalRepositoryRelativePath(
   return ok(parsed.value as unknown as CanonicalRepositoryRelativePath);
 }
 
-export const parseRemediationPath = parseCanonicalRepositoryRelativePath;
-
 export type RemediationPathSet = Readonly<{
   paths: readonly CanonicalRepositoryRelativePath[];
   digest: ArtifactDigest;
@@ -252,7 +249,7 @@ export function parseRemediationPathSet(
   const paths: CanonicalRepositoryRelativePath[] = [];
   const errors: RemediationPathError[] = [];
   for (let index = 0; index < entries.value.length; index++) {
-    const parsed = parseRemediationPath(entries.value[index], `${field}[${index}]`);
+    const parsed = parseCanonicalRepositoryRelativePath(entries.value[index], `${field}[${index}]`);
     if (parsed.ok) paths.push(parsed.value);
     else errors.push(parsed.error);
   }
@@ -788,9 +785,8 @@ export function parseRemediationPathAuthority(
   if (typeof record.value.sourceResultJson !== "string") {
     return invalid("sourceResultJson", "pathAuthority.sourceResultJson must be canonical JSON text");
   }
-  let rawResult: unknown;
   try {
-    rawResult = JSON.parse(record.value.sourceResultJson);
+    JSON.parse(record.value.sourceResultJson);
   } catch {
     return invalid("sourceResultJson", "pathAuthority.sourceResultJson is not valid JSON");
   }
@@ -879,7 +875,7 @@ export function registerSupportPath(
       message: "support paths require parser-produced standalone result authority",
     }));
   }
-  const path = parseRemediationPath(rawPath, "supportPath");
+  const path = parseCanonicalRepositoryRelativePath(rawPath, "supportPath");
   if (!path.ok) {
     return fail(canonicalRecord({
       kind: "support-path-registration-rejected",
@@ -971,7 +967,7 @@ export function parseDirtyPathObservation(
       message,
     }));
   if (!record.ok) return invalid(field, record.error);
-  const path = parseRemediationPath(record.value.path, `${field}.path`);
+  const path = parseCanonicalRepositoryRelativePath(record.value.path, `${field}.path`);
   if (!path.ok) return invalid(path.error.field, path.error.message);
   if (!includes(PATH_CHANGES, record.value.change)) {
     return invalid(`${field}.change`, `${field}.change is not a supported Git path change`, path.value);
@@ -1253,10 +1249,6 @@ export type ExactStagingEvidencePublication = ExactStagingEvidenceMembership & R
   auditedEqualsTemporaryIndexStaged: ExactPathSetWitness;
   digest: ArtifactDigest;
 }>;
-
-export type RemediationEvidencePublication =
-  | AuditedDirtyEvidencePublication
-  | ExactStagingEvidencePublication;
 
 const auditedEvidenceCache = new WeakSet<object>();
 const exactStagingEvidenceCache = new WeakSet<object>();
@@ -2798,6 +2790,3 @@ export function reduceRemediation(
   const reduced = reduceParserMintedRemediation(state, event);
   return reduced.ok ? ok(mintRemediationState(reduced.value)) : reduced;
 }
-
-/** LC-3's single executable transition source for Fugue adapters. */
-export const remediationMachine = Object.freeze({ transition: reduceRemediation });

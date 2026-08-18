@@ -108,7 +108,6 @@ const LAYOUT = REVIEW_LAYOUT;
  * which is the drift nothing used to catch.
  */
 export const REVIEW_PANEL_OPERATIONS = ["brief", "manifest", "lenses", "verdict", "tally"] as const;
-export type ReviewPanelOperation = (typeof REVIEW_PANEL_OPERATIONS)[number];
 
 const USAGE =
   `Usage: helper review-panel <${REVIEW_PANEL_OPERATIONS.join("|")}> --runs-root <dir> ` +

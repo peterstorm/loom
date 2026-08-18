@@ -20,7 +20,6 @@ import {
 } from "../utils/artifact-baseline";
 import { repositoryContext } from "../utils/git";
 import { anyActiveSubagent } from "../machine";
-import type { TaskGraph } from "../types";
 
 /**
  * Reservations no agent can still be serving.

@@ -544,8 +544,3 @@ export function scoreCalibration(
 export function serializeCalibrationScore(score: CalibrationScore): string {
   return `${JSON.stringify(score, null, 2)}\n`;
 }
-
-export const parseCorpus = parseCalibrationCorpus;
-export const parsePredictions = parseCalibrationPredictions;
-export const matchFindings = matchCalibrationFindings;
-export const scoreModelCalibration = scoreCalibration;

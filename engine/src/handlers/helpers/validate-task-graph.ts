@@ -5,8 +5,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { match } from "ts-pattern";
-import type { HookHandler, Phase, TaskGraph } from "../../types";
+import type { HookHandler } from "../../types";
 import { PHASE_ORDER, KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
 import {
   attributeFindings,
@@ -129,7 +128,6 @@ export function validateFull(
   scope: ValidationScope = "state-file",
 ): ValidationResult {
   const errors: string[] = [];
-  const warnings: string[] = [];
   if (scope === "state-file") errors.push(...taskGraphLifecycleErrors(json));
 
   // Required top-level fields — path fields must be real strings, not merely

@@ -8,7 +8,7 @@
  * This test exercises the exact logic pattern used in pi/extension.ts lines 183-216.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { processToolResult } from "../../src/handlers/pi-adapter";
 
 /**

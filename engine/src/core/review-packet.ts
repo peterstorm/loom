@@ -14,8 +14,6 @@ export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[];
 export type JsonObject = Readonly<{ [key: string]: JsonValue }>;
 
 export const REVIEW_PACKET_SCHEMA_VERSION = 2 as const;
-export const REVIEW_ARTIFACT_KINDS = ["diff", "postimage"] as const;
-export type ReviewArtifactKind = (typeof REVIEW_ARTIFACT_KINDS)[number];
 export const REVIEW_POSTIMAGE_ENCODINGS = ["utf8", "base64"] as const;
 export type ReviewPostimageEncoding = (typeof REVIEW_POSTIMAGE_ENCODINGS)[number];
 
@@ -347,10 +345,6 @@ export const postimageDigestOf = (bytes: Uint8Array): PostimageDigest =>
 
 export const parsePacketId = (raw: unknown): PacketId | null =>
   typeof raw === "string" && SHA256_HEX.test(raw) ? raw as PacketId : null;
-export const parseDiffDigest = (raw: unknown): DiffDigest | null =>
-  typeof raw === "string" && SHA256_HEX.test(raw) ? raw as DiffDigest : null;
-export const parsePostimageDigest = (raw: unknown): PostimageDigest | null =>
-  typeof raw === "string" && SHA256_HEX.test(raw) ? raw as PostimageDigest : null;
 
 function freezeJson<T>(value: T): T {
   if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
@@ -671,8 +665,3 @@ export function parseReviewPacketRecovery(raw: unknown): ParseResult<VerifiedRev
   if (object.value.schemaVersion === 1) return parseLegacyRecoveryPacket(object.value);
   return fail([`schemaVersion must equal 1 or ${REVIEW_PACKET_SCHEMA_VERSION}`]);
 }
-
-export const verifyReviewPacket = parseReviewPacket;
-export const buildReviewPacket = createReviewPacket;
-export const canonicalizeReviewPacket = createReviewPacket;
-export const parseAndVerifyReviewPacket = parseReviewPacket;

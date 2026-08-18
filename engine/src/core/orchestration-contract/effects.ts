@@ -421,11 +421,6 @@ export function parseEffectReceipt(raw: unknown): DomainResult<EffectReceipt, Re
   }
 }
 
-export function sameArtifact(left: ArtifactRef, right: ArtifactRef): boolean {
-  return left.runId === right.runId && left.slot.path === right.slot.path &&
-    left.digest === right.digest && left.byteLength === right.byteLength;
-}
-
 export function samePath(left: RepositoryPath, right: RepositoryPath): boolean {
   return left.relative === right.relative && left.absolute === right.absolute;
 }

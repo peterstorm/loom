@@ -53,6 +53,7 @@ import { parseTaskGraph } from "../../state-manager";
 import type { HookHandler, HookResult } from "../../types";
 import {
   deriveLoomStatusFromParsedGraph,
+  deriveWaveReadiness,
   renderLoomStatusHuman,
   renderLoomStatusJson,
   type ActiveRunDirectoryObservation,
@@ -236,9 +237,47 @@ function statusRunDirectoryObservation(rawGraph: unknown, args: readonly string[
   });
 }
 
-function statusOperation(args: readonly string[]): HookResult {
+/**
+ * Has the operator already approved this run's advisory request?
+ *
+ * The decision lives in the run's event log, never in the protected graph, so
+ * LC-1 cannot derive it — the shell observes it and hands it to the core. Any
+ * failure to read reads as "not approved", which keeps status asking for a
+ * decision rather than reporting progress that has not happened.
+ */
+async function observedAdvisoryApproval(
+  rawGraph: unknown,
+  observation: ActiveRunDirectoryObservation,
+): Promise<boolean> {
+  if (observation.kind !== "present") return false;
+  const parsed = parseTaskGraph(rawGraph);
+  if (!parsed.ok) return false;
+  const opened = openRunDirectory(dirname(observation.path), observation.path);
+  if (!opened.ok) return false;
+  const readiness = deriveWaveReadiness(parsed.value, productionGateDeps);
+  if (!readiness.ok) return false;
+  const decisionId = waveAdvisoryDecisionRequestId(observation.runId, readiness.value.waveTasks);
+  try {
+    const events = await opened.value.readEvents();
+    return events.some(({ event }) => {
+      if (typeof event !== "object" || event === null) return false;
+      const record = event as Record<string, unknown>;
+      const decision = record.decision;
+      return record.kind === "user-decision-recorded" && record.decisionId === decisionId &&
+        typeof decision === "object" && decision !== null && !Array.isArray(decision) &&
+        Object.keys(decision).length === 1 && (decision as Record<string, unknown>).kind === "approve";
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function statusOperation(args: readonly string[]): Promise<HookResult> {
   const rawGraph = readGraph(TASK_GRAPH_PATH);
-  const observation = statusRunDirectoryObservation(rawGraph, args);
+  const base = statusRunDirectoryObservation(rawGraph, args);
+  const observation: ActiveRunDirectoryObservation = base.kind === "present"
+    ? Object.freeze({ ...base, advisoryApproved: await observedAdvisoryApproval(rawGraph, base) })
+    : base;
   const output = renderStatus(rawGraph, productionGateDeps, hasFlag(args, "json"), observation);
   process.stdout.write(`${output}\n`);
   return { kind: "allow" };

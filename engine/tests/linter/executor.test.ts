@@ -9,8 +9,6 @@ import { createDeadlineChecker } from "../../src/linter/safety";
 import type {
   RegexRule,
   ProgrammaticRule,
-  Rule,
-  Violation,
 } from "../../src/linter/types";
 import { makeViolation } from "../../src/linter/types";
 
@@ -293,7 +291,7 @@ describe("executeRules — programmatic rules", () => {
   it("invokes handler and collects returned violations", () => {
     const rule = makeProgrammaticRule({
       name: "custom-check",
-      handler: (content, filePath) => [
+      handler: (_content, filePath) => [
         makeViolation("custom-check", filePath, 1, "bad line", "Fix it"),
       ],
     });

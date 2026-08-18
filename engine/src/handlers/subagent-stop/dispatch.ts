@@ -4,7 +4,7 @@
  * handlers.
  */
 
-import { match, P } from "ts-pattern";
+import { match } from "ts-pattern";
 import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
 import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";

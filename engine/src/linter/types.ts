@@ -10,9 +10,6 @@
 /** Execution tier: immediate (PostEdit, single-file fast path) or full (wave-gate, complete rule suite) */
 export type Tier = "immediate" | "full";
 
-/** Rule classification: regex (declarative JSON) or programmatic (TS handler) */
-export type RuleKind = "regex" | "programmatic";
-
 /** Origin of a rule: shipped default or project-local override */
 export type RuleSource = "default" | "project";
 

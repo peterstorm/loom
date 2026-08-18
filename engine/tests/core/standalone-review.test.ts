@@ -52,7 +52,7 @@ import {
   type CapturedReviewerResult,
   type FrozenStandalonePanelAuthority,
   type FrozenStandaloneReviewAuthority,
-  type StandaloneReviewerRole,
+
   type StandaloneRosterCompletionProof,
 } from "../../src/core/standalone-review";
 import {

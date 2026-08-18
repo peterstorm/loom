@@ -26,7 +26,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { fail, isRecord, ok, sanitizeProse, type ParseResult } from "./panel-kernel";
+import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import {
   aggregateCanonicalTranscripts,
   canonicalDigest,
@@ -42,7 +42,6 @@ import {
   parseStandaloneReviewScope,
   uniqueNonEmpty,
   STANDALONE_REVIEW_SUBJECT,
-  STANDALONE_REVIEWER_ROLES,
   type AdjudicatedStandaloneReview,
   type FrozenStandalonePanelAuthority,
   type PanelRefutation,

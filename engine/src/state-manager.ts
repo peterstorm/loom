@@ -7,7 +7,6 @@
  * Replaces: state-file-write.sh, resolve-task-graph.sh, loom-config.sh
  */
 
-import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, chmodSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,7 +25,7 @@ import {
   reviewRunError,
 } from "./core/findings";
 import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, OrphanedWaveGateRetirement, SpecCheck, TaskGraph } from "./types";
-import type { DomainResult, OrchestrationRunId } from "./core/orchestration-contract";
+import type { DomainResult } from "./core/orchestration-contract";
 import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
 import {
   parseArtifactDigest,

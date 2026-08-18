@@ -646,7 +646,7 @@ describe("Pi extension review tool_result integration", () => {
 
       // The reserved reviewer slot comes back as a DIFFERENT agent, which is
       // exactly the "missing or mismatched" reconciliation case.
-      const responses = await pi.emit("tool_result", {
+      await pi.emit("tool_result", {
         toolName: "subagent",
         toolCallId,
         isError: false,

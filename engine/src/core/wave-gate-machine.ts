@@ -77,17 +77,6 @@ import {
 
 const waveReadinessProofs = new WeakSet<object>();
 
-export const WAVE_GATE_STATE_KINDS = [
-  "preparing",
-  "awaiting-review-results",
-  "awaiting-refutation",
-  "awaiting-advisory-decision",
-  "ready-to-complete",
-  "recoverable-blocked",
-  "done",
-  "terminal-blocked",
-] as const;
-
 type WaveGateLifecycleCheckpoint = Readonly<{
   runId: OrchestrationRunId;
   registrationRevision: number;
@@ -593,7 +582,20 @@ export interface GateDeps {
  * before it describes a registered run as resumable. */
 export type ActiveRunDirectoryObservation =
   | Readonly<{ kind: "unverified" }>
-  | Readonly<{ kind: "present"; runId: string; path: string }>
+  | Readonly<{
+      kind: "present";
+      runId: string;
+      path: string;
+      /**
+       * Did the operator already approve this run's advisory request? It is
+       * recorded in the run's event log, not the protected graph, so it is the
+       * one LC-1 evidence field the core cannot derive and the shell must
+       * observe. Absent (legacy callers) reads as "not approved", which is the
+       * fail-closed answer: status keeps asking for a decision rather than
+       * reporting progress that has not happened.
+       */
+      advisoryApproved?: boolean;
+    }>
   | Readonly<{ kind: "absent"; runId: string; path: string }>
   | Readonly<{ kind: "invalid"; runId: string; path: string; message: string }>;
 
@@ -801,22 +803,22 @@ const nonEmptyReasons = (values: readonly StatusReason[], fallback: StatusReason
   return Object.freeze(all) as NonEmpty<StatusReason>;
 };
 
+/** First matching bucket wins; the order below IS the precedence. */
+function taskBucket(task: Task, executing: ReadonlySet<string>): keyof StatusTaskCounts {
+  if (task.status === "completed") return "completed";
+  if (
+    task.status === "failed" || task.proof?.state === "failed" ||
+    task.review_status === "blocked" || task.review_status === "evidence_capture_failed"
+  ) return "blocked";
+  if (executing.has(task.id)) return "running";
+  if (task.status === "implemented") return "implemented";
+  return "pending";
+}
+
 function taskCounts(graph: TaskGraph): StatusTaskCounts {
   const executing = new Set(graph.executing_tasks ?? []);
   const counts = { pending: 0, running: 0, implemented: 0, blocked: 0, completed: 0 };
-  for (const task of graph.tasks) {
-    const bucket: keyof StatusTaskCounts = task.status === "completed"
-      ? "completed"
-      : task.status === "failed" || task.proof?.state === "failed" ||
-          task.review_status === "blocked" || task.review_status === "evidence_capture_failed"
-        ? "blocked"
-        : executing.has(task.id)
-          ? "running"
-          : task.status === "implemented"
-            ? "implemented"
-            : "pending";
-    counts[bucket]++;
-  }
+  for (const task of graph.tasks) counts[taskBucket(task, executing)]++;
   return canonicalRecord(counts);
 }
 
@@ -1813,6 +1815,116 @@ export function prepareWaveRefutationPanel(
   }) });
 }
 
+// ---------------------------------------------------------------------------
+// LC-1 projection: the run's stage, reduced from durable evidence
+// ---------------------------------------------------------------------------
+
+/**
+ * The durable facts a Wave Gate run's stage is a function of.
+ *
+ * The shell reads them; LC-1 decides what they mean. Every field is derivable
+ * from the protected graph except `advisoryApproved`, which lives in the run's
+ * event log — so the shell supplies it, exactly as it supplies
+ * `ActiveRunDirectoryObservation`. Core performs no I/O.
+ */
+export type WaveGateLifecycleEvidence = Readonly<{
+  /** The wave's review batch has been published (a Review Run exists). */
+  batchPublished: boolean;
+  /** Reviewer results durably accepted so far, none of them completing the roster. */
+  acceptedResults: number;
+  /** A semantic attempt was durably rejected, and which one. */
+  rejectedAttempt: 1 | 2 | null;
+  /** Every expected reviewer slot has landed evidence. */
+  rosterComplete: boolean;
+  /** Blocking criticals the wave still carries. */
+  activeCritical: number;
+  /** Advisory Findings awaiting user triage. */
+  advisoryCount: number;
+  /** The user approved this run's exact advisory request. */
+  advisoryApproved: boolean;
+  /** The protected completion receipt, once committed. */
+  committed: ProtectedWaveStateCommitted | null;
+}>;
+
+export type WaveGateProjectionError = Readonly<{
+  kind: "wave-gate-projection-rejected";
+  message: string;
+}>;
+
+const projectionFailure = (message: string): DomainResult<WaveGateState, WaveGateProjectionError> =>
+  canonicalRecord({ ok: false, error: canonicalRecord({ kind: "wave-gate-projection-rejected", message }) });
+
+/**
+ * Reduce LC-1 forward over one run's durable evidence and return the stage it
+ * reaches.
+ *
+ * The Wave Gate façade is already a replay — every drive reconstructs the run
+ * from durable evidence rather than resuming an in-memory position — so LC-1
+ * does not need a serialized checkpoint to be executable. It needs the events
+ * that evidence implies. This is the seam where the two meet: one small
+ * interface, the whole stage decision behind it, callable by the façade and by
+ * `status` alike.
+ *
+ * Every transition goes through `reduceWaveGate`, so a combination of facts
+ * that no declared transition admits is a rejection rather than a stage nobody
+ * checked. The order below IS the wave's order: publish, collect, adjudicate
+ * criticals, triage advisories, complete.
+ */
+export function projectWaveGateLifecycle(
+  snapshot: WaveReadinessSnapshot,
+  evidence: WaveGateLifecycleEvidence,
+): DomainResult<WaveGateState, WaveGateProjectionError> {
+  const initial = createWaveGateState(snapshot);
+  if (!initial.ok) return projectionFailure(initial.error.message);
+
+  let state: WaveGateState = initial.value;
+  let rejection: WaveGateTransitionError | null = null;
+  const step = (event: WaveGateEvent): boolean => {
+    const next = reduceWaveGate(state as Extract<WaveGateState, { kind: "preparing" }>, event as never);
+    if (!next.ok) {
+      rejection = next.error;
+      return false;
+    }
+    state = next.value;
+    return true;
+  };
+  const settled = (): DomainResult<WaveGateState, WaveGateProjectionError> =>
+    rejection === null
+      ? canonicalRecord({ ok: true, value: state })
+      : projectionFailure(`${rejection.state} rejects ${rejection.event}: ${rejection.message}`);
+
+  if (!evidence.batchPublished) return settled();
+  if (!step({ kind: "preparation-published" })) return settled();
+
+  // A rejected attempt 2 is terminal and outranks everything after it.
+  if (evidence.rejectedAttempt === 2) {
+    step({ kind: "result-rejected", attempt: 2 });
+    return settled();
+  }
+  for (let accepted = 0; accepted < evidence.acceptedResults; accepted++) {
+    if (!step({ kind: "result-accepted", completeness: "incomplete" })) return settled();
+  }
+  if (evidence.rejectedAttempt === 1 && !step({ kind: "result-rejected", attempt: 1 })) return settled();
+
+  if (!evidence.rosterComplete) return settled();
+  if (evidence.activeCritical > 0) {
+    step({ kind: "complete-roster-with-criticals" });
+    return settled();
+  }
+  if (evidence.advisoryCount > 0) {
+    if (!step({ kind: "complete-roster-with-advisories" })) return settled();
+    if (!evidence.advisoryApproved) return settled();
+    if (!step({ kind: "advisory-decision-accepted" })) return settled();
+  } else if (!step({ kind: "complete-roster-clean" })) {
+    return settled();
+  }
+
+  if (evidence.committed !== null) {
+    step({ kind: "completion-committed", readiness: snapshot, receipt: evidence.committed });
+  }
+  return settled();
+}
+
 /** Advisory policy remains user-owned. The engine derives whether the action
  * exists from canonical advisory counts and only accepts the exact run-sized
  * T1 advisory request. */
@@ -1939,6 +2051,29 @@ function snapshotActionProofIsExact(snapshot: WaveReadinessSnapshot): boolean {
     binding.lifecycleCheckpointDigest === snapshot.lifecycleCheckpointDigest;
 }
 
+/** Why the proven authority selected this action. One arm per authority kind. */
+function nextActionReason(
+  authority: WaveGateNextAction,
+  action: NextActionDecision["action"],
+): StatusReason {
+  if (authority.kind === "advisory-decision") {
+    return reason(
+      "advisory-decision-required",
+      `${action.kind === "await-user" ? action.request.advisories.length : 0} advisory artifact(s) require a user decision`,
+    );
+  }
+  if (authority.kind === "review-batch") {
+    return reason(
+      "review-spawn-required",
+      `${action.kind === "spawn-batch" ? action.requests.length : 0} exact review request(s) are ready to spawn`,
+    );
+  }
+  if (authority.kind === "blocked") {
+    return reason("blocked-diagnostic", action.kind === "blocked" ? action.diagnostic.message : "Wave Gate is blocked");
+  }
+  return reason("run-complete", `Wave Gate run ${action.runId} is complete`);
+}
+
 /** Exactly one action, selected only from the shared readiness snapshot. A
  * copied/stale proof fails closed even if a caller bypasses deriveWaveReadiness. */
 export function deriveNextAction(snapshot: WaveReadinessSnapshot): NextActionDecision {
@@ -1950,13 +2085,7 @@ export function deriveNextAction(snapshot: WaveReadinessSnapshot): NextActionDec
     actionReason = reason("authority-contradiction", message);
   } else if (snapshot.nextActionAuthority !== null) {
     action = snapshot.nextActionAuthority.action;
-    actionReason = snapshot.nextActionAuthority.kind === "advisory-decision"
-      ? reason("advisory-decision-required", `${action.kind === "await-user" ? action.request.advisories.length : 0} advisory artifact(s) require a user decision`)
-      : snapshot.nextActionAuthority.kind === "review-batch"
-        ? reason("review-spawn-required", `${action.kind === "spawn-batch" ? action.requests.length : 0} exact review request(s) are ready to spawn`)
-        : snapshot.nextActionAuthority.kind === "blocked"
-          ? reason("blocked-diagnostic", action.kind === "blocked" ? action.diagnostic.message : "Wave Gate is blocked")
-          : reason("run-complete", `Wave Gate run ${action.runId} is complete`);
+    actionReason = nextActionReason(snapshot.nextActionAuthority, action);
   } else {
     action = engineResumeAction(snapshot.registration.runId);
     actionReason = reason(
@@ -1977,7 +2106,7 @@ export function deriveLoomStatus(snapshot: WaveReadinessSnapshot): LoomStatus {
 /** Fail-closed status retains the complete fact inventory; no zero/ready value is fabricated. */
 export function deriveUnavailableLoomStatus(rawReasons: NonEmpty<StatusReason>): LoomStatus {
   const reasons = Object.freeze([...rawReasons]) as NonEmpty<StatusReason>;
-  const unavailable = <T>(): Readonly<{ kind: "unavailable"; reasons: NonEmpty<StatusReason> }> =>
+  const unavailable = (): Readonly<{ kind: "unavailable"; reasons: NonEmpty<StatusReason> }> =>
     canonicalRecord({ kind: "unavailable", reasons });
   return canonicalRecord({
     schemaVersion: 1,
@@ -2174,6 +2303,60 @@ function unstartedWaveStatus(graph: TaskGraph): LoomStatus | null {
   });
 }
 
+/**
+ * Status's own LC-1 pass, for the one stage where "resume the engine" is wrong.
+ *
+ * Of the four actions LC-1 can prove, three resolve to engine work: a review
+ * batch, a blocked diagnostic, and a completed run are all things the engine
+ * drives or that the terminal branches above already answer. The exception is
+ * `awaiting-advisory-decision`, which is waiting on a PERSON. Reporting
+ * "resume the engine" there tells the operator to do the one thing that cannot
+ * unblock the run, and hides the decision that can.
+ *
+ * So status reduces LC-1 over the run's durable evidence and, only when the
+ * stage is the advisory one, proves and reports the real await-user action.
+ * Every other stage falls through to the ordinary readiness path — where
+ * "resume the engine" is the correct answer, not a placeholder.
+ *
+ * `null` means "not the advisory stage, or it could not be proven" — the
+ * caller continues, so a projection failure degrades to today's behaviour
+ * rather than replacing a usable status with an error.
+ */
+function projectedAdvisoryStatus(
+  graph: TaskGraph,
+  deps: GateDeps,
+  runDirectory: ActiveRunDirectoryObservation,
+): LoomStatus | null {
+  const snapshot = deriveWaveReadiness(graph, deps);
+  if (!snapshot.ok) return null;
+  const counts = snapshot.value.facts.findingCounts;
+  const runs = snapshot.value.facts.reviewRuns;
+  if (counts.kind !== "known" || runs.kind !== "known") return null;
+
+  const rosterComplete = runs.value.rosterGaps.length === 0 && runs.value.evidenceFailures.length === 0;
+  const evidence: WaveGateLifecycleEvidence = canonicalRecord({
+    // A complete roster necessarily implies the batch was published, so an
+    // active Review Run is sufficient evidence but not required — a wave whose
+    // reviews already landed must not read as still `preparing`.
+    batchPublished: rosterComplete || snapshot.value.waveTasks.some((task) => task.review_run !== undefined),
+    acceptedResults: 0,
+    rejectedAttempt: null,
+    rosterComplete,
+    activeCritical: counts.value.activeCritical,
+    advisoryCount: counts.value.advisory,
+    advisoryApproved: runDirectory.kind === "present" && runDirectory.advisoryApproved === true,
+    committed: null,
+  });
+
+  const state = projectWaveGateLifecycle(snapshot.value, evidence);
+  if (!state.ok || state.value.kind !== "awaiting-advisory-decision") return null;
+  const proven = deriveWaveAdvisoryNextAction(snapshot.value, state.value);
+  if (!proven.ok) return null;
+
+  const bound = deriveWaveReadiness(graph, deps, proven.value, state.value);
+  return bound.ok ? deriveLoomStatus(bound.value) : null;
+}
+
 /** Anti-corruption adapter from the protected-state parser into the canonical status contract. */
 export function deriveLoomStatusFromParsedGraph(
   parsed: Readonly<{ ok: true; value: TaskGraph }> | Readonly<{ ok: false; error: string }>,
@@ -2217,6 +2400,10 @@ export function deriveLoomStatusFromParsedGraph(
   // legitimately has none for its whole implementation span.
   const unstarted = unstartedWaveStatus(parsed.value);
   if (unstarted !== null) return unstarted;
+  if (nextActionAuthority === null && lifecycleCheckpoint === null) {
+    const projected = projectedAdvisoryStatus(parsed.value, deps, runDirectory);
+    if (projected !== null) return projected;
+  }
   const readiness = deriveWaveReadiness(parsed.value, deps, nextActionAuthority, lifecycleCheckpoint);
   return readiness.ok
     ? deriveLoomStatus(readiness.value)
@@ -2228,9 +2415,6 @@ export function deriveLoomStatusFromParsedGraph(
 export function renderLoomStatusJson(status: LoomStatus): string {
   return JSON.stringify(status, null, 2);
 }
-
-/** Alias for callers that name the representation rather than its encoding. */
-export const renderLoomStatusMachine = renderLoomStatusJson;
 
 /** Versioned human renderer over the same value used by the JSON renderer. */
 export function renderLoomStatusHuman(status: LoomStatus): string {

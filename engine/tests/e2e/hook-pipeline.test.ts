@@ -14,13 +14,6 @@ import type { TaskGraph, Task, WaveGate } from "../../src/types";
  * Tests the full state machine: validate → update → wave-gate → advance
  */
 
-/** Helper: write state to file */
-function writeState(path: string, state: TaskGraph) {
-  chmodSync(path, 0o644);
-  writeFileSync(path, JSON.stringify(state, null, 2));
-  chmodSync(path, 0o444);
-}
-
 /** Helper: read state from file */
 function readState(path: string): TaskGraph {
   return JSON.parse(readFileSync(path, "utf-8")) as TaskGraph;
@@ -233,14 +226,22 @@ describe("E2E: hook pipeline state machine", () => {
   });
 
   it("wave 2 task blocked until all wave 1 deps completed", () => {
-    // Complete only T1, not T2
+    // Only T1 is implemented; T2 is never touched.
     markImplemented(statePath, "T1", true);
-    completeWaveGate(statePath, 1); // This completes all implemented tasks
+    // The gate completes every IMPLEMENTED wave-1 task and advances the wave —
+    // it does not wait for tasks that were still pending when it ran.
+    completeWaveGate(statePath, 1);
 
     const state = readState(statePath);
-    // T2 was pending when gate ran, so it stays pending
-    // But our simplified gate marks all implemented as completed
-    // Let's verify T3 is blocked if T2 isn't completed
+    expect(state.current_wave).toBe(2);
+    expect(state.tasks.find((t) => t.id === "T1")!.status).toBe("completed");
+    expect(state.tasks.find((t) => t.id === "T2")!.status).toBe("pending");
+
+    // The wave advanced and wave 1's gate reports reviews complete, so neither
+    // of those checks can block T3. Dependency completeness is the independent
+    // guard that must: T2 never completed, so T3 stays blocked.
+    expect(state.wave_gates["1"].reviews_complete).toBe(true);
+    expect(validateExecution("T3", state)).toBe("block");
   });
 });
 

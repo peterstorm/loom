@@ -441,9 +441,6 @@ export function startArchitectureDispatchProgram(
   return ok({ state, action: batch(requests) });
 }
 
-/** Alias that emphasizes parse-don't-validate construction. */
-export const parseArchitectureProgram = startArchitectureProgram;
-
 /** Parse configuration and emit the first refutation action (or an exact skip). */
 export function startRefutationProgram(
   input: RefutationProgramInput,
@@ -515,9 +512,6 @@ export function startRefutationDispatchProgram(
   };
   return ok({ state, action: batch(requests) });
 }
-
-/** Alias that emphasizes parse-don't-validate construction. */
-export const parseRefutationProgram = startRefutationProgram;
 
 /**
  * How one settled slot leaves the panel — a DISCRIMINATED UNION.
@@ -1858,7 +1852,6 @@ function replaceSlot<Result>(slots: NonEmpty<OpenSlot<Result>>, index: number, r
 }
 
 function settleAccepted<Result>(
-  panel: "architecture" | "refutation",
   roster: ExactRoster,
   slots: NonEmpty<OpenSlot<Result>>,
   result: DurableAcceptedPanelResult<Result>,
@@ -2139,7 +2132,7 @@ export function reducePersistentArchitecturePanel(state: ArchitecturePanelState,
     if (event.type === "architecture-candidate-accepted") {
       if (state.stage !== "awaiting-candidates") return persistentFailure(panelError("architecture", "unexpected-event", `candidate result is not accepted during ${state.stage}`));
       const result = durableAccepted(event.request, event.value);
-      const settled = settleAccepted("architecture", state.authority.candidateRoster, state.slots, result);
+      const settled = settleAccepted(state.authority.candidateRoster, state.slots, result);
       if (!settled.ok) return settled;
       const complete = completeSlotProgress(settled.value);
       const next = complete !== null
@@ -2175,7 +2168,7 @@ export function reducePersistentArchitecturePanel(state: ArchitecturePanelState,
     if (event.type === "architecture-judge-accepted") {
       if (state.stage !== "awaiting-judges") return persistentFailure(panelError("architecture", "unexpected-event", `judge result is not accepted during ${state.stage}`));
       const result = durableAccepted(event.request, event.value);
-      const settled = settleAccepted("architecture", state.authority.judgeRoster, state.slots, result);
+      const settled = settleAccepted(state.authority.judgeRoster, state.slots, result);
       if (!settled.ok) return settled;
       const complete = completeSlotProgress(settled.value);
       const next = complete !== null
@@ -2235,7 +2228,7 @@ export function reducePersistentRefutationPanel(state: RefutationPanelState, eve
     if (event.type === "refutation-verdict-accepted") {
       if (state.stage !== "awaiting-verdicts") return persistentFailure(panelError("refutation", "unexpected-event", `verdict is not accepted during ${state.stage}`));
       const result = durableAccepted(event.request, event.value);
-      const settled = settleAccepted("refutation", state.authority.verifierRoster, state.slots, result);
+      const settled = settleAccepted(state.authority.verifierRoster, state.slots, result);
       if (!settled.ok) return settled;
       const complete = completeSlotProgress(settled.value);
       const next = complete !== null
@@ -2406,20 +2399,6 @@ function rehydrateAccepted<T>(panel: "architecture" | "refutation", roster: Exac
     results.push(acceptedResult.value);
   }
   return persistentSuccess(Object.freeze(results));
-}
-
-export function proveArchitectureCandidateRoster(state: ArchitecturePanelState, resolver: PublicationAuthorityResolver): PersistentPanelResult<CompleteRoster<AcceptedAgentResult<ArchitectureCandidateResult>>> {
-  const accepted = rehydrateAccepted("architecture", state.authority.candidateRoster, selectAcceptedArchitectureCandidates(state), resolver);
-  if (!accepted.ok) return accepted;
-  const proven = parseCompleteRoster(resolver, state.authority.candidateRoster, accepted.value, (raw) => {
-    const record = safeRecord(raw, ["lens", "candidate", "artifact"]);
-    if (record === null || typeof record.lens !== "string" || typeof record.candidate !== "string" || typeof record.artifact !== "string" || record.artifact.length === 0) return { ok: false, error: { message: "candidate payload is malformed" } };
-    const index = state.authority.candidateLenses.indexOf(record.lens as PanelLens);
-    return index < 0 || state.authority.candidateIds[index] !== record.candidate
-      ? { ok: false, error: { message: "candidate claims do not match panel authority" } }
-      : { ok: true, value: { lens: state.authority.candidateLenses[index]!, candidate: state.authority.candidateIds[index]!, artifact: record.artifact } };
-  });
-  return proven.ok ? persistentSuccess(proven.value) : persistentFailure(panelError("architecture", "incomplete-roster", proven.error.violations.map(({ kind }) => kind).join("; ")));
 }
 
 export function proveArchitectureJudgeRoster(state: ArchitecturePanelState, resolver: PublicationAuthorityResolver): PersistentPanelResult<CompleteRoster<AcceptedAgentResult<JudgeVerdict>>> {
@@ -2726,21 +2705,6 @@ export function parsePanelPersistenceReceipt(raw: unknown, expected: Architectur
   }
   return persistentSuccess(Object.freeze({ schemaVersion: 1, kind: "panel-persistence-recorded", panel, runId: expected.runId, sequence: expected.sequence, dedupKey: expected.dedupKey }));
 }
-
-export const architecturePanelMachine = Object.freeze({
-  start: startPersistentArchitecturePanel,
-  parseEvent: parsePersistentArchitecturePanelEvent,
-  reduce: reducePersistentArchitecturePanel,
-  replay: replayPersistentArchitecturePanel,
-  parseCheckpoint: parseArchitecturePanelCheckpoint,
-});
-export const refutationPanelMachine = Object.freeze({
-  start: startPersistentRefutationPanel,
-  parseEvent: parsePersistentRefutationPanelEvent,
-  reduce: reducePersistentRefutationPanel,
-  replay: replayPersistentRefutationPanel,
-  parseCheckpoint: parseRefutationPanelCheckpoint,
-});
 
 const _architectureLensRemainsDisjoint: Exclude<PanelLens, ReviewLens> = "simplicity-first";
 const _refutationLensRemainsDisjoint: Exclude<ReviewLens, PanelLens> = "reproduction";

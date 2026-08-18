@@ -21,7 +21,7 @@ import {
   planArchitecturePanelPersistence,
   planRefutationPanelPersistence,
   reducePersistentArchitecturePanel,
-  reducePersistentRefutationPanel,
+
   refutationPanelCheckpoint,
   replayPersistentArchitecturePanel,
   replayPersistentRefutationPanel,
@@ -47,7 +47,7 @@ import {
   type PersistentRefutationPanelHistory,
   type PersistentRefutationStep,
   type RefutationPanelAuthority,
-  type RefutationPanelState,
+
   type ArchitectureEngineOperation,
   type ArchitectureProgramState,
   type HeadlessSpawnRequest,

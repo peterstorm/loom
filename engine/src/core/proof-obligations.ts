@@ -82,7 +82,6 @@ export const TRUSTED_LEDGER_ONLY_POLICY: ProofEvaluationPolicy = Object.freeze({
 export const PI_STRUCTURED_EVIDENCE_POLICY: ProofEvaluationPolicy = Object.freeze({
   untrustedPass: "accept-pi-structured",
 });
-export const DEFAULT_PROOF_POLICY = TRUSTED_LEDGER_ONLY_POLICY;
 
 /** Expected insufficiencies are values, never exceptions. */
 export type ProofFailure =
@@ -305,7 +304,7 @@ const evaluateOne = (
 export function evaluateProofObligations(
   obligations: NonEmpty<ProofObligation>,
   observed: ObservedProofEvidence,
-  policy: ProofEvaluationPolicy = DEFAULT_PROOF_POLICY,
+  policy: ProofEvaluationPolicy = TRUSTED_LEDGER_ONLY_POLICY,
 ): FailedTaskProof | SatisfiedTaskProof {
   // Do not retain caller-owned object/array aliases in the proof aggregate.
   const authoredObligations = mapNonEmpty(obligations, freezeObligation);
@@ -351,7 +350,7 @@ export function evaluateProofObligations(
 export function evaluateTaskProof(
   input: ProofObligationInput,
   observed: ObservedProofEvidence,
-  policy: ProofEvaluationPolicy = DEFAULT_PROOF_POLICY,
+  policy: ProofEvaluationPolicy = TRUSTED_LEDGER_ONLY_POLICY,
 ): FailedTaskProof | SatisfiedTaskProof {
   return evaluateProofObligations(deriveProofObligations(input), observed, policy);
 }
@@ -360,7 +359,7 @@ export function evaluateTaskProof(
 export function reevaluateTaskProof(
   proof: TaskProof,
   observed: ObservedProofEvidence,
-  policy: ProofEvaluationPolicy = DEFAULT_PROOF_POLICY,
+  policy: ProofEvaluationPolicy = TRUSTED_LEDGER_ONLY_POLICY,
 ): FailedTaskProof | SatisfiedTaskProof {
   return evaluateProofObligations(proof.obligations, observed, policy);
 }

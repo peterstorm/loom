@@ -520,14 +520,11 @@ export function writeRunFileExclusiveNoFollow(path: string, data: string): void 
 }
 
 /**
- * Write exact bytes. Raw harness transcripts and binary artifacts must survive
- * byte-for-byte, so they never pass through a string encoding on the way in.
+ * Claim one fresh immutable byte artifact without following or replacing a leaf.
+ *
+ * Raw harness transcripts and binary artifacts must survive byte-for-byte, so
+ * they never pass through a string encoding on the way in.
  */
-export function writeRunBytesNoFollow(path: string, bytes: Uint8Array): void {
-  writeAnchoredRunFile(path, bytes, false);
-}
-
-/** Claim one fresh immutable byte artifact without following or replacing a leaf. */
 export function writeRunBytesExclusiveNoFollow(path: string, bytes: Uint8Array): void {
   writeAnchoredRunFile(path, bytes, true);
 }

@@ -6,31 +6,17 @@ import {
   reduceRefutationProgram,
   startArchitectureDispatchProgram,
   startRefutationDispatchProgram,
-  type ArchitectureEngineOperation,
-  type ArchitectureProgramEvent,
   type PersistentArchitecturePanelHistory,
   type PersistentArchitectureStep,
   type PersistentRefutationPanelHistory,
   type PersistentRefutationStep,
-  type RefutationEngineOperation,
-  type RefutationProgramEvent,
 } from "../../core/panel-program";
-import { type PanelLens } from "../../core/panel-contract";
-import { type ReviewLens } from "../../core/review-panel";
 import type { PublicationAuthorityResolver } from "../../core/orchestration-contract";
-// The legacy v1 journal translation surface moved to the archive (A11): this
-// helper file keeps the byte-preserving shell entry point and re-exports the
-// archive's names so existing import sites (orchestration.ts, tests) keep
-// working. See core/legacy-archive.ts Section D for the deprecation horizon.
 import {
   translateLegacyPanelJournal,
-  LEGACY_PANEL_PROGRAM_SCHEMA_VERSION,
   PANELS,
-  type LegacyArchitecturePanelJournal,
-  type LegacyJournalTranslation,
   type LegacyPanelJournal,
   type LegacyPanelKind,
-  type LegacyRefutationPanelJournal,
 } from "../../core/legacy-archive";
 
 const USAGE = `Usage: helper panel-program <${PANELS.join("|")}> < program.json`;
@@ -79,7 +65,10 @@ export function prepareRefutationPanelPersistenceOperations(
     : planRefutationPanelPersistence(step, history, resolver);
 }
 
-// ── Legacy v1 journal translation surface (archived; re-exported for compat) ──
+// The legacy v1 journal translation surface moved to the archive (A11): this
+// helper file keeps the byte-preserving shell entry point and re-exports the
+// archive's names so existing import sites (orchestration.ts, tests) keep
+// working. See core/legacy-archive.ts Section D for the deprecation horizon.
 export {
   LEGACY_PANEL_PROGRAM_SCHEMA_VERSION,
   translateLegacyPanelJournal,

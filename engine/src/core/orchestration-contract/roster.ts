@@ -8,7 +8,7 @@ import { lowerModelProfile, parseAgentName, parseLlmProfileId, resolveAgentPolic
 import { canonicalRecord, describeUnknown, failure, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 import { includes, readDenseDataArray, readExactDataRecord, type DataBoundaryError, type DataBoundaryReason } from './bytes';
 import { AGENT_REQUIRED_SKILLS, ORCHESTRATION_PROGRAMS, parseFixedArtifactSlot, type ExactHarnessBinding, type FixedArtifactSlot, type OrchestrationProgram } from './artifacts';
-import { type SemanticPayloadDiagnostic } from './completion';
+import { type SemanticPayloadDiagnostic } from './errors';
 
 export type AgentRequestAuthority<Attempt extends SemanticAttempt = SemanticAttempt> = Readonly<{
   runId: OrchestrationRunId;

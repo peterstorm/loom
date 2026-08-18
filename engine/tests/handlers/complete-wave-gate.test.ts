@@ -1970,7 +1970,6 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
       tasks: [{ ...baseTask, findings: [advisory], critical_findings: [], advisory_findings: [advisory.claim] }],
     });
     const snapshot = authorityValue(deriveWaveReadiness(graph, statusDeps));
-    const runId = snapshot.registration.runId;
     const preparing = authorityValue(createWaveGateState(snapshot));
     const reviewing = authorityValue(reduceWaveGate(preparing, { kind: "preparation-published" }));
     const advisoryState = authorityValue(reduceWaveGate(reviewing, { kind: "complete-roster-with-advisories" }));
@@ -1980,6 +1979,58 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
     const status = deriveLoomStatus(advisoryReadiness);
     expect(status.next.action.kind).toBe("await-user");
     expect(status.next.reasons.some(({ kind }) => kind === "advisory-decision-required")).toBe(true);
+  });
+
+  /**
+   * LC-1 is now DRIVEN by the production status path, not only by the hand-wired
+   * sequence above. `deriveLoomStatusFromParsedGraph` is what `loom status`
+   * calls; before this it passed `null, null` for the lifecycle and so could
+   * only ever answer "resume the engine" once a run was in flight — including
+   * while a human decision was the one thing that could unblock the wave.
+   */
+  const advisoryGraph = (): TaskGraph => {
+    const advisory = {
+      id: "comment-analyzer-1",
+      agent: "comment-analyzer",
+      severity: "advisory" as const,
+      file: null,
+      line: null,
+      claim: "clarify wording",
+    };
+    return registeredGraph({
+      tasks: [{ ...baseTask, findings: [advisory], critical_findings: [], advisory_findings: [advisory.claim] }],
+    });
+  };
+
+  it("reports the pending advisory decision through the real status entry point", () => {
+    const graph = advisoryGraph();
+    const observation = Object.freeze({
+      kind: "present" as const,
+      runId: graph.active_wave_gate!.runId,
+      path: "/runs/registered-wave-run",
+      advisoryApproved: false,
+    });
+    const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps, null, null, observation);
+    expect(status.next.action.kind).toBe("await-user");
+    expect(status.next.reasons.some(({ kind }) => kind === "advisory-decision-required")).toBe(true);
+  });
+
+  it("stops asking once the operator's approval is observed in the run", () => {
+    const graph = advisoryGraph();
+    const observation = Object.freeze({
+      kind: "present" as const,
+      runId: graph.active_wave_gate!.runId,
+      path: "/runs/registered-wave-run",
+      advisoryApproved: true,
+    });
+    const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps, null, null, observation);
+    expect(status.next.action.kind).not.toBe("await-user");
+  });
+
+  it("treats an unobservable run directory as 'decision still required', never as approved", () => {
+    const graph = advisoryGraph();
+    const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+    expect(status.next.action.kind).toBe("await-user");
   });
 });
 

@@ -14,7 +14,7 @@ const run = `ledger-test-${process.pid}-${Date.now()}`;
 // The ledger API takes the branded SessionId — parse once at construction
 // (the run/name chars are all SessionId-legal, so the assertion never fires).
 const sid = (name: string) => ledger.parseSessionId(`${run}-${name}`)!;
-const sessions = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "never-seen"].map(sid);
+
 
 // Sweep by run prefix, NOT by a hand-maintained session list. The list rotted
 // once already: sessions added by a later test leaked `.active` files into the

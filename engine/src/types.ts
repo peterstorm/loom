@@ -45,11 +45,6 @@ export function nonEmptyMessage(s: string | undefined | null): string {
 
 /** Smart constructors — preferred over object literals so callers funnel through nonEmptyMessage. */
 export const allowResult = (): HookResult => ({ kind: "allow" });
-/** Allow the call, but tell the operator something. See `HookResult.allow`. */
-export const allowWithNotice = (systemMessage: string): HookResult => ({
-  kind: "allow",
-  systemMessage: nonEmptyMessage(systemMessage),
-});
 export const passthroughResult = (): HookResult => ({ kind: "passthrough" });
 export const errorResult = (message: string): HookResult => ({ kind: "error", message: nonEmptyMessage(message) });
 export const blockResult = (message: string): HookResult => ({ kind: "block", message: nonEmptyMessage(message) });

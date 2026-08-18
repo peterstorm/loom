@@ -155,11 +155,6 @@ export function diff(from?: string, to?: string): string {
   return exec("git diff");
 }
 
-/** Get staged diff */
-export function diffStaged(): string {
-  return exec("git diff --cached");
-}
-
 /** Diff specific files (unstaged) */
 export function diffFiles(files: string[]): string {
   if (files.length === 0) return "";
@@ -278,11 +273,4 @@ export function filterTestFiles(files: string[]): string[] {
     // Match files with test/spec suffix (e.g. foo.test.ts, bar.spec.js)
     /\.(?:test|spec)\.[jt]sx?$/.test(f)
   );
-}
-
-/** List untracked files that look like test files (directories or suffixes) */
-export function listUntrackedTestFiles(): string[] {
-  const result = exec("git ls-files --others --exclude-standard").trim();
-  if (!result) return [];
-  return filterTestFiles(result.split("\n"));
 }

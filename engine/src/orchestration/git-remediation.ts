@@ -29,7 +29,7 @@
  * and the work tree byte-for-byte unchanged.
  */
 
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   closeSync,
@@ -41,7 +41,6 @@ import {
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -54,7 +53,7 @@ import {
 } from "../core/orchestration-contract";
 import {
   isExcludedRemediationPath,
-  parseRemediationPath,
+  parseCanonicalRepositoryRelativePath,
   type FixedGitPathspecContract,
 } from "../core/remediation-machine";
 
@@ -443,7 +442,7 @@ export function readStagedPaths(
   if (!output.ok) return output;
 
   const paths = splitNul(output.value);
-  const invalid = paths.filter((path) => !parseRemediationPath(path).ok);
+  const invalid = paths.filter((path) => !parseCanonicalRepositoryRelativePath(path).ok);
   if (invalid.length > 0) {
     return failure("diff-index", `staged path is not repository-relative: ${invalid.join(", ")}`);
   }
@@ -574,15 +573,6 @@ function driftedFields(
 ): readonly string[] {
   return (["baseTreeDigest", "indexDigest", "worktreeDigest"] as const)
     .filter((field) => expected[field] !== current[field]);
-}
-
-/** True when the path exists and is a regular file — never a symlink or directory. */
-export function isRegularFile(root: string, path: string): boolean {
-  try {
-    return statSync(join(root, path)).isFile();
-  } catch {
-    return false;
-  }
 }
 
 /** Read a repository file's exact bytes, for byte-equality proofs in tests. */

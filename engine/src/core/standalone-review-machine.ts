@@ -24,7 +24,6 @@ import {
   finalizeStandaloneReview,
   fingerprintCapturedReviewerResult,
   freezeStandalonePanelAuthority as freezePanelReadAuthority,
-  isFrozenStandalonePanelAuthority,
   parseCapturedReviewerResult,
   parseFrozenStandalonePanelAuthority,
   parseStandaloneAggregate,
@@ -279,14 +278,10 @@ export function parseStandaloneRefutationCompletion(input: Readonly<{
   }
   const completed = checkpointCompleted ?? stateCompleted;
   if (completed === null) {
-    const message = replayed !== null && !replayed.ok
-      ? replayed.message
-      : resumed?.ok === true
-        ? "refutation panel has not reached completed state"
-        : resumed?.ok === false
-          ? resumed.error.message
-          : "refutation completion requires a completed T2 state or canonical checkpoint";
-    return machineFailure(message);
+    if (replayed !== null && !replayed.ok) return machineFailure(replayed.message);
+    if (resumed?.ok === true) return machineFailure("refutation panel has not reached completed state");
+    if (resumed?.ok === false) return machineFailure(resumed.error.message);
+    return machineFailure("refutation completion requires a completed T2 state or canonical checkpoint");
   }
   const completedManifestDigest = digest(refutationManifestValue(completed.authority));
   const independentlyFrozen = freezePanelReadAuthority({
@@ -1391,9 +1386,3 @@ export function parseStandaloneReviewMachineState(
   });
   return done.ok ? canonicalRecord({ ok: true as const, value: done.value }) : failure(done.error.message);
 }
-
-/** Runtime-facing adapter imported by T6/T8; this file remains the transition source of truth. */
-export const standaloneReviewMachine = Object.freeze({
-  initial: startStandaloneReviewMachine,
-  transition: reduceStandaloneReviewMachine,
-});

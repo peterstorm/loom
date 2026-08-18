@@ -67,9 +67,3 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
     },
   ];
 }
-
-/**
- * Default programmatic rules (no project config).
- * Used when loadRules is called without project config context.
- */
-export const PROGRAMMATIC_RULES: readonly ProgrammaticRule[] = createProgrammaticRules();

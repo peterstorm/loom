@@ -1,7 +1,5 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { buildStandaloneFindingBrief, type ReviewLens, type WaveFindingId } from "../../src/core/review-panel";
 import {
   auditRemediationPaths,
   compareExactPathSets,
@@ -37,50 +35,7 @@ import {
   type VerifiedIndexInstallation,
   type VerifiedTemporaryIndex,
 } from "../../src/core/remediation-machine";
-import {
-  acceptedAgentResult,
-  createAtomicInitialPublicationClaimPort,
-  createInitialBatchPublicationReconciler,
-  createInitialPublicationEffectPort,
-  createPublicationAuthorityResolver,
-  parseArtifactRef,
-  prepareInitialBatchPublicationIntent,
-  spawnBatchAction,
-  type AgentRequestAuthority,
-  type ArtifactSetPublished,
-  type BatchPublishedReceipt,
-  type DomainResult,
-  type SpawnRequest,
-} from "../../src/core/orchestration-contract";
-import {
-  aggregateStandaloneReview,
-  capturedReviewerResultFromText,
-  prepareStandaloneReview,
-  proveStandaloneRosterCompletion,
-  serializeAdjudicatedStandaloneReview,
-  type FrozenStandalonePanelAuthority,
-  type FrozenStandaloneReviewAuthority,
-  type StandaloneReviewAggregate,
-} from "../../src/core/standalone-review";
-import {
-  freezeStandaloneRefutationPanelAuthority,
-  parseAuthoritativeStandaloneReviewResult,
-  parseStandaloneRefutationCompletion,
-  reduceStandaloneReviewMachine,
-  startStandaloneReviewMachine,
-  type AuthoritativeStandaloneReviewResult,
-  type StandaloneRefutationCompletionReceipt,
-} from "../../src/core/standalone-review-machine";
-import {
-  completePersistentRefutationPanel,
-  deriveRefutationVerifierBinding,
-  panelRequestIdentity,
-  parseRefutationPanelAuthority,
-  startPersistentRefutationPanel,
-  submitRefutationVerdict,
-  type NonEmpty,
-  type RefutationPanelAuthority,
-} from "../../src/core/panel-program";
+import { serializeAdjudicatedStandaloneReview } from "../../src/core/standalone-review";
 
 import {
   digest,

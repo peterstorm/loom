@@ -56,9 +56,6 @@ export function alreadyCapturedAttempts(handle: RunDirHandle): ReadonlySet<Captu
   return captured.value;
 }
 
-/** Historical import name retained while its value is now attempt-specific. */
-export const alreadyCapturedSlots = alreadyCapturedAttempts;
-
 /**
  * Resolve the reservation a finished Agent answers for.
  *

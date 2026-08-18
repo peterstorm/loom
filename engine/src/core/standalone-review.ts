@@ -42,7 +42,6 @@ import { fail, isRecord, ok, sanitizeProse, type ParseResult } from "./panel-ker
 import { resolveReviewFindings, type ParsedFindings } from "./review-output";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
 
-export const STANDALONE_REVIEW_SCHEMA_VERSION = 1 as const;
 export const STANDALONE_REVIEW_SUBJECT = "standalone-review" as const;
 
 export const STANDALONE_REVIEWER_ROLES = Object.freeze([

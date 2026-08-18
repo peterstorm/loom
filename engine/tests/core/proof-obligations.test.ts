@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 
 import {
-  DEFAULT_PROOF_POLICY,
+  TRUSTED_LEDGER_ONLY_POLICY,
   PI_STRUCTURED_EVIDENCE_POLICY,
   derivePendingTaskProof,
   deriveProofObligations,
@@ -112,7 +112,7 @@ describe("proof evaluation", () => {
       testResult: { verdict: "untrusted", passed: true, label: "transcript-regex (fallback)", provenance: "unverified" },
     });
 
-    expect(DEFAULT_PROOF_POLICY.untrustedPass).toBe("reject");
+    expect(TRUSTED_LEDGER_ONLY_POLICY.untrustedPass).toBe("reject");
     expect(proof.state).toBe("failed");
     if (proof.state === "failed") {
       expect(proof.failures).toContainEqual({
@@ -328,7 +328,7 @@ describe("unknown-input parsers", () => {
   it("parses only explicit policies", () => {
     expect(parseProofEvaluationPolicy({ untrustedPass: "reject" })).toEqual({
       ok: true,
-      value: DEFAULT_PROOF_POLICY,
+      value: TRUSTED_LEDGER_ONLY_POLICY,
     });
     expect(parseProofEvaluationPolicy({ untrustedPass: "trust-everything" }).ok).toBe(false);
     expect(parseProofEvaluationPolicy(undefined).ok).toBe(false);

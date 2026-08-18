@@ -128,7 +128,7 @@ describe("StateManager", () => {
 
     // Run 5 concurrent updates
     await Promise.all(
-      Array.from({ length: 5 }, (_, i) =>
+      Array.from({ length: 5 }, () =>
         mgr.update((s) => ({ ...s, current_wave: (s.current_wave ?? 0) + 1 }))
       )
     );

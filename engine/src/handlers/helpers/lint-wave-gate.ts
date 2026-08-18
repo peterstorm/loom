@@ -2,7 +2,7 @@
  * Lint wave-gate helper — full-tier multi-file validation at phase boundaries.
  *
  * Reads the task graph to find `files_modified` for current wave tasks,
- * runs `lintFile(path, "full")` for each, and aggregates results.
+ * runs `lintFiles(paths, "full")` over them, and aggregates results.
  *
  * Satisfies:
  * - FR-020: Execute all rules (declarative + programmatic) at wave-gate boundaries
@@ -15,7 +15,7 @@ import { existsSync } from "node:fs";
 import type { HookHandler, HookResult, Task } from "../../types";
 import { TASK_GRAPH_PATH, DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../config";
 import { StateManager } from "../../state-manager";
-import { lintFile, lintFiles as lintFilesBatch, formatOutput, formatBlockMessage } from "../../linter/index";
+import { lintFiles as lintFilesBatch, formatOutput, formatBlockMessage } from "../../linter/index";
 import type { LintResult, LintOutput } from "../../linter/index";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 import { repositoryRoot } from "../../utils/git";

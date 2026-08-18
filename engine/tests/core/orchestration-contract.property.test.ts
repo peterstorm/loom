@@ -18,7 +18,7 @@ import {
   MAX_DIAGNOSTIC_MESSAGE_LENGTH,
   MAX_SEMANTIC_PAYLOAD_ARRAY_LENGTH,
   parseAgentRequestAuthority,
-  parseAgentRequestAuthorityForAttempt,
+
   parseStoredAgentRequestAuthority,
   parseAgentRosterSlot,
   parseArtifactByteLength,
@@ -44,7 +44,6 @@ import {
   type AcceptedAgentResult,
   type AgentRequestAuthority,
   type AgentRosterSlot,
-  type ArtifactByteLength,
   type ArtifactDigest,
   type ArtifactRef,
   type AtomicInitialPublicationClaim,
@@ -227,7 +226,6 @@ const slotId = (suffix: string): SlotId => valueOf(parseSlotId(`slot:${suffix}`)
 const contextDigest = (n: number): ContextDigest => valueOf(parseContextDigest(digest(n)));
 const artifactDigest = (n: number): ArtifactDigest => valueOf(parseArtifactDigest(digest(n)));
 const effectId = (suffix: string): EffectId => valueOf(parseEffectId(`effect:${suffix}`));
-const byteLength = (n: number): ArtifactByteLength => valueOf(parseArtifactByteLength(n));
 
 const implementationBindings = {
   pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },

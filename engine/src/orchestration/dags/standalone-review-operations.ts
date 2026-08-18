@@ -269,14 +269,3 @@ export const standaloneCriticalRouteDag: DagDef = defineDag({
   ],
   outputNodeId: ROUTE_RESULT,
 });
-
-export const STANDALONE_DAG_NODE_IDS = Object.freeze({
-  resolveScope: RESOLVE_SCOPE,
-  explicitScope: EXPLICIT_SCOPE,
-  derivedScope: DERIVED_SCOPE,
-  scopeResult: SCOPE_RESULT,
-  routeCriticals: ROUTE_CRITICALS,
-  toRefutation: TO_REFUTATION,
-  toFinalize: TO_FINALIZE,
-  routeResult: ROUTE_RESULT,
-});

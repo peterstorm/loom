@@ -77,7 +77,6 @@ import {
   parseBindingLine,
   parseReportedAgentId,
   parseEvidenceLine,
-  parseSessionId,
   resolveSoleActiveBinding,
 } from "./evidence";
 import type { Epoch, Evidence, EvidenceRecord, MachineDef } from "./types";

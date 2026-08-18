@@ -11,7 +11,6 @@ import {
   selectPanelLenses,
   serializeJudgeVerdict,
   serializeRankings,
-  type JudgeVerdict,
   type PanelManifest,
 } from "../../core/panel-contract";
 import {
@@ -52,7 +51,6 @@ export const PANEL_CONTRACT_OPERATIONS = [
   "verdict",
   "aggregate",
 ] as const;
-export type PanelContractOperation = (typeof PANEL_CONTRACT_OPERATIONS)[number];
 
 const USAGE = `Usage: helper panel-contract <${PANEL_CONTRACT_OPERATIONS.join("|")}> [--runs-root <dir> --manifest <file> --designers <N> --criterion <text>]`;
 

@@ -18,39 +18,8 @@ import { createHash } from "node:crypto";
 import { expect } from "vitest";
 import { buildStandaloneFindingBrief, type ReviewLens, type WaveFindingId } from "../../src/core/review-panel";
 import {
-  auditRemediationPaths,
-  compareExactPathSets,
   createStandaloneResultPublicationAuthorityResolver,
-  freezePathAuthority,
-  parseAuditedPathSet as parseAuditedPathSetWithAuthority,
-  parseCanonicalRepositoryRelativePath,
-  parseDirtyPathObservation,
-  parseFixedGitPathspecContract,
-  parseRemediationPathAuthority as parseRemediationPathAuthorityWithAuthority,
-  parseRemediationPathSet,
-  parseRemediationState as parseRemediationStateWithAuthority,
-  parseRepositorySnapshotWitness,
-  parseStagedTemporaryIndex as parseStagedTemporaryIndexWithAuthority,
-  parseVerifiedIndexInstallation as parseVerifiedIndexInstallationWithAuthority,
-  parseVerifiedTemporaryIndex as parseVerifiedTemporaryIndexWithAuthority,
-  prepareLiteralGitPathspec,
-  prepareVerifiedIndexInstallation,
-  recoveryReceiptFor,
-  reduceRemediation,
-  registerSupportPath,
-  stageTemporaryIndex,
-  startRemediation,
-  verifyTemporaryIndex,
-  type AuditedPathSet,
-  type FrozenPathAuthority,
-  type RegisteredPathAuthority,
-  type RemediationEvent,
-  type RemediationState,
-  type RepositorySnapshotWitness,
-  type StagedTemporaryIndex,
   type StandaloneResultPublicationAuthorityResolver,
-  type VerifiedIndexInstallation,
-  type VerifiedTemporaryIndex,
 } from "../../src/core/remediation-machine";
 import {
   acceptedAgentResult,
@@ -107,7 +76,6 @@ export function valueOf<T>(result: AnyResult<T>): T {
 }
 
 export const digest = (n: number): string => n.toString(16).padStart(64, "0").slice(-64);
-const jsonRoundTrip = <T>(value: T): unknown => JSON.parse(JSON.stringify(value));
 
 const reviewerBindings = {
   "code-reviewer": {

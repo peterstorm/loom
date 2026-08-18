@@ -4,7 +4,7 @@
  * Usage: bun cli.ts helper mark-tests-passed [--wave N]
  */
 
-import type { HookHandler, Task } from "../../types";
+import type { HookHandler } from "../../types";
 import { testResultPassed } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";

@@ -104,7 +104,7 @@ function assistantTextOf(line: string | undefined): string | null {
  * the implementations stay shared with Pi.
  */
 export {
-  alreadyCapturedSlots,
+  alreadyCapturedAttempts,
   readCorrelatorIdentity,
   readIssuedRequests,
 } from "../../orchestration/harness-capture-runtime";

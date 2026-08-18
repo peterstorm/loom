@@ -24,7 +24,7 @@ import { Task, TaskGraph } from '../../../types';
 import { anyActiveSubagent } from '../../../machine';
 import { parseSpecCheckOutput, reconcileSpecCheck } from '../../../core/spec-check';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
-import { durableRequests, exactObject, failed, parseRegisteredFacadeProgram, publicationResolver, publishInitialBatch, renderSpawnTask, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
+import { exactObject, failed, parseRegisteredFacadeProgram, publicationResolver, publishInitialBatch, renderSpawnTask, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
 import { durableCaptureRejection, durableRefutationRequests, executableRefutationRequests, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic } from './standalone';
 
 export const waveGateDeps = Object.freeze({ loadPlanModels: loadPlanModelsSource, fileExists: existsSync });

@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 
-/** Claude Code expands this token for plugin-owned markdown resources. */
-export const CLAUDE_PLUGIN_ROOT_TOKEN = "${CLAUDE_PLUGIN_ROOT}";
-
+/** Claude Code expands these tokens for plugin-owned markdown resources. */
 const CLAUDE_PLUGIN_ROOT_PATTERN = /\$\{CLAUDE_PLUGIN_ROOT\}|\$CLAUDE_PLUGIN_ROOT\b/g;
 
 /**

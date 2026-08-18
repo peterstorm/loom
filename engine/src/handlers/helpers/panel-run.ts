@@ -11,7 +11,6 @@
  */
 
 import {
-  closeSync,
   lstatSync,
   readFileSync,
   readdirSync,

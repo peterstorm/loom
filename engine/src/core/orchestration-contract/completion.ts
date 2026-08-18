@@ -5,7 +5,8 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 import { canonicalRecord, failure, success, type DomainResult, type NonEmpty, type SlotId } from './identity';
-import { MAX_SEMANTIC_PAYLOAD_ARRAY_LENGTH, causedMessage, describeThrownCause, includes, readDenseDataArray, readExactDataRecord, type DataBoundaryReason } from './bytes';
+import { type AcceptedAgentResultError, type SemanticPayloadDiagnostic, type SemanticPayloadFailureReason } from './errors';
+import { MAX_SEMANTIC_PAYLOAD_ARRAY_LENGTH, causedMessage, describeThrownCause, readDenseDataArray, readExactDataRecord } from './bytes';
 import { CompleteRosterMembership, immutableMap, isRegisteredExactRoster, parseStoredAgentRequestAuthority, sameHarnessBinding, type AgentRequestAuthority, type ExactRoster, type RosterViolation, type UnissuedResultCause } from './roster';
 import { authorityResolutionFailure, issuedSpawnRequestFor, parseIssuedSpawnRequestAgainstRegistration, parseIssuedSpawnRequestIdentity, resolveRegisteredPublicationAuthority, samePublicationIdentity, type PublicationAuthorityResolver, type RegisteredBatchPublicationAuthority, type SpawnRequest } from './publication';
 
@@ -18,25 +19,11 @@ import { authorityResolutionFailure, issuedSpawnRequestFor, parseIssuedSpawnRequ
  */
 const completeRosterCache = new WeakSet<object>();
 
-/**
- * Was `value` minted by `parseCompleteRoster`? Read-only view of the proof
- * cache, granting no way to create one.
- */
-export function isRegisteredCompleteRoster(value: unknown): boolean {
-  return typeof value === "object" && value !== null && completeRosterCache.has(value);
-}
-
 export type AcceptedAgentResult<T> = Readonly<{
   kind: "accepted-agent-result";
   authority: AgentRequestAuthority;
   issuedRequest: SpawnRequest;
   value: T;
-}>;
-
-export type AcceptedAgentResultError = Readonly<{
-  kind: "invalid-accepted-agent-result";
-  field?: string;
-  message: string;
 }>;
 
 /** Associate a payload only with a fresh canonical runtime issuance proof. */
@@ -123,25 +110,6 @@ export type SemanticPayloadParseError = Readonly<{ message: string }>;
 export type SemanticPayloadParser<T> = (
   raw: unknown,
 ) => DomainResult<T, SemanticPayloadParseError>;
-
-export type SemanticPayloadFailureReason =
-  | DataBoundaryReason
-  | "non-finite-number"
-  | "unsupported-value"
-  | "cyclic-value"
-  | "wrong-container-prototype"
-  | "parser-threw"
-  | "invalid-parser-result"
-  | "parser-rejected";
-
-export type SemanticPayloadDiagnostic = Readonly<{
-  kind: "invalid-semantic-payload";
-  phase: "parse" | "canonicalize";
-  reason: SemanticPayloadFailureReason;
-  field: string | null;
-  index: number | null;
-  message: string;
-}>;
 
 export function semanticPayloadFailure<T>(
   phase: SemanticPayloadDiagnostic["phase"],

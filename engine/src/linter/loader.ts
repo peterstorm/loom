@@ -10,7 +10,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { type RegexRule, type Rule, type Tier, type RuleSource, isRegexRule } from "./types";
 import { analyzeRegex } from "./safety";
-import { PROGRAMMATIC_RULES, createProgrammaticRules } from "./programmatic/index";
+import { createProgrammaticRules } from "./programmatic/index";
 import { loadProjectConfig } from "./programmatic/config";
 
 // --- Public API ---
