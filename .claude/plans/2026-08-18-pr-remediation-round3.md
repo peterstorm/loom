@@ -117,7 +117,7 @@ two reachable branches.
 48 advisories, dispositioned autonomously from evidence, correctness impact,
 risk and reviewed scope.
 
-### Accepted (18)
+### Accepted (19)
 
 | ID | Fix |
 |----|-----|
@@ -141,7 +141,7 @@ risk and reviewed scope.
 | `code-simplifier-27` | Delete the importer-less `isTestCommand` export and its re-export. |
 | `code-simplifier-31` | Remove the dead `!parsedMessages.ok` disjunct and the ternary arm built on it. |
 
-(19 rows: `architecture-tech-lead-10` is discharged as part of K5.)
+`architecture-tech-lead-10` is discharged as part of K5 rather than on its own.
 
 ### Dismissed (1)
 
@@ -151,7 +151,7 @@ risk and reviewed scope.
   as `hookType` with `handlerName` present. Collapsing them would change which
   argv shapes are accepted. Not a defect.
 
-### Deferred (29)
+### Deferred (28)
 
 Each needs its own design pass and a blast radius larger than a remediation
 commit should carry; none is a live-wrongness claim.
