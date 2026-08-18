@@ -6,25 +6,14 @@
  * Reads decompose JSON from stdin.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
 import { newWaveGate } from "../../types";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { validateFull, fixFull } from "./validate-task-graph";
-import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
+import { checkPlanModelBindings, productionModelBindingDeps } from "./validate-model-bindings";
 import { derivePendingTaskProof } from "../../core/proof-obligations";
-
-/** Filesystem adapter for the pure binding check; failures retain their cause. */
-const BINDING_DEPS: ModelBindingDeps = {
-  readFile: (p) => {
-    try {
-      return { ok: true, content: readFileSync(p, "utf-8") };
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
-  },
-};
 
 interface DecomposeInput {
   plan_title: string;
@@ -172,7 +161,7 @@ const handler: HookHandler = async (stdin, args) => {
   const bindings = checkPlanModelBindings(
     planFile,
     decompose.tasks as unknown as Record<string, unknown>[],
-    BINDING_DEPS,
+    productionModelBindingDeps,
   );
   if (!bindings.ok) {
     return {

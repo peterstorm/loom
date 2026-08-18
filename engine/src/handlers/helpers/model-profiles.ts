@@ -8,6 +8,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { argumentValue } from "./cli-args";
+import { parseFrontmatterFields } from "../../utils/frontmatter";
 import type { HookHandler } from "../../types";
 import {
   AGENT_POLICIES,
@@ -23,21 +25,9 @@ import { renderPiAgentDefinition } from "../../utils/render-pi-agent";
 const OPERATIONS = ["show", "agent", "validate", "render-pi"] as const;
 const USAGE = `Usage: helper model-profiles <${OPERATIONS.join("|")}> [--agent <name> --agents-dir <dir> --package-root <dir> --output <dir>]`;
 
-function arg(args: readonly string[], name: string): string | null {
-  const index = args.indexOf(name);
-  return index >= 0 && typeof args[index + 1] === "string" ? args[index + 1]! : null;
-}
 
-function frontmatter(content: string): Record<string, unknown> | null {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!match) return null;
-  const result: Record<string, unknown> = {};
-  for (const line of match[1]!.split(/\r?\n/)) {
-    const field = line.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.*?)\s*$/);
-    if (field && field[2] !== "") result[field[1]!] = field[2]!;
-  }
-  return result;
-}
+const frontmatter = (content: string): Record<string, unknown> | null =>
+  parseFrontmatterFields(content);
 
 function markdownFiles(dir: string): string[] {
   if (!existsSync(dir)) return [];
@@ -69,7 +59,7 @@ const handler: HookHandler = async (_stdin, args) => {
   }
 
   if (operation === "agent") {
-    const agent = arg(args, "--agent");
+    const agent = argumentValue(args, "--agent");
     if (!agent) return { kind: "error", message: `${USAGE}\n--agent is required` };
     const policy = resolveAgentPolicy(agent);
     const profile = resolveAgentProfile(agent);
@@ -84,7 +74,7 @@ const handler: HookHandler = async (_stdin, args) => {
     return { kind: "passthrough" };
   }
 
-  const agentsDir = arg(args, "--agents-dir") ?? join(process.cwd(), "agents");
+  const agentsDir = argumentValue(args, "--agents-dir") ?? join(process.cwd(), "agents");
   const files = markdownFiles(agentsDir);
   const expected = files.map((file) => basename(file, ".md"));
   const catalog = validateAgentPolicyCatalog(expected);
@@ -104,9 +94,9 @@ const handler: HookHandler = async (_stdin, args) => {
     return { kind: "passthrough" };
   }
 
-  const output = arg(args, "--output");
+  const output = argumentValue(args, "--output");
   if (!output) return { kind: "error", message: `${USAGE}\n--output is required for render-pi` };
-  const packageRoot = resolve(arg(args, "--package-root") ?? dirname(agentsDir));
+  const packageRoot = resolve(argumentValue(args, "--package-root") ?? dirname(agentsDir));
   mkdirSync(output, { recursive: true });
   for (const file of files) {
     const agent = basename(file, ".md");

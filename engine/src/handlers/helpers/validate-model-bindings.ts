@@ -16,6 +16,7 @@
  * own header) — so none of them can skip enforcement.
  */
 
+import { readFileSync } from "node:fs";
 import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../parsers/parse-plan-models";
 import type { ValidationResult } from "./validate-task-graph";
 
@@ -27,6 +28,22 @@ export interface ModelBindingDeps {
   /** Reads one binding artifact while preserving the concrete boundary failure. */
   readonly readFile: (path: string) => ModelFileRead;
 }
+
+/**
+ * The production filesystem adapter for the pure binding check. It lives beside
+ * the port it implements because three shell callers (populate-task-graph,
+ * repair-task-graph, validate-task-graph) each had a byte-identical private
+ * copy — three places to fix if the boundary failure shape ever changes.
+ */
+export const productionModelBindingDeps: ModelBindingDeps = {
+  readFile: (path) => {
+    try {
+      return { ok: true, content: readFileSync(path, "utf-8") };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+};
 
 function ok(): ValidationResult {
   return { ok: true };

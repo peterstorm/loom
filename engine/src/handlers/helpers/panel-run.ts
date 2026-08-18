@@ -39,10 +39,7 @@ import {
 export { ARCHITECTURE_LAYOUT, REVIEW_LAYOUT } from "../../core/panel-kernel";
 export type { RunLayout } from "../../core/panel-kernel";
 
-export function argumentValue(args: readonly string[], flag: string): string | null {
-  const index = args.indexOf(flag);
-  return index >= 0 && args[index + 1] ? args[index + 1]! : null;
-}
+export { argumentValue } from "./cli-args";
 
 export function contractError(context: string, errors: readonly string[]) {
   return {

@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync, spawnSync } from "node:child_process";
@@ -19,9 +19,8 @@ import type { TaskGraph, Task } from "../../../src/types";
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
 
 function makeTmpDir(): string {
-  const dir = join(tmpdir(), `loom-ste-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(dir, { recursive: true });
-  return dir;
+  // See set-phase.test.ts: mkdtempSync is the collision-free form.
+  return mkdtempSync(join(tmpdir(), "loom-ste-"));
 }
 
 function graphWith(task: Partial<Task>): TaskGraph {

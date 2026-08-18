@@ -170,7 +170,8 @@ export function issuePiWriteGrant(input: {
   let scopeDirs: readonly string[] | undefined;
   if (input.scopeDirs !== undefined && input.scopeDirs.length > 0) {
     const seen = new Set<string>();
-    scopeDirs = Object.freeze(input.scopeDirs.map((dir) => {
+    const accepted: string[] = [];
+    for (const dir of input.scopeDirs) {
       if (typeof dir !== "string" || dir === "") throw new Error("Pi write grant scope dirs must be non-empty strings");
       // A `..` segment lets a prompt-derived scope resolve OUTSIDE its intended
       // `.claude/specs|plans` confinement into a non-guarded sibling that the
@@ -186,10 +187,13 @@ export function issuePiWriteGrant(input: {
       if (scopeIsCwdOrAncestor(normalized, input.cwd)) {
         throw new Error(`Pi write grant scope dir ${normalized} is the spawn cwd or an ancestor; refusing scoped grant`);
       }
-      if (seen.has(normalized)) return normalized;
+      // Actually deduplicate. Both branches used to return `normalized`, so
+      // `seen` was populated and never filtered anything.
+      if (seen.has(normalized)) continue;
       seen.add(normalized);
-      return normalized;
-    }));
+      accepted.push(normalized);
+    }
+    scopeDirs = Object.freeze(accepted);
   }
   const unsigned: Omit<StoredWriteGrant, "bindingMac"> = {
     version: GRANT_VERSION,

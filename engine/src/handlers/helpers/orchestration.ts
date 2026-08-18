@@ -115,6 +115,7 @@ import {
   type RegisteredStandaloneProgram,
   type RegisteredWaveGateProgram,
 } from "./programs";
+import { argumentValue, hasFlag } from "./cli-args";
 
 const OPERATIONS = ["status", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide"] as const;
 type Operation = (typeof OPERATIONS)[number];
@@ -145,14 +146,6 @@ function usage(): HookResult {
   };
 }
 
-function flag(args: readonly string[], name: string): string | null {
-  const index = args.indexOf(`--${name}`);
-  if (index === -1) return null;
-  const value = args[index + 1];
-  return value === undefined || value.startsWith("--") ? null : value;
-}
-
-const hasFlag = (args: readonly string[], name: string): boolean => args.includes(`--${name}`);
 
 /** The real filesystem seams status reads through. */
 const productionGateDeps: GateDeps = {
@@ -203,7 +196,7 @@ function statusRunDirectoryObservation(rawGraph: unknown, args: readonly string[
       parsed.value.active_wave_gate.terminalOutcome !== null) return Object.freeze({ kind: "unverified" });
   const active = parsed.value.active_wave_gate;
   const runId = active.runId;
-  const requestedRoot = flag(args, "runs-root");
+  const requestedRoot = argumentValue(args, "--runs-root");
   const runsRoot = active.runsRoot ?? resolve(requestedRoot ?? canonicalWaveGateRunsRoot());
   if (active.runsRoot !== undefined && requestedRoot !== null && resolve(requestedRoot) !== active.runsRoot) {
     return Object.freeze({
@@ -278,7 +271,7 @@ async function statusOperation(args: readonly string[]): Promise<HookResult> {
   const observation: ActiveRunDirectoryObservation = base.kind === "present"
     ? Object.freeze({ ...base, advisoryApproved: await observedAdvisoryApproval(rawGraph, base) })
     : base;
-  const output = renderStatus(rawGraph, productionGateDeps, hasFlag(args, "json"), observation);
+  const output = renderStatus(rawGraph, productionGateDeps, hasFlag(args, "--json"), observation);
   process.stdout.write(`${output}\n`);
   return { kind: "allow" };
 }
@@ -306,8 +299,8 @@ function bindRun(
   args: readonly string[],
   bind: RunDirectoryBinder = openRunDirectory,
 ): Readonly<{ ok: true; value: RunBinding }> | HookResult {
-  const runsRoot = flag(args, "runs-root");
-  const runDirectory = flag(args, "run");
+  const runsRoot = argumentValue(args, "--runs-root");
+  const runDirectory = argumentValue(args, "--run");
   if (runsRoot === null || runDirectory === null) {
     return { kind: "error", message: "both --runs-root and --run are required" };
   }
@@ -706,11 +699,11 @@ async function startOperation(stdin: string, args: readonly string[]): Promise<H
 }
 
 async function recoverOrphanOperation(args: readonly string[]): Promise<HookResult> {
-  const runsRoot = flag(args, "runs-root");
-  const runId = flag(args, "run-id");
-  const waveRaw = flag(args, "wave");
-  const authorityDigest = flag(args, "digest");
-  const nextRunDirectory = flag(args, "new-run");
+  const runsRoot = argumentValue(args, "--runs-root");
+  const runId = argumentValue(args, "--run-id");
+  const waveRaw = argumentValue(args, "--wave");
+  const authorityDigest = argumentValue(args, "--digest");
+  const nextRunDirectory = argumentValue(args, "--new-run");
   if (runsRoot === null || runId === null || waveRaw === null || authorityDigest === null || nextRunDirectory === null) {
     return {
       kind: "error",
@@ -734,8 +727,8 @@ async function recoverOrphanOperation(args: readonly string[]): Promise<HookResu
 async function restartOperation(args: readonly string[]): Promise<HookResult> {
   const previous = bindRun(args);
   if (!isBound(previous)) return previous;
-  const runsRoot = flag(args, "runs-root");
-  const nextRunDirectory = flag(args, "new-run");
+  const runsRoot = argumentValue(args, "--runs-root");
+  const nextRunDirectory = argumentValue(args, "--new-run");
   if (runsRoot === null || nextRunDirectory === null) {
     return { kind: "error", message: "restart requires --runs-root, --run, and --new-run" };
   }
@@ -941,9 +934,9 @@ async function submitOperation(stdin: string, args: readonly string[]): Promise<
   const bound = bindRun(args);
   if (!isBound(bound)) return bound;
 
-  const requestId = flag(args, "request");
-  const slotId = flag(args, "slot");
-  const attempt = flag(args, "attempt");
+  const requestId = argumentValue(args, "--request");
+  const slotId = argumentValue(args, "--slot");
+  const attempt = argumentValue(args, "--attempt");
   if (requestId === null || slotId === null || (attempt !== "1" && attempt !== "2")) {
     return { kind: "error", message: "--request, --slot, and --attempt (1 or 2) are required" };
   }
@@ -1067,9 +1060,9 @@ async function submitOperation(stdin: string, args: readonly string[]): Promise<
 async function correlateOperation(args: readonly string[]): Promise<HookResult> {
   const bound = bindRun(args);
   if (!isBound(bound)) return bound;
-  const requestId = flag(args, "request");
-  const harness = flag(args, "harness");
-  const nativeId = flag(args, "native-id");
+  const requestId = argumentValue(args, "--request");
+  const harness = argumentValue(args, "--harness");
+  const nativeId = argumentValue(args, "--native-id");
   if (requestId === null || (harness !== "pi" && harness !== "claude") || nativeId === null) {
     return { kind: "error", message: "--request, --harness (pi or claude), and --native-id are required" };
   }
@@ -1077,7 +1070,7 @@ async function correlateOperation(args: readonly string[]): Promise<HookResult> 
   if (!issued.ok) return { kind: "error", message: issued.error.message };
   const request = issued.value.find((candidate) => candidate.requestId === requestId);
   if (request === undefined) return { kind: "error", message: `request ${requestId} was never reserved in this run` };
-  const agent = flag(args, "agent");
+  const agent = argumentValue(args, "--agent");
   if (agent === null || agent !== request.role) {
     return { kind: "error", message: `--agent must match reserved request role ${request.role}` };
   }
@@ -1246,11 +1239,11 @@ function executeDeterministicPanelOperation(
 async function completeOperation(args: readonly string[]): Promise<HookResult> {
   const bound = bindRun(args);
   if (!isBound(bound)) return bound;
-  const operationId = flag(args, "operation");
+  const operationId = argumentValue(args, "--operation");
   if (operationId === null) {
     return { kind: "error", message: "--operation is required" };
   }
-  if (flag(args, "outcome") !== null || flag(args, "error") !== null) {
+  if (argumentValue(args, "--outcome") !== null || argumentValue(args, "--error") !== null) {
     return { kind: "error", message: "deterministic engine operations do not accept caller-attested outcomes" };
   }
   const stored = bound.value.handle.readProgramRegistration();
@@ -1293,7 +1286,7 @@ async function decideOperation(stdin: string, args: readonly string[]): Promise<
     return { kind: "error", message: "this registered program does not accept user decisions" };
   }
 
-  const decisionId = flag(args, "request");
+  const decisionId = argumentValue(args, "--request");
   if (decisionId === null) return { kind: "error", message: "--request <decision-id> is required" };
   if (facadeRegistration?.kind === "wave-gate") {
     let graphRaw: unknown;

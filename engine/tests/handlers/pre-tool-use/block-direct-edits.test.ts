@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { mkdirSync, rmSync, writeFileSync, symlinkSync, mkdtempSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, symlinkSync, mkdtempSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -25,6 +25,12 @@ import { SUBAGENT_DIR, TASK_GRAPH_PATH, pathExistsFailClosed } from "../../../sr
 import { parseSessionId } from "../../../src/machine/evidence";
 
 const orchestrating = () => true;
+
+/** chmod 0o000 denies nothing to root; skip the EACCES case there instead of
+ *  asserting a permission the OS is not enforcing. */
+function readableAsRoot(path: string): boolean {
+  try { readFileSync(path); return true; } catch { return false; }
+}
 const s = `block-direct-${process.pid}-${Date.now()}`;
 // A session that never gets an .active file — used by the default-probe test
 // so a leftover active-file fixture from earlier cases cannot mask the gate.
@@ -249,5 +255,78 @@ describe("shouldBlockDirectEdit — default task-graph probe fails CLOSED (round
     const viaDefault = shouldBlockDirectEdit("Edit", sNoActive);
     const viaFailClosed = shouldBlockDirectEdit("Edit", sNoActive, () => pathExistsFailClosed(TASK_GRAPH_PATH));
     expect(viaDefault.kind).toBe(viaFailClosed.kind);
+  });
+});
+
+describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () => {
+  /**
+   * The probe's own comment promises the failure is ANNOUNCED rather than
+   * swallowed: "silence here would make a permissions or race problem
+   * indistinguishable from 'no subagent active'". The ELOOP case for the
+   * sibling `pathExistsFailClosed` was pinned; this branch was not, so the
+   * promise rested on reading the code.
+   *
+   * Reached through a REAL failure — a roster file that exists and is
+   * non-empty but cannot be read — rather than by stubbing `readActiveAgentRoles`,
+   * so the test proves the adapter converts what the filesystem actually throws.
+   */
+  const dirs: string[] = [];
+  const originalSubagentDir = process.env.LOOM_SUBAGENT_DIR;
+
+  afterAll(() => {
+    if (originalSubagentDir === undefined) delete process.env.LOOM_SUBAGENT_DIR;
+    else process.env.LOOM_SUBAGENT_DIR = originalSubagentDir;
+    for (const dir of dirs) {
+      try { chmodSync(dir, 0o700); } catch { /* best effort before removal */ }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an unreadable roster file returns null AND announces the cause on stderr", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loom-roster-eacces-"));
+    dirs.push(dir);
+    process.env.LOOM_SUBAGENT_DIR = dir;
+    const session = parseSessionId(`roster-eacces-${process.pid}`)!;
+    const active = join(dir, `${session}.active`);
+    writeFileSync(active, "agent-1\tcode-reviewer\n");
+    chmodSync(active, 0o000);
+    if (readableAsRoot(active)) return; // running as root: the mode is not enforced
+
+    const written: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    try {
+      expect(activeRosterProbe(session)).toBeNull();
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(written.join("")).toContain("block-direct-edits: cannot check");
+    expect(written.join("")).toContain("falling through to block");
+  });
+
+  it("null from the probe makes the gate fail CLOSED", () => {
+    const session = parseSessionId(`roster-null-${process.pid}`)!;
+    expect(shouldBlockDirectEdit("Edit", session, orchestrating, () => null).kind).toBe("block");
+  });
+
+  it("an absent roster file answers null without entering the catch (no diagnostic)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loom-roster-absent-"));
+    dirs.push(dir);
+    process.env.LOOM_SUBAGENT_DIR = dir;
+    const session = parseSessionId(`roster-absent-${process.pid}`)!;
+
+    const written: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    try {
+      expect(activeRosterProbe(session)).toBeNull();
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(written.join("")).toBe("");
   });
 });

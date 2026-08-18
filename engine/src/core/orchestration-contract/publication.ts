@@ -563,22 +563,64 @@ export function boundaryField(prefix: string, error: DataBoundaryError): string 
   return error.field === null ? prefix : `${prefix}.${error.field}`;
 }
 
-export function parseInitialPublicationEffectResult(
+/**
+ * The ok/value/error envelope every external publication port returns.
+ *
+ * Three parsers — the initial publication effect, the initial publication
+ * claim, and the registration loader — each re-implemented this same four-step
+ * shape check (exact ok/value/error keys, a boolean tag, and exactly-two-keys
+ * on whichever branch the tag selects). One of them getting a step wrong is a
+ * fail-OPEN in a boundary whose entire job is to refuse malformed input, and
+ * nothing tied the three copies together.
+ *
+ * This classifies the envelope only. What each branch's payload must contain,
+ * which error kinds are legal, and which failure type to build stay with the
+ * caller — they genuinely differ.
+ *
+ * The violation carries `field` and a `kind` so each caller reproduces its own
+ * exact diagnostic: the registration loader deliberately reports its
+ * success-shape violation WITHOUT a field, where the other two name the prefix.
+ */
+type ResultEnvelope =
+  | Readonly<{ branch: "failed"; error: unknown }>
+  | Readonly<{ branch: "succeeded"; value: unknown }>;
+
+type EnvelopeViolation = Readonly<{
+  kind: "unreadable" | "invalid-tag" | "failure-shape" | "success-shape";
+  message: string;
+  field: string;
+}>;
+
+function readResultEnvelope(
   raw: unknown,
-): DomainResult<readonly number[], ExternalActionError> {
-  const result = readExactDataRecord(raw, ["ok", "value", "error"], "initial publication effect result");
+  noun: string,
+  prefix: string,
+): DomainResult<ResultEnvelope, EnvelopeViolation> {
+  const result = readExactDataRecord(raw, ["ok", "value", "error"], `${noun} result`);
   if (!result.ok) {
-    return actionFailure(result.error.message, boundaryField("publicationEffect", result.error));
+    return failure({ kind: "unreadable", message: result.error.message, field: boundaryField(prefix, result.error) });
   }
   if (typeof result.value.ok !== "boolean") {
-    return actionFailure("initial publication effect returned an invalid result tag", "publicationEffect.ok");
+    return failure({ kind: "invalid-tag", message: `${noun} returned an invalid result tag`, field: `${prefix}.ok` });
   }
   const keys = Object.keys(result.value);
   if (result.value.ok === false) {
-    if (keys.length !== 2 || !keys.includes("error")) {
-      return actionFailure("failed initial publication effect must contain exactly ok and error", "publicationEffect");
-    }
-    const error = readExactDataRecord(result.value.error, ["kind", "message"], "initial publication effect error");
+    return keys.length === 2 && keys.includes("error")
+      ? success(canonicalRecord({ branch: "failed" as const, error: result.value.error }))
+      : failure({ kind: "failure-shape", message: `failed ${noun} must contain exactly ok and error`, field: prefix });
+  }
+  return keys.length === 2 && keys.includes("value")
+    ? success(canonicalRecord({ branch: "succeeded" as const, value: result.value.value }))
+    : failure({ kind: "success-shape", message: `successful ${noun} must contain exactly ok and value`, field: prefix });
+}
+
+export function parseInitialPublicationEffectResult(
+  raw: unknown,
+): DomainResult<readonly number[], ExternalActionError> {
+  const envelope = readResultEnvelope(raw, "initial publication effect", "publicationEffect");
+  if (!envelope.ok) return actionFailure(envelope.error.message, envelope.error.field);
+  if (envelope.value.branch === "failed") {
+    const error = readExactDataRecord(envelope.value.error, ["kind", "message"], "initial publication effect error");
     if (!error.ok) {
       return actionFailure(error.error.message, boundaryField("publicationEffect.error", error.error));
     }
@@ -590,11 +632,8 @@ export function parseInitialPublicationEffectResult(
     }
     return actionFailure(error.value.message, "publicationEffect.error.message");
   }
-  if (keys.length !== 2 || !keys.includes("value")) {
-    return actionFailure("successful initial publication effect must contain exactly ok and value", "publicationEffect");
-  }
   const bytes = readDenseDataArray(
-    result.value.value,
+    envelope.value.value,
     "initial publication receipt bytes",
     MAX_PUBLICATION_REGISTRATION_BYTES,
   );
@@ -675,19 +714,10 @@ export function parseInitialPublicationClaimKey(
 export function parseInitialPublicationClaimResult(
   raw: unknown,
 ): DomainResult<InitialPublicationClaimOutcome, ExternalActionError> {
-  const result = readExactDataRecord(raw, ["ok", "value", "error"], "initial publication claim result");
-  if (!result.ok) {
-    return actionFailure(result.error.message, boundaryField("publicationClaim", result.error));
-  }
-  if (typeof result.value.ok !== "boolean") {
-    return actionFailure("initial publication claim returned an invalid result tag", "publicationClaim.ok");
-  }
-  const keys = Object.keys(result.value);
-  if (result.value.ok === false) {
-    if (keys.length !== 2 || !keys.includes("error")) {
-      return actionFailure("failed initial publication claim must contain exactly ok and error", "publicationClaim");
-    }
-    const error = readExactDataRecord(result.value.error, ["kind", "message"], "initial publication claim error");
+  const envelope = readResultEnvelope(raw, "initial publication claim", "publicationClaim");
+  if (!envelope.ok) return actionFailure(envelope.error.message, envelope.error.field);
+  if (envelope.value.branch === "failed") {
+    const error = readExactDataRecord(envelope.value.error, ["kind", "message"], "initial publication claim error");
     if (!error.ok) {
       return actionFailure(error.error.message, boundaryField("publicationClaim.error", error.error));
     }
@@ -699,24 +729,22 @@ export function parseInitialPublicationClaimResult(
     }
     return actionFailure(error.value.message, "publicationClaim.error.message");
   }
-  if (keys.length !== 2 || !keys.includes("value")) {
-    return actionFailure("successful initial publication claim must contain exactly ok and value", "publicationClaim");
-  }
-  const envelope = readExactDataRecord(
-    result.value.value,
+  const claimed = envelope.value.value;
+  const outcomeShape = readExactDataRecord(
+    claimed,
     ["schemaVersion", "kind", "key", "identity", "requestedIdentity", "claimedIdentity"],
     "initial publication claim outcome",
   );
-  if (!envelope.ok || envelope.value.schemaVersion !== 1) {
+  if (!outcomeShape.ok || outcomeShape.value.schemaVersion !== 1) {
     return actionFailure(
-      envelope.ok ? "initial publication claim outcome schemaVersion is invalid" : envelope.error.message,
+      outcomeShape.ok ? "initial publication claim outcome schemaVersion is invalid" : outcomeShape.error.message,
       "publicationClaim",
     );
   }
-  const kind = envelope.value.kind;
+  const kind = outcomeShape.value.kind;
   if (kind === "initial-publication-claimed" || kind === "initial-publication-matching-replay") {
     const outcome = readExactDataRecord(
-      result.value.value,
+      claimed,
       ["schemaVersion", "kind", "key", "identity"],
       "initial publication claim outcome",
     );
@@ -729,7 +757,7 @@ export function parseInitialPublicationClaimResult(
   }
   if (kind === "initial-publication-conflict") {
     const outcome = readExactDataRecord(
-      result.value.value,
+      claimed,
       ["schemaVersion", "kind", "key", "requestedIdentity", "claimedIdentity"],
       "initial publication claim conflict",
     );
@@ -920,29 +948,17 @@ export function parseBatchPublicationIdentity(
 export function parseRegistrationLoaderResult(
   raw: unknown,
 ): DomainResult<readonly number[], PublicationAuthorityResolutionError> {
-  const loaded = readExactDataRecord(raw, ["ok", "value", "error"], "publication registration loader result");
-  if (!loaded.ok) {
-    return failure(publicationResolutionFailure(
-      loaded.error.message,
-      boundaryField("publicationRegistrationLoader", loaded.error),
-    ));
+  const envelope = readResultEnvelope(raw, "publication registration loader", "publicationRegistrationLoader");
+  if (!envelope.ok) {
+    // The success-shape violation is reported WITHOUT a field, as it always
+    // was here; every other violation names the field the classifier derived.
+    return failure(envelope.error.kind === "success-shape"
+      ? publicationResolutionFailure(envelope.error.message)
+      : publicationResolutionFailure(envelope.error.message, envelope.error.field));
   }
-  if (typeof loaded.value.ok !== "boolean") {
-    return failure(publicationResolutionFailure(
-      "publication registration loader returned an invalid result tag",
-      "publicationRegistrationLoader.ok",
-    ));
-  }
-  const keys = Object.keys(loaded.value);
-  if (loaded.value.ok === false) {
-    if (keys.length !== 2 || !keys.includes("error")) {
-      return failure(publicationResolutionFailure(
-        "failed publication registration load must contain exactly ok and error",
-        "publicationRegistrationLoader",
-      ));
-    }
+  if (envelope.value.branch === "failed") {
     const loaderError = readExactDataRecord(
-      loaded.value.error,
+      envelope.value.error,
       ["kind", "field", "message"],
       "publication registration loader error",
     );
@@ -978,13 +994,8 @@ export function parseRegistrationLoaderResult(
         : "publicationRegistrationLoader.error.message",
     ));
   }
-  if (keys.length !== 2 || !keys.includes("value")) {
-    return failure(publicationResolutionFailure(
-      "successful publication registration load must contain exactly ok and value",
-    ));
-  }
   const bytes = readDenseDataArray(
-    loaded.value.value,
+    envelope.value.value,
     "publication registration bytes",
     MAX_PUBLICATION_REGISTRATION_BYTES,
   );

@@ -314,6 +314,61 @@ export interface AppliedStopResolution {
 }
 
 /**
+ * Install one resolved task and reset its wave gate — the ONE transition both
+ * harnesses make when an implementation child stops.
+ *
+ * It was written twice: once on the Claude-side path and once in pi's Stop
+ * mirror, whose own comment called itself "Mirror of the Claude-side reset
+ * above". Only convention kept the copies equal, and they encode a rule that
+ * must not drift — a code change invalidates the task's review AND drops the
+ * evidence the wave gate would otherwise read as green: `tests_passed` and
+ * `reviews_complete` reset, and `blocked` clears only when the cause it
+ * tracks (this wave's critical spec-check record, dropped here) goes with it.
+ * Leaving `blocked: true` behind used to print "BLOCKED due to:" with no
+ * listed reason.
+ *
+ * The two callers differ ONLY in which fields they write onto the task, so
+ * that is the one thing passed in.
+ */
+function applyResolvedTask(
+  s: TaskGraph,
+  taskId: string,
+  wave: number,
+  codeChanged: boolean,
+  clearedExecuting: readonly string[],
+  resolveTask: (task: Task) => Task,
+): TaskGraph {
+  const resolved: TaskGraph = {
+    ...s,
+    tasks: s.tasks.map((t) => {
+      if (t.id !== taskId) return t;
+      const updated = resolveTask(t);
+      return codeChanged ? invalidateTaskReview(updated) : updated;
+    }),
+    executing_tasks: [...clearedExecuting],
+  };
+  const specCheckCleared = codeChanged && resolved.spec_check?.wave === wave;
+  return {
+    ...resolved,
+    ...(specCheckCleared ? { spec_check: undefined } : {}),
+    wave_gates: {
+      ...resolved.wave_gates,
+      [String(wave)]: {
+        ...(resolved.wave_gates[String(wave)] ?? newWaveGate()),
+        impl_complete: isWaveComplete(resolved, wave),
+        ...(codeChanged
+          ? {
+              tests_passed: null,
+              reviews_complete: false,
+              ...(specCheckCleared ? { blocked: false } : {}),
+            }
+          : {}),
+      },
+    },
+  };
+}
+
+/**
  * The verdict-resolution decision for an UNTRUSTED Stop-handler resolution,
  * meant to run INSIDE the locked state update (pi/extension.ts's Stop
  * handler): a pre-lock snapshot can be outdated by a concurrent writer
@@ -364,53 +419,18 @@ export function applyUntrustedStopResolution(
     },
     proofPolicy,
   );
-  const resolved: TaskGraph = {
-    ...s,
-    tasks: s.tasks.map((t) => {
-      if (t.id !== taskId) return t;
-      const updated: Task = {
-        ...t,
-        status: proof.state === "satisfied" ? "implemented" : "pending",
-        proof,
-        test_result: proofTestResult,
-        test_evidence: preserveExistingTrusted ? t.test_evidence : resolution.testEvidence,
-        files_modified: cumulativeFiles,
-        new_tests_written: currentNewTests.written,
-        new_test_evidence: currentNewTests.evidence,
-      };
-      return codeChanged ? invalidateTaskReview(updated) : updated;
-    }),
-    executing_tasks: clearedExecuting,
-  };
-  const wave = target.wave;
   return {
     skipped: false,
-    state: {
-      ...resolved,
-      ...(codeChanged && resolved.spec_check?.wave === wave ? { spec_check: undefined } : {}),
-      wave_gates: {
-        ...resolved.wave_gates,
-        [String(wave)]: {
-          ...(resolved.wave_gates[String(wave)] ?? newWaveGate()),
-          impl_complete: isWaveComplete(resolved, wave),
-          ...(codeChanged
-            ? {
-                tests_passed: null,
-                reviews_complete: false,
-                // A code change clears the only two blocked causes that can
-                // outlive their evidence: the wave's critical spec-check (the
-                // record is dropped below) and review status (invalidateTaskReview
-                // re-opens the review above). Leaving `blocked: true` here used
-                // to print "BLOCKED due to:" with no listed reason and withhold
-                // terminal status until an unrelated later pass — the flag now
-                // tracks its causes, exactly like the load boundary's
-                // cross-field proof.
-                ...(resolved.spec_check?.wave === wave ? { blocked: false } : {}),
-              }
-            : {}),
-        },
-      },
-    },
+    state: applyResolvedTask(s, taskId, target.wave, codeChanged, clearedExecuting, (t) => ({
+      ...t,
+      status: proof.state === "satisfied" ? "implemented" : "pending",
+      proof,
+      test_result: proofTestResult,
+      test_evidence: preserveExistingTrusted ? t.test_evidence : resolution.testEvidence,
+      files_modified: cumulativeFiles,
+      new_tests_written: currentNewTests.written,
+      new_test_evidence: currentNewTests.evidence,
+    })),
   };
 }
 
@@ -831,9 +851,13 @@ export const runUpdateTaskStatus = async (
       },
       TRUSTED_LEDGER_ONLY_POLICY,
     );
-    const updatedTasks = s.tasks.map((t) => {
-      if (t.id !== taskId) return t;
-      const updated: Task = {
+    return applyResolvedTask(
+      s,
+      taskId,
+      target.wave,
+      codeChanged,
+      (s.executing_tasks ?? []).filter((id) => id !== taskId),
+      (t) => ({
         ...t,
         status: proof.state === "satisfied" ? "implemented" : "pending",
         proof,
@@ -842,38 +866,8 @@ export const runUpdateTaskStatus = async (
         files_modified: cumulativeFiles,
         new_tests_written: currentNewTestEvidence.written,
         new_test_evidence: currentNewTestEvidence.evidence,
-      };
-      return codeChanged ? invalidateTaskReview(updated) : updated;
-    });
-
-    const resolved: TaskGraph = {
-      ...s,
-      tasks: updatedTasks,
-      executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
-    };
-    const wave = target.wave;
-    return {
-      ...resolved,
-      ...(codeChanged && resolved.spec_check?.wave === wave ? { spec_check: undefined } : {}),
-      wave_gates: {
-        ...resolved.wave_gates,
-        [String(wave)]: {
-          ...(resolved.wave_gates[String(wave)] ?? newWaveGate()),
-          impl_complete: isWaveComplete(resolved, wave),
-          ...(codeChanged
-            ? {
-                tests_passed: null,
-                reviews_complete: false,
-                // Mirror of the Claude-side reset above: a code change drops
-                // the wave's critical spec-check record, and the blocked flag
-                // must not outlive its cause (see the note on the sibling
-                // reset path).
-                ...(resolved.spec_check?.wave === wave ? { blocked: false } : {}),
-              }
-            : {}),
-        },
-      },
-    };
+      }),
+    );
   });
 
   if (skippedExistingVerdict) {

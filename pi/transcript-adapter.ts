@@ -237,28 +237,41 @@ export interface PiStructuredTestDiagnostics {
   readonly verdict: "structured" | "relaxed" | "no-test-command" | "exit-not-attributable" | "strict-summary-refused" | "no-paired-result";
 }
 
-export function piStructuredTestDiagnostics(
-  input: unknown,
-): PiTranscriptResult<PiStructuredTestDiagnostics> {
-  const parsed = parsePiMessages(input);
-  if (!parsed.ok) return parsed;
+/**
+ * One walk over Pi's messages that pairs each classified test toolCall with
+ * its toolResult and attributes an exit code to it.
+ *
+ * `piStructuredTestDiagnostics` and `piStructuredTestResult` each carried a
+ * private copy of this walk — the same toolCall map keyed by tool-call id, the
+ * same `attributeExitForStructuredEvidence` pairing, the same text join. They
+ * are supposed to explain the SAME evidence, one as a verdict and one as a
+ * diagnosis, so a divergence between the copies would make the diagnosis
+ * describe a run the verdict never saw.
+ *
+ * Emitted as events rather than a return value because the two consumers
+ * accumulate different things: the diagnostic counts classifications and
+ * refusals, the verdict only cares about paired results.
+ */
+type TestPairEvent =
+  | Readonly<{ kind: "classified"; command: string }>
+  | Readonly<{ kind: "attribution-refused" }>
+  | Readonly<{
+      kind: "paired";
+      attributed: ReturnType<typeof attributeExitForStructuredEvidence>;
+      text: string;
+    }>;
+
+function* structuredTestPairs(messages: readonly PiMessage[]): Generator<TestPairEvent> {
   const testCalls = new Map<string, Readonly<{ command: string; classified: ClassifiedTestCommand }>>();
-  let classifiedCommands: string[] = [];
-  let attributedPairs = 0;
-  let verdict: PiStructuredTestDiagnostics["verdict"] = "no-test-command";
-  let sawClassified = false;
-  let sawAttributionRefusal = false;
-  for (const message of parsed.value) {
+  for (const message of messages) {
     if (message.role === "assistant") {
       for (const block of message.content ?? []) {
         if (block.type !== "toolCall" || block.name?.toLowerCase() !== "bash" || !block.id) continue;
         const command = typeof block.arguments?.command === "string" ? block.arguments.command : "";
         const classified = classifyTestCommandDetailed(command);
-        if (classified !== null) {
-          sawClassified = true;
-          testCalls.set(block.id, { command, classified });
-          if (!classifiedCommands.includes(command)) classifiedCommands.push(command);
-        }
+        if (classified === null) continue;
+        testCalls.set(block.id, { command, classified });
+        yield { kind: "classified", command };
       }
       continue;
     }
@@ -271,24 +284,48 @@ export function piStructuredTestDiagnostics(
       entry.command,
     );
     if (attributed.attributed === null) {
-      sawAttributionRefusal = true;
+      yield { kind: "attribution-refused" };
       continue;
     }
-    attributedPairs++;
     const text = (message.content ?? [])
       .filter((block) => block.type === "text")
       .map((block) => block.text ?? "")
       .join("\n");
-    const evidence = extractTestEvidence(text);
+    yield { kind: "paired", attributed, text };
+  }
+}
+
+export function piStructuredTestDiagnostics(
+  input: unknown,
+): PiTranscriptResult<PiStructuredTestDiagnostics> {
+  const parsed = parsePiMessages(input);
+  if (!parsed.ok) return parsed;
+  const classifiedCommands: string[] = [];
+  let attributedPairs = 0;
+  let verdict: PiStructuredTestDiagnostics["verdict"] = "no-test-command";
+  let sawClassified = false;
+  let sawAttributionRefusal = false;
+  for (const event of structuredTestPairs(parsed.value)) {
+    if (event.kind === "classified") {
+      sawClassified = true;
+      if (!classifiedCommands.includes(event.command)) classifiedCommands.push(event.command);
+      continue;
+    }
+    if (event.kind === "attribution-refused") {
+      sawAttributionRefusal = true;
+      continue;
+    }
+    attributedPairs++;
+    const evidence = extractTestEvidence(event.text);
     if (!evidence.passed) {
       verdict = "structured"; // a genuine structured FAIL also resolves the trace
       continue;
     }
-    if (attributed.relaxed && !ZERO_FAILURE_MARKER.test(text)) {
+    if (event.attributed.relaxed && !ZERO_FAILURE_MARKER.test(event.text)) {
       verdict = "strict-summary-refused";
       continue;
     }
-    verdict = attributed.relaxed ? "relaxed" : "structured";
+    verdict = event.attributed.relaxed ? "relaxed" : "structured";
   }
   return {
     ok: true,
@@ -311,38 +348,16 @@ export function piStructuredTestResult(
 ): PiTranscriptResult<{ passed: boolean; evidence: string } | null> {
   const parsed = parsePiMessages(input);
   if (!parsed.ok) return parsed;
-  const testCalls = new Map<string, Readonly<{ command: string; classified: ClassifiedTestCommand }>>();
   let latest: { passed: boolean; evidence: string } | null = null;
-  for (const message of parsed.value) {
-    if (message.role === "assistant") {
-      for (const block of message.content ?? []) {
-        if (block.type !== "toolCall" || block.name?.toLowerCase() !== "bash" || !block.id) continue;
-        const command = typeof block.arguments?.command === "string" ? block.arguments.command : "";
-        const classified = classifyTestCommandDetailed(command);
-        if (classified !== null) testCalls.set(block.id, { command, classified });
-      }
-      continue;
-    }
-    if (message.role !== "toolResult" || !message.toolCallId) continue;
-    const entry = testCalls.get(message.toolCallId);
-    if (entry === undefined) continue;
-    const attributed = attributeExitForStructuredEvidence(
-      message.isError === true ? 1 : 0,
-      entry.classified,
-      entry.command,
-    );
-    if (attributed.attributed === null) continue;
-    const text = (message.content ?? [])
-      .filter((block) => block.type === "text")
-      .map((block) => block.text ?? "")
-      .join("\n");
-    const parsedEvidence = extractTestEvidence(text);
+  for (const event of structuredTestPairs(parsed.value)) {
+    if (event.kind !== "paired") continue;
+    const parsedEvidence = extractTestEvidence(event.text);
     // A relaxed (non-attributable) composition may only mint a GREEN verdict
     // when the output still carries the runner's explicit zero-failure line;
     // a structured FAIL is always taken (the gate rejects it either way).
-    if (parsedEvidence.passed && attributed.relaxed && !ZERO_FAILURE_MARKER.test(text)) continue;
+    if (parsedEvidence.passed && event.attributed.relaxed && !ZERO_FAILURE_MARKER.test(event.text)) continue;
     latest = {
-      passed: attributed.attributed === 0 && parsedEvidence.passed,
+      passed: event.attributed.attributed === 0 && parsedEvidence.passed,
       evidence: parsedEvidence.evidence,
     };
   }

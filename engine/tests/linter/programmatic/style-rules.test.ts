@@ -308,3 +308,107 @@ describe("exhaustive-discriminant-branching — chain vs standalone guards", () 
     expect(exhaustive(source, "engine/src/core/example.ts")).toHaveLength(1);
   });
 });
+
+/**
+ * `branchBody`'s condition scan, and the limits of `discriminantOf` around it
+ * (round-41 A3).
+ *
+ * `branchBody`'s doc comment claims it "scans with paren depth and skips quoted
+ * text, so neither a `)` inside a string literal nor a nested call ends the
+ * condition early" — a claim no test exercised. Where the condition ends decides
+ * whether a branch has a same-line exit, which is the evidence that separates a
+ * real switch from a row of sibling guards.
+ *
+ * The quoted-text cases are written so the verdict FLIPS if quote skipping
+ * regresses: the literal holds a `)` with an exit keyword AFTER it, so a scan
+ * that stopped at the literal's paren would read "return" out of the string and
+ * invent chain evidence that is not there.
+ */
+describe("exhaustive-discriminant-branching — condition scanning", () => {
+  const FILE_UNDER_TEST = "engine/src/core/example.ts";
+
+  it("does not read an exit keyword out of a double-quoted literal holding a paren", () => {
+    // Correct scan: the condition closes at the REAL paren, so each body is
+    // ` apply();` — no exit, no chain evidence, no violation. A scan that
+    // stopped at the literal's `)` would see `return") apply();` and flag.
+    const source = [
+      `function f(mode) {`,
+      `  if (mode.kind === "a)return") apply();`,
+      `  if (mode.kind === "b)return") defer();`,
+      `  if (mode.kind === "c)return") run();`,
+      `}`,
+    ].join("\n");
+    expect(exhaustive(source, FILE_UNDER_TEST)).toEqual([]);
+  });
+
+  it("does the same for a single-quoted literal", () => {
+    const source = [
+      `function f(mode) {`,
+      `  if (mode.kind === 'a)return') apply();`,
+      `  if (mode.kind === 'b)return') defer();`,
+      `  if (mode.kind === 'c)return') run();`,
+      `}`,
+    ].join("\n");
+    expect(exhaustive(source, FILE_UNDER_TEST)).toEqual([]);
+  });
+
+  it("a same-line body after a nested call in the condition is still found", () => {
+    // `allow(x)`'s closing paren is not the condition's: depth tracking has to
+    // carry past it for ` return 1;` to read as the branch body.
+    const source = [
+      `function classify(x) {`,
+      `  if (x.kind === "a" && allow(x)) return 1;`,
+      `  if (x.kind === "b" && allow(x)) return 2;`,
+      `  if (x.kind === "c" && allow(x)) return 3;`,
+      `}`,
+    ].join("\n");
+    expect(exhaustive(source, FILE_UNDER_TEST)).toHaveLength(1);
+  });
+
+  it("a multi-line condition has no same-line body, so the run is not a chain", () => {
+    // The condition never closes on its own line — `branchBody` returns "" and
+    // the branch cannot contribute a same-line exit.
+    const source = [
+      `function classify(x) {`,
+      `  if (`,
+      `    x.kind === "a"`,
+      `  ) return 1;`,
+      `  if (`,
+      `    x.kind === "b"`,
+      `  ) return 2;`,
+      `  if (`,
+      `    x.kind === "c"`,
+      `  ) return 3;`,
+      `}`,
+    ].join("\n");
+    expect(exhaustive(source, FILE_UNDER_TEST)).toHaveLength(0);
+  });
+
+  /**
+   * Documented LIMITS of `discriminantOf`, which gates every case above: it
+   * recognises only `<expr>.<tag> === "quoted-literal"`. Both shapes here are
+   * deliberately invisible to the rule, and pinning them keeps a future
+   * "improvement" to that pattern from silently changing what the rule reports.
+   */
+  it("does not recognise a template-literal discriminant", () => {
+    const source = [
+      `function classify(x) {`,
+      "  if (x.kind === `a`) return 1;",
+      "  if (x.kind === `b`) return 2;",
+      "  if (x.kind === `c`) return 3;",
+      `}`,
+    ].join("\n");
+    expect(exhaustive(source, FILE_UNDER_TEST)).toEqual([]);
+  });
+
+  it("does not recognise a discriminant read through a call", () => {
+    const source = [
+      `function classify(x) {`,
+      `  if (normalize(x.kind).trim() === "a") return 1;`,
+      `  if (normalize(x.kind).trim() === "b") return 2;`,
+      `  if (normalize(x.kind).trim() === "c") return 3;`,
+      `}`,
+    ].join("\n");
+    expect(exhaustive(source, FILE_UNDER_TEST)).toEqual([]);
+  });
+});

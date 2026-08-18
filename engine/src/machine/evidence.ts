@@ -60,9 +60,18 @@ export type GrantedAgentId = AgentId & { readonly [GRANTED_AGENT_ID]: true };
  */
 const BINDING_UNSAFE = /[\s:/\\]/;
 
+/**
+ * The one binding-safety predicate behind both smart constructors below. An id
+ * and a type are interpolated into the same file paths and the same
+ * tab-separated ledger lines, so they answer to identical rules; two copies of
+ * the predicate could drift and open one of the two.
+ */
+const bindingSafe = (raw: string): boolean =>
+  raw !== "" && !BINDING_UNSAFE.test(raw) && !raw.includes("..");
+
 /** Smart constructor: null when the raw id cannot be safely bound/attributed. */
 export function parseAgentId(raw: string): AgentId | null {
-  return raw !== "" && !BINDING_UNSAFE.test(raw) && !raw.includes("..") ? (raw as AgentId) : null;
+  return bindingSafe(raw) ? (raw as AgentId) : null;
 }
 
 /**
@@ -96,7 +105,7 @@ export function parseGrantedAgentId(raw: string): GrantedAgentId | null {
 /** Smart constructor: null when the raw type cannot be safely bound/attributed
  *  or safely name a machine-definition file. */
 export function parseAgentType(raw: string): AgentType | null {
-  return raw !== "" && !BINDING_UNSAFE.test(raw) && !raw.includes("..") ? (raw as AgentType) : null;
+  return bindingSafe(raw) ? (raw as AgentType) : null;
 }
 
 // --- Branded session identity ---

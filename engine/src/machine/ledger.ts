@@ -166,7 +166,7 @@ function classifyBindingLines(sessionId: SessionId, nowMs: number): ClassifiedLi
  * activity exceeds the TTL are treated as ABSENT (their subagent plausibly
  * died without SubagentStop) — refreshBindingActivity reaps them.
  */
-export function readBindings(sessionId: SessionId, nowMs: number = Date.now()): MachineBinding[] {
+export function readBindings(sessionId: SessionId, nowMs: number = Date.now()): readonly MachineBinding[] {
   const lines = classifyBindingLines(sessionId, nowMs);
   const malformed = lines.filter((l) => l.kind === "malformed").length;
   if (malformed > 0) {

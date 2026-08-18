@@ -67,13 +67,20 @@ export function isBinaryFile(filePath: string): boolean {
  * @param tier - "immediate" (PostEdit, fast) or "full" (wave-gate, all rules)
  * @param defaultRulesDir - Directory containing shipped default rules
  * @param projectRulesDir - Directory containing project-local rule overrides (or null)
+ * @param timeoutMs - Wall-clock budget for this file. Defaults to the hook
+ *   budget (`DEFAULT_TIMEOUT_MS`); callers that are not a latency-bound hook —
+ *   a batch audit, or a test feeding a deliberately huge file — pass their own.
+ *   Without it, "does this rule find the violation" and "did the machine finish
+ *   in 50ms" were the same assertion, so a slow or loaded host turned a
+ *   correctness test into a flaky one.
  * @returns LintResult: pass | violations | error
  */
 export function lintFile(
   filePath: string,
   tier: Tier,
   defaultRulesDir: string,
-  projectRulesDir: string | null
+  projectRulesDir: string | null,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS
 ): LintResult {
   try {
     // Resolve to absolute path
@@ -94,7 +101,7 @@ export function lintFile(
     const rules = loadRules(defaultRulesDir, projectRulesDir, tier);
 
     // Create deadline checker (imperative shell creates the time-dependent resource)
-    const checkDeadline = createDeadlineChecker(DEFAULT_TIMEOUT_MS);
+    const checkDeadline = createDeadlineChecker(timeoutMs);
 
     // Execute rules against file content
     // executeRules internally filters by extension — if no rules match, returns []

@@ -3,18 +3,7 @@ import { taskGraphPath } from "../../config";
 import { parseTaskGraph, StateManager } from "../../state-manager";
 import type { HookHandler, TaskGraph } from "../../types";
 import { fixFull, validateFull } from "./validate-task-graph";
-import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
-
-/** Filesystem adapter for the pure binding check; failures retain their cause. */
-const BINDING_DEPS: ModelBindingDeps = {
-  readFile: (p) => {
-    try {
-      return { ok: true, content: readFileSync(p, "utf-8") };
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
-  },
-};
+import { checkPlanModelBindings, productionModelBindingDeps, type ModelBindingDeps } from "./validate-model-bindings";
 
 export type TaskGraphRepairPreparation =
   | {
@@ -44,7 +33,7 @@ export type TaskGraphRepairPreparation =
  */
 export function prepareTaskGraphRepair(
   raw: unknown,
-  deps: ModelBindingDeps = BINDING_DEPS,
+  deps: ModelBindingDeps = productionModelBindingDeps,
 ): TaskGraphRepairPreparation {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return { ok: false, errors: ["Task graph must be a JSON object"] };

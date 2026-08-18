@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { argumentValue } from "./cli-args";
 import { readFileSync } from "node:fs";
 import type { HookHandler } from "../../types";
 import {
@@ -11,10 +12,6 @@ import {
 const OPERATIONS = ["validate", "prompt", "score"] as const;
 const USAGE = `Usage: helper model-calibration <${OPERATIONS.join("|")}> --corpus <file> [--case <id>]`;
 
-function arg(args: readonly string[], name: string): string | null {
-  const index = args.indexOf(name);
-  return index >= 0 && args[index + 1] ? args[index + 1]! : null;
-}
 
 function loadCorpus(path: string) {
   try { return parseCalibrationCorpus(readFileSync(path, "utf-8")); }
@@ -66,7 +63,7 @@ export function calibrationRevisionPaths(revision: string): readonly string[] {
 
 const handler: HookHandler = async (stdin, args) => {
   const operation = args[0];
-  const corpusPath = arg(args, "--corpus") ?? "calibration/corpus.json";
+  const corpusPath = argumentValue(args, "--corpus") ?? "calibration/corpus.json";
   if (!operation || !(OPERATIONS as readonly string[]).includes(operation)) {
     return { kind: "error", message: USAGE };
   }
@@ -88,7 +85,7 @@ const handler: HookHandler = async (stdin, args) => {
   }
 
   if (operation === "prompt") {
-    const caseId = arg(args, "--case");
+    const caseId = argumentValue(args, "--case");
     const selected = corpus.value.cases.find((entry) => entry.id === caseId);
     if (!selected) return { kind: "error", message: `Unknown calibration case ${JSON.stringify(caseId)}` };
     let paths: readonly string[];

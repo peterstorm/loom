@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, chmodSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
@@ -8,9 +8,11 @@ import type { TaskGraph } from "../../../src/types";
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
 
 function makeTmpDir(): string {
-  const dir = join(tmpdir(), `loom-sp-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(dir, { recursive: true });
-  return dir;
+  // mkdtempSync, not a Date.now()+Math.random() name: the OS guarantees the
+  // directory is fresh and exclusively ours, where the hand-rolled name only
+  // made a collision unlikely and mkdirSync({recursive:true}) would silently
+  // ADOPT one that already existed.
+  return mkdtempSync(join(tmpdir(), "loom-sp-"));
 }
 
 function minimalGraph(overrides: Partial<TaskGraph> = {}): TaskGraph {

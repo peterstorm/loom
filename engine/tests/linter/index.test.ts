@@ -449,8 +449,11 @@ describe("lintFile", () => {
 
       writeRule(defaultDir, "rule.json", makeValidRule());
 
-      // Use a generous timeout for large file
-      const result = lintFile(filePath, "full", defaultDir, projectDir);
+      // A generous budget for a deliberately huge fixture. This asserts the
+      // rule FINDS the violation at line 5001; the 50ms hook budget is a
+      // separate concern, and folding the two made this test fail whenever the
+      // host was loaded rather than whenever the linter was wrong.
+      const result = lintFile(filePath, "full", defaultDir, projectDir, 5000);
       expect(result.kind).toBe("violations");
       if (result.kind === "violations") {
         expect(result.violations).toHaveLength(1);

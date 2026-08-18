@@ -10,7 +10,7 @@
 import { execFileSync } from "node:child_process";
 import { closeSync, constants as fsConstants, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { HookHandler, HookResult, LoomStatus, TaskGraph, Task } from "../../types";
+import type { HookHandler, HookResult, TaskGraph, Task } from "../../types";
 import { legacyTestsPassedNote } from "../../types";
 import { taskGraphPath } from "../../config";
 import {
@@ -25,22 +25,10 @@ import { parsePlanModels } from "../../parsers/parse-plan-models";
 import { pathsMatch } from "./validate-model-bindings";
 import { inspectRepositoryPath } from "../../utils/repository-path";
 import {
-  applyGateDecision as applyCoreGateDecision,
   commitWaveGateCompletion,
-  checkCriticalFindings as checkCoreCriticalFindings,
-  checkImplementationProof as checkCoreImplementationProof,
-  checkLifecycleArtifacts as checkCoreLifecycleArtifacts,
-  checkNewTests as checkCoreNewTests,
-  checkNoExecutingTasks as checkCoreNoExecutingTasks,
-  checkReviews as checkCoreReviews,
-  checkSpecAlignment as checkCoreSpecAlignment,
-  checkTestEvidence as checkCoreTestEvidence,
-  computeNextWave as computeCoreNextWave,
   deriveWaveReadiness,
   evaluateWaveGate as evaluateCoreWaveGate,
   gateCheckMessage as coreGateCheckMessage,
-  renderLoomStatusHuman as renderCoreLoomStatusHuman,
-  renderLoomStatusJson as renderCoreLoomStatusJson,
   type GateCheck as CoreGateCheck,
   type GateDecision as CoreGateDecision,
   type GateDeps as CoreGateDeps,
@@ -64,80 +52,9 @@ import { parseWaveArg } from "./wave-args";
 
 export type GateCheck = CoreGateCheck;
 
-/**
- * Pure status renderers, re-exported as part of this module's facade over
- * `core/wave-gate-machine`.
- *
- * The CLI wiring they once anticipated has SHIPPED, but not through here:
- * `helpers/orchestration`'s status route imports the core renderers directly.
- * These stay because the facade is the surface this module's tests pin — the
- * parity case asserts each delegates to its core original, so a future divergence
- * between the two import paths fails a test rather than splitting the rendering.
- */
-export const renderLoomStatusHuman = (status: LoomStatus): string => renderCoreLoomStatusHuman(status);
-export const renderLoomStatusJson = (status: LoomStatus): string => renderCoreLoomStatusJson(status);
-
-/** Render a check for stderr output. */
-export function gateCheckMessage(c: GateCheck): string {
-  return coreGateCheckMessage(c);
-}
-
-/** Locked-state precondition: no selected-wave implementation child is live. */
-export function checkNoExecutingTasks(tasks: readonly Task[], executingTaskIds: readonly string[]): GateCheck {
-  return checkCoreNoExecutingTasks(tasks, executingTaskIds);
-}
-
-/** Check 1: every task reached an implementation-bearing status through a
- * satisfied proof. Completing any other state would violate TaskGraph's
- * status/proof lockstep at the next load. */
-export function checkImplementationProof(tasks: Task[]): GateCheck {
-  return checkCoreImplementationProof(tasks);
-}
-
-/** Check 2: All tasks have test evidence (skipped for tasks declaring no tests required) */
-export function checkTestEvidence(tasks: Task[]): GateCheck {
-  return checkCoreTestEvidence(tasks);
-}
-
-/** Check 3: New tests written or not required */
-export function checkNewTests(tasks: Task[]): GateCheck {
-  return checkCoreNewTests(tasks);
-}
-
-/** Check 4: All tasks reviewed */
-export function checkReviews(tasks: Task[]): GateCheck {
-  return checkCoreReviews(tasks);
-}
-
-/** Check 5: Spec alignment */
-export function checkSpecAlignment(state: TaskGraph, wave: number): GateCheck {
-  return checkCoreSpecAlignment(state, wave);
-}
-
-/** Check 6: No critical code review findings */
-export function checkCriticalFindings(tasks: Task[]): GateCheck {
-  return checkCoreCriticalFindings(tasks);
-}
 
 /** How the plan's executable models were obtained for gate checks */
 export type PlanModelsSource = CorePlanModelsSource;
-
-/**
- * Check 7: Lifecycle machine artifacts exist (executable-models policy).
- *
- * Decompose-time binding is a promise; this is the evidence check — any
- * lifecycle machine file bound to a task in this wave must exist on disk
- * before the wave can pass. No plan in state → skipped (legacy flows);
- * plan named but unreadable → fail closed (Phase 3 committed it, so a
- * missing plan at gate time is an error, never an opt-out).
- */
-export function checkLifecycleArtifacts(
-  source: PlanModelsSource,
-  waveTasks: Task[],
-  fileExists: (path: string) => boolean,
-): GateCheck {
-  return checkCoreLifecycleArtifacts(source, waveTasks, fileExists);
-}
 
 // --- Gate decision (evaluate once, apply pure) ---
 
@@ -195,22 +112,6 @@ export function snapshotGateDeps(state: TaskGraph, io: GateIO): GateDeps {
  * observations made under that same lock.
  */
 export type GateDecision = CoreGateDecision;
-
-/** Evaluate every gate check against a state snapshot. Deterministic given
- *  its deps; performs no writes. */
-export function evaluateWaveGate(state: TaskGraph, waveArg: number | null, deps: GateDeps): GateDecision {
-  return evaluateCoreWaveGate(state, waveArg, deps);
-}
-
-/**
- * Pure: apply a passing decision to the task graph — complete the wave's
- * tasks, stamp the wave gate, advance current_wave. A failing decision
- * returns the state unchanged. Safe to re-run: no side effects, and
- * applying the same decision twice yields the same state.
- */
-export function applyGateDecision(state: TaskGraph, decision: GateDecision): TaskGraph {
-  return applyCoreGateDecision(state, decision);
-}
 
 export interface GitHubIssuePort {
   readonly readBody: (issue: number, repository?: string) => string;
@@ -277,11 +178,6 @@ export function updateGitHubIssue(
   } catch (e) {
     process.stderr.write(`WARNING: Failed to update GH issue #${issue} checkboxes: ${notificationCauseMessage(e)}\n`);
   }
-}
-
-/** Compute next wave from actual wave numbers (handles non-contiguous waves) */
-export function computeNextWave(tasks: readonly Task[], currentWave: number): number | null {
-  return computeCoreNextWave(tasks, currentWave);
 }
 
 /** Pure: Generate wave gate summary markdown */
@@ -532,7 +428,7 @@ async function runCompleteWaveGate(
         loadPlanModels: loadPlanModelsSource,
         fileExists: existsSync,
       });
-      decision = evaluateWaveGate(state, waveArg, liveDeps);
+      decision = evaluateCoreWaveGate(state, waveArg, liveDeps);
       if (decision.verdict.kind !== "pass") {
         return {
           ok: false,
@@ -621,7 +517,7 @@ async function runCompleteWaveGate(
   const lockedDecision: GateDecision = decision;
   process.stderr.write(`Completing wave ${lockedDecision.wave} gate...\n\n`);
   for (const check of lockedDecision.checks) {
-    process.stderr.write(gateCheckMessage(check) + "\n");
+    process.stderr.write(coreGateCheckMessage(check) + "\n");
     if (!check.passed) break;
   }
 

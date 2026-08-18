@@ -184,11 +184,15 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/types",
       "engine/src/config",
       "engine/src/state-manager",
-      // The same pure identity-brand module `core/` is allowed: `SessionId`,
-      // `RequestId` and the run-directory suffix vocabulary. The machine's fs
-      // shell (`machine/ledger`, `machine/report-discovery`) stays denied by
-      // omission — this allowlist is fail-closed, so naming the pure module
-      // individually cannot open a path into the shell.
+      // The same pure identity-brand module `core/` is allowed. What it
+      // actually supplies here is `SessionId`/`parseSessionId` and the
+      // run-directory suffix vocabulary (`ORCHESTRATION_RUNS_SUFFIX`) — see
+      // `orchestration/session-run-bindings`, the sole consumer. `RequestId`
+      // is NOT among them; it arrives from `core/orchestration-contract`,
+      // allowed separately above. The machine's fs shell (`machine/ledger`,
+      // `machine/report-discovery`) stays denied by omission — this allowlist
+      // is fail-closed, so naming the pure module individually cannot open a
+      // path into the shell.
       "engine/src/machine/evidence",
       "node:",
       "@fuguejs/framework",

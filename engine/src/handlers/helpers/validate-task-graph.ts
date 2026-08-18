@@ -30,7 +30,7 @@ import {
   salvageMalformedFindings,
   RECOVERED_AGENT,
 } from "../../core/findings";
-import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
+import { checkPlanModelBindings, productionModelBindingDeps } from "./validate-model-bindings";
 import {
   taskDependencyErrors,
   taskGraphLifecycleErrors,
@@ -652,16 +652,6 @@ export function fixFull(json: Record<string, unknown>): FixReport {
 }
 
 /** Production filesystem port for model-binding checks; failures retain their cause. */
-const PROD_DEPS: ModelBindingDeps = {
-  readFile: (p) => {
-    try {
-      return { ok: true, content: readFileSync(p, "utf-8") };
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
-  },
-};
-
 function tasksOf(json: Record<string, unknown>): Record<string, unknown>[] {
   return Array.isArray(json.tasks) ? (json.tasks as Record<string, unknown>[]) : [];
 }
@@ -743,7 +733,7 @@ const handler: HookHandler = async (stdin, args) => {
     // structurally fixable, so surface them rather than dropping them.
     // populate-task-graph enforces bindings fail-closed before any state write.
     if (!isMinimal) {
-      const bindings = checkPlanModelBindings(json.plan_file, tasksOf(json), PROD_DEPS);
+      const bindings = checkPlanModelBindings(json.plan_file, tasksOf(json), productionModelBindingDeps);
       if (!bindings.ok) {
         process.stderr.write(`Executable-model binding issues (not fixable by --fix; populate-task-graph will block):\n`);
         for (const err of bindings.errors) process.stderr.write(`  - ${err}\n`);
@@ -765,7 +755,7 @@ const handler: HookHandler = async (stdin, args) => {
   // Fail-closed — an unreadable plan is an error, not a skipped check; plans
   // without model sections produce zero checks (genuine opt-out).
   if (!isMinimal) {
-    const bindings = checkPlanModelBindings(json.plan_file, tasksOf(json), PROD_DEPS);
+    const bindings = checkPlanModelBindings(json.plan_file, tasksOf(json), productionModelBindingDeps);
     if (!bindings.ok) {
       return {
         kind: "error",

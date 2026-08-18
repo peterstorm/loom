@@ -67,6 +67,44 @@ export function loadProjectConfig(configDir: string | null): ProgrammaticConfig 
   return parseConfig(obj, configPath);
 }
 
+/**
+ * Every optional list on ProgrammaticConfig asks the same question — an array
+ * whose entries are non-empty strings — and every optional bound asks "a
+ * positive integer". These two replace five near-identical blocks.
+ *
+ * The non-empty check is now uniform. `discriminantTags` already had it;
+ * `pureModules` and `excludeFromMaxLines` did not, and an empty entry in either
+ * is a prefix that matches EVERY path — it would silently mark the whole tree
+ * pure, or exempt it from the line bound. Fail-closed parsing is this loader's
+ * contract, so the looser two are brought up to the stricter one.
+ */
+function parseOptionalStringArray(
+  raw: unknown,
+  filePath: string,
+  key: string,
+): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    throw new Error(`${filePath}: '${key}' must be an array`);
+  }
+  if (!raw.every((entry: unknown) => typeof entry === "string" && entry.length > 0)) {
+    throw new Error(`${filePath}: '${key}' entries must be non-empty strings`);
+  }
+  return raw as string[];
+}
+
+function parseOptionalPositiveInt(
+  raw: unknown,
+  filePath: string,
+  key: string,
+): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
+    throw new Error(`${filePath}: '${key}' must be a positive integer`);
+  }
+  return raw;
+}
+
 function parseConfig(obj: Record<string, unknown>, filePath: string): ProgrammaticConfig {
   // Mutable while assembling; returned as the readonly ProgrammaticConfig
   const config: { -readonly [K in keyof ProgrammaticConfig]?: ProgrammaticConfig[K] } = {};
@@ -78,62 +116,29 @@ function parseConfig(obj: Record<string, unknown>, filePath: string): Programmat
     config.boundaries = obj.boundaries.map((b, i) => parseBoundary(b, filePath, i));
   }
 
-  if (obj.pureModules !== undefined) {
-    if (!Array.isArray(obj.pureModules)) {
-      throw new Error(`${filePath}: 'pureModules' must be an array`);
-    }
-    if (!obj.pureModules.every((m: unknown) => typeof m === "string")) {
-      throw new Error(`${filePath}: 'pureModules' entries must be strings`);
-    }
-    config.pureModules = obj.pureModules as string[];
-  }
+  const pureModules = parseOptionalStringArray(obj.pureModules, filePath, "pureModules");
+  if (pureModules !== undefined) config.pureModules = pureModules;
 
-  if (obj.maxFunctionLines !== undefined) {
-    if (
-      typeof obj.maxFunctionLines !== "number" ||
-      !Number.isInteger(obj.maxFunctionLines) ||
-      obj.maxFunctionLines < 1
-    ) {
-      throw new Error(`${filePath}: 'maxFunctionLines' must be a positive integer`);
-    }
-    config.maxFunctionLines = obj.maxFunctionLines;
-  }
+  const maxFunctionLines = parseOptionalPositiveInt(obj.maxFunctionLines, filePath, "maxFunctionLines");
+  if (maxFunctionLines !== undefined) config.maxFunctionLines = maxFunctionLines;
 
-  if (obj.excludeFromMaxLines !== undefined) {
-    if (!Array.isArray(obj.excludeFromMaxLines)) {
-      throw new Error(`${filePath}: 'excludeFromMaxLines' must be an array`);
-    }
-    if (!obj.excludeFromMaxLines.every((e: unknown) => typeof e === "string")) {
-      throw new Error(`${filePath}: 'excludeFromMaxLines' entries must be strings`);
-    }
-    config.excludeFromMaxLines = obj.excludeFromMaxLines as string[];
-  }
+  const excludeFromMaxLines = parseOptionalStringArray(obj.excludeFromMaxLines, filePath, "excludeFromMaxLines");
+  if (excludeFromMaxLines !== undefined) config.excludeFromMaxLines = excludeFromMaxLines;
 
   // These two were DECLARED on ProgrammaticConfig and READ by
   // `createProgrammaticRules`, but never parsed here — so a project that set
   // either one got the built-in default with no throw and no log, the one
   // failure mode this loader's "fail-closed" contract is supposed to exclude.
   // Every field above rejects a bad value loudly; these now do too.
-  if (obj.maxDiscriminantBranches !== undefined) {
-    if (
-      typeof obj.maxDiscriminantBranches !== "number" ||
-      !Number.isInteger(obj.maxDiscriminantBranches) ||
-      obj.maxDiscriminantBranches < 1
-    ) {
-      throw new Error(`${filePath}: 'maxDiscriminantBranches' must be a positive integer`);
-    }
-    config.maxDiscriminantBranches = obj.maxDiscriminantBranches;
-  }
+  const maxDiscriminantBranches = parseOptionalPositiveInt(
+    obj.maxDiscriminantBranches,
+    filePath,
+    "maxDiscriminantBranches",
+  );
+  if (maxDiscriminantBranches !== undefined) config.maxDiscriminantBranches = maxDiscriminantBranches;
 
-  if (obj.discriminantTags !== undefined) {
-    if (!Array.isArray(obj.discriminantTags)) {
-      throw new Error(`${filePath}: 'discriminantTags' must be an array`);
-    }
-    if (!obj.discriminantTags.every((t: unknown) => typeof t === "string" && t.length > 0)) {
-      throw new Error(`${filePath}: 'discriminantTags' entries must be non-empty strings`);
-    }
-    config.discriminantTags = obj.discriminantTags as string[];
-  }
+  const discriminantTags = parseOptionalStringArray(obj.discriminantTags, filePath, "discriminantTags");
+  if (discriminantTags !== undefined) config.discriminantTags = discriminantTags;
 
   return config as ProgrammaticConfig;
 }

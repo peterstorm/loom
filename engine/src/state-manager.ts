@@ -546,35 +546,47 @@ function taskBaselineError(
   index: number,
   id: string,
 ): string | null {
-  if (t.artifact_baseline !== undefined) {
-    const baseline = parseDeclaredArtifactBaseline(
-      t.artifact_baseline,
-      `tasks[${index}] ("${id}"): artifact_baseline`,
-    );
+  // Both baselines answer the same question — does the declared baseline agree
+  // with file_list, in order — and differ only in whether file_list must be the
+  // WHOLE baseline or just its prefix. One comparison, two coverage rules.
+  const fileListAgreement = (
+    raw: unknown,
+    field: "artifact_baseline" | "attempt_artifact_baseline",
+    coverage: "exact" | "prefix",
+    requirement: string,
+  ): string | null => {
+    const baseline = parseDeclaredArtifactBaseline(raw, `tasks[${index}] ("${id}"): ${field}`);
     if (!baseline.ok) return baseline.errors.join("; ");
     const declaredArtifacts = Array.isArray(t.file_list) ? t.file_list : [];
     const actualArtifacts = baseline.value.map(({ artifact }) => artifact);
+    const covers = coverage === "exact"
+      ? actualArtifacts.length === declaredArtifacts.length
+      : actualArtifacts.length >= declaredArtifacts.length;
     if (
-      actualArtifacts.length !== declaredArtifacts.length ||
+      !covers ||
       declaredArtifacts.some((artifact, artifactIndex) => artifact !== actualArtifacts[artifactIndex])
     ) {
-      return `tasks[${index}] ("${id}"): artifact_baseline must exactly match file_list in order`;
+      return `tasks[${index}] ("${id}"): ${field} ${requirement}`;
     }
+    return null;
+  };
+  if (t.artifact_baseline !== undefined) {
+    const error = fileListAgreement(
+      t.artifact_baseline,
+      "artifact_baseline",
+      "exact",
+      "must exactly match file_list in order",
+    );
+    if (error !== null) return error;
   }
   if (t.attempt_artifact_baseline !== undefined) {
-    const baseline = parseDeclaredArtifactBaseline(
+    const error = fileListAgreement(
       t.attempt_artifact_baseline,
-      `tasks[${index}] ("${id}"): attempt_artifact_baseline`,
+      "attempt_artifact_baseline",
+      "prefix",
+      "must cover file_list first and in order",
     );
-    if (!baseline.ok) return baseline.errors.join("; ");
-    const declaredArtifacts = Array.isArray(t.file_list) ? t.file_list : [];
-    const actualArtifacts = baseline.value.map(({ artifact }) => artifact);
-    if (
-      actualArtifacts.length < declaredArtifacts.length ||
-      declaredArtifacts.some((artifact, artifactIndex) => artifact !== actualArtifacts[artifactIndex])
-    ) {
-      return `tasks[${index}] ("${id}"): attempt_artifact_baseline must cover file_list first and in order`;
-    }
+    if (error !== null) return error;
   }
   if (t.attempt_repository_baseline !== undefined) {
     const baseline = parseDeclaredArtifactBaseline(

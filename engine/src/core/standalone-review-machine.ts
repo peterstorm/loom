@@ -1041,17 +1041,17 @@ export function serializeStandaloneReviewMachineState(state: StandaloneReviewMac
     schema_version: 1,
     authority: JSON.parse(serializeStandaloneReviewAuthority(state.authority)),
   };
-  const withRefutation = state as StandaloneReviewMachineState & {
-    readonly refutationAuthority?: RefutationPanelAuthority;
-    readonly refutationCompletion?: StandaloneRefutationCompletionReceipt | null;
-  };
-  if (withRefutation.refutationAuthority !== undefined) {
-    record.refutationAuthority = serializableRefutationAuthority(withRefutation.refutationAuthority);
+  // `in` narrows the real union; the ad-hoc intersection cast this replaces
+  // re-declared both field types by hand, so a change to either declaration
+  // would have been silently ignored here — in a durable checkpoint writer,
+  // where a silently wrong projection is a checkpoint that will not load back.
+  if ("refutationAuthority" in state) {
+    record.refutationAuthority = serializableRefutationAuthority(state.refutationAuthority);
   }
-  if (withRefutation.refutationCompletion !== undefined) {
-    record.refutationCompletion = withRefutation.refutationCompletion === null
+  if ("refutationCompletion" in state && state.refutationCompletion !== undefined) {
+    record.refutationCompletion = state.refutationCompletion === null
       ? null
-      : serializableRefutationCompletion(withRefutation.refutationCompletion);
+      : serializableRefutationCompletion(state.refutationCompletion);
   }
   if ("aggregate" in state) {
     record.aggregate = JSON.parse(serializeStandaloneAggregate(state.aggregate));

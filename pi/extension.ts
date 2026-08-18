@@ -66,6 +66,7 @@ import { fsSessionRegistry, parseAgentId, parseSessionId, rosterAgentId } from "
 import type { AgentId } from "../engine/src/machine/evidence";
 import { buildContextOutput } from "../engine/src/handlers/session-start/resume-after-clear";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
+import { classifyMissingReservedResults } from "./reserved-results";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import * as git from "../engine/src/utils/git";
 
@@ -1426,29 +1427,12 @@ export default function (pi: ExtensionAPI) {
     // every gate-owned slot before any malformed-details early return so stale
     // review/spec evidence cannot remain authoritative.
     if (reservation) {
-      const returnedAgentAt = (index: number): string | null => {
-        const raw = rawResults[index];
-        if (typeof raw !== "object" || raw === null || Array.isArray(raw) || !("agent" in raw)) return null;
-        return typeof raw.agent === "string" ? stripNamespace(raw.agent) : null;
-      };
-      const missingReviews = reservation.orchestrationRunBinding !== null
-        ? []
-        : reservation.items.flatMap((item, index) =>
-            item.kind === "standalone" || item.taskId === null || !isReviewAgent(item.agentType) ||
-              returnedAgentAt(index) === item.agentType
-              ? []
-              : [{ item, index }]);
-      const missingSpecChecks = reservation.orchestrationRunBinding !== null
-        ? []
-        : reservation.items.flatMap((item, index) =>
-            item.kind === "standalone" || item.agentType !== "spec-check-invoker" ||
-              returnedAgentAt(index) === item.agentType
-              ? []
-              : [{ item, index }]);
-      const missingRunResults = reservation.orchestrationRunBinding === null
-        ? []
-        : reservation.items.flatMap((item, index) =>
-            returnedAgentAt(index) === item.agentType ? [] : [{ item, index }]);
+      const { reviews: missingReviews, specChecks: missingSpecChecks, runResults: missingRunResults } =
+        classifyMissingReservedResults(
+          reservation.items,
+          rawResults,
+          reservation.orchestrationRunBinding !== null,
+        );
       for (const { item, index } of missingRunResults) {
         const diagnostic = `request-bound result ${index + 1} for ${item.agentType} was missing or mismatched`;
         processingErrors.push(diagnostic);
@@ -1471,38 +1455,58 @@ export default function (pi: ExtensionAPI) {
           process.stderr.write(`loom(pi): ${diagnostic}\n`);
         } else {
           const runAt = new Date().toISOString();
-          await manager.update((state) => ({
-            ...state,
-            tasks: state.tasks.map((task) => {
-              const failures = missingReviews.filter(({ item }) => item.taskId === task.id);
-              return failures.reduce((current, { item, index }) => applyReviewResolution(current, {
-                kind: "evidence-failed" as const,
-                agent: item.agentType,
-                message: `reserved reviewer result ${index + 1} for ${item.agentType} was missing or mismatched`,
-              }), task);
-            }),
-            ...(missingSpecChecks.length === 0
-              ? {}
-              : {
-                  spec_check: {
-                    wave: state.current_wave ?? 1,
-                    run_at: runAt,
-                    verdict: "EVIDENCE_CAPTURE_FAILED" as const,
-                    error: missingSpecChecks.map(({ index }) =>
-                      `reserved spec-check result ${index + 1} for spec-check-invoker was missing or mismatched`
-                    ).join("; "),
-                  },
-                }),
-          }));
-          for (const { item, index } of missingReviews) {
-            process.stderr.write(
-              `loom(pi): reserved reviewer result ${index + 1} for ${item.agentType}/${item.taskId} was missing or mismatched — marking evidence_capture_failed\n`,
-            );
-          }
-          for (const { index } of missingSpecChecks) {
-            process.stderr.write(
-              `loom(pi): reserved spec-check result ${index + 1} for spec-check-invoker was missing or mismatched — marking evidence_capture_failed\n`,
-            );
+          // Guarded exactly like the sibling `manager.update` in
+          // `finalizeReservedImplementations` above. This handler has no
+          // top-level try/catch, so an unguarded throw here (corrupt state
+          // JSON, lock contention, disk failure) escaped the whole
+          // `tool_result` handler — skipping the per-result evidence loop
+          // below, whose own comment demands that one failure must not abort
+          // the rest of the batch — and left tasks stuck `executing` with zero
+          // `processingErrors` and zero stderr. The throw now becomes a
+          // diagnostic and the batch continues.
+          try {
+            await manager.update((state) => ({
+              ...state,
+              tasks: state.tasks.map((task) => {
+                const failures = missingReviews.filter(({ item }) => item.taskId === task.id);
+                return failures.reduce((current, { item, index }) => applyReviewResolution(current, {
+                  kind: "evidence-failed" as const,
+                  agent: item.agentType,
+                  message: `reserved reviewer result ${index + 1} for ${item.agentType} was missing or mismatched`,
+                }), task);
+              }),
+              ...(missingSpecChecks.length === 0
+                ? {}
+                : {
+                    spec_check: {
+                      wave: state.current_wave ?? 1,
+                      run_at: runAt,
+                      verdict: "EVIDENCE_CAPTURE_FAILED" as const,
+                      error: missingSpecChecks.map(({ index }) =>
+                        `reserved spec-check result ${index + 1} for spec-check-invoker was missing or mismatched`
+                      ).join("; "),
+                    },
+                  }),
+            }));
+            for (const { item, index } of missingReviews) {
+              process.stderr.write(
+                `loom(pi): reserved reviewer result ${index + 1} for ${item.agentType}/${item.taskId} was missing or mismatched — marking evidence_capture_failed\n`,
+              );
+            }
+            for (const { index } of missingSpecChecks) {
+              process.stderr.write(
+                `loom(pi): reserved spec-check result ${index + 1} for spec-check-invoker was missing or mismatched — marking evidence_capture_failed\n`,
+              );
+            }
+          } catch (error) {
+            // The per-item lines above stay inside the `try`: they announce
+            // evidence that was RECORDED, and printing them after a failed
+            // write would report a state change that never happened.
+            const diagnostic = `cannot persist ${missingReviews.length} missing reserved review result(s) and ` +
+              `${missingSpecChecks.length} missing reserved spec-check result(s) for session ${reservation.sessionId}: ` +
+              `${error instanceof Error ? error.message : String(error)}`;
+            processingErrors.push(diagnostic);
+            process.stderr.write(`loom(pi): ${diagnostic}\n`);
           }
         }
       }

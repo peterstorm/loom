@@ -30,6 +30,7 @@ import {
   loomMarkerValue,
 } from "../../core/grandfathered-spawn-model";
 import { resolveRepositoryRoot } from "../../utils/git";
+import { parseFrontmatterFields } from "../../utils/frontmatter";
 import { parseStoredAgentRequestAuthority, type AgentRequestAuthority } from "../../core/orchestration-contract/roster";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
@@ -53,13 +54,8 @@ function modelFrontmatter(path: string): ModelFrontmatterRead {
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!match) return { ok: true, value: null };
-  const fields: Record<string, string> = {};
-  for (const line of match[1]!.split(/\r?\n/)) {
-    const field = line.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.*?)\s*$/);
-    if (field && field[2] !== "") fields[field[1]!] = field[2]!;
-  }
+  const fields = parseFrontmatterFields(content);
+  if (fields === null) return { ok: true, value: null };
   return {
     ok: true,
     value: {

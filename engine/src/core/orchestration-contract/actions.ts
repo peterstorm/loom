@@ -207,17 +207,27 @@ export function awaitUserAction(rawRequest: unknown): DomainResult<AwaitUserActi
   return success(canonicalRecord({ kind: "await-user", runId: runId.value, request }));
 }
 
+/**
+ * A GATE, not a parser: it proves a diagnostic sub-record carries exactly the
+ * constant fields its diagnostic kind fixes, and nothing more.
+ *
+ * The success type is `void` because that is the truth. It used to return the
+ * validated record, which promised callers a structure every one of them
+ * discards — all five read only `.ok` and return the failure. A return type
+ * that over-promises invites a caller to start reading fields the constants
+ * already determine.
+ */
 export function exactDiagnosticConstants(
   raw: unknown,
   expected: Readonly<Record<string, unknown>>,
   field: string,
-): DomainResult<Readonly<Record<string, unknown>>, DiagnosticConstructionError> {
+): DomainResult<void, DiagnosticConstructionError> {
   const parsed = readExactDataRecord(raw, Object.keys(expected), field);
   if (!parsed.ok) return diagnosticFailure(field, parsed.error.message);
   for (const [key, value] of Object.entries(expected)) {
     if (parsed.value[key] !== value) return diagnosticFailure(`${field}.${key}`, `${field}.${key} is invalid`);
   }
-  return parsed;
+  return success(undefined);
 }
 
 export function parseBlockedDiagnostic(

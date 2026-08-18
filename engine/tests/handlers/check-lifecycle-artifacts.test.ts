@@ -3,10 +3,10 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import gateHandler, {
-  checkLifecycleArtifacts,
   loadPlanModelsSource,
   type PlanModelsSource,
 } from "../../src/handlers/helpers/complete-wave-gate";
+import { checkLifecycleArtifacts } from "../../src/core/wave-gate-machine";
 import type { Task } from "../../src/types";
 import type { PlanModels } from "../../src/parsers/parse-plan-models";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";

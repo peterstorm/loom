@@ -2439,8 +2439,11 @@ export function aggregateArchitecturePanel(authority: ArchitecturePanelAuthority
     if (architectureJudgeRosterProofs.get(complete) !== authority || !completeRosterMatches(authority.judgeRoster, complete as CompleteRoster<AcceptedAgentResult<unknown>>)) return persistentFailure(panelError("architecture", "incomplete-roster", "complete judge roster is unproved, stale, or belongs to another panel"));
     const aggregated = aggregateVerdicts(complete.ordered.map(({ value }) => value), authority.judgeCriteria, authority.candidateIds);
     return aggregated.ok ? persistentSuccess(Object.freeze([...aggregated.value])) : persistentFailure(panelError("architecture", "invalid-aggregate", aggregated.errors.join("; ")));
-  } catch {
-    return persistentFailure(panelError("architecture", "invalid-aggregate", "judge roster could not be safely aggregated"));
+  } catch (error) {
+    // The message is KEPT, for the reason the sibling reducers above document:
+    // a bare `catch {}` makes a code regression indistinguishable from bad
+    // input. Fail-closed is unchanged; only the diagnostic survives.
+    return persistentFailure(panelError("architecture", "invalid-aggregate", `judge roster could not be safely aggregated: ${error instanceof Error ? error.message : String(error)}`));
   }
 }
 
@@ -2454,8 +2457,9 @@ export function tallyRefutationPanel(authority: RefutationPanelAuthority, comple
     if (!tallied.ok) return persistentFailure(panelError("refutation", "invalid-aggregate", tallied.errors.join("; ")));
     const outcomes = Object.freeze([...tallied.value]);
     return persistentSuccess(Object.freeze({ threshold: strictMajority, lenses: authority.lenses, verdicts: Object.freeze(verdicts), outcomes, retained: Object.freeze(outcomes.filter(({ survives }) => survives)), refuted: Object.freeze(outcomes.filter(({ survives }) => !survives)) }));
-  } catch {
-    return persistentFailure(panelError("refutation", "invalid-aggregate", "verifier roster could not be safely tallied"));
+  } catch (error) {
+    // Same reasoning as `aggregateArchitecturePanel` above: keep the message.
+    return persistentFailure(panelError("refutation", "invalid-aggregate", `verifier roster could not be safely tallied: ${error instanceof Error ? error.message : String(error)}`));
   }
 }
 

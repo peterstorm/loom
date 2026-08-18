@@ -1185,6 +1185,48 @@ function sameFindingContent(left: DraftFinding, right: DraftFinding): boolean {
 }
 
 /**
+ * Attribute each expected agent's genuinely-new findings onto the active list.
+ *
+ * "Genuinely new" is judged against `priorFindings` — the list as it stood
+ * BEFORE this run — not against the accumulating result, so two agents
+ * reporting the same defect each get their own attributed finding rather than
+ * the second silently vanishing into the first. Ordinals continue from the
+ * active list plus the refuted and resolved sets, so an id is never reused.
+ *
+ * Shared by `preserveAcceptedReviewRunFindings` (incomplete packet retired)
+ * and `finalizeReviewRun` (complete roster landed); they differ only in
+ * whether missing evidence is tolerated and in which resolved set the ordinal
+ * counts against.
+ */
+function appendAttributedNewFindings(
+  task: Task,
+  run: ReviewRun,
+  active: readonly Finding[],
+  priorFindings: readonly Finding[],
+  resolved: readonly ResolvedFinding[],
+  requireEvidence: boolean,
+): Finding[] {
+  let next = [...active];
+  for (const agent of run.expected_agents) {
+    const evidence = run.evidence.find((candidate) => candidate.agent === agent);
+    if (evidence === undefined) {
+      if (requireEvidence) throw new Error(`review run for task ${task.id} is missing evidence from ${agent}`);
+      continue;
+    }
+    const genuinelyNew = evidence.new_findings.filter((draft) =>
+      !priorFindings.some((finding) => sameFindingContent(finding, draft))
+    );
+    next = [...next, ...attributeFindings(
+      genuinelyNew,
+      agent,
+      nextOrdinal(next, task.refuted_findings ?? [], agent, resolved),
+      { generation: run.generation, packetId: run.packet_id },
+    )];
+  }
+  return next;
+}
+
+/**
  * Materialize only the NEW findings from reviewer evidence already accepted by
  * an incomplete packet. Prior-finding resolution still requires the complete
  * roster and is therefore deliberately not applied here. Used when an
@@ -1195,21 +1237,14 @@ export function preserveAcceptedReviewRunFindings(task: Task): Task {
   const run = task.review_run;
   if (run === undefined || run.evidence.length === 0) return task;
   const priorFindings = task.findings ?? [];
-  let active = [...priorFindings];
-  for (const agent of run.expected_agents) {
-    const evidence = run.evidence.find((candidate) => candidate.agent === agent);
-    if (evidence === undefined) continue;
-    const genuinelyNew = evidence.new_findings.filter((draft) =>
-      !priorFindings.some((finding) => sameFindingContent(finding, draft))
-    );
-    const attributed = attributeFindings(
-      genuinelyNew,
-      agent,
-      nextOrdinal(active, task.refuted_findings ?? [], agent, task.resolved_findings ?? []),
-      { generation: run.generation, packetId: run.packet_id },
-    );
-    active = [...active, ...attributed];
-  }
+  const active = appendAttributedNewFindings(
+    task,
+    run,
+    priorFindings,
+    priorFindings,
+    task.resolved_findings ?? [],
+    false,
+  );
   return {
     ...task,
     findings: active,
@@ -1255,20 +1290,14 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
   });
   const resolved = [...(task.resolved_findings ?? []), ...retired];
   const priorFindings = task.findings ?? [];
-  let active = priorFindings.filter((finding) => !resolvedIds.has(finding.id));
-  for (const agent of run.expected_agents) {
-    const evidence = run.evidence.find((candidate) => candidate.agent === agent)!;
-    const genuinelyNew = evidence.new_findings.filter((draft) =>
-      !priorFindings.some((finding) => sameFindingContent(finding, draft))
-    );
-    const attributed = attributeFindings(
-      genuinelyNew,
-      agent,
-      nextOrdinal(active, task.refuted_findings ?? [], agent, resolved),
-      { generation: run.generation, packetId: run.packet_id },
-    );
-    active = [...active, ...attributed];
-  }
+  const active = appendAttributedNewFindings(
+    task,
+    run,
+    priorFindings.filter((finding) => !resolvedIds.has(finding.id)),
+    priorFindings,
+    resolved,
+    true,
+  );
   return {
     ...task,
     review_status: active.some((finding) => finding.severity === "critical") ? "blocked" : "passed",

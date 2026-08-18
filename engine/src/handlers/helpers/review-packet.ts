@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { argumentValue } from "./cli-args";
 import {
   existsSync,
   mkdirSync,
@@ -74,10 +75,6 @@ export async function persistReviewPacketAndBind(
 
 const USAGE = `Usage: helper review-packet <${OPERATIONS.join("|")}> --task <id> --output <file> | --packet <file>`;
 
-function arg(args: readonly string[], name: string): string | null {
-  const index = args.indexOf(name);
-  return index >= 0 && args[index + 1] ? args[index + 1]! : null;
-}
 
 function git(args: readonly string[], cwd: string, allowDiffExit = false): string {
   try {
@@ -177,7 +174,7 @@ const handler: HookHandler = async (_stdin, args) => {
   }
 
   if (operation === "verify" || operation === "show") {
-    const packetPath = arg(args, "--packet");
+    const packetPath = argumentValue(args, "--packet");
     if (!packetPath) return { kind: "error", message: `${USAGE}\n--packet is required` };
     let raw: string;
     try { raw = readFileSync(packetPath, "utf-8"); }
@@ -189,8 +186,8 @@ const handler: HookHandler = async (_stdin, args) => {
     return { kind: "passthrough" };
   }
 
-  const taskId = arg(args, "--task");
-  const output = arg(args, "--output");
+  const taskId = argumentValue(args, "--task");
+  const output = argumentValue(args, "--output");
   if (!taskId || !output) return { kind: "error", message: `${USAGE}\n--task and --output are required` };
   const manager = StateManager.fromPath(taskGraphPath());
   if (!manager) return { kind: "error", message: `No task graph at ${taskGraphPath()}` };

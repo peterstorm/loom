@@ -22,7 +22,7 @@ import {
   type BriefFinding,
   type ReviewLens,
 } from "../../src/core/review-panel";
-import { checkCriticalFindings } from "../../src/handlers/helpers/complete-wave-gate";
+import { checkCriticalFindings } from "../../src/core/wave-gate-machine";
 import type { Task } from "../../src/types";
 
 const LENSES: readonly ReviewLens[] = ["reproduction", "intent", "blast-radius"];

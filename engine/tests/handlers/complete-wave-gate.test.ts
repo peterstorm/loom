@@ -5,30 +5,39 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import completeWaveGateHandler, {
-  applyGateDecision,
-  checkImplementationProof,
   createCompleteWaveGateHandler,
-  checkTestEvidence,
-  checkNewTests,
-  checkReviews,
-  checkSpecAlignment,
-  checkCriticalFindings,
-  computeNextWave,
-  evaluateWaveGate,
   generateWaveGateSummary,
-  gateCheckMessage,
   notificationCauseMessage,
   parseWaveArg,
   persistWaveGateSummaryFallback,
   postWaveGateSummary,
-  renderLoomStatusHuman,
-  renderLoomStatusJson,
   snapshotGateDeps,
   updateGitHubIssue,
   type GateDeps,
   type GitHubIssuePort,
   type GateIO,
 } from "../../src/handlers/helpers/complete-wave-gate";
+// The gate checks, the decision functions, and the status renderers live in
+// `core/wave-gate-machine` and are imported from it directly. They used to
+// arrive through a `complete-wave-gate` facade that re-exported them
+// unchanged; production never routed through that facade (`orchestration`
+// already imported the core originals), so the second path was pinned by
+// these tests alone. Deleting it removes the divergence its own parity case
+// was written to detect.
+import {
+  applyGateDecision,
+  checkCriticalFindings,
+  checkImplementationProof,
+  checkNewTests,
+  checkReviews,
+  checkSpecAlignment,
+  checkTestEvidence,
+  computeNextWave,
+  evaluateWaveGate,
+  gateCheckMessage,
+  renderLoomStatusHuman,
+  renderLoomStatusJson,
+} from "../../src/core/wave-gate-machine";
 import type { CapturedSpecCheck, Task, TaskGraph } from "../../src/types";
 import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
 import {
