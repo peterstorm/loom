@@ -210,12 +210,6 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
 // --- Import extraction ---
 
 /**
- * Extracts import specifiers from TypeScript/JavaScript/Java source.
- * Handles:
- *   - TS/JS: import ... from "specifier", import "specifier", require("specifier")
- *   - Java: import com.example.package.Class;
- */
-/**
  * Reject captures that cannot be module specifiers.
  *
  * The regex is line-based, so prose describing an import still matches — a
@@ -231,6 +225,12 @@ function isPlausibleSpecifier(specifier: string | undefined): specifier is strin
     !/\s/.test(specifier);
 }
 
+/**
+ * Extracts import specifiers from TypeScript/JavaScript/Java source.
+ * Handles:
+ *   - TS/JS: import ... from "specifier", import "specifier", require("specifier")
+ *   - Java: import com.example.package.Class;
+ */
 export function extractImports(
   content: string
 ): readonly { line: number; specifier: string; text: string }[] {

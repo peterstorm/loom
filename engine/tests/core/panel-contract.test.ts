@@ -274,18 +274,25 @@ describe("parseJudgeVerdict", () => {
     }
   });
 
+  // The base rankings, parsed ONCE. Each row used to re-parse `verdict()` up to
+  // four times to reach the same two entries, so the table's real subject — the
+  // single field each row perturbs — was buried in repeated JSON.parse noise.
+  const BASE = JSON.parse(verdict()).rankings as [Record<string, unknown>, Record<string, unknown>];
+  const perturb = (index: 0 | 1, patch: Record<string, unknown>): string =>
+    verdict({ rankings: BASE.map((entry, i) => i === index ? { ...entry, ...patch } : entry) });
+
   it.each([
     ["malformed JSON", "not json"],
     ["criterion mismatch", verdict({ criterion: "performance" })],
-    ["missing candidate", JSON.stringify({ criterion: "simplicity", rankings: JSON.parse(verdict()).rankings.slice(0, 1) })],
-    ["duplicate candidate", JSON.stringify({ criterion: "simplicity", rankings: [JSON.parse(verdict()).rankings[0], JSON.parse(verdict()).rankings[0]] })],
-    ["foreign candidate", verdict({ rankings: [{ ...JSON.parse(verdict()).rankings[0], candidate: "candidate-foreign.md" }, JSON.parse(verdict()).rankings[1]] })],
-    ["out-of-range score", verdict({ rankings: [{ ...JSON.parse(verdict()).rankings[0], score: 11 }, JSON.parse(verdict()).rankings[1]] })],
-    ["fractional score", verdict({ rankings: [{ ...JSON.parse(verdict()).rankings[0], score: 8.5 }, JSON.parse(verdict()).rankings[1]] })],
-    ["invalid fatal flaw", verdict({ rankings: [{ ...JSON.parse(verdict()).rankings[0], fatal_flaw: 42 }, JSON.parse(verdict()).rankings[1]] })],
-    ["brace-only fatal flaw", verdict({ rankings: [{ ...JSON.parse(verdict()).rankings[0], fatal_flaw: "{}" }, JSON.parse(verdict()).rankings[1]] })],
-    ["brace-only strongest idea", verdict({ rankings: [{ ...JSON.parse(verdict()).rankings[0], strongest_idea: "{}" }, JSON.parse(verdict()).rankings[1]] })],
-    ["ascending score order", verdict({ rankings: [{ ...JSON.parse(verdict()).rankings[0], score: 2 }, { ...JSON.parse(verdict()).rankings[1], score: 8 }] })],
+    ["missing candidate", JSON.stringify({ criterion: "simplicity", rankings: BASE.slice(0, 1) })],
+    ["duplicate candidate", JSON.stringify({ criterion: "simplicity", rankings: [BASE[0], BASE[0]] })],
+    ["foreign candidate", perturb(0, { candidate: "candidate-foreign.md" })],
+    ["out-of-range score", perturb(0, { score: 11 })],
+    ["fractional score", perturb(0, { score: 8.5 })],
+    ["invalid fatal flaw", perturb(0, { fatal_flaw: 42 })],
+    ["brace-only fatal flaw", perturb(0, { fatal_flaw: "{}" })],
+    ["brace-only strongest idea", perturb(0, { strongest_idea: "{}" })],
+    ["ascending score order", verdict({ rankings: [{ ...BASE[0], score: 2 }, { ...BASE[1], score: 8 }] })],
   ])("rejects %s", (_label, raw) => {
     expect(parseJudgeVerdict(raw, "simplicity", CANDIDATES).ok).toBe(false);
   });

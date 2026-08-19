@@ -101,9 +101,12 @@ export interface WaveBlockCauseSpecCheck {
  * Does wave `wave` have a CAUSE to be blocked, right now?
  *
  * `blocked` has exactly two causes — a task in the wave carrying critical
- * review findings, and a wave-scoped spec-check reporting a critical — and
- * `validate-task-execution` enumerates precisely those two when it refuses to
- * start the next wave. This predicate is that rule, and it is deliberately the
+ * review findings, and a wave-scoped spec-check that CAPTURED its evidence and
+ * reported a critical (an `EVIDENCE_CAPTURE_FAILED` spec-check carries no
+ * counts to believe, so it is not a cause here; the gate withholds on it
+ * separately) — and `validate-task-execution` enumerates precisely those two,
+ * through `waveBlockCauses` below, when it refuses to start the next wave.
+ * This predicate is that rule, and it is deliberately the
  * ONLY copy: every writer that sets or clears the flag computes it from here,
  * and the load boundary proves the stored flag against it. When the rule lived
  * only in the setters, both clearers were simply missing — `store-review-findings`
@@ -124,14 +127,47 @@ export function waveHasBlockCause(
   specCheck: WaveBlockCauseSpecCheck | undefined,
   wave: number,
 ): boolean {
+  const causes = waveBlockCauses(tasks, specCheck, wave);
+  return causes.criticalReviewFindings > 0 || causes.criticalSpecCheckFindings > 0;
+}
+
+/**
+ * The two causes, COUNTED — the same rule `waveHasBlockCause` reduces to a
+ * boolean.
+ *
+ * `validate-task-execution` renders these counts back to the operator when it
+ * refuses to start the next wave, and it used to enumerate them itself: it
+ * summed task-level criticals and never read the spec-check at all. A wave
+ * blocked purely by a critical spec-check therefore printed
+ * "Wave N is BLOCKED due to:" followed by nothing — the empty-cause-set
+ * dead end this predicate's doc describes, reproduced at the DISPLAY boundary
+ * after it had been fixed at the computation boundary. One function answers
+ * both questions now, so the flag and the explanation cannot disagree.
+ */
+export function waveBlockCauses(
+  tasks: readonly WaveBlockCauseTask[],
+  specCheck: WaveBlockCauseSpecCheck | undefined,
+  wave: number,
+): WaveBlockCauses {
   const substantive = (findings: readonly string[] | undefined): number =>
     findings?.filter((finding) => finding.trim() !== "").length ?? 0;
-  if (tasks.some((task) => task.wave === wave && substantive(task.critical_findings) > 0)) return true;
-  return specCheck !== undefined &&
-    specCheck.wave === wave &&
-    specCheck.verdict !== "EVIDENCE_CAPTURE_FAILED" &&
-    (specCheck.critical_count ?? 0) > 0;
+  return Object.freeze({
+    criticalReviewFindings: tasks
+      .filter((task) => task.wave === wave)
+      .reduce((sum, task) => sum + substantive(task.critical_findings), 0),
+    criticalSpecCheckFindings: specCheck !== undefined &&
+      specCheck.wave === wave &&
+      specCheck.verdict !== "EVIDENCE_CAPTURE_FAILED"
+      ? specCheck.critical_count ?? 0
+      : 0,
+  });
 }
+
+/** Why a wave is blocked, by cause. Both zero means it has no cause to be. */
+export type WaveBlockCauses = Readonly<{
+  criticalReviewFindings: number;
+  criticalSpecCheckFindings: number;
+}>;
 
 /**
  * The wave-gate record with `blocked` re-derived from the causes present in

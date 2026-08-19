@@ -124,8 +124,8 @@ describe("every REVIEW_SUB_AGENT declares the Machine Summary contract", () => {
     expect(
       resolved.kind,
       resolved.kind === "evidence-failed" ? `parser rejected the documented example: ${resolved.message}` : "",
-    ).toBe("findings");
-    if (resolved.kind !== "findings" || resolved.bound === undefined) return;
+    ).toBe("bound-findings");
+    if (resolved.kind !== "bound-findings") return;
     expect(resolved.bound.priorAssessments.map((a) => a.finding_id)).toEqual(priorIds);
     for (const assessment of resolved.bound.priorAssessments) {
       expect(["resolved_by_remediation", "still_present"]).toContain(assessment.verdict);

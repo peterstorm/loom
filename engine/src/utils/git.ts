@@ -256,11 +256,11 @@ export function diffUntracked(file: string): string {
 // --- Pure functions for test evidence (no git calls) ---
 
 export interface TestCount {
-  java: number;
-  ts: number;
-  python: number;
-  rust: number;
-  total: number;
+  readonly java: number;
+  readonly ts: number;
+  readonly python: number;
+  readonly rust: number;
+  readonly total: number;
 }
 
 /** Count new test methods in a diff string (pure) */

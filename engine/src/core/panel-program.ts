@@ -1359,6 +1359,26 @@ function boundRefutationLens(
 }
 
 /**
+ * The criterion a judge slot answers for, refused rather than assumed.
+ *
+ * Both judge paths — the event reducer and the direct submission — used to do
+ * `judgeRoster.orderedSlots.findIndex(...)` and then `judgeCriteria[index]!`,
+ * which is precisely the pattern `boundEntryForSlot`'s doc exists to forbid: an
+ * unknown slot yields -1, indexing with -1 yields `undefined`, and the `!` hands
+ * that downstream as if it were a real criterion. The verdict parser would then
+ * check the submission against `undefined` and admit whatever it was given.
+ */
+function boundJudgeCriterion(
+  authority: ArchitecturePanelAuthority,
+  slotId: SlotId,
+): PersistentPanelResult<ArchitectureCriterion> {
+  const criterion = boundEntryForSlot(authority.judgeRoster, authority.judgeCriteria, slotId);
+  return criterion === null
+    ? persistentFailure(panelError("architecture", "request-binding-mismatch", `slot ${slotId} is bound to no judge criterion`, { slotId }))
+    : persistentSuccess(criterion);
+}
+
+/**
  * Resolve the lens and candidate id a designer slot answers for. Both come from
  * the same ordinal, so they are resolved together — pairing a lens from one
  * position with a candidate id from another is the mismatch this prevents.
@@ -1983,7 +2003,9 @@ function parseRejection<Result>(
 const DERIVED_ROSTER_VIEWS: ReadonlySet<string> = new Set(["byId", "bySlot"]);
 
 /**
- * Structural equality for a durable panel checkpoint's state.
+ * Structural equality for any two panel values compared by content: a durable
+ * checkpoint's state, a replayed event prefix, a deterministic aggregate, and a
+ * panel authority projection all come through here.
  *
  * The derived roster views are dropped from BOTH sides, because including them
  * made the comparison depend on how a `Map` happens to serialize — and it did,
@@ -2031,8 +2053,9 @@ export function parsePersistentArchitecturePanelEvent(
     if (!resolved.ok) return resolved;
     const located = locateProgress(state.authority.judgeRoster, state.slots, resolved.value.expected.requestId);
     if (!located.ok) return located;
-    const index = state.authority.judgeRoster.orderedSlots.findIndex(({ slotId }) => slotId === resolved.value.expected.slotId);
-    const value = parseCanonicalJudge(exact.value, state.authority, state.authority.judgeCriteria[index]!);
+    const criterion = boundJudgeCriterion(state.authority, resolved.value.expected.slotId);
+    if (!criterion.ok) return criterion;
+    const value = parseCanonicalJudge(exact.value, state.authority, criterion.value);
     if (!value.ok) return persistentFailure(panelError("architecture", "request-binding-mismatch", value.error.message, { requestId: resolved.value.expected.requestId, slotId: resolved.value.expected.slotId }));
     return persistentSuccess(architectureEvent(Object.freeze({ schemaVersion: 1, type: "architecture-judge-accepted", request: resolved.value.identity, value: value.value })));
   }
@@ -2348,8 +2371,9 @@ export function submitArchitectureJudgeResult(state: ArchitecturePanelState, res
   if (!resolved.ok) return resolved;
   const located = locateProgress(state.authority.judgeRoster, state.slots, resolved.value.expected.requestId);
   if (!located.ok) return located;
-  const index = state.authority.judgeRoster.orderedSlots.findIndex(({ slotId }) => slotId === resolved.value.expected.slotId);
-  const criterion = state.authority.judgeCriteria[index]!;
+  const bound = boundJudgeCriterion(state.authority, resolved.value.expected.slotId);
+  if (!bound.ok) return bound;
+  const criterion = bound.value;
   const parsed: ParseResult<JudgeVerdict> = typeof rawJson === "string" ? parseJudgeVerdict(rawJson, criterion, state.authority.candidateIds) : fail(["judge result must be raw JSON text"]);
   if (!parsed.ok) {
     const kind = publicResultClaimsForeignAuthority(

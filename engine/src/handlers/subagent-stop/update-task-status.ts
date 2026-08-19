@@ -78,68 +78,63 @@ function lastMatch(str: string, regex: RegExp): MatchWithIndex | null {
   return last as MatchWithIndex;
 }
 
+/**
+ * One test runner's pass/fail tally shapes, and how to render its evidence.
+ *
+ * The decision rule is the same for all five — a pass tally counts only when
+ * there is no LATER failure tally — and it was written out five times, differing
+ * only in these fields. Two of the five (pytest, bun) had already needed extra
+ * anchoring against prose false positives, and each hardening landed in one copy
+ * at a time; a shared rule means the next one applies everywhere at once.
+ *
+ * Order is significant and preserved: the first runner whose pass tally matches
+ * and survives the failure check wins.
+ */
+type RunnerTally = Readonly<{
+  label: string;
+  pass: RegExp;
+  fail: RegExp;
+  render: (match: MatchWithIndex) => string;
+}>;
+
+const RUNNER_TALLIES: readonly RunnerTally[] = Object.freeze([
+  // Node/Mocha: "N passing" without "N failing".
+  { label: "node", pass: /(\d+) passing/, fail: /(\d+) failing/, render: (m) => m[0] },
+  // Vitest's "Tests  N passed" summary line ONLY. The sibling "Test Files  N
+  // passed" line does not match and is not meant to: `Files` sits exactly where
+  // the count must be, and the per-file tally is not evidence that the tests
+  // themselves passed.
+  { label: "vitest", pass: /Tests?\s+\d+ passed/, fail: /Tests?\s+(\d+) failed/, render: (m) => m[0] },
+  // Rust/cargo test: "test result: ok. N passed; 0 failed".
+  { label: "cargo", pass: /test result: ok\. (\d+) passed/, fail: /test result:.*(\d+) failed/, render: (m) => `${m[1]} passed` },
+  // pytest: "N passed … in X.XXs" (runner summary shape). Anchored to the timing
+  // suffix so prose like "3 passed review" cannot mint a passing result — this
+  // path already yields only untrusted evidence, but unbound/legacy agents'
+  // gates accept it.
+  { label: "pytest", pass: /(\d+) passed\b[^\n]*\bin \d+(?:\.\d+)?s/, fail: /(\d+) failed/, render: (m) => m[0] },
+  // Bun: "N pass" without "N fail". Line-start anchored (bun prints each counter
+  // on its own line) so mid-sentence prose like "all 5 pass rates" never matches.
+  { label: "bun", pass: /^\s*(\d+) pass\b/m, fail: /^\s*(\d+) fail\b/m, render: (m) => m[0] },
+]);
+
 export function extractTestEvidence(bashOutput: string): TestEvidence {
-  // Java/Maven
+  // Java/Maven is its own shape: the tally already asserts zero failures, so
+  // there is no separate failure regex to outrank.
   if (/BUILD SUCCESS/.test(bashOutput)) {
     const cleaned = bashOutput.replace(/\*\*/g, "");
     const maven = lastMatch(cleaned, /Tests run: \d+, Failures: 0, Errors: 0/);
     if (maven) return { passed: true, evidence: `maven: ${maven[0]}` };
   }
 
-  // Node/Mocha: "N passing" without "N failing" (or failing comes before passing)
-  const passing = lastMatch(bashOutput, /(\d+) passing/);
-  if (passing) {
-    const failMatch = lastMatch(bashOutput, /(\d+) failing/);
-    if (!failMatch || failMatch[1] === "0" || failMatch.index < passing.index) {
-      return { passed: true, evidence: `node: ${passing[0]}` };
-    }
-  }
-
-  // Vitest's "Tests  N passed" summary line ONLY. The sibling
-  // "Test Files  N passed" line does not match and is not meant to: `Files`
-  // sits exactly where the count must be, and the per-file tally is not
-  // evidence that the tests themselves passed.
-  const vitest = lastMatch(bashOutput, /Tests?\s+\d+ passed/);
-  if (vitest) {
-    // The `=== "0"` guard every sibling branch carries. It matters when one
-    // bash output holds more than one vitest run — a later "Tests  10 passed"
-    // must not be credited over an earlier "Tests  2 failed" unless it really
-    // came after it, which is what the index comparison establishes.
-    const vitestFailed = lastMatch(bashOutput, /Tests?\s+(\d+) failed/);
-    if (!vitestFailed || vitestFailed[1] === "0" || vitestFailed.index < vitest.index) {
-      return { passed: true, evidence: `vitest: ${vitest[0]}` };
-    }
-  }
-
-  // Rust/cargo test: "test result: ok. N passed; 0 failed"
-  const cargoTest = lastMatch(bashOutput, /test result: ok\. (\d+) passed/);
-  if (cargoTest) {
-    const cargoFail = lastMatch(bashOutput, /test result:.*(\d+) failed/);
-    if (!cargoFail || cargoFail[1] === "0" || cargoFail.index < cargoTest.index) {
-      return { passed: true, evidence: `cargo: ${cargoTest[1]} passed` };
-    }
-  }
-
-  // pytest: "N passed … in X.XXs" (runner summary shape) without "N failed"
-  // (or failed comes before passed). Anchored to the timing suffix so prose
-  // like "3 passed review" cannot mint a passing result — this path already
-  // yields only untrusted evidence, but unbound/legacy agents' gates accept it.
-  const pytest = lastMatch(bashOutput, /(\d+) passed\b[^\n]*\bin \d+(?:\.\d+)?s/);
-  if (pytest) {
-    const pyFail = lastMatch(bashOutput, /(\d+) failed/);
-    if (!pyFail || pyFail[1] === "0" || pyFail.index < pytest.index) {
-      return { passed: true, evidence: `pytest: ${pytest[0]}` };
-    }
-  }
-
-  // Bun: "N pass" without "N fail" (or "0 fail" or fail comes before pass).
-  // Line-start anchored (bun prints each counter on its own line) so
-  // mid-sentence prose like "all 5 pass rates" never matches.
-  const bunPass = lastMatch(bashOutput, /^\s*(\d+) pass\b/m);
-  if (bunPass) {
-    const bunFail = lastMatch(bashOutput, /^\s*(\d+) fail\b/m);
-    if (!bunFail || bunFail[1] === "0" || bunFail.index < bunPass.index) {
-      return { passed: true, evidence: `bun: ${bunPass[0]}` };
+  for (const runner of RUNNER_TALLIES) {
+    const passed = lastMatch(bashOutput, runner.pass);
+    if (!passed) continue;
+    // The `=== "0"` guard and the index comparison together: when one bash
+    // output holds more than one run, a later "10 passed" must not be credited
+    // over an earlier "2 failed" unless it really came after it.
+    const failed = lastMatch(bashOutput, runner.fail);
+    if (!failed || failed[1] === "0" || failed.index < passed.index) {
+      return { passed: true, evidence: `${runner.label}: ${runner.render(passed)}` };
     }
   }
 

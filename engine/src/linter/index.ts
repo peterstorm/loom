@@ -50,24 +50,6 @@ export function isBinaryBuffer(buffer: Buffer): boolean {
 
 
 /**
- * Lints a single file against all applicable rules for the given tier.
- *
- * Stateless: loads rules fresh on every invocation. No caching, no memoization.
- * Fail-closed: entire function wrapped in try/catch — any throw → LintResult.error.
- *
- * @param filePath - Absolute or relative path to the file to lint
- * @param tier - "immediate" (PostEdit, fast) or "full" (wave-gate, all rules)
- * @param defaultRulesDir - Directory containing shipped default rules
- * @param projectRulesDir - Directory containing project-local rule overrides (or null)
- * @param timeoutMs - Wall-clock budget for this file. Defaults to the hook
- *   budget (`DEFAULT_TIMEOUT_MS`); callers that are not a latency-bound hook —
- *   a batch audit, or a test feeding a deliberately huge file — pass their own.
- *   Without it, "does this rule find the violation" and "did the machine finish
- *   in 50ms" were the same assertion, so a slow or loaded host turned a
- *   correctness test into a flaky one.
- * @returns LintResult: pass | violations | error
- */
-/**
  * The per-file pipeline both entry points run: resolve → single atomic read →
  * binary skip → decode → deadline → execute → fail-closed error.
  *
@@ -104,6 +86,24 @@ function lintLoadedFile(
   }
 }
 
+/**
+ * Lints a single file against all applicable rules for the given tier.
+ *
+ * Stateless: loads rules fresh on every invocation. No caching, no memoization.
+ * Fail-closed: entire function wrapped in try/catch — any throw → LintResult.error.
+ *
+ * @param filePath - Absolute or relative path to the file to lint
+ * @param tier - "immediate" (PostEdit, fast) or "full" (wave-gate, all rules)
+ * @param defaultRulesDir - Directory containing shipped default rules
+ * @param projectRulesDir - Directory containing project-local rule overrides (or null)
+ * @param timeoutMs - Wall-clock budget for this file. Defaults to the hook
+ *   budget (`DEFAULT_TIMEOUT_MS`); callers that are not a latency-bound hook —
+ *   a batch audit, or a test feeding a deliberately huge file — pass their own.
+ *   Without it, "does this rule find the violation" and "did the machine finish
+ *   in 50ms" were the same assertion, so a slow or loaded host turned a
+ *   correctness test into a flaky one.
+ * @returns LintResult: pass | violations | error
+ */
 export function lintFile(
   filePath: string,
   tier: Tier,

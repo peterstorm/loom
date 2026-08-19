@@ -63,7 +63,7 @@ describe("deriveRunInspection — program and state", () => {
         programRegistration: observed<unknown>({ schemaVersion: 1, kind }),
         checkpoint: observed<string | null>(JSON.stringify(checkpoint)),
       }));
-      expect(inspection.program).toEqual({ kind: "observed", value: kind });
+      expect(inspection.program).toEqual({ kind: "observed", value: { kind: "registered", program: kind } });
       expect(inspection.state, `${kind} state`).toEqual({ kind: "observed", value: expected });
     }
   });
@@ -98,11 +98,24 @@ describe("deriveRunInspection — program and state", () => {
   it("reports an unregistered run as such, and refuses to label its checkpoint", () => {
     const inspection = deriveRunInspection(observation({ programRegistration: observed<unknown>(null) }));
 
-    expect(inspection.program).toEqual({ kind: "observed", value: null });
+    expect(inspection.program).toEqual({ kind: "observed", value: { kind: "unregistered" } });
     expect(inspection.state).toEqual({
       kind: "unavailable",
       reason: "run has a checkpoint but no registered program to read it through",
     });
+  });
+
+  it("distinguishes an unrecognized program kind from no program at all", () => {
+    const inspection = deriveRunInspection(observation({
+      programRegistration: observed<unknown>({ schemaVersion: 1, kind: "program-from-a-newer-engine" }),
+    }));
+
+    expect(inspection.program).toEqual({ kind: "observed", value: { kind: "unrecognized" } });
+    expect(inspection.state).toEqual({
+      kind: "unavailable",
+      reason: "run has a checkpoint but its registered program kind is not recognised by this build",
+    });
+    expect(renderRunInspectionHuman(inspection)).toContain("program:   unrecognized program kind");
   });
 
   it("propagates an unreadable registration into the state rather than guessing", () => {
@@ -263,7 +276,7 @@ describe("run inspection renderers", () => {
       schemaVersion: 1,
       kind: "run-inspection",
       runId: "run.example",
-      program: { kind: "observed", value: "standalone-review" },
+      program: { kind: "observed", value: { kind: "registered", program: "standalone-review" } },
       state: { kind: "observed", value: "awaiting-results" },
       abandonment: { kind: "observed", value: { supersededBy: "run.replacement" } },
     });

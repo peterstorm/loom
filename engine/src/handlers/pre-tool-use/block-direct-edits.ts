@@ -1,7 +1,10 @@
 /**
  * Block Edit/Write/MultiEdit from the MAIN agent during loom orchestration.
- * Subagent Edit/Write is allowed — detected via the configured subagent
- * directory (`LOOM_SUBAGENT_DIR`, default `/tmp/claude-subagents`).
+ * IMPLEMENTATION subagent Edit/Write is allowed — detected via the configured
+ * subagent directory (`LOOM_SUBAGENT_DIR`, default `/tmp/claude-subagents`).
+ * Being on the active roster is NOT itself a write grant: `shouldBlockDirectEdit`
+ * admits only implementation-role agents and holders of a minted write grant, so
+ * review agents and refutation verifiers stay read-only even while active.
  *
  * Claude Code wrapper — delegates the DECISION to core/ and owns the I/O the
  * decision needs, which is why the roster read lives here rather than there.

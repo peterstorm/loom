@@ -15,12 +15,21 @@
 
 import { isReviewAgent } from "../engine/src/config";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
+import { type TaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
 
-/** The reservation fields the classification actually reads. */
+/**
+ * The reservation fields the classification actually reads.
+ *
+ * `kind` is the closed lifecycle union, not a bare `string`: every construction
+ * site already supplies a `TaskExecutionSpawn["kind"]`, and the predicates below
+ * test it against the `"standalone"` member. Typed as `string`, a typo in that
+ * comparison — or a new lifecycle arm — would silently reclassify every
+ * reservation with no compile error at the site that did it.
+ */
 export type ReservedResultItem = Readonly<{
   agentType: string;
   taskId: string | null;
-  kind: string;
+  kind: TaskExecutionSpawn["kind"];
 }>;
 
 /** One expected slot and the batch position its result should have occupied. */

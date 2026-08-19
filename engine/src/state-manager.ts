@@ -206,6 +206,29 @@ function blockedGateCauseError(
   return null;
 }
 
+/**
+ * Which required fields are absent and which unknown ones are present, as one
+ * error — or `null` when the record's key set is exactly right.
+ *
+ * The three protected wave-gate registration parsers each hand-rolled this same
+ * pair of filters against their own FIELDS constant. They are the load-boundary
+ * proofs for protected state, so a copy that forgot to `.sort()` its unknown
+ * list, or checked `in` against the wrong constant, would weaken exactly the
+ * check that keeps a hand-edited State File out.
+ */
+function exactFieldsError(
+  record: Readonly<Record<string, unknown>>,
+  required: readonly string[],
+  optional: readonly string[],
+  label: string,
+): string | null {
+  const allowed = new Set<string>([...required, ...optional]);
+  const unknownFields = Object.keys(record).filter((field) => !allowed.has(field));
+  if (unknownFields.length > 0) return `${label} contains unknown field(s): ${unknownFields.sort().join(", ")}`;
+  const missingFields = required.filter((field) => !(field in record));
+  return missingFields.length > 0 ? `${label} is missing field(s): ${missingFields.join(", ")}` : null;
+}
+
 const ACTIVE_WAVE_GATE_FIELDS = [
   "schemaVersion", "kind", "runId", "wave", "authorityDigest", "revision", "terminalOutcome",
 ] as const;
@@ -217,12 +240,8 @@ export function parseActiveWaveGateRegistration(raw: unknown): ParseResult<Activ
     return parseErr("active_wave_gate must be an object");
   }
   const record = raw as Record<string, unknown>;
-  const unknownFields = Object.keys(record).filter((field) =>
-    !(ACTIVE_WAVE_GATE_FIELDS as readonly string[]).includes(field) &&
-    !(ACTIVE_WAVE_GATE_OPTIONAL_FIELDS as readonly string[]).includes(field));
-  const missingFields = ACTIVE_WAVE_GATE_FIELDS.filter((field) => !(field in record));
-  if (unknownFields.length > 0) return parseErr(`active_wave_gate contains unknown field(s): ${unknownFields.sort().join(", ")}`);
-  if (missingFields.length > 0) return parseErr(`active_wave_gate is missing field(s): ${missingFields.join(", ")}`);
+  const fieldsError = exactFieldsError(record, ACTIVE_WAVE_GATE_FIELDS, ACTIVE_WAVE_GATE_OPTIONAL_FIELDS, "active_wave_gate");
+  if (fieldsError !== null) return parseErr(fieldsError);
   if (record.schemaVersion !== 1) return parseErr("active_wave_gate.schemaVersion must be 1");
   if (record.kind !== "active-wave-gate") return parseErr("active_wave_gate.kind must be active-wave-gate");
   const runId = parseOrchestrationRunId(record.runId);
@@ -294,10 +313,8 @@ export function parseCompletedWaveGateRegistration(raw: unknown): ParseResult<Co
     return parseErr("wave_gate_history entry must be an object");
   }
   const record = raw as Record<string, unknown>;
-  const unknownFields = Object.keys(record).filter((field) => !(COMPLETED_WAVE_GATE_FIELDS as readonly string[]).includes(field));
-  const missingFields = COMPLETED_WAVE_GATE_FIELDS.filter((field) => !(field in record));
-  if (unknownFields.length > 0) return parseErr(`wave_gate_history entry contains unknown field(s): ${unknownFields.sort().join(", ")}`);
-  if (missingFields.length > 0) return parseErr(`wave_gate_history entry is missing field(s): ${missingFields.join(", ")}`);
+  const fieldsError = exactFieldsError(record, COMPLETED_WAVE_GATE_FIELDS, [], "wave_gate_history entry");
+  if (fieldsError !== null) return parseErr(fieldsError);
   if (record.schemaVersion !== 1 || record.kind !== "completed-wave-gate") {
     return parseErr("wave_gate_history entry must be completed-wave-gate schemaVersion 1");
   }
@@ -359,15 +376,8 @@ export function parseOrphanedWaveGateRetirement(raw: unknown): ParseResult<Orpha
     return parseErr("orphaned_wave_gate_history entry must be an object");
   }
   const record = raw as Record<string, unknown>;
-  const unknownFields = Object.keys(record).filter((field) =>
-    !(ORPHANED_WAVE_GATE_RETIREMENT_FIELDS as readonly string[]).includes(field));
-  const missingFields = ORPHANED_WAVE_GATE_RETIREMENT_FIELDS.filter((field) => !(field in record));
-  if (unknownFields.length > 0) {
-    return parseErr(`orphaned_wave_gate_history entry contains unknown field(s): ${unknownFields.sort().join(", ")}`);
-  }
-  if (missingFields.length > 0) {
-    return parseErr(`orphaned_wave_gate_history entry is missing field(s): ${missingFields.join(", ")}`);
-  }
+  const fieldsError = exactFieldsError(record, ORPHANED_WAVE_GATE_RETIREMENT_FIELDS, [], "orphaned_wave_gate_history entry");
+  if (fieldsError !== null) return parseErr(fieldsError);
   if (record.schemaVersion !== 1 || record.kind !== "orphaned-wave-gate-retirement" ||
       record.reason !== "authoritative-run-directory-missing") {
     return parseErr("orphaned_wave_gate_history entry has invalid schema, kind, or reason");

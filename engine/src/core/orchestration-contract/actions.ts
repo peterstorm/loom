@@ -180,7 +180,6 @@ export function awaitUserAction(rawRequest: unknown): DomainResult<AwaitUserActi
   if (!requestId.ok) return actionFailure(requestId.error.message, "request.requestId");
   if (!runId.ok) return actionFailure(runId.error.message, "request.runId");
   if (!context.ok) return actionFailure(context.error.message, `request.${context.error.field}`);
-  if (context.value.slot.path !== `contexts/${context.value.digest}.json`) return actionFailure("decision context slot must be content-addressed", "request.context.slot");
   const rawAdvisories = readDenseDataArray(raw.value.advisories, "advisories");
   if (!rawAdvisories.ok || rawAdvisories.value.length === 0) {
     return actionFailure(rawAdvisories.ok ? "advisories must be a non-empty array" : rawAdvisories.error.message, "request.advisories");
@@ -213,7 +212,7 @@ export function awaitUserAction(rawRequest: unknown): DomainResult<AwaitUserActi
  *
  * The success type is `void` because that is the truth. It used to return the
  * validated record, which promised callers a structure every one of them
- * discards — all five read only `.ok` and return the failure. A return type
+ * discards — all four read only `.ok` and return the failure. A return type
  * that over-promises invites a caller to start reading fields the constants
  * already determine.
  */

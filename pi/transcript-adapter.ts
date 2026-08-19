@@ -369,6 +369,12 @@ export function piStructuredTestResult(
  * by Loom's transcript parsers. Tool-call IDs are preserved so anti-spoofing
  * parsers can pair a real command with its exact result.
  */
+/** Text blocks normalised to a defined `text`; every other block passes through
+ *  untouched. The toolResult and user branches below mapped identical closures. */
+function normalizedTextBlocks(content: readonly PiContentBlock[]): readonly unknown[] {
+  return content.map((block) => block.type === "text" ? { type: "text", text: block.text ?? "" } : block);
+}
+
 export function messagesToClaudeJsonl(input: unknown): PiTranscriptResult<string> {
   const parsed = parsePiMessages(input);
   if (!parsed.ok) return parsed;
@@ -395,9 +401,7 @@ export function messagesToClaudeJsonl(input: unknown): PiTranscriptResult<string
 
     if (msg.role === "toolResult") {
       if (!msg.toolCallId) throw new Error("validated Pi tool result lost its call identity");
-      const resultContent = msg.content.map((block) =>
-        block.type === "text" ? { type: "text", text: block.text ?? "" } : block,
-      );
+      const resultContent = normalizedTextBlocks(msg.content);
       lines.push(JSON.stringify({
         message: {
           role: "user",
@@ -412,10 +416,7 @@ export function messagesToClaudeJsonl(input: unknown): PiTranscriptResult<string
     }
 
     if (msg.role === "user") {
-      const content = msg.content.map((block) =>
-        block.type === "text" ? { type: "text", text: block.text ?? "" } : block,
-      );
-      lines.push(JSON.stringify({ message: { role: "user", content } }));
+      lines.push(JSON.stringify({ message: { role: "user", content: normalizedTextBlocks(msg.content) } }));
     }
   }
 

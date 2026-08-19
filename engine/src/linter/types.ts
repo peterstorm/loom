@@ -45,7 +45,12 @@ export type Rule = RegexRule | ProgrammaticRule;
 
 export interface Violation {
   readonly rule: string;    // rule name
-  readonly file: string;    // absolute path
+  /** Whatever path the rule was given. `lintFile`/`lintFiles` resolve() before
+   *  executing rules, so a violation from either entry point is absolute; a rule
+   *  handler invoked directly (as the rule tests do) reports the caller's own
+   *  path, which the boundary rules rely on being repo-relative. NOT an
+   *  enforced invariant, and the previous "absolute path" comment claimed it was. */
+  readonly file: string;
   readonly line: number;    // 1-indexed
   readonly text: string;    // matched line content (trimmed)
   readonly fixHint: string;

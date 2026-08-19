@@ -109,9 +109,12 @@ describe("set-phase helper", () => {
   });
 
   it("returns error when no active task graph exists", () => {
-    // Create a separate tmpDir with no state file
-    const emptyDir = join(tmpdir(), `loom-sp-empty-${Date.now()}`);
-    mkdirSync(emptyDir, { recursive: true });
+    // A separate tmpDir with no state file, through the same `makeTmpDir` the
+    // rest of this file uses. It was hand-rolled as `loom-sp-empty-${Date.now()}`
+    // + `mkdirSync({recursive:true})` — exactly the pattern `makeTmpDir`'s own
+    // comment explains is unsafe, and exactly the ADOPT-an-existing-directory
+    // hazard it names, in the one test that asserts a directory is EMPTY.
+    const emptyDir = makeTmpDir();
     execSync("git init", { cwd: emptyDir, stdio: "ignore" });
 
     try {

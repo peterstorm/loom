@@ -65,9 +65,13 @@ export function hasStandaloneReviewContext(text: string): boolean {
 }
 
 /**
- * What became of the optional structured block. Reported to the operator,
- * because every arm but `used` means the findings carry no file/line and
- * verification quality is degraded — a difference that was previously invisible.
+ * What became of the optional structured block.
+ *
+ * `absent` and `used` are the two silent arms — the block is absent by the
+ * reviewer's own choice, or it is present and authoritative, and neither is a
+ * degradation to report. Every OTHER arm means the findings lost file/line
+ * fidelity, and `blockStatusNote` reports each to the operator; that difference
+ * was previously invisible.
  *
  * A discriminated union, not a string beside an independent `carriedOver`
  * count. The count is meaningful for exactly the two arms that carry claims
@@ -449,8 +453,10 @@ function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
 }
 
 /**
- * Legacy fallback: section-headed Critical/Advisory blocks first; fall back to
- * whole-output line scan if no sections matched.
+ * Legacy fallback: section-headed Critical/Advisory blocks first; fall back to a
+ * whole-output line scan when those sections yield NO claims — which covers both
+ * "no section matched" and "a section matched but its only entry was the literal
+ * `None` placeholder".
  *
  * Arbitrated through `chooseSource` exactly like the Machine Summary path. It
  * used to return the scraped claims directly, so a reviewer that emitted a
@@ -498,18 +504,30 @@ function scrapeLegacyFindings(output: string): ParsedFindings {
 // The one path both harnesses take
 // ---------------------------------------------------------------------------
 
-/**
- * What a review transcript resolves to. Closed union: a reviewer either failed
- * to emit its evidence marker (the wave must not silently pass) or produced a
- * reconciled finding set. There is no third state, and no "maybe" shape a
- * caller could forget to handle.
- */
+/** A finding set proven to belong to a specific Review Packet generation. */
 export interface BoundReviewEvidence {
   readonly packetId: string;
   readonly generation: number;
   readonly priorAssessments: readonly PriorFindingAssessment[];
 }
 
+/**
+ * What a review transcript resolves to. Closed union of FOUR outcomes, and no
+ * "maybe" shape a caller could forget to handle:
+ *
+ * - `evidence-failed` — the reviewer emitted no usable evidence marker, so the
+ *   wave must not silently pass;
+ * - `ignored-stale` — the output is bound to a packet generation that is no
+ *   longer current, so it is discarded rather than merged;
+ * - `findings` — a reconciled finding set with no packet binding (legacy merge);
+ * - `bound-findings` — a reconciled finding set WITH its `BoundReviewEvidence`.
+ *
+ * The last two were one variant with an optional `bound` field, and every
+ * consumer re-derived the distinction by hand: `applyReviewResolution` and
+ * `reviewResolutionLog` between them tested `bound === undefined` six times to
+ * choose between two genuinely different behaviours. Splitting the arm makes
+ * `ts-pattern`'s `.exhaustive()` prove each branch handled instead.
+ */
 export type ReviewResolution =
   | { readonly kind: "evidence-failed"; readonly agent: string; readonly message: string }
   | { readonly kind: "ignored-stale"; readonly agent: string; readonly message: string }
@@ -517,10 +535,24 @@ export type ReviewResolution =
       readonly kind: "findings";
       readonly agent: string;
       readonly findings: ParsedFindings;
-      readonly bound?: BoundReviewEvidence;
+    }
+  | {
+      readonly kind: "bound-findings";
+      readonly agent: string;
+      readonly findings: ParsedFindings;
+      readonly bound: BoundReviewEvidence;
     };
 
-export type UnboundReviewResolution = Exclude<ReviewResolution, { readonly kind: "ignored-stale" }>;
+/** Either finding-carrying arm — the two that own a `ParsedFindings`. */
+export type FindingsResolution = Extract<
+  ReviewResolution,
+  { readonly kind: "findings" | "bound-findings" }
+>;
+
+export type UnboundReviewResolution = Exclude<
+  ReviewResolution,
+  { readonly kind: "ignored-stale" | "bound-findings" }
+>;
 
 /** Pure: parse → reconcile, in one place, for every harness. */
 export function resolveReviewFindings(transcript: string, agent: string): UnboundReviewResolution {
@@ -618,7 +650,9 @@ export function resolveBoundReviewFindings(
     return { kind: "evidence-failed", agent, message: assessments.error };
   }
   return {
-    ...base,
+    kind: "bound-findings",
+    agent: base.agent,
+    findings: base.findings,
     bound: {
       packetId: run.packet_id,
       generation: run.generation,
@@ -660,7 +694,7 @@ export function constrainReviewResolutionToScope(
   resolution: ReviewResolution,
   scope: readonly string[],
 ): ReviewResolution {
-  if (resolution.kind !== "findings") return resolution;
+  if (resolution.kind !== "findings" && resolution.kind !== "bound-findings") return resolution;
   const allowed = new Set(scope.flatMap((path) => {
     const parsed = parseReviewPath(path, "review scope path");
     return parsed.ok ? [parsed.value] : [];
@@ -720,8 +754,8 @@ export function applyReviewResolution(task: Task, resolution: ReviewResolution):
         ],
       };
     })
-    .with({ kind: "findings" }, (r): Task => {
-      if (r.bound === undefined) return mergeFindings(task, r.findings, r.agent);
+    .with({ kind: "findings" }, (r): Task => mergeFindings(task, r.findings, r.agent))
+    .with({ kind: "bound-findings" }, (r): Task => {
       const transition = recordReviewRunEvidence(
         task,
         r.bound.packetId,
@@ -770,6 +804,16 @@ export function applyReviewResolution(task: Task, resolution: ReviewResolution):
  * duplicate, and an operator who cannot see the count cannot tell an inflated
  * finding set from a genuinely large one.
  */
+/**
+ * The larger of the reviewer's tally and what was actually captured — the same
+ * disjunction `mergeFindings` blocks on. Reporting the tally alone logged
+ * "passed (0 critical)" for a task the very next line recorded as blocked with a
+ * real critical in it.
+ */
+function criticalTally(resolution: FindingsResolution): number {
+  return Math.max(resolution.findings.criticalCount ?? 0, resolution.findings.critical.length);
+}
+
 function blockStatusNote(status: FindingsBlockStatus): string {
   const carried = (count: number) => `${count} claim(s) carried over`;
   return match(status)
@@ -810,28 +854,21 @@ export function reviewResolutionLog(
       { kind: "ignored-stale" },
       (r) => `WARNING: ${r.message} for ${taskId} — evidence ignored`,
     )
-    .with({ kind: "findings" }, (r) => {
-      if (r.bound !== undefined && appliedTask?.review_evidence_failures?.includes(r.agent)) {
+    .with({ kind: "findings" }, (r) =>
+      `Task ${taskId} review: ${criticalTally(r) > 0 ? "blocked" : "passed"} (${criticalTally(r)} critical)` +
+      blockStatusNote(r.findings.blockStatus))
+    .with({ kind: "bound-findings" }, (r) => {
+      if (appliedTask?.review_evidence_failures?.includes(r.agent)) {
         return `WARNING: ${appliedTask.review_error ?? "review evidence was rejected"} for ${taskId} — marking evidence_capture_failed`;
       }
-      if (r.bound !== undefined && applicationChanged === false) {
+      if (applicationChanged === false) {
         return `WARNING: review evidence did not apply to current task state for ${taskId} — evidence ignored`;
       }
-      if (r.bound !== undefined && appliedTask !== undefined &&
-          appliedTask.review_generation !== r.bound.generation) {
+      if (appliedTask !== undefined && appliedTask.review_generation !== r.bound.generation) {
         return `WARNING: review output is stale for ${taskId} — evidence ignored`;
       }
-      // The larger of the reviewer's tally and what was actually captured —
-      // the same disjunction `mergeFindings` blocks on. Reporting the tally
-      // alone logged "passed (0 critical)" for a task the very next line
-      // recorded as blocked with a real critical in it.
-      const count = Math.max(r.findings.criticalCount ?? 0, r.findings.critical.length);
-      return (
-        (r.bound === undefined
-          ? `Task ${taskId} review: ${count > 0 ? "blocked" : "passed"} (${count} critical)`
-          : `Task ${taskId} review evidence staged for packet ${r.bound.packetId} (${count} new critical)`) +
-        blockStatusNote(r.findings.blockStatus)
-      );
+      return `Task ${taskId} review evidence staged for packet ${r.bound.packetId} (${criticalTally(r)} new critical)` +
+        blockStatusNote(r.findings.blockStatus);
     })
     .exhaustive();
 }

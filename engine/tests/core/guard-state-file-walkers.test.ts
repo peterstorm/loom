@@ -181,3 +181,40 @@ describe("guard-state-file walker divergence net", () => {
     expect(data.bodies).toEqual([]); // quoted DATA body: opaque
   });
 });
+
+/**
+ * The backtick that `findClosingParen` did not count as a quote.
+ *
+ * `hasOutputRedirect` (same module) and `stripComment` (machine/extract-evidence)
+ * both treated a backtick as a quote opener; `findClosingParen` tracked only `"`
+ * and `'`. So the `)` inside a backtick body nested in `$(…)` was read as the
+ * OUTER substitution's close and the guard analysed a truncated body — the twin-
+ * scanner divergence class this file's property net exists to catch, in the one
+ * dimension no property covered. All three now share `core/shell-quoting`'s
+ * `scanUnquoted`, so this pins the alphabet they share.
+ */
+describe("guard-state-file — backtick inside $( … )", () => {
+  it("does not close a $(…) span at a ) inside a nested backtick body", () => {
+    // The `)` in `a)b` belongs to the backtick body, so the substitution runs
+    // to the FINAL `)` and its body is the whole `echo `a)b``.
+    const scan = scanSubstitutions("$(echo `a)b`)", (body) => body);
+    expect(scan.unclosed).toBe(false);
+    expect(scan.bodies).toEqual(["echo `a)b`"]);
+  });
+
+  it("flattens such a command instead of failing closed on a phantom unclosed span", () => {
+    expect(flattenSubstitutions("echo $(echo `a)b`)")).not.toBeNull();
+  });
+
+  it("still reports a genuinely unclosed substitution", () => {
+    expect(flattenSubstitutions("echo $(echo `a)b`")).toBeNull();
+  });
+
+  it("keeps a guarded token inside a backtick-bearing body visible to the guard", () => {
+    // The truncation was not fail-closed: a body cut short at the wrong `)`
+    // hid whatever followed it, including the guarded path.
+    const scan = scanSubstitutions("$(echo `x)y` .claude/state/active_task_graph.json)", (body) => body);
+    expect(scan.unclosed).toBe(false);
+    expect(scan.bodies[0]).toContain(".claude/state/active_task_graph.json");
+  });
+});

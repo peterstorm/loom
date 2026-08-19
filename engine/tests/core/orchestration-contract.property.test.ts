@@ -77,6 +77,9 @@ function valueOf<T>(result: Result<T>): T {
 }
 
 const registeredPublicationBytes = new Map<string, readonly number[]>();
+/** The \u0000-joined (runId, effectId) pair both fake stores key on. The
+ *  publication registry and the initial-claim store each declared their own
+ *  byte-identical copy of this ~30 lines apart. */
 const registrationKey = (identity: Readonly<{
   runId: string;
   effectId: string;
@@ -108,10 +111,6 @@ function registerPublication(rawReceipt: unknown): RegisteredBatchPublicationAut
   return valueOf(publicationResolver(publicationIdentity(receipt)));
 }
 
-const initialPublicationClaimKey = (identity: Readonly<{
-  runId: string;
-  effectId: string;
-}>): string => `${identity.runId}\u0000${identity.effectId}`;
 
 type DurableInitialPublicationClaims = Map<string, BatchPublicationIdentity>;
 
@@ -128,7 +127,7 @@ function atomicInitialPublicationClaim(
 ): AtomicInitialPublicationClaim {
   return (request) => {
     onCall(request.identity);
-    const storageKey = initialPublicationClaimKey(request.key);
+    const storageKey = registrationKey(request.key);
     const claimedIdentity = claims.get(storageKey);
     if (claimedIdentity === undefined) {
       claims.set(storageKey, request.identity);

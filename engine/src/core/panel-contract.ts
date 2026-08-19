@@ -50,6 +50,24 @@ export const SENSITIVE_BOUNDARY_STATUSES = Object.freeze(["flagged", "none"] as 
 export type SensitiveBoundaryStatus = (typeof SENSITIVE_BOUNDARY_STATUSES)[number];
 
 /**
+ * The prefix matcher, DERIVED from the vocabulary above rather than restated.
+ *
+ * A hardcoded `/^(flagged|none)…/` sat here instead, which made the closed-
+ * vocabulary doc false for this one array: `SENSITIVE_BOUNDARY_STATUSES` was
+ * referenced by nothing but its own type alias, so freezing it protected
+ * nothing and adding a status to it would have changed the brand's admitted
+ * values without changing what the parser accepts.
+ */
+const SENSITIVE_BOUNDARY_PREFIX = new RegExp(
+  `^(${SENSITIVE_BOUNDARY_STATUSES.join("|")})(?:\\b|\\s|[-—:])`,
+  "i",
+);
+
+/** The same alternation, unanchored to a boundary — used to normalise the
+ *  matched prefix to its canonical lower-case status. */
+const SENSITIVE_BOUNDARY_HEAD = new RegExp(`^(${SENSITIVE_BOUNDARY_STATUSES.join("|")})`, "i");
+
+/**
  * Free prose that PROVABLY begins with `flagged` or `none`.
  *
  * The status drives lens selection — a `flagged` digest pulls the
@@ -149,9 +167,9 @@ export function parseInterviewDigest(markdown: string): ParseResult<InterviewDig
   }
 
   const sensitiveBoundaries = values.sensitiveBoundaries;
-  const sensitiveStatus = sensitiveBoundaries?.match(/^(flagged|none)(?:\b|\s|[-—:])/i)?.[1]?.toLowerCase();
+  const sensitiveStatus = sensitiveBoundaries?.match(SENSITIVE_BOUNDARY_PREFIX)?.[1]?.toLowerCase();
   if (sensitiveBoundaries && !sensitiveStatus) {
-    errors.push("Sensitive boundaries must begin with 'flagged' or 'none'");
+    errors.push(`Sensitive boundaries must begin with ${SENSITIVE_BOUNDARY_STATUSES.map((status) => `'${status}'`).join(" or ")}`);
   }
 
   if (errors.length > 0) return fail(errors);
@@ -177,7 +195,7 @@ export function parseInterviewDigest(markdown: string): ParseResult<InterviewDig
     codebaseMaturity: codebaseMaturity as CodebaseMaturity,
     // The single mint: the prefix is normalised to the exact status here, which
     // is what the brand asserts everywhere downstream.
-    sensitiveBoundaries: sensitiveBoundaries.replace(/^(flagged|none)/i, sensitiveStatus) as SensitiveBoundaries,
+    sensitiveBoundaries: sensitiveBoundaries.replace(SENSITIVE_BOUNDARY_HEAD, sensitiveStatus) as SensitiveBoundaries,
   });
 }
 
@@ -483,8 +501,10 @@ export function parseJudgeVerdict(
 /**
  * The architecture panel's two remaining submissions, parsed HERE.
  *
- * Every other panel submission — refutation verdict, judge verdict — already
- * reaches the shell through an `Either`-returning parser in this module. These
+ * Every other panel submission already reaches the shell through an
+ * `Either`-returning parser in the core: the judge verdict through
+ * `parseJudgeVerdict` in this module, the refutation verdict through
+ * `parseRefutationVerdict` in its `review-panel` sibling. These
  * two were hand-rolled inline in `handlers/helpers/orchestration.ts`: a raw
  * `JSON.parse`, ad-hoc `typeof` checks, and an `as never` cast to make a
  * `Set<CandidateFilename>.has` accept an unbranded string. That put admission

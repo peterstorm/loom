@@ -85,6 +85,7 @@ import {
   captureAuditLine,
   captureHarnessResult,
   RUN_DIR_ENV,
+  describeCaptureFailure,
   RUNS_ROOT_ENV,
   type CaptureOutcome,
 } from "../engine/src/orchestration/harness-capture-runtime";
@@ -172,9 +173,9 @@ export function piSystemAgentIdentity(systemPrompt: string): string {
   return matches[0]![1]!;
 }
 
-/** Stable per-spawn roster identity shared by tool_call and tool_result.
- * Task text is deliberately excluded: Pi substitutes `{previous}` in chain
- * results, so it is not stable across the lifecycle. */
+/** The raw batch entry at `index`, whichever spawn shape the caller used
+ *  (`tasks`, `chain`, or a bare single entry). Returned by reference: callers
+ *  such as `replacePiSpawnTask` write its `task` field in place. */
 function piSpawnItem(raw: Record<string, unknown>, index: number): Record<string, unknown> {
   const entries = Array.isArray(raw.tasks)
     ? raw.tasks
@@ -244,6 +245,9 @@ export function replacePiSpawnTask(raw: unknown, index: number, task: string): v
   piSpawnItem(input, index).task = task;
 }
 
+/** Stable per-spawn roster identity shared by tool_call and tool_result.
+ *  Task text is deliberately excluded: Pi substitutes `{previous}` in chain
+ *  results, so it is not stable across the lifecycle. */
 export const piSpawnRosterId = (
   toolCallId: unknown,
   index: number,
@@ -1648,11 +1652,7 @@ export default function (pi: ExtensionAPI) {
       // task-state short-circuit.
       if (runBound || reservedItem?.kind === "standalone" || hasStandaloneReviewContext(result.task ?? "")) {
         if (runBound && captureOutcome.kind !== "captured") {
-          const detail = captureOutcome.kind === "rejected"
-            ? `${captureOutcome.reason}: ${captureOutcome.message}`
-            : captureOutcome.kind === "no-reservation"
-              ? `no reservation for ${captureOutcome.agentId}`
-              : "orchestration run authority was unavailable";
+          const detail = describeCaptureFailure(captureOutcome);
           const diagnostic = `standalone request-bound capture failed for ${agentType}: ${detail}`;
           processingErrors.push(diagnostic);
           process.stderr.write(`loom(pi): ${diagnostic}; task state untouched\n`);
@@ -1677,11 +1677,7 @@ export default function (pi: ExtensionAPI) {
       // path.
       if (captureOutcome.kind === "rejected" ||
           (runBound && isLoomOwnedResultAgent(agentType) && captureOutcome.kind !== "captured")) {
-        const detail = captureOutcome.kind === "rejected"
-          ? `${captureOutcome.reason}: ${captureOutcome.message}`
-          : captureOutcome.kind === "no-reservation"
-            ? `no reservation for ${captureOutcome.agentId}`
-            : "orchestration run authority was unavailable";
+        const detail = describeCaptureFailure(captureOutcome);
         const diagnostic = `request-bound capture rejected for ${agentType}: ${detail}`;
         processingErrors.push(diagnostic);
         process.stderr.write(`loom(pi): ${diagnostic}; protected state unchanged\n`);

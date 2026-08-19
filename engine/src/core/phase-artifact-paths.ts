@@ -53,8 +53,10 @@ export type PhaseArtifactKind = "spec" | "plan";
  * directory, so they are always judged against `PLAN_ARTIFACT_DIR`.
  *
  * The filename tests are `basename`/`extname`, not `endsWith`: `endsWith(".md")`
- * also accepts a path whose final segment is literally `.md`, and
- * `endsWith("/spec.md")` accepts `notspec.md` under a directory named `/spec`.
+ * also accepts a path whose final segment is literally `.md`, and neither
+ * `endsWith` spelling of the spec test is right — `endsWith("spec.md")` accepts
+ * `notspec.md`, while `endsWith("/spec.md")` rejects a bare relative `spec.md`
+ * that has no directory component at all.
  */
 export function classifyPhaseArtifact(
   filePath: string,

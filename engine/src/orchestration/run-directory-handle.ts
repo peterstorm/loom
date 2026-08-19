@@ -682,21 +682,45 @@ function readRunAuthority(
     : failure("authority", "existing run authority does not match the opened run identity");
 }
 
+/**
+ * Write `body` to `path` exactly once, treating a byte-identical repeat as the
+ * idempotent retry it is and anything else as a conflicting second claim.
+ *
+ * Six operations — program registration, abandonment, context publication,
+ * request reservation, correlator binding, receipt recording — each hand-rolled
+ * this same "write exclusive; on EEXIST read back and compare bytes" idiom. It
+ * is the run directory's whole write-once discipline, and six copies of it is
+ * six chances for one to compare the wrong thing, or to treat a genuine write
+ * error as a conflict. They differ only in the field name and the two
+ * diagnostics, so those are the parameters.
+ */
+function claimIdempotentWrite(
+  path: string,
+  body: string,
+  field: string,
+  writeFailure: (cause: string) => string,
+  conflict: string,
+): DomainResult<void, RunDirectoryError> {
+  try {
+    writeRunFileExclusiveNoFollow(path, body);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      return failure(field, writeFailure((error as Error).message));
+    }
+    if (readRunFileNoFollow(path) !== body) return failure(field, conflict);
+  }
+  return success(undefined);
+}
+
 function programOperations(runId: OrchestrationRunId, directory: string) {
   return {
     async registerProgram(registration: unknown): Promise<DomainResult<OrchestrationRunId, RunDirectoryError>> {
       const body = JSON.stringify(registration);
       const path = join(directory, PROGRAM_FILE);
-      try {
-        writeRunFileExclusiveNoFollow(path, body);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-          return failure("program", `cannot register orchestration program: ${(error as Error).message}`);
-        }
-        if (readRunFileNoFollow(path) !== body) {
-          return failure("program", "run is already registered under different program authority");
-        }
-      }
+      const claimed = claimIdempotentWrite(path, body, "program",
+        (cause) => `cannot register orchestration program: ${cause}`,
+        "run is already registered under different program authority");
+      if (!claimed.ok) return claimed;
       return success(runId);
     },
 
@@ -762,19 +786,10 @@ function abandonmentOperations(runId: OrchestrationRunId, directory: string) {
       const parsed = parseRunAbandonment(runId, input);
       if (!parsed.ok) return parsed;
       const body = JSON.stringify(parsed.value, null, 2);
-      try {
-        writeRunFileExclusiveNoFollow(path, body);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-          return failure("abandonment", `cannot record run abandonment: ${(error as Error).message}`);
-        }
-        // Exactly `registerProgram`'s rule: a byte-identical repeat is the
-        // idempotent retry of an interrupted command, and anything else is a
-        // second, different terminal claim on a run that already has one.
-        if (readRunFileNoFollow(path) !== body) {
-          return failure("abandonment", "run is already abandoned under a different marker");
-        }
-      }
+      const claimed = claimIdempotentWrite(path, body, "abandonment",
+        (cause) => `cannot record run abandonment: ${cause}`,
+        "run is already abandoned under a different marker");
+      if (!claimed.ok) return claimed;
       return success(parsed.value);
     },
 
@@ -881,17 +896,11 @@ function contextOperations(runId: OrchestrationRunId, directory: string) {
     async publishContext(packet: ContextPacket): Promise<DomainResult<ContextPublishedReceipt, RunDirectoryError>> {
       const path = join(directory, CONTEXTS, `${packet.digest}.json`);
       const body = JSON.stringify(packet);
-      try {
-        writeRunFileExclusiveNoFollow(path, body);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-          return failure("context", `cannot publish context packet: ${(error as Error).message}`);
-        }
-        // Content-addressed: an identical digest must carry identical bytes.
-        if (readRunFileNoFollow(path) !== body) {
-          return failure("context", "a different context packet already occupies this digest");
-        }
-      }
+      // Content-addressed: an identical digest must carry identical bytes.
+      const claimed = claimIdempotentWrite(path, body, "context",
+        (cause) => `cannot publish context packet: ${cause}`,
+        "a different context packet already occupies this digest");
+      if (!claimed.ok) return claimed;
       return success(canonicalRecord({
         kind: "context-published" as const,
         runId,
@@ -956,16 +965,10 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
       if (request.runId !== runId) return failure("request", "request authority belongs to a different run");
       const requestPath = join(directory, REQUESTS, `${request.requestId}.json`);
       const body = JSON.stringify(request);
-      try {
-        writeRunFileExclusiveNoFollow(requestPath, body);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-          return failure("request", `cannot reserve request authority: ${(error as Error).message}`);
-        }
-        if (readRunFileNoFollow(requestPath) !== body) {
-          return failure("request", `request ${request.requestId} is already reserved under different authority`);
-        }
-      }
+      const claimed = claimIdempotentWrite(requestPath, body, "request",
+        (cause) => `cannot reserve request authority: ${cause}`,
+        `request ${request.requestId} is already reserved under different authority`);
+      if (!claimed.ok) return claimed;
       // Anchored creation REFUSES a symlinked or otherwise unsafe component
       // rather than following it, so this is a reachable failure and belongs in
       // the result channel: a throw here would escape the DomainResult contract
@@ -1152,16 +1155,10 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
       }
       const path = correlatorPath(directory, parsed.value.harness, parsed.value.nativeId);
       const body = JSON.stringify(parsed.value);
-      try {
-        writeRunFileExclusiveNoFollow(path, body);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-          return failure("correlator", `cannot record harness correlator: ${(error as Error).message}`);
-        }
-        if (readRunFileNoFollow(path) !== body) {
-          return failure("correlator", "native harness correlator is already bound to different request authority");
-        }
-      }
+      const claimed = claimIdempotentWrite(path, body, "correlator",
+        (cause) => `cannot record harness correlator: ${cause}`,
+        "native harness correlator is already bound to different request authority");
+      if (!claimed.ok) return claimed;
       return success(parsed.value);
     },
 
@@ -1450,16 +1447,10 @@ function receiptOperations(directory: string) {
     async recordReceipt(receipt: EffectReceipt): Promise<DomainResult<EffectId, RunDirectoryError>> {
       const path = join(directory, RECEIPTS, `${receipt.effectId}.json`);
       const body = JSON.stringify(receipt);
-      try {
-        writeRunFileExclusiveNoFollow(path, body);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-          return failure("receipt", `cannot record receipt: ${(error as Error).message}`);
-        }
-        if (readRunFileNoFollow(path) !== body) {
-          return failure("receipt", `effect ${receipt.effectId} already recorded a different receipt`);
-        }
-      }
+      const claimed = claimIdempotentWrite(path, body, "receipt",
+        (cause) => `cannot record receipt: ${cause}`,
+        `effect ${receipt.effectId} already recorded a different receipt`);
+      if (!claimed.ok) return claimed;
       return success(receipt.effectId);
     },
 

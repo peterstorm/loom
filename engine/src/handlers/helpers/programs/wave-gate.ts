@@ -45,6 +45,42 @@ export function waveAdvisoryDecisionRequestId(
   return `wave-advisory:${runId}:${digest}`;
 }
 
+/**
+ * Which dimension of a Wave Gate decision's authority failed to match, or `null`
+ * when the decision is the exact pending one for this run.
+ *
+ * This is the guard that stops a decision meant for one Wave Gate run from being
+ * applied to a stale or foreign one — a correctness rule, not I/O plumbing. It
+ * lived inline in `decideOperation` as a raw boolean chain inside the CLI
+ * dispatcher, so its four dimensions (run, wave, authority digest, decision id)
+ * had no interface of their own and no test that could tell them apart: the only
+ * coverage ran the whole CLI against fixture files and matched stderr. Named
+ * here, beside the two functions it compares against, each mismatch is
+ * independently reachable.
+ *
+ * Pure: the caller reads and parses the protected graph; this only judges it.
+ */
+export function waveGateDecisionMismatch(
+  graph: TaskGraph,
+  registration: RegisteredWaveGateProgram,
+  runId: string,
+  decisionId: string,
+): string | null {
+  const active = graph.active_wave_gate;
+  if (active?.runId !== runId ||
+      active.wave !== registration.input.wave ||
+      active.authorityDigest !== registration.authorityDigest) {
+    return "protected active Wave Gate authority differs from this decision run";
+  }
+  const expected = waveAdvisoryDecisionRequestId(
+    runId,
+    graph.tasks.filter(({ id }) => registration.taskIds.includes(id)),
+  );
+  return decisionId === expected
+    ? null
+    : `decision request ${decisionId} is not the exact pending advisory request ${expected}`;
+}
+
 export function waveBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {
   return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: { kind: "wave-gate-blocked", message } } };
 }

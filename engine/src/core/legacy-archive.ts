@@ -29,21 +29,17 @@ import { createHash } from "node:crypto";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import {
   aggregateCanonicalTranscripts,
-  canonicalDigest,
-  canonicalStandalonePanelFindingAuthority,
   canonicalStandalonePanelFindings,
   capturedReviewerResultFromText,
   decodeCapturedReviewerText,
   exactKeys,
   findingScopeErrors,
-  isFrozenStandalonePanelAuthority,
   parseReviewerEvidence,
   parseStandalonePanelOutcomes,
   parseStandaloneReviewScope,
   uniqueNonEmpty,
   STANDALONE_REVIEW_SUBJECT,
   type AdjudicatedStandaloneReview,
-  type FrozenStandalonePanelAuthority,
   type PanelRefutation,
   type ParsedPanelOutcomes,
   type StandaloneReviewerEvidence,
@@ -188,23 +184,23 @@ export type HistoricalStandaloneReviewResult = AdjudicatedStandaloneReview & Rea
  */
 export function parseAdjudicatedStandaloneReview(
   raw: unknown,
-  panelAuthority?: FrozenStandalonePanelAuthority,
 ): ParseResult<HistoricalStandaloneReviewResult> {
   if (!isRecord(raw)) return fail(["standalone review result must be an object"]);
-  const versioned = Object.hasOwn(raw, "schema_version");
-  if (versioned) return fail(["schema-v1 standalone results require authoritative LC-2 publication parsing"]);
-  const v1Fields = [
-    "schema_version", "run_id", "subject_id", "scope", "reviewer_evidence",
-    "surviving_critical_findings", "advisory_findings", "refuted_critical_findings", "panel",
-  ] as const;
+  // The ONLY schema discriminator this parser makes, and it is a refusal: a
+  // versioned result belongs to the LC-2 authoritative publication parser, not
+  // here. Everything below therefore describes unversioned historical bytes
+  // unconditionally. It used to keep a `versioned` local past this point and
+  // branch on it eight more times — for v1 field sets, `schema_version` and
+  // `subject_id` checks, frozen panel authority, and a schema-v1 strictness
+  // rule — all of it provably dead after this return, and two of those dead
+  // branches carried comments describing enforcement that could never run.
+  if (Object.hasOwn(raw, "schema_version")) {
+    return fail(["schema-v1 standalone results require authoritative LC-2 publication parsing"]);
+  }
   const historicalFields = [
     "run_id", "scope", "surviving_critical_findings", "advisory_findings", "refuted_critical_findings", "panel",
   ] as const;
-  const errors = exactKeys(raw, versioned ? v1Fields : historicalFields, "result");
-  if (versioned && raw.schema_version !== 1) errors.push("result.schema_version must be 1");
-  if (versioned && raw.subject_id !== STANDALONE_REVIEW_SUBJECT) {
-    errors.push(`result.subject_id must be '${STANDALONE_REVIEW_SUBJECT}'`);
-  }
+  const errors = exactKeys(raw, historicalFields, "result");
   const runId = typeof raw.run_id === "string" ? raw.run_id.trim() : "";
   if (runId === "") errors.push("result.run_id must be non-empty");
   const scope = parseStandaloneReviewScope(raw.scope, "result.scope");
@@ -260,49 +256,24 @@ export function parseAdjudicatedStandaloneReview(
     errors.push(...findingScopeErrors(scope.value, refutedCriticals.map(({ finding }) => finding), "result.refuted_critical_findings"));
   }
 
-  const evidence = parseReviewerEvidence(versioned ? raw.reviewer_evidence : undefined, runId, "result.reviewer_evidence");
+  const evidence = parseReviewerEvidence(undefined, runId, "result.reviewer_evidence");
   if (!evidence.ok) errors.push(...evidence.errors);
   if (raw.panel !== null && !isRecord(raw.panel)) errors.push("result.panel must be null or an object");
   let panel: ParsedPanelOutcomes | null = null;
   const criticals = [...survivingCriticals, ...refutedCriticals.map(({ finding }) => finding)];
   if (isRecord(raw.panel)) {
-    // Genuine unversioned compatibility is intentionally isolated here. Only
-    // that historical reader may derive an expectation from serialized lenses.
-    // Schema-v1 must receive independently frozen standalone panel authority.
-    const panelInput = versioned ? raw.panel : normalizeHistoricalPanel(raw.panel, criticals);
-    const historicalSerializedLenses = !versioned && Array.isArray(panelInput.lenses)
+    // Genuine unversioned compatibility is intentionally isolated here, and
+    // this is the ONLY reader permitted to derive its lens expectation from
+    // serialized bytes rather than from independently frozen authority —
+    // historical archives carry no such authority to check against.
+    const panelInput = normalizeHistoricalPanel(raw.panel, criticals);
+    const expectedLenses = Array.isArray(panelInput.lenses)
       ? panelInput.lenses.filter((lens): lens is string => typeof lens === "string")
       : [];
-    const trustedAuthority = versioned && panelAuthority !== undefined &&
-      isFrozenStandalonePanelAuthority(panelAuthority) && panelAuthority.standaloneRunId === runId
-      ? panelAuthority
-      : null;
-    if (versioned && trustedAuthority === null) {
-      errors.push("critical-bearing schema-v1 result requires independently frozen standalone panel authority");
-    }
-    const expectedLenses = trustedAuthority?.lenses ?? historicalSerializedLenses;
-    if (trustedAuthority !== null && panelInput.threshold !== trustedAuthority.threshold) {
-      errors.push("result.panel.threshold does not match independently frozen standalone panel authority");
-    }
-    const authorityCriticals = trustedAuthority === null
-      ? criticals
-      : trustedAuthority.findings.flatMap((expected) => {
-          const localId = expected.id.startsWith(`${STANDALONE_REVIEW_SUBJECT}:`)
-            ? expected.id.slice(STANDALONE_REVIEW_SUBJECT.length + 1)
-            : "";
-          const finding = criticals.find(({ id }) => id === localId);
-          return finding === undefined ? [] : [finding];
-        });
-    if (trustedAuthority !== null && (
-      authorityCriticals.length !== trustedAuthority.findings.length ||
-      canonicalDigest(canonicalStandalonePanelFindingAuthority(authorityCriticals)) !== trustedAuthority.findingBriefDigest
-    )) {
-      errors.push("result critical dispositions do not match independently frozen panel finding-brief authority");
-    }
     const parsedPanel = parseStandalonePanelOutcomes(
       panelInput,
-      authorityCriticals,
-      trustedAuthority?.findings.map(({ id, claim }) => ({ id, claim })) ?? canonicalStandalonePanelFindings(criticals),
+      criticals,
+      canonicalStandalonePanelFindings(criticals),
       expectedLenses,
     );
     if (!parsedPanel.ok) errors.push(...parsedPanel.errors.map((error) => `result.panel: ${error}`));
@@ -324,11 +295,6 @@ export function parseAdjudicatedStandaloneReview(
     }
   }
   if (criticals.length === 0 && panel !== null) errors.push("clean result must not contain panel outcomes");
-  // Old serializers are read-only compatibility authority. Schema-v1 remains
-  // strict: every critical disposition requires its canonical panel evidence.
-  if (versioned && criticals.length > 0 && panel === null) {
-    errors.push("critical-bearing schema-v1 result must contain canonical panel outcomes");
-  }
   return errors.length > 0 || !scope.ok || !evidence.ok
     ? fail(errors)
     : ok(Object.freeze({

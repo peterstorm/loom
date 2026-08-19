@@ -5,6 +5,7 @@ import { isImplAgent, isStandaloneReviewAgent } from "../config";
 import { extractTaskId } from "../utils/extract-task-id";
 import { stripNamespace } from "../utils/strip-namespace";
 import { hasStandaloneReviewContext } from "./review-output";
+import { waveBlockCauses } from "./wave-gate-model";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 
 export interface ValidateTaskExecutionInput {
@@ -78,13 +79,18 @@ export function taskExecutionDecision(state: TaskGraph, taskId: string): HookRes
         lines.push(`Wave ${prevWave} is BLOCKED due to:`);
         // `tests_passed` is typed `true | null` and no writer ever produces
         // `false` (failing runs are judged by test_result evidence), so there
-        // is no "Integration tests failed" branch here to mint — the gate's
-        // blocked flag has exactly two causes: critical spec-check findings
-        // and critical review findings. Both are counted below.
-        const critCount = state.tasks
-          .filter((candidate) => candidate.wave === currentWave - 1)
-          .reduce((sum, candidate) => sum + (candidate.critical_findings?.length ?? 0), 0);
-        if (critCount > 0) lines.push(`  - ${critCount} critical review findings`);
+        // is no "Integration tests failed" branch here to mint. The gate's
+        // blocked flag has exactly two causes, and they are read from the ONE
+        // function that also decides the flag — `waveBlockCauses`. Enumerating
+        // them here instead is what left a spec-check-only block printing this
+        // header with nothing under it.
+        const causes = waveBlockCauses(state.tasks, state.spec_check, currentWave - 1);
+        if (causes.criticalReviewFindings > 0) {
+          lines.push(`  - ${causes.criticalReviewFindings} critical review findings`);
+        }
+        if (causes.criticalSpecCheckFindings > 0) {
+          lines.push(`  - ${causes.criticalSpecCheckFindings} critical spec-check findings`);
+        }
       } else {
         lines.push(`Wave ${prevWave} gates not yet run.`);
       }

@@ -17,7 +17,7 @@ import {
 const item = (over: Partial<ReservedResultItem> = {}): ReservedResultItem => ({
   agentType: "code-reviewer",
   taskId: "T1",
-  kind: "review",
+  kind: "non-implementation",
   ...over,
 });
 

@@ -19,6 +19,7 @@ import {
   type PublicationAuthorityResolver,
   type RequestId,
   type SlotId,
+  sameAgentRequestAuthority,
 } from "./orchestration-contract";
 import {
   aggregateStandaloneReview,
@@ -705,17 +706,6 @@ function eventRunId(event: StandaloneReviewMachineEvent): string | null {
   }
 }
 
-function sameAcceptedAuthority(
-  actual: AcceptedAgentResult<CapturedReviewerResult>["authority"],
-  expected: AcceptedAgentResult<CapturedReviewerResult>["authority"],
-): boolean {
-  return actual.runId === expected.runId && actual.requestId === expected.requestId &&
-    actual.slotId === expected.slotId && actual.program === expected.program && actual.role === expected.role &&
-    actual.attempt === expected.attempt && actual.modelProfile === expected.modelProfile &&
-    actual.requiredSkill === expected.requiredSkill && actual.contextDigest === expected.contextDigest &&
-    actual.outputSlot.path === expected.outputSlot.path &&
-    JSON.stringify(actual.harnessBinding) === JSON.stringify(expected.harnessBinding);
-}
 
 function acceptedPayloadMatchesAuthority(
   result: AcceptedAgentResult<CapturedReviewerResult>,
@@ -743,7 +733,7 @@ function withAccepted(
   }
   const slot = state.authority.roster.byId.get(authority.slotId);
   const expected = authority.attempt === 1 ? slot?.attempts[0] : slot?.attempts[1];
-  if (expected === undefined || !sameAcceptedAuthority(authority, expected) || !acceptedPayloadMatchesAuthority(result)) {
+  if (expected === undefined || !sameAgentRequestAuthority(authority, expected) || !acceptedPayloadMatchesAuthority(result)) {
     return reject(state, { kind: "result-accepted", result }, "roster-mismatch",
       "accepted result does not match frozen run/agent/request/context/model/output or artifact authority");
   }
@@ -1148,7 +1138,13 @@ function parsePersistedStandaloneProgress(
     }
     const record = entry as Record<string, unknown>;
     const slot = authority.roster.orderedSlots.find(({ slotId }) => slotId === record.slotId);
-    const attempt = record.attempt === 1 ? slot?.attempts[0] : record.attempt === 2 ? slot?.attempts[1] : undefined;
+    // Indexed, not branched: `attempts` is the ordered pair and the checkpoint's
+    // 1-or-2 IS its ordinal. The two-arm ternary this replaces read the same
+    // array at two literal indices, so a third attempt ordinal would have to be
+    // added in two places to be readable in either.
+    const attempt = record.attempt === 1 || record.attempt === 2
+      ? slot?.attempts[record.attempt - 1]
+      : undefined;
     if (slot === undefined || attempt === undefined || record.requestId !== attempt.requestId ||
         typeof record.payloadFingerprint !== "string" || !/^[0-9a-f]{64}$/.test(record.payloadFingerprint) ||
         observed.has(slot.slotId)) {

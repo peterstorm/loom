@@ -168,7 +168,8 @@ export const RUN_LAYOUT_COMPONENTS: ReadonlySet<string> = frozenSet([
   "orchestration-runs",
 ]);
 
-/** Canonical policy predicate shared by freeze, registration, audit, and replay parsers. */
+/** Canonical policy predicate — the ONE copy, shared by the freeze,
+ *  registration, audit, replay, and temporary-index parsers. */
 export function isExcludedRemediationPath(path: CanonicalRepositoryRelativePath): boolean {
   if (pathIsWithin(path, ".git") || pathIsWithin(path, ".claude/state") ||
       pathIsWithin(path, ".claude/reviews")) return true;

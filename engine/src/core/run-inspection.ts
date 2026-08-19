@@ -102,14 +102,29 @@ export type RunInspection = Readonly<{
   runsRoot: string;
   runDirectory: string;
   authority: ObservedFact<null>;
-  /** `null` = the run exists but no program was ever registered against it. */
-  program: ObservedFact<InspectableProgram | null>;
+  program: ObservedFact<InspectedProgram>;
   /** `null` = no checkpoint was ever written; a label only ever comes from a known program. */
   state: ObservedFact<string | null>;
   slots: ObservedFact<readonly InspectedSlot[]>;
   events: ObservedFact<InspectedEventSummary>;
   abandonment: ObservedFact<InspectedAbandonment | null>;
 }>;
+
+/**
+ * What the run's program registration turned out to be.
+ *
+ * Three distinct facts, not two. `InspectableProgram | null` collapsed the last
+ * two: `null` was documented as "no program was ever registered", but
+ * `deriveRunInspection` also folded a registration whose `kind` this build does
+ * not recognise into the same `null`, and both rendered as "none registered".
+ * An operator debugging a run written by a newer engine was told the run had no
+ * program at all. They are different conditions with different next steps, so
+ * they are different values.
+ */
+export type InspectedProgram =
+  | Readonly<{ kind: "registered"; program: InspectableProgram }>
+  | Readonly<{ kind: "unregistered" }>
+  | Readonly<{ kind: "unrecognized" }>;
 
 const CAPTURE_REJECTED_EVENT = "request-capture-rejected";
 
@@ -212,10 +227,12 @@ const mapFact = <A, B>(fact: ObservedFact<A>, project: (value: A) => B): Observe
 
 /** Derive the whole projection. Pure: every input was observed by the shell. */
 export function deriveRunInspection(observation: RunInspectionObservation): RunInspection {
-  const program = mapFact(observation.programRegistration, (raw): InspectableProgram | null => {
-    if (raw === null) return null;
-    const kind = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>)["kind"] : undefined;
-    return isInspectableProgram(kind) ? kind : null;
+  const program = mapFact(observation.programRegistration, (raw): InspectedProgram => {
+    if (raw === null) return Object.freeze({ kind: "unregistered" as const });
+    const kind = typeof raw === "object" ? (raw as Record<string, unknown>)["kind"] : undefined;
+    return isInspectableProgram(kind)
+      ? Object.freeze({ kind: "registered" as const, program: kind })
+      : Object.freeze({ kind: "unrecognized" as const });
   });
 
   return Object.freeze({
@@ -237,7 +254,7 @@ export function deriveRunInspection(observation: RunInspectionObservation): RunI
 }
 
 function deriveState(
-  program: ObservedFact<InspectableProgram | null>,
+  program: ObservedFact<InspectedProgram>,
   checkpoint: ObservedFact<string | null>,
 ): ObservedFact<string | null> {
   if (program.kind === "unavailable") {
@@ -245,16 +262,21 @@ function deriveState(
   }
   if (checkpoint.kind === "unavailable") return checkpoint;
   if (checkpoint.value === null) return observed(null);
-  if (program.value === null) return unavailable("run has a checkpoint but no registered program to read it through");
+  if (program.value.kind === "unregistered") {
+    return unavailable("run has a checkpoint but no registered program to read it through");
+  }
+  if (program.value.kind === "unrecognized") {
+    return unavailable("run has a checkpoint but its registered program kind is not recognised by this build");
+  }
   let raw: unknown;
   try {
     raw = JSON.parse(checkpoint.value) as unknown;
   } catch (error) {
     return unavailable(`checkpoint is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const label = checkpointStateLabel(program.value, raw);
+  const label = checkpointStateLabel(program.value.program, raw);
   return label === null
-    ? unavailable(`checkpoint carries no ${program.value} state label`)
+    ? unavailable(`checkpoint carries no ${program.value.program} state label`)
     : observed(label);
 }
 
@@ -294,7 +316,11 @@ export function renderRunInspectionHuman(inspection: RunInspection): string {
     `run:       ${inspection.runId}`,
     `directory: ${inspection.runDirectory}`,
     `authority: ${renderFact(inspection.authority, () => "readable")}`,
-    `program:   ${renderFact(inspection.program, (kind) => kind ?? "none registered")}`,
+    `program:   ${renderFact(inspection.program, (program) => match(program)
+      .with({ kind: "registered" }, ({ program: kind }) => kind as string)
+      .with({ kind: "unregistered" }, () => "none registered")
+      .with({ kind: "unrecognized" }, () => "unrecognized program kind")
+      .exhaustive())}`,
     `state:     ${renderFact(inspection.state, (label) => label ?? "no checkpoint written")}`,
     `events:    ${renderFact(inspection.events, ({ count, last }) =>
       last === null ? `${count}` : `${count} (last: ${last.kind} @ seq ${last.sequence})`)}`,

@@ -111,7 +111,7 @@ function applyAgent(
 ): Task {
   const run = task.review_run!;
   const resolution = resolveBoundReviewFindings(transcript(run, verdicts, findings), agent, run);
-  expect(resolution.kind).toBe("findings");
+  expect(resolution.kind).toBe("bound-findings");
   return applyReviewResolution(task, resolution);
 }
 
@@ -294,9 +294,11 @@ describe("packet-bound remediation review runs", () => {
     expect(resolveBoundReviewFindings(withoutLifecycle, AGENTS[0], run))
       .toMatchObject({ kind: "evidence-failed", message: expect.stringContaining("block missing") });
 
-    const duplicated = `${transcript(run, [])}\n${transcript(run, []).split("```review_lifecycle")[1] === undefined
-      ? ""
-      : `\`\`\`review_lifecycle${transcript(run, []).split("```review_lifecycle")[1]}`}`;
+    // `transcript()` always emits exactly ONE lifecycle block, so the split's
+    // second half is never undefined and the ternary guarding it could not fire;
+    // building the same string three times hid that.
+    const single = transcript(run, []);
+    const duplicated = `${single}\n\`\`\`review_lifecycle${single.split("```review_lifecycle")[1]!}`;
     expect(resolveBoundReviewFindings(duplicated, AGENTS[0], run))
       .toMatchObject({ kind: "evidence-failed", message: expect.stringContaining("exactly one") });
   });
@@ -370,7 +372,7 @@ describe("packet-bound remediation review runs", () => {
       AGENTS[0],
       run,
     );
-    expect(resolution.kind).toBe("findings");
+    expect(resolution.kind).toBe("bound-findings");
     const changedCurrent: Task = {
       ...snapshot,
       review_run: { ...run, prior_finding_ids: [...run.prior_finding_ids].reverse() },

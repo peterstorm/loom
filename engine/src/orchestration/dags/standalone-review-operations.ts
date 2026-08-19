@@ -67,14 +67,19 @@ const resolvedScopeSchema = z.union([
 type ScopeEnvelope = Readonly<Partial<Record<string, ScopeClassification>>>;
 type ScopeOutcomeEnvelope = Readonly<Partial<Record<string, ResolvedScope>>>;
 
+// Both envelopes validate their wrapped member with the REAL schema. Declaring
+// it `z.unknown().optional()` behind an `as unknown as z.ZodType<Envelope>` cast
+// made the static type assert a well-formed classification while the runtime
+// accepted any value at all, and the branch transforms below read `.kind` and
+// `.paths` straight off it. Same fix, same reason, as `panel-operations.ts`.
 const scopeEnvelopeSchema = z.object({
-  [RESOLVE_SCOPE]: z.unknown().optional(),
-}) as unknown as z.ZodType<ScopeEnvelope>;
+  [RESOLVE_SCOPE]: scopeClassificationSchema.optional(),
+}) satisfies z.ZodType<ScopeEnvelope>;
 
 const scopeOutcomeEnvelopeSchema = z.object({
-  [EXPLICIT_SCOPE]: z.unknown().optional(),
-  [DERIVED_SCOPE]: z.unknown().optional(),
-}) as unknown as z.ZodType<ScopeOutcomeEnvelope>;
+  [EXPLICIT_SCOPE]: resolvedScopeSchema.optional(),
+  [DERIVED_SCOPE]: resolvedScopeSchema.optional(),
+}) satisfies z.ZodType<ScopeOutcomeEnvelope>;
 
 /** A path that escapes the repository or is empty is never reviewable. */
 function unsafePath(path: string): boolean {
@@ -184,13 +189,13 @@ type RouteEnvelope = Readonly<Partial<Record<string, AggregateSummary>>>;
 type RouteOutcomeEnvelope = Readonly<Partial<Record<string, CriticalRoute>>>;
 
 const routeEnvelopeSchema = z.object({
-  [ROUTE_CRITICALS]: z.unknown().optional(),
-}) as unknown as z.ZodType<RouteEnvelope>;
+  [ROUTE_CRITICALS]: aggregateSummarySchema.optional(),
+}) satisfies z.ZodType<RouteEnvelope>;
 
 const routeOutcomeEnvelopeSchema = z.object({
-  [TO_REFUTATION]: z.unknown().optional(),
-  [TO_FINALIZE]: z.unknown().optional(),
-}) as unknown as z.ZodType<RouteOutcomeEnvelope>;
+  [TO_REFUTATION]: criticalRouteSchema.optional(),
+  [TO_FINALIZE]: criticalRouteSchema.optional(),
+}) satisfies z.ZodType<RouteOutcomeEnvelope>;
 
 const summarizeNode = createTransformNode<AggregateSummary, AggregateSummary>({
   id: ROUTE_CRITICALS,

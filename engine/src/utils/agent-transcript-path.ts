@@ -93,6 +93,25 @@ function projectDirCandidates(root: string, slug: string): string[] {
 }
 
 /**
+ * Every subagent file named `suffix` for `<sessionId, agentId>`, in search
+ * order, across every candidate project directory.
+ *
+ * The nested "for each candidate dir, for each project-dir candidate, join a
+ * path" walk was written out twice — once to find a transcript, once to find a
+ * metadata file — so the two searches could look in different places while
+ * appearing to share a lookup rule. A generator keeps each caller's own
+ * first-match-wins control flow without either re-deriving where to look.
+ */
+function* subagentFileCandidates(sessionId: string, agentId: string, suffix: string): Generator<string> {
+  const root = projectsRoot();
+  for (const dir of candidateProjectDirs()) {
+    for (const projectDir of projectDirCandidates(root, projectSlug(dir))) {
+      yield join(projectDir, sessionId, "subagents", `agent-${agentId}${suffix}`);
+    }
+  }
+}
+
+/**
  * The on-disk transcript for `<sessionId, agentId>`, or null when nothing at
  * the derived location exists.
  *
@@ -106,12 +125,8 @@ export function deriveAgentTranscriptPath(sessionIdRaw: string, agentIdRaw: stri
   const agentId = parseAgentId(agentIdRaw);
   if (!sessionId || !agentId) return null;
 
-  const root = projectsRoot();
-  for (const dir of candidateProjectDirs()) {
-    for (const projectDir of projectDirCandidates(root, projectSlug(dir))) {
-      const path = join(projectDir, sessionId, "subagents", `agent-${agentId}.jsonl`);
-      if (existsSync(path)) return path;
-    }
+  for (const path of subagentFileCandidates(sessionId, agentId, ".jsonl")) {
+    if (existsSync(path)) return path;
   }
   return null;
 }
@@ -169,24 +184,20 @@ export function deriveAgentType(sessionIdRaw: string, agentIdRaw: string): strin
   const agentId = parseAgentId(agentIdRaw);
   if (!sessionId || !agentId) return null;
 
-  const root = projectsRoot();
-  for (const dir of candidateProjectDirs()) {
-    for (const projectDir of projectDirCandidates(root, projectSlug(dir))) {
-      const path = join(projectDir, sessionId, "subagents", `agent-${agentId}.meta.json`);
-      if (!existsSync(path)) continue;
-      try {
-        const meta: unknown = JSON.parse(readFileSync(path, "utf-8"));
-        const agentType = typeof meta === "object" && meta !== null && "agentType" in meta
-          ? (meta as { agentType: unknown }).agentType
-          : null;
-        if (typeof agentType === "string" && agentType.trim() !== "") return agentType.trim();
-      } catch (error) {
-        // A metadata file we cannot parse names no role — say so, then keep
-        // looking. Silence here reproduces the very defect this closes.
-        process.stderr.write(
-          `loom: cannot read agent metadata at ${path}: ${error instanceof Error ? error.message : String(error)}\n`,
-        );
-      }
+  for (const path of subagentFileCandidates(sessionId, agentId, ".meta.json")) {
+    if (!existsSync(path)) continue;
+    try {
+      const meta: unknown = JSON.parse(readFileSync(path, "utf-8"));
+      const agentType = typeof meta === "object" && meta !== null && "agentType" in meta
+        ? (meta as { agentType: unknown }).agentType
+        : null;
+      if (typeof agentType === "string" && agentType.trim() !== "") return agentType.trim();
+    } catch (error) {
+      // A metadata file we cannot parse names no role — say so, then keep
+      // looking. Silence here reproduces the very defect this closes.
+      process.stderr.write(
+        `loom: cannot read agent metadata at ${path}: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
     }
   }
   return null;

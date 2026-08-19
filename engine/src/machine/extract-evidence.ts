@@ -17,6 +17,7 @@
 
 import { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "../core/tool-vocabulary";
 import { normalizeShellSpan } from "../core/shell-normalize";
+import { CONTINUE, halt, scanUnquoted } from "../core/shell-quoting";
 import type { Evidence, TestReportSummary } from "./types";
 
 const QUOTE_CHARS = ['"', "'", "`"] as const;
@@ -181,28 +182,10 @@ function isMavenHead(lowerSegment: string): boolean {
  * segment start or preceded by whitespace, OUTSIDE quotes, truncates.
  */
 export function stripComment(segment: string): string {
-  let quote: QuoteChar | null = null;
-  for (let i = 0; i < segment.length; i++) {
-    const c = segment[i];
-    if (quote !== null) {
-      if (quote !== "'" && c === "\\") {
-        i++;
-        continue;
-      }
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === "\\") {
-      i++;
-      continue;
-    }
-    if (isQuoteChar(c)) {
-      quote = c;
-      continue;
-    }
-    if (c === "#" && (i === 0 || /\s/.test(segment[i - 1]))) return segment.slice(0, i);
-  }
-  return segment;
+  return scanUnquoted<string>(segment, 0, (c, i) =>
+    c === "#" && (i === 0 || /\s/.test(segment[i - 1]!))
+      ? halt(segment.slice(0, i))
+      : CONTINUE) ?? segment;
 }
 
 /**

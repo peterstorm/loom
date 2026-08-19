@@ -1,7 +1,6 @@
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createTemporaryIndex,
@@ -17,34 +16,13 @@ import {
   stageAuditedPaths,
   type GitRepository,
 } from "../../src/orchestration/git-remediation";
-import type { FixedGitPathspecContract } from "../../src/core/remediation-machine";
+import { git, gitResult, pathspecContract, write } from "../fixtures/git-repository";
 
 const cleanup: string[] = [];
 
 afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
 });
-
-/** Real Git, fixed identity and config so the fixture is deterministic. */
-function gitResult(root: string, args: readonly string[]) {
-  const result = spawnSync("git", [...args], {
-    cwd: root,
-    encoding: "utf-8",
-    env: { PATH: process.env["PATH"] ?? "", HOME: root, LC_ALL: "C" },
-  });
-  if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
-  return result;
-}
-
-function git(root: string, args: readonly string[]): void {
-  gitResult(root, args);
-}
-
-function write(root: string, path: string, contents: string): void {
-  const full = join(root, path);
-  mkdirSync(dirname(full), { recursive: true });
-  writeFileSync(full, contents);
-}
 
 /** A repository with one commit and a few tracked files. */
 function fixtureRepository(): GitRepository {
@@ -73,26 +51,6 @@ function fixtureRepository(): GitRepository {
  * shape so the adapter is exercised through the same structure it receives in
  * production — including the canonical NUL bytes.
  */
-function pathspecContract(paths: readonly string[]): FixedGitPathspecContract {
-  const bytes = [...Buffer.from(paths.map((path) => `${path}\0`).join(""), "utf-8")];
-  return {
-    schemaVersion: 1,
-    kind: "fixed-git-pathspec-contract",
-    globalArgs: ["--literal-pathspecs"],
-    pathspecArgs: ["--pathspec-from-file=-", "--pathspec-file-nul"],
-    manifest: {
-      schemaVersion: 1,
-      kind: "literal-nul-path-manifest",
-      paths: { paths, digest: "0".repeat(64) },
-      bytes,
-      byteLength: bytes.length,
-      contentDigest: "0".repeat(64),
-      digest: "0".repeat(64),
-    },
-    digest: "0".repeat(64),
-  } as unknown as FixedGitPathspecContract;
-}
-
 function stageInto(repository: GitRepository, paths: readonly string[]) {
   const temporary = createTemporaryIndex(repository);
   if (!temporary.ok) throw new Error(temporary.error.message);

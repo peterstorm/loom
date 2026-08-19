@@ -117,6 +117,28 @@ export function sameHarnessBinding(left: ExactHarnessBinding, right: ExactHarnes
   return samePiBinding(left.pi, right.pi) && sameClaudeBinding(left.claude, right.claude);
 }
 
+/**
+ * Field-by-field equality for a request authority — the ONE copy.
+ *
+ * `standalone-review-machine`'s `sameAcceptedAuthority` and `standalone-review`'s
+ * `sameCaptureRequest` were byte-identical, and both compared `harnessBinding`
+ * with `JSON.stringify` rather than the `sameHarnessBinding` comparator sitting
+ * beside them here — so key order in a rehydrated binding could decide whether a
+ * captured result matched its issued request. Two copies of an equality rule is
+ * one copy too many when the rule decides whether evidence is accepted.
+ */
+export function sameAgentRequestAuthority(
+  actual: AgentRequestAuthority,
+  expected: AgentRequestAuthority,
+): boolean {
+  return actual.runId === expected.runId && actual.requestId === expected.requestId &&
+    actual.slotId === expected.slotId && actual.program === expected.program && actual.role === expected.role &&
+    actual.attempt === expected.attempt && actual.modelProfile === expected.modelProfile &&
+    actual.requiredSkill === expected.requiredSkill && actual.contextDigest === expected.contextDigest &&
+    actual.outputSlot.path === expected.outputSlot.path &&
+    sameHarnessBinding(actual.harnessBinding, expected.harnessBinding);
+}
+
 export function canonicalHarnessBinding(pi: PiBinding, claude: ClaudeCodeBinding): ExactHarnessBinding {
   return canonicalRecord({
     pi: canonicalRecord({

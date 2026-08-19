@@ -5,8 +5,9 @@
  * artifact probes) arrive as injected ports, so the decision logic is data-in /
  * data-out and can be exercised with in-memory fixtures.
  *
- * Re-exports detectPhase and checkArtifacts from the original handler
- * for backwards compatibility.
+ * Definition site of `detectPhase` and `checkArtifacts`. `core/index.ts` and the
+ * `handlers/pre-tool-use/validate-phase-order` wrapper re-export them onward, so
+ * import sites that predate the move keep working.
  */
 
 import { match } from "ts-pattern";

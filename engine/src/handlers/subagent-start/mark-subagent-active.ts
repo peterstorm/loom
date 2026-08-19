@@ -1,7 +1,9 @@
 /**
  * SubagentStart bookkeeping — three jobs:
  * 1. Track the agent on the session's `.active` roster so PreToolUse can
- *    allow Edit/Write from subagents AND contention can be counted.
+ *    allow Edit/Write from IMPLEMENTATION subagents AND contention can be
+ *    counted. Roster membership alone is not a write grant — `shouldBlockDirectEdit`
+ *    keeps review agents and refutation verifiers read-only while active.
  * 2. Bind the guarded skill machine for machine-gated agent types, minting
  *    the attribution epoch the recorder and gate key evidence by.
  * 3. Persist the task_graph absolute path for cross-repo SubagentStop access.

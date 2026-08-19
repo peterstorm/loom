@@ -16,6 +16,7 @@
  * to observe an Agent's final payload, and what its own correlator is.
  */
 
+import { match } from "ts-pattern";
 import { createHash } from "node:crypto";
 import {
   bindCapture,
@@ -41,6 +42,24 @@ export type CaptureOutcome =
   | Readonly<{ kind: "no-reservation"; agentId: string }>
   | Readonly<{ kind: "captured"; receipt: CaptureReceipt }>
   | Readonly<{ kind: "rejected"; reason: string; message: string }>;
+
+/**
+ * Why a capture did not happen, in operator-facing words.
+ *
+ * Written beside the union rather than at the call site: `pi/extension` derived
+ * it twice, byte-for-byte, in the two branches that report a failed capture, so
+ * the two diagnostics could drift apart while describing the same value. A
+ * `captured` outcome has no failure to describe and says so rather than
+ * pretending to.
+ */
+export function describeCaptureFailure(outcome: CaptureOutcome): string {
+  return match(outcome)
+    .with({ kind: "rejected" }, ({ reason, message }) => `${reason}: ${message}`)
+    .with({ kind: "no-reservation" }, ({ agentId }) => `no reservation for ${agentId}`)
+    .with({ kind: "not-an-orchestration-run" }, () => "orchestration run authority was unavailable")
+    .with({ kind: "captured" }, () => "capture succeeded")
+    .exhaustive();
+}
 
 /** Every request this run reserved, read through the anchored handle. */
 export function readIssuedRequests(handle: RunDirHandle): readonly AgentRequestAuthority[] {

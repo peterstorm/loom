@@ -11,6 +11,7 @@ import {
 import { createHash } from "node:crypto";
 import { dirname, join, relative, resolve } from "node:path";
 import { renderMarkdownForPi } from "../engine/src/core/harness-resources";
+import { compareStrings } from "../engine/src/core/ordering";
 
 const RESOURCE_FORMAT_VERSION = "loom-pi-resources-v2";
 const SOURCE_TREES = ["skills", "commands", "references", "rules"] as const;
@@ -35,7 +36,7 @@ function sourceFiles(packageRoot: string): readonly SourceFile[] {
   const files: SourceFile[] = [];
 
   const visit = (absoluteDir: string): void => {
-    for (const entry of readdirSync(absoluteDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const entry of readdirSync(absoluteDir, { withFileTypes: true }).sort((a, b) => compareStrings(a.name, b.name))) {
       const absolutePath = join(absoluteDir, entry.name);
       const stat = lstatSync(absolutePath);
       if (stat.isSymbolicLink()) {
@@ -63,7 +64,7 @@ function sourceFiles(packageRoot: string): readonly SourceFile[] {
     }
     visit(treeRoot);
   }
-  return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+  return files.sort((a, b) => compareStrings(a.relativePath, b.relativePath));
 }
 
 function renderedContent(file: SourceFile, packageRoot: string): Buffer {

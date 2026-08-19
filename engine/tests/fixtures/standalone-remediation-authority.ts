@@ -34,6 +34,8 @@ import {
   type ArtifactSetPublished,
   type BatchPublishedReceipt,
   type DomainResult,
+  type InitialBatchPublicationIntent,
+  type SpawnBatchAction,
   type SpawnRequest,
 } from "../../src/core/orchestration-contract";
 import {
@@ -147,6 +149,43 @@ function rawRequest(request: AgentRequestAuthority) {
   };
 }
 
+/**
+ * Reconcile an initial batch publication into its spawn action, plus the receipt
+ * bytes an authority resolver must return for it.
+ *
+ * Both fixture builders in this file constructed the receipt, encoded it, drove
+ * `createInitialBatchPublicationReconciler` through the same two fake ports, and
+ * unwrapped the action — verbatim. A fixture that publishes differently from its
+ * sibling proves nothing about the contract the tests share.
+ */
+function publishBatch(
+  intent: InitialBatchPublicationIntent,
+  requests: readonly unknown[],
+): Readonly<{ action: SpawnBatchAction; receiptBytes: readonly number[] }> {
+  const receipt: BatchPublishedReceipt = {
+    schemaVersion: 1,
+    kind: "batch-published",
+    effectId: intent.identity.effectId,
+    runId: intent.identity.runId,
+    requestIds: intent.requestIds,
+    contextDigests: intent.contextDigests,
+    issuedRequests: intent.issuedRequests,
+    publicationDigest: intent.identity.publicationDigest,
+  };
+  const receiptBytes = [...new TextEncoder().encode(JSON.stringify(receipt))];
+  const issuance = createInitialBatchPublicationReconciler(
+    createInitialPublicationEffectPort(() => ({ ok: true, value: receiptBytes })),
+    createAtomicInitialPublicationClaimPort((claim) => ({
+      ok: true,
+      value: { schemaVersion: 1, kind: "initial-publication-claimed", key: claim.key, identity: claim.identity },
+    })),
+  )(intent);
+  if (!issuance.ok) throw new Error(issuance.error.message);
+  const action = spawnBatchAction(issuance.value, requests);
+  if (!action.ok) throw new Error(action.error.message);
+  return { action: action.value, receiptBytes };
+}
+
 function upholdStandaloneCriticals(
   standaloneAuthority: FrozenStandaloneReviewAuthority,
   aggregate: StandaloneReviewAggregate,
@@ -208,31 +247,11 @@ function upholdStandaloneCriticals(
   const requests = parsedAuthority.value.verifierRoster.orderedSlots.map(({ attempts }) => rawRequest(attempts[0]));
   const intent = prepareInitialBatchPublicationIntent(panelRunId, "effect:remediation-panel-batch", requests);
   if (!intent.ok) throw new Error(intent.error.message);
-  const receipt: BatchPublishedReceipt = {
-    schemaVersion: 1,
-    kind: "batch-published",
-    effectId: intent.value.identity.effectId,
-    runId: intent.value.identity.runId,
-    requestIds: intent.value.requestIds,
-    contextDigests: intent.value.contextDigests,
-    issuedRequests: intent.value.issuedRequests,
-    publicationDigest: intent.value.identity.publicationDigest,
-  };
-  const receiptBytes = [...new TextEncoder().encode(JSON.stringify(receipt))];
-  const issuance = createInitialBatchPublicationReconciler(
-    createInitialPublicationEffectPort(() => ({ ok: true, value: receiptBytes })),
-    createAtomicInitialPublicationClaimPort((claim) => ({
-      ok: true,
-      value: { schemaVersion: 1, kind: "initial-publication-claimed", key: claim.key, identity: claim.identity },
-    })),
-  )(intent.value);
-  if (!issuance.ok) throw new Error(issuance.error.message);
-  const action = spawnBatchAction(issuance.value, requests);
-  if (!action.ok) throw new Error(action.error.message);
+  const { action, receiptBytes } = publishBatch(intent.value, requests);
   const resolver = createPublicationAuthorityResolver(() => ({ ok: true, value: receiptBytes }));
 
   let panelState = startPersistentRefutationPanel(parsedAuthority.value).state;
-  action.value.requests.forEach((request, index) => {
+  action.requests.forEach((request, index) => {
     const submitted = submitRefutationVerdict(
       panelState,
       resolver,
@@ -301,28 +320,8 @@ export function standaloneFixture(
   const rawRequests = requests.map(rawRequest);
   const intent = prepareInitialBatchPublicationIntent(authority.runId, "effect:remediation-review-batch", rawRequests);
   if (!intent.ok) throw new Error(intent.error.message);
-  const receipt: BatchPublishedReceipt = {
-    schemaVersion: 1,
-    kind: "batch-published",
-    effectId: intent.value.identity.effectId,
-    runId: intent.value.identity.runId,
-    requestIds: intent.value.requestIds,
-    contextDigests: intent.value.contextDigests,
-    issuedRequests: intent.value.issuedRequests,
-    publicationDigest: intent.value.identity.publicationDigest,
-  };
-  const receiptBytes = [...new TextEncoder().encode(JSON.stringify(receipt))];
-  const issuance = createInitialBatchPublicationReconciler(
-    createInitialPublicationEffectPort(() => ({ ok: true, value: receiptBytes })),
-    createAtomicInitialPublicationClaimPort((claim) => ({
-      ok: true,
-      value: { schemaVersion: 1, kind: "initial-publication-claimed", key: claim.key, identity: claim.identity },
-    })),
-  )(intent.value);
-  if (!issuance.ok) throw new Error(issuance.error.message);
-  const action = spawnBatchAction(issuance.value, rawRequests);
-  if (!action.ok) throw new Error(action.error.message);
-  const issuedBySlot = new Map(action.value.requests.map((request) => [request.authority.slotId, request] as const));
+  const { action, receiptBytes } = publishBatch(intent.value, rawRequests);
+  const issuedBySlot = new Map(action.requests.map((request) => [request.authority.slotId, request] as const));
   const accepted = authority.roster.orderedSlots.map(({ slotId }, index) => {
     const request = issuedBySlot.get(slotId) as SpawnRequest;
     const transcript = withCritical && index === 0 ? criticalTranscript : cleanTranscript;

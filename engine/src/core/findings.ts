@@ -341,7 +341,12 @@ export function parseFindingsBlock(output: string): readonly DraftFinding[] | nu
   return drafts;
 }
 
-/** Whether a fenced findings block was present in the output at all. */
+/**
+ * Distinguishes a reviewer that emitted NO structured block from one whose
+ * block failed to parse — the `absent` vs `rejected` arms of
+ * `FindingsBlockStatus`. Both yield zero drafts, so the draft list alone cannot
+ * tell the operator which happened, and only one of the two is a reviewer bug.
+ */
 export function hasFindingsBlock(output: string): boolean {
   FINDINGS_BLOCK.lastIndex = 0;
   return FINDINGS_BLOCK.test(output);

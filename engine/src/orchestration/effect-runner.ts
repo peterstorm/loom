@@ -152,6 +152,19 @@ async function runCaptureRawTranscript(
   }));
 }
 
+/**
+ * A caught port exception, kept UNFORGEABLE by a port's own return value.
+ *
+ * The marker used to be a `{ __failed: string }` record, so a legitimate
+ * payload that happened to carry a `__failed` string key was read as a thrown
+ * adapter — a value crossing the port could impersonate the runner's own
+ * control signal. A module-private class cannot be produced by anything but the
+ * `catch` below.
+ */
+class PortThrew {
+  constructor(readonly message: string) {}
+}
+
 async function runThroughPort(
   intent: EffectIntent,
   port: () => Promise<unknown>,
@@ -160,12 +173,11 @@ async function runThroughPort(
     try {
       return await port();
     } catch (error) {
-      return canonicalRecord({ __failed: error instanceof Error ? error.message : String(error) });
+      return new PortThrew(error instanceof Error ? error.message : String(error));
     }
   })();
-  const failed = (raw as Record<string, unknown> | null)?.["__failed"];
-  return typeof failed === "string"
-    ? failure(intent.effectId, true, failed)
+  return raw instanceof PortThrew
+    ? failure(intent.effectId, true, raw.message)
     : reconcile(intent, raw);
 }
 

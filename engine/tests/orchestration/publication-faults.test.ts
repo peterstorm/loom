@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { agentRequestAuthority } from "../fixtures/agent-request-authority";
 import type {
   AgentRequestAuthority,
   EffectIntent,
@@ -70,25 +71,8 @@ function packet(requestId: string, body = "task context"): ContextPacket {
   return built.value;
 }
 
-function authority(overrides: Record<string, unknown> = {}): AgentRequestAuthority {
-  return {
-    runId: RUN_ID,
-    requestId: "request:reviewer:1",
-    slotId: "slot-1",
-    program: "wave-gate",
-    role: "code-reviewer",
-    attempt: 1,
-    modelProfile: "general-review",
-    harnessBinding: {
-      pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-      claude: { harness: "claude-code", model: "sonnet" },
-    },
-    requiredSkill: null,
-    contextDigest: "a".repeat(64),
-    outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
-    ...overrides,
-  } as AgentRequestAuthority;
-}
+const authority = (overrides: Record<string, unknown> = {}): AgentRequestAuthority =>
+  agentRequestAuthority(RUN_ID, overrides);
 
 const ports = (overrides: Partial<EffectPorts> = {}): EffectPorts => ({
   commitProtectedWaveState: async () => { throw new Error("not wired"); },

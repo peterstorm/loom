@@ -60,6 +60,17 @@ export type ContextReference = Readonly<{
   slot: FixedArtifactSlot;
 }>;
 
+/**
+ * A context reference whose slot is PROVEN to be content-addressed by its own
+ * digest — the invariant the type's shape alone cannot state.
+ *
+ * The check used to live at the call sites instead (`awaitUserAction` in
+ * `actions.ts`, `parsePublishedSpawnRequest` below), each re-deriving the same
+ * `contexts/${digest}.json` string. Two copies agreeing is not enforcement: a
+ * third caller that simply forgot would have accepted a reference whose slot
+ * names a DIFFERENT digest's packet, and nothing in the type would have said
+ * so. The smart constructor is the only place that can make it impossible.
+ */
 export function parseContextReference(raw: unknown): DomainResult<ContextReference, ExternalActionError> {
   const context = readExactDataRecord(raw, ["digest", "slot"], "context");
   if (!context.ok) return actionFailure(context.error.message, `context${context.error.field === null ? "" : `.${context.error.field}`}`);
@@ -67,6 +78,9 @@ export function parseContextReference(raw: unknown): DomainResult<ContextReferen
   const slot = parseFixedArtifactSlot(context.value.slot);
   if (!digest.ok) return actionFailure(digest.error.message, "context.digest");
   if (!slot.ok) return actionFailure(slot.error.message, "context.slot");
+  if (slot.value.path !== `contexts/${digest.value}.json`) {
+    return actionFailure("context slot must be content-addressed by its digest", "context.slot");
+  }
   return success(canonicalRecord({ digest: digest.value, slot: slot.value }));
 }
 
@@ -220,9 +234,6 @@ export function parsePublishedSpawnRequest(
   if (!context.ok) return actionFailure(context.error.message, `${field}.${context.error.field}`);
   if (authority.value.contextDigest !== context.value.digest) {
     return actionFailure("request authority does not match context digest", `${field}.context.digest`);
-  }
-  if (context.value.slot.path !== `contexts/${context.value.digest}.json`) {
-    return actionFailure("context slot must be content-addressed by its digest", `${field}.context.slot`);
   }
   return success(canonicalRecord({ authority: authority.value, context: context.value }));
 }
@@ -1137,29 +1148,21 @@ export function resolveRegisteredPublicationAuthority(
   } catch (cause) {
     return failure(authorityResolutionFailure(causedMessage("publication authority resolver threw", cause)));
   }
-  const resolution = readExactDataRecord(rawResolution, ["ok", "value", "error"], "publication authority resolution");
-  if (!resolution.ok) {
-    return failure(authorityResolutionFailure(
-      resolution.error.message,
-      boundaryField("publicationAuthorityResolver", resolution.error),
-    ));
+  // Classified by the SHARED envelope reader, like the other three publication
+  // ports. This site used to re-implement the same four steps inline — a fourth,
+  // untied copy of the check `readResultEnvelope` was introduced to consolidate,
+  // sitting directly under the JSDoc that claims the consolidation happened.
+  const envelope = readResultEnvelope(rawResolution, "publication authority resolver", "publicationAuthorityResolver");
+  if (!envelope.ok) {
+    // The success-shape violation is reported WITHOUT a field, as it always was
+    // here; every other violation names the field the classifier derived.
+    return failure(envelope.error.kind === "success-shape"
+      ? authorityResolutionFailure(envelope.error.message)
+      : authorityResolutionFailure(envelope.error.message, envelope.error.field));
   }
-  if (typeof resolution.value.ok !== "boolean") {
-    return failure(authorityResolutionFailure(
-      "publication authority resolver returned an invalid result tag",
-      "publicationAuthorityResolver.ok",
-    ));
-  }
-  const keys = Object.keys(resolution.value);
-  if (resolution.value.ok === false) {
-    if (keys.length !== 2 || !keys.includes("error")) {
-      return failure(authorityResolutionFailure(
-        "failed publication authority resolution must contain exactly ok and error",
-        "publicationAuthorityResolver",
-      ));
-    }
+  if (envelope.value.branch === "failed") {
     const resolverError = readExactDataRecord(
-      resolution.value.error,
+      envelope.value.error,
       ["kind", "field", "message"],
       "publication authority resolution error",
     );
@@ -1195,10 +1198,7 @@ export function resolveRegisteredPublicationAuthority(
         : "publicationAuthorityResolver.error.message",
     ));
   }
-  if (keys.length !== 2 || !keys.includes("value")) {
-    return failure(authorityResolutionFailure("successful publication authority resolution must contain exactly ok and value"));
-  }
-  const registered = resolution.value.value;
+  const registered = envelope.value.value;
   if (typeof registered !== "object" || registered === null || !registeredPublicationCache.has(registered)) {
     return failure(authorityResolutionFailure("publication authority resolver returned an untrusted or forged registration proof"));
   }

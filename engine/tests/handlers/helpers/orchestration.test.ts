@@ -2853,9 +2853,18 @@ describe("orchestration CLI", () => {
     expect(JSON.parse(done.stdout).kind).toBe("done");
   });
 
-  it("installs only a standalone-authorized dirty set through the remediation façade", async () => {
+  /**
+   * A repository with one committed-then-edited file, and a standalone review
+   * run over it already driven to `done` with clean reviewer transcripts.
+   *
+   * This ~20-line arrangement — git init, identity, commit, dirty edit, start
+   * the review, capture every slot, resume — was written out verbatim per
+   * remediation test. Duplicated setup is how two tests end up believing
+   * different things about the state they share.
+   */
+  async function cleanStandaloneReviewFixture(slug: string) {
     const repository = project();
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-remediation-facade-runs-")));
+    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), slug)));
     cleanup.push(runsRoot);
     const git = (args: readonly string[]) => spawnSync("git", args, { cwd: repository, encoding: "utf8" });
     expect(git(["init", "-q"]).status).toBe(0);
@@ -2878,6 +2887,11 @@ describe("orchestration CLI", () => {
       expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
     }
     expect(runCli(["resume", "--runs-root", runsRoot, "--run", sourceRun], "", repository).status).toBe(0);
+    return { repository, runsRoot, sourceRun, remediationRun, git };
+  }
+
+  it("installs only a standalone-authorized dirty set through the remediation façade", async () => {
+    const { repository, runsRoot, sourceRun, remediationRun, git } = await cleanStandaloneReviewFixture("loom-remediation-facade-runs-");
     const remediated = runCli(["start", "remediation", "--runs-root", runsRoot, "--run", remediationRun], JSON.stringify({
       sourceRunsRoot: runsRoot, sourceRun, supportPaths: [],
     }), repository);
@@ -2898,30 +2912,7 @@ describe("orchestration CLI", () => {
    * from `run-directory-handle.ts` and guess that a fresh run was the remedy.
    */
   it("tells an unauthorized dirty path to start a fresh run, not to resume this one", async () => {
-    const repository = project();
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-remediation-unauthorized-runs-")));
-    cleanup.push(runsRoot);
-    const git = (args: readonly string[]) => spawnSync("git", args, { cwd: repository, encoding: "utf8" });
-    expect(git(["init", "-q"]).status).toBe(0);
-    git(["config", "user.email", "loom@example.test"]);
-    git(["config", "user.name", "Loom Test"]);
-    writeFileSync(join(repository, "a.txt"), "old\n");
-    git(["add", "a.txt"]); git(["commit", "-qm", "initial"]);
-    writeFileSync(join(repository, "a.txt"), "new\n");
-    const sourceRun = join(runsRoot, "source");
-    const remediationRun = join(runsRoot, "remediation");
-    mkdirSync(sourceRun); mkdirSync(remediationRun);
-    const started = runCli(["start", "standalone-review", "--runs-root", runsRoot, "--run", sourceRun],
-      JSON.stringify({ kind: "comments", files: ["a.txt"], dryRun: false }), repository);
-    expect(started.status, started.stderr).toBe(0);
-    const action = JSON.parse(started.stdout) as { requests: { authority: AgentRequestAuthority }[] };
-    const opened = openRunDirectory(runsRoot, sourceRun);
-    if (!opened.ok) throw new Error(opened.error.message);
-    const transcript = ["### Machine Summary", "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "", "```findings", "[]", "```"].join("\n");
-    for (const request of action.requests) {
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
-    }
-    expect(runCli(["resume", "--runs-root", runsRoot, "--run", sourceRun], "", repository).status).toBe(0);
+    const { repository, runsRoot, sourceRun, remediationRun, git } = await cleanStandaloneReviewFixture("loom-remediation-unauthorized-runs-");
 
     // A regression pin the remediation itself added: dirty, real, and outside
     // the frozen review scope — so `supportPaths` is its only authorization.
@@ -3505,11 +3496,11 @@ describe("orchestration CLI", () => {
       expect(inspected.status, inspected.stderr).toBe(0);
       const projection = JSON.parse(inspected.stdout) as {
         kind: string;
-        program: { value: string };
+        program: { value: { kind: string; program?: string } };
         slots: { value: { slotId: string; capture: string; diagnostic: string | null }[] };
       };
       expect(projection.kind).toBe("run-inspection");
-      expect(projection.program.value).toBe("standalone-review");
+      expect(projection.program.value).toEqual({ kind: "registered", program: "standalone-review" });
       expect(projection.slots.value.find(({ slotId }) => slotId === rejected.slotId))
         .toMatchObject({ capture: "rejected", diagnostic: expect.stringContaining("agent-failed") });
     });

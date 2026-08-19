@@ -53,6 +53,7 @@ import {
   parsePiMessages,
   piStructuredTestDiagnostics,
   piStructuredTestResult,
+  type PiTranscriptResult,
 } from "./transcript-adapter";
 
 /**
@@ -124,7 +125,21 @@ export type PiSubagentResultEntry =
   | Readonly<{ ok: true; result: PiSubagentResult }>
   | Readonly<{ ok: false; problem: string }>;
 
-/** `null` when the field is absent — pi versions differ on `stopReason`. */
+/** The errors of the FIRST failed result, or none when all succeeded. */
+function firstFailureErrors(
+  ...results: readonly PiTranscriptResult<unknown>[]
+): readonly string[] {
+  const failed = results.find((result) => !result.ok);
+  return failed === undefined || failed.ok ? [] : failed.errors;
+}
+
+/**
+ * The problem with an optional string field, or `null` when there is none.
+ *
+ * `null` therefore covers BOTH acceptable states — the field is absent (pi
+ * versions differ on `stopReason`) and the field is a string. A non-null return
+ * is the offending type name, for the caller's rejection message.
+ */
 const optionalString = (value: unknown): string | null =>
   value === undefined || typeof value === "string" ? null : `${typeof value}`;
 
@@ -493,11 +508,10 @@ export async function applyImplementationPiResult(args: Readonly<{
   // derived values ARE `parsedMessages` when it failed, so it can never be the
   // disjunct that fires, and there is no arm for it below.
   if (!adaptedTranscript.ok || !structuredEvidence.ok || !parsedMessages.ok) {
-    const errors = !adaptedTranscript.ok
-      ? adaptedTranscript.errors
-      : !structuredEvidence.ok
-        ? structuredEvidence.errors
-        : [];
+    // First failure wins, and the order matters: when `parsedMessages` failed
+    // BOTH derived values carry that same cause, so concatenating them would
+    // report one cause twice.
+    const errors = firstFailureErrors(adaptedTranscript, structuredEvidence);
     const failureReason = `Pi transcript evidence capture failed: ${errors.join("; ")}`;
     const root = repository.root();
     const comparisonFailures: string[] = [];

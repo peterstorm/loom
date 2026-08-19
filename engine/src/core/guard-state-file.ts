@@ -82,6 +82,7 @@
 
 import type { HookResult } from "../types";
 import { normalizeShellSpan } from "./shell-normalize";
+import { CONTINUE, halt, scanUnquoted, skip } from "./shell-quoting";
 import {
   TASK_GRAPH_PATH,
   WHITELISTED_HELPERS,
@@ -581,33 +582,14 @@ function hasReadOnlyHead(segment: string): boolean {
  * a quoted argument (`jq 'select(.x > 1)' <state>`) alone.
  */
 function hasOutputRedirect(segment: string): boolean {
-  let quote: '"' | "'" | "`" | null = null;
-  for (let i = 0; i < segment.length; i++) {
-    const c = segment[i];
-    if (quote !== null) {
-      if (quote !== "'" && c === "\\") {
-        i++;
-        continue;
-      }
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === "\\") {
-      i++;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === ">") {
-      if (segment[i + 1] !== "&") return true;
-      const dup = classifyFdDupWord(segment, i + 2);
-      if (!dup.isFdDup) return true; // `>&word` writes the FILE `word`
-      i = dup.end - 1; // skip the dup word (digits/`-`: nothing special inside)
-    }
-  }
-  return false;
+  return scanUnquoted<true>(segment, 0, (c, i) => {
+    if (c !== ">") return CONTINUE;
+    if (segment[i + 1] !== "&") return halt(true);
+    const dup = classifyFdDupWord(segment, i + 2);
+    return dup.isFdDup
+      ? skip(dup.end) // digits/`-`: nothing special inside the dup word
+      : halt(true); // `>&word` writes the FILE `word`
+  }) ?? false;
 }
 
 interface FlattenedCommand {
@@ -663,36 +645,20 @@ export function flattenSubstitutions(command: string): FlattenedCommand | null {
 }
 
 /** Index of the `)` closing a substitution opened before `start` — paren
- *  depth counted quote-aware (parens inside a quoted body don't count).
- *  -1 when unclosed. */
+ *  depth counted quote-aware (parens inside a quoted body don't count, and
+ *  "quoted" includes a BACKTICK body: this scanner tracked only `"` and `'`
+ *  where both its twins tracked all three, so `` $(`a)b`) `` closed here at the
+ *  `)` inside the backtick). -1 when unclosed. */
 function findClosingParen(command: string, start: number): number {
   let depth = 1;
-  let quote: '"' | "'" | null = null;
-  for (let i = start; i < command.length; i++) {
-    const c = command[i];
-    if (quote !== null) {
-      if (quote !== "'" && c === "\\") {
-        i++;
-        continue;
-      }
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === "\\") {
-      i++;
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      quote = c;
-      continue;
-    }
+  return scanUnquoted<number>(command, start, (c, i) => {
     if (c === "(") depth++;
     if (c === ")") {
       depth--;
-      if (depth === 0) return i;
+      if (depth === 0) return halt(i);
     }
-  }
-  return -1;
+    return CONTINUE;
+  }) ?? -1;
 }
 
 /** Index of the backtick closing a body opened before `start` (backslash-
@@ -908,8 +874,10 @@ function interpreterExecutesStdin(head: string, args: readonly string[]): boolea
     const a = unquote(args[i]!);
     if (a === "-") return true;
     if (inline.includes(a)) return false;
-    // A file/module program supplied via a bound descriptor (`node -e` aside,
-    // `python3 --file /dev/stdin`) reads the heredoc body as its program.
+    // A file program supplied via a bound descriptor — `php -f /dev/stdin`,
+    // `pwsh -File /dev/stdin` — reads the heredoc body as its program. Only the
+    // heads in FILE_PROGRAM_FLAGS reach this branch; anything else takes the
+    // generic fallback below.
     if (file.includes(a)) return isFdDevicePath(args[i + 1] ?? "");
     if (programFlags.includes(a)) {
       if (isFdDevicePath(args[i + 1] ?? "")) return true;

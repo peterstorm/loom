@@ -187,14 +187,23 @@ function verifyStagedSetNode(resolver: StandaloneResultPublicationAuthorityResol
  */
 type BranchEnvelope<K extends string, T> = Readonly<Partial<Record<K, T>>>;
 
+// The branch envelopes validate their wrapped member with the REAL schema.
+// Declaring it `z.unknown().optional()` behind an `as unknown as
+// z.ZodType<Envelope>` cast made the static type assert a well-formed
+// StagedSetVerdict/InstallationDecision while the runtime accepted any value at
+// all — at the one boundary these DAGs exist to parse. The transforms below then
+// read `.kind`, `.paths`, `.digest` and `.reason` off it with nothing having
+// checked any of them. `satisfies` keeps the static type honest without
+// silencing the runtime check, which is the form `panel-operations.ts` already
+// carries for the identical defect.
 const branchEnvelopeSchema = z.object({
-  [VERIFY_STAGED]: z.unknown().optional(),
-}) as unknown as z.ZodType<BranchEnvelope<typeof VERIFY_STAGED, StagedSetVerdict>>;
+  [VERIFY_STAGED]: stagedVerdictSchema.optional(),
+}) satisfies z.ZodType<BranchEnvelope<typeof VERIFY_STAGED, StagedSetVerdict>>;
 
 const decisionEnvelopeSchema = z.object({
-  [EMIT_INTENT]: z.unknown().optional(),
-  [BLOCK]: z.unknown().optional(),
-}) as unknown as z.ZodType<Readonly<Partial<Record<string, InstallationDecision>>>>;
+  [EMIT_INTENT]: installationDecisionSchema.optional(),
+  [BLOCK]: installationDecisionSchema.optional(),
+}) satisfies z.ZodType<Readonly<Partial<Record<string, InstallationDecision>>>>;
 
 /**
  * Reached only by the conditional edge. The non-verified and pruned cases are

@@ -201,6 +201,38 @@ async function piCaptureRun(runSuffix: string, contextText = "Pi capture context
 }
 
 describe("Pi extension review tool_result integration", () => {
+  /**
+   * `piSpawnRosterId` off the SAME module `extension()` loads.
+   *
+   * Five cases re-declared the dynamic import inline, immediately after calling
+   * `extension()`, purely to reach this one function — so "which extension
+   * module is under test" had six answers in one file.
+   */
+  const rosterId = async (toolCallId: unknown, index: number, agent: string): Promise<string> => {
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
+    };
+    return module.piSpawnRosterId(toolCallId, index, agent);
+  };
+
+  /**
+   * Bind `session` to a staged run so the extension can resolve its authority.
+   *
+   * Nine cases repeated the same five-field call verbatim; the ONE that differs
+   * — two reserved requests in one binding — says so by passing its ids.
+   */
+  const bindSession = async (
+    session: string,
+    staged: Readonly<{ request: AgentRequestAuthority; runsRoot: string; runDir: string }>,
+    requestIds: readonly string[] = [staged.request.requestId],
+  ) => registerSessionRunBinding(subagentDir, session, {
+    runId: staged.request.runId,
+    runsRoot: staged.runsRoot,
+    runDirectory: staged.runDir,
+    requestIds,
+  });
+
   const extension = async () => {
     const extensionSpecifier = "../../pi/extension.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
@@ -274,13 +306,9 @@ describe("Pi extension review tool_result integration", () => {
 
   it("captures Pi tool_result bytes through request-bound run authority", async () => {
     const pi = await extension();
-    const extensionSpecifier = "../../pi/extension.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
-      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
-    };
     const staged = await piCaptureRun("pi-tool-result");
     const toolCallId = "call-request-bound-capture";
-    const nativeId = module.piSpawnRosterId(toolCallId, 0, "code-reviewer");
+    const nativeId = await rosterId(toolCallId, 0, "code-reviewer");
     const correlated = await staged.handle.recordHarnessCorrelator({
       schemaVersion: 1,
       harness: "pi",
@@ -305,13 +333,9 @@ describe("Pi extension review tool_result integration", () => {
 
   it("does not apply Pi review evidence after request-bound capture rejection", async () => {
     const pi = await extension();
-    const extensionSpecifier = "../../pi/extension.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
-      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
-    };
     const staged = await piCaptureRun("pi-rejected-capture");
     const toolCallId = "call-rejected-capture";
-    const nativeId = module.piSpawnRosterId(toolCallId, 0, "code-reviewer");
+    const nativeId = await rosterId(toolCallId, 0, "code-reviewer");
     const correlated = await staged.handle.recordHarnessCorrelator({
       schemaVersion: 1,
       harness: "pi",
@@ -874,10 +898,6 @@ describe("Pi extension review tool_result integration", () => {
 
   it("records the durable Pi correlator before accepting an orchestration spawn", async () => {
     const pi = await extension();
-    const extensionSpecifier = "../../pi/extension.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
-      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
-    };
     const staged = await piCaptureRun("pi-spawn-correlator");
     process.env.LOOM_ORCHESTRATION_RUNS_ROOT = staged.runsRoot;
     process.env.LOOM_ORCHESTRATION_RUN_DIR = staged.runDir;
@@ -897,7 +917,7 @@ describe("Pi extension review tool_result integration", () => {
       }, { sessionManager: { getSessionId: () => session } });
 
       expect(results).toEqual([undefined]);
-      const nativeId = module.piSpawnRosterId(toolCallId, 0, "code-reviewer");
+      const nativeId = await rosterId(toolCallId, 0, "code-reviewer");
       const binding = staged.handle.readHarnessCorrelator("pi", nativeId);
       expect(binding.ok).toBe(true);
       if (binding.ok) {
@@ -989,12 +1009,7 @@ describe("Pi extension review tool_result integration", () => {
       `LOOM_CONTEXT_DIGEST: ${staged.request.contextDigest}`,
       "Review the exact issued request",
     ].join("\n");
-    expect((await registerSessionRunBinding(subagentDir, session, {
-      runId: staged.request.runId,
-      runsRoot: staged.runsRoot,
-      runDirectory: staged.runDir,
-      requestIds: [staged.request.requestId],
-    })).ok).toBe(true);
+    expect((await bindSession(session, staged)).ok).toBe(true);
     expect(await beforeReload.emit("tool_call", {
       toolName: "subagent",
       toolCallId,
@@ -1020,12 +1035,7 @@ describe("Pi extension review tool_result integration", () => {
     const session = "019fca39-f989-7510-8e62-50dadbcad444";
     const toolCallId = "call-session-binding-current-after-stale";
     for (const staged of [stale, current]) {
-      expect((await registerSessionRunBinding(subagentDir, session, {
-        runId: staged.request.runId,
-        runsRoot: staged.runsRoot,
-        runDirectory: staged.runDir,
-        requestIds: [staged.request.requestId],
-      })).ok).toBe(true);
+      expect((await bindSession(session, staged)).ok).toBe(true);
     }
     const prompt = [
       "LOOM_REVIEW_CONTEXT: standalone",
@@ -1074,10 +1084,7 @@ describe("Pi extension review tool_result integration", () => {
     expect((await staged.handle.reserveRequest(second)).ok).toBe(true);
     const session = "019fca39-f989-7510-8e62-50dadbcad445";
     const toolCallId = "call-session-binding-reload-same-role";
-    expect((await registerSessionRunBinding(subagentDir, session, {
-      runId: staged.request.runId, runsRoot: staged.runsRoot, runDirectory: staged.runDir,
-      requestIds: [staged.request.requestId, second.requestId],
-    })).ok).toBe(true);
+    expect((await bindSession(session, staged, [staged.request.requestId, second.requestId])).ok).toBe(true);
     const prompts = [staged.request, second].map((request, index) => [
       "LOOM_REVIEW_CONTEXT: standalone",
       `LOOM_REQUEST_ID: ${request.requestId}`,
@@ -1115,12 +1122,7 @@ describe("Pi extension review tool_result integration", () => {
       `LOOM_CONTEXT_DIGEST: ${staged.request.contextDigest}`,
       "Review the exact issued request",
     ].join("\n");
-    expect((await registerSessionRunBinding(subagentDir, session, {
-      runId: staged.request.runId,
-      runsRoot: staged.runsRoot,
-      runDirectory: staged.runDir,
-      requestIds: [staged.request.requestId],
-    })).ok).toBe(true);
+    expect((await bindSession(session, staged)).ok).toBe(true);
     expect(await beforeReload.emit("tool_call", {
       toolName: "subagent", toolCallId,
       input: { agent: "code-reviewer", task: prompt, agentScope: "user" },
@@ -1149,12 +1151,7 @@ describe("Pi extension review tool_result integration", () => {
       `LOOM_CONTEXT_DIGEST: ${staged.request.contextDigest}`,
       "Review the exact issued request",
     ].join("\n");
-    expect((await registerSessionRunBinding(subagentDir, session, {
-      runId: staged.request.runId,
-      runsRoot: staged.runsRoot,
-      runDirectory: staged.runDir,
-      requestIds: [staged.request.requestId],
-    })).ok).toBe(true);
+    expect((await bindSession(session, staged)).ok).toBe(true);
     expect(await pi.emit("tool_call", {
       toolName: "subagent",
       toolCallId,
@@ -1204,12 +1201,7 @@ describe("Pi extension review tool_result integration", () => {
       `LOOM_CONTEXT_DIGEST: ${staged.request.contextDigest}`,
       "Review the exact issued request",
     ].join("\n");
-    expect((await registerSessionRunBinding(subagentDir, session, {
-      runId: staged.request.runId,
-      runsRoot: staged.runsRoot,
-      runDirectory: staged.runDir,
-      requestIds: [staged.request.requestId],
-    })).ok).toBe(true);
+    expect((await bindSession(session, staged)).ok).toBe(true);
     expect(await pi.emit("tool_call", {
       toolName: "subagent",
       toolCallId,
@@ -1246,12 +1238,7 @@ describe("Pi extension review tool_result integration", () => {
       `LOOM_CONTEXT_DIGEST: ${staged.request.contextDigest}`,
       "Review the exact issued Wave request",
     ].join("\n");
-    expect((await registerSessionRunBinding(subagentDir, session, {
-      runId: staged.request.runId,
-      runsRoot: staged.runsRoot,
-      runDirectory: staged.runDir,
-      requestIds: [staged.request.requestId],
-    })).ok).toBe(true);
+    expect((await bindSession(session, staged)).ok).toBe(true);
     const before = readFileSync(statePath, "utf-8");
     expect(await pi.emit("tool_call", {
       toolName: "subagent", toolCallId,
@@ -1271,12 +1258,7 @@ describe("Pi extension review tool_result integration", () => {
     const pi = await extension();
     const staged = await piCaptureRun("pi-session-binding-wrong-context");
     const session = "019fca39-f989-7510-8e62-50dadbcad43d";
-    const published = await registerSessionRunBinding(subagentDir, session, {
-      runId: staged.request.runId,
-      runsRoot: staged.runsRoot,
-      runDirectory: staged.runDir,
-      requestIds: [staged.request.requestId],
-    });
+    const published = await bindSession(session, staged);
     expect(published.ok).toBe(true);
 
     const call = await pi.emit("tool_call", {
@@ -1303,21 +1285,12 @@ describe("Pi extension review tool_result integration", () => {
 
   it("uses context authority to disambiguate identical request ids across active runs", async () => {
     const pi = await extension();
-    const extensionSpecifier = "../../pi/extension.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
-      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
-    };
     const first = await piCaptureRun("pi-duplicate-request-first", "first context");
     const second = await piCaptureRun("pi-duplicate-request-second", "second context");
     const session = "019fca39-f989-7510-8e62-50dadbcad441";
     const toolCallId = "call-duplicate-request-context";
     for (const staged of [first, second]) {
-      expect((await registerSessionRunBinding(subagentDir, session, {
-        runId: staged.request.runId,
-        runsRoot: staged.runsRoot,
-        runDirectory: staged.runDir,
-        requestIds: [staged.request.requestId],
-      })).ok).toBe(true);
+      expect((await bindSession(session, staged)).ok).toBe(true);
     }
     const prompt = [
       "LOOM_REVIEW_CONTEXT: standalone",
@@ -1333,7 +1306,7 @@ describe("Pi extension review tool_result integration", () => {
     }, { sessionManager: { getSessionId: () => session } });
     expect(call).toEqual([undefined]);
 
-    const nativeId = module.piSpawnRosterId(toolCallId, 0, "code-reviewer");
+    const nativeId = await rosterId(toolCallId, 0, "code-reviewer");
     expect(first.handle.readHarnessCorrelator("pi", nativeId)).toMatchObject({ ok: true, value: null });
     expect(second.handle.readHarnessCorrelator("pi", nativeId)).toMatchObject({
       ok: true,
@@ -1344,10 +1317,6 @@ describe("Pi extension review tool_result integration", () => {
 
   it("binds duplicate-role Pi batch items by exact request marker instead of lexical request order", async () => {
     const pi = await extension();
-    const extensionSpecifier = "../../pi/extension.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
-      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
-    };
     const staged = await piCaptureRun("pi-duplicate-role-correlator");
     const second = {
       ...staged.request,
@@ -1379,11 +1348,11 @@ describe("Pi extension review tool_result integration", () => {
       expect(results).toEqual([undefined]);
       const firstBinding = staged.handle.readHarnessCorrelator(
         "pi",
-        module.piSpawnRosterId(toolCallId, 0, "code-reviewer"),
+        await rosterId(toolCallId, 0, "code-reviewer"),
       );
       const secondBinding = staged.handle.readHarnessCorrelator(
         "pi",
-        module.piSpawnRosterId(toolCallId, 1, "code-reviewer"),
+        await rosterId(toolCallId, 1, "code-reviewer"),
       );
       expect(firstBinding.ok && firstBinding.value?.requestId).toBe(second.requestId);
       expect(secondBinding.ok && secondBinding.value?.requestId).toBe(staged.request.requestId);

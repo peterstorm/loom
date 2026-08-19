@@ -40,6 +40,10 @@ export type ActiveRosterEntry = Readonly<{ agentId: AgentId; agentType: AgentTyp
 export type ActiveRosterProbe = (sessionId: SessionId) => readonly ActiveRosterEntry[] | null;
 
 /**
+ * Two admissions, not one: an agent whose id is an implementation-role id
+ * (`IMPL_AGENTS`), or one holding a minted Pi write grant. Review agents and
+ * refutation verifiers match neither and stay read-only.
+ *
  * Write-grant agent IDs are minted by the Pi write-grant system, which verifies
  * the grant's token digest, binding MAC, expiry, agent identity, Task ID, and
  * cwd before minting — then BURNS the record, so nothing downstream can re-run

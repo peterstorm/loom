@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { agentRequestAuthority } from "../fixtures/agent-request-authority";
 import {
   bindCapture,
   captureKey,
@@ -40,25 +41,8 @@ afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-function authority(overrides: Partial<AgentRequestAuthority> = {}): AgentRequestAuthority {
-  return {
-    runId: "run.acceptance-1",
-    requestId: "request:reviewer:1",
-    slotId: "slot-1",
-    program: "wave-gate",
-    role: "code-reviewer",
-    attempt: 1,
-    modelProfile: "general-review",
-    harnessBinding: {
-      pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-      claude: { harness: "claude-code", model: "sonnet" },
-    },
-    requiredSkill: null,
-    contextDigest: "a".repeat(64),
-    outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
-    ...overrides,
-  } as AgentRequestAuthority;
-}
+const authority = (overrides: Partial<AgentRequestAuthority> = {}): AgentRequestAuthority =>
+  agentRequestAuthority("run.acceptance-1", overrides as Record<string, unknown>);
 
 const identity = (overrides: Partial<HarnessResultIdentity> = {}): HarnessResultIdentity => ({
   harness: "claude",

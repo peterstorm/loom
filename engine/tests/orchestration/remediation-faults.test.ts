@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,27 +17,13 @@ import {
   type TemporaryIndex,
 } from "../../src/orchestration/git-remediation";
 import type { FixedGitPathspecContract } from "../../src/core/remediation-machine";
+import { git, pathspecContract, write } from "../fixtures/git-repository";
 
 const cleanup: string[] = [];
 
 afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
 });
-
-function git(root: string, args: readonly string[]): void {
-  const result = spawnSync("git", [...args], {
-    cwd: root,
-    encoding: "utf-8",
-    env: { PATH: process.env["PATH"] ?? "", HOME: root, LC_ALL: "C" },
-  });
-  if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
-}
-
-function write(root: string, path: string, contents: string): void {
-  const full = join(root, path);
-  mkdirSync(dirname(full), { recursive: true });
-  writeFileSync(full, contents);
-}
 
 function fixtureRepository(): GitRepository {
   const root = mkdtempSync(join(tmpdir(), "loom-git-faults-"));
@@ -52,26 +38,6 @@ function fixtureRepository(): GitRepository {
   const opened = openGitRepository(root);
   if (!opened.ok) throw new Error(opened.error.message);
   return opened.value;
-}
-
-function pathspecContract(paths: readonly string[]): FixedGitPathspecContract {
-  const bytes = [...Buffer.from(paths.map((path) => `${path}\0`).join(""), "utf-8")];
-  return {
-    schemaVersion: 1,
-    kind: "fixed-git-pathspec-contract",
-    globalArgs: ["--literal-pathspecs"],
-    pathspecArgs: ["--pathspec-from-file=-", "--pathspec-file-nul"],
-    manifest: {
-      schemaVersion: 1,
-      kind: "literal-nul-path-manifest",
-      paths: { paths, digest: "0".repeat(64) },
-      bytes,
-      byteLength: bytes.length,
-      contentDigest: "0".repeat(64),
-      digest: "0".repeat(64),
-    },
-    digest: "0".repeat(64),
-  } as unknown as FixedGitPathspecContract;
 }
 
 /** A full worktree snapshot, so "unchanged" can be asserted on bytes. */

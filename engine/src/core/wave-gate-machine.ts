@@ -1622,6 +1622,29 @@ export type WaveReviewSlotEvidence = Readonly<{
   attempted: 1 | 2;
 }>;
 
+/**
+ * How a wave-scoped spec-check slot settled: it must belong to THIS wave, and a
+ * capture failure is evidence that arrived broken rather than evidence missing.
+ * The two distinctions were a nested ternary inline in the evidence loop.
+ */
+function specCheckSlotResult(
+  spec: Readonly<{ wave: number; verdict: string }> | undefined,
+  wave: number,
+): WaveReviewSlotEvidence["result"] {
+  if (spec?.wave !== wave) return "missing";
+  return spec.verdict === "EVIDENCE_CAPTURE_FAILED" ? "invalid" : "accepted";
+}
+
+/**
+ * How one reviewer slot settled. `accepted` and `invalid` are proven mutually
+ * exclusive by the caller before this is reached, so the order here decides
+ * nothing the caller has not already established.
+ */
+function reviewerSlotResult(accepted: boolean, invalid: boolean): WaveReviewSlotEvidence["result"] {
+  if (accepted) return "accepted";
+  return invalid ? "invalid" : "missing";
+}
+
 export type WaveReviewRecovery =
   | Readonly<{ kind: "complete"; affectedSlotIds: readonly [] }>
   | Readonly<{
@@ -1655,9 +1678,7 @@ function authoritativeWaveReviewSlotEvidence(
       const spec = activeSnapshot.graph.spec_check;
       evidence.push(canonicalRecord({
         slotId: pair.value.slotId,
-        result: spec?.wave !== preparation.wave
-          ? "missing" as const
-          : spec.verdict === "EVIDENCE_CAPTURE_FAILED" ? "invalid" as const : "accepted" as const,
+        result: specCheckSlotResult(spec, preparation.wave),
         attempted: 1 as const,
       }));
       continue;
@@ -1687,7 +1708,7 @@ function authoritativeWaveReviewSlotEvidence(
     if (accepted && invalid) return preparationFailure(`Task ${task.id}/${subject.reviewer} is both accepted and invalid in active Review Run authority`);
     evidence.push(canonicalRecord({
       slotId: pair.value.slotId,
-      result: accepted ? "accepted" as const : invalid ? "invalid" as const : "missing" as const,
+      result: reviewerSlotResult(accepted, invalid),
       attempted: slot.attempted,
     }));
   }

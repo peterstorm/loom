@@ -24,11 +24,17 @@ import {
   type ArchitecturePanelAuthority,
   type RefutationPanelAuthority,
 } from "../../core/panel-program";
+import type { JudgeVerdict } from "../../core/panel-contract";
+import type { RefutationVerdict } from "../../core/review-panel";
+import type { VerdictEnvelope } from "../../core/panel-kernel";
 import {
   parseCompleteRoster,
+  type AcceptedAgentResult,
+  type CompleteRoster,
   type DomainResult,
   type PublicationAuthorityResolver,
   type RosterViolation,
+  type SemanticPayloadParser,
 } from "../../core/orchestration-contract";
 
 const PROVE_ROSTER = "prove-complete-roster";
@@ -87,11 +93,11 @@ const outcomeEnvelopeSchema = z.object({
  * only in how their authority parses and what aggregation means, so the shape
  * is written once and specialised rather than duplicated.
  */
-export type PanelOperationSpec<A> = Readonly<{
+export type PanelOperationSpec<A, P = unknown> = Readonly<{
   dagId: string;
   parseAuthority: (raw: unknown) => Readonly<{ ok: true; value: A }> | Readonly<{ ok: false; message: string }>;
   rosterOf: (authority: A) => Parameters<typeof parseCompleteRoster>[1];
-  parsePayload: Parameters<typeof parseCompleteRoster>[3];
+  parsePayload: SemanticPayloadParser<P>;
   /**
    * `DomainResult`, the codebase's own result ADT, which both real
    * implementations already return. The previous
@@ -99,12 +105,20 @@ export type PanelOperationSpec<A> = Readonly<{
    * `{ ok: true }` alone while the consumer unconditionally read `["value"]`,
    * so an aggregation with no value type-checked and published
    * `{ kind: "aggregated", value: undefined }` as a panel's successful result.
+   *
+   * The roster parameter is the roster `parsePayload` actually produces, tied to
+   * it through `P`. It was typed `never`, which reads as "no aggregator can be
+   * written" but in fact accepts EVERY one: a parameter is checked
+   * contravariantly, and every type is a supertype of `never`. So the one thing
+   * the annotation appeared to guarantee — that an aggregator receives the
+   * roster shape this spec's own payload parser yields — was the one thing it
+   * could not.
    */
-  aggregate: (authority: A, complete: never) => DomainResult<unknown, unknown>;
+  aggregate: (authority: A, complete: CompleteRoster<AcceptedAgentResult<P>>) => DomainResult<unknown, unknown>;
 }>;
 
-function proveRosterNode<A>(
-  spec: PanelOperationSpec<A>,
+function proveRosterNode<A, P>(
+  spec: PanelOperationSpec<A, P>,
   resolver: PublicationAuthorityResolver,
 ) {
   return createTransformNode<PanelOperationInput, RosterProof>({
@@ -138,7 +152,7 @@ function proveRosterNode<A>(
  * pruned branch or a rejected proof yields a rejection rather than an
  * exception, so route totality survives a future rewiring.
  */
-function aggregateNode<A>(spec: PanelOperationSpec<A>) {
+function aggregateNode<A, P>(spec: PanelOperationSpec<A, P>) {
   return createTransformNode<ProofEnvelope, PanelOutcome>({
     id: AGGREGATE,
     inputSchema: proofEnvelopeSchema,
@@ -148,7 +162,7 @@ function aggregateNode<A>(spec: PanelOperationSpec<A>) {
       if (proof === undefined) return ok({ kind: "rejected", reason: "aggregation ran without a roster proof" });
       if (proof.kind !== "proved") return ok({ kind: "rejected", reason: proof.reason });
 
-      const { authority, roster } = proof.complete as Readonly<{ authority: A; roster: never }>;
+      const { authority, roster } = proof.complete as Readonly<{ authority: A; roster: CompleteRoster<AcceptedAgentResult<P>> }>;
       const aggregated = spec.aggregate(authority, roster);
       // `value` and `error` are now reachable only on their own arm, so neither
       // read needs a stringly-keyed lookup to defend itself.
@@ -212,8 +226,8 @@ const resultNode = createTransformNode<OutcomeEnvelope, PanelOutcome>({
 });
 
 /** `prove roster → (proved) aggregate | (default) reject → result`. */
-export function createPanelOperationDag<A>(
-  spec: PanelOperationSpec<A>,
+export function createPanelOperationDag<A, P>(
+  spec: PanelOperationSpec<A, P>,
   resolver: PublicationAuthorityResolver,
 ): DagDef {
   return defineDag({
@@ -246,12 +260,12 @@ export function createPanelOperationDag<A>(
 /** Architecture: complete judge roster → candidate ranking. */
 export function createArchitecturePanelDag(
   input: Readonly<{
-    parseAuthority: PanelOperationSpec<ArchitecturePanelAuthority>["parseAuthority"];
-    parsePayload: PanelOperationSpec<ArchitecturePanelAuthority>["parsePayload"];
+    parseAuthority: PanelOperationSpec<ArchitecturePanelAuthority, JudgeVerdict>["parseAuthority"];
+    parsePayload: PanelOperationSpec<ArchitecturePanelAuthority, JudgeVerdict>["parsePayload"];
     resolver: PublicationAuthorityResolver;
   }>,
 ): DagDef {
-  return createPanelOperationDag<ArchitecturePanelAuthority>({
+  return createPanelOperationDag<ArchitecturePanelAuthority, JudgeVerdict>({
     dagId: "architecture-panel-operations",
     parseAuthority: input.parseAuthority,
     rosterOf: (authority) => authority.judgeRoster as Parameters<typeof parseCompleteRoster>[1],
@@ -263,12 +277,12 @@ export function createArchitecturePanelDag(
 /** Refutation: complete verifier roster → strict-majority tally. */
 export function createRefutationPanelDag(
   input: Readonly<{
-    parseAuthority: PanelOperationSpec<RefutationPanelAuthority>["parseAuthority"];
-    parsePayload: PanelOperationSpec<RefutationPanelAuthority>["parsePayload"];
+    parseAuthority: PanelOperationSpec<RefutationPanelAuthority, VerdictEnvelope<RefutationVerdict>>["parseAuthority"];
+    parsePayload: PanelOperationSpec<RefutationPanelAuthority, VerdictEnvelope<RefutationVerdict>>["parsePayload"];
     resolver: PublicationAuthorityResolver;
   }>,
 ): DagDef {
-  return createPanelOperationDag<RefutationPanelAuthority>({
+  return createPanelOperationDag<RefutationPanelAuthority, VerdictEnvelope<RefutationVerdict>>({
     dagId: "refutation-panel-operations",
     parseAuthority: input.parseAuthority,
     rosterOf: (authority) => authority.verifierRoster as Parameters<typeof parseCompleteRoster>[1],

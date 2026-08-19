@@ -66,6 +66,10 @@ function modelFrontmatter(path: string): ModelFrontmatterRead {
   };
 }
 
+/** An untrusted `tool_input` field as a string, or `undefined` if it is not one. */
+const readString = (value: unknown): string | undefined =>
+  typeof value === "string" ? value : undefined;
+
 const handler: HookHandler = async (stdin) => {
   let input: PreToolUseInput;
   try {
@@ -78,8 +82,12 @@ const handler: HookHandler = async (stdin) => {
   }
   if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
-  const rawAgent = (input.tool_input?.subagent_type as string | undefined)
-    ?? (input.tool_input?.agent as string | undefined)
+  // Read, not cast. `tool_input` is `Record<string, unknown>` straight off
+  // untrusted hook JSON: `as string | undefined` let a non-string value through
+  // as if it were an agent name, and the very next call fed it to a parser that
+  // assumes a string. A non-string is simply not a name — it reads as absent.
+  const rawAgent = readString(input.tool_input?.subagent_type)
+    ?? readString(input.tool_input?.agent)
     ?? "";
   const parsedAgent = parseAgentName(rawAgent);
   // Non-Loom utility agents remain outside Loom model policy. An unknown name

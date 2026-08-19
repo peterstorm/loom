@@ -141,6 +141,7 @@ import {
   startStandaloneFacade,
   startWaveGateFacade,
   waveAdvisoryDecisionRequestId,
+  waveGateDecisionMismatch,
   type FacadeDriveResult,
   type ProgramParse,
   type RegisteredRemediationProgram,
@@ -507,6 +508,48 @@ function parseRegisteredPanelProgram(raw: unknown): RegisteredPanelProgram | nul
         context: Object.hasOwn(record, "context") ? record["context"] : record["input"],
       })
     : null;
+}
+
+/**
+ * The runner for effects a run directory serves ENTIRELY on its own.
+ *
+ * All three outside ports are unreachable by construction: an operation routed
+ * here that reaches for git or protected wave state is a routing bug, and it
+ * should fail loudly rather than be served. `submitOperation`'s transcript
+ * capture built this same three-stub runner inline instead of calling it, so a
+ * change to what "unreachable" means here would have silently missed one of the
+ * two run-directory-only paths.
+ */
+/**
+ * Record how one semantic attempt settled, keyed so a replay is a no-op.
+ *
+ * The dedup key is derived from the RESERVED request id and attempt (the pair
+ * that names the slot on disk), while the event carries the LOGICAL request id
+ * the panel program reasons about — the two differ for a retried panel attempt,
+ * and both call sites had to get that pairing right independently. One function
+ * now owns it, because a dedup key that drifted from the slot identity would
+ * make a replayed submission mint a second outcome for the same attempt.
+ */
+async function appendSpawnOutcome(
+  handle: RunDirHandle,
+  reservedRequestId: string,
+  attempt: 1 | 2,
+  logicalRequestId: string,
+  problem: string | null,
+): Promise<void> {
+  await handle.appendEvent({
+    schemaVersion: 1,
+    sequence: 0,
+    dedupKey: `result:${createHash("sha256").update(`${reservedRequestId}:${attempt}`).digest("hex")}`,
+    recordedAtMs: Date.now(),
+    event: {
+      type: "spawn-outcome",
+      requestId: logicalRequestId,
+      attempt,
+      outcome: problem === null ? "succeeded" : "failed",
+      ...(problem === null ? {} : { error: problem }),
+    },
+  });
 }
 
 const facadeEffectRunner = (handle: RunDirHandle) => {
@@ -920,10 +963,12 @@ async function restartOperation(args: readonly string[]): Promise<HookResult> {
 }
 
 /**
- * Resume is idempotent and never silently spawns or decides policy: it reports
- * what the run's durable evidence already says. A run whose authority cannot
- * be read is reported as such rather than restarted, because restarting would
- * discard the very evidence that explains the failure.
+ * Fold every captured-but-unsettled panel attempt into a `spawn-outcome` event.
+ *
+ * A transcript can be captured into its reserved slot without the program yet
+ * having judged it — the capture and the judgement are separate writes. This
+ * replays each such attempt through `panelSubmissionProblem` and records the
+ * verdict, keyed so a repeat is a no-op. It decides no policy of its own.
  */
 async function reconcileCapturedPanelResults(
   handle: RunDirHandle,
@@ -954,23 +999,17 @@ async function reconcileCapturedPanelResults(
       logicalRequestId,
       Buffer.from(bytes.value).toString("utf-8"),
     );
-    await handle.appendEvent({
-      schemaVersion: 1,
-      sequence: 0,
-      dedupKey: `result:${createHash("sha256").update(`${request.requestId}:${request.attempt}`).digest("hex")}`,
-      recordedAtMs: Date.now(),
-      event: {
-        type: "spawn-outcome",
-        requestId: logicalRequestId,
-        attempt: request.attempt,
-        outcome: problem === null ? "succeeded" : "failed",
-        ...(problem === null ? {} : { error: problem }),
-      },
-    });
+    await appendSpawnOutcome(handle, request.requestId, request.attempt, logicalRequestId, problem);
   }
   return { ok: true };
 }
 
+/**
+ * Resume is idempotent and never silently spawns or decides policy: it reports
+ * what the run's durable evidence already says. A run whose authority cannot
+ * be read is reported as such rather than restarted, because restarting would
+ * discard the very evidence that explains the failure.
+ */
 async function resumeOperation(args: readonly string[]): Promise<HookResult> {
   const bound = bindLiveRun(args);
   if (!isBound(bound)) return bound;
@@ -1139,17 +1178,7 @@ async function submitOperation(stdin: string, args: readonly string[]): Promise<
       request: reserved,
       bytes: [...Buffer.from(stdin, "utf-8")],
     };
-    const unreachablePort = async (): Promise<never> => { throw new Error("effect port is unreachable for transcript capture"); };
-    const runEffect = createEffectRunner({
-      handle: bound.value.handle,
-      ports: {
-        commitProtectedWaveState: unreachablePort,
-        inspectGitRemediation: unreachablePort,
-        installVerifiedIndex: unreachablePort,
-      },
-      resolveArtifacts: () => [],
-    });
-    const captured = await runEffect(captureIntent);
+    const captured = await facadeEffectRunner(bound.value.handle)(captureIntent);
     if (!captured.ok) return { kind: "error", message: captured.error.message };
     if (captured.value.kind !== "raw-transcript-captured") {
       return { kind: "error", message: "transcript capture reconciled to the wrong receipt kind" };
@@ -1176,19 +1205,7 @@ async function submitOperation(stdin: string, args: readonly string[]): Promise<
     const numericAttempt = Number(attempt) as 1 | 2;
     const logicalRequestId = logicalPanelRequestId(requestId, numericAttempt);
     const problem = panelSubmissionProblem(registration, logicalRequestId, semanticRaw);
-    await bound.value.handle.appendEvent({
-      schemaVersion: 1,
-      sequence: 0,
-      dedupKey: `result:${createHash("sha256").update(`${requestId}:${attempt}`).digest("hex")}`,
-      recordedAtMs: Date.now(),
-      event: {
-        type: "spawn-outcome",
-        requestId: logicalRequestId,
-        attempt: numericAttempt,
-        outcome: problem === null ? "succeeded" : "failed",
-        ...(problem === null ? {} : { error: problem }),
-      },
-    });
+    await appendSpawnOutcome(bound.value.handle, requestId, numericAttempt, logicalRequestId, problem);
     const driven = await driveRegisteredPanel(bound.value.handle, registration);
     if (!driven.ok) return { kind: "error", message: driven.message };
     return emitRunAction(bound.value.handle, driven.action);
@@ -1440,18 +1457,10 @@ async function decideOperation(stdin: string, args: readonly string[]): Promise<
     catch (error) { return { kind: "error", message: `cannot read protected Wave authority: ${error instanceof Error ? error.message : String(error)}` }; }
     const graph = parseTaskGraph(graphRaw);
     if (!graph.ok) return { kind: "error", message: `protected Wave authority is invalid: ${graph.error}` };
-    if (graph.value.active_wave_gate?.runId !== bound.value.handle.runId ||
-        graph.value.active_wave_gate.wave !== facadeRegistration.input.wave ||
-        graph.value.active_wave_gate.authorityDigest !== facadeRegistration.authorityDigest) {
-      return { kind: "error", message: "protected active Wave Gate authority differs from this decision run" };
-    }
-    const expectedDecisionId = waveAdvisoryDecisionRequestId(
-      bound.value.handle.runId,
-      graph.value.tasks.filter(({ id }) => facadeRegistration.taskIds.includes(id)),
+    const mismatch = waveGateDecisionMismatch(
+      graph.value, facadeRegistration, bound.value.handle.runId, decisionId,
     );
-    if (decisionId !== expectedDecisionId) {
-      return { kind: "error", message: `decision request ${decisionId} is not the exact pending advisory request ${expectedDecisionId}` };
-    }
+    if (mismatch !== null) return { kind: "error", message: mismatch };
   }
   if (stdin.trim().length === 0) return { kind: "error", message: "a decision must be supplied on stdin" };
 

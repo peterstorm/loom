@@ -30,6 +30,7 @@ import {
   type SlotId,
   type SemanticPayloadParseError,
   type SpawnRequest,
+  sameAgentRequestAuthority,
 } from "./orchestration-contract";
 import {
   lowerModelProfile,
@@ -860,14 +861,6 @@ const preparedStandaloneCaptureCache = new WeakSet<object>();
 const captureFailure = (message: string): DomainResult<never, StandaloneCaptureError> =>
   resultFail(canonicalRecord({ kind: "standalone-capture-rejected", message }));
 
-function sameCaptureRequest(actual: AgentRequestAuthority, expected: AgentRequestAuthority): boolean {
-  return actual.runId === expected.runId && actual.requestId === expected.requestId &&
-    actual.slotId === expected.slotId && actual.program === expected.program && actual.role === expected.role &&
-    actual.attempt === expected.attempt && actual.modelProfile === expected.modelProfile &&
-    actual.requiredSkill === expected.requiredSkill && actual.contextDigest === expected.contextDigest &&
-    actual.outputSlot.path === expected.outputSlot.path &&
-    JSON.stringify(actual.harnessBinding) === JSON.stringify(expected.harnessBinding);
-}
 
 /** Bind only T1-issued requests to the frozen standalone authority. */
 export function bindStandaloneCaptureAuthority(
@@ -883,7 +876,7 @@ export function bindStandaloneCaptureAuthority(
     if (!issuance.ok) return captureFailure(issuance.error.message);
     const slot = authority.roster.byId.get(request.authority.slotId);
     const expected = request.authority.attempt === 1 ? slot?.attempts[0] : slot?.attempts[1];
-    if (expected === undefined || !sameCaptureRequest(request.authority, expected) || request.authority.runId !== authority.runId) {
+    if (expected === undefined || !sameAgentRequestAuthority(request.authority, expected) || request.authority.runId !== authority.runId) {
       return captureFailure("issued request does not match frozen standalone run/agent/request/context/model/output authority");
     }
     if (seenRequests.has(request.authority.requestId) || seenSlots.has(request.authority.slotId)) {

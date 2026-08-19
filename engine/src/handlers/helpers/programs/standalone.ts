@@ -277,6 +277,38 @@ export async function finalizeStandaloneState(
   return { ok: true, action: { kind: "done", runId: handle.runId, outcome: done.value.outcome } };
 }
 
+/**
+ * Record that one standalone reviewer result was refused.
+ *
+ * Phase A (attempt-1 rejections, which stay awaiting-results) and Phase C (an
+ * attempt-2 rejection, which terminal-blocks) wrote the same event with the same
+ * dedup-key derivation, independently. Note the deliberate asymmetry the shared
+ * form preserves: the dedup key is keyed by the SLOT's own attempt, so a replay
+ * of the same slot is a no-op, while `eventAttempt` is what the machine already
+ * reduced against.
+ */
+async function appendStandaloneRejection(
+  handle: RunDirHandle,
+  slot: Readonly<{ requestId: string; slotId: string; attempt: number }>,
+  eventAttempt: number,
+  diagnostic: string,
+): Promise<void> {
+  await handle.appendEvent({
+    schemaVersion: 1,
+    sequence: 0,
+    dedupKey: `standalone-result-rejected:${createHash("sha256").update(`${slot.requestId}:${slot.attempt}`).digest("hex")}`,
+    recordedAtMs: Date.now(),
+    event: {
+      kind: "standalone-result-rejected",
+      runId: handle.runId,
+      requestId: slot.requestId,
+      slotId: slot.slotId,
+      attempt: eventAttempt,
+      diagnostic,
+    },
+  });
+}
+
 export async function resumeStandaloneFacade(
   handle: RunDirHandle,
   registration: RegisteredStandaloneProgram,
@@ -466,20 +498,7 @@ export async function resumeStandaloneFacade(
       }
       await handle.writeCheckpoint(serializeStandaloneReviewMachineState(machine));
       for (const { slot, problems } of rejected) {
-        await handle.appendEvent({
-          schemaVersion: 1,
-          sequence: 0,
-          dedupKey: `standalone-result-rejected:${createHash("sha256").update(`${slot.requestId}:${slot.attempt}`).digest("hex")}`,
-          recordedAtMs: Date.now(),
-          event: {
-            kind: "standalone-result-rejected",
-            runId: handle.runId,
-            requestId: slot.requestId,
-            slotId: slot.slotId,
-            attempt: slot.attempt,
-            diagnostic: problems.join("; "),
-          },
-        });
+        await appendStandaloneRejection(handle, slot, slot.attempt, problems.join("; "));
       }
     }
 
@@ -540,20 +559,7 @@ export async function resumeStandaloneFacade(
             return failed(terminal.ok ? "standalone attempt-2 rejection did not terminal-block" : terminal.error.message);
           }
           await handle.writeCheckpoint(serializeStandaloneReviewMachineState(terminal.value));
-          await handle.appendEvent({
-            schemaVersion: 1,
-            sequence: 0,
-            dedupKey: `standalone-result-rejected:${createHash("sha256").update(`${request.authority.requestId}:${request.authority.attempt}`).digest("hex")}`,
-            recordedAtMs: Date.now(),
-            event: {
-              kind: "standalone-result-rejected",
-              runId: handle.runId,
-              requestId: request.authority.requestId,
-              slotId: request.authority.slotId,
-              attempt: 2,
-              diagnostic: problems.join("; "),
-            },
-          });
+          await appendStandaloneRejection(handle, request.authority, 2, problems.join("; "));
           return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: terminal.value } };
         }
       }
