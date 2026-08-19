@@ -217,7 +217,8 @@ export function reconcileFindings(findings: ParsedFindings): ParsedFindings {
       });
 }
 
-/** Extract CRITICAL/ADVISORY lines and CRITICAL_COUNT from a text block.
+/** Extract CRITICAL/ADVISORY claim lines plus BOTH declared counts
+ *  (CRITICAL_COUNT and ADVISORY_COUNT) from a text block.
  *  Strips code fences and handles bold/starred markers. */
 function extractFindings(block: string): ParsedFindings {
   const cleaned = block.replace(/^\`\`\`\w*$/gm, "");

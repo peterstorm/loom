@@ -33,10 +33,11 @@
  * Three further lockstep writers live in handlers because none of them is a
  * review step: `updateTaskFindings` (the manual operator override),
  * `fixTaskFindings` (`--fix`), and `sanitizeDecomposedTask` (the decomposition
- * that first admits a task to the graph). All three derive their views through
- * `claimsOfSeverity` here, and all three are held to the same invariant by
- * `findingsLockstepError` at the load boundary — the enumeration of all six
- * writers lives on `Task.findings` in types.ts.
+ * that first admits a task to the graph). The first two derive their views
+ * through `claimsOfSeverity` here; `sanitizeDecomposedTask` admits a task with
+ * no findings at all, so it writes the empty triple directly. All three are
+ * held to the same invariant by `findingsLockstepError` at the load boundary —
+ * the enumeration of all six writers lives on `Task.findings` in types.ts.
  *
  * Pure module: no I/O, no clock, no randomness.
  */
@@ -487,11 +488,14 @@ function parseStoredResolution(raw: unknown): ResolvedFinding | null {
 /**
  * Repair-path parse of `Task.findings`: malformed entries are DROPPED.
  *
- * Only a `fixFull` repair caller should reach this. The LOAD path fails loudly
- * instead (findingsUnionError) — dropping on every read would silently lose a
- * critical, and the repair is only safe because `fixFull` re-derives the two
- * `string[]` views from whatever survives, restoring lockstep rather than
- * leaving an orphaned claim no panel can adjudicate.
+ * Callers are the ones that OWN the drop: `fixFull` repair
+ * (validate-task-graph), legacy-archive's replay of already-adjudicated
+ * records, and standalone-review's reviewer-evidence parse. Task-graph LOAD
+ * does NOT come through here — it fails loudly instead (findingsUnionError),
+ * because dropping on every read would silently lose a critical. The repair is
+ * only safe because `fixFull` re-derives the two `string[]` views from
+ * whatever survives, restoring lockstep rather than leaving an orphaned claim
+ * no panel can adjudicate.
  */
 export function parseStoredFindings(raw: unknown): Finding[] {
   if (!Array.isArray(raw)) return [];
@@ -946,6 +950,20 @@ export type AdjudicatedFinding =
 export const RECOVERED_AGENT = "recovered-view";
 
 /**
+ * The two `string[]` views a task carries, as a LABELLED PAIR.
+ *
+ * They were adjacent same-typed positional parameters, and a transposed call at
+ * any of the four production sites compiled cleanly while reattributing every
+ * recovered claim to the wrong severity — silently turning a critical that
+ * blocks the wave gate into an advisory that does not. `CriterionScore` in
+ * `panel-contract` is a pair for exactly this reason.
+ */
+export type SeverityViews = Readonly<{
+  critical: readonly string[] | undefined;
+  advisory: readonly string[] | undefined;
+}>;
+
+/**
  * Mint identity for claims the `string[]` views hold that no structured finding
  * accounts for. Returns only the recovered findings; empty when already in step.
  *
@@ -962,20 +980,6 @@ export const RECOVERED_AGENT = "recovered-view";
  * handlers/helpers/store-review-findings) — so none of them can disagree about
  * what recovery means. Changing the semantics here changes all three.
  */
-/**
- * The two `string[]` views a task carries, as a LABELLED PAIR.
- *
- * They were adjacent same-typed positional parameters, and a transposed call at
- * any of the four production sites compiled cleanly while reattributing every
- * recovered claim to the wrong severity — silently turning a critical that
- * blocks the wave gate into an advisory that does not. `CriterionScore` in
- * `panel-contract` is a pair for exactly this reason.
- */
-export type SeverityViews = Readonly<{
-  critical: readonly string[] | undefined;
-  advisory: readonly string[] | undefined;
-}>;
-
 export function recoverViewOnlyClaims(
   findings: readonly Finding[],
   refuted: readonly RefutedFinding[],

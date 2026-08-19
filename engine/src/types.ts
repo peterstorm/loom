@@ -264,8 +264,9 @@ export interface Refutation {
 /**
  * One or more refutations.
  *
- * A refuted finding always has at least one — `tallyRefutations` destructures
- * `[head, ...tail]` at the vote site specifically to establish it, and
+ * A refuted finding always has at least one — `countRefutationVotes` (reached
+ * per finding from `tallyRefutations`) destructures `[head, ...tail]` at the
+ * vote site specifically to establish it, and
  * `parseStoredRefutation` rejects an empty list on the way back in. The
  * invariant was proven on write and on read and then forgotten by the type in
  * between, so `RefutedFinding` documented in a comment what `AdjudicatedFinding`

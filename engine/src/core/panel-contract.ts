@@ -21,26 +21,32 @@ import { compareStrings } from "./ordering";
 // Re-exported so existing importers of this module need not know the split.
 export type { ParseResult };
 
-export const PRIMARY_AXES = [
+/**
+ * The CLOSED vocabularies. Each is `Object.freeze`d, not merely `as const`:
+ * these lists are what the parsers validate against to mint branded types, so a
+ * push into one at runtime would widen a brand's admitted values behind every
+ * proof that depends on it. `as const` is a compile-time claim only.
+ */
+export const PRIMARY_AXES = Object.freeze([
   "simplicity",
   "performance",
   "extensibility",
   "shipping speed",
   "operational cost",
-] as const;
+] as const);
 export type PrimaryAxis = (typeof PRIMARY_AXES)[number];
 
-export const TESTABILITY_BARS = [
+export const TESTABILITY_BARS = Object.freeze([
   "pure functional core",
   "pragmatic mix",
   "integration-first",
-] as const;
+] as const);
 export type TestabilityBar = (typeof TESTABILITY_BARS)[number];
 
-export const CODEBASE_MATURITIES = ["greenfield", "brownfield", "rewrite"] as const;
+export const CODEBASE_MATURITIES = Object.freeze(["greenfield", "brownfield", "rewrite"] as const);
 export type CodebaseMaturity = (typeof CODEBASE_MATURITIES)[number];
 
-export const SENSITIVE_BOUNDARY_STATUSES = ["flagged", "none"] as const;
+export const SENSITIVE_BOUNDARY_STATUSES = Object.freeze(["flagged", "none"] as const);
 export type SensitiveBoundaryStatus = (typeof SENSITIVE_BOUNDARY_STATUSES)[number];
 
 /**
@@ -63,13 +69,13 @@ export function sensitiveBoundaryStatus(value: SensitiveBoundaries): SensitiveBo
   return value.startsWith("flagged") ? "flagged" : "none";
 }
 
-export const PANEL_LENSES = [
+export const PANEL_LENSES = Object.freeze([
   "simplicity-first",
   "type-driven-fp",
   "risk-security-first",
   "performance-first",
   "codebase-conventionist",
-] as const;
+] as const);
 export type PanelLens = (typeof PANEL_LENSES)[number];
 
 const INTERVIEW_FIELDS = [
@@ -472,6 +478,74 @@ export function parseJudgeVerdict(
       crossCheck: requireNonIncreasingScores,
     },
   );
+}
+
+/**
+ * The architecture panel's two remaining submissions, parsed HERE.
+ *
+ * Every other panel submission — refutation verdict, judge verdict — already
+ * reaches the shell through an `Either`-returning parser in this module. These
+ * two were hand-rolled inline in `handlers/helpers/orchestration.ts`: a raw
+ * `JSON.parse`, ad-hoc `typeof` checks, and an `as never` cast to make a
+ * `Set<CandidateFilename>.has` accept an unbranded string. That put admission
+ * policy for two of the four slot kinds in the shell, where the other two
+ * cannot see it, and made the brand a formality at the one place it guards
+ * untrusted bytes.
+ */
+export type ArchitectureCandidateSubmission = Readonly<{
+  lens: PanelLens;
+  candidate: CandidateFilename;
+  artifact: string;
+}>;
+
+export type ArchitectureFinalizationSubmission = Readonly<{
+  selectedCandidate: CandidateFilename;
+  planArtifact: string;
+}>;
+
+function parseSubmissionRecord(rawJson: string, label: string): ParseResult<Record<string, unknown>> {
+  let value: unknown;
+  try {
+    value = JSON.parse(rawJson);
+  } catch (error) {
+    return fail([`${label} is invalid JSON: ${error instanceof Error ? error.message : String(error)}`]);
+  }
+  return typeof value !== "object" || value === null || Array.isArray(value)
+    ? fail([`${label} must be a JSON object`])
+    : ok(value as Record<string, unknown>);
+}
+
+function nonEmptyField(record: Record<string, unknown>, field: string): string | null {
+  const value = record[field];
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+/** Parse untrusted candidate output against the lens whose slot issued it. */
+export function parseArchitectureCandidate(
+  rawJson: string,
+  expectedLens: PanelLens,
+): ParseResult<ArchitectureCandidateSubmission> {
+  const record = parseSubmissionRecord(rawJson, "architecture candidate");
+  if (!record.ok) return record;
+  const expectedCandidate = candidateFilename(expectedLens);
+  const artifact = nonEmptyField(record.value, "artifact");
+  return record.value["lens"] === expectedLens && record.value["candidate"] === expectedCandidate && artifact !== null
+    ? ok(Object.freeze({ lens: expectedLens, candidate: expectedCandidate, artifact }))
+    : fail([`architecture candidate must bind lens ${expectedLens}, candidate ${expectedCandidate}, and a non-empty artifact`]);
+}
+
+/** Parse untrusted finalization output against this run's exact candidate set. */
+export function parseArchitectureFinalization(
+  rawJson: string,
+  expectedCandidates: readonly CandidateFilename[],
+): ParseResult<ArchitectureFinalizationSubmission> {
+  const record = parseSubmissionRecord(rawJson, "architecture finalization");
+  if (!record.ok) return record;
+  const selected = expectedCandidates.find((candidate) => candidate === record.value["selectedCandidate"]);
+  const planArtifact = nonEmptyField(record.value, "planArtifact");
+  return selected !== undefined && planArtifact !== null
+    ? ok(Object.freeze({ selectedCandidate: selected, planArtifact }))
+    : fail(["architecture finalization must select a canonical candidate and name a non-empty plan artifact"]);
 }
 
 /** Serialize a validated verdict using the external snake_case contract. */

@@ -88,13 +88,18 @@ export function readCorrelatorIdentity(
  * Pure with respect to decisions: every refusal is returned as a typed outcome
  * the caller audits rather than thrown or guessed at. What is written differs
  * by outcome, not whether anything is written at all — a refusal that reached a
- * real reservation is itself durably recorded (`rejectCapture` tombstones the
- * attempt and a `request-capture-rejected` event lands in the journal), because
- * a rejected attempt that left no trace is indistinguishable from an attempt
- * that never happened. Only the refusals that never resolved a reservation —
- * `not-an-orchestration-run`, `no-reservation`, and the run-authority/
- * run-directory/correlator rejections above it — write nothing, having nothing
- * to write against.
+ * real reservation and left it UNFILLED is itself durably recorded
+ * (`rejectCapture` tombstones the attempt and a `request-capture-rejected`
+ * event lands in the journal), because a rejected attempt that left no trace is
+ * indistinguishable from an attempt that never happened.
+ *
+ * Two families write nothing, both because they have nothing to write against.
+ * The refusals that never resolved a reservation — `not-an-orchestration-run`,
+ * `no-reservation`, `run-authority`, `run-directory`, `correlator`,
+ * `requests`, and `unknown-request` — never reached one. And
+ * `duplicate-capture` reached a reservation that is already durably FILLED:
+ * `rejectCapture` refuses to tombstone a captured attempt by design, since the
+ * accepted evidence is the record.
  *
  * The adapter supplies the two harness-native facts — the native correlator and
  * every candidate final payload it observed — and nothing else differs between
@@ -171,35 +176,38 @@ export async function captureHarnessResult(args: Readonly<{
   if (!payload.ok) return reject(payload.error.reason, payload.error.message);
 
   const captured = handle.readCapturedAttempts();
-  if (!captured.ok) return { kind: "rejected", reason: "transcripts", message: captured.error.message };
+  if (!captured.ok) return reject("transcripts", captured.error.message);
   const bound = bindCapture({
     issued: issued.value,
     identity,
     payload: payload.value,
     alreadyCaptured: captured.value,
   });
-  if (!bound.ok) return { kind: "rejected", reason: bound.error.reason, message: bound.error.message };
+  if (!bound.ok) {
+    // `duplicate-capture` is the one bind refusal that must NOT tombstone: the
+    // slot already holds accepted bytes, and `rejectCapture` refuses a captured
+    // attempt. Every other bind refusal leaves the reservation unfilled.
+    return bound.error.reason === "duplicate-capture"
+      ? { kind: "rejected", reason: bound.error.reason, message: bound.error.message }
+      : reject(bound.error.reason, bound.error.message);
+  }
 
   if (correlator.value.role !== request.role) {
-    return {
-      kind: "rejected",
-      reason: "wrong-agent-role",
-      message: `native ${args.harness} result is bound as ${correlator.value.role}, not ${request.role}`,
-    };
+    return reject(
+      "wrong-agent-role",
+      `native ${args.harness} result is bound as ${correlator.value.role}, not ${request.role}`,
+    );
   }
   const context = handle.readContext(request.contextDigest);
-  if (!context.ok) {
-    return { kind: "rejected", reason: "context", message: context.error.message };
-  }
+  if (!context.ok) return reject("context", context.error.message);
   if (context.value.requestId !== request.requestId || context.value.role !== request.role) {
-    return {
-      kind: "rejected",
-      reason: "context-binding",
-      message: `context ${request.contextDigest} does not describe request ${request.requestId}/${request.role}`,
-    };
+    return reject(
+      "context-binding",
+      `context ${request.contextDigest} does not describe request ${request.requestId}/${request.role}`,
+    );
   }
   const written = await handle.captureTranscript(request, payload.value.bytes);
-  if (!written.ok) return { kind: "rejected", reason: "transcript", message: written.error.message };
+  if (!written.ok) return reject("transcript", written.error.message);
 
   return { kind: "captured", receipt: bound.value };
 }

@@ -22,6 +22,7 @@
 
 import { match } from "ts-pattern";
 import { captureKey, type CaptureKey } from "./harness-capture";
+import { compareStrings } from "./ordering";
 import type { AgentRequestAuthority } from "./orchestration-contract";
 
 /**
@@ -170,7 +171,7 @@ function inspectSlots(
 ): readonly InspectedSlot[] {
   const fromEvents = eventRejections(events);
   return Object.freeze([...requests]
-    .sort((left, right) => left.slotId.localeCompare(right.slotId) || left.attempt - right.attempt)
+    .sort((left, right) => compareStrings(left.slotId, right.slotId) || left.attempt - right.attempt)
     .map((request) => {
       const diagnostic = fromEvents.get(request.requestId) ?? markers.get(request.requestId) ?? null;
       const capture: SlotCapture = match({

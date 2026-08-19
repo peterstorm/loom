@@ -18,6 +18,7 @@ import {
 } from "../../core/findings";
 import { StateManager } from "../../state-manager";
 import { isNoFindingSentinel } from "../../utils/no-finding-sentinel";
+import { argumentValue } from "./cli-args";
 
 /** Pure: Parse CRITICAL/ADVISORY lines from stdin */
 export function parseFindings(stdin: string): { critical: string[]; advisory: string[] } {
@@ -147,8 +148,7 @@ export function updateTaskFindings(
 }
 
 const handler: HookHandler = async (stdin, args) => {
-  const taskIdx = args.indexOf("--task");
-  const taskId = taskIdx >= 0 ? args[taskIdx + 1] : null;
+  const taskId = argumentValue(args, "--task");
   if (!taskId) return { kind: "error", message: "--task required" };
 
   const mgr = StateManager.fromPath(TASK_GRAPH_PATH);

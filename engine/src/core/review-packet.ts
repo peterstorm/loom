@@ -8,6 +8,7 @@
 import { createHash } from "node:crypto";
 import type { IssuedReviewPacketRegistration } from "../types";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
+import { compareStrings } from "./ordering";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[];
@@ -140,10 +141,6 @@ const SHA256_HEX = /^[0-9a-f]{64}$/;
 const GIT_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const WINDOWS_ABSOLUTE = /^(?:[A-Za-z]:[\\/]|\\\\)/;
 const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-
-function compareStrings(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
 
 function parseJsonValue(raw: unknown, label: string): ParseResult<JsonValue> {
   const visiting = new WeakSet<object>();

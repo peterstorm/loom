@@ -127,9 +127,15 @@ export type DerivedChangedPaths = Readonly<{
   created: ReadonlySet<string>;
 }>;
 
+/**
+ * Fail CLOSED on a path this repository's own parser cannot canonicalize: a
+ * path we cannot name is a path we cannot prove is not run evidence, and
+ * admitting it would put a Run Directory's own transcripts into the frozen
+ * review scope. Exclusion is the safe answer; the reviewed set only shrinks.
+ */
 export function reviewablePath(path: string): boolean {
   const parsed = parseCanonicalRepositoryRelativePath(path, "standalone review scope path");
-  return !parsed.ok || !isExcludedRemediationPath(parsed.value);
+  return parsed.ok && !isExcludedRemediationPath(parsed.value);
 }
 
 export function deriveChangedPaths(): DerivedChangedPaths {
@@ -203,12 +209,21 @@ export function classifyScope(
   additions: number,
 ): StandaloneReviewMetadata {
   const extensions = scope.map((path) => extname(path).toLowerCase());
-  const docsOnly = scope.every((path) => /(^|\/)(docs?|README)(\/|\.|$)|\.(md|mdx|txt)$/.test(path));
   const languages = [...new Set(extensions.filter(Boolean).map((extension) => extension.slice(1)))].sort();
+  const sourceOrTestChanged = scope.some((path, index) =>
+    SOURCE_EXTENSIONS.has(extensions[index]!) || /(^|\/)(test|tests|__tests__)(\/|$)/.test(path));
+  // `docs_only` MEANS "no source or test file changed", and the load boundary
+  // (core/standalone-review) refuses any record where both are true. Matching
+  // the documentation shape alone did not carry that meaning: `docs/tests/x.md`
+  // satisfies the docs pattern AND the test-path pattern, so this producer
+  // could emit a record its own validator would reject. The exclusion is part
+  // of the definition, not a check layered on top of it.
+  const docsOnly = !sourceOrTestChanged
+    && scope.every((path) => /(^|\/)(docs?|README)(\/|\.|$)|\.(md|mdx|txt)$/.test(path));
   return Object.freeze({
     requestedKinds: Object.freeze([kind]) as readonly [StandaloneReviewKind],
     docsOnly,
-    sourceOrTestChanged: scope.some((path, index) => SOURCE_EXTENSIONS.has(extensions[index]!) || /(^|\/)(test|tests|__tests__)(\/|$)/.test(path)),
+    sourceOrTestChanged,
     typesChanged: scope.some((_, index) => TYPE_EXTENSIONS.has(extensions[index]!)),
     commentsChanged: docsOnly || scope.some((path) => /\.(md|mdx)$/.test(path)),
     additions,

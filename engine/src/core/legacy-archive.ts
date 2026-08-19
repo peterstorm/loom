@@ -50,7 +50,7 @@ import {
   type StandaloneReviewerRole,
   type StandaloneReviewState,
 } from "./standalone-review";
-import { parseArtifactDigest, parseArtifactRef, parseOrchestrationRunId, type ArtifactDigest, type ArtifactRef, type DomainResult, type NonEmpty, type OrchestrationRunId } from "./orchestration-contract";
+import { parseArtifactDigest, parseArtifactRef, parseOrchestrationRunId, parseRequestId, parseSlotId, type ArtifactDigest, type ArtifactRef, type DomainResult, type NonEmpty, type OrchestrationRunId } from "./orchestration-contract";
 import { findingsUnionError, parseStoredFindings } from "./findings";
 import type { CompletedWaveGateRegistration, Finding, RefutedFinding, TaskGraph } from "../types";
 
@@ -99,11 +99,19 @@ export function aggregateLegacyStandaloneReview(input: {
       errors.push(`${transcript.agent}: ${captured.error.message}`);
       return [];
     }
+    // Minted through the same parsers the load boundary uses, so this archived
+    // producer cannot introduce an identity the reader would refuse.
+    const slotId = parseSlotId(`legacy-slot:${index + 1}`);
+    const requestId = parseRequestId(`legacy-request:${index + 1}`);
+    if (!slotId.ok || !requestId.ok) {
+      errors.push(`${transcript.agent}: internal legacy slot identity is invalid`);
+      return [];
+    }
     const evidence: StandaloneReviewerEvidence = Object.freeze({
       authorityKind: "legacy-slot-bound",
       agent: transcript.agent,
-      slotId: `legacy-slot:${index + 1}`,
-      requestId: `legacy-request:${index + 1}`,
+      slotId: slotId.value,
+      requestId: requestId.value,
       attempt: 1,
       modelProfile: null,
       contextDigest: null,

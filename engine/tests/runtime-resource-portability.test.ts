@@ -112,7 +112,8 @@ describe("runtime markdown is portable across harnesses", () => {
     "%s has no unresolved Claude root after Pi lowering",
     (_relativePath, file) => {
       const rendered = renderMarkdownForPi(readFileSync(file, "utf-8"), "/active/loom-package");
-      expect(rendered).not.toMatch(/\$\{?CLAUDE_PLUGIN_ROOT\}?/);
+      expect(rendered.ok).toBe(true);
+      if (rendered.ok) expect(rendered.value).not.toMatch(/\$\{?CLAUDE_PLUGIN_ROOT\}?/);
     },
   );
 });

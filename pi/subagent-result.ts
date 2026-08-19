@@ -383,10 +383,11 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
  * Which task an implementation result belongs to, or why it cannot be told.
  *
  * Pure: the reservation, the two prompt texts, and the currently-executing set
- * are all the inputs. An unextractable id must not vanish silently — exactly one
- * executing task infers it; ambiguous or empty is reported and clears
- * `executing_tasks` rather than failing tasks, which would cascade into
- * evidence overwrites downstream.
+ * are all the inputs, and the answer is the only output — this function mutates
+ * nothing. An unextractable id must not vanish silently: exactly one executing
+ * task infers it, while ambiguous or empty is reported as `unbound`. The
+ * caller (`applyImplementationPiResult`) then clears `executing_tasks` rather
+ * than failing tasks, which would cascade into evidence overwrites downstream.
  */
 export type ImplementationTaskBinding =
   | Readonly<{ kind: "bound"; taskId: string; inferred: boolean }>

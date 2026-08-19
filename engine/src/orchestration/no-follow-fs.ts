@@ -387,8 +387,14 @@ function releaseDirectoryLock(directory: AnchoredDirectory, lockName: string, ow
 }
 
 /**
- * Hold a lock and its target directory through one retained descriptor. A path
- * swap after acquisition cannot redirect either the lock or callback I/O.
+ * Hold a lock and its target directory through one retained descriptor.
+ *
+ * On Linux the descriptor IS the anchor, so no path swap after acquisition can
+ * redirect either the lock or the callback's I/O. On darwin the same holds for
+ * every SYMLINK swap (`O_NOFOLLOW_ANY` refuses those in the kernel), but the
+ * one case the header documents as irreproducible still applies: an ancestor
+ * directory replaced by another REAL directory between two operations is not
+ * detected there.
  */
 export async function withAnchoredDirectoryLock<T>(
   directory: string,

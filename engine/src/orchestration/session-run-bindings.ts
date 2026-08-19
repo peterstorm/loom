@@ -1,6 +1,7 @@
 import { renameSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseOrchestrationRunId, parseRequestId, type RequestId } from "../core/orchestration-contract";
+import { compareStrings } from "../core/ordering";
 import { ORCHESTRATION_RUNS_SUFFIX, parseSessionId, type SessionId } from "../machine/evidence";
 import {
   type AnchoredDirectory,
@@ -194,8 +195,10 @@ export async function registerSessionRunBinding(
           ({ runsRoot, runDirectory }) => `${runsRoot}\0${runDirectory}` !== identity,
         ),
         mergedBinding,
-      ].sort((left, right) =>
-        `${left.runsRoot}\0${left.runDirectory}`.localeCompare(`${right.runsRoot}\0${right.runDirectory}`));
+      ].sort((left, right) => compareStrings(
+        `${left.runsRoot}\0${left.runDirectory}`,
+        `${right.runsRoot}\0${right.runDirectory}`,
+      ));
       const next: SessionRunBindingRegistry = Object.freeze({
         schemaVersion: 1,
         kind: "session-run-bindings",

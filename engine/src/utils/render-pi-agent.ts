@@ -33,12 +33,16 @@ export function renderPiAgentDefinition(
   if (!profile.ok) throw new Error(profile.error.message);
   const target = lowerModelProfile(profile.value, "pi");
   const exactModel = `${target.provider}/${target.model}:${target.thinking}`;
-  const rendered = renderPiAgentResource(
+  const result = renderPiAgentResource(
     sourceAgent,
     exactModel,
     packageRoot,
     preloadedSkills(sourceAgent, packageRoot),
   );
+  // The core returns the refusal; this shell is where an unrenderable agent
+  // becomes fatal, alongside the sibling throws already here.
+  if (!result.ok) throw new Error(result.error.message);
+  const rendered = result.value;
   const frontmatterEnd = rendered.indexOf("\n---\n", 4);
   if (frontmatterEnd < 0) throw new Error(`rendered Pi agent '${agent}' has no frontmatter boundary`);
   const bodyStart = frontmatterEnd + "\n---\n".length;

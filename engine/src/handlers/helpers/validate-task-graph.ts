@@ -680,7 +680,15 @@ const handler: HookHandler = async (stdin, args) => {
 
   let json: Record<string, unknown>;
   try {
-    json = JSON.parse(raw);
+    const parsed: unknown = JSON.parse(raw);
+    // `JSON.parse` yields any JSON value, not an object. Assigning `null`, an
+    // array, or a bare number straight into `Record<string, unknown>` compiled
+    // fine and then threw an uncaught TypeError on the first property access
+    // downstream — past the refusal this branch exists to produce.
+    if (!isRecord(parsed)) {
+      return { kind: "error", message: "Invalid JSON: task graph must be a JSON object" };
+    }
+    json = parsed;
   } catch (e) {
     // Unparseable input is a refusal on EVERY path, including `--fix --minimal`.
     // That branch used to write `fixMinimal({})` and return `passthrough`

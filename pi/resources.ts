@@ -67,9 +67,12 @@ function sourceFiles(packageRoot: string): readonly SourceFile[] {
 }
 
 function renderedContent(file: SourceFile, packageRoot: string): Buffer {
-  return file.relativePath.endsWith(".md")
-    ? Buffer.from(renderMarkdownForPi(file.content.toString("utf-8"), packageRoot), "utf-8")
-    : file.content;
+  if (!file.relativePath.endsWith(".md")) return file.content;
+  const lowered = renderMarkdownForPi(file.content.toString("utf-8"), packageRoot);
+  // Core returns the refusal; the shell decides it is fatal, matching the
+  // sibling throws in this module's own tree walk.
+  if (!lowered.ok) throw new Error(`${file.relativePath}: ${lowered.error.message}`);
+  return Buffer.from(lowered.value, "utf-8");
 }
 
 function resourceDigest(packageRoot: string, files: readonly SourceFile[]): string {

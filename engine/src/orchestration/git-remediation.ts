@@ -322,10 +322,25 @@ export function snapshotRepositoryWitness(
 // Temporary index
 // ---------------------------------------------------------------------------
 
-export type TemporaryIndex = Readonly<{
+declare class TemporaryIndexProvenance { private readonly temporaryIndexProvenance: true }
+
+/**
+ * A throwaway index this module CREATED, proven by construction.
+ *
+ * The nominal brand is not decoration: `installVerifiedIndex` writes the real
+ * `.git/index` from whatever it is handed, and as a plain `{ path, directory }`
+ * shape any object with those two fields typechecked there — including one
+ * naming the repository's own index. Only `createTemporaryIndex` mints the
+ * brand, so a value that reaches the installer is one this module seeded from
+ * HEAD and staged itself. Mirrors the membership proofs `StagedTemporaryIndex`
+ * and `VerifiedTemporaryIndex` already carry in core/remediation-machine.
+ */
+export type TemporaryIndex = TemporaryIndexProvenance & Readonly<{
   path: string;
   directory: string;
 }>;
+
+const temporaryIndexProofs = new WeakSet<object>();
 
 /**
  * Create a throwaway index seeded from the current HEAD tree. Staging happens
@@ -346,7 +361,9 @@ export function createTemporaryIndex(
     rmSync(directory, { recursive: true, force: true });
     return seeded;
   }
-  return success(canonicalRecord({ path, directory }));
+  const temporary = canonicalRecord({ path, directory }) as unknown as TemporaryIndex;
+  temporaryIndexProofs.add(temporary);
+  return success(temporary);
 }
 
 /** Remove a temporary index. Safe to call twice; an already-gone index is fine. */
@@ -367,6 +384,9 @@ function requireTemporaryIndex(
   temporary: TemporaryIndex,
   operation: string,
 ): DomainResult<TemporaryIndex, GitBoundaryError> {
+  if (!temporaryIndexProofs.has(temporary)) {
+    return failure(operation, "temporary index was not produced by createTemporaryIndex");
+  }
   return existsSync(temporary.path)
     ? success(temporary)
     : failure(operation, `temporary index is missing: ${temporary.path}`);

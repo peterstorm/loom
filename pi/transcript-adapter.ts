@@ -153,8 +153,6 @@ export function parsePiMessages(messages: unknown): PiTranscriptResult<readonly 
     : { ok: true, value: Object.freeze(parsedMessages) };
 }
 
-/** Pair only parser-proven test commands with their exact Pi tool result.
- * The classified test segment must own the Bash call's exit status. */
 /** An explicit zero-failure marker from the common runner summaries. The
  *  anti-stripping guard for relaxed (non-attributable) compositions: a green
  *  verdict may only be minted when the paired output itself still contains
@@ -261,6 +259,8 @@ type TestPairEvent =
       text: string;
     }>;
 
+/** Pair only parser-proven test commands with their exact Pi tool result.
+ * The classified test segment must own the Bash call's exit status. */
 function* structuredTestPairs(messages: readonly PiMessage[]): Generator<TestPairEvent> {
   const testCalls = new Map<string, Readonly<{ command: string; classified: ClassifiedTestCommand }>>();
   for (const message of messages) {

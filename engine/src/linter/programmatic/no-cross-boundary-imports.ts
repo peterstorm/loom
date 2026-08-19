@@ -242,8 +242,9 @@ export function extractImports(
   // `from` INSIDE a string literal matches — a union like
   // `"renamed-from" | "renamed-to"` yielded the phantom specifier `" | "` and
   // reported it as a cross-boundary import. A real `from`/`import`/`require`
-  // is always at the start of a line or preceded by whitespace or one of
-  // `}`, `)`, `*` (as in `} from`, `* as ns from`, `= require(`).
+  // is always at the start of a line or preceded by one of the characters in
+  // the guard class `[\s})*;,=]` — whitespace, `}`, `)`, `*`, `;`, `,`, `=`
+  // (as in `} from`, `* as ns from`, `= require(`).
   const tsImportRe = /(?:^|[\s})*;,=])(?:from|import|require)\s*\(?["']([^"']+)["']\)?/;
   // Java: import com.example.Foo; or import static com.example.Foo.bar; or import java.util.*;
   const javaImportRe = /^\s*import\s+(?:static\s+)?([\w.*]+)\s*;/;
@@ -301,18 +302,6 @@ export function resolveImportPath(filePath: string, specifier: string): string {
 }
 
 /**
- * Checks if a resolved import path violates any boundary rules for the given file.
- *
- * Enforcement model:
- *   1. Find the boundary rule matching this file's path
- *   2. Check DENY list first — explicit denials always block
- *   3. Check the per-file capability allowlist (perFileAllow) — a file named
- *      there may import exactly its listed prefixes, whether or not the
- *      directory allow would admit them
- *   4. Check ALLOW list — import must match at least one allow entry
- *   5. If none admits the import — violation (fail-closed allowlist)
- */
-/**
  * Does `path` fall under `prefix`? Directory prefixes (trailing `/`) and
  * namespace prefixes (`node:`, `ts-pattern` — no embedded path separator)
  * match by plain containment. A path-like prefix WITHOUT a trailing slash
@@ -329,6 +318,18 @@ export function underPrefix(path: string, prefix: string): boolean {
   return true;
 }
 
+/**
+ * Checks if a resolved import path violates any boundary rules for the given file.
+ *
+ * Enforcement model:
+ *   1. Find the boundary rule matching this file's path
+ *   2. Check DENY list first — explicit denials always block
+ *   3. Check the per-file capability allowlist (perFileAllow) — a file named
+ *      there may import exactly its listed prefixes, whether or not the
+ *      directory allow would admit them
+ *   4. Check ALLOW list — import must match at least one allow entry
+ *   5. If none admits the import — violation (fail-closed allowlist)
+ */
 export function checkBoundaryViolation(
   filePath: string,
   resolvedImport: string,

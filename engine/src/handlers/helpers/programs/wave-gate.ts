@@ -24,6 +24,7 @@ import { Task, TaskGraph } from '../../../types';
 import { anyActiveSubagent } from '../../../machine';
 import { parseSpecCheckOutput, reconcileSpecCheck } from '../../../core/spec-check';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
+import { compareStrings } from '../../../core/ordering';
 import { exactObject, failed, parseRegisteredFacadeProgram, publicationResolver, publishInitialBatch, renderSpawnTask, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
 import { durableCaptureRejection, durableRefutationRequests, executableRefutationRequests, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic } from './standalone';
 
@@ -36,7 +37,10 @@ export function waveAdvisoryDecisionRequestId(
   const advisories = tasks.flatMap(({ id: taskId, findings }) => (findings ?? [])
     .filter(({ severity }) => severity === "advisory")
     .map(({ id, claim }) => Object.freeze({ taskId: taskId ?? null, id, claim })))
-    .sort((left, right) => left.id.localeCompare(right.id) || left.claim.localeCompare(right.claim));
+    // Byte order, never `localeCompare`: this ordering feeds the SHA-256 that
+    // IS the idempotency key, so a locale change would stop a resume from
+    // reconciling against the receipt it already wrote for the same decision.
+    .sort((left, right) => compareStrings(left.id, right.id) || compareStrings(left.claim, right.claim));
   const digest = createHash("sha256").update(JSON.stringify(advisories)).digest("hex").slice(0, 32);
   return `wave-advisory:${runId}:${digest}`;
 }

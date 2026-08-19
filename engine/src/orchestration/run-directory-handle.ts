@@ -10,6 +10,8 @@
  * Layout:
  *   authority.json                     immutable run/roster/root authority
  *   abandoned.json                     immutable operator retirement marker
+ *   program.json                       immutable registered program input
+ *   progress.json                      mutable operator-facing progress view
  *   checkpoint.json                    atomic projection, not primary history
  *   events/<sequence>-<dedup>.json     immutable domain events
  *   requests/<request-id>.json         immutable request authority
@@ -21,7 +23,10 @@
  *
  * Immutable artifacts are written with O_EXCL through a descriptor anchored at
  * their parent, so republishing a slot fails loudly instead of silently
- * rewriting history.
+ * rewriting history. Two slots reach that guarantee by a different route and
+ * say so at their own call sites: transcripts land via `linkSync` (EEXIST from
+ * the link itself), and promoted artifacts via `renameSync` plus an explicit
+ * byte comparison, because `rename` has no O_EXCL.
  */
 
 import { createHash } from "node:crypto";
@@ -30,6 +35,7 @@ import { basename, join, resolve } from "node:path";
 import {
   canonicalRecord,
   canonicalStructuralEquals,
+  parseEffectReceipt,
   parseStoredAgentRequestAuthority,
   parseArtifactByteLength,
   parseOrchestrationRunId,
@@ -1466,7 +1472,15 @@ function receiptOperations(directory: string) {
     readReceipt(effectId: EffectId): DomainResult<EffectReceipt | null, RunDirectoryError> {
       const path = join(directory, RECEIPTS, `${effectId}.json`);
       try {
-        return success(readJsonNoFollow(path) as EffectReceipt);
+        // PARSED, not asserted. A bare `as EffectReceipt` typed whatever JSON
+        // was on disk as a valid receipt, so a truncated or hand-edited file
+        // reached the effect runner as authority to SKIP an effect — the exact
+        // outcome this method's own doc says must never be indistinguishable
+        // from "never ran".
+        const parsed = parseEffectReceipt(readJsonNoFollow(path));
+        return parsed.ok
+          ? success(parsed.value)
+          : failure("receipt", `receipt for effect ${effectId} is malformed: ${parsed.error.message}`);
       } catch (error) {
         return (error as NodeJS.ErrnoException).code === "ENOENT"
           ? success(null)

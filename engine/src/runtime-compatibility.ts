@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
+import { compareStrings } from "./core/ordering";
 
 /**
  * Runtime identity published by the in-memory Pi extension and required by
@@ -26,7 +27,9 @@ export type RuntimeRevisionEntry = Readonly<{
 
 /** Pure content-addressing core. Paths and bytes are both bound into the hash. */
 export function runtimeRevisionFromEntries(entries: readonly RuntimeRevisionEntry[]): string {
-  const ordered = [...entries].sort((left, right) => left.path.localeCompare(right.path));
+  // Byte order, never `localeCompare`: this ordering IS a digest input, and a
+  // revision that depends on the host locale is not content-addressed at all.
+  const ordered = [...entries].sort((left, right) => compareStrings(left.path, right.path));
   const duplicate = ordered.find((entry, index) => index > 0 && ordered[index - 1]?.path === entry.path);
   if (duplicate !== undefined) throw new Error(`duplicate Loom runtime revision path ${duplicate.path}`);
 

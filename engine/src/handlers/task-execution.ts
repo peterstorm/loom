@@ -1,6 +1,5 @@
-import { existsSync } from "node:fs";
-import type { HookResult } from "../types";
-import { taskGraphPath } from "../config";
+import type { HookResult, TaskGraph } from "../types";
+import { pathExistsFailClosed, taskGraphPath } from "../config";
 import { StateManager } from "../state-manager";
 import {
   classifyTaskExecutionSpawn,
@@ -68,11 +67,27 @@ export async function validateTaskExecutionBatch(
   );
   if (inputs.length === 0) return { kind: "allow" };
   const statePath = taskGraphPath();
-  if (!existsSync(statePath)) return { kind: "allow" };
+  // Fail CLOSED on an unreadable graph: `existsSync` collapses EACCES/ELOOP/
+  // ENOTDIR/EIO into `false`, which would wave the whole implementation batch
+  // through with no ownership, staleness, or baseline check and no trace.
+  if (!pathExistsFailClosed(statePath)) return { kind: "allow" };
+  // Past the fail-closed probe the graph is PRESENT-or-unprovable, so every
+  // remaining failure to read it is a refusal, never a pass: returning "allow"
+  // here is the same fail-open the probe above was introduced to close.
   const manager = StateManager.fromPath(statePath);
-  if (!manager) return { kind: "allow" };
+  if (!manager) {
+    return { kind: "block", message: `BLOCKED: task graph at ${statePath} could not be opened; refusing to spawn implementation tasks unchecked` };
+  }
 
-  const state = manager.load();
+  let state: TaskGraph;
+  try {
+    state = manager.load();
+  } catch (error) {
+    return {
+      kind: "block",
+      message: `BLOCKED: cannot read the task graph at ${statePath}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
   const bindings = parseImplementationTaskBindings(state, inputs);
   if (!bindings.ok) return { kind: "block", message: `BLOCKED: ${bindings.error}` };
   const taskIds = bindings.taskIds;

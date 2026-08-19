@@ -1538,7 +1538,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     }));
     const action = authorityValue(blockedAction(diagnostic));
     const proven = authorityValue(proveWaveGateNextAction(foreignSnapshot, foreignTerminal, action));
-    const readiness = deriveWaveReadiness(graph, statusDeps, proven, foreignTerminal);
+    const readiness = deriveWaveReadiness(graph, statusDeps, { nextActionAuthority: proven, lifecycleCheckpoint: foreignTerminal });
     expect(readiness).toMatchObject({
       ok: false,
       error: { reasons: [{ kind: "authority-contradiction" }] },
@@ -1567,7 +1567,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       byteLength: 12,
     }));
     const provenDone = authorityValue(proveWaveGateNextAction(snapshot, doneState, done));
-    expect(deriveWaveReadiness(snapshot.graph, statusDeps, provenDone, doneState)).toMatchObject({
+    expect(deriveWaveReadiness(snapshot.graph, statusDeps, { nextActionAuthority: provenDone, lifecycleCheckpoint: doneState })).toMatchObject({
       ok: false,
       error: { reasons: [{ message: expect.stringContaining("committed terminal") }] },
     });
@@ -1578,14 +1578,14 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     }));
     const blocked = authorityValue(blockedAction(diagnostic));
     const provenBlocked = authorityValue(proveWaveGateNextAction(snapshot, terminal, blocked));
-    const blockedReadiness = authorityValue(deriveWaveReadiness(snapshot.graph, statusDeps, provenBlocked, terminal));
+    const blockedReadiness = authorityValue(deriveWaveReadiness(snapshot.graph, statusDeps, { nextActionAuthority: provenBlocked, lifecycleCheckpoint: terminal }));
     expect(deriveNextAction(blockedReadiness).action).toMatchObject({
       kind: "blocked",
       diagnostic: { kind: "terminal-blocked", retry: { eligible: false } },
     });
 
     const disconnected = { ...terminal } as WaveGateState;
-    expect(deriveWaveReadiness(snapshot.graph, statusDeps, provenBlocked, disconnected)).toMatchObject({
+    expect(deriveWaveReadiness(snapshot.graph, statusDeps, { nextActionAuthority: provenBlocked, lifecycleCheckpoint: disconnected })).toMatchObject({
       ok: false,
       error: { reasons: [{ kind: "authority-contradiction" }] },
     });
@@ -1737,7 +1737,7 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
       expect(action.action.receipt.publicationDigest)
         .toBe(preparation.publicationIntent.requestPublicationIntent.identity.publicationDigest);
     }
-    const actionReadiness = authorityValue(deriveWaveReadiness(snapshot.graph, statusDeps, action, state));
+    const actionReadiness = authorityValue(deriveWaveReadiness(snapshot.graph, statusDeps, { nextActionAuthority: action, lifecycleCheckpoint: state }));
     expect(deriveNextAction(actionReadiness).action.kind).toBe("spawn-batch");
     expect(deriveLoomStatus(actionReadiness).next.reasons.some(({ kind }) => kind === "review-spawn-required")).toBe(true);
 
@@ -1754,17 +1754,17 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
       tasks: snapshot.graph.tasks.map((task) => ({ ...task, test_result: { verdict: "trusted-fail" as const } })),
     };
     for (const attacked of [revisedGraph, reauthorizedGraph, changedReadinessGraph]) {
-      expect(deriveWaveReadiness(attacked, statusDeps, action, state)).toMatchObject({
+      expect(deriveWaveReadiness(attacked, statusDeps, { nextActionAuthority: action, lifecycleCheckpoint: state })).toMatchObject({
         ok: false,
         error: { reasons: [{ kind: "authority-contradiction" }] },
       });
     }
     const advancedCheckpoint = authorityValue(reduceWaveGate(state, { kind: "preparation-published" }));
-    expect(deriveWaveReadiness(snapshot.graph, statusDeps, action, advancedCheckpoint)).toMatchObject({
+    expect(deriveWaveReadiness(snapshot.graph, statusDeps, { nextActionAuthority: action, lifecycleCheckpoint: advancedCheckpoint })).toMatchObject({
       ok: false,
       error: { reasons: [{ kind: "authority-contradiction" }] },
     });
-    expect(deriveWaveReadiness(snapshot.graph, statusDeps, { ...action }, state)).toMatchObject({
+    expect(deriveWaveReadiness(snapshot.graph, statusDeps, { nextActionAuthority: { ...action }, lifecycleCheckpoint: state })).toMatchObject({
       ok: false,
       error: { reasons: [{ kind: "authority-contradiction" }] },
     });
@@ -1983,7 +1983,7 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
     const reviewing = authorityValue(reduceWaveGate(preparing, { kind: "preparation-published" }));
     const advisoryState = authorityValue(reduceWaveGate(reviewing, { kind: "complete-roster-with-advisories" }));
     const proven = authorityValue(deriveWaveAdvisoryNextAction(snapshot, advisoryState));
-    const advisoryReadiness = authorityValue(deriveWaveReadiness(graph, statusDeps, proven, advisoryState));
+    const advisoryReadiness = authorityValue(deriveWaveReadiness(graph, statusDeps, { nextActionAuthority: proven, lifecycleCheckpoint: advisoryState }));
     expect(deriveNextAction(advisoryReadiness).action.kind).toBe("await-user");
     const status = deriveLoomStatus(advisoryReadiness);
     expect(status.next.action.kind).toBe("await-user");
@@ -2019,7 +2019,7 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
       path: "/runs/registered-wave-run",
       advisoryApproved: false,
     });
-    const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps, null, null, observation);
+    const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps, null, observation);
     expect(status.next.action.kind).toBe("await-user");
     expect(status.next.reasons.some(({ kind }) => kind === "advisory-decision-required")).toBe(true);
   });
@@ -2032,7 +2032,7 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
       path: "/runs/registered-wave-run",
       advisoryApproved: true,
     });
-    const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps, null, null, observation);
+    const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps, null, observation);
     expect(status.next.action.kind).not.toBe("await-user");
   });
 

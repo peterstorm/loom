@@ -9,13 +9,14 @@
  */
 
 import { GATE_WIRED_TOOLS } from "../machine/types";
+import { frozenSet } from "./frozen";
 
 /**
  * Tools that modify files — DERIVED from GATE_WIRED_TOOLS (machine/types.ts,
  * the single source of truth pinned against hooks.json by
  * tests/machine/hooks-sync.test.ts) so the two sets can never drift apart.
  */
-export const FILE_MODIFYING_TOOLS: ReadonlySet<string> = new Set(GATE_WIRED_TOOLS);
+export const FILE_MODIFYING_TOOLS: ReadonlySet<string> = frozenSet(GATE_WIRED_TOOLS);
 
 /**
  * Every tool name a harness uses to SPAWN A SUBAGENT.
@@ -37,7 +38,7 @@ export const FILE_MODIFYING_TOOLS: ReadonlySet<string> = new Set(GATE_WIRED_TOOL
  * `Task` is inert under Pi; both stay listed so the vocabulary has one home
  * rather than one per harness.
  */
-export const SUBAGENT_SPAWN_TOOLS: ReadonlySet<string> = new Set(["Task", "Agent", "subagent"]);
+export const SUBAGENT_SPAWN_TOOLS: ReadonlySet<string> = frozenSet(["Task", "Agent", "subagent"]);
 
 /** Test command patterns (for bash test output parsing) */
 export const TEST_COMMAND_PATTERNS: readonly string[] = [

@@ -67,10 +67,12 @@ const handler: HookHandler = async (stdin, args) => {
     }
   };
 
-  // Snapshot the ledger BEFORE cleanup unbinds: the next bind with zero
-  // bindings truncates the ledger, so update-task-status must judge this
-  // epoch's evidence from a pre-unbind snapshot, not whatever file is on
-  // disk by the time it runs. The EvidenceSnapshot union (owned by
+  // Snapshot the ledger BEFORE cleanup unbinds: attribution runs through the
+  // live binding, so once cleanup has unbound it update-task-status can no
+  // longer tell this epoch's records apart from a sibling's in the file on
+  // disk. It must judge from the pre-unbind snapshot instead. (The bind itself
+  // no longer truncates — machine/ledger.ts's `bindMachineAgent` documents why
+  // that was removed.) The EvidenceSnapshot union (owned by
   // update-task-status.ts — keep both sides in sync) keeps a FAILED read
   // distinct from a genuinely empty ledger: downstream labels the verdict
   // snapshot-read-failed instead of minting a misleading "degraded".

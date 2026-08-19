@@ -1,5 +1,6 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fail, ok, type ParseResult } from "./panel-kernel";
+import { compareStrings } from "./ordering";
 
 export interface RepositoryPath {
   readonly relative: string;
@@ -65,6 +66,6 @@ export function parseRepositoryPathSet(
   return errors.length > 0
     ? fail(errors)
     : ok(Object.freeze([...byRelative.values()].sort((left, right) =>
-        left.relative < right.relative ? -1 : left.relative > right.relative ? 1 : 0,
+        compareStrings(left.relative, right.relative),
       )));
 }

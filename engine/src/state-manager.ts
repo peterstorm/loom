@@ -11,7 +11,7 @@ import { readFileSync, writeFileSync, chmodSync, existsSync, renameSync, unlinkS
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withLock } from "./utils/lock";
-import { KNOWN_AGENTS, PHASE_ORDER, REVIEW_SUB_AGENTS, taskGraphPath } from "./config";
+import { KNOWN_AGENTS, PHASE_ORDER, REVIEW_SUB_AGENTS, pathExistsFailClosed, taskGraphPath } from "./config";
 import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
 import { REVIEW_STATUSES, TASK_STATUSES, type Phase } from "./types";
 import {
@@ -1198,8 +1198,16 @@ export class StateManager {
     return path ? new StateManager(path) : null;
   }
 
+  /**
+   * `null` means the graph is genuinely ABSENT — ENOENT and nothing else.
+   * Bare `existsSync` also returns `false` for EACCES/ELOOP/ENOTDIR/EIO, so an
+   * unreadable graph used to be indistinguishable from a missing one and every
+   * caller reported "no task graph at X" for a path that was really there.
+   * A present-but-unreadable graph now yields a manager whose `load()` reports
+   * the real access failure, the same way a corrupt one already does.
+   */
   static fromPath(path: string): StateManager | null {
-    return existsSync(path) ? new StateManager(path) : null;
+    return pathExistsFailClosed(path) ? new StateManager(path) : null;
   }
 
   load(): TaskGraph {

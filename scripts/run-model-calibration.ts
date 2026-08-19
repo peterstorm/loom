@@ -63,18 +63,22 @@ function findings(text: string): unknown[] {
 }
 
 const cases = corpus.value.cases.map((entry) => {
-  const run = spawnSync("pi", [
-    "--mode", "json", "-p", "--no-session",
-    "--provider", target.provider,
-    "--model", target.model,
-    "--thinking", target.thinking,
-    "--tools", "read,grep,find,ls,bash",
-    prompt(entry.id),
-  ], { encoding: "utf-8", cwd: process.cwd(), maxBuffer: 64 * 1024 * 1024 });
-  if (run.status !== 0) {
-    return { case_id: entry.id, status: "not-executed", reason: run.stderr.trim() || `pi exited ${run.status}` };
-  }
+  // `prompt()` throws when the helper cannot build this case's prompt. Built
+  // INSIDE the try that isolates one case: evaluated as a `spawnSync` argument
+  // it sat outside, so a single unbuildable case aborted the whole run before
+  // any result was written.
   try {
+    const run = spawnSync("pi", [
+      "--mode", "json", "-p", "--no-session",
+      "--provider", target.provider,
+      "--model", target.model,
+      "--thinking", target.thinking,
+      "--tools", "read,grep,find,ls,bash",
+      prompt(entry.id),
+    ], { encoding: "utf-8", cwd: process.cwd(), maxBuffer: 64 * 1024 * 1024 });
+    if (run.status !== 0) {
+      return { case_id: entry.id, status: "not-executed", reason: run.stderr.trim() || `pi exited ${run.status}` };
+    }
     const text = finalText(run.stdout);
     if (!text) throw new Error("Pi produced no final assistant text");
     return { case_id: entry.id, status: "executed", findings: findings(text) };

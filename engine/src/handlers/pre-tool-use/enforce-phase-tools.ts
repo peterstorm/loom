@@ -33,10 +33,14 @@ import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 
 function anyBindingExists(): boolean {
   try {
-    if (!existsSync(SUBAGENT_DIR)) return false;
+    // `readdirSync` is the probe: `existsSync` never throws, so an EACCES /
+    // ELOOP / ENOTDIR / EIO on the directory itself would have returned `false`
+    // right past the fail-closed fallback this catch exists to reach. ENOENT
+    // stays the one genuinely-absent answer.
     return readdirSync(SUBAGENT_DIR).some((f) => f.endsWith(MACHINE_SUFFIX));
   } catch (e) {
-    // Can't scan the dir (e.g. EACCES/ENOENT on readdir) → assume a binding
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+    // Can't scan the dir (EACCES, ELOOP, ENOTDIR, EIO) → assume a binding
     // exists → fail closed below. Log it so the generic downstream
     // "missing/invalid session_id — failing closed" message isn't misleading.
     process.stderr.write(

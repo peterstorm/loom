@@ -252,9 +252,10 @@ export const REVIEW_SUB_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("re
  * That module declares itself pure — "no I/O, no clock, no randomness" — and
  * importing this file to answer a one-line membership question made the claim
  * false: `config` resolves TASK_GRAPH_PATH at import, which spawns
- * `git rev-parse --show-toplevel`, and drags in four throwing load-time
- * assertions besides. Agent-name classification is a harness concern, and both
- * callers already hold the agent type before they reach the parser.
+ * `git rev-parse --show-toplevel`, and drags in three throwing load-time
+ * assertions besides (assertPanelPhaseDisjoint, assertReviewPanelDisjoint,
+ * assertPanelExecuteDisjoint). Agent-name classification is a harness concern,
+ * and both callers already hold the agent type before they reach the parser.
  */
 export function isReviewAgent(agentType: string): boolean {
   return REVIEW_SUB_AGENTS.has(agentType);
@@ -450,20 +451,23 @@ export const protectedDirSegments = (): readonly (readonly string[])[] =>
  * dir resolves machinesDir() at decision time (a re-pointed
  * LOOM_MACHINES_DIR is guarded without a module reload, mirroring
  * mark-subagent-active / update-task-status).
- * Includes the guarded-machine subagent dir (derived from SUBAGENT_DIR, not
- * hardcoded): an agent writing the evidence ledger or binding files via Bash
- * would forge trusted test evidence, appending to `.active` would fake
- * attribution, and `rm` of the directory itself would silently disarm the
- * gate — so any reference to the dir in a segment that is not an
- * allowlisted read-only command or whitelisted helper blocks.
+ * Includes the guarded-machine subagent dir (derived from the lazy
+ * `subagentDir()`, not the import-frozen SUBAGENT_DIR and not hardcoded — that
+ * is what makes the re-pointing above work): an agent writing the evidence
+ * ledger or binding files via Bash would forge trusted test evidence,
+ * appending to `.active` would fake attribution, and `rm` of the directory
+ * itself would silently disarm the gate — so any reference to the dir in a
+ * segment that is not an allowlisted read-only command or whitelisted helper
+ * blocks.
  * The machine-definitions dir is guarded for the same reason: `rm` of a
  * machine file via Bash would make the gate see "no machine" for a BOUND
  * agent (which now fails closed — but deleting definitions must be blocked
  * at the source too). The state DIRECTORY (dirname of the task-graph path,
- * derived from taskGraphRelative, not hardcoded) is guarded for the same
- * dir-guard reason: a glob (`active_task*.json`, `.claude/state/*.json`) or
- * brace (`active_task_{graph,x}.json`) write names the directory but never
- * the file literal, so only a dir match can catch the forgery. */
+ * derived from `taskGraphRelatives()` — every candidate, not just the first —
+ * and not hardcoded) is guarded for the same dir-guard reason: a glob
+ * (`active_task*.json`, `.claude/state/*.json`) or brace
+ * (`active_task_{graph,x}.json`) write names the directory but never the file
+ * literal, so only a dir match can catch the forgery. */
 export const stateFilePatterns = (): RegExp => new RegExp(
   ["active_task_graph", "review-invocations", ...guardedDirs()].map(escapeRegex).join("|"),
 );

@@ -22,7 +22,9 @@ type Authority = Readonly<{
   contextDigest: string;
 }>;
 
-type SpawnRequest = Readonly<{ authority: Authority }>;
+/** `task` is the spawn prompt the engine renders; the retry assertions below
+ *  read it, so it belongs in the type rather than behind a `!`. */
+type SpawnRequest = Readonly<{ authority: Authority; task: string }>;
 type SpawnBatch = Readonly<{ kind: "spawn-batch"; requests: readonly SpawnRequest[] }>;
 type AwaitUser = Readonly<{
   kind: "await-user";
@@ -271,10 +273,10 @@ function standaloneReviewerRetrySmoke(): void {
   );
   const retry = retryBatch.requests.find(({ authority }) => authority.slotId === first.authority.slotId);
   check(retry !== undefined, "retry batch dropped the rejected reviewer slot");
-  check(retry!.authority.attempt === 2, "rejected reviewer slot did not advance to attempt 2");
-  check(typeof retry!.task === "string" && retry!.task.includes("rejected by the engine's admission check"),
+  check(retry.authority.attempt === 2, "rejected reviewer slot did not advance to attempt 2");
+  check(retry.task.includes("rejected by the engine's admission check"),
     "retry task lacks the rejection diagnostic");
-  check(retry!.task.includes("outside the frozen review scope") || retry!.task.includes("src/outside.ts"),
+  check(retry.task.includes("outside the frozen review scope") || retry.task.includes("src/outside.ts"),
     "retry task must quote the engine's own diagnostic, not a generic reminder");
 
   // Regression: the diagnostic used to live only in the pass-local rejected set,
@@ -286,7 +288,7 @@ function standaloneReviewerRetrySmoke(): void {
   ).requests.find(({ authority }) => authority.slotId === first.authority.slotId);
   check(replayedRetry !== undefined && replayedRetry.authority.attempt === 2,
     "resume replay dropped the retried reviewer slot");
-  check(replayedRetry!.task === retry!.task,
+  check(replayedRetry.task === retry.task,
     "resume replay lost the durable rejection diagnostic from the attempt-2 task");
   check(retryBatch.requests.some(({ authority }) =>
     authority.slotId !== first.authority.slotId && authority.attempt === 1),

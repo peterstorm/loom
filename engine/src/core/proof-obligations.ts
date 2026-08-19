@@ -575,7 +575,12 @@ const resultMatchesObligation = (result: ProofObligationResult): boolean => {
       || (result.evidence.kind === "declared-artifact-changed"
         && result.obligation.artifact === result.evidence.artifact);
   }
-  return true;
+  // `pending` — no evidence and no failure to disagree with the obligation, so
+  // the pair matches vacuously. Named explicitly: as a bare trailing `return
+  // true` this also caught any `failed` result whose obligation kind the switch
+  // above did not cover, ACCEPTING it. A new obligation kind would have been
+  // admitted with an unrelated failure attached rather than refused.
+  return result.state === "pending";
 };
 
 export function parseProofObligationResult(

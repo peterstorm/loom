@@ -9,6 +9,8 @@ import {
   parseExactRoster,
   parseOrchestrationRunId,
   parseCompleteRoster,
+  parseRequestId,
+  parseSlotId,
   reconcileEffectReceipt,
   type AcceptedAgentResult,
   type AgentRequestAuthority,
@@ -74,7 +76,12 @@ export interface StandaloneReviewMetadata {
 }
 
 export interface StandaloneChangedPaths {
-  /** Tracked files whose worktree content differs from HEAD, plus untracked non-ignored files. */
+  /**
+   * Tracked files whose worktree content differs from the INDEX, plus untracked
+   * non-ignored files. The producer runs `git diff --name-only` without
+   * `--cached`, so a path already staged with no further edits appears in
+   * `staged` alone, not here.
+   */
   readonly unstaged: readonly string[];
   readonly staged: readonly string[];
   readonly committed: readonly string[];
@@ -248,8 +255,10 @@ function parseReviewMetadata(raw: unknown): ParseResult<StandaloneReviewMetadata
   }
   // The producer's OTHER docs-only invariant, and the more dangerous one to
   // leave unproven. `docs_only` is by definition "no source or test file
-  // changed", so the pair is mutually exclusive — yet only the comments half
-  // was checked, leaving `docs_only && source_or_test_changed` representable.
+  // changed" — `classifyScope` derives it as the docs pattern AND
+  // `!sourceOrTestChanged`, precisely so the pair cannot both be true — yet
+  // only the comments half was checked here, leaving
+  // `docs_only && source_or_test_changed` representable at the boundary.
   // `selectStandaloneReviewers` reads exactly those two fields independently:
   // such a record claims real source changed AND silently drops
   // silent-failure-hunter (gated on `!docsOnly`) while admitting
@@ -583,8 +592,11 @@ export interface CapturedReviewerResult {
 export interface StandaloneReviewerEvidence {
   readonly authorityKind: "request-bound" | "legacy-slot-bound";
   readonly agent: StandaloneReviewerRole;
-  readonly slotId: string;
-  readonly requestId: string;
+  /** Branded like every other slot/request identity in this module: the value
+   *  comes from untrusted `aggregate.json`, so it is PARSED against
+   *  `SAFE_AUTHORITY_ID`, not merely shape-checked for non-emptiness. */
+  readonly slotId: SlotId;
+  readonly requestId: RequestId;
   readonly attempt: 1 | 2;
   readonly modelProfile: LlmProfileId | null;
   readonly contextDigest: string | null;
@@ -1300,8 +1312,10 @@ export function parseReviewerEvidence(raw: unknown, runId: string, label: string
     if (artifact.ok && artifact.value.runId !== runId) errors.push(`${path}.artifact belongs to another run`);
     if (entry.authority_kind !== "request-bound" && entry.authority_kind !== "legacy-slot-bound") errors.push(`${path}.authority_kind is invalid`);
     if (typeof entry.agent !== "string" || !(STANDALONE_REVIEWER_ROLES as readonly string[]).includes(entry.agent)) errors.push(`${path}.agent is invalid`);
-    if (typeof entry.slot_id !== "string" || entry.slot_id.trim() === "") errors.push(`${path}.slot_id must be non-empty`);
-    if (typeof entry.request_id !== "string" || entry.request_id.trim() === "") errors.push(`${path}.request_id must be non-empty`);
+    const slotId = parseSlotId(entry.slot_id);
+    if (!slotId.ok) errors.push(`${path}.slot_id: ${slotId.error.message}`);
+    const requestId = parseRequestId(entry.request_id);
+    if (!requestId.ok) errors.push(`${path}.request_id: ${requestId.error.message}`);
     if (entry.attempt !== 1 && entry.attempt !== 2) errors.push(`${path}.attempt must be 1 or 2`);
     const requestBound = entry.authority_kind === "request-bound";
     // A closed-set id has to be parsed against the allowlist, not merely
@@ -1312,14 +1326,14 @@ export function parseReviewerEvidence(raw: unknown, runId: string, label: string
     if (!requestBound && entry.model_profile !== null) errors.push(`${path}.model_profile must be null for legacy evidence`);
     if (requestBound && (typeof entry.context_digest !== "string" || !/^[0-9a-f]{64}$/.test(entry.context_digest))) errors.push(`${path}.context_digest must be a SHA-256 digest for request-bound evidence`);
     if (!requestBound && entry.context_digest !== null) errors.push(`${path}.context_digest must be null for legacy evidence`);
-    if (artifact.ok && typeof entry.agent === "string" && typeof entry.slot_id === "string" && typeof entry.request_id === "string" &&
+    if (artifact.ok && typeof entry.agent === "string" && slotId.ok && requestId.ok &&
         (entry.attempt === 1 || entry.attempt === 2) && (entry.authority_kind === "request-bound" || entry.authority_kind === "legacy-slot-bound") &&
         (modelProfile === null || modelProfile.ok)) {
       evidence.push(Object.freeze({
         authorityKind: entry.authority_kind,
         agent: entry.agent as StandaloneReviewerRole,
-        slotId: entry.slot_id,
-        requestId: entry.request_id,
+        slotId: slotId.value,
+        requestId: requestId.value,
         attempt: entry.attempt,
         modelProfile: modelProfile === null ? null : modelProfile.value,
         contextDigest: requestBound ? entry.context_digest as string : null,
@@ -1386,7 +1400,10 @@ export function canonicalStandalonePanelFindingAuthority(
     taskId: STANDALONE_REVIEW_SUBJECT,
     agent: sanitizeProse(finding.agent),
     severity: "critical" as const,
-    file: finding.file,
+    // Sanitized for the same reason as `claim`: this record is substituted into
+    // verifier prompts, and a path is just as much reviewer-controlled text as
+    // the claim beside it. Mirrors `buildFindingBrief` in core/review-panel.
+    file: finding.file === null ? null : sanitizeProse(finding.file) || null,
     line: finding.line,
     claim: sanitizeProse(finding.claim) || UNUSABLE_PANEL_CLAIM,
   })));

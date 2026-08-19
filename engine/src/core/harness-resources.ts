@@ -1,5 +1,26 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
+import { canonicalRecord, type DomainResult } from "./orchestration-contract";
+
+/**
+ * Why a harness resource could not be rendered.
+ *
+ * These are BOUNDARY refusals over untrusted input — an install path the
+ * package-root token cannot safely represent, an agent file with no model
+ * line. They are returned, not thrown: this is functional core, and a core
+ * that signals by exception forces every caller into a try/catch the type
+ * never asked for. The two shells that render resources still throw, because
+ * an unrenderable resource is fatal THERE — but that is the shell's call.
+ */
+export type HarnessResourceError = Readonly<{
+  kind: "harness-resource-rejected";
+  message: string;
+}>;
+
+const rejected = <T>(message: string): DomainResult<T, HarnessResourceError> =>
+  canonicalRecord({ ok: false, error: canonicalRecord({ kind: "harness-resource-rejected" as const, message }) });
+const produced = <T>(value: T): DomainResult<T, HarnessResourceError> =>
+  canonicalRecord({ ok: true, value });
 
 /** Claude Code expands these tokens for plugin-owned markdown resources. */
 const CLAUDE_PLUGIN_ROOT_PATTERN = /\$\{CLAUDE_PLUGIN_ROOT\}|\$CLAUDE_PLUGIN_ROOT\b/g;
@@ -12,9 +33,9 @@ const CLAUDE_PLUGIN_ROOT_PATTERN = /\$\{CLAUDE_PLUGIN_ROOT\}|\$CLAUDE_PLUGIN_ROO
  * store, or local checkout, so the only valid root is the extension module's
  * own package root — never cwd and never a Claude plugin cache scan.
  */
-export function canonicalPackageRoot(packageRoot: string): string {
+export function canonicalPackageRoot(packageRoot: string): DomainResult<string, HarnessResourceError> {
   if (!isAbsolute(packageRoot)) {
-    throw new Error(`Pi resource package root must be absolute, got ${JSON.stringify(packageRoot)}`);
+    return rejected(`Pi resource package root must be absolute, got ${JSON.stringify(packageRoot)}`);
   }
   const canonicalRoot = resolve(packageRoot);
   // One shared token appears in shell snippets, Markdown code spans, and tool
@@ -22,14 +43,17 @@ export function canonicalPackageRoot(packageRoot: string): string {
   // represented by context-free substitution, so fail closed rather than turn
   // a valid-but-hostile install path into shell syntax.
   if (/[\x00-\x20\x7F"$`\\*?\[\]]/.test(canonicalRoot)) {
-    throw new Error(`Pi resource package root contains unsupported metacharacters: ${JSON.stringify(canonicalRoot)}`);
+    return rejected(`Pi resource package root contains unsupported metacharacters: ${JSON.stringify(canonicalRoot)}`);
   }
-  return canonicalRoot;
+  return produced(canonicalRoot);
 }
 
 /** Stable, frontmatter-safe identity stamped into generated Pi agents. */
-export function packageRootBinding(packageRoot: string): string {
-  return Buffer.from(canonicalPackageRoot(packageRoot), "utf-8").toString("base64url");
+export function packageRootBinding(packageRoot: string): DomainResult<string, HarnessResourceError> {
+  const canonicalRoot = canonicalPackageRoot(packageRoot);
+  return canonicalRoot.ok
+    ? produced(Buffer.from(canonicalRoot.value, "utf-8").toString("base64url"))
+    : canonicalRoot;
 }
 
 export interface PreloadedSkill {
@@ -43,13 +67,14 @@ export function renderPiAgentResource(
   exactModel: string,
   packageRoot: string,
   skills: readonly PreloadedSkill[],
-): string {
+): DomainResult<string, HarnessResourceError> {
   const modelLine = /^model:\s*.*$/m;
-  if (!modelLine.test(sourceAgent)) throw new Error("agent has no explicit Claude model line");
+  if (!modelLine.test(sourceAgent)) return rejected("agent has no explicit Claude model line");
   const binding = packageRootBinding(packageRoot);
+  if (!binding.ok) return binding;
   const withBinding = sourceAgent.replace(
     modelLine,
-    `model: ${exactModel}\nloom-package-root: ${binding}`,
+    `model: ${exactModel}\nloom-package-root: ${binding.value}`,
   );
   const preloaded = skills.map(({ name, content }) => [
     "",
@@ -58,18 +83,22 @@ export function renderPiAgentResource(
     content.trimEnd(),
   ].join("\n")).join("\n");
   const lowered = renderMarkdownForPi(withBinding + preloaded + (preloaded === "" ? "" : "\n"), packageRoot);
-  const digest = createHash("sha256").update(lowered).digest("hex");
-  return lowered.replace(
+  if (!lowered.ok) return lowered;
+  const digest = createHash("sha256").update(lowered.value).digest("hex");
+  return produced(lowered.value.replace(
     /^loom-package-root:.*$/m,
     (line) => `${line}\nloom-agent-digest: ${digest}`,
-  );
+  ));
 }
 
-export function renderMarkdownForPi(content: string, packageRoot: string): string {
+export function renderMarkdownForPi(
+  content: string,
+  packageRoot: string,
+): DomainResult<string, HarnessResourceError> {
   const canonicalRoot = canonicalPackageRoot(packageRoot);
-  const rendered = content.replace(CLAUDE_PLUGIN_ROOT_PATTERN, canonicalRoot);
-  if (CLAUDE_PLUGIN_ROOT_PATTERN.test(rendered)) {
-    throw new Error("Pi resource rendering left an unresolved CLAUDE_PLUGIN_ROOT token");
-  }
-  return rendered;
+  if (!canonicalRoot.ok) return canonicalRoot;
+  const substituted = content.replace(CLAUDE_PLUGIN_ROOT_PATTERN, () => canonicalRoot.value);
+  return CLAUDE_PLUGIN_ROOT_PATTERN.test(substituted)
+    ? rejected("Pi resource rendering left an unresolved CLAUDE_PLUGIN_ROOT token")
+    : produced(substituted);
 }

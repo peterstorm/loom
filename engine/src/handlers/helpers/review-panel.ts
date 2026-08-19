@@ -101,11 +101,16 @@ const LAYOUT = REVIEW_LAYOUT;
 /**
  * Every operation this helper implements, in the order one run performs them.
  *
- * Exported because it is a CONTRACT, not an implementation detail: the wave-gate
- * runbook has to document all of them and drive them in this order, and
- * `tests/runbook-contract.test.ts` binds the prose to this list in both
- * directions. An operation added here without a runbook step fails that test,
- * which is the drift nothing used to catch.
+ * Exported because it is a CONTRACT, not an implementation detail: the
+ * registered Wave Gate and Standalone Review programs drive these operations in
+ * this order, and the ORDER is the contract a reader needs.
+ *
+ * The runbooks deliberately do NOT name them. `tests/runbook-contract.test.ts`
+ * asserts the opposite direction for this list — wave-gate.md, review-and-fix
+ * and the SKILL prose must contain no `helper review-panel brief|manifest|tally`
+ * invocation at all, because a parent that can run a panel step by hand is a
+ * parent that can run it out of order. (Its two-way prose binding covers
+ * `PANEL_CONTRACT_OPERATIONS`, which /loom --panel really is parent-driven.)
  */
 export const REVIEW_PANEL_OPERATIONS = ["brief", "manifest", "lenses", "verdict", "tally"] as const;
 

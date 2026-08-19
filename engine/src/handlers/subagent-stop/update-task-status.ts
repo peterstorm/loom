@@ -95,12 +95,16 @@ export function extractTestEvidence(bashOutput: string): TestEvidence {
     }
   }
 
-  // Vitest: "Tests  N passed" or "Test Files  N passed"
+  // Vitest's "Tests  N passed" summary line ONLY. The sibling
+  // "Test Files  N passed" line does not match and is not meant to: `Files`
+  // sits exactly where the count must be, and the per-file tally is not
+  // evidence that the tests themselves passed.
   const vitest = lastMatch(bashOutput, /Tests?\s+\d+ passed/);
   if (vitest) {
-    // The `=== "0"` guard every sibling branch carries: vitest prints
-    // "Tests  2 failed | 10 passed", failed FIRST, so the index comparison
-    // alone reads a genuinely failing run as passed.
+    // The `=== "0"` guard every sibling branch carries. It matters when one
+    // bash output holds more than one vitest run — a later "Tests  10 passed"
+    // must not be credited over an earlier "Tests  2 failed" unless it really
+    // came after it, which is what the index comparison establishes.
     const vitestFailed = lastMatch(bashOutput, /Tests?\s+(\d+) failed/);
     if (!vitestFailed || vitestFailed[1] === "0" || vitestFailed.index < vitest.index) {
       return { passed: true, evidence: `vitest: ${vitest[0]}` };
@@ -567,9 +571,12 @@ export type EvidenceSnapshot =
 
 /**
  * Handler core. `evidenceSnapshot` lets the dispatcher pass ledger records
- * captured BEFORE cleanup unbound the machine — a subsequent bind truncates
- * the ledger, so reading the file here can race a fresh run's truncation.
- * Standalone invocation (no snapshot) reads the ledger directly.
+ * captured BEFORE cleanup unbound the machine: attribution runs through the
+ * live binding, so once cleanup has unbound it this epoch's own records can no
+ * longer be told apart from a sibling's by reading the file here. (The bind
+ * itself no longer truncates — see `bindMachineAgent` in machine/ledger.ts,
+ * which documents why that was removed.) Standalone invocation (no snapshot)
+ * reads the ledger directly.
  */
 export const runUpdateTaskStatus = async (
   stdin: string,
@@ -731,10 +738,12 @@ export const runUpdateTaskStatus = async (
   // (execution-time ground truth, attribution via agent_id), transcript
   // regex as explicit labeled fallback. Foreign epochs are never consulted.
   // Identity is PARSED before epoch construction AND before loadMachine: a
-  // reserved or path-unsafe character in the hook input could never have
-  // been bound/recorded (the bind boundary rejects it) and must never name
-  // a machine file, so it yields no epoch events, no machine, and routes to
-  // the existing fallback path instead of silently mis-keying the lookup.
+  // reserved or path-unsafe character in the hook input could never have been
+  // bound/recorded (the bind boundary rejects it) and must never name a machine
+  // file. The two parses are independent, so the consequences are too: an
+  // unparseable `agent_id` yields no epoch events, and an unparseable
+  // `agentType` yields no machine. Either way the lookup is never mis-keyed —
+  // the missing half routes to the existing fallback path instead.
   const epochAgentId = input.agent_id ? parseAgentId(input.agent_id) : null;
   const epochAgentType = parseAgentType(agentType);
   // machinesDir() is resolved at call time (not the import-frozen constant)

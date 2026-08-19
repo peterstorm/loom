@@ -291,8 +291,26 @@ export function reduceWaveGate<
 >(
   state: S,
   event: E & WaveGateEventFor<NoInfer<S>>,
-): DomainResult<WaveGateTransitionTarget<S, E>, WaveGateTransitionError>;
-export function reduceWaveGate(
+): DomainResult<WaveGateTransitionTarget<S, E>, WaveGateTransitionError> {
+  return replayWaveGateTransition(state, event) as
+    DomainResult<WaveGateTransitionTarget<S, E>, WaveGateTransitionError>;
+}
+
+/**
+ * The SAME reducer, entered with the plain unions.
+ *
+ * `reduceWaveGate`'s generic signature pairs each state with exactly the events
+ * that state declares, which is what gives ordinary call sites their
+ * compile-time transition check. A replay loop cannot satisfy it: its state and
+ * its event are both runtime-varying unions. `projectWaveGateLifecycle` used to
+ * force them through with `state as Extract<…, {kind:"preparing"}>` and
+ * `event as never` — asserting a pairing it had not established, at the one
+ * site that walks EVERY transition, and losing the failure the generic
+ * signature exists to produce. This door takes the unions honestly: the
+ * transition is still checked, at runtime, by the reducer's own
+ * `undeclared-transition` refusal.
+ */
+export function replayWaveGateTransition(
   state: WaveGateState,
   event: WaveGateEvent,
 ): DomainResult<WaveGateState, WaveGateTransitionError> {
@@ -477,17 +495,32 @@ export function checkImplementationProof(tasks: readonly Task[]): GateCheck {
       `  Unready: ${unready.map(unreadyTaskMessage).join(", ")}`);
 }
 
+/**
+ * The three test-readiness predicates, defined ONCE.
+ *
+ * The gate (`checkTestEvidence`/`checkNewTests`) and the status projection
+ * (`deriveTestReadinessForTasks`) must answer "is this task test-ready?"
+ * identically — a gate that blocks while status reports ready, or the reverse,
+ * is a contradiction the operator has no way to resolve. They read the same
+ * fields, so they read them through the same functions.
+ */
+const testsExempt = (task: Task): boolean => task.new_tests_required === false;
+const testEvidenceSatisfied = (task: Task): boolean =>
+  testsExempt(task) || testResultPassed(task.test_result);
+const newTestsSatisfied = (task: Task): boolean =>
+  testsExempt(task) || task.new_tests_written === true;
+
 export function checkTestEvidence(tasks: readonly Task[]): GateCheck {
-  const missing = tasks.filter((task) => task.new_tests_required !== false && !testResultPassed(task.test_result));
+  const missing = tasks.filter((task) => !testEvidenceSatisfied(task));
   if (missing.length > 0) return fail(`FAILED: Not all tasks have test evidence.\n  Missing: ${missing.map((task) => task.id).join(", ")}`);
-  const lines = tasks.map((task) => `     ${task.id}: ${task.new_tests_required === false ? "not required" : (task.test_evidence ?? "evidence present")}`);
+  const lines = tasks.map((task) => `     ${task.id}: ${testsExempt(task) ? "not required" : (task.test_evidence ?? "evidence present")}`);
   return pass(`2. Test evidence verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
 }
 
 export function checkNewTests(tasks: readonly Task[]): GateCheck {
-  const missing = tasks.filter((task) => task.new_tests_required !== false && !task.new_tests_written);
+  const missing = tasks.filter((task) => !newTestsSatisfied(task));
   if (missing.length > 0) return fail(`FAILED: Not all tasks satisfied new-test requirement.\n  Missing: ${missing.map((task) => task.id).join(", ")}`);
-  const lines = tasks.map((task) => `     ${task.id}: ${task.new_test_evidence ?? (task.new_tests_required === false ? "not required" : "new tests present")}`);
+  const lines = tasks.map((task) => `     ${task.id}: ${task.new_test_evidence ?? (testsExempt(task) ? "not required" : "new tests present")}`);
   return pass(`3. New tests verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
 }
 
@@ -830,10 +863,9 @@ function failedProofs(graph: TaskGraph): readonly FailedProofObligation[] {
 
 function deriveTestReadinessForTasks(tasks: readonly Task[]): TestReadiness {
   const affected = tasks.flatMap((task) => {
-    if (task.new_tests_required === false) return [];
     const reasons: string[] = [];
-    if (!testResultPassed(task.test_result)) reasons.push("passing test evidence is missing");
-    if (task.new_tests_written !== true) reasons.push("required new tests were not observed");
+    if (!testEvidenceSatisfied(task)) reasons.push("passing test evidence is missing");
+    if (!newTestsSatisfied(task)) reasons.push("required new tests were not observed");
     return reasons.length === 0 ? [] : [canonicalRecord({ taskId: task.id, reasons: Object.freeze(reasons) as NonEmpty<string> })];
   });
   return affected.length === 0
@@ -990,6 +1022,21 @@ function completionAuthority(
 }
 
 /**
+ * The lifecycle proof pair, as ONE value.
+ *
+ * A next-action proof and the lifecycle checkpoint it was derived from are only
+ * ever legal TOGETHER: half the pair proves nothing, and the cross-checks below
+ * read both. As two independently-nullable parameters that rule lived in a
+ * hand-written both-or-neither runtime check — a check the type carries for
+ * free once the pair is one value, at every call site rather than inside one
+ * function body.
+ */
+export type WaveLifecycleProof = Readonly<{
+  nextActionAuthority: WaveGateNextAction;
+  lifecycleCheckpoint: WaveGateState;
+}>;
+
+/**
  * Derive every status fact and completion decision once from one parsed graph
  * snapshot. Consumers (program execution and status) must share this value;
  * renderers must not repeat gate policy.
@@ -997,9 +1044,10 @@ function completionAuthority(
 export function deriveWaveReadiness(
   graph: TaskGraph,
   deps: GateDeps,
-  nextActionAuthority: WaveGateNextAction | null = null,
-  lifecycleCheckpoint: WaveGateState | null = null,
+  lifecycleProof: WaveLifecycleProof | null = null,
 ): DomainResult<WaveReadinessSnapshot, Readonly<{ kind: "wave-readiness-unavailable"; reasons: NonEmpty<StatusReason> }>> {
+  const nextActionAuthority = lifecycleProof?.nextActionAuthority ?? null;
+  const lifecycleCheckpoint = lifecycleProof?.lifecycleCheckpoint ?? null;
   const registration = graph.active_wave_gate;
   const failures: StatusReason[] = [];
   if (graph.current_phase === "execute" && graph.current_wave === undefined) {
@@ -1011,9 +1059,6 @@ export function deriveWaveReadiness(
   }
   if (registration?.terminalOutcome !== null && registration !== undefined) {
     failures.push(reason("authority-contradiction", "terminal Wave Gate history cannot serve as active current-Wave authority"));
-  }
-  if ((nextActionAuthority === null) !== (lifecycleCheckpoint === null)) {
-    failures.push(reason("authority-contradiction", "Wave next action proof and lifecycle checkpoint must be supplied together"));
   }
   if (failures.length > 0 || registration === undefined) {
     return canonicalRecord({
@@ -1880,7 +1925,7 @@ export function projectWaveGateLifecycle(
   let state: WaveGateState = initial.value;
   let rejection: WaveGateTransitionError | null = null;
   const step = (event: WaveGateEvent): boolean => {
-    const next = reduceWaveGate(state as Extract<WaveGateState, { kind: "preparing" }>, event as never);
+    const next = replayWaveGateTransition(state, event);
     if (!next.ok) {
       rejection = next.error;
       return false;
@@ -2353,7 +2398,10 @@ function projectedAdvisoryStatus(
   const proven = deriveWaveAdvisoryNextAction(snapshot.value, state.value);
   if (!proven.ok) return null;
 
-  const bound = deriveWaveReadiness(graph, deps, proven.value, state.value);
+  const bound = deriveWaveReadiness(graph, deps, canonicalRecord({
+    nextActionAuthority: proven.value,
+    lifecycleCheckpoint: state.value,
+  }));
   return bound.ok ? deriveLoomStatus(bound.value) : null;
 }
 
@@ -2361,8 +2409,7 @@ function projectedAdvisoryStatus(
 export function deriveLoomStatusFromParsedGraph(
   parsed: Readonly<{ ok: true; value: TaskGraph }> | Readonly<{ ok: false; error: string }>,
   deps: GateDeps,
-  nextActionAuthority: WaveGateNextAction | null = null,
-  lifecycleCheckpoint: WaveGateState | null = null,
+  lifecycleProof: WaveLifecycleProof | null = null,
   runDirectory: ActiveRunDirectoryObservation = canonicalRecord({ kind: "unverified" }),
 ): LoomStatus {
   if (!parsed.ok) {
@@ -2400,11 +2447,11 @@ export function deriveLoomStatusFromParsedGraph(
   // legitimately has none for its whole implementation span.
   const unstarted = unstartedWaveStatus(parsed.value);
   if (unstarted !== null) return unstarted;
-  if (nextActionAuthority === null && lifecycleCheckpoint === null) {
+  if (lifecycleProof === null) {
     const projected = projectedAdvisoryStatus(parsed.value, deps, runDirectory);
     if (projected !== null) return projected;
   }
-  const readiness = deriveWaveReadiness(parsed.value, deps, nextActionAuthority, lifecycleCheckpoint);
+  const readiness = deriveWaveReadiness(parsed.value, deps, lifecycleProof);
   return readiness.ok
     ? deriveLoomStatus(readiness.value)
     : deriveUnavailableLoomStatus(readiness.error.reasons);

@@ -4,11 +4,11 @@
  * mentions the skill name. Only active during loom orchestration.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import {
   TASK_GRAPH_PATH, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
-  REVIEW_PANEL_AGENTS, UTILITY_AGENTS, ARCH_PANEL_AGENTS,
+  REVIEW_PANEL_AGENTS, UTILITY_AGENTS, ARCH_PANEL_AGENTS, pathExistsFailClosed,
 } from "../../config";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { stripNamespace } from "../../utils/strip-namespace";
@@ -53,7 +53,11 @@ export function parseSkillsFromFrontmatter(filePath: string): DeclaredSkills {
 }
 
 const handler: HookHandler = async (stdin) => {
-  if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
+  // ENOENT is the only "orchestration inactive" answer. Bare `existsSync`
+  // reads EACCES/ELOOP/ENOTDIR/EIO as absence too, which would let every
+  // subagent spawn past this gate unvalidated — the same fail-open the
+  // malformed-input branch below already refuses to take.
+  if (!pathExistsFailClosed(TASK_GRAPH_PATH)) return { kind: "allow" };
 
   let input: PreToolUseInput;
   try {

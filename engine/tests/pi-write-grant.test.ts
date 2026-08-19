@@ -302,6 +302,35 @@ describe("Pi child write grants (incl. scoped phase-agent grants)", () => {
     }
   });
 
+  it("audits a schema-invalid grant separately from an unparseable one", () => {
+    // The `if (!grant)` branch is NOT the catch block: valid JSON that fails
+    // `parseStoredGrant` never throws, so the sibling test above (which writes
+    // "{not-json") exercises the catch and leaves this branch unvisited. The
+    // two report the same prose but reach it by different routes, and only
+    // this one proves a well-formed-but-wrong grant is deleted rather than
+    // honoured.
+    const { cwd, graph } = fixture();
+    issuePiWriteGrant({
+      agent: "code-implementer-agent", taskId: "T1", cwd, taskGraphPath: graph,
+    });
+    const grantDir = join(process.env.LOOM_SUBAGENT_DIR!, "pi-write-grants");
+    const grantPath = join(grantDir, readdirSync(grantDir)[0]!);
+    const stored = JSON.parse(readFileSync(grantPath, "utf-8")) as Record<string, unknown>;
+    delete stored.taskId;
+    writeFileSync(grantPath, JSON.stringify(stored));
+
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      sweepExpiredPiWriteGrants();
+      const written = stderr.mock.calls.map(([text]) => String(text)).join("");
+      expect(written).toContain(`removing malformed write grant ${grantPath}`);
+      expect(written).toContain("stored grant schema is invalid");
+      expect(readdirSync(grantDir)).toEqual([]);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it("rejects marker smuggling and sweeps abandoned capabilities", () => {
     const { cwd, graph } = fixture();
     const issued = issuePiWriteGrant({

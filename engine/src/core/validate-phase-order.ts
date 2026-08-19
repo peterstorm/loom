@@ -112,12 +112,15 @@ export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   return "unknown";
 }
 
+/** `readonly` throughout, like its siblings `ArtifactProbe` and
+ *  `PhaseOrderDeps`: this is the gate's DECISION INPUT, and a decision input a
+ *  checker can reassign in place is one the next checker may read differently. */
 export interface ArtifactState {
-  skipped_phases: readonly Phase[];
-  phase_artifacts: Readonly<Partial<Record<Phase, string>>>;
-  spec_file: string | null;
-  plan_file: string | null;
-  spec_dir?: string | null;
+  readonly skipped_phases: readonly Phase[];
+  readonly phase_artifacts: Readonly<Partial<Record<Phase, string>>>;
+  readonly spec_file: string | null;
+  readonly plan_file: string | null;
+  readonly spec_dir?: string | null;
 }
 
 function checkPlanAlignmentGate(state: ArtifactState, probe: ArtifactProbe): string | null {

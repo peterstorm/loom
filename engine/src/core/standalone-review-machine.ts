@@ -8,11 +8,13 @@ import {
   parseEffectId,
   reconcileEffectReceipt,
   type AcceptedAgentResult,
+  type ArtifactDigest,
   type ArtifactRef,
   type ArtifactSetPublished,
   type EffectIntent,
   type EffectReceipt,
   type InfrastructureRetryDiagnostic,
+  type OrchestrationRunId,
   type PublishArtifactSet,
   type PublicationAuthorityResolver,
   type RequestId,
@@ -59,11 +61,15 @@ export type StandaloneRefutationAuthorityError = Readonly<{
 export type StandaloneRefutationCompletionReceipt = Readonly<{
   schemaVersion: 1;
   kind: "standalone-refutation-completed";
-  standaloneRunId: string;
-  panelRunId: string;
+  /** The SAME branded identities `FrozenStandalonePanelAuthority` carries. The
+   *  reducer below compares these four fields against that authority field by
+   *  field; as plain `string` the comparison typechecked even if a run id and a
+   *  digest were transposed at the construction site. */
+  standaloneRunId: OrchestrationRunId;
+  panelRunId: OrchestrationRunId;
   panelAuthority: FrozenStandalonePanelAuthority;
-  findingBriefDigest: string;
-  manifestDigest: string;
+  findingBriefDigest: ArtifactDigest;
+  manifestDigest: ArtifactDigest;
   threshold: number;
   outcomeDigest: string;
   completedPanelStateDigest: string;

@@ -847,8 +847,10 @@ export default function (pi: ExtensionAPI) {
 
         // Reserve every lifecycle identity before task-state mutation. A roster
         // failure can now refuse the spawn without leaving executing_tasks or
-        // artifact baselines claiming work began. The ids include batch ordinal
-        // and task text, so repeated verifier/designer types remain distinct.
+        // artifact baselines claiming work began. The ids hash the tool call,
+        // the batch ordinal, and the agent type — task text is deliberately
+        // excluded (see `piSpawnItem`) — so repeated verifier/designer types in
+        // one batch remain distinct without the id moving when the prompt does.
         currentGuard = "subagent-tracking";
         const safeSessionId = parseSessionId(sessionId);
         if (safeSessionId === null) {

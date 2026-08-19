@@ -33,6 +33,7 @@
 // the engine wrote, on win32, a manifest its own validator rejects: one half of
 // a round trip disagreeing with the other about what "the same path" is, inside
 // a module that declares itself pure.
+import { match } from "ts-pattern";
 import { posix } from "node:path";
 import { parseFindingSeverity } from "./findings";
 
@@ -1193,10 +1194,16 @@ export function countRefutationVotes(
   const upheldBy: ReviewLens[] = [];
   const uncertainFrom: ReviewLens[] = [];
 
+  // Matched exhaustively over `RefutationKind` rather than by a trailing
+  // `else`: a fourth verdict added to REFUTATION_VERDICTS would silently have
+  // been counted as `uncertain` — a vote toward SURVIVING — instead of failing
+  // to compile at the one place that turns verdicts into an outcome.
   for (const { lens, entry } of judgements) {
-    if (entry.verdict === "refuted") refutations.push({ lens, reason: entry.reasoning });
-    else if (entry.verdict === "upheld") upheldBy.push(lens);
-    else uncertainFrom.push(lens);
+    match(entry.verdict)
+      .with("refuted", () => { refutations.push({ lens, reason: entry.reasoning }); })
+      .with("upheld", () => { upheldBy.push(lens); })
+      .with("uncertain", () => { uncertainFrom.push(lens); })
+      .exhaustive();
   }
 
   const votes = Object.freeze({

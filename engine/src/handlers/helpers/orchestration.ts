@@ -116,7 +116,7 @@ import {
 import { resolveModelProfile, lowerModelProfile } from "../../core/model-profiles";
 import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../orchestration/context-packets";
 import { countRefutationVotes, defaultRefutationThreshold, parseRefutationVerdict, type RefutationVerdict } from "../../core/review-panel";
-import { aggregateVerdicts, candidateFilename, parseJudgeVerdict, type JudgeVerdict } from "../../core/panel-contract";
+import { aggregateVerdicts, candidateFilename, parseArchitectureCandidate, parseArchitectureFinalization, parseJudgeVerdict, type JudgeVerdict } from "../../core/panel-contract";
 import type { VerdictEnvelope } from "../../core/panel-kernel";
 import { createEffectRunner } from "../../orchestration/effect-runner";
 import { captureKey } from "../../core/harness-capture";
@@ -208,7 +208,7 @@ export function renderStatus(
   runDirectory: ActiveRunDirectoryObservation = Object.freeze({ kind: "unverified" }),
 ): string {
   const parsed = parseTaskGraph(rawGraph);
-  const status = deriveLoomStatusFromParsedGraph(parsed, deps, null, null, runDirectory);
+  const status = deriveLoomStatusFromParsedGraph(parsed, deps, null, runDirectory);
   return asJson ? renderLoomStatusJson(status) : renderLoomStatusHuman(status);
 }
 
@@ -1040,20 +1040,8 @@ function panelSubmissionProblem(
     const index = Number(candidateMatch[1]) - 1;
     const lens = input.candidateLenses[index];
     if (lens === undefined) return `request ${logicalRequestId} is not a canonical candidate slot`;
-    try {
-      const value = JSON.parse(raw) as unknown;
-      if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        return "architecture candidate must be a JSON object";
-      }
-      const record = value as Record<string, unknown>;
-      const expectedCandidate = candidateFilename(lens);
-      return record["lens"] === lens && record["candidate"] === expectedCandidate &&
-        typeof record["artifact"] === "string" && record["artifact"].trim().length > 0
-        ? null
-        : `architecture candidate must bind lens ${lens}, candidate ${expectedCandidate}, and a non-empty artifact`;
-    } catch (error) {
-      return `architecture candidate is invalid JSON: ${error instanceof Error ? error.message : String(error)}`;
-    }
+    const parsed = parseArchitectureCandidate(raw, lens);
+    return parsed.ok ? null : parsed.errors.join("; ");
   }
 
   const judgeMatch = /^architecture:judge:(\d+)$/.exec(logicalRequestId);
@@ -1065,20 +1053,8 @@ function panelSubmissionProblem(
   }
 
   if (logicalRequestId === "architecture:finalize") {
-    try {
-      const value = JSON.parse(raw) as unknown;
-      if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        return "architecture finalization must be a JSON object";
-      }
-      const record = value as Record<string, unknown>;
-      const candidates = new Set(input.candidateLenses.map(candidateFilename));
-      return typeof record["selectedCandidate"] === "string" && candidates.has(record["selectedCandidate"] as never) &&
-        typeof record["planArtifact"] === "string" && record["planArtifact"].trim().length > 0
-        ? null
-        : "architecture finalization must select a canonical candidate and name a non-empty plan artifact";
-    } catch (error) {
-      return `architecture finalization is invalid JSON: ${error instanceof Error ? error.message : String(error)}`;
-    }
+    const parsed = parseArchitectureFinalization(raw, input.candidateLenses.map(candidateFilename));
+    return parsed.ok ? null : parsed.errors.join("; ");
   }
 
   return `request ${logicalRequestId} is not a canonical architecture result slot`;

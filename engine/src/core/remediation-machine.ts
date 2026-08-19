@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { compareStrings } from "./ordering";
+import { frozenSet } from "./frozen";
 import {
   canonicalRecord,
   parseArtifactDigest,
@@ -58,10 +60,6 @@ const includes = <T extends string>(values: readonly T[], value: unknown): value
 
 function immutableArray<T>(values: readonly T[]): readonly T[] {
   return Object.freeze([...values]);
-}
-
-function compareStrings(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function digestBytes(bytes: Uint8Array): ArtifactDigest {
@@ -162,13 +160,13 @@ function pathIsWithin(path: CanonicalRepositoryRelativePath, root: string): bool
  * silent divergence between "this path is run evidence" and "this path may be
  * trusted as run evidence".
  */
-export const RUN_LAYOUT_COMPONENTS: ReadonlySet<string> = Object.freeze(new Set([
+export const RUN_LAYOUT_COMPONENTS: ReadonlySet<string> = frozenSet([
   "panel-runs",
   "review-runs",
   "review-and-fix-runs",
   "wave-gate-runs",
   "orchestration-runs",
-])) as ReadonlySet<string>;
+]);
 
 /** Canonical policy predicate shared by freeze, registration, audit, and replay parsers. */
 export function isExcludedRemediationPath(path: CanonicalRepositoryRelativePath): boolean {
