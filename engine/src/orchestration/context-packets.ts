@@ -126,18 +126,29 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Cont
   // Section identity must cover the exact bytes: a caller-supplied ByteSection
   // whose digest/byteLength do not match its bytes would otherwise let a
   // packet's content-addressed identity disagree with its content.
+  const canonicalSections: ByteSection[] = [];
   for (const [index, section] of [...input.fixedContext, ...input.variableContext].entries()) {
-    const parsedLength = parseArtifactByteLength(section.bytes.length);
-    const bytesAreValid = section.bytes.every(isByte);
-    const verified = bytesAreValid && parsedLength.ok && parsedLength.value === section.byteLength &&
-      digestBytes(section.bytes) === section.digest;
+    // Array.from materializes sparse holes as `undefined`; Array#every on the
+    // caller's array would skip them and incorrectly accept a non-byte value.
+    const bytes = Array.from(section.bytes);
+    const parsedLength = parseArtifactByteLength(bytes.length);
+    const verified = bytes.every(isByte) && parsedLength.ok && parsedLength.value === section.byteLength &&
+      digestBytes(bytes) === section.digest;
     if (!verified) {
       const field = index < input.fixedContext.length
         ? `fixedContext[${index}]`
         : `variableContext[${index - input.fixedContext.length}]`;
       return failure(field, "a context section must contain only bytes whose digest and length cover the exact content");
     }
+    canonicalSections.push(canonicalRecord({
+      label: section.label,
+      byteLength: section.byteLength,
+      digest: section.digest,
+      bytes: Object.freeze([...bytes]),
+    }));
   }
+  const fixedContext = canonicalSections.slice(0, input.fixedContext.length);
+  const variableContext = canonicalSections.slice(input.fixedContext.length);
 
   const withoutDigest = {
     schemaVersion: CONTEXT_PACKET_SCHEMA_VERSION,
@@ -145,8 +156,8 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Cont
     role: input.role,
     requiredSkill: input.requiredSkill,
     outputContract: input.outputContract,
-    fixedContext: Object.freeze([...input.fixedContext]),
-    variableContext: Object.freeze([...input.variableContext]),
+    fixedContext: Object.freeze(fixedContext),
+    variableContext: Object.freeze(variableContext),
   } as const;
 
   return success(canonicalRecord({ ...withoutDigest, digest: contextPacketDigest(withoutDigest) }));
@@ -179,7 +190,7 @@ function parseSection(raw: unknown, field: string): DomainResult<ByteSection, Co
     return failure(`${field}.label`, "a context section label must be a non-empty string");
   }
   if (!Array.isArray(record["bytes"])) return failure(`${field}.bytes`, "a context section must carry its bytes");
-  const bytes = record["bytes"] as readonly unknown[];
+  const bytes = Array.from(record["bytes"] as readonly unknown[]);
   if (!bytes.every(isByte)) {
     return failure(`${field}.bytes`, "a context section byte must be an integer from 0 through 255");
   }

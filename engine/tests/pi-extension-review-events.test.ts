@@ -254,6 +254,36 @@ describe("Pi extension review tool_result integration", () => {
     expect(process.env[PI_EXTENSION_RUNTIME_REVISION_ENV]).toBe(expected.revision);
   });
 
+  it("blocks post-edit lint when project rules are inaccessible", async () => {
+    const pi = await extension();
+    const project = mkdtempSync(join(tmpdir(), "loom-pi-project-rules-"));
+    const previousCwd = process.cwd();
+    try {
+      writeFileSync(join(project, "edited.ts"), "export const edited = true;\n");
+      for (const relative of [".pi/linter/rules", ".claude/linter/rules"]) {
+        const rulesPath = join(project, relative);
+        mkdirSync(dirname(rulesPath), { recursive: true });
+        symlinkSync(rulesPath, rulesPath);
+      }
+      process.chdir(project);
+
+      const responses = await pi.emit("tool_result", {
+        toolName: "edit",
+        isError: false,
+        input: { path: "edited.ts", edits: [] },
+      }, { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad4f1" } });
+
+      expect(responses).toContainEqual(expect.objectContaining({
+        isError: true,
+        content: [expect.objectContaining({ text: expect.stringContaining("LINT ENGINE ERROR") })],
+      }));
+      expect(JSON.stringify(responses)).toContain("ELOOP");
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
   it("BLOCKS a subagent spawn when the checkout drifts from the loaded extension runtime", async () => {
     // The earliest of the three skew guards, and the only one whose blocking arm
     // had no test: the CLI-entry and state-write backstops are exercised against

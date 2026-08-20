@@ -171,10 +171,12 @@ const ZERO_FAILURE_MARKER = /\b0 fail(?:ed|ing)?\b|\bFailures: 0\b|\bErrors: 0\b
  *  provably the test runner's OWN, uncontaminated by any other command's
  *  stdout? Two conditions, both structural:
  *
- *  - every segment BEFORE the test is a pure `cd` preamble (`cd X && bun test`
- *    is the canonical shape; `cd` cannot change the outcome). Any other prior
- *    (`false && bun test`, `git stash && bun test`) means the test may never
- *    have run.
+ *  - every segment BEFORE the test is a `cd` preamble (`cd X && bun test` is
+ *    the canonical shape). A successful paired result plus the strict runner
+ *    summary can keep stdout attributable across that preamble; this does not
+ *    claim that `cd` is outcome-neutral or leaves test selection unchanged.
+ *    Any other prior (`false && bun test`, `git stash && bun test`) means the
+ *    test may never have run.
  *  - every segment AFTER the test is a PIPE stage (`| tail`, `| tee`) that only
  *    transforms the runner's own output. A `;`/`&&`/`||`/`&`-sequenced command
  *    after the test runs NEW code whose stdout is concatenated into the paired

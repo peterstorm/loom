@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -370,7 +370,22 @@ describe("findReport", () => {
     }
   });
 
-  it("an unreadable JUnit dir stays fail-closed but says so on stderr", () => {
+  it("an inaccessible JUnit dir stays fail-closed but says so on stderr", () => {
+    const dir = join(cwd, "target/surefire-reports");
+    mkdirSync(join(cwd, "target"), { recursive: true });
+    symlinkSync(dir, dir);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(findReport("mvn test", cwd, "", { nowMs: Date.now(), callStartMs: callStart })).toBeNull();
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("cannot read JUnit dir");
+      expect(text).toContain("ELOOP");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("a non-directory JUnit path stays fail-closed but says so on stderr", () => {
     // A FILE where a report DIR is expected: existsSync passes, readdirSync throws
     mkdirSync(join(cwd, "target"), { recursive: true });
     writeFileSync(join(cwd, "target/surefire-reports"), "not a directory");

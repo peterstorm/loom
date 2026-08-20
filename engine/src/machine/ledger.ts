@@ -658,7 +658,6 @@ export async function recordCallStart(
  */
 export function callStartFor(sessionId: SessionId, toolUseId: string): number | null {
   const path = callStartPath(sessionId);
-  if (!existsSync(path)) return null;
   try {
     const entries = parseCallStartEntries(readFileSync(path, "utf-8"));
     if (entries === null) {
@@ -669,8 +668,9 @@ export function callStartFor(sessionId: SessionId, toolUseId: string): number | 
     }
     return callStartOf(entries, toolUseId);
   } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return null;
     process.stderr.write(
-      `callStartFor: cannot read call-start file for ${sessionId}: ${e instanceof Error ? e.message : String(e)}\n`,
+      `callStartFor: cannot read call-start file ${path}: ${e instanceof Error ? e.message : String(e)}\n`,
     );
     return null;
   }

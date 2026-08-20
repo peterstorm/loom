@@ -20,7 +20,7 @@ import type { LintResult, LintOutput } from "../../linter/index";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 import { repositoryRoot } from "../../utils/git";
 
-// --- Pure logic (extracted for testability) ---
+// --- Testable helper logic (pure transformations and filesystem adapters) ---
 
 export { parseWaveArg } from "./wave-args";
 import { parseWaveArg } from "./wave-args";

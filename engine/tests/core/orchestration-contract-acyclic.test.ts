@@ -20,7 +20,8 @@ import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const KERNEL_DIR = join(__dirname, "../../src/core/orchestration-contract");
+const CORE_DIR = join(__dirname, "../../src/core");
+const KERNEL_DIR = join(CORE_DIR, "orchestration-contract");
 
 /** Sibling-volume imports (`./name`) declared by one volume file. */
 function siblingImports(source: string): readonly string[] {
@@ -68,6 +69,21 @@ describe("orchestration-contract volume graph", () => {
       .map((cycle) => cycle.join(" -> "));
 
     expect([...new Set(cycles)]).toEqual([]);
+  });
+
+  it("keeps historical compatibility imports one-way", () => {
+    const names = ["legacy-archive", "standalone-review", "review-panel"] as const;
+    const graph = new Map(names.map((name) => [
+      name,
+      siblingImports(readFileSync(join(CORE_DIR, `${name}.ts`), "utf-8"))
+        .filter((dependency) => names.includes(dependency as typeof names[number])),
+    ]));
+    const cycles = [...graph.keys()]
+      .flatMap((volume) => cyclesFrom(volume, graph))
+      .map((cycle) => cycle.join(" -> "));
+
+    expect([...new Set(cycles)]).toEqual([]);
+    expect(graph.get("standalone-review")).not.toContain("legacy-archive");
   });
 
   it("keeps the shared error vocabulary beneath every volume that raises it", () => {

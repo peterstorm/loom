@@ -14,7 +14,6 @@ import { basename, dirname, join, resolve } from "node:path";
 import { isReviewAgent } from "../../config";
 import type { HookHandler, HookResult } from "../../types";
 import {
-  aggregateLegacyStandaloneReview,
   captureStandaloneReviewerBytes,
   finalizeStandaloneReview,
   parseStandaloneAggregate,
@@ -27,6 +26,7 @@ import {
   type StandaloneReviewAggregate,
   type StandaloneReviewerRole,
 } from "../../core/standalone-review";
+import { aggregateLegacyStandaloneReview } from "../../core/legacy-archive";
 import { parseArtifactRef, type ArtifactRef } from "../../core/orchestration-contract";
 import { resolveReviewFindings, reviewResolutionLog } from "../../core/review-output";
 import {

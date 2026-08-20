@@ -36,6 +36,7 @@ import {
   constants as fsConstants,
   existsSync,
   fsyncSync,
+  lstatSync,
   mkdtempSync,
   openSync,
   readFileSync,
@@ -257,22 +258,45 @@ export function observeDirtyPaths(
     if (renamed && source !== undefined) index += 1;
 
     const primaryCode = indexCode === " " || indexCode === "?" ? worktreeCode : indexCode;
-    observed.push(observationFor(repository.root, path, primaryCode));
+    const primary = observationFor(repository.root, path, primaryCode);
+    if (!primary.ok) return primary;
+    observed.push(primary.value);
     if (source !== undefined && source.length > 0) {
-      observed.push(observationFor(repository.root, source, "R-from"));
+      const renamedFrom = observationFor(repository.root, source, "R-from");
+      if (!renamedFrom.ok) return renamedFrom;
+      observed.push(renamedFrom.value);
     }
   }
   return success(Object.freeze(observed));
 }
 
-function observationFor(root: string, path: string, code: string): ObservedDirtyPath {
-  const present = existsSync(join(root, path));
+function observationFor(
+  root: string,
+  path: string,
+  code: string,
+): DomainResult<ObservedDirtyPath, GitBoundaryError> {
+  let present: boolean;
+  try {
+    const node = lstatSync(join(root, path));
+    if (node.isSymbolicLink()) {
+      return failure("status-path", `dirty path is a symbolic link: ${path}`);
+    }
+    present = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") present = false;
+    else {
+      return failure(
+        "status-path",
+        `cannot inspect dirty path ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   const change = code === "R-from" ? "renamed-from" : changeOf(code, present);
-  return canonicalRecord({
+  return success(canonicalRecord({
     path,
     change,
     nodeKind: present ? ("file" as const) : ("missing" as const),
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------

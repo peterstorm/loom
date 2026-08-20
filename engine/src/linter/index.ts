@@ -50,7 +50,7 @@ export function isBinaryBuffer(buffer: Buffer): boolean {
 
 
 /**
- * The per-file pipeline both entry points run: resolve → single atomic read →
+ * The per-file pipeline both entry points run: resolve → one buffered read →
  * binary skip → decode → deadline → execute → fail-closed error.
  *
  * One copy, because two had already drifted: `lintFiles` hardcoded the hook's
@@ -65,7 +65,7 @@ function lintLoadedFile(
   try {
     const absolutePath = resolve(filePath);
 
-    // Single atomic read — eliminates TOCTOU race between binary check and content read
+    // One buffer read — binary detection and decoding cannot observe different reads.
     const buffer = readFileSync(absolutePath);
 
     // FR-009 / SC-007: Skip binary files entirely
@@ -129,6 +129,7 @@ export function lintFile(
  * @param tier - Execution tier
  * @param defaultRulesDir - Default rules directory
  * @param projectRulesDir - Project rules directory (or null)
+ * @param timeoutMs - Per-file wall-clock budget; defaults to the immediate-tier hook budget
  * @returns Map of file path → LintResult
  */
 export function lintFiles(

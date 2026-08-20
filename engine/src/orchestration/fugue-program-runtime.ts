@@ -181,7 +181,12 @@ export function createFileProgramJournal(directory: string): ProgramJournal {
         parseProgramEventRecord(fromJson(readFileSync(join(eventsDirectory, name), "utf-8")), name)));
     },
     async readCheckpoint(): Promise<string | null> {
-      return existsSync(checkpointPath) ? readFileSync(checkpointPath, "utf-8") : null;
+      try {
+        return readFileSync(checkpointPath, "utf-8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+        throw error;
+      }
     },
     async writeCheckpoint(json: string): Promise<void> {
       atomicWriteFile(checkpointPath, json);

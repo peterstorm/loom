@@ -296,7 +296,7 @@ export interface TestCount {
   readonly total: number;
 }
 
-/** Count new test methods in a diff string (pure) */
+/** Heuristically count added test and suite declarations in a diff string (pure). */
 export function countNewTests(diffContent: string): TestCount {
   const lines = diffContent.split("\n");
   let java = 0;

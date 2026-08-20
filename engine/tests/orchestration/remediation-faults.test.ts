@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -207,6 +207,19 @@ describe("command construction", () => {
 
     // The hijack index was never written to.
     expect(() => readFileSync(hijack)).toThrow();
+  });
+
+  it("fails instead of classifying an inaccessible dirty path as missing", () => {
+    const repository = fixtureRepository();
+    rmSync(join(repository.root, "src"), { recursive: true, force: true });
+    symlinkSync("src", join(repository.root, "src"));
+
+    const observed = observeDirtyPaths(repository);
+
+    expect(observed.ok).toBe(false);
+    if (observed.ok) return;
+    expect(observed.error.operation).toBe("status-path");
+    expect(observed.error.message).toMatch(/ELOOP|symbolic link/i);
   });
 
   it("ignores an ambient GIT_DIR that would point at another repository", () => {

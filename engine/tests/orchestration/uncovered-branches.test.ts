@@ -4,7 +4,12 @@ import fc from "fast-check";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildContextPacket, encodeByteSection, type ByteSection } from "../../src/orchestration/context-packets";
+import {
+  buildContextPacket,
+  encodeByteSection,
+  parseContextPacket,
+  type ByteSection,
+} from "../../src/orchestration/context-packets";
 import {
   parseSessionRunBindingRegistry,
   registerSessionRunBinding,
@@ -82,6 +87,40 @@ describe("context packet required fields", () => {
       fixedContext: [],
       variableContext: [section("task", "the finding under review")],
     }).ok).toBe(true);
+  });
+
+  it("takes immutable ownership of caller-supplied section bytes", () => {
+    const encoded = section("mutable", "abc");
+    const callerBytes = [...encoded.bytes];
+    const callerSection = { ...encoded, bytes: callerBytes };
+
+    const built = buildContextPacket({ ...valid, fixedContext: [callerSection] });
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    const digest = built.value.digest;
+    callerBytes[0] = 0;
+
+    expect(built.value.fixedContext[0]?.bytes).toEqual([97, 98, 99]);
+    expect(built.value.digest).toBe(digest);
+    expect(Object.isFrozen(built.value.fixedContext[0]?.bytes)).toBe(true);
+  });
+
+  it("refuses sparse byte arrays at build and parse boundaries", () => {
+    const sparse = new Array<number>(1);
+    const zeroDigest = createHash("sha256").update(Uint8Array.from([0])).digest("hex");
+    const forged = { label: "sparse", byteLength: 1, digest: zeroDigest, bytes: sparse };
+
+    expect(buildContextPacket({ ...valid, fixedContext: [forged as never] }).ok).toBe(false);
+    expect(parseContextPacket({
+      schemaVersion: 1,
+      digest: "irrelevant",
+      requestId: valid.requestId,
+      role: valid.role,
+      requiredSkill: valid.requiredSkill,
+      outputContract: valid.outputContract,
+      fixedContext: [forged],
+      variableContext: [],
+    }).ok).toBe(false);
   });
 
   it("refuses an in-process section containing a number outside the byte domain", () => {

@@ -4,16 +4,17 @@
  * - BIRTH is atomic: the pid file is staged in a private temp dir and
  *   renameSync'd onto the lock path, so no contender can ever observe a
  *   pid-less live lock (the old mkdir-then-write window read as "stale").
- * - STEALING a stale lock is atomic: the victim dir is renameSync'd into a
- *   private tomb first — of two contenders that both judged the same lock
- *   stale, only one rename succeeds, so the loser can never rmSync a FRESH
- *   lock re-created at the path in the meantime.
+ * - RETIRING a stale lock is generation-addressed: birth writes PID and a
+ *   unique generation in one owner record. Every observer of that generation
+ *   renames toward the same persistent, non-empty fence, so a delayed observer
+ *   cannot rename a newer live generation after another contender acquires it.
  * - RELEASE is ownership-checked: only the process the pid file names may
  *   remove the lock, so a holder whose lock was stolen cannot break the new
  *   holder's mutual exclusion on its way out.
  */
 
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, renameSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, renameSync, statSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 const MAX_ATTEMPTS = 50;
@@ -29,20 +30,78 @@ function sleepSync(ms: number): void {
   Atomics.wait(signal, 0, 0, ms);
 }
 
-/** Check if a lock dir is stale (owning process is dead) */
-export function isStaleLock(lockDir: string): boolean {
+type LockObservation =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "live" }>
+  | Readonly<{ kind: "stale"; generation: string }>;
+
+export type StaleLockObservation = Readonly<{
+  lockDir: string;
+  generation: string;
+}>;
+
+const staleObservationProofs = new WeakSet<object>();
+
+const OWNER_RECORD = /^(?<pid>[1-9][0-9]*):(?<generation>[a-zA-Z0-9-]+)$/;
+
+function legacyGeneration(ownerText: string | null): string {
+  if (ownerText === null) return "legacy-missing-owner";
+  const digest = createHash("sha256").update(ownerText).digest("hex").slice(0, 24);
+  return `legacy-${digest}`;
+}
+
+function parseOwner(ownerText: string): Readonly<{ pid: number; generation: string }> | null {
+  const match = OWNER_RECORD.exec(ownerText.trim());
+  if (match?.groups === undefined) return null;
+  const pid = Number(match.groups["pid"]);
+  const generation = match.groups["generation"];
+  return Number.isSafeInteger(pid) && generation !== undefined ? { pid, generation } : null;
+}
+
+function observeLock(lockDir: string): LockObservation {
+  let ownerText: string;
   try {
-    const pid = Number(readFileSync(join(lockDir, "pid"), "utf-8").trim());
-    if (!Number.isSafeInteger(pid) || pid <= 0) return true;
-    process.kill(pid, 0); // throws if process doesn't exist
-    return false;
-  } catch (err: unknown) {
-    const code = (err as NodeJS.ErrnoException)?.code;
-    // A missing pid file or dead owner is stale. Every access/path/I/O error
-    // is treated as a live lock so an authority failure cannot break mutual
-    // exclusion.
-    return code === "ENOENT" || code === "ESRCH";
+    ownerText = readFileSync(join(lockDir, "pid"), "utf-8").trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") return { kind: "live" };
+    try {
+      // Distinguish a missing owner record in an existing legacy lock from an
+      // acquisition race in which the whole lock has already disappeared.
+      statSync(lockDir);
+      return { kind: "stale", generation: legacyGeneration(null) };
+    } catch (lockError) {
+      return (lockError as NodeJS.ErrnoException)?.code === "ENOENT"
+        ? { kind: "absent" }
+        : { kind: "live" };
+    }
   }
+
+  const parsed = parseOwner(ownerText);
+  const pid = parsed?.pid ?? Number(ownerText);
+  const generation = parsed?.generation ?? legacyGeneration(ownerText);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return { kind: "stale", generation };
+  try {
+    process.kill(pid, 0);
+    return { kind: "live" };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "ESRCH"
+      ? { kind: "stale", generation }
+      : { kind: "live" };
+  }
+}
+
+/** Check if a lock dir is stale (owning process is dead). */
+export function isStaleLock(lockDir: string): boolean {
+  return observeLock(lockDir).kind === "stale";
+}
+
+/** Mint stale-generation authority from one owner-record observation. */
+export function observeStaleLock(lockDir: string): StaleLockObservation | null {
+  const observed = observeLock(lockDir);
+  if (observed.kind !== "stale") return null;
+  const stale = Object.freeze({ lockDir, generation: observed.generation });
+  staleObservationProofs.add(stale);
+  return stale;
 }
 
 /**
@@ -54,7 +113,7 @@ export function isStaleLock(lockDir: string): boolean {
 function tryBirthLock(lockDir: string): boolean {
   const staging = mkdtempSync(`${lockDir}.birth-`);
   try {
-    writeFileSync(join(staging, "pid"), `${process.pid}`);
+    writeFileSync(join(staging, "pid"), `${process.pid}:${randomUUID()}`);
     renameSync(staging, lockDir);
     return true;
   } catch (err) {
@@ -68,42 +127,44 @@ function tryBirthLock(lockDir: string): boolean {
 }
 
 /**
- * Atomic steal of a stale lock. Rename the victim into a private tomb:
- * losers of the rename race fall through to a normal retry instead of
- * rmSync'ing whatever now lives at the path. The staleness judgment is
- * repeated INSIDE the tomb — if a faster contender already reaped and a
- * fresh lock was re-born between our read and our rename, we stole a LIVE
- * lock and must put it back. True only when this process reaped the stale
- * dir (caller may retry acquisition immediately).
+ * Retire one already-observed stale generation. The destination is deliberately
+ * persistent and non-empty: once generation G is retired, every delayed G
+ * observer collides with the same fence instead of moving whichever generation
+ * now occupies `lockDir`.
  *
- * Exported for tests only — withLock/acquireLock are the real API.
+ * Exported for the deterministic late-observer regression only.
  */
-export function stealStaleLock(lockDir: string): boolean {
-  const tomb = `${lockDir}.tomb-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+export function retireObservedStaleLock(observed: StaleLockObservation): boolean {
+  if (!staleObservationProofs.has(observed)) {
+    throw new Error("Stale lock retirement requires a parser-minted observation");
+  }
+  const { lockDir, generation } = observed;
+  const retired = `${lockDir}.retired-${generation}`;
   try {
-    renameSync(lockDir, tomb);
-  } catch {
-    // Someone else stole or released it first — normal retry, never a crash.
-    return false;
-  }
-  if (!isStaleLock(tomb)) {
-    // We grabbed a live lock (stale-reap + fresh re-birth raced our rename):
-    // restore it. If the path was ALREADY re-taken, restoring is impossible —
-    // the victim holder lost its lock; say so loudly (its ownership-checked
-    // release will no-op) instead of leaving a silent double-hold.
-    try {
-      renameSync(tomb, lockDir);
-    } catch {
-      rmSync(tomb, { recursive: true, force: true });
-      process.stderr.write(
-        `WARNING: displaced a live lock while reaping ${lockDir} — the previous holder's lock is gone and its release will no-op\n`,
-      );
+    // This also makes a legacy pid-less lock non-empty before rename. A late
+    // observer may write the same marker, but can never remove it.
+    writeFileSync(join(lockDir, "retired"), generation, { flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+      throw error;
     }
-    return false;
   }
-  rmSync(tomb, { recursive: true, force: true });
-  process.stderr.write(`Removed stale lock: ${lockDir}\n`);
+  try {
+    renameSync(lockDir, retired);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "EEXIST" || code === "ENOTEMPTY") return false;
+    throw error;
+  }
+  process.stderr.write(`Retired stale lock generation ${generation}: ${lockDir}\n`);
   return true;
+}
+
+/** Observe and retire a stale lock; false means absent, live, or lost race. */
+export function stealStaleLock(lockDir: string): boolean {
+  const observed = observeStaleLock(lockDir);
+  return observed === null ? false : retireObservedStaleLock(observed);
 }
 
 export async function acquireLock(lockFile: string): Promise<void> {
@@ -111,8 +172,8 @@ export async function acquireLock(lockFile: string): Promise<void> {
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     if (tryBirthLock(lockDir)) return;
-    // Check for stale lock on first retry
-    if (attempt === 0 && isStaleLock(lockDir) && stealStaleLock(lockDir)) {
+    // Check for stale lock on first retry.
+    if (attempt === 0 && stealStaleLock(lockDir)) {
       continue; // we won the reap → retry immediately
     }
     await sleep(RETRY_MS);
@@ -127,7 +188,7 @@ export function acquireLockSync(lockFile: string): void {
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     if (tryBirthLock(lockDir)) return;
-    if (attempt === 0 && isStaleLock(lockDir) && stealStaleLock(lockDir)) continue;
+    if (attempt === 0 && stealStaleLock(lockDir)) continue;
     sleepSync(RETRY_MS);
   }
 
@@ -142,7 +203,7 @@ export function releaseLock(lockFile: string): void {
     // we ran, the pid file names the NEW holder — removing it would break
     // their mutual exclusion too. Only the recorded owner releases; a
     // genuinely missing lock remains an idempotent no-op.
-    pid = readFileSync(join(lockDir, "pid"), "utf-8").trim();
+    pid = readFileSync(join(lockDir, "pid"), "utf-8").trim().split(":", 1)[0] ?? "";
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return;
     throw new Error(

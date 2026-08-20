@@ -17,9 +17,8 @@
  *     evidence through standalone-review's canonical request-bound parsers.
  *   - No legacy reader may be extended to accept new shapes; a new on-disk
  *     form is a new canonical parser, not a new compatibility branch here.
- *   - The canonical modules (standalone-review, state-manager) re-export the
- *     moved functions with @deprecated markers so existing import sites and
- *     the test suite keep working while the migration completes.
+ *   - Historical callers import this archive explicitly. Canonical modules do
+ *     not re-export it, keeping the compatibility seam one-way and acyclic.
  *
  * Pure module: no I/O, no clock, no randomness. (The façade's shell supplies
  * all bytes; these parsers only interpret them.)

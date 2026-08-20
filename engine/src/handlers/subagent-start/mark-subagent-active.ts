@@ -121,20 +121,18 @@ const handler: HookHandler = async (stdin) => {
   // epoch key). machinesDir() is resolved at CALL time — the same
   // resolution the PreToolUse gate uses, so bind and gate can never see
   // different dirs.
-  const agentTypeRaw = rosterAgentTypeRaw;
-  const agentType = rosterAgentType;
-  if (agentTypeRaw && agentType === null && rosterSound) {
+  if (rosterAgentTypeRaw && rosterAgentType === null && rosterSound) {
     process.stderr.write(
-      `mark-subagent-active: agent_type ${JSON.stringify(agentTypeRaw)} contains reserved or path-unsafe characters (whitespace/colon/slash/'..') — no machine looked up or bound; it will run UNGATED\n`,
+      `mark-subagent-active: agent_type ${JSON.stringify(rosterAgentTypeRaw)} contains reserved or path-unsafe characters (whitespace/colon/slash/'..') — no machine looked up or bound; it will run UNGATED\n`,
     );
   }
   let bindingFailure: string | null = null;
-  if (agentType && rosterSound) {
-    const loaded = loadMachine(machinesDir(), agentType);
+  if (rosterAgentType && rosterSound) {
+    const loaded = loadMachine(machinesDir(), rosterAgentType);
     if (loaded.kind !== "none") {
       if (agentId && rosterId !== null) {
         try {
-          await bindMachineAgent(sessionId, agentType, agentId);
+          await bindMachineAgent(sessionId, rosterAgentType, agentId);
         } catch (error) {
           // The roster row carries write authority by role. A denied Agent has
           // no SubagentStop cleanup, so roll that exact row back now rather
@@ -148,14 +146,14 @@ const handler: HookHandler = async (stdin) => {
           // Finish the independent task-graph pointer bookkeeping below, then
           // fail the spawn closed through the surfaced Hook result.
           bindingFailure = [
-            `mark-subagent-active: bindMachineAgent failed — refusing to run ${agentType} (${agentId}) ungated: ${error instanceof Error ? error.message : String(error)}`,
+            `mark-subagent-active: bindMachineAgent failed — refusing to run ${rosterAgentType} (${agentId}) ungated: ${error instanceof Error ? error.message : String(error)}`,
             ...(rollbackFailure === null
               ? []
               : [`active-roster rollback could not be proven: ${rollbackFailure}`]),
           ].join("; ");
         }
       } else {
-        process.stderr.write(`mark-subagent-active: cannot bind machine for ${agentType} — no valid agent_id in hook input; it will run UNGATED\n`);
+        process.stderr.write(`mark-subagent-active: cannot bind machine for ${rosterAgentType} — no valid agent_id in hook input; it will run UNGATED\n`);
       }
       if (loaded.kind === "invalid") {
         process.stderr.write(`mark-subagent-active: machine invalid (gate will fail closed) — ${loaded.error}\n`);

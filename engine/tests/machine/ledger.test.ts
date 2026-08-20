@@ -155,6 +155,26 @@ describe("evidence ledger", () => {
   });
 });
 
+describe("call-start stamp reads", () => {
+  it("returns quiet absence only for ENOENT", () => {
+    expect(ledger.callStartFor(sid("callstart-absent"), "toolu_missing")).toBeNull();
+  });
+
+  it("diagnoses an inaccessible stamp and remains fail-closed", () => {
+    const s = sid("callstart-inaccessible");
+    const path = ledger.sessionScopedPath(s, ledger.CALL_START_SUFFIX);
+    symlinkSync(path, path);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(ledger.callStartFor(s, "toolu_x")).toBeNull();
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toMatch(/cannot read call-start file .*ELOOP/i);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+});
+
 describe("machine binding lifecycle", () => {
   it("bind → sole binding (with the bound agent rostered) → unbind → gone", async () => {
     const s = sid("s2");

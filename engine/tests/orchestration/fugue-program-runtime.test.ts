@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -184,6 +184,16 @@ describe("program journal dedup", () => {
     const names = readdirSync(join(directory, "events")).sort();
     expect(names).toEqual(["000000-key-a.json", "000001-key-b.json"]);
     expect(names.some((name) => name.includes(".tmp."))).toBe(false);
+  });
+
+  it("treats only a missing checkpoint as absent", async () => {
+    const directory = runDirectory();
+    const journal = createFileProgramJournal(directory);
+    expect(await journal.readCheckpoint()).toBeNull();
+
+    const checkpoint = join(directory, "checkpoint.json");
+    symlinkSync(checkpoint, checkpoint);
+    await expect(journal.readCheckpoint()).rejects.toThrow(/ELOOP/i);
   });
 
   it("round-trips Map/Set state through the checkpoint codec", async () => {

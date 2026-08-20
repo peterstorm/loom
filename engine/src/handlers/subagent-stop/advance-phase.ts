@@ -50,6 +50,15 @@ export function countMarkers(filePath: string): number {
   }
 }
 
+function readableSpecArtifact(state: TaskGraph): string | null {
+  let spec = state.spec_file;
+  if (spec && !resolvesWithin(spec, SPEC_ARTIFACT_DIR)) spec = null;
+  if ((!spec || !phaseArtifactExists(spec)) && state.spec_dir) {
+    spec = findFile(state.spec_dir, "spec.md");
+  }
+  return spec && phaseArtifactExists(spec) ? spec : null;
+}
+
 /** Determine next phase + artifact after a phase completes */
 export function resolveTransition(
   completedPhase: Phase,
@@ -64,23 +73,8 @@ export function resolveTransition(
       return { nextPhase: "specify" as Phase, artifact: file };
     })
     .with("specify", () => {
-      // Try state.spec_file first, fall back to finding spec.md on disk.
-      // RESOLVED containment, not `String.includes`: the substring form admits
-      // `.claude/specs/../../../../tmp/evil/spec.md`, which is the exact test
-      // the artifact write path below (and `core/phase-artifact-paths`) was
-      // written to replace. A read site that keeps the weak form re-opens the
-      // hole the writer closed.
-      let spec = state.spec_file;
-      if (spec && !resolvesWithin(spec, SPEC_ARTIFACT_DIR)) {
-        // spec_file set but not in expected location — reject and try fallback
-        spec = null;
-      }
-      if (!spec || !phaseArtifactExists(spec)) {
-        if (state.spec_dir) {
-          spec = findFile(state.spec_dir, "spec.md");
-        }
-      }
-      if (!spec || !phaseArtifactExists(spec)) return null;
+      const spec = readableSpecArtifact(state);
+      if (spec === null) return null;
       const markers = countMarkers(spec);
       if (markers > CLARIFY_THRESHOLD) {
         return { nextPhase: "clarify" as Phase, artifact: spec };
@@ -88,19 +82,8 @@ export function resolveTransition(
       return { nextPhase: "architecture" as Phase, artifact: spec, skipClarify: true };
     })
     .with("clarify", () => {
-      // Try state.spec_file first, fall back to finding spec.md on disk.
-      // The containment check is NOT optional here just because this branch
-      // only counts markers: the accepted path is also what lands in
-      // `phase_artifacts.clarify`, so an out-of-tree file read here becomes the
-      // run's authoritative spec artifact. Same rule as `specify` below/above.
-      let spec = state.spec_file;
-      if (spec && !resolvesWithin(spec, SPEC_ARTIFACT_DIR)) spec = null;
-      if (!spec || !phaseArtifactExists(spec)) {
-        if (state.spec_dir) {
-          spec = findFile(state.spec_dir, "spec.md");
-        }
-      }
-      if (!spec || !phaseArtifactExists(spec)) return null;
+      const spec = readableSpecArtifact(state);
+      if (spec === null) return null;
       const markers = countMarkers(spec);
       if (markers > 0) return null; // All markers must be resolved before advancing
       return { nextPhase: "architecture" as Phase, artifact: spec };

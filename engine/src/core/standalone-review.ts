@@ -1265,12 +1265,6 @@ export function aggregateStandaloneReview(input: {
   return aggregateCanonicalTranscripts(authority.runId, authority.scope, transcripts);
 }
 
-/** @deprecated Historical CLI adapter only — archived in ./legacy-archive (Section A).
- *  New orchestration must use aggregateStandaloneReview; this entry point and
- *  the re-export below survive only for historical run directories.
- *  Deprecation horizon: retire with the manual standalone-review helper. */
-export { aggregateLegacyStandaloneReview } from "./legacy-archive";
-
 export function serializeStandaloneAggregate(aggregate: StandaloneReviewAggregate): string {
   return JSON.stringify({
     schema_version: aggregate.schemaVersion,
@@ -1702,11 +1696,3 @@ export function canonicalStandaloneResultArtifact(
     ? resultOk(artifact.value)
     : resultFail({ message: `canonical standalone result artifact is invalid: ${artifact.error.message}` });
 }
-
-/** @deprecated Compatibility parser for explicitly unversioned historical bytes
- *  only — archived in ./legacy-archive (Section B). Schema-v1 results are
- *  accepted solely by the LC-2 authoritative publication parser, which
- *  requires frozen run/roster/finalization intent and its receipt.
- *  Deprecation horizon: retire once no run directory carries an unversioned
- *  result.json. */
-export { parseAdjudicatedStandaloneReview, type HistoricalStandaloneReviewResult } from "./legacy-archive";

@@ -1234,7 +1234,7 @@ export default function (pi: ExtensionAPI) {
 
       const projectRoot = process.cwd();
       const projectRulesPath = join(projectRoot, PROJECT_RULES_DIR);
-      const projectRulesDir = existsSync(projectRulesPath) ? projectRulesPath : null;
+      const projectRulesDir = pathExistsFailClosed(projectRulesPath) ? projectRulesPath : null;
 
       const loomDefaultRulesDir = join(PACKAGE_ROOT, "lint-rules");
       const response = processToolResult(

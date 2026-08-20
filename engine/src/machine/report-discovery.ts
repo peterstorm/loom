@@ -208,7 +208,6 @@ function isFresh(path: string, nowMs: number, callStartMs: number): boolean {
 }
 
 function readJunitDir(dir: string, nowMs: number, callStartMs: number): TestReportSummary[] {
-  if (!existsSync(dir)) return [];
   try {
     return readdirSync(dir)
       .filter((f) => f.endsWith(".xml"))
@@ -226,6 +225,7 @@ function readJunitDir(dir: string, nowMs: number, callStartMs: number): TestRepo
       })
       .filter((s): s is TestReportSummary => s !== null);
   } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return [];
     // Unreadable report dir → no reports (fail closed), logged so a
     // permissions/race problem is distinguishable from an empty dir.
     process.stderr.write(`findReport: cannot read JUnit dir '${dir}': ${errMessage(e)}\n`);

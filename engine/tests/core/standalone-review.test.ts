@@ -25,7 +25,6 @@ import {
 } from "../../src/core/orchestration-contract";
 import {
   STANDALONE_REVIEW_SUBJECT,
-  aggregateLegacyStandaloneReview,
   aggregateStandaloneReview,
   bindStandaloneCaptureAuthority,
   captureStandaloneReviewerBytes,
@@ -34,7 +33,6 @@ import {
   completeStandaloneReviewerCapture,
   finalizeStandaloneReview,
   fingerprintCapturedReviewerResult,
-  parseAdjudicatedStandaloneReview,
   parseCapturedReviewerResult,
   parsePreparedStandaloneReviewerCapture,
   parseStandaloneAggregate,
@@ -55,6 +53,10 @@ import {
 
   type StandaloneRosterCompletionProof,
 } from "../../src/core/standalone-review";
+import {
+  aggregateLegacyStandaloneReview,
+  parseAdjudicatedStandaloneReview,
+} from "../../src/core/legacy-archive";
 import {
   STANDALONE_REVIEW_DECLARED_TRANSITIONS,
   freezeStandaloneRefutationPanelAuthority,
