@@ -41,6 +41,7 @@ import { parseStoredSpecCheck } from "./core/spec-check";
 import { waveHasBlockCause } from "./core/wave-gate-model";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
 import { assertPiCliMutationCompatible, captureLoomRuntimeIdentity } from "./runtime-compatibility";
+import { isExactGitSha } from "./core/git-sha";
 
 const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
@@ -635,8 +636,7 @@ function taskPacketError(
   }
   if (
     t.artifact_baseline_recovered_from !== undefined &&
-    (typeof t.artifact_baseline_recovered_from !== "string" ||
-      !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(t.artifact_baseline_recovered_from))
+    !isExactGitSha(t.artifact_baseline_recovered_from)
   ) {
     return `tasks[${index}] ("${id}"): artifact_baseline_recovered_from must be a lowercase 40- or 64-character Git SHA`;
   }
@@ -652,7 +652,7 @@ function taskPacketError(
       const label = `tasks[${index}] ("${id}"): recovered_artifact_writes[${recoveryIndex}]`;
       if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return `${label} must be an object`;
       const recovery = raw as Record<string, unknown>;
-      if (typeof recovery.baseline_sha !== "string" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(recovery.baseline_sha)) {
+      if (!isExactGitSha(recovery.baseline_sha)) {
         return `${label}.baseline_sha must be an exact Git SHA`;
       }
       if (t.artifact_baseline_recovered_from !== undefined && recovery.baseline_sha !== t.artifact_baseline_recovered_from) {

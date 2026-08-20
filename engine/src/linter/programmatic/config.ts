@@ -6,7 +6,7 @@
  * without modifying the loom source.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BoundaryRule } from "./no-cross-boundary-imports";
 
@@ -53,12 +53,11 @@ export function loadProjectConfig(configDir: string | null): ProgrammaticConfig 
   if (!configDir) return EMPTY_CONFIG;
 
   const configPath = join(configDir, "config.json");
-  if (!existsSync(configPath)) return EMPTY_CONFIG;
-
   let content: string;
   try {
     content = readFileSync(configPath, "utf-8");
   } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return EMPTY_CONFIG;
     throw new Error(
       `Cannot read linter config at ${configPath}: ${e instanceof Error ? e.message : String(e)}. Check file permissions.`
     );

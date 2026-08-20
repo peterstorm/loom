@@ -12,7 +12,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { blockResult, type HookHandler, type SubagentStartInput } from "../../types";
-import { SUBAGENT_DIR, machinesDir, taskGraphPath } from "../../config";
+import { SUBAGENT_DIR, machinesDir, pathExistsFailClosed, taskGraphPath } from "../../config";
 import { stripNamespace } from "../../utils/strip-namespace";
 import {
   bindMachineAgent,
@@ -178,7 +178,7 @@ const handler: HookHandler = async (stdin) => {
   // of one session always share one orchestration graph, so they write the
   // identical value and never clobber each other; only a genuine graph switch
   // (sequential across repos) rewrites it.
-  const currentGraph = existsSync(taskGraph) ? resolve(taskGraph) : null;
+  const currentGraph = pathExistsFailClosed(taskGraph) ? resolve(taskGraph) : null;
   let storedGraph: string | null = null;
   try {
     storedGraph = existsSync(taskGraphFile) ? readFileSync(taskGraphFile, "utf-8").trim() : null;

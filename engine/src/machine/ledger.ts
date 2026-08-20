@@ -480,11 +480,11 @@ export async function removeActiveAgentStrict(sessionId: SessionId, agentId: Age
  */
 export async function removeActiveAgent(sessionId: SessionId, agentId: AgentId): Promise<void> {
   const path = activeFlagPath(sessionId);
-  if (!existsSync(path)) return;
   await withLock(bindingLock(sessionId), () => {
     try {
       removeActiveRosterEntry(path, agentId);
     } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       process.stderr.write(`removeActiveAgent: .active update failed for ${sessionId}: ${error}\n`);
     }
   });
@@ -568,7 +568,6 @@ export async function unbindMachineAgent(
   nowMs: number = Date.now(),
 ): Promise<void> {
   const path = machineBindingPath(sessionId);
-  if (!existsSync(path)) return;
   await withLock(bindingLock(sessionId), () => {
     try {
       const remaining = classifyBindingLines(sessionId, nowMs).filter(
@@ -583,6 +582,7 @@ export async function unbindMachineAgent(
         rewriteFileAtomic(path, remaining.map((l) => l.raw).join("\n") + "\n");
       }
     } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
       process.stderr.write(`unbindMachineAgent: failed for ${agentId}/${sessionId}: ${e}\n`);
     }
   });

@@ -10,7 +10,7 @@
  * decision needs, which is why the roster read lives here rather than there.
  */
 
-import { existsSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import { shouldBlockDirectEdit, type ActiveRosterProbe } from "../../core/block-direct-edits";
 import { subagentDir } from "../../config";
@@ -32,9 +32,10 @@ import { readActiveAgentRoles } from "../../machine/ledger";
 export const activeRosterProbe: ActiveRosterProbe = (sessionId) => {
   const activeFile = `${subagentDir()}/${sessionId}.active`;
   try {
-    if (!existsSync(activeFile) || statSync(activeFile).size === 0) return null;
+    if (statSync(activeFile).size === 0) return null;
     return readActiveAgentRoles(sessionId);
   } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
     process.stderr.write(
       `block-direct-edits: cannot check ${activeFile}: ${e instanceof Error ? e.message : String(e)} — falling through to block\n`,
     );

@@ -8,6 +8,7 @@
 import { createHash } from "node:crypto";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import { compareStrings } from "./ordering";
+import { isExactGitSha } from "./git-sha";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[];
@@ -147,7 +148,6 @@ export interface VerifiedReviewPacketRecovery {
 }
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
-const GIT_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const WINDOWS_ABSOLUTE = /^(?:[A-Za-z]:[\\/]|\\\\)/;
 const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
@@ -274,7 +274,7 @@ function parsePathSet(raw: unknown, label: string): ParseResult<readonly string[
 }
 
 function parseGitSha(raw: unknown, label: string): ParseResult<string> {
-  if (typeof raw !== "string" || !GIT_SHA.test(raw)) {
+  if (!isExactGitSha(raw)) {
     return fail([`${label} must be a lowercase 40- or 64-character hexadecimal git SHA`]);
   }
   return ok(raw);

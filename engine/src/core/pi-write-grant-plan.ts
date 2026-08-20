@@ -21,7 +21,11 @@
  * rejected-grant session) and both this planner and the edit gate must judge
  * the same instant.
  *
- * No I/O, no clock, no randomness.
+ * The decision functions perform no I/O, clock, or randomness. Importing this
+ * module is not currently side-effect-free: its Agent policy dependencies reach
+ * `config.ts`, whose initialization resolves the Task Graph through filesystem
+ * and Git probes. Splitting runtime discovery from Agent policy is tracked as
+ * a separate configuration-seam deepening.
  */
 
 import { match } from "ts-pattern";

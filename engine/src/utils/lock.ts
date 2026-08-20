@@ -23,6 +23,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Synchronous retry delay for shell APIs whose public contract is synchronous. */
+function sleepSync(ms: number): void {
+  const signal = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  Atomics.wait(signal, 0, 0, ms);
+}
+
 /** Check if a lock dir is stale (owning process is dead) */
 export function isStaleLock(lockDir: string): boolean {
   try {
@@ -118,6 +124,19 @@ export async function acquireLock(lockFile: string): Promise<void> {
   throw new Error(`Could not acquire lock after ${MAX_ATTEMPTS} attempts: ${lockFile}`);
 }
 
+/** Acquire the same cross-process lock for a synchronous shell boundary. */
+export function acquireLockSync(lockFile: string): void {
+  const lockDir = `${lockFile}.lock`;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    if (tryBirthLock(lockDir)) return;
+    if (attempt === 0 && isStaleLock(lockDir) && stealStaleLock(lockDir)) continue;
+    sleepSync(RETRY_MS);
+  }
+
+  throw new Error(`Could not acquire lock after ${MAX_ATTEMPTS} attempts: ${lockFile}`);
+}
+
 export function releaseLock(lockFile: string): void {
   const lockDir = `${lockFile}.lock`;
   try {
@@ -133,11 +152,21 @@ export function releaseLock(lockFile: string): void {
   }
 }
 
-/** Run fn while holding lock, auto-release on completion or error */
+/** Run fn while holding lock, auto-release on completion or error. */
 export async function withLock<T>(lockFile: string, fn: () => T | Promise<T>): Promise<T> {
   await acquireLock(lockFile);
   try {
     return await fn();
+  } finally {
+    releaseLock(lockFile);
+  }
+}
+
+/** Synchronous counterpart for synchronous filesystem adapters. */
+export function withLockSync<T>(lockFile: string, fn: () => T): T {
+  acquireLockSync(lockFile);
+  try {
+    return fn();
   } finally {
     releaseLock(lockFile);
   }

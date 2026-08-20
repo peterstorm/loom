@@ -14,7 +14,10 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { remediationAuditBlockMessage } from "../../../../src/handlers/helpers/programs/remediation";
+import {
+  recordInstalledRemediation,
+  remediationAuditBlockMessage,
+} from "../../../../src/handlers/helpers/programs/remediation";
 import type { CanonicalRepositoryRelativePath, RemediationAuditError } from "../../../../src/core/remediation-machine";
 
 const path = (value: string): CanonicalRepositoryRelativePath => value as CanonicalRepositoryRelativePath;
@@ -36,6 +39,35 @@ const auditError = (
 });
 
 const FRESH_RUN_ADVICE = "start a FRESH remediation run";
+
+describe("recordInstalledRemediation", () => {
+  it("reports a checkpoint failure as post-install and retains the receipt", async () => {
+    const receipt = {
+      kind: "verified-index-installed",
+      effectId: "effect:remediation-install:test",
+      runId: "run.remediation",
+      indexDigest: "a".repeat(64),
+      witnessDigest: "b".repeat(64),
+    } as never;
+    const handle = {
+      runId: "run.remediation",
+      writeCheckpoint: async () => { throw new Error("disk full"); },
+    } as never;
+
+    const result = await recordInstalledRemediation(
+      handle,
+      { state: "done", receipt } as never,
+      receipt,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain("verified index was installed");
+    expect(result.message).toContain("checkpoint recording failed: disk full");
+    expect(result.message).toContain('"kind":"verified-index-installed"');
+    expect(result.message).not.toContain("remediation-blocked");
+  });
+});
 
 describe("remediationAuditBlockMessage", () => {
   it("adds the fresh-run advice when a dirty path is unauthorized", () => {

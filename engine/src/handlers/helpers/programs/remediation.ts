@@ -4,7 +4,7 @@
  * helpers, the shared recovery/git/scope machinery). The public surface is
  * re-exported by index.ts so all existing import sites are unchanged.
  */
-import { parseEffectId, parseVerifiedIndexInstalled } from '../../../core/orchestration-contract';
+import { parseEffectId, parseVerifiedIndexInstalled, type VerifiedIndexInstalled } from '../../../core/orchestration-contract';
 import { parseStandaloneReviewMachineState } from '../../../core/standalone-review-machine';
 import { openRunDirectory, type RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { auditRemediationPaths, parseRepositorySnapshotWitness, prepareLiteralGitPathspec, prepareVerifiedIndexInstallation, reduceRemediation, stageTemporaryIndex, startRemediation, verifyTemporaryIndex, type RemediationAuditError, type RemediationState } from '../../../core/remediation-machine';
@@ -49,6 +49,24 @@ export function witness(repository: Parameters<typeof snapshotRepositoryWitness>
   if (!observed.ok) return { ok: false, message: observed.error.message };
   const parsed = parseRepositorySnapshotWitness(observed.value);
   return parsed.ok ? { ok: true, value: parsed.value } : { ok: false, message: parsed.error.message };
+}
+
+/** Persist terminal evidence after the real Git index has already been installed. */
+export async function recordInstalledRemediation(
+  handle: RunDirHandle,
+  state: Extract<RemediationState, { state: "done" }>,
+  receipt: VerifiedIndexInstalled,
+): Promise<FacadeDriveResult> {
+  try {
+    await handle.writeCheckpoint(JSON.stringify({ schemaVersion: 1, state }));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return failed(
+      `verified index was installed, but remediation checkpoint recording failed: ${detail}; ` +
+      `installation receipt: ${JSON.stringify(receipt)}`,
+    );
+  }
+  return { ok: true, action: { kind: "done", runId: handle.runId, outcome: receipt } };
 }
 
 export async function startRemediationFacade(
@@ -172,19 +190,23 @@ export async function driveRemediationFacade(
     if (!effectId.ok) return remediationBlocked(handle, effectId.error.message);
     const installation = prepareVerifiedIndexInstallation(verified.value, effectId.value, verificationWitness.value);
     if (!installation.ok) return remediationBlocked(handle, installation.error.message);
-    const installed = installVerifiedIndex(repository.value, temporary.value, verificationWitness.value);
-    if (!installed.ok) return remediationBlocked(handle, installed.error.message);
-    const receipt = {
-      kind: "verified-index-installed" as const,
+    const receipt: VerifiedIndexInstalled = {
+      kind: "verified-index-installed",
       effectId: installation.value.intent.effectId,
       runId: installation.value.intent.runId,
       indexDigest: installation.value.intent.indexDigest,
       witnessDigest: installation.value.intent.witnessDigest,
     };
     next = reduceRemediation(state, { kind: "index-installed", installation: installation.value, receipt });
-    if (!next.ok || next.value.state !== "done") return remediationBlocked(handle, next.ok ? "installation transition failed" : next.error.message);
-    await handle.writeCheckpoint(JSON.stringify({ schemaVersion: 1, state: next.value }));
-    return { ok: true, action: { kind: "done", runId: handle.runId, outcome: receipt } };
+    if (!next.ok || next.value.state !== "done") {
+      return remediationBlocked(handle, next.ok ? "installation transition failed" : next.error.message);
+    }
+    // Prove the terminal state before crossing the irreversible index-install
+    // boundary. After this call succeeds, no later error may claim that the
+    // repository remained unmodified.
+    const installed = installVerifiedIndex(repository.value, temporary.value, verificationWitness.value);
+    if (!installed.ok) return remediationBlocked(handle, installed.error.message);
+    return recordInstalledRemediation(handle, next.value, receipt);
   } catch (error) {
     return remediationBlocked(handle, error instanceof Error ? error.message : String(error));
   }

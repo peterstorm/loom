@@ -4,6 +4,7 @@
  */
 
 import { execSync, execFileSync } from "node:child_process";
+import { isExactGitSha } from "../core/git-sha";
 
 /**
  * Resolve the git repository root FRESH: CLAUDE_PROJECT_DIR > git rev-parse >
@@ -95,7 +96,7 @@ export function repositoryContext(): GitRepositoryContext {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(headSha)) {
+    if (!isExactGitSha(headSha)) {
       return { ok: false, error: `git returned an invalid HEAD for ${root}: ${JSON.stringify(headSha)}` };
     }
     return { ok: true, root, headSha };

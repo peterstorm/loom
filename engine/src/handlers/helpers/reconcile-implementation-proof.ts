@@ -32,8 +32,7 @@ import {
   type NewTestEvidence,
 } from "../subagent-stop/update-task-status";
 import { parseWaveArg } from "./wave-args";
-
-const GIT_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+import { isExactGitSha } from "../../core/git-sha";
 
 export interface RecoveryPacketBinding {
   readonly taskId: string;
@@ -68,7 +67,7 @@ export function parseRecoveredBaselineSha(args: readonly string[]): string | nul
   if (indexes.length === 0) return null;
   if (indexes.length > 1) throw new Error("--baseline-sha may be supplied only once");
   const value = args[indexes[0]! + 1];
-  if (!value || !GIT_SHA.test(value)) {
+  if (!isExactGitSha(value)) {
     throw new Error("--baseline-sha must be a lowercase 40- or 64-character Git SHA");
   }
   return value;

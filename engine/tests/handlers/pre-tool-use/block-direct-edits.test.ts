@@ -282,6 +282,28 @@ describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () =>
     }
   });
 
+  it("an ELOOP roster returns null AND announces the cause on stderr", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loom-roster-eloop-"));
+    dirs.push(dir);
+    process.env.LOOM_SUBAGENT_DIR = dir;
+    const session = parseSessionId(`roster-eloop-${process.pid}`)!;
+    const active = join(dir, `${session}.active`);
+    symlinkSync(active, active);
+
+    const written: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    try {
+      expect(activeRosterProbe(session)).toBeNull();
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(written.join("")).toContain("block-direct-edits: cannot check");
+    expect(written.join("")).toContain("ELOOP");
+  });
+
   it("an unreadable roster file returns null AND announces the cause on stderr", () => {
     const dir = mkdtempSync(join(tmpdir(), "loom-roster-eacces-"));
     dirs.push(dir);

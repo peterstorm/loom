@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { acquireLock, releaseLock, isStaleLock } from "../../src/utils/lock";
+import { acquireLock, isStaleLock, releaseLock, withLockSync } from "../../src/utils/lock";
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `lock-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -25,6 +25,16 @@ describe("lock", () => {
     expect(existsSync(`${lockFile}.lock`)).toBe(true);
 
     releaseLock(lockFile);
+    expect(existsSync(`${lockFile}.lock`)).toBe(false);
+  });
+
+  it("holds and releases the same protocol synchronously", () => {
+    tmpDir = makeTmpDir();
+    const lockFile = join(tmpDir, "sync");
+
+    const observed = withLockSync(lockFile, () => existsSync(`${lockFile}.lock`));
+
+    expect(observed).toBe(true);
     expect(existsSync(`${lockFile}.lock`)).toBe(false);
   });
 

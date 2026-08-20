@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, relative, resolve } from "node:path";
 import { renderMarkdownForPi } from "../engine/src/core/harness-resources";
 import { compareStrings } from "../engine/src/core/ordering";
+import { withLockSync } from "../engine/src/utils/lock";
 
 const RESOURCE_FORMAT_VERSION = "loom-pi-resources-v2";
 const SOURCE_TREES = ["skills", "commands", "references", "rules"] as const;
@@ -233,7 +234,6 @@ function quarantineInvalidRoot(root: string, cacheRoot: string): void {
 }
 
 function publishRenderedTree(
-  stage: string,
   root: string,
   cacheRoot: string,
   packageRoot: string,
@@ -242,14 +242,20 @@ function publishRenderedTree(
 ): void {
   for (let attempt = 1; attempt <= PUBLISH_ATTEMPTS; attempt++) {
     if (isReady(root, packageRoot, digest, files)) return;
-    quarantineInvalidRoot(root, cacheRoot);
+    const stage = mkdtempSync(join(cacheRoot, ".stage-"));
     try {
-      renameSync(stage, root);
-    } catch (error) {
-      if (!directoryEntryExists(root)) throw error;
-      continue;
+      writeRenderedTree(stage, packageRoot, files, digest);
+      quarantineInvalidRoot(root, cacheRoot);
+      try {
+        renameSync(stage, root);
+      } catch (error) {
+        if (!directoryEntryExists(root)) throw error;
+        continue;
+      }
+      if (isReady(root, packageRoot, digest, files)) return;
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
     }
-    if (isReady(root, packageRoot, digest, files)) return;
   }
   throw new Error(`Loom Pi resource cache could not be published after ${PUBLISH_ATTEMPTS} attempts: ${root}`);
 }
@@ -269,13 +275,13 @@ export function materializePiResources(rawPackageRoot: string, rawCacheRoot: str
   }
 
   if (!isReady(root, packageRoot, digest, files)) {
-    const stage = mkdtempSync(join(cacheRoot, ".stage-"));
-    try {
-      writeRenderedTree(stage, packageRoot, files, digest);
-      publishRenderedTree(stage, root, cacheRoot, packageRoot, digest, files);
-    } finally {
-      rmSync(stage, { recursive: true, force: true });
-    }
+    withLockSync(`${root}.publish`, () => {
+      // A contender may have completed while this process waited. Recheck
+      // under the lock before rendering or quarantining anything.
+      if (!isReady(root, packageRoot, digest, files)) {
+        publishRenderedTree(root, cacheRoot, packageRoot, digest, files);
+      }
+    });
   }
 
   if (!isReady(root, packageRoot, digest, files)) {

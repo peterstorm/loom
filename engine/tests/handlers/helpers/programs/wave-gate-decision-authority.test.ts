@@ -176,6 +176,8 @@ describe("wave review context authority", () => {
   it.each([
     ["a foreign Task payload", taskAuthority({ id: "T2" }), "identity/generation"],
     ["a stale Task generation", taskAuthority({ reviewGeneration: 1 }), "identity/generation"],
+    ["malformed proof evidence", taskAuthority({ proof: { state: "invented" } }), "task.proof is invalid"],
+    ["malformed test evidence", taskAuthority({ testResult: { verdict: "invented" } }), "task.testResult is invalid"],
     ["malformed prior Findings", taskAuthority({ priorFindings: [{ id: "missing-fields" }] }), "fields are invalid"],
   ] as const)("rejects %s", (_label, task, message) => {
     const packetId = "c".repeat(64);

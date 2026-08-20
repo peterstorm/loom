@@ -942,7 +942,7 @@ export default function (pi: ExtensionAPI) {
             reserved.push(agentId);
           }
           const activeTaskGraphPath = taskGraphPath();
-          if (needsTaskGraphLifecycle && existsSync(activeTaskGraphPath)) {
+          if (needsTaskGraphLifecycle && pathExistsFailClosed(activeTaskGraphPath)) {
             const taskGraphFile = `${subagentDir()}/${safeSessionId}.task_graph`;
             if (!existsSync(taskGraphFile)) {
               writeFileSync(taskGraphFile, resolve(activeTaskGraphPath));

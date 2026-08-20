@@ -424,20 +424,32 @@ export type ClassifiedPiSpawnBatch =
   | Readonly<{ kind: "loom-owned"; items: readonly PiSpawnItem[] }>
   | Readonly<{ kind: "external"; items: readonly ExternalPiSpawnItem[] }>;
 
+type PiSpawnInputMode =
+  | Readonly<{ kind: "single"; entries: readonly unknown[] }>
+  | Readonly<{ kind: "parallel"; entries: readonly unknown[] }>
+  | Readonly<{ kind: "chain"; entries: readonly unknown[] }>;
+
 function parseRawPiSpawnItems(raw: unknown): PolicyResult<readonly ExternalPiSpawnItem[]> {
   if (!isRecord(raw)) {
     return failure({ kind: "unknown-agent", message: "Pi subagent input must be an object" });
   }
-  const single = typeof raw.agent === "string" || typeof raw.task === "string";
-  const parallel = Array.isArray(raw.tasks) && raw.tasks.length > 0;
-  const chain = Array.isArray(raw.chain) && raw.chain.length > 0;
-  if (Number(single) + Number(parallel) + Number(chain) !== 1) {
+  const modes: PiSpawnInputMode[] = [];
+  if (typeof raw.agent === "string" || typeof raw.task === "string") {
+    modes.push(Object.freeze({ kind: "single", entries: Object.freeze([raw]) }));
+  }
+  if (Array.isArray(raw.tasks) && raw.tasks.length > 0) {
+    modes.push(Object.freeze({ kind: "parallel", entries: Object.freeze([...raw.tasks]) }));
+  }
+  if (Array.isArray(raw.chain) && raw.chain.length > 0) {
+    modes.push(Object.freeze({ kind: "chain", entries: Object.freeze([...raw.chain]) }));
+  }
+  if (modes.length !== 1) {
     return failure({
       kind: "unknown-agent",
       message: "Pi subagent input must provide exactly one non-empty single, parallel, or chain mode",
     });
   }
-  const entries: unknown[] = single ? [raw] : parallel ? raw.tasks as unknown[] : raw.chain as unknown[];
+  const entries = modes[0]!.entries;
   const items: ExternalPiSpawnItem[] = [];
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index];

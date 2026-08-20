@@ -25,6 +25,7 @@ import type { Finding, Task, TaskGraph } from '../../../types';
 import { anyActiveSubagent } from '../../../machine';
 import { parseSpecCheckOutput, reconcileSpecCheck } from '../../../core/spec-check';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
+import { parseTaskProof, parseTaskTestResult, type ProofTestResult, type TaskProof } from '../../../core/proof-obligations';
 import { durableCaptureRejection, durableRefutationRequests, exactObject, executableRefutationRequests, failed, parseRegisteredFacadeProgram, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic, renderSpawnTask, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
 
 export const waveGateDeps = Object.freeze({ loadPlanModels: loadPlanModelsSource, fileExists: existsSync });
@@ -819,8 +820,8 @@ export type WaveReviewTaskAuthority = Readonly<{
   specAnchors: readonly string[];
   declaredFiles: readonly string[];
   modifiedFiles: readonly string[];
-  proof: unknown;
-  testResult: unknown;
+  proof: TaskProof | null;
+  testResult: ProofTestResult | null;
   priorFindings: readonly Finding[];
 }>;
 
@@ -873,8 +874,18 @@ function parseWaveReviewTaskAuthority(
   const declaredFiles = parseStringArray(record.declaredFiles);
   const modifiedFiles = parseStringArray(record.modifiedFiles);
   const priorFindings = parseStoredFindings(record.priorFindings);
+  const proof = record.proof === null ? null : parseTaskProof(record.proof);
+  const testResult = record.testResult === null
+    ? null
+    : parseTaskTestResult(record.testResult, "wave-review-authority task.testResult");
   if (record.id !== taskId || record.reviewGeneration !== generation) {
     return { ok: false, message: "wave-review-authority task identity/generation does not match Task Run authority" };
+  }
+  if (proof !== null && !proof.ok) {
+    return { ok: false, message: `wave-review-authority task.proof is invalid: ${proof.errors.join("; ")}` };
+  }
+  if (testResult !== null && !testResult.ok) {
+    return { ok: false, message: `wave-review-authority task.testResult is invalid: ${testResult.errors.join("; ")}` };
   }
   if (typeof record.description !== "string" || typeof record.agent !== "string" || record.agent.trim() === "" ||
       (record.planContext !== null && typeof record.planContext !== "string") || specAnchors === null ||
@@ -893,8 +904,8 @@ function parseWaveReviewTaskAuthority(
       specAnchors,
       declaredFiles,
       modifiedFiles,
-      proof: record.proof,
-      testResult: record.testResult,
+      proof: proof === null ? null : proof.value,
+      testResult: testResult === null ? null : testResult.value,
       priorFindings: Object.freeze(priorFindings),
     }),
   };

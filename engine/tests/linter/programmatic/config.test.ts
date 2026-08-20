@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadProjectConfig, EMPTY_CONFIG, type ProgrammaticConfig } from "../../../src/linter/programmatic/config";
@@ -17,6 +17,14 @@ describe("programmatic config loader", () => {
   it("returns EMPTY_CONFIG when config.json doesn't exist", () => {
     const dir = makeTempDir();
     expect(loadProjectConfig(dir)).toEqual(EMPTY_CONFIG);
+  });
+
+  it("throws when config.json is inaccessible instead of silently disabling policy", () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, "config.json");
+    symlinkSync(configPath, configPath);
+
+    expect(() => loadProjectConfig(dir)).toThrow(/Cannot read linter config.*ELOOP/i);
   });
 
   it("parses boundaries from config.json", () => {

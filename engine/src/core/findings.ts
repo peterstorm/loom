@@ -63,6 +63,7 @@ import type {
 } from "../types";
 import type { HeadSha, PacketId } from "./review-packet";
 import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
+import { isExactGitSha } from "./git-sha";
 
 // The shapes live in types.ts (the schema root, with `Task`); this module owns
 // their BEHAVIOUR. Re-exported so every existing import site keeps working and
@@ -452,7 +453,7 @@ function parseStoredResolution(raw: unknown): ResolvedFinding | null {
       resolution.generation < 0) return null;
   if (finding.review_generation !== undefined && resolution.generation <= finding.review_generation) return null;
   if (typeof resolution.packet_id !== "string" || !/^[0-9a-f]{64}$/.test(resolution.packet_id)) return null;
-  if (typeof resolution.head_sha !== "string" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(resolution.head_sha)) return null;
+  if (!isExactGitSha(resolution.head_sha)) return null;
   if (!Array.isArray(resolution.expected_agents) || resolution.expected_agents.length === 0 ||
       resolution.expected_agents.some((agent) => typeof agent !== "string" || agent.trim() === "") ||
       new Set(resolution.expected_agents).size !== resolution.expected_agents.length) return null;
@@ -743,7 +744,7 @@ export function reviewRunError(
   if (typeof run.packet_id !== "string" || !/^[0-9a-f]{64}$/.test(run.packet_id)) {
     return `${label}.packet_id must be a lowercase SHA-256 digest`;
   }
-  if (typeof run.head_sha !== "string" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(run.head_sha)) {
+  if (!isExactGitSha(run.head_sha)) {
     return `${label}.head_sha must be an exact Git SHA`;
   }
   if (!Array.isArray(run.expected_agents) || run.expected_agents.length === 0 ||
@@ -1155,7 +1156,7 @@ export function startReviewRun(task: Task, binding: ReviewRunBinding): ReviewRun
   // the one thing a compile-time brand cannot cover — a value smuggled in by
   // an `as` cast rather than through `parsePacketId`/`parseHeadSha`.
   if (!/^[0-9a-f]{64}$/.test(binding.packetId)) return { ok: false, error: "review packet id is invalid" };
-  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(binding.headSha)) return { ok: false, error: "review head SHA is invalid" };
+  if (!isExactGitSha(binding.headSha)) return { ok: false, error: "review head SHA is invalid" };
   if (binding.expectedAgents.length === 0 || new Set(binding.expectedAgents).size !== binding.expectedAgents.length ||
       binding.expectedAgents.some((agent) => agent.trim() === "")) {
     return { ok: false, error: "review run expected agents must be non-empty and unique" };
@@ -1441,12 +1442,9 @@ export function mergeFindings(
   // could not see them.
   const hasCritical =
     (findings.criticalCount ?? 0) > 0 || merged.some((finding) => finding.severity === "critical");
-  const reviewStatus: ReviewStatus =
-    outstanding.length > 0
-      ? "evidence_capture_failed"
-      : task.review_status === "blocked" || hasCritical
-        ? "blocked"
-        : "passed";
+  let reviewStatus: ReviewStatus = "passed";
+  if (outstanding.length > 0) reviewStatus = "evidence_capture_failed";
+  else if (task.review_status === "blocked" || hasCritical) reviewStatus = "blocked";
 
   return {
     ...task,

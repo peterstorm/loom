@@ -11,7 +11,11 @@
  * may write at all — a judge whose prompt names candidate paths is READING
  * them and receives nothing. Path mentions only REFINE a writer's scope.
  *
- * No I/O, no clock, no randomness.
+ * The decision functions perform no I/O, clock, or randomness. Importing this
+ * module is not currently side-effect-free: `PHASE_AGENT_MAP` comes from
+ * `config.ts`, whose initialization resolves the Task Graph through filesystem
+ * and Git probes. Splitting runtime discovery from Agent policy is tracked as
+ * a separate configuration-seam deepening.
  */
 
 import { PHASE_AGENT_MAP } from "../config";

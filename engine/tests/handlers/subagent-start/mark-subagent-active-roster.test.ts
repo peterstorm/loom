@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SUBAGENT_DIR } from "../../../src/config";
@@ -125,6 +125,21 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     // This is why the failed rollback is security-sensitive: the ghost row is
     // still interpreted as an active implementation-role write authority.
     expect(shouldBlockDirectEdit("Edit", s, () => true, activeRosterProbe).kind).toBe("allow");
+  });
+
+  it("an inaccessible Task Graph still writes the fail-closed cross-repo pointer", async () => {
+    const s = session("graph-eloop");
+    const loop = join(stateDir, "graph-loop");
+    symlinkSync(loop, loop);
+    process.env.LOOM_STATE_PATH = loop;
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await markActive(start(s), []);
+      expect(result.kind).toBe("passthrough");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    expect(readFileSync(join(SUBAGENT_DIR, `${s}.task_graph`), "utf-8")).toBe(resolve(loop));
   });
 
   it("control: a healthy roster arms the binding AND writes .task_graph", async () => {
