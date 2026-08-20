@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { appendFileSync, mkdtempSync, readdirSync, rmSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Evidence } from "../../src/machine/types";
@@ -87,6 +87,13 @@ describe("evidence ledger", () => {
 
   it("reads [] for a session with no ledger", () => {
     expect(ledger.readEvidence(sid("never-seen"))).toEqual([]);
+  });
+
+  it("propagates an inaccessible ledger instead of treating it as empty evidence", () => {
+    const s = sid("inaccessible-evidence");
+    symlinkSync(ledger.ledgerPath(s), ledger.ledgerPath(s));
+
+    expect(() => ledger.readEvidence(s)).toThrow(/cannot read evidence ledger.*ELOOP/i);
   });
 
   it("skips corrupt, unknown, and epoch-less ledger lines", () => {
@@ -397,6 +404,13 @@ describe("machine registry", () => {
       writeFileSync(join(machines, "bad-agent.machine.json"), "{broken");
       expect(ledger.loadMachine(machines, agentType("bad-agent")).kind).toBe("invalid");
 
+      const loopPath = join(machines, "loop-agent.machine.json");
+      symlinkSync(loopPath, loopPath);
+      expect(ledger.loadMachine(machines, agentType("loop-agent"))).toMatchObject({
+        kind: "invalid",
+        error: expect.stringMatching(/cannot read machine definition.*ELOOP/i),
+      });
+
       writeFileSync(
         join(machines, "mismatch-agent.machine.json"),
         JSON.stringify({
@@ -440,6 +454,23 @@ describe("roster records the agent role alongside its identity", () => {
       { agentId: "pi-grant-abcdef0123456789", agentType: null },
     ]);
     expect(ledger.countActiveAgents(s)).toBe(1);
+  });
+
+  it("propagates an inaccessible roster instead of standing down as if it were empty", () => {
+    const s = sid("roster-inaccessible-read");
+    const path = `${SUBAGENT_DIR}/${s}.active`;
+    symlinkSync(path, path);
+
+    expect(() => ledger.readActiveAgentRoles(s)).toThrow(/cannot read active roster.*ELOOP/i);
+    expect(() => ledger.soleActiveBinding(s)).toThrow(/cannot read active roster.*ELOOP/i);
+  });
+
+  it("strict removal reports an inaccessible roster instead of claiming rollback succeeded", async () => {
+    const s = sid("roster-inaccessible-removal");
+    const path = `${SUBAGENT_DIR}/${s}.active`;
+    symlinkSync(path, path);
+
+    await expect(ledger.removeActiveAgentStrict(s, agentId("denied-agent"))).rejects.toThrow(/ELOOP/i);
   });
 
   it("treats identity as column 0 for duplicate detection", async () => {

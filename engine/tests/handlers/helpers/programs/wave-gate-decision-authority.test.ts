@@ -114,6 +114,21 @@ describe("wave review context authority", () => {
     return packet.value;
   };
 
+  const taskAuthority = (overrides: Record<string, unknown> = {}) => ({
+    id: "T1",
+    description: "review T1",
+    agent: "code-implementer-agent",
+    reviewGeneration: 0,
+    planContext: null,
+    specAnchors: [],
+    declaredFiles: ["engine/src/a.ts"],
+    modifiedFiles: ["engine/src/a.ts"],
+    proof: null,
+    testResult: null,
+    priorFindings: [],
+    ...overrides,
+  });
+
   it("loads only a proven exact authority shape", () => {
     const packet = packetFor({
       runId: RUN_ID,
@@ -142,7 +157,7 @@ describe("wave review context authority", () => {
       batchEpoch: "b".repeat(64),
       subject: { role: "code-reviewer", taskId: "T1" },
       taskRun: { taskId: "T1", generation: 0, packetId, headSha: "d".repeat(64) },
-      task: { id: "T1" },
+      task: taskAuthority(),
       packetId,
       specFile: null,
       planFile: null,
@@ -150,7 +165,36 @@ describe("wave review context authority", () => {
 
     expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
       kind: "loaded",
-      value: { subject: { role: "code-reviewer", taskId: "T1" }, packetId },
+      value: {
+        subject: { role: "code-reviewer", taskId: "T1" },
+        task: { id: "T1", reviewGeneration: 0, declaredFiles: ["engine/src/a.ts"] },
+        packetId,
+      },
+    });
+  });
+
+  it.each([
+    ["a foreign Task payload", taskAuthority({ id: "T2" }), "identity/generation"],
+    ["a stale Task generation", taskAuthority({ reviewGeneration: 1 }), "identity/generation"],
+    ["malformed prior Findings", taskAuthority({ priorFindings: [{ id: "missing-fields" }] }), "fields are invalid"],
+  ] as const)("rejects %s", (_label, task, message) => {
+    const packetId = "c".repeat(64);
+    const packet = packetFor({
+      runId: RUN_ID,
+      wave: 1,
+      authorityDigest: DIGEST,
+      batchEpoch: "b".repeat(64),
+      subject: { role: "code-reviewer", taskId: "T1" },
+      taskRun: { taskId: "T1", generation: 0, packetId, headSha: "d".repeat(64) },
+      task,
+      packetId,
+      specFile: null,
+      planFile: null,
+    });
+
+    expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
+      kind: "corrupt",
+      message: expect.stringContaining(message),
     });
   });
 

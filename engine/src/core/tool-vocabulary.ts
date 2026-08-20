@@ -1,6 +1,6 @@
 /**
- * Tool + test-runner vocabulary — pure constants (the only import is the
- * pure machine/types module, for the gate-wired tool tuple).
+ * Tool + test-runner vocabulary — pure constants built only from pure core
+ * and machine vocabulary helpers.
  *
  * Lives outside config.ts so pure modules (the guarded-skill-machine core,
  * the transcript parsers) can use the vocabulary without transitively

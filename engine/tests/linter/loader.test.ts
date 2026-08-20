@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadRules } from "../../src/linter/loader";
@@ -245,6 +245,15 @@ describe("loadRules", () => {
 
       expect(rules).toHaveLength(1);
       expect(rules[0].source).toBe("default");
+    });
+
+    it("surfaces an inaccessible projectDir instead of silently disabling project policy", () => {
+      writeRule(defaultDir, "rule.json", makeValidRule({ name: "default-only" }));
+      rmSync(projectDir, { recursive: true, force: true });
+      symlinkSync(projectDir, projectDir);
+
+      expect(() => loadRules(defaultDir, projectDir, "full", { includeProgrammatic: false }))
+        .toThrow(/ELOOP/i);
     });
   });
 

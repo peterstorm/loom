@@ -334,6 +334,40 @@ describe("Pi extension review tool_result integration", () => {
     expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings).toBeUndefined();
   });
 
+  it("retains malformed Pi transcript diagnostics in the capture rejection", async () => {
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      capturePiSubagentResult: (
+        toolCallId: unknown,
+        resultIndex: number,
+        agentType: string,
+        messages: unknown,
+      ) => Promise<{ kind: string; reason?: string; message?: string }>;
+    };
+    const staged = await piCaptureRun("pi-malformed-transcript-shape");
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = staged.runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = staged.runDir;
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const outcome = await module.capturePiSubagentResult(
+        "call-malformed-transcript",
+        0,
+        "code-reviewer",
+        [null],
+      );
+
+      expect(outcome).toEqual({
+        kind: "rejected",
+        reason: "transcript-shape",
+        message: "messages[0] must be an object",
+      });
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toContain("rejected (transcript-shape): messages[0] must be an object");
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it("does not apply Pi review evidence after request-bound capture rejection", async () => {
     const pi = await extension();
     const staged = await piCaptureRun("pi-rejected-capture");

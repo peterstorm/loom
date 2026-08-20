@@ -41,15 +41,9 @@ stdinPromise.catch(() => {});
 
 function resultToExit(result: HookResult): never {
   match(result)
-    .with({ kind: "allow" }, ({ systemMessage }) => {
-      // JSON on stdout, not stderr: a hook that exits 0 has its stderr
-      // swallowed, so a gate reporting that it could not run reached nobody.
-      if (systemMessage) process.stdout.write(JSON.stringify({ systemMessage }) + "\n");
-      process.exit(0);
-    })
-    .with({ kind: "passthrough" }, ({ systemMessage }) => {
-      // Same channel and same reason as `allow` above: a passthrough hook also
-      // exits 0, so its stderr reaches nobody.
+    .with({ kind: "allow" }, { kind: "passthrough" }, ({ systemMessage }) => {
+      // JSON on stdout, not stderr: successful hooks have stderr swallowed,
+      // so this is the only channel that reaches the operator.
       if (systemMessage) process.stdout.write(JSON.stringify({ systemMessage }) + "\n");
       process.exit(0);
     })

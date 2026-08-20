@@ -129,6 +129,16 @@ function rewriteFileAtomic(path: string, content: string): void {
   renameSync(tmp, path);
 }
 
+/** Read an optional text file without collapsing access/path failures into absence. */
+function readOptionalTextFile(path: string, label: string): string | null {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error(`cannot read ${label} ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 // --- Bindings ---
 
 /** One raw binding-file line classified for liveness decisions. */
@@ -198,8 +208,9 @@ const rosterLineAgentId = (line: string): AgentId => rosterAgentId(line.split("\
 
 function readActiveAgentEntries(sessionId: SessionId): ActiveAgent[] {
   const path = activeFlagPath(sessionId);
-  if (!existsSync(path)) return [];
-  return readFileSync(path, "utf-8")
+  const content = readOptionalTextFile(path, "active roster");
+  if (content === null) return [];
+  return content
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l !== "")
@@ -453,8 +464,14 @@ function removeActiveRosterEntry(path: string, agentId: AgentId): void {
  */
 export async function removeActiveAgentStrict(sessionId: SessionId, agentId: AgentId): Promise<void> {
   const path = activeFlagPath(sessionId);
-  if (!existsSync(path)) return;
-  await withLock(bindingLock(sessionId), () => removeActiveRosterEntry(path, agentId));
+  await withLock(bindingLock(sessionId), () => {
+    try {
+      removeActiveRosterEntry(path, agentId);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+  });
 }
 
 /**
@@ -661,8 +678,9 @@ export function callStartFor(sessionId: SessionId, toolUseId: string): number | 
 
 export function readEvidence(sessionId: SessionId): readonly EvidenceRecord[] {
   const path = ledgerPath(sessionId);
-  if (!existsSync(path)) return [];
-  const lines = readFileSync(path, "utf-8")
+  const content = readOptionalTextFile(path, "evidence ledger");
+  if (content === null) return [];
+  const lines = content
     .split("\n")
     .filter((l) => l.trim() !== "");
   const records = lines.map(parseEvidenceLine).filter((r): r is EvidenceRecord => r !== null);
@@ -699,8 +717,14 @@ export type LoadedMachine =
  */
 export function loadMachine(machinesDir: string, agentType: AgentType): LoadedMachine {
   const path = machineDefPath(machinesDir, agentType);
-  if (!existsSync(path)) return { kind: "none" };
-  const parsed = parseMachineJson(readFileSync(path, "utf-8"));
+  let content: string | null;
+  try {
+    content = readOptionalTextFile(path, "machine definition");
+  } catch (error) {
+    return { kind: "invalid", error: error instanceof Error ? error.message : String(error) };
+  }
+  if (content === null) return { kind: "none" };
+  const parsed = parseMachineJson(content);
   if (!parsed.ok) return { kind: "invalid", error: `${path}: ${parsed.error}` };
   if (parsed.value.agent !== agentType) {
     return { kind: "invalid", error: `${path}: machine.agent "${parsed.value.agent}" does not match file name agent "${agentType}"` };

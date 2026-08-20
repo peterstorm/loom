@@ -6,13 +6,22 @@
  */
 
 import { createHash } from "node:crypto";
-import type { IssuedReviewPacketRegistration } from "../types";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import { compareStrings } from "./ordering";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[];
 export type JsonObject = Readonly<{ [key: string]: JsonValue }>;
+
+/** Persisted provenance binding for one engine-issued Review Packet. */
+export interface IssuedReviewPacketRegistration {
+  readonly task_id: string;
+  readonly packet_id: string;
+  readonly packet_path: string;
+  readonly base_sha: string;
+  readonly head_sha: string;
+  readonly scope: readonly string[];
+}
 
 export const REVIEW_PACKET_SCHEMA_VERSION = 2 as const;
 export const REVIEW_POSTIMAGE_ENCODINGS = ["utf8", "base64"] as const;

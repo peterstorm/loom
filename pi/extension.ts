@@ -485,16 +485,22 @@ export async function capturePiSubagentResult(
 ): Promise<CaptureOutcome> {
   try {
     const candidates = piResultFinalPayloadCandidates(messages ?? []);
-    const outcome = await captureHarnessResult({
-      harness: "pi",
-      runsRoot: runBinding?.runsRoot ?? process.env[RUNS_ROOT_ENV],
-      runDirectory: runBinding?.runDirectory ?? process.env[RUN_DIR_ENV],
-      nativeId: piSpawnRosterId(toolCallId, resultIndex, agentType),
-      // Malformed messages yield NO candidate rather than a guess, so the
-      // ambiguity rules reject instead of accepting salvage — the same posture
-      // the Claude adapter takes for an unreadable transcript.
-      candidates: candidates.ok ? candidates.value : [],
-    });
+    const runsRoot = runBinding?.runsRoot ?? process.env[RUNS_ROOT_ENV];
+    const runDirectory = runBinding?.runDirectory ?? process.env[RUN_DIR_ENV];
+    const hasRunAuthority = runsRoot !== undefined || runDirectory !== undefined;
+    const outcome: CaptureOutcome = !candidates.ok && hasRunAuthority
+      ? {
+          kind: "rejected",
+          reason: "transcript-shape",
+          message: candidates.errors.join("; "),
+        }
+      : await captureHarnessResult({
+          harness: "pi",
+          runsRoot,
+          runDirectory,
+          nativeId: piSpawnRosterId(toolCallId, resultIndex, agentType),
+          candidates: candidates.ok ? candidates.value : [],
+        });
     const audit = captureAuditLine("loom(pi): capture-orchestration-result", outcome);
     if (audit !== null) process.stderr.write(audit);
     return outcome;

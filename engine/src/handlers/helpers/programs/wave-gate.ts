@@ -19,9 +19,9 @@ import { StateManager } from '../../../state-manager';
 import { commitWaveGateCompletion, deriveWaveAdvisoryDecisionRequest, deriveWaveGateDriveStep, deriveWaveReadiness, deriveWaveRefutationPlan, waveAdvisoryDecisionActionRequest, WAVE_REVIEW_AGENTS, type WaveAdvisoryDecisionRequest } from '../../../core/wave-gate-machine';
 import { loadPlanModelsSource } from '../complete-wave-gate';
 import { runFullTierWaveLint } from '../lint-wave-gate';
-import { applyFindingOutcomes, preserveAcceptedReviewRunFindings } from '../../../core/findings';
+import { applyFindingOutcomes, parseStoredFindings, preserveAcceptedReviewRunFindings } from '../../../core/findings';
 import { applyReviewResolution, constrainReviewResolutionToScope, resolveTaskReviewFindings } from '../../../core/review-output';
-import { Task, TaskGraph } from '../../../types';
+import type { Finding, Task, TaskGraph } from '../../../types';
 import { anyActiveSubagent } from '../../../machine';
 import { parseSpecCheckOutput, reconcileSpecCheck } from '../../../core/spec-check';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
@@ -810,6 +810,20 @@ type WaveReviewContextBase = Readonly<{
   planFile: string | null;
 }>;
 
+export type WaveReviewTaskAuthority = Readonly<{
+  id: string;
+  description: string;
+  agent: string;
+  reviewGeneration: number;
+  planContext: string | null;
+  specAnchors: readonly string[];
+  declaredFiles: readonly string[];
+  modifiedFiles: readonly string[];
+  proof: unknown;
+  testResult: unknown;
+  priorFindings: readonly Finding[];
+}>;
+
 export type WaveReviewContextAuthority =
   | Readonly<WaveReviewContextBase & {
       subject: Readonly<{ role: "spec-check-invoker"; taskId: null }>;
@@ -820,7 +834,7 @@ export type WaveReviewContextAuthority =
   | Readonly<WaveReviewContextBase & {
       subject: Readonly<{ role: (typeof WAVE_REVIEW_AGENTS)[number]; taskId: string }>;
       taskRun: WaveTaskRunAuthority;
-      task: Readonly<Record<string, unknown>>;
+      task: WaveReviewTaskAuthority;
       packetId: string;
     }>;
 
@@ -830,6 +844,61 @@ export type WaveReviewContextRead =
   | Readonly<{ kind: "loaded"; value: WaveReviewContextAuthority }>;
 
 const corruptWaveContext = (message: string): WaveReviewContextRead => ({ kind: "corrupt", message });
+
+type WaveReviewTaskParse =
+  | Readonly<{ ok: true; value: WaveReviewTaskAuthority }>
+  | Readonly<{ ok: false; message: string }>;
+
+function parseStringArray(raw: unknown): readonly string[] | null {
+  return Array.isArray(raw) && raw.every((entry) => typeof entry === "string")
+    ? Object.freeze([...raw])
+    : null;
+}
+
+function parseWaveReviewTaskAuthority(
+  raw: unknown,
+  taskId: string,
+  generation: number,
+): WaveReviewTaskParse {
+  const keys = [
+    "id", "description", "agent", "reviewGeneration", "planContext", "specAnchors",
+    "declaredFiles", "modifiedFiles", "proof", "testResult", "priorFindings",
+  ];
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw) ||
+      !exactObject(raw as Record<string, unknown>, keys)) {
+    return { ok: false, message: "wave-review-authority task has an invalid schema" };
+  }
+  const record = raw as Record<string, unknown>;
+  const specAnchors = parseStringArray(record.specAnchors);
+  const declaredFiles = parseStringArray(record.declaredFiles);
+  const modifiedFiles = parseStringArray(record.modifiedFiles);
+  const priorFindings = parseStoredFindings(record.priorFindings);
+  if (record.id !== taskId || record.reviewGeneration !== generation) {
+    return { ok: false, message: "wave-review-authority task identity/generation does not match Task Run authority" };
+  }
+  if (typeof record.description !== "string" || typeof record.agent !== "string" || record.agent.trim() === "" ||
+      (record.planContext !== null && typeof record.planContext !== "string") || specAnchors === null ||
+      declaredFiles === null || modifiedFiles === null || !Array.isArray(record.priorFindings) ||
+      priorFindings.length !== record.priorFindings.length) {
+    return { ok: false, message: "wave-review-authority task fields are invalid" };
+  }
+  return {
+    ok: true,
+    value: Object.freeze({
+      id: taskId,
+      description: record.description,
+      agent: record.agent,
+      reviewGeneration: generation,
+      planContext: record.planContext,
+      specAnchors,
+      declaredFiles,
+      modifiedFiles,
+      proof: record.proof,
+      testResult: record.testResult,
+      priorFindings: Object.freeze(priorFindings),
+    }),
+  };
+}
 
 function parseWaveReviewContextAuthority(raw: unknown): WaveReviewContextRead {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw) || !exactObject(raw as Record<string, unknown>, [
@@ -908,10 +977,11 @@ function parseWaveReviewContextAuthority(raw: unknown): WaveReviewContextRead {
     };
   }
   if (typeof subject.taskId !== "string" || taskRun === null ||
-      subject.taskId !== taskRun.taskId || record.packetId !== taskRun.packetId ||
-      typeof record.task !== "object" || record.task === null || Array.isArray(record.task)) {
+      subject.taskId !== taskRun.taskId || record.packetId !== taskRun.packetId) {
     return corruptWaveContext("wave-review-authority Task reviewer subject lacks matching Task authority");
   }
+  const task = parseWaveReviewTaskAuthority(record.task, subject.taskId, taskRun.generation);
+  if (!task.ok) return corruptWaveContext(task.message);
   return {
     kind: "loaded",
     value: Object.freeze({
@@ -921,7 +991,7 @@ function parseWaveReviewContextAuthority(raw: unknown): WaveReviewContextRead {
         taskId: subject.taskId,
       }),
       taskRun,
-      task: Object.freeze(record.task as Record<string, unknown>),
+      task: task.value,
       packetId: taskRun.packetId,
     }),
   };

@@ -4,6 +4,8 @@
 
 import type { TaskProof } from "./core/proof-obligations";
 import type { DeclaredArtifactBaseline } from "./core/artifact-baseline";
+import type { IssuedReviewPacketRegistration } from "./core/review-packet";
+export type { IssuedReviewPacketRegistration } from "./core/review-packet";
 import type {
   ArtifactDigest,
   ArtifactRef,
@@ -286,15 +288,6 @@ export interface RefutedFinding {
   readonly finding: Finding;
   /** The lenses that refuted it, with their reasoning, in lens order. */
   readonly refutations: NonEmptyRefutations;
-}
-
-export interface IssuedReviewPacketRegistration {
-  readonly task_id: string;
-  readonly packet_id: string;
-  readonly packet_path: string;
-  readonly base_sha: string;
-  readonly head_sha: string;
-  readonly scope: readonly string[];
 }
 
 export interface RecoveredArtifactWriteEvidence {

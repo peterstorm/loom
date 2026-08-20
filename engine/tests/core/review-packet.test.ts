@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import fc from "fast-check";
 import {
   createReviewPacket,
@@ -52,6 +53,12 @@ function expectError(result: ReturnType<typeof createReviewPacket>, text: RegExp
 }
 
 describe("Review Packet", () => {
+  it("owns packet registration types without importing the outer schema aggregate", () => {
+    const source = readFileSync(new URL("../../src/core/review-packet.ts", import.meta.url), "utf-8");
+
+    expect(source).not.toMatch(/from ["']\.\.\/types["']/);
+  });
+
   it("implements standard SHA-256 deterministically without ambient crypto", () => {
     expect(sha256Hex("")).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     expect(sha256Hex("abc")).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
