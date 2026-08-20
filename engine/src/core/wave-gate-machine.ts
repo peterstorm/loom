@@ -27,6 +27,12 @@ import type {
 import { newWaveGate, reconcileWaveBlock, testResultPassed } from "./wave-gate-model";
 import type { ProofFailure } from "./proof-obligations";
 import {
+  WAVE_REVIEW_AGENTS,
+  lowerModelProfile,
+  resolveAgentPolicy,
+  resolveModelProfile,
+} from "./model-profiles";
+import {
   awaitUserAction,
   blockedAction,
   canonicalRecord,
@@ -1245,8 +1251,6 @@ export function commitWaveGateCompletion(
   });
 }
 
-import { WAVE_REVIEW_AGENTS } from "./model-profiles";
-
 export { WAVE_REVIEW_AGENTS };
 
 type WaveReviewAgent = (typeof WAVE_REVIEW_AGENTS)[number];
@@ -1343,40 +1347,7 @@ function subjectMatches(
   ));
 }
 
-const waveReviewModelAuthority = Object.freeze({
-  "spec-check-invoker": Object.freeze({
-    profile: "general-review",
-    pi: Object.freeze({ harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" }),
-    claude: Object.freeze({ harness: "claude-code", model: "sonnet" }),
-  }),
-  "code-reviewer": Object.freeze({
-    profile: "general-review",
-    pi: Object.freeze({ harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" }),
-    claude: Object.freeze({ harness: "claude-code", model: "sonnet" }),
-  }),
-  "silent-failure-hunter": Object.freeze({
-    profile: "focused-review",
-    pi: Object.freeze({ harness: "pi", provider: "openai-codex", model: "gpt-5.5", thinking: "high" }),
-    claude: Object.freeze({ harness: "claude-code", model: "sonnet" }),
-  }),
-  "pr-test-analyzer": Object.freeze({
-    profile: "focused-review",
-    pi: Object.freeze({ harness: "pi", provider: "openai-codex", model: "gpt-5.5", thinking: "high" }),
-    claude: Object.freeze({ harness: "claude-code", model: "sonnet" }),
-  }),
-  "type-design-analyzer": Object.freeze({
-    profile: "focused-review",
-    pi: Object.freeze({ harness: "pi", provider: "openai-codex", model: "gpt-5.5", thinking: "high" }),
-    claude: Object.freeze({ harness: "claude-code", model: "sonnet" }),
-  }),
-  "comment-analyzer": Object.freeze({
-    profile: "focused-review",
-    pi: Object.freeze({ harness: "pi", provider: "openai-codex", model: "gpt-5.5", thinking: "high" }),
-    claude: Object.freeze({ harness: "claude-code", model: "sonnet" }),
-  }),
-} as const);
-
-type WaveReviewRole = keyof typeof waveReviewModelAuthority;
+type WaveReviewRole = "spec-check-invoker" | (typeof WAVE_REVIEW_AGENTS)[number];
 
 function prepareReviewPacketForTask(
   snapshot: WaveReadinessSnapshot,
@@ -1443,7 +1414,10 @@ function deriveWaveReviewBinding(
   const slotHash = createHash("sha256").update(subjectAuthority).digest("hex");
   const slotId = parseSlotId(`wave-slot:${slotHash.slice(0, 32)}`);
   if (!slotId.ok) return preparationFailure(slotId.error.message);
-  const model = waveReviewModelAuthority[role];
+  const policy = resolveAgentPolicy(role);
+  if (!policy.ok) return preparationFailure(policy.error.message);
+  const profile = resolveModelProfile(policy.value.profile);
+  if (!profile.ok) return preparationFailure(profile.error.message);
   const attempts: InitialSpawnRequestInput[] = [];
   for (const attempt of [1, 2] as const) {
     const requestId = parseRequestId(`wave-request:${slotHash.slice(0, 32)}:${attempt}`);
@@ -1460,9 +1434,12 @@ function deriveWaveReviewBinding(
       program: "wave-gate",
       role,
       attempt,
-      modelProfile: model.profile,
-      harnessBinding: { pi: model.pi, claude: model.claude },
-      requiredSkill: role === "spec-check-invoker" ? "spec-check" : null,
+      modelProfile: policy.value.profile,
+      harnessBinding: {
+        pi: lowerModelProfile(profile.value, "pi"),
+        claude: lowerModelProfile(profile.value, "claude-code"),
+      },
+      requiredSkill: policy.value.requiredSkill,
       contextDigest: contextDigest.value,
       outputSlot: `transcripts/wave-${slotHash.slice(0, 32)}/attempt-${attempt}.raw`,
     });

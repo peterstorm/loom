@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { acquireLock, isStaleLock, releaseLock, withLockSync } from "../../src/utils/lock";
@@ -89,6 +89,33 @@ describe("lock", () => {
     // Should NOT be stale — process exists, we just can't signal it
     expect(isStaleLock(lockDir)).toBe(false);
   });
+
+  it("treats an inaccessible pid path as live instead of reaping its lock", () => {
+    tmpDir = makeTmpDir();
+    const lockDir = join(tmpDir, "pid-eloop.lock");
+    mkdirSync(lockDir);
+    symlinkSync("pid", join(lockDir, "pid"));
+
+    expect(isStaleLock(lockDir)).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "surfaces removal failure after proving this process owns the lock",
+    () => {
+      tmpDir = makeTmpDir();
+      const lockFile = join(tmpDir, "owned");
+      const lockDir = `${lockFile}.lock`;
+      mkdirSync(lockDir);
+      writeFileSync(join(lockDir, "pid"), `${process.pid}`);
+      chmodSync(tmpDir, 0o500);
+      try {
+        expect(() => releaseLock(lockFile)).toThrow(/Failed to release owned lock/);
+        expect(existsSync(lockDir)).toBe(true);
+      } finally {
+        chmodSync(tmpDir, 0o700);
+      }
+    },
+  );
 });
 
 describe("stealStaleLock — live-lock restore path (round-10 gap 18)", () => {

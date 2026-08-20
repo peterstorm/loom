@@ -744,37 +744,37 @@ export interface WaveReviewEpochAuthority {
 }
 
 export interface TaskGraph {
-  current_phase: Phase;
+  readonly current_phase: Phase;
   /** Readonly like `tasks`: every mutation must flow through StateManager.update's locked transform. */
-  phase_artifacts: Readonly<Partial<Record<Phase, string>>>;
-  skipped_phases: readonly Phase[];
-  spec_dir?: string | null;
-  spec_file: string | null;
-  plan_file: string | null;
-  plan_title?: string;
+  readonly phase_artifacts: Readonly<Partial<Record<Phase, string>>>;
+  readonly skipped_phases: readonly Phase[];
+  readonly spec_dir?: string | null;
+  readonly spec_file: string | null;
+  readonly plan_file: string | null;
+  readonly plan_title?: string;
   /** `readonly` for the same reason `Task.findings` is: every producer already
    *  returns a fresh array, and an in-place `push`/`sort` on the task list is a
    *  state mutation that bypasses `StateManager.update`'s locked transform. */
-  tasks: readonly Task[];
-  current_wave?: number;
-  executing_tasks?: readonly string[];
+  readonly tasks: readonly Task[];
+  readonly current_wave?: number;
+  readonly executing_tasks?: readonly string[];
   /** Readonly like `tasks`: wave gates are derived per wave and every writer
    *  replaces the record (or a gate) with a fresh object through
    *  StateManager.update's locked transform. A holder of the graph must not be
    *  able to mutate a gate — or add a gate — in place and bypass that. */
-  wave_gates: Readonly<Record<string, WaveGate>>;
-  github_issue?: number;
-  github_repo?: string;
-  spec_check?: SpecCheck;
+  readonly wave_gates: Readonly<Record<string, WaveGate>>;
+  readonly github_issue?: number;
+  readonly github_repo?: string;
+  readonly spec_check?: SpecCheck;
   /** Exact current Wave review batch epoch, shared by reviewer and spec-check slots. */
-  wave_review_epoch?: WaveReviewEpochAuthority;
+  readonly wave_review_epoch?: WaveReviewEpochAuthority;
   /** Parser-proven protected registration; absent until a Wave Gate is explicitly registered. */
-  active_wave_gate?: ActiveWaveGateRegistration;
+  readonly active_wave_gate?: ActiveWaveGateRegistration;
   /** Immutable terminal registrations, separate from authority for the next Wave. */
-  wave_gate_history?: readonly CompletedWaveGateRegistration[];
+  readonly wave_gate_history?: readonly CompletedWaveGateRegistration[];
   /** Nonterminal retirement audit for missing Run Directories replaced in-place. */
-  orphaned_wave_gate_history?: readonly OrphanedWaveGateRetirement[];
-  updated_at?: string;
+  readonly orphaned_wave_gate_history?: readonly OrphanedWaveGateRetirement[];
+  readonly updated_at?: string;
 }
 
 // ---------------------------------------------------------------------------

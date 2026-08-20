@@ -9,7 +9,7 @@
  * 3. Persist the task_graph absolute path for cross-repo SubagentStop access.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { blockResult, type HookHandler, type SubagentStartInput } from "../../types";
 import { SUBAGENT_DIR, machinesDir, pathExistsFailClosed, taskGraphPath } from "../../config";
@@ -181,9 +181,13 @@ const handler: HookHandler = async (stdin) => {
   const currentGraph = pathExistsFailClosed(taskGraph) ? resolve(taskGraph) : null;
   let storedGraph: string | null = null;
   try {
-    storedGraph = existsSync(taskGraphFile) ? readFileSync(taskGraphFile, "utf-8").trim() : null;
-  } catch {
-    storedGraph = null; // unreadable → treat as absent and rewrite below
+    storedGraph = readFileSync(taskGraphFile, "utf-8").trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      process.stderr.write(
+        `mark-subagent-active: cannot read task_graph pointer ${taskGraphFile}: ${error instanceof Error ? error.message : String(error)} — attempting rewrite\n`,
+      );
+    }
   }
   if (currentGraph !== null && storedGraph !== currentGraph) {
     try {

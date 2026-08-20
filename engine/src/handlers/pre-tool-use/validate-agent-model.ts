@@ -14,7 +14,7 @@
  * routing decision.
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
@@ -37,10 +37,26 @@ import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
 import { resolveClaudeAgentDefinitionPath } from "../../utils/agent-definition";
 import { validatePiAgentDefinitionFile } from "../../utils/render-pi-agent";
 
-function piAgentPath(agentName: string): string | null {
+type PiAgentDefinitionLookup =
+  | Readonly<{ kind: "found"; path: string }>
+  | Readonly<{ kind: "absent"; path: string }>
+  | Readonly<{ kind: "unreadable"; path: string; error: string }>;
+
+function piAgentDefinition(agentName: string): PiAgentDefinitionLookup {
   const home = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
-  const candidates = [join(home, "agents", `${agentName}.md`)];
-  return candidates.find(existsSync) ?? null;
+  const path = join(home, "agents", `${agentName}.md`);
+  try {
+    lstatSync(path);
+    return { kind: "found", path };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "ENOENT"
+      ? { kind: "absent", path }
+      : {
+          kind: "unreadable",
+          path,
+          error: error instanceof Error ? error.message : String(error),
+        };
+  }
 }
 
 type ModelFrontmatterRead =
@@ -107,19 +123,25 @@ const handler: HookHandler = async (stdin) => {
         message: `BLOCKED: Loom-owned Pi agents require agentScope='user'; got ${JSON.stringify(requestedScope)}.`,
       };
     }
-    const path = piAgentPath(agent);
-    if (!path) {
+    const definition = piAgentDefinition(agent);
+    if (definition.kind === "absent") {
       return {
         kind: "block",
         message: `BLOCKED: Pi agent '${agent}' has no generated definition. Run scripts/sync-pi-agents.sh; model routing cannot prove a binding without the synced render.`,
       };
     }
-    const validation = validatePiAgentDefinitionFile(path, agent, LOOM_PACKAGE_ROOT);
+    if (definition.kind === "unreadable") {
+      return {
+        kind: "block",
+        message: `BLOCKED: cannot inspect Pi agent definition '${agent}' (${definition.path}): ${definition.error}`,
+      };
+    }
+    const validation = validatePiAgentDefinitionFile(definition.path, agent, LOOM_PACKAGE_ROOT);
     return validation.ok
       ? { kind: "allow" }
       : {
           kind: "block",
-          message: `BLOCKED: Pi agent policy failed for '${agent}' (${path}):\n  - ${validation.error}`,
+          message: `BLOCKED: Pi agent policy failed for '${agent}' (${definition.path}):\n  - ${validation.error}`,
         };
   }
 

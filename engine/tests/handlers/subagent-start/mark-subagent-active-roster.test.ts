@@ -142,6 +142,24 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     expect(readFileSync(join(SUBAGENT_DIR, `${s}.task_graph`), "utf-8")).toBe(resolve(loop));
   });
 
+  it("reports an unreadable stored task_graph pointer before attempting repair", async () => {
+    const s = session("pointer-eloop");
+    const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
+    process.env.LOOM_STATE_PATH = statePath;
+    symlinkSync(pointer, pointer);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await markActive(start(s), []);
+      expect(result.kind).toBe("passthrough");
+      const text = stderrSpy.mock.calls.map(([value]) => String(value)).join("");
+      expect(text).toContain(`cannot read task_graph pointer ${pointer}`);
+      expect(text).toContain("attempting rewrite");
+      expect(text).toMatch(/ELOOP|too many levels of symbolic links/i);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
   it("control: a healthy roster arms the binding AND writes .task_graph", async () => {
     const s = session("ok");
     process.env.LOOM_STATE_PATH = statePath;

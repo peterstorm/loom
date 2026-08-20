@@ -27,6 +27,7 @@ import {
   deriveWaveReadiness,
 } from "../../../../src/core/wave-gate-machine";
 import { observedAdvisoryApproval } from "../../../../src/handlers/helpers/orchestration";
+import { derivePendingTaskProof } from "../../../../src/core/proof-obligations";
 import { parseRequestId } from "../../../../src/core/orchestration-contract";
 import { buildContextPacket, encodeByteSection } from "../../../../src/orchestration/context-packets";
 import { openRunDirectory } from "../../../../src/orchestration/run-directory-handle";
@@ -170,6 +171,29 @@ describe("wave review context authority", () => {
         task: { id: "T1", reviewGeneration: 0, declaredFiles: ["engine/src/a.ts"] },
         packetId,
       },
+    });
+  });
+
+  it("accepts and preserves valid non-null proof and test evidence", () => {
+    const packetId = "c".repeat(64);
+    const proof = derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] });
+    const testResult = { verdict: "trusted-pass" as const };
+    const packet = packetFor({
+      runId: RUN_ID,
+      wave: 1,
+      authorityDigest: DIGEST,
+      batchEpoch: "b".repeat(64),
+      subject: { role: "code-reviewer", taskId: "T1" },
+      taskRun: { taskId: "T1", generation: 0, packetId, headSha: "d".repeat(64) },
+      task: taskAuthority({ proof, testResult }),
+      packetId,
+      specFile: null,
+      planFile: null,
+    });
+
+    expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
+      kind: "loaded",
+      value: { task: { proof, testResult } },
     });
   });
 

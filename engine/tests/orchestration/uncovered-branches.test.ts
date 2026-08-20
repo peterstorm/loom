@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -81,6 +82,23 @@ describe("context packet required fields", () => {
       fixedContext: [],
       variableContext: [section("task", "the finding under review")],
     }).ok).toBe(true);
+  });
+
+  it("refuses an in-process section containing a number outside the byte domain", () => {
+    const coercedDigest = createHash("sha256").update(Uint8Array.from([0])).digest("hex");
+    const forged = {
+      label: "forged",
+      byteLength: 1,
+      digest: coercedDigest,
+      bytes: [256],
+    } as never;
+
+    const built = buildContextPacket({ ...valid, fixedContext: [forged] });
+
+    expect(built.ok).toBe(false);
+    if (built.ok) return;
+    expect(built.error.field).toBe("fixedContext[0]");
+    expect(built.error.message).toContain("only bytes");
   });
 });
 

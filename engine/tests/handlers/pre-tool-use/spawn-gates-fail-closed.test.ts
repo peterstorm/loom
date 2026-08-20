@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import validateTaskExecution from "../../../src/handlers/pre-tool-use/validate-task-execution";
@@ -105,6 +105,31 @@ describe("spawn-gate handlers — malformed stdin fails CLOSED", () => {
       if (priorHome === undefined) delete process.env.HOME;
       else process.env.HOME = priorHome;
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("validate-agent-model distinguishes an unreadable Pi definition from absence", async () => {
+    const priorDir = process.env.PI_CODING_AGENT_DIR;
+    const piDir = join(tmpdir(), `unreadable-pi-model-policy-${process.pid}-${Date.now()}`);
+    const definition = join(piDir, "agents", "code-reviewer.md");
+    mkdirSync(join(piDir, "agents"), { recursive: true });
+    symlinkSync("code-reviewer.md", definition);
+    process.env.PI_CODING_AGENT_DIR = piDir;
+    try {
+      const result = await validateAgentModel(JSON.stringify({
+        tool_name: "subagent",
+        tool_input: { agent: "code-reviewer", agentScope: "user" },
+      }), []);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") {
+        expect(result.message).toContain(`Pi agent policy failed for 'code-reviewer' (${definition})`);
+        expect(result.message).toMatch(/ELOOP|too many levels of symbolic links/i);
+        expect(result.message).not.toContain("has no generated definition");
+      }
+    } finally {
+      if (priorDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = priorDir;
+      rmSync(piDir, { recursive: true, force: true });
     }
   });
 

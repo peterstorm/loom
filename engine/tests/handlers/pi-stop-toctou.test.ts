@@ -147,16 +147,18 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
   });
 
   it("invalidates older evidence when bytes changed despite empty transcript attribution", () => {
-    const s = graph([task({
-      id: "T1",
-      status: "implemented",
-      test_result: { verdict: "trusted-pass" },
-      new_tests_required: false,
-      review_status: "passed",
-    })], ["T1"]);
-    s.spec_check = {
-      wave: 1, run_at: "now", verdict: "PASSED", critical_count: 0, high_count: 0,
-      critical_findings: [], high_findings: [], medium_findings: [],
+    const s: TaskGraph = {
+      ...graph([task({
+        id: "T1",
+        status: "implemented",
+        test_result: { verdict: "trusted-pass" },
+        new_tests_required: false,
+        review_status: "passed",
+      })], ["T1"]),
+      spec_check: {
+        wave: 1, run_at: "now", verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
     };
     const unobservedChange: UntrustedStopResolution = {
       ...untrustedPass,
@@ -233,7 +235,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
   });
 
   it("unions retry writes, recomputes new-test evidence, and invalidates stale review/spec gates", () => {
-    const s = graph([task({
+    const initial = graph([task({
       id: "T1",
       files_modified: ["src/old.ts"],
       new_tests_written: true,
@@ -242,13 +244,16 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
       review_error: "review transcript did not contain a machine summary",
       review_evidence_failures: ["code-reviewer"],
     })], ["T1"]);
-    s.spec_check = {
-      wave: 1, run_at: "now", verdict: "PASSED", critical_count: 0, high_count: 0,
-      critical_findings: [], high_findings: [], medium_findings: [],
+    const s: TaskGraph = {
+      ...initial,
+      spec_check: {
+        wave: 1, run_at: "now", verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+      wave_gates: { ...initial.wave_gates, "1": {
+        impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false,
+      } },
     };
-    s.wave_gates = { ...s.wave_gates, "1": {
-      impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false,
-    } };
     const retry: UntrustedStopResolution = {
       ...untrustedPass,
       filesModified: ["src/new.ts"],
@@ -273,10 +278,13 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
   });
 
   it("a failed re-resolution clears a stale impl_complete bit atomically", () => {
-    const stale = graph([task({ id: "T1", status: "implemented" })], ["T1"]);
-    stale.wave_gates = { ...stale.wave_gates, "1": {
-      impl_complete: true, tests_passed: true, reviews_complete: false, blocked: false,
-    } };
+    const initial = graph([task({ id: "T1", status: "implemented" })], ["T1"]);
+    const stale: TaskGraph = {
+      ...initial,
+      wave_gates: { ...initial.wave_gates, "1": {
+        impl_complete: true, tests_passed: true, reviews_complete: false, blocked: false,
+      } },
+    };
     const failedResolution: UntrustedStopResolution = {
       ...untrustedPass,
       newTestsWritten: false,

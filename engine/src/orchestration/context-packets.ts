@@ -62,6 +62,9 @@ const success = <T>(value: T): DomainResult<T, ContextPacketError> => ({ ok: tru
 
 const encoder = new TextEncoder();
 
+const isByte = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 255;
+
 function digestBytes(bytes: readonly number[]): string {
   return createHash("sha256").update(Uint8Array.from(bytes)).digest("hex");
 }
@@ -125,13 +128,14 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Cont
   // packet's content-addressed identity disagree with its content.
   for (const [index, section] of [...input.fixedContext, ...input.variableContext].entries()) {
     const parsedLength = parseArtifactByteLength(section.bytes.length);
-    const verified = parsedLength.ok && parsedLength.value === section.byteLength &&
+    const bytesAreValid = section.bytes.every(isByte);
+    const verified = bytesAreValid && parsedLength.ok && parsedLength.value === section.byteLength &&
       digestBytes(section.bytes) === section.digest;
     if (!verified) {
       const field = index < input.fixedContext.length
         ? `fixedContext[${index}]`
         : `variableContext[${index - input.fixedContext.length}]`;
-      return failure(field, "a context section digest and length must cover its exact bytes");
+      return failure(field, "a context section must contain only bytes whose digest and length cover the exact content");
     }
   }
 
@@ -176,7 +180,7 @@ function parseSection(raw: unknown, field: string): DomainResult<ByteSection, Co
   }
   if (!Array.isArray(record["bytes"])) return failure(`${field}.bytes`, "a context section must carry its bytes");
   const bytes = record["bytes"] as readonly unknown[];
-  if (!bytes.every((byte) => typeof byte === "number" && Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+  if (!bytes.every(isByte)) {
     return failure(`${field}.bytes`, "a context section byte must be an integer from 0 through 255");
   }
   const materialised = bytes as readonly number[];

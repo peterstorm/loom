@@ -13,7 +13,7 @@
  *   holder's mutual exclusion on its way out.
  */
 
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, renameSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 
 const MAX_ATTEMPTS = 50;
@@ -32,19 +32,16 @@ function sleepSync(ms: number): void {
 /** Check if a lock dir is stale (owning process is dead) */
 export function isStaleLock(lockDir: string): boolean {
   try {
-    const pidFile = `${lockDir}/pid`;
-    if (!existsSync(pidFile)) return true;
-    const pid = Number(readFileSync(pidFile, "utf-8").trim());
-    if (isNaN(pid)) return true;
+    const pid = Number(readFileSync(join(lockDir, "pid"), "utf-8").trim());
+    if (!Number.isSafeInteger(pid) || pid <= 0) return true;
     process.kill(pid, 0); // throws if process doesn't exist
     return false;
   } catch (err: unknown) {
-    // ESRCH = no such process → stale lock
-    if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "ESRCH") {
-      return true;
-    }
-    // EPERM or other → process exists but we can't signal it → not stale
-    return false;
+    const code = (err as NodeJS.ErrnoException)?.code;
+    // A missing pid file or dead owner is stale. Every access/path/I/O error
+    // is treated as a live lock so an authority failure cannot break mutual
+    // exclusion.
+    return code === "ENOENT" || code === "ESRCH";
   }
 }
 
@@ -139,16 +136,28 @@ export function acquireLockSync(lockFile: string): void {
 
 export function releaseLock(lockFile: string): void {
   const lockDir = `${lockFile}.lock`;
+  let pid: string;
   try {
     // Ownership check: if this lock was stale-reaped and re-acquired while
     // we ran, the pid file names the NEW holder — removing it would break
     // their mutual exclusion too. Only the recorded owner releases; a
-    // missing/foreign lock makes release a no-op.
-    const pid = readFileSync(join(lockDir, "pid"), "utf-8").trim();
-    if (pid !== `${process.pid}`) return;
-    rmSync(lockDir, { recursive: true, force: true });
-  } catch {
-    // Ignore cleanup errors (lock already gone / unreadable = not ours)
+    // genuinely missing lock remains an idempotent no-op.
+    pid = readFileSync(join(lockDir, "pid"), "utf-8").trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return;
+    throw new Error(
+      `Cannot inspect lock ownership for ${lockDir}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  if (pid !== `${process.pid}`) return;
+  try {
+    rmSync(lockDir, { recursive: true, force: false });
+  } catch (error) {
+    throw new Error(
+      `Failed to release owned lock ${lockDir}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 }
 

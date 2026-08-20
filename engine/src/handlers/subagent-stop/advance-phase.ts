@@ -197,7 +197,7 @@ const handler: HookHandler = async (stdin) => {
 
     try {
       await mgr.update((s) => {
-        const updates: Partial<TaskGraph> = {};
+        const updates: { spec_file?: string | null; plan_file?: string | null } = {};
 
         // RESOLVED containment, not substring containment. These paths come
         // from an agent's transcript and become the authoritative

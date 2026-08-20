@@ -208,10 +208,9 @@ const handler: HookHandler = async (stdin, args) => {
       current_wave: 1,
       executing_tasks: [],
       wave_gates: buildWaveGates(decompose.tasks),
+      ...(issue === undefined ? {} : { github_issue: issue }),
+      ...(repo === undefined ? {} : { github_repo: repo }),
     };
-
-    if (issue) merged.github_issue = issue;
-    if (repo) merged.github_repo = repo;
 
     return merged;
   });

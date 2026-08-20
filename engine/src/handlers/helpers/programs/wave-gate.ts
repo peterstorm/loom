@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { awaitUserAction, parseAgentRequestAuthority, parseStoredAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type AwaitUserAction, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
+import { awaitUserAction, parseAgentRequestAuthority, parseStoredAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, type AgentRequestAuthority, type AwaitUserAction, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
 import { defaultRefutationThreshold } from '../../../core/review-panel';
 import { completePersistentRefutationPanel, deriveRefutationVerifierBinding, panelRequestIdentity, parseRefutationPanelAuthority, startPersistentRefutationPanel, submitRefutationVerdict } from '../../../core/panel-program';
 import type { FindingOutcome } from '../../../core/review-panel';
@@ -24,7 +24,7 @@ import { applyReviewResolution, constrainReviewResolutionToScope, resolveTaskRev
 import type { Finding, Task, TaskGraph } from '../../../types';
 import { anyActiveSubagent } from '../../../machine';
 import { parseSpecCheckOutput, reconcileSpecCheck } from '../../../core/spec-check';
-import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
+import { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
 import { parseTaskProof, parseTaskTestResult, type ProofTestResult, type TaskProof } from '../../../core/proof-obligations';
 import { durableCaptureRejection, durableRefutationRequests, exactObject, executableRefutationRequests, failed, parseRegisteredFacadeProgram, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic, renderSpawnTask, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
 
@@ -410,11 +410,11 @@ export function waveRequests(
     const requestId = parseRequestId(`wave-request:${hash.slice(0, 32)}:${attempt}`);
     if (!slotId.ok) throw new Error(slotId.error.message);
     if (!requestId.ok) throw new Error(requestId.error.message);
-    const profileId = subject.role === "code-reviewer" || subject.role === "spec-check-invoker"
-      ? "general-review" : "focused-review";
-    const profile = resolveModelProfile(profileId);
+    const policy = resolveAgentPolicy(subject.role);
+    if (!policy.ok) throw new Error(policy.error.message);
+    const profile = resolveModelProfile(policy.value.profile);
     if (!profile.ok) throw new Error(profile.error.message);
-    const requiredSkill = AGENT_REQUIRED_SKILLS[subject.role] ?? null;
+    const requiredSkill = policy.value.requiredSkill;
     const section = encodeByteSection("wave-review-authority", JSON.stringify({
       runId: handle.runId,
       wave: registration.input.wave,
@@ -1719,8 +1719,9 @@ export async function resumeWaveGateFacade(
       }
     }
     const belongsToCurrentPacket = (request: AgentRequestAuthority): boolean => {
+      const contextRead = handle.readContext(request.contextDigest);
       const context = handleWaveReviewContext(
-        request.contextDigest === undefined ? [] : [handle.readContext(request.contextDigest)].flatMap((read) => read.ok ? [read.value] : []),
+        contextRead.ok ? [contextRead.value] : [],
         request.contextDigest,
       );
       // Corruption is blocked by the pre-scan above; an absent section is the

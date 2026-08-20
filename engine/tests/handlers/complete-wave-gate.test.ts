@@ -40,6 +40,7 @@ import {
 } from "../../src/core/wave-gate-machine";
 import type { CapturedSpecCheck, Task, TaskGraph } from "../../src/types";
 import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
+import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../src/core/model-profiles";
 import {
   commitWaveGateCompletion,
   createWaveGateState,
@@ -1648,6 +1649,19 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
     expect(preparation.initialRequests.map((request) => (request.authority as AgentRequestAuthority).modelProfile)).toEqual([
       "general-review", "general-review", "focused-review", "focused-review", "focused-review", "focused-review",
     ]);
+    for (const request of preparation.initialRequests) {
+      const authority = request.authority as AgentRequestAuthority;
+      const policy = authorityValue(resolveAgentPolicy(authority.role));
+      const profile = authorityValue(resolveModelProfile(policy.profile));
+      expect(authority).toMatchObject({
+        modelProfile: policy.profile,
+        requiredSkill: policy.requiredSkill,
+        harnessBinding: {
+          pi: lowerModelProfile(profile, "pi"),
+          claude: lowerModelProfile(profile, "claude-code"),
+        },
+      });
+    }
     const replay = authorityValue(prepareWaveReviewBatch(snapshot));
     expect(replay.publicationIntent).toEqual(preparation.publicationIntent);
     const assertedReplay = authorityValue(prepareWaveReviewBatch(snapshot, {
@@ -2258,7 +2272,7 @@ describe("protected active Wave Gate registration", () => {
   it("rejects completion when snapshot.graph.active_wave_gate is replaced after readiness derivation", () => {
     const graph = registeredGraph();
     const readiness = authorityValue(deriveWaveReadiness(graph, statusDeps));
-    graph.active_wave_gate = { ...graph.active_wave_gate! };
+    Object.assign(graph, { active_wave_gate: { ...graph.active_wave_gate! } });
     expect(commitWaveGateCompletion(readiness)).toMatchObject({
       ok: false,
       error: { message: "snapshot graph active_wave_gate is not the exact readiness registration" },
