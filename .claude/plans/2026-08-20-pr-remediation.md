@@ -8,7 +8,7 @@
 - **Canonical result:** `.claude/reviews/review-and-fix-runs/review-20260820T153850Z-5379411f/result.json`
 - **Result digest:** `34a999b823f506f06ce9c60e271f66f24ef819dc2fe901bd11eedb240ab885ea`
 - **Exact frozen scope:** the canonical 481-path array at `result.json#/scope`; it is not reconstructed by hand.
-- **Support paths outside frozen scope:** `engine/src/core/git-sha.ts`.
+- **Support paths outside frozen scope:** `engine/src/core/git-sha.ts`, `engine/src/utils/lock.ts`, and `engine/tests/utils/lock.test.ts`.
 
 ## Surviving critical Findings — mandatory
 
@@ -80,14 +80,14 @@
 - `engine/src/machine/ledger.ts`
 - `engine/src/state-manager.ts`
 - `engine/src/utils/git.ts`
-- `engine/src/utils/lock.ts`
+- `engine/src/utils/lock.ts` (support path)
 - `engine/tests/handlers/helpers/programs/remediation-audit-message.test.ts`
 - `engine/tests/handlers/helpers/programs/wave-gate-decision-authority.test.ts`
 - `engine/tests/handlers/pre-tool-use/block-direct-edits.test.ts`
 - `engine/tests/linter/programmatic/config.test.ts`
 - `engine/tests/machine/ledger.test.ts`
 - `engine/tests/pi-resources.test.ts`
-- `engine/tests/utils/lock.test.ts`
+- `engine/tests/utils/lock.test.ts` (support path)
 - `pi/extension.ts`
 - `pi/resources.ts`
 
@@ -114,4 +114,4 @@ npm run test:unit
 npm test
 ```
 
-After the green implementation, run `distill` in apply mode against the changed code, one behavior-preserving move at a time. Then start registered remediation with `supportPaths: ["engine/src/core/git-sha.ts"]`, resume to `done`, use only the engine-installed verified index, commit, and push without force.
+After the green implementation, run `distill` in apply mode against the changed code, one behavior-preserving move at a time. Then start registered remediation with `supportPaths: ["engine/src/core/git-sha.ts", "engine/src/utils/lock.ts", "engine/tests/utils/lock.test.ts"]`, resume to `done`, use only the engine-installed verified index, commit, and push without force. If a run was already registered with an incomplete immutable support set, retain it as blocked evidence and supersede it with a fresh run carrying the complete set.
