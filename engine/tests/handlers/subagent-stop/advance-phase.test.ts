@@ -7,7 +7,7 @@ import { findFile } from "../../../src/utils/find-file";
 import { CLARIFY_THRESHOLD, PHASE_AGENT_MAP, ARCH_PANEL_AGENTS } from "../../../src/config";
 import { stripNamespace } from "../../../src/utils/strip-namespace";
 import type { TaskGraph } from "../../../src/types";
-import { mkdtempSync, writeFileSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -241,6 +241,15 @@ describe("resolveTransition", () => {
 
   it("architecture → null when plan_file is null", () => {
     expect(resolveTransition("architecture", mkState())).toBeNull();
+  });
+
+  it("surfaces an unreadable plan instead of treating it as missing", () => {
+    const planFile = join(tmpDir, ".claude", "plans", "loop.md");
+    mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
+    symlinkSync(planFile, planFile);
+
+    expect(() => resolveTransition("architecture", mkState({ plan_file: planFile })))
+      .toThrow(/cannot access phase artifact/);
   });
 
   // ── plan-alignment ──

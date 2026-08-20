@@ -38,15 +38,8 @@ import {
   taskUnionError,
 } from "../../state-manager";
 import { parseReviewPath } from "../../core/review-packet";
-
-export type ValidationResult =
-  | { ok: true }
-  | { ok: false; errors: readonly string[] };
-
-/** Constructors for `ValidationResult`, exported beside the type they build so
- *  a second validator does not hand-roll a second byte-identical pair. */
-export function ok(): ValidationResult { return { ok: true }; }
-export function fail(errors: string[]): ValidationResult { return { ok: false, errors }; }
+import { type ValidationResult, ok, fail } from "./validation-result";
+export type { ValidationResult } from "./validation-result";
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 

@@ -39,13 +39,14 @@ import {
 export type { CaptureOutcome };
 
 /**
- * Read the last assistant message from a Claude agent transcript as the sole
- * final-payload candidate.
+ * Inspect the final non-empty Claude transcript line as the sole final-payload
+ * candidate, accepting it only when it is an assistant message with exactly one
+ * text block.
  *
- * Claude's transcript is JSONL with one message per line, so "the final
- * assistant text" is unambiguous by construction — unlike Pi, where a result
- * carries a list of blocks. Any parse failure yields NO candidate rather than
- * a guess, so the ambiguity rules reject instead of accepting salvage.
+ * Claude's transcript is JSONL with one message per line. Unlike Pi, where a
+ * result carries a list of blocks, no earlier line is searched as a fallback.
+ * Any parse failure yields NO candidate rather than a guess, so the ambiguity
+ * rules reject instead of accepting salvage.
  */
 export function claudeFinalPayloadCandidates(transcriptPath: string): readonly FinalPayloadCandidate[] {
   // One read, no pre-check: `existsSync` returns false for ELOOP/ENOTDIR too,
@@ -111,8 +112,9 @@ export {
 
 /**
  * Capture one finished Claude agent. Pure with respect to decisions: every
- * refusal is returned as a typed outcome the caller audits, and only an
- * accepted capture writes anything.
+ * refusal is returned as a typed outcome the caller audits. Accepted captures
+ * write transcript evidence; refusals that reached a reservation may durably
+ * record a rejection marker and journal event.
  */
 export async function captureClaudeResult(
   input: SubagentStopInput,

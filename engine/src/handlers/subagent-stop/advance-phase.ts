@@ -7,7 +7,7 @@
  * which includes init as the first phase).
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { accessSync, constants as fsConstants, readFileSync, readdirSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookHandler, SubagentStopInput, Phase, TaskGraph } from "../../types";
 import { PHASE_AGENT_MAP, PHASE_ORDER, CLARIFY_THRESHOLD } from "../../config";
@@ -26,6 +26,19 @@ import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 // Re-exported because this module's own containment rule moved to the pure core
 // so the Pi shell could share it verbatim; the name stays importable from here.
 export { resolvesWithin };
+
+/** ENOENT is absence; every other access failure must reach the hook diagnostic boundary. */
+function phaseArtifactExists(path: string): boolean {
+  try {
+    accessSync(path, fsConstants.F_OK);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw new Error(
+      `cannot access phase artifact ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
 
 /** Count NEEDS CLARIFICATION markers in a file */
 export function countMarkers(filePath: string): number {
@@ -62,12 +75,12 @@ export function resolveTransition(
         // spec_file set but not in expected location — reject and try fallback
         spec = null;
       }
-      if (!spec || !existsSync(spec)) {
+      if (!spec || !phaseArtifactExists(spec)) {
         if (state.spec_dir) {
           spec = findFile(state.spec_dir, "spec.md");
         }
       }
-      if (!spec || !existsSync(spec)) return null;
+      if (!spec || !phaseArtifactExists(spec)) return null;
       const markers = countMarkers(spec);
       if (markers > CLARIFY_THRESHOLD) {
         return { nextPhase: "clarify" as Phase, artifact: spec };
@@ -82,12 +95,12 @@ export function resolveTransition(
       // run's authoritative spec artifact. Same rule as `specify` below/above.
       let spec = state.spec_file;
       if (spec && !resolvesWithin(spec, SPEC_ARTIFACT_DIR)) spec = null;
-      if (!spec || !existsSync(spec)) {
+      if (!spec || !phaseArtifactExists(spec)) {
         if (state.spec_dir) {
           spec = findFile(state.spec_dir, "spec.md");
         }
       }
-      if (!spec || !existsSync(spec)) return null;
+      if (!spec || !phaseArtifactExists(spec)) return null;
       const markers = countMarkers(spec);
       if (markers > 0) return null; // All markers must be resolved before advancing
       return { nextPhase: "architecture" as Phase, artifact: spec };
@@ -101,18 +114,18 @@ export function resolveTransition(
         // containment carries `..` segments through unharmed.
         return null;
       }
-      if (!plan || !existsSync(plan)) {
+      if (!plan || !phaseArtifactExists(plan)) {
         // plan_file not set or file missing — try deriving from spec_dir slug
         if (state.spec_dir) {
           const slug = state.spec_dir.split("/").pop() ?? "";
           if (slug) {
             const candidate = `.claude/plans/${slug}.md`;
-            if (existsSync(candidate)) plan = candidate;
+            if (phaseArtifactExists(candidate)) plan = candidate;
           }
           // Final fallback: look for any plan matching the date prefix
-          if (!plan || !existsSync(plan)) {
+          if (!plan || !phaseArtifactExists(plan)) {
             const datePrefix = slug.slice(0, 10); // "2026-05-18"
-            if (datePrefix && existsSync(".claude/plans")) {
+            if (datePrefix && phaseArtifactExists(".claude/plans")) {
               const files = readdirSync(".claude/plans").filter(
                 (f: string) => f.startsWith(datePrefix) && f.endsWith(".md")
               );
@@ -121,7 +134,7 @@ export function resolveTransition(
           }
         }
       }
-      if (!plan || !existsSync(plan)) return null;
+      if (!plan || !phaseArtifactExists(plan)) return null;
       if (state.skipped_phases.includes("plan-alignment")) {
         return { nextPhase: "decompose" as Phase, artifact: plan };
       }
@@ -193,11 +206,11 @@ const handler: HookHandler = async (stdin) => {
         // `.claude/specs/../../../../tmp/evil/spec.md` contains the substring
         // while resolving well outside the tree, and both this check and the
         // parser's used the same weak form.
-        if (artifacts.spec_file && existsSync(artifacts.spec_file)
+        if (artifacts.spec_file && phaseArtifactExists(artifacts.spec_file)
             && resolvesWithin(artifacts.spec_file, SPEC_ARTIFACT_DIR)) {
           updates.spec_file = artifacts.spec_file;
         }
-        if (!s.plan_file && artifacts.plan_file && existsSync(artifacts.plan_file)
+        if (!s.plan_file && artifacts.plan_file && phaseArtifactExists(artifacts.plan_file)
             && resolvesWithin(artifacts.plan_file, PLAN_ARTIFACT_DIR)) {
           updates.plan_file = artifacts.plan_file;
         }
@@ -211,7 +224,14 @@ const handler: HookHandler = async (stdin) => {
 
   // Reload after potential artifact writes
   const state = mgr.load();
-  const transition = resolveTransition(completedPhase, state);
+  let transition: ReturnType<typeof resolveTransition>;
+  try {
+    transition = resolveTransition(completedPhase, state);
+  } catch (error) {
+    return passthroughDiagnostic(
+      `advance-phase: phase artifact discovery failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
   if (!transition) return { kind: "passthrough" };
 
   const { nextPhase, artifact, skipClarify } = transition;

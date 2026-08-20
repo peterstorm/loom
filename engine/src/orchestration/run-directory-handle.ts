@@ -707,7 +707,11 @@ function claimIdempotentWrite(
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
       return failure(field, writeFailure((error as Error).message));
     }
-    if (readRunFileNoFollow(path) !== body) return failure(field, conflict);
+    try {
+      if (readRunFileNoFollow(path) !== body) return failure(field, conflict);
+    } catch (readError) {
+      return failure(field, writeFailure((readError as Error).message));
+    }
   }
   return success(undefined);
 }
@@ -1334,6 +1338,19 @@ function stagedBytesMatch(stagedPath: string, occupied: Uint8Array): boolean {
   }
 }
 
+function occupiedArtifactConflict(
+  entry: StagedPair,
+  occupied: Uint8Array | Readonly<{ __unreadable: string }>,
+): string | null {
+  if (!(occupied instanceof Uint8Array)) {
+    return `artifact slot is occupied by unreadable bytes: ${entry.final}`;
+  }
+  if (!stagedBytesMatch(entry.staged, occupied)) {
+    return `a different artifact already occupies this slot: ${entry.final}`;
+  }
+  return null;
+}
+
 /**
  * Promote a fully staged set. Every target is checked BEFORE any rename,
  * because renaming is the one step that cannot be undone member-by-member —
@@ -1366,11 +1383,7 @@ export function promoteArtifactSet(
   for (const entry of stagedPaths) {
     const occupied = occupiedArtifactBytes(entry.final);
     if (occupied === null) continue;
-    const reason = !(occupied instanceof Uint8Array)
-      ? `artifact slot is occupied by unreadable bytes: ${entry.final}`
-      : !stagedBytesMatch(entry.staged, occupied)
-        ? `a different artifact already occupies this slot: ${entry.final}`
-        : null;
+    const reason = occupiedArtifactConflict(entry, occupied);
     if (reason !== null) {
       discardStaged(stagedPaths);
       return failure("artifacts", reason);

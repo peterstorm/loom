@@ -57,18 +57,20 @@ export function resolveTaskGraph(sessionId?: string): string | null {
       );
     } else {
       const sessionFile = sessionScopedPath(parsed, ".task_graph");
-      if (existsSync(sessionFile)) {
-        try {
-          const absPath = readFileSync(sessionFile, "utf-8").trim();
-          if (existsSync(absPath)) return absPath;
-          // A dangling pointer silently re-targets every session-scoped
-          // handler at the LOCAL graph — say so instead of quietly diverging.
-          process.stderr.write(
-            `resolveTaskGraph: session pointer ${sessionFile} names missing graph '${absPath}' — falling back to local task graph\n`,
-          );
-        } catch (e) {
-          process.stderr.write(
-            `resolveTaskGraph: cannot read session pointer ${sessionFile}: ${e instanceof Error ? e.message : String(e)} — falling back to local task graph\n`,
+      try {
+        const absPath = readFileSync(sessionFile, "utf-8").trim();
+        if (pathExistsFailClosed(absPath)) return absPath;
+        // A genuinely dangling pointer keeps the documented local fallback.
+        // An unreadable target is treated as present by pathExistsFailClosed,
+        // so StateManager.load surfaces that authority failure instead of
+        // silently retargeting session-scoped work.
+        process.stderr.write(
+          `resolveTaskGraph: session pointer ${sessionFile} names missing graph '${absPath}' — falling back to local task graph\n`,
+        );
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw new Error(
+            `resolveTaskGraph: cannot read session pointer ${sessionFile}: ${e instanceof Error ? e.message : String(e)} — refusing local task-graph fallback`,
           );
         }
       }
@@ -76,7 +78,7 @@ export function resolveTaskGraph(sessionId?: string): string | null {
   }
 
   const localTaskGraph = taskGraphPath();
-  if (existsSync(localTaskGraph)) return localTaskGraph;
+  if (pathExistsFailClosed(localTaskGraph)) return localTaskGraph;
 
   return null;
 }

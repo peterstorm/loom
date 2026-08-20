@@ -331,6 +331,16 @@ function postCommitProtectionFailureMessage(error: PostCommitStateProtectionErro
   );
 }
 
+function completionFailureMessage(decisionFailure: string | null, commitFailure: string | null): string {
+  if (commitFailure === null) {
+    return decisionFailure ?? "[loom] complete-wave-gate: completion produced no committed receipt";
+  }
+  if (decisionFailure === null) {
+    return `[loom] complete-wave-gate: failed to persist exact completion receipt: ${commitFailure}`;
+  }
+  return `${decisionFailure}\n[loom] complete-wave-gate: locked state transaction also failed: ${commitFailure}`;
+}
+
 async function runCompleteWaveGate(
   _stdin: string,
   args: string[],
@@ -525,11 +535,7 @@ async function runCompleteWaveGate(
     const decisionFailure = lockedDecision.verdict.kind === "fail" ? lockedDecision.verdict.reason : null;
     return {
       kind: "error",
-      message: formattedCommitError === null
-        ? decisionFailure ?? "[loom] complete-wave-gate: completion produced no committed receipt"
-        : decisionFailure === null
-          ? `[loom] complete-wave-gate: failed to persist exact completion receipt: ${formattedCommitError}`
-          : `${decisionFailure}\n[loom] complete-wave-gate: locked state transaction also failed: ${formattedCommitError}`,
+      message: completionFailureMessage(decisionFailure, formattedCommitError),
     };
   }
   const verdict = lockedDecision.verdict;

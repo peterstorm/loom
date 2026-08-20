@@ -143,9 +143,9 @@ export interface TranscriptLocator {
  *
  * Precedence is the whole point: a supplied path that exists WINS, and the
  * derivation is consulted only when the harness gave nothing or gave a path
- * that is no longer there. Every SubagentStop handler that reads a transcript
- * goes through here, so "which harnesses can loom record status on" has one
- * answer instead of one per handler.
+ * that is no longer there. Legacy status and phase handlers go through here;
+ * request-bound Claude capture intentionally consumes the supplied transcript
+ * path directly because its reservation already establishes run authority.
  */
 export function resolveAgentTranscriptPath(input: TranscriptLocator): string | null {
   const supplied = input.agent_transcript_path?.replace(/^~/, process.env.HOME ?? "~") ?? "";

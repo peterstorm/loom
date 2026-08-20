@@ -573,6 +573,33 @@ describe("validate-task-execution — review gate (previous wave)", () => {
     expect(validateExecution("T1", state).kind).toBe("allow");
   });
 
+  it("names a previous wave blocked solely by critical spec-check findings", () => {
+    const state = mkState([
+      mkTask({ id: "T1", wave: 1, status: "completed" }),
+      mkTask({ id: "T2", wave: 2 }),
+    ], {
+      current_wave: 2,
+      wave_gates: { "1": mkGate({ reviews_complete: false, blocked: true }) },
+      spec_check: {
+        wave: 1,
+        run_at: "2026-08-20T00:00:00.000Z",
+        verdict: "BLOCKED",
+        critical_count: 1,
+        high_count: 0,
+        critical_findings: ["spec contract drift"],
+        high_findings: [],
+        medium_findings: [],
+      },
+    });
+
+    const result = validateExecution("T2", state);
+
+    expect(result).toEqual({
+      kind: "block",
+      reason: expect.stringContaining("1 critical spec-check findings"),
+    });
+  });
+
   it("blocks when prev gate is blocked", () => {
     const state = mkState([
       mkTask({ id: "T1", wave: 2 }),

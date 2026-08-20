@@ -320,7 +320,7 @@ function sessionRunBinding(
 }
 
 /**
- * Capture one finished Pi subagent result into its reserved run-directory slot.
+ * Record Pi spawn correlators into their reserved run-directory slots before dispatch.
  *
  * Pi's native correlator is `piSpawnRosterId(toolCallId, index, agent)` — the
  * same stable per-spawn identity the lifecycle registry already uses, and the

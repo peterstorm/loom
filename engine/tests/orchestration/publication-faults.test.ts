@@ -119,6 +119,20 @@ describe("run directory identity", () => {
     expect(readdirSync(real)).toHaveLength(0);
   });
 
+  it("returns a typed failure when an existing idempotent claim cannot be read", async () => {
+    const { directory, handle } = freshRun();
+    const programPath = join(directory, "program.json");
+    symlinkSync(programPath, programPath);
+
+    const registered = await handle.registerProgram({ kind: "test-program" });
+
+    expect(registered.ok).toBe(false);
+    if (!registered.ok) {
+      expect(registered.error.field).toBe("program");
+      expect(registered.error.message).toContain("cannot register orchestration program");
+    }
+  });
+
   it("claims immutable authority once and reads it back on re-open", () => {
     const { root, directory, handle } = freshRun();
 

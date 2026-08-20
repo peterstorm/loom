@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { StateManager, parseTaskGraph, resolveTaskGraph } from "../src/state-manager";
@@ -836,6 +836,39 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
     try {
       expect(resolveTaskGraph(s)).toBe(statePath);
     } finally {
+      rmSync(pointer, { force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an unreadable session pointer refuses local fallback", () => {
+    const s = `sm-unreadable-pointer-${process.pid}-${Date.now()}`;
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
+    symlinkSync(pointer, pointer);
+    try {
+      expect(() => resolveTaskGraph(s)).toThrow(/cannot read session pointer.*refusing local task-graph fallback/);
+    } finally {
+      rmSync(pointer, { force: true });
+    }
+  });
+
+  it("an unreadable pointed graph remains session authority and fails on load", () => {
+    const s = `sm-unreadable-graph-${process.pid}-${Date.now()}`;
+    const dir = makeTmpDir();
+    const target = join(dir, "active_task_graph.json");
+    symlinkSync(target, target);
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
+    writeFileSync(pointer, target);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(resolveTaskGraph(s)).toBe(target);
+      const manager = StateManager.fromSession(s);
+      expect(manager?.getPath()).toBe(target);
+      expect(() => manager?.load()).toThrow();
+    } finally {
+      stderrSpy.mockRestore();
       rmSync(pointer, { force: true });
       rmSync(dir, { recursive: true, force: true });
     }

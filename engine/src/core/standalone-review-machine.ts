@@ -715,6 +715,13 @@ function acceptedPayloadMatchesAuthority(
     parsed.value.artifact.slot.path === result.authority.outputSlot.path;
 }
 
+function rosterAttempt<First, Second>(
+  slot: Readonly<{ attempts: readonly [First, Second] }> | undefined,
+  attempt: 1 | 2,
+): First | Second | undefined {
+  return slot?.attempts[attempt - 1];
+}
+
 function withAccepted(
   state: StandaloneAwaitingResultsState,
   result: AcceptedAgentResult<CapturedReviewerResult>,
@@ -732,7 +739,7 @@ function withAccepted(
       `slot ${authority.slotId} expects attempt ${pending.expectedAttempt}, received ${authority.attempt}`);
   }
   const slot = state.authority.roster.byId.get(authority.slotId);
-  const expected = authority.attempt === 1 ? slot?.attempts[0] : slot?.attempts[1];
+  const expected = rosterAttempt(slot, authority.attempt);
   if (expected === undefined || !sameAgentRequestAuthority(authority, expected) || !acceptedPayloadMatchesAuthority(result)) {
     return reject(state, { kind: "result-accepted", result }, "roster-mismatch",
       "accepted result does not match frozen run/agent/request/context/model/output or artifact authority");
@@ -770,7 +777,7 @@ function withRejected(
       `slot ${event.request.slotId} expects attempt ${pending.expectedAttempt}, received ${event.request.attempt}`);
   }
   const slot = state.authority.roster.byId.get(event.request.slotId);
-  const expected = event.request.attempt === 1 ? slot?.attempts[0] : slot?.attempts[1];
+  const expected = rosterAttempt(slot, event.request.attempt);
   if (expected === undefined || expected.requestId !== event.request.requestId) {
     return reject(state, event, "roster-mismatch", "rejected request does not match frozen slot authority");
   }

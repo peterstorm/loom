@@ -1075,15 +1075,17 @@ describe("ExactRoster and CompleteRoster conservation", () => {
         expect(complete.bySlot.size).toBe(size);
         expect(Object.isFrozen(complete)).toBe(true);
         expect(Object.isFrozen(complete.ordered)).toBe(true);
-        // Immutability asserted by BEHAVIOUR, not by the absence of a key. The
-        // view is a real `Map` subclass now — so that structural equality and
-        // serialization see its entries instead of a bag of function properties
-        // — which means `set`/`delete`/`clear` are inherited names. Each refuses.
+        // Immutability asserted by BEHAVIOUR, including native-prototype escape
+        // hatches and the third argument Map.forEach normally leaks.
         for (const mutator of ["set", "delete", "clear"] as const) {
           expect(mutator in complete.bySlot).toBe(true);
           expect(() => (complete.bySlot as unknown as Record<string, () => void>)[mutator]!())
             .toThrow(/immutable/);
         }
+        const first = complete.bySlot.entries().next().value;
+        expect(first).toBeDefined();
+        expect(() => Map.prototype.set.call(complete.bySlot, first![0], first![1])).toThrow();
+        complete.bySlot.forEach((_value, _key, map) => expect(map).toBe(complete.bySlot));
         expect(complete.bySlot.size).toBe(size);
       },
     ));

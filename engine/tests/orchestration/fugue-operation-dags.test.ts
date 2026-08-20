@@ -157,6 +157,30 @@ describe("remediation audit routing", () => {
 });
 
 describe("staged-set routing", () => {
+  const stagedNode = (id: string) => {
+    const node = stagedDag.nodes.find((candidate) => candidate.id === id);
+    expect(node, `${id} must exist in the staged-set DAG`).toBeDefined();
+    return node as unknown as {
+      inputSchema: { safeParse: (value: unknown) => { success: boolean } };
+    };
+  };
+
+  it("rejects malformed staged-set and decision branch envelopes at runtime", () => {
+    const malformedVerdict = {
+      [REMEDIATION_DAG_NODE_IDS.verifyStaged]: { kind: "verified", paths: "not-an-array", digest: "bad" },
+    };
+    expect(stagedNode(REMEDIATION_DAG_NODE_IDS.emitIntent).inputSchema.safeParse(malformedVerdict).success)
+      .toBe(false);
+    expect(stagedNode(REMEDIATION_DAG_NODE_IDS.blocked).inputSchema.safeParse(malformedVerdict).success)
+      .toBe(false);
+
+    const malformedDecision = {
+      [REMEDIATION_DAG_NODE_IDS.emitIntent]: { kind: "install-intent", paths: "not-an-array", digest: "bad" },
+    };
+    expect(stagedNode(REMEDIATION_DAG_NODE_IDS.decide).inputSchema.safeParse(malformedDecision).success)
+      .toBe(false);
+  });
+
   it("takes the default edge to blocked when the audited set does not parse", async () => {
     const result = await runDag<unknown, InstallationDecision>(stagedDag, {
       auditedPathSet: { forged: true },

@@ -18,7 +18,7 @@
 
 import { readFileSync } from "node:fs";
 import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../parsers/parse-plan-models";
-import { type ValidationResult, ok, fail } from "./validate-task-graph";
+import { type ValidationResult, ok, fail } from "./validation-result";
 
 export type ModelFileRead =
   | { readonly ok: true; readonly content: string }

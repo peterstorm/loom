@@ -697,6 +697,22 @@ function completeCapturedRoster(
   return { roster: complete.value, completion: completion.value, resolver: registration };
 }
 
+function aggregationEntry(authority: FrozenStandaloneReviewAuthority) {
+  return (complete: ProvenCapturedRoster) => {
+    const awaiting = reduceStandaloneReviewMachine(startStandaloneReviewMachine(authority), {
+      kind: "review-batch-published",
+      runId: authority.runId,
+    });
+    if (!awaiting.ok) throw new Error(awaiting.error.message);
+    const aggregating = reduceStandaloneReviewMachine(awaiting.value, {
+      kind: "complete-roster-proved",
+      completion: complete.completion,
+    });
+    if (!aggregating.ok) throw new Error(aggregating.error.message);
+    return aggregating.value;
+  };
+}
+
 function completedRefutationPanel(
   standaloneAuthority: FrozenStandaloneReviewAuthority,
   aggregate: ReturnType<typeof required>["aggregate"],
@@ -1249,16 +1265,7 @@ describe("historical standalone result compatibility and v1 authority", () => {
 describe("LC-2 standalone lifecycle machine", () => {
   it("routes zero criticals directly to finalization and criticals only to refutation", () => {
     const authority = preparedAuthority();
-    const enterAggregation = (complete: ProvenCapturedRoster) => {
-      const started = startStandaloneReviewMachine(authority);
-      const awaiting = reduceStandaloneReviewMachine(started, { kind: "review-batch-published", runId: authority.runId });
-      if (!awaiting.ok) throw new Error(awaiting.error.message);
-      const aggregating = reduceStandaloneReviewMachine(awaiting.value, {
-        kind: "complete-roster-proved", completion: complete.completion,
-      });
-      if (!aggregating.ok) throw new Error(aggregating.error.message);
-      return aggregating.value;
-    };
+    const enterAggregation = aggregationEntry(authority);
 
     const cleanRoster = completeCapturedRoster(authority, [transcript(), transcript([], ["small advisory"])], [1, 0]);
     const cleanAggregate = aggregateStandaloneReview({ authority, completion: cleanRoster.completion });
@@ -1514,17 +1521,7 @@ describe("LC-2 standalone lifecycle machine", () => {
 
   it("rehydrates durable authority at aggregating, refutation, finalization, and publication boundaries", () => {
     const authority = preparedAuthority();
-    const enterAggregation = (complete: ProvenCapturedRoster) => {
-      const awaiting = reduceStandaloneReviewMachine(startStandaloneReviewMachine(authority), {
-        kind: "review-batch-published", runId: authority.runId,
-      });
-      if (!awaiting.ok) throw new Error(awaiting.error.message);
-      const aggregating = reduceStandaloneReviewMachine(awaiting.value, {
-        kind: "complete-roster-proved", completion: complete.completion,
-      });
-      if (!aggregating.ok) throw new Error(aggregating.error.message);
-      return aggregating.value;
-    };
+    const enterAggregation = aggregationEntry(authority);
     const reload = (state: Parameters<typeof serializeStandaloneReviewMachineState>[0], resolver: PublicationAuthorityResolver) => {
       const parsed = parseStandaloneReviewMachineState(
         JSON.parse(serializeStandaloneReviewMachineState(state)),

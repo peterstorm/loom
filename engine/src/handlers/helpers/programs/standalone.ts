@@ -5,7 +5,7 @@
  * re-exported by index.ts so all existing import sites are unchanged.
  */
 import { createHash } from 'node:crypto';
-import { parseAgentRequestAuthority, parseEffectId, parseIssuedSpawnRequest, type AgentRequestAuthority, type InitialSpawnRequestInput, type PublicationAuthorityResolver, type SpawnRequest } from '../../../core/orchestration-contract';
+import { parseAgentRequestAuthority, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
 import { aggregateStandaloneReview, bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, canonicalStandaloneResultArtifact, completeStandaloneReviewerCapture, prepareFreshStandaloneReview, proveStandaloneRosterCompletion, serializeStandaloneReviewAuthority, serializeAdjudicatedStandaloneReview, admitStandaloneTranscript, type FrozenStandaloneReviewAuthority } from '../../../core/standalone-review';
 import { parseStandaloneReviewMachineState, reduceStandaloneReviewMachine, freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion, serializeStandaloneReviewMachineState, startStandaloneReviewMachine, type StandaloneReviewMachineState } from '../../../core/standalone-review-machine';
 import { buildStandaloneFindingBrief, defaultRefutationThreshold, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
@@ -15,7 +15,7 @@ import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from '../../../o
 import { captureKey } from '../../../core/harness-capture';
 import { type RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
-import { decodeReviewerTranscript, deriveChangedPaths, durablePublicationDigest, durableRequests, failed, metadata, parsedAuthority, publicationFile, publicationResolver, publishInitialBatch, recoverOrPublishStandaloneRetry, refutationRetryTask, renderSpawnTask, safeScope, standalonePackets, standalonePublicationEffectId, standaloneRetryTask, type DurableRequestRecovery, type FacadeDriveResult, type RegisteredStandaloneProgram } from './helpers';
+import { decodeReviewerTranscript, deriveChangedPaths, durableCaptureRejection, durablePublicationDigest, durableRefutationRequests, durableRequests, executableRefutationRequests, failed, metadata, parsedAuthority, publicationFile, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, recoverOrPublishStandaloneRetry, refutationRejectionDiagnostic, renderSpawnTask, safeScope, standalonePackets, standalonePublicationEffectId, standaloneRetryTask, type FacadeDriveResult, type RegisteredStandaloneProgram } from './helpers';
 
 export async function startStandaloneFacade(
   handle: RunDirHandle,
@@ -154,103 +154,6 @@ export function standaloneRefutationPreparation(
   const frozen = freezeStandaloneRefutationPanelAuthority({ standaloneAuthority: authority, aggregate, panelAuthority: panel.value, threshold });
   if (!frozen.ok) throw new Error(frozen.error.message);
   return { brief, lenses, panel: panel.value, frozen: frozen.value, threshold, packets, inputs, retryInputs };
-}
-
-/**
- * The verdict-parse diagnostic that refused this verifier's attempt 1, or null
- * when the step recorded something else. The panel re-derives its whole event
- * prefix from the durable transcripts on every resume, so the rejection message
- * is regenerated deterministically — it needs no checkpoint field of its own.
- */
-export function refutationRejectionDiagnostic(event: PersistentRefutationPanelEvent | undefined): string | null {
-  return event !== undefined && event.type === "refutation-verdict-rejected" ? event.message : null;
-}
-
-export function executableRefutationRequests(
-  handle: RunDirHandle,
-  requests: readonly SpawnRequest[],
-  standalone: boolean,
-  retryDiagnostic: string | null = null,
-): readonly Readonly<SpawnRequest & { task: string }>[] {
-  return requests.map((request) => {
-    const task = renderSpawnTask(handle, request.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then complete the exact pending Refutation Panel request.", { standalone });
-    return Object.freeze({
-      ...request,
-      // Attempt 2 exists only because attempt 1 was refused. Re-asking the
-      // identical question is what made the flake fatal.
-      task: request.authority.attempt === 2 ? refutationRetryTask(task, retryDiagnostic) : task,
-    });
-  });
-}
-
-export function durableRefutationRequests(
-  handle: RunDirHandle,
-  inputs: readonly InitialSpawnRequestInput[],
-  resolver: PublicationAuthorityResolver,
-  label = "standalone-refutation",
-): DurableRequestRecovery {
-  const effectId = parseEffectId(`effect:${label}:${createHash("sha256").update(inputs.map((input) =>
-    (input.authority as AgentRequestAuthority).requestId).join("|")).digest("hex")}`);
-  if (!effectId.ok) return { kind: "corrupt", message: effectId.error.message };
-  const publication = durablePublicationDigest(handle, effectId.value);
-  if (publication.kind !== "found") return publication;
-  const requests: SpawnRequest[] = [];
-  for (const [batchIndex, input] of inputs.entries()) {
-    const parsed = parseIssuedSpawnRequest(resolver, {
-      ...input,
-      issuance: { schemaVersion: 1, kind: "issued-spawn-request-proof", runId: handle.runId,
-        effectId: effectId.value, publicationDigest: publication.digest, batchIndex },
-    });
-    if (!parsed.ok) return { kind: "corrupt", message: `durable refutation request is invalid: ${parsed.error.message}` };
-    requests.push(parsed.value);
-  }
-  return { kind: "found", requests: Object.freeze(requests) };
-}
-
-export async function durableCaptureRejection(
-  handle: RunDirHandle,
-  authority: AgentRequestAuthority,
-): Promise<string | null> {
-  const events = await handle.readEvents();
-  const rejected = events.find(({ event }) => {
-    if (typeof event !== "object" || event === null || Array.isArray(event)) return false;
-    const record = event as Record<string, unknown>;
-    return record.kind === "request-capture-rejected" && record.requestId === authority.requestId &&
-      record.slotId === authority.slotId && record.attempt === authority.attempt;
-  });
-  if (rejected !== undefined && typeof rejected.event === "object" && rejected.event !== null) {
-    const diagnostic = (rejected.event as Record<string, unknown>).diagnostic;
-    return typeof diagnostic === "string" ? diagnostic : "capture was rejected without a diagnostic";
-  }
-  const marker = handle.readCaptureRejection(authority);
-  if (!marker.ok) throw new Error(marker.error.message);
-  return marker.value;
-}
-
-export async function recoverOrPublishRefutationRetry(
-  handle: RunDirHandle,
-  authority: AgentRequestAuthority,
-  retryInputs: readonly Readonly<{ input: InitialSpawnRequestInput; packet: ContextPacket }>[],
-  resolver: PublicationAuthorityResolver,
-  label: string,
-): Promise<Readonly<{ ok: true; request: SpawnRequest }> | Readonly<{ ok: false; message: string }>> {
-  const rejection = await durableCaptureRejection(handle, authority);
-  if (rejection !== null) {
-    return { ok: false, message: `refutation attempt 2 exhausted after capture rejection: ${rejection}` };
-  }
-  const prepared = retryInputs.find(({ input }) =>
-    (input.authority as AgentRequestAuthority).requestId === authority.requestId);
-  if (prepared === undefined || JSON.stringify(prepared.input.authority) !== JSON.stringify(authority)) {
-    return { ok: false, message: `refutation retry ${authority.requestId} is not exact prepared attempt-2 authority` };
-  }
-  const retryLabel = `${label}-retry:${authority.slotId}`;
-  const recovered = durableRefutationRequests(handle, [prepared.input], resolver, retryLabel);
-  if (recovered.kind === "corrupt") return { ok: false, message: recovered.message };
-  if (recovered.kind === "found") return { ok: true, request: recovered.requests[0]! };
-  const published = await publishInitialBatch(handle, [prepared.input], [prepared.packet], retryLabel);
-  return published.ok
-    ? { ok: true, request: published.requests[0]! }
-    : { ok: false, message: published.message };
 }
 
 export async function finalizeStandaloneState(

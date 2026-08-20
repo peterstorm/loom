@@ -588,35 +588,34 @@ export type ExactRosterError = Readonly<{
  * drops function-valued keys, so a roster serialized to `{"size":N}` — a
  * plausible-looking document with the entries silently gone.
  *
- * Subclassing `Map` fixes both at the root: `structurallyEqual` takes its `Map`
- * arm and compares by content, and `JSON.stringify` produces `{}` — the honest
- * "a Map does not serialize" answer that makes the existing projections
- * (`serializableRefutationAuthority` and friends, which project `orderedSlots`
- * instead) obviously necessary rather than accidentally load-bearing.
- *
- * `Map`'s constructor invokes `this.set` for each entry of an iterable argument,
- * which a throwing override would break — so entries are installed through
- * `Map.prototype.set` directly, before the instance is frozen.
+ * A proxy over an encapsulated native `Map` keeps both value-level behaviours:
+ * `structurallyEqual` takes its `Map` arm and compares by content, while
+ * `JSON.stringify` produces `{}`. Unlike a subclass override, the proxy also
+ * withholds the native receiver, so `Map.prototype.set.call(view, ...)` fails
+ * instead of bypassing the public mutators. `forEach` is adapted separately
+ * because native Map would otherwise leak its mutable target as callback arg 3.
  */
-class ImmutableMap<K, V> extends Map<K, V> {
-  constructor(entries: readonly (readonly [K, V])[]) {
-    super();
-    for (const [key, value] of entries) Map.prototype.set.call(this, key, value);
-    Object.freeze(this);
-  }
-  override set(): never {
-    throw new TypeError("roster map is immutable");
-  }
-  override delete(): never {
-    throw new TypeError("roster map is immutable");
-  }
-  override clear(): never {
-    throw new TypeError("roster map is immutable");
-  }
-}
-
 export function immutableMap<K, V>(entries: readonly (readonly [K, V])[]): ReadonlyMap<K, V> {
-  return new ImmutableMap<K, V>(entries);
+  const target = new Map<K, V>(entries);
+  const immutableMutation = (): never => {
+    throw new TypeError("roster map is immutable");
+  };
+  let view: ReadonlyMap<K, V>;
+  const proxy = new Proxy(target, {
+    get(map, property) {
+      if (property === "set" || property === "delete" || property === "clear") return immutableMutation;
+      if (property === "forEach") {
+        return (callback: (value: V, key: K, map: ReadonlyMap<K, V>) => void, thisArg?: unknown): void => {
+          map.forEach((value, key) => callback.call(thisArg, value, key, view));
+        };
+      }
+      const value: unknown = Reflect.get(map, property, map);
+      if (property === "constructor") return value;
+      return typeof value === "function" ? value.bind(map) : value;
+    },
+  });
+  view = proxy;
+  return Object.freeze(proxy);
 }
 
 export function parseExactRoster(

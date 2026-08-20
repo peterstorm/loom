@@ -144,18 +144,24 @@ type ClassifiedLine =
  */
 function classifyBindingLines(sessionId: SessionId, nowMs: number): ClassifiedLine[] {
   const path = machineBindingPath(sessionId);
-  if (!existsSync(path)) return [];
-  const anchorMs = statSync(path).mtimeMs;
-  return readFileSync(path, "utf-8")
-    .split("\n")
-    .filter((l) => l.trim() !== "")
-    .map((raw): ClassifiedLine => {
-      const persisted = parseBindingLine(raw);
-      if (persisted === null) return { kind: "malformed", raw };
-      return isBindingFresh({ boundAtMs: persisted.boundAtMs, anchorMs, nowMs, ttlMs: STALE_SUBAGENT_TTL_MS })
-        ? { kind: "fresh", raw, persisted }
-        : { kind: "stale", raw, persisted };
-    });
+  try {
+    const anchorMs = statSync(path).mtimeMs;
+    return readFileSync(path, "utf-8")
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((raw): ClassifiedLine => {
+        const persisted = parseBindingLine(raw);
+        if (persisted === null) return { kind: "malformed", raw };
+        return isBindingFresh({ boundAtMs: persisted.boundAtMs, anchorMs, nowMs, ttlMs: STALE_SUBAGENT_TTL_MS })
+          ? { kind: "fresh", raw, persisted }
+          : { kind: "stale", raw, persisted };
+      });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw new Error(
+      `cannot read machine binding file ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 /**
@@ -313,9 +319,15 @@ export function soleActiveBinding(sessionId: SessionId, nowMs: number = Date.now
  */
 export async function refreshBindingActivity(sessionId: SessionId, nowMs: number = Date.now()): Promise<void> {
   const path = machineBindingPath(sessionId);
-  if (!existsSync(path)) return;
+  try {
+    statSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error(
+      `cannot inspect machine binding file ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   await withLock(bindingLock(sessionId), () => {
-    if (!existsSync(path)) return;
     const lines = classifyBindingLines(sessionId, nowMs);
     const stale = lines.filter((l) => l.kind === "stale");
     const kept = lines.filter((l) => l.kind !== "stale");
