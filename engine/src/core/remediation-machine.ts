@@ -31,20 +31,20 @@ import { parseReviewPath } from "./review-packet";
 const ok = <T, E = never>(value: T): DomainResult<T, E> => canonicalRecord({ ok: true, value });
 const fail = <T = never, E = never>(error: E): DomainResult<T, E> => canonicalRecord({ ok: false, error });
 
-const PATH_CHANGES = [
-  "added",
-  "modified",
-  "renamed-from",
-  "renamed-to",
-  "deleted",
-  "absent",
-] as const;
+const PRESENT_CHANGES = ["added", "modified", "renamed-to"] as const;
+const ABSENT_CHANGES = ["renamed-from", "deleted", "absent"] as const;
+const PATH_CHANGES = [...PRESENT_CHANGES, ...ABSENT_CHANGES] as const;
+export type PresentRemediationPathChange = (typeof PRESENT_CHANGES)[number];
+export type AbsentRemediationPathChange = (typeof ABSENT_CHANGES)[number];
 export type RemediationPathChange = (typeof PATH_CHANGES)[number];
 
 const PATH_NODE_KINDS = ["file", "missing", "symlink", "directory", "other"] as const;
 
-const PRESENT_CHANGES: readonly RemediationPathChange[] = ["added", "modified", "renamed-to"];
-const ABSENT_CHANGES: readonly RemediationPathChange[] = ["renamed-from", "deleted", "absent"];
+const isPresentChange = (change: RemediationPathChange): change is PresentRemediationPathChange =>
+  includes(PRESENT_CHANGES, change);
+
+const isAbsentChange = (change: RemediationPathChange): change is AbsentRemediationPathChange =>
+  includes(ABSENT_CHANGES, change);
 
 /** Fixed policy data, never caller-extended or caller-reduced. */
 export const REMEDIATION_EXCLUDED_LAYOUTS = Object.freeze([
@@ -942,11 +942,17 @@ export function registerSupportPath(
   return ok(result);
 }
 
-export type DirtyPathObservation = Readonly<{
-  path: CanonicalRepositoryRelativePath;
-  change: RemediationPathChange;
-  nodeKind: "file" | "missing";
-}>;
+export type DirtyPathObservation =
+  | Readonly<{
+      path: CanonicalRepositoryRelativePath;
+      change: PresentRemediationPathChange;
+      nodeKind: "file";
+    }>
+  | Readonly<{
+      path: CanonicalRepositoryRelativePath;
+      change: AbsentRemediationPathChange;
+      nodeKind: "missing";
+    }>;
 
 export type DirtyPathObservationError = Readonly<{
   kind: "invalid-dirty-path-observation";
@@ -982,13 +988,18 @@ export function parseDirtyPathObservation(
   if (record.value.nodeKind === "directory" || record.value.nodeKind === "other") {
     return invalid(`${field}.nodeKind`, `dirty path '${path.value}' must be a regular file or absent`, path.value);
   }
-  if (PRESENT_CHANGES.includes(record.value.change) && record.value.nodeKind !== "file") {
-    return invalid(`${field}.nodeKind`, `${record.value.change} path '${path.value}' must be a regular file`, path.value);
+  const change = record.value.change;
+  if (isPresentChange(change)) {
+    return record.value.nodeKind === "file"
+      ? ok(canonicalRecord({ path: path.value, change, nodeKind: "file" as const }))
+      : invalid(`${field}.nodeKind`, `${change} path '${path.value}' must be a regular file`, path.value);
   }
-  if (ABSENT_CHANGES.includes(record.value.change) && record.value.nodeKind !== "missing") {
-    return invalid(`${field}.nodeKind`, `${record.value.change} path '${path.value}' must be absent`, path.value);
+  if (isAbsentChange(change)) {
+    return record.value.nodeKind === "missing"
+      ? ok(canonicalRecord({ path: path.value, change, nodeKind: "missing" as const }))
+      : invalid(`${field}.nodeKind`, `${change} path '${path.value}' must be absent`, path.value);
   }
-  return ok(canonicalRecord({ path: path.value, change: record.value.change, nodeKind: record.value.nodeKind }));
+  return invalid(`${field}.change`, `${field}.change is not a supported Git path change`, path.value);
 }
 
 export type RepositorySnapshotWitness = Readonly<{

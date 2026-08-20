@@ -188,22 +188,46 @@ export function diff(from?: string, to?: string): string {
   return exec("git diff");
 }
 
-/** Diff specific files (unstaged) */
-export function diffFiles(files: string[]): string {
-  if (files.length === 0) return "";
-  return execArgs(["diff", "--", ...files]);
+export type GitDiffResult =
+  | Readonly<{ ok: true; diff: string }>
+  | Readonly<{ ok: false; error: string }>;
+
+/** Git diff proof boundary: command failure is not an empty diff. */
+function diffArgs(args: readonly string[]): GitDiffResult {
+  const root = currentRepoRoot("diffArgs");
+  if (root === undefined) return { ok: false, error: "cannot collect a diff outside a Git repository" };
+  try {
+    return {
+      ok: true,
+      diff: execFileSync("git", [...args], {
+        encoding: "utf-8",
+        cwd: root,
+        stdio: ["pipe", "pipe", "pipe"],
+      }),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `git ${args.map((arg) => JSON.stringify(arg)).join(" ")} failed: ${commandFailure(error)}`,
+    };
+  }
 }
 
-/** Diff specific files (staged) */
-export function diffFilesStaged(files: string[]): string {
-  if (files.length === 0) return "";
-  return execArgs(["diff", "--cached", "--", ...files]);
+/** Diff specific files (unstaged). */
+export function diffFiles(files: string[]): GitDiffResult {
+  return files.length === 0 ? { ok: true, diff: "" } : diffArgs(["diff", "--", ...files]);
+}
+
+/** Diff specific files (staged). */
+export function diffFilesStaged(files: string[]): GitDiffResult {
+  return files.length === 0 ? { ok: true, diff: "" } : diffArgs(["diff", "--cached", "--", ...files]);
 }
 
 /** Diff committed changes for specific files from one trusted task baseline. */
-export function diffFilesSince(revision: string, files: string[]): string {
-  if (files.length === 0) return "";
-  return execArgs(["diff", revision, "HEAD", "--", ...files]);
+export function diffFilesSince(revision: string, files: string[]): GitDiffResult {
+  return files.length === 0
+    ? { ok: true, diff: "" }
+    : diffArgs(["diff", revision, "HEAD", "--", ...files]);
 }
 
 export type GitTrackedResult =
@@ -231,25 +255,33 @@ export function isTracked(file: string): GitTrackedResult {
   }
 }
 
-/** Diff untracked file against /dev/null */
-export function diffUntracked(file: string): string {
+/** Diff untracked file against /dev/null without collapsing command failure. */
+export function diffUntracked(file: string): GitDiffResult {
+  const root = currentRepoRoot("diffUntracked");
+  if (root === undefined) return { ok: false, error: "cannot diff an untracked file outside a Git repository" };
   try {
-    return execFileSync("git", ["diff", "--no-index", "/dev/null", file], {
-      encoding: "utf-8",
-      cwd: currentRepoRoot("diffUntracked"),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-  } catch (e: unknown) {
-    // git diff --no-index exits 1 when files differ (always for new files) and
-    // carries the diff on stdout — that is the expected answer, not a failure.
-    if (e && typeof e === "object" && "status" in e && (e as { status?: unknown }).status === 1 &&
-        "stdout" in e) {
-      return String((e as { stdout: unknown }).stdout ?? "");
+    return {
+      ok: true,
+      diff: execFileSync("git", ["diff", "--no-index", "/dev/null", file], {
+        encoding: "utf-8",
+        cwd: root,
+        stdio: ["pipe", "pipe", "pipe"],
+      }),
+    };
+  } catch (error: unknown) {
+    // git diff --no-index exits 1 both for a real difference and for some
+    // access failures. Only an actual patch is positive evidence.
+    const detail = error && typeof error === "object"
+      ? error as { status?: unknown; stdout?: unknown }
+      : null;
+    const stdout = detail?.stdout === undefined ? "" : String(detail.stdout);
+    if (detail?.status === 1 && /^diff --git /m.test(stdout)) {
+      return { ok: true, diff: stdout };
     }
-    process.stderr.write(
-      `loom: git diff --no-index ${JSON.stringify(file)} failed: ${e instanceof Error ? e.message : String(e)}\n`,
-    );
-    return "";
+    return {
+      ok: false,
+      error: `git diff --no-index ${JSON.stringify(file)} failed: ${commandFailure(error)}`,
+    };
   }
 }
 

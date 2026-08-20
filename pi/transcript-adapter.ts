@@ -260,7 +260,9 @@ type TestPairEvent =
     }>;
 
 /** Pair only parser-proven test commands with their exact Pi tool result.
- * The classified test segment must own the Bash call's exit status. */
+ * Standard pairs require the test segment to own the Bash exit status; the
+ * narrow structured-output relaxation instead derives the verdict from the
+ * runner's uncontaminated summary and explicit zero-failure marker. */
 function* structuredTestPairs(messages: readonly PiMessage[]): Generator<TestPairEvent> {
   const testCalls = new Map<string, Readonly<{ command: string; classified: ClassifiedTestCommand }>>();
   for (const message of messages) {

@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
-import type {
-  AgentRequestAuthority,
-  EffectIntent,
-  EffectReceipt,
-  OrchestrationRunId,
+import {
+  parseContextDigest,
+  type AgentRequestAuthority,
+  type EffectIntent,
+  type EffectReceipt,
+  type OrchestrationRunId,
 } from "../../src/core/orchestration-contract";
 import {
   buildContextPacket,
@@ -355,6 +356,60 @@ describe("context packets", () => {
 
     expect(handle.readContext(built.digest).ok).toBe(false);
   });
+
+  it("publishes valid decision JSON byte-identically and idempotently", async () => {
+    const { directory, handle } = freshRun();
+    const bytes = [...Buffer.from('{"kind":"wave-advisory-decision-context"}', "utf8")];
+    const digest = parseContextDigest(createHash("sha256").update(Uint8Array.from(bytes)).digest("hex"));
+    if (!digest.ok) throw new Error(digest.error.message);
+
+    const first = await handle.publishDecisionContext(digest.value, bytes);
+    const replay = await handle.publishDecisionContext(digest.value, bytes);
+
+    expect(first.ok).toBe(true);
+    expect(replay).toEqual(first);
+    expect([...readFileSync(join(directory, "contexts", `${digest.value}.json`))]).toEqual(bytes);
+  });
+
+  it("refuses decision bytes that do not match their digest or byte contract", async () => {
+    const { handle } = freshRun();
+    const digest = parseContextDigest("a".repeat(64));
+    if (!digest.ok) throw new Error(digest.error.message);
+
+    const mismatch = await handle.publishDecisionContext(digest.value, [...Buffer.from("{}")]);
+    const nonBytes = await handle.publishDecisionContext(digest.value, [0, 1.5, 256]);
+
+    expect(mismatch).toMatchObject({ ok: false, error: { message: expect.stringContaining("digest does not match") } });
+    expect(nonBytes).toMatchObject({ ok: false, error: { message: expect.stringContaining("integers from 0 through 255") } });
+  });
+
+  it.each([
+    ["invalid UTF-8", [0xff], "valid UTF-8 JSON"],
+    ["invalid JSON", [...Buffer.from("{truncated", "utf8")], "valid UTF-8 JSON"],
+  ] as const)("refuses decision context with %s", async (_label, bytes, expected) => {
+    const { handle } = freshRun();
+    const digest = parseContextDigest(createHash("sha256").update(Uint8Array.from(bytes)).digest("hex"));
+    if (!digest.ok) throw new Error(digest.error.message);
+
+    const result = await handle.publishDecisionContext(digest.value, bytes);
+
+    expect(result).toMatchObject({ ok: false, error: { message: expect.stringContaining(expected) } });
+  });
+
+  it("refuses different bytes already occupying the decision digest slot", async () => {
+    const { directory, handle } = freshRun();
+    const bytes = [...Buffer.from("{}", "utf8")];
+    const digest = parseContextDigest(createHash("sha256").update(Uint8Array.from(bytes)).digest("hex"));
+    if (!digest.ok) throw new Error(digest.error.message);
+    writeFileSync(join(directory, "contexts", `${digest.value}.json`), '{"forged":true}');
+
+    const result = await handle.publishDecisionContext(digest.value, bytes);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("different decision context bytes already occupy this digest") },
+    });
+  });
 });
 
 // --- Requests and transcripts ----------------------------------------------
@@ -386,6 +441,25 @@ describe("request reservation and transcript capture", () => {
     expect(readBack.ok).toBe(true);
     if (!readBack.ok) return;
     expect([...readBack.value]).toEqual(bytes);
+  });
+
+  it("reports a staged transcript cleanup failure with its exact path", async () => {
+    const { directory, handle } = freshRun();
+    const request = authority();
+    await handle.reserveRequest(request);
+    const bytes = [1, 2, 3];
+    const stagedName = `attempt-1.raw.staged-${process.pid}-${createHash("sha256")
+      .update(Uint8Array.from(bytes)).digest("hex").slice(0, 16)}`;
+    const stagedPath = join(directory, "transcripts", request.slotId, stagedName);
+    mkdirSync(stagedPath);
+
+    const captured = await handle.captureTranscript(request, bytes);
+
+    expect(captured.ok).toBe(false);
+    if (captured.ok) return;
+    expect(captured.error.message).toContain("cannot capture transcript");
+    expect(captured.error.message).toContain("staged cleanup failed");
+    expect(captured.error.message).toContain(stagedName);
   });
 
   it("refuses a second capture for an attempt that already landed", async () => {
@@ -518,6 +592,22 @@ describe("artifact set publication", () => {
     expect(published.value).toHaveLength(2);
     expect(readFileSync(join(directory, "artifacts", "result.json"), "utf-8")).toBe("{}");
     expect(readFileSync(join(directory, "artifacts", "nested", "report.md"), "utf-8")).toBe("# report");
+  });
+
+  it("reports every staged artifact it could not clean up", () => {
+    const { directory } = freshRun();
+    const staged = join(directory, "artifacts", "leftover.staged");
+    const final = join(directory, "artifacts", "occupied");
+    mkdirSync(staged);
+    mkdirSync(final);
+
+    const promoted = promoteArtifactSet([{ staged, final }]);
+
+    expect(promoted.ok).toBe(false);
+    if (promoted.ok) return;
+    expect(promoted.error.message).toContain("artifact slot is occupied by a directory");
+    expect(promoted.error.message).toContain("staged cleanup failed");
+    expect(promoted.error.message).toContain(staged);
   });
 
   it("refuses an empty artifact set rather than reporting a vacuous success", async () => {

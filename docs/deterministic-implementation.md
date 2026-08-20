@@ -13,7 +13,7 @@ The organizing principle extends the shipped one ("models for judgment, code for
 
 ## 1. Where remediation cost actually comes from
 
-Empirically, from the engine and its documented bug history, remediation cost has five distinct drivers plus one gap. Static analysis addresses some but not all of them; the proposal is honest about which.
+Empirically, from the engine and its documented bug history, remediation cost has five distinct drivers. Static analysis addresses some but not all of them; the proposal is honest about which.
 
 1. **Total invalidation on any byte change.** When a fix subagent stops with changed bytes, `applyUntrustedStopResolution` (`engine/src/handlers/subagent-stop/update-task-status.ts`) bumps `review_generation`, drops `review_run`, clears the wave's `spec_check`, and resets `tests_passed`/`reviews_complete`. A one-line advisory fix therefore costs a full reviewer-roster re-run (`WAVE_REVIEW_AGENTS` × every wave task) plus spec-check, plus a fresh refutation panel if any critical remains. Nothing scopes re-review to what changed. This is the dominant structural cost driver.
 2. **Prior-finding re-assessment grows monotonically.** Every reviewer must assess every prior finding id exactly once per round (`core/findings.ts`, packet-order lockstep). The design is correctly fail-closed — a clean rerun cannot silently erase an old blocker by omission — but it makes round *N* cost O(accumulated findings), every round.
@@ -21,7 +21,7 @@ Empirically, from the engine and its documented bug history, remediation cost ha
 4. **Wire-format failures burn attempts.** The attempt-1/attempt-2 machinery and its retry diagnostic (`programs/wave-gate.ts`, `WAVE_RETRY_PREAMBLE`) exist because models emit malformed lifecycle JSON and repeat it on retry, exhausting a batch and forcing an exhausted-run restart into a fresh run directory.
 5. **Acceptance is judged, not checked.** The machine-checkable per-task contract is thin: declared artifacts changed bytes, a trusted test ran, `LC-N` machine files exist. As `references/executable-models.md` states: *"Wave-gate artifact verification is existence, not semantics. An empty file at the declared path passes the gate and fails at test evidence."* Spec alignment is an LLM emitting `FR-XXX: PASS`.
 
-**Gap (pre-existing, independent of this proposal):** `commands/loom.md` and `docs/workflows.md` claim full-tier lint runs at the wave boundary ("Step 4c"), but `commands/wave-gate.md` v3 has no such step and the registered wave-gate program never invokes `lint-wave-gate`. The strongest deterministic check already shipped is currently an unenforced manual step.
+**Shipped baseline:** the registered Wave Gate now invokes the same fail-closed full-tier lint shell as `lint-wave-gate` after advisory disposition and semantic readiness, before protected completion. Programmatic boundary, purity, function-length, and generated-integrity violations therefore block advancement automatically; the old documented-only “Step 4c” gap is closed.
 
 ## 2. The three-distance model
 
@@ -43,7 +43,7 @@ Organized as a ladder from "close existing gaps" to "formal methods," in rough o
 
 ### Tier 0 — close existing gaps (no new tools)
 
-**T0.1 — Wire full-tier lint into the registered wave-gate program.** The helper (`engine/src/handlers/helpers/lint-wave-gate.ts`) and the fail-closed linter (ADR-0002, ADR-0003) already exist. The gate checks are pure functions in `core/wave-gate-machine.ts`; add a ninth check that runs the full tier over the wave's `files_modified` and fails the gate on any error. This also repairs the documented-but-unenforced Step 4c drift.
+**T0.1 — Full-tier lint in the registered wave-gate program (shipped).** The helper (`engine/src/handlers/helpers/lint-wave-gate.ts`) and registered façade share one fail-closed shell over the Wave's `files_modified`. The façade runs it after semantic readiness and before the protected completion commit, closing the former documented-but-unenforced lint drift.
 
 **T0.2 — Engine-executed build/typecheck/test as a gate check.** The proof-obligation system establishes *trusted* test evidence via ledger attribution, with documented forgery residuals (agent-writable report artifacts; same-call forgery windows). The stronger move is orthogonal: the engine itself runs `tsc --noEmit` / `./gradlew compileJava test` / the project test command at the gate and records the exit code. Evidence the engine produced needs no trust model. This upgrades `checkTestEvidence` from "a TestRun fact appeared in the right epoch" to ground truth and closes the report-forgery residual for the cases that matter.
 

@@ -341,6 +341,24 @@ function completionFailureMessage(decisionFailure: string | null, commitFailure:
   return `${decisionFailure}\n[loom] complete-wave-gate: locked state transaction also failed: ${commitFailure}`;
 }
 
+function legacyCompletionReplayResult(
+  replay: ReturnType<typeof findLegacyWaveGateCompletionReplay>,
+  timing: "already" | "concurrently",
+): HookResult | null {
+  if (!replay.ok) {
+    return {
+      kind: "error",
+      message: `[loom] complete-wave-gate: conflicting compatibility completion replay: ${replay.error.message}`,
+    };
+  }
+  if (replay.value === null) return null;
+  process.stderr.write(
+    `Wave ${replay.value.wave} was ${timing} completed by ${replay.value.runId}; ` +
+    `reusing receipt ${replay.value.completionReceipt.effectId}.\n`,
+  );
+  return { kind: "passthrough" };
+}
+
 async function runCompleteWaveGate(
   _stdin: string,
   args: string[],
@@ -372,20 +390,11 @@ async function runCompleteWaveGate(
       };
     }
     compatibilityAuthority = compatibility.value;
-    const existingCompletion = findLegacyWaveGateCompletionReplay(preRead, compatibilityAuthority);
-    if (!existingCompletion.ok) {
-      return {
-        kind: "error",
-        message: `[loom] complete-wave-gate: conflicting compatibility completion replay: ${existingCompletion.error.message}`,
-      };
-    }
-    if (existingCompletion.value !== null) {
-      process.stderr.write(
-        `Wave ${existingCompletion.value.wave} was already completed by ${existingCompletion.value.runId}; ` +
-        `reusing receipt ${existingCompletion.value.completionReceipt.effectId}.\n`,
-      );
-      return { kind: "passthrough" };
-    }
+    const existingCompletion = legacyCompletionReplayResult(
+      findLegacyWaveGateCompletionReplay(preRead, compatibilityAuthority),
+      "already",
+    );
+    if (existingCompletion !== null) return existingCompletion;
     try {
       await mgr.migrateLegacyWaveGateRegistration(compatibilityAuthority);
       preRead = mgr.load();
@@ -394,20 +403,11 @@ async function runCompleteWaveGate(
       // pre-read. Re-read terminal history and classify only the exact outcome
       // as idempotent; a different run/digest remains a hard conflict.
       try {
-        const racedCompletion = findLegacyWaveGateCompletionReplay(mgr.load(), compatibilityAuthority);
-        if (!racedCompletion.ok) {
-          return {
-            kind: "error",
-            message: `[loom] complete-wave-gate: conflicting compatibility completion replay: ${racedCompletion.error.message}`,
-          };
-        }
-        if (racedCompletion.value !== null) {
-          process.stderr.write(
-            `Wave ${racedCompletion.value.wave} was concurrently completed by ${racedCompletion.value.runId}; ` +
-            `reusing receipt ${racedCompletion.value.completionReceipt.effectId}.\n`,
-          );
-          return { kind: "passthrough" };
-        }
+        const racedCompletion = legacyCompletionReplayResult(
+          findLegacyWaveGateCompletionReplay(mgr.load(), compatibilityAuthority),
+          "concurrently",
+        );
+        if (racedCompletion !== null) return racedCompletion;
       } catch (replayReadError) {
         return {
           kind: "error",
@@ -470,20 +470,11 @@ async function runCompleteWaveGate(
 
   if (commitError !== null && compatibilityAuthority !== null) {
     try {
-      const racedCompletion = findLegacyWaveGateCompletionReplay(mgr.load(), compatibilityAuthority);
-      if (!racedCompletion.ok) {
-        return {
-          kind: "error",
-          message: `[loom] complete-wave-gate: conflicting compatibility completion replay: ${racedCompletion.error.message}`,
-        };
-      }
-      if (racedCompletion.value !== null) {
-        process.stderr.write(
-          `Wave ${racedCompletion.value.wave} was concurrently completed by ${racedCompletion.value.runId}; ` +
-          `reusing receipt ${racedCompletion.value.completionReceipt.effectId}.\n`,
-        );
-        return { kind: "passthrough" };
-      }
+      const racedCompletion = legacyCompletionReplayResult(
+        findLegacyWaveGateCompletionReplay(mgr.load(), compatibilityAuthority),
+        "concurrently",
+      );
+      if (racedCompletion !== null) return racedCompletion;
     } catch (replayReadError) {
       return {
         kind: "error",

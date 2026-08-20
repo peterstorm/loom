@@ -110,9 +110,10 @@ describe("Pi test-evidence transcript adapter", () => {
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
     });
-    // The PI-path relax: a test headed by only a `cd` preamble and trailed
-    // only by PIPE stages (`| tail`, `| tee`) is attributable — the paired
-    // output is the runner's own, merely viewed through a filter.
+    // The Pi structured-output relaxation: a test headed by only a `cd`
+    // preamble and trailed only by PIPE stages (`| tail`, `| tee`) may use the
+    // paired runner summary as its verdict even though standard exit
+    // attribution refused the composition.
     expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -n 40"))).toEqual({
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },

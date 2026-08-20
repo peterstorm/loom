@@ -28,7 +28,11 @@ type SpawnRequest = Readonly<{ authority: Authority; task: string }>;
 type SpawnBatch = Readonly<{ kind: "spawn-batch"; requests: readonly SpawnRequest[] }>;
 type AwaitUser = Readonly<{
   kind: "await-user";
-  request: Readonly<{ requestId: string; advisoryCount: number }>;
+  request: Readonly<{
+    requestId: string;
+    context: Readonly<{ digest: string; slot: Readonly<{ path: string }> }>;
+    advisories: readonly Readonly<{ slot: Readonly<{ path: string }>; digest: string; byteLength: number }>[];
+  }>;
 }>;
 type Done = Readonly<{ kind: "done"; outcome: unknown }>;
 
@@ -117,7 +121,19 @@ function asAwaitUser(value: unknown, label: string): AwaitUser {
   check(action.kind === "await-user", `${label} must be await-user, got ${JSON.stringify(action)}`);
   const request = record(action.request, `${label}.request`);
   check(typeof request.requestId === "string", `${label} requestId is missing`);
-  check(typeof request.advisoryCount === "number" && request.advisoryCount > 0, `${label} advisory count must be positive`);
+  const context = record(request.context, `${label}.request.context`);
+  const contextSlot = record(context.slot, `${label}.request.context.slot`);
+  check(typeof context.digest === "string" && typeof contextSlot.path === "string",
+    `${label} context reference is incomplete`);
+  check(Array.isArray(request.advisories) && request.advisories.length > 0,
+    `${label} advisory artifacts must be non-empty`);
+  for (const [index, candidate] of request.advisories.entries()) {
+    const advisory = record(candidate, `${label}.request.advisories[${index}]`);
+    const slot = record(advisory.slot, `${label}.request.advisories[${index}].slot`);
+    check(typeof slot.path === "string" && typeof advisory.digest === "string" &&
+      typeof advisory.byteLength === "number" && advisory.byteLength > 0,
+    `${label} advisory artifact ${index} is incomplete`);
+  }
   return action as unknown as AwaitUser;
 }
 
@@ -471,6 +487,14 @@ function waveGateSmoke(): void {
   }
 
   const suspended = asAwaitUser(next, "Wave Gate advisory suspension");
+  check(existsSync(join(runDir, suspended.request.context.slot.path)),
+    "Wave Gate advisory context reference was not published");
+  for (const advisory of suspended.request.advisories) {
+    const path = join(runDir, advisory.slot.path);
+    check(existsSync(path), `Wave Gate advisory artifact was not published: ${advisory.slot.path}`);
+    check(readFileSync(path).byteLength === advisory.byteLength,
+      `Wave Gate advisory artifact byte length drifted: ${advisory.slot.path}`);
+  }
   const resumedSuspension = asAwaitUser(run(cwd, ["resume", "--runs-root", runsRoot, "--run", runDir]), "Wave Gate suspended replay");
   check(resumedSuspension.request.requestId === suspended.request.requestId, "Wave Gate resume changed advisory decision authority");
   const staleDecision = runFailure(cwd, [

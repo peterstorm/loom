@@ -11,7 +11,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import type { HookHandler, SubagentStartInput } from "../../types";
+import { blockResult, type HookHandler, type SubagentStartInput } from "../../types";
 import { SUBAGENT_DIR, machinesDir, taskGraphPath } from "../../config";
 import { stripNamespace } from "../../utils/strip-namespace";
 import {
@@ -21,6 +21,7 @@ import {
   parseAgentType,
   parseReportedAgentId,
   parseSessionId,
+  removeActiveAgentStrict,
   reportedRosterAgentId,
   sessionScopedPath,
   WRITE_GRANT_AGENT_NAMESPACE,
@@ -73,6 +74,7 @@ const handler: HookHandler = async (stdin) => {
   // constructor governs the roster entry below, so binding and roster identity
   // can never disagree about which id an agent is.
   const agentId = agent_id ? parseReportedAgentId(agent_id) : null;
+  const rosterId = agent_id ? reportedRosterAgentId(agent_id) : null;
   if (agent_id && agentId === null) {
     process.stderr.write(
       `mark-subagent-active: agent_id ${JSON.stringify(agent_id)} is reserved or path-unsafe (whitespace/colon/slash/'..', or the ${WRITE_GRANT_AGENT_NAMESPACE} write-grant namespace) — machine NOT bound, it will run UNGATED; tracked on the roster as ${reportedRosterAgentId(agent_id)} for contention counting\n`,
@@ -99,9 +101,9 @@ const handler: HookHandler = async (stdin) => {
   const rosterAgentTypeRaw = stripNamespace(input.agent_type ?? "");
   const rosterAgentType = rosterAgentTypeRaw ? parseAgentType(rosterAgentTypeRaw) : null;
   let rosterSound = true;
-  if (agent_id) {
+  if (rosterId !== null) {
     try {
-      await markAgentActive(sessionId, reportedRosterAgentId(agent_id), rosterAgentType);
+      await markAgentActive(sessionId, rosterId, rosterAgentType);
     } catch (e) {
       rosterSound = false;
       process.stderr.write(
@@ -126,18 +128,31 @@ const handler: HookHandler = async (stdin) => {
       `mark-subagent-active: agent_type ${JSON.stringify(agentTypeRaw)} contains reserved or path-unsafe characters (whitespace/colon/slash/'..') — no machine looked up or bound; it will run UNGATED\n`,
     );
   }
+  let bindingFailure: string | null = null;
   if (agentType && rosterSound) {
     const loaded = loadMachine(machinesDir(), agentType);
     if (loaded.kind !== "none") {
-      if (agentId) {
+      if (agentId && rosterId !== null) {
         try {
           await bindMachineAgent(sessionId, agentType, agentId);
-        } catch (e) {
-          // A failed bind must not abort the handler (the .task_graph path
-          // below still needs writing) — but it disables gating, so shout.
-          process.stderr.write(
-            `mark-subagent-active: bindMachineAgent failed — ${agentType} (${agentId}) will run UNGATED: ${e instanceof Error ? e.message : String(e)}\n`,
-          );
+        } catch (error) {
+          // The roster row carries write authority by role. A denied Agent has
+          // no SubagentStop cleanup, so roll that exact row back now rather
+          // than leaving a ghost capability for later parent edits.
+          let rollbackFailure: string | null = null;
+          try {
+            await removeActiveAgentStrict(sessionId, rosterId);
+          } catch (rollbackError) {
+            rollbackFailure = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+          }
+          // Finish the independent task-graph pointer bookkeeping below, then
+          // fail the spawn closed through the surfaced Hook result.
+          bindingFailure = [
+            `mark-subagent-active: bindMachineAgent failed — refusing to run ${agentType} (${agentId}) ungated: ${error instanceof Error ? error.message : String(error)}`,
+            ...(rollbackFailure === null
+              ? []
+              : [`active-roster rollback could not be proven: ${rollbackFailure}`]),
+          ].join("; ");
         }
       } else {
         process.stderr.write(`mark-subagent-active: cannot bind machine for ${agentType} — no valid agent_id in hook input; it will run UNGATED\n`);
@@ -183,7 +198,9 @@ const handler: HookHandler = async (stdin) => {
     }
   }
 
-  return { kind: "passthrough" };
+  return bindingFailure === null
+    ? { kind: "passthrough" }
+    : blockResult(bindingFailure);
 };
 
 export default handler;

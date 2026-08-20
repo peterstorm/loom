@@ -89,6 +89,25 @@ describe("parseTranscript", () => {
     const result = parseTranscript(content);
     expect(result).toContain("Result text");
   });
+
+  it("uses the same text-block flattener for nested Claude tool results", () => {
+    const content = JSON.stringify({
+      message: { content: [{ type: "tool_result", content: [
+        { type: "text", text: "first" },
+        { type: "image", source: "ignored" },
+        { type: "text", text: "second" },
+      ] }] },
+    });
+    expect(parseTranscript(content, "claude")).toBe("first\nsecond");
+  });
+
+  it.each([
+    ["string", "Pi string", "Pi string"],
+    ["text blocks", [{ type: "text", text: "Pi first" }, { type: "text", text: "Pi second" }], "Pi first\nPi second"],
+  ] as const)("extracts Pi %s content through the shared flattener", (_label, body, expected) => {
+    const content = JSON.stringify({ type: "message", message: { role: "assistant", content: body } });
+    expect(parseTranscript(content, "pi")).toBe(expected);
+  });
 });
 
 describe("parseFilesModified", () => {

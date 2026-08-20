@@ -8,7 +8,7 @@ import { renderStatus } from "../../../src/handlers/helpers/orchestration";
 import { WAVE_REVIEW_AGENTS, type GateDeps } from "../../../src/core/wave-gate-machine";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { parseAgentRequestAuthority, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
-import { persistedWaveAttemptTwoCompatibilityProblem, prepareOrphanedWaveGateRecovery } from "../../../src/handlers/helpers/programs";
+import { persistedWaveAttemptTwoCompatibilityProblem, prepareOrphanedWaveGateRecovery } from "../../../src/handlers/helpers/programs/wave-gate";
 import { buildContextPacket, encodeByteSection } from "../../../src/orchestration/context-packets";
 import { openRunDirectory, inspectRunDirectoryEntry, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings } from "../../../src/orchestration/session-run-bindings";
@@ -2647,6 +2647,53 @@ describe("orchestration CLI", () => {
     expect(JSON.parse(replay.stdout).kind).toBe("done");
   }, 30_000);
 
+  it("blocks protected completion when automatic full-tier lint fails", () => {
+    const root = repository();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    );
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "x.ts"), "console.log('full-tier violation');\n");
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, wave_gates: {},
+      wave_review_epoch: { runId: "run.wave-lint-block", wave: 1, batchEpoch: "b".repeat(64) },
+      spec_check: {
+        wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+      tasks: [{
+        id: "T1", description: "lint target", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "passed", review_generation: 0,
+        findings: [], critical_findings: [], advisory_findings: [],
+      }],
+    }));
+    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-lint-block-runs-")));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-lint-block");
+    mkdirSync(runDir);
+
+    const started = runCli([
+      "start", "wave-gate", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ wave: 1 }), root);
+
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as { kind: string; diagnostic: { message: string } };
+    expect(action.kind).toBe("blocked");
+    expect(action.diagnostic.message).toContain("WAVE-GATE LINT");
+    expect(action.diagnostic.message).toContain("no-console");
+    const protectedGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { status: string }[];
+      wave_gate_history?: readonly unknown[];
+    };
+    expect(protectedGraph.tasks[0]?.status).toBe("implemented");
+    expect(protectedGraph.wave_gate_history ?? []).toEqual([]);
+  });
+
   it("publishes standalone refutation attempt 2 after a malformed attempt-1 verdict", async () => {
     const root = repository();
     writeFileSync(join(root, "a.txt"), "changed\n");
@@ -3246,7 +3293,8 @@ describe("orchestration CLI", () => {
         { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
         { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
       );
-      writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+      mkdirSync(join(root, "src"));
+      writeFileSync(join(root, "src", "x.ts"), "export const x = 1;\n");
       const statePath = join(root, ".claude", "state", "active_task_graph.json");
       writeFileSync(statePath, JSON.stringify({
         current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
@@ -3267,6 +3315,75 @@ describe("orchestration CLI", () => {
       expect(started.status, started.stderr).toBe(0);
       return { root, runsRoot, runDir, statePath };
     }
+
+    it("drives the façade-emitted advisory request through decide and resume to done", () => {
+      const { root, runsRoot, runDir, statePath } = startedWaveRun("decide-end-to-end");
+      const protectedGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
+        tasks: readonly Record<string, unknown>[];
+        [key: string]: unknown;
+      };
+      const advisory = {
+        id: "comment-analyzer-1",
+        agent: "comment-analyzer",
+        severity: "advisory",
+        file: "src/x.ts",
+        line: 1,
+        claim: "prefer the façade-owned lifecycle request",
+      };
+      chmodSync(statePath, 0o644);
+      writeFileSync(statePath, JSON.stringify({
+        ...protectedGraph,
+        spec_check: {
+          wave: 1,
+          run_at: new Date().toISOString(),
+          verdict: "PASSED",
+          critical_count: 0,
+          high_count: 0,
+          critical_findings: [],
+          high_findings: [],
+          medium_findings: [],
+        },
+        tasks: protectedGraph.tasks.map((task) => ({
+          ...task,
+          review_status: "passed",
+          review_run: undefined,
+          findings: [advisory],
+          critical_findings: [],
+          advisory_findings: [advisory.claim],
+        })),
+      }));
+
+      const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+      expect(resumed.status, resumed.stderr).toBe(0);
+      const awaiting = JSON.parse(resumed.stdout) as {
+        kind: string;
+        request: { requestId: string; advisories: readonly unknown[] };
+      };
+      expect(awaiting.kind).toBe("await-user");
+      expect(awaiting.request.advisories).toHaveLength(1);
+
+      const status = runCli(["status", "--json", "--runs-root", runsRoot], "", root);
+      expect(status.status, status.stderr).toBe(0);
+      expect(JSON.parse(status.stdout).next.action).toMatchObject({
+        kind: "await-user",
+        request: { requestId: awaiting.request.requestId },
+      });
+
+      const decided = runCli(
+        ["decide", "--runs-root", runsRoot, "--run", runDir, "--request", awaiting.request.requestId],
+        JSON.stringify({ kind: "approve" }),
+        root,
+      );
+
+      expect(decided.status, decided.stderr).toBe(0);
+      expect(JSON.parse(decided.stdout)).toMatchObject({
+        kind: "done",
+        outcome: { kind: "protected-wave-state-committed" },
+      });
+      const replay = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+      expect(replay.status, replay.stderr).toBe(0);
+      expect(JSON.parse(replay.stdout).kind).toBe("done");
+    }, 15_000);
 
     it("refuses a decision id that is not the exact pending advisory request", () => {
       const { root, runsRoot, runDir } = startedWaveRun("decide-wrong-id");

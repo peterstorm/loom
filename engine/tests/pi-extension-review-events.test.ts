@@ -19,12 +19,15 @@ type Handler = (event: Record<string, unknown>, context: Record<string, unknown>
 
 class FakePi {
   readonly handlers = new Map<string, Handler[]>();
+  readonly commands = new Map<string, { handler: Handler }>();
 
   on(event: string, handler: Handler): void {
     this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
   }
 
-  registerCommand(): void {}
+  registerCommand(name: string, command: { handler: Handler }): void {
+    this.commands.set(name, command);
+  }
 
   async emit(event: string, payload: Record<string, unknown>, context: Record<string, unknown>): Promise<unknown[]> {
     const results: unknown[] = [];
@@ -846,6 +849,39 @@ describe("Pi extension review tool_result integration", () => {
     } finally {
       restoreEnv("LOOM_STATE_PATH", previous);
       rmSync(latePath, { force: true });
+    }
+  });
+
+  it("surfaces task-graph access failure in resume context and loom-status", async () => {
+    const pi = await extension();
+    const loop = join(temp, `pi-task-graph-loop-${process.pid}`);
+    const previous = process.env.LOOM_STATE_PATH;
+    rmSync(loop, { force: true });
+    symlinkSync(loop, loop);
+    process.env.LOOM_STATE_PATH = loop;
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const outputs = await pi.emit("before_agent_start", { prompt: "", systemPrompt: "" }, {
+        sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad417" },
+      });
+      expect(outputs).not.toContainEqual(expect.objectContaining({
+        message: expect.objectContaining({ customType: "loom-context" }),
+      }));
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toContain("resume context skipped — task graph unreadable");
+
+      const notifications: Array<{ message: string; level: string }> = [];
+      const status = pi.commands.get("loom-status");
+      expect(status).toBeDefined();
+      await status?.handler({}, {
+        ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
+      });
+      expect(notifications).toContainEqual({ message: expect.stringContaining("Error: ELOOP"), level: "error" });
+      expect(notifications).not.toContainEqual({ message: "No active loom orchestration", level: "info" });
+    } finally {
+      stderr.mockRestore();
+      restoreEnv("LOOM_STATE_PATH", previous);
+      rmSync(loop, { force: true });
     }
   });
 
@@ -2002,6 +2038,54 @@ describe("Pi extension review tool_result integration", () => {
 
     expect(result.kind).toBe("block");
     expect(JSON.parse(readFileSync(statePath, "utf-8"))).toEqual(before);
+  });
+
+  it("reclaims an aged current-protocol reservation before adding the retry's own Pi roster row", async () => {
+    // This scenario's premise is that no earlier agent is still serving the
+    // graph. Other integration cases intentionally leave durable session
+    // artifacts for reload tests, so give this liveness assertion a clean
+    // registry rather than depending on file order.
+    rmSync(subagentDir, { recursive: true, force: true });
+    mkdirSync(subagentDir, { recursive: true });
+    const planPath = join(temp, "current-reservation-retry-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    const strandedAt = new Date(Date.now() - 11 * 60_000).toISOString();
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      executing_tasks: ["T1"],
+      tasks: [{ ...initialGraph().tasks[0], reserved_at: strandedAt }],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad483";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-current-reservation-retry";
+    const prompt = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+
+    const result = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: { agent: "code-implementer-agent", task: prompt, agentScope: "user" },
+    }, context);
+
+    expect(result).toEqual([undefined]);
+    const retried = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(retried.executing_tasks).toEqual(["T1"]);
+    expect(Date.parse(retried.tasks[0].reserved_at)).toBeGreaterThan(Date.parse(strandedAt));
+    expect(readFileSync(join(subagentDir, `${session}.active`), "utf-8").trim()).not.toBe("");
+
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId,
+      content: [],
+      details: {
+        results: [{ agent: "code-implementer-agent", task: prompt, exitCode: 1, messages: [] }],
+      },
+    }, context);
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).executing_tasks).toEqual([]);
+    expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
   });
 
   it("blocks duplicate and overlapping parallel implementation ownership through the shared core", async () => {

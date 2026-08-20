@@ -17,7 +17,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SUBAGENT_DIR } from "../../../src/config";
+import { shouldBlockDirectEdit } from "../../../src/core/block-direct-edits";
+import { activeRosterProbe } from "../../../src/handlers/pre-tool-use/block-direct-edits";
 import markActive from "../../../src/handlers/subagent-start/mark-subagent-active";
+import { parseSessionId } from "../../../src/machine";
 
 const uniq = `roster-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const stateDir = mkdtempSync(join(tmpdir(), "loom-roster-state-"));
@@ -34,7 +37,7 @@ const session = (label: string) => {
 afterAll(() => {
   delete process.env.LOOM_STATE_PATH;
   for (const s of sessions) {
-    for (const suffix of ["active", "machine", "task_graph", "evidence.jsonl", "cleanup"]) {
+    for (const suffix of ["active", "active.tmp", "machine", "task_graph", "evidence.jsonl", "cleanup"]) {
       rmSync(join(SUBAGENT_DIR, `${s}.${suffix}`), { recursive: true, force: true });
     }
   }
@@ -68,6 +71,60 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     // (c) …but the .task_graph path write still happened.
     expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(true);
     expect(readFileSync(join(SUBAGENT_DIR, `${s}.task_graph`), "utf-8")).toBe(resolve(statePath));
+  });
+
+  it("machine binding failure blocks the Agent after writing .task_graph", async () => {
+    const s = session("bind-fail");
+    process.env.LOOM_STATE_PATH = statePath;
+    mkdirSync(join(SUBAGENT_DIR, `${s}.machine`), { recursive: true });
+
+    const result = await markActive(start(s), []);
+
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") {
+      expect(result.message).toContain("bindMachineAgent failed");
+      expect(result.message).toContain("refusing to run code-implementer-agent (a-1) ungated");
+    }
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(true);
+    expect(readFileSync(join(SUBAGENT_DIR, `${s}.task_graph`), "utf-8")).toBe(resolve(statePath));
+
+    const parsedSession = parseSessionId(s);
+    expect(parsedSession).not.toBeNull();
+    if (parsedSession === null) return;
+    expect(activeRosterProbe(parsedSession)).toBeNull();
+    expect(shouldBlockDirectEdit("Edit", s, () => true, activeRosterProbe).kind).toBe("block");
+  });
+
+  it("reports an unproven rollback when strict roster removal itself fails", async () => {
+    const s = session("rollback-fail");
+    process.env.LOOM_STATE_PATH = statePath;
+    const activePath = join(SUBAGENT_DIR, `${s}.active`);
+    writeFileSync(activePath, "reviewer-1\tcode-reviewer\n");
+    // A second surviving row makes rollback use the atomic rewrite path. Its
+    // deterministic temporary slot is a directory, so strict removal cannot
+    // prove the denied implementation Agent's role-bearing row was removed.
+    mkdirSync(`${activePath}.tmp`);
+    mkdirSync(join(SUBAGENT_DIR, `${s}.machine`));
+
+    const result = await markActive(start(s), []);
+
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") {
+      expect(result.message).toContain("bindMachineAgent failed");
+      expect(result.message).toContain("active-roster rollback could not be proven");
+      expect(result.message).toContain("EISDIR");
+    }
+    expect(readFileSync(activePath, "utf8")).toContain("a-1\tcode-implementer-agent");
+
+    const parsedSession = parseSessionId(s);
+    expect(parsedSession).not.toBeNull();
+    if (parsedSession === null) return;
+    expect(activeRosterProbe(parsedSession)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ agentType: "code-implementer-agent" }),
+    ]));
+    // This is why the failed rollback is security-sensitive: the ghost row is
+    // still interpreted as an active implementation-role write authority.
+    expect(shouldBlockDirectEdit("Edit", s, () => true, activeRosterProbe).kind).toBe("allow");
   });
 
   it("control: a healthy roster arms the binding AND writes .task_graph", async () => {

@@ -559,19 +559,26 @@ export function parseStoredResolutions(raw: unknown): ResolvedFinding[] {
     .filter((record): record is ResolvedFinding => record !== null);
 }
 
+function salvageFindingsFromMalformedRecords(
+  raw: unknown,
+  parseEnvelope: (entry: unknown) => unknown | null,
+): readonly Finding[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    if (parseEnvelope(entry) !== null) return [];
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
+    const finding = parseStoredFinding((entry as Record<string, unknown>).finding);
+    return finding === null ? [] : [finding];
+  });
+}
+
 /**
  * Recover a valid nested finding from a malformed remediation record. The
  * remediation audit is unusable, so the finding returns to the active set
  * rather than disappearing with the broken envelope.
  */
 export function salvageFindingsFromMalformedResolutions(raw: unknown): readonly Finding[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.flatMap((entry) => {
-    if (parseStoredResolution(entry) !== null) return [];
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
-    const finding = parseStoredFinding((entry as Record<string, unknown>).finding);
-    return finding === null ? [] : [finding];
-  });
+  return salvageFindingsFromMalformedRecords(raw, parseStoredResolution);
 }
 
 /**
@@ -580,13 +587,7 @@ export function salvageFindingsFromMalformedResolutions(raw: unknown): readonly 
  * disappearing with the broken envelope.
  */
 export function salvageFindingsFromMalformedRefutations(raw: unknown): readonly Finding[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.flatMap((entry) => {
-    if (parseStoredRefutation(entry) !== null) return [];
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
-    const finding = parseStoredFinding((entry as Record<string, unknown>).finding);
-    return finding === null ? [] : [finding];
-  });
+  return salvageFindingsFromMalformedRecords(raw, parseStoredRefutation);
 }
 
 /** The repair a rejected task graph needs, named in the diagnostic itself. */

@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { parseAgentRequestAuthority, parseStoredAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
+import { awaitUserAction, parseAgentRequestAuthority, parseStoredAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type AwaitUserAction, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
 import { defaultRefutationThreshold } from '../../../core/review-panel';
 import { completePersistentRefutationPanel, deriveRefutationVerifierBinding, panelRequestIdentity, parseRefutationPanelAuthority, startPersistentRefutationPanel, submitRefutationVerdict } from '../../../core/panel-program';
 import type { FindingOutcome } from '../../../core/review-panel';
@@ -16,32 +16,54 @@ import { captureKey } from '../../../core/harness-capture';
 import { inspectRunDirectoryEntry, type RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { TASK_GRAPH_PATH } from '../../../config';
 import { StateManager } from '../../../state-manager';
-import { commitWaveGateCompletion, deriveWaveReadiness, deriveWaveRefutationPlan, WAVE_REVIEW_AGENTS } from '../../../core/wave-gate-machine';
+import { commitWaveGateCompletion, deriveWaveAdvisoryDecisionRequest, deriveWaveGateDriveStep, deriveWaveReadiness, deriveWaveRefutationPlan, waveAdvisoryDecisionActionRequest, WAVE_REVIEW_AGENTS, type WaveAdvisoryDecisionRequest } from '../../../core/wave-gate-machine';
 import { loadPlanModelsSource } from '../complete-wave-gate';
+import { runFullTierWaveLint } from '../lint-wave-gate';
 import { applyFindingOutcomes, preserveAcceptedReviewRunFindings } from '../../../core/findings';
 import { applyReviewResolution, constrainReviewResolutionToScope, resolveTaskReviewFindings } from '../../../core/review-output';
 import { Task, TaskGraph } from '../../../types';
 import { anyActiveSubagent } from '../../../machine';
 import { parseSpecCheckOutput, reconcileSpecCheck } from '../../../core/spec-check';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
-import { compareStrings } from '../../../core/ordering';
 import { durableCaptureRejection, durableRefutationRequests, exactObject, executableRefutationRequests, failed, parseRegisteredFacadeProgram, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic, renderSpawnTask, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
 
 export const waveGateDeps = Object.freeze({ loadPlanModels: loadPlanModelsSource, fileExists: existsSync });
 
 export function waveAdvisoryDecisionRequestId(
   runId: string,
-  tasks: readonly Readonly<{ id?: string; findings?: readonly Readonly<{ id: string; severity: string; claim: string }>[] }>[],
+  tasks: readonly Task[],
 ): string {
-  const advisories = tasks.flatMap(({ id: taskId, findings }) => (findings ?? [])
-    .filter(({ severity }) => severity === "advisory")
-    .map(({ id, claim }) => Object.freeze({ taskId: taskId ?? null, id, claim })))
-    // Byte order, never `localeCompare`: this ordering feeds the SHA-256 that
-    // IS the idempotency key, so a locale change would stop a resume from
-    // reconciling against the receipt it already wrote for the same decision.
-    .sort((left, right) => compareStrings(left.id, right.id) || compareStrings(left.claim, right.claim));
-  const digest = createHash("sha256").update(JSON.stringify(advisories)).digest("hex").slice(0, 32);
-  return `wave-advisory:${runId}:${digest}`;
+  const request = deriveWaveAdvisoryDecisionRequest(runId, tasks);
+  if (!request.ok) throw new Error(request.error.message);
+  return request.value.requestId;
+}
+
+/** Publish every byte referenced by the canonical user-decision request. */
+export async function publishWaveAdvisoryDecisionRequest(
+  handle: RunDirHandle,
+  material: WaveAdvisoryDecisionRequest,
+): Promise<Readonly<{ ok: true; request: AwaitUserAction["request"] }> | Readonly<{ ok: false; message: string }>> {
+  if (material.advisories[0].reference.runId !== handle.runId) {
+    return { ok: false, message: "advisory decision material belongs to a different run" };
+  }
+  const published = await handle.publishArtifactSet(material.advisories.map(({ reference, bytes }) => ({
+    relativePath: reference.slot.path.slice("artifacts/".length),
+    bytes,
+  })));
+  if (!published.ok) return { ok: false, message: published.error.message };
+  const expectedRefs = material.advisories.map(({ reference }) => reference);
+  if (!canonicalStructuralEquals(published.value, expectedRefs)) {
+    return { ok: false, message: "published advisory artifacts differ from core-derived references" };
+  }
+  const context = await handle.publishDecisionContext(material.context.digest, material.context.bytes);
+  if (!context.ok) return { ok: false, message: context.error.message };
+  if (context.value.digest !== material.context.digest) {
+    return { ok: false, message: "published advisory context differs from core-derived context authority" };
+  }
+  const action = awaitUserAction(waveAdvisoryDecisionActionRequest(material));
+  return action.ok
+    ? { ok: true, request: action.value.request }
+    : { ok: false, message: action.error.message };
 }
 
 /**
@@ -71,13 +93,16 @@ export function waveGateDecisionMismatch(
       active.authorityDigest !== registration.authorityDigest) {
     return "protected active Wave Gate authority differs from this decision run";
   }
-  const expected = waveAdvisoryDecisionRequestId(
+  const pending = deriveWaveAdvisoryDecisionRequest(
     runId,
     graph.tasks.filter(({ id }) => registration.taskIds.includes(id)),
   );
-  return decisionId === expected
+  if (!pending.ok) {
+    return `decision request ${decisionId} is not the exact pending advisory request: ${pending.error.message}`;
+  }
+  return decisionId === pending.value.requestId
     ? null
-    : `decision request ${decisionId} is not the exact pending advisory request ${expected}`;
+    : `decision request ${decisionId} is not the exact pending advisory request ${pending.value.requestId}`;
 }
 
 export function waveBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {
@@ -108,8 +133,8 @@ export type WaveGateRestartResult =
 /**
  * Pure protected-state transition for replacing one exhausted Wave review run.
  * Existing findings survive as prior findings; only packet-bound evidence is
- * invalidated. Every Wave task receives a new review generation, so stale old
- * transcripts can never bind to the replacement run.
+ * invalidated. Review Generation stays stable because implementation bytes did
+ * not change; fresh packet, epoch, and Run identities reject stale transcripts.
  */
 export function prepareExhaustedWaveGateRestart(
   graph: TaskGraph,
@@ -776,10 +801,131 @@ export async function installWaveReviewRuns(
   }));
 }
 
+type WaveReviewContextBase = Readonly<{
+  runId: string;
+  wave: number;
+  authorityDigest: string;
+  batchEpoch: string;
+  specFile: string | null;
+  planFile: string | null;
+}>;
+
+export type WaveReviewContextAuthority =
+  | Readonly<WaveReviewContextBase & {
+      subject: Readonly<{ role: "spec-check-invoker"; taskId: null }>;
+      taskRun: null;
+      task: null;
+      packetId: null;
+    }>
+  | Readonly<WaveReviewContextBase & {
+      subject: Readonly<{ role: (typeof WAVE_REVIEW_AGENTS)[number]; taskId: string }>;
+      taskRun: WaveTaskRunAuthority;
+      task: Readonly<Record<string, unknown>>;
+      packetId: string;
+    }>;
+
 export type WaveReviewContextRead =
   | Readonly<{ kind: "absent" }>
   | Readonly<{ kind: "corrupt"; message: string }>
-  | Readonly<{ kind: "loaded"; value: Readonly<{ wave?: number; batchEpoch?: string; taskRun?: WaveTaskRunAuthority | null }> }>;
+  | Readonly<{ kind: "loaded"; value: WaveReviewContextAuthority }>;
+
+const corruptWaveContext = (message: string): WaveReviewContextRead => ({ kind: "corrupt", message });
+
+function parseWaveReviewContextAuthority(raw: unknown): WaveReviewContextRead {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw) || !exactObject(raw as Record<string, unknown>, [
+    "runId", "wave", "authorityDigest", "batchEpoch", "subject", "taskRun", "task",
+    "packetId", "specFile", "planFile",
+  ])) return corruptWaveContext("wave-review-authority section has an invalid top-level schema");
+  const record = raw as Record<string, unknown>;
+  const runId = parseOrchestrationRunId(record.runId);
+  const authorityDigest = parseArtifactDigest(record.authorityDigest);
+  const batchEpoch = parseArtifactDigest(record.batchEpoch);
+  if (!runId.ok) return corruptWaveContext(`wave-review-authority runId: ${runId.error.message}`);
+  if (!Number.isSafeInteger(record.wave) || (record.wave as number) < 1) {
+    return corruptWaveContext("wave-review-authority wave must be a positive safe integer");
+  }
+  if (!authorityDigest.ok) return corruptWaveContext(`wave-review-authority authorityDigest: ${authorityDigest.error.message}`);
+  if (!batchEpoch.ok) return corruptWaveContext(`wave-review-authority batchEpoch: ${batchEpoch.error.message}`);
+
+  if (typeof record.subject !== "object" || record.subject === null || Array.isArray(record.subject) ||
+      !exactObject(record.subject as Record<string, unknown>, ["role", "taskId"])) {
+    return corruptWaveContext("wave-review-authority subject has an invalid schema");
+  }
+  const subject = record.subject as Record<string, unknown>;
+  const isSpecCheck = subject.role === "spec-check-invoker";
+  const isTaskReviewer = typeof subject.role === "string" &&
+    (WAVE_REVIEW_AGENTS as readonly string[]).includes(subject.role);
+  if ((!isSpecCheck && !isTaskReviewer) ||
+      (subject.taskId !== null && (typeof subject.taskId !== "string" || subject.taskId.trim() === ""))) {
+    return corruptWaveContext("wave-review-authority subject role/taskId is invalid");
+  }
+
+  let taskRun: WaveTaskRunAuthority | null = null;
+  if (record.taskRun !== null) {
+    if (typeof record.taskRun !== "object" || Array.isArray(record.taskRun) ||
+        !exactObject(record.taskRun as Record<string, unknown>, ["taskId", "generation", "packetId", "headSha"])) {
+      return corruptWaveContext("wave-review-authority taskRun has an invalid schema");
+    }
+    const candidate = record.taskRun as Record<string, unknown>;
+    const packetId = parseArtifactDigest(candidate.packetId);
+    const headSha = parseArtifactDigest(candidate.headSha);
+    if (typeof candidate.taskId !== "string" || !Number.isSafeInteger(candidate.generation) ||
+        (candidate.generation as number) < 0 || !packetId.ok || !headSha.ok) {
+      return corruptWaveContext("wave-review-authority taskRun fields are invalid");
+    }
+    taskRun = Object.freeze({
+      taskId: candidate.taskId,
+      generation: candidate.generation as number,
+      packetId: packetId.value,
+      headSha: headSha.value,
+    });
+  }
+  if ((record.specFile !== null && typeof record.specFile !== "string") ||
+      (record.planFile !== null && typeof record.planFile !== "string")) {
+    return corruptWaveContext("wave-review-authority specFile/planFile is invalid");
+  }
+  const common: WaveReviewContextBase = Object.freeze({
+    runId: runId.value,
+    wave: record.wave as number,
+    authorityDigest: authorityDigest.value,
+    batchEpoch: batchEpoch.value,
+    specFile: record.specFile as string | null,
+    planFile: record.planFile as string | null,
+  });
+  if (isSpecCheck) {
+    if (subject.taskId !== null || taskRun !== null || record.task !== null || record.packetId !== null) {
+      return corruptWaveContext("wave-review-authority spec-check subject cannot carry Task authority");
+    }
+    return {
+      kind: "loaded",
+      value: Object.freeze({
+        ...common,
+        subject: Object.freeze({ role: "spec-check-invoker" as const, taskId: null }),
+        taskRun: null,
+        task: null,
+        packetId: null,
+      }),
+    };
+  }
+  if (typeof subject.taskId !== "string" || taskRun === null ||
+      subject.taskId !== taskRun.taskId || record.packetId !== taskRun.packetId ||
+      typeof record.task !== "object" || record.task === null || Array.isArray(record.task)) {
+    return corruptWaveContext("wave-review-authority Task reviewer subject lacks matching Task authority");
+  }
+  return {
+    kind: "loaded",
+    value: Object.freeze({
+      ...common,
+      subject: Object.freeze({
+        role: subject.role as (typeof WAVE_REVIEW_AGENTS)[number],
+        taskId: subject.taskId,
+      }),
+      taskRun,
+      task: Object.freeze(record.task as Record<string, unknown>),
+      packetId: taskRun.packetId,
+    }),
+  };
+}
 
 /**
  * Read one request's persisted wave-review-authority section as a tri-state.
@@ -798,9 +944,10 @@ export function handleWaveReviewContext(
   const section = packet?.fixedContext.find(({ label }) => label === "wave-review-authority");
   if (section === undefined) return { kind: "absent" };
   try {
-    return { kind: "loaded", value: Object.freeze(JSON.parse(
+    const raw: unknown = JSON.parse(
       new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(section.bytes)),
-    )) };
+    );
+    return parseWaveReviewContextAuthority(raw);
   } catch (error) {
     return { kind: "corrupt", message: `wave-review-authority section is not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
   }
@@ -1253,16 +1400,11 @@ export async function applyWaveFacadeSubmission(
   try {
     const packet = handle.readContext(authority.contextDigest);
     if (!packet.ok) return { ok: false, message: packet.error.message };
-    const section = packet.value.fixedContext.find(({ label }) => label === "wave-review-authority");
-    if (section === undefined) return { ok: false, message: "Wave request context lacks subject authority" };
-    const context = JSON.parse(new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(section.bytes))) as {
-      wave?: unknown;
-      authorityDigest?: unknown;
-      batchEpoch?: unknown;
-      subject?: { role?: unknown; taskId?: unknown };
-      taskRun?: { taskId?: unknown; generation?: unknown; packetId?: unknown; headSha?: unknown } | null;
-    };
-    if (context.subject?.role !== authority.role) {
+    const parsedContext = handleWaveReviewContext([packet.value], authority.contextDigest);
+    if (parsedContext.kind === "absent") return { ok: false, message: "Wave request context lacks subject authority" };
+    if (parsedContext.kind === "corrupt") return { ok: false, message: parsedContext.message };
+    const context = parsedContext.value;
+    if (context.subject.role !== authority.role || context.runId !== authority.runId) {
       return { ok: false, message: "Wave request role drifted from immutable subject authority" };
     }
     const manager = new StateManager(TASK_GRAPH_PATH);
@@ -1286,7 +1428,7 @@ export async function applyWaveFacadeSubmission(
       });
       return { ok: true };
     }
-    const taskId = context.subject?.taskId;
+    const taskId = context.subject.taskId;
     if (typeof taskId !== "string") return { ok: false, message: "Wave reviewer request lacks Task identity" };
     await manager.update((locked) => {
       const target = locked.tasks.find((task) => task.id === taskId);
@@ -1836,26 +1978,37 @@ export async function resumeWaveGateFacade(
       // blocked until remediation retires it. Fall through to the advisory and
       // gate-decision steps below with the unchanged snapshot.
     }
-    const advisoryCount = current.value.facts.findingCounts.kind === "known" ? current.value.facts.findingCounts.value.advisory : 0;
-    const advisoryRequestId = waveAdvisoryDecisionRequestId(handle.runId, current.value.waveTasks);
-    const decisions = await handle.readEvents();
-    const advisoryDecision = decisions.some(({ event }) => {
-      if (typeof event !== "object" || event === null) return false;
-      const record = event as Record<string, unknown>;
-      const decision = record.decision;
-      return record.kind === "user-decision-recorded" && record.decisionId === advisoryRequestId &&
-        typeof decision === "object" && decision !== null && !Array.isArray(decision) &&
-        Object.keys(decision).length === 1 && (decision as Record<string, unknown>).kind === "approve";
-    });
-    if (advisoryCount > 0 && !advisoryDecision) {
-      return { ok: true, action: {
-        kind: "await-user", runId: handle.runId,
-        request: { kind: "advisory-triage", requestId: advisoryRequestId, advisoryCount },
-      } };
+    const pendingDrive = deriveWaveGateDriveStep(current.value, false);
+    if (!pendingDrive.ok) return waveBlocked(handle, pendingDrive.error.message);
+    let drive = pendingDrive.value;
+    if (drive.kind === "await-advisory-decision") {
+      const advisoryDrive = drive;
+      const decisions = await handle.readEvents();
+      const advisoryApproved = decisions.some(({ event }) => {
+        if (typeof event !== "object" || event === null) return false;
+        const record = event as Record<string, unknown>;
+        const decision = record.decision;
+        return record.kind === "user-decision-recorded" &&
+          record.decisionId === advisoryDrive.material.requestId &&
+          typeof decision === "object" && decision !== null && !Array.isArray(decision) &&
+          Object.keys(decision).length === 1 && (decision as Record<string, unknown>).kind === "approve";
+      });
+      if (!advisoryApproved) {
+        const published = await publishWaveAdvisoryDecisionRequest(handle, advisoryDrive.material);
+        return published.ok
+          ? { ok: true, action: { kind: "await-user", runId: handle.runId, request: published.request } }
+          : waveBlocked(handle, published.message);
+      }
+      const approvedDrive = deriveWaveGateDriveStep(current.value, true);
+      if (!approvedDrive.ok) return waveBlocked(handle, approvedDrive.error.message);
+      drive = approvedDrive.value;
     }
-    if (current.value.gateDecision.verdict.kind !== "pass") {
-      return waveBlocked(handle, current.value.gateDecision.verdict.reason);
+    if (drive.kind === "blocked") return waveBlocked(handle, drive.message);
+    if (drive.kind !== "ready-to-complete") {
+      return waveBlocked(handle, `Wave Gate lifecycle produced unexpected drive step ${drive.kind}`);
     }
+    const lint = runFullTierWaveLint(current.value.waveTasks);
+    if (lint.kind === "block") return waveBlocked(handle, lint.message);
     const committed = await manager.commitActiveWaveGateCompletion((locked) => {
       const lockedReadiness = deriveWaveReadiness(locked, waveGateDeps);
       return lockedReadiness.ok ? commitWaveGateCompletion(lockedReadiness.value) : {

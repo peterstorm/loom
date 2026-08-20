@@ -31,6 +31,29 @@ function cli(args: string[], stdin = "", env: Record<string, string> = {}): stri
 }
 
 describe("quality-program helper boundaries", () => {
+  it("keeps the program-driver Public Surface limited to parent caller operations", async () => {
+    const surface = await import("../../../src/handlers/helpers/programs");
+
+    expect(Object.keys(surface).sort()).toEqual([
+      "applyWaveFacadeSubmission",
+      "parseRegisteredFacadeProgram",
+      "parseRemediationStartInput",
+      "parseStandaloneStartInput",
+      "parseWaveGateStartInput",
+      "recoverOrphanedWaveGateFacade",
+      "renderSpawnTask",
+      "restartWaveGateFacade",
+      "resumeRemediationFacade",
+      "resumeStandaloneFacade",
+      "resumeWaveGateFacade",
+      "startRemediationFacade",
+      "startStandaloneFacade",
+      "startWaveGateFacade",
+      "waveAdvisoryDecisionRequestId",
+      "waveGateDecisionMismatch",
+    ]);
+  });
+
   it("validates source profiles and renders exact Pi OpenAI models", () => {
     expect(cli(["helper", "model-profiles", "validate", "--agents-dir", "agents"]))
       .toContain("Validated 28");

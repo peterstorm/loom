@@ -25,6 +25,7 @@ import {
   startRemediation,
   verifyTemporaryIndex,
   type AuditedPathSet,
+  type DirtyPathObservation,
   type FrozenPathAuthority,
   type RegisteredPathAuthority,
   type RemediationEvent,
@@ -383,6 +384,14 @@ describe("literal NUL Git path contract", () => {
 
 describe("exact audited, dirty, and staged evidence", () => {
   it("represents additions, modifications, both rename sides, deletion, and absence without symlinks", () => {
+    if (false) {
+      const path = valueOf(parseCanonicalRepositoryRelativePath("src/impossible.ts"));
+      // @ts-expect-error Present changes can only describe a regular file.
+      const presentButMissing: DirtyPathObservation = { path, change: "added", nodeKind: "missing" };
+      // @ts-expect-error Absent changes can only describe a missing node.
+      const absentButPresent: DirtyPathObservation = { path, change: "deleted", nodeKind: "file" };
+      void [presentButMissing, absentButPresent];
+    }
     const cases = [
       { path: "a", change: "added", nodeKind: "file" },
       { path: "b", change: "modified", nodeKind: "file" },

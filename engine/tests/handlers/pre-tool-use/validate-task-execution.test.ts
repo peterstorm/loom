@@ -7,6 +7,7 @@ import {
   parseImplementationTaskBindings,
   registerTaskExecutionBaseline,
   RESERVATION_GRACE_MS,
+  staleReservationsForRosterObservation,
   staleReservationsFromState,
   taskExecutionDecision,
   taskExecutionOwnershipError,
@@ -375,6 +376,35 @@ describe("validate-task-execution — reservation grace window (startup-race saf
   it("treats a legacy (timestamp-less) reservation as eligible so pre-upgrade strandings still recover", () => {
     const state = mkState([reserved("T1", undefined)], { executing_tasks: ["T1"] });
     expect(staleReservationsFromState(state, false, T0)).toEqual(new Set(["T1"]));
+  });
+
+  it("limits a pre-roster current-protocol observation to aged timestamped reservations", () => {
+    const aged = reserved("T1", T0 - RESERVATION_GRACE_MS - 1);
+    const fresh = reserved("T2", T0);
+    const legacy = reserved("T3", undefined);
+    const corrupt = mkTask({ id: "T4", wave: 1, reserved_at: "not-an-instant" });
+    const state = mkState([aged, fresh, legacy, corrupt], {
+      executing_tasks: ["T1", "T2", "T3", "T4", "T404"],
+    });
+
+    expect(staleReservationsForRosterObservation(
+      state,
+      { kind: "pre-roster-current-protocol", anyActiveForGraph: false },
+      T0,
+    )).toEqual(new Set(["T1"]));
+  });
+
+  it("never reclaims a timestamped reservation when the pre-roster observation found another active agent", () => {
+    const state = mkState(
+      [reserved("T1", T0 - RESERVATION_GRACE_MS - 1)],
+      { executing_tasks: ["T1"] },
+    );
+
+    expect(staleReservationsForRosterObservation(
+      state,
+      { kind: "pre-roster-current-protocol", anyActiveForGraph: true },
+      T0,
+    )).toEqual(new Set());
   });
 
   it("closes the double-registration race (scenario B): a fresh reservation is not re-reclaimed under the lock", () => {

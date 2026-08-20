@@ -27,10 +27,10 @@ import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 // so the Pi shell could share it verbatim; the name stays importable from here.
 export { resolvesWithin };
 
-/** ENOENT is absence; every other access failure must reach the hook diagnostic boundary. */
+/** ENOENT is absence; every other readability failure reaches the diagnostic boundary. */
 function phaseArtifactExists(path: string): boolean {
   try {
-    accessSync(path, fsConstants.F_OK);
+    accessSync(path, fsConstants.R_OK);
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;

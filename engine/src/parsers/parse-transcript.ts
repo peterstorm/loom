@@ -14,25 +14,21 @@ import {
   type TranscriptLine,
 } from "./types";
 
+function textContent(content: unknown): string[] {
+  if (typeof content === "string") return [content];
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((block) =>
+    typeof block === "object" && block !== null &&
+      "type" in block && block.type === "text" &&
+      "text" in block && typeof block.text === "string" && block.text.length > 0
+      ? [block.text]
+      : []
+  );
+}
+
 function extractText(block: ContentBlock): string[] {
-  const texts: string[] = [];
-
-  if (block.type === "text" && block.text) {
-    texts.push(block.text);
-  } else if (block.type === "tool_result") {
-    const content = block.content;
-    if (typeof content === "string") {
-      texts.push(content);
-    } else if (Array.isArray(content)) {
-      for (const sub of content) {
-        if (sub.type === "text" && sub.text) {
-          texts.push(sub.text);
-        }
-      }
-    }
-  }
-
-  return texts;
+  if (block.type === "text") return textContent([block]);
+  return block.type === "tool_result" ? textContent(block.content) : [];
 }
 
 function parseClaudeTranscript(content: string): string {
@@ -62,18 +58,7 @@ function parsePiTranscript(content: string): string {
     const msg = entry.message;
     if (!msg) continue;
 
-    if (typeof msg.content === "string") {
-      texts.push(msg.content);
-      continue;
-    }
-
-    if (Array.isArray(msg.content)) {
-      for (const block of msg.content) {
-        if (block.type === "text" && block.text) {
-          texts.push(block.text);
-        }
-      }
-    }
+    texts.push(...textContent(msg.content));
   }
 
   return texts.join("\n");
@@ -91,15 +76,9 @@ export type FirstUserPromptParse =
 const promptFailure = (error: string): FirstUserPromptParse => ({ ok: false, error });
 
 function authoredPromptText(body: unknown): string | null {
-  if (typeof body === "string") return body;
-  if (!Array.isArray(body)) return null;
-  return body.flatMap((block) =>
-    typeof block === "object" && block !== null &&
-      "type" in block && block.type === "text" &&
-      "text" in block && typeof block.text === "string"
-      ? [block.text]
-      : []
-  ).join("\n");
+  return typeof body === "string" || Array.isArray(body)
+    ? textContent(body).join("\n")
+    : null;
 }
 
 /** The first user-authored prompt only. Unlike general transcript extraction,

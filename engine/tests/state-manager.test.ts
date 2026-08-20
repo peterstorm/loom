@@ -357,6 +357,42 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it("recursively copies and freezes nested Task and Wave Gate data", () => {
+    const dependsOn: string[] = [];
+    const fileList = ["src/a.ts"];
+    const labels = ["original"];
+    const gateNotes = ["pending"];
+    const rawTask = { ...validTask, depends_on: dependsOn, file_list: fileList, metadata: { labels } };
+    const rawGate = {
+      impl_complete: false,
+      tests_passed: null,
+      reviews_complete: false,
+      blocked: false,
+      metadata: { notes: gateNotes },
+    };
+    const parsed = parseTaskGraph({ ...validGraph, tasks: [rawTask], wave_gates: { "1": rawGate } });
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    dependsOn.push("T99");
+    fileList.push("src/foreign.ts");
+    labels.push("mutated");
+    gateNotes.push("mutated");
+
+    const task = parsed.value.tasks[0] as unknown as Record<string, unknown>;
+    const taskMetadata = task.metadata as Readonly<{ labels: readonly string[] }>;
+    const gate = parsed.value.wave_gates["1"] as unknown as Record<string, unknown>;
+    const gateMetadata = gate.metadata as Readonly<{ notes: readonly string[] }>;
+    expect(task.depends_on).toEqual([]);
+    expect(task.file_list).toEqual(["src/a.ts"]);
+    expect(taskMetadata.labels).toEqual(["original"]);
+    expect(gateMetadata.notes).toEqual(["pending"]);
+    expect(Object.isFrozen(task.depends_on)).toBe(true);
+    expect(Object.isFrozen(taskMetadata)).toBe(true);
+    expect(Object.isFrozen(taskMetadata.labels)).toBe(true);
+    expect(Object.isFrozen(gateMetadata.notes)).toBe(true);
+  });
+
   it.each([
     ["description", 42, "description must be a non-empty string"],
     ["description", "", "description must be a non-empty string"],

@@ -11,13 +11,15 @@ import {
  * neither vi.mock nor vi.hoisted).
  */
 
+const diff = (value: string) => ({ ok: true as const, diff: value });
+
 function fakeDeps(overrides: Partial<DiffDeps> = {}): DiffDeps {
   return {
     isTracked: (f) => ({ ok: true, tracked: !f.startsWith("untracked/") }),
-    diffFiles: (files) => (files.length ? `diff --tracked\n${files.map((f) => `+modified ${f}`).join("\n")}` : ""),
-    diffFilesStaged: () => "",
-    diffFilesSince: () => "",
-    diffUntracked: (f) => `diff --untracked ${f}\n+new content in ${f}`,
+    diffFiles: (files) => diff(files.length ? `diff --tracked\n${files.map((f) => `+modified ${f}`).join("\n")}` : ""),
+    diffFilesStaged: () => diff(""),
+    diffFilesSince: () => diff(""),
+    diffUntracked: (f) => diff(`diff --untracked ${f}\n+new content in ${f}`),
     fileExists: () => true,
     ...overrides,
   };
@@ -36,7 +38,7 @@ describe("collectDiff", () => {
     const deps = fakeDeps({
       diffUntracked: (f) => {
         diffedFiles.push(f);
-        return `diff --untracked ${f}\n+content`;
+        return diff(`diff --untracked ${f}\n+content`);
       },
       // Mark test file as untracked so it goes through diffUntracked path from filesModified
       isTracked: (f) => ({ ok: true, tracked: f === "src/main.ts" }),
@@ -54,7 +56,7 @@ describe("collectDiff", () => {
     const deps = fakeDeps({
       diffUntracked: (f) => {
         diffedFiles.push(f);
-        return `diff --untracked ${f}\n+content`;
+        return diff(`diff --untracked ${f}\n+content`);
       },
     });
 
@@ -82,19 +84,26 @@ describe("collectDiff", () => {
     )).toThrow("new-test diff authority unavailable");
   });
 
+  it("surfaces a Git diff failure instead of reporting no tests written", () => {
+    expect(() => collectDiff(
+      ["engine/tests/existing.test.ts"],
+      fakeDeps({ diffFiles: () => ({ ok: false, error: "git object database unreadable" }) }),
+    )).toThrow("new-test diff authority unavailable: git object database unreadable");
+  });
+
   it("proves new tests from tracked unstaged worktree changes for every harness", () => {
     const evidence = collectNewTestEvidence(
       ["engine/tests/existing.test.ts"],
       true,
       undefined,
       fakeDeps({
-        diffFiles: () => [
+        diffFiles: () => diff([
           "diff --git a/engine/tests/existing.test.ts b/engine/tests/existing.test.ts",
           "+  it(\"covers the fix\", () => {",
           "+    expect(result).toBe(true);",
           "+  });",
-        ].join("\n"),
-        diffFilesStaged: () => "",
+        ].join("\n")),
+        diffFilesStaged: () => diff(""),
       }),
     );
 
@@ -111,16 +120,16 @@ describe("collectDiff", () => {
       true,
       "a".repeat(40),
       fakeDeps({
-        diffFiles: () => "",
-        diffFilesStaged: () => "",
+        diffFiles: () => diff(""),
+        diffFilesStaged: () => diff(""),
         diffFilesSince: (revision, files) => {
           calls.push({ revision, files });
-          return [
+          return diff([
             "diff --git a/engine/tests/committed.test.ts b/engine/tests/committed.test.ts",
             "+  it(\"survives an agent commit\", () => {",
             "+    expect(result).toBe(true);",
             "+  });",
-          ].join("\n");
+          ].join("\n"));
         },
       }),
     );

@@ -434,30 +434,41 @@ export async function markAgentActive(
   });
 }
 
+function removeActiveRosterEntry(path: string, agentId: AgentId): void {
+  // Match on column 0 so an entry that recorded a type is still removed by
+  // its id alone — markAgentActive/removeActiveAgent must stay symmetric
+  // across the agent's start and stop hooks.
+  const remaining = readFileSync(path, "utf-8")
+    .split("\n")
+    .filter((line) => line.trim() !== "" && rosterLineAgentId(line) !== agentId)
+    .join("\n");
+  if (remaining.trim() === "") unlinkSync(path);
+  else rewriteFileAtomic(path, remaining + "\n");
+}
+
 /**
- * Remove one agent from the session's `.active` roster (locked, mirrors
- * markAgentActive). Failures are logged — a ghost roster entry silently
- * voids attribution for the rest of the session otherwise.
+ * Remove one agent from the session's `.active` roster and propagate failure.
+ * Spawn admission uses this strict form when a denied Agent's role-bearing row
+ * must be proven absent before the Hook returns.
+ */
+export async function removeActiveAgentStrict(sessionId: SessionId, agentId: AgentId): Promise<void> {
+  const path = activeFlagPath(sessionId);
+  if (!existsSync(path)) return;
+  await withLock(bindingLock(sessionId), () => removeActiveRosterEntry(path, agentId));
+}
+
+/**
+ * Completion cleanup preserves its historical failure split: a rewrite error
+ * is logged, while lock acquisition failure escapes to dispatch isolation.
  */
 export async function removeActiveAgent(sessionId: SessionId, agentId: AgentId): Promise<void> {
   const path = activeFlagPath(sessionId);
   if (!existsSync(path)) return;
   await withLock(bindingLock(sessionId), () => {
     try {
-      // Match on column 0 so an entry that recorded a type is still removed by
-      // its id alone — markAgentActive/removeActiveAgent must stay symmetric
-      // across the agent's start and stop hooks.
-      const remaining = readFileSync(path, "utf-8")
-        .split("\n")
-        .filter((line) => line.trim() !== "" && rosterLineAgentId(line) !== agentId)
-        .join("\n");
-      if (remaining.trim() === "") {
-        unlinkSync(path);
-      } else {
-        rewriteFileAtomic(path, remaining + "\n");
-      }
-    } catch (e) {
-      process.stderr.write(`removeActiveAgent: .active update failed for ${sessionId}: ${e}\n`);
+      removeActiveRosterEntry(path, agentId);
+    } catch (error) {
+      process.stderr.write(`removeActiveAgent: .active update failed for ${sessionId}: ${error}\n`);
     }
   });
 }

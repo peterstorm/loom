@@ -45,8 +45,9 @@ export type { CaptureOutcome };
  *
  * Claude's transcript is JSONL with one message per line. Unlike Pi, where a
  * result carries a list of blocks, no earlier line is searched as a fallback.
- * Any parse failure yields NO candidate rather than a guess, so the ambiguity
- * rules reject instead of accepting salvage.
+ * A syntactically malformed final line is reported as transcript corruption
+ * with its line number. A well-formed non-assistant or ambiguous message yields
+ * no candidate, so the payload rules still reject instead of accepting salvage.
  */
 export function claudeFinalPayloadCandidates(transcriptPath: string): readonly FinalPayloadCandidate[] {
   // One read, no pre-check: `existsSync` returns false for ELOOP/ENOTDIR too,
@@ -57,7 +58,7 @@ export function claudeFinalPayloadCandidates(transcriptPath: string): readonly F
   // operator must see instead of a generic missing-payload rejection.
   const lines = ((): readonly string[] => {
     try {
-      return readFileSync(transcriptPath, "utf-8").split("\n").filter((line) => line.trim().length > 0);
+      return readFileSync(transcriptPath, "utf-8").split("\n");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.freeze([]);
       throw new Error(
@@ -66,23 +67,24 @@ export function claudeFinalPayloadCandidates(transcriptPath: string): readonly F
     }
   })();
 
-  const finalIndex = lines.length - 1;
+  const finalIndex = lines.findLastIndex((line) => line.trim().length > 0);
   if (finalIndex < 0) return Object.freeze([]);
-  const text = assistantTextOf(lines[finalIndex]);
+  const text = assistantTextOf(lines[finalIndex], finalIndex);
   return text === null
     ? Object.freeze([])
     : Object.freeze([{ origin: `transcript.line[${finalIndex}]`, text }]);
 }
 
-function assistantTextOf(line: string | undefined): string | null {
+function assistantTextOf(line: string | undefined, zeroBasedLine: number): string | null {
   if (line === undefined) return null;
-  const parsed = ((): unknown => {
-    try {
-      return JSON.parse(line) as unknown;
-    } catch {
-      return null;
-    }
-  })();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line) as unknown;
+  } catch (error) {
+    throw new Error(
+      `invalid final Claude transcript JSON at line ${zeroBasedLine + 1}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   if (typeof parsed !== "object" || parsed === null) return null;
   const message = (parsed as Record<string, unknown>)["message"];
   if (typeof message !== "object" || message === null) return null;
@@ -121,6 +123,16 @@ export async function captureClaudeResult(
   runsRoot: string | undefined,
   runDirectory: string | undefined,
 ): Promise<CaptureOutcome> {
+  let candidates: readonly FinalPayloadCandidate[];
+  try {
+    candidates = claudeFinalPayloadCandidates(input.agent_transcript_path ?? "");
+  } catch (error) {
+    return {
+      kind: "rejected",
+      reason: "transcript-json",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
   return captureHarnessResult({
     harness: "claude",
     runsRoot,
@@ -128,7 +140,7 @@ export async function captureClaudeResult(
     // Claude's native correlator is the agent id its SubagentStop payload
     // carries; the spawn side recorded it beside the reservation.
     nativeId: typeof input.agent_id === "string" ? input.agent_id : "",
-    candidates: claudeFinalPayloadCandidates(input.agent_transcript_path ?? ""),
+    candidates,
   });
 }
 

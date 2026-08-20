@@ -10,12 +10,12 @@
  * machine, so a project-blind probe lets another repo's live agent, or any
  * stray roster file, veto recovery here indefinitely.
  *
- * Pi is the case that must not regress. Pi runs every guard in ONE process and
- * marks the roster (`fsSessionRegistry.markActive`, unconditionally, for every
- * roster id) BEFORE `validate-task-execution` reserves — so at reservation
- * time a Pi spawn always has a non-empty roster and nothing is ever released.
- * Pi additionally rolls back on a block, and its `validate-task-execution` is
- * the last guard that can block, so Pi never strands a reservation at all.
+ * Pi samples graph activity before adding the prospective batch's own roster
+ * rows, then passes that observation into registration. This lets an aged,
+ * timestamped current-protocol reservation recover after process death without
+ * mistaking the retry itself for the old owner. Timestamp-less legacy entries
+ * remain ineligible on that Pi path; once rows are present, the ordinary probe
+ * still reports active and releases nothing.
  */
 
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from "node:fs";
@@ -172,7 +172,7 @@ describe("anyActiveSubagent", () => {
 });
 
 describe("Pi ordering parity", () => {
-  it("never releases a reservation while a Pi spawn holds the roster", async () => {
+  it("does not reinterpret a timestamp-less reservation after the Pi roster is present", async () => {
     const dir = scopedSubagentDir();
     const { taskExecutionOwnershipError } = await import(
       "../../src/core/validate-task-execution"
@@ -197,9 +197,9 @@ describe("Pi ordering parity", () => {
       }],
     };
 
-    // Pi marks the roster BEFORE reserving, and mark-subagent-active writes the
-    // graph pointer alongside it, so this is the state the probe sees for every
-    // in-flight Pi spawn on this graph.
+    // Once Pi has marked its roster and graph pointer, the ordinary liveness
+    // probe is fail-closed. The pre-roster exception is both earlier and limited
+    // to timestamped current-protocol reservations, which this fixture is not.
     activeSession(dir, "pi-session", GRAPH);
     expect(anyActiveSubagent(GRAPH)).toBe(true);
 

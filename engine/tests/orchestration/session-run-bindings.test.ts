@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseRequestId } from "../../src/core/orchestration-contract";
 import { parseRunDirectoryIdentity } from "../../src/orchestration/run-directory-handle";
 import {
@@ -16,6 +16,7 @@ const cleanup: string[] = [];
 const sessionId = "019ff290-ffee-7e86-8ed0-c834c04b7f6e";
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
@@ -65,6 +66,32 @@ describe("Pi session run bindings", () => {
       .toEqual(["request:first:1", "request:first:2"]);
     expect(read.value.find(({ runId }) => runId === second.runId)?.requestIds)
       .toEqual(["request:second:1"]);
+  });
+
+  it("reports failure to remove a staged registry after publication fails", async () => {
+    const base = root();
+    const directory = join(base, "bindings");
+    mkdirSync(directory);
+    const random = 0.25;
+    vi.spyOn(Math, "random").mockReturnValue(random);
+    const token = random.toString(36).slice(2, 10);
+    const stagedPath = join(
+      directory,
+      `${sessionId}${ORCHESTRATION_RUNS_SUFFIX}.staged-${process.pid}-${token}`,
+    );
+    mkdirSync(stagedPath);
+
+    const result = await registerSessionRunBinding(
+      directory,
+      sessionId,
+      binding(base, "cleanup-failure", ["request:cleanup:1"]),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain("cannot publish Pi session run binding");
+    expect(result.message).toContain("staged cleanup failed");
+    expect(result.message).toContain(`${sessionId}${ORCHESTRATION_RUNS_SUFFIX}.staged-${process.pid}-${token}`);
   });
 
   it("rejects malformed and cross-session registry authority", () => {

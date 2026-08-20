@@ -971,6 +971,25 @@ function nonterminalActiveGateConflict(
   return null;
 }
 
+/** Create a recursively frozen defensive copy of JSON-shaped protected data. */
+function frozenJsonCopy(value: unknown, copies = new WeakMap<object, unknown>()): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  const existing = copies.get(value);
+  if (existing !== undefined) return existing;
+  if (Array.isArray(value)) {
+    const copy: unknown[] = [];
+    copies.set(value, copy);
+    copy.push(...value.map((entry) => frozenJsonCopy(entry, copies)));
+    return Object.freeze(copy);
+  }
+  const copy: Record<string, unknown> = {};
+  copies.set(value, copy);
+  for (const [key, entry] of Object.entries(value)) {
+    copy[key] = frozenJsonCopy(entry, copies);
+  }
+  return Object.freeze(copy);
+}
+
 /**
  * Parse raw disk JSON into a TaskGraph, mirroring parseMachine: every
  * union-typed field (current_phase, task status / review_status /
@@ -1074,22 +1093,15 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
     }
   }
 
-  // Fresh frozen copies, never aliases of the parsed JSON: a caller holding
-  // the graph — or the raw object it came from — must not be able to mutate a
-  // task or a gate in place and bypass StateManager.update's locked transform.
-  // Shallow copies are sufficient: every nested array/record field is already
-  // parsed to a fresh readonly array/record by the validators above or by the
-  // blessed cast consumers, and freezing the container prevents in-place field
-  // assignment, which is the mutation the invariant forbids.
-  const frozenTasks = Object.freeze(tasks.map((task) => {
-    const proven = task as Record<string, unknown>;
-    return Object.freeze({ ...proven });
-  }));
+  // Fresh recursively frozen copies, never aliases of parsed JSON: a caller
+  // retaining the raw object cannot mutate nested Task or Wave Gate data and
+  // bypass StateManager.update's locked transform.
+  const frozenTasks = Object.freeze(tasks.map((task) => frozenJsonCopy(task)));
   const frozenWaveGates = Object.freeze(
     Object.fromEntries(
       Object.entries(waveGates as Record<string, unknown>).map(([wave, gate]) => [
         wave,
-        Object.freeze({ ...(gate as Record<string, unknown>) }),
+        frozenJsonCopy(gate),
       ]),
     ),
   );

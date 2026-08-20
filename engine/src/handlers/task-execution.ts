@@ -5,11 +5,12 @@ import {
   classifyTaskExecutionSpawn,
   parseImplementationTaskBindings,
   registerTaskExecutionBaseline,
-  staleReservationsFromState,
+  staleReservationsForRosterObservation,
   taskExecutionDecision,
   taskExecutionOwnershipError,
   taskExecutionRegistrationError,
   type ExecutionBatchMode,
+  type TaskExecutionRosterObservation,
   type TaskExecutionSpawn,
   type ValidateTaskExecutionInput,
 } from "../core/validate-task-execution";
@@ -60,6 +61,7 @@ function activeSubagentForGraph(taskGraphPath: string): boolean {
 export async function validateTaskExecutionBatch(
   spawns: readonly TaskExecutionSpawn[],
   mode: ExecutionBatchMode = "parallel",
+  rosterObservation?: TaskExecutionRosterObservation,
 ): Promise<HookResult> {
   const inputs = spawns.filter(
     (spawn): spawn is Extract<TaskExecutionSpawn, { kind: "implementation" }> =>
@@ -91,15 +93,20 @@ export async function validateTaskExecutionBatch(
   const bindings = parseImplementationTaskBindings(state, inputs);
   if (!bindings.ok) return { kind: "block", message: `BLOCKED: ${bindings.error}` };
   const taskIds = bindings.taskIds;
-  // The roster fact (fs read) and the clock are resolved ONCE in the shell; the
-  // pure staleness predicate is re-derived under the lock against the graph the
-  // lock actually holds. Reusing `anyActive` under the lock is sound because
-  // the grace window — not the roster flag — is what shields a live agent
-  // during its startup gap: an agent that went active between this read and the
-  // lock also carries a fresh `reserved_at`, so grace protects it regardless.
+  // The roster fact and clock are resolved ONCE in the shell; the pure
+  // staleness predicate is re-derived under the lock against the graph the lock
+  // actually holds. Pi supplies the fact sampled before its own prospective
+  // roster rows were added. Other callers probe here. In either case a racing
+  // successful registration carries a fresh `reserved_at`, so grace protects
+  // it when this same observation is reused under the lock.
   const now = Date.now();
-  const anyActive = activeSubagentForGraph(statePath);
-  const staleReservations = staleReservationsFromState(state, anyActive, now);
+  const observedRoster: TaskExecutionRosterObservation = rosterObservation ?? {
+    kind: "at-registration",
+    anyActiveForGraph: activeSubagentForGraph(statePath),
+  };
+  const staleFor = (snapshot: TaskGraph) =>
+    staleReservationsForRosterObservation(snapshot, observedRoster, now);
+  const staleReservations = staleFor(state);
   const ownershipError = taskExecutionOwnershipError(state, taskIds, mode, staleReservations);
   if (ownershipError !== null) return { kind: "block", message: `BLOCKED: ${ownershipError}` };
 
@@ -162,7 +169,7 @@ export async function validateTaskExecutionBatch(
     // roster fact). If a racing sibling already committed one of these
     // reservations, its `reserved_at` is now young and it is no longer stale,
     // so this batch will not reclaim a live registration out from under it.
-    const lockedStale = staleReservationsFromState(current, anyActive, now);
+    const lockedStale = staleFor(current);
     lockedRegistrationError = taskExecutionRegistrationError(
       current, inputs, taskIds, mode, baselines, lockedStale,
     );

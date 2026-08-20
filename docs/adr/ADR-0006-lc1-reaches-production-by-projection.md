@@ -113,9 +113,12 @@ the protected graph, so the shell observes it and hands it to the core through
 purpose. Absent or unreadable, it reads as "not approved", which keeps status
 asking for a decision rather than reporting progress that has not happened.
 
-The Wave Gate façade's drive function is **unchanged**. Its control flow is the
-program (ADR-0005), and rewriting the commit path was not necessary to make LC-1
-executable.
+The Wave Gate façade keeps its per-program driver (ADR-0005), but its
+post-review decision seam now consumes `deriveWaveGateDriveStep`, which projects
+LC-1 over canonical readiness plus the shell-observed advisory approval. The
+shell publishes the returned advisory material or executes the returned
+completion/block intent; it no longer re-derives advisory count, request, and
+approval stage predicates inline.
 
 ## Consequences
 
@@ -128,9 +131,8 @@ executable.
   engine". Three tests in `tests/handlers/complete-wave-gate.test.ts` pin this
   through the real entry point, `deriveLoomStatusFromParsedGraph`; all three
   fail if the projection call is removed.
-- The façade still infers its own stage from the five-source conjunction. That
-  duplication is now *visible* rather than structural: `projectWaveGateLifecycle`
-  is the named place the stage decision belongs, and moving the façade onto it is
-  a follow-up that touches the commit path and deserves its own change.
+- The façade's post-review drive path now uses the same LC-1 projection as
+  status. Earlier review-packet publication/retry mechanics remain program-owned
+  per ADR-0005; lifecycle stage policy is concentrated in the functional core.
 - Anyone tempted to delete LC-1 as dead code should read this first: it is
   reachable, and the reachability is load-bearing for the advisory action.

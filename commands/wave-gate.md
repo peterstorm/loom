@@ -9,7 +9,10 @@ description: "Run the engine-owned Wave Gate lifecycle after wave implementation
 Run this after the implementation hook reports that the active Wave is implemented.
 The engine owns protected-state verification, test readiness, Review Packets,
 reviewer/model/Skill selection, exact request authority, retries, aggregation,
-Refutation Panel routing, advisory suspension, and atomic Wave advancement.
+Refutation Panel routing, advisory suspension, automatic full-tier lint, and
+atomic Wave advancement. Lint runs after semantic readiness and advisory
+approval but before the protected completion commit; violations return the
+registered run's `blocked` action.
 
 **Arguments:** "$ARGUMENTS"
 

@@ -212,8 +212,19 @@ export async function registerSessionRunBinding(
         writeDirectoryFileExclusiveNoFollow(anchored, stagedName, `${JSON.stringify(next, null, 2)}\n`);
         renameSync(anchoredChildPath(anchored, stagedName), anchoredChildPath(anchored, finalName));
       } catch (error) {
-        try { unlinkSync(anchoredChildPath(anchored, stagedName)); } catch { /* never published */ }
-        throw error;
+        const stagedPath = anchoredChildPath(anchored, stagedName);
+        let cleanupFailure: string | null = null;
+        try {
+          unlinkSync(stagedPath);
+        } catch (cleanupError) {
+          if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
+            cleanupFailure = `${stagedPath}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`;
+          }
+        }
+        if (cleanupFailure === null) throw error;
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}; staged cleanup failed: ${cleanupFailure}`,
+        );
       }
       return ok(next);
     });

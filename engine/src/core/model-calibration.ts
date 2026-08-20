@@ -136,6 +136,9 @@ export interface CalibrationScore {
 
 const GIT_REVISION = /^[0-9a-f]{7,64}$/;
 
+function firstDuplicateIndex(values: readonly string[]): number {
+  return values.findIndex((value, index) => values.indexOf(value) !== index);
+}
 
 function parseRawJson(raw: unknown, label: string): ParseResult<Record<string, unknown>> {
   if (typeof raw !== "string") return isRecord(raw) ? ok(raw) : fail([`${label} must be a JSON object`]);
@@ -179,7 +182,7 @@ function stringSet(raw: unknown, label: string, optional: boolean): ParseResult<
     else errors.push(...parsed.errors);
   });
   const normalized = values.map(normalizeFindingText);
-  const duplicate = normalized.findIndex((value, index) => normalized.indexOf(value) !== index);
+  const duplicate = firstDuplicateIndex(normalized);
   if (duplicate >= 0) errors.push(`${label} contains a duplicate term '${values[duplicate]}'`);
   return errors.length === 0 ? ok(values) : fail(errors);
 }
@@ -248,7 +251,7 @@ function parseCorpusCase(raw: unknown, label: string): ParseResult<CalibrationCa
     });
   }
   const ids = expectations.map((expectation) => expectation.id);
-  const duplicate = ids.findIndex((value, index) => ids.indexOf(value) !== index);
+  const duplicate = firstDuplicateIndex(ids);
   if (duplicate >= 0) errors.push(`${label}.expected_criticals repeats id '${ids[duplicate]}'`);
   if (errors.length > 0 || !id.ok || !revision.ok || state === null) return fail(errors);
 
@@ -282,7 +285,7 @@ export function parseCalibrationCorpus(raw: unknown): ParseResult<CalibrationCor
     });
   }
   const ids = cases.map((entry) => entry.id);
-  const duplicate = ids.findIndex((value, index) => ids.indexOf(value) !== index);
+  const duplicate = firstDuplicateIndex(ids);
   if (duplicate >= 0) errors.push(`calibration corpus repeats case id '${ids[duplicate]}'`);
   return errors.length === 0
     ? ok({ schemaVersion: CALIBRATION_SCHEMA_VERSION, cases: [...cases].sort((a, b) => compareStrings(a.id, b.id)) })
@@ -355,7 +358,7 @@ export function parseCalibrationPredictions(raw: unknown): ParseResult<Calibrati
     });
   }
   const ids = cases.map((entry) => entry.caseId);
-  const duplicate = ids.findIndex((value, index) => ids.indexOf(value) !== index);
+  const duplicate = firstDuplicateIndex(ids);
   if (duplicate >= 0) errors.push(`calibration predictions repeats case id '${ids[duplicate]}'`);
   return errors.length === 0 && profileId.ok
     ? ok({
@@ -381,7 +384,9 @@ function matchQuality(expectation: CalibrationExpectation, prediction: Calibrati
   const claim = normalizeFindingText(prediction.claim);
   const expectedClaims = [expectation.claim, ...expectation.aliases].map(normalizeFindingText);
   const exactIndex = expectedClaims.indexOf(claim);
-  let quality = exactIndex === 0 ? 100 : exactIndex > 0 ? 95 : 0;
+  let quality = 0;
+  if (exactIndex === 0) quality = 100;
+  else if (exactIndex > 0) quality = 95;
 
   if (expectation.match !== null) {
     const all = expectation.match.allOf.map(normalizeFindingText);

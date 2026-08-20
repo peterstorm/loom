@@ -25,6 +25,8 @@ import {
   parseFindingsBlock,
   parseStoredFindings,
   parseStoredRefutations,
+  salvageFindingsFromMalformedRefutations,
+  salvageFindingsFromMalformedResolutions,
   type DraftFinding,
   type Finding,
   type RefutedFinding,
@@ -251,6 +253,25 @@ describe("parseStoredFindings — untrusted state file", () => {
       stored,
     ]);
     expect(parsed).toEqual([stored]);
+  });
+});
+
+describe("malformed remediation-record salvage", () => {
+  const finding: Finding = {
+    id: "code-reviewer-1",
+    agent: "code-reviewer",
+    severity: "critical",
+    file: null,
+    line: null,
+    claim: "unchecked cast",
+  };
+
+  it.each([
+    ["resolution", salvageFindingsFromMalformedResolutions, { finding, resolution: { kind: "wrong" } }],
+    ["refutation", salvageFindingsFromMalformedRefutations, { finding, refutations: [] }],
+  ] as const)("recovers the nested finding from a malformed %s envelope", (_label, salvage, malformed) => {
+    expect(salvage([malformed, null, { finding: { ...finding, id: "" } }])).toEqual([finding]);
+    expect(salvage(undefined)).toEqual([]);
   });
 });
 

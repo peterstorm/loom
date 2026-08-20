@@ -146,17 +146,14 @@ const handler: HookHandler = async (stdin) => {
   // the engine's own issued authority for THIS request authorizes exactly the
   // supplied model, honor it. A missing model (inheritance) or a frontmatter
   // fault is never grandfathered — only a mismatch against a proven authority.
-  if (
-    frontmatter.ok &&
-    !requested.ok &&
-    typeof requestedModel === "string" &&
-    spawnModelIsEngineAuthorized(input, requestedModel)
-  ) {
-    return { kind: "allow" };
-  }
+  const grandfathered = frontmatter.ok && !requested.ok && typeof requestedModel === "string"
+    ? grandfatheredModelAuthorization(input, requestedModel)
+    : null;
+  if (grandfathered?.authorized) return { kind: "allow" };
   const errors = [
     ...(frontmatter.ok ? [] : frontmatter.errors),
     ...(requested.ok ? [] : requested.errors),
+    ...(grandfathered?.diagnostic === undefined ? [] : [grandfathered.diagnostic]),
   ];
   return errors.length === 0
     ? { kind: "allow" }
@@ -166,40 +163,58 @@ const handler: HookHandler = async (stdin) => {
       };
 };
 
-/**
- * The Claude Code model the engine issued for `requestId` in a run directory,
- * read directly from `<runDir>/requests/*.json`. Returns null on ANY failure —
- * unreadable directory, a corrupt/unreadable authority file, or no matching
- * request — so a caller can only ever use a positive, proven answer. Does not
- * open a run-directory handle (that mutates the run); it only reads the
- * engine-written, guarded authority artifacts. Lives in the SHELL (this
- * handler), not the grandfathered-spawn-model core: the core module is pure
- * by its own header, and the no-cross-boundary-imports linter denies
- * `node:fs` there (per-file capability list).
- */
-export function engineIssuedClaudeModelFromRunDir(
+export type EngineIssuedClaudeModelLookup =
+  | Readonly<{ kind: "found"; model: string }>
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "unavailable"; message: string }>;
+
+/** Read engine-issued model authority without collapsing corruption into absence. */
+export function lookupEngineIssuedClaudeModel(
   runDirectory: string,
   requestId: string,
-): string | null {
+): EngineIssuedClaudeModelLookup {
   let names: readonly string[];
   try {
     names = readdirSync(join(runDirectory, "requests"));
-  } catch {
-    return null;
+  } catch (error) {
+    return {
+      kind: "unavailable",
+      message: `cannot read issued request directory ${join(runDirectory, "requests")}: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
   const issued: AgentRequestAuthority[] = [];
   for (const name of names) {
     if (!name.endsWith(".json")) continue;
+    const path = join(runDirectory, "requests", name);
     let raw: unknown;
     try {
-      raw = JSON.parse(readFileSync(join(runDirectory, "requests", name), "utf-8")) as unknown;
-    } catch {
-      return null; // a corrupt authority file → prove nothing (fail closed)
+      raw = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    } catch (error) {
+      return {
+        kind: "unavailable",
+        message: `cannot read issued request authority ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
     const parsed = parseStoredAgentRequestAuthority(raw);
-    if (parsed.ok) issued.push(parsed.value);
+    if (!parsed.ok) {
+      return {
+        kind: "unavailable",
+        message: `issued request authority ${path} is invalid: ${parsed.error.violations.map(({ message }) => message).join("; ")}`,
+      };
+    }
+    issued.push(parsed.value);
   }
-  return engineIssuedClaudeModel(issued, requestId);
+  const model = engineIssuedClaudeModel(issued, requestId);
+  return model === null ? { kind: "absent" } : { kind: "found", model };
+}
+
+/** Compatibility projection: only positive authority yields a model. */
+export function engineIssuedClaudeModelFromRunDir(
+  runDirectory: string,
+  requestId: string,
+): string | null {
+  const lookup = lookupEngineIssuedClaudeModel(runDirectory, requestId);
+  return lookup.kind === "found" ? lookup.model : null;
 }
 
 /**
@@ -220,16 +235,45 @@ export function engineIssuedClaudeModelFromRunDir(
  * the rescue can only ADD an allow when a real, guarded authority proves the
  * model, never remove one.
  */
-export function spawnModelIsEngineAuthorized(input: PreToolUseInput, requestedModel: string): boolean {
+type GrandfatheredModelAuthorization =
+  | Readonly<{ authorized: true }>
+  | Readonly<{ authorized: false; diagnostic: string }>;
+
+function grandfatheredModelAuthorization(
+  input: PreToolUseInput,
+  requestedModel: string,
+): GrandfatheredModelAuthorization {
   const prompt = typeof input.tool_input?.prompt === "string" ? input.tool_input.prompt : "";
   const requestId = loomMarkerValue(prompt, "REQUEST_ID");
   const contextPath = loomMarkerValue(prompt, "CONTEXT_PATH");
-  if (requestId === null || contextPath === null) return false;
+  if (requestId === null || contextPath === null) {
+    return { authorized: false, diagnostic: "grandfathered model authority requires exact request and context markers" };
+  }
   const repositoryRoot = resolveRepositoryRoot();
-  if (repositoryRoot === undefined) return false;
+  if (repositoryRoot === undefined) {
+    return { authorized: false, diagnostic: "grandfathered model authority cannot resolve the repository root" };
+  }
   const runDirectory = anchoredRunDirectoryFromContextPath(repositoryRoot, contextPath);
-  if (runDirectory === null) return false;
-  return engineIssuedClaudeModelFromRunDir(runDirectory, requestId) === requestedModel;
+  if (runDirectory === null) {
+    return { authorized: false, diagnostic: "grandfathered model authority context is not anchored to an in-repository Run Directory" };
+  }
+  const lookup = lookupEngineIssuedClaudeModel(runDirectory, requestId);
+  if (lookup.kind === "unavailable") {
+    return { authorized: false, diagnostic: `grandfathered model authority is unreadable: ${lookup.message}` };
+  }
+  if (lookup.kind === "absent") {
+    return { authorized: false, diagnostic: `grandfathered model authority has no issued request ${requestId}` };
+  }
+  return lookup.model === requestedModel
+    ? { authorized: true }
+    : {
+        authorized: false,
+        diagnostic: `grandfathered model authority issued ${JSON.stringify(lookup.model)}, not ${JSON.stringify(requestedModel)}`,
+      };
+}
+
+export function spawnModelIsEngineAuthorized(input: PreToolUseInput, requestedModel: string): boolean {
+  return grandfatheredModelAuthorization(input, requestedModel).authorized;
 }
 
 export default handler;

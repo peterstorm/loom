@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,7 +9,10 @@ import {
 } from "../../src/core/grandfathered-spawn-model";
 // The fs-reading shell function moved to the pre-tool-use handler (the core
 // module is pure; the no-cross-boundary-imports linter denies node:fs there).
-import { engineIssuedClaudeModelFromRunDir } from "../../src/handlers/pre-tool-use/validate-agent-model";
+import {
+  engineIssuedClaudeModelFromRunDir,
+  lookupEngineIssuedClaudeModel,
+} from "../../src/handlers/pre-tool-use/validate-agent-model";
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 
@@ -85,7 +88,27 @@ describe("grandfathered-spawn-model — reads the engine's issued authority from
     expect(engineIssuedClaudeModelFromRunDir(runDir, "request:comment-analyzer:1")).toBeNull();
   });
 
-  it("returns null (fail closed) for a missing run directory", () => {
+  it("distinguishes unavailable authority from an absent request", () => {
+    const unavailable = lookupEngineIssuedClaudeModel("/does/not/exist", "request:x:1");
+    expect(unavailable.kind).toBe("unavailable");
+    if (unavailable.kind === "unavailable") {
+      expect(unavailable.message).toContain("cannot read issued request directory");
+    }
     expect(engineIssuedClaudeModelFromRunDir("/does/not/exist", "request:x:1")).toBeNull();
+  });
+
+  it("reports corrupt stored authority as unavailable instead of no matching request", () => {
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-grandfather-corrupt-"));
+    dirs.push(runsRoot);
+    const runDir = join(runsRoot, "run.grandfather-corrupt");
+    mkdirSync(join(runDir, "requests"), { recursive: true });
+    writeFileSync(join(runDir, "requests", "corrupt.json"), "{not json");
+
+    const lookup = lookupEngineIssuedClaudeModel(runDir, "request:comment-analyzer:2");
+    expect(lookup.kind).toBe("unavailable");
+    if (lookup.kind === "unavailable") {
+      expect(lookup.message).toContain("corrupt.json");
+      expect(lookup.message).toContain("cannot read issued request authority");
+    }
   });
 });

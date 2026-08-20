@@ -24,7 +24,10 @@ import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
 // Both harnesses share ONE protected-state read seam, so a Pi gate and a
 // Claude gate cannot disagree about what "no active plan" means.
 import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate-phase-order";
-import { type TaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
+import {
+  type TaskExecutionRosterObservation,
+  type TaskExecutionSpawn,
+} from "../engine/src/core/validate-task-execution";
 import { validateTaskExecutionBatch } from "../engine/src/handlers/task-execution";
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { admitPiSpawnBatch, MAX_PI_ORCHESTRATION_BATCH_SIZE } from "../engine/src/core/spawn-admission";
@@ -66,7 +69,7 @@ import {
 import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
-import { fsSessionRegistry, parseAgentId, parseSessionId, rosterAgentId } from "../engine/src/machine";
+import { anyActiveSubagent, fsSessionRegistry, parseAgentId, parseSessionId, rosterAgentId } from "../engine/src/machine";
 import type { AgentId } from "../engine/src/machine/evidence";
 import { buildContextOutput } from "../engine/src/handlers/session-start/resume-after-clear";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
@@ -913,6 +916,19 @@ export default function (pi: ExtensionAPI) {
           }
           return runPiCleanupActions(actions);
         };
+        // Observe graph activity before this prospective batch writes its own
+        // roster rows. Those rows prove only that admission is in progress;
+        // treating them as an older reservation's liveness makes a timestamped
+        // reservation stranded by process death unrecoverable forever. Keep the
+        // observation typed so the registration core can limit this ordering
+        // exception to current-protocol (timestamped) reservations.
+        const rosterObservation: TaskExecutionRosterObservation | undefined =
+          graphIsActive && taskExecutionSpawns.some(({ kind }) => kind === "implementation")
+            ? {
+                kind: "pre-roster-current-protocol",
+                anyActiveForGraph: anyActiveSubagent(taskGraphPath()),
+              }
+            : undefined;
         try {
           mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
           for (const agentId of rosterIds) {
@@ -991,7 +1007,11 @@ export default function (pi: ExtensionAPI) {
           const executionMode = Array.isArray((event.input as { chain?: unknown }).chain)
             ? "sequential" as const
             : "parallel" as const;
-          taskResult = await validateTaskExecutionBatch(taskExecutionSpawns, executionMode);
+          taskResult = await validateTaskExecutionBatch(
+            taskExecutionSpawns,
+            executionMode,
+            rosterObservation,
+          );
         } catch (error) {
           const cleanupErrors = await rollbackLifecycle();
           throw new Error(
@@ -1162,10 +1182,13 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (_event, _ctx) => {
     const activeTaskGraphPath = taskGraphPath();
-    if (!existsSync(activeTaskGraphPath)) return;
+    if (!pathExistsFailClosed(activeTaskGraphPath)) return;
 
     const sm = StateManager.fromPath(activeTaskGraphPath);
-    if (!sm) return;
+    if (!sm) {
+      process.stderr.write(`loom(pi): resume context skipped — task graph could not be opened at ${activeTaskGraphPath}\n`);
+      return;
+    }
 
     let state;
     try {
@@ -1568,217 +1591,217 @@ export default function (pi: ExtensionAPI) {
       // while processing result #1 must not abort results #2..N — that
       // leaves tasks stuck "executing" with zero diagnostics.
       try {
-      const agentType = stripNamespace(result.agent);
-      const sessionId = _ctx.sessionManager.getSessionId() ?? "unknown";
-      const reservedItem = reservation?.items[resultIndex];
-      const markers = orchestrationMarkers(
-        result.task ?? "",
-        `Pi result ${resultIndex + 1}/${agentType}`,
-      );
-      const durableRunBinding = reservation?.orchestrationRunBinding ??
-        (markers !== null && resultSessionId !== null
-          ? sessionRunBinding(resultSessionId, [markers])
-          : null);
-      const runBound = durableRunBinding !== null ||
-        process.env[RUNS_ROOT_ENV] !== undefined || process.env[RUN_DIR_ENV] !== undefined;
-      if (reservedItem && agentType !== reservedItem.agentType) {
-        const diagnostic =
-          `result ${resultIndex + 1} agent ${JSON.stringify(agentType)} does not match reserved ${JSON.stringify(reservedItem.agentType)}`;
-        if (runBound) processingErrors.push(`request-bound ${diagnostic}`);
-        process.stderr.write(`loom(pi): ${diagnostic} — evidence ignored\n`);
-        continue;
-      }
-      if (durableRunBinding !== null) {
-        const authorityProblem = markers === null
-          ? `request-bound result ${resultIndex + 1}/${agentType} has no request/context markers`
-          : piResultAuthorityProblem(durableRunBinding, toolCallId, resultIndex, agentType, markers);
-        if (authorityProblem !== null) {
-          const diagnostic = `request-bound result authority rejected for ${agentType}: ${authorityProblem}`;
-          processingErrors.push(diagnostic);
-          process.stderr.write(`loom(pi): ${diagnostic}; transcript was not captured\n`);
-          await recordPiRequestCaptureRejection(
-            durableRunBinding, toolCallId, resultIndex, agentType, diagnostic,
-          );
+        const agentType = stripNamespace(result.agent);
+        const sessionId = _ctx.sessionManager.getSessionId() ?? "unknown";
+        const reservedItem = reservation?.items[resultIndex];
+        const markers = orchestrationMarkers(
+          result.task ?? "",
+          `Pi result ${resultIndex + 1}/${agentType}`,
+        );
+        const durableRunBinding = reservation?.orchestrationRunBinding ??
+          (markers !== null && resultSessionId !== null
+            ? sessionRunBinding(resultSessionId, [markers])
+            : null);
+        const runBound = durableRunBinding !== null ||
+          process.env[RUNS_ROOT_ENV] !== undefined || process.env[RUN_DIR_ENV] !== undefined;
+        if (reservedItem && agentType !== reservedItem.agentType) {
+          const diagnostic =
+            `result ${resultIndex + 1} agent ${JSON.stringify(agentType)} does not match reserved ${JSON.stringify(reservedItem.agentType)}`;
+          if (runBound) processingErrors.push(`request-bound ${diagnostic}`);
+          process.stderr.write(`loom(pi): ${diagnostic} — evidence ignored\n`);
           continue;
         }
-      }
-
-      // Cleanup subagent flag. Parse the session id before interpolating it
-      // into the SUBAGENT_DIR path (path-traversal guard); an unsafe id could
-      // never have named a tracking file, so there is nothing to clean up.
-      const safeSessionId = parseSessionId(sessionId);
-      if (safeSessionId === null) {
-        process.stderr.write(
-          `loom: invalid session id ${JSON.stringify(sessionId)} — subagent flag cleanup skipped\n`,
-        );
-      } else if (!reservedItem) {
-        // Compatibility for a result emitted by an older Pi call that predates
-        // reservation capture. New calls always release above from authority.
-        try {
-          const rosterId = piSpawnRosterId(toolCallId, resultIndex, agentType);
-          await fsSessionRegistry.removeActive(safeSessionId, rosterId);
-        } catch (err) {
-          process.stderr.write(`loom: subagent flag cleanup failed: ${(err as Error).message}\n`);
-        }
-      }
-
-      // Request-bound capture runs BEFORE the standalone short-circuit and
-      // before any StateManager resolution — the same two orderings dispatch.ts
-      // documents as load-bearing on the Claude side. Standalone results are
-      // precisely the ones a run directory exists to collect, so capturing
-      // after that `continue` would capture nothing for exactly the flows this
-      // path serves; and capture must record evidence before any handler acts
-      // on it. It reads only the run directory it is pointed at, never a State
-      // File, so a run beside an active wave cannot cross into it.
-      const captureOutcome: CaptureOutcome = piSubagentResultFailed(result) && runBound
-        ? {
-            kind: "rejected",
-            reason: "agent-failed",
-            message: `${agentType} exited without a successful result (${piSubagentFailureSignals(result)})`,
-          }
-        : await capturePiSubagentResult(
-            toolCallId,
-            resultIndex,
-            agentType,
-            result.messages,
-            durableRunBinding,
-          );
-
-      // Standalone review/refutation results are run artifacts. Short-circuit
-      // before StateManager resolution so an unrelated local graph is neither
-      // read nor mutated merely because it exists. When a run directory is
-      // active, however, capture is mandatory evidence: a rejection or missing
-      // correlator must be surfaced rather than disguised as a harmless
-      // task-state short-circuit.
-      if (runBound || reservedItem?.kind === "standalone" || hasStandaloneReviewContext(result.task ?? "")) {
-        if (runBound && captureOutcome.kind !== "captured") {
-          const detail = describeCaptureFailure(captureOutcome);
-          const diagnostic = `standalone request-bound capture failed for ${agentType}: ${detail}`;
-          processingErrors.push(diagnostic);
-          process.stderr.write(`loom(pi): ${diagnostic}; task state untouched\n`);
-          if (durableRunBinding !== null) {
+        if (durableRunBinding !== null) {
+          const authorityProblem = markers === null
+            ? `request-bound result ${resultIndex + 1}/${agentType} has no request/context markers`
+            : piResultAuthorityProblem(durableRunBinding, toolCallId, resultIndex, agentType, markers);
+          if (authorityProblem !== null) {
+            const diagnostic = `request-bound result authority rejected for ${agentType}: ${authorityProblem}`;
+            processingErrors.push(diagnostic);
+            process.stderr.write(`loom(pi): ${diagnostic}; transcript was not captured\n`);
             await recordPiRequestCaptureRejection(
               durableRunBinding, toolCallId, resultIndex, agentType, diagnostic,
             );
+            continue;
           }
-        } else {
-          process.stderr.write(
-            piSubagentResultFailed(result)
-              ? `loom(pi): failed standalone ${agentType} result ignored — task state untouched\n`
-              : `loom(pi): ${agentType} belongs to a standalone review run — task state untouched\n`,
-          );
         }
-        continue;
-      }
 
-      // Any Loom-owned result under explicit run authority must have exact
-      // request-bound evidence before protected state can change. Only truly
-      // unrelated legacy agents may retain the no-reservation compatibility
-      // path.
-      if (captureOutcome.kind === "rejected" ||
-          (runBound && isLoomOwnedResultAgent(agentType) && captureOutcome.kind !== "captured")) {
-        const detail = describeCaptureFailure(captureOutcome);
-        const diagnostic = `request-bound capture rejected for ${agentType}: ${detail}`;
-        processingErrors.push(diagnostic);
-        process.stderr.write(`loom(pi): ${diagnostic}; protected state unchanged\n`);
-        continue;
-      }
-
-      const mgr = StateManager.fromSession(sessionId);
-      if (!mgr) {
-        // An ad-hoc spawn had no task graph to begin with, so "completion was
-        // NOT applied" describes nothing that was lost: the agent's answer is
-        // its return value, and there is no protected state it was ever going
-        // to update. Reporting it as an evidence-processing failure made every
-        // graphless Loom agent look broken to the caller.
-        if (spawnedWithoutTaskGraph(reservation)) {
+        // Cleanup subagent flag. Parse the session id before interpolating it
+        // into the SUBAGENT_DIR path (path-traversal guard); an unsafe id could
+        // never have named a tracking file, so there is nothing to clean up.
+        const safeSessionId = parseSessionId(sessionId);
+        if (safeSessionId === null) {
           process.stderr.write(
-            `loom(pi): ad-hoc ${agentType} completion — no task graph for session ${JSON.stringify(sessionId)}, nothing to apply\n`,
+            `loom: invalid session id ${JSON.stringify(sessionId)} — subagent flag cleanup skipped\n`,
           );
-        } else if (isLoomOwnedResultAgent(agentType)) {
-          const diagnostic = `no task graph for session ${JSON.stringify(sessionId)}; ${agentType} completion was NOT applied`;
+        } else if (!reservedItem) {
+          // Compatibility for a result emitted by an older Pi call that predates
+          // reservation capture. New calls always release above from authority.
+          try {
+            const rosterId = piSpawnRosterId(toolCallId, resultIndex, agentType);
+            await fsSessionRegistry.removeActive(safeSessionId, rosterId);
+          } catch (err) {
+            process.stderr.write(`loom: subagent flag cleanup failed: ${(err as Error).message}\n`);
+          }
+        }
+
+        // Request-bound capture runs BEFORE the standalone short-circuit and
+        // before any StateManager resolution — the same two orderings dispatch.ts
+        // documents as load-bearing on the Claude side. Standalone results are
+        // precisely the ones a run directory exists to collect, so capturing
+        // after that `continue` would capture nothing for exactly the flows this
+        // path serves; and capture must record evidence before any handler acts
+        // on it. It reads only the run directory it is pointed at, never a State
+        // File, so a run beside an active wave cannot cross into it.
+        const captureOutcome: CaptureOutcome = piSubagentResultFailed(result) && runBound
+          ? {
+              kind: "rejected",
+              reason: "agent-failed",
+              message: `${agentType} exited without a successful result (${piSubagentFailureSignals(result)})`,
+            }
+          : await capturePiSubagentResult(
+              toolCallId,
+              resultIndex,
+              agentType,
+              result.messages,
+              durableRunBinding,
+            );
+
+        // Standalone review/refutation results are run artifacts. Short-circuit
+        // before StateManager resolution so an unrelated local graph is neither
+        // read nor mutated merely because it exists. When a run directory is
+        // active, however, capture is mandatory evidence: a rejection or missing
+        // correlator must be surfaced rather than disguised as a harmless
+        // task-state short-circuit.
+        if (runBound || reservedItem?.kind === "standalone" || hasStandaloneReviewContext(result.task ?? "")) {
+          if (runBound && captureOutcome.kind !== "captured") {
+            const detail = describeCaptureFailure(captureOutcome);
+            const diagnostic = `standalone request-bound capture failed for ${agentType}: ${detail}`;
+            processingErrors.push(diagnostic);
+            process.stderr.write(`loom(pi): ${diagnostic}; task state untouched\n`);
+            if (durableRunBinding !== null) {
+              await recordPiRequestCaptureRejection(
+                durableRunBinding, toolCallId, resultIndex, agentType, diagnostic,
+              );
+            }
+          } else {
+            process.stderr.write(
+              piSubagentResultFailed(result)
+                ? `loom(pi): failed standalone ${agentType} result ignored — task state untouched\n`
+                : `loom(pi): ${agentType} belongs to a standalone review run — task state untouched\n`,
+            );
+          }
+          continue;
+        }
+
+        // Any Loom-owned result under explicit run authority must have exact
+        // request-bound evidence before protected state can change. Only truly
+        // unrelated legacy agents may retain the no-reservation compatibility
+        // path.
+        if (captureOutcome.kind === "rejected" ||
+            (runBound && isLoomOwnedResultAgent(agentType) && captureOutcome.kind !== "captured")) {
+          const detail = describeCaptureFailure(captureOutcome);
+          const diagnostic = `request-bound capture rejected for ${agentType}: ${detail}`;
           processingErrors.push(diagnostic);
-          process.stderr.write(`loom(pi): ${diagnostic}\n`);
+          process.stderr.write(`loom(pi): ${diagnostic}; protected state unchanged\n`);
+          continue;
         }
-        continue;
-      }
 
-      // Each concern below is one named applier in `pi/subagent-result`, taking
-      // the state store and the repository as ports. They decide and persist;
-      // this dispatcher owns stderr and owns which of their diagnostics count as
-      // orchestration processing errors.
-      const store: TaskGraphStore = mgr;
-      const repository: RepositoryProbe = {
-        root: () => git.repositoryRoot() ?? process.cwd(),
-        isRepo: () => git.isGitRepo(),
-      };
-      const parentPrompt = event.content
-        .filter((c: { type: string }) => c.type === "text")
-        .map((c: { type: string; text?: string }) => c.text ?? "")
-        .join("\n");
-      const emit = (applied: PiResultOutcome): void => {
-        processingErrors.push(...applied.processingErrors);
-        for (const line of applied.log) process.stderr.write(`${line}\n`);
-      };
+        const mgr = StateManager.fromSession(sessionId);
+        if (!mgr) {
+          // An ad-hoc spawn had no task graph to begin with, so "completion was
+          // NOT applied" describes nothing that was lost: the agent's answer is
+          // its return value, and there is no protected state it was ever going
+          // to update. Reporting it as an evidence-processing failure made every
+          // graphless Loom agent look broken to the caller.
+          if (spawnedWithoutTaskGraph(reservation)) {
+            process.stderr.write(
+              `loom(pi): ad-hoc ${agentType} completion — no task graph for session ${JSON.stringify(sessionId)}, nothing to apply\n`,
+            );
+          } else if (isLoomOwnedResultAgent(agentType)) {
+            const diagnostic = `no task graph for session ${JSON.stringify(sessionId)}; ${agentType} completion was NOT applied`;
+            processingErrors.push(diagnostic);
+            process.stderr.write(`loom(pi): ${diagnostic}\n`);
+          }
+          continue;
+        }
 
-      // A failed process may retain valid-looking assistant text. Never parse
-      // that text as completion/review/spec evidence, but do persist the
-      // failed CAPTURE for gate-owned agents so a healthy sibling or stale pass
-      // cannot make the missing evidence disappear.
-      if (piSubagentResultFailed(result)) {
-        emit(await applyFailedPiResult({
-          store,
-          agentType,
-          result,
-          reservedSlot: reservedItem,
-          now: new Date().toISOString(),
-        }));
-        continue;
-      }
+        // Each concern below is one named applier in `pi/subagent-result`, taking
+        // the state store and the repository as ports. They decide and persist;
+        // this dispatcher owns stderr and owns which of their diagnostics count as
+        // orchestration processing errors.
+        const store: TaskGraphStore = mgr;
+        const repository: RepositoryProbe = {
+          root: () => git.repositoryRoot() ?? process.cwd(),
+          isRepo: () => git.isGitRepo(),
+        };
+        const parentPrompt = event.content
+          .filter((c: { type: string }) => c.type === "text")
+          .map((c: { type: string; text?: string }) => c.text ?? "")
+          .join("\n");
+        const emit = (applied: PiResultOutcome): void => {
+          processingErrors.push(...applied.processingErrors);
+          for (const line of applied.log) process.stderr.write(`${line}\n`);
+        };
 
-      // --- Phase agent → advance phase ---
-      const completedPhase = PHASE_AGENT_MAP[agentType];
-      if (completedPhase) {
-        emit(await applyPhaseAgentPiResult({
-          store,
-          agentType,
-          completedPhase,
-          result,
-          now: new Date().toISOString(),
-        }));
-        continue;
-      }
+        // A failed process may retain valid-looking assistant text. Never parse
+        // that text as completion/review/spec evidence, but do persist the
+        // failed CAPTURE for gate-owned agents so a healthy sibling or stale pass
+        // cannot make the missing evidence disappear.
+        if (piSubagentResultFailed(result)) {
+          emit(await applyFailedPiResult({
+            store,
+            agentType,
+            result,
+            reservedSlot: reservedItem,
+            now: new Date().toISOString(),
+          }));
+          continue;
+        }
 
-      // --- Impl agent → update task status ---
-      if (IMPL_AGENTS.has(agentType)) {
-        emit(await applyImplementationPiResult({
-          store,
-          repository,
-          agentType,
-          result,
-          reservedSlot: reservedItem,
-          parentPrompt,
-        }));
-        continue;
-      }
+        // --- Phase agent → advance phase ---
+        const completedPhase = PHASE_AGENT_MAP[agentType];
+        if (completedPhase) {
+          emit(await applyPhaseAgentPiResult({
+            store,
+            agentType,
+            completedPhase,
+            result,
+            now: new Date().toISOString(),
+          }));
+          continue;
+        }
 
-      // --- Review agent → store findings ---
-      if (isReviewAgent(agentType)) {
-        emit(await applyReviewPiResult({
-          store,
-          agentType,
-          result,
-          reservedSlot: reservedItem,
-          parentPrompt,
-        }));
-        continue;
-      }
+        // --- Impl agent → update task status ---
+        if (IMPL_AGENTS.has(agentType)) {
+          emit(await applyImplementationPiResult({
+            store,
+            repository,
+            agentType,
+            result,
+            reservedSlot: reservedItem,
+            parentPrompt,
+          }));
+          continue;
+        }
 
-      // --- Spec-check invoker → store spec-check findings ---
-      if (agentType === "spec-check-invoker") {
-        emit(await applySpecCheckPiResult({ store, result, now: new Date().toISOString() }));
-        continue;
-      }
+        // --- Review agent → store findings ---
+        if (isReviewAgent(agentType)) {
+          emit(await applyReviewPiResult({
+            store,
+            agentType,
+            result,
+            reservedSlot: reservedItem,
+            parentPrompt,
+          }));
+          continue;
+        }
+
+        // --- Spec-check invoker → store spec-check findings ---
+        if (agentType === "spec-check-invoker") {
+          emit(await applySpecCheckPiResult({ store, result, now: new Date().toISOString() }));
+          continue;
+        }
       } catch (err) {
         // Loud + isolated: name the agent, the task (best effort), and the
         // cause, then continue with the next result.
@@ -1806,7 +1829,7 @@ export default function (pi: ExtensionAPI) {
     description: "Show current loom orchestration status",
     handler: async (_args, ctx) => {
       const activeTaskGraphPath = taskGraphPath();
-      if (!existsSync(activeTaskGraphPath)) {
+      if (!pathExistsFailClosed(activeTaskGraphPath)) {
         ctx.ui.notify("No active loom orchestration", "info");
         return;
       }

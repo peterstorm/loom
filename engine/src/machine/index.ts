@@ -92,6 +92,7 @@ export {
   reportedRosterAgentId,
   markAgentActive,
   removeActiveAgent,
+  removeActiveAgentStrict,
   bindMachineAgent,
   unbindMachineAgent,
   machineDefPath,

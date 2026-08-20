@@ -109,6 +109,20 @@ export type ImplementationTaskBindings =
 export type ExecutionBatchMode = "parallel" | "sequential";
 
 /**
+ * When the shell observed roster liveness for reservation recovery.
+ *
+ * The ordinary handler probes at registration time. Pi must instead observe
+ * immediately before it adds the prospective batch's own roster rows; those
+ * rows are lifecycle bookkeeping, not evidence that an older reservation is
+ * still served. The pre-roster arm is deliberately limited to timestamped
+ * reservations minted by the current protocol, so this is not a migration path
+ * for timestamp-less legacy graphs.
+ */
+export type TaskExecutionRosterObservation =
+  | Readonly<{ kind: "at-registration"; anyActiveForGraph: boolean }>
+  | Readonly<{ kind: "pre-roster-current-protocol"; anyActiveForGraph: boolean }>;
+
+/**
  * How long a committed reservation is shielded from reclamation.
  *
  * A reservation is committed at PreToolUse; the agent's roster mark is written
@@ -171,6 +185,33 @@ export function staleReservationsFromState(
       return nowMs - reservedAt > graceMs;
     }),
   );
+}
+
+/**
+ * Project stale reservations from the shell's typed roster observation.
+ *
+ * Registration-time probes retain the established recovery policy. Pi's
+ * pre-roster observation admits only timestamped current-protocol reservations;
+ * missing tasks and missing/unparseable timestamps remain untouched rather than
+ * becoming eligible merely because Pi changed when it sampled its own roster.
+ */
+export function staleReservationsForRosterObservation(
+  state: TaskGraph,
+  observation: TaskExecutionRosterObservation,
+  nowMs: number,
+  graceMs: number = RESERVATION_GRACE_MS,
+): ReadonlySet<string> {
+  const stale = staleReservationsFromState(
+    state,
+    observation.anyActiveForGraph,
+    nowMs,
+    graceMs,
+  );
+  if (observation.kind === "at-registration") return stale;
+  return new Set([...stale].filter((taskId) => {
+    const task = state.tasks.find((candidate) => candidate.id === taskId);
+    return task?.reserved_at !== undefined && !Number.isNaN(Date.parse(task.reserved_at));
+  }));
 }
 
 /**

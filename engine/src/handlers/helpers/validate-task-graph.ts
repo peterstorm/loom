@@ -360,8 +360,11 @@ function salvageAndRecoverFindings(
  * discarding it would lose the audit record and any finding nested in it.
  */
 function readFindingContainers(t: Record<string, unknown>) {
-  const asEntries = (raw: unknown): readonly unknown[] =>
-    Array.isArray(raw) ? raw : raw === undefined ? [] : [raw];
+  const asEntries = (raw: unknown): readonly unknown[] => {
+    if (Array.isArray(raw)) return raw;
+    if (raw === undefined) return [];
+    return [raw];
+  };
 
   const rawRefutations = asEntries(t.refuted_findings);
   const rawResolutions = asEntries(t.resolved_findings);

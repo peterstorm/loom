@@ -38,10 +38,12 @@ import {
   parseEffectReceipt,
   parseStoredAgentRequestAuthority,
   parseArtifactByteLength,
+  parseContextDigest,
   parseOrchestrationRunId,
   type AgentRequestAuthority,
   type ArtifactDigest,
   type ArtifactRef,
+  type ContextDigest,
   type DomainResult,
   type EffectId,
   type EffectReceipt,
@@ -391,6 +393,10 @@ export interface RunDirHandle extends ProgramJournal {
   isPristine(): DomainResult<boolean, RunDirectoryError>;
   publishContext(packet: ContextPacket): Promise<DomainResult<ContextPublishedReceipt, RunDirectoryError>>;
   readContext(digest: ContextPacket["digest"]): DomainResult<ContextPacket, RunDirectoryError>;
+  publishDecisionContext(
+    digest: ContextDigest,
+    bytes: readonly number[],
+  ): Promise<DomainResult<ContextPublishedReceipt, RunDirectoryError>>;
   reserveRequest(authority: AgentRequestAuthority): Promise<DomainResult<TranscriptReserved, RunDirectoryError>>;
   readIssuedRequests(): DomainResult<readonly AgentRequestAuthority[], RunDirectoryError>;
   readCapturedAttempts(): DomainResult<ReadonlySet<CaptureKey>, RunDirectoryError>;
@@ -445,6 +451,12 @@ function digestOf(bytes: readonly number[]): ArtifactDigest {
   return createHash("sha256").update(Uint8Array.from(bytes)).digest("hex") as ArtifactDigest;
 }
 
+function contextDigestOf(bytes: readonly number[]): ContextDigest {
+  const parsed = parseContextDigest(createHash("sha256").update(Uint8Array.from(bytes)).digest("hex"));
+  if (!parsed.ok) throw new Error("internal context digest construction failed");
+  return parsed.value;
+}
+
 function readJsonNoFollow(path: string): unknown {
   return JSON.parse(readRunFileNoFollow(path)) as unknown;
 }
@@ -487,15 +499,23 @@ function isExistingDirectory(path: string): boolean {
   }
 }
 
-/** Remove staged bytes that will never be promoted; a leftover is inert but noisy. */
-function discardStaged(entries: readonly Readonly<{ staged: string }>[]): void {
+/** Remove staged bytes that will never be promoted and retain every real cleanup failure. */
+function discardStaged(entries: readonly Readonly<{ staged: string }>[]): readonly string[] {
+  const failures: string[] = [];
   for (const entry of entries) {
     try {
       removeRunFileNoFollow(entry.staged);
-    } catch {
-      // The set is already abandoned; a leftover staged file publishes nothing.
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        failures.push(`${entry.staged}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }
+  return Object.freeze(failures);
+}
+
+function cleanupFailureSuffix(failures: readonly string[]): string {
+  return failures.length === 0 ? "" : `; staged cleanup failed: ${failures.join("; ")}`;
 }
 
 function transcriptSlotPath(runDirectory: string, authority: AgentRequestAuthority): string {
@@ -930,6 +950,39 @@ function contextOperations(runId: OrchestrationRunId, directory: string) {
       if (parsed.value.digest !== digest) return failure("context", "stored context packet digest does not match its slot");
       return success(parsed.value);
     },
+
+    async publishDecisionContext(
+      rawDigest: ContextDigest,
+      bytes: readonly number[],
+    ): Promise<DomainResult<ContextPublishedReceipt, RunDirectoryError>> {
+      const digest = parseContextDigest(rawDigest);
+      if (!digest.ok) return failure("context", digest.error.message);
+      if (!Array.isArray(bytes) || !bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+        return failure("context", "decision context bytes must be integers from 0 through 255");
+      }
+      if (contextDigestOf(bytes) !== digest.value) {
+        return failure("context", "decision context digest does not match its exact bytes");
+      }
+      let body: string;
+      try {
+        body = new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(bytes));
+        JSON.parse(body);
+      } catch (error) {
+        return failure("context", `decision context must be valid UTF-8 JSON: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const path = join(directory, CONTEXTS, `${digest.value}.json`);
+      const claimed = claimIdempotentWrite(path, body, "context",
+        (cause) => `cannot publish decision context: ${cause}`,
+        "different decision context bytes already occupy this digest");
+      if (!claimed.ok) return claimed;
+      return success(canonicalRecord({
+        kind: "context-published" as const,
+        runId,
+        digest: digest.value,
+        slotPath: path,
+      }));
+    },
+
   };
 }
 
@@ -1225,18 +1278,29 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
             }
             const rawName = `attempt-${supplied.value.attempt}.raw`;
             const stagedName = `${rawName}.staged-${process.pid}-${createHash("sha256").update(Uint8Array.from(bytes)).digest("hex").slice(0, 16)}`;
+            let publicationAttempted = false;
             try {
               writeDirectoryFileExclusiveNoFollow(slotDirectory, stagedName, Uint8Array.from(bytes));
+              publicationAttempted = true;
               // link(2) is the no-overwrite atomic publication point: the
               // fully-written staged inode becomes visible at rawName, while
               // EEXIST preserves the previously published attempt.
               linkSync(anchoredChildPath(slotDirectory, stagedName), anchoredChildPath(slotDirectory, rawName));
               unlinkSync(anchoredChildPath(slotDirectory, stagedName));
             } catch (error) {
-              try { unlinkSync(anchoredChildPath(slotDirectory, stagedName)); } catch { /* inert staged cleanup */ }
-              return failure("transcript", (error as NodeJS.ErrnoException).code === "EEXIST"
+              const stagedPath = anchoredChildPath(slotDirectory, stagedName);
+              const cleanupFailures: string[] = [];
+              try {
+                unlinkSync(stagedPath);
+              } catch (cleanupError) {
+                if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
+                  cleanupFailures.push(`${stagedPath}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+                }
+              }
+              const primary = publicationAttempted && (error as NodeJS.ErrnoException).code === "EEXIST"
                 ? `attempt ${supplied.value.attempt} for slot ${supplied.value.slotId} is already captured`
-                : `cannot capture transcript: ${(error as Error).message}`);
+                : `cannot capture transcript: ${(error as Error).message}`;
+              return failure("transcript", `${primary}${cleanupFailureSuffix(cleanupFailures)}`);
             }
             const byteLength = parseArtifactByteLength(bytes.length);
             if (!byteLength.ok) return failure("transcript", byteLength.error.message);
@@ -1301,8 +1365,8 @@ function stageArtifactSet(
       stagedPaths.push({ staged: stagedPath, final });
     }
   } catch (error) {
-    discardStaged(stagedPaths);
-    return failure("artifacts", `cannot stage artifact set: ${(error as Error).message}`);
+    const cleanupFailures = discardStaged(stagedPaths);
+    return failure("artifacts", `cannot stage artifact set: ${(error as Error).message}${cleanupFailureSuffix(cleanupFailures)}`);
   }
   return success(Object.freeze(stagedPaths));
 }
@@ -1376,8 +1440,8 @@ export function promoteArtifactSet(
 ): DomainResult<readonly StagedPair[], RunDirectoryError> {
   const blocked = stagedPaths.find((entry) => isExistingDirectory(entry.final));
   if (blocked !== undefined) {
-    discardStaged(stagedPaths);
-    return failure("artifacts", `artifact slot is occupied by a directory: ${blocked.final}`);
+    const cleanupFailures = discardStaged(stagedPaths);
+    return failure("artifacts", `artifact slot is occupied by a directory: ${blocked.final}${cleanupFailureSuffix(cleanupFailures)}`);
   }
 
   for (const entry of stagedPaths) {
@@ -1385,8 +1449,8 @@ export function promoteArtifactSet(
     if (occupied === null) continue;
     const reason = occupiedArtifactConflict(entry, occupied);
     if (reason !== null) {
-      discardStaged(stagedPaths);
-      return failure("artifacts", reason);
+      const cleanupFailures = discardStaged(stagedPaths);
+      return failure("artifacts", `${reason}${cleanupFailureSuffix(cleanupFailures)}`);
     }
   }
 
@@ -1398,8 +1462,8 @@ export function promoteArtifactSet(
     try {
       publishStagedRunFile(entry.staged, entry.final);
     } catch (error) {
-      discardStaged(stagedPaths.slice(index));
-      return failure("artifacts", `cannot publish artifact set: ${(error as Error).message}`);
+      const cleanupFailures = discardStaged(stagedPaths.slice(index));
+      return failure("artifacts", `cannot publish artifact set: ${(error as Error).message}${cleanupFailureSuffix(cleanupFailures)}`);
     }
   }
   return success(stagedPaths);

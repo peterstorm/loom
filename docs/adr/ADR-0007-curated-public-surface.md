@@ -97,11 +97,11 @@ wanted later, the boundary rules can encode the DAG the test already guarantees.
 - `Public Surface` is now a term in `CONTEXT.md`, with the relationship "a
   module's Public Surface is curated, and every symbol on it has a consumer
   outside that module".
-- The rule is currently enforced for **one** module. The broader finding — 279
-  exports across the engine that only tests reach, concentrated in shell handlers
-  where each internal step is exported so tests can call it directly — is not
-  settled by this ADR. Settling it needs a marked internal surface so the check
-  can distinguish "internal, reached by tests" from "public, reached by nobody";
-  until that exists, extending the check repo-wide would flag correct code.
+- The rule is enforced for the orchestration shared kernel and the
+  `handlers/helpers/programs` façade. Program helper tests import owning volumes
+  directly, while the façade publishes only parent caller operations. The
+  broader engine-wide export inventory remains unsolved; extending the check
+  repo-wide still needs a marked internal surface so correct test seams are not
+  mistaken for Public Surface commitments.
 - `engine/src/core/orchestration-contract/index.ts` is the worked example. A
   future facade should start curated rather than start as a barrel.

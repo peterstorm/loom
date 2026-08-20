@@ -178,6 +178,20 @@ type TestRunEvidence = Extract<Evidence, { kind: "TestRun" }>;
  *                  distinct from a genuinely-empty ledger — never mislabel
  *                  it "degraded". `ledgerEvents` are ignored in this mode.
  */
+function fallbackEvidenceLabel(
+  demotionLabel: string | null,
+  sawExitZero: boolean,
+  machineBound: boolean,
+  ledgerEmpty: boolean,
+): string {
+  if (demotionLabel !== null) return demotionLabel;
+  if (sawExitZero) return "low-trust (exit 0, no report artifact; transcript-regex)";
+  if (machineBound && ledgerEmpty) {
+    return "degraded (machine bound, no ledger evidence; transcript-regex)";
+  }
+  return "transcript-regex (fallback)";
+}
+
 export function resolveTestEvidence(
   ledgerEvents: readonly Evidence[],
   bashOutput: string,
@@ -239,12 +253,12 @@ export function resolveTestEvidence(
     }
   }
 
-  const label = demotionLabel
-    ?? (judged.some((j) => j.run.exit === 0)
-      ? "low-trust (exit 0, no report artifact; transcript-regex)"
-      : machineBound && ledgerEvents.length === 0
-        ? "degraded (machine bound, no ledger evidence; transcript-regex)"
-        : "transcript-regex (fallback)");
+  const label = fallbackEvidenceLabel(
+    demotionLabel,
+    judged.some((judgment) => judgment.run.exit === 0),
+    machineBound,
+    ledgerEvents.length === 0,
+  );
   const fallback = extractTestEvidence(bashOutput);
   if (!fallback.passed) {
     return { result: { verdict: "untrusted", passed: false, label, provenance: "unverified" }, evidence: "" };
@@ -497,10 +511,10 @@ export function analyzeNewTests(
  */
 export interface DiffDeps {
   readonly isTracked: (file: string) => git.GitTrackedResult;
-  readonly diffFiles: (files: string[]) => string;
-  readonly diffFilesStaged: (files: string[]) => string;
-  readonly diffFilesSince: (revision: string, files: string[]) => string;
-  readonly diffUntracked: (file: string) => string;
+  readonly diffFiles: (files: string[]) => git.GitDiffResult;
+  readonly diffFilesStaged: (files: string[]) => git.GitDiffResult;
+  readonly diffFilesSince: (revision: string, files: string[]) => git.GitDiffResult;
+  readonly diffUntracked: (file: string) => git.GitDiffResult;
   readonly fileExists: (path: string) => boolean;
 }
 
@@ -531,12 +545,17 @@ export function collectDiff(
   const tracked = classified.flatMap(({ file, result }) => result.ok && result.tracked ? [file] : []);
   const untracked = classified.flatMap(({ file, result }) =>
     result.ok && !result.tracked && deps.fileExists(file) ? [file] : []);
-  return [
-    startSha === undefined ? "" : deps.diffFilesSince(startSha, tracked),
+  const diffs = [
+    startSha === undefined ? { ok: true as const, diff: "" } : deps.diffFilesSince(startSha, tracked),
     deps.diffFiles(tracked),
     deps.diffFilesStaged(tracked),
     ...untracked.map((file) => deps.diffUntracked(file)),
-  ].join("\n");
+  ];
+  const unavailable = diffs.find((result) => !result.ok);
+  if (unavailable !== undefined && !unavailable.ok) {
+    throw new Error(`new-test diff authority unavailable: ${unavailable.error}`);
+  }
+  return diffs.flatMap((result) => result.ok ? [result.diff] : []).join("\n");
 }
 
 /** Shared shell operation for both Claude and Pi completion paths. Keeping
@@ -548,6 +567,7 @@ export function collectNewTestEvidence(
   startSha?: string,
   deps: DiffDeps = REAL_DIFF_DEPS,
 ): NewTestEvidence {
+  if (newTestsRequired === false) return analyzeNewTests("", false);
   return analyzeNewTests(collectDiff(filesModified, deps, startSha), newTestsRequired);
 }
 
@@ -842,9 +862,11 @@ export const runUpdateTaskStatus = async (
     const resolvedTestEvidence = preserveExistingTrusted ? target.test_evidence : testEvidence.evidence;
     const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, filesModified);
     const proofArtifactsChanged = attributedChangedArtifacts(changedDeclaredArtifacts, cumulativeFiles);
-    const currentNewTestEvidence = git.isGitRepo()
-      ? collectNewTestEvidence(cumulativeFiles, target.new_tests_required, target.start_sha)
-      : { written: false, evidence: "" };
+    const currentNewTestEvidence = collectNewTestEvidence(
+      cumulativeFiles,
+      target.new_tests_required,
+      target.start_sha,
+    );
     const proof = evaluateTaskProof(
       {
         newTestsRequired: target.new_tests_required !== false,

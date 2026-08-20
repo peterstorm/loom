@@ -1,11 +1,30 @@
 /**
- * Façade program drivers — facade (A14). The single 2,900-line module is
- * split into per-program driver volumes (standalone, wave-gate, remediation)
- * plus shared recovery/git/scope helpers; this index re-exports the full
- * public surface so all import sites (orchestration.ts, tests) are unchanged.
+ * Curated Public Surface for parent-facing program drivers.
+ *
+ * Owning volumes may export internal pure helpers for sibling volumes and
+ * focused tests. That does not make those helpers part of this caller seam.
  */
 
-export { classifyScope, parseRegisteredFacadeProgram, parseRemediationStartInput, parseStandaloneStartInput, parseWaveGateStartInput, renderSpawnTask, type FacadeDriveResult, type FacadeRegistrationParse, type ProgramParse, type RegisteredFacadeProgram, type RegisteredRemediationProgram, type RegisteredStandaloneProgram, type RegisteredWaveGateProgram } from './helpers';
+export {
+  parseRegisteredFacadeProgram,
+  parseRemediationStartInput,
+  parseStandaloneStartInput,
+  parseWaveGateStartInput,
+  renderSpawnTask,
+  type FacadeDriveResult,
+  type ProgramParse,
+  type RegisteredRemediationProgram,
+  type RegisteredStandaloneProgram,
+  type RegisteredWaveGateProgram,
+} from './helpers';
 export { resumeStandaloneFacade, startStandaloneFacade } from './standalone';
-export { applyWaveFacadeSubmission, parseWaveRetryDiagnosticSection, persistedWaveAttemptTwoCompatibilityProblem, prepareOrphanedWaveGateRecovery, recoverOrphanedWaveGateFacade, restartWaveGateFacade, resumeWaveGateFacade, startWaveGateFacade, waveAdvisoryDecisionRequestId, waveGateDecisionMismatch } from './wave-gate';
-export { remediationAuditBlockMessage, resumeRemediationFacade, startRemediationFacade } from './remediation';
+export {
+  applyWaveFacadeSubmission,
+  recoverOrphanedWaveGateFacade,
+  restartWaveGateFacade,
+  resumeWaveGateFacade,
+  startWaveGateFacade,
+  waveAdvisoryDecisionRequestId,
+  waveGateDecisionMismatch,
+} from './wave-gate';
+export { resumeRemediationFacade, startRemediationFacade } from './remediation';

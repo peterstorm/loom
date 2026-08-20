@@ -545,6 +545,20 @@ describe("Pi and Claude reach the same result", () => {
     });
   });
 
+  it("surfaces malformed final Claude JSON with its physical line number", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-claude-malformed-"));
+    cleanup.push(root);
+    const transcript = join(root, "transcript.jsonl");
+    writeFileSync(transcript, [
+      JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "earlier" }] } }),
+      "",
+      "{truncated-final",
+    ].join("\n"));
+
+    expect(() => claudeFinalPayloadCandidates(transcript))
+      .toThrow(/invalid final Claude transcript JSON at line 3:.*JSON/);
+  });
+
   it("surfaces an unreadable Claude transcript instead of returning no candidates", () => {
     const root = mkdtempSync(join(tmpdir(), "loom-claude-loop-"));
     cleanup.push(root);
@@ -847,7 +861,7 @@ describe("Claude capture against a real run directory", () => {
     expect(outcome.reason).toBe("no-final-payload");
   });
 
-  it("survives an interrupted transcript without inventing a payload", async () => {
+  it("reports an interrupted final transcript record without salvaging an earlier payload", async () => {
     const { runsRoot, runDir } = await stagedRun();
     const path = join(runDir, "truncated.jsonl");
     // A crash mid-write leaves a partial final line.
@@ -861,8 +875,11 @@ describe("Claude capture against a real run directory", () => {
 
     // A malformed terminal record invalidates the final-payload boundary; an
     // earlier assistant message is never salvaged as canonical evidence.
-    expect(outcome.kind).toBe("rejected");
-    if (outcome.kind === "rejected") expect(outcome.reason).toBe("no-final-payload");
+    expect(outcome).toMatchObject({
+      kind: "rejected",
+      reason: "transcript-json",
+      message: expect.stringContaining("invalid final Claude transcript JSON at line 2"),
+    });
   });
 
   it("reports a missing transcript rather than capturing nothing silently", async () => {

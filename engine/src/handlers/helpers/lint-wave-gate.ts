@@ -134,6 +134,21 @@ export function lintFiles(
 
 // --- Imperative shell (I/O at edges) ---
 
+/** Execute full-tier lint for one already-authorized Wave task set. */
+export function runFullTierWaveLint(tasks: readonly Task[]): HookResult {
+  try {
+    const root = repositoryRoot() ?? process.cwd();
+    const existingFiles = resolveLintTargets(root, collectModifiedFiles(tasks));
+    if (existingFiles.length === 0) return { kind: "allow" };
+    return aggregateResults(lintFiles(existingFiles, DEFAULT_RULES_DIR, PROJECT_RULES_DIR));
+  } catch (error) {
+    return {
+      kind: "block",
+      message: `🚫 WAVE-GATE LINT ENGINE ERROR: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
 const handler: HookHandler = async (_stdin, args) => {
   try {
     const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
@@ -149,29 +164,16 @@ const handler: HookHandler = async (_stdin, args) => {
     const wave = waveArg ?? state.current_wave ?? 1;
 
     const waveTasks = state.tasks.filter((t) => t.wave === wave);
-    // Legacy graphs may contain absolute tool paths. Canonicalize before any
-    // read, then inspect every component so transcript-controlled paths cannot
-    // make the linter read through a symlink or outside the repository.
-    const root = repositoryRoot() ?? process.cwd();
-    const existingFiles = resolveLintTargets(root, collectModifiedFiles(waveTasks));
-
-    if (existingFiles.length === 0) {
+    const modifiedCount = collectModifiedFiles(waveTasks).length;
+    if (modifiedCount === 0) {
       process.stderr.write(`lint-wave-gate: wave ${wave} — no modified files to lint.\n`);
       return { kind: "allow" };
     }
 
-    process.stderr.write(
-      `lint-wave-gate: wave ${wave} — linting ${existingFiles.length} file(s) (full tier)...\n`
-    );
-
-    const results = lintFiles(existingFiles, DEFAULT_RULES_DIR, PROJECT_RULES_DIR);
-    const hookResult = aggregateResults(results);
-
-    if (hookResult.kind === "allow") {
-      process.stderr.write(`lint-wave-gate: all ${existingFiles.length} file(s) passed.\n`);
-    }
-
-    return hookResult;
+    process.stderr.write(`lint-wave-gate: wave ${wave} — running full-tier lint...\n`);
+    const result = runFullTierWaveLint(waveTasks);
+    if (result.kind === "allow") process.stderr.write(`lint-wave-gate: wave ${wave} passed full-tier lint.\n`);
+    return result;
   } catch (error: unknown) {
     // Fail closed — any unexpected error blocks the gate
     const message = error instanceof Error ? error.message : String(error);

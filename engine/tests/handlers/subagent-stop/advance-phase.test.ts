@@ -152,6 +152,15 @@ describe("resolveTransition", () => {
     expect(resolveTransition("specify", mkState({ spec_file: join(tmpDir, ".claude/specs/nope.md") }))).toBeNull();
   });
 
+  it("surfaces an unreadable spec instead of advancing to clarify", () => {
+    const specFile = join(tmpDir, ".claude", "specs", "feat", "spec.md");
+    mkdirSync(join(tmpDir, ".claude", "specs", "feat"), { recursive: true });
+    symlinkSync(specFile, specFile);
+
+    expect(() => resolveTransition("specify", mkState({ spec_file: specFile })))
+      .toThrow(/cannot access phase artifact/);
+  });
+
   it("specify → null when spec_file not in .claude/specs/", () => {
     const f = join(tmpDir, "random.md");
     writeFileSync(f, "x");

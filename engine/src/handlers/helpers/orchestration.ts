@@ -275,7 +275,7 @@ function statusRunDirectoryObservation(rawGraph: unknown, args: readonly string[
  * failure to read reads as "not approved", which keeps status asking for a
  * decision rather than reporting progress that has not happened.
  */
-async function observedAdvisoryApproval(
+export async function observedAdvisoryApproval(
   rawGraph: unknown,
   observation: ActiveRunDirectoryObservation,
 ): Promise<boolean> {
@@ -286,6 +286,8 @@ async function observedAdvisoryApproval(
   if (!opened.ok) return false;
   const readiness = deriveWaveReadiness(parsed.value, productionGateDeps);
   if (!readiness.ok) return false;
+  const findingCounts = readiness.value.facts.findingCounts;
+  if (findingCounts.kind !== "known" || findingCounts.value.advisory === 0) return false;
   const decisionId = waveAdvisoryDecisionRequestId(observation.runId, readiness.value.waveTasks);
   try {
     const events = await opened.value.readEvents();
@@ -297,7 +299,10 @@ async function observedAdvisoryApproval(
         typeof decision === "object" && decision !== null && !Array.isArray(decision) &&
         Object.keys(decision).length === 1 && (decision as Record<string, unknown>).kind === "approve";
     });
-  } catch {
+  } catch (error) {
+    process.stderr.write(
+      `orchestration status: cannot read advisory decision event log for ${observation.runId}: ${error instanceof Error ? error.message : String(error)} — treating approval as absent\n`,
+    );
     return false;
   }
 }

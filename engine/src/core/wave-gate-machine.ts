@@ -33,7 +33,9 @@ import {
   doneAction,
   parseAgentRequestAuthority,
   parseAgentRosterSlot,
+  parseArtifactByteLength,
   parseArtifactDigest,
+  parseArtifactRef,
   parseContextDigest,
   parseEffectId,
   parseOrchestrationRunId,
@@ -44,6 +46,7 @@ import {
   spawnBatchAction,
   terminalBlockedDiagnostic,
   type AgentRosterSlot,
+  type ArtifactRef,
   type CommitProtectedWaveState,
   type DomainResult,
   type EffectIntent,
@@ -55,6 +58,7 @@ import {
   type InitialSpawnRequestInput,
   type NonEmpty,
   type OrchestrationRunId,
+  type RequestId,
   type ProtectedWaveStateCommitted,
   type SlotId,
 } from "./orchestration-contract";
@@ -1991,6 +1995,152 @@ export function projectWaveGateLifecycle(
   return settled();
 }
 
+export type WaveAdvisoryArtifactMaterial = Readonly<{
+  reference: ArtifactRef;
+  bytes: readonly number[];
+}>;
+
+export type WaveAdvisoryDecisionRequest = Readonly<{
+  requestId: RequestId;
+  decisionDigest: import("./orchestration-contract").ContextDigest;
+  context: Readonly<{
+    digest: import("./orchestration-contract").ContextDigest;
+    slot: Readonly<{ kind: "fixed-artifact-slot"; path: string }>;
+    bytes: readonly number[];
+  }>;
+  advisories: NonEmpty<WaveAdvisoryArtifactMaterial>;
+}>;
+
+/** Strip publication bytes only after the same material produced every ref. */
+export function waveAdvisoryDecisionActionRequest(material: WaveAdvisoryDecisionRequest) {
+  return canonicalRecord({
+    kind: "advisory-triage" as const,
+    requestId: material.requestId,
+    runId: material.advisories[0].reference.runId,
+    context: canonicalRecord({ digest: material.context.digest, slot: material.context.slot }),
+    advisories: Object.freeze(material.advisories.map(({ reference }) => reference)) as NonEmpty<ArtifactRef>,
+  });
+}
+
+/** One pure source for advisory bytes, references, and request identity. */
+export function deriveWaveAdvisoryDecisionRequest(
+  rawRunId: string,
+  tasks: readonly Task[],
+): DomainResult<WaveAdvisoryDecisionRequest, WavePreparationError> {
+  const runId = parseOrchestrationRunId(rawRunId);
+  if (!runId.ok) return preparationFailure(runId.error.message);
+  const canonicalAdvisories = tasks.flatMap((task) => {
+    if (task.findings !== undefined) {
+      return task.findings.filter((finding) => finding.severity === "advisory").map((finding) => ({
+        identity: `${task.id}:${finding.id}`,
+        bytes: Object.freeze([...new TextEncoder().encode(JSON.stringify({ taskId: task.id, finding }))]),
+      }));
+    }
+    return (task.advisory_findings ?? []).filter((claim) => claim.trim() !== "").map((claim, index) => ({
+      identity: `${task.id}:legacy-advisory-${index + 1}`,
+      bytes: Object.freeze([...new TextEncoder().encode(JSON.stringify({ taskId: task.id, claim }))]),
+    }));
+  });
+  if (canonicalAdvisories.length === 0) return preparationFailure("no canonical advisories require user triage");
+
+  const advisories: WaveAdvisoryArtifactMaterial[] = [];
+  for (const { identity, bytes } of canonicalAdvisories) {
+    const byteLength = parseArtifactByteLength(bytes.length);
+    const digest = parseArtifactDigest(createHash("sha256").update(Uint8Array.from(bytes)).digest("hex"));
+    if (!byteLength.ok) return preparationFailure(byteLength.error.message);
+    if (!digest.ok) return preparationFailure(digest.error.message);
+    const reference = parseArtifactRef({
+      runId: runId.value,
+      slot: canonicalRecord({
+        kind: "fixed-artifact-slot",
+        path: `artifacts/advisories/${identity.replace(/[^A-Za-z0-9_.-]+/g, "-")}.json`,
+      }),
+      digest: digest.value,
+      byteLength: byteLength.value,
+    });
+    if (!reference.ok) return preparationFailure(reference.error.message);
+    advisories.push(canonicalRecord({ reference: reference.value, bytes }));
+  }
+
+  const contextBytes = Object.freeze([...new TextEncoder().encode(JSON.stringify(canonicalRecord({
+    schemaVersion: 1,
+    kind: "wave-advisory-decision-context",
+    runId: runId.value,
+    advisories: advisories.map(({ reference }) => reference),
+  })))]);
+  const contextDigest = parseContextDigest(createHash("sha256")
+    .update(Uint8Array.from(contextBytes)).digest("hex"));
+  if (!contextDigest.ok) return preparationFailure(contextDigest.error.message);
+  const requestId = parseRequestId(`advisory-decision:${contextDigest.value.slice(0, 32)}`);
+  if (!requestId.ok) return preparationFailure(requestId.error.message);
+  return canonicalRecord({ ok: true, value: canonicalRecord({
+    requestId: requestId.value,
+    decisionDigest: contextDigest.value,
+    context: canonicalRecord({
+      digest: contextDigest.value,
+      slot: canonicalRecord({ kind: "fixed-artifact-slot", path: `contexts/${contextDigest.value}.json` }),
+      bytes: contextBytes,
+    }),
+    advisories: Object.freeze(advisories) as NonEmpty<WaveAdvisoryArtifactMaterial>,
+  }) });
+}
+
+export type WaveGateDriveStep =
+  | Readonly<{
+      kind: "await-advisory-decision";
+      material: WaveAdvisoryDecisionRequest;
+      state: Extract<WaveGateState, { kind: "awaiting-advisory-decision" }>;
+    }>
+  | Readonly<{
+      kind: "ready-to-complete";
+      state: Extract<WaveGateState, { kind: "ready-to-complete" }>;
+    }>
+  | Readonly<{ kind: "blocked"; message: string; state: WaveGateState }>;
+
+/**
+ * Pure driver intent for the post-review Wave Gate seam.
+ *
+ * The shell supplies only the durable user-decision observation. Canonical
+ * Finding counts, stage transitions, advisory material, and completion
+ * eligibility all stay behind LC-1, so status and resume cannot grow separate
+ * advisory-stage predicates.
+ */
+export function deriveWaveGateDriveStep(
+  snapshot: WaveReadinessSnapshot,
+  advisoryApproved: boolean,
+): DomainResult<WaveGateDriveStep, WavePreparationError> {
+  if (!waveReadinessProofs.has(snapshot)) {
+    return preparationFailure("Wave Gate drive requires canonical readiness");
+  }
+  const counts = snapshot.facts.findingCounts;
+  if (counts.kind !== "known") return preparationFailure("Wave Gate drive lacks canonical Finding counts");
+  const projected = projectWaveGateLifecycle(snapshot, canonicalRecord({
+    batchPublished: true,
+    acceptedResults: 0,
+    rejectedAttempt: null,
+    rosterComplete: true,
+    activeCritical: counts.value.activeCritical,
+    advisoryCount: counts.value.advisory,
+    advisoryApproved,
+    committed: null,
+  }));
+  if (!projected.ok) return preparationFailure(projected.error.message);
+  const state = projected.value;
+  if (state.kind === "awaiting-advisory-decision") {
+    const material = deriveWaveAdvisoryDecisionRequest(snapshot.registration.runId, snapshot.waveTasks);
+    return material.ok
+      ? canonicalRecord({ ok: true, value: canonicalRecord({ kind: "await-advisory-decision", material: material.value, state }) })
+      : material;
+  }
+  if (state.kind === "ready-to-complete" && snapshot.gateDecision.verdict.kind === "pass") {
+    return canonicalRecord({ ok: true, value: canonicalRecord({ kind: "ready-to-complete", state }) });
+  }
+  const message = snapshot.gateDecision.verdict.kind === "fail"
+    ? snapshot.gateDecision.verdict.reason
+    : `Wave Gate lifecycle reached ${state.kind}, not a post-review drive state`;
+  return canonicalRecord({ ok: true, value: canonicalRecord({ kind: "blocked", message, state }) });
+}
+
 /** Advisory policy remains user-owned. The engine derives whether the action
  * exists from canonical advisory counts and only accepts the exact run-sized
  * T1 advisory request. */
@@ -2001,38 +2151,9 @@ export function deriveWaveAdvisoryNextAction(
   if (!waveReadinessProofs.has(snapshot) || state.runId !== snapshot.registration.runId) {
     return preparationFailure("advisory action requires canonical readiness for this lifecycle run");
   }
-  const canonicalAdvisories = snapshot.waveTasks.flatMap((task) => {
-    if (task.findings !== undefined) {
-      return task.findings.filter((finding) => finding.severity === "advisory").map((finding) => ({
-        identity: `${task.id}:${finding.id}`,
-        bytes: new TextEncoder().encode(JSON.stringify({ taskId: task.id, finding })),
-      }));
-    }
-    return (task.advisory_findings ?? []).filter((claim) => claim.trim() !== "").map((claim, index) => ({
-      identity: `${task.id}:legacy-advisory-${index + 1}`,
-      bytes: new TextEncoder().encode(JSON.stringify({ taskId: task.id, claim })),
-    }));
-  });
-  if (canonicalAdvisories.length === 0) return preparationFailure("no canonical advisories require user triage");
-  const advisoryArtifacts = canonicalAdvisories.map(({ identity, bytes }) => ({
-    runId: snapshot.registration.runId,
-    slot: `artifacts/advisories/${identity.replace(/[^A-Za-z0-9_.-]+/g, "-")}.json`,
-    digest: createHash("sha256").update(bytes).digest("hex"),
-    byteLength: bytes.byteLength,
-  }));
-  const decisionDigest = createHash("sha256")
-    .update(`${snapshot.registration.runId}|${advisoryArtifacts.map(({ digest }) => digest).join("|")}`)
-    .digest("hex");
-  const built = awaitUserAction({
-    kind: "advisory-triage",
-    requestId: `advisory-decision:${decisionDigest.slice(0, 32)}`,
-    runId: snapshot.registration.runId,
-    context: {
-      digest: decisionDigest,
-      slot: `contexts/${decisionDigest}.json`,
-    },
-    advisories: advisoryArtifacts,
-  });
+  const request = deriveWaveAdvisoryDecisionRequest(snapshot.registration.runId, snapshot.waveTasks);
+  if (!request.ok) return request;
+  const built = awaitUserAction(waveAdvisoryDecisionActionRequest(request.value));
   if (!built.ok) return preparationFailure(built.error.message);
   const proven = proveWaveGateNextAction(snapshot, state, built.value);
   return proven.ok ? canonicalRecord({ ok: true, value: proven.value }) : preparationFailure(proven.error.message);
