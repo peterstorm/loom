@@ -128,6 +128,12 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Cont
   // packet's content-addressed identity disagree with its content.
   const canonicalSections: ByteSection[] = [];
   for (const [index, section] of [...input.fixedContext, ...input.variableContext].entries()) {
+    const field = index < input.fixedContext.length
+      ? `fixedContext[${index}]`
+      : `variableContext[${index - input.fixedContext.length}]`;
+    if (typeof section.label !== "string" || section.label.length === 0) {
+      return failure(`${field}.label`, "a context section label must be a non-empty string");
+    }
     // Array.from materializes sparse holes as `undefined`; Array#every on the
     // caller's array would skip them and incorrectly accept a non-byte value.
     const bytes = Array.from(section.bytes);
@@ -135,9 +141,6 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Cont
     const verified = bytes.every(isByte) && parsedLength.ok && parsedLength.value === section.byteLength &&
       digestBytes(bytes) === section.digest;
     if (!verified) {
-      const field = index < input.fixedContext.length
-        ? `fixedContext[${index}]`
-        : `variableContext[${index - input.fixedContext.length}]`;
       return failure(field, "a context section must contain only bytes whose digest and length cover the exact content");
     }
     canonicalSections.push(canonicalRecord({

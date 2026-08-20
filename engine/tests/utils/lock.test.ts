@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   acquireLock,
+  acquireLockSync,
   isStaleLock,
   observeStaleLock,
   releaseLock,
@@ -169,7 +170,7 @@ describe("generation-addressed stale-lock retirement", () => {
     expect(readdirSync(tmpDir).filter((entry) => entry.includes(".retired-"))).toEqual([]);
   });
 
-  it("retires a genuinely stale lock behind its persistent generation fence", () => {
+  it("retires a genuinely stale lock through its exclusive generation claim", () => {
     tmpDir = makeTmpDir();
     const lockDir = join(tmpDir, "stale.lock");
     mkdirSync(lockDir);
@@ -179,7 +180,7 @@ describe("generation-addressed stale-lock retirement", () => {
     try {
       expect(stealStaleLock(lockDir)).toBe(true);
       expect(existsSync(lockDir)).toBe(false);
-      expect(readdirSync(tmpDir).some((entry) => entry.includes(".retired-legacy-"))).toBe(true);
+      expect(readdirSync(tmpDir).some((entry) => entry.includes(".retiring-"))).toBe(false);
     } finally {
       stderrSpy.mockRestore();
     }
@@ -188,6 +189,39 @@ describe("generation-addressed stale-lock retirement", () => {
   it("a lock that vanished before observation is a normal retry", () => {
     tmpDir = makeTmpDir();
     expect(stealStaleLock(join(tmpDir, "never-existed.lock"))).toBe(false);
+  });
+
+  it("a generation claim rejects replacement between owner read and PID probing", async () => {
+    tmpDir = makeTmpDir();
+    const lockFile = join(tmpDir, "release-race");
+    const lockDir = `${lockFile}.lock`;
+    await acquireLock(lockFile);
+    const releasedOwner = readFileSync(join(lockDir, "pid"), "utf-8");
+    const releasedGeneration = releasedOwner.split(":")[1];
+    expect(releasedGeneration).toBeDefined();
+
+    // Simulate even an uncoordinated actor replacing G with H after the owner
+    // snapshot and generation claim but before the PID probe returns ESRCH.
+    // Normal release is stricter: it must acquire the same exclusive claim.
+    const probe = vi.spyOn(process, "kill").mockImplementationOnce(() => {
+      rmSync(lockDir, { recursive: true, force: true });
+      acquireLockSync(lockFile);
+      throw Object.assign(new Error("observed owner exited"), { code: "ESRCH" });
+    });
+    try {
+      const delayedObservation = observeStaleLock(lockDir);
+      expect(delayedObservation?.generation).toBe(releasedGeneration);
+      if (delayedObservation === null) return;
+      const freshOwner = readFileSync(join(lockDir, "pid"), "utf-8");
+      expect(freshOwner).not.toBe(releasedOwner);
+
+      expect(retireObservedStaleLock(delayedObservation)).toBe(false);
+      expect(readFileSync(join(lockDir, "pid"), "utf-8")).toBe(freshOwner);
+      expect(readdirSync(tmpDir).some((entry) => entry.includes(".retiring-"))).toBe(false);
+    } finally {
+      probe.mockRestore();
+      releaseLock(lockFile);
+    }
   });
 
   it("a delayed third contender cannot displace the fresh holder", async () => {
@@ -200,8 +234,8 @@ describe("generation-addressed stale-lock retirement", () => {
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      // Contenders A and C observe the same stale generation. A retires it,
-      // then contender B acquires fresh before delayed contender C acts.
+      // Contender A claims and retires the stale generation, then contender B
+      // acquires fresh before A's already-consumed proof is replayed.
       const delayedObservation = observeStaleLock(lockDir);
       expect(delayedObservation).not.toBeNull();
       if (delayedObservation === null) return;
@@ -210,8 +244,8 @@ describe("generation-addressed stale-lock retirement", () => {
       const freshOwner = readFileSync(join(lockDir, "pid"), "utf-8");
       expect(freshOwner).not.toContain(staleGeneration);
 
-      // Contender C carries A's delayed stale observation. The persistent
-      // generation fence makes its rename collide instead of moving B.
+      // A's claim moved away with its generation, so replaying the proof
+      // cannot acquire authority over B's fresh owner record.
       expect(retireObservedStaleLock(delayedObservation)).toBe(false);
       expect(readFileSync(join(lockDir, "pid"), "utf-8")).toBe(freshOwner);
       releaseLock(lockFile);

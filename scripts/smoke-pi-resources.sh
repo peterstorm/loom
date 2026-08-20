@@ -5,18 +5,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOOM_DIR="$(dirname "$SCRIPT_DIR")"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/subagents"
 
 command -v pi >/dev/null || { echo "FATAL: pi not found" >&2; exit 1; }
 
 { sleep 3; printf '%s\n' '{"type":"get_commands"}'; } \
-  | PI_CODING_AGENT_DIR="$TMP/agent" PI_OFFLINE=1 timeout 20 \
+  | PI_CODING_AGENT_DIR="$TMP/agent" LOOM_SUBAGENT_DIR="$TMP/subagents" PI_OFFLINE=1 timeout 20 \
       pi --approve --mode rpc --no-session --no-context-files -e "$LOOM_DIR/pi/extension.ts" \
       > "$TMP/commands.jsonl" 2> "$TMP/commands.stderr"
 
 # Pi attaches its RPC stdin consumer after extension/resource initialization;
 # delay the request so a cold cache cannot race and drop the first JSONL record.
 { sleep 3; printf '%s\n' '{"id":"root","type":"bash","command":"printf %s \"$LOOM_PLUGIN_ROOT\""}'; sleep 2; } \
-  | PI_CODING_AGENT_DIR="$TMP/agent" PI_OFFLINE=1 timeout 20 \
+  | PI_CODING_AGENT_DIR="$TMP/agent" LOOM_SUBAGENT_DIR="$TMP/subagents" PI_OFFLINE=1 timeout 20 \
       pi --approve --mode rpc --no-session --no-context-files -e "$LOOM_DIR/pi/extension.ts" \
       > "$TMP/root.jsonl" 2> "$TMP/root.stderr"
 

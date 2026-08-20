@@ -40,11 +40,12 @@ export const realArtifactProbe: ArtifactProbe = {
  * means "no active plan", which `validatePhaseOrder` answers with `allow`. An
  * unreadable task graph would therefore have disarmed this spawn gate while
  * its siblings (block-direct-edits, validate-template-substitution,
- * guard-state-file) stayed armed on the same file. `StateManager.fromPath` is
- * deliberately bypassed for the same reason: its own bare `existsSync` would
- * re-introduce the fail-open one call down. A present-but-unreadable graph now
- * raises out of `load()`, and `pre-tool-use/validate-phase-order` is a
- * FAIL_CLOSED_ROUTE, so the crash exits 2 (block).
+ * guard-state-file) stayed armed on the same file. `StateManager.fromPath`
+ * now uses the same fail-closed probe; this shell keeps the probe explicit so
+ * the gate's sole absent answer is visible here without performing that probe
+ * twice. A present-but-unreadable graph raises out of `load()`, and
+ * `pre-tool-use/validate-phase-order` is a FAIL_CLOSED_ROUTE, so the crash
+ * exits 2 (block).
  */
 export const realPhaseOrderDeps: PhaseOrderDeps = {
   loadState: (): TaskGraph | null => {

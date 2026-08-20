@@ -89,6 +89,17 @@ describe("context packet required fields", () => {
     }).ok).toBe(true);
   });
 
+  it("refuses an in-process section with an empty label", () => {
+    const unlabeled = { ...section("rules", "content"), label: "" };
+
+    const built = buildContextPacket({ ...valid, fixedContext: [unlabeled] });
+
+    expect(built.ok).toBe(false);
+    if (built.ok) return;
+    expect(built.error.field).toBe("fixedContext[0].label");
+    expect(built.error.message).toContain("non-empty string");
+  });
+
   it("takes immutable ownership of caller-supplied section bytes", () => {
     const encoded = section("mutable", "abc");
     const callerBytes = [...encoded.bytes];

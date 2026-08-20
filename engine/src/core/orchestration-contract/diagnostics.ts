@@ -292,6 +292,15 @@ export const EXHAUSTED_RESULT_CATEGORIES = Object.freeze([
   "result-binding-mismatch",
 ] as const);
 
+function terminalInputFieldNames(
+  runScoped: boolean,
+  requestScoped: boolean,
+): readonly string[] {
+  if (runScoped) return ["category", "runId", "message"];
+  if (requestScoped) return ["category", "runId", "requestId", "slotId", "message"];
+  return ["category", "failedRequest", "message"];
+}
+
 export function terminalBlockedDiagnostic(
   input: TerminalBlockedDiagnosticInput,
 ): DomainResult<TerminalBlockedDiagnostic, DiagnosticConstructionError> {
@@ -309,12 +318,11 @@ export function terminalBlockedDiagnostic(
     return diagnosticFailure("category", "terminal blocked category is invalid");
   }
 
-  const allowed = runScoped
-    ? ["category", "runId", "message"]
-    : requestScoped
-      ? ["category", "runId", "requestId", "slotId", "message"]
-      : ["category", "failedRequest", "message"];
-  const exactInput = readExactDataRecord(input, allowed, "terminal blocked diagnostic");
+  const exactInput = readExactDataRecord(
+    input,
+    terminalInputFieldNames(runScoped, requestScoped),
+    "terminal blocked diagnostic",
+  );
   if (!exactInput.ok) return diagnosticFailure("diagnostic", exactInput.error.message);
   const message = parseDiagnosticMessage(exactInput.value.message);
   if (!message.ok) return message;

@@ -4,13 +4,13 @@
  * - BIRTH is atomic: the pid file is staged in a private temp dir and
  *   renameSync'd onto the lock path, so no contender can ever observe a
  *   pid-less live lock (the old mkdir-then-write window read as "stale").
- * - RETIRING a stale lock is generation-addressed: birth writes PID and a
- *   unique generation in one owner record. Every observer of that generation
- *   renames toward the same persistent, non-empty fence, so a delayed observer
- *   cannot rename a newer live generation after another contender acquires it.
- * - RELEASE is ownership-checked: only the process the pid file names may
- *   remove the lock, so a holder whose lock was stolen cannot break the new
- *   holder's mutual exclusion on its way out.
+ * - RETIREMENT is generation-claimed: an observer or owner must atomically
+ *   claim the current generation and then re-read its owner record before it
+ *   may rename. Release and stale observation therefore cannot overlap, and
+ *   authority for generation G cannot move a newly acquired generation H.
+ * - RELEASE is ownership-checked: only the process the claimed owner record
+ *   names may retire the lock, so a holder whose lock was stolen cannot break
+ *   the new holder's mutual exclusion on its way out.
  */
 
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, renameSync, statSync } from "node:fs";
@@ -30,18 +30,27 @@ function sleepSync(ms: number): void {
   Atomics.wait(signal, 0, 0, ms);
 }
 
-type LockObservation =
+type LockSnapshot =
   | Readonly<{ kind: "absent" }>
-  | Readonly<{ kind: "live" }>
-  | Readonly<{ kind: "stale"; generation: string }>;
+  | Readonly<{ kind: "unreadable"; error: unknown }>
+  | Readonly<{
+      kind: "observed";
+      ownerText: string | null;
+      pid: number | null;
+      generation: string;
+    }>;
 
-export type StaleLockObservation = Readonly<{
+type GenerationClaim = Readonly<{
   lockDir: string;
+  ownerText: string | null;
   generation: string;
+  claimToken: string;
 }>;
 
-const staleObservationProofs = new WeakSet<object>();
+export type StaleLockObservation = GenerationClaim;
 
+const staleObservationProofs = new WeakSet<object>();
+const GENERATION_CLAIM = "generation-claim";
 const OWNER_RECORD = /^(?<pid>[1-9][0-9]*):(?<generation>[a-zA-Z0-9-]+)$/;
 
 function legacyGeneration(ownerText: string | null): string {
@@ -58,50 +67,111 @@ function parseOwner(ownerText: string): Readonly<{ pid: number; generation: stri
   return Number.isSafeInteger(pid) && generation !== undefined ? { pid, generation } : null;
 }
 
-function observeLock(lockDir: string): LockObservation {
+function snapshotLock(lockDir: string): LockSnapshot {
   let ownerText: string;
   try {
     ownerText = readFileSync(join(lockDir, "pid"), "utf-8").trim();
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") return { kind: "live" };
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      return { kind: "unreadable", error };
+    }
     try {
-      // Distinguish a missing owner record in an existing legacy lock from an
-      // acquisition race in which the whole lock has already disappeared.
       statSync(lockDir);
-      return { kind: "stale", generation: legacyGeneration(null) };
+      return {
+        kind: "observed",
+        ownerText: null,
+        pid: null,
+        generation: legacyGeneration(null),
+      };
     } catch (lockError) {
       return (lockError as NodeJS.ErrnoException)?.code === "ENOENT"
         ? { kind: "absent" }
-        : { kind: "live" };
+        : { kind: "unreadable", error: lockError };
     }
   }
 
   const parsed = parseOwner(ownerText);
-  const pid = parsed?.pid ?? Number(ownerText);
-  const generation = parsed?.generation ?? legacyGeneration(ownerText);
-  if (!Number.isSafeInteger(pid) || pid <= 0) return { kind: "stale", generation };
+  const rawPid = parsed?.pid ?? Number(ownerText);
+  return {
+    kind: "observed",
+    ownerText,
+    pid: Number.isSafeInteger(rawPid) && rawPid > 0 ? rawPid : null,
+    generation: parsed?.generation ?? legacyGeneration(ownerText),
+  };
+}
+
+function claimText(claim: GenerationClaim): string {
+  return `${claim.generation}:${claim.claimToken}`;
+}
+
+function releaseGenerationClaim(claim: GenerationClaim): void {
+  const path = join(claim.lockDir, GENERATION_CLAIM);
   try {
-    process.kill(pid, 0);
-    return { kind: "live" };
+    if (readFileSync(path, "utf-8") !== claimText(claim)) return;
+    rmSync(path, { force: false });
   } catch (error) {
-    return (error as NodeJS.ErrnoException)?.code === "ESRCH"
-      ? { kind: "stale", generation }
-      : { kind: "live" };
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
   }
 }
 
-/** Check if a lock dir is stale (owning process is dead). */
-export function isStaleLock(lockDir: string): boolean {
-  return observeLock(lockDir).kind === "stale";
+function claimGeneration(
+  lockDir: string,
+  snapshot: Extract<LockSnapshot, { kind: "observed" }>,
+): GenerationClaim | null {
+  const claim = Object.freeze({
+    lockDir,
+    ownerText: snapshot.ownerText,
+    generation: snapshot.generation,
+    claimToken: randomUUID(),
+  });
+  try {
+    writeFileSync(join(lockDir, GENERATION_CLAIM), claimText(claim), { flag: "wx" });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "EEXIST") return null;
+    throw error;
+  }
+
+  const current = snapshotLock(lockDir);
+  if (current.kind !== "observed" ||
+      current.ownerText !== snapshot.ownerText ||
+      current.generation !== snapshot.generation) {
+    releaseGenerationClaim(claim);
+    return null;
+  }
+  return claim;
 }
 
-/** Mint stale-generation authority from one owner-record observation. */
+/** Mint exclusive stale-generation authority from one stable owner snapshot. */
 export function observeStaleLock(lockDir: string): StaleLockObservation | null {
-  const observed = observeLock(lockDir);
-  if (observed.kind !== "stale") return null;
-  const stale = Object.freeze({ lockDir, generation: observed.generation });
-  staleObservationProofs.add(stale);
-  return stale;
+  const snapshot = snapshotLock(lockDir);
+  if (snapshot.kind !== "observed") return null;
+  const claim = claimGeneration(lockDir, snapshot);
+  if (claim === null) return null;
+
+  if (snapshot.pid !== null) {
+    try {
+      process.kill(snapshot.pid, 0);
+      releaseGenerationClaim(claim);
+      return null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ESRCH") {
+        releaseGenerationClaim(claim);
+        return null;
+      }
+    }
+  }
+
+  staleObservationProofs.add(claim);
+  return claim;
+}
+
+/** Check if a lock dir is stale without retaining retirement authority. */
+export function isStaleLock(lockDir: string): boolean {
+  const observed = observeStaleLock(lockDir);
+  if (observed === null) return false;
+  releaseGenerationClaim(observed);
+  return true;
 }
 
 /**
@@ -126,39 +196,49 @@ function tryBirthLock(lockDir: string): boolean {
   }
 }
 
+function retireClaimedGeneration(claim: GenerationClaim): boolean {
+  const snapshot = snapshotLock(claim.lockDir);
+  let currentClaim: string;
+  try {
+    currentClaim = readFileSync(join(claim.lockDir, GENERATION_CLAIM), "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+    throw error;
+  }
+  if (snapshot.kind !== "observed" ||
+      snapshot.ownerText !== claim.ownerText ||
+      snapshot.generation !== claim.generation ||
+      currentClaim !== claimText(claim)) {
+    releaseGenerationClaim(claim);
+    return false;
+  }
+
+  const retired = `${claim.lockDir}.retiring-${claim.claimToken}`;
+  try {
+    renameSync(claim.lockDir, retired);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+    throw error;
+  }
+  rmSync(retired, { recursive: true, force: false });
+  return true;
+}
+
 /**
- * Retire one already-observed stale generation. The destination is deliberately
- * persistent and non-empty: once generation G is retired, every delayed G
- * observer collides with the same fence instead of moving whichever generation
- * now occupies `lockDir`.
- *
- * Exported for the deterministic late-observer regression only.
+ * Retire one exclusively claimed generation. The claim lives inside the lock
+ * directory, so moving the directory consumes both the generation and the
+ * authority atomically; a claim minted for G cannot remain at the path after H
+ * acquires. Exported for deterministic race regressions only.
  */
 export function retireObservedStaleLock(observed: StaleLockObservation): boolean {
   if (!staleObservationProofs.has(observed)) {
     throw new Error("Stale lock retirement requires a parser-minted observation");
   }
-  const { lockDir, generation } = observed;
-  const retired = `${lockDir}.retired-${generation}`;
-  try {
-    // This also makes a legacy pid-less lock non-empty before rename. A late
-    // observer may write the same marker, but can never remove it.
-    writeFileSync(join(lockDir, "retired"), generation, { flag: "wx" });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") {
-      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
-      throw error;
-    }
+  const retired = retireClaimedGeneration(observed);
+  if (retired) {
+    process.stderr.write(`Retired stale lock generation ${observed.generation}: ${observed.lockDir}\n`);
   }
-  try {
-    renameSync(lockDir, retired);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException)?.code;
-    if (code === "ENOENT" || code === "EEXIST" || code === "ENOTEMPTY") return false;
-    throw error;
-  }
-  process.stderr.write(`Retired stale lock generation ${generation}: ${lockDir}\n`);
-  return true;
+  return retired;
 }
 
 /** Observe and retire a stale lock; false means absent, live, or lost race. */
@@ -197,29 +277,32 @@ export function acquireLockSync(lockFile: string): void {
 
 export function releaseLock(lockFile: string): void {
   const lockDir = `${lockFile}.lock`;
-  let pid: string;
-  try {
-    // Ownership check: if this lock was stale-reaped and re-acquired while
-    // we ran, the pid file names the NEW holder — removing it would break
-    // their mutual exclusion too. Only the recorded owner releases; a
-    // genuinely missing lock remains an idempotent no-op.
-    pid = readFileSync(join(lockDir, "pid"), "utf-8").trim().split(":", 1)[0] ?? "";
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return;
-    throw new Error(
-      `Cannot inspect lock ownership for ${lockDir}: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+    const snapshot = snapshotLock(lockDir);
+    if (snapshot.kind === "absent") return;
+    if (snapshot.kind === "unreadable") {
+      throw new Error(
+        `Cannot inspect lock ownership for ${lockDir}: ${snapshot.error instanceof Error ? snapshot.error.message : String(snapshot.error)}`,
+        { cause: snapshot.error },
+      );
+    }
+    if (snapshot.pid !== process.pid) return;
+
+    const claim = claimGeneration(lockDir, snapshot);
+    if (claim === null) {
+      sleepSync(RETRY_MS);
+      continue;
+    }
+    try {
+      if (retireClaimedGeneration(claim)) return;
+    } catch (error) {
+      throw new Error(
+        `Failed to release owned lock ${lockDir}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
   }
-  if (pid !== `${process.pid}`) return;
-  try {
-    rmSync(lockDir, { recursive: true, force: false });
-  } catch (error) {
-    throw new Error(
-      `Failed to release owned lock ${lockDir}: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
-  }
+  throw new Error(`Failed to release owned lock ${lockDir}: generation claim remained contended`);
 }
 
 /** Run fn while holding lock, auto-release on completion or error. */

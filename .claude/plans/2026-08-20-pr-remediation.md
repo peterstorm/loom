@@ -103,3 +103,100 @@ npm test
 ```
 
 After the implementation is green, run `distill` in apply mode one behavior-preserving move at a time. Then start registered remediation with `supportPaths: ["engine/tests/handlers/helpers/programs/remediation-post-install.test.ts"]`, resume to `done`, use only the engine-installed verified index, commit, and push without force.
+
+---
+
+# PR Remediation — 2026-08-20, Round 3
+
+## Authority
+
+- **Branch:** `feat/architecture-panel-mode-plan`
+- **Reviewed head:** `8de59492b02f7842adc71611661e4ee3c098ad7c`
+- **Standalone Review Run Directory:** `.claude/reviews/review-and-fix-runs/review-20260820T183133Z-01a02071`
+- **Canonical result:** `.claude/reviews/review-and-fix-runs/review-20260820T183133Z-01a02071/result.json`
+- **Result digest:** `467ad3d1dce93932de50f9c685635f12a2d303c8224316cb38843c5952878a3f`
+- **Exact frozen scope:** the canonical 486-path array at `result.json#/scope`; remediation consumes that authority directly and does not reconstruct or broaden it.
+- **Support paths outside frozen scope:** none. This existing plan path and every production/regression path below are in the frozen scope.
+
+## Surviving critical Findings — mandatory
+
+1. **`code-reviewer-1` — delayed stale observation can displace a fresh lock generation.**
+   - Require stale observation and normal release to acquire the same exclusive in-directory generation claim, then re-read the owner snapshot before any rename.
+   - Move and remove only the directory carrying that exact claim; a claim minted for G is consumed with G and cannot authorize H, without leaking permanent fence directories.
+   - Preserve ownership checks, foreign/missing idempotence, and loud release failures.
+   - Add a deterministic regression that replaces generation G with H between the owner snapshot and PID-probe result, then proves G's claim cannot move H.
+
+2. **`comment-analyzer-1` — protected-state probe rationale is stale.**
+   - Correct the shell comment to acknowledge that `StateManager.fromPath` now uses `pathExistsFailClosed`.
+   - Retain the actual reason for the explicit shell probe: absence semantics stay visible at the fail-closed gate boundary without a redundant second probe.
+
+## Advisory dispositions
+
+### Accepted
+
+1. **`code-reviewer-2` — dirty FIFO is classified as a regular file.** Require `lstat.isFile()` for every present remediation path and fail before staging on FIFOs, directories, sockets, or devices. Add a tracked-file-to-FIFO regression.
+2. **`type-design-analyzer-1` — `buildContextPacket` accepts an empty section label.** Enforce the same non-empty label invariant at the trusted in-process construction boundary and add a regression naming the exact section field.
+3. **`comment-analyzer-2` — `ArtifactProbe.exists` overclaims readability.** Describe its actual existence-only contract; `readText` remains the readability boundary.
+4. **`comment-analyzer-3` — `EXECUTE_AGENTS` comment overclaims exhaustiveness.** Document that the set is the implementation/review dispatch projection and that refutation verifiers are classified separately.
+5. **`code-simplifier-1` — nested terminal field selector in `parseBlockedDiagnostic`.** Extract a named early-return field selector without changing parsing behavior.
+6. **`code-simplifier-2` — nested terminal field selector in `terminalBlockedDiagnostic`.** Extract a named early-return field selector without changing construction behavior.
+7. **`code-simplifier-3` — standalone transcript decode/admission is duplicated.** Extract one local pure decode-and-scope-admit helper shared by attempt 1 and attempt 2.
+8. **`code-simplifier-4` — orchestration smoke CLI invocation is duplicated.** Extract one process invocation helper; retain distinct success parsing and expected-failure assertions.
+
+### Deferred
+
+1. **`architecture-tech-lead-1` — Wave Gate core executes shell-supplied filesystem callbacks.** Sound, but a complete correction moves the Wave Gate evidence seam and rewires readiness inputs and callers. It is a dedicated architecture migration, not a safe adjunct to lock/remediation correctness; this remediation introduces no new core I/O.
+2. **`architecture-tech-lead-2` — `StateManager` combines TaskGraph transitions and persistence.** Sound, but extracting pure aggregate commands is a broad protected-state interface migration with many lifecycle callers. A partial extraction would leave the Finding true and increase transition risk in this focused remediation.
+3. **`architecture-tech-lead-3` — shell grammar parsing and protected-state policy share one module.** Sound, but splitting the parser evidence model from authorization policy changes a security-sensitive interface across a 1,300-line guard and its regression corpus. It warrants a dedicated deepen session rather than opportunistic churn.
+
+### Dismissed
+
+- None.
+
+## Refuted critical Finding audit
+
+- `result.json.refuted_critical_findings` is empty; no refuted Finding is fixed or omitted.
+- Both critical Findings survived all three registered refutation lenses: reproduction, intent, and blast-radius.
+
+## Planned changed files
+
+- `.claude/plans/2026-08-20-pr-remediation.md`
+- `engine/src/utils/lock.ts`
+- `engine/tests/utils/lock.test.ts`
+- `engine/src/handlers/pre-tool-use/validate-phase-order.ts`
+- `engine/src/orchestration/git-remediation.ts`
+- `engine/tests/orchestration/remediation-index.test.ts`
+- `engine/src/orchestration/context-packets.ts`
+- `engine/tests/orchestration/uncovered-branches.test.ts`
+- `engine/src/core/validate-phase-order.ts`
+- `engine/src/config.ts`
+- `engine/src/core/orchestration-contract/actions.ts`
+- `engine/src/core/orchestration-contract/diagnostics.ts`
+- `engine/src/handlers/helpers/programs/standalone.ts`
+- `scripts/smoke-orchestration-facades.ts`
+- `scripts/smoke-pi-resources.sh` (isolated smoke-test subagent state)
+
+## Validation
+
+Focused gates after each coherent move:
+
+```bash
+cd engine
+npm run test:unit -- tests/utils/lock.test.ts
+npm run test:unit -- tests/orchestration/remediation-index.test.ts tests/orchestration/remediation-faults.test.ts
+npm run test:unit -- tests/orchestration/uncovered-branches.test.ts
+npm run test:unit -- tests/core/orchestration-contract.property.test.ts
+npm run test:unit -- tests/handlers/helpers/orchestration.test.ts tests/handlers/validate-phase-order.test.ts
+npm run typecheck
+bun ../scripts/smoke-orchestration-facades.ts
+```
+
+Final gates:
+
+```bash
+cd engine
+npm run test:unit
+npm test
+```
+
+After a green implementation baseline, run `distill` in apply mode one behavior-preserving move at a time. Then start registered remediation with `supportPaths: []`, resume to `done`, use only the engine-installed verified index, commit, and push without force.

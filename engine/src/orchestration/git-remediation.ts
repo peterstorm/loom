@@ -281,6 +281,9 @@ function observationFor(
     if (node.isSymbolicLink()) {
       return failure("status-path", `dirty path is a symbolic link: ${path}`);
     }
+    if (!node.isFile()) {
+      return failure("status-path", `dirty path is not a regular file: ${path}`);
+    }
     present = true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") present = false;

@@ -32,7 +32,7 @@ import { hasStandaloneReviewContext } from "./review-output";
  * implementations.
  */
 export interface ArtifactProbe {
-  /** True when the path names a readable artifact. */
+  /** True when the path exists; readability is established by `readText`. */
   readonly exists: (path: string) => boolean;
   /** Artifact contents as UTF-8. Throws like `readFileSync` when unreadable. */
   readonly readText: (path: string) => string;

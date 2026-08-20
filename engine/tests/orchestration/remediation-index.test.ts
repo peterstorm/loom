@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -128,6 +129,25 @@ describe("observing dirty paths", () => {
     expect(byPath.get("src/renamed-to.ts")?.change).toBe("renamed-to");
     expect(byPath.get("src/renamed.ts")?.change).toBe("renamed-from");
   });
+
+  it.skipIf(process.platform === "win32")(
+    "rejects a tracked file replaced by a FIFO before staging",
+    () => {
+      const repository = fixtureRepository();
+      const path = "src/edited.ts";
+      const absolute = join(repository.root, path);
+      unlinkSync(absolute);
+      const created = spawnSync("mkfifo", [absolute], { encoding: "utf8" });
+      expect(created.status, created.stderr).toBe(0);
+
+      const observed = observeDirtyPaths(repository);
+
+      expect(observed.ok).toBe(false);
+      if (observed.ok) return;
+      expect(observed.error.operation).toBe("status-path");
+      expect(observed.error.message).toContain(`not a regular file: ${path}`);
+    },
+  );
 });
 
 // --- Staging ----------------------------------------------------------------

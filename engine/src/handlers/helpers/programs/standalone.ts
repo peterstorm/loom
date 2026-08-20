@@ -6,7 +6,7 @@
  */
 import { createHash } from 'node:crypto';
 import { parseAgentRequestAuthority, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
-import { aggregateStandaloneReview, bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, canonicalStandaloneResultArtifact, completeStandaloneReviewerCapture, prepareFreshStandaloneReview, proveStandaloneRosterCompletion, serializeStandaloneReviewAuthority, serializeAdjudicatedStandaloneReview, admitStandaloneTranscript, type FrozenStandaloneReviewAuthority } from '../../../core/standalone-review';
+import { aggregateStandaloneReview, bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, canonicalStandaloneResultArtifact, completeStandaloneReviewerCapture, prepareFreshStandaloneReview, proveStandaloneRosterCompletion, serializeStandaloneReviewAuthority, serializeAdjudicatedStandaloneReview, admitStandaloneTranscript, type FrozenStandaloneReviewAuthority, type StandaloneTranscriptAdmission } from '../../../core/standalone-review';
 import { parseStandaloneReviewMachineState, reduceStandaloneReviewMachine, freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion, serializeStandaloneReviewMachineState, startStandaloneReviewMachine, type StandaloneReviewMachineState } from '../../../core/standalone-review-machine';
 import { buildStandaloneFindingBrief, defaultRefutationThreshold, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
 import { completePersistentRefutationPanel, deriveRefutationVerifierBinding, panelRequestIdentity, parseRefutationPanelAuthority, refutationPanelCheckpoint, startPersistentRefutationPanel, submitRefutationVerdict, type PersistentRefutationPanelEvent } from '../../../core/panel-program';
@@ -212,6 +212,17 @@ async function appendStandaloneRejection(
   });
 }
 
+function admitCapturedStandaloneTranscript(
+  scope: readonly string[],
+  bytes: Uint8Array,
+  role: string,
+): StandaloneTranscriptAdmission {
+  const decoded = decodeReviewerTranscript(bytes, role);
+  return decoded.ok
+    ? admitStandaloneTranscript(scope, decoded.text, role)
+    : Object.freeze({ ok: false, problems: Object.freeze([decoded.message]) });
+}
+
 export async function resumeStandaloneFacade(
   handle: RunDirHandle,
   registration: RegisteredStandaloneProgram,
@@ -380,10 +391,11 @@ export async function resumeStandaloneFacade(
       }
       const bytes = handle.readTranscriptBytes(attemptOne.authority);
       if (!bytes.ok) return failed(bytes.error.message);
-      const decoded = decodeReviewerTranscript(bytes.value, attemptOne.authority.role);
-      const admission = decoded.ok
-        ? admitStandaloneTranscript(scope, decoded.text, attemptOne.authority.role)
-        : { ok: false as const, problems: Object.freeze([decoded.message]) };
+      const admission = admitCapturedStandaloneTranscript(
+        scope,
+        bytes.value,
+        attemptOne.authority.role,
+      );
       if (!admission.ok) rejected.push({ slot: attemptOne.authority, problems: [...admission.problems] });
     }
     let machine: StandaloneReviewMachineState = state.value;
@@ -447,10 +459,11 @@ export async function resumeStandaloneFacade(
       const bytes = handle.readTranscriptBytes(request.authority);
       if (!bytes.ok) return failed(bytes.error.message);
       if (request.authority.attempt === 2) {
-        const decoded = decodeReviewerTranscript(bytes.value, request.authority.role);
-        const admission = decoded.ok
-          ? admitStandaloneTranscript(scope, decoded.text, request.authority.role)
-          : { ok: false as const, problems: Object.freeze([decoded.message]) };
+        const admission = admitCapturedStandaloneTranscript(
+          scope,
+          bytes.value,
+          request.authority.role,
+        );
         if (!admission.ok) {
           const problems = [...admission.problems];
           const terminal = reduceStandaloneReviewMachine(machine, {

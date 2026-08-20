@@ -229,6 +229,17 @@ export function exactDiagnosticConstants(
   return success(undefined);
 }
 
+function terminalBlockedFieldNames(
+  runScoped: boolean,
+  exhaustedResult: boolean,
+): readonly string[] {
+  if (runScoped) return ["kind", "category", "runId", "message", "retry", "recovery"];
+  if (exhaustedResult) {
+    return ["kind", "category", "runId", "requestId", "slotId", "attempt", "message", "retry", "recovery"];
+  }
+  return ["kind", "category", "runId", "requestId", "slotId", "message", "retry", "recovery"];
+}
+
 export function parseBlockedDiagnostic(
   raw: unknown,
 ): DomainResult<BlockedDiagnostic, DiagnosticConstructionError> {
@@ -369,11 +380,7 @@ export function parseBlockedDiagnostic(
     }
     const exact = readExactDataRecord(
       raw,
-      runScoped
-        ? ["kind", "category", "runId", "message", "retry", "recovery"]
-        : exhaustedResult
-          ? ["kind", "category", "runId", "requestId", "slotId", "attempt", "message", "retry", "recovery"]
-          : ["kind", "category", "runId", "requestId", "slotId", "message", "retry", "recovery"],
+      terminalBlockedFieldNames(runScoped, exhaustedResult),
       "terminal blocked diagnostic",
     );
     if (!exact.ok) return diagnosticFailure("diagnostic", exact.error.message);

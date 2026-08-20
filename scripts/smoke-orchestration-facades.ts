@@ -51,16 +51,20 @@ function record(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function run(cwd: string, args: readonly string[], stdin = ""): unknown {
+function invokeOrchestrationCli(cwd: string, args: readonly string[], stdin: string): CliResult {
   // Every call starts a fresh CLI process. No in-memory program state can cross
   // this boundary; progress must be recovered from the immutable run directory.
-  const result = spawnSync("bun", [CLI, "helper", "orchestration", ...args], {
+  return spawnSync("bun", [CLI, "helper", "orchestration", ...args], {
     cwd,
     input: stdin,
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
     env: { ...process.env, LOOM_STATE_PATH: join(cwd, ".claude", "state", "active_task_graph.json") },
   }) as CliResult;
+}
+
+function run(cwd: string, args: readonly string[], stdin = ""): unknown {
+  const result = invokeOrchestrationCli(cwd, args, stdin);
   check(result.status === 0, `CLI failed (${args.join(" ")}): ${result.stderr || result.stdout}`);
   try {
     return JSON.parse(result.stdout) as unknown;
@@ -70,13 +74,7 @@ function run(cwd: string, args: readonly string[], stdin = ""): unknown {
 }
 
 function runFailure(cwd: string, args: readonly string[], stdin = ""): CliResult {
-  const result = spawnSync("bun", [CLI, "helper", "orchestration", ...args], {
-    cwd,
-    input: stdin,
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-    env: { ...process.env, LOOM_STATE_PATH: join(cwd, ".claude", "state", "active_task_graph.json") },
-  }) as CliResult;
+  const result = invokeOrchestrationCli(cwd, args, stdin);
   check(result.status !== 0, `CLI unexpectedly accepted invalid input (${args.join(" ")})`);
   return result;
 }
