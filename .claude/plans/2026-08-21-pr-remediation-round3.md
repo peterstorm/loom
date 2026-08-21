@@ -95,7 +95,24 @@ bun scripts/stamp-wire-contract.ts --check
 
 Pass criteria: all green; the new deny cases (`env -0`/`env -v`/`watch -d`/`sudo -S`/`sudo -S -u root` heredoc shapes) block; the pytest failure shape classifies `passed: false`; the ELOOP-pointer regression tests show the named diagnostic and a batch that continues.
 
-## Phase 4 status — blocked on Pi runtime skew (environmental, evidence below)
+## Phase 4 status — COMPLETE (was briefly blocked on Pi runtime skew; resolved by operator /reload)
+
+Remediation run `run.2iemjjaf1u` started successfully after the operator
+reloaded the Pi runtime (handshake `sha256:11c82101…` == checkout
+`sha256:11c82101…`) and the engine installed the verified index in one step:
+
+| field | value |
+|-------|-------|
+| outcome | `verified-index-installed` |
+| effectId | `effect:remediation-install:e1423aa8371a35b19764b321d19219c2b034e41b0181f66156867fecb4929a1a` |
+| indexDigest | `a93ec5349b5f3764640271698ccfd4edb9d9523f7627f149bd3d32a2b70e0ee9` |
+| witnessDigest | `2045a28243f262498a81189e4452f3f11429640cc7fdd4e184689d836d2fcf37` |
+| commit | `218008c` (17 files, +870/−152) |
+| push | `13f0e0c..218008c` → `origin/feat/architecture-panel-mode-plan` (no force-push) |
+
+(The first start attempt, before the reload, exited 1 at the runtime
+handshake with the `c91c1234…` vs `755e2022…` skew diagnostic and created
+no state; the block history is preserved below for the record.)
 
 ### Validation results (all remediation code complete and verified)
 
