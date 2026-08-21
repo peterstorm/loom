@@ -77,7 +77,7 @@ Claude Code lifecycle coverage:
 - correlating native Pi batch-item identities to engine-issued request identities;
 - capturing exact final result bytes into reserved Run Directory slots.
 
-`pi/loom-bridge.ts` is a fail-closed legacy stub and is not registered by `package.json`.
+The legacy `pi/loom-bridge.ts` bridge was removed; `pi/extension.ts` is the only Pi state adapter, and the Pi package manifest pins the bridge's absence.
 
 ## Layer 3: handler shell and parsing boundaries
 

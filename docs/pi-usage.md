@@ -1,6 +1,6 @@
 # Using Loom with Pi
 
-Loom ships as a native Pi package. It uses the same deterministic engine as Claude Code, with a Pi extension for tool guards, lifecycle capture, resource rendering, and child write capabilities.
+Loom ships as a first-class native Pi package: its `package.json` exposes one native extension (`pi/extension.ts`), Loom skills, and top-level command templates. It uses the same deterministic engine as Claude Code, with the extension providing tool guards, lifecycle capture, resource rendering, and child write capabilities.
 
 ## Support summary
 
@@ -18,6 +18,46 @@ Supported through the shared engine:
 Current parity gap:
 
 - Pi subagents are headless and cannot relay interactive phase questionnaires to the parent TUI. Architecture-panel interviewer spawns fail fast. Standard specify/architecture questionnaire templates have the same transport limitation even where the role is not separately blocked. See [Pi phase-agent interviews](pi-phase-agent-interviews.md).
+
+## Interactive phase agents in Pi
+
+Pi subagents are non-interactive. When a Loom phase requires user input, its agent emits `QUESTIONS_REQUIRED` or `APPROACH_SELECTION_REQUIRED`; ask those questions in the main Pi session and rerun the agent with the answers.
+
+## This workstation: dotfiles-managed local package
+
+Home Manager installs the Pi binary and links these directories from the dotfiles repository:
+
+```text
+~/.pi/agent/agents      -> ~/.dotfiles/pi/agents
+~/.pi/agent/extensions  -> ~/.dotfiles/pi/extensions
+~/.pi/agent/prompts     -> ~/.dotfiles/pi/prompts
+```
+
+`~/.pi/agent/settings.json` is a mutable copy of `~/.dotfiles/pi/settings.json`. It declares Loom as a live local package:
+
+```json
+{
+  "packages": [
+    "../../dev/claude-plugins/loom",
+    "../../dev/claude-plugins/cortex",
+    "../../dev/claude-plugins/obsidian",
+    "../../dev/claude-plugins/loom-pi-goal/packages/pi-goal"
+  ]
+}
+```
+
+The Loom path resolves relative to `~/.pi/agent/` as `~/dev/claude-plugins/loom`. Pi therefore loads the currently checked-out Loom worktree; no `pi install` or `pi update` is required for normal development.
+
+After changing or pulling Loom:
+
+```bash
+cd ~/dev/claude-plugins/loom
+git pull
+```
+
+Restart Pi or run `/reload`. Run `home-manager switch` only after changing the Home Manager module or dotfiles' default Pi settings.
+
+The dotfiles package supplies a generic `subagent` extension and a small set of generic agents (planner, reviewer, scout, worker). Loom's agent definitions live in the same Pi agent directory as rendered, integrity-stamped files produced by `scripts/sync-pi-agents.sh` (see [Agent sync and model policy](#agent-sync-and-model-policy)); do not hand-edit them or byte-copy raw source agents there.
 
 ## Installation
 
@@ -41,6 +81,8 @@ pi install git:github.com/peterstorm/loom@<tag-or-commit>
 pi install npm:@peterstorm/loom@<version>
 ```
 
+A Git ref is intentionally pinned. To adopt a newer Loom version, change the ref or reinstall with the desired ref, then `/reload`. Use an unpinned Git source only when you explicitly want `pi update` to follow the repository's default branch.
+
 Run `scripts/sync-pi-agents.sh` from the installed package root, then `/reload`.
 
 Generated Agents are written to:
@@ -51,7 +93,7 @@ ${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/agents
 
 ## Verify the active package
 
-Pi derives identity from the extension module’s `import.meta.url`, never cwd or a Claude installation. The extension exports that root:
+Pi derives identity from the extension module’s `import.meta.url`, never cwd or a Claude installation. The extension exports that root as both `CLAUDE_PLUGIN_ROOT` and `LOOM_PLUGIN_ROOT`; Loom commands, skills, and subagents use these variables for package-relative files.
 
 ```bash
 printf 'LOOM_PLUGIN_ROOT=%s\n' "$LOOM_PLUGIN_ROOT"
@@ -128,7 +170,7 @@ Pi’s subagent tool accepts at most eight items per call. Large engine-issued b
 | Registered result capture | native correlator + shared capture runtime |
 | Run persistence | shared anchored Run Directory and orchestration runtime |
 
-`pi/loom-bridge.ts` is not loaded. It is an inert fail-closed compatibility stub.
+The legacy `pi/loom-bridge.ts` bridge was removed; `pi/extension.ts` is the only Pi state adapter, and the package manifest pins the bridge's absence.
 
 ## Development workflow
 
@@ -145,9 +187,9 @@ Then `/reload` Pi and exercise the affected command from a project that has the 
 
 ## Troubleshooting
 
-### `CLAUDE_PLUGIN_ROOT` is unset
+### `CLAUDE_PLUGIN_ROOT` is unset where a command needs it
 
-Expected. Shared resources must be rendered before the model sees them. Use `LOOM_PLUGIN_ROOT` for diagnostics. An unresolved Claude token in a Pi prompt is a packaging bug.
+The native extension sets `CLAUDE_PLUGIN_ROOT` (and `LOOM_PLUGIN_ROOT`) for Pi subprocesses; if it is missing, the loom extension is not loaded for this process. Use `LOOM_PLUGIN_ROOT` for diagnostics where the command accepts it. An unresolved Claude token in a rendered Pi prompt is a packaging bug.
 
 ### Command uses the wrong checkout
 
@@ -185,6 +227,18 @@ Never broaden the grant manually.
 ### Architecture panel is refused
 
 This is intentional until interactive child-to-parent question relay exists. Use Claude Code for the panel interview, or use non-panel architecture only when all required decisions are already explicit and the flow can honestly avoid live questions.
+
+### `Unknown agent: "code-implementer-agent"`
+
+Confirm the dotfiles generic `subagent` extension is enabled, that `~/.pi/agent/agents/` holds the rendered Loom definitions (run `scripts/sync-pi-agents.sh`), and run `/reload`.
+
+### `FATAL: active Loom package is incomplete`
+
+Loom's native Pi extension is not loaded (or the package root it resolved is incomplete). Confirm `pi list` includes the Loom package and restart/reload Pi.
+
+### Tasks update twice or state transitions behave unexpectedly
+
+Remove any legacy `loom-bridge` extension from the loaded package set (it no longer ships in the package; an old cached copy is the only source). The native Loom extension is the only state adapter that should process `subagent` results.
 
 ### Runtime version skew / restart required
 

@@ -94,7 +94,11 @@ describe("pi package manifest", () => {
   it("loads only the extension entry point; it renders harness-specific resources", () => {
     const manifest = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf-8"));
 
-    expect(manifest.pi).toEqual({ extensions: ["./pi/extension.ts"] });
+    expect(manifest.pi).toEqual({
+      extensions: ["./pi/extension.ts"],
+      skills: ["./skills", "./commands/vercel-react-best-practices"],
+      prompts: ["./commands/*.md"],
+    });
     const extension = readFileSync(join(PI_DIR, "extension.ts"), "utf-8");
     expect(extension).toContain('pi.on("resources_discover"');
     expect(extension).toContain("materializePiResources(PACKAGE_ROOT");

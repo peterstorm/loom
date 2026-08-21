@@ -222,4 +222,4 @@ Run `/reload` and exercise the changed command from a project with the intended 
 
 ## Legacy bridge
 
-`pi/loom-bridge.ts` is intentionally inert. Its historical partial roster could lose review/spec evidence, so it emits a diagnostic and dispatches nothing. Do not add new behavior there; `pi/extension.ts` is the only supported adapter.
+The legacy `pi/loom-bridge.ts` bridge was removed entirely: its historical partial roster could lose review/spec evidence, which is why it never received new behavior. `pi/extension.ts` is the only supported adapter, and the Pi package manifest pins the bridge's absence.

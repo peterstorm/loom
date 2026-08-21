@@ -19,12 +19,12 @@ Template for spawning specify-agent. All template variables must be substituted 
 
 You will:
 1. Read brainstorm.md to understand what's already settled.
-2. **Ask ALL the interview questions** listed below via `AskUserQuestion` to lock down every aspect of the spec.
+2. **Ask ALL the interview questions** listed below to lock down every aspect of the spec. In Claude Code, use `AskUserQuestion`; in Pi subagents, output a `QUESTIONS_REQUIRED` block and stop so the main session can ask the user, then resume with answers.
 3. Only THEN write the spec, informed by both brainstorm and the interview.
 
 If brainstorm.md gives a **confident, explicit, unambiguous** answer to a question, you may skip that specific question. When in doubt, ask. Do not skip questions just to be efficient — the user wants depth, not speed.
 
-`AskUserQuestion` accepts up to 4 questions per call. **Batch related questions across multiple calls** to cover everything.
+When an interactive question tool is available, batch up to 4 related questions per call. In Pi, group the same batches under `QUESTIONS_REQUIRED`.
 
 ---
 
@@ -46,7 +46,7 @@ Read `.claude/specs/{date_slug}/brainstorm.md` end-to-end. List in your head:
 
 ### 2. Interview the User — Ask ALL Questions
 
-Use `AskUserQuestion` with multiple-choice options where possible. Batch across multiple calls (4 questions per call max). **Cover every topic below** — skip a specific question only if brainstorm.md already gives a confident, explicit answer for it.
+Use multiple-choice options where possible. Batch across multiple calls/blocks (4 questions per batch max). **Cover every topic below** — skip a specific question only if brainstorm.md already gives a confident, explicit answer for it.
 
 **Required interview topics:**
 
@@ -61,7 +61,7 @@ Use `AskUserQuestion` with multiple-choice options where possible. Batch across 
 9. **External dependencies & integration points** — What external systems/services does this feature interact with from a user-facing perspective? (Not implementation — just what shows up in scenarios.)
 10. **Out-of-scope clarifications** — Items the user wants to **explicitly exclude** so they don't get pulled in during implementation.
 
-Prefer multiple-choice or short-list options over open-ended. Group related topics into single `AskUserQuestion` calls when natural (e.g., priorities + scope often fit in one batch).
+Prefer multiple-choice or short-list options over open-ended. Group related topics into single question batches when natural (e.g., priorities + scope often fit in one batch).
 
 **Do NOT ask about implementation** (tech stack, APIs, DB schema, frameworks, libraries) — those are architecture's job. If a question keeps drifting toward HOW, drop it and let the spec mark `[NEEDS CLARIFICATION: technical approach TBD]`.
 

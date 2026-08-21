@@ -6,7 +6,9 @@
   "type": "module",
   "author": { "name": "peterstorm" },
   "pi": {
-    "extensions": ["./pi/extension.ts"]
+    "extensions": ["./pi/extension.ts"],
+    "skills": ["./skills", "./commands/vercel-react-best-practices"],
+    "prompts": ["./commands/*.md"]
   },
   "dependencies": {
     "@fuguejs/framework": "0.4.0",

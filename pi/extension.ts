@@ -723,14 +723,19 @@ export default function (pi: ExtensionAPI) {
   const rejectedChildWriteGrantSessions = new Set<string>();
 
   // ─── Resource Discovery ───────────────────────────────────────────────
-  // Contribute skills from this package that aren't in the pi manifest's
-  // auto-discovery (the manifest covers skills/ and commands/ already,
-  // but we also register agents dir for the subagent tool).
+  // The package.json "pi" manifest declares the raw skills/ and command
+  // templates so the package loads first-class without this handler. This
+  // handler adds the RENDERED, content-addressed copies (package-relative
+  // tokens expanded) under the Loom resource cache — the paths the extension
+  // and spawn admission actually read.
 
   // Pi does not expand Claude Code's CLAUDE_PLUGIN_ROOT token in markdown.
   // Render package-owned prompts and skills from THIS extension's import URL;
   // cwd and the Claude plugin cache are never package identity.
   process.env.LOOM_PLUGIN_ROOT = LOADED_RUNTIME_IDENTITY.packageRoot;
+  // Make package-relative references work in Pi subprocesses (notably the
+  // subagent example extension, which inherits process.env when it spawns `pi`).
+  process.env.CLAUDE_PLUGIN_ROOT = LOADED_RUNTIME_IDENTITY.packageRoot;
   // Commands executed by Pi's Bash tool inherit process environment. This
   // handshake binds every fresh mutating CLI process to the exact source bytes
   // this extension loaded, preventing mutable-checkout split brain.
@@ -756,7 +761,6 @@ export default function (pi: ExtensionAPI) {
       skillPaths: [...resources.skillPaths],
     };
   });
-
   // ─── PreToolUse Guards (tool_call event) ──────────────────────────────
 
   pi.on("tool_call", async (event, ctx) => {

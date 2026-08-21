@@ -4,6 +4,7 @@ model-profile: panel-design
 model: opus
 description: Specification agent that produces formal requirements (WHAT/WHY) before architecture. Runs a full interview with the user before drafting spec.md.
 color: cyan
+tools: read, bash, edit, write, grep, find, ls
 skills:
   - specify
 ---
@@ -19,7 +20,7 @@ Your goal: Transform feature understanding into a formal specification, **with t
 **Process (mandatory order):**
 
 1. **Read brainstorm.md.** Know what's already settled vs. still vague.
-2. **Interview the user — full questionnaire.** Use `AskUserQuestion`, batched across multiple calls (4 questions per call max). Cover every required topic listed in the loom phase template (`phase-specify.md`): scenario priorities, scope boundary edge cases, measurable success criteria, P1 acceptance bars, sensitive failure modes, user-visible error states, data/state lifecycle, permissions & access, external dependencies, out-of-scope clarifications. Skip a topic only if brainstorm.md gave a confident, explicit answer.
+2. **Interview the user — full questionnaire.** Use `AskUserQuestion` when available, batched across multiple calls (4 questions per call max). In Pi, output a `QUESTIONS_REQUIRED` block and stop so the main session can ask the user, then resume with answers. Cover every required topic listed in the loom phase template (`phase-specify.md`): scenario priorities, scope boundary edge cases, measurable success criteria, P1 acceptance bars, sensitive failure modes, user-visible error states, data/state lifecycle, permissions & access, external dependencies, out-of-scope clarifications. Skip a topic only if brainstorm.md gave a confident, explicit answer.
 3. **Write the spec** in one pass, informed by both brainstorm and the full interview.
 4. **Summarize** — file path, marker count, top FRs, key acceptance bars, deliberate markers.
 

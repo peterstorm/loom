@@ -202,7 +202,7 @@ Substitute variables:
 
 **Spawn clarify-agent** with the substituted template as prompt.
 
-**IMPORTANT: Do NOT pre-resolve markers in the agent prompt.** The clarify agent MUST ask the user via AskUserQuestion. Pass only the spec path and marker count — let the agent drive the questioning.
+**IMPORTANT: Do NOT pre-resolve markers in the agent prompt.** The clarify agent MUST ask the user via AskUserQuestion. Pass only the spec path and marker count — let the agent drive the questioning. Under Pi, if the subagent cannot interactively ask questions, have it output the unresolved questions and stop; ask the user in the main session, then re-run the clarify agent with the answers.
 
 **Wait for agent completion.** Verify markers resolved.
 
@@ -514,7 +514,7 @@ If user continues: Proceed to Phase 5 normally.
 For each wave:
 
 1. Get pending tasks in the current wave (crashed tasks remain `pending` and are re-spawned)
-2. Spawn ALL wave tasks in parallel (single message, multiple Agent calls)
+2. Spawn ALL wave tasks in parallel (single message, multiple Task/subagent calls)
 3. Wait for all to reach "implemented"
 4. If any wave task never reached `implemented` (agent crashed): re-spawn it (still `pending`, `executing_tasks` was cleared)
 5. **RUN `/wave-gate` — MANDATORY, via subagents** (see below)
@@ -776,7 +776,7 @@ jq '.wave_gates' .claude/state/active_task_graph.json
 ### Fixing Blocked Waves
 
 When blocked (critical findings), Edit/Write blocked too. To fix:
-1. **Re-spawn a subagent** — create fix agent with findings context (subagent CAN Edit/Write)
+1. **Re-spawn via Task/subagent** — create fix agent with findings context (subagent CAN Edit/Write)
 2. **Run `/wave-gate`** — re-reviews only blocked tasks
 3. **Override false positives** — pipe corrected findings through whitelisted helpers (guard hook allows these):
    ```bash
@@ -809,7 +809,7 @@ Critical findings **block** the gate. Advisory findings do **not** — but loom 
 ## Constraints
 
 - **ALL phases via agents** - brainstorm, specify, clarify, architecture, plan-alignment, decompose agents
-- **ALL implementation via the subagent-spawn tool** - Edit/Write/MultiEdit blocked
+- **ALL implementation via Task/subagent tool** - Edit/Write/MultiEdit blocked
 - **ALL state writes via hooks** - Bash writes blocked (exception: `start_sha` PreToolUse write)
 - **NEVER skip phases** unless explicit `--skip-X` flag provided
 - **NEVER proceed with >3 unresolved markers** without user acknowledgment or `--skip-clarify`

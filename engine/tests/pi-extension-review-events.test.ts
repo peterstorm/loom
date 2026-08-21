@@ -3706,29 +3706,6 @@ describe("Pi extension review tool_result integration", () => {
   });
 });
 
-describe("legacy Pi bridge", () => {
-  it("returns a caller-visible failure for unsupported subagent dispatch", async () => {
-    const bridgeSpecifier = "../../pi/loom-bridge.ts";
-    const bridge = await import(/* @vite-ignore */ bridgeSpecifier) as {
-      default: (pi: unknown) => void;
-    };
-    const pi = new FakePi();
-    bridge.default(pi as never);
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      const results = await pi.emit("tool_result", {
-        toolName: "subagent",
-      }, {});
-      expect(results).toContainEqual({
-        content: [expect.objectContaining({ text: expect.stringContaining("unsupported legacy adapter") })],
-        isError: true,
-      });
-    } finally {
-      stderr.mockRestore();
-    }
-  });
-});
-
 /**
  * The Pi extension's fail-closed BACKSTOPS.
  *

@@ -302,6 +302,8 @@ The native Pi package registers `pi/extension.ts`. It:
 - binds Pi batch items to engine request authority;
 - captures result bytes into immutable slots.
 
+The legacy `loom-bridge` extension no longer exists in the package; do not load a cached copy alongside the native extension — both would process `subagent` completion and duplicate state transitions.
+
 Headless interactive interviews remain the main parity gap. Non-interactive registered review, Wave Gate, remediation, guards, lint, and execution machinery use the shared engine. Read [Using Loom with Pi](docs/pi-usage.md) for the exact support contract.
 
 ## Development
