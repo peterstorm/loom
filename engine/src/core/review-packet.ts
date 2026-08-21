@@ -193,11 +193,10 @@ function parseJsonValue(raw: unknown, label: string): ParseResult<JsonValue> {
 function parseJsonObject(raw: unknown, label: string): ParseResult<JsonObject> {
   if (!isRecord(raw)) return fail([`${label} must be a JSON object`]);
   const parsed = parseJsonValue(raw, label);
-  return parsed.ok && isRecord(parsed.value)
+  if (!parsed.ok) return parsed;
+  return isRecord(parsed.value)
     ? ok(parsed.value as JsonObject)
-    : parsed.ok
-      ? fail([`${label} must be a JSON object`])
-      : parsed;
+    : fail([`${label} must be a JSON object`]);
 }
 
 /**

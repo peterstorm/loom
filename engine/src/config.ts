@@ -137,6 +137,11 @@ function phaseLookupKeys(panelAgent: string): string[] {
   return [bare, panelAgent, panelAgent + "-agent"];
 }
 
+const agentCollisionOverlap = (
+  panel: ReadonlySet<string>,
+  reserved: ReadonlySet<string>,
+): string[] => [...panel].filter((agent) => phaseLookupKeys(agent).some((key) => reserved.has(key)));
+
 /** The panel/phase disjointness invariant, as a live predicate: the panel
  *  agents that are ALSO reachable as phase agents through any key detectPhase
  *  probes (see phaseLookupKeys). Must always be empty — see the comment on
@@ -299,7 +304,7 @@ export function reviewPanelOverlap(
     ...IMPL_AGENTS, ...REVIEW_AGENTS, ...UTILITY_AGENTS,
   ]),
 ): string[] {
-  return [...panel].filter((a) => phaseLookupKeys(a).some((k) => reserved.has(k)));
+  return agentCollisionOverlap(panel, reserved);
 }
 
 /** Throw if a review-panel verifier collides with any other agent set. Called
@@ -340,7 +345,7 @@ export function panelExecuteOverlap(
   panel: ReadonlySet<string> = ARCH_PANEL_AGENTS,
   reserved: ReadonlySet<string> = new Set([...IMPL_AGENTS, ...REVIEW_AGENTS, ...UTILITY_AGENTS]),
 ): string[] {
-  return [...panel].filter((a) => phaseLookupKeys(a).some((k) => reserved.has(k)));
+  return agentCollisionOverlap(panel, reserved);
 }
 
 /** Throw if any panel agent also collides with an execute-phase or utility

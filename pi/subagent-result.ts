@@ -30,8 +30,8 @@ import {
   applyUntrustedStopResolution,
   collectNewTestEvidence,
   cumulativeModifiedPaths,
-  extractTestEvidence,
 } from "../engine/src/handlers/subagent-stop/update-task-status";
+import { extractTestEvidence } from "../engine/src/core/test-evidence";
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
   applyReviewResolution,

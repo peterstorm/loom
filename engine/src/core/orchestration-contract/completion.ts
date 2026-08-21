@@ -268,11 +268,14 @@ export function parseAndCanonicalizePayload<T>(
       );
     }
     const parsedError = readExactDataRecord(envelope.value.error, ["message"], "semantic payload parse error");
-    const message = parsedError.ok && typeof parsedError.value.message === "string" && parsedError.value.message.trim().length > 0
-      ? parsedError.value.message
-      : parsedError.ok
-        ? "semantic payload parser rejected the payload"
-        : parsedError.error.message;
+    let message: string;
+    if (!parsedError.ok) {
+      message = parsedError.error.message;
+    } else if (typeof parsedError.value.message === "string" && parsedError.value.message.trim().length > 0) {
+      message = parsedError.value.message;
+    } else {
+      message = "semantic payload parser rejected the payload";
+    }
     return semanticPayloadFailure("parse", "parser-rejected", message, parsedError.ok ? null : parsedError.error.field);
   }
   if (envelopeKeys.length !== 2 || !envelopeKeys.includes("value")) {

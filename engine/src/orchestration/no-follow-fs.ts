@@ -244,6 +244,33 @@ function directoryEntryExistsNoFollow(directory: AnchoredDirectory, name: string
   }
 }
 
+function removeOwnedRecoveryGuard(
+  directory: AnchoredDirectory,
+  recoveryName: string,
+  recoveryToken: string,
+): void {
+  let observed: string;
+  try {
+    observed = readDirectoryFileNoFollow(directory, recoveryName).toString("utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error(
+      `cannot inspect recovery guard ${recoveryName}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  if (observed !== recoveryToken) return;
+  try {
+    unlinkSync(anchoredChildPath(directory, recoveryName));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error(
+      `cannot remove recovery guard ${recoveryName}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+}
+
 /**
  * Recover one stale descriptor-relative lock without ever removing a lock that
  * may still have a live owner. The owner is inspected while the canonical lock
@@ -271,6 +298,8 @@ export function recoverStaleDirectoryLock(
     throw error;
   }
 
+  let primaryFailed = false;
+  let primaryError: unknown;
   try {
     let observedOwner: string;
     try {
@@ -326,13 +355,21 @@ export function recoverStaleDirectoryLock(
     }
     unlinkSync(anchoredChildPath(directory, tomb));
     return true;
+  } catch (error) {
+    primaryFailed = true;
+    primaryError = error;
+    throw error;
   } finally {
     try {
-      if (readDirectoryFileNoFollow(directory, recoveryName).toString("utf-8") === recoveryToken) {
-        unlinkSync(anchoredChildPath(directory, recoveryName));
+      removeOwnedRecoveryGuard(directory, recoveryName, recoveryToken);
+    } catch (cleanupError) {
+      if (primaryFailed) {
+        throw new AggregateError(
+          [primaryError, cleanupError],
+          `stale lock recovery for ${lockName} failed and its recovery guard could not be cleaned up`,
+        );
       }
-    } catch {
-      // A missing/foreign recovery guard is never ours to remove.
+      throw cleanupError;
     }
   }
 }

@@ -272,11 +272,12 @@ export function parseStandaloneRefutationCompletion(input: Readonly<{
   const replayed = rawState !== undefined && resumed?.ok === false && input.publicationResolver !== undefined
     ? replaySerializedRefutationCompletion(rawState, input.publicationResolver)
     : null;
-  const stateCompleted = resumed?.ok === true && resumed.value.state.stage === "done"
-    ? resumed.value.state
-    : replayed?.ok === true
-      ? replayed.value
-      : null;
+  let stateCompleted: Extract<RefutationPanelState, { stage: "done" }> | null = null;
+  if (resumed?.ok === true && resumed.value.state.stage === "done") {
+    stateCompleted = resumed.value.state;
+  } else if (replayed?.ok === true) {
+    stateCompleted = replayed.value;
+  }
   if (checkpointCompleted !== null && stateCompleted !== null && !canonicalStructuralEquals(
     serializableCompletedPanelState(checkpointCompleted),
     serializableCompletedPanelState(stateCompleted),

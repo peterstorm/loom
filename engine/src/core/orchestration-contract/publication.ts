@@ -375,14 +375,20 @@ export function digestCanonicalBatchPublicationContent(
   return createHash("sha256").update(bytes).digest("hex") as ArtifactDigest;
 }
 
-export function batchPublicationIdentity(receipt: BatchPublishedReceipt): BatchPublicationIdentity {
+function publicationIdentity(
+  source: Pick<BatchPublicationIdentity, "runId" | "effectId" | "publicationDigest">,
+): BatchPublicationIdentity {
   return canonicalRecord({
     schemaVersion: 1,
     kind: "batch-publication-identity",
-    runId: receipt.runId,
-    effectId: receipt.effectId,
-    publicationDigest: receipt.publicationDigest,
+    runId: source.runId,
+    effectId: source.effectId,
+    publicationDigest: source.publicationDigest,
   });
+}
+
+export function batchPublicationIdentity(receipt: BatchPublishedReceipt): BatchPublicationIdentity {
+  return publicationIdentity(receipt);
 }
 
 export function samePublicationIdentity(
@@ -1120,13 +1126,7 @@ export function parseIssuedSpawnRequestProof(
 }
 
 export function issuancePublicationIdentity(issuance: IssuedSpawnRequestProof): BatchPublicationIdentity {
-  return canonicalRecord({
-    schemaVersion: 1,
-    kind: "batch-publication-identity",
-    runId: issuance.runId,
-    effectId: issuance.effectId,
-    publicationDigest: issuance.publicationDigest,
-  });
+  return publicationIdentity(issuance);
 }
 
 export function authorityResolutionFailure(message: string, field?: string): AcceptedAgentResultError {

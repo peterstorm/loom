@@ -261,7 +261,13 @@ export async function resumeStandaloneFacade(
         return failed("standalone review checkpoint is missing and no durable batch publication exists");
       }
     } else {
-      try { rawState = JSON.parse(checkpoint); } catch { return failed("standalone review checkpoint is invalid JSON"); }
+      try {
+        rawState = JSON.parse(checkpoint);
+      } catch (error) {
+        return failed(
+          `standalone review checkpoint is invalid JSON for ${handle.runDirectory}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
     const state = parseStandaloneReviewMachineState(rawState, resolver);
     if (!state.ok) return failed(state.error.message);

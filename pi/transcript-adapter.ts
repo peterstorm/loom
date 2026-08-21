@@ -2,7 +2,7 @@
 
 import { attributeExit, classifyTestCommandDetailed, type ClassifiedTestCommand } from "../engine/src/machine";
 import { splitCommandSegmentsWithOps, stripComment, stripEnvPrefix } from "../engine/src/machine/extract-evidence";
-import { extractTestEvidence } from "../engine/src/handlers/subagent-stop/update-task-status";
+import { extractTestEvidence } from "../engine/src/core/test-evidence";
 
 const TOOL_NAME_MAP: Readonly<Record<string, string>> = Object.freeze({
   bash: "Bash",
@@ -177,16 +177,23 @@ const ZERO_FAILURE_MARKER = /\b0 fail(?:ed|ing)?\b|\bFailures: 0\b|\bErrors: 0\b
  *    claim that `cd` is outcome-neutral or leaves test selection unchanged.
  *    Any other prior (`false && bun test`, `git stash && bun test`) means the
  *    test may never have run.
- *  - every segment AFTER the test is a PIPE stage (`| tail`, `| tee`) that only
- *    transforms the runner's own output. A `;`/`&&`/`||`/`&`-sequenced command
- *    after the test runs NEW code whose stdout is concatenated into the paired
- *    output and would be read as the verdict — the confirmed fabrication vector
- *    (`bun test 2>/dev/null; echo ' 1 pass'; echo ' 0 fail'` mints a green pass
- *    for a failed run). Sequenced trailers fail closed to the transcript
- *    fallback; only pipe pass-through keeps the relax.
+ *  - every segment AFTER the test is a proven stdin-only PIPE stage. The narrow
+ *    grammar admits `tail` without file operands and `tee` with inert path
+ *    operands; an arbitrary pipe command can ignore stdin and fabricate a green
+ *    summary just as easily as a sequenced trailer. A `;`/`&&`/`||`/`&` command
+ *    after the test is also refused because its stdout is concatenated into the
+ *    paired output and would be read as the verdict.
  *
- *  A segment that cannot be located fails closed (previously it was treated as
- *  safe — a fail-open default guarding a relaxation). */
+ *  A segment that cannot be located or proven stdin-derived fails closed. */
+function isStdinDerivedPipeStage(stage: string): boolean {
+  if (/^tail(?:\s+-n\s+[1-9][0-9]*)?$/.test(stage)) return true;
+  const [command, ...rawArguments] = stage.split(/\s+/);
+  if (command !== "tee") return false;
+  const withoutAppend = rawArguments[0] === "-a" ? rawArguments.slice(1) : rawArguments;
+  const paths = withoutAppend[0] === "--" ? withoutAppend.slice(1) : withoutAppend;
+  return paths.every((path) => !path.startsWith("-") && /^[A-Za-z0-9_./-]+$/.test(path));
+}
+
 function relaxableComposition(command: string, classified: ClassifiedTestCommand): boolean {
   const segments = splitCommandSegmentsWithOps(command)
     .map((s) => ({ text: stripEnvPrefix(stripComment(s.text).trim()), opBefore: s.opBefore }))
@@ -198,7 +205,8 @@ function relaxableComposition(command: string, classified: ClassifiedTestCommand
     return head === "cd" || /^cd\//.test(head);
   });
   if (!priorsAreCd) return false;
-  return segments.slice(ownIndex + 1).every((s) => s.opBefore === "|");
+  return segments.slice(ownIndex + 1)
+    .every((segment) => segment.opBefore === "|" && isStdinDerivedPipeStage(segment.text));
 }
 
 /**
@@ -208,9 +216,10 @@ function relaxableComposition(command: string, classified: ClassifiedTestCommand
  * own summary is the verdict — not for the Claude/ledger paths. The relax
  * requires: the line was not backgrounded, the Bash result was not an error,
  * and the composition is relaxable (see relaxableComposition — the test is
- * headed only by `cd` and trailed only by pipe stages, so the paired output is
- * the runner's own). The verdict is then governed by the output summary, and
- * the strict zero-failure marker (caller side) closes line-stripping laundering.
+ * headed only by `cd` and trailed only by parser-proven stdin-derived stages,
+ * so the paired output is the runner's own). The verdict is then governed by
+ * the output summary, and the strict zero-failure marker (caller side) closes
+ * line-stripping laundering.
  */
 function attributeExitForStructuredEvidence(
   exit: number | null,

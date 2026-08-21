@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -189,6 +190,90 @@ describe("generation-addressed stale-lock retirement", () => {
   it("a lock that vanished before observation is a normal retry", () => {
     tmpDir = makeTmpDir();
     expect(stealStaleLock(join(tmpDir, "never-existed.lock"))).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "recovers after a claimant process dies immediately after publishing its generation claim",
+    async () => {
+      tmpDir = makeTmpDir();
+      const lockFile = join(tmpDir, "orphaned-claim");
+      const lockDir = `${lockFile}.lock`;
+      mkdirSync(lockDir);
+      writeFileSync(join(lockDir, "pid"), "999999999:stale-generation");
+      const lockModule = new URL("../../src/utils/lock.ts", import.meta.url).href;
+
+      const crashed = spawnSync("bun", ["--eval", [
+        `const { observeStaleLock } = await import(${JSON.stringify(lockModule)});`,
+        `if (observeStaleLock(${JSON.stringify(lockDir)}) === null) process.exit(2);`,
+        `process.kill(process.pid, "SIGKILL");`,
+      ].join("\n")], { encoding: "utf-8" });
+
+      expect(crashed.signal).toBe("SIGKILL");
+      expect(existsSync(join(lockDir, "generation-claim"))).toBe(true);
+      await acquireLock(lockFile);
+      expect(readFileSync(join(lockDir, "pid"), "utf-8")).toContain(`${process.pid}:`);
+      releaseLock(lockFile);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "rechecks an initially-live generation claim and acquires after its claimant exits",
+    async () => {
+      tmpDir = makeTmpDir();
+      const lockFile = join(tmpDir, "claimant-exits-during-wait");
+      const lockDir = `${lockFile}.lock`;
+      mkdirSync(lockDir);
+      writeFileSync(join(lockDir, "pid"), "999999999:stale-generation");
+      const lockModule = new URL("../../src/utils/lock.ts", import.meta.url).href;
+      const claimant = spawn("bun", ["--eval", [
+        `const { observeStaleLock } = await import(${JSON.stringify(lockModule)});`,
+        `if (observeStaleLock(${JSON.stringify(lockDir)}) === null) process.exit(2);`,
+        `console.log("claimed");`,
+        `setTimeout(() => process.exit(0), 250);`,
+      ].join("\n")], { stdio: ["ignore", "pipe", "pipe"] });
+      const exited = new Promise<Readonly<{ code: number | null; signal: NodeJS.Signals | null }>>((resolveExit) => {
+        claimant.once("exit", (code, signal) => resolveExit({ code, signal }));
+      });
+      await new Promise<void>((resolveClaim, rejectClaim) => {
+        let announced = false;
+        claimant.once("error", rejectClaim);
+        claimant.stdout.on("data", (chunk) => {
+          if (!String(chunk).includes("claimed") || announced) return;
+          announced = true;
+          resolveClaim();
+        });
+        claimant.once("exit", (code, signal) => {
+          if (!announced) rejectClaim(new Error(`claimant exited before announcing its claim: code=${code}, signal=${signal}`));
+        });
+      });
+
+      await acquireLock(lockFile);
+
+      expect(await exited).toEqual({ code: 0, signal: null });
+      expect(readFileSync(join(lockDir, "pid"), "utf-8")).toContain(`${process.pid}:`);
+      releaseLock(lockFile);
+    },
+  );
+
+  it("keeps an unexpired generation claim contended while its claimant is alive", () => {
+    tmpDir = makeTmpDir();
+    const lockDir = join(tmpDir, "live-claim.lock");
+    mkdirSync(lockDir);
+    writeFileSync(join(lockDir, "pid"), "999999999:stale-generation");
+    const claim = observeStaleLock(lockDir);
+    expect(claim).not.toBeNull();
+    if (claim === null) throw new Error("expected this process to own the generation claim");
+    const claimBytes = readFileSync(join(lockDir, "generation-claim"), "utf-8");
+
+    expect(stealStaleLock(lockDir)).toBe(false);
+    expect(readFileSync(join(lockDir, "generation-claim"), "utf-8")).toBe(claimBytes);
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(retireObservedStaleLock(claim)).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 
   it("a generation claim rejects replacement between owner read and PID probing", async () => {

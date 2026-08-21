@@ -112,14 +112,15 @@ function snapshotRepositoryArtifact(root: string, artifact: string): ArtifactSna
   });
   if (!inspected.exists) return Object.freeze({ kind: "missing" });
   const stat = lstatSync(inspected.absolute);
-  const bytes = stat.isSymbolicLink()
-    ? Buffer.from(`symlink\0${readlinkSync(inspected.absolute)}`, "utf-8")
-    : stat.isFile()
-      ? Buffer.concat([
-          Buffer.from(`file\0${stat.mode & 0o777}\0`, "utf-8"),
-          readFileSync(inspected.absolute),
-        ])
-      : null;
+  let bytes: Buffer | null = null;
+  if (stat.isSymbolicLink()) {
+    bytes = Buffer.from(`symlink\0${readlinkSync(inspected.absolute)}`, "utf-8");
+  } else if (stat.isFile()) {
+    bytes = Buffer.concat([
+      Buffer.from(`file\0${stat.mode & 0o777}\0`, "utf-8"),
+      readFileSync(inspected.absolute),
+    ]);
+  }
   if (bytes === null) throw new Error(`repository change must be a file or leaf symlink: ${artifact}`);
   return Object.freeze({ kind: "sha256", digest: digest(bytes) });
 }

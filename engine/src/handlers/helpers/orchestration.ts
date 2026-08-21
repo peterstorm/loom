@@ -653,11 +653,12 @@ async function materializePanelAction(
   registration: RegisteredPanelProgram,
   action: PanelProgramAction | Readonly<{ type: "await-results"; runId: string }>,
 ): Promise<Readonly<{ ok: true; action: unknown }> | Readonly<{ ok: false; message: string }>> {
-  const panelRequests = action.type === "spawn-batch"
-    ? action.requests
-    : action.type === "await-user"
-      ? [action.request]
-      : [];
+  let panelRequests: readonly PanelSpawnRequest[] = [];
+  if (action.type === "spawn-batch") {
+    panelRequests = action.requests;
+  } else if (action.type === "await-user") {
+    panelRequests = [action.request];
+  }
   if (panelRequests.length === 0) {
     if (action.type === "done") return { ok: true, action: Object.freeze({ kind: "done", ...action, type: undefined }) };
     if (action.type === "blocked") return { ok: true, action: Object.freeze({ kind: "blocked", runId: handle.runId, diagnostic: action }) };
@@ -1030,11 +1031,14 @@ async function resumeOperation(args: readonly string[]): Promise<HookResult> {
     }
     if (facadeParse.kind === "registered") {
       const facadeRegistration = facadeParse.program;
-      const driven = facadeRegistration.kind === "standalone-review"
-        ? await resumeStandaloneFacade(bound.value.handle, facadeRegistration)
-        : facadeRegistration.kind === "remediation"
-          ? await resumeRemediationFacade(bound.value.handle, facadeRegistration)
-          : await resumeWaveGateFacade(bound.value.handle, facadeRegistration);
+      const driven = await match(facadeRegistration)
+        .with({ kind: "standalone-review" }, (registration) =>
+          resumeStandaloneFacade(bound.value.handle, registration))
+        .with({ kind: "remediation" }, (registration) =>
+          resumeRemediationFacade(bound.value.handle, registration))
+        .with({ kind: "wave-gate" }, (registration) =>
+          resumeWaveGateFacade(bound.value.handle, registration))
+        .exhaustive();
       if (!driven.ok) return { kind: "error", message: driven.message };
       return emitRunAction(bound.value.handle, driven.action);
     }

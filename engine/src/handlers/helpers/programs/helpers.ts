@@ -523,11 +523,12 @@ export function parseRegisteredFacadeProgram(raw: unknown): FacadeRegistrationPa
   }
 
   const waveBaseKeys = ["schemaVersion", "kind", "input", "taskIds", "authorityDigest"] as const;
-  const waveKeys = Object.hasOwn(raw as object, "restart")
-    ? [...waveBaseKeys, "restart"]
-    : Object.hasOwn(raw as object, "orphanRecovery")
-      ? [...waveBaseKeys, "orphanRecovery"]
-      : [...waveBaseKeys];
+  let waveKeys: readonly string[] = waveBaseKeys;
+  if (Object.hasOwn(raw as object, "restart")) {
+    waveKeys = [...waveBaseKeys, "restart"];
+  } else if (Object.hasOwn(raw as object, "orphanRecovery")) {
+    waveKeys = [...waveBaseKeys, "orphanRecovery"];
+  }
   if (!exactObject(raw, waveKeys) || raw.schemaVersion !== 1) {
     return invalidRegistration(`wave-gate registration must contain exactly schemaVersion 1, ${waveKeys.slice(1).join(", ")}`);
   }

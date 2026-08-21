@@ -17,10 +17,11 @@
  * so adding a volume requires no change here — only not reintroducing a cycle.
  */
 import { describe, expect, it } from "vitest";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 
-const CORE_DIR = join(__dirname, "../../src/core");
+const SOURCE_DIR = join(__dirname, "../../src");
+const CORE_DIR = join(SOURCE_DIR, "core");
 const KERNEL_DIR = join(CORE_DIR, "orchestration-contract");
 
 /** Sibling-volume imports (`./name`) declared by one volume file. */
@@ -91,5 +92,49 @@ describe("orchestration-contract volume graph", () => {
     // errors.ts is the leaf that broke the three original cycles. If it ever
     // imports a volume other than identity/bytes, it can close a cycle again.
     expect([...(graph.get("errors") ?? [])].sort()).toEqual(["bytes", "identity"]);
+  });
+
+  it("keeps top-level source domains acyclic across runtime and type-only imports", () => {
+    const sourceFiles = (directory: string): readonly string[] => readdirSync(directory).flatMap((entry) => {
+      const path = join(directory, entry);
+      return statSync(path).isDirectory()
+        ? sourceFiles(path)
+        : path.endsWith(".ts")
+          ? [path]
+          : [];
+    });
+    const files = sourceFiles(SOURCE_DIR);
+    const modulePath = (path: string): string => relative(SOURCE_DIR, path).replace(/\.ts$/, "");
+    const modules = new Set(files.map(modulePath));
+    const graph = new Map(files.map((path): readonly [string, readonly string[]] => {
+      const source = readFileSync(path, "utf-8");
+      const specifiers = [...source.matchAll(/\bfrom\s*["']([^"']+)["']|\bimport\s*(?:\(\s*)?["']([^"']+)["']/g)]
+        .map((match) => match[1] ?? match[2])
+        .filter((specifier): specifier is string => specifier !== undefined && specifier.startsWith("."));
+      const dependencies = specifiers.flatMap((specifier) => {
+        const target = resolve(dirname(path), specifier);
+        const candidates = [`${target}.ts`, join(target, "index.ts")];
+        const found = candidates.find((candidate) => existsSync(candidate));
+        if (found === undefined) return [];
+        const key = modulePath(found);
+        return modules.has(key) ? [key] : [];
+      });
+      return [modulePath(path), Object.freeze([...new Set(dependencies)])];
+    }));
+    const reachesSelf = (start: string, current: string, seen: ReadonlySet<string>): boolean =>
+      (graph.get(current) ?? []).some((next) =>
+        next === start || (!seen.has(next) && reachesSelf(start, next, new Set([...seen, next]))));
+    const cyclicModules = [...graph.keys()].filter((module) => reachesSelf(module, module, new Set([module]))).sort();
+
+    // The Guarded Skill Machine's three-volume legacy cycle predates the
+    // orchestration kernel and is explicitly outside ADR-0007. No shared-kernel
+    // or schema-root module may join it or form another cycle.
+    expect(cyclicModules).toEqual([
+      "machine/evidence",
+      "machine/test-report",
+      "machine/types",
+    ]);
+    expect(readFileSync(join(CORE_DIR, "model-profiles.ts"), "utf-8")).toContain('from "./phases"');
+    expect(readFileSync(join(CORE_DIR, "model-profiles.ts"), "utf-8")).not.toContain('from "../types"');
   });
 });

@@ -983,6 +983,35 @@ describe("orchestration CLI", () => {
     expect(resumed.stderr).toContain("invalid JSON");
   });
 
+  it("preserves the parser cause and Run Directory for malformed facade checkpoints", () => {
+    const root = project();
+    const runsRoot = join(root, "runs");
+    const standaloneRun = join(runsRoot, "run.malformed-standalone-checkpoint");
+    const remediationRun = join(runsRoot, "run.malformed-remediation-checkpoint");
+    mkdirSync(standaloneRun, { recursive: true });
+    mkdirSync(remediationRun);
+
+    const standaloneStarted = runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", standaloneRun,
+    ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), ENGINE);
+    expect(standaloneStarted.status, standaloneStarted.stderr).toBe(0);
+    writeFileSync(join(standaloneRun, "checkpoint.json"), "{broken\n");
+
+    const standaloneResumed = runCli(["resume", "--runs-root", runsRoot, "--run", standaloneRun], "", ENGINE);
+    expect(standaloneResumed.status).not.toBe(0);
+    expect(standaloneResumed.stderr).toContain(`standalone review checkpoint is invalid JSON for ${standaloneRun}:`);
+
+    const remediationStarted = runCli([
+      "start", "remediation", "--runs-root", runsRoot, "--run", remediationRun,
+    ], JSON.stringify({ sourceRunsRoot: runsRoot, sourceRun: "run.absent-source", supportPaths: [] }), root);
+    expect(remediationStarted.status, remediationStarted.stderr).toBe(0);
+    writeFileSync(join(remediationRun, "checkpoint.json"), "{broken\n");
+
+    const remediationResumed = runCli(["resume", "--runs-root", runsRoot, "--run", remediationRun], "", root);
+    expect(remediationResumed.status).not.toBe(0);
+    expect(remediationResumed.stderr).toContain(`remediation checkpoint is invalid JSON for ${remediationRun}:`);
+  });
+
   it("rejects a Wave reviewer submission when its packet-bound task disappeared", () => {
     const root = repository();
     const proof = evaluateTaskProof(
@@ -2846,6 +2875,19 @@ describe("orchestration CLI", () => {
     });
     expect(retry.requests[0]?.task).toContain("no-final-payload: result carried no final text payload");
     expect(retry.requests[0]?.task).toContain("### Machine Summary");
+
+    // A later resume has no fresh rejection in its per-pass set. It must read
+    // the durable diagnostic from LC-2 state when reissuing the exact retry.
+    const reissued = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+    expect(reissued.status, reissued.stderr).toBe(0);
+    const reissuedRetry = JSON.parse(reissued.stdout) as {
+      kind: string;
+      requests: readonly { authority: AgentRequestAuthority; task: string }[];
+    };
+    expect(reissuedRetry.kind).toBe("spawn-batch");
+    expect(reissuedRetry.requests).toHaveLength(1);
+    expect(reissuedRetry.requests[0]?.authority.requestId).toBe(retry.requests[0]?.authority.requestId);
+    expect(reissuedRetry.requests[0]?.task).toContain("no-final-payload: result carried no final text payload");
 
     // The terminal rejection still binds: late bytes for attempt 1 cannot
     // overwrite it, and only the exact attempt-2 authority closes the slot.

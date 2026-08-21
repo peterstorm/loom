@@ -18,10 +18,10 @@
  * still reports active and releases nothing.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { anyActiveSubagent } from "../../src/machine";
 
 const created: string[] = [];
@@ -82,6 +82,19 @@ describe("anyActiveSubagent", () => {
     writeFileSync(join(dir, "session-a.task_graph"), GRAPH);
 
     expect(anyActiveSubagent(GRAPH)).toBe(false);
+  });
+
+  it("logs an unreadable roster before assuming a subagent is active", () => {
+    const dir = scopedSubagentDir();
+    symlinkSync("unreadable.active", join(dir, "unreadable.active"));
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(anyActiveSubagent(GRAPH)).toBe(true);
+      expect(stderr.mock.calls.map(([message]) => String(message)).join(""))
+        .toMatch(/cannot stat roster unreadable\.active.*assuming a subagent is active.*fail closed/i);
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it("reports a running agent bound to this graph", () => {

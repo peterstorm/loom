@@ -5,7 +5,9 @@
 import type { TaskProof } from "./core/proof-obligations";
 import type { DeclaredArtifactBaseline } from "./core/artifact-baseline";
 import type { IssuedReviewPacketRegistration } from "./core/review-packet";
+import type { Phase } from "./core/phases";
 export type { IssuedReviewPacketRegistration } from "./core/review-packet";
+export { PHASES, type Phase } from "./core/phases";
 import type {
   ArtifactDigest,
   ArtifactRef,
@@ -96,14 +98,6 @@ export interface SubagentStartInput {
 }
 
 // --- Task Graph state ---
-
-/** Phase ordering — the const tuple is the single source of truth so both
- *  the `Phase` type and config's PHASE_ORDER derive from it (dropping a phase
- *  can't leave the type wider than what parseTaskGraph proves against). */
-export const PHASES = [
-  "init", "brainstorm", "specify", "clarify", "architecture", "plan-alignment", "decompose", "execute",
-] as const;
-export type Phase = (typeof PHASES)[number];
 
 /** Task status values — the const tuple is the source of truth so parsers
  *  (parseTaskGraph) can prove disk values against it. */

@@ -289,9 +289,11 @@ export function anyActiveSubagent(taskGraphPath: string): boolean {
     try {
       if (statSync(`${subagentDir()}/${name}`).size === 0) return false;
     } catch (e) {
-      // A roster we cannot stat may be a live agent.
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") return true;
-      return false;
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+      process.stderr.write(
+        `anyActiveSubagent: cannot stat roster ${name} (${e instanceof Error ? e.message : String(e)}) — assuming a subagent is active (fail closed)\n`,
+      );
+      return true;
     }
     try {
       return resolve(readFileSync(`${subagentDir()}/${session}.task_graph`, "utf-8").trim()) === wanted;

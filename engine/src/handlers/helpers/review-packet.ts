@@ -116,11 +116,12 @@ function artifact(root: string, baseSha: BaseSha, path: string): ReviewPacketArt
   if (!trackedAtBase && !tracked && !present) {
     throw new Error(`review packet path is neither tracked nor present at its base: ${path}`);
   }
-  const diff = trackedAtBase || tracked
-    ? git(["diff", "--binary", baseSha, "--", path], root)
-    : present
-      ? git(["diff", "--no-index", "--binary", "/dev/null", path], root, true)
-      : "";
+  let diff = "";
+  if (trackedAtBase || tracked) {
+    diff = git(["diff", "--binary", baseSha, "--", path], root);
+  } else if (present) {
+    diff = git(["diff", "--no-index", "--binary", "/dev/null", path], root, true);
+  }
   return {
     path,
     diff,

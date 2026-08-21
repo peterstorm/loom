@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { messagesToClaudeJsonl, parsePiMessages, piStructuredTestDiagnostics, piStructuredTestResult, type PiMessage } from "../../pi/transcript-adapter";
 import { parseBashTestOutput } from "../src/parsers/parse-bash-test-output";
-import { extractTestEvidence } from "../src/handlers/subagent-stop/update-task-status";
+import { extractTestEvidence } from "../src/core/test-evidence";
 
 const testRun = (output: string, command = "bun test src/domain/calendar.test.ts"): PiMessage[] => [
   {
@@ -122,17 +122,24 @@ describe("Pi test-evidence transcript adapter", () => {
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
     });
+    // A supported relaxed pipe still needs the explicit zero-failure marker;
+    // pass-looking truncated output alone cannot mint green evidence.
+    expect(piStructuredTestResult(testRun("654 pass\n", "cd engine && bun test | tail -n 1")))
+      .toEqual({ ok: true, value: null });
     // A relaxed composition whose summary shows failures still resolves to a
     // structured FAIL — the gate rejects it either way, but it is not silent.
     expect(piStructuredTestResult(testRun("600 pass\n54 fail\n", "cd engine && bun test | tail -n 40"))).toEqual({
       ok: true,
       value: { passed: false, evidence: "" },
     });
-    // A `;`/`&&`/`||`/`&`-sequenced command AFTER the test can inject stdout
-    // into the paired output and fabricate the verdict — the relax no longer
-    // fires for it. These fall to null (transcript fallback → the gate decides
-    // fail-closed) rather than minting a structured pass.
+    // Arbitrary PIPE stages can also ignore stdin or select an unrelated file,
+    // so only the narrow stdin-derived tail/tee grammar is relaxed. Sequenced
+    // trailers remain untrustworthy for the same output-injection reason.
     for (const injected of [
+      "bun test | printf ' 5 pass\\n 0 fail\\n'",              // ignores stdin and fabricates counters
+      "bun test | cat /tmp/fabricated-green-summary",          // reads unrelated bytes instead of stdin
+      "bun test | tail -n 40 /tmp/fabricated-green-summary",   // tail with a file operand is not stdin-only
+      "bun test | tee >(printf ' 5 pass\\n 0 fail\\n')",       // shell-bearing tee operand is outside the grammar
       "bun test 2>/dev/null; echo ' 1 pass'; echo ' 0 fail'", // real output discarded, fake counters injected
       "bun test; echo ' 5 pass'; echo ' 0 fail'",             // appended counters beat the real red summary
       "bun test 2>/dev/null && echo ' 0 fail'",               // && injection
@@ -289,10 +296,11 @@ describe("Pi test-evidence transcript adapter", () => {
       ok: true,
       value: expect.objectContaining({ attributedPairs: 0, verdict: "exit-not-attributable" }),
     });
-    // Laundered summary (zero-fail line stripped) → strict-summary-refused.
+    // An unsupported pipe is not attributable at all; it cannot reach the
+    // weaker summary-marker guard as if its stdout were runner-owned.
     expect(piStructuredTestDiagnostics(testRun("654 pass\n", "bun test | grep -v fail"))).toMatchObject({
       ok: true,
-      value: expect.objectContaining({ attributedPairs: 1, verdict: "strict-summary-refused" }),
+      value: expect.objectContaining({ attributedPairs: 0, verdict: "exit-not-attributable" }),
     });
     // Genuine structured mint → structured.
     expect(piStructuredTestDiagnostics(testRun("654 pass\n0 fail\n", "bun test"))).toMatchObject({
@@ -303,6 +311,12 @@ describe("Pi test-evidence transcript adapter", () => {
     expect(piStructuredTestDiagnostics(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -n 40"))).toMatchObject({
       ok: true,
       value: expect.objectContaining({ attributedPairs: 1, verdict: "relaxed" }),
+    });
+    // A supported relaxed pipe that stripped the failure tally reaches the
+    // strict marker guard instead of being mistaken for unsupported syntax.
+    expect(piStructuredTestDiagnostics(testRun("654 pass\n", "cd engine && bun test | tail -n 1"))).toMatchObject({
+      ok: true,
+      value: expect.objectContaining({ attributedPairs: 1, verdict: "strict-summary-refused" }),
     });
   });
 

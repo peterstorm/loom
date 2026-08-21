@@ -165,6 +165,23 @@ describe("anchored lock ownership", () => {
     }
   });
 
+  it("surfaces recovery-guard cleanup corruption after otherwise successful recovery", () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    const lockName = "cleanup.lock";
+    const recoveryPath = join(directory, `${lockName}.recovery`);
+    writeFileSync(join(directory, lockName), "999999999");
+    const anchored = openDirectoryNoFollow(directory);
+    try {
+      expect(() => recoverStaleDirectoryLock(anchored, lockName, () => {
+        rmSync(recoveryPath, { force: true });
+        symlinkSync(`${lockName}.recovery`, recoveryPath);
+      })).toThrow(/cannot inspect recovery guard cleanup\.lock\.recovery/i);
+    } finally {
+      closeAnchoredDirectory(anchored);
+    }
+  });
+
   it("never overlaps critical sections while the recorded owner is alive", async () => {
     const root = workspace();
     const directory = join(root, "run");

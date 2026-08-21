@@ -14,7 +14,7 @@
  * boundary — this module never infers one.
  */
 
-import type { Phase } from "../types";
+import type { Phase } from "./phases";
 
 export const LLM_PROFILE_IDS = [
   "implementation",

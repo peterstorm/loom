@@ -8,10 +8,8 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  extractTestEvidence,
-  resolveTestEvidence,
-} from "../../src/handlers/subagent-stop/update-task-status";
+import { resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
+import { extractTestEvidence } from "../../src/core/test-evidence";
 import { parseBashTestOutput } from "../../src/parsers/parse-bash-test-output";
 import { classifyTestCommand, extractEvidence, extractBashOutcome } from "../../src/machine/extract-evidence";
 import { foldEvidence, isToolAllowed, isTerminal, blockExplanation } from "../../src/machine/advance";

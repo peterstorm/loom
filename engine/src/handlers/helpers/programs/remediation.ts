@@ -86,8 +86,13 @@ export async function resumeRemediationFacade(
   const checkpoint = await handle.readCheckpoint();
   if (checkpoint !== null) {
     let raw: unknown;
-    try { raw = JSON.parse(checkpoint); }
-    catch { return failed("remediation checkpoint is invalid JSON"); }
+    try {
+      raw = JSON.parse(checkpoint);
+    } catch (error) {
+      return failed(
+        `remediation checkpoint is invalid JSON for ${handle.runDirectory}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     if (typeof raw === "object" && raw !== null) {
       const record = raw as { schemaVersion?: unknown; state?: { state?: unknown; receipt?: unknown } };
       if (record.schemaVersion === 1 && typeof record.state === "object" && record.state !== null && record.state.state === "done") {

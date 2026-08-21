@@ -1296,11 +1296,14 @@ function parseStrictBriefFinding(raw: unknown): DomainResult<BriefFinding, Reado
   const agent = typeof finding.agent === "string" ? sanitizeProse(finding.agent) : "";
   const claim = typeof finding.claim === "string" ? sanitizeProse(finding.claim) : "";
   const file = finding.file === null ? null : parseReviewPath(finding.file, "Finding file");
-  const line = finding.line === null
-    ? null
-    : typeof finding.line === "number" && Number.isSafeInteger(finding.line) && finding.line > 0
-      ? finding.line
-      : undefined;
+  let line: number | null | undefined;
+  if (finding.line === null) {
+    line = null;
+  } else if (typeof finding.line === "number" && Number.isSafeInteger(finding.line) && finding.line > 0) {
+    line = finding.line;
+  } else {
+    line = undefined;
+  }
   const errors: string[] = [];
   if (id === null) errors.push("Finding id must be a wave-scoped task-id:finding-id without whitespace or extra colons");
   if (taskId.length === 0) errors.push("Finding taskId must be non-empty after sanitization");

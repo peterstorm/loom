@@ -16,7 +16,7 @@ const read = (...parts: string[]) => readFileSync(join(REPO_ROOT, ...parts), "ut
  * The runbooks are executable prose: `commands/loom.md` and
  * `commands/wave-gate.md` tell a model which helper to invoke, with which
  * flags, in which order. The engine's side of every one of those calls is
- * proven — by unit tests, by CLI-driven tests, and by the two smoke scripts.
+ * proven — by unit tests, by CLI-driven tests, and by the smoke suite.
  * What the prose SAYS about them was proven by nothing but hardcoded greps.
  *
  * That one-directional check is how `--threshold` came to be a supported flag
@@ -249,11 +249,11 @@ describe("the smoke scripts this file's own header cites are actually run", () =
   };
 
   it("`npm test` invokes the smoke suite, not just vitest", () => {
-    // The header above claims the helper chain is "proven … by the two smoke
-    // scripts". It was not: `test` ran vitest alone, `test:smoke` was invoked by
-    // nothing, and the repo has no CI — so 878 lines of end-to-end harness
-    // gated nothing while the prose said otherwise. Both scripts finish in
-    // ~1.3s combined, so there is no reason for them to sit outside the default
+    // The header above claims the helper chain is proven by the smoke suite.
+    // It was not: `test` ran vitest alone, `test:smoke` was invoked by nothing,
+    // and the repo has no CI — so the end-to-end harness gated nothing while
+    // the prose said otherwise. All five checks finish quickly, so there is no
+    // reason for them to sit outside the default
     // command. Asserted here, beside the claim, so the claim cannot go stale
     // again without a red test.
     expect(pkg.scripts.test).toContain("test:smoke");

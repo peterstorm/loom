@@ -44,14 +44,23 @@ type GenerationClaim = Readonly<{
   lockDir: string;
   ownerText: string | null;
   generation: string;
+  claimantPid: number;
+  claimedAtMs: number;
   claimToken: string;
+}>;
+
+type GenerationClaimOwner = Readonly<{
+  pid: number;
+  claimedAtMs: number;
 }>;
 
 export type StaleLockObservation = GenerationClaim;
 
 const staleObservationProofs = new WeakSet<object>();
 const GENERATION_CLAIM = "generation-claim";
+const GENERATION_CLAIM_EXPIRY_MS = 30_000;
 const OWNER_RECORD = /^(?<pid>[1-9][0-9]*):(?<generation>[a-zA-Z0-9-]+)$/;
+const GENERATION_CLAIM_RECORD = /^v1:(?<pid>[1-9][0-9]*):(?<claimedAtMs>[0-9]+):[a-zA-Z0-9-]+:[a-zA-Z0-9-]+$/;
 
 function legacyGeneration(ownerText: string | null): string {
   if (ownerText === null) return "legacy-missing-owner";
@@ -101,7 +110,57 @@ function snapshotLock(lockDir: string): LockSnapshot {
 }
 
 function claimText(claim: GenerationClaim): string {
-  return `${claim.generation}:${claim.claimToken}`;
+  return `v1:${claim.claimantPid}:${claim.claimedAtMs}:${claim.generation}:${claim.claimToken}`;
+}
+
+function parseGenerationClaimOwner(text: string): GenerationClaimOwner | null {
+  const match = GENERATION_CLAIM_RECORD.exec(text);
+  if (match?.groups === undefined) return null;
+  const pid = Number(match.groups["pid"]);
+  const claimedAtMs = Number(match.groups["claimedAtMs"]);
+  return Number.isSafeInteger(pid) && Number.isSafeInteger(claimedAtMs)
+    ? Object.freeze({ pid, claimedAtMs })
+    : null;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code !== "ESRCH";
+  }
+}
+
+/**
+ * Reap a claim whose process died or whose short retirement lease expired.
+ * The retirement path re-checks the fixed claim bytes before moving the lock,
+ * so even a claimant paused beyond the lease loses authority rather than
+ * retiring a generation after another claimant recovered it.
+ */
+function reapOrphanedGenerationClaim(lockDir: string): boolean {
+  const path = join(lockDir, GENERATION_CLAIM);
+  let observed: string;
+  try {
+    observed = readFileSync(path, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return true;
+    throw error;
+  }
+
+  const owner = parseGenerationClaimOwner(observed);
+  const claimedAtMs = owner?.claimedAtMs ?? statSync(path).mtimeMs;
+  const expired = Date.now() - claimedAtMs >= GENERATION_CLAIM_EXPIRY_MS;
+  if (!expired && (owner === null || processIsAlive(owner.pid))) return false;
+
+  try {
+    if (readFileSync(path, "utf-8") !== observed) return false;
+    rmSync(path, { force: false });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return true;
+    throw error;
+  }
 }
 
 function releaseGenerationClaim(claim: GenerationClaim): void {
@@ -122,14 +181,20 @@ function claimGeneration(
     lockDir,
     ownerText: snapshot.ownerText,
     generation: snapshot.generation,
+    claimantPid: process.pid,
+    claimedAtMs: Date.now(),
     claimToken: randomUUID(),
   });
-  try {
-    writeFileSync(join(lockDir, GENERATION_CLAIM), claimText(claim), { flag: "wx" });
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException)?.code;
-    if (code === "ENOENT" || code === "EEXIST") return null;
-    throw error;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      writeFileSync(join(lockDir, GENERATION_CLAIM), claimText(claim), { flag: "wx" });
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT") return null;
+      if (code !== "EEXIST") throw error;
+      if (attempt > 0 || !reapOrphanedGenerationClaim(lockDir)) return null;
+    }
   }
 
   const current = snapshotLock(lockDir);
@@ -252,10 +317,9 @@ export async function acquireLock(lockFile: string): Promise<void> {
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     if (tryBirthLock(lockDir)) return;
-    // Check for stale lock on first retry.
-    if (attempt === 0 && stealStaleLock(lockDir)) {
-      continue; // we won the reap → retry immediately
-    }
+    // A claimant may die after any earlier observation. Re-check on every
+    // retry; generation/token authority still prevents retiring a replacement.
+    if (stealStaleLock(lockDir)) continue;
     await sleep(RETRY_MS);
   }
 
@@ -268,7 +332,7 @@ export function acquireLockSync(lockFile: string): void {
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     if (tryBirthLock(lockDir)) return;
-    if (attempt === 0 && stealStaleLock(lockDir)) continue;
+    if (stealStaleLock(lockDir)) continue;
     sleepSync(RETRY_MS);
   }
 

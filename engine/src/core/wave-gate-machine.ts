@@ -566,11 +566,15 @@ export function checkSpecAlignment(state: TaskGraph, wave: number): GateCheck {
 }
 
 export function checkCriticalFindings(tasks: readonly Task[]): GateCheck {
-  const totalCritical = tasks.reduce((sum, task) => sum + (task.critical_findings?.filter((finding) => finding.trim() !== "").length ?? 0), 0);
+  const criticalByTask = tasks.map((task) => ({
+    taskId: task.id,
+    findings: (task.critical_findings ?? []).filter((finding) => finding.trim() !== ""),
+  }));
+  const totalCritical = criticalByTask.reduce((sum, { findings }) => sum + findings.length, 0);
   if (totalCritical > 0) {
-    const details = tasks
-      .filter((task) => (task.critical_findings?.filter((finding) => finding.trim() !== "").length ?? 0) > 0)
-      .map((task) => `  ${task.id}: ${task.critical_findings!.filter((finding) => finding.trim() !== "").join(", ")}`)
+    const details = criticalByTask
+      .filter(({ findings }) => findings.length > 0)
+      .map(({ taskId, findings }) => `  ${taskId}: ${findings.join(", ")}`)
       .join("\n");
     return fail(`FAILED: ${totalCritical} critical code review findings.\n${details}`);
   }

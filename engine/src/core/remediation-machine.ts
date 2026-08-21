@@ -467,11 +467,12 @@ export function createStandaloneResultPublicationAuthorityResolver(
           ["kind", "message"],
           "LC-2 publication loader error",
         );
-    const resolutionError = resolutionErrorWithField.ok
-      ? resolutionErrorWithField.value
-      : resolutionErrorWithoutField?.ok === true
-        ? resolutionErrorWithoutField.value
-        : null;
+    let resolutionError: Readonly<Record<string, unknown>> | null = null;
+    if (resolutionErrorWithField.ok) {
+      resolutionError = resolutionErrorWithField.value;
+    } else if (resolutionErrorWithoutField?.ok === true) {
+      resolutionError = resolutionErrorWithoutField.value;
+    }
     if (resolutionError === null ||
         resolutionError.kind !== "standalone-result-publication-authority-unavailable" ||
         typeof resolutionError.message !== "string" || resolutionError.message.trim() === "" ||
@@ -520,11 +521,12 @@ function resolveStandaloneResultPublicationAuthority(
             ["kind", "message"],
             "LC-2 publication authority resolution error",
           );
-      const error = errorWithField.ok
-        ? errorWithField.value
-        : errorWithoutField?.ok === true
-          ? errorWithoutField.value
-          : null;
+      let error: Readonly<Record<string, unknown>> | null = null;
+      if (errorWithField.ok) {
+        error = errorWithField.value;
+      } else if (errorWithoutField?.ok === true) {
+        error = errorWithoutField.value;
+      }
       if (error !== null && error.kind === "standalone-result-publication-authority-unavailable" &&
           typeof error.message === "string") return fail(error.message);
     }
