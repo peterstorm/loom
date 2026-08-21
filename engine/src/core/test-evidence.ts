@@ -43,8 +43,25 @@ const RUNNER_TALLIES: readonly RunnerTally[] = Object.freeze([
 export function extractTestEvidence(bashOutput: string): TestEvidence {
   // Maven's pass tally already asserts zero failures and errors.
   if (/BUILD SUCCESS/.test(bashOutput)) {
-    const maven = lastMatch(bashOutput.replace(/\*\*/g, ""), /Tests run: \d+, Failures: 0, Errors: 0/);
-    if (maven !== null) return Object.freeze({ passed: true, evidence: `maven: ${maven[0]}` });
+    const stripped = bashOutput.replace(/\*\*/g, "");
+    const maven = lastMatch(stripped, /Tests run: \d+, Failures: 0, Errors: 0/);
+    if (maven !== null) {
+      // A success tally is only the FINAL verdict when nothing worse follows it:
+      // a later non-zero Failures:/Errors: tally (a broken re-run, or a later
+      // module in the same output) or a later BUILD FAILURE vetoes it — the same
+      // "last verdict wins" rule the runner loop applies, so a pass-then-fail
+      // transcript cannot mint a pass off the superseded run.
+      const tail = stripped.slice(maven.index);
+      // The last tally in the tail is the final verdict: if it is the selected
+      // zero tally the pass holds; a non-zero final tally vetoes (the runner
+      // loop's same rule). The tail always contains the selected tally, so a
+      // final tally always exists.
+      const finalTally = lastMatch(tail, /Tests run: \d+, Failures: (\d+), Errors: (\d+)/);
+      const tallyVetoes = finalTally !== null && (finalTally[1] !== "0" || finalTally[2] !== "0");
+      if (!tallyVetoes && !/BUILD FAILURE/.test(tail)) {
+        return Object.freeze({ passed: true, evidence: `maven: ${maven[0]}` });
+      }
+    }
   }
 
   for (const runner of RUNNER_TALLIES) {

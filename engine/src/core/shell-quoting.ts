@@ -50,12 +50,18 @@ export const halt = <T>(value: T): UnquotedStep<T> => Object.freeze({ kind: "hal
  * the next character everywhere EXCEPT inside single quotes, where sh gives it
  * no special meaning.
  */
-export function scanUnquoted<T>(
+/**
+ * The shared walk behind `scanUnquoted` and `openQuoteAfter`: the visitor
+ * decides at unquoted characters, and the walk reports both the first halt
+ * value and the quote still open when the walk stops (end of text or halt).
+ */
+function walkQuotedText<T>(
   text: string,
   start: number,
   visit: (char: string, index: number) => UnquotedStep<T>,
-): T | null {
+): Readonly<{ halted: T | null; openQuote: ShellQuoteChar | null }> {
   let quote: ShellQuoteChar | null = null;
+  let halted: T | null = null;
   for (let i = start; i < text.length; i++) {
     const char = text[i]!;
     if (quote !== null) {
@@ -75,8 +81,30 @@ export function scanUnquoted<T>(
       continue;
     }
     const step = visit(char, i);
-    if (step.kind === "halt") return step.value;
+    if (step.kind === "halt") {
+      halted = step.value;
+      break;
+    }
     if (step.kind === "skip") i = step.resumeAt - 1;
   }
-  return null;
+  return Object.freeze({ halted, openQuote: quote });
+}
+
+export function scanUnquoted<T>(
+  text: string,
+  start: number,
+  visit: (char: string, index: number) => UnquotedStep<T>,
+): T | null {
+  return walkQuotedText(text, start, visit).halted;
+}
+
+/**
+ * The quote character still open after walking `text` from `start` — `null`
+ * when every opened region was closed. This is the balance check raw
+ * per-character parity cannot express: an escaped quote (`\"`) or a quote
+ * nested inside another region (`'a " b'`) does not open, while an even raw
+ * count can still leave a region open (`\" a"`).
+ */
+export function openQuoteAfter(text: string, start: number): ShellQuoteChar | null {
+  return walkQuotedText(text, start, () => CONTINUE).openQuote;
 }

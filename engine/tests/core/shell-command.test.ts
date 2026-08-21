@@ -187,10 +187,20 @@ describe("hasUnbalancedQuotes", () => {
     expect(hasUnbalancedQuotes("echo `abc")).toBe(true);
   });
 
-  it("flags a lone single quote (per-character parity — conservative by design)", () => {
-    // Each quote char is counted for odd/even parity independently of the
-    // others: a single ' inside double quotes still refuses classification.
-    expect(hasUnbalancedQuotes('echo "a\'b"')).toBe(true);
+  it("accepts a quote nested inside another region (bash reads it as closed)", () => {
+    // The old per-character parity flagged this: one raw single quote. The
+    // splitter's quote state does not — inside double quotes `'` is literal,
+    // so the command is balanced and must classify.
+    expect(hasUnbalancedQuotes('echo "a\'b"')).toBe(false);
+    expect(hasUnbalancedQuotes("echo 'a \" b'")).toBe(false);
+  });
+
+  it("flags an open region hidden behind an even raw count (parity missed this)", () => {
+    // `\"` is an escaped quote (closed), but the trailing `"` opens a region
+    // that never closes — two raw quotes, one effective open.
+    expect(hasUnbalancedQuotes('echo \\" a"')).toBe(true);
+    // …while a lone escaped quote is balanced:
+    expect(hasUnbalancedQuotes('echo \\"')).toBe(false);
   });
 
   it("accepts balanced quotes, including the sh 'it''s' idiom", () => {

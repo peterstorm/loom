@@ -22,6 +22,7 @@
  */
 
 export { MAX_DIAGNOSTIC_MESSAGE_LENGTH, canonicalRecord, canonicalStructuralEquals, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseEffectId, parseOrchestrationRunId, parseRequestId, parseSlotId, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type EffectId, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
+export { fieldFailureError } from './errors';
 export { MAX_DENSE_DATA_ARRAY_LENGTH, MAX_SEMANTIC_PAYLOAD_ARRAY_LENGTH, digestRawTranscriptBytes } from './bytes';
 export { AGENT_REQUIRED_SKILLS, parseFixedArtifactSlot } from './artifacts';
 export { sameAgentRequestAuthority, parseAgentRequestAuthority, parseStoredAgentRequestAuthority, parseAgentRosterSlot, parseArtifactRef, parseExactRoster, type AgentRequestAuthority, type AgentRosterSlot, type ArtifactRef, type ExactRoster, type RosterViolation } from './roster';

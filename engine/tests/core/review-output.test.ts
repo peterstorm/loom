@@ -623,7 +623,8 @@ describe("the structured block never costs a claim the markers made", () => {
     // The bug this pins: the block/marker arbitration counted CRITICALS only. A
     // block that accounted for every critical but listed no advisories won
     // outright and deleted all three ADVISORY: lines, with blockStatus still
-    // reporting "used" so no degradation note was printed. /wave-gate Step 4b
+    // reporting "used" so no degradation note was printed. The wave gate's
+    // advisory-disposition step (the `await-user` action in `commands/wave-gate.md`)
     // must triage every advisory to fixed/deferred/dismissed; it cannot triage
     // what it never sees. And a criticals-only block is exactly what a reviewer
     // following the prompt literally emits — the prompt scopes its mandatory

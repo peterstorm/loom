@@ -37,7 +37,7 @@ describe("every REVIEW_SUB_AGENT declares the Machine Summary contract", () => {
     expect(md, "must name CRITICAL_COUNT — its absence is what fails the gate").toContain(
       "CRITICAL_COUNT:",
     );
-    expect(md, "must name ADVISORY_COUNT — wave-gate Step 4b triages advisories").toContain(
+    expect(md, "must name ADVISORY_COUNT — the wave gate's advisory-disposition step triages advisories").toContain(
       "ADVISORY_COUNT:",
     );
     expect(md, "must name the CRITICAL: marker line").toContain("CRITICAL: {");

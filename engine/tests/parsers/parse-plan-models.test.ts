@@ -86,8 +86,8 @@ describe("parsePlanModels", () => {
       declaredNodes: ["fetch-order"],
     });
     expect(models.invariants).toEqual([
-      { id: "INV-1", title: "No state string literals outside the machine", tier: "checkable", ruleFile: ".claude/linter/rules/inv-1-no-raw-order-states.json" },
-      { id: "INV-2", title: "Refunds complete within 30 days", tier: "advisory", ruleFile: null },
+      { id: "INV-1", title: "No state string literals outside the machine", tier: { status: "ok", tier: "checkable" }, ruleFile: ".claude/linter/rules/inv-1-no-raw-order-states.json" },
+      { id: "INV-2", title: "Refunds complete within 30 days", tier: { status: "ok", tier: "advisory" }, ruleFile: null },
     ]);
     expect(hasModels(models)).toBe(true);
   });
@@ -122,14 +122,19 @@ describe("parsePlanModels", () => {
     });
   });
 
-  it("represents an unrecognized tier as null", () => {
+  it("represents an unrecognized tier with its raw text", () => {
     const models = parsePlanModels("## Invariants\n\n### INV-1: Weird\n\n**Tier:** enforced-ish\n");
-    expect(models.invariants).toEqual([{ id: "INV-1", title: "Weird", tier: null, ruleFile: null }]);
+    expect(models.invariants).toEqual([{ id: "INV-1", title: "Weird", tier: { status: "unrecognized", raw: "enforced-ish" }, ruleFile: null }]);
+  });
+
+  it("represents a missing tier line as absent (not conflated with unrecognized)", () => {
+    const models = parsePlanModels("## Invariants\n\n### INV-1: X\n\n**Statement:** prose\n");
+    expect(models.invariants).toEqual([{ id: "INV-1", title: "X", tier: { status: "absent" }, ruleFile: null }]);
   });
 
   it("tier matching is case-insensitive", () => {
     const models = parsePlanModels("## Invariants\n\n### INV-1: X\n\n**Tier:** Checkable\n**Rule file:** r.json\n");
-    expect(models.invariants[0].tier).toBe("checkable");
+    expect(models.invariants[0].tier).toEqual({ status: "ok", tier: "checkable" });
   });
 
   it("section headings are case-insensitive", () => {
@@ -315,8 +320,8 @@ describe("template conformance — the shipped plan template parses cleanly", ()
     expect(models.pipeline).not.toBeNull();
     expect(models.pipeline!.dagFile).not.toBeNull();
     expect(models.invariants).toHaveLength(2);
-    expect(models.invariants[0].tier).toBe("checkable");
+    expect(models.invariants[0].tier).toEqual({ status: "ok", tier: "checkable" });
     expect(models.invariants[0].ruleFile).not.toBeNull();
-    expect(models.invariants[1].tier).toBe("advisory");
+    expect(models.invariants[1].tier).toEqual({ status: "ok", tier: "advisory" });
   });
 });

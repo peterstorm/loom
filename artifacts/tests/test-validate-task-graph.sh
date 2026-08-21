@@ -1,6 +1,6 @@
 #!/bin/bash
 # Tests for validate-task-graph + populate-task-graph (TS CLI)
-# Run: bash .claude/tests/test-validate-task-graph.sh
+# Run: bash artifacts/tests/test-validate-task-graph.sh
 
 set -e
 

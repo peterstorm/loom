@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { parsePlanModels, hasModels, renderStray, type PlanModels, type Stray } from "../../src/parsers/parse-plan-models";
+import { parsePlanModels, hasModels, renderStray, type PlanModels, type PlanInvariant, type Stray } from "../../src/parsers/parse-plan-models";
 import { validateModelBindings, type ModelBindingDeps } from "../../src/handlers/helpers/validate-model-bindings";
 
 const NO_FILES: ModelBindingDeps = { readFile: (path) => ({ ok: false, error: `ENOENT: ${path}` }) };
@@ -24,13 +24,19 @@ function isWellShapedStray(s: Stray): boolean {
   );
 }
 
+function isWellShapedTier(t: PlanInvariant["tier"]): boolean {
+  if (t.status === "absent") return true;
+  if (t.status === "unrecognized") return typeof t.raw === "string";
+  return t.tier === "checkable" || t.tier === "advisory";
+}
+
 function isWellShaped(models: PlanModels): boolean {
   return (
     Array.isArray(models.lifecycles) &&
     models.lifecycles.every((lc) => /^LC-\d+$/.test(lc.id) && typeof lc.title === "string" && (lc.machineFile === null || typeof lc.machineFile === "string")) &&
     (models.pipeline === null || models.pipeline.dagFile === null || typeof models.pipeline.dagFile === "string") &&
     Array.isArray(models.invariants) &&
-    models.invariants.every((inv) => /^INV-\d+$/.test(inv.id) && (inv.tier === null || inv.tier === "checkable" || inv.tier === "advisory")) &&
+    models.invariants.every((inv) => /^INV-\d+$/.test(inv.id) && isWellShapedTier(inv.tier)) &&
     Array.isArray(models.strays) &&
     models.strays.every(isWellShapedStray)
   );
@@ -96,7 +102,7 @@ describe("parsePlanModels — properties", () => {
             models.lifecycles.length === lifecycles.length &&
             models.invariants.length === invariants.length &&
             models.lifecycles.every((lc, i) => lc.machineFile === lifecycles[i].file) &&
-            models.invariants.every((inv, i) => inv.tier === invariants[i].tier)
+            models.invariants.every((inv, i) => inv.tier.status === "ok" && inv.tier.tier === invariants[i].tier)
           );
         }
       ),
@@ -110,7 +116,7 @@ describe("validateModelBindings — properties", () => {
     const arbAdvisory = fc.record({
       id: fc.integer({ min: 1, max: 99 }).map((n) => `INV-${n}`),
       title: fc.string({ maxLength: 30 }),
-      tier: fc.constant("advisory" as const),
+      tier: fc.constant({ status: "ok" as const, tier: "advisory" as const }),
       ruleFile: fc.constant(null),
     });
     fc.assert(

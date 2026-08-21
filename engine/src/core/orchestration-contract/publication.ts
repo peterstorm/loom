@@ -9,7 +9,7 @@ import { canonicalRecord, failure, parseArtifactDigest, parseContextDigest, pars
 import { causedMessage, readDenseDataArray, readExactDataRecord, type DataBoundaryError } from './bytes';
 import { parseFixedArtifactSlot, type FixedArtifactSlot } from './artifacts';
 import { AtomicInitialPublicationClaimPortMembership, InitialBatchPublicationIntentMembership, InitialPublicationEffectPortMembership, InitialPublicationIssuanceMembership, parseStoredAgentRequestAuthority, sameHarnessBinding, type AgentRequestAuthority } from './roster';
-import { type AcceptedAgentResultError, actionFailure, outputSlotCollision, type ExternalActionError } from './errors';
+import { fieldFailureError, type AcceptedAgentResultError, actionFailure, outputSlotCollision, type ExternalActionError } from './errors';
 
 export const REGISTERED_PUBLICATION_PROOF: unique symbol = Symbol("RegisteredBatchPublicationAuthority");
 export const ISSUED_REQUEST_PROOF: unique symbol = Symbol("IssuedRequest");
@@ -929,9 +929,7 @@ export function publicationResolutionFailure(
   message: string,
   field?: string,
 ): PublicationAuthorityResolutionError {
-  return field === undefined
-    ? canonicalRecord({ kind: "publication-authority-unavailable", message })
-    : canonicalRecord({ kind: "publication-authority-unavailable", field, message });
+  return fieldFailureError("publication-authority-unavailable", message, field);
 }
 
 export function parseBatchPublicationIdentity(
@@ -1130,9 +1128,7 @@ export function issuancePublicationIdentity(issuance: IssuedSpawnRequestProof): 
 }
 
 export function authorityResolutionFailure(message: string, field?: string): AcceptedAgentResultError {
-  return field === undefined
-    ? canonicalRecord({ kind: "invalid-accepted-agent-result", message })
-    : canonicalRecord({ kind: "invalid-accepted-agent-result", field, message });
+  return fieldFailureError("invalid-accepted-agent-result", message, field);
 }
 
 export function resolveRegisteredPublicationAuthority(

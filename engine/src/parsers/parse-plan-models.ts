@@ -31,6 +31,7 @@ import type {
   InvariantTier,
   ModelSection,
   PlanInvariant,
+  PlanInvariantTier,
   PlanLifecycle,
   PlanModels,
   PlanPipeline,
@@ -46,6 +47,7 @@ export type {
   InvariantTier,
   ModelSection,
   PlanInvariant,
+  PlanInvariantTier,
   PlanLifecycle,
   PlanModels,
   PlanPipeline,
@@ -185,10 +187,15 @@ function pipelineNodes(body: string): string[] {
   return nodes;
 }
 
-function parseTier(raw: string | null): InvariantTier | null {
-  if (raw === null) return null;
+/**
+ * The `**Tier:**` line as its three real states. The raw text is kept on the
+ * unrecognized arm — the error message names what the plan actually wrote.
+ */
+function parseTier(raw: string | null): PlanInvariantTier {
+  if (raw === null) return { status: "absent" };
   const lowered = raw.toLowerCase();
-  return lowered === "checkable" || lowered === "advisory" ? lowered : null;
+  if (lowered === "checkable" || lowered === "advisory") return { status: "ok", tier: lowered };
+  return { status: "unrecognized", raw };
 }
 
 const CANONICAL_SECTIONS = ["Lifecycles", "Pipeline", "Invariants"] as const;

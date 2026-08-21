@@ -172,7 +172,8 @@ describe("ADVISORY_COUNT is an authority, not decoration", () => {
   });
 
   it("a shortfall becomes a self-describing advisory entry", () => {
-    // /wave-gate Step 4b must triage every advisory to fixed/deferred/dismissed.
+    // The wave gate's advisory-disposition step (the `await-user` action in
+    // `commands/wave-gate.md`) must triage every advisory to fixed/deferred/dismissed.
     // It cannot triage what a failed scrape silently dropped, and there was no
     // advisory analogue of the critical backstop.
     const parsed = parseMachineSummary(

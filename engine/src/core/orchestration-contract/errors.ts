@@ -109,3 +109,21 @@ export function outputSlotCollision<T>(
     duplicate: canonicalRecord(duplicate),
   }));
 }
+
+/**
+ * The canonical optional-field failure: `field` is present ONLY when a
+ * specific field is named — the record's shape (and so its canonical digest)
+ * differs with and without the field, and both forms must be constructed
+ * together. This two-branch shape existed in three copies (publication ×2,
+ * remediation-machine); a drifted copy would have silently changed stored
+ * error digests.
+ */
+export function fieldFailureError<Kind extends string>(
+  kind: Kind,
+  message: string,
+  field: string | undefined,
+): Readonly<{ kind: Kind; field?: string; message: string }> {
+  return field === undefined
+    ? canonicalRecord({ kind, message })
+    : canonicalRecord({ kind, field, message });
+}

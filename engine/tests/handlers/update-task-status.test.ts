@@ -224,6 +224,28 @@ describe("extractTestEvidence (pure)", () => {
     expect(result.evidence).toContain("Tests run: 15");
   });
 
+  it("uses last match for maven: first passes, last fails", () => {
+    // A re-run that broke (or a later failing module in the same output) must
+    // not launder into a pass off the superseded run's BUILD SUCCESS — the
+    // runner loop's last-verdict-wins rule, mirrored for maven.
+    const output = "Tests run: 15, Failures: 0, Errors: 0\nBUILD SUCCESS\n\nTests run: 10, Failures: 2, Errors: 0\nBUILD FAILURE";
+    const result = extractTestEvidence(output);
+    expect(result.passed).toBe(false);
+  });
+
+  it("a later non-zero maven Errors tally vetoes an earlier pass", () => {
+    const output = "Tests run: 15, Failures: 0, Errors: 0\nBUILD SUCCESS\n\nTests run: 10, Failures: 0, Errors: 3\nBUILD FAILURE";
+    const result = extractTestEvidence(output);
+    expect(result.passed).toBe(false);
+  });
+
+  it("keeps the cross-line exemption for maven: a superseded failing run does not veto a later passing run", () => {
+    const output = "Tests run: 5, Failures: 1, Errors: 0\nBUILD FAILURE\n\nTests run: 5, Failures: 0, Errors: 0\nBUILD SUCCESS";
+    const result = extractTestEvidence(output);
+    expect(result.passed).toBe(true);
+    expect(result.evidence).toContain("maven");
+  });
+
   it("handles 3+ test runs, uses last", () => {
     const output = "5 pass\n2 fail\n\n10 pass\n1 fail\n\n50 pass\n0 fail";
     const result = extractTestEvidence(output);

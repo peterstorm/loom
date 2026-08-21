@@ -121,7 +121,8 @@ export interface ParsedFindings {
    * by every reviewer agent contract and was read by nothing, so a reviewer that
    * declared four advisories whose `ADVISORY:` lines failed to scrape — wrapped,
    * re-indented, reformatted — recorded zero with nothing reporting the
-   * shortfall, and `/wave-gate` Step 4b (a MUST-level constraint) had nothing to
+   * shortfall, and the wave gate's advisory-disposition step (the `await-user`
+   * action in `commands/wave-gate.md`, a MUST-level constraint) had nothing to
    * triage. Both count markers are mandatory evidence: omitting either means the
    * transcript may be truncated and must fail closed.
    */
@@ -190,8 +191,8 @@ function parseFailureClaim(severity: FindingSeverity, missing: number, total: nu
  * BOTH severities. `ADVISORY_COUNT` is mandated by every reviewer agent file and
  * used to be parsed by nothing, so advisory marker lines that failed to scrape
  * vanished with no backstop — the mirror image of the critical loss this
- * function was written for, on the severity `/wave-gate` Step 4b must triage
- * item by item. The synthetic entry keeps its own severity, so a lost advisory
+ * function was written for, on the severity the wave gate must triage item by
+ * item (its `await-user` advisory-disposition action in `commands/wave-gate.md`). The synthetic entry keeps its own severity, so a lost advisory
  * does not fabricate a blocker.
  */
 export function reconcileFindings(findings: ParsedFindings): ParsedFindings {
@@ -351,8 +352,9 @@ function alignStructuredSeverity(
  * The advisory half of that bar is not decoration. Gating on criticals alone
  * let a criticals-only block win outright and delete every `ADVISORY:` marker
  * line, while `blockStatus` still reported `used` so no degradation note was
- * printed. `/wave-gate` Step 4b must triage every advisory to
- * fixed/deferred/dismissed; it cannot triage what it never sees. (Every agent
+ * printed. The wave gate's advisory-disposition step (the `await-user` action
+ * in `commands/wave-gate.md`) must triage every advisory to fixed/deferred/
+ * dismissed; it cannot triage what it never sees. (Every agent
  * file in `REVIEW_SUB_AGENTS` requires the block to account for advisories too
  * — `tests/review-agent-contract.test.ts` proves that claim rather than
  * asserting it — but the arbitration must hold for output that does not honour
@@ -792,6 +794,16 @@ export function applyReviewResolution(task: Task, resolution: ReviewResolution):
 }
 
 /**
+ * The larger of the reviewer's tally and what was actually captured — the same
+ * disjunction `mergeFindings` blocks on. Reporting the tally alone logged
+ * "passed (0 critical)" for a task the very next line recorded as blocked with a
+ * real critical in it.
+ */
+function criticalTally(resolution: FindingsResolution): number {
+  return Math.max(resolution.findings.criticalCount ?? 0, resolution.findings.critical.length);
+}
+
+/**
  * The operator-facing note a degraded structured block earns. Empty when the
  * block was used or never offered — only a LOSS is worth a line of output.
  *
@@ -804,16 +816,6 @@ export function applyReviewResolution(task: Task, resolution: ReviewResolution):
  * duplicate, and an operator who cannot see the count cannot tell an inflated
  * finding set from a genuinely large one.
  */
-/**
- * The larger of the reviewer's tally and what was actually captured — the same
- * disjunction `mergeFindings` blocks on. Reporting the tally alone logged
- * "passed (0 critical)" for a task the very next line recorded as blocked with a
- * real critical in it.
- */
-function criticalTally(resolution: FindingsResolution): number {
-  return Math.max(resolution.findings.criticalCount ?? 0, resolution.findings.critical.length);
-}
-
 function blockStatusNote(status: FindingsBlockStatus): string {
   const carried = (count: number) => `${count} claim(s) carried over`;
   return match(status)

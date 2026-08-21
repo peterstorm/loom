@@ -16,6 +16,8 @@
  * own header) — so none of them can skip enforcement.
  */
 
+import { match } from "ts-pattern";
+
 import { readFileSync } from "node:fs";
 import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../parsers/parse-plan-models";
 import { type ValidationResult, ok, fail } from "./validation-result";
@@ -153,11 +155,22 @@ export function validateModelBindings(
   }
 
   for (const inv of models.invariants) {
-    if (inv.tier === null) {
-      errors.push(`${inv.id} ("${inv.title}"): missing or unrecognized '**Tier:**' — must be 'checkable' or 'advisory'`);
-      continue;
-    }
-    if (inv.tier === "advisory") {
+    // Three states, three messages: the old `tier: null` conflated "line
+    // missing" with "line present but unrecognized", and the error could
+    // only guess which failure the operator was looking at.
+    const tier = match(inv.tier)
+      .with({ status: "absent" }, () => {
+        errors.push(`${inv.id} ("${inv.title}"): missing '**Tier:**' — must be 'checkable' or 'advisory'`);
+        return null;
+      })
+      .with({ status: "unrecognized" }, ({ raw }) => {
+        errors.push(`${inv.id} ("${inv.title}"): unrecognized '**Tier:**' '${raw}' — must be 'checkable' or 'advisory'`);
+        return null;
+      })
+      .with({ status: "ok" }, ({ tier }) => tier)
+      .exhaustive();
+    if (tier === null) continue;
+    if (tier === "advisory") {
       if (inv.ruleFile !== null) {
         errors.push(`${inv.id} ("${inv.title}"): tier is 'advisory' but declares a '**Rule file:**' — advisory invariants are never enforced; re-tier as 'checkable' or remove the rule file line`);
       }

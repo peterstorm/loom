@@ -1407,7 +1407,11 @@ function occupiedArtifactConflict(
   occupied: Uint8Array | Readonly<{ __unreadable: string }>,
 ): string | null {
   if (!(occupied instanceof Uint8Array)) {
-    return `artifact slot is occupied by unreadable bytes: ${entry.final}`;
+    // The `__unreadable` sentinel collected the read cause so an operator can
+    // tell EACCES from an ELOOP symlink race from a directory-in-slot — the
+    // same rule `readRunAuthority` applies to its own unreadable reads. A
+    // refusal that dropped it sent all three causes down one unactionable path.
+    return `artifact slot is occupied by unreadable bytes: ${entry.final} (${occupied.__unreadable})`;
   }
   if (!stagedBytesMatch(entry.staged, occupied)) {
     return `a different artifact already occupies this slot: ${entry.final}`;

@@ -190,44 +190,53 @@ describe("validateModelBindings", () => {
   });
 
   describe("invariants", () => {
-    it("rejects a missing/unrecognized tier", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: null, ruleFile: null }] };
-      expectError(validateModelBindings(models, [], NO_FILES), "'checkable' or 'advisory'");
+    it("rejects a missing tier with the missing-specific message", () => {
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "absent" }, ruleFile: null }] };
+      const result = validateModelBindings(models, [], NO_FILES);
+      expectError(result, "missing '**Tier:**'");
+      expectError(result, "'checkable' or 'advisory'");
+    });
+
+    it("rejects an unrecognized tier, naming the raw text it saw", () => {
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "unrecognized", raw: "enforced-ish" }, ruleFile: null }] };
+      const result = validateModelBindings(models, [], NO_FILES);
+      expectError(result, "unrecognized '**Tier:**' 'enforced-ish'");
+      expectError(result, "'checkable' or 'advisory'");
     });
 
     it("rejects a checkable invariant with no rule file", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: "checkable", ruleFile: null }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: null }] };
       expectError(validateModelBindings(models, [], NO_FILES), "must be a lint rule");
     });
 
     it("rejects an ADVISORY invariant that declares a rule file (mis-tiered intent)", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: "advisory", ruleFile: "r.json" }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "advisory" }, ruleFile: "r.json" }] };
       expectError(validateModelBindings(models, [], NO_FILES), "advisory invariants are never enforced");
     });
 
     it("rejects a checkable invariant whose rule file does not exist", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: "checkable", ruleFile: ".claude/linter/rules/inv-1.json" }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: ".claude/linter/rules/inv-1.json" }] };
       expectError(validateModelBindings(models, [], NO_FILES), "cannot read rule file");
     });
 
     it("rejects a rule file that is not a rule-shaped JSON object", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: "checkable", ruleFile: "r.json" }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: "r.json" }] };
       expectError(validateModelBindings(models, [], depsWith({ "r.json": JSON.stringify({ pattern: "x" }) })), "'kind' and 'name'");
     });
 
     it("rejects a rule file with invalid JSON and preserves the parse error", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: "checkable", ruleFile: "r.json" }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: "r.json" }] };
       expectError(validateModelBindings(models, [], depsWith({ "r.json": "{{" })), "not valid JSON:");
     });
 
     it("accepts a checkable invariant bound to an existing rule file", () => {
       const rule = JSON.stringify({ kind: "regex", name: "inv-1", description: "d", extensions: [".ts"], pattern: "x", fixHint: "f", enabled: true });
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: "checkable", ruleFile: "r.json" }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: "r.json" }] };
       expect(validateModelBindings(models, [], depsWith({ "r.json": rule })).ok).toBe(true);
     });
 
     it("accepts an advisory invariant with no rule file (honest prose)", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-2", title: "SLA", tier: "advisory", ruleFile: null }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-2", title: "SLA", tier: { status: "ok", tier: "advisory" }, ruleFile: null }] };
       expect(validateModelBindings(models, [], NO_FILES).ok).toBe(true);
     });
   });
@@ -236,7 +245,7 @@ describe("validateModelBindings", () => {
     const models: PlanModels = {
       lifecycles: [{ id: "LC-1", title: "A", machineFile: null }],
       pipeline: { dagFile: null, declaredNodes: [] },
-      invariants: [{ id: "INV-1", title: "B", tier: "checkable", ruleFile: null }],
+      invariants: [{ id: "INV-1", title: "B", tier: { status: "ok", tier: "checkable" }, ruleFile: null }],
       strays: [{ kind: "near-miss-heading", heading: "## Lifecycles:" }],
     };
     expect(errorsOf(validateModelBindings(models, [], NO_FILES))).toHaveLength(4);

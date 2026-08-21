@@ -786,6 +786,17 @@ export interface TaskGraph {
 
 export type InvariantTier = "checkable" | "advisory";
 
+/**
+ * The three states a `**Tier:**` line can be in: absent, recognized, or
+ * present-but-unrecognized. The old `InvariantTier | null` conflated absent
+ * with unrecognized — a consumer that wanted to say which failure it was
+ * looking at had no way to know.
+ */
+export type PlanInvariantTier =
+  | { readonly status: "absent" }
+  | { readonly status: "ok"; readonly tier: InvariantTier }
+  | { readonly status: "unrecognized"; readonly raw: string };
+
 /** Model sections that carry `### ` id-blocks. */
 export type BlockSection = "Lifecycles" | "Invariants";
 
@@ -831,8 +842,8 @@ export interface PlanInvariant {
   /** e.g. "INV-1" */
   readonly id: string;
   readonly title: string;
-  /** null when the `**Tier:**` line is missing or not a recognized tier */
-  readonly tier: InvariantTier | null;
+  /** The `**Tier:**` line, three-state: absent, recognized, or unrecognized */
+  readonly tier: PlanInvariantTier;
   /** Path from the `**Rule file:**` line; null when the line is missing */
   readonly ruleFile: string | null;
 }

@@ -3,6 +3,7 @@ import { compareStrings } from "./ordering";
 import { frozenSet } from "./frozen";
 import {
   canonicalRecord,
+  fieldFailureError,
   parseArtifactDigest,
   parseArtifactRef,
   parseEffectId,
@@ -351,9 +352,7 @@ function publicationResolutionFailure(
   message: string,
   field?: string,
 ): StandaloneResultPublicationAuthorityResolutionError {
-  return field === undefined
-    ? canonicalRecord({ kind: "standalone-result-publication-authority-unavailable", message })
-    : canonicalRecord({ kind: "standalone-result-publication-authority-unavailable", field, message });
+  return fieldFailureError("standalone-result-publication-authority-unavailable", message, field);
 }
 
 function expectedStandaloneResultPublication(

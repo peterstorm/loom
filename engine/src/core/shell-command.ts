@@ -1,4 +1,4 @@
-import { CONTINUE, halt, isShellQuoteChar, scanUnquoted, SHELL_QUOTE_CHARS, type ShellQuoteChar } from "./shell-quoting";
+import { CONTINUE, halt, isShellQuoteChar, openQuoteAfter, scanUnquoted, type ShellQuoteChar } from "./shell-quoting";
 
 /** Shell separator between two simple-command segments. */
 export type SegmentOp = "&&" | "||" | ";" | "|" | "&";
@@ -86,9 +86,16 @@ export function splitCommandSegments(command: string): readonly string[] {
   return splitCommandSegmentsWithOps(command).map(({ text }) => text);
 }
 
-/** Refuse command classification when quoting cannot be resolved. */
+/**
+ * Refuse command classification when quoting cannot be resolved.
+ *
+ * Mirrors the splitter's quote state rather than raw character parity: a
+ * quote bash reads as closed (escaped, or nested inside another region —
+ * `echo "a'b"`) classifies, while a region left open despite an even raw
+ * count (`echo \" a"`) refuses. Parity got both directions wrong.
+ */
 export function hasUnbalancedQuotes(segment: string): boolean {
-  return SHELL_QUOTE_CHARS.some((quote) => (segment.split(quote).length - 1) % 2 === 1);
+  return openQuoteAfter(segment, 0) !== null;
 }
 
 /** Strip a trailing unquoted shell comment. */

@@ -728,6 +728,26 @@ describe("artifact set publication", () => {
       expect(artifacts.some((name) => name.endsWith(".staged"))).toBe(false);
       expect(readFileSync(join(directory, "artifacts", "taken.json"), "utf-8")).toBe("original");
     });
+
+    it("carries the read cause when an occupied slot is unreadable, so an ELOOP symlink race is not a generic refusal", () => {
+      const { directory } = freshRun();
+      const final = join(directory, "artifacts", "loop.json");
+      // A self-symlink is an occupied slot the no-follow read can never read:
+      // the sentinel collects the ELOOP cause so the refusal names it instead
+      // of collapsing permission, symlink-race, and corruption into one string.
+      symlinkSync(final, final);
+      const staged = join(directory, "artifacts", "loop.json.staged");
+      writeFileSync(staged, "new");
+
+      const promoted = promoteArtifactSet([{ staged, final }]);
+
+      expect(promoted.ok).toBe(false);
+      if (promoted.ok) return;
+      expect(promoted.error.message).toContain("artifact slot is occupied by unreadable bytes");
+      expect(promoted.error.message).toContain(final);
+      expect(promoted.error.message).toContain("ELOOP");
+      expect(readdirSync(join(directory, "artifacts")).some((name) => name.endsWith(".staged"))).toBe(false);
+    });
   });
 });
 

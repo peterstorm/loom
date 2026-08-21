@@ -185,7 +185,7 @@ describe("the panel's verdict is the gate's verdict", () => {
     const after = adjudicate([withAdvisory], { [id]: [true, true, true] });
 
     expect(checkCriticalFindings(after).passed).toBe(true);
-    expect(after[0]!.advisory_findings, "still there for Step 4b triage").toEqual([
+    expect(after[0]!.advisory_findings, "still there for the wave gate's advisory triage").toEqual([
       "prefer a named constant",
     ]);
   });
