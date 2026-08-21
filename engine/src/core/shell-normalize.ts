@@ -3,7 +3,7 @@
  * escapes, `\`-newline line continuation, ANSI-C `$'…'` decoding (NUL truncates
  * the ANSI-C body), locale `$"…"` quoting, and unquoted/double-quoted parameter
  * expansion (`$name` / `${…}`). Both the guard's matching view
- * (core/guard-state-file `collapseQuotes`) and the evidence scanner's
+ * (core/guard-state-file `collapseVariants`) and the evidence scanner's
  * redirect-target reader (machine/extract-evidence `readRedirectTarget`) build
  * on this, so a rule taught to one (ANSI-C in round 17, line-continuation + NUL
  * in round 18, parameter expansion in round 19) can never again be missing from
@@ -28,15 +28,18 @@
  * var is set-but-empty they expand to EMPTY, and `.claude/stat${x-X}e` then
  * reassembles to `.claude/state` — a guarded literal the word-reveal view
  * conceals (the round-20 regression). The guard tests BOTH via the
- * colonlessDefaultsEmpty base in referencesPattern; colon forms stay reveal-only
+ * `collapseVariants` cross-product — `referencesPattern` feeds the unset,
+ * blanked, and completed forms through it, and the colonless empty output is
+ * one enumerated view; colon forms stay reveal-only
  * (they can never expand to empty). The ALTERNATE forms (`${x:+w}`/`${x+w}`) are
  * the MIRROR: they yield EMPTY on unset (the primary view deletes them, exactly
  * as before) but the WORD `w` on set (`:+` set-non-null, `+` set), and `w` can
  * carry a guarded literal (`${PWD:+.claude/state/…}` — always-set `PWD` makes
  * bash run the delete). Deleting the span in the unset view is right, but the
  * set-state output must ALSO be tested or the guard fails OPEN (it ALLOWed a real
- * state write before round 24); the guard reveals `w` via the alternateFormsReveal
- * base in referencesPattern. `$'…'`, `$"…"`, and `$(…)` are NOT parameter
+ * state write before round 24); the guard reveals `w` through the same
+ * `collapseVariants` cross-product (the alternate form's set-state output is an
+ * enumerated view). `$'…'`, `$"…"`, and `$(…)` are NOT parameter
  * expansions and are handled separately (`$(…)` stays literal here — the guard
  * models command-substitution-to-empty in its own front gate, NOT here; both
  * callers run on UNFLATTENED text).
@@ -199,7 +202,7 @@ export interface NormalizedSpan {
  * union so the incoherent boolean-product configs the old
  * `{ stopAtWordBoundary; backtickQuotes? }` admitted are unrepresentable:
  *
- *   - `"matching-view"` (guard `collapseQuotes`): consume to the end of `text`
+ *   - `"matching-view"` (guard `collapseVariants`): consume to the end of `text`
  *     and treat an unquoted backtick as a LITERAL. Backticks stay literal
  *     because guarded patterns contain no backtick, so keeping the char is
  *     reveal-monotonic — it can only ever fail to hide a guarded token, never

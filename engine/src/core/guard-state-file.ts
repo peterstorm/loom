@@ -70,7 +70,7 @@
  *    case…esac, [[ ]]); pipe members stay in ONE group.
  *  - scanPastHeredocSpans / parseHeredocDelimiter / scanHeredocBodySubstitutions
  *    — the heredoc pre-pass; bodies are data unless the owning group EXECUTES
- *    stdin (groupExecutesStdin/commandsExecuteStdin, which recurses into
+ *    stdin (commandsExecuteStdin, which recurses into
  *    inline `-c` programs because they inherit the command's stdin).
  *  - unquoted-heredoc bodies are scanned quote-INSENSITIVELY (only `\`
  *    escapes), because quote chars are literal data there.
@@ -84,7 +84,6 @@ import type { HookResult } from "../types";
 import { normalizeShellVariants } from "./shell-normalize";
 import { CONTINUE, halt, scanUnquoted, skip } from "./shell-quoting";
 import {
-  TASK_GRAPH_PATH,
   WHITELISTED_HELPERS,
   stateFilePatterns,
   READ_ONLY_STATE_COMMANDS,
@@ -92,7 +91,7 @@ import {
   protectedDirSegments,
   guardedDirSegments,
   SUBAGENT_DIR,
-  pathExistsFailClosed,
+  defaultTaskGraphExists,
 } from "../config";
 import {
   classifyFdDupWord,
@@ -719,18 +718,27 @@ const WRAPPER_HEADS = new Set([
 ]);
 
 /** Wrapper options that CONSUME the next token, so it must not be mistaken
- *  for the wrapped command (`sudo -u root bash`, `timeout -s KILL 5 bash`). */
+ *  for the wrapped command (`sudo -u root bash`, `timeout -s KILL 5 bash`).
+ *  BOOLEAN flags are deliberately ABSENT from this table: `sudo -S` (read
+ *  password from stdin), `env -0`/`--null`, `env -v`/`--debug`, and
+ *  `watch -d`/`--differences` take no value. Listing one here makes
+ *  `unwrapWrapper` swallow the wrapped interpreter (`env -0 bash` → `[]`),
+ *  resolution lands off the interpreter set, and a quoted heredoc body is
+ *  judged opaque DATA instead of a script — the fail-open direction this
+ *  guard exists to close (round-3 reviewer, upheld by the refutation panel).
+ *  Boolean flags instead take the plain flag-skip below, leaving the
+ *  wrapped command to be resolved as usual. */
 const WRAPPER_FLAG_ARGS: Readonly<Record<string, readonly string[]>> = {
-  sudo: ["-u", "-g", "-C", "-p", "-T", "-R", "-r", "-D", "-S"],
+  sudo: ["-u", "-g", "-C", "-p", "-T", "-R", "-r", "-D"],
   timeout: ["-s", "-k", "--signal", "--kill-after"],
   nice: ["-n"],
   stdbuf: ["-i", "-o", "-e"],
   taskset: ["-c", "-p"],
   ionice: ["-c", "-n", "-p"],
   chrt: ["-p"],
-  watch: ["-n", "-d"],
+  watch: ["-n"],
   exec: ["-a", "-c"],
-  env: ["-u", "--unset", "-C", "--chdir", "--argv0", "-S", "--split-string", "-0", "-v"],
+  env: ["-u", "--unset", "-C", "--chdir", "--argv0", "-S", "--split-string"],
   command: [],
   builtin: [],
   setsid: [],
@@ -868,8 +876,12 @@ function unwrapWrapper(tokens: readonly string[]): readonly string[] | null {
   while (i < tokens.length) {
     const t = tokens[i]!;
     if (t === "--") { i++; break; }
-    if (t === "-S" || t === "--split-string") {
-      // `env -S 'bash -c …'`: the option VALUE is the whole command line.
+    if (head === "env" && (t === "-S" || t === "--split-string")) {
+      // `env -S 'bash -c …'` / `env --split-string '…'`: the option VALUE is
+      // the whole command line, so it must be re-split. Split-string is an
+      // ENV semantic — `sudo -S` (read password from stdin) is a BOOLEAN
+      // flag: it is not in WRAPPER_FLAG_ARGS above, so it takes the flag-skip
+      // and the following token is the wrapped command, not its value.
       return tokens.slice(i + 1).join(" ").split(/\s+/).filter((w) => w !== "");
     }
     if (t.startsWith("-") && consume.includes(t)) { i += 2; continue; }
@@ -1372,20 +1384,6 @@ function commandsExecuteStdin(text: string, depth: number): boolean {
   return readsStdin && executesVar;
 }
 
-/** Does the pipe-chain group that owns a heredoc opener execute the body?
- *  Any of: an interpreter head consuming stdin as its program; xargs (body
- *  lines become command arguments); or a compound that reads stdin into a
- *  variable — or through a substitution — and then executes it
- *  (`while read l; do eval "$l"; done`, `read x; sh -c "$x"`,
- *  `eval "$(cat)"`). Every simple command in the group is examined —
- *  including INSIDE braces/parens/loops, because a `;` there is a compound
- *  internal, not a group cut. Inline programs of interpreter heads are
- *  recursed into (see commandsExecuteStdin), so `bash -c 'sh'` is a script
- *  feed while `bash -c 'echo hi'` is data. */
-function groupExecutesStdin(group: string): boolean {
-  return commandsExecuteStdin(group, 0);
-}
-
 /** Is the heredoc opener at `openerPos` inside a pipe-chain group that
  *  executes the body as a script? Pipe-linked members share the body's fate
  *  (`cat << 'X' | bash` really runs the body under bash); `&&`/`;`/`&` at
@@ -1396,7 +1394,10 @@ function groupExecutesStdin(group: string): boolean {
 function heredocBodyIsScript(line: string, openerPos: number): boolean {
   for (const group of openerLineGroups(line)) {
     if (openerPos < group.start || openerPos > group.end) continue;
-    return groupExecutesStdin(line.slice(group.start, group.end));
+    // Depth 0: the group slice is the TOP of the stdin-execution check —
+    // pipe members share the body's fate, and recursion into inline `-c`
+    // programs starts from here (see commandsExecuteStdin).
+    return commandsExecuteStdin(line.slice(group.start, group.end), 0);
   }
   return false;
 }
@@ -1781,16 +1782,9 @@ function decide(command: string, depth: number): HookResult {
   return { kind: "allow" };
 }
 
-/**
- * Default task-graph existence probe, FAIL-CLOSED. The historical default was
- * bare `existsSync(TASK_GRAPH_PATH)`, which returns `false` for ANY error —
- * EACCES, ELOOP, ENOTDIR, EIO all read as "no graph" — so one unreadable path
- * silently disarmed the whole state-file forgery guard while the operator
- * believed Bash writes were blocked. ENOENT is the only absent answer; anything
- * unreadable stays armed. Identical semantics to `block-direct-edits.ts`, which
- * fixed this same probe first.
- */
-const defaultTaskGraphExists = (): boolean => pathExistsFailClosed(TASK_GRAPH_PATH);
+// Default task-graph existence probe: the shared fail-closed probe in config
+// (`defaultTaskGraphExists` — ENOENT is the only absent answer). Historically
+// a byte-identical twin of the block-direct-edits default; one home now.
 
 export function guardStateFile(
   command: string,

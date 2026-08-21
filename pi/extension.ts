@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { accessSync, constants as fsConstants, existsSync, unlinkSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, unlinkSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Engine core — harness-agnostic, no Claude Code dependency (these do fs I/O)
@@ -66,7 +66,7 @@ import {
 // with it — every hook below, not just review capture. `tests/pi-imports.test.ts`
 // resolves every engine import in this file against the real exports so the next
 // move of a shared symbol fails a test instead of silently disarming Pi.
-import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS } from "../engine/src/config";
+import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { anyActiveSubagent, fsSessionRegistry, parseAgentId, parseSessionId, rosterAgentId } from "../engine/src/machine";
@@ -139,20 +139,14 @@ const PI_RESOURCE_CACHE = join(PI_AGENT_DIR, "cache", "loom-resources");
 /**
  * Fail-closed path existence check. Returns `true` (assume active) for any
  * access error other than ENOENT — prevents EACCES, ELOOP, and other
- * non-absence errors from silently disabling orchestration guards.
+ * non-absence errors from silently disabling orchestration guards. Delegates
+ * to the shared core in config (`probePathFailClosed`): the ENOENT-only-
+ * absent semantics have one home; only the operator line stays Pi-specific,
+ * and it is regex-pinned by the ELOOP regression test.
  */
 function pathExistsFailClosed(path: string): boolean {
-  try {
-    accessSync(path, fsConstants.F_OK);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    // Non-ENOENT error (EACCES, ELOOP, etc.): assume path exists → fail closed.
-    process.stderr.write(
-      `loom(pi): pathExistsFailClosed cannot access ${path}: ${(error as Error).message} — assuming active (fail closed)\n`,
-    );
-    return true;
-  }
+  return probePathFailClosed(path, (p, cause) =>
+    `loom(pi): pathExistsFailClosed cannot access ${p}: ${cause} — assuming active (fail closed)`);
 }
 
 const isLoomOwnedResultAgent = (agentType: string): boolean =>
@@ -181,11 +175,14 @@ export function piSystemAgentIdentity(systemPrompt: string): string {
  *  (`tasks`, `chain`, or a bare single entry). Returned by reference: callers
  *  such as `replacePiSpawnTask` write its `task` field in place. */
 function piSpawnItem(raw: Record<string, unknown>, index: number): Record<string, unknown> {
-  const entries = Array.isArray(raw.tasks)
-    ? raw.tasks
-    : Array.isArray(raw.chain)
-      ? raw.chain
-      : [raw];
+  let entries: unknown[];
+  if (Array.isArray(raw.tasks)) {
+    entries = raw.tasks;
+  } else if (Array.isArray(raw.chain)) {
+    entries = raw.chain;
+  } else {
+    entries = [raw];
+  }
   const entry = entries[index];
   if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
     throw new Error(`missing Pi spawn item ${index}`);
@@ -199,11 +196,14 @@ export function piSpawnCwd(raw: unknown, index: number, defaultCwd: string): str
   }
   const input = raw as Record<string, unknown>;
   const entry = piSpawnItem(input, index);
-  const cwd = typeof entry.cwd === "string"
-    ? entry.cwd
-    : typeof input.cwd === "string"
-      ? input.cwd
-      : defaultCwd;
+  let cwd: string;
+  if (typeof entry.cwd === "string") {
+    cwd = entry.cwd;
+  } else if (typeof input.cwd === "string") {
+    cwd = input.cwd;
+  } else {
+    cwd = defaultCwd;
+  }
   return resolve(defaultCwd, cwd);
 }
 
@@ -737,7 +737,20 @@ export default function (pi: ExtensionAPI) {
   process.env[PI_EXTENSION_RUNTIME_ROOT_ENV] = LOADED_RUNTIME_IDENTITY.packageRoot;
   process.env[PI_EXTENSION_RUNTIME_REVISION_ENV] = LOADED_RUNTIME_IDENTITY.revision;
   pi.on("resources_discover", () => {
-    const resources = materializePiResources(PACKAGE_ROOT, PI_RESOURCE_CACHE);
+    let resources;
+    try {
+      resources = materializePiResources(PACKAGE_ROOT, PI_RESOURCE_CACHE);
+    } catch (error) {
+      // Name the failure, then RE-THROW: a swallowed crash would make Pi
+      // discover zero Loom resources and continue as if the package were
+      // intentionally quiet — the breakage would only surface later, as
+      // missing skills, far from its cause. Failing discovery loudly keeps
+      // the operator at the point of failure.
+      process.stderr.write(
+        `loom(pi): resource materialization failed — skills/agents unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      throw error;
+    }
     return {
       promptPaths: [...resources.promptPaths],
       skillPaths: [...resources.skillPaths],
@@ -1089,8 +1102,28 @@ export default function (pi: ExtensionAPI) {
     // the session's files), and the TTL is the shared STALE_SUBAGENT_TTL_MS,
     // so a live session's roster/ledger can't be reaped out from under a
     // fresh `.machine` anchor.
-    sweepStaleSessions(subagentDir(), Date.now() - STALE_SUBAGENT_TTL_MS);
-    sweepExpiredPiWriteGrants();
+    //
+    // Each sweep is guarded on its own: a crash in one must not prevent the
+    // other, and neither must escape the `session_start` handler as an
+    // unhandled rejection. Hygiene, not authority — expired or invalid
+    // grants are independently refused by `consumePiWriteGrant` at the
+    // actual authority boundary, so a missed sweep costs one session's
+    // cleanup, never a write.
+    for (const sweep of [
+      {
+        name: "sweepStaleSessions",
+        run: (): void => sweepStaleSessions(subagentDir(), Date.now() - STALE_SUBAGENT_TTL_MS),
+      },
+      { name: "sweepExpiredPiWriteGrants", run: (): void => sweepExpiredPiWriteGrants() },
+    ]) {
+      try {
+        sweep.run();
+      } catch (error) {
+        process.stderr.write(
+          `loom(pi): session_start sweep failed: ${sweep.name}: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
+    }
   });
 
   // Each Pi subagent is a separate `pi --no-session` process. Parent-session
@@ -1396,7 +1429,22 @@ export default function (pi: ExtensionAPI) {
       rawResults: readonly unknown[],
     ): Promise<readonly string[]> => {
       if (!reservation || !reservation.items.some((item) => item.kind === "implementation")) return [];
-      const manager = StateManager.fromSession(reservation.sessionId);
+      let manager: StateManager | null;
+      try {
+        manager = StateManager.fromSession(reservation.sessionId);
+      } catch (error) {
+        // Guarded like the sibling `manager.update` below. This handler has no
+        // top-level try/catch, so an unguarded throw here — resolveTaskGraph
+        // REFUSES its local fallback and throws for any non-ENOENT read of the
+        // session pointer (EACCES/EIO/ELOOP/ENOTDIR) — would escape the whole
+        // `tool_result` handler: no finalization, no per-result evidence loop,
+        // no capture terminalization, zero diagnostics, tasks stuck
+        // `executing`. The throw becomes a diagnostic and the batch continues.
+        const diagnostic = `cannot finalize reserved implementation attempts for session ${reservation.sessionId} ` +
+          `— task graph pointer unreadable: ${error instanceof Error ? error.message : String(error)}`;
+        process.stderr.write(`loom(pi): ${diagnostic}\n`);
+        return [diagnostic];
+      }
       if (!manager) {
         // Ad-hoc: no graph existed at spawn, so there is no attempt record to
         // finalize and nothing was lost.
@@ -1458,11 +1506,14 @@ export default function (pi: ExtensionAPI) {
               continue;
             }
 
-            const failure = resultAgent !== null && resultAgent !== item.agentType
-              ? `reserved ${item.agentType} result was returned as ${resultAgent}`
-              : envelope === null
-                ? "reserved implementation result was missing or malformed"
-                : `${item.agentType} failed before implementation evidence completed`;
+            let failure: string;
+            if (resultAgent !== null && resultAgent !== item.agentType) {
+              failure = `reserved ${item.agentType} result was returned as ${resultAgent}`;
+            } else if (envelope === null) {
+              failure = "reserved implementation result was missing or malformed";
+            } else {
+              failure = `${item.agentType} failed before implementation evidence completed`;
+            }
             state = applyUntrustedStopResolution(state, item.taskId, {
               taskCompleted: false,
               testResult: {
@@ -1523,8 +1574,32 @@ export default function (pi: ExtensionAPI) {
         }
       }
       if (missingReviews.length > 0 || missingSpecChecks.length > 0) {
-        const manager = StateManager.fromSession(reservation.sessionId);
-        if (!manager && spawnedWithoutTaskGraph(reservation)) {
+        let manager: StateManager | null = null;
+        let pointerReadFailed = false;
+        try {
+          manager = StateManager.fromSession(reservation.sessionId);
+        } catch (error) {
+          // Guarded exactly like the sibling `manager.update` below. This
+          // handler has no top-level try/catch, so an unguarded throw here —
+          // resolveTaskGraph refuses its local fallback and throws for any
+          // non-ENOENT read of the session pointer (EACCES/EIO/ELOOP/ENOTDIR)
+          // — would escape the whole `tool_result` handler, skipping the
+          // per-result evidence loop below and leaving tasks stuck
+          // `executing` with zero diagnostics. The throw becomes a
+          // processing error and the batch continues.
+          pointerReadFailed = true;
+          const diagnostic = `cannot persist ${missingReviews.length} missing reserved review result(s) and ` +
+            `${missingSpecChecks.length} missing reserved spec-check result(s) for session ${reservation.sessionId} ` +
+            `— task graph pointer unreadable: ${error instanceof Error ? error.message : String(error)}`;
+          processingErrors.push(diagnostic);
+          process.stderr.write(`loom(pi): ${diagnostic}\n`);
+        }
+        if (pointerReadFailed) {
+          // The diagnostic was already recorded above: the pointer is
+          // present-but-unreadable, not absent, so the ad-hoc and
+          // "task graph unavailable" arms do not apply. The batch continues
+          // to the per-result evidence loop below.
+        } else if (!manager && spawnedWithoutTaskGraph(reservation)) {
           // Ad-hoc: the missing result is still worth naming, but there is no
           // protected state to record an evidence failure against, so it is
           // not an orchestration processing error.

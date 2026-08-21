@@ -107,9 +107,21 @@ describe("extractTestEvidence (pure)", () => {
   });
 
   it("rejects pytest with failures", () => {
-    const output = "===== 6 passed, 2 failed =====";
+    // The REAL pytest summary shape: one line, failures FIRST. A non-zero
+    // failure tally on the same line as the pass tally is one verdict unit
+    // and must veto it. The former fixture (`6 passed, 2 failed`) never
+    // matched the pass regex at all (no `in X.XXs` suffix), so that case was
+    // green for the wrong reason.
+    const output = "===== 2 failed, 6 passed in 0.42s =====";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(false);
+  });
+
+  it("keeps the cross-line exemption: a superseded failing run does not veto a later passing run", () => {
+    const output = "===== 3 failed, 12 passed in 0.9s =====\n\n===== 15 passed in 0.5s =====";
+    const result = extractTestEvidence(output);
+    expect(result.passed).toBe(true);
+    expect(result.evidence).toContain("15 passed");
   });
 
   it("detects bun test passing", () => {

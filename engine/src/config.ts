@@ -499,9 +499,11 @@ export const protectedDirPatterns = (): RegExp => new RegExp(
  * `xxd` (-r <outfile>), `base64` (macOS -o), `sed`/`awk` (-i / in-script
  * `w`/`print >`), `find` (-delete/-exec), `git` (checkout/restore rewrite the
  * work tree — a `git checkout -- <state>` is a verdict-restore forgery),
- * `touch` (mtime forgery defeats report freshness), `rg` (--pre <cmd> /
- * --hostname-bin <cmd> execute an arbitrary program per input file — a
- * pre-staged script receives the guarded path and can rewrite or delete it),
+ * `touch` (mtime forgery defeats report freshness),
+ * `rg` (--pre <cmd> executes an arbitrary program per input file — a
+ * pre-staged script receives the guarded path and can rewrite or delete it;
+ * --hostname-bin <cmd> executes one program once to resolve the hostname.
+ * Arbitrary program execution under any use disqualifies it),
  * `more` (interactive shell escape via `!cmd`/`v`; non-interactive it acts
  * like cat, but membership requires no write capability under ANY use),
  * `cd` (writes nothing itself, but it RE-SCOPES path resolution:
@@ -576,25 +578,35 @@ function taskGraphRelative(): string {
 }
 
 /**
- * Fail-closed existence probe for orchestration state paths: ENOENT is the
- * ONLY absent answer. `existsSync` returns `false` for ANY error — EACCES,
- * ELOOP, ENOTDIR, EIO all read as "no file" — so an unreadable task-graph
- * path would silently disarm the gates that arm on its presence. Non-ENOENT
- * access errors therefore mean "cannot prove absence": assume present, say
- * why, and let the gate fail closed. Mirrors pi/extension.ts
- * `pathExistsFailClosed` so both harnesses hold the same semantics.
+ * Fail-closed existence probe core: ENOENT is the ONLY absent answer.
+ * `existsSync` returns `false` for ANY error — EACCES, ELOOP, ENOTDIR, EIO
+ * all read as "no file" — so an unreadable task-graph path would silently
+ * disarm the gates that arm on its presence. Non-ENOENT access errors
+ * therefore mean "cannot prove absence": assume present, say why, and let
+ * the gate fail closed. The operator line is built by `diagnostic` so each
+ * harness keeps its own name (and the ELOOP regression tests can tell the
+ * probes apart) while the ENOENT-only-absent semantics live in exactly one
+ * place.
  */
-export function pathExistsFailClosed(path: string): boolean {
+export function probePathFailClosed(
+  path: string,
+  diagnostic: (path: string, cause: string) => string,
+): boolean {
   try {
     accessSync(path, fsConstants.F_OK);
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    process.stderr.write(
-      `loom: cannot access ${path}: ${error instanceof Error ? error.message : String(error)} — assuming present (fail closed)\n`,
-    );
+    const cause = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${diagnostic(path, cause)}\n`);
     return true;
   }
+}
+
+/** Engine-side fail-closed existence probe (see `probePathFailClosed`). */
+export function pathExistsFailClosed(path: string): boolean {
+  return probePathFailClosed(path, (p, cause) =>
+    `loom: cannot access ${p}: ${cause} — assuming present (fail closed)`);
 }
 
 /** Find task graph by walking up from cwd to git root. */
@@ -636,6 +648,14 @@ export const taskGraphPath = (): string => findTaskGraphPath();
 
 /** Task graph path — resolved once at import (consumers that never re-point) */
 export const TASK_GRAPH_PATH = findTaskGraphPath();
+
+/**
+ * The ONE default task-graph existence probe: the fail-closed probe on the
+ * import-time-resolved graph path. Core guards (`block-direct-edits`,
+ * `guard-state-file`) inject it instead of declaring byte-identical twins;
+ * Pi passes its own override built on the same `probePathFailClosed` core.
+ */
+export const defaultTaskGraphExists = (): boolean => pathExistsFailClosed(TASK_GRAPH_PATH);
 
 // --- Linter Configuration ---
 

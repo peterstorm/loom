@@ -99,11 +99,16 @@ export function parsePiMessages(messages: unknown): PiTranscriptResult<readonly 
     const isStringContent = role !== null && typeof contentValue === "string";
     const isArrayContent = Array.isArray(contentValue);
     const isSingletonContentBlock = isRecord(contentValue);
-    const contentBlocks = isArrayContent
-      ? contentValue.map((block, blockIndex): readonly [unknown, string] => [block, `${messageLabel}.content[${blockIndex}]`])
-      : isSingletonContentBlock
-        ? [[contentValue, `${messageLabel}.content`] as const]
-        : [];
+    let contentBlocks: readonly (readonly [unknown, string])[];
+    if (isArrayContent) {
+      contentBlocks = contentValue.map(
+        (block, blockIndex) => [block, `${messageLabel}.content[${blockIndex}]`] as const,
+      );
+    } else if (isSingletonContentBlock) {
+      contentBlocks = [[contentValue, `${messageLabel}.content`] as const];
+    } else {
+      contentBlocks = [];
+    }
     if (!isStringContent && !isArrayContent && !isSingletonContentBlock) {
       errors.push(`${messageLabel}.content must be an array, string, or typed content block`);
       return;
@@ -340,18 +345,22 @@ export function piStructuredTestDiagnostics(
     }
     verdict = event.attributed.relaxed ? "relaxed" : "structured";
   }
+  let finalVerdict: PiStructuredTestDiagnostics["verdict"];
+  if (attributedPairs > 0) {
+    finalVerdict = verdict;
+  } else if (!sawClassified) {
+    finalVerdict = "no-test-command";
+  } else if (sawAttributionRefusal) {
+    finalVerdict = "exit-not-attributable";
+  } else {
+    finalVerdict = "no-paired-result";
+  }
   return {
     ok: true,
     value: Object.freeze({
       classifiedCommands: Object.freeze(classifiedCommands),
       attributedPairs,
-      verdict: attributedPairs > 0
-        ? verdict
-        : sawClassified
-          ? sawAttributionRefusal
-            ? "exit-not-attributable"
-            : "no-paired-result"
-          : "no-test-command",
+      verdict: finalVerdict,
     }),
   };
 }

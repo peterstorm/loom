@@ -87,7 +87,7 @@ Run from `engine/` unless noted:
    - `bunx vitest run tests/utils/render-pi-agent.test.ts tests/machine/report-discovery.test.ts --testTimeout=15000`
    - `bunx vitest run tests/state-manager-load-guards.test.ts tests/orchestration/fugue-operation-dags.test.ts --testTimeout=15000`
    - `bunx vitest run tests/machine/extract-evidence.test.ts tests/core/guard-state-file-walkers.test.ts tests/handlers/pre-tool-use/guard-state-file.test.ts --testTimeout=15000`
-   - `bunx vitest run tests/handlers/pre-tool-use/validate-template-substitution.test.ts tests/handlers/store-reviewer-findings.test.ts tests/handlers/store-spec-check-findings.test.ts tests/handlers/populate-task-graph.test.ts --testTimeout=15000`
+   - `bunx vitest run tests/handlers/pre-tool-use/validate-template-substitution.test.ts tests/handlers/subagent-stop/store-reviewer-findings.test.ts tests/handlers/store-spec-check-findings.test.ts tests/handlers/populate-task-graph.test.ts --testTimeout=15000`
 2. `npm run typecheck`
 3. `npm test`
 4. Repository root: `git diff --check`

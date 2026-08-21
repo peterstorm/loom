@@ -24,7 +24,11 @@ type RunnerTally = Readonly<{
 
 /**
  * One source of truth for each runner's pass/fail tally shape. Order is
- * significant: the first pass tally with no later non-zero failure tally wins.
+ * significant: the first pass tally that is not VETOED by a non-zero failure
+ * tally wins. A failure tally on an EARLIER line is a superseded run and does
+ * not veto; a failure tally on the SAME line as the pass tally is part of the
+ * runner's one-line verdict unit (pytest: `2 failed, 6 passed in 0.42s`) and
+ * vetoes it.
  */
 const RUNNER_TALLIES: readonly RunnerTally[] = Object.freeze([
   { label: "node", pass: /(\d+) passing/, fail: /(\d+) failing/, render: (match) => match[0] },
@@ -47,10 +51,25 @@ export function extractTestEvidence(bashOutput: string): TestEvidence {
     const passed = lastMatch(bashOutput, runner.pass);
     if (passed === null) continue;
     const failed = lastMatch(bashOutput, runner.fail);
-    if (failed === null || failed[1] === "0" || failed.index < passed.index) {
+    // A non-zero failure tally vetoes the pass unless it sits on an EARLIER
+    // line — a superseded run whose verdict the later pass replaces. A
+    // same-line failure is one verdict unit with the pass and wins.
+    const vetoed = failed !== null &&
+      failed[1] !== "0" &&
+      lineOf(bashOutput, failed.index) >= lineOf(bashOutput, passed.index);
+    if (!vetoed) {
       return Object.freeze({ passed: true, evidence: `${runner.label}: ${runner.render(passed)}` });
     }
   }
 
   return Object.freeze({ passed: false, evidence: "" });
+}
+
+/** Zero-based line number of the character at `index`. */
+function lineOf(input: string, index: number): number {
+  let line = 0;
+  for (let i = 0; i < index; i += 1) {
+    if (input.charCodeAt(i) === 10) line += 1;
+  }
+  return line;
 }

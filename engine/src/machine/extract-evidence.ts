@@ -26,25 +26,8 @@ import {
   stripEnvPrefix,
   type SegmentOp,
 } from "../core/shell-command";
+import { isShellQuoteChar, type ShellQuoteChar } from "../core/shell-quoting";
 import type { Evidence, TestReportSummary } from "./types";
-
-export {
-  classifyFdDupWord,
-  hasUnbalancedQuotes,
-  splitCommandSegments,
-  splitCommandSegmentsWithOps,
-  stripComment,
-  stripEnvPrefix,
-  type CommandSegment,
-  type SegmentOp,
-} from "../core/shell-command";
-
-const QUOTE_CHARS = ['"', "'", "`"] as const;
-type QuoteChar = (typeof QUOTE_CHARS)[number];
-
-function isQuoteChar(c: string): c is QuoteChar {
-  return (QUOTE_CHARS as readonly string[]).includes(c);
-}
 
 /** The runner pattern must end at a token boundary: `npm testify` is not `npm test`. */
 function headMatchesRunner(lowerSegment: string): boolean {
@@ -219,7 +202,7 @@ function readRedirectTarget(segment: string, start: number, out: string[]): numb
 
 /** Collect `>`/`>>`/`&>`/`&>>`/`n>`/`n>>` targets in one segment — quote-aware. */
 function collectRedirectTargets(segment: string, out: string[]): void {
-  let quote: QuoteChar | null = null;
+  let quote: ShellQuoteChar | null = null;
   let i = 0;
   while (i < segment.length) {
     const c = segment[i];
@@ -236,7 +219,7 @@ function collectRedirectTargets(segment: string, out: string[]): void {
       i += 2;
       continue;
     }
-    if (isQuoteChar(c)) {
+    if (isShellQuoteChar(c)) {
       quote = c;
       i++;
       continue;
@@ -260,7 +243,7 @@ function collectRedirectTargets(segment: string, out: string[]): void {
 function wordsBeforeRedirect(segment: string): string[] {
   const words: string[] = [];
   let current = "";
-  let quote: QuoteChar | null = null;
+  let quote: ShellQuoteChar | null = null;
   for (let i = 0; i < segment.length; i++) {
     const c = segment[i];
     if (quote !== null) {
@@ -281,7 +264,7 @@ function wordsBeforeRedirect(segment: string): string[] {
       i++;
       continue;
     }
-    if (isQuoteChar(c)) {
+    if (isShellQuoteChar(c)) {
       quote = c;
       continue;
     }

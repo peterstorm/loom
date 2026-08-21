@@ -3308,6 +3308,152 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  /**
+   * C1 regression: a session pointer that is PRESENT but unreadable.
+   *
+   * `resolveTaskGraph` reads `${LOOM_SUBAGENT_DIR}/<session>.task_graph` with
+   * a bare `readFileSync` and refuses the local task-graph fallback — it
+   * throws — for every non-ENOENT failure (EACCES/EIO/ELOOP/ENOTDIR), and
+   * `StateManager.fromSession` propagates that throw. A self-referential
+   * symlink is the cheapest deterministic ELOOP. Before the fix the two
+   * `fromSession` calls in this handler were unguarded, so the throw escaped
+   * the entire `tool_result` handler: no finalization, no per-result evidence
+   * loop, no diagnostics, tasks stuck `executing`. These tests pin the named
+   * pointer-failure diagnostic in place of that silent abort — and in place
+   * of the "task graph unavailable" / "ad-hoc" misdiagnoses, which describe an
+   * ABSENT graph, not a present-but-unreadable one.
+   */
+  describe("task graph pointer present-but-unreadable (ELOOP)", () => {
+    const makePointerUnreadable = (session: string): string => {
+      const pointer = join(subagentDir, `${session}.task_graph`);
+      mkdirSync(subagentDir, { recursive: true });
+      rmSync(pointer, { force: true });
+      symlinkSync(pointer, pointer); // self-loop: readFileSync throws ELOOP
+      return pointer;
+    };
+
+    it("finalizes a failed reserved implementation with a named pointer diagnostic and keeps the batch alive", async () => {
+      const planPath = join(temp, "c1-impl-pointer-plan.md");
+      writeFileSync(planPath, "# Plan\n");
+      writeState({
+        ...initialGraph(),
+        phase_artifacts: { architecture: planPath },
+        skipped_phases: ["plan-alignment"],
+        plan_file: planPath,
+      });
+      const session = "019fca39-f989-7510-8e62-50dadbcad4b1";
+      const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+      const toolCallId = "call-c1-impl-pointer";
+      const pi = await extension();
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: {
+          agent: "code-implementer-agent",
+          task: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+          agentScope: "user",
+        },
+      }, context)).toEqual([undefined]);
+      // The pointer must become unreadable at RESULT time, not spawn time: a
+      // loop at spawn would hit the spawn's own (correctly guarded) resolution.
+      const pointer = makePointerUnreadable(session);
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const responses = await pi.emit("tool_result", {
+          toolName: "subagent",
+          toolCallId,
+          content: [],
+          details: {
+            results: [{
+              agent: "code-implementer-agent",
+              task: "Task ID: T1",
+              exitCode: 1,
+              messages: [],
+            }],
+          },
+        }, context);
+
+        expect(responses).toContainEqual(expect.objectContaining({
+          isError: true,
+          content: [expect.objectContaining({
+            text: expect.stringContaining("task graph pointer unreadable"),
+          })],
+        }));
+        const audit = stderr.mock.calls.map(([text]) => String(text)).join("");
+        expect(audit).toContain("cannot finalize reserved implementation attempts for session");
+        expect(audit).toContain("refusing local task-graph fallback");
+        // Present-but-unreadable is not absent: the absent-graph
+        // misdiagnoses must not fire.
+        expect(audit).not.toContain("— task graph unavailable");
+        expect(audit).not.toContain("ad-hoc implementation spawn");
+        // The handler did not abort: the per-result loop ran, and its own
+        // pointer failure was isolated per result.
+        expect(audit).toContain("subagent-stop processing failed");
+        // Fail-closed: the spawn's own executing_tasks registration was not
+        // cleared by the aborted finalization — the task is still executing.
+        expect(JSON.parse(readFileSync(statePath, "utf-8")).executing_tasks).toEqual(["T1"]);
+      } finally {
+        stderr.mockRestore();
+        rmSync(pointer, { force: true });
+      }
+    });
+
+    it("records missing reserved reviews against a named pointer diagnostic and touches no state", async () => {
+      const planPath = join(temp, "c1-review-pointer-plan.md");
+      writeFileSync(planPath, "# Plan\n");
+      writeState({
+        ...initialGraph(),
+        phase_artifacts: { architecture: planPath },
+        skipped_phases: ["plan-alignment"],
+        plan_file: planPath,
+      });
+      const session = "019fca39-f989-7510-8e62-50dadbcad4b2";
+      const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+      const toolCallId = "call-c1-review-pointer";
+      const pi = await extension();
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: {
+          agentScope: "user",
+          agent: "code-reviewer",
+          task: "Task ID: T1\nReview and emit Machine Summary findings.",
+        },
+      }, context)).toEqual([undefined]);
+      const pointer = makePointerUnreadable(session);
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const responses = await pi.emit("tool_result", {
+          toolName: "subagent",
+          toolCallId,
+          content: [],
+          details: { results: [] },
+        }, context);
+
+        expect(responses).toContainEqual(expect.objectContaining({
+          isError: true,
+          content: [expect.objectContaining({
+            text: expect.stringContaining("task graph pointer unreadable"),
+          })],
+        }));
+        const audit = stderr.mock.calls.map(([text]) => String(text)).join("");
+        expect(audit).toContain(
+          "cannot persist 1 missing reserved review result(s) and 0 missing reserved spec-check result(s)",
+        );
+        expect(audit).toContain("refusing local task-graph fallback");
+        expect(audit).not.toContain("— task graph unavailable");
+        expect(audit).not.toContain("ad-hoc spawn");
+        // Fail-closed: no partial evidence failure was recorded.
+        const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+        expect(task.review_status).toBe("pending");
+        expect(task.review_error).toBeUndefined();
+      } finally {
+        stderr.mockRestore();
+        rmSync(pointer, { force: true });
+      }
+    });
+  });
+
   it("rejects a malformed first result and still stores the second", async () => {
     // `agent: null` never reaches the loop's own try/catch any more: the
     // per-element parse rejects the element up front, which is the point —

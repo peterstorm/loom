@@ -1,11 +1,4 @@
-import { CONTINUE, halt, scanUnquoted } from "./shell-quoting";
-
-const QUOTE_CHARS = ['"', "'", "`"] as const;
-type QuoteChar = (typeof QUOTE_CHARS)[number];
-
-function isQuoteChar(char: string): char is QuoteChar {
-  return (QUOTE_CHARS as readonly string[]).includes(char);
-}
+import { CONTINUE, halt, isShellQuoteChar, scanUnquoted, SHELL_QUOTE_CHARS, type ShellQuoteChar } from "./shell-quoting";
 
 /** Shell separator between two simple-command segments. */
 export type SegmentOp = "&&" | "||" | ";" | "|" | "&";
@@ -24,7 +17,7 @@ export function splitCommandSegmentsWithOps(command: string): readonly CommandSe
   const segments: CommandSegment[] = [];
   let current = "";
   let pendingOp: SegmentOp | null = null;
-  let quote: QuoteChar | null = null;
+  let quote: ShellQuoteChar | null = null;
   const push = (op: SegmentOp): void => {
     segments.push({ text: current, opBefore: pendingOp });
     current = "";
@@ -48,7 +41,7 @@ export function splitCommandSegmentsWithOps(command: string): readonly CommandSe
       index++;
       continue;
     }
-    if (isQuoteChar(char)) {
+    if (isShellQuoteChar(char)) {
       quote = char;
       current += char;
       continue;
@@ -95,7 +88,7 @@ export function splitCommandSegments(command: string): readonly string[] {
 
 /** Refuse command classification when quoting cannot be resolved. */
 export function hasUnbalancedQuotes(segment: string): boolean {
-  return QUOTE_CHARS.some((quote) => (segment.split(quote).length - 1) % 2 === 1);
+  return SHELL_QUOTE_CHARS.some((quote) => (segment.split(quote).length - 1) % 2 === 1);
 }
 
 /** Strip a trailing unquoted shell comment. */
@@ -113,7 +106,7 @@ export function stripEnvPrefix(segment: string): string {
     const assignment = rest.match(/^[A-Za-z_][A-Za-z0-9_]*=/);
     if (!assignment) return rest;
     let index = assignment[0].length;
-    let quote: QuoteChar | null = null;
+    let quote: ShellQuoteChar | null = null;
     while (index < rest.length) {
       const char = rest[index];
       if (quote !== null) {
@@ -129,7 +122,7 @@ export function stripEnvPrefix(segment: string): string {
         index += 2;
         continue;
       }
-      if (isQuoteChar(char)) {
+      if (isShellQuoteChar(char)) {
         quote = char;
         index++;
         continue;

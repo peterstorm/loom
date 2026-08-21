@@ -1095,6 +1095,37 @@ describe("guard-state-file — heredoc script-body detection stays fail-closed (
     expect(guardDecision(`nice -n 5 bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
   });
 
+  it("boolean wrapper flags are NOT argument consumers — they must not swallow the wrapped interpreter (round-3 fail-open)", () => {
+    // WRAPPER_FLAG_ARGS used to list the BOOLEAN flags sudo -S (--stdin),
+    // env -0 (--null), env -v (--debug), and watch -d (--differences) as
+    // argument-consuming options. unwrapWrapper then did i += 2 for each,
+    // swallowing the wrapped interpreter, so resolution landed off the
+    // interpreter set and the quoted heredoc body was judged opaque DATA —
+    // ALLOW — while the no-flag controls blocked. Verified against real
+    // sudo 1.9.17 / GNU coreutils env / procps-ng 4.0.6, reproduced against
+    // the frozen source, upheld by the refutation panel.
+    expect(guardDecision(`env -0 bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`env -v bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`watch -d bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    // sudo -S reads the password from stdin: the following token is the
+    // wrapped command, not the flag's value. The unscoped -S special case
+    // used to re-split it as the command line, which left
+    // `sudo -S -u root bash` resolving to nothing (ALLOW) — with the
+    // special case scoped to env, the -u root pair consumes and bash
+    // resolves, so both spellings block.
+    expect(guardDecision(`sudo -S bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`sudo -S -u root bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    // Precision: the genuine argument-consuming forms of the same wrappers
+    // keep consuming (their argument must not be mistaken for the command).
+    expect(guardDecision(`env --null bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block"); // -0 long form
+    expect(guardDecision(`sudo -u root bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`watch -n 2 bash << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    // env -S/--split-string still re-splits its value as a command line —
+    // the env-specific special case the row above must not have disturbed.
+    expect(guardDecision(`env -S 'bash' << 'EOF'\n${guardedWrite}\nEOF`)).toBe("block");
+    expect(guardDecision(`env --split-string 'bash -c "sh"' << 'BODY'\n${guardedWrite}\nBODY`)).toBe("block");
+  });
+
   it("xargs turns body lines into command arguments: the body is judged", () => {
     expect(guardDecision(`cat << 'EOF' | xargs rm\n${G}\nEOF`)).toBe("block");
     expect(guardDecision(`cat << 'EOF' | xargs -I{} sh -c '{}'\n${guardedWrite}\nEOF`)).toBe("block");

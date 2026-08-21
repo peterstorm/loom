@@ -6,7 +6,7 @@
  */
 
 import type { HookResult } from "../types";
-import { IMPL_AGENTS, TASK_GRAPH_PATH, pathExistsFailClosed } from "../config";
+import { IMPL_AGENTS, defaultTaskGraphExists } from "../config";
 import {
   parseGrantedAgentId,
   parseSessionId,
@@ -59,16 +59,10 @@ function isWriteAuthorizedAgent(agentId: string): boolean {
   return IMPL_AGENTS.has(agentId) || parseGrantedAgentId(agentId) !== null;
 }
 
-/**
- * Default task-graph existence probe, FAIL-CLOSED. The historical default was
- * bare `existsSync(TASK_GRAPH_PATH)`, which returns `false` for ANY error —
- * EACCES, ELOOP, ENOTDIR, EIO all read as "no graph" and the gate silently
- * returned allow while the operator believed it was blocked. ENOENT is the
- * only absent answer; anything unreadable stays armed (`pathExistsFailClosed`
- * reports the cause and assumes present). Pi passes its own override built on
- * the same semantics; this default covers every other caller.
- */
-const defaultTaskGraphExists = (): boolean => pathExistsFailClosed(TASK_GRAPH_PATH);
+// Default task-graph existence probe: the shared fail-closed probe in config
+// (`defaultTaskGraphExists` — ENOENT is the only absent answer), injected
+// here as `shouldBlockDirectEdit`'s default port. Pi passes its own override
+// built on the same `probePathFailClosed` core.
 
 /**
  * No roster reader supplied — answer `null`, i.e. "cannot prove a subagent is
