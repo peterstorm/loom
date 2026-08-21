@@ -4,7 +4,7 @@
  * Usage: bun cli.ts helper mark-tests-passed [--wave N]
  */
 
-import type { HookHandler, Task } from "../../types";
+import type { HookHandler } from "../../types";
 import { testResultPassed } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
@@ -59,8 +59,11 @@ const handler: HookHandler = async (_stdin, args) => {
     return { kind: "passthrough" };
   }
 
-  const missing = tasks.filter((t) => t.new_tests_required !== false && !testResultPassed(t.test_result)).map((t) => t.id);
-  const missingNew = tasks.filter((t) => t.new_tests_required !== false && !t.new_tests_written).map((t) => t.id);
+  // Derived from the arrays above, not re-derived from the rule: restating the
+  // `new_tests_required` exemption here is what let this verifier disagree with
+  // the gate it is supposed to agree with.
+  const missing = tasks.filter((t) => !withTests.includes(t)).map((t) => t.id);
+  const missingNew = tasks.filter((t) => !newTestOk.includes(t)).map((t) => t.id);
 
   const parts = [];
   if (missing.length > 0) parts.push(`Missing test evidence: ${missing.join(", ")}`);

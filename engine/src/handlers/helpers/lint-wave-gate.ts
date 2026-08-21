@@ -2,7 +2,7 @@
  * Lint wave-gate helper — full-tier multi-file validation at phase boundaries.
  *
  * Reads the task graph to find `files_modified` for current wave tasks,
- * runs `lintFile(path, "full")` for each, and aggregates results.
+ * runs `lintFiles(paths, "full")` over them, and aggregates results.
  *
  * Satisfies:
  * - FR-020: Execute all rules (declarative + programmatic) at wave-gate boundaries
@@ -15,10 +15,12 @@ import { existsSync } from "node:fs";
 import type { HookHandler, HookResult, Task } from "../../types";
 import { TASK_GRAPH_PATH, DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../config";
 import { StateManager } from "../../state-manager";
-import { lintFile, lintFiles as lintFilesBatch, formatOutput, formatBlockMessage } from "../../linter/index";
+import { lintFiles as lintFilesBatch, formatOutput, formatBlockMessage } from "../../linter/index";
 import type { LintResult, LintOutput } from "../../linter/index";
+import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
+import { repositoryRoot } from "../../utils/git";
 
-// --- Pure logic (extracted for testability) ---
+// --- Testable helper logic (pure transformations and filesystem adapters) ---
 
 export { parseWaveArg } from "./wave-args";
 import { parseWaveArg } from "./wave-args";
@@ -48,6 +50,15 @@ export function filterExistingFiles(
   existsFn: (path: string) => boolean = existsSync
 ): readonly string[] {
   return files.filter(existsFn);
+}
+
+/** Canonical, repository-confined filesystem targets for the lint shell. */
+export function resolveLintTargets(root: string, files: readonly string[]): readonly string[] {
+  const canonical = canonicalRepositoryPaths(root, files, "task.files_modified");
+  return canonical
+    .map((path) => inspectRepositoryPath(root, path, "lint target", { mustBeFile: true }))
+    .filter(({ exists }) => exists)
+    .map(({ absolute }) => absolute);
 }
 
 /**
@@ -123,6 +134,21 @@ export function lintFiles(
 
 // --- Imperative shell (I/O at edges) ---
 
+/** Execute full-tier lint for one already-authorized Wave task set. */
+export function runFullTierWaveLint(tasks: readonly Task[]): HookResult {
+  try {
+    const root = repositoryRoot() ?? process.cwd();
+    const existingFiles = resolveLintTargets(root, collectModifiedFiles(tasks));
+    if (existingFiles.length === 0) return { kind: "allow" };
+    return aggregateResults(lintFiles(existingFiles, DEFAULT_RULES_DIR, PROJECT_RULES_DIR));
+  } catch (error) {
+    return {
+      kind: "block",
+      message: `🚫 WAVE-GATE LINT ENGINE ERROR: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
 const handler: HookHandler = async (_stdin, args) => {
   try {
     const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
@@ -138,26 +164,16 @@ const handler: HookHandler = async (_stdin, args) => {
     const wave = waveArg ?? state.current_wave ?? 1;
 
     const waveTasks = state.tasks.filter((t) => t.wave === wave);
-    const allFiles = collectModifiedFiles(waveTasks);
-    const existingFiles = filterExistingFiles(allFiles);
-
-    if (existingFiles.length === 0) {
+    const modifiedCount = collectModifiedFiles(waveTasks).length;
+    if (modifiedCount === 0) {
       process.stderr.write(`lint-wave-gate: wave ${wave} — no modified files to lint.\n`);
       return { kind: "allow" };
     }
 
-    process.stderr.write(
-      `lint-wave-gate: wave ${wave} — linting ${existingFiles.length} file(s) (full tier)...\n`
-    );
-
-    const results = lintFiles(existingFiles, DEFAULT_RULES_DIR, PROJECT_RULES_DIR);
-    const hookResult = aggregateResults(results);
-
-    if (hookResult.kind === "allow") {
-      process.stderr.write(`lint-wave-gate: all ${existingFiles.length} file(s) passed.\n`);
-    }
-
-    return hookResult;
+    process.stderr.write(`lint-wave-gate: wave ${wave} — running full-tier lint...\n`);
+    const result = runFullTierWaveLint(waveTasks);
+    if (result.kind === "allow") process.stderr.write(`lint-wave-gate: wave ${wave} passed full-tier lint.\n`);
+    return result;
   } catch (error: unknown) {
     // Fail closed — any unexpected error blocks the gate
     const message = error instanceof Error ? error.message : String(error);

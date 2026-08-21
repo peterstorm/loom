@@ -1,6 +1,13 @@
-import { describe, it, expect } from "vitest";
-import updateTaskStatus, { extractTestEvidence, analyzeNewTests, isMachineBound, resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import updateTaskStatus, { analyzeNewTests, isMachineBound, resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
+import { extractTestEvidence } from "../../src/core/test-evidence";
 import { legacyTestsPassedNote } from "../../src/types";
+import type { TaskGraph } from "../../src/types";
+import { captureDeclaredArtifactBaseline } from "../../src/utils/artifact-baseline";
 
 describe("update-task-status — malformed stdin guard (directly-registered route)", () => {
   it("returns a contextual error naming that status/evidence was NOT updated, not a bare throw", async () => {
@@ -100,9 +107,21 @@ describe("extractTestEvidence (pure)", () => {
   });
 
   it("rejects pytest with failures", () => {
-    const output = "===== 6 passed, 2 failed =====";
+    // The REAL pytest summary shape: one line, failures FIRST. A non-zero
+    // failure tally on the same line as the pass tally is one verdict unit
+    // and must veto it. The former fixture (`6 passed, 2 failed`) never
+    // matched the pass regex at all (no `in X.XXs` suffix), so that case was
+    // green for the wrong reason.
+    const output = "===== 2 failed, 6 passed in 0.42s =====";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(false);
+  });
+
+  it("keeps the cross-line exemption: a superseded failing run does not veto a later passing run", () => {
+    const output = "===== 3 failed, 12 passed in 0.9s =====\n\n===== 15 passed in 0.5s =====";
+    const result = extractTestEvidence(output);
+    expect(result.passed).toBe(true);
+    expect(result.evidence).toContain("15 passed");
   });
 
   it("detects bun test passing", () => {
@@ -205,6 +224,28 @@ describe("extractTestEvidence (pure)", () => {
     expect(result.evidence).toContain("Tests run: 15");
   });
 
+  it("uses last match for maven: first passes, last fails", () => {
+    // A re-run that broke (or a later failing module in the same output) must
+    // not launder into a pass off the superseded run's BUILD SUCCESS — the
+    // runner loop's last-verdict-wins rule, mirrored for maven.
+    const output = "Tests run: 15, Failures: 0, Errors: 0\nBUILD SUCCESS\n\nTests run: 10, Failures: 2, Errors: 0\nBUILD FAILURE";
+    const result = extractTestEvidence(output);
+    expect(result.passed).toBe(false);
+  });
+
+  it("a later non-zero maven Errors tally vetoes an earlier pass", () => {
+    const output = "Tests run: 15, Failures: 0, Errors: 0\nBUILD SUCCESS\n\nTests run: 10, Failures: 0, Errors: 3\nBUILD FAILURE";
+    const result = extractTestEvidence(output);
+    expect(result.passed).toBe(false);
+  });
+
+  it("keeps the cross-line exemption for maven: a superseded failing run does not veto a later passing run", () => {
+    const output = "Tests run: 5, Failures: 1, Errors: 0\nBUILD FAILURE\n\nTests run: 5, Failures: 0, Errors: 0\nBUILD SUCCESS";
+    const result = extractTestEvidence(output);
+    expect(result.passed).toBe(true);
+    expect(result.evidence).toContain("maven");
+  });
+
   it("handles 3+ test runs, uses last", () => {
     const output = "5 pass\n2 fail\n\n10 pass\n1 fail\n\n50 pass\n0 fail";
     const result = extractTestEvidence(output);
@@ -224,6 +265,7 @@ describe("resolveTestEvidence — stale trusted failure vs later untrusted run (
       verdict: "untrusted",
       passed: true,
       label: "low-trust (exit 0, no report artifact; transcript-regex)",
+      provenance: "unverified",
     });
     expect(resolved.evidence).toContain("low-trust");
   });
@@ -257,6 +299,7 @@ describe("resolveTestEvidence — a trusted pass goes stale when files change af
       verdict: "untrusted",
       passed: true,
       label: "low-trust (files modified after last trusted pass; transcript-regex)",
+      provenance: "unverified",
     });
     expect(resolved.evidence).toContain("files modified after last trusted pass");
   });
@@ -267,6 +310,7 @@ describe("resolveTestEvidence — a trusted pass goes stale when files change af
       verdict: "untrusted",
       passed: false,
       label: "low-trust (files modified after last trusted pass; transcript-regex)",
+      provenance: "unverified",
     });
   });
 
@@ -321,6 +365,7 @@ describe("resolveTestEvidence — snapshot-read-failed labeling (pure)", () => {
       verdict: "untrusted",
       passed: true,
       label: "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)",
+      provenance: "unverified",
     });
     expect(resolved.evidence).toContain("snapshot-read-failed");
   });
@@ -331,6 +376,7 @@ describe("resolveTestEvidence — snapshot-read-failed labeling (pure)", () => {
       verdict: "untrusted",
       passed: false,
       label: "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)",
+      provenance: "unverified",
     });
   });
 
@@ -395,5 +441,209 @@ describe("analyzeNewTests (pure)", () => {
     const result = analyzeNewTests(diff, undefined);
     expect(result.written).toBe(false);
     expect(result.evidence).toBe("");
+  });
+});
+
+/**
+ * Harness compatibility: SubagentStop without `agent_transcript_path`.
+ *
+ * This handler is the ONLY writer of task status, and it resolves the task id
+ * from the transcript (falling back to a single-entry `executing_tasks`). A
+ * harness that sends no transcript path therefore recorded NOTHING — tasks
+ * stayed `pending`, `test_result` stayed null, and not one line reached stderr
+ * saying so, while the transcript sat on disk the whole time.
+ */
+describe("update-task-status — transcript path resolution", () => {
+  const cleanup: Array<() => void> = [];
+
+  afterEach(() => {
+    for (const undo of cleanup.splice(0)) undo();
+  });
+
+  /**
+   * A session with a task graph, a bound state pointer, and — when asked — a
+   * transcript planted exactly where the harness writes one.
+   */
+  async function makeSession(opts: {
+    plantTranscript: boolean;
+    modifiedPath?: string;
+    transcriptTaskId?: string;
+    failedReview?: boolean;
+  }): Promise<{
+    session: string;
+    agentId: string;
+    read: () => TaskGraph;
+  }> {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    const { projectSlug } = await import("../../src/utils/agent-transcript-path");
+    const stamp = `${process.pid}${Date.now()}${Math.random().toString(36).slice(2)}`;
+    const session = `uts-${stamp}`;
+    const agentId = `a${stamp}`;
+
+    const tmpDir = join(tmpdir(), `uts-${stamp}`);
+    const configDir = join(tmpDir, "config");
+    mkdirSync(configDir, { recursive: true });
+    const statePath = join(tmpDir, "graph.json");
+    const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
+    // A case that plants a write into THIS repository must declare this
+    // repository as the project: the handler canonicalizes modified paths
+    // against the live `CLAUDE_PROJECT_DIR`, so a temp project dir plus a
+    // real-repo path is a combination production cannot produce, and it only
+    // used to pass because the git helpers answered from a root frozen at
+    // import time. Transcript isolation still comes from CLAUDE_CONFIG_DIR
+    // and the unique session id, not from the project dir.
+    const projectDir = opts.modifiedPath ? repoRoot : join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    const artifactBaseline = opts.modifiedPath
+      ? captureDeclaredArtifactBaseline(repoRoot, ["engine/src/types.ts"])
+      : undefined;
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      current_wave: 1,
+      executing_tasks: [],
+      tasks: [
+        {
+          id: "T1", description: "a task", agent: "code-implementer-agent", status: "pending", wave: 1, depends_on: [],
+          ...(opts.failedReview ? {
+            review_status: "evidence_capture_failed",
+            review_error: "review transcript missing evidence",
+            review_evidence_failures: ["code-reviewer"],
+          } : {}),
+          ...(opts.modifiedPath ? {
+            file_list: ["engine/src/types.ts"],
+            artifact_baseline: artifactBaseline,
+          } : {}),
+        },
+      ],
+      wave_gates: {},
+    }));
+
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(pointer, statePath);
+
+    if (opts.plantTranscript) {
+      const dir = join(configDir, "projects", projectSlug(projectDir), session, "subagents");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `agent-${agentId}.jsonl`),
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [
+            { type: "text", text: `**Task ID:** ${opts.transcriptTaskId ?? "T1"}\n\nImplemented the thing.` },
+            ...(opts.modifiedPath
+              ? [{ type: "tool_use", name: "Write", input: { file_path: opts.modifiedPath } }]
+              : []),
+          ] },
+        }) + "\n",
+      );
+    }
+
+    const prevConfig = process.env.CLAUDE_CONFIG_DIR;
+    const prevProject = process.env.CLAUDE_PROJECT_DIR;
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    process.env.CLAUDE_PROJECT_DIR = projectDir;
+
+    cleanup.push(() => {
+      if (prevConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = prevConfig;
+      if (prevProject === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = prevProject;
+      rmSync(tmpDir, { recursive: true, force: true });
+      rmSync(pointer, { force: true });
+    });
+
+    return { session, agentId, read: (): TaskGraph => JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph };
+  }
+
+  it("resolves the task from the DERIVED transcript when the payload names none", async () => {
+    const s = await makeSession({ plantTranscript: true });
+
+    const result = await updateTaskStatus(JSON.stringify({
+      session_id: s.session,
+      agent_id: s.agentId,
+      agent_type: "code-implementer-agent",
+      // No agent_transcript_path — exactly what the harness sends.
+    }), []);
+
+    expect(result.kind).toBe("passthrough");
+    const task = s.read().tasks.find((t) => t.id === "T1");
+    expect(task?.status, "untrusted transcript evidence must not claim implementation").toBe("pending");
+    expect(task?.proof?.state).toBe("failed");
+  });
+
+  it("fails loudly when the transcript names a task outside the graph", async () => {
+    const s = await makeSession({ plantTranscript: true, transcriptTaskId: "T999" });
+
+    const result = await updateTaskStatus(JSON.stringify({
+      session_id: s.session,
+      agent_id: s.agentId,
+      agent_type: "code-implementer-agent",
+    }), []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      expect(result.message).toContain("unknown task T999");
+      expect(result.message).toContain("known tasks: T1");
+      expect(result.message).toContain("evidence was NOT stored");
+    }
+    expect(s.read().tasks[0]?.status).toBe("pending");
+  });
+
+  it("canonicalizes transcript paths but does not treat an attempted no-op Write as artifact proof", async () => {
+    const s = await makeSession({
+      plantTranscript: true,
+      modifiedPath: join(dirname(fileURLToPath(import.meta.url)), "../../src/types.ts"),
+      failedReview: true,
+    });
+
+    const result = await updateTaskStatus(JSON.stringify({
+      session_id: s.session,
+      agent_id: s.agentId,
+      agent_type: "code-implementer-agent",
+    }), []);
+
+    expect(result.kind).toBe("passthrough");
+    const task = s.read().tasks.find((candidate) => candidate.id === "T1");
+    expect(task?.files_modified).toEqual(["engine/src/types.ts"]);
+    expect(task?.review_status).toBe("pending");
+    expect(task?.review_error).toBeUndefined();
+    expect(task?.review_evidence_failures).toBeUndefined();
+    expect(task?.proof?.obligations).toContainEqual({
+      kind: "declared-artifact-changed",
+      artifact: "engine/src/types.ts",
+    });
+    expect(task?.proof?.results).toContainEqual(expect.objectContaining({
+      state: "failed",
+      failure: { kind: "declared-artifact-not-changed", artifact: "engine/src/types.ts" },
+    }));
+  });
+
+  it("says out loud that nothing was recorded when there is no transcript and nothing executing", async () => {
+    const s = await makeSession({ plantTranscript: false });
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    let text = "";
+    try {
+      const result = await updateTaskStatus(JSON.stringify({
+        session_id: s.session,
+        agent_id: s.agentId,
+        agent_type: "code-implementer-agent",
+      }), []);
+      expect(result.kind).toBe("passthrough");
+      text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    expect(text, "a no-op this consequential must never be silent").toContain("code-implementer-agent");
+    expect(text).toContain("task status was NOT recorded");
+    expect(text).toContain("no transcript found");
+    expect(text).toContain("executing_tasks is empty");
+    expect(s.read().tasks.find((t) => t.id === "T1")?.status).toBe("pending");
   });
 });

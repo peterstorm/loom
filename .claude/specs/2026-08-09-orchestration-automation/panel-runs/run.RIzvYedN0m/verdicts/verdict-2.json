@@ -1,0 +1,23 @@
+{
+  "criterion": "pure functional core",
+  "rankings": [
+    {
+      "candidate": "candidate-type-driven-fp.md",
+      "score": 10,
+      "fatal_flaw": null,
+      "strongest_idea": "Represent every side effect as immutable effect data with stable IDs and typed receipts, leaving each domain lifecycle as a total reducer over closed ADTs."
+    },
+    {
+      "candidate": "candidate-risk-security-first.md",
+      "score": 9,
+      "fatal_flaw": null,
+      "strongest_idea": "Keep Fugue validation and routing nodes capability-free while reducers return pure transition intents executed by narrow fail-closed adapters."
+    },
+    {
+      "candidate": "candidate-simplicity-first.md",
+      "score": 8,
+      "fatal_flaw": "The broad orchestration-runner combines persistence, publication sequencing, Fugue adaptation, and dispatch without an explicit typed effect-and-receipt protocol, leaving important orchestration behavior in an imperative component rather than fully inside the replayable functional core.",
+      "strongest_idea": "Expose one typed external action from each pure domain reducer while retaining separate domain programs and a minimal shared contract."
+    }
+  ]
+}

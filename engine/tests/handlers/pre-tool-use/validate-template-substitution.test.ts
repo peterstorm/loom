@@ -1,25 +1,26 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
+import {
+  findResidualPlaceholders,
+  validateTemplateSubstitution,
+} from "../../../src/core/validate-template-substitution";
+import validateTemplateSubstitutionHandler from "../../../src/handlers/pre-tool-use/validate-template-substitution";
 
 /**
  * Tests for the template substitution validation logic.
- * We test the pure regex/filtering logic extracted from the handler.
+ *
+ * These exercise the REAL exported `findResidualPlaceholders` — the single
+ * source of truth — rather than a re-implemented copy, so the property/edge
+ * assertions below cannot silently drift from the shipped detector.
  */
 
-const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}"]);
-
-/** Simulate the core template validation decision */
+/** The core allow/block decision, driven by the real placeholder detector. */
 function validateTemplate(prompt: string): "allow" | "block" {
   if (!prompt) return "allow";
-
-  // Remove shell ${var} expansions
-  const cleaned = prompt.replace(/\$\{[^}]*\}/g, "");
-
-  // Find {word} patterns
-  const matches = cleaned.match(/\{[a-zA-Z_][a-zA-Z0-9_]*\}/g) ?? [];
-  const realIssues = matches.filter((v) => !FALSE_POSITIVES.has(v));
-
-  return realIssues.length === 0 ? "allow" : "block";
+  return findResidualPlaceholders(prompt).length === 0 ? "allow" : "block";
 }
 
 describe("validate-template-substitution — property tests", () => {
@@ -50,6 +51,34 @@ describe("validate-template-substitution — property tests", () => {
   });
 });
 
+describe("validate-template-substitution — active graph boundary", () => {
+  it("keeps the core decision pure over a pre-gathered graph-existence fact", () => {
+    expect(validateTemplateSubstitution("Use {task_id}", false)).toEqual({ kind: "allow" });
+    expect(validateTemplateSubstitution("Use {task_id}", true)).toMatchObject({ kind: "block" });
+  });
+
+  it("resolves LOOM_STATE_PATH in the shell after module import", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "loom-template-state-"));
+    const statePath = join(temp, "active_task_graph.json");
+    const previous = process.env.LOOM_STATE_PATH;
+    process.env.LOOM_STATE_PATH = statePath;
+    const stdin = JSON.stringify({
+      tool_name: "Agent",
+      tool_input: { prompt: "Use {task_id}" },
+      session_id: "session",
+    });
+    try {
+      expect(await validateTemplateSubstitutionHandler(stdin, [])).toEqual({ kind: "allow" });
+      writeFileSync(statePath, "{}\n");
+      expect(await validateTemplateSubstitutionHandler(stdin, [])).toMatchObject({ kind: "block" });
+    } finally {
+      if (previous === undefined) delete process.env.LOOM_STATE_PATH;
+      else process.env.LOOM_STATE_PATH = previous;
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("validate-template-substitution — edge cases", () => {
   it("empty prompt → allow", () => {
     expect(validateTemplate("")).toBe("allow");
@@ -59,15 +88,7 @@ describe("validate-template-substitution — edge cases", () => {
     expect(validateTemplate("Use {type} and {id} and {name}")).toBe("allow");
   });
 
-  it("JSON objects in prompt → allow (keys not single-word patterns)", () => {
-    // JSON like {"key": "value"} → cleaned, the {key} pattern doesn't match
-    // because : is after key but the regex only looks for {word}
-    // Actually {"key": "value"} would match {key} if not careful...
-    // Let's test: "key" would match as a false positive? No — {key} is not in FALSE_POSITIVES
-    // But the actual JSON '{"key": "value"}' — the regex matches \{[a-zA-Z_]...\}
-    // However, JSON keys are usually followed by colon, making the match include more than {word}
-    // The regex is /\{[a-zA-Z_][a-zA-Z0-9_]*\}/ — this requires } immediately after the word
-    // In '{"key": "value"}', the pattern is {"key" — no closing } after "key"
+  it("JSON objects in prompt → allow (a quote sits between { and the key, so no {word} match)", () => {
     expect(validateTemplate('{"key": "value"}')).toBe("allow");
   });
 
@@ -86,6 +107,32 @@ describe("validate-template-substitution — edge cases", () => {
   it("nested ${outer_{inner}} → shell var cleaned correctly", () => {
     // The outer ${...} should be removed, leaving the inner content
     expect(validateTemplate("${outer_{inner}}")).toBe("allow");
+  });
+
+  it("nested ${foo{bar}} → allow (strip matches to the first }, leaving a lone } that matches no placeholder)", () => {
+    // Pins the true nesting behavior: the non-greedy ${...} strip consumes
+    // `${foo{bar}` and leaves `}` — NOT `{bar}`. Allowing a genuine nested shell
+    // expansion is correct; this guards against a "fix" that broke it.
+    expect(validateTemplate("${foo{bar}}")).toBe("allow");
+  });
+
+  it("adjacent ${done}{leftover} → block (the strip leaves {leftover}, a genuine residual)", () => {
+    // The one case the ${...} strip DOES leave a residual placeholder — and it
+    // should, because {leftover} is an unsubstituted variable, not part of the
+    // shell expansion.
+    expect(validateTemplate("${done}{leftover}")).toBe("block");
+  });
+
+  it("JSX/member expression {props.title} → allow", () => {
+    expect(validateTemplate("return <h1>{props.title}</h1>")).toBe("allow");
+  });
+
+  it("arithmetic expression {width-height} → allow", () => {
+    expect(validateTemplate("const gap = {width-height}")).toBe("allow");
+  });
+
+  it("underscore template names remain blocked", () => {
+    expect(validateTemplate("Read {plan_file}")).toBe("block");
   });
 
   it("plain text without any braces → allow", () => {

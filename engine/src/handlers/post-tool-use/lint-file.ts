@@ -13,7 +13,7 @@
  * Fail-closed: any unexpected error → block (prevents silent bypass).
  */
 
-import type { HookHandler, HookResult } from "../../types";
+import type { HookHandler } from "../../types";
 import { allowResult, blockResult, passthroughResult } from "../../types";
 import { lintFile, formatOutput, formatBlockMessage } from "../../linter/index";
 import { DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../config";

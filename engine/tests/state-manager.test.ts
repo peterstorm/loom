@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { StateManager, parseTaskGraph, resolveTaskGraph } from "../src/state-manager";
 import { SUBAGENT_DIR } from "../src/config";
 import type { TaskGraph } from "../src/types";
+import { derivePendingTaskProof, evaluateTaskProof } from "../src/core/proof-obligations";
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `loom-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -78,6 +79,20 @@ describe("StateManager", () => {
     expect(mode).toBe(0o444);
   });
 
+  it("rejects an invalid produced graph before replacing state authority", async () => {
+    const mgr = new StateManager(statePath);
+    const before = readFileSync(statePath, "utf-8");
+
+    await expect(mgr.update((state) => ({
+      ...state,
+      current_phase: "not-a-phase",
+    } as unknown as TaskGraph))).rejects.toThrow("Refusing to persist invalid task graph");
+
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+    expect(() => readFileSync(`${statePath}.tmp`, "utf-8")).toThrow();
+    expect(statSync(statePath).mode & 0o777).toBe(0o444);
+  });
+
   it("replaces state entirely", async () => {
     const mgr = new StateManager(statePath);
     const newState: TaskGraph = {
@@ -108,18 +123,18 @@ describe("StateManager", () => {
   it("handles concurrent updates via locking", async () => {
     const mgr = new StateManager(statePath);
 
-    // Write initial state with a counter
-    await mgr.update((s) => ({ ...s, current_wave: 0 }));
+    // current_wave is a positive domain value; start at one.
+    await mgr.update((s) => ({ ...s, current_wave: 1 }));
 
     // Run 5 concurrent updates
     await Promise.all(
-      Array.from({ length: 5 }, (_, i) =>
+      Array.from({ length: 5 }, () =>
         mgr.update((s) => ({ ...s, current_wave: (s.current_wave ?? 0) + 1 }))
       )
     );
 
     const final = mgr.load();
-    expect(final.current_wave).toBe(5);
+    expect(final.current_wave).toBe(6);
   });
 
   it("throws on empty file", () => {
@@ -161,7 +176,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     description: "impl",
     agent: "code-implementer-agent",
     wave: 1,
-    status: "implemented",
+    status: "pending",
     depends_on: [],
   };
   const validGraph = {
@@ -186,6 +201,149 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it("parses immutable orphaned Wave Gate retirement audit and rejects contradictory reuse", () => {
+    const retirement = {
+      schemaVersion: 1, kind: "orphaned-wave-gate-retirement", runId: "run.orphaned", wave: 1,
+      authorityDigest: "a".repeat(64), revision: 0,
+      reason: "authoritative-run-directory-missing",
+      runsRoot: "/runs", runDirectory: "/runs/run.orphaned",
+      replacementRunId: "run.replacement", replacementAuthorityDigest: "b".repeat(64),
+    };
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      current_wave: 1,
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.replacement", wave: 1,
+        authorityDigest: "b".repeat(64), revision: 0, runsRoot: "/runs", terminalOutcome: null,
+      },
+      orphaned_wave_gate_history: [retirement],
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.value.orphaned_wave_gate_history).toEqual([retirement]);
+      expect(Object.isFrozen(parsed.value.orphaned_wave_gate_history)).toBe(true);
+      expect(Object.isFrozen(parsed.value.orphaned_wave_gate_history?.[0])).toBe(true);
+    }
+
+    const duplicate = parseTaskGraph({ ...validGraph, orphaned_wave_gate_history: [retirement, retirement] });
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) expect(duplicate.error).toContain("duplicate retired run identities");
+
+    const contradictory = parseTaskGraph({
+      ...validGraph,
+      current_wave: 1,
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.orphaned", wave: 1,
+        authorityDigest: "a".repeat(64), revision: 0, terminalOutcome: null,
+      },
+      orphaned_wave_gate_history: [retirement],
+    });
+    expect(contradictory.ok).toBe(false);
+    if (!contradictory.ok) expect(contradictory.error).toContain("already retired");
+  });
+
+  it("refuses every malformed orphaned Wave Gate retirement audit entry with a named reason", () => {
+    const base = {
+      schemaVersion: 1, kind: "orphaned-wave-gate-retirement", runId: "run.orphaned", wave: 1,
+      authorityDigest: "a".repeat(64), revision: 0,
+      reason: "authoritative-run-directory-missing",
+      runsRoot: "/runs", runDirectory: "/runs/run.orphaned",
+      replacementRunId: "run.replacement", replacementAuthorityDigest: "b".repeat(64),
+    };
+    const cases: ReadonlyArray<Readonly<{ label: string; entry: unknown; expects: string }>> = [
+      { label: "non-object", entry: 42, expects: "must be an object" },
+      { label: "unknown field", entry: { ...base, stray: true }, expects: "unknown field" },
+      { label: "missing field", entry: Object.fromEntries(Object.entries(base).filter(([k]) => k !== "wave")), expects: "missing field" },
+      { label: "bad kind", entry: { ...base, kind: "completed-wave-gate" }, expects: "invalid schema, kind, or reason" },
+      { label: "bad reason", entry: { ...base, reason: "operator-requested" }, expects: "invalid schema, kind, or reason" },
+      { label: "unparseable runId", entry: { ...base, runId: "has space" }, expects: "runId" },
+      { label: "unparseable digest", entry: { ...base, authorityDigest: "short" }, expects: "authorityDigest" },
+      { label: "replacement equals retired", entry: { ...base, replacementRunId: "run.orphaned" }, expects: "replacement run must differ" },
+      { label: "wave below 1", entry: { ...base, wave: 0 }, expects: "wave must be an integer >= 1" },
+      { label: "fractional revision", entry: { ...base, revision: 1.5 }, expects: "revision must be a non-negative safe integer" },
+      { label: "relative runsRoot", entry: { ...base, runsRoot: "runs" }, expects: "exact normalized authoritative runsRoot/runDirectory" },
+      { label: "runDirectory not under runsRoot", entry: { ...base, runDirectory: "/elsewhere/run.orphaned" }, expects: "exact normalized authoritative runsRoot/runDirectory" },
+      { label: "runDirectory mismatch", entry: { ...base, runDirectory: "/runs/run.different" }, expects: "exact normalized authoritative runsRoot/runDirectory" },
+    ];
+    for (const { label, entry, expects } of cases) {
+      const parsed = parseTaskGraph({ ...validGraph, orphaned_wave_gate_history: [entry] });
+      expect(parsed.ok, label).toBe(false);
+      if (!parsed.ok) expect(parsed.error, label).toContain(expects);
+    }
+  });
+
+  it("refuses multiple installation audits for one active run and any audit that contradicts it", () => {
+    const retirement = (runId: string, digest: string) => ({
+      schemaVersion: 1, kind: "orphaned-wave-gate-retirement", runId, wave: 1,
+      authorityDigest: digest, revision: 0,
+      reason: "authoritative-run-directory-missing",
+      runsRoot: "/runs", runDirectory: "/runs/" + runId,
+      replacementRunId: "run.installed", replacementAuthorityDigest: "c".repeat(64),
+    });
+    const activeGate = (authorityDigest: string, wave = 1, runsRoot = "/runs") => ({
+      schemaVersion: 1, kind: "active-wave-gate", runId: "run.installed", wave,
+      authorityDigest, revision: 0, runsRoot, terminalOutcome: null,
+    });
+
+    // Two retirements both claiming to have INSTALLED the same active run —
+    // at most one installation audit may name a given replacement.
+    const multi = parseTaskGraph({
+      ...validGraph,
+      current_wave: 1,
+      active_wave_gate: activeGate("c".repeat(64)),
+      orphaned_wave_gate_history: [
+        retirement("run.first", "a".repeat(64)),
+        retirement("run.second", "b".repeat(64)),
+      ],
+    });
+    expect(multi.ok).toBe(false);
+    if (!multi.ok) expect(multi.error).toContain("multiple orphan-recovery installation audits");
+
+    // A single installation audit whose runsRoot does not match the active
+    // run's protected root.
+    const wrongRoot = parseTaskGraph({
+      ...validGraph,
+      current_wave: 1,
+      active_wave_gate: activeGate("c".repeat(64), 1, "/elsewhere"),
+      orphaned_wave_gate_history: [retirement("run.first", "a".repeat(64))],
+    });
+    expect(wrongRoot.ok).toBe(false);
+    if (!wrongRoot.ok) expect(wrongRoot.error).toContain("contradicts its orphan-recovery installation audit");
+
+    // A single installation audit whose replacement digest does not match.
+    const wrongDigest = parseTaskGraph({
+      ...validGraph,
+      current_wave: 1,
+      active_wave_gate: activeGate("d".repeat(64)),
+      orphaned_wave_gate_history: [retirement("run.first", "a".repeat(64))],
+    });
+    expect(wrongDigest.ok).toBe(false);
+    if (!wrongDigest.ok) expect(wrongDigest.error).toContain("contradicts its orphan-recovery installation audit");
+
+    // Baseline: one matching audit + matching active run parses.
+    const matching = parseTaskGraph({
+      ...validGraph,
+      current_wave: 1,
+      active_wave_gate: activeGate("c".repeat(64)),
+      orphaned_wave_gate_history: [retirement("run.first", "a".repeat(64))],
+    });
+    expect(matching.ok).toBe(true);
+  });
+
+  it("shares task-agent authority with validate-task-graph", () => {
+    const unknown = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, agent: "not-a-real-agent" }],
+    });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.error).toContain("unknown agent");
+
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, agent: "code-implementer-agent" }],
+    }).ok).toBe(true);
+  });
+
   it("preserves unknown extra fields (legacy tests_passed still visible downstream)", () => {
     const parsed = parseTaskGraph({
       ...validGraph,
@@ -199,10 +357,242 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it("recursively copies and freezes nested Task and Wave Gate data", () => {
+    const dependsOn: string[] = [];
+    const fileList = ["src/a.ts"];
+    const labels = ["original"];
+    const gateNotes = ["pending"];
+    const rawTask = { ...validTask, depends_on: dependsOn, file_list: fileList, metadata: { labels } };
+    const rawGate = {
+      impl_complete: false,
+      tests_passed: null,
+      reviews_complete: false,
+      blocked: false,
+      metadata: { notes: gateNotes },
+    };
+    const parsed = parseTaskGraph({ ...validGraph, tasks: [rawTask], wave_gates: { "1": rawGate } });
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    dependsOn.push("T99");
+    fileList.push("src/foreign.ts");
+    labels.push("mutated");
+    gateNotes.push("mutated");
+
+    const task = parsed.value.tasks[0] as unknown as Record<string, unknown>;
+    const taskMetadata = task.metadata as Readonly<{ labels: readonly string[] }>;
+    const gate = parsed.value.wave_gates["1"] as unknown as Record<string, unknown>;
+    const gateMetadata = gate.metadata as Readonly<{ notes: readonly string[] }>;
+    expect(task.depends_on).toEqual([]);
+    expect(task.file_list).toEqual(["src/a.ts"]);
+    expect(taskMetadata.labels).toEqual(["original"]);
+    expect(gateMetadata.notes).toEqual(["pending"]);
+    expect(Object.isFrozen(task.depends_on)).toBe(true);
+    expect(Object.isFrozen(taskMetadata)).toBe(true);
+    expect(Object.isFrozen(taskMetadata.labels)).toBe(true);
+    expect(Object.isFrozen(gateMetadata.notes)).toBe(true);
+  });
+
+  it.each([
+    ["description", 42, "description must be a non-empty string"],
+    ["description", "", "description must be a non-empty string"],
+    ["agent", { name: "code-implementer-agent" }, "agent must be a non-empty string"],
+    ["wave", 1.5, "wave must be an integer >= 1"],
+    ["wave", 0, "wave must be an integer >= 1"],
+  ])("rejects an invalid required task %s field", (field, value, message) => {
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, [field]: value }],
+    });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain(message);
+  });
+
+  it.each([
+    ["a non-array", "REQ-1"],
+    ["a non-string entry", ["REQ-1", 42]],
+    ["a blank entry", ["REQ-1", "  "]],
+  ])("rejects %s spec_anchors value at the typed load boundary", (_label, spec_anchors) => {
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, spec_anchors }],
+    });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("spec_anchors must be an array of non-empty strings");
+  });
+
+  it("enforces dependency existence and earlier-wave ordering at the typed load boundary", () => {
+    const task2 = { ...validTask, id: "T2", wave: 2, depends_on: ["T1"] };
+    expect(parseTaskGraph({ ...validGraph, tasks: [validTask, task2] }).ok).toBe(true);
+
+    const invalid = [
+      { tasks: [{ ...validTask, depends_on: ["T1"] }], message: "self-dependency" },
+      { tasks: [{ ...validTask, depends_on: ["T99"] }], message: "depends on non-existent" },
+      {
+        tasks: [validTask, { ...task2, wave: 1 }],
+        message: "deps must be in earlier wave",
+      },
+      {
+        tasks: [{ ...validTask, depends_on: ["T2"] }, task2],
+        message: "deps must be in earlier wave",
+      },
+    ];
+    for (const { tasks, message } of invalid) {
+      const parsed = parseTaskGraph({ ...validGraph, tasks });
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toContain(message);
+    }
+  });
+
+  it.each(["bad:id", " T1", "T 1", "task-1"])(
+    "rejects task id %j that cannot form a wave finding identity",
+    (id) => {
+      const parsed = parseTaskGraph({ ...validGraph, tasks: [{ ...validTask, id }] });
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toContain("id must match T\\d+");
+    },
+  );
+
+  it.each([
+    ["absolute", ["/tmp/outside.ts"]],
+    ["traversal", ["src/../outside.ts"]],
+    ["backslash", ["src\\outside.ts"]],
+    ["alias", ["./src/x.ts"]],
+    ["duplicate", ["src/x.ts", "src/x.ts"]],
+  ])("rejects %s task file_list at the typed load boundary", (_label, file_list) => {
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, file_list }],
+    });
+    expect(parsed.ok).toBe(false);
+  });
+
+  it("enforces status/proof lockstep for proof-bearing graphs", () => {
+    const pendingProof = derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] });
+    const impossible = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, status: "implemented", proof: pendingProof }],
+    });
+    expect(impossible.ok).toBe(false);
+    if (!impossible.ok) expect(impossible.error).toContain("status/proof lockstep");
+
+    const satisfied = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: [] },
+      {
+        taskCompleted: true,
+        testResult: { verdict: "trusted-pass" },
+        filesModified: [],
+        newTestsWritten: true,
+      },
+    );
+    expect(satisfied.state).toBe("satisfied");
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, status: "implemented", proof: satisfied }],
+    }).ok).toBe(true);
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, status: "pending", proof: satisfied }],
+    }).ok).toBe(false);
+  });
+
+  it("binds persisted proof obligations exactly to new_tests_required and file_list", () => {
+    const exact = derivePendingTaskProof({
+      newTestsRequired: true,
+      declaredArtifacts: ["src/a.ts"],
+    });
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        new_tests_required: true,
+        file_list: ["src/a.ts"],
+        proof: exact,
+      }],
+    }).ok).toBe(true);
+
+    const omittedArtifact = derivePendingTaskProof({
+      newTestsRequired: true,
+      declaredArtifacts: [],
+    });
+    const omitted = parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        new_tests_required: true,
+        file_list: ["src/a.ts"],
+        proof: omittedArtifact,
+      }],
+    });
+    expect(omitted.ok).toBe(false);
+    if (!omitted.ok) expect(omitted.error).toContain("proof obligations do not exactly match");
+
+    const foreignTests = derivePendingTaskProof({
+      newTestsRequired: true,
+      declaredArtifacts: [],
+    });
+    const waived = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, new_tests_required: false, proof: foreignTests }],
+    });
+    expect(waived.ok).toBe(false);
+  });
+
   it("rejects an out-of-union current_phase loudly, naming the value", () => {
     const parsed = parseTaskGraph({ ...validGraph, current_phase: "vibing" });
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.error).toContain('"vibing"');
+  });
+
+  it.each([
+    { label: "null", value: null },
+    { label: "array", value: ["x"] },
+    { label: "string", value: "artifact" },
+    { label: "number", value: 42 },
+  ])("rejects non-object phase_artifacts: $label", ({ value }) => {
+    // Object cases, not bare values: vitest's it.each spreads ARRAY cases as
+    // argument tuples, so a bare `[]` case silently arrived as undefined — and
+    // the empty-array case itself hung the runner's %j name formatting.
+    const parsed = parseTaskGraph({ ...validGraph, phase_artifacts: value });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("phase_artifacts must be an object");
+  });
+
+  it("rejects unknown phase-artifact keys and non-string artifact paths", () => {
+    for (const phase_artifacts of [{ invented: "x.md" }, { architecture: 42 }]) {
+      expect(parseTaskGraph({ ...validGraph, phase_artifacts }).ok).toBe(false);
+    }
+  });
+
+  it("parses adjacent top-level TaskGraph fields instead of admitting impossible values", () => {
+    const cases = [
+      { skipped_phases: ["invented"] },
+      { spec_file: 42 },
+      { plan_file: {} },
+      { executing_tasks: ["T1", "T1"] },
+      { github_issue: 0 },
+      { github_repo: 42 },
+    ];
+    for (const fields of cases) expect(parseTaskGraph({ ...validGraph, ...fields }).ok).toBe(false);
+  });
+
+  it("rejects a captured spec check carrying the failed-capture error field", () => {
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      spec_check: {
+        wave: 1, run_at: "now", verdict: "PASSED", error: "stale",
+        critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+    });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("error must be absent");
+  });
+
+  it("rejects duplicate task ids at the load boundary", () => {
+    const parsed = parseTaskGraph({ ...validGraph, tasks: [validTask, { ...validTask }] });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("duplicate task id: T1");
   });
 
   it("rejects an out-of-union task status (drifted 'in_progress' fails at load, not inside .exhaustive())", () => {
@@ -249,9 +639,193 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it("proves files_modified is an array of strings before consumers read it", () => {
+    for (const files_modified of ["src/a.ts", ["src/a.ts", 42], null]) {
+      const parsed = parseTaskGraph({
+        ...validGraph,
+        tasks: [{ ...validTask, files_modified }],
+      });
+      expect(parsed.ok, JSON.stringify(files_modified)).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toContain("files_modified");
+    }
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, files_modified: ["src/a.ts"] }],
+    }).ok).toBe(true);
+  });
+
+  it("parses artifact baselines as an exact discriminated union", () => {
+    const valid = [{
+      artifact: "src/a.ts",
+      snapshot: { kind: "sha256", digest: "a".repeat(64) },
+    }, {
+      artifact: "src/new.ts",
+      snapshot: { kind: "missing" },
+    }];
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, file_list: ["src/a.ts", "src/new.ts"], artifact_baseline: valid }],
+    }).ok).toBe(true);
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        file_list: ["src/a.ts", "src/new.ts"],
+        attempt_artifact_baseline: valid,
+      }],
+    }).ok).toBe(true);
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        file_list: ["src/new.ts", "src/a.ts"],
+        attempt_artifact_baseline: valid,
+      }],
+    }).ok).toBe(false);
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        file_list: ["src/a.ts"],
+        files_modified: ["src/new.ts"],
+        attempt_artifact_baseline: valid,
+      }],
+    }).ok).toBe(true);
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        file_list: ["src/new.ts", "src/a.ts"],
+        artifact_baseline: valid,
+      }],
+    }).ok).toBe(false);
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, attempt_repository_baseline: valid }],
+    }).ok).toBe(true);
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        attempt_repository_baseline: [{
+          artifact: "src/a.ts",
+          snapshot: { kind: "sha256", digest: "bad" },
+        }],
+      }],
+    }).ok).toBe(false);
+
+    for (const artifact_baseline of [
+      "not-an-array",
+      [{ artifact: "src/a.ts", snapshot: { kind: "sha256", digest: "bad" } }],
+      [{ artifact: "src/a.ts", snapshot: { kind: "unknown" } }],
+      [valid[0], valid[0]],
+    ]) {
+      const parsed = parseTaskGraph({
+        ...validGraph,
+        tasks: [{ ...validTask, artifact_baseline }],
+      });
+      expect(parsed.ok, JSON.stringify(artifact_baseline)).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toContain("artifact_baseline");
+    }
+  });
+
+  it("parses engine-issued packet registrations and rejects authority drift", () => {
+    const registration = {
+      task_id: "T1",
+      packet_id: "b".repeat(64),
+      packet_path: ".claude/reviews/T1.json",
+      base_sha: "a".repeat(40),
+      head_sha: "c".repeat(40),
+      scope: ["src/a.ts"],
+    };
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, issued_review_packets: [registration] }],
+    }).ok).toBe(true);
+    for (const issued_review_packets of [
+      [{ ...registration, task_id: "T2" }],
+      [{ ...registration, packet_path: "../outside.json" }],
+      [{ ...registration, packet_id: "bad" }],
+      [{ ...registration, scope: ["src/a.ts", "src/a.ts"] }],
+      [registration, { ...registration }],
+    ]) {
+      expect(parseTaskGraph({
+        ...validGraph,
+        tasks: [{ ...validTask, issued_review_packets }],
+      }).ok).toBe(false);
+    }
+  });
+
+  it("parses only exact Git SHAs as recovered artifact baseline provenance", () => {
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, artifact_baseline_recovered_from: "a".repeat(40) }],
+    }).ok).toBe(true);
+    for (const artifact_baseline_recovered_from of ["HEAD~1", "A".repeat(40), "a".repeat(39)]) {
+      const parsed = parseTaskGraph({
+        ...validGraph,
+        tasks: [{ ...validTask, artifact_baseline_recovered_from }],
+      });
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toContain("artifact_baseline_recovered_from");
+    }
+  });
+
+  it("parses recovered write provenance and rejects drift or duplicate packet ids", () => {
+    const sha = "a".repeat(40);
+    const packet = "b".repeat(64);
+    const evidence = [{
+      baseline_sha: sha,
+      packet_id: packet,
+      packet_path: ".claude/reviews/T1.json",
+      modified_paths: ["src/a.ts"],
+    }];
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        file_list: ["src/a.ts"],
+        artifact_baseline_recovered_from: sha,
+        recovered_artifact_writes: evidence,
+      }],
+    }).ok).toBe(true);
+    for (const recovered_artifact_writes of [
+      [{ ...evidence[0], baseline_sha: "c".repeat(40) }],
+      [...evidence, { ...evidence[0] }],
+      [{ ...evidence[0], packet_path: "../outside.json" }],
+      [{ ...evidence[0], modified_paths: ["src/a.ts", "src/a.ts"] }],
+      [{ ...evidence[0], modified_paths: [] }],
+      [{ ...evidence[0], modified_paths: ["src/outside.ts"] }],
+    ]) {
+      expect(parseTaskGraph({
+        ...validGraph,
+        tasks: [{
+          ...validTask,
+          file_list: ["src/a.ts"],
+          artifact_baseline_recovered_from: sha,
+          recovered_artifact_writes,
+        }],
+      }).ok).toBe(false);
+    }
+  });
+
   it("rejects non-array tasks and non-object wave_gates", () => {
     expect(parseTaskGraph({ ...validGraph, tasks: "none" }).ok).toBe(false);
     expect(parseTaskGraph({ ...validGraph, wave_gates: [] }).ok).toBe(false);
+  });
+
+  it("requires every persisted wave gate field instead of casting partial records", () => {
+    const complete = {
+      impl_complete: false,
+      tests_passed: null,
+      reviews_complete: false,
+      blocked: false,
+    };
+    expect(parseTaskGraph({ ...validGraph, wave_gates: { "1": complete } }).ok).toBe(true);
+    for (const partial of [{}, { impl_complete: false }, { ...complete, tests_passed: undefined }]) {
+      const parsed = parseTaskGraph({ ...validGraph, wave_gates: { "1": partial } });
+      expect(parsed.ok, JSON.stringify(partial)).toBe(false);
+    }
   });
 
   it("StateManager.load surfaces the parse error as a contextual throw", () => {
@@ -271,6 +845,22 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
 });
 
 describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR files", () => {
+  it("resolves a LOOM_STATE_PATH established after module import", () => {
+    const dir = makeTmpDir();
+    const latePath = join(dir, "late-active-task-graph.json");
+    const previous = process.env.LOOM_STATE_PATH;
+    writeFileSync(latePath, JSON.stringify(minimalGraph()));
+    process.env.LOOM_STATE_PATH = latePath;
+    try {
+      expect(resolveTaskGraph()).toBe(latePath);
+      expect(StateManager.fromSession("sm-late-binding")?.getPath()).toBe(latePath);
+    } finally {
+      if (previous === undefined) delete process.env.LOOM_STATE_PATH;
+      else process.env.LOOM_STATE_PATH = previous;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("a valid session id resolves through its .task_graph pointer", () => {
     const s = `sm-resolve-${process.pid}-${Date.now()}`;
     const dir = makeTmpDir();
@@ -282,6 +872,39 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
     try {
       expect(resolveTaskGraph(s)).toBe(statePath);
     } finally {
+      rmSync(pointer, { force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an unreadable session pointer refuses local fallback", () => {
+    const s = `sm-unreadable-pointer-${process.pid}-${Date.now()}`;
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
+    symlinkSync(pointer, pointer);
+    try {
+      expect(() => resolveTaskGraph(s)).toThrow(/cannot read session pointer.*refusing local task-graph fallback/);
+    } finally {
+      rmSync(pointer, { force: true });
+    }
+  });
+
+  it("an unreadable pointed graph remains session authority and fails on load", () => {
+    const s = `sm-unreadable-graph-${process.pid}-${Date.now()}`;
+    const dir = makeTmpDir();
+    const target = join(dir, "active_task_graph.json");
+    symlinkSync(target, target);
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
+    writeFileSync(pointer, target);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(resolveTaskGraph(s)).toBe(target);
+      const manager = StateManager.fromSession(s);
+      expect(manager?.getPath()).toBe(target);
+      expect(() => manager?.load()).toThrow();
+    } finally {
+      stderrSpy.mockRestore();
       rmSync(pointer, { force: true });
       rmSync(dir, { recursive: true, force: true });
     }
@@ -319,5 +942,96 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
     } finally {
       stderrSpy.mockRestore();
     }
+  });
+});
+
+describe("parseTaskGraph proves findings, not just the fields that always did", () => {
+  const validTask = {
+    id: "T1",
+    description: "impl",
+    agent: "code-implementer-agent",
+    wave: 1,
+    status: "pending",
+    depends_on: [],
+  };
+  const graph = (task: Record<string, unknown>) => ({
+    current_phase: "execute",
+    phase_artifacts: {},
+    tasks: [{ ...validTask, ...task }],
+    wave_gates: {},
+  });
+  const wellFormed = {
+    id: "code-reviewer-1",
+    agent: "code-reviewer",
+    severity: "critical",
+    file: "src/x.ts",
+    line: 4,
+    claim: "unchecked cast",
+  };
+
+  it("accepts a task with no findings, and one whose views are in lockstep", () => {
+    expect(parseTaskGraph(graph({})).ok).toBe(true);
+    expect(parseTaskGraph(graph({ findings: [] })).ok).toBe(true);
+    expect(parseTaskGraph(graph({
+      findings: [wellFormed],
+      critical_findings: ["unchecked cast"],
+    })).ok).toBe(true);
+    expect(parseTaskGraph(graph({
+      refuted_findings: [{ finding: wellFormed, refutations: [{ lens: "intent", reason: "deliberate" }] }],
+    })).ok).toBe(true);
+  });
+
+  it("accepts the same claim twice — two reviewers may word it identically", () => {
+    // A multiset comparison, not a set one. Collapsing duplicates would reject
+    // a graph the sanctioned writers are allowed to produce.
+    expect(parseTaskGraph(graph({
+      findings: [wellFormed, { ...wellFormed, id: "silent-failure-hunter-1", agent: "silent-failure-hunter" }],
+      critical_findings: ["unchecked cast", "unchecked cast"],
+    })).ok).toBe(true);
+  });
+
+  it.each([
+    ["findings that are not an array", { findings: {} }],
+    ["refuted_findings that are not an array", { refuted_findings: "none" }],
+    ["a finding with no id", { findings: [{ ...wellFormed, id: "" }] }],
+    ["a finding id with an extra colon", { findings: [{ ...wellFormed, id: "bad:id" }] }],
+    ["a finding id with whitespace", { findings: [{ ...wellFormed, id: "bad id" }] }],
+    ["a finding with no agent", { findings: [{ ...wellFormed, agent: undefined }] }],
+    ["a finding with an unknown severity", { findings: [{ ...wellFormed, severity: "blocker" }] }],
+    ["a finding with a non-string claim", { findings: [{ ...wellFormed, claim: 7 }] }],
+    // Two findings under one id make applyFindingOutcomes delete BOTH where one
+    // was adjudicated, and attach the panel's reasoning to the wrong claim —
+    // the failure nextOrdinal forecloses when minting, and nothing caught on read.
+    ["two findings sharing an id", {
+      findings: [wellFormed, { ...wellFormed, claim: "a different claim" }],
+      critical_findings: ["unchecked cast", "a different claim"],
+    }],
+    // The dangerous drift direction: the gate counts the view, so a critical
+    // present only in `findings` never blocks the wave.
+    ["a critical present only in findings", { findings: [wellFormed], critical_findings: [] }],
+    // The other direction: a claim no finding accounts for can never enter a
+    // brief, so no panel can ever adjudicate it.
+    ["a claim present only in the view", { findings: [], critical_findings: ["orphan"] }],
+    ["an advisory view that outruns findings", {
+      findings: [wellFormed],
+      critical_findings: ["unchecked cast"],
+      advisory_findings: ["nit"],
+    }],
+    ["a refutation with no refuters", { refuted_findings: [{ finding: wellFormed, refutations: [] }] }],
+    ["a refutation missing a reason", { refuted_findings: [{ finding: wellFormed, refutations: [{ lens: "intent" }] }] }],
+  ])("rejects %s at the load boundary", (_label, task) => {
+    // The type says `readonly Finding[]`; before this the cast asserted it from
+    // unvalidated JSON, and a finding missing its `file` key surfaced as an
+    // unhandled TypeError from inside a pure panel function rather than as a
+    // contract diagnostic.
+    const parsed = parseTaskGraph(graph(task));
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain('tasks[0] ("T1")');
+  });
+
+  it("names the repair so a rejected graph is not a dead end", () => {
+    const parsed = parseTaskGraph(graph({ findings: [{}] }));
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("repair-task-graph");
   });
 });

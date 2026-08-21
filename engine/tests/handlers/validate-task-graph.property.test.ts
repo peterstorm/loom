@@ -10,10 +10,13 @@ function errorsOf(r: import("../../src/handlers/helpers/validate-task-graph").Va
 /** Build a minimal valid top-level graph wrapper around tasks */
 function wrapTasks(tasks: Record<string, unknown>[]) {
   return {
+    current_phase: "execute",
+    phase_artifacts: {},
+    skipped_phases: [],
     plan_title: "Test Plan",
     plan_file: ".claude/plans/test.md",
     spec_file: ".claude/specs/test/spec.md",
-    tasks,
+    tasks: tasks.map((task) => ({ status: "pending", ...task })),
   };
 }
 
@@ -25,9 +28,21 @@ const AGENTS = [
   "ts-test-agent",
   "frontend-agent",
   "security-agent",
-  "dotfiles-agent",
-  "general-purpose",
 ];
+
+describe("task implementation-agent authority", () => {
+  it.each(["dotfiles-agent", "general-purpose"])("rejects unsupported task agent %s", (agent) => {
+    const result = validateFull(wrapTasks([{
+      id: "T1",
+      description: "Unsupported task agent",
+      agent,
+      wave: 1,
+      depends_on: [],
+    }]));
+    expect(result.ok).toBe(false);
+    expect(errorsOf(result)).toContain(`Task T1: unknown agent '${agent}'`);
+  });
+});
 
 /** Generate a valid task with given constraints */
 function arbTask(id: string, wave: number, deps: string[]) {
@@ -198,9 +213,8 @@ describe("validateFull — edge cases", () => {
         { id: "T1", description: "duplicate", agent: "ts-test-agent", wave: 1, depends_on: [] },
       ]),
     );
-    // Both T1s exist in allIds set — no direct "duplicate" error but still valid check
-    // The key is: does the system handle it gracefully?
-    expect(result).toBeDefined();
+    expect(result.ok).toBe(false);
+    expect(errorsOf(result)).toContain("Duplicate task id: T1");
   });
 
   it("rejects wave gaps (wave 1, wave 3, no wave 2)", () => {

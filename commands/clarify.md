@@ -2,11 +2,14 @@
 name: clarify
 version: "1.0.0"
 description: "This skill should be used when the user asks to 'clarify requirements', 'resolve uncertainties', 'answer spec questions', or when auto-triggered by /specify with >3 NEEDS CLARIFICATION markers. Systematically surfaces and resolves ambiguities in specifications."
+argument-hint: "[path/to/spec.md]"
 ---
 
 # Clarify - Systematic Uncertainty Resolution
 
 Scan specifications for ambiguities and resolve them through structured questioning. Produces cleaner specs that feed into architecture and planning.
+
+**Arguments:** "$ARGUMENTS"
 
 **Triggers:**
 - Auto-triggered by `/specify` when >3 `[NEEDS CLARIFICATION]` markers

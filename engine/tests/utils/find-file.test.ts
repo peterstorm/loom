@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { findFile } from "../../src/utils/find-file";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, chmodSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -30,26 +30,10 @@ describe("findFile", () => {
     expect(findFile(join(tmpDir, "nope"), "f.md")).toBeNull();
   });
 
-  it("logs non-ENOENT errors to stderr", () => {
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  it("throws on non-ENOENT errors instead of reporting the directory absent", () => {
+    const unreadable = join(tmpDir, "loop");
+    symlinkSync(unreadable, unreadable);
 
-    // Create a directory that can't be read
-    const unreadable = join(tmpDir, "secret");
-    mkdirSync(unreadable);
-    chmodSync(unreadable, 0o000);
-
-    const result = findFile(unreadable, "file.md");
-
-    // Should return null (can't read the dir)
-    expect(result).toBeNull();
-    // Should have logged to stderr (EACCES or similar)
-    const logged = stderrSpy.mock.calls.some(
-      ([msg]) => typeof msg === "string" && msg.includes("findFile error"),
-    );
-    expect(logged).toBe(true);
-
-    // Restore permissions for cleanup
-    chmodSync(unreadable, 0o755);
-    stderrSpy.mockRestore();
+    expect(() => findFile(unreadable, "file.md")).toThrow(/findFile error.*ELOOP|findFile error.*symbolic/i);
   });
 });

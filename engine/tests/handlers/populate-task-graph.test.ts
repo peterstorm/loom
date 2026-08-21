@@ -111,7 +111,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
       plan_file: plan,
       tasks: [{
         id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1,
-        depends_on: [], spec_anchors: [], new_tests_required: true, file_list: ["src/other.ts"],
+        depends_on: [], spec_anchors: [], new_tests_required: true, plan_context: "", file_list: ["src/other.ts"],
         // Forged execution state — must never reach the persisted graph.
         status: "completed",
         review_status: "passed",
@@ -120,6 +120,8 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
         new_tests_written: true,
         new_test_evidence: "forged",
         critical_findings: ["planted"],
+        findings: [{ id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "planted" }],
+        refuted_findings: [{ finding: { id: "code-reviewer-9", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "planted" }, refutations: [{ lens: "intent", reason: "planted" }] }],
         advisory_findings: ["planted"],
         files_modified: ["everything"],
         start_sha: "deadbeef",
@@ -140,14 +142,48 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     expect(t9.new_test_evidence).toBeUndefined();
     expect(t9.critical_findings).toEqual([]);
     expect(t9.advisory_findings).toEqual([]);
+    // The authoritative array and the refutation audit trail are execution
+    // state too — a decomposer that planted either would seed a wave gate with
+    // findings nobody reviewed, or an audit record of a panel that never ran.
+    expect(t9.findings).toEqual([]);
+    expect(t9.refuted_findings).toEqual([]);
     expect(t9.files_modified).toBeUndefined();
     expect(t9.start_sha).toBeUndefined();
     expect(t9.failure_reason).toBeUndefined();
     expect(t9.retry_count).toBeUndefined();
     // Decompose-contract fields survive.
     expect(t9.new_tests_required).toBe(true);
+    expect(t9.plan_context).toBe("");
     expect(t9.file_list).toEqual(["src/other.ts"]);
+    expect(t9.proof?.state).toBe("pending");
+    expect(t9.proof?.obligations).toEqual([
+      { kind: "task-completed" },
+      { kind: "regression-test-pass" },
+      { kind: "new-tests" },
+      { kind: "declared-artifact-changed", artifact: "src/other.ts" },
+    ]);
     expect(t9.spec_anchors).toEqual([]);
+  });
+
+  it("rejects malformed file_list before proof derivation and leaves state untouched", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, []);
+    const malformed = JSON.stringify({
+      plan_title: "t",
+      spec_file: "spec.md",
+      plan_file: plan,
+      tasks: [{
+        id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1,
+        depends_on: [], spec_anchors: [], new_tests_required: true, file_list: ["src/x.ts", 42],
+      }],
+    });
+
+    const result = await populate(malformed, []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("file_list");
+    expect((JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph).tasks).toEqual([]);
   });
 
   it("--fix re-validates: unfixable structural errors fail loudly instead of persisting", async () => {

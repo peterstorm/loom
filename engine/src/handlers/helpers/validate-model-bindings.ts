@@ -10,25 +10,44 @@
  *
  * Pure core (`validateModelBindings`) with filesystem access injected via
  * `ModelBindingDeps`; `checkPlanModelBindings` is the shared fail-closed
- * entry point used by both the validate-task-graph handler and
- * populate-task-graph (the only whitelisted helper that populates tasks
- * into state), so neither path can skip enforcement.
+ * entry point used by the validate-task-graph handler, populate-task-graph,
+ * and repair-task-graph — the whitelisted helpers that populate tasks into
+ * state (repair-task-graph installs through `StateManager.replace`, see its
+ * own header) — so none of them can skip enforcement.
  */
 
+import { match } from "ts-pattern";
+
+import { readFileSync } from "node:fs";
 import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../parsers/parse-plan-models";
-import type { ValidationResult } from "./validate-task-graph";
+import { type ValidationResult, ok, fail } from "./validation-result";
+
+export type ModelFileRead =
+  | { readonly ok: true; readonly content: string }
+  | { readonly ok: false; readonly error: string };
 
 export interface ModelBindingDeps {
-  /** Returns file content, or null when the file does not exist or is unreadable */
-  readonly readFile: (path: string) => string | null;
+  /** Reads one binding artifact while preserving the concrete boundary failure. */
+  readonly readFile: (path: string) => ModelFileRead;
 }
 
-function ok(): ValidationResult {
-  return { ok: true };
-}
-function fail(errors: string[]): ValidationResult {
-  return { ok: false, errors };
-}
+/**
+ * The production filesystem adapter for the pure binding check. It lives beside
+ * the port it implements because three shell callers (populate-task-graph,
+ * repair-task-graph, validate-task-graph) each had a byte-identical private
+ * copy — three places to fix if the boundary failure shape ever changes.
+ */
+export const productionModelBindingDeps: ModelBindingDeps = {
+  readFile: (path) => {
+    try {
+      return { ok: true, content: readFileSync(path, "utf-8") };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+};
+
+
 
 function normalizePath(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\.\//, "");
@@ -86,14 +105,14 @@ export function validateModelBindings(
     if (dagFile === null) {
       errors.push("Pipeline section declares no '**AuthoredDag:**' path — a pipeline without an authored DAG is a descriptive model (see references/executable-models.md)");
     } else {
-      const content = deps.readFile(dagFile);
-      if (content === null) {
-        errors.push(`Pipeline: AuthoredDag file '${dagFile}' not found or unreadable — the architecture phase must author it before decompose`);
+      const read = deps.readFile(dagFile);
+      if (!read.ok) {
+        errors.push(`Pipeline: cannot read AuthoredDag file '${dagFile}': ${read.error} — the architecture phase must author it before decompose`);
       } else {
         let dag: unknown;
         let parseError: string | null = null;
         try {
-          dag = JSON.parse(content);
+          dag = JSON.parse(read.content);
         } catch (e) {
           parseError = jsonParseError(e);
         }
@@ -102,24 +121,33 @@ export function validateModelBindings(
         } else if (typeof dag !== "object" || dag === null || Array.isArray(dag) || !Array.isArray((dag as Record<string, unknown>).nodes)) {
           errors.push(`Pipeline: AuthoredDag file '${dagFile}' must be a JSON object with a 'nodes' array (deep validation is fugue's job — 'fugue new --from' gates codegen)`);
         } else {
-          // Drift guard: every node the plan's Pipeline table names must appear
-          // in the sidecar. Matched as an EXACT QUOTED JSON token (`"name"`)
-          // inside the serialized `nodes` array, not a bare substring of the
-          // raw sidecar text. A substring test false-passes three ways: a
-          // substring collision (declared `fetch` satisfied by a sidecar
-          // `fetch-order`), a non-node occurrence (the name appearing in a
-          // comment/other field), and a degenerate empty name (`includes("")`
-          // is always true). Serializing only the `nodes` array — already
-          // parsed and in scope — keeps loom's "no schema knowledge of fugue's
-          // DAG shape" stance (it assumes only a `nodes` array) while catching
-          // real plan↔sidecar drift that the unguarded-intermediate leak
-          // allowed through to fugue runtime.
-          const nodesJson = JSON.stringify((dag as { nodes: unknown[] }).nodes);
-          const missing = models.pipeline.declaredNodes.filter((n) => !nodesJson.includes(`"${n}"`));
-          if (missing.length > 0) {
-            errors.push(
-              `Pipeline: node(s) named in the plan's table are absent from AuthoredDag file '${dagFile}': ${missing.join(", ")} — plan and sidecar have drifted; re-author the sidecar or fix the table`,
-            );
+          // Narrow anti-corruption boundary: Loom knows only the node identity
+          // field needed for plan↔sidecar drift checks. Fugue still owns every
+          // deeper node-kind/schema invariant.
+          const nodeIds = new Set<string>();
+          const nodeErrors: string[] = [];
+          for (const [index, node] of (dag as { nodes: unknown[] }).nodes.entries()) {
+            if (typeof node !== "object" || node === null || Array.isArray(node)) {
+              nodeErrors.push(`nodes[${index}] must be an object with a non-empty id`);
+              continue;
+            }
+            const id = (node as Record<string, unknown>).id;
+            if (typeof id !== "string" || id.trim() === "" || id.trim() !== id) {
+              nodeErrors.push(`nodes[${index}].id must be a non-empty string without surrounding whitespace`);
+              continue;
+            }
+            if (nodeIds.has(id)) nodeErrors.push(`nodes[${index}].id duplicates '${id}'`);
+            nodeIds.add(id);
+          }
+          if (nodeErrors.length > 0) {
+            errors.push(`Pipeline: AuthoredDag file '${dagFile}' has invalid node identities: ${nodeErrors.join("; ")}`);
+          } else {
+            const missing = models.pipeline.declaredNodes.filter((node) => !nodeIds.has(node));
+            if (missing.length > 0) {
+              errors.push(
+                `Pipeline: node(s) named in the plan's table are absent from AuthoredDag file '${dagFile}': ${missing.join(", ")} — plan and sidecar have drifted; re-author the sidecar or fix the table`,
+              );
+            }
           }
         }
       }
@@ -127,11 +155,22 @@ export function validateModelBindings(
   }
 
   for (const inv of models.invariants) {
-    if (inv.tier === null) {
-      errors.push(`${inv.id} ("${inv.title}"): missing or unrecognized '**Tier:**' — must be 'checkable' or 'advisory'`);
-      continue;
-    }
-    if (inv.tier === "advisory") {
+    // Three states, three messages: the old `tier: null` conflated "line
+    // missing" with "line present but unrecognized", and the error could
+    // only guess which failure the operator was looking at.
+    const tier = match(inv.tier)
+      .with({ status: "absent" }, () => {
+        errors.push(`${inv.id} ("${inv.title}"): missing '**Tier:**' — must be 'checkable' or 'advisory'`);
+        return null;
+      })
+      .with({ status: "unrecognized" }, ({ raw }) => {
+        errors.push(`${inv.id} ("${inv.title}"): unrecognized '**Tier:**' '${raw}' — must be 'checkable' or 'advisory'`);
+        return null;
+      })
+      .with({ status: "ok" }, ({ tier }) => tier)
+      .exhaustive();
+    if (tier === null) continue;
+    if (tier === "advisory") {
       if (inv.ruleFile !== null) {
         errors.push(`${inv.id} ("${inv.title}"): tier is 'advisory' but declares a '**Rule file:**' — advisory invariants are never enforced; re-tier as 'checkable' or remove the rule file line`);
       }
@@ -142,15 +181,15 @@ export function validateModelBindings(
       errors.push(`${inv.id} ("${inv.title}"): tier is 'checkable' but no '**Rule file:**' declared — a checkable invariant must be a lint rule, or be honestly tiered 'advisory'`);
       continue;
     }
-    const content = deps.readFile(ruleFile);
-    if (content === null) {
-      errors.push(`${inv.id}: rule file '${ruleFile}' not found or unreadable — the architecture phase must write it (validate with the validate-lint-rules helper)`);
+    const read = deps.readFile(ruleFile);
+    if (!read.ok) {
+      errors.push(`${inv.id}: cannot read rule file '${ruleFile}': ${read.error} — the architecture phase must write it (validate with the validate-lint-rules helper)`);
       continue;
     }
     let rule: unknown;
     let parseError: string | null = null;
     try {
-      rule = JSON.parse(content);
+      rule = JSON.parse(read.content);
     } catch (e) {
       parseError = jsonParseError(e);
     }
@@ -201,15 +240,15 @@ export function checkPlanModelBindings(
       errors: ["plan_file must be a non-empty string path — executable-model bindings cannot be verified without the plan"],
     };
   }
-  const content = deps.readFile(planFile);
-  if (content === null) {
+  const read = deps.readFile(planFile);
+  if (!read.ok) {
     return {
       kind: "plan-unavailable",
       ok: false,
-      errors: [`plan_file '${planFile}' not found or unreadable — executable-model bindings cannot be verified (fix the path or run from the repo root)`],
+      errors: [`cannot read plan_file '${planFile}': ${read.error} — executable-model bindings cannot be verified (fix the path or run from the repo root)`],
     };
   }
-  const models = parsePlanModels(content);
+  const models = parsePlanModels(read.content);
   if (!hasModels(models)) return { kind: "opted-out", ok: true, models };
   const result = validateModelBindings(models, tasks, deps);
   return result.ok

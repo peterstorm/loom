@@ -40,18 +40,20 @@
  */
 
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import {
   appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   statSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../config";
+import { STALE_SUBAGENT_TTL_MS, subagentDir } from "../config";
 import { withLock } from "../utils/lock";
 import { parseMachineJson } from "./parse-machine";
 import {
@@ -71,9 +73,10 @@ import {
   formatBindingLine,
   isBindingFresh,
   parseAgentId,
+  parseAgentType,
   parseBindingLine,
+  parseReportedAgentId,
   parseEvidenceLine,
-  parseSessionId,
   resolveSoleActiveBinding,
 } from "./evidence";
 import type { Epoch, Evidence, EvidenceRecord, MachineDef } from "./types";
@@ -87,7 +90,7 @@ import type { Epoch, Evidence, EvidenceRecord, MachineDef } from "./types";
  * at its own boundary (fail-closed there) and threads SessionId inward.
  */
 function sessionFilePath(sessionId: SessionId, suffix: string): string {
-  return `${SUBAGENT_DIR}/${sessionId}${suffix}`;
+  return `${subagentDir()}/${sessionId}${suffix}`;
 }
 
 export const ledgerPath = (sessionId: SessionId): string =>
@@ -126,6 +129,16 @@ function rewriteFileAtomic(path: string, content: string): void {
   renameSync(tmp, path);
 }
 
+/** Read an optional text file without collapsing access/path failures into absence. */
+function readOptionalTextFile(path: string, label: string): string | null {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error(`cannot read ${label} ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 // --- Bindings ---
 
 /** One raw binding-file line classified for liveness decisions. */
@@ -141,18 +154,24 @@ type ClassifiedLine =
  */
 function classifyBindingLines(sessionId: SessionId, nowMs: number): ClassifiedLine[] {
   const path = machineBindingPath(sessionId);
-  if (!existsSync(path)) return [];
-  const anchorMs = statSync(path).mtimeMs;
-  return readFileSync(path, "utf-8")
-    .split("\n")
-    .filter((l) => l.trim() !== "")
-    .map((raw): ClassifiedLine => {
-      const persisted = parseBindingLine(raw);
-      if (persisted === null) return { kind: "malformed", raw };
-      return isBindingFresh({ boundAtMs: persisted.boundAtMs, anchorMs, nowMs, ttlMs: STALE_SUBAGENT_TTL_MS })
-        ? { kind: "fresh", raw, persisted }
-        : { kind: "stale", raw, persisted };
-    });
+  try {
+    const anchorMs = statSync(path).mtimeMs;
+    return readFileSync(path, "utf-8")
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((raw): ClassifiedLine => {
+        const persisted = parseBindingLine(raw);
+        if (persisted === null) return { kind: "malformed", raw };
+        return isBindingFresh({ boundAtMs: persisted.boundAtMs, anchorMs, nowMs, ttlMs: STALE_SUBAGENT_TTL_MS })
+          ? { kind: "fresh", raw, persisted }
+          : { kind: "stale", raw, persisted };
+      });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw new Error(
+      `cannot read machine binding file ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 /**
@@ -163,7 +182,7 @@ function classifyBindingLines(sessionId: SessionId, nowMs: number): ClassifiedLi
  * activity exceeds the TTL are treated as ABSENT (their subagent plausibly
  * died without SubagentStop) — refreshBindingActivity reaps them.
  */
-export function readBindings(sessionId: SessionId, nowMs: number = Date.now()): MachineBinding[] {
+export function readBindings(sessionId: SessionId, nowMs: number = Date.now()): readonly MachineBinding[] {
   const lines = classifyBindingLines(sessionId, nowMs);
   const malformed = lines.filter((l) => l.kind === "malformed").length;
   if (malformed > 0) {
@@ -176,25 +195,116 @@ export function readBindings(sessionId: SessionId, nowMs: number = Date.now()): 
   return lines.flatMap((l) => (l.kind === "fresh" ? [l.persisted.binding] : []));
 }
 
-function readActiveAgents(sessionId: SessionId): AgentId[] {
+/**
+ * One roster entry. A line is `<agentId>` or `<agentId>\t<agentType>`; the
+ * type column is optional because not every producer knows the type (Pi's
+ * write-grant children mark the roster with a `pi-grant-` id and no type) and
+ * because rosters written before the column existed must keep parsing.
+ */
+export type ActiveAgent = Readonly<{ agentId: AgentId; agentType: AgentType | null }>;
+
+/** Column 0 of a roster line — the identity every existing reader means. */
+const rosterLineAgentId = (line: string): AgentId => rosterAgentId(line.split("\t")[0]!.trim());
+
+function readActiveAgentEntries(sessionId: SessionId): ActiveAgent[] {
   const path = activeFlagPath(sessionId);
-  if (!existsSync(path)) return [];
-  return readFileSync(path, "utf-8")
+  const content = readOptionalTextFile(path, "active roster");
+  if (content === null) return [];
+  return content
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l !== "")
-    // Re-parse through the SAME producer that wrote the roster (rosterAgentId),
-    // so the read-back carries the AgentId brand instead of a raw string and
-    // the sole-active comparison in resolveSoleActiveBinding stays brand-to-
-    // brand. Mapping (not dropping) preserves the count: rosterAgentId is
-    // total and idempotent on already-written lines, so a corrupt line can
-    // never silently shrink the roster into a false 2→1 attribution.
-    .map((l) => rosterAgentId(l));
+    .map((line) => {
+      const [, rawType] = line.split("\t");
+      const trimmedType = rawType?.trim() ?? "";
+      return Object.freeze({
+        // Re-parse through the SAME producer that wrote the roster
+        // (rosterAgentId), so the read-back carries the AgentId brand instead
+        // of a raw string and the sole-active comparison in
+        // resolveSoleActiveBinding stays brand-to-brand. Mapping (not
+        // dropping) preserves the count: rosterAgentId is total and idempotent
+        // on already-written lines, so a corrupt line can never silently
+        // shrink the roster into a false 2→1 attribution.
+        agentId: rosterLineAgentId(line),
+        // An absent or unparseable type is null, never a guess: callers that
+        // authorize on type must fall back rather than trust a repaired value.
+        agentType: trimmedType === "" ? null : parseAgentType(trimmedType),
+      });
+    });
+}
+
+/**
+ * Active agents with the role each is serving.
+ *
+ * The roster's original job was to COUNT agents, so it stored identity alone.
+ * Authorization needs the ROLE: on Claude Code `agent_id` is an opaque handle
+ * (`a339f6fd51d78b179`), which no set of agent-type names can ever match.
+ */
+export function readActiveAgentRoles(sessionId: SessionId): readonly ActiveAgent[] {
+  return Object.freeze(readActiveAgentEntries(sessionId));
+}
+
+function readActiveAgents(sessionId: SessionId): AgentId[] {
+  return readActiveAgentEntries(sessionId).map(({ agentId }) => agentId);
 }
 
 /** Number of agents currently on the session's `.active` roster. */
 export function countActiveAgents(sessionId: SessionId): number {
   return readActiveAgents(sessionId).length;
+}
+
+/**
+ * Is any subagent active FOR THIS TASK GRAPH?
+ *
+ * SUBAGENT_DIR is global and shared by every project on the machine, while a
+ * reservation belongs to one task graph. A project-blind answer therefore lets
+ * a live agent in project A veto reservation recovery in project B — and lets
+ * any stray `.active` file veto it everywhere, forever. Scope the question with
+ * the `<session>.task_graph` pointer mark-subagent-active already writes.
+ *
+ * Per roster, by the pointer beside it:
+ *   - resolves to THIS graph  → active (proven to be serving this project)
+ *   - resolves elsewhere      → not ours
+ *   - absent (ENOENT)         → not ours; "bound to no graph" is a real answer,
+ *                               which is what stops stray rosters vetoing
+ *   - unreadable (any other)  → active (fail closed: cannot disprove it's ours)
+ *
+ * The ENOENT-vs-error split is load-bearing: absence is evidence, failure is
+ * not. A directory that cannot be read at all is likewise fail-closed.
+ */
+export function anyActiveSubagent(taskGraphPath: string): boolean {
+  const wanted = resolve(taskGraphPath);
+  let entries: readonly string[];
+  try {
+    entries = readdirSync(subagentDir());
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+    process.stderr.write(
+      `anyActiveSubagent: cannot read ${subagentDir()} (${e instanceof Error ? e.message : String(e)}) — assuming a subagent is active (fail closed)\n`,
+    );
+    return true;
+  }
+  return entries.filter((name) => name.endsWith(".active")).some((name) => {
+    const session = name.slice(0, -".active".length);
+    try {
+      if (statSync(`${subagentDir()}/${name}`).size === 0) return false;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+      process.stderr.write(
+        `anyActiveSubagent: cannot stat roster ${name} (${e instanceof Error ? e.message : String(e)}) — assuming a subagent is active (fail closed)\n`,
+      );
+      return true;
+    }
+    try {
+      return resolve(readFileSync(`${subagentDir()}/${session}.task_graph`, "utf-8").trim()) === wanted;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+      process.stderr.write(
+        `anyActiveSubagent: cannot read the task-graph pointer for ${session} (${e instanceof Error ? e.message : String(e)}) — assuming it serves this graph (fail closed)\n`,
+      );
+      return true;
+    }
+  });
 }
 
 /**
@@ -222,9 +332,15 @@ export function soleActiveBinding(sessionId: SessionId, nowMs: number = Date.now
  */
 export async function refreshBindingActivity(sessionId: SessionId, nowMs: number = Date.now()): Promise<void> {
   const path = machineBindingPath(sessionId);
-  if (!existsSync(path)) return;
+  try {
+    statSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error(
+      `cannot inspect machine binding file ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   await withLock(bindingLock(sessionId), () => {
-    if (!existsSync(path)) return;
     const lines = classifyBindingLines(sessionId, nowMs);
     const stale = lines.filter((l) => l.kind === "stale");
     const kept = lines.filter((l) => l.kind !== "stale");
@@ -256,12 +372,37 @@ export async function refreshBindingActivity(sessionId: SessionId, nowMs: number
  * deterministic `unparseable-<hex digest>` placeholder that itself
  * satisfies the roster line format, keeping markAgentActive /
  * removeActiveAgent symmetric for the agent's start and stop hooks.
+ *
+ * This is the roster LINE codec — total, idempotent on already-written lines,
+ * and deliberately namespace-preserving, because it also reads back the
+ * `pi-grant-` identities the write-grant flow legitimately wrote. Untrusted,
+ * harness-reported ids must go through `reportedRosterAgentId` instead.
  */
 export function rosterAgentId(raw: string): AgentId {
-  const parsed = parseAgentId(raw);
+  return placeholderOnNull(raw, parseAgentId(raw));
+}
+
+/**
+ * Roster identity for a HARNESS-REPORTED `agent_id` — one that arrives as hook
+ * input from SubagentStart/SubagentStop and was never proved to carry anything.
+ *
+ * Identical to `rosterAgentId` except that the reserved write-grant namespace
+ * is refused along with binding-unsafe ids. The write gate authorizes on the
+ * roster's identity column, so a reported id merely SHAPED like a grant
+ * identity landing there verbatim would hand out Edit/Write with no grant ever
+ * consumed. The placeholder absorbs it: the agent is still COUNTED — all the
+ * roster owes attribution — under an id that authorizes nothing. Start and stop
+ * derive the same placeholder from the same raw id, so removal stays symmetric.
+ */
+export function reportedRosterAgentId(raw: string): AgentId {
+  return placeholderOnNull(raw, parseReportedAgentId(raw));
+}
+
+/** Deterministic, binding-safe stand-in for an id its constructor refused. */
+function placeholderOnNull(raw: string, parsed: AgentId | null): AgentId {
   if (parsed !== null) return parsed;
   const digest = createHash("sha256").update(raw).digest("hex").slice(0, 16);
-  const placeholder = parseAgentId(`unparseable-${digest}`);
+  const placeholder = parseReportedAgentId(`unparseable-${digest}`);
   if (placeholder === null) {
     throw new Error("unreachable: hex placeholder is binding-safe by construction");
   }
@@ -277,14 +418,21 @@ export function rosterAgentId(raw: string): AgentId {
  * makes soleActiveBinding stand down for the rest of the run (roster count
  * 2 ≠ 1), silently disarming the recorder and the gate's evidence fold.
  */
-export async function markAgentActive(sessionId: SessionId, agentId: AgentId): Promise<void> {
-  mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+export async function markAgentActive(
+  sessionId: SessionId,
+  agentId: AgentId,
+  agentType: AgentType | null = null,
+): Promise<void> {
+  mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
   await withLock(bindingLock(sessionId), () => {
     const path = activeFlagPath(sessionId);
     if (existsSync(path)) {
+      // Identity is column 0: a re-marked agent must be recognised as a
+      // duplicate whether or not the earlier line recorded a type.
       const already = readFileSync(path, "utf-8")
         .split("\n")
-        .some((l) => l.trim() === `${agentId}`);
+        .filter((l) => l.trim() !== "")
+        .some((l) => rosterLineAgentId(l) === agentId);
       if (already) {
         process.stderr.write(
           `markAgentActive: ${agentId} already on the roster for ${sessionId} — duplicate SubagentStart ignored\n`,
@@ -292,31 +440,54 @@ export async function markAgentActive(sessionId: SessionId, agentId: AgentId): P
         return;
       }
     }
-    appendFileSync(path, `${agentId}\n`);
+    // The type column is what lets PreToolUse authorize by ROLE. Omitting it
+    // (unknown type) is safe but downgrades the agent to identity-only
+    // authorization, which only the `pi-grant-` prefix satisfies.
+    appendFileSync(path, agentType === null ? `${agentId}\n` : `${agentId}\t${agentType}\n`);
+  });
+}
+
+function removeActiveRosterEntry(path: string, agentId: AgentId): void {
+  // Match on column 0 so an entry that recorded a type is still removed by
+  // its id alone — markAgentActive/removeActiveAgent must stay symmetric
+  // across the agent's start and stop hooks.
+  const remaining = readFileSync(path, "utf-8")
+    .split("\n")
+    .filter((line) => line.trim() !== "" && rosterLineAgentId(line) !== agentId)
+    .join("\n");
+  if (remaining.trim() === "") unlinkSync(path);
+  else rewriteFileAtomic(path, remaining + "\n");
+}
+
+/**
+ * Remove one agent from the session's `.active` roster and propagate failure.
+ * Spawn admission uses this strict form when a denied Agent's role-bearing row
+ * must be proven absent before the Hook returns.
+ */
+export async function removeActiveAgentStrict(sessionId: SessionId, agentId: AgentId): Promise<void> {
+  const path = activeFlagPath(sessionId);
+  await withLock(bindingLock(sessionId), () => {
+    try {
+      removeActiveRosterEntry(path, agentId);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
   });
 }
 
 /**
- * Remove one agent from the session's `.active` roster (locked, mirrors
- * markAgentActive). Failures are logged — a ghost roster entry silently
- * voids attribution for the rest of the session otherwise.
+ * Completion cleanup preserves its historical failure split: a rewrite error
+ * is logged, while lock acquisition failure escapes to dispatch isolation.
  */
 export async function removeActiveAgent(sessionId: SessionId, agentId: AgentId): Promise<void> {
   const path = activeFlagPath(sessionId);
-  if (!existsSync(path)) return;
   await withLock(bindingLock(sessionId), () => {
     try {
-      const remaining = readFileSync(path, "utf-8")
-        .split("\n")
-        .filter((line) => line.trim() !== "" && line.trim() !== agentId)
-        .join("\n");
-      if (remaining.trim() === "") {
-        unlinkSync(path);
-      } else {
-        rewriteFileAtomic(path, remaining + "\n");
-      }
-    } catch (e) {
-      process.stderr.write(`removeActiveAgent: .active update failed for ${sessionId}: ${e}\n`);
+      removeActiveRosterEntry(path, agentId);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      process.stderr.write(`removeActiveAgent: .active update failed for ${sessionId}: ${error}\n`);
     }
   });
 }
@@ -326,9 +497,24 @@ export async function removeActiveAgent(sessionId: SessionId, agentId: AgentId):
  * Takes BRANDED identity — callers must go through parseAgentId /
  * parseAgentType at the boundary, so a reserved character can never be
  * appended into the `\t`-separated binding line. Stale lines are reaped in
- * the same write. When no fresh binding is currently active, the previous
- * ledger is best-effort truncated — epoch filtering already makes stale
- * lines inert, so a failed truncate is logged, never fatal.
+ * the same write.
+ *
+ * This bind deliberately does NOT truncate the evidence ledger. It used to,
+ * whenever no fresh binding was active — but `appendEvidence` writes WITHOUT
+ * the binding lock this function holds, so that delete raced every concurrent
+ * writer: a parallel batch of subagents could have a sibling's already-written
+ * TestRun records unlinked out from under it, and the sibling's SubagentStop
+ * then judged its own epoch as having no trusted evidence. The observable
+ * symptom was a task whose tests demonstrably passed being recorded
+ * `untrusted-regression-pass` and blocked at the Wave Gate, while re-running
+ * the SAME agent alone succeeded.
+ *
+ * Truncation was only ever a growth optimization, never a correctness
+ * requirement: `eventsForEpoch` already makes another epoch's lines inert, and
+ * the SessionStart stale sweep deletes `.evidence.jsonl` with the rest of its
+ * session group (it is a `SESSION_SUFFIXES` member), so the file stays bounded
+ * without a mid-session delete. Growth is therefore bounded by session
+ * lifetime rather than by racing live writers.
  */
 export async function bindMachineAgent(
   sessionId: SessionId,
@@ -336,7 +522,7 @@ export async function bindMachineAgent(
   agentId: AgentId,
   nowMs: number = Date.now(),
 ): Promise<void> {
-  mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+  mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
   await withLock(bindingLock(sessionId), () => {
     const lines = classifyBindingLines(sessionId, nowMs);
     const kept = lines.filter((l) => l.kind !== "stale");
@@ -357,15 +543,6 @@ export async function bindMachineAgent(
         `bindMachineAgent: ${agentId}/${agentType} already bound for ${sessionId} — duplicate SubagentStart ignored\n`,
       );
       return;
-    }
-    if (!kept.some((l) => l.kind === "fresh")) {
-      try {
-        unlinkSync(ledgerPath(sessionId));
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-          process.stderr.write(`bindMachineAgent: ledger truncate failed for ${sessionId}: ${e}\n`);
-        }
-      }
     }
     const binding: MachineBinding = { agentId, agentType, epoch: epochOf(agentId, agentType) };
     const content =
@@ -393,7 +570,6 @@ export async function unbindMachineAgent(
   nowMs: number = Date.now(),
 ): Promise<void> {
   const path = machineBindingPath(sessionId);
-  if (!existsSync(path)) return;
   await withLock(bindingLock(sessionId), () => {
     try {
       const remaining = classifyBindingLines(sessionId, nowMs).filter(
@@ -408,6 +584,7 @@ export async function unbindMachineAgent(
         rewriteFileAtomic(path, remaining.map((l) => l.raw).join("\n") + "\n");
       }
     } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
       process.stderr.write(`unbindMachineAgent: failed for ${agentId}/${sessionId}: ${e}\n`);
     }
   });
@@ -422,7 +599,7 @@ export function appendEvidence(
   callId?: string,
 ): void {
   if (events.length === 0) return;
-  mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+  mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
   const lines =
     events
       .map((event) =>
@@ -453,7 +630,7 @@ export async function recordCallStart(
   toolUseId: string,
   startMs: number,
 ): Promise<void> {
-  mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+  mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
   await withLock(bindingLock(sessionId), () => {
     const path = callStartPath(sessionId);
     let current: readonly CallStartEntry[] = [];
@@ -483,7 +660,6 @@ export async function recordCallStart(
  */
 export function callStartFor(sessionId: SessionId, toolUseId: string): number | null {
   const path = callStartPath(sessionId);
-  if (!existsSync(path)) return null;
   try {
     const entries = parseCallStartEntries(readFileSync(path, "utf-8"));
     if (entries === null) {
@@ -494,8 +670,9 @@ export function callStartFor(sessionId: SessionId, toolUseId: string): number | 
     }
     return callStartOf(entries, toolUseId);
   } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return null;
     process.stderr.write(
-      `callStartFor: cannot read call-start file for ${sessionId}: ${e instanceof Error ? e.message : String(e)}\n`,
+      `callStartFor: cannot read call-start file ${path}: ${e instanceof Error ? e.message : String(e)}\n`,
     );
     return null;
   }
@@ -503,8 +680,9 @@ export function callStartFor(sessionId: SessionId, toolUseId: string): number | 
 
 export function readEvidence(sessionId: SessionId): readonly EvidenceRecord[] {
   const path = ledgerPath(sessionId);
-  if (!existsSync(path)) return [];
-  const lines = readFileSync(path, "utf-8")
+  const content = readOptionalTextFile(path, "evidence ledger");
+  if (content === null) return [];
+  const lines = content
     .split("\n")
     .filter((l) => l.trim() !== "");
   const records = lines.map(parseEvidenceLine).filter((r): r is EvidenceRecord => r !== null);
@@ -541,8 +719,14 @@ export type LoadedMachine =
  */
 export function loadMachine(machinesDir: string, agentType: AgentType): LoadedMachine {
   const path = machineDefPath(machinesDir, agentType);
-  if (!existsSync(path)) return { kind: "none" };
-  const parsed = parseMachineJson(readFileSync(path, "utf-8"));
+  let content: string | null;
+  try {
+    content = readOptionalTextFile(path, "machine definition");
+  } catch (error) {
+    return { kind: "invalid", error: error instanceof Error ? error.message : String(error) };
+  }
+  if (content === null) return { kind: "none" };
+  const parsed = parseMachineJson(content);
   if (!parsed.ok) return { kind: "invalid", error: `${path}: ${parsed.error}` };
   if (parsed.value.agent !== agentType) {
     return { kind: "invalid", error: `${path}: machine.agent "${parsed.value.agent}" does not match file name agent "${agentType}"` };

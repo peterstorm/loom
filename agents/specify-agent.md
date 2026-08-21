@@ -1,5 +1,7 @@
 ---
 name: specify-agent
+model-profile: panel-design
+model: opus
 description: Specification agent that produces formal requirements (WHAT/WHY) before architecture. Runs a full interview with the user before drafting spec.md.
 color: cyan
 tools: read, bash, edit, write, grep, find, ls

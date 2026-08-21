@@ -6,24 +6,15 @@
  * Reads decompose JSON from stdin.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
 import { newWaveGate } from "../../types";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { validateFull, fixFull } from "./validate-task-graph";
-import { checkPlanModelBindings, type ModelBindingDeps } from "./validate-model-bindings";
-
-/** Honest null on any read failure — the binding check reports it in context */
-const BINDING_DEPS: ModelBindingDeps = {
-  readFile: (p) => {
-    try {
-      return readFileSync(p, "utf-8");
-    } catch {
-      return null;
-    }
-  },
-};
+import { checkPlanModelBindings, productionModelBindingDeps } from "./validate-model-bindings";
+import { derivePendingTaskProof } from "../../core/proof-obligations";
+import { argumentValue, hasFlag } from "./cli-args";
 
 interface DecomposeInput {
   plan_title: string;
@@ -32,20 +23,21 @@ interface DecomposeInput {
   tasks: Task[];
 }
 
+/**
+ * Through `cli-args`, not by hand: the hand-rolled loop this replaced accepted
+ * the NEXT FLAG as a value, so `--issue --fix` read as `issue = NaN` with
+ * `--fix` silently consumed — the exact divergence `argumentValue` exists to
+ * end.
+ */
 function parseArgs(args: string[]): { issue?: number; repo?: string; fix: boolean; force: boolean } {
-  let issue: number | undefined;
-  let repo: string | undefined;
-  let fix = false;
-  let force = false;
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--issue" && args[i + 1]) { issue = Number(args[++i]); continue; }
-    if (args[i] === "--repo" && args[i + 1]) { repo = args[++i]; continue; }
-    if (args[i] === "--fix") { fix = true; continue; }
-    if (args[i] === "--force") { force = true; continue; }
-  }
-
-  return { issue, repo, fix, force };
+  const rawIssue = argumentValue(args, "--issue");
+  const issue = rawIssue === null ? undefined : Number(rawIssue);
+  return {
+    ...(issue === undefined || Number.isNaN(issue) ? {} : { issue }),
+    ...(argumentValue(args, "--repo") === null ? {} : { repo: argumentValue(args, "--repo")! }),
+    fix: hasFlag(args, "--fix"),
+    force: hasFlag(args, "--force"),
+  };
 }
 
 /**
@@ -68,16 +60,28 @@ function sanitizeDecomposedTask(t: Task): Task {
     depends_on: t.depends_on ?? [],
     ...(t.spec_anchors !== undefined ? { spec_anchors: t.spec_anchors } : {}),
     ...(t.new_tests_required !== undefined ? { new_tests_required: t.new_tests_required } : {}),
+    ...(t.plan_context !== undefined ? { plan_context: t.plan_context } : {}),
     ...(t.file_list !== undefined ? { file_list: t.file_list } : {}),
+    proof: derivePendingTaskProof({
+      newTestsRequired: t.new_tests_required !== false,
+      declaredArtifacts: t.file_list ?? [],
+    }),
     review_status: "pending",
+    review_generation: 0,
+    findings: [],
     critical_findings: [],
     advisory_findings: [],
+    refuted_findings: [],
+    resolved_findings: [],
   };
 }
 
+function taskWaves(tasks: readonly Task[]): readonly number[] {
+  return [...new Set(tasks.map((task) => task.wave))].sort((left, right) => left - right);
+}
+
 /** Build wave gates for all waves */
-function buildWaveGates(tasks: Task[]): Record<string, WaveGate> {
-  const waves = [...new Set(tasks.map((t) => t.wave))].sort((a, b) => a - b);
+function buildWaveGates(waves: readonly number[]): Record<string, WaveGate> {
   const gates: Record<string, WaveGate> = {};
   for (const w of waves) {
     gates[String(w)] = newWaveGate();
@@ -97,24 +101,34 @@ const handler: HookHandler = async (stdin, args) => {
   let decompose: DecomposeInput;
   try {
     decompose = JSON.parse(stdin) as DecomposeInput;
-  } catch {
-    return { kind: "error", message: "Invalid JSON on stdin" };
+  } catch (e) {
+    // Preserve the parse error: "Invalid JSON on stdin" alone left the operator
+    // with no position or malformed token to look for.
+    return {
+      kind: "error",
+      message: `Invalid JSON on stdin: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 
   if (!Array.isArray(decompose.tasks) || decompose.tasks.length === 0) {
     return { kind: "error", message: "No tasks in decompose JSON" };
   }
 
-  // Validate decompose output before merging
-  const validation = validateFull(decompose as unknown as Record<string, unknown>);
+  // Validate decompose output before merging. Scoped to the PAYLOAD: the
+  // findings aggregate is agent-forgeable here and `sanitizeDecomposedTask`
+  // strips it below, so holding this to the load-boundary findings rules would
+  // reject exactly the input that sanitization exists to clean.
+  const validation = validateFull(decompose as unknown as Record<string, unknown>, "decompose-payload");
   if (!validation.ok) {
     if (fix) {
-      decompose = JSON.parse(fixFull(decompose as unknown as Record<string, unknown>)) as DecomposeInput;
+      const repair = fixFull(decompose as unknown as Record<string, unknown>);
+      for (const note of repair.notes) process.stderr.write(`  ${note}\n`);
+      decompose = JSON.parse(repair.json) as DecomposeInput;
       // fixFull only defaults missing optional fields — structural errors
       // (unknown agent, wave gaps, self-dependency) are unfixable. Re-validate
       // so they fail loudly instead of reaching the persisted graph under a
       // misleading "Auto-fixed" banner.
-      const revalidation = validateFull(decompose as unknown as Record<string, unknown>);
+      const revalidation = validateFull(decompose as unknown as Record<string, unknown>, "decompose-payload");
       if (!revalidation.ok) {
         return {
           kind: "error",
@@ -130,10 +144,14 @@ const handler: HookHandler = async (stdin, args) => {
   const mgr = StateManager.fromPath(statePath);
   if (!mgr) return { kind: "error", message: "Cannot open task graph" };
 
-  // Executable-models policy: this is the only whitelisted helper that
-  // populates tasks into active_task_graph.json, so bindings are enforced
-  // here fail-closed — validate-task-graph's 4a run is advisory to the
-  // orchestrator, this is the gate. The plan path prefers evidence-derived
+  // Executable-models policy: bindings are enforced here fail-closed —
+  // validate-task-graph's 4a run is advisory to the orchestrator, this is the
+  // gate for the populate path. `repair-task-graph` is the ONE other
+  // whitelisted helper that writes tasks into active_task_graph.json (it
+  // installs through StateManager.replace, bypassing load() by design), and it
+  // runs the same `checkPlanModelBindings` for the same reason; neither path
+  // may install a graph whose bindings were never checked. The plan path
+  // prefers evidence-derived
   // state (plan_file set by advance-phase from transcript-parsed Write tool
   // calls (existence-checked), else the
   // architecture phase artifact recorded from disk) over the decompose
@@ -148,7 +166,7 @@ const handler: HookHandler = async (stdin, args) => {
   const bindings = checkPlanModelBindings(
     planFile,
     decompose.tasks as unknown as Record<string, unknown>[],
-    BINDING_DEPS,
+    productionModelBindingDeps,
   );
   if (!bindings.ok) {
     return {
@@ -161,6 +179,7 @@ const handler: HookHandler = async (stdin, args) => {
   }
   // checkPlanModelBindings only passes when planFile is a readable string
   const validatedPlanFile = planFile as string;
+  const waves = taskWaves(decompose.tasks);
 
   // Guard against overwriting non-pending tasks
   if (!force && existingState.tasks.some((t) => t.status !== "pending")) {
@@ -170,7 +189,20 @@ const handler: HookHandler = async (stdin, args) => {
     };
   }
 
-  await mgr.update((existing) => {
+  const populate = async (): Promise<void> => mgr.update((existing) => {
+    // Re-check the guard INSIDE the locked transform. The check above ran on a
+    // snapshot loaded before the lock, and this callback receives a freshly
+    // reloaded graph — so a task that left "pending" in between (an agent
+    // starting, a wave completing) had its real status silently overwritten by
+    // the unconditional `tasks:` assignment below. The pre-lock check stays: it
+    // gives the operator the clean CLI error in the common case; this one makes
+    // the overwrite impossible in the racing case.
+    if (!force && existing.tasks.some((t) => t.status !== "pending")) {
+      throw new Error(
+        "Cannot overwrite task graph with non-pending tasks: a task left \"pending\" while this " +
+        "population was being prepared. Use --force to override.",
+      );
+    }
     const merged: TaskGraph = {
       ...existing,
       plan_title: decompose.plan_title,
@@ -179,17 +211,24 @@ const handler: HookHandler = async (stdin, args) => {
       tasks: decompose.tasks.map(sanitizeDecomposedTask),
       current_wave: 1,
       executing_tasks: [],
-      wave_gates: buildWaveGates(decompose.tasks),
+      wave_gates: buildWaveGates(waves),
+      ...(issue === undefined ? {} : { github_issue: issue }),
+      ...(repo === undefined ? {} : { github_repo: repo }),
     };
-
-    if (issue) merged.github_issue = issue;
-    if (repo) merged.github_repo = repo;
 
     return merged;
   });
 
+  try {
+    await populate();
+  } catch (error) {
+    // The locked re-check refuses by throwing (the only way out of a transform);
+    // surface it as the same clean CLI error the pre-lock check produces rather
+    // than as an unhandled rejection.
+    return { kind: "error", message: error instanceof Error ? error.message : String(error) };
+  }
+
   const taskCount = decompose.tasks.length;
-  const waves = [...new Set(decompose.tasks.map((t) => t.wave))].sort((a, b) => a - b);
   process.stderr.write(`Task graph populated: ${taskCount} tasks, waves: ${waves.join(", ")}\n`);
 
   return { kind: "passthrough" };

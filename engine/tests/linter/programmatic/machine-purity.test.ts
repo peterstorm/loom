@@ -36,9 +36,12 @@ const MACHINE_PURE_MODULES = [
 
 /** Pure modules outside machine/ that the core may depend on. */
 const PURE_DEPENDENCIES = [
+  "engine/src/core/frozen.ts",
   "engine/src/core/tool-vocabulary.ts",
   "engine/src/core/shell-ansi-c.ts",
+  "engine/src/core/shell-command.ts",
   "engine/src/core/shell-normalize.ts",
+  "engine/src/core/shell-quoting.ts",
 ] as const;
 
 /** Side-effect-free package imports the core may use. */

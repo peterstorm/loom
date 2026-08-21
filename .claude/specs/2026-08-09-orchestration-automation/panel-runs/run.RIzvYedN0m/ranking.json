@@ -1,0 +1,66 @@
+{
+  "criteria": [
+    "simplicity",
+    "pure functional core",
+    "codebase fit + effort"
+  ],
+  "ranking": [
+    {
+      "rank": 1,
+      "candidate": "candidate-simplicity-first.md",
+      "total_score": 25,
+      "scores": [
+        {
+          "criterion": "simplicity",
+          "score": 8
+        },
+        {
+          "criterion": "pure functional core",
+          "score": 8
+        },
+        {
+          "criterion": "codebase fit + effort",
+          "score": 9
+        }
+      ]
+    },
+    {
+      "rank": 2,
+      "candidate": "candidate-type-driven-fp.md",
+      "total_score": 20,
+      "scores": [
+        {
+          "criterion": "simplicity",
+          "score": 4
+        },
+        {
+          "criterion": "pure functional core",
+          "score": 10
+        },
+        {
+          "criterion": "codebase fit + effort",
+          "score": 6
+        }
+      ]
+    },
+    {
+      "rank": 3,
+      "candidate": "candidate-risk-security-first.md",
+      "total_score": 16,
+      "scores": [
+        {
+          "criterion": "simplicity",
+          "score": 2
+        },
+        {
+          "criterion": "pure functional core",
+          "score": 9
+        },
+        {
+          "criterion": "codebase fit + effort",
+          "score": 5
+        }
+      ]
+    }
+  ]
+}

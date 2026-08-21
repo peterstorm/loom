@@ -1,92 +1,63 @@
 /**
  * Enforce agent prompt references the correct preloaded skill.
- * Reads `skills:` from agent frontmatter and checks the Task prompt
+ * Reads `skills:` from agent frontmatter and checks the spawn prompt
  * mentions the skill name. Only active during loom orchestration.
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { execSync } from "node:child_process";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import {
   TASK_GRAPH_PATH, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
-  UTILITY_AGENTS,
+  REVIEW_PANEL_AGENTS, UTILITY_AGENTS, ARCH_PANEL_AGENTS, pathExistsFailClosed,
 } from "../../config";
-import { stripNamespace, extractNamespace } from "../../utils/strip-namespace";
+import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
+import { stripNamespace } from "../../utils/strip-namespace";
+import { resolveClaudeAgentDefinitionPath } from "../../utils/agent-definition";
+import {
+  parseDeclaredSkills,
+  promptReferencesSkill,
+  type DeclaredSkills,
+} from "../../core/agent-skills";
+import { isLoomNamespacedAgent } from "../../core/model-profiles";
+
+export { promptReferencesSkill } from "../../core/agent-skills";
+export type { DeclaredSkills } from "../../core/agent-skills";
 
 /** All agents whose skill we validate */
-const VALIDATED_AGENTS = new Set([
+export const VALIDATED_AGENTS: ReadonlySet<string> = new Set([
   ...Object.keys(PHASE_AGENT_MAP),
+  ...ARCH_PANEL_AGENTS,
+  ...REVIEW_PANEL_AGENTS,
   ...IMPL_AGENTS,
   ...REVIEW_AGENTS,
 ]);
 
-/** Agents that don't require a skill (tools-only or general-purpose) */
-const SKILL_EXEMPT_AGENTS = new Set([
-  "decompose-agent",
-  "general-purpose",
-]);
+/** Loom agents that do not require a skill preload. */
+const SKILL_EXEMPT_AGENTS = new Set(["decompose-agent"]);
 
-/** Resolve agent .md path — checks CLAUDE_PLUGIN_ROOT, git root, home dir, and plugin cache */
-function resolveAgentPath(agentName: string, fullAgentType: string): string | null {
-  const candidates: string[] = [];
-
-  // Prefer CLAUDE_PLUGIN_ROOT — set by the plugin system, portable across OS and users
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-  if (pluginRoot) {
-    candidates.push(join(pluginRoot, "agents", `${agentName}.md`));
-  }
-
+/** Read an agent file at the shell boundary, then use the shared pure parser. */
+export function parseSkillsFromFrontmatter(filePath: string): DeclaredSkills {
+  let content: string;
   try {
-    const root = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
-    candidates.push(join(root, ".claude/agents", `${agentName}.md`));
-  } catch {}
-
-  candidates.push(join(process.env.HOME ?? "", ".claude/agents", `${agentName}.md`));
-
-  // Fallback: scan plugin cache directories (covers both "plugins" and "local-plugins")
-  const namespace = extractNamespace(fullAgentType);
-  if (namespace) {
-    const cacheBase = join(process.env.HOME ?? "", ".claude/plugins/cache");
-    try {
-      for (const cacheDir of readdirSync(cacheBase)) {
-        const pluginBase = join(cacheBase, cacheDir, namespace);
-        try {
-          for (const version of readdirSync(pluginBase)) {
-            candidates.push(join(pluginBase, version, "agents", `${agentName}.md`));
-          }
-        } catch {}
-      }
-    } catch {}
+    content = readFileSync(filePath, "utf-8");
+  } catch (error) {
+    return {
+      kind: "unreadable",
+      reason: `cannot read ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
-
-  return candidates.find((p) => existsSync(p)) ?? null;
-}
-
-/** Parse skills list from YAML frontmatter */
-export function parseSkillsFromFrontmatter(filePath: string): string[] {
-  try {
-    const content = readFileSync(filePath, "utf-8");
-    const fm = content.match(/^---\n([\s\S]*?)\n---/);
-    if (!fm) return [];
-    const skillsBlock = fm[1].match(/^skills:\s*\n((?:\s+-\s+.+\n?)*)/m);
-    if (!skillsBlock) return [];
-    return [...skillsBlock[1].matchAll(/^\s+-\s+(.+)$/gm)].map((m) => m[1].trim());
-  } catch {
-    return [];
-  }
-}
-
-/** Check if prompt references a skill (by name or /name pattern) */
-export function promptReferencesSkill(prompt: string, skill: string): boolean {
-  const lower = prompt.toLowerCase();
-  const skillLower = skill.toLowerCase();
-  // Match: skill name as word, /skill-name, or "skill-name" in quotes
-  return lower.includes(skillLower);
+  const parsed = parseDeclaredSkills(content);
+  return parsed.kind === "unreadable"
+    ? { ...parsed, reason: `${filePath}: ${parsed.reason}` }
+    : parsed;
 }
 
 const handler: HookHandler = async (stdin) => {
-  if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
+  // ENOENT is the only "orchestration inactive" answer. Bare `existsSync`
+  // reads EACCES/ELOOP/ENOTDIR/EIO as absence too, which would let every
+  // subagent spawn past this gate unvalidated — the same fail-open the
+  // malformed-input branch below already refuses to take.
+  if (!pathExistsFailClosed(TASK_GRAPH_PATH)) return { kind: "allow" };
 
   let input: PreToolUseInput;
   try {
@@ -101,22 +72,61 @@ const handler: HookHandler = async (stdin) => {
       message: `validate-agent-skill: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
-  if (input.tool_name !== "Task") return { kind: "allow" };
+  if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
-  const subagentType = (input.tool_input?.subagent_type as string) ?? "";
+  const subagentType = (input.tool_input?.subagent_type as string | undefined)
+    ?? (input.tool_input?.agent as string | undefined)
+    ?? "";
   const bareAgent = stripNamespace(subagentType);
 
-  if (!VALIDATED_AGENTS.has(bareAgent)) return { kind: "allow" };
+  if (!VALIDATED_AGENTS.has(bareAgent)) {
+    return isLoomNamespacedAgent(subagentType)
+      ? { kind: "block", message: `BLOCKED: unknown Loom agent "${subagentType}"; skill policy cannot be proven.` }
+      : { kind: "allow" };
+  }
   if (UTILITY_AGENTS.has(bareAgent)) return { kind: "allow" };
   if (SKILL_EXEMPT_AGENTS.has(bareAgent)) return { kind: "allow" };
 
-  const agentPath = resolveAgentPath(bareAgent, subagentType);
-  if (!agentPath) return { kind: "allow" };
+  let agentPath: string | null;
+  try {
+    agentPath = resolveClaudeAgentDefinitionPath(bareAgent, subagentType);
+  } catch (error) {
+    return {
+      kind: "block",
+      message: `BLOCKED: Claude Code agent-definition authority for "${subagentType}" is unreadable: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  if (!agentPath) {
+    return {
+      kind: "block",
+      message: [
+        `BLOCKED: cannot locate Loom agent definition for "${subagentType}"; skill policy cannot be proven.`,
+        "",
+        "Searched the executing Loom package, CLAUDE_PLUGIN_ROOT, repository/user agent catalogs, and development checkout agents.",
+        "Run the Pi agent sync/reload command or repair the package root before retrying.",
+      ].join("\n"),
+    };
+  }
 
-  const declaredSkills = parseSkillsFromFrontmatter(agentPath);
-  if (declaredSkills.length === 0) return { kind: "allow" };
+  const declared = parseSkillsFromFrontmatter(agentPath);
+  if (declared.kind === "unreadable") {
+    return {
+      kind: "block",
+      message: [
+        `BLOCKED: cannot determine which skills "${subagentType}" requires — failing closed.`,
+        "",
+        `  ${declared.reason}`,
+        "",
+        "An agent whose frontmatter cannot be read may require a skill this prompt omits.",
+      ].join("\n"),
+    };
+  }
+  if (declared.kind === "none") return { kind: "allow" };
+  const declaredSkills = declared.names;
 
-  const prompt = (input.tool_input?.prompt as string) ?? "";
+  const prompt = (input.tool_input?.prompt as string | undefined)
+    ?? (input.tool_input?.task as string | undefined)
+    ?? "";
   if (!prompt) {
     return {
       kind: "block",

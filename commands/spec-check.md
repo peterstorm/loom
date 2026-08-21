@@ -2,11 +2,14 @@
 name: spec-check
 version: "2.0.0"
 description: "This skill should be used when the user asks to 'check spec alignment', 'verify requirements coverage', 'detect drift', 'spec audit', or automatically at wave gates. Verifies implementation aligns with specification - different from code review which checks quality."
+argument-hint: "[scope or instructions]"
 ---
 
 # Spec-Check - Drift Detection
 
 Read-only verification that implementation aligns with specification. Mechanically extracts requirements, forces per-FR verdicts, detects coverage gaps and scope creep.
+
+**Arguments:** "$ARGUMENTS"
 
 **Not what this does:** Check code quality, style, security (that's code-reviewer's job).
 
@@ -199,7 +202,7 @@ SPEC_CHECK_VERDICT: PASSED | BLOCKED
 - Each `CRITICAL:` / `HIGH:` / `MEDIUM:` line MUST start at column 0 (no leading spaces)
 - One finding per line, no line breaks within a finding
 - Counts MUST match the number of CRITICAL/HIGH/MEDIUM lines above them
-- Even if counts are zero, emit the SPEC_CHECK_CRITICAL_COUNT and SPEC_CHECK_VERDICT lines
+- Even if counts are zero, emit the SPEC_CHECK_CRITICAL_COUNT, SPEC_CHECK_HIGH_COUNT, and SPEC_CHECK_VERDICT lines — all three are required, and a missing marker fails evidence capture rather than reading as zero
 - These lines appear AFTER the human-readable report, as the very last output
 
 ---

@@ -13,10 +13,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { lintFile, isBinaryFile } from "../../src/linter/index";
+import { lintFile, isBinaryBuffer } from "../../src/linter/index";
 
 // --- Test Helpers ---
 
@@ -49,7 +49,11 @@ function makeValidRule(overrides: Record<string, unknown> = {}): Record<string, 
 
 // --- Tests ---
 
-describe("isBinaryFile", () => {
+// Against isBinaryBuffer, the detector lintFile actually calls. The
+// isBinaryFile wrapper these used to target had no production caller and
+// re-read the file for its check — the second, non-atomic read lintFile
+// exists to avoid.
+describe("isBinaryBuffer", () => {
   let tempDir: string;
 
   beforeEach(() => {
@@ -64,26 +68,26 @@ describe("isBinaryFile", () => {
     const filePath = join(tempDir, "binary.bin");
     const buffer = Buffer.from([0x48, 0x65, 0x6c, 0x00, 0x6f]); // "Hel\0o"
     writeFileSync(filePath, buffer);
-    expect(isBinaryFile(filePath)).toBe(true);
+    expect(isBinaryBuffer(readFileSync(filePath))).toBe(true);
   });
 
   it("returns false for text files without null bytes", () => {
     const filePath = join(tempDir, "text.ts");
     writeFileSync(filePath, "const x = 1;\nconsole.log(x);\n");
-    expect(isBinaryFile(filePath)).toBe(false);
+    expect(isBinaryBuffer(readFileSync(filePath))).toBe(false);
   });
 
   it("returns true for null byte at end of buffer", () => {
     const filePath = join(tempDir, "trailing-null.bin");
     const content = "A".repeat(100) + "\x00";
     writeFileSync(filePath, content);
-    expect(isBinaryFile(filePath)).toBe(true);
+    expect(isBinaryBuffer(readFileSync(filePath))).toBe(true);
   });
 
   it("returns false for empty files", () => {
     const filePath = join(tempDir, "empty.ts");
     writeFileSync(filePath, "");
-    expect(isBinaryFile(filePath)).toBe(false);
+    expect(isBinaryBuffer(readFileSync(filePath))).toBe(false);
   });
 
   it("returns true for null byte beyond typical ASCII range", () => {
@@ -92,7 +96,7 @@ describe("isBinaryFile", () => {
     buffer.fill(0x41); // All 'A'
     buffer[4000] = 0;  // Null byte deep in the file
     writeFileSync(filePath, buffer);
-    expect(isBinaryFile(filePath)).toBe(true);
+    expect(isBinaryBuffer(readFileSync(filePath))).toBe(true);
   });
 });
 
@@ -449,8 +453,11 @@ describe("lintFile", () => {
 
       writeRule(defaultDir, "rule.json", makeValidRule());
 
-      // Use a generous timeout for large file
-      const result = lintFile(filePath, "full", defaultDir, projectDir);
+      // A generous budget for a deliberately huge fixture. This asserts the
+      // rule FINDS the violation at line 5001; the 50ms hook budget is a
+      // separate concern, and folding the two made this test fail whenever the
+      // host was loaded rather than whenever the linter was wrong.
+      const result = lintFile(filePath, "full", defaultDir, projectDir, 5000);
       expect(result.kind).toBe("violations");
       if (result.kind === "violations") {
         expect(result.violations).toHaveLength(1);

@@ -10,12 +10,19 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import type { HookHandler, HookResult, SubagentStopInput, TaskGraph, TaskTestResult } from "../../types";
+import type { HookHandler, HookResult, SubagentStopInput, Task, TaskGraph, TaskTestResult } from "../../types";
 import { legacyTestsPassedNote, newWaveGate } from "../../types";
 import { IMPL_AGENTS, machinesDir } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { extractTaskId } from "../../utils/extract-task-id";
+import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
+import { canonicalRepositoryPaths } from "../../utils/repository-path";
+import {
+  compareAttemptBaseline,
+} from "../../utils/artifact-baseline";
+import { attributedChangedArtifacts } from "../../core/artifact-baseline";
+import { invalidateTaskReview } from "../../core/review-output";
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
@@ -33,6 +40,14 @@ import {
   readEvidence,
 } from "../../machine";
 import type { Evidence, EvidenceRecord, LoadedMachine, Requirement, TrustedTestVerdict } from "../../machine";
+import {
+  evaluateTaskProof,
+  PI_STRUCTURED_EVIDENCE_POLICY,
+  TRUSTED_LEDGER_ONLY_POLICY,
+  type ProofEvaluationPolicy,
+} from "../../core/proof-obligations";
+import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
+import { extractTestEvidence } from "../../core/test-evidence";
 
 /**
  * Is the agent's machine BOUND for evidence purposes? "invalid" counts as
@@ -42,87 +57,6 @@ import type { Evidence, EvidenceRecord, LoadedMachine, Requirement, TrustedTestV
  */
 export function isMachineBound(loaded: LoadedMachine): boolean {
   return loaded.kind !== "none";
-}
-
-// --- Pure: extract test pass evidence from bash output ---
-
-interface TestEvidence {
-  passed: boolean;
-  evidence: string;
-}
-
-// Helper to get last regex match with its position (handles multiple test runs in concatenated output)
-interface MatchWithIndex extends RegExpMatchArray {
-  index: number;
-}
-
-function lastMatch(str: string, regex: RegExp): MatchWithIndex | null {
-  const flags = regex.flags.includes("g") ? regex.flags : regex.flags + "g";
-  const matches = [...str.matchAll(new RegExp(regex.source, flags))];
-  if (matches.length === 0) return null;
-  const last = matches[matches.length - 1];
-  return last as MatchWithIndex;
-}
-
-export function extractTestEvidence(bashOutput: string): TestEvidence {
-  // Java/Maven
-  if (/BUILD SUCCESS/.test(bashOutput)) {
-    const cleaned = bashOutput.replace(/\*\*/g, "");
-    const maven = lastMatch(cleaned, /Tests run: \d+, Failures: 0, Errors: 0/);
-    if (maven) return { passed: true, evidence: `maven: ${maven[0]}` };
-  }
-
-  // Node/Mocha: "N passing" without "N failing" (or failing comes before passing)
-  const passing = lastMatch(bashOutput, /(\d+) passing/);
-  if (passing) {
-    const failMatch = lastMatch(bashOutput, /(\d+) failing/);
-    if (!failMatch || failMatch[1] === "0" || failMatch.index < passing.index) {
-      return { passed: true, evidence: `node: ${passing[0]}` };
-    }
-  }
-
-  // Vitest: "Tests  N passed" or "Test Files  N passed"
-  const vitest = lastMatch(bashOutput, /Tests?\s+\d+ passed/);
-  if (vitest) {
-    const vitestFailed = lastMatch(bashOutput, /Tests?\s+\d+ failed/);
-    if (!vitestFailed || vitestFailed.index < vitest.index) {
-      return { passed: true, evidence: `vitest: ${vitest[0]}` };
-    }
-  }
-
-  // Rust/cargo test: "test result: ok. N passed; 0 failed"
-  const cargoTest = lastMatch(bashOutput, /test result: ok\. (\d+) passed/);
-  if (cargoTest) {
-    const cargoFail = lastMatch(bashOutput, /test result:.*(\d+) failed/);
-    if (!cargoFail || cargoFail[1] === "0" || cargoFail.index < cargoTest.index) {
-      return { passed: true, evidence: `cargo: ${cargoTest[1]} passed` };
-    }
-  }
-
-  // pytest: "N passed … in X.XXs" (runner summary shape) without "N failed"
-  // (or failed comes before passed). Anchored to the timing suffix so prose
-  // like "3 passed review" cannot mint a passing result — this path already
-  // yields only untrusted evidence, but unbound/legacy agents' gates accept it.
-  const pytest = lastMatch(bashOutput, /(\d+) passed\b[^\n]*\bin \d+(?:\.\d+)?s/);
-  if (pytest) {
-    const pyFail = lastMatch(bashOutput, /(\d+) failed/);
-    if (!pyFail || pyFail[1] === "0" || pyFail.index < pytest.index) {
-      return { passed: true, evidence: `pytest: ${pytest[0]}` };
-    }
-  }
-
-  // Bun: "N pass" without "N fail" (or "0 fail" or fail comes before pass).
-  // Line-start anchored (bun prints each counter on its own line) so
-  // mid-sentence prose like "all 5 pass rates" never matches.
-  const bunPass = lastMatch(bashOutput, /^\s*(\d+) pass\b/m);
-  if (bunPass) {
-    const bunFail = lastMatch(bashOutput, /^\s*(\d+) fail\b/m);
-    if (!bunFail || bunFail[1] === "0" || bunFail.index < bunPass.index) {
-      return { passed: true, evidence: `bun: ${bunPass[0]}` };
-    }
-  }
-
-  return { passed: false, evidence: "" };
 }
 
 // --- Pure: resolve test evidence, ledger first ---
@@ -162,6 +96,20 @@ type TestRunEvidence = Extract<Evidence, { kind: "TestRun" }>;
  *                  distinct from a genuinely-empty ledger — never mislabel
  *                  it "degraded". `ledgerEvents` are ignored in this mode.
  */
+function fallbackEvidenceLabel(
+  demotionLabel: string | null,
+  sawExitZero: boolean,
+  machineBound: boolean,
+  ledgerEmpty: boolean,
+): string {
+  if (demotionLabel !== null) return demotionLabel;
+  if (sawExitZero) return "low-trust (exit 0, no report artifact; transcript-regex)";
+  if (machineBound && ledgerEmpty) {
+    return "degraded (machine bound, no ledger evidence; transcript-regex)";
+  }
+  return "transcript-regex (fallback)";
+}
+
 export function resolveTestEvidence(
   ledgerEvents: readonly Evidence[],
   bashOutput: string,
@@ -172,10 +120,10 @@ export function resolveTestEvidence(
     const label = "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)";
     const fromTranscript = extractTestEvidence(bashOutput);
     if (!fromTranscript.passed) {
-      return { result: { verdict: "untrusted", passed: false, label }, evidence: "" };
+      return { result: { verdict: "untrusted", passed: false, label, provenance: "unverified" }, evidence: "" };
     }
     return {
-      result: { verdict: "untrusted", passed: true, label },
+      result: { verdict: "untrusted", passed: true, label, provenance: "unverified" },
       evidence: `${label}: ${fromTranscript.evidence}`,
     };
   }
@@ -223,18 +171,18 @@ export function resolveTestEvidence(
     }
   }
 
-  const label = demotionLabel
-    ?? (judged.some((j) => j.run.exit === 0)
-      ? "low-trust (exit 0, no report artifact; transcript-regex)"
-      : machineBound && ledgerEvents.length === 0
-        ? "degraded (machine bound, no ledger evidence; transcript-regex)"
-        : "transcript-regex (fallback)");
+  const label = fallbackEvidenceLabel(
+    demotionLabel,
+    judged.some((judgment) => judgment.run.exit === 0),
+    machineBound,
+    ledgerEvents.length === 0,
+  );
   const fallback = extractTestEvidence(bashOutput);
   if (!fallback.passed) {
-    return { result: { verdict: "untrusted", passed: false, label }, evidence: "" };
+    return { result: { verdict: "untrusted", passed: false, label, provenance: "unverified" }, evidence: "" };
   }
   return {
-    result: { verdict: "untrusted", passed: true, label },
+    result: { verdict: "untrusted", passed: true, label, provenance: "unverified" },
     evidence: `${label}: ${fallback.evidence}`,
   };
 }
@@ -257,7 +205,7 @@ export function capVerdictForMachineCompletion(
   const reqs = missing.map((r) => `${r.event} ≥ ${r.min}`).join(", ");
   const label = `machine-incomplete: ${reqs}`;
   return {
-    result: { verdict: "untrusted", passed: true, label },
+    result: { verdict: "untrusted", passed: true, label, provenance: "unverified" },
     evidence: `${label} — ${resolved.evidence}`,
   };
 }
@@ -266,6 +214,9 @@ export function capVerdictForMachineCompletion(
 
 /** What an untrusted Stop-handler resolution wants to persist on the task. */
 export interface UntrustedStopResolution {
+  /** Process-level completion observed by the harness. A failed child may
+   * retain structural attribution, but it must never mint completion proof. */
+  readonly taskCompleted: boolean;
   readonly testResult: Extract<TaskTestResult, { verdict: "untrusted" }>;
   readonly testEvidence: string;
   /** Files the agent modified (parsed from its transcript) — persisted on
@@ -273,14 +224,83 @@ export interface UntrustedStopResolution {
    *  from `files_modified`; a resolution that omits it makes every wave-gate
    *  lint run over an empty set and report clean (round-16 pi finding). */
   readonly filesModified: readonly string[];
+  /** Declared artifacts whose current bytes differ from the first task
+   *  baseline. This, not attempted tool calls, discharges artifact proof. */
+  readonly changedDeclaredArtifacts: readonly string[];
+  /** Whether declared bytes differ from the baseline captured for this exact
+   * attempt. This invalidates older test/review evidence independently of
+   * transcript tool attribution. */
+  readonly bytesChangedSinceAttempt: boolean;
   readonly newTestsWritten: boolean;
   readonly newTestEvidence: string;
 }
 
+export function cumulativeModifiedPaths(
+  previous: readonly string[] | undefined,
+  current: readonly string[],
+): string[] {
+  return [...new Set([...(previous ?? []), ...current])].sort();
+}
+
 export interface AppliedStopResolution {
   readonly state: TaskGraph;
-  /** true → an existing trusted verdict / completed task stood; nothing was overwritten. */
+  /** true → the target was missing/completed; task evidence was not updated. */
   readonly skipped: boolean;
+}
+
+/**
+ * Install one resolved task and reset its wave gate — the ONE transition both
+ * harnesses make when an implementation child stops.
+ *
+ * It was written twice: once on the Claude-side path and once in pi's Stop
+ * mirror, whose own comment called itself "Mirror of the Claude-side reset
+ * above". Only convention kept the copies equal, and they encode a rule that
+ * must not drift — a code change invalidates the task's review AND drops the
+ * evidence the wave gate would otherwise read as green: `tests_passed` and
+ * `reviews_complete` reset, and `blocked` clears only when the cause it
+ * tracks (this wave's critical spec-check record, dropped here) goes with it.
+ * Leaving `blocked: true` behind used to print "BLOCKED due to:" with no
+ * listed reason.
+ *
+ * The two callers differ ONLY in which fields they write onto the task, so
+ * that is the one thing passed in.
+ */
+function applyResolvedTask(
+  s: TaskGraph,
+  taskId: string,
+  wave: number,
+  codeChanged: boolean,
+  clearedExecuting: readonly string[],
+  resolveTask: (task: Task) => Task,
+): TaskGraph {
+  const resolved: TaskGraph = {
+    ...s,
+    tasks: s.tasks.map((t) => {
+      if (t.id !== taskId) return t;
+      const updated = resolveTask(t);
+      return codeChanged ? invalidateTaskReview(updated) : updated;
+    }),
+    executing_tasks: [...clearedExecuting],
+  };
+  const specCheckCleared = codeChanged && resolved.spec_check?.wave === wave;
+  return {
+    ...resolved,
+    ...(specCheckCleared ? { spec_check: undefined } : {}),
+    wave_gates: {
+      ...resolved.wave_gates,
+      [String(wave)]: {
+        ...(resolved.wave_gates[String(wave)] ?? newWaveGate()),
+        impl_complete: isWaveComplete(resolved, wave),
+        ...(codeChanged
+          ? {
+              tests_passed: null,
+              reviews_complete: false,
+              ...(specCheckCleared ? { blocked: false } : {}),
+            }
+          : {}),
+      },
+    },
+  };
 }
 
 /**
@@ -289,8 +309,10 @@ export interface AppliedStopResolution {
  * handler): a pre-lock snapshot can be outdated by a concurrent writer
  * before the write lands (TOCTOU), so the target is re-found and re-checked
  * against the CURRENT state here. An untrusted resolution never overwrites
- * an existing trusted-pass/trusted-fail verdict and never reopens a
- * completed task — but the agent still STOPPED either way, so the task is
+ * a trusted failure, and preserves a trusted pass only while no newer code
+ * bytes were attributed to this retry; historical green evidence cannot prove
+ * changed bytes. A completed task is never reopened — but the agent still
+ * STOPPED either way, so the task is
  * always removed from executing_tasks (leaving it would ghost-block
  * duplicate-spawn checks for the rest of the session).
  */
@@ -298,33 +320,52 @@ export function applyUntrustedStopResolution(
   s: TaskGraph,
   taskId: string,
   resolution: UntrustedStopResolution,
+  proofPolicy: ProofEvaluationPolicy = PI_STRUCTURED_EVIDENCE_POLICY,
 ): AppliedStopResolution {
   const clearedExecuting = (s.executing_tasks ?? []).filter((id) => id !== taskId);
   const target = s.tasks.find((t) => t.id === taskId);
-  const verdict = target?.test_result?.verdict;
-  const existingTrusted = verdict === "trusted-pass" || verdict === "trusted-fail";
-  if (!target || target.status === "completed" || existingTrusted) {
+  if (!target || target.status === "completed") {
     return { state: { ...s, executing_tasks: clearedExecuting }, skipped: true };
   }
+  const codeChanged = resolution.bytesChangedSinceAttempt;
+  const preserveExistingTrusted = target.test_result?.verdict === "trusted-fail" ||
+    (target.test_result?.verdict === "trusted-pass" && !codeChanged);
+  const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, resolution.filesModified);
+  const currentNewTests: NewTestEvidence = {
+    written: resolution.newTestsWritten,
+    evidence: resolution.newTestEvidence,
+  };
+  const proofTestResult = preserveExistingTrusted ? target.test_result : resolution.testResult;
+  const proofArtifactsChanged = attributedChangedArtifacts(
+    resolution.changedDeclaredArtifacts,
+    cumulativeFiles,
+  );
+  const proof = evaluateTaskProof(
+    {
+      newTestsRequired: target.new_tests_required !== false,
+      declaredArtifacts: target.file_list ?? [],
+    },
+    {
+      taskCompleted: resolution.taskCompleted,
+      testResult: proofTestResult,
+      filesModified: proofArtifactsChanged,
+      newTestsWritten: currentNewTests.written,
+      newTestEvidence: currentNewTests.evidence,
+    },
+    proofPolicy,
+  );
   return {
     skipped: false,
-    state: {
-      ...s,
-      tasks: s.tasks.map((t) =>
-        t.id === taskId
-          ? {
-              ...t,
-              status: "implemented" as const,
-              test_result: resolution.testResult,
-              test_evidence: resolution.testEvidence,
-              files_modified: [...resolution.filesModified],
-              new_tests_written: resolution.newTestsWritten,
-              new_test_evidence: resolution.newTestEvidence,
-            }
-          : t,
-      ),
-      executing_tasks: clearedExecuting,
-    },
+    state: applyResolvedTask(s, taskId, target.wave, codeChanged, clearedExecuting, (t) => ({
+      ...t,
+      status: proof.state === "satisfied" ? "implemented" : "pending",
+      proof,
+      test_result: proofTestResult,
+      test_evidence: preserveExistingTrusted ? t.test_evidence : resolution.testEvidence,
+      files_modified: cumulativeFiles,
+      new_tests_written: currentNewTests.written,
+      new_test_evidence: currentNewTests.evidence,
+    })),
   };
 }
 
@@ -344,9 +385,9 @@ export function isWaveComplete(state: TaskGraph, wave: number): boolean {
 
 // --- Pure: determine new test evidence from diff ---
 
-interface NewTestEvidence {
-  written: boolean;
-  evidence: string;
+export interface NewTestEvidence {
+  readonly written: boolean;
+  readonly evidence: string;
 }
 
 export function analyzeNewTests(
@@ -387,15 +428,11 @@ export function analyzeNewTests(
  * literals (no module mocking, which bun's vitest shim does not support).
  */
 export interface DiffDeps {
-  readonly isTracked: (file: string) => boolean;
-  readonly diffFiles: (files: string[]) => string;
-  readonly diffFilesStaged: (files: string[]) => string;
-  readonly diffUntracked: (file: string) => string;
-  readonly listUntrackedTestFiles: () => string[];
-  readonly diff: (from?: string, to?: string) => string;
-  readonly diffStaged: () => string;
-  readonly defaultBranch: () => string;
-  readonly mergeBase: (branch: string) => string | null;
+  readonly isTracked: (file: string) => git.GitTrackedResult;
+  readonly diffFiles: (files: string[]) => git.GitDiffResult;
+  readonly diffFilesStaged: (files: string[]) => git.GitDiffResult;
+  readonly diffFilesSince: (revision: string, files: string[]) => git.GitDiffResult;
+  readonly diffUntracked: (file: string) => git.GitDiffResult;
   readonly fileExists: (path: string) => boolean;
 }
 
@@ -403,65 +440,53 @@ const REAL_DIFF_DEPS: DiffDeps = {
   isTracked: git.isTracked,
   diffFiles: git.diffFiles,
   diffFilesStaged: git.diffFilesStaged,
+  diffFilesSince: git.diffFilesSince,
   diffUntracked: git.diffUntracked,
-  listUntrackedTestFiles: git.listUntrackedTestFiles,
-  diff: git.diff,
-  diffStaged: git.diffStaged,
-  defaultBranch: git.defaultBranch,
-  mergeBase: git.mergeBase,
   fileExists: existsSync,
 };
 
 export function collectDiff(
-  filesModified: string[],
-  startSha: string | undefined,
+  filesModified: readonly string[],
   deps: DiffDeps = REAL_DIFF_DEPS,
+  startSha?: string,
 ): string {
-  if (filesModified.length > 0) {
-    const tracked = filesModified.filter((f) => deps.isTracked(f));
-    const untracked = filesModified.filter((f) => deps.fileExists(f) && !deps.isTracked(f));
+  // New-test proof is task-scoped evidence. A branch-wide fallback or a scan of
+  // every untracked test lets a sibling task's test satisfy this task. Missing
+  // attribution therefore fails closed instead of broadening the evidence set.
+  if (filesModified.length === 0) return "";
 
-    const parts = [
-      deps.diffFiles(tracked),
-      deps.diffFilesStaged(tracked),
-      ...untracked.map((f) => deps.diffUntracked(f)),
-    ];
-
-    // Also include untracked test files NOT already in filesModified.
-    // parseFilesModified often misses test files due to transcript parsing gaps
-    // (e.g. tool name casing, truncated transcripts, partial captures).
-    const alreadyIncluded = new Set(filesModified);
-    const untrackedTests = deps.listUntrackedTestFiles();
-    for (const f of untrackedTests) {
-      if (!alreadyIncluded.has(f)) {
-        parts.push(deps.diffUntracked(f));
-      }
-    }
-
-    const combined = parts.join("\n");
-    if (combined.trim()) return combined;
+  const classified = filesModified.map((file) => ({ file, result: deps.isTracked(file) }));
+  const failed = classified.find(({ result }) => !result.ok);
+  if (failed !== undefined && !failed.result.ok) {
+    throw new Error(`new-test diff authority unavailable: ${failed.result.error}`);
   }
-
-  // Fallback: SHA-based or branch-based diff + untracked test files
-  const parts: string[] = [];
-
-  if (startSha) {
-    parts.push(deps.diff(startSha, "HEAD"), deps.diff(), deps.diffStaged());
-  } else {
-    const branch = deps.defaultBranch();
-    const base = deps.mergeBase(branch);
-    parts.push(base ? deps.diff(base, "HEAD") : deps.diff("HEAD~1", "HEAD"));
-    parts.push(deps.diff(), deps.diffStaged());
+  const tracked = classified.flatMap(({ file, result }) => result.ok && result.tracked ? [file] : []);
+  const untracked = classified.flatMap(({ file, result }) =>
+    result.ok && !result.tracked && deps.fileExists(file) ? [file] : []);
+  const diffs = [
+    startSha === undefined ? { ok: true as const, diff: "" } : deps.diffFilesSince(startSha, tracked),
+    deps.diffFiles(tracked),
+    deps.diffFilesStaged(tracked),
+    ...untracked.map((file) => deps.diffUntracked(file)),
+  ];
+  const unavailable = diffs.find((result) => !result.ok);
+  if (unavailable !== undefined && !unavailable.ok) {
+    throw new Error(`new-test diff authority unavailable: ${unavailable.error}`);
   }
+  return diffs.flatMap((result) => result.ok ? [result.diff] : []).join("\n");
+}
 
-  // Also include untracked test files (common when agent creates new test files
-  // without committing — e.g. pi subagents working on unstaged branches)
-  const untrackedTests = deps.listUntrackedTestFiles();
-  for (const f of untrackedTests) {
-    parts.push(deps.diffUntracked(f));
-  }
-
-  return parts.join("\n");
+/** Shared shell operation for both Claude and Pi completion paths. Keeping
+ * worktree, index, committed, and untracked-test collection here prevents one
+ * harness from proving fewer test changes than the other. */
+export function collectNewTestEvidence(
+  filesModified: readonly string[],
+  newTestsRequired: boolean | undefined,
+  startSha?: string,
+  deps: DiffDeps = REAL_DIFF_DEPS,
+): NewTestEvidence {
+  if (newTestsRequired === false) return analyzeNewTests("", false);
+  return analyzeNewTests(collectDiff(filesModified, deps, startSha), newTestsRequired);
 }
 
 /**
@@ -479,9 +504,12 @@ export type EvidenceSnapshot =
 
 /**
  * Handler core. `evidenceSnapshot` lets the dispatcher pass ledger records
- * captured BEFORE cleanup unbound the machine — a subsequent bind truncates
- * the ledger, so reading the file here can race a fresh run's truncation.
- * Standalone invocation (no snapshot) reads the ledger directly.
+ * captured BEFORE cleanup unbound the machine: attribution runs through the
+ * live binding, so once cleanup has unbound it this epoch's own records can no
+ * longer be told apart from a sibling's by reading the file here. (The bind
+ * itself no longer truncates — see `bindMachineAgent` in machine/ledger.ts,
+ * which documents why that was removed.) Standalone invocation (no snapshot)
+ * reads the ledger directly.
  */
 export const runUpdateTaskStatus = async (
   stdin: string,
@@ -501,7 +529,11 @@ export const runUpdateTaskStatus = async (
       message: `update-task-status: malformed SubagentStop input — task status and test evidence NOT updated: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
-  const agentType = stripNamespace(input.agent_type ?? "");
+  // Claude Code does not send agent_type; fall back to the metadata the
+  // harness writes beside the transcript. This handler is also registered
+  // standalone (KNOWN_HANDLERS), so it cannot assume the dispatcher already
+  // resolved it.
+  const agentType = stripNamespace(resolveAgentType(input));
 
   // Skip non-impl agents
   if (!IMPL_AGENTS.has(agentType)) return { kind: "passthrough" };
@@ -509,14 +541,27 @@ export const runUpdateTaskStatus = async (
   const mgr = StateManager.fromSession(input.session_id);
   if (!mgr) return { kind: "passthrough" };
 
-  // Parse transcript (read file content, then parse)
-  // Expand ~ in transcript path (Claude Code may send tilde-prefixed paths)
-  const transcriptPath = input.agent_transcript_path?.replace(/^~/, process.env.HOME ?? "~") ?? "";
-  const transcriptContent = transcriptPath && existsSync(transcriptPath)
-    ? readFileSync(transcriptPath, "utf-8")
-    : "";
+  // Parse transcript (read file content, then parse). The path is RESOLVED,
+  // not read off the payload: a supplied `agent_transcript_path` wins, and a
+  // harness that sends none falls back to the derived on-disk location. This
+  // handler is the only writer of task status, so an unlocatable transcript
+  // costs the whole record — see utils/agent-transcript-path.
+  const transcriptPath = resolveAgentTranscriptPath(input);
+  let transcriptContent = "";
+  if (transcriptPath) {
+    try {
+      transcriptContent = readFileSync(transcriptPath, "utf-8");
+    } catch (e) {
+      // The path existed a moment ago (the resolver proved it), so this is a
+      // permission or I/O fault, not a miss. Say so and fall through to the
+      // executing_tasks inference rather than throwing out of the hook.
+      process.stderr.write(
+        `[loom] update-task-status: cannot read transcript at ${transcriptPath}: ${e instanceof Error ? e.message : String(e)}\n`,
+      );
+    }
+  }
   const transcript = parseTranscript(transcriptContent);
-  const filesModified = parseFilesModified(transcriptContent);
+  const rawFilesModified = parseFilesModified(transcriptContent);
   const bashTestOutput = parseBashTestOutput(transcriptContent);
 
   // Extract task ID
@@ -535,8 +580,21 @@ export const runUpdateTaskStatus = async (
       // Ambiguous or empty — just clear executing_tasks, don't mark tasks as failed.
       // Marking all executing tasks as "failed" causes a cascade where subsequent hooks
       // bypass the guard and overwrite valid test evidence.
+      //
+      // Both arms MUST speak. The empty arm used to return here in total
+      // silence, which is how a harness that recorded no `executing_tasks` and
+      // sent no transcript path looked exactly like a run with nothing to do:
+      // every task stayed `pending`, no test_result was ever written, and
+      // nothing on stderr said why. An unrecorded task is a wave gate reading
+      // green on no evidence — it has to be loud.
       if (executing.length > 0) {
         process.stderr.write(`WARNING: ${agentType} completed without task ID, ${executing.length} tasks executing (ambiguous)\n`);
+      } else {
+        process.stderr.write(
+          `WARNING: ${agentType} completed but task status was NOT recorded — no task ID in the transcript ` +
+            `(${transcriptPath ? `read ${transcriptPath}` : "no transcript found: the payload named none and none was derivable from session/agent id"}) ` +
+            `and executing_tasks is empty, so there is nothing to attribute the run to\n`,
+        );
       }
       await mgr.update((s) => ({
         ...s,
@@ -548,7 +606,60 @@ export const runUpdateTaskStatus = async (
 
   const state = mgr.load();
   const task = state.tasks.find((t) => t.id === taskId);
-  if (!task) return { kind: "passthrough" };
+  if (!task) {
+    return {
+      kind: "error",
+      message:
+        `update-task-status: transcript named unknown task ${taskId}; ` +
+        `known tasks: ${state.tasks.map((candidate) => candidate.id).join(", ") || "<none>"}. ` +
+        "Implementation evidence was NOT stored.",
+    };
+  }
+
+  let filesModified: string[];
+  try {
+    filesModified = [...canonicalRepositoryPaths(
+      git.repositoryRoot() ?? process.cwd(),
+      rawFilesModified,
+      "transcript files_modified",
+    )];
+  } catch (error) {
+    // An agent that edited outside the repository cannot satisfy task proof.
+    // Clear its live marker, leave the task pending, and fail loudly rather
+    // than persisting a path later consumers might read.
+    await mgr.update((s) => ({
+      ...s,
+      executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
+    }));
+    return {
+      kind: "error",
+      message: `update-task-status: unsafe modified-file evidence for ${taskId}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+
+  // The compact repository boundary detects declared and undeclared writes,
+  // including paths that became clean again; a missing legacy boundary falls
+  // back to the declared-artifact baseline. Shared with the three Pi call sites
+  // through `compareAttemptBaseline` — this was a fourth hand-written copy of
+  // the same comparison, and four copies of one rule are four chances to
+  // disagree about what "the bytes changed" means.
+  const comparison = compareAttemptBaseline(
+    git.repositoryRoot() ?? process.cwd(),
+    task,
+    { kind: "repository-or-declared", extraModifiedPaths: filesModified },
+  );
+  const changedDeclaredArtifacts = comparison.changedDeclaredArtifacts;
+  const bytesChangedSinceAttempt = comparison.bytesChangedSinceAttempt;
+  if (comparison.failure !== null) {
+    await mgr.update((s) => ({
+      ...s,
+      executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
+    }));
+    return {
+      kind: "error",
+      message: `update-task-status: cannot compare declared-artifact baseline for ${taskId}: ${comparison.failure}`,
+    };
+  }
 
   // Pre-refactor graphs carried `tests_passed` on the task (replaced by
   // `test_result`, no compat read — unshipped branch). Explain the
@@ -560,10 +671,12 @@ export const runUpdateTaskStatus = async (
   // (execution-time ground truth, attribution via agent_id), transcript
   // regex as explicit labeled fallback. Foreign epochs are never consulted.
   // Identity is PARSED before epoch construction AND before loadMachine: a
-  // reserved or path-unsafe character in the hook input could never have
-  // been bound/recorded (the bind boundary rejects it) and must never name
-  // a machine file, so it yields no epoch events, no machine, and routes to
-  // the existing fallback path instead of silently mis-keying the lookup.
+  // reserved or path-unsafe character in the hook input could never have been
+  // bound/recorded (the bind boundary rejects it) and must never name a machine
+  // file. The two parses are independent, so the consequences are too: an
+  // unparseable `agent_id` yields no epoch events, and an unparseable
+  // `agentType` yields no machine. Either way the lookup is never mis-keyed —
+  // the missing half routes to the existing fallback path instead.
   const epochAgentId = input.agent_id ? parseAgentId(input.agent_id) : null;
   const epochAgentType = parseAgentType(agentType);
   // machinesDir() is resolved at call time (not the import-frozen constant)
@@ -595,14 +708,12 @@ export const runUpdateTaskStatus = async (
       `update-task-status: invalid session id ${input.session_id} — ledger not read; verdict may be mislabeled\n`,
     );
   }
-  const records: readonly EvidenceRecord[] =
-    evidenceSnapshot === undefined
-      ? standaloneSessionId
-        ? readEvidence(standaloneSessionId)
-        : []
-      : evidenceSnapshot.kind === "snapshot"
-        ? evidenceSnapshot.events
-        : [];
+  let records: readonly EvidenceRecord[] = [];
+  if (evidenceSnapshot === undefined) {
+    records = standaloneSessionId === null ? [] : readEvidence(standaloneSessionId);
+  } else if (evidenceSnapshot.kind === "snapshot") {
+    records = evidenceSnapshot.events;
+  }
   const epochEvents = epochAgentId && epochAgentType
     ? eventsForEpoch(records, epochOf(epochAgentId, epochAgentType))
     : [];
@@ -627,21 +738,18 @@ export const runUpdateTaskStatus = async (
     }
   }
 
-  // Section 2: New test verification via git diff
-  let newTestEvidence: NewTestEvidence = { written: false, evidence: "" };
-  if (git.isGitRepo()) {
-    const fullDiff = collectDiff(filesModified, task.start_sha);
-    newTestEvidence = analyzeNewTests(fullDiff, task.new_tests_required);
-  }
-
-  // Section 3: Atomic state write. The preserve-evidence guards run INSIDE
+  // Section 3: Atomic state write. Cumulative attribution and new-test
+  // evidence are derived from the locked Task snapshot below, not the stale
+  // pre-lock task read; the preserve-evidence guards also run INSIDE
   // the locked update (a pre-lock read can be outdated by a concurrent
   // writer before this write lands — TOCTOU) and are TRUST-aware ON BOTH
-  // SIDES: an existing ledger-trusted verdict is preserved only against an
-  // UNTRUSTED incoming resolution. An untrusted result — e.g. a
-  // helper-reported "pass" from agent-controlled stdin — must never preempt
-  // ground truth (mirrors store-test-evidence's skippedTrustedVerdict
-  // pattern), but NEWER ground truth supersedes older: a re-spawned agent's
+  // SIDES: an existing trusted failure is preserved against an UNTRUSTED
+  // incoming resolution, while a trusted pass is preserved only if this retry
+  // changed no code. Historical green evidence cannot prove newer bytes. An
+  // untrusted result — e.g. a helper-reported "pass" from agent-controlled
+  // stdin — otherwise cannot preempt ground truth (mirrors
+  // store-test-evidence's skippedTrustedVerdict pattern), but NEWER ground
+  // truth supersedes older: a re-spawned agent's
   // fresh epoch yielding trusted-pass/trusted-fail must land, or the first
   // real red run would wedge the task forever (the gate treats trusted-fail
   // as missing evidence and store-test-evidence also refuses trusted).
@@ -650,13 +758,8 @@ export const runUpdateTaskStatus = async (
   await mgr.update((s) => {
     const target = s.tasks.find((t) => t.id === taskId);
     const verdict = target?.test_result?.verdict;
-    const existingTrusted = verdict === "trusted-pass" || verdict === "trusted-fail";
     const incomingTrusted = testEvidence.result.verdict !== "untrusted";
-    if (
-      !target ||
-      target.status === "completed" ||
-      (existingTrusted && !incomingTrusted)
-    ) {
+    if (!target || target.status === "completed") {
       skippedExistingVerdict = true;
       // The verdict stands down, but the agent still STOPPED: leaving the
       // task on executing_tasks would ghost-block validate-task-execution's
@@ -667,52 +770,71 @@ export const runUpdateTaskStatus = async (
       };
     }
 
-    const updatedTasks = s.tasks.map((t) =>
-      t.id === taskId
-        ? {
-            ...t,
-            status: "implemented" as const,
-            test_result: testEvidence.result,
-            test_evidence: testEvidence.evidence,
-            files_modified: filesModified,
-            new_tests_written: newTestEvidence.written,
-            new_test_evidence: newTestEvidence.evidence,
-          }
-        : t
+    const codeChanged = bytesChangedSinceAttempt;
+    const preserveExistingTrusted = !incomingTrusted && (
+      verdict === "trusted-fail" || (verdict === "trusted-pass" && !codeChanged)
     );
-
-    return {
-      ...s,
-      tasks: updatedTasks,
-      executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
-    };
+    const resolvedTestResult = preserveExistingTrusted ? target.test_result : testEvidence.result;
+    const resolvedTestEvidence = preserveExistingTrusted ? target.test_evidence : testEvidence.evidence;
+    const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, filesModified);
+    const proofArtifactsChanged = attributedChangedArtifacts(changedDeclaredArtifacts, cumulativeFiles);
+    const currentNewTestEvidence = collectNewTestEvidence(
+      cumulativeFiles,
+      target.new_tests_required,
+      target.start_sha,
+    );
+    const proof = evaluateTaskProof(
+      {
+        newTestsRequired: target.new_tests_required !== false,
+        declaredArtifacts: target.file_list ?? [],
+      },
+      {
+        taskCompleted: true,
+        testResult: resolvedTestResult,
+        filesModified: proofArtifactsChanged,
+        newTestsWritten: currentNewTestEvidence.written,
+        newTestEvidence: currentNewTestEvidence.evidence,
+      },
+      TRUSTED_LEDGER_ONLY_POLICY,
+    );
+    return applyResolvedTask(
+      s,
+      taskId,
+      target.wave,
+      codeChanged,
+      (s.executing_tasks ?? []).filter((id) => id !== taskId),
+      (t) => ({
+        ...t,
+        status: proof.state === "satisfied" ? "implemented" : "pending",
+        proof,
+        test_result: resolvedTestResult,
+        test_evidence: resolvedTestEvidence,
+        files_modified: cumulativeFiles,
+        new_tests_written: currentNewTestEvidence.written,
+        new_test_evidence: currentNewTestEvidence.evidence,
+      }),
+    );
   });
 
   if (skippedExistingVerdict) {
-    process.stderr.write(
-      `update-task-status: ${taskId} is completed or carries a trusted verdict this untrusted resolution cannot supersede — leaving it untouched\n`,
-    );
-    return { kind: "passthrough" };
+    return passthroughDiagnostic(`update-task-status: ${taskId} is completed or missing — leaving task evidence untouched\n`);
   }
 
-  process.stderr.write(`Task ${taskId} implemented.\n`);
+  const persistedTask = mgr.load().tasks.find((candidate) => candidate.id === taskId);
+  if (persistedTask?.proof?.state === "satisfied") {
+    process.stderr.write(`Task ${taskId} implemented with all proof obligations satisfied.\n`);
+  } else {
+    const failures = persistedTask?.proof?.state === "failed"
+      ? persistedTask.proof.failures.map((failure) => failure.kind).join(", ")
+      : "proof unavailable";
+    process.stderr.write(`Task ${taskId} remains pending — proof obligations failed: ${failures}.\n`);
+  }
 
-  // Check wave completion (shared pure predicate — pi's Stop mirror uses
-  // the same one, inside its locked update)
+  // The same locked update that landed the resolution reconciled the wave's
+  // implementation bit in both directions. Report completion from that state.
   const updated = mgr.load();
   const currentWave = updated.current_wave ?? 1;
-
   if (isWaveComplete(updated, currentWave)) {
-    await mgr.update((s) => ({
-      ...s,
-      wave_gates: {
-        ...s.wave_gates,
-        [String(currentWave)]: {
-          ...(s.wave_gates[String(currentWave)] ?? newWaveGate()),
-          impl_complete: true,
-        },
-      },
-    }));
     process.stderr.write(`\nWave ${currentWave} implementation complete. Run: /wave-gate\n`);
   }
 

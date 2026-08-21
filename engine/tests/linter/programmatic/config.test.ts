@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { loadProjectConfig, EMPTY_CONFIG } from "../../../src/linter/programmatic/config";
+import { loadProjectConfig, EMPTY_CONFIG, type ProgrammaticConfig } from "../../../src/linter/programmatic/config";
+import { createProgrammaticRules } from "../../../src/linter/programmatic";
 
 describe("programmatic config loader", () => {
   function makeTempDir(): string {
@@ -16,6 +17,14 @@ describe("programmatic config loader", () => {
   it("returns EMPTY_CONFIG when config.json doesn't exist", () => {
     const dir = makeTempDir();
     expect(loadProjectConfig(dir)).toEqual(EMPTY_CONFIG);
+  });
+
+  it("throws when config.json is inaccessible instead of silently disabling policy", () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, "config.json");
+    symlinkSync(configPath, configPath);
+
+    expect(() => loadProjectConfig(dir)).toThrow(/Cannot read linter config.*ELOOP/i);
   });
 
   it("parses boundaries from config.json", () => {
@@ -129,6 +138,60 @@ describe("programmatic config loader", () => {
     expect(config).toEqual({});
   });
 
+  // Both fields were declared on ProgrammaticConfig and read by
+  // createProgrammaticRules, but the parser never looked at them — a project
+  // that set either got the built-in default with no error and no log. These
+  // pin the read, and the two rejection cases pin the fail-closed contract the
+  // silent drop was violating.
+  it("parses maxDiscriminantBranches from config.json", () => {
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ maxDiscriminantBranches: 2 }));
+
+    expect(loadProjectConfig(dir).maxDiscriminantBranches).toBe(2);
+  });
+
+  it("parses discriminantTags from config.json", () => {
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ discriminantTags: ["kind", "state"] }));
+
+    expect(loadProjectConfig(dir).discriminantTags).toEqual(["kind", "state"]);
+  });
+
+  it("throws on a non-integer maxDiscriminantBranches", () => {
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ maxDiscriminantBranches: 0 }));
+
+    expect(() => loadProjectConfig(dir)).toThrow("'maxDiscriminantBranches' must be a positive integer");
+  });
+
+  it("throws on discriminantTags entries that are not non-empty strings", () => {
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ discriminantTags: ["kind", ""] }));
+
+    expect(() => loadProjectConfig(dir)).toThrow("'discriminantTags' entries must be non-empty strings");
+  });
+
+  it("carries a configured discriminant limit through to the rule that reads it", () => {
+    // The end-to-end path the silent drop broke: config → createProgrammaticRules
+    // → handler. Two branches are under the default of 3 and over a limit of 2.
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ maxDiscriminantBranches: 2 }));
+    const source = [
+      `function f(r) {`,
+      `  if (r.kind === "a") {`,
+      `    a();`,
+      `  } else if (r.kind === "b") {`,
+      `    b();`,
+      `  }`,
+      `}`,
+    ].join("\n");
+    const rule = (config: ProgrammaticConfig) =>
+      createProgrammaticRules(config).find((r) => r.name === "exhaustive-discriminant-branching")!;
+
+    expect(rule(EMPTY_CONFIG).handler(source, "engine/src/core/example.ts")).toEqual([]);
+    expect(rule(loadProjectConfig(dir)).handler(source, "engine/src/core/example.ts")).toHaveLength(1);
+  });
+
   it("full config with all fields works", () => {
     const dir = makeTempDir();
     writeFileSync(join(dir, "config.json"), JSON.stringify({
@@ -137,7 +200,9 @@ describe("programmatic config loader", () => {
       ],
       pureModules: ["src/main/java/com/example/domain/"],
       maxFunctionLines: 40,
-      excludeFromMaxLines: [".test.java"]
+      excludeFromMaxLines: [".test.java"],
+      maxDiscriminantBranches: 4,
+      discriminantTags: ["kind"]
     }));
 
     const config = loadProjectConfig(dir);
@@ -145,5 +210,7 @@ describe("programmatic config loader", () => {
     expect(config.pureModules).toHaveLength(1);
     expect(config.maxFunctionLines).toBe(40);
     expect(config.excludeFromMaxLines).toEqual([".test.java"]);
+    expect(config.maxDiscriminantBranches).toBe(4);
+    expect(config.discriminantTags).toEqual(["kind"]);
   });
 });

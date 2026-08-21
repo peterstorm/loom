@@ -5,7 +5,8 @@
  */
 
 import type { HookHandler, PreToolUseInput } from "../../types";
-import { validateTaskExecution } from "../../core/validate-task-execution";
+import { validateTaskExecution } from "../task-execution";
+import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 
 const handler: HookHandler = async (stdin) => {
   let input: PreToolUseInput;
@@ -20,9 +21,10 @@ const handler: HookHandler = async (stdin) => {
       message: `validate-task-execution: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
-  if (input.tool_name !== "Task" && input.tool_name !== "subagent") return { kind: "allow" };
+  if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
   return validateTaskExecution({
+    agentType: (input.tool_input?.subagent_type as string) ?? (input.tool_input?.agent as string) ?? "",
     prompt: (input.tool_input?.prompt as string) ?? (input.tool_input?.task as string) ?? "",
     description: (input.tool_input?.description as string) ?? "",
   });

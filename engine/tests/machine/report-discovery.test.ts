@@ -1,12 +1,77 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CALL_START_SLACK_MS,
+  bunJunitOutputFileFromCommand,
   findReport,
+  literalShellWords,
   outputFileFromCommand,
 } from "../../src/machine/report-discovery";
+
+describe("literalShellWords — refusal and quote/escape branches (round-29)", () => {
+  it("parses plain words with quoted parts collapsed and escapes resolved", () => {
+    expect(literalShellWords('bun test --reporter=junit --out="my report.xml"')).toEqual([
+      { value: "bun", optionEligible: false },
+      { value: "test", optionEligible: false },
+      { value: "--reporter=junit", optionEligible: true },
+      { value: "--out=my report.xml", optionEligible: true },
+    ]);
+    expect(literalShellWords("bun test --out=it\\'s.xml")).toEqual([
+      { value: "bun", optionEligible: false },
+      { value: "test", optionEligible: false },
+      { value: "--out=it's.xml", optionEligible: true },
+    ]);
+    expect(literalShellWords("bun test --out=a\\\nb.xml")).toEqual([
+      { value: "bun", optionEligible: false },
+      { value: "test", optionEligible: false },
+      { value: "--out=ab.xml", optionEligible: true },
+    ]);
+    expect(literalShellWords('bun test --reporter "junit" --out "a\\"b".xml')).toEqual([
+      { value: "bun", optionEligible: false },
+      { value: "test", optionEligible: false },
+      { value: "--reporter", optionEligible: true },
+      { value: "junit", optionEligible: false },
+      { value: "--out", optionEligible: true },
+      { value: "a\"b.xml", optionEligible: false },
+    ]);
+  });
+
+  it("refuses dynamic expansions and substitutions outright", () => {
+    for (const command of [
+      "bun test --out=$FILE.xml",
+      "bun test --out=${FILE}.xml",
+      "bun test --out=$(printf x).xml",
+      "bun test --out=`printf x`.xml",
+      'bun test --reporter "--out=$FILE.xml"',
+      'bun test --reporter "--out=`printf x`.xml"',
+      'bun test --reporter "$(printf x)"',
+    ]) {
+      expect(literalShellWords(command), command).toBeNull();
+    }
+  });
+
+  it("refuses unterminated quotes and a trailing backslash", () => {
+    for (const command of [
+      "bun test --out='unterminated",
+      'bun test --out="unterminated',
+      "bun test --out=trailing\\",
+      'bun test --out="trailing backslash\\',
+      'bun test --out="under \\',
+    ]) {
+      expect(literalShellWords(command), command).toBeNull();
+    }
+  });
+
+  it("keeps a $ inside single quotes literal (no expansion there)", () => {
+    expect(literalShellWords("bun test --out='$FILE.xml'")).toEqual([
+      { value: "bun", optionEligible: false },
+      { value: "test", optionEligible: false },
+      { value: "--out=$FILE.xml", optionEligible: true },
+    ]);
+  });
+});
 
 describe("outputFileFromCommand", () => {
   it("extracts --outputFile=path", () => {
@@ -21,6 +86,188 @@ describe("outputFileFromCommand", () => {
 
   it("returns null when absent", () => {
     expect(outputFileFromCommand("npm test")).toBeNull();
+  });
+});
+
+describe("bunJunitOutputFileFromCommand", () => {
+  it.each([
+    ["equals options", "bun test --reporter=junit --reporter-outfile=report.xml", "report.xml"],
+    ["space options", "bun test --reporter junit --reporter-outfile report.xml", "report.xml"],
+    ["double-quoted equals path", 'bun test --reporter=junit --reporter-outfile="reports/my report.xml"', "reports/my report.xml"],
+    ["single-quoted equals path", "bun test --reporter=junit --reporter-outfile='reports/my report.xml'", "reports/my report.xml"],
+    ["separate double-quoted path", 'bun test --reporter "junit" --reporter-outfile "reports/my report.xml"', "reports/my report.xml"],
+    ["focused test before options", "bun test engine/tests/example.test.ts --reporter=junit --reporter-outfile=report.xml", "report.xml"],
+  ])("extracts Bun JUnit outfile for %s", (_label, command, expected) => {
+    expect(bunJunitOutputFileFromCommand(command)).toBe(expected);
+  });
+
+  it.each([
+    ["non-Bun runner", "npm test --reporter=junit --reporter-outfile=report.xml"],
+    ["bun run rather than bun test", "bun run test --reporter=junit --reporter-outfile=report.xml"],
+    ["missing reporter", "bun test --reporter-outfile=report.xml"],
+    ["non-JUnit reporter", "bun test --reporter=json --reporter-outfile=report.xml"],
+    ["missing outfile", "bun test --reporter=junit"],
+    ["empty outfile", "bun test --reporter=junit --reporter-outfile="],
+    ["duplicate outfiles", "bun test --reporter=junit --reporter-outfile=a.xml --reporter-outfile=b.xml"],
+    ["option-looking test pattern", "bun test --test-name-pattern='--reporter=junit' --reporter-outfile=report.xml"],
+    ["options after argument terminator", "bun test -- --reporter=junit --reporter-outfile=report.xml"],
+    ["dynamic path", "bun test --reporter=junit --reporter-outfile=$REPORT"],
+  ])("fails closed for %s", (_label, command) => {
+    expect(bunJunitOutputFileFromCommand(command)).toBeNull();
+  });
+});
+
+describe("findReport — Bun JUnit artifacts", () => {
+  let cwd: string;
+  let callStart: number;
+
+  beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), "loom-bun-report-"));
+    callStart = Date.now() - 1000;
+  });
+
+  afterEach(() => {
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("parses an explicit fresh Bun JUnit artifact via parseJunitXml", () => {
+    writeFileSync(join(cwd, "report.xml"), '<testsuites><testsuite tests="7" failures="1" errors="1"/></testsuites>');
+
+    expect(findReport(
+      "bun test --reporter=junit --reporter-outfile=report.xml",
+      cwd,
+      "",
+      { nowMs: Date.now(), callStartMs: callStart },
+    )).toEqual({ total: 7, failed: 2, source: "junit-xml" });
+  });
+
+  it("resolves a quoted relative outfile against the command cwd", () => {
+    const dir = join(cwd, "test reports");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "bun.xml"), '<testsuite tests="3" failures="0" errors="0"/>');
+
+    expect(findReport(
+      'bun test --reporter junit --reporter-outfile "test reports/bun.xml"',
+      cwd,
+      "",
+      { nowMs: Date.now(), callStartMs: callStart },
+    )).toEqual({ total: 3, failed: 0, source: "junit-xml" });
+  });
+
+  it("supports an absolute Bun reporter path", () => {
+    const path = join(cwd, "absolute.xml");
+    writeFileSync(path, '<testsuite tests="2" failures="0" errors="0"/>');
+
+    expect(findReport(
+      `bun test --reporter=junit --reporter-outfile='${path}'`,
+      join(cwd, "unused-command-cwd"),
+      "",
+      { nowMs: Date.now(), callStartMs: callStart },
+    )).toEqual({ total: 2, failed: 0, source: "junit-xml" });
+  });
+
+  it("requires both the Bun runner and explicit JUnit reporter before reading the artifact", () => {
+    writeFileSync(join(cwd, "report.xml"), '<testsuite tests="5" failures="0" errors="0"/>');
+    const times = { nowMs: Date.now(), callStartMs: callStart };
+
+    expect(findReport("bun test --reporter-outfile=report.xml", cwd, "", times)).toBeNull();
+    expect(findReport("bun test --reporter=json --reporter-outfile=report.xml", cwd, "", times)).toBeNull();
+    expect(findReport("npm test --reporter=junit --reporter-outfile=report.xml", cwd, "", times)).toBeNull();
+  });
+
+  it("applies the agent-authored-artifact veto to the resolved absolute path", () => {
+    const path = join(cwd, "report.xml");
+    writeFileSync(path, '<testsuite tests="5" failures="0" errors="0"/>');
+    const seen: string[] = [];
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(findReport(
+        "bun test --reporter=junit --reporter-outfile=report.xml",
+        cwd,
+        "",
+        { nowMs: Date.now(), callStartMs: callStart },
+        (candidate) => {
+          seen.push(candidate);
+          return true;
+        },
+      )).toBeNull();
+      expect(seen).toEqual([path]);
+      expect(stderrSpy.mock.calls.map((c) => String(c[0])).join(""))
+        .toContain("rejecting --reporter-outfile");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("fails closed with a diagnostic when the call-start stamp is missing", () => {
+    writeFileSync(join(cwd, "report.xml"), '<testsuite tests="5" failures="0" errors="0"/>');
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(findReport(
+        "bun test --reporter=junit --reporter-outfile=report.xml",
+        cwd,
+        "",
+        { nowMs: Date.now(), callStartMs: null },
+      )).toBeNull();
+      expect(stderrSpy.mock.calls.map((c) => String(c[0])).join(""))
+        .toContain("no call-start stamp");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("rejects and diagnoses an artifact that predates this call", () => {
+    const path = join(cwd, "report.xml");
+    writeFileSync(path, '<testsuite tests="5" failures="0" errors="0"/>');
+    const stale = (Date.now() - 5 * 60 * 1000) / 1000;
+    utimesSync(path, stale, stale);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(findReport(
+        "bun test --reporter=junit --reporter-outfile=report.xml",
+        cwd,
+        "",
+        { nowMs: Date.now(), callStartMs: Date.now() - 1000 },
+      )).toBeNull();
+      expect(stderrSpy.mock.calls.map((c) => String(c[0])).join(""))
+        .toContain("stale report");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("fails closed and diagnoses an unreadable Bun artifact", () => {
+    mkdirSync(join(cwd, "report.xml"));
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(findReport(
+        "bun test --reporter=junit --reporter-outfile=report.xml",
+        cwd,
+        "",
+        { nowMs: Date.now(), callStartMs: callStart },
+      )).toBeNull();
+      expect(stderrSpy.mock.calls.map((c) => String(c[0])).join(""))
+        .toContain("cannot read Bun JUnit report");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("fails closed and diagnoses malformed JUnit XML", () => {
+    writeFileSync(join(cwd, "report.xml"), '<testsuite tests="4" failures="5" errors="0"/>');
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(findReport(
+        "bun test --reporter=junit --reporter-outfile=report.xml",
+        cwd,
+        "",
+        { nowMs: Date.now(), callStartMs: callStart },
+      )).toBeNull();
+      expect(stderrSpy.mock.calls.map((c) => String(c[0])).join(""))
+        .toContain("malformed Bun JUnit report");
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 });
 
@@ -123,7 +370,51 @@ describe("findReport", () => {
     }
   });
 
-  it("an unreadable JUnit dir stays fail-closed but says so on stderr", () => {
+  it("distinguishes inaccessible explicit artifacts from missing files", () => {
+    const bunPath = join(cwd, "loop.xml");
+    const vitestPath = join(cwd, "loop.json");
+    symlinkSync("loop.xml", bunPath);
+    symlinkSync("loop.json", vitestPath);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(findReport(
+        "bun test --reporter=junit --reporter-outfile=loop.xml",
+        cwd,
+        "",
+        { nowMs: Date.now(), callStartMs: callStart },
+      )).toBeNull();
+      expect(findReport(
+        "npx vitest run --reporter=json --outputFile=loop.json",
+        cwd,
+        "",
+        { nowMs: Date.now(), callStartMs: callStart },
+      )).toBeNull();
+      const text = stderrSpy.mock.calls.map((call) => String(call[0])).join("");
+      expect(text).toContain("cannot inspect Bun JUnit report");
+      expect(text).toContain("cannot inspect --outputFile report");
+      expect(text).toMatch(/ELOOP|too many levels of symbolic links/i);
+      expect(text).not.toContain("does not exist");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("an inaccessible JUnit dir stays fail-closed but says so on stderr", () => {
+    const dir = join(cwd, "target/surefire-reports");
+    mkdirSync(join(cwd, "target"), { recursive: true });
+    symlinkSync(dir, dir);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(findReport("mvn test", cwd, "", { nowMs: Date.now(), callStartMs: callStart })).toBeNull();
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toContain("cannot read JUnit dir");
+      expect(text).toContain("ELOOP");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("a non-directory JUnit path stays fail-closed but says so on stderr", () => {
     // A FILE where a report DIR is expected: existsSync passes, readdirSync throws
     mkdirSync(join(cwd, "target"), { recursive: true });
     writeFileSync(join(cwd, "target/surefire-reports"), "not a directory");

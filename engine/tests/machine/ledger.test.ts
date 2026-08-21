@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Evidence } from "../../src/machine/types";
@@ -14,19 +14,26 @@ const run = `ledger-test-${process.pid}-${Date.now()}`;
 // The ledger API takes the branded SessionId — parse once at construction
 // (the run/name chars are all SessionId-legal, so the assertion never fires).
 const sid = (name: string) => ledger.parseSessionId(`${run}-${name}`)!;
-const sessions = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "never-seen"].map(sid);
 
+
+// Sweep by run prefix, NOT by a hand-maintained session list. The list rotted
+// once already: sessions added by a later test leaked `.active` files into the
+// shared SUBAGENT_DIR, and a stray roster there makes anyActiveSubagent report
+// a live agent — disabling stale-reservation recovery for every project using
+// that directory. The failure is far too quiet to police by hand, so cleanup
+// derives from the unique run prefix every session id here already carries.
 afterAll(() => {
-  for (const s of sessions) {
-    for (const path of [
-      ledger.ledgerPath(s),
-      ledger.machineBindingPath(s),
-      `${SUBAGENT_DIR}/${s}.active`,
-    ]) {
-      try {
-        unlinkSync(path);
-      } catch {}
-    }
+  let entries: readonly string[];
+  try {
+    entries = readdirSync(SUBAGENT_DIR);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (!name.startsWith(run)) continue;
+    try {
+      unlinkSync(`${SUBAGENT_DIR}/${name}`);
+    } catch {}
   }
 });
 
@@ -80,6 +87,13 @@ describe("evidence ledger", () => {
 
   it("reads [] for a session with no ledger", () => {
     expect(ledger.readEvidence(sid("never-seen"))).toEqual([]);
+  });
+
+  it("propagates an inaccessible ledger instead of treating it as empty evidence", () => {
+    const s = sid("inaccessible-evidence");
+    symlinkSync(ledger.ledgerPath(s), ledger.ledgerPath(s));
+
+    expect(() => ledger.readEvidence(s)).toThrow(/cannot read evidence ledger.*ELOOP/i);
   });
 
   it("skips corrupt, unknown, and epoch-less ledger lines", () => {
@@ -141,6 +155,26 @@ describe("evidence ledger", () => {
   });
 });
 
+describe("call-start stamp reads", () => {
+  it("returns quiet absence only for ENOENT", () => {
+    expect(ledger.callStartFor(sid("callstart-absent"), "toolu_missing")).toBeNull();
+  });
+
+  it("diagnoses an inaccessible stamp and remains fail-closed", () => {
+    const s = sid("callstart-inaccessible");
+    const path = ledger.sessionScopedPath(s, ledger.CALL_START_SUFFIX);
+    symlinkSync(path, path);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(ledger.callStartFor(s, "toolu_x")).toBeNull();
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toMatch(/cannot read call-start file .*ELOOP/i);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+});
+
 describe("machine binding lifecycle", () => {
   it("bind → sole binding (with the bound agent rostered) → unbind → gone", async () => {
     const s = sid("s2");
@@ -158,17 +192,58 @@ describe("machine binding lifecycle", () => {
     expect(existsSync(ledger.machineBindingPath(s))).toBe(false);
   });
 
-  it("a fresh bind truncates the previous run's ledger (epochs make leftovers inert anyway)", async () => {
+  it("a fresh bind leaves the previous run's ledger intact; epochs make leftovers inert", async () => {
     const s = sid("s3");
     await bind(s, "code-implementer-agent", "a-1");
     ledger.appendEvidence(s, ep("a-1:code-implementer-agent"), [read("/old.ts")]);
     await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("a-1"));
 
     await bind(s, "code-implementer-agent", "a-2");
-    expect(ledger.readEvidence(s)).toEqual([]);
-    // Even if truncation had failed, the new epoch sees nothing:
+    // The bind no longer unlinks the ledger — that delete raced unlocked
+    // appendEvidence writers. The leftover record survives...
+    expect(ledger.readEvidence(s)).toHaveLength(1);
+    // ...and is inert for the new epoch, which is what actually matters.
     expect(ledger.eventsForEpoch(ledger.readEvidence(s), ep("a-2:code-implementer-agent"))).toEqual([]);
     await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("a-2"));
+  });
+
+  it("a sibling's bind never destroys a concurrent agent's already-written evidence", async () => {
+    // Regression: bindMachineAgent used to unlink the ledger whenever no fresh
+    // binding was active. appendEvidence takes no lock, so a parallel batch
+    // could lose a still-running sibling's TestRun records, and that sibling's
+    // SubagentStop then saw no trusted evidence for its own epoch.
+    const s = sid("s3-race");
+    await bind(s, "code-implementer-agent", "a-1");
+    ledger.appendEvidence(s, ep("a-1:code-implementer-agent"), [read("/a1-first.ts")]);
+
+    // A sibling binds while a-1 is still running and still appending.
+    await bind(s, "ts-test-agent", "b-1");
+    ledger.appendEvidence(s, ep("a-1:code-implementer-agent"), [read("/a1-second.ts")]);
+    ledger.appendEvidence(s, ep("b-1:ts-test-agent"), [read("/b1.ts")]);
+
+    // Each epoch still sees exactly its own evidence.
+    expect(ledger.eventsForEpoch(ledger.readEvidence(s), ep("a-1:code-implementer-agent")))
+      .toEqual([read("/a1-first.ts"), read("/a1-second.ts")]);
+    expect(ledger.eventsForEpoch(ledger.readEvidence(s), ep("b-1:ts-test-agent")))
+      .toEqual([read("/b1.ts")]);
+
+    await ledger.unbindMachineAgent(s, agentType("ts-test-agent"), agentId("b-1"));
+    await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("a-1"));
+  });
+
+  it("a bind after every sibling unbound still preserves the unjudged epoch's evidence", async () => {
+    // The exact shape that bit a real run: the fast sibling finishes and
+    // unbinds, leaving zero fresh bindings; the next spawn's bind must not
+    // delete the slow sibling's records before its SubagentStop reads them.
+    const s = sid("s3-unbound");
+    await bind(s, "code-implementer-agent", "a-1");
+    ledger.appendEvidence(s, ep("a-1:code-implementer-agent"), [read("/slow.ts")]);
+    await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("a-1"));
+
+    await bind(s, "ts-test-agent", "c-1");
+    expect(ledger.eventsForEpoch(ledger.readEvidence(s), ep("a-1:code-implementer-agent")))
+      .toEqual([read("/slow.ts")]);
+    await ledger.unbindMachineAgent(s, agentType("ts-test-agent"), agentId("c-1"));
   });
 
   it("logs skipped malformed binding lines instead of silently dropping them", () => {
@@ -349,6 +424,13 @@ describe("machine registry", () => {
       writeFileSync(join(machines, "bad-agent.machine.json"), "{broken");
       expect(ledger.loadMachine(machines, agentType("bad-agent")).kind).toBe("invalid");
 
+      const loopPath = join(machines, "loop-agent.machine.json");
+      symlinkSync(loopPath, loopPath);
+      expect(ledger.loadMachine(machines, agentType("loop-agent"))).toMatchObject({
+        kind: "invalid",
+        error: expect.stringMatching(/cannot read machine definition.*ELOOP/i),
+      });
+
       writeFileSync(
         join(machines, "mismatch-agent.machine.json"),
         JSON.stringify({
@@ -364,6 +446,117 @@ describe("machine registry", () => {
     } finally {
       rmSync(machines, { recursive: true, force: true });
     }
+  });
+});
+
+// The roster stored identity alone because its original job was COUNTING.
+// Authorization needs the ROLE, and on Claude Code `agent_id` is an opaque
+// handle no agent-type name can match — so the line carries an optional
+// second column. Counting and attribution must be unchanged by it.
+describe("roster records the agent role alongside its identity", () => {
+  it("round-trips the recorded role without disturbing identity or count", async () => {
+    const s = sid("roster-role-1");
+    await ledger.markAgentActive(s, agentId("a339f6fd51d78b179"), agentType("code-implementer-agent"));
+
+    expect(ledger.readActiveAgentRoles(s)).toEqual([
+      { agentId: "a339f6fd51d78b179", agentType: "code-implementer-agent" },
+    ]);
+    expect(ledger.countActiveAgents(s)).toBe(1);
+  });
+
+  it("keeps a single-column line readable with an unknown role", async () => {
+    // Pi passes no type, and rosters written before the column existed must
+    // keep parsing rather than being dropped from the count.
+    const s = sid("roster-role-2");
+    await ledger.markAgentActive(s, agentId("pi-grant-abcdef0123456789"));
+
+    expect(ledger.readActiveAgentRoles(s)).toEqual([
+      { agentId: "pi-grant-abcdef0123456789", agentType: null },
+    ]);
+    expect(ledger.countActiveAgents(s)).toBe(1);
+  });
+
+  it("propagates an inaccessible roster instead of standing down as if it were empty", () => {
+    const s = sid("roster-inaccessible-read");
+    const path = `${SUBAGENT_DIR}/${s}.active`;
+    symlinkSync(path, path);
+
+    expect(() => ledger.readActiveAgentRoles(s)).toThrow(/cannot read active roster.*ELOOP/i);
+    expect(() => ledger.soleActiveBinding(s)).toThrow(/cannot read active roster.*ELOOP/i);
+  });
+
+  it("strict removal reports an inaccessible roster instead of claiming rollback succeeded", async () => {
+    const s = sid("roster-inaccessible-removal");
+    const path = `${SUBAGENT_DIR}/${s}.active`;
+    symlinkSync(path, path);
+
+    await expect(ledger.removeActiveAgentStrict(s, agentId("denied-agent"))).rejects.toThrow(/ELOOP/i);
+  });
+
+  it("completion removal logs an inaccessible roster instead of treating it as absent", async () => {
+    const s = sid("roster-inaccessible-completion");
+    const path = `${SUBAGENT_DIR}/${s}.active`;
+    symlinkSync(path, path);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await ledger.removeActiveAgent(s, agentId("finished-agent"));
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toMatch(/removeActiveAgent:.*ELOOP/i);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("binding cleanup logs an inaccessible binding instead of treating it as absent", async () => {
+    const s = sid("binding-inaccessible-completion");
+    const path = ledger.machineBindingPath(s);
+    symlinkSync(path, path);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("finished-agent"));
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toMatch(/unbindMachineAgent:.*ELOOP/i);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("treats identity as column 0 for duplicate detection", async () => {
+    const s = sid("roster-role-3");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await ledger.markAgentActive(s, agentId("a-dup"), agentType("code-implementer-agent"));
+      // Same identity, redelivered without a type — still a duplicate.
+      await ledger.markAgentActive(s, agentId("a-dup"));
+      expect(ledger.countActiveAgents(s)).toBe(1);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("removes a role-carrying entry by identity alone", async () => {
+    // markAgentActive/removeActiveAgent must stay symmetric across the
+    // agent's start and stop hooks, which only know the id.
+    const s = sid("roster-role-4");
+    await ledger.markAgentActive(s, agentId("a-keep"), agentType("code-implementer-agent"));
+    await ledger.markAgentActive(s, agentId("a-drop"), agentType("code-reviewer"));
+
+    await ledger.removeActiveAgent(s, agentId("a-drop"));
+
+    expect(ledger.readActiveAgentRoles(s)).toEqual([
+      { agentId: "a-keep", agentType: "code-implementer-agent" },
+    ]);
+    expect(ledger.countActiveAgents(s)).toBe(1);
+  });
+
+  it("keeps sole-active attribution keyed on identity", async () => {
+    // soleActiveBinding compares the roster to the machine binding brand-to-
+    // brand; the added column must not break that comparison.
+    const s = sid("roster-role-5");
+    await bind(s, "code-implementer-agent", "a339f6fd51d78b179");
+    await ledger.markAgentActive(s, agentId("a339f6fd51d78b179"), agentType("code-implementer-agent"));
+
+    expect(ledger.soleActiveBinding(s)?.agentId).toBe("a339f6fd51d78b179");
   });
 });
 

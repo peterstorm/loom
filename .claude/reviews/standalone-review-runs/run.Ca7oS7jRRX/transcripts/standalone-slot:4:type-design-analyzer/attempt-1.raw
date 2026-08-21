@@ -1,0 +1,70 @@
+## Scope reviewed
+
+Type design in the two TypeScript source files in the frozen scope: `engine/src/core/model-profiles.ts` (Loom's model/agent policy core) and `engine/src/handlers/helpers/programs/helpers.ts` (the standalone/wave-gate/remediation facade driver helpers). `engine/tests/pi-extension-review-events.test.ts` and the Markdown files carry no production types worth a formal pass.
+
+## Type: `LlmProfile` / `AgentPolicy` / `AGENT_CATALOG` (model-profiles.ts)
+
+### Invariants identified
+- Every `LlmProfileId` has exactly one catalog entry, checked by `validateAgentPolicyCatalog` and structurally by `LLM_PROFILE_IDS` being the sole source for both the union and the array iterated at construction.
+- `AgentKind` is a closed ADT — a Wave-review agent, a phase agent, a panel agent, etc. are mutually exclusive by construction, not by convention.
+- `AgentFrontmatter`'s `model` and `modelProfile` fields are proven mutually consistent by the sole producer, `parseAgentFrontmatter` — the type documents this explicitly and no other constructor exists in the module.
+- `resolveAgentProfile`/`resolveHarnessBinding` never fall back to an inherited/ambient model; absence is a typed `PolicyResult` failure, never an implicit default.
+
+### Ratings
+- **Encapsulation**: 9/10 — `AGENT_CATALOG` is `Object.freeze`d, all constructors return frozen values, and every mutation point is a pure function returning a new value.
+- **Invariant Expression**: 9/10 — `AgentKind`, `PolicyResult<T>`, and `AgentFrontmatter`'s self-consistency invariant are all made structurally obvious; doc comments state *why* the invariant lives where it does (e.g. line 522: "enforced HERE, not by the caller").
+- **Invariant Usefulness**: 9/10 — directly prevents real classes of bugs this codebase has clearly hit before (implicit model inheritance, frontmatter/policy drift).
+- **Invariant Enforcement**: 8/10, with one concrete gap below.
+
+### Concern
+`resolveAgentPolicy` (model-profiles.ts:301) is annotated `PolicyResult<AgentPolicy>`, where `AgentPolicy<Agent extends string = string>` defaults to `string`. `AGENT_POLICIES: readonly AgentPolicy<LoomAgentName>[]` and `parseAgentName` both already carry the tighter `LoomAgentName` literal-union type, so this is a needless narrowing loss at the return boundary — callers get back `agent: string` on the resolved policy instead of the finite `LoomAgentName`, even though the runtime value always satisfies it. Trivial fix: `PolicyResult<AgentPolicy<LoomAgentName>>`.
+
+## Type: `RegisteredWaveGateProgram` (helpers.ts:35-43)
+
+### Invariants identified
+- `restart` and `orphanRecovery` are meant to describe two distinct recovery histories for a Wave Gate registration — a fresh run has neither, a restart has `restart`, an orphan-recovery run has `orphanRecovery`. This exclusivity is real: `parseRegisteredFacadeProgram` (helpers.ts:415-456) enforces it at the untrusted-input boundary by picking an exact expected key set based on which optional key is present, so an object carrying both fields fails `exactObject`'s exact-key-count check and is rejected. Every real constructor in `wave-gate.ts` (lines 154-161 for restart, ~275 for orphanRecovery) also only ever sets one.
+
+### Ratings
+- **Encapsulation**: 8/10 — frozen, well-scoped.
+- **Invariant Expression**: 5/10 — the mutual exclusivity is real and consistently honored by every caller, but the type itself doesn't say so: `restart?` and `orphanRecovery?` are two independent optional fields, so nothing in the type signature rules out a value with both set.
+- **Invariant Usefulness**: 7/10 — the invariant matters (a registration claiming to be simultaneously a restart-of and an orphan-recovery-of a previous run is semantically incoherent), but its usefulness is currently realized only via a parser-side key-count trick, not via the type.
+- **Invariant Enforcement**: 6/10 — enforced at the one untrusted boundary that matters today, but only because `parseRegisteredFacadeProgram` happens to use `exactObject`'s key-count as a de facto discriminant. Nothing stops a future in-module constructor (a fourth call site, a test fixture, a refactor of `wave-gate.ts`) from building `{ restart, orphanRecovery }` together and having it type-check.
+
+### Recommended improvement
+Fold the two optional audits into one discriminated field so the illegal combination is unrepresentable:
+```ts
+export type WaveGateRecoveryContext =
+  | Readonly<{ kind: "fresh" }>
+  | Readonly<{ kind: "restart"; restart: WaveGateRestartAudit }>
+  | Readonly<{ kind: "orphan-recovery"; orphanRecovery: OrphanedWaveGateRecoveryAudit }>;
+```
+and replace the two optional fields on `RegisteredWaveGateProgram` with `recovery: WaveGateRecoveryContext`. `parseRegisteredFacadeProgram` then becomes a `match`-shaped parse instead of a key-count heuristic, and no future call site can construct the invalid combination even by accident.
+
+## Cross-cutting concern: ad-hoc Result unions in helpers.ts
+
+The module repeats the literal shape `Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; message: string }>` inline at every parse/lookup boundary — `parseStandaloneStartInput` (line 64), `parseWaveGateStartInput` (line 387), `parseRemediationStartInput` (line 398), `parsedAuthority` (line 458), `standaloneRetryEffectId` (line 542), and the `Promise`-wrapped variants in `recoverOrPublishStandaloneRetry` and `publishInitialBatch` — instead of one named generic. This is inconsistent with the codebase's own convention one file over: `model-profiles.ts` defines `PolicyResult<T>`, and the same pattern (`ParseResult<T>`, `ProofParseResult<T>`, `ProgramResult<T>`) recurs across `panel-kernel.ts`, `proof-obligations.ts`, and `panel-program.ts`. `durablePublicationDigest`'s three-way `absent/found/corrupt` shape is likewise structurally identical to `DurableRequestRecovery` but not unified with it. Not a correctness bug — every call site handles its local shape correctly — but it's duplicated boilerplate that a shared generic would remove, and it makes helpers.ts read as an outlier against the module's own established idiom.
+
+## Strengths
+`model-profiles.ts` is close to exemplary functional-core type design: single source of truth (`AGENT_CATALOG`), closed ADTs, `Object.freeze` discipline, and — notably — invariants proven at the sole construction site rather than checked redundantly by every caller (`parseAgentFrontmatter`'s doc comment names this design choice explicitly). `helpers.ts`'s discriminated `RegisteredFacadeProgram`, `DurableRequestRecovery`, and `ClassifiedPiSpawnBatch` are all well-formed ADTs that make their respective illegal states unrepresentable.
+
+## Concerns (summary)
+1. `RegisteredWaveGateProgram.restart`/`.orphanRecovery` mutual exclusivity is real but not type-level (helpers.ts:41-42).
+2. Repeated inline Result-shaped unions instead of a shared named generic (helpers.ts, multiple sites).
+3. `resolveAgentPolicy`'s return type discards `LoomAgentName` narrowing already available (model-profiles.ts:301).
+
+None of these permit a currently-reachable inconsistent state in production code paths — all three are advisory improvements to how tightly the types express invariants that are, today, honored by discipline rather than by the compiler.
+
+### Machine Summary
+CRITICAL_COUNT: 0
+ADVISORY_COUNT: 3
+ADVISORY: RegisteredWaveGateProgram's `restart` and `orphanRecovery` fields are independently optional, so the type permits a registration with both recovery contexts set even though every constructor and the untrusted-input parser only ever populate one.
+ADVISORY: helpers.ts repeats the ad-hoc union `Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; message: string }>` inline across many functions (e.g. parseStandaloneStartInput, parseWaveGateStartInput, parseRemediationStartInput, parsedAuthority, standaloneRetryEffectId) instead of a shared named generic, unlike PolicyResult<T>/ParseResult<T>/ProofParseResult<T> elsewhere in the codebase.
+ADVISORY: resolveAgentPolicy in model-profiles.ts is annotated to return PolicyResult<AgentPolicy> (Agent defaulted to string), discarding the LoomAgentName narrowing that AGENT_POLICIES and parseAgentName already establish, even though the resolved value's agent field is always a LoomAgentName.
+
+```findings
+[
+  { "severity": "advisory", "file": "engine/src/handlers/helpers/programs/helpers.ts", "line": 41, "claim": "RegisteredWaveGateProgram's `restart` and `orphanRecovery` fields are independently optional, so the type permits a registration with both recovery contexts set even though every constructor and the untrusted-input parser only ever populate one." },
+  { "severity": "advisory", "file": "engine/src/handlers/helpers/programs/helpers.ts", "line": 64, "claim": "helpers.ts repeats the ad-hoc union `Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; message: string }>` inline across many functions (e.g. parseStandaloneStartInput, parseWaveGateStartInput, parseRemediationStartInput, parsedAuthority, standaloneRetryEffectId) instead of a shared named generic, unlike PolicyResult<T>/ParseResult<T>/ProofParseResult<T> elsewhere in the codebase." },
+  { "severity": "advisory", "file": "engine/src/core/model-profiles.ts", "line": 301, "claim": "resolveAgentPolicy in model-profiles.ts is annotated to return PolicyResult<AgentPolicy> (Agent defaulted to string), discarding the LoomAgentName narrowing that AGENT_POLICIES and parseAgentName already establish, even though the resolved value's agent field is always a LoomAgentName." }
+]
+```

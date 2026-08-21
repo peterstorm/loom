@@ -1,0 +1,12 @@
+**Reviewed:** commit `8fa7491` ("feat(deepen): wire the deepen skill into review and implementation") — the frozen scope of `README.md`, `agents/README.md`, `agents/architecture-tech-lead.md`, `commands/review-pr.md`, `engine/src/core/model-profiles.ts`, `engine/src/handlers/helpers/programs/helpers.ts`, `engine/tests/pi-extension-review-events.test.ts`, `skills/code-implementer/SKILL.md`, `skills/deepen/SKILL.md`.
+
+No findings at confidence ≥80. Verified:
+
+- `engine/src/core/model-profiles.ts:168` — `"architecture-tech-lead": traits("focused-review", plainKind("reviewer"), "deepen")` correctly flows through `AGENT_REQUIRED_SKILLS` (derived in `engine/src/core/orchestration-contract/artifacts.ts:54-58`) with no hardcoded skill-name enum to update elsewhere.
+- `agents/architecture-tech-lead.md` frontmatter (`skills:\n  - deepen`) matches the block-style regex in `engine/src/core/agent-skills.ts:parseDeclaredSkills`, so `checkAgentSkillPrompt`'s spawn gate will require the literal substring `"deepen"` in any ad-hoc spawn prompt.
+- `engine/tests/pi-extension-review-events.test.ts:561` — the updated `taskPrompt` ("Use the deepen skill in review mode…") satisfies that gate; test intent matches the real enforcement path.
+- `README.md` / `commands/review-pr.md` prose about auto-selection thresholds (">500 additions, >10 files, or new structure") matches the unchanged selection logic in `engine/src/core/standalone-review.ts:299`, consistent with the commit message's "no reviewer-selection change."
+- `skills/deepen/SKILL.md`'s new "Two Modes" section and its `references/LANGUAGE.md` cross-reference resolve to a real file (`skills/deepen/references/LANGUAGE.md`).
+- The severity-discipline block added to `agents/architecture-tech-lead.md` (advisory-by-default, critical reserved for shallowness that hides wrongness) mirrors the existing `code-simplifier`/`distill` pattern verbatim in structure and placement relative to the stamped wire-contract block.
+
+This is a documentation/wiring change with no logic risk — no delegation to a specialized skill is warranted.

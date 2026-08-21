@@ -6,7 +6,7 @@
  * without modifying the loom source.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BoundaryRule } from "./no-cross-boundary-imports";
 
@@ -21,10 +21,28 @@ export interface ProgrammaticConfig {
   readonly maxFunctionLines?: number;
   /** File patterns to exclude from max-function-lines */
   readonly excludeFromMaxLines?: readonly string[];
+  /** Branches on one discriminant that read as a switch (for exhaustive-discriminant-branching) */
+  readonly maxDiscriminantBranches?: number;
+  /** Field names that tag a discriminated union (for exhaustive-discriminant-branching) */
+  readonly discriminantTags?: readonly string[];
 }
 
 /** Default config when no project config exists */
 export const EMPTY_CONFIG: ProgrammaticConfig = {};
+
+/** The suffixes that make a path a test file, for every rule that skips them. */
+const TEST_FILE_SUFFIXES: readonly string[] = [".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx"];
+
+/**
+ * Is this a test file, and therefore out of scope for the style rules?
+ *
+ * One definition for the whole programmatic tier. Three rules had each declared
+ * their own copy of the suffix list and the same `endsWith` guard over it, so
+ * "what counts as a test file" was answered three times — and a fourth rule
+ * adding a fifth suffix would have had to find and update all of them.
+ */
+export const isTestFile = (filePath: string): boolean =>
+  TEST_FILE_SUFFIXES.some((suffix) => filePath.endsWith(suffix));
 
 /**
  * Loads project-local programmatic config from the linter config directory.
@@ -35,12 +53,11 @@ export function loadProjectConfig(configDir: string | null): ProgrammaticConfig 
   if (!configDir) return EMPTY_CONFIG;
 
   const configPath = join(configDir, "config.json");
-  if (!existsSync(configPath)) return EMPTY_CONFIG;
-
   let content: string;
   try {
     content = readFileSync(configPath, "utf-8");
   } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return EMPTY_CONFIG;
     throw new Error(
       `Cannot read linter config at ${configPath}: ${e instanceof Error ? e.message : String(e)}. Check file permissions.`
     );
@@ -63,6 +80,44 @@ export function loadProjectConfig(configDir: string | null): ProgrammaticConfig 
   return parseConfig(obj, configPath);
 }
 
+/**
+ * Every optional list on ProgrammaticConfig asks the same question — an array
+ * whose entries are non-empty strings — and every optional bound asks "a
+ * positive integer". These two replace five near-identical blocks.
+ *
+ * The non-empty check is now uniform. `discriminantTags` already had it;
+ * `pureModules` and `excludeFromMaxLines` did not, and an empty entry in either
+ * is a prefix that matches EVERY path — it would silently mark the whole tree
+ * pure, or exempt it from the line bound. Fail-closed parsing is this loader's
+ * contract, so the looser two are brought up to the stricter one.
+ */
+function parseOptionalStringArray(
+  raw: unknown,
+  filePath: string,
+  key: string,
+): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    throw new Error(`${filePath}: '${key}' must be an array`);
+  }
+  if (!raw.every((entry: unknown) => typeof entry === "string" && entry.length > 0)) {
+    throw new Error(`${filePath}: '${key}' entries must be non-empty strings`);
+  }
+  return raw as string[];
+}
+
+function parseOptionalPositiveInt(
+  raw: unknown,
+  filePath: string,
+  key: string,
+): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
+    throw new Error(`${filePath}: '${key}' must be a positive integer`);
+  }
+  return raw;
+}
+
 function parseConfig(obj: Record<string, unknown>, filePath: string): ProgrammaticConfig {
   // Mutable while assembling; returned as the readonly ProgrammaticConfig
   const config: { -readonly [K in keyof ProgrammaticConfig]?: ProgrammaticConfig[K] } = {};
@@ -74,36 +129,29 @@ function parseConfig(obj: Record<string, unknown>, filePath: string): Programmat
     config.boundaries = obj.boundaries.map((b, i) => parseBoundary(b, filePath, i));
   }
 
-  if (obj.pureModules !== undefined) {
-    if (!Array.isArray(obj.pureModules)) {
-      throw new Error(`${filePath}: 'pureModules' must be an array`);
-    }
-    if (!obj.pureModules.every((m: unknown) => typeof m === "string")) {
-      throw new Error(`${filePath}: 'pureModules' entries must be strings`);
-    }
-    config.pureModules = obj.pureModules as string[];
-  }
+  const pureModules = parseOptionalStringArray(obj.pureModules, filePath, "pureModules");
+  if (pureModules !== undefined) config.pureModules = pureModules;
 
-  if (obj.maxFunctionLines !== undefined) {
-    if (
-      typeof obj.maxFunctionLines !== "number" ||
-      !Number.isInteger(obj.maxFunctionLines) ||
-      obj.maxFunctionLines < 1
-    ) {
-      throw new Error(`${filePath}: 'maxFunctionLines' must be a positive integer`);
-    }
-    config.maxFunctionLines = obj.maxFunctionLines;
-  }
+  const maxFunctionLines = parseOptionalPositiveInt(obj.maxFunctionLines, filePath, "maxFunctionLines");
+  if (maxFunctionLines !== undefined) config.maxFunctionLines = maxFunctionLines;
 
-  if (obj.excludeFromMaxLines !== undefined) {
-    if (!Array.isArray(obj.excludeFromMaxLines)) {
-      throw new Error(`${filePath}: 'excludeFromMaxLines' must be an array`);
-    }
-    if (!obj.excludeFromMaxLines.every((e: unknown) => typeof e === "string")) {
-      throw new Error(`${filePath}: 'excludeFromMaxLines' entries must be strings`);
-    }
-    config.excludeFromMaxLines = obj.excludeFromMaxLines as string[];
-  }
+  const excludeFromMaxLines = parseOptionalStringArray(obj.excludeFromMaxLines, filePath, "excludeFromMaxLines");
+  if (excludeFromMaxLines !== undefined) config.excludeFromMaxLines = excludeFromMaxLines;
+
+  // These two were DECLARED on ProgrammaticConfig and READ by
+  // `createProgrammaticRules`, but never parsed here — so a project that set
+  // either one got the built-in default with no throw and no log, the one
+  // failure mode this loader's "fail-closed" contract is supposed to exclude.
+  // Every field above rejects a bad value loudly; these now do too.
+  const maxDiscriminantBranches = parseOptionalPositiveInt(
+    obj.maxDiscriminantBranches,
+    filePath,
+    "maxDiscriminantBranches",
+  );
+  if (maxDiscriminantBranches !== undefined) config.maxDiscriminantBranches = maxDiscriminantBranches;
+
+  const discriminantTags = parseOptionalStringArray(obj.discriminantTags, filePath, "discriminantTags");
+  if (discriminantTags !== undefined) config.discriminantTags = discriminantTags;
 
   return config as ProgrammaticConfig;
 }

@@ -5,6 +5,7 @@ import {
   checkBoundaryViolation,
   underPrefix,
   handler,
+  toRepositoryRelative,
   DEFAULT_BOUNDARIES,
 } from "../../../src/linter/programmatic/no-cross-boundary-imports";
 
@@ -79,6 +80,35 @@ describe("no-cross-boundary-imports", () => {
       const content = `const x = 42;\nconst y = x + 1;`;
       expect(extractImports(content)).toHaveLength(0);
     });
+
+    it("ignores the word 'from' inside a string literal", () => {
+      // A union of domain terms is not an import. Matching the bare word
+      // yielded the phantom specifier " | " and reported it as a
+      // cross-boundary violation.
+      const content = `type Change = "renamed-from" | "renamed-to" | "deleted";`;
+      expect(extractImports(content)).toHaveLength(0);
+    });
+
+    it("ignores 'import' and 'require' inside string literals", () => {
+      const content = `const message = "cannot import \\"x\\"";\nconst other = "require(\\"y\\") is banned";`;
+      expect(extractImports(content)).toHaveLength(0);
+    });
+
+    it("still finds imports in every real form", () => {
+      const content = [
+        `import "./side-effect";`,
+        `import { a } from "./named";`,
+        `import * as ns from "./namespace";`,
+        `const b = require("./required");`,
+      ].join("\n");
+
+      expect(extractImports(content).map((entry) => entry.specifier)).toEqual([
+        "./side-effect",
+        "./named",
+        "./namespace",
+        "./required",
+      ]);
+    });
   });
 
   describe("checkBoundaryViolation", () => {
@@ -144,6 +174,55 @@ describe("no-cross-boundary-imports", () => {
         DEFAULT_BOUNDARIES
       );
       expect(result).toBeNull();
+    });
+
+    it("core grants node: builtins PER-MODULE, never blanket", () => {
+      // A listed core module may import exactly its granted subpaths.
+      const granted = checkBoundaryViolation(
+        "engine/src/core/harness-resources.ts",
+        "node:path",
+        DEFAULT_BOUNDARIES
+      );
+      expect(granted).toBeNull();
+      const grantedHash = checkBoundaryViolation(
+        "engine/src/core/standalone-review.ts",
+        "node:crypto",
+        DEFAULT_BOUNDARIES
+      );
+      expect(grantedHash).toBeNull();
+      // A listed module reaching a NON-granted subpath is still refused:
+      // node:fs is not on harness-resources's capability list.
+      const ungranted = checkBoundaryViolation(
+        "engine/src/core/harness-resources.ts",
+        "node:fs",
+        DEFAULT_BOUNDARIES
+      );
+      expect(ungranted).not.toBeNull();
+      expect(ungranted).toContain("may only import from");
+      // validate-phase-order's node:fs grant was WITHDRAWN when its artifact
+      // reads became the injected ArtifactProbe port, and block-direct-edits's
+      // went the same way when its `.active` roster read became the injected
+      // ActiveRosterProbe. Re-adding an fs import in either must fail the lint
+      // gate until the grant is re-reviewed.
+      for (const withdrawnFrom of [
+        "engine/src/core/validate-phase-order.ts",
+        "engine/src/core/block-direct-edits.ts",
+      ]) {
+        expect(
+          checkBoundaryViolation(withdrawnFrom, "node:fs", DEFAULT_BOUNDARIES),
+          withdrawnFrom,
+        ).not.toBeNull();
+      }
+      // An UNLISTED core module importing any node: builtin fails closed with
+      // the capability message — a future I/O import must earn an entry.
+      const unlisted = checkBoundaryViolation(
+        "engine/src/core/findings.ts",
+        "node:fs",
+        DEFAULT_BOUNDARIES
+      );
+      expect(unlisted).not.toBeNull();
+      expect(unlisted).toContain("per-module only");
+      expect(unlisted).toContain("engine/src/core/findings.ts");
     });
   });
 
@@ -300,6 +379,62 @@ describe("no-cross-boundary-imports (extended)", () => {
       const content = `import java.util.List;\nimport java.time.Instant;`;
       const violations = handler(content, "src/domain/model/User.java", boundaries);
       expect(violations).toHaveLength(0);
+    });
+  });
+
+  describe("absolute paths", () => {
+    // lintFile resolves every path to absolute before calling a rule. Boundary
+    // prefixes are repo-relative, so an unnormalized absolute path matched no
+    // rule and the check returned "allow" for every file — failing OPEN.
+    const content = `import { dispatch } from "../handlers/dispatch";`;
+
+    it("enforces boundaries on the absolute path lintFile actually passes", () => {
+      const violations = handler(
+        content,
+        "/home/dev/checkout/engine/src/core/thing.ts",
+        DEFAULT_BOUNDARIES,
+      );
+
+      expect(violations).toHaveLength(1);
+      expect(violations[0].rule).toBe("no-cross-boundary-imports");
+    });
+
+    it("agrees with the relative form for the same file", () => {
+      const absolute = handler(content, "/home/dev/checkout/engine/src/core/thing.ts", DEFAULT_BOUNDARIES);
+      const relative = handler(content, "engine/src/core/thing.ts", DEFAULT_BOUNDARIES);
+
+      expect(absolute).toHaveLength(relative.length);
+    });
+
+    it("still allows a permitted import when the path is absolute", () => {
+      const violations = handler(
+        `import { parseSessionId } from "./block-direct-edits";`,
+        "/home/dev/checkout/engine/src/core/thing.ts",
+        DEFAULT_BOUNDARIES,
+      );
+
+      expect(violations).toHaveLength(0);
+    });
+
+    describe("toRepositoryRelative", () => {
+      it("reduces an absolute path to its repo-relative form", () => {
+        expect(toRepositoryRelative("/home/dev/checkout/engine/src/core/thing.ts"))
+          .toBe("engine/src/core/thing.ts");
+      });
+
+      it("leaves an already-relative path untouched", () => {
+        expect(toRepositoryRelative("engine/src/core/thing.ts")).toBe("engine/src/core/thing.ts");
+      });
+
+      it("resolves against the innermost checkout when one is nested in another", () => {
+        expect(toRepositoryRelative("/srv/engine/src/core/checkout/engine/src/core/thing.ts"))
+          .toBe("engine/src/core/thing.ts");
+      });
+
+      it("returns a path under no boundary unchanged", () => {
+        expect(toRepositoryRelative("/home/dev/checkout/scripts/tool.ts"))
+          .toBe("/home/dev/checkout/scripts/tool.ts");
+      });
     });
   });
 });

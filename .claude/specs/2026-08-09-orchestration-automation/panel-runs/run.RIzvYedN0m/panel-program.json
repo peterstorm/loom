@@ -1,0 +1,68 @@
+{
+  "input": {
+    "candidateLenses": [
+      "simplicity-first",
+      "type-driven-fp",
+      "risk-security-first"
+    ],
+    "judgeCriteria": [
+      "simplicity",
+      "pure functional core",
+      "codebase fit + effort"
+    ]
+  },
+  "events": [
+    {
+      "type": "spawn-outcome",
+      "requestId": "architecture:candidate:1",
+      "attempt": 1,
+      "outcome": "succeeded"
+    },
+    {
+      "type": "spawn-outcome",
+      "requestId": "architecture:candidate:2",
+      "attempt": 1,
+      "outcome": "succeeded"
+    },
+    {
+      "type": "spawn-outcome",
+      "requestId": "architecture:candidate:3",
+      "attempt": 1,
+      "outcome": "succeeded"
+    },
+    {
+      "type": "engine-outcome",
+      "operationId": "architecture-prepare-judges",
+      "outcome": "succeeded"
+    },
+    {
+      "type": "spawn-outcome",
+      "requestId": "architecture:judge:1",
+      "attempt": 1,
+      "outcome": "succeeded"
+    },
+    {
+      "type": "spawn-outcome",
+      "requestId": "architecture:judge:2",
+      "attempt": 1,
+      "outcome": "succeeded"
+    },
+    {
+      "type": "spawn-outcome",
+      "requestId": "architecture:judge:3",
+      "attempt": 1,
+      "outcome": "succeeded"
+    },
+    {
+      "type": "engine-outcome",
+      "operationId": "architecture-aggregate",
+      "outcome": "succeeded"
+    },
+    {
+      "type": "spawn-outcome",
+      "requestId": "architecture:finalize",
+      "attempt": 1,
+      "outcome": "succeeded"
+    }
+  ]
+}

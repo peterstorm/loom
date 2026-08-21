@@ -1,4 +1,17 @@
 .memory/
 .claude/cortex-memory.local.md
 .pi/cortex-memory.local.md
+.claude/reviews/review-and-fix-runs/
+
+# Ephemeral run evidence. These directories hold the events, checkpoints,
+# contexts, transcripts, and receipts of individual Wave Gate, panel, and
+# orchestration runs. They are audit data for a run in flight, not source:
+# committing them would fold a run's own evidence into the change it audits.
+.claude/reviews/packets/
+.claude/reviews/panel-runs/
+.claude/state/
+.claude/specs/*/panel-runs/
+.claude/**/orchestration-runs/
+.claude/**/wave-gate-runs/
+
 node_modules/

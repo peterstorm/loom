@@ -1,9 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { resolveTransition, countMarkers } from "../../../src/handlers/subagent-stop/advance-phase";
+import advancePhaseHandler, {
+  resolveTransition,
+  countMarkers,
+} from "../../../src/handlers/subagent-stop/advance-phase";
 import { findFile } from "../../../src/utils/find-file";
-import { CLARIFY_THRESHOLD } from "../../../src/config";
+import { CLARIFY_THRESHOLD, PHASE_AGENT_MAP, ARCH_PANEL_AGENTS } from "../../../src/config";
+import { stripNamespace } from "../../../src/utils/strip-namespace";
 import type { TaskGraph } from "../../../src/types";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -26,7 +30,7 @@ function mkState(overrides: Partial<TaskGraph> = {}): TaskGraph {
 describe("countMarkers", () => {
   let tmpDir: string;
 
-  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "loom-cm-")); });
+  beforeEach(() => { tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-cm-"))); });
   afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
 
   it("counts NEEDS CLARIFICATION markers", () => {
@@ -57,7 +61,7 @@ describe("countMarkers", () => {
 describe("findFile", () => {
   let tmpDir: string;
 
-  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "loom-ff-")); });
+  beforeEach(() => { tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-ff-"))); });
   afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
 
   it("finds file in top directory", () => {
@@ -88,7 +92,7 @@ describe("resolveTransition", () => {
   let origCwd: string;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "loom-rt-"));
+    tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-rt-")));
     origCwd = process.cwd();
     process.chdir(tmpDir);
   });
@@ -146,6 +150,15 @@ describe("resolveTransition", () => {
 
   it("specify → null when spec_file doesn't exist", () => {
     expect(resolveTransition("specify", mkState({ spec_file: join(tmpDir, ".claude/specs/nope.md") }))).toBeNull();
+  });
+
+  it("surfaces an unreadable spec instead of advancing to clarify", () => {
+    const specFile = join(tmpDir, ".claude", "specs", "feat", "spec.md");
+    mkdirSync(join(tmpDir, ".claude", "specs", "feat"), { recursive: true });
+    symlinkSync(specFile, specFile);
+
+    expect(() => resolveTransition("specify", mkState({ spec_file: specFile })))
+      .toThrow(/cannot access phase artifact/);
   });
 
   it("specify → null when spec_file not in .claude/specs/", () => {
@@ -239,6 +252,15 @@ describe("resolveTransition", () => {
     expect(resolveTransition("architecture", mkState())).toBeNull();
   });
 
+  it("surfaces an unreadable plan instead of treating it as missing", () => {
+    const planFile = join(tmpDir, ".claude", "plans", "loop.md");
+    mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
+    symlinkSync(planFile, planFile);
+
+    expect(() => resolveTransition("architecture", mkState({ plan_file: planFile })))
+      .toThrow(/cannot access phase artifact/);
+  });
+
   // ── plan-alignment ──
 
   it("plan-alignment → decompose when gap report exists in spec_dir", () => {
@@ -326,5 +348,78 @@ describe("resolveTransition", () => {
 
   it("init → null (no transition)", () => {
     expect(resolveTransition("init", mkState())).toBeNull();
+  });
+});
+
+// ── panel agents: advance-phase must ignore them (design constraint 2) ────────
+
+describe("panel agents — advance-phase passthrough (never mutates phase)", () => {
+  let tmpDir: string;
+  let origCwd: string;
+
+  beforeEach(() => {
+    tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-panel-")));
+    origCwd = process.cwd();
+    process.chdir(tmpDir);
+  });
+
+  afterEach(() => {
+    process.chdir(origCwd);
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("panel agents are not PHASE_AGENT_MAP members — handler short-circuits before resolveTransition", () => {
+    // advance-phase looks up `PHASE_AGENT_MAP[stripNamespace(agent_type)]`
+    // and returns passthrough on undefined. Panel agents must miss this map, or
+    // their SubagentStop would run resolveTransition and could advance the phase.
+    for (const agent of ARCH_PANEL_AGENTS) {
+      expect(PHASE_AGENT_MAP[stripNamespace(agent)]).toBeUndefined();
+      expect(PHASE_AGENT_MAP[stripNamespace(`loom:${agent}`)]).toBeUndefined();
+    }
+  });
+
+  it("TRAP: a same-date-prefix plan on disk would advance IF a panel agent reached the architecture case — proving the map gate is load-bearing", () => {
+    // Reproduce the exact hazard from design constraint 2: a stale same-day plan
+    // sits in .claude/plans/ while a designer/judge completes mid-panel.
+    const specDir = join(tmpDir, ".claude", "specs", "2026-07-16-feat");
+    mkdirSync(specDir, { recursive: true });
+    mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
+    // A same-date-prefix plan the date-prefix fallback in resolveTransition
+    // ("architecture" case) would happily pick up.
+    writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-stale.md"), "stale plan");
+
+    const state = mkState({
+      current_phase: "architecture",
+      spec_dir: specDir,
+      plan_file: null, // force the date-prefix fallback path
+    });
+
+    // IF the handler ever routed a panel agent into the architecture case, this
+    // is what it would compute — a bogus advance off a stale plan:
+    const wouldAdvance = resolveTransition("architecture", state);
+    expect(wouldAdvance).not.toBeNull();
+    expect(wouldAdvance!.nextPhase).toBe("plan-alignment");
+
+    // The ONLY thing preventing that is panel agents missing from PHASE_AGENT_MAP,
+    // so the handler returns passthrough before resolveTransition is ever called.
+    for (const agent of ARCH_PANEL_AGENTS) {
+      expect(PHASE_AGENT_MAP[stripNamespace(agent)]).toBeUndefined();
+    }
+  });
+
+  it("the REAL handler short-circuits a panel-agent SubagentStop to passthrough before any state access", async () => {
+    // Drive the actual default-export handler, not just the map precondition. A
+    // panel agent misses PHASE_AGENT_MAP, so the handler returns passthrough at
+    // its first branch — before StateManager is ever consulted. It must never
+    // throw and never advance, in both bare and `loom:`-namespaced forms. (The
+    // full advance-vs-no-advance contract with real state on disk is exercised
+    // end-to-end by scripts/smoke-panel-mode.sh, which spawns an isolated CLI
+    // process; a same-process test cannot repoint the import-frozen state path.)
+    for (const agent of ARCH_PANEL_AGENTS) {
+      for (const name of [agent, `loom:${agent}`]) {
+        const stdin = JSON.stringify({ session_id: "smoke", agent_type: name });
+        await expect(advancePhaseHandler(stdin, [])).resolves.toEqual({ kind: "passthrough" });
+      }
+    }
   });
 });

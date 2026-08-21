@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import {
   isPureModule,
   handler,
-  DEFAULT_PURE_MODULES,
 } from "../../../src/linter/programmatic/no-io-in-pure-modules";
 
 describe("no-io-in-pure-modules", () => {

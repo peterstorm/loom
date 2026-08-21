@@ -1,154 +1,56 @@
 /**
- * Auto-store findings when review sub-agents complete.
- * Parses Machine Summary block (primary) or legacy free-text (fallback).
- * Merges findings from multiple agents per task, never demoting review_status.
+ * Auto-store findings when review sub-agents complete — the Claude Code half.
+ *
+ * All parsing, reconciliation, and state transformation lives in
+ * `core/review-output.ts`. This file is the imperative shell: read the
+ * transcript, find the task, write, log. `pi/extension.ts` is the same shell
+ * over the same core, which is what keeps the two harnesses from drifting.
+ *
+ * Every early return that DISCARDS a reviewer's output logs. A reviewer whose
+ * findings vanish silently is indistinguishable from one that found nothing —
+ * the exact confusion the `evidence_capture_failed` status exists to prevent.
+ * The one silent return is the `!isReviewAgent` passthrough, which discards
+ * nothing: this handler fires on every SubagentStop, and a non-reviewer has no
+ * findings for it to lose.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { match } from "ts-pattern";
-import type { HookHandler, SubagentStopInput, TaskGraph, Task, ReviewStatus } from "../../types";
-import { REVIEW_SUB_AGENTS } from "../../config";
+import { readFileSync } from "node:fs";
+import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
+import {
+  applyReviewResolution,
+  constrainReviewResolutionToScope,
+  hasStandaloneReviewContext,
+  resolveTaskReviewFindings,
+  reviewResolutionLog,
+  type ReviewResolution,
+} from "../../core/review-output";
+import { isReviewAgent } from "../../config";
 import { StateManager } from "../../state-manager";
-import { parseTranscript } from "../../parsers/parse-transcript";
 import { extractTaskId } from "../../utils/extract-task-id";
-import { dropNoFindingSentinels } from "../../utils/no-finding-sentinel";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
+import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
+import { parseFirstUserPrompt } from "../../parsers/parse-transcript";
+import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
+import { stripNamespace } from "../../utils/strip-namespace";
 
-export interface ParsedFindings {
-  readonly critical: readonly string[];
-  readonly advisory: readonly string[];
-  readonly criticalCount: number | null;
-}
+/**
+ * A reviewer's output was discarded. Report it and let the stop proceed.
+ *
+ * On both channels, because either one alone is silent somewhere: stderr is
+ * swallowed on an exit-0 hook, and `systemMessage` is the harness's channel
+ * rather than the one a `--debug` run or a direct-call harness reads.
+ */
+const discarded = (message: string): HookResult =>
+  passthroughDiagnostic(`[loom] store-reviewer-findings: ${message}`);
 
-/** Smart constructor: filter empty strings and freeze arrays. */
-export function makeParsedFindings(input: {
-  critical?: readonly string[];
-  advisory?: readonly string[];
-  criticalCount?: number | null;
-}): ParsedFindings {
-  const filter = (xs: readonly string[] | undefined): readonly string[] =>
-    Object.freeze(dropNoFindingSentinels(xs ?? []));
-  return Object.freeze({
-    critical: filter(input.critical),
-    advisory: filter(input.advisory),
-    criticalCount: input.criticalCount ?? null,
-  });
-}
-
-export const EMPTY_FINDINGS: ParsedFindings = makeParsedFindings({});
-
-/** Pure: Check if an agent type is a recognized review agent */
-export function isReviewAgent(agentType: string): boolean {
-  return REVIEW_SUB_AGENTS.has(agentType);
-}
-
-/** Pure: Build evidence_capture_failed error message, surfacing partial findings if any. */
-export function buildEvidenceFailureMessage(findings: ParsedFindings): string {
-  const partial = findings.critical.length + findings.advisory.length;
-  return partial > 0
-    ? `CRITICAL_COUNT marker not found — partial findings extracted (${findings.critical.length} critical, ${findings.advisory.length} advisory)`
-    : "CRITICAL_COUNT marker not found in agent output";
-}
-
-/** Pure: Reconcile a count > 0 but empty-criticals findings into a self-describing entry,
- *  so a broken parse cannot pass the wave gate silently. */
-export function reconcileFindings(findings: ParsedFindings): ParsedFindings {
-  if (findings.criticalCount !== null && findings.criticalCount > 0 && findings.critical.length === 0) {
-    return makeParsedFindings({
-      ...findings,
-      critical: [`Review output parsing failed - ${findings.criticalCount} findings not captured`],
-    });
-  }
-  return findings;
-}
-
-/** Pure: Merge new findings into a task, accumulating rather than overwriting.
- *  Never demotes review_status from "blocked" to "passed". */
-export function mergeFindings(task: Task, findings: ParsedFindings): Task {
-  const newStatus: ReviewStatus = (findings.criticalCount ?? 0) > 0 ? "blocked" : "passed";
-  const reviewStatus: ReviewStatus = task.review_status === "blocked" ? "blocked" : newStatus;
-
-  return {
-    ...task,
-    review_status: reviewStatus,
-    critical_findings: [...(task.critical_findings ?? []), ...findings.critical],
-    advisory_findings: [...(task.advisory_findings ?? []), ...findings.advisory],
-  };
-}
-
-/** Extract CRITICAL/ADVISORY lines and CRITICAL_COUNT from a text block.
- *  Strips code fences and handles bold/starred markers. */
-function extractFindings(block: string): ParsedFindings {
-  const cleaned = block.replace(/^\`\`\`\w*$/gm, "");
-
-  const critical: string[] = [];
-  const advisory: string[] = [];
-
-  for (const line of cleaned.split("\n")) {
-    const critMatch = line.match(/^[\s\-*]*\*{0,2}CRITICAL(?!_COUNT):?\*{0,2}\s*(.*)/);
-    if (critMatch) critical.push(critMatch[1].trim());
-    const advMatch = line.match(/^[\s\-*]*\*{0,2}ADVISORY(?!_COUNT):?\*{0,2}\s*(.*)/);
-    if (advMatch) advisory.push(advMatch[1].trim());
-  }
-
-  const countMatch = cleaned.match(/^\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*(\d+)/m);
-  const criticalCount = countMatch ? Number(countMatch[1]) : null;
-
-  return makeParsedFindings({ critical, advisory, criticalCount });
-}
-
-/** Parse Machine Summary block for structured findings.
- *  Matches heading variants: ## / ### / #### (with optional bold), MACHINE_SUMMARY, etc.
- *  Uses the LAST match to skip skill-template echoes that precede real output. */
-export function parseMachineSummary(output: string): ParsedFindings | null {
-  // Match various heading formats agents produce
-  const headingPattern = /^(?:#{2,4}\s*\*{0,2}Machine Summary\*{0,2}|MACHINE[_ ]SUMMARY)/gim;
-
-  // Find the last match (agents often echo the template before their real summary)
-  let lastMatch: RegExpExecArray | null = null;
-  let m: RegExpExecArray | null;
-  while ((m = headingPattern.exec(output)) !== null) {
-    lastMatch = m;
-  }
-  if (!lastMatch) return null;
-
-  let block = output.slice(lastMatch.index);
-  // Trim at next heading of same or higher level (if any)
-  const nextHeading = block.match(/\n#{2,4}\s+[^#]/);
-  if (nextHeading && nextHeading.index! > 0) block = block.slice(0, nextHeading.index!);
-
-  return extractFindings(block);
-}
-
-/** Legacy fallback: section-headed Critical/Advisory blocks first;
- *  fall back to whole-output line scan if no sections matched. */
-export function parseLegacyFindings(output: string): ParsedFindings {
-  const critical: string[] = [];
-  const advisory: string[] = [];
-
-  const critSection = output.match(/###?\s*Critical(?:\s+Findings)?[\s\S]*?(?=###? |$)/);
-  if (critSection) {
-    for (const m of critSection[0].matchAll(/^- (?:\*\*)?(.+?)(?:\*\*)?$/gm)) {
-      if (m[1] !== "None") critical.push(m[1]);
-    }
-  }
-
-  const advSection = output.match(/###?\s*Advisory(?:\s+Findings)?[\s\S]*?(?=###? |$)/);
-  if (advSection) {
-    for (const m of advSection[0].matchAll(/^- (?:\*\*)?(.+?)(?:\*\*)?$/gm)) {
-      if (m[1] !== "None") advisory.push(m[1]);
-    }
-  }
-
-  if (critical.length === 0 && advisory.length === 0) {
-    return extractFindings(output);
-  }
-
-  const countMatch = output.match(/\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*(\d+)/);
-  const criticalCount = countMatch ? Number(countMatch[1]) : null;
-
-  return makeParsedFindings({ critical, advisory, criticalCount });
-}
+/**
+ * The same line for the paths that then FAIL the hook. `error` exits non-zero
+ * and its message is surfaced by the CLI, but these handlers are also called
+ * directly (pi, tests), where stderr is the only channel either way.
+ */
+const warn = (message: string): void => {
+  process.stderr.write(`[loom] store-reviewer-findings: ${message}\n`);
+};
 
 const handler: HookHandler = async (stdin) => {
   let input: SubagentStopInput;
@@ -161,54 +63,99 @@ const handler: HookHandler = async (stdin) => {
     };
   }
 
-  const agentType = (input.agent_type ?? "").replace(/^[^:]+:/, "");
+  const agentType = stripNamespace(input.agent_type ?? "");
   if (!isReviewAgent(agentType)) {
     return { kind: "passthrough" };
   }
 
   const mgr = StateManager.fromSession(input.session_id);
   if (!mgr) {
-    return { kind: "passthrough" };
+    return discarded(`no task graph for session ${input.session_id ?? "<unset>"} — ${agentType} findings NOT stored`);
   }
 
-  const rawPath = input.agent_transcript_path ?? "";
-  const transcript = await readTranscriptWithRetry(rawPath, /\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*\d+/);
-  if (!transcript) {
-    process.stderr.write(`[loom] store-reviewer-findings: empty transcript for ${agentType} (path=${rawPath || "<unset>"})\n`);
-    return { kind: "passthrough" };
+  // Resolved, not read off the payload: a harness that sends no
+  // `agent_transcript_path` would otherwise lose every reviewer's findings —
+  // the wave gate would then read a clean review that never happened. Read the
+  // trusted first-user prompt BEFORE requiring reviewer output: it carries the
+  // task binding even when the assistant transcript is empty or malformed.
+  const rawPath = resolveAgentTranscriptPath(input) ?? input.agent_transcript_path ?? "";
+  let trustedPrompt: string;
+  try {
+    const path = rawPath.replace(/^~/, process.env.HOME ?? "~");
+    const parsedPrompt = parseFirstUserPrompt(readFileSync(path, "utf-8"));
+    if (!parsedPrompt.ok) throw new Error(parsedPrompt.error);
+    trustedPrompt = parsedPrompt.prompt;
+  } catch (error) {
+    const message = `cannot read trusted ${agentType} prompt (${error instanceof Error ? error.message : String(error)}) — review evidence cannot be attributed`;
+    warn(message);
+    return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
+  }
+  if (hasStandaloneReviewContext(trustedPrompt)) {
+    return passthroughDiagnostic(`[loom] store-reviewer-findings: ${agentType} belongs to a standalone review run — task state untouched\n`);
   }
 
-  const taskId = extractTaskId(transcript);
+  const taskId = extractTaskId(trustedPrompt);
   if (!taskId) {
-    return { kind: "passthrough" };
+    const message = `trusted ${agentType} prompt has no extractable task ID — review evidence cannot be attributed`;
+    warn(message);
+    return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
   }
 
-  const findings = parseMachineSummary(transcript) ?? parseLegacyFindings(transcript);
-
-  if (findings.criticalCount === null) {
-    const errorMsg = buildEvidenceFailureMessage(findings);
-    process.stderr.write(`WARNING: ${errorMsg} for ${taskId} — marking evidence_capture_failed\n`);
-    await mgr.update((s) => ({
-      ...s,
-      tasks: s.tasks.map((t) =>
-        t.id === taskId
-          ? { ...t, review_status: "evidence_capture_failed" as ReviewStatus, review_error: errorMsg }
-          : t
-      ),
-    }));
-    return { kind: "passthrough" };
+  // Guard: reject findings for task IDs not present in the graph.
+  // `extractTaskId` falls back to any standalone `T\d+` in the transcript,
+  // so a reviewer quoting an unrelated task id resolves to one the graph
+  // does not have — this lookup rejects that case explicitly rather than
+  // silently discarding the findings via a no-op map.
+  let targetTask: ReturnType<typeof mgr.load>["tasks"][number] | undefined;
+  try {
+    targetTask = mgr.load().tasks.find((t) => t.id === taskId);
+  } catch (error) {
+    const message = (
+      `cannot load task graph for ${agentType} ` +
+      `(${error instanceof Error ? error.message : String(error)}) — findings NOT stored`
+    );
+    warn(message);
+    return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
+  }
+  if (!targetTask) {
+    return discarded(`${agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored`);
   }
 
-  const reconciled = reconcileFindings(findings);
-
+  const transcript = await readTranscriptWithRetry(rawPath, /\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*\d+/);
+  let resolution: ReviewResolution = {
+    kind: "evidence-failed",
+    agent: agentType,
+    message: `review transcript empty or unreadable at ${rawPath || "<unset>"}`,
+  };
+  let appliedTask = targetTask;
+  let applicationChanged = false;
+  let taskFound = false;
   await mgr.update((s) => ({
     ...s,
-    tasks: s.tasks.map((t) => t.id === taskId ? mergeFindings(t, reconciled) : t),
+    tasks: s.tasks.map((t) => {
+      if (t.id !== taskId) return t;
+      taskFound = true;
+      resolution = transcript
+        ? constrainReviewResolutionToScope(
+            resolveTaskReviewFindings(
+              transcript,
+              agentType,
+              t.review_run,
+              t.review_generation,
+            ),
+            [...(t.file_list ?? []), ...(t.files_modified ?? [])],
+          )
+        : resolution;
+      appliedTask = applyReviewResolution(t, resolution);
+      applicationChanged = appliedTask !== t;
+      return appliedTask;
+    }),
   }));
 
-  const status: ReviewStatus = reconciled.criticalCount! > 0 ? "blocked" : "passed";
-  process.stderr.write(`Task ${taskId} review: ${status} (${reconciled.criticalCount} critical)\n`);
-  return { kind: "passthrough" };
+  if (!taskFound) {
+    return discarded(`${agentType} review task ${taskId} disappeared before evidence application — findings NOT stored`);
+  }
+  return passthroughDiagnostic(reviewResolutionLog(taskId, resolution, appliedTask, applicationChanged) + "\n");
 };
 
 export default handler;

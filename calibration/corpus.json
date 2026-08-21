@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "round12-finding-repair-idempotency-fixed",
+      "state": "fixed",
+      "revision": "4927f0c",
+      "expected_criticals": [{
+        "id": "repair-idempotency",
+        "claim": "validate-task-graph --fix deletes critical finding claims on a second run",
+        "file": "engine/src/handlers/helpers/validate-task-graph.ts",
+        "line": null,
+        "aliases": [],
+        "match": { "all_of": ["validate task graph", "critical"], "any_of": ["delete", "idempotent", "second run"] }
+      }],
+      "context": { "source": ".claude/plans/2026-08-02-pr-remediation-round12.md#c2" }
+    },
+    {
+      "id": "round12-finding-repair-idempotency-vulnerable",
+      "state": "vulnerable",
+      "revision": "cc0c592",
+      "expected_criticals": [{
+        "id": "repair-idempotency",
+        "claim": "validate-task-graph --fix deletes critical finding claims on a second run",
+        "file": "engine/src/handlers/helpers/validate-task-graph.ts",
+        "line": null,
+        "aliases": [],
+        "match": { "all_of": ["validate task graph", "critical"], "any_of": ["delete", "idempotent", "second run"] }
+      }],
+      "context": { "source": ".claude/plans/2026-08-02-pr-remediation-round12.md#c2" }
+    },
+    {
+      "id": "round13-manifest-panel-shrink-fixed",
+      "state": "fixed",
+      "revision": "907771d",
+      "expected_criticals": [{
+        "id": "panel-size-shrink",
+        "claim": "rerunning review-panel manifest can silently shrink the panel and lower its refutation threshold",
+        "file": "engine/src/handlers/helpers/review-panel.ts",
+        "line": null,
+        "aliases": [],
+        "match": { "all_of": ["manifest", "panel"], "any_of": ["shrink", "threshold", "lens count"] }
+      }],
+      "context": { "source": ".claude/plans/2026-08-02-pr-remediation-round13.md#c2" }
+    },
+    {
+      "id": "round13-manifest-panel-shrink-vulnerable",
+      "state": "vulnerable",
+      "revision": "8ce7c58",
+      "expected_criticals": [{
+        "id": "panel-size-shrink",
+        "claim": "rerunning review-panel manifest can silently shrink the panel and lower its refutation threshold",
+        "file": "engine/src/handlers/helpers/review-panel.ts",
+        "line": null,
+        "aliases": [],
+        "match": { "all_of": ["manifest", "panel"], "any_of": ["shrink", "threshold", "lens count"] }
+      }],
+      "context": { "source": ".claude/plans/2026-08-02-pr-remediation-round13.md#c2" }
+    },
+    {
+      "id": "round14-review-evidence-race-fixed",
+      "state": "fixed",
+      "revision": "ec2cc90",
+      "expected_criticals": [{
+        "id": "review-evidence-race",
+        "claim": "a clean parallel reviewer can overwrite evidence_capture_failed and incorrectly pass the task",
+        "file": "engine/src/core/findings.ts",
+        "line": null,
+        "aliases": [],
+        "match": { "all_of": ["evidence capture failed", "reviewer"], "any_of": ["overwrite", "demote", "parallel", "race"] }
+      }],
+      "context": { "source": ".claude/plans/2026-08-02-pr-remediation-round14.md#c1" }
+    },
+    {
+      "id": "round14-review-evidence-race-vulnerable",
+      "state": "vulnerable",
+      "revision": "0710b76",
+      "expected_criticals": [{
+        "id": "review-evidence-race",
+        "claim": "a clean parallel reviewer can overwrite evidence_capture_failed and incorrectly pass the task",
+        "file": "engine/src/core/findings.ts",
+        "line": null,
+        "aliases": [],
+        "match": { "all_of": ["evidence capture failed", "reviewer"], "any_of": ["overwrite", "demote", "parallel", "race"] }
+      }],
+      "context": { "source": ".claude/plans/2026-08-02-pr-remediation-round14.md#c1" }
+    },
+    {
+      "id": "round15-retally-replay-fixed",
+      "state": "fixed",
+      "revision": "592fa8d",
+      "expected_criticals": [{
+        "id": "retally-replay",
+        "claim": "retallying a stale brief can refute a different finding and promote a blocked task",
+        "file": "engine/src/core/review-panel.ts",
+        "line": null,
+        "aliases": [],
+        "match": { "all_of": ["stale", "finding"], "any_of": ["retally", "replay", "different finding"] }
+      }],
+      "context": { "source": ".claude/plans/2026-08-03-pr-remediation-round15.md#c4" }
+    },
+    {
+      "id": "round15-retally-replay-vulnerable",
+      "state": "vulnerable",
+      "revision": "ec2cc90",
+      "expected_criticals": [{
+        "id": "retally-replay",
+        "claim": "retallying a stale brief can refute a different finding and promote a blocked task",
+        "file": "engine/src/core/review-panel.ts",
+        "line": null,
+        "aliases": [],
+        "match": { "all_of": ["stale", "finding"], "any_of": ["retally", "replay", "different finding"] }
+      }],
+      "context": { "source": ".claude/plans/2026-08-03-pr-remediation-round15.md#c4" }
+    }
+  ]
+}

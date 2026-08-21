@@ -1,5 +1,7 @@
 ---
 name: clarify-agent
+model-profile: panel-design
+model: opus
 description: "Uncertainty resolution agent that systematically resolves [NEEDS CLARIFICATION] markers in specifications through structured questioning."
 color: orange
 skills:

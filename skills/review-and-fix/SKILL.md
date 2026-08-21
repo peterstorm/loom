@@ -1,206 +1,169 @@
 ---
 name: review-and-fix
-version: "1.0.0"
-description: "This skill should be used when the user asks to 'review and fix', 'fix the PR', 'review then implement fixes', 'clean up the PR', 'run review and commit', 'remediate findings', or wants an automated end-to-end workflow that reviews code, plans fixes, implements them, and commits+pushes. Chains: /review-pr → remediation plan → implementation → commit+push."
+version: "3.1.0"
+description: "Review a PR, adjudicate critical findings, remediate, validate, and install an exact verified Git index."
 ---
 
-# Review and Fix — End-to-End PR Remediation
+# Review and Fix
 
-Automated workflow that chains review → plan → implement → commit → push.
-
-**Single command** that does what would otherwise take 3+ manual steps.
+Canonical workflow: registered standalone review → engine-owned refutation →
+plan → remediation → validation → verified index installation → commit/push.
 
 ## Arguments
 
+```text
+/review-and-fix [code|errors|tests|types|comments|architecture|simplify|all]
+  [--files file1,file2] [--no-push] [--dry-run] [--commit-msg "..."]
 ```
-/review-and-fix [aspects] [--files file1,file2] [--no-push] [--commit-msg "..."]
-```
 
-- **aspects**: `code`, `errors`, `tests`, `types`, `comments`, `architecture`, `simplify`, `all` (default: `all`)
-- `--files file1,file2,...` — Explicit file list (skips git diff detection)
-- `--no-push` — Commit but don't push
-- `--commit-msg "..."` — Custom commit message (default: auto-generated from findings)
-- `--dry-run` — Review + plan only, don't implement or commit
+`all` is the default. Resolve `LOOM_DIR` once from the active plugin package.
 
-## Workflow
+## Invariants
 
-### Phase 1: Review (via sub-agents)
+- The orchestration façade owns scope derivation, reviewer/model/Skill policy,
+  request authority, transcript capture, retries, aggregation, adjudication,
+  publication, path audit, temporary-index staging, verification, and install.
+- Execute only `spawn-batch`, `await-user`, `blocked`, or `done` actions.
+- Never hand-build findings, verdicts, manifests, transcript files, Git
+  pathspecs, or protected-state mutations.
+- Refuted criticals are audited and never fixed. Every surviving critical is
+  mandatory. By default, the parent autonomously dispositions each advisory as
+  accepted, deferred, or dismissed; it does not ask the operator to choose IDs.
+  Validation must pass before remediation installation.
+- Never force-push.
 
-Spawn review agents in parallel using the available Task/subagent tool. Each agent MUST be spawned as a sub-agent — do NOT perform reviews inline.
+## Phase 1 — Registered standalone review
 
-**Determine scope:**
+Name one fresh Run Directory and start the façade with user policy only. The
+engine creates the Run Directory; `--run` takes either its bare run id or a full
+path to that same direct child of `--runs-root`:
+
 ```bash
-git diff --name-only
-git diff --cached --name-only
-git diff main...HEAD --stat | tail -1
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start standalone-review \
+  --runs-root ".claude/reviews/review-and-fix-runs" \
+  --run "<fresh-review-run-id>" <<'JSON'
+{"kind":"all","files":null,"dryRun":false}
+JSON
 ```
 
-**Launch review agents (parallel via Task/subagent tool):**
+Spawn the exact returned batch. Each reviewer's exact raw bytes must then reach
+its reserved slot. On a harness that captures transcripts itself this already
+happened at spawn completion and a repeat submit is an idempotent confirmation;
+on any other harness the parent performs it, once per issued request:
 
-1. **`loom:code-reviewer`** — CLAUDE.md compliance, bugs, patterns
-2. **`loom:silent-failure-hunter`** — Error handling, Either patterns, silent failures
-3. **`loom:pr-test-analyzer`** — Test coverage, property tests, gaps
-4. **`loom:type-design-analyzer`** — Invariants, encapsulation, sealed types
-5. **`loom:comment-analyzer`** — Comment accuracy, rot, documentation
-6. **`loom:architecture-agent`** — FC/IS adherence, coupling, testability (auto for >500 additions or >10 files)
-
-Each agent gets:
-- The file list (from git diff or `--files`)
-- Instruction to produce Machine Summary output
-
-**Aggregate findings** into a unified list:
-- CRITICAL issues (must fix)
-- ADVISORY issues (should fix)
-- SUGGESTIONS (nice to have)
-
-**If zero CRITICAL + zero ADVISORY:** Report clean review, skip remaining phases. Done.
-
-### Phase 2: Plan (write remediation doc)
-
-Write a remediation plan to `.claude/plans/YYYY-MM-DD-pr-remediation.md`.
-
-**Plan structure:**
-```markdown
-# PR Remediation Plan
-
-**Date:** YYYY-MM-DD
-**Branch:** {current branch}
-**Scope:** {N} critical, {M} advisory findings
-
-## Critical Fixes (must do)
-
-### Fix 1: {title}
-- **Finding:** {agent}: {description}
-- **File:** {path}:{line}
-- **Fix:** {concrete description of the change}
-- **Validation:** {how to verify — test command or type check}
-
-### Fix 2: ...
-
-## Advisory Fixes (should do)
-
-### Fix N: ...
-
-## Deferred (not fixing now)
-
-- {reason for deferral}
-
-## Validation
-
-Run after all fixes:
 ```bash
-{typecheck command}
-{test command}
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration submit \
+  --runs-root ".claude/reviews/review-and-fix-runs" \
+  --run "<same-review-run-id>" \
+  --request "<exact-request-id>" --slot "<exact-slot-id>" --attempt 1 \
+  < "<reviewer-raw-output>"
 ```
-```
 
-**Prioritization rules:**
-1. Type errors / build failures first (blocks everything)
-2. Silent failures / error handling gaps second
-3. Code quality / architecture third
-4. Comments / style last
+Then resume until `done`:
 
-### Phase 3: Implement (using code-implementer patterns)
-
-**Before implementing, load rules:**
-- Read `${CLAUDE_PLUGIN_ROOT}/rules/architecture.md`
-- Read `${CLAUDE_PLUGIN_ROOT}/rules/typescript-patterns.md` (for TS projects)
-- Read `${CLAUDE_PLUGIN_ROOT}/rules/java-patterns.md` (for Java projects)
-
-**Implement each fix from the plan sequentially:**
-
-For each fix:
-1. Read the target file
-2. Make the minimal, precise edit
-3. Verify the edit doesn't break surrounding code
-
-**After all fixes applied:**
 ```bash
-# Run type check
-bun run typecheck  # or equivalent
-
-# Run tests
-bun test  # or equivalent
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration resume \
+  --runs-root ".claude/reviews/review-and-fix-runs" \
+  --run "<same-review-run-id>"
 ```
 
-**If tests/typecheck fail after fixes:** Iterate — read error, fix, re-run. Max 3 iterations per fix.
+The registered Standalone Review Program automatically routes non-empty
+critical sets through its registered Refutation Panel and publishes canonical
+`result.json`. Read remediation inputs only from that authoritative result:
 
-### Phase 4: Commit and Push
+- `surviving_critical_findings` — mandatory fixes
+- `advisory_findings` — autonomous parent triage by default
+- `refuted_critical_findings` — report, never fix
 
-**Stage all changes:**
+## Phase 2 — Plan
+
+Every surviving critical Finding is mandatory. Independently disposition every
+advisory as `accepted`, `deferred`, or `dismissed`. By default, make this choice
+autonomously from the evidence, correctness impact, risk, and reviewed scope;
+do not ask the operator to choose advisory IDs. Accept an advisory when its
+claim is sound and a complete in-scope fix is practical. Defer or dismiss only
+with a concrete evidence-based reason. An explicit user instruction about a
+specific advisory overrides this default.
+
+If neither criticals nor accepted advisories survive, report the clean review
+or advisory dispositions and stop.
+
+Write `.claude/plans/YYYY-MM-DD-pr-remediation.md` containing branch, exact
+scope, review Run Directory, every surviving critical and concrete fix, every
+advisory disposition and reason, accepted advisory fixes, refuted-finding
+audit, and validation commands. `--dry-run` stops here.
+
+## Phase 3 — Implement and validate
+
+Read `rules/architecture.md` and relevant language rules. Apply only planned
+surviving findings. Register every necessary support path in the remediation
+start input. Run typecheck/build and full relevant tests; iterate to a real fix.
+Stop without staging or committing if validation cannot pass.
+
+## Phase 4 — Registered remediation
+
+Name a fresh remediation Run Directory. The source review run remains immutable
+authority, and `sourceRun` names it the same way `--run` does — bare run id or
+full path, resolved against `sourceRunsRoot`:
+
 ```bash
-git add -A
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start remediation \
+  --runs-root ".claude/reviews/review-and-fix-runs" \
+  --run "<fresh-remediation-run-id>" <<'JSON'
+{
+  "sourceRunsRoot":".claude/reviews/review-and-fix-runs",
+  "sourceRun":"<review-run-id>",
+  "supportPaths":["<plan-or-regression-path-not-in-reviewed-scope>"]
+}
+JSON
 ```
 
-**Generate commit message** (unless `--commit-msg` provided):
-```
-fix: remediate PR review findings
+Every path the remediation touches that is NOT inside the frozen review scope —
+the plan file, a regression pin added for an accepted fix — must be named in
+`supportPaths` **here**, at start. The start input is registered exclusively and
+admits only a byte-identical re-registration, so a run cannot authorize a path
+its own start input never named.
 
-- {summary of critical fixes}
-- {summary of advisory fixes}
+A `blocked` start reports the exact cause and leaves the run registered. Never
+delete a run directory to retry: the run holds the evidence of why it blocked.
+Recovery depends on the cause:
 
-Reviewed by: code-reviewer, silent-failure-hunter, type-design-analyzer
-Fixes: {N} critical, {M} advisory findings
-```
+- **source review is not `done`** — finish or fix the source run, then `resume`
+  the SAME run.
+- **unrelated staged work** — unstage it, then `resume` the SAME run.
+- **unauthorized dirty paths** — resume the same run only if the dirty state is
+  genuinely unrelated and can be reverted or committed away. If the path belongs
+  to the remediation (the case `supportPaths` exists for), the same run can
+  never authorize it: start a **fresh** remediation run whose start input adds
+  the path to `supportPaths`. The blocked run stays in place as evidence.
 
-**Commit:**
+When a fresh run supersedes a blocked one, say so in the retired run rather
+than only in this session, so the next operator reading the runs root can tell
+which of the two is live:
+
 ```bash
-git commit -m "{message}"
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration abandon \
+  --runs-root ".claude/reviews/review-and-fix-runs" \
+  --run "<blocked-run-id>" --superseded-by "<fresh-run-id>" \
+  --reason "<why it was replaced>"
 ```
 
-**Push** (unless `--no-push`):
-```bash
-git push
-```
+`helper orchestration inspect --runs-root <root> --run <run-id>` reads any
+run's program, state, per-slot capture, and rejection diagnostics in one
+command — use it instead of hand-reading `checkpoint.json` and `events/`.
 
-### Phase 5: Summary
+Resume until `done`. The engine proves observed dirty paths are authorized,
+rejects excluded Run evidence and unrelated staged work, stages literal paths
+in a temporary index, proves `audited == staged`, rechecks the repository
+witness under the real index lock, and atomically installs the verified index.
+The parent must not run its own staging recipe.
 
-Output final summary:
-```markdown
-## Review & Fix Complete
+Commit the installed index and push unless `--no-push`. A push failure leaves
+the valid local commit intact and is reported with its SHA.
 
-**Findings:** {N} critical, {M} advisory
-**Fixed:** {X} critical, {Y} advisory
-**Deferred:** {Z} items (with reasons)
-**Commit:** {short sha}
-**Branch:** {branch name}
+## Phase 5 — Report
 
-### Changes Made
-- {file}: {what changed}
-- ...
-
-### Validation
-- Typecheck: ✅ PASS
-- Tests: ✅ PASS ({N} tests, {M} assertions)
-```
-
-## Handling Edge Cases
-
-### No findings
-Report clean review. No changes needed. Exit early.
-
-### Only ADVISORY findings
-Ask user: "Only advisory findings (no critical). Fix them? [Y/n]"
-If yes → proceed. If no → exit.
-
-### Fix introduces new failure
-Revert that specific fix, log it as "deferred", continue with remaining fixes.
-
-### Cannot push (no remote, auth failure)
-Log the commit SHA, inform user, suggest manual push.
-
-## Integration with Loom
-
-This skill can be invoked:
-- **Standalone:** `/review-and-fix` — for ad-hoc PR cleanup
-- **From wave-gate:** When wave-gate blocks on critical findings, spawn a `loom:code-implementer` agent with the findings as context
-- **Pre-merge:** As a final quality gate before `/finalize`
-
-## Constraints
-
-- **Never skip review phase** — always run sub-agents first
-- **Never implement without a plan** — plan doc is mandatory (enables audit trail)
-- **Minimal edits** — fix exactly what's reported, don't refactor adjacent code
-- **Preserve semantics** — fixes must not change behavior unless fixing a bug
-- **Run validation** — typecheck + tests MUST pass before commit
-- **Atomic commit** — all fixes in one commit (reviewable as a unit)
+Report found/refuted/surviving/fixed/advisory counts, every advisory disposition
+and reason, both Run Directories, plan, changed files, validation evidence,
+installation receipt, commit SHA, branch, and push status. Include every
+refuted finding with panel reasoning.

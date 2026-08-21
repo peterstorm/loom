@@ -3,7 +3,7 @@ import fc from "fast-check";
 import { advance, foldEvidence, isTerminal, isToolAllowed, missingRequirements, tokensFor } from "../../src/machine/advance";
 import { initialState, type Evidence } from "../../src/machine/types";
 import { parseMachine } from "../../src/machine/parse-machine";
-import { parseReportSummary } from "../../src/machine/test-report";
+import { judgeTestRun, parseReportSummary } from "../../src/machine/test-report";
 
 // MachineDef is branded: parseMachine is its only producer, so tests build
 // the machine the same way production does — from a raw definition.
@@ -41,9 +41,15 @@ const evidenceArb: fc.Arbitrary<Evidence> = fc.oneof(
   }),
 );
 
-/** The judgment the reducer must derive: exit 0 + confirming report. */
+/**
+ * The judgment the reducer must derive — ASKED of judgeTestRun rather than
+ * restated here. The oracle used to spell out "exit 0 + confirming report",
+ * which silently became a different rule than the one under test the moment
+ * the trust rule changed. Deriving it means this property checks what it says
+ * it checks: that the reducer honours the rule, whatever the rule is.
+ */
 const isTrustedPass = (e: Evidence): boolean =>
-  e.kind === "TestRun" && e.exit === 0 && e.report !== null && e.report.total > 0 && e.report.failed === 0;
+  e.kind === "TestRun" && judgeTestRun(e.exit, e.report).verdict === "trusted-pass";
 
 describe("phase machine — invariants", () => {
   it("terminal is unreachable without a fact-confirmed passing TestRun", () => {

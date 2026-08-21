@@ -1,0 +1,42 @@
+I've completed the review of the frozen scope (9 files: README.md, agents/README.md, agents/architecture-tech-lead.md, commands/review-pr.md, engine/src/core/model-profiles.ts, engine/src/handlers/helpers/programs/helpers.ts, engine/tests/pi-extension-review-events.test.ts, skills/code-implementer/SKILL.md, skills/deepen/SKILL.md).
+
+## Findings
+
+### Critical: unanchored `docsOnly` regex misclassifies real source paths as documentation
+
+**File**: `engine/src/handlers/helpers/programs/helpers.ts:174`
+
+```ts
+const docsOnly = scope.every((path) => /(^|\/)(docs?|README)|\.(md|mdx|txt)$/.test(path));
+```
+
+The `docs?` alternative is not bounded to a full path segment (no trailing `\/|$` the way the sibling regex two lines below correctly has at line 183: `/(^|\/)(test|tests|__tests__)(\/|$)/`). Because `docs?` only requires the literal characters "doc" (optionally followed by "s") to appear at the very start of a path segment, it matches as a prefix of any longer word — verified directly:
+
+```
+docker-compose.yml   => true   (false positive)
+src/docker/build.ts  => true   (false positive — a .ts source file!)
+documented-api.ts    => true   (false positive)
+docs/guide.md        => true   (correct)
+README.md            => true   (correct)
+package.json         => false (correct)
+```
+
+Concrete failure scenario: a change whose frozen scope is `["src/docker/build.ts", "docs/guide.md"]` — a real TypeScript source-code change alongside a docs update — sets `docsOnly = true` (line 174) and therefore also `commentsChanged = true` via the `docsOnly ||` short-circuit at line 185. `docsOnly`/`commentsChanged` feed `selectStandaloneReviewers(reviewMetadata)` (imported from `core/standalone-review`, called at helpers.ts:248), which uses this metadata to decide the reviewer roster for `/review-pr`. A source file merely living under a `docker/`-named directory, or named `documented-*.ts`, can cause the engine to under-select reviewers appropriate for a real code change because the metadata says the scope is docs-only.
+
+Fix: anchor the segment boundary the same way the adjacent `test` regex does, e.g. `/(^|\/)(docs?|README)(\/|\.|$)|\.(md|mdx|txt)$/` or simply require a path separator/extension boundary after `docs?`.
+
+This file is wholly new in this branch (`git diff origin/main...HEAD` shows it as a new file), so this is not a pre-existing/inherited issue.
+
+No other findings met the confidence bar. `engine/tests/pi-extension-review-events.test.ts` (also new, 3422 lines) was scanned for weak-assertion/skip/only smells — none found — but was not exhaustively read line-by-line given its size; it does not appear to exercise `metadata()`/`docsOnly` directly. `engine/src/core/model-profiles.ts` is clean functional-core code with no violations found. The markdown docs (`README.md`, `agents/README.md`, `agents/architecture-tech-lead.md`, `commands/review-pr.md`, both `SKILL.md` files) were cross-checked against `AGENT_CATALOG`/`WAVE_REVIEW_AGENTS` in `model-profiles.ts` (agent counts, kinds, preloaded skills, phase-agent list) and found fully consistent — no drift.
+
+### Machine Summary
+CRITICAL_COUNT: 1
+ADVISORY_COUNT: 0
+CRITICAL: The unanchored `docs?` branch in the `docsOnly` regex at engine/src/handlers/helpers/programs/helpers.ts:174 matches any path merely starting with the substring "doc" (e.g. `docker-compose.yml`, `src/docker/build.ts`, `documented-api.ts`), misclassifying real source-code changes as documentation-only and skewing reviewer-roster selection in `/review-pr`.
+ADVISORY:
+
+```findings
+[
+  { "severity": "critical", "file": "engine/src/handlers/helpers/programs/helpers.ts", "line": 174, "claim": "The unanchored `docs?` branch in the `docsOnly` regex at engine/src/handlers/helpers/programs/helpers.ts:174 matches any path merely starting with the substring \"doc\" (e.g. `docker-compose.yml`, `src/docker/build.ts`, `documented-api.ts`), misclassifying real source-code changes as documentation-only and skewing reviewer-roster selection in `/review-pr`." }
+]
+```

@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, afterAll } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import enforce from "../../../src/handlers/pre-tool-use/enforce-phase-tools";
@@ -34,7 +34,7 @@ async function bind(session: SessionId, type: string, id: string): Promise<void>
 const run = `gate-fail-closed-${process.pid}-${Date.now()}`;
 // Ledger API takes the branded SessionId; parse once at construction.
 const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
-const sessions = ["missing-fields", "missing-fields-armed", "corrupt-binding", "absent", "invalid-machine", "vanished-machine", "crash"].map(sid);
+const sessions = ["missing-fields", "missing-fields-armed", "corrupt-binding", "unreadable-binding", "absent", "invalid-machine", "vanished-machine", "crash"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
@@ -102,6 +102,21 @@ describe("gate fails closed on corrupt binding files (Fix 2)", () => {
     expect(result.kind).toBe("block");
     if (result.kind === "block") {
       expect(result.message).toContain("no parseable bindings");
+    }
+  });
+
+  it("an unreadable binding file blocks instead of looking absent", async () => {
+    const s = sid("unreadable-binding");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const path = machineBindingPath(s);
+    symlinkSync(path, path);
+
+    const result = await enforce(pre(s, "Write"), []);
+
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") {
+      expect(result.message).toContain("gate evaluation failed");
+      expect(result.message).toContain("machine binding file");
     }
   });
 

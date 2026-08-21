@@ -17,6 +17,8 @@ import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-
 import { SUBAGENT_DIR } from "../../../src/config";
 import { parseEpoch } from "../../../src/machine";
 import type { EvidenceRecord } from "../../../src/machine";
+import type { AgentRequestAuthority } from "../../../src/core/orchestration-contract";
+import { openRunDirectory } from "../../../src/orchestration/run-directory-handle";
 import { reportSummary } from "../../machine/report-summary";
 
 const run = `dispatch-resilience-${process.pid}-${Date.now()}`;
@@ -75,6 +77,87 @@ function pointSessionAt(session: string, statePath: string): void {
   sessionFiles.push(pointer);
 }
 
+describe("category handler errors propagate instead of passthrough (critical)", () => {
+  it("a storeReviewerFindings failure fails the SubagentStop hook", async () => {
+    const dir = tempDir();
+    const statePath = writeState(dir);
+    const session = sid("review-evidence-error");
+    pointSessionAt(session, statePath);
+
+    // The reviewer transcript is unreadable, so storeReviewerFindings returns
+    // kind error. dispatch must surface that as a failed SubagentStop — a
+    // swallowed error would make a wave look clean while evidence was lost.
+    const result = await dispatch(JSON.stringify({
+      session_id: session,
+      agent_id: "agent-review-error",
+      agent_type: "code-reviewer",
+      agent_transcript_path: join(dir, "missing-transcript.jsonl"),
+    }), []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("store-reviewer-findings");
+  });
+});
+
+describe("request-bound capture gates legacy dispatch", () => {
+  it("runs cleanup but skips state mutation after Claude capture rejection", async () => {
+    const dir = tempDir();
+    const statePath = writeState(dir);
+    const session = sid("capture-rejected");
+    pointSessionAt(session, statePath);
+    const runsRoot = join(dir, "runs");
+    const runDir = join(runsRoot, "run.dispatch-capture");
+    mkdirSync(runDir, { recursive: true });
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const request = {
+      runId: "run.dispatch-capture",
+      requestId: "request:reviewer:1",
+      slotId: "slot-1",
+      program: "wave-gate",
+      role: "code-reviewer",
+      attempt: 1,
+      modelProfile: "general-review",
+      harnessBinding: {
+        pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+        claude: { harness: "claude-code", model: "sonnet" },
+      },
+      requiredSkill: null,
+      contextDigest: "a".repeat(64),
+      outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
+    } as AgentRequestAuthority;
+    expect((await opened.value.reserveRequest(request)).ok).toBe(true);
+    expect((await opened.value.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "claude",
+      nativeId: "agent-capture",
+      requestId: request.requestId,
+      role: request.role,
+      attempt: request.attempt,
+    })).ok).toBe(true);
+    const previousRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+    const previousRun = process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = runDir;
+    try {
+      const result = await dispatch(JSON.stringify({
+        session_id: session,
+        agent_id: "agent-capture",
+        agent_type: "code-reviewer",
+        agent_transcript_path: join(dir, "missing-transcript.jsonl"),
+      }), []);
+      expect(result.kind).toBe("error");
+      const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+      expect(task.critical_findings ?? []).toEqual([]);
+    } finally {
+      if (previousRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+      else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;
+      if (previousRun === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+      else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousRun;
+    }
+  });
+});
+
 describe("malformed hook input is caught, not crashed on (Advisory 4)", () => {
   it("dispatch: malformed stdin → passthrough + 'bindings may leak' stderr", async () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -94,8 +177,69 @@ describe("malformed hook input is caught, not crashed on (Advisory 4)", () => {
   });
 });
 
+/**
+ * Each of these three paths ends in `passthrough` — indistinguishable, from the
+ * hook's return value alone, from "nothing to do". The stderr line IS the
+ * record that something was discarded. Untested, a refactor could drop any of
+ * them and every assertion in this file would still pass, silently undoing the
+ * observability they were added for.
+ */
+describe("dispatch names what it discarded (audit diagnostics)", () => {
+  const stderrOf = async (payload: Record<string, unknown>): Promise<string> => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await dispatch(JSON.stringify(payload), []);
+      expect(result.kind).toBe("passthrough");
+      return stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  };
+
+  it("says the whole record was skipped when no task graph resolves", async () => {
+    // Session bound to nothing: StateManager.fromSession returns null, so
+    // status, evidence and findings are ALL skipped.
+    const text = await stderrOf({
+      session_id: sid("no-graph-at-all"),
+      agent_id: "agent-no-graph",
+      agent_type: "code-implementer-agent",
+    });
+    expect(text).toContain("no task graph resolvable");
+    expect(text).toContain("recorded NOTHING");
+  });
+
+  it("distinguishes an UNNAMEABLE agent from a merely unrouted one", async () => {
+    const dir = tempDir();
+    const session = sid("unnameable");
+    pointSessionAt(session, writeState(dir));
+
+    // Neither the payload nor the harness metadata can say what ran — a loom
+    // agent's result may have just been lost, which is not the same as a user's
+    // own subagent legitimately having no orchestration hooks.
+    const unnameable = await stderrOf({ session_id: session, agent_id: "agent-unnameable" });
+    expect(unnameable).toContain("carried no agent_type and none could be derived");
+    expect(unnameable).toContain("its result is LOST");
+  });
+
+  it("names an agent type that resolved but maps to no route", async () => {
+    const dir = tempDir();
+    const session = sid("unrouted");
+    pointSessionAt(session, writeState(dir));
+
+    const unrouted = await stderrOf({
+      session_id: session,
+      agent_id: "agent-unrouted",
+      agent_type: "some-users-own-agent",
+    });
+    expect(unrouted).toContain("no orchestration route for agent type");
+    expect(unrouted).toContain("some-users-own-agent");
+    // The louder "result is LOST" wording belongs to the unnameable case only.
+    expect(unrouted).not.toContain("its result is LOST");
+  });
+});
+
 describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)", () => {
-  it("held cleanup lock crashes cleanup; T1 is still marked implemented", async () => {
+  it("held cleanup lock crashes cleanup; T1 evidence is still recorded but untrusted proof stays pending", async () => {
     const s = sid("cleanup-crash");
     const dir = tempDir();
     const statePath = writeState(dir);
@@ -127,7 +271,8 @@ describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)
     }
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.tasks[0].status).toBe("implemented");
+    expect(state.tasks[0].status).toBe("pending");
+    expect(state.tasks[0].proof.state).toBe("failed");
     expect(state.executing_tasks).toEqual([]);
   }, 30000);
 });
@@ -136,7 +281,8 @@ describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7
   it("a trusted TestRun in the snapshot decides the verdict even with no ledger on disk", async () => {
     const s = sid("snapshot");
     const dir = tempDir();
-    const statePath = writeState(dir);
+    // New-test detection is independent of this snapshot-attribution test.
+    const statePath = writeState(dir, { new_tests_required: false });
     pointSessionAt(s, statePath);
 
     // No <session>.evidence.jsonl exists — the snapshot is the only source,
@@ -199,7 +345,7 @@ describe("trust-aware skip guard — decided INSIDE the locked update", () => {
     expect(state.tasks[0].test_evidence).toContain("ledger: exit 1");
   }, 30000);
 
-  it("a trusted verdict on the task IS preserved (skip fires inside the lock)", async () => {
+  it("a trusted verdict is preserved while task cleanup resolves inside the lock", async () => {
     const s = sid("trusted-kept");
     const dir = tempDir();
     const statePath = writeState(dir, {
@@ -211,18 +357,20 @@ describe("trust-aware skip guard — decided INSIDE the locked update", () => {
     pointSessionAt(s, statePath);
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    // Empty snapshot + no transcript: the handler would write an untrusted
-    // failure — the existing trusted verdict must survive it.
+    // Empty snapshot + no transcript: the handler produces an untrusted
+    // failure, but the existing trusted verdict must survive while execution
+    // cleanup lands. New-test evidence is deliberately not asserted here: it is
+    // recomputed from the repository diff and belongs to dedicated tests with
+    // injected DiffDeps.
     const result = await runUpdateTaskStatus(stopInput(s), [], { kind: "snapshot", events: [] });
     const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
     stderrSpy.mockRestore();
     expect(result.kind).toBe("passthrough");
-    expect(text).toContain("leaving it untouched");
+    expect(text).not.toContain("leaving it untouched");
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
     expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-fail" });
     expect(state.tasks[0].test_evidence).toBe("ledger: exit 1 (npm test)");
-    expect(state.tasks[0].new_tests_written).toBe(true);
     // The VERDICT stands down, but the agent still STOPPED: the task must
     // leave executing_tasks or the duplicate-spawn check ghost-blocks re-runs.
     expect(state.executing_tasks).toEqual([]);
@@ -276,13 +424,15 @@ describe("a FAILED evidence snapshot is never laundered into 'genuinely empty' (
     expect(text).toContain("labeled snapshot-read-failed");
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.tasks[0].status).toBe("implemented");
+    expect(state.tasks[0].status).toBe("pending");
+    expect(state.tasks[0].proof.state).toBe("failed");
     // No transcript in this run → the fallback found no pass markers; the
     // labeled untrusted verdict carries exactly that.
     expect(state.tasks[0].test_result).toEqual({
       verdict: "untrusted",
       passed: false,
       label: "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)",
+      provenance: "unverified",
     });
     expect(state.tasks[0].test_result.label).not.toContain("degraded");
   }, 30000);

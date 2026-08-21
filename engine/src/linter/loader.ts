@@ -10,7 +10,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { type RegexRule, type Rule, type Tier, type RuleSource, isRegexRule } from "./types";
 import { analyzeRegex } from "./safety";
-import { PROGRAMMATIC_RULES, createProgrammaticRules } from "./programmatic/index";
+import { createProgrammaticRules } from "./programmatic/index";
 import { loadProjectConfig } from "./programmatic/config";
 
 // --- Public API ---
@@ -65,11 +65,11 @@ export function loadRules(
   // Load default rules
   const defaultRules = loadRulesFromDir(defaultDir, "default");
 
-  // Load project rules (if projectDir provided and exists)
-  const projectRules =
-    projectDir !== null && existsSync(projectDir)
-      ? loadRulesFromDir(projectDir, "project")
-      : [];
+  // Project policy is optional only when genuinely absent. Access/path
+  // failures must surface rather than silently disabling local rules.
+  const projectRules = projectDir === null
+    ? []
+    : loadRulesFromDir(projectDir, "project", true);
 
   // Merge: project rules override defaults by name
   const merged = mergeRules(defaultRules, projectRules);
@@ -109,8 +109,15 @@ export function loadRules(
  * Skips `config.json` which is reserved for programmatic rule configuration.
  * Throws on malformed JSON or invalid rule structure (fail-closed).
  */
-function loadRulesFromDir(dir: string, source: RuleSource): Rule[] {
-  const files = readdirSync(dir).filter((f) => f.endsWith(".json") && f !== "config.json");
+function loadRulesFromDir(dir: string, source: RuleSource, absentIsEmpty = false): Rule[] {
+  let entries: readonly string[];
+  try {
+    entries = readdirSync(dir);
+  } catch (error) {
+    if (absentIsEmpty && (error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const files = entries.filter((f) => f.endsWith(".json") && f !== "config.json");
   const rules: Rule[] = [];
 
   for (const file of files) {

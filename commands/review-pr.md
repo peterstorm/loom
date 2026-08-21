@@ -1,195 +1,138 @@
 ---
-description: "Comprehensive PR review using specialized agents"
-argument-hint: "[code|errors|tests|types|comments|architecture|simplify|all] [--files file1,file2] [--task T1]"
-allowed-tools: ["Bash", "Glob", "Grep", "Read", "Task"]
+description: "Adjudicated multi-Agent review of an exact repository scope"
+argument-hint: "[code|errors|tests|types|comments|architecture|simplify|all] [--files file1,file2] [--dry-run]"
+allowed-tools: ["Bash", "Read", "Task", "Agent", "subagent"]
 ---
 
-# Comprehensive PR Review
+# Review PR
 
-Run a comprehensive pull request review using multiple specialized agents, each focusing on a different aspect of code quality.
+Run a registered Standalone Review Program. The engine owns scope derivation,
+reviewer/model/Skill policy, Context Packets, request authority, exact transcript
+capture, retries, aggregation, critical-Finding refutation, and canonical result
+publication. This workflow never mutates the feature TaskGraph.
 
 **Arguments:** "$ARGUMENTS"
 
-## Review Workflow
+## 1. Resolve Loom
 
-### 1. Determine Review Scope
-
-**Parse arguments for:**
-- `--files file1,file2,...` - Explicit file list (comma-separated)
-- `--task T1` - Task ID for wave-gate integration
-- Review aspects: code, errors, tests, types, comments, architecture, simplify, all
-
-**If --files provided:** Use those files instead of git diff
-**Otherwise:** Check git status to identify changed files
-
-### 2. Available Review Aspects
-
-- **code** - General code review for project guidelines and bugs
-- **errors** - Check error handling for silent failures (Either patterns)
-- **tests** - Review test coverage quality and completeness
-- **types** - Analyze type design and invariants
-- **comments** - Analyze code comment accuracy
-- **architecture** - FC/IS adherence, coupling, testability, service design
-- **simplify** - Simplify code for clarity (run after other reviews pass)
-- **all** - Run all applicable reviews (default)
-
-### 3. Identify Changed Files
-
-**If --files provided:**
-Use the explicit file list directly.
-
-**Otherwise:**
 ```bash
-git diff --name-only
-git diff --cached --name-only
+LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"
+test -f "$LOOM_DIR/engine/src/cli.ts" || exit 1
 ```
 
-Check if PR already exists: `gh pr view`
+Claude Code expands the shared token; Pi receives an absolute rendered path.
+Never infer package identity from cwd or another harness installation.
 
-### 4. Determine Applicable Reviews
+## 2. Parse user policy
 
-Based on changes:
-- **Always**: code-reviewer (general quality)
-- **If error handling changed**: silent-failure-hunter
-- **If test files changed or new logic added**: pr-test-analyzer
-- **If types added/modified**: type-design-analyzer
-- **If comments/docs added**: comment-analyzer
-- **If large PR (>500 additions OR >10 files) OR new services/packages/migrations**: architecture-agent (FC/IS, coupling, testability)
-- **After other reviews pass**: code-simplifier (polish)
+Accepted review kinds:
 
-**To determine PR size, run:**
+- `code`
+- `errors`
+- `tests`
+- `types`
+- `comments`
+- `architecture`
+- `simplify`
+- `all` (default)
+
+`simplify` selects the `code-simplifier` reviewer (preloading the `distill`
+skill) unconditionally; under `all` the engine adds it whenever the frozen
+scope changes source or test files.
+
+`architecture` selects the `architecture-tech-lead` reviewer (preloading the
+`deepen` skill in review mode) unconditionally; under `all` it always joins the
+roster, and it is auto-selected for >500 additions, >10 files, or new
+structure.
+
+`--files` is a comma-separated explicit scope. Without it, the engine freezes
+the canonical sorted union of branch-committed, staged, unstaged tracked, and
+untracked non-ignored paths, excluding Loom run/state evidence. Empty scope is a
+hard stop. `--dry-run` is recorded in review authority; it does not weaken
+review/adjudication.
+
+Do not use this command to feed one Wave Task. `/wave-gate` owns packet-bound
+per-Task review and Wave-wide adjudication.
+
+## 3. Start one fresh run
+
+Create a fresh direct child beneath the runs root, for example:
+
 ```bash
-git diff main...HEAD --stat | tail -1
-# Example output: "23 files changed, 5843 insertions(+), 35 deletions(-)"
-# Parse additions count and file count to decide architecture trigger
+RUNS_ROOT=".claude/reviews/standalone-review-runs"
+mkdir -p "$RUNS_ROOT"
+RUN_DIR="$(mktemp -d "$RUNS_ROOT/run.XXXXXXXXXX")"
 ```
 
-### 5. Launch Review Agents
+Pass only parsed user policy:
 
-**For comprehensive review, launch these agents in parallel using the Task/subagent tool.**
-
-Each agent MUST be spawned via Claude Code `Task` (`subagent_type`) or Pi `subagent` (`agent`) as appropriate. Do NOT perform reviews inline — always dispatch to specialized agents.
-
-1. **`loom:code-reviewer`** - CLAUDE.md compliance, bugs, architecture
-   - Will recommend delegation to: security-expert, java-test-engineer, ts-test-engineer, nextjs-frontend-design
-
-2. **`loom:silent-failure-hunter`** - Error handling, Either patterns, silent failures
-
-3. **`loom:pr-test-analyzer`** - Test coverage, property tests, gaps
-   - Will recommend delegation to: java-test-engineer, ts-test-engineer
-
-4. **`loom:type-design-analyzer`** - Invariants, encapsulation, sealed types
-
-5. **`loom:comment-analyzer`** - Comment accuracy, rot, documentation
-
-6. **`loom:architecture-agent`** *(auto-triggered for large PRs)* - FC/IS adherence, coupling, testability, service layer design, brand duplication, I/O boundary placement
-   - **Auto-trigger:** >500 additions OR >10 files changed OR new services/packages/DB migrations
-   - **Always included** when `all` or `architecture` aspect requested
-   - Prompt must include: file list, diff stats, architecture principles from CLAUDE.md
-   - Reviews: FC/IS pattern, coupling, testability score, service design, refactoring priorities, unresolved questions
-
-**After fixes applied:**
-7. **`loom:code-simplifier`** - Clarity, FP patterns, maintainability
-
-### 6. Aggregate Results
-
-After agents complete, summarize:
-
-```markdown
-# PR Review Summary
-
-## Critical Issues (must fix before merge)
-- [agent-name]: Issue description [file:line]
-
-## Important Issues (should fix)
-- [agent-name]: Issue description [file:line]
-
-## Suggestions (nice to have)
-- [agent-name]: Suggestion [file:line]
-
-## Delegation Recommendations
-- [ ] security-expert: [reason]
-- [ ] java-test-engineer: [reason]
-- [ ] ts-test-engineer: [reason]
-- [ ] nextjs-frontend-design: [reason]
-
-## Strengths
-- What's well-done in this PR
-
-## Recommended Action
-1. Fix critical issues first
-2. Address important issues
-3. Consider suggestions
-4. Run delegated reviews if recommended
-5. Run code-simplifier after fixes
-
-### Machine Summary
-CRITICAL_COUNT: {number of critical issues}
-ADVISORY_COUNT: {number of important + suggestion issues}
-CRITICAL: {each critical finding on its own line}
-ADVISORY: {each non-critical finding on its own line}
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration start standalone-review \
+  --runs-root "$RUNS_ROOT" \
+  --run "$RUN_DIR" <<'JSON'
+{"kind":"all","files":null,"dryRun":false}
+JSON
 ```
 
-**IMPORTANT:** The `### Machine Summary` block is MANDATORY. It MUST appear at the end of every review output, even if counts are zero. This block is parsed by automated hooks — do NOT omit it.
+For explicit files, `files` is a non-empty JSON string array. Never hand-build
+scope metadata, reviewer rosters, model lookups, transcript slots, findings,
+verdict manifests, or panel events.
 
-## Usage Examples
+## 4. Execute returned actions
 
-**Full review (default):**
+Execute only the single typed action returned by `start` or `resume`:
+
+- `spawn-batch` — spawn every exact request, preserving Agent, model, required
+  Skill, task text, Context Packet reference, `LOOM_REQUEST_ID`, and cwd.
+  Claude may send the batch in one message. Pi accepts at most eight requests
+  per native subagent call; partition larger batches into ordered chunks of at
+  most eight without changing/dropping/duplicating a request, then wait for all
+  chunks before resume.
+- `blocked` — stop and report the complete diagnostic.
+- `done` — read/report the authoritative result receipt.
+
+Standalone review has no advisory `await-user` stage: it reports advisories; it
+does not choose remediation policy.
+
+After a complete harness batch:
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration resume \
+  --runs-root "$RUNS_ROOT" \
+  --run "$RUN_DIR"
 ```
+
+Resume until `done` or `blocked`. Resume is idempotent. Pi and Claude adapters
+bind native result identities and write exact final bytes directly into
+engine-reserved slots. Never copy Agent output into files yourself.
+
+## 5. Report only canonical results
+
+Read the authoritative `artifacts/result.json` from the Run Directory named by
+the completion receipt. Report:
+
+- exact frozen scope and selected reviewer roster;
+- surviving critical Findings;
+- advisory Findings;
+- refuted critical Findings with lenses/votes/reasoning;
+- evidence/retry diagnostics, if any;
+- Run Directory and result artifact path.
+
+Do not merge refuted Findings into “fixed,” hide them, or summarize an
+incomplete/blocked run as a review result. A missing roster member, malformed
+attempt-2 output, or publication failure is blocked evidence—not a partial
+success.
+
+## Examples
+
+One review kind per invocation (the orchestration input carries exactly one
+`kind`); omit it for `all`.
+
+```text
 /review-pr
-```
-
-**Specific aspects:**
-```
-/review-pr code errors
-/review-pr tests types
+/review-pr code
+/review-pr tests
 /review-pr architecture
-/review-pr simplify
-```
-
-**With explicit files (for wave-gate):**
-```
-/review-pr --files components/foo.tsx,lib/bar.ts --task T3
-/review-pr code --files src/User.java --task T1
-```
-
-**Parallel review:**
-```
-/review-pr all parallel
-```
-
-## Tips
-
-- **Run early**: Before creating PR, not after
-- **Focus on changes**: Agents analyze git diff by default (unless --files)
-- **Address critical first**: Fix high-priority issues before lower priority
-- **Re-run after fixes**: Verify issues are resolved
-- **Use delegation**: When agents recommend specialized skills, invoke them
-- **Simplify last**: Run code-simplifier after other issues are fixed
-- **Architecture auto-triggers**: For PRs with >500 additions or >10 files, architecture-agent launches automatically with `all`
-
-## Workflow Integration
-
-**Before committing:**
-```
-1. Write code
-2. Run: /review-pr code errors
-3. Fix critical issues
-4. Commit
-```
-
-**Before creating PR:**
-```
-1. Stage all changes
-2. Run: /review-pr all
-3. Address critical and important issues
-4. Run delegated reviews (security-expert, java-test-engineer, ts-test-engineer, etc.)
-5. Run: /review-pr simplify
-6. Create PR with /finalize
-```
-
-**Wave-gate integration:**
-```
-# Wave-gate spawns review sub-agents directly per task
-# Each sub-agent reviews scoped files and produces Machine Summary output
+/review-pr comments --files README.md,docs/architecture.md
+/review-pr all --dry-run
 ```

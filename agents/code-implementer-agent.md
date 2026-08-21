@@ -1,5 +1,7 @@
 ---
 name: code-implementer-agent
+model-profile: implementation
+model: opus
 description: Implementation agent for Java/Spring Boot or TypeScript/Next.js following FP, DDD, testability patterns
 color: blue
 skills:

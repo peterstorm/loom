@@ -1,5 +1,7 @@
 ---
 name: ts-test-agent
+model-profile: implementation
+model: opus
 description: TypeScript testing agent for Vitest, React Testing Library, Playwright, fast-check
 color: green
 skills:

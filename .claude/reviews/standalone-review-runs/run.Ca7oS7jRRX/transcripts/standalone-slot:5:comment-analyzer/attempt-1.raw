@@ -1,0 +1,18 @@
+Line numbers confirmed. Now producing the final Loom-format result.
+
+### Machine Summary
+CRITICAL_COUNT: 0
+ADVISORY_COUNT: 3
+ADVISORY: skills/code-implementer/SKILL.md:11 tells the reader to use `/architecture-tech-lead` as a slash command, but no such command is registered — commands/ has no architecture-tech-lead.md, and skills/deepen/SKILL.md correctly refers to the same target without a leading slash as a Skill/Agent, not a command.
+ADVISORY: engine/src/handlers/helpers/programs/helpers.ts:357-366's doc comment for renderSpawnTask omits the optional `LOOM_REVIEW_CONTEXT: standalone` marker line the function actually prepends when `options.standalone` is true, and its claim that authority alone determines the task text ignores that `instruction` and `options.standalone` also shape the output.
+ADVISORY: engine/src/handlers/helpers/programs/helpers.ts:100's doc comment describes `CanonicalChangedPaths.unstaged` as paths "not represented by HEAD," but the tracked-unstaged subset (from `git diff --name-only`) is paths whose HEAD entry exists and only differs in content, so the phrase only accurately describes the untracked half of the union.
+
+```findings
+[
+  { "severity": "advisory", "file": "skills/code-implementer/SKILL.md", "line": 11, "claim": "skills/code-implementer/SKILL.md:11 tells the reader to use `/architecture-tech-lead` as a slash command, but no such command is registered — commands/ has no architecture-tech-lead.md, and skills/deepen/SKILL.md correctly refers to the same target without a leading slash as a Skill/Agent, not a command." },
+  { "severity": "advisory", "file": "engine/src/handlers/helpers/programs/helpers.ts", "line": 357, "claim": "engine/src/handlers/helpers/programs/helpers.ts:357-366's doc comment for renderSpawnTask omits the optional `LOOM_REVIEW_CONTEXT: standalone` marker line the function actually prepends when `options.standalone` is true, and its claim that authority alone determines the task text ignores that `instruction` and `options.standalone` also shape the output." },
+  { "severity": "advisory", "file": "engine/src/handlers/helpers/programs/helpers.ts", "line": 100, "claim": "engine/src/handlers/helpers/programs/helpers.ts:100's doc comment describes `CanonicalChangedPaths.unstaged` as paths \"not represented by HEAD,\" but the tracked-unstaged subset (from `git diff --name-only`) is paths whose HEAD entry exists and only differs in content, so the phrase only accurately describes the untracked half of the union." }
+]
+```
+
+Positive findings worth noting for the record (not part of the wire contract, informational only): the frozen scope is unusually well-documented. `engine/src/core/model-profiles.ts`'s `AGENT_CATALOG` doc comment claims exhaustiveness over `agents/*.md` and the catalog keys match all 28 agent files exactly; `agents/README.md`'s per-kind tables (phase/panel/impl/reviewer/utility) match the catalog's `AgentKind` partition exactly, including counts; the `requiredSkillMarker` doc's three worked examples (`code-simplifier → distill`, `architecture-tech-lead → deepen`, `spec-check-invoker → spec-check`) all check out against the catalog; and the large test file's inline "why" comments (skew-guard rationale, containment-boundary rationale, fail-closed backstop rationale) all matched the test bodies they annotate.

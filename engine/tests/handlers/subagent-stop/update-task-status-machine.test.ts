@@ -65,9 +65,9 @@ function writeState(
   return statePath;
 }
 
-const implTask = (id: string): Record<string, unknown> => ({
+const implTask = (id: string, newTestsRequired = true): Record<string, unknown> => ({
   id, description: "impl", agent: "code-implementer-agent",
-  wave: 1, status: "pending", depends_on: [], new_tests_required: true,
+  wave: 1, status: "pending", depends_on: [], new_tests_required: newTestsRequired,
 });
 
 function pointSessionAt(session: string, statePath: string): void {
@@ -105,7 +105,7 @@ describe("capVerdictForMachineCompletion (pure)", () => {
     expect(capped.result).toEqual({
       verdict: "untrusted",
       passed: true,
-      label: "machine-incomplete: TestRunPassed ≥ 2",
+      label: "machine-incomplete: TestRunPassed ≥ 2", provenance: "unverified" as const,
     });
     expect(capped.evidence).toContain("machine-incomplete: TestRunPassed ≥ 2");
     expect(capped.evidence).toContain("ledger: exit 0");
@@ -122,7 +122,7 @@ describe("capVerdictForMachineCompletion (pure)", () => {
 
   it("untrusted resolutions are already at the floor — untouched", () => {
     const untrusted = {
-      result: { verdict: "untrusted" as const, passed: true, label: "transcript-regex (fallback)" },
+      result: { verdict: "untrusted" as const, passed: true, label: "transcript-regex (fallback)", provenance: "unverified" as const },
       evidence: "vitest: Tests 5 passed",
     };
     expect(capVerdictForMachineCompletion(untrusted, missing)).toBe(untrusted);
@@ -152,11 +152,12 @@ describe("machine terminal requirements gate the persisted verdict (Fix 7)", () 
     expect(text).toContain("unmet terminal requirements");
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.tasks[0].status).toBe("implemented");
+    expect(state.tasks[0].status).toBe("pending");
+    expect(state.tasks[0].proof.state).toBe("failed");
     expect(state.tasks[0].test_result).toEqual({
       verdict: "untrusted",
       passed: true,
-      label: "machine-incomplete: TestRunPassed ≥ 2",
+      label: "machine-incomplete: TestRunPassed ≥ 2", provenance: "unverified" as const,
     });
   }, 30000);
 
@@ -190,7 +191,7 @@ describe("wave-completion gate write (round-17 A1 pin)", () => {
   it("resolving the last task of a wave stamps impl_complete=true", async () => {
     const s = sid("wave-done");
     const dir = tempDir();
-    const statePath = writeState(dir, [implTask("T1")], ["T1"]);
+    const statePath = writeState(dir, [implTask("T1", false)], ["T1"]);
     pointSessionAt(s, statePath);
 
     const snapshot: readonly EvidenceRecord[] = [
@@ -210,7 +211,7 @@ describe("wave-completion gate write (round-17 A1 pin)", () => {
     const s = sid("wave-partial");
     const dir = tempDir();
     // T1 executing and resolved; T2 still pending in the same wave.
-    const statePath = writeState(dir, [implTask("T1"), implTask("T2")], ["T1"]);
+    const statePath = writeState(dir, [implTask("T1", false), implTask("T2")], ["T1"]);
     pointSessionAt(s, statePath);
 
     const snapshot: readonly EvidenceRecord[] = [

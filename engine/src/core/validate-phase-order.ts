@@ -1,22 +1,44 @@
 /**
  * Core: Enforce phase ordering during loom orchestration.
- * Harness-agnostic — no stdin parsing. Not pure: reads the filesystem
- * (existsSync/readFileSync).
+ * Harness-agnostic — no stdin parsing, and no filesystem imports: BOTH
+ * categories of I/O this gate needs (the protected-state read and the phase
+ * artifact probes) arrive as injected ports, so the decision logic is data-in /
+ * data-out and can be exercised with in-memory fixtures.
  *
- * Re-exports detectPhase and checkArtifacts from the original handler
- * for backwards compatibility.
+ * Definition site of `detectPhase` and `checkArtifacts`. `core/index.ts` and the
+ * `handlers/pre-tool-use/validate-phase-order` wrapper re-export them onward, so
+ * import sites that predate the move keep working.
  */
 
-import { existsSync, readFileSync } from "node:fs";
 import { match } from "ts-pattern";
-import type { HookResult, Phase } from "../types";
+import type { HookResult, Phase, TaskGraph } from "../types";
 import {
-  TASK_GRAPH_PATH, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
-  UTILITY_AGENTS, VALID_TRANSITIONS, CLARIFY_THRESHOLD,
+  PHASE_AGENT_MAP, isImplAgent, REVIEW_AGENTS,
+  REVIEW_PANEL_AGENTS, UTILITY_AGENTS, VALID_TRANSITIONS, CLARIFY_THRESHOLD,
+  ARCH_PANEL_AGENTS, ARCH_PANEL_PHASE, isStandaloneReviewAgent,
 } from "../config";
-import { StateManager } from "../state-manager";
 import { stripNamespace } from "../utils/strip-namespace";
-import { findFile } from "../utils/find-file";
+import { hasStandaloneReviewContext } from "./review-output";
+
+/**
+ * The phase-artifact reads this gate needs, injected rather than imported.
+ *
+ * The state read was already a seam (`PhaseOrderDeps.loadState`) so the gate
+ * could not acquire `StateManager`'s write capability. Artifact existence and
+ * content were not, which left `existsSync`/`readFileSync` in the middle of the
+ * decision logic: the rule that decides which artifact a phase transition
+ * requires could only be observed by writing real files into a real temp
+ * directory. Both categories are now ports; the shell supplies the real
+ * implementations.
+ */
+export interface ArtifactProbe {
+  /** True when the path exists; readability is established by `readText`. */
+  readonly exists: (path: string) => boolean;
+  /** Artifact contents as UTF-8. Throws like `readFileSync` when unreadable. */
+  readonly readText: (path: string) => string;
+  /** Locate `filename` beneath `dir`, or null when absent. */
+  readonly findFile: (dir: string, filename: string) => string | null;
+}
 
 /**
  * Resolves an artifact reference to an existing file path.
@@ -27,13 +49,17 @@ import { findFile } from "../utils/find-file";
  * Falls back to the explicit file field (spec_file/plan_file) when the artifact
  * isn't a valid path.
  */
-function resolveArtifact(artifact: string | undefined, fallback: string | null): string | null {
+function resolveArtifact(
+  artifact: string | undefined,
+  fallback: string | null,
+  probe: ArtifactProbe,
+): string | null {
   // If artifact is a real file path that exists, use it
-  if (artifact && artifact !== "completed" && existsSync(artifact)) {
+  if (artifact && artifact !== "completed" && probe.exists(artifact)) {
     return artifact;
   }
   // Fall back to the explicit field
-  if (fallback && existsSync(fallback)) {
+  if (fallback && probe.exists(fallback)) {
     return fallback;
   }
   return null;
@@ -44,9 +70,39 @@ export interface ValidatePhaseOrderInput {
   prompt: string;      // task prompt
 }
 
+export function isPanelAgent(agent: string): boolean {
+  return ARCH_PANEL_AGENTS.has(agent) || ARCH_PANEL_AGENTS.has(agent + "-agent");
+}
+
+export function canRunPanelAgent(currentPhase: Phase): boolean {
+  return currentPhase === ARCH_PANEL_PHASE;
+}
+
+/** Refutation-panel verifiers run inside the wave gate, so they are
+ *  execute-phase work — recognized here (bare or `-agent`-suffixed, like every
+ *  other set) but absent from REVIEW_SUB_AGENTS so the SubagentStop dispatcher
+ *  never parses them for findings they do not emit. */
+export function isReviewPanelAgent(agent: string): boolean {
+  return REVIEW_PANEL_AGENTS.has(agent) || REVIEW_PANEL_AGENTS.has(agent + "-agent");
+}
+
 export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
-  if (PHASE_AGENT_MAP[agent]) return PHASE_AGENT_MAP[agent]; if (PHASE_AGENT_MAP[agent + "-agent"]) return PHASE_AGENT_MAP[agent + "-agent"];
-  if (IMPL_AGENTS.has(agent) || IMPL_AGENTS.has(agent + "-agent") || REVIEW_AGENTS.has(agent) || REVIEW_AGENTS.has(agent + "-agent")) return "execute";
+  // Bound to a local rather than re-indexed: the map's value type is now
+  // honestly `Phase | undefined`, so the guard and the returned value are the
+  // same narrowed binding instead of two lookups the compiler must trust to
+  // agree.
+  const direct = PHASE_AGENT_MAP[agent];
+  if (direct) return direct;
+  const suffixed = PHASE_AGENT_MAP[agent + "-agent"];
+  if (suffixed) return suffixed;
+  if (isImplAgent(agent) || REVIEW_AGENTS.has(agent) || REVIEW_AGENTS.has(agent + "-agent")) return "execute";
+  if (isReviewPanelAgent(agent)) return "execute";
+  // Architecture-panel agents (--panel) are architecture-phase work. Recognized
+  // here so validate-phase-order allows them, but never added to PHASE_AGENT_MAP
+  // (advance-phase must ignore them — only architecture-agent advances the phase).
+  // ARCH_PANEL_PHASE (config) is the single source for this classification so it
+  // cannot drift from ARCH_PANEL_AGENTS.
+  if (isPanelAgent(agent)) return ARCH_PANEL_PHASE;
 
   if (/brainstorm|explore.*intent|refine.*idea/i.test(prompt)) return "brainstorm";
   if (/specify|specification|requirements|spec\.md/i.test(prompt)) return "specify";
@@ -57,59 +113,74 @@ export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   return "unknown";
 }
 
+/** `readonly` throughout, like its siblings `ArtifactProbe` and
+ *  `PhaseOrderDeps`: this is the gate's DECISION INPUT, and a decision input a
+ *  checker can reassign in place is one the next checker may read differently. */
 export interface ArtifactState {
-  skipped_phases: Phase[];
-  phase_artifacts: Partial<Record<Phase, string>>;
-  spec_file: string | null;
-  plan_file: string | null;
-  spec_dir?: string | null;
+  readonly skipped_phases: readonly Phase[];
+  readonly phase_artifacts: Readonly<Partial<Record<Phase, string>>>;
+  readonly spec_file: string | null;
+  readonly plan_file: string | null;
+  readonly spec_dir?: string | null;
 }
 
-function checkPlanAlignmentGate(state: ArtifactState): string | null {
-  const plan = resolveArtifact(state.phase_artifacts.architecture, state.plan_file);
+function checkPlanAlignmentGate(state: ArtifactState, probe: ArtifactProbe): string | null {
+  const plan = resolveArtifact(state.phase_artifacts.architecture, state.plan_file, probe);
   if (!plan) return "architecture (no plan.md found)";
   if (!state.skipped_phases.includes("plan-alignment")) {
     const specDir = state.spec_dir ?? ".claude/specs";
-    if (!findFile(specDir, "plan-alignment.md")) {
+    if (!probe.findFile(specDir, "plan-alignment.md")) {
       return "plan-alignment (no plan-alignment.md found)";
     }
   }
   return null;
 }
 
-export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string | null {
+/**
+ * The spec artifact, or the reason it is missing.
+ *
+ * `clarify` and `architecture` both gate on "specify produced a readable
+ * spec.md", and both used to spell out the same declared-artifact →
+ * spec_file → spec_dir search and the same failure string. One rule, one
+ * resolution: a change to where a spec may live cannot now reach one gate and
+ * not the other.
+ */
+function resolveSpecArtifact(
+  state: ArtifactState,
+  probe: ArtifactProbe,
+): Readonly<{ ok: true; spec: string }> | Readonly<{ ok: false; missing: string }> {
+  const declared = resolveArtifact(state.phase_artifacts.specify, state.spec_file, probe);
+  // Only fall back to disk search if spec_dir is explicitly set
+  const spec = declared ?? (state.spec_dir ? probe.findFile(state.spec_dir, "spec.md") : null);
+  return spec && probe.exists(spec)
+    ? { ok: true, spec }
+    : { ok: false, missing: "specify (no spec.md found)" };
+}
+
+export function checkArtifacts(
+  targetPhase: Phase,
+  state: ArtifactState,
+  probe: ArtifactProbe,
+): string | null {
   return match(targetPhase)
     .with("specify", () => {
       if (state.skipped_phases.includes("brainstorm")) return null;
       const specDir = state.spec_dir ?? ".claude/specs";
-      if (!findFile(specDir, "brainstorm.md")) {
+      if (!probe.findFile(specDir, "brainstorm.md")) {
         return `brainstorm (no brainstorm.md found in ${specDir})`;
       }
       return null;
     })
     .with("clarify", () => {
-      let spec = resolveArtifact(state.phase_artifacts.specify, state.spec_file);
-      if (!spec) {
-        // Only fall back to disk search if spec_dir is explicitly set
-        if (state.spec_dir) {
-          spec = findFile(state.spec_dir, "spec.md");
-        }
-      }
-      if (!spec || !existsSync(spec)) return "specify (no spec.md found)";
-      return null;
+      const resolved = resolveSpecArtifact(state, probe);
+      return resolved.ok ? null : resolved.missing;
     })
     .with("architecture", () => {
-      let spec = resolveArtifact(state.phase_artifacts.specify, state.spec_file);
-      if (!spec) {
-        // Only fall back to disk search if spec_dir is explicitly set
-        if (state.spec_dir) {
-          spec = findFile(state.spec_dir, "spec.md");
-        }
-      }
-      if (!spec || !existsSync(spec)) return "specify (no spec.md found)";
+      const resolved = resolveSpecArtifact(state, probe);
+      if (!resolved.ok) return resolved.missing;
       if (!state.skipped_phases.includes("clarify")) {
         try {
-          const content = readFileSync(spec, "utf-8");
+          const content = probe.readText(resolved.spec);
           const markers = (content.match(/NEEDS CLARIFICATION/g) ?? []).length;
           if (markers > CLARIFY_THRESHOLD) return `clarify (${markers} markers > ${CLARIFY_THRESHOLD})`;
         } catch (e) {
@@ -119,21 +190,59 @@ export function checkArtifacts(targetPhase: Phase, state: ArtifactState): string
       return null;
     })
     .with("plan-alignment", () => {
-      const plan = resolveArtifact(state.phase_artifacts.architecture, state.plan_file);
+      const plan = resolveArtifact(state.phase_artifacts.architecture, state.plan_file, probe);
       if (!plan) return "architecture (no plan.md found)";
       return null;
     })
-    .with("decompose", () => checkPlanAlignmentGate(state))
-    .with("execute", () => checkPlanAlignmentGate(state))
+    .with("decompose", () => checkPlanAlignmentGate(state, probe))
+    .with("execute", () => checkPlanAlignmentGate(state, probe))
     .with("init", () => null)
     .with("brainstorm", () => null)
     .exhaustive();
 }
 
-export function validatePhaseOrder(input: ValidatePhaseOrderInput): HookResult {
-  if (!existsSync(TASK_GRAPH_PATH)) return { kind: "allow" };
+/**
+ * The protected-state read this gate needs, injected rather than imported.
+ *
+ * `StateManager` is the sole writer of the protected task graph, and a gate
+ * that imports it acquires — in type terms — the ability to write the state it
+ * is meant to judge. Passing a read seam keeps that capability in the shell
+ * and lets this module be exercised without a real state file. The shell
+ * supplies `realPhaseOrderDeps`; nothing else may.
+ */
+export interface PhaseOrderDeps {
+  /**
+   * Loaded protected graph, or null when there is no active plan.
+   *
+   * `null` is the ALLOW answer, so the shell must return it only when absence
+   * is proven (ENOENT). An unreadable-but-present graph must raise, never
+   * report "no plan" — see `realPhaseOrderDeps`.
+   */
+  readonly loadState: () => TaskGraph | null;
+  /** Phase-artifact existence and content reads. */
+  readonly artifacts: ArtifactProbe;
+}
 
+export function validatePhaseOrder(
+  input: ValidatePhaseOrderInput,
+  deps: PhaseOrderDeps,
+): HookResult {
   const bareAgent = stripNamespace(input.agentType);
+  // A standalone review is an isolated run artifact, but the marker is prompt
+  // text supplied across a harness boundary. Only the closed review/verifier
+  // roster may exercise that authority; every other use fails loudly.
+  if (hasStandaloneReviewContext(input.prompt)) {
+    return isStandaloneReviewAgent(bareAgent)
+      ? { kind: "allow" }
+      : {
+          kind: "block",
+          message: `BLOCKED: Agent ${input.agentType} is not authorized for LOOM_REVIEW_CONTEXT: standalone.`,
+        };
+  }
+  // No active plan → nothing to order. The shell decides what "no state"
+  // means; this gate only reacts to the answer.
+  const loadedState = deps.loadState();
+  if (loadedState === null) return { kind: "allow" };
 
   // Allow utility agents
   if (UTILITY_AGENTS.has(bareAgent) || UTILITY_AGENTS.has(bareAgent + "-agent")) return { kind: "allow" };
@@ -155,10 +264,24 @@ export function validatePhaseOrder(input: ValidatePhaseOrderInput): HookResult {
     };
   }
 
-  const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
-  if (!mgr) return { kind: "allow" };
-  const state = mgr.load();
+  const state = loadedState;
   const currentPhase: Phase = state.current_phase ?? "init";
+
+  // Panel mode is an architecture-only fan-out. Generic transition rules allow
+  // plan-alignment → architecture for the standard single-agent loop-back, but
+  // that must never reopen the expensive panel workflow.
+  if (isPanelAgent(bareAgent) && !canRunPanelAgent(currentPhase)) {
+    return {
+      kind: "block",
+      message: [
+        "BLOCKED: Architecture panel agents may run only during the architecture phase.",
+        "",
+        `Agent: ${input.agentType}`,
+        `Current phase: ${currentPhase}`,
+        "Plan-alignment loop-backs must use architecture-agent (single-agent mode).",
+      ].join("\n"),
+    };
+  }
 
   // Validate transition
   const allowed = VALID_TRANSITIONS[currentPhase] ?? [];
@@ -186,7 +309,7 @@ export function validatePhaseOrder(input: ValidatePhaseOrderInput): HookResult {
   }
 
   // Check artifact requirements
-  const missing = checkArtifacts(targetPhase, state);
+  const missing = checkArtifacts(targetPhase, state, deps.artifacts);
   if (missing) {
     return {
       kind: "block",

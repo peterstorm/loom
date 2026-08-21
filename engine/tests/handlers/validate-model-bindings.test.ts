@@ -23,10 +23,14 @@ function expectError(r: { ok: true } | { ok: false; errors: readonly string[] },
 
 const NO_MODELS: PlanModels = { lifecycles: [], pipeline: null, invariants: [], strays: [] };
 
-const NO_FILES: ModelBindingDeps = { readFile: () => null };
+const NO_FILES: ModelBindingDeps = { readFile: (path) => ({ ok: false, error: `ENOENT: ${path}` }) };
 
 function depsWith(files: Record<string, string>): ModelBindingDeps {
-  return { readFile: (p: string) => files[p] ?? null };
+  return {
+    readFile: (path) => path in files
+      ? { ok: true, content: files[path]! }
+      : { ok: false, error: `ENOENT: ${path}` },
+  };
 }
 
 function task(overrides: Record<string, unknown>): Record<string, unknown> {
@@ -124,7 +128,7 @@ describe("validateModelBindings", () => {
 
     it("rejects a missing AuthoredDag file", () => {
       const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "plans/x.dag.authored.json", declaredNodes: [] } };
-      expectError(validateModelBindings(models, [], NO_FILES), "not found or unreadable");
+      expectError(validateModelBindings(models, [], NO_FILES), "cannot read AuthoredDag");
     });
 
     it("rejects invalid JSON and preserves the parse error detail", () => {
@@ -167,47 +171,72 @@ describe("validateModelBindings", () => {
       expectError(result, "have drifted");
       expect(errorsOf(result).some((e) => e.includes("fetch"))).toBe(true);
     });
+
+    it("does not accept a declared node name found only in node metadata", () => {
+      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "x.json", declaredNodes: ["review"] } };
+      const dag = JSON.stringify({ nodes: [{ id: "fetch", description: "then review" }] });
+      expectError(validateModelBindings(models, [], depsWith({ "x.json": dag })), "have drifted");
+    });
+
+    it.each([
+      [{ nodes: ["fetch"] }, "nodes[0] must be an object"],
+      [{ nodes: [{ kind: "fetch" }] }, "nodes[0].id"],
+      [{ nodes: [{ id: " fetch " }] }, "surrounding whitespace"],
+      [{ nodes: [{ id: "fetch" }, { id: "fetch" }] }, "duplicates 'fetch'"],
+    ])("rejects malformed or duplicate AuthoredDag node identities", (dag, message) => {
+      const models: PlanModels = { ...NO_MODELS, pipeline: { dagFile: "x.json", declaredNodes: [] } };
+      expectError(validateModelBindings(models, [], depsWith({ "x.json": JSON.stringify(dag) })), message);
+    });
   });
 
   describe("invariants", () => {
-    it("rejects a missing/unrecognized tier", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: null, ruleFile: null }] };
-      expectError(validateModelBindings(models, [], NO_FILES), "'checkable' or 'advisory'");
+    it("rejects a missing tier with the missing-specific message", () => {
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "absent" }, ruleFile: null }] };
+      const result = validateModelBindings(models, [], NO_FILES);
+      expectError(result, "missing '**Tier:**'");
+      expectError(result, "'checkable' or 'advisory'");
+    });
+
+    it("rejects an unrecognized tier, naming the raw text it saw", () => {
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "unrecognized", raw: "enforced-ish" }, ruleFile: null }] };
+      const result = validateModelBindings(models, [], NO_FILES);
+      expectError(result, "unrecognized '**Tier:**' 'enforced-ish'");
+      expectError(result, "'checkable' or 'advisory'");
     });
 
     it("rejects a checkable invariant with no rule file", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: "checkable", ruleFile: null }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: null }] };
       expectError(validateModelBindings(models, [], NO_FILES), "must be a lint rule");
     });
 
     it("rejects an ADVISORY invariant that declares a rule file (mis-tiered intent)", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: "advisory", ruleFile: "r.json" }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "advisory" }, ruleFile: "r.json" }] };
       expectError(validateModelBindings(models, [], NO_FILES), "advisory invariants are never enforced");
     });
 
     it("rejects a checkable invariant whose rule file does not exist", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: "checkable", ruleFile: ".claude/linter/rules/inv-1.json" }] };
-      expectError(validateModelBindings(models, [], NO_FILES), "not found or unreadable");
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: ".claude/linter/rules/inv-1.json" }] };
+      expectError(validateModelBindings(models, [], NO_FILES), "cannot read rule file");
     });
 
     it("rejects a rule file that is not a rule-shaped JSON object", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: "checkable", ruleFile: "r.json" }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: "r.json" }] };
       expectError(validateModelBindings(models, [], depsWith({ "r.json": JSON.stringify({ pattern: "x" }) })), "'kind' and 'name'");
     });
 
     it("rejects a rule file with invalid JSON and preserves the parse error", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: "checkable", ruleFile: "r.json" }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: "r.json" }] };
       expectError(validateModelBindings(models, [], depsWith({ "r.json": "{{" })), "not valid JSON:");
     });
 
     it("accepts a checkable invariant bound to an existing rule file", () => {
       const rule = JSON.stringify({ kind: "regex", name: "inv-1", description: "d", extensions: [".ts"], pattern: "x", fixHint: "f", enabled: true });
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: "checkable", ruleFile: "r.json" }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: "r.json" }] };
       expect(validateModelBindings(models, [], depsWith({ "r.json": rule })).ok).toBe(true);
     });
 
     it("accepts an advisory invariant with no rule file (honest prose)", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-2", title: "SLA", tier: "advisory", ruleFile: null }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-2", title: "SLA", tier: { status: "ok", tier: "advisory" }, ruleFile: null }] };
       expect(validateModelBindings(models, [], NO_FILES).ok).toBe(true);
     });
   });
@@ -216,7 +245,7 @@ describe("validateModelBindings", () => {
     const models: PlanModels = {
       lifecycles: [{ id: "LC-1", title: "A", machineFile: null }],
       pipeline: { dagFile: null, declaredNodes: [] },
-      invariants: [{ id: "INV-1", title: "B", tier: "checkable", ruleFile: null }],
+      invariants: [{ id: "INV-1", title: "B", tier: { status: "ok", tier: "checkable" }, ruleFile: null }],
       strays: [{ kind: "near-miss-heading", heading: "## Lifecycles:" }],
     };
     expect(errorsOf(validateModelBindings(models, [], NO_FILES))).toHaveLength(4);
@@ -232,8 +261,10 @@ describe("checkPlanModelBindings (fail-closed entry point)", () => {
     expectError(checkPlanModelBindings("  ", [], NO_FILES), "plan_file must be a non-empty string");
   });
 
-  it("errors when the plan file is unreadable — a typo'd path must not disarm the gate", () => {
-    expectError(checkPlanModelBindings("/nonexistent/plan.md", [], NO_FILES), "not found or unreadable");
+  it("errors with the concrete read cause when the plan file is unavailable", () => {
+    const result = checkPlanModelBindings("/nonexistent/plan.md", [], NO_FILES);
+    expectError(result, "cannot read plan_file");
+    expectError(result, "ENOENT: /nonexistent/plan.md");
   });
 
   it("passes when the plan is readable and declares no models (genuine opt-out)", () => {
@@ -270,10 +301,13 @@ describe("validate-task-graph handler integration (plan file on disk)", () => {
 
   function graphJson(planFile: unknown, fileList: string[]): string {
     return JSON.stringify({
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
       plan_title: "t",
       spec_file: "spec.md",
       plan_file: planFile,
-      tasks: [{ id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [], spec_anchors: [], new_tests_required: true, plan_context: "", file_list: fileList }],
+      tasks: [{ id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], spec_anchors: [], new_tests_required: true, plan_context: "", file_list: fileList }],
     });
   }
 
@@ -294,10 +328,13 @@ describe("validate-task-graph handler integration (plan file on disk)", () => {
     if (result.kind === "error") expect(result.message).toContain("LC-1");
   });
 
-  it("FAILS CLOSED when plan_file does not exist", async () => {
+  it("FAILS CLOSED with the filesystem cause when plan_file does not exist", async () => {
     const result = await handler(graphJson("/nonexistent/plan.md", []), ["-"]);
     expect(result.kind).toBe("error");
-    if (result.kind === "error") expect(result.message).toContain("not found or unreadable");
+    if (result.kind === "error") {
+      expect(result.message).toContain("cannot read plan_file");
+      expect(result.message).toMatch(/ENOENT|no such file/i);
+    }
   });
 
   it("rejects a non-string plan_file at schema level (no silent skip)", async () => {
@@ -459,6 +496,7 @@ describe("validateFull path-field type checks", () => {
   it("rejects non-string spec_file and plan_title", async () => {
     const { validateFull } = await import("../../src/handlers/helpers/validate-task-graph");
     const base = {
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
       plan_title: "t", plan_file: "p.md", spec_file: "s.md",
       tasks: [{ id: "T1", description: "x", agent: "code-implementer-agent", wave: 1, depends_on: [] }],
     };

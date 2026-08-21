@@ -11,9 +11,7 @@ import {
   lintErrorResult,
   type RegexRule,
   type ProgrammaticRule,
-  type Rule,
   type Violation,
-  type LintResult,
 } from "../../src/linter/types";
 
 // --- Fixtures ---

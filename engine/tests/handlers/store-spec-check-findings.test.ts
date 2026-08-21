@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseSpecCheckOutput } from "../../src/handlers/subagent-stop/store-spec-check-findings";
 import handler from "../../src/handlers/subagent-stop/store-spec-check-findings";
+import { projectSlug } from "../../src/utils/agent-transcript-path";
+import { reconcileSpecCheck } from "../../src/core/spec-check";
 
 describe("parseSpecCheckOutput (pure)", () => {
   it("parses all severity levels", () => {
@@ -54,6 +56,74 @@ describe("parseSpecCheckOutput (pure)", () => {
     const result = parseSpecCheckOutput(output);
     expect(result.critical).toHaveLength(2);
     expect(result.high).toHaveLength(3);
+  });
+
+  it("fails evidence reconciliation when the required verdict marker is absent", () => {
+    const parsed = parseSpecCheckOutput([
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+    ].join("\n"));
+
+    const resolution = reconcileSpecCheck(parsed, 1, "now");
+    expect(resolution).toEqual({
+      kind: "evidence-failed",
+      specCheck: {
+        wave: 1,
+        run_at: "now",
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: "SPEC_CHECK_VERDICT marker not found - re-run /wave-gate",
+      },
+    });
+  });
+
+  it("fails evidence reconciliation when the required high-count marker is absent", () => {
+    // A transcript truncated after CRITICAL_COUNT and VERDICT carries no HIGH:
+    // lines either, so coercing the missing marker to 0 made the count agree
+    // with the itemization and recorded a truncated report as a clean one.
+    const parsed = parseSpecCheckOutput([
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+    ].join("\n"));
+
+    const resolution = reconcileSpecCheck(parsed, 1, "now");
+    expect(resolution).toEqual({
+      kind: "evidence-failed",
+      specCheck: {
+        wave: 1,
+        run_at: "now",
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: "SPEC_CHECK_HIGH_COUNT marker not found - re-run /wave-gate",
+      },
+    });
+  });
+
+  it("captures a genuinely clean report that emits all three markers", () => {
+    const parsed = parseSpecCheckOutput([
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+    ].join("\n"));
+
+    const resolution = reconcileSpecCheck(parsed, 1, "now");
+    expect(resolution.kind).toBe("captured");
+    if (resolution.kind !== "captured") return;
+    expect(resolution.specCheck.high_count).toBe(0);
+    expect(resolution.specCheck.verdict).toBe("PASSED");
+  });
+
+  it("fails evidence reconciliation when the high count drifts from HIGH lines", () => {
+    const parsed = parseSpecCheckOutput([
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+      "HIGH: uncounted risk",
+    ].join("\n"));
+
+    const resolution = reconcileSpecCheck(parsed, 1, "now");
+    expect(resolution.kind).toBe("evidence-failed");
+    if (resolution.kind === "evidence-failed") {
+      expect(resolution.specCheck.error).toContain("SPEC_CHECK_HIGH_COUNT");
+    }
   });
 
   it("finds last spec-check block, not skill template", () => {
@@ -221,6 +291,63 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       stderrSpy.mockRestore();
       rmSync(tmpDir, { recursive: true, force: true });
       rmSync(pointer, { force: true });
+    }
+  });
+
+  it("derives and consumes the transcript when agent_transcript_path is absent", async () => {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    const tmpDir = join(tmpdir(), `spec-check-derived-${Date.now()}`);
+    const configDir = join(tmpDir, "claude-config");
+    const projectDir = join(tmpDir, "project");
+    const statePath = join(tmpDir, "active_task_graph.json");
+    const session = `spec-check-derived-${process.pid}-${Date.now()}`;
+    const agentId = "a0a0057138606bfd0";
+    const transcriptDir = join(
+      configDir, "projects", projectSlug(projectDir), session, "subagents",
+    );
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    const previousConfig = process.env.CLAUDE_CONFIG_DIR;
+    const previousProject = process.env.CLAUDE_PROJECT_DIR;
+    mkdirSync(transcriptDir, { recursive: true });
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, current_wave: 2, tasks: [], wave_gates: {},
+    }));
+    writeFileSync(pointer, statePath);
+    writeFileSync(join(transcriptDir, `agent-${agentId}.jsonl`), JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "text",
+          text: "SPEC_CHECK_WAVE: 2\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED",
+        }],
+      },
+    }));
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    process.env.CLAUDE_PROJECT_DIR = projectDir;
+
+    try {
+      const result = await handler(JSON.stringify({
+        session_id: session,
+        agent_id: agentId,
+        agent_type: "spec-check-invoker",
+      }), []);
+
+      expect(result.kind).toBe("passthrough");
+      const state = JSON.parse(readFileSync(statePath, "utf-8"));
+      expect(state.spec_check).toMatchObject({
+        wave: 2,
+        verdict: "PASSED",
+        critical_count: 0,
+      });
+    } finally {
+      if (previousConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousConfig;
+      if (previousProject === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = previousProject;
+      rmSync(pointer, { force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 

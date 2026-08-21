@@ -1,5 +1,51 @@
-import { describe, it, expect } from "vitest";
-import { countNewTests, countAssertions } from "../../src/utils/git";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, it, expect, vi } from "vitest";
+import { countNewTests, countAssertions, diffUntracked, mergeBase } from "../../src/utils/git";
+
+describe("git command diagnostics", () => {
+  it("reports array-argument git failures instead of returning empty silently", () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(mergeBase("definitely-missing-loom-test-ref")).toBeNull();
+      const output = stderr.mock.calls.map(([text]) => String(text)).join("");
+      expect(output).toContain("git warning: git");
+      expect(output).toContain("merge-base");
+      expect(output).toContain("definitely-missing-loom-test-ref");
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+});
+
+describe("diffUntracked", () => {
+  it("accepts exit 1 only when Git emitted an actual patch", () => {
+    const directory = mkdtempSync(join(tmpdir(), "loom-untracked-diff-"));
+    const file = join(directory, "new.test.ts");
+    try {
+      writeFileSync(file, "export const answer = 42;\n");
+      const result = diffUntracked(file);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.diff).toContain("diff --git");
+        expect(result.diff).toContain("+export const answer = 42;");
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("returns typed failure when the untracked path cannot be read", () => {
+    const missing = join(tmpdir(), `loom-missing-untracked-${process.pid}-${Date.now()}.ts`);
+    const result = diffUntracked(missing);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("git diff --no-index");
+      expect(result.error).toContain(missing);
+    }
+  });
+});
 
 describe("countNewTests (pure)", () => {
   it("counts Java @Test annotations", () => {

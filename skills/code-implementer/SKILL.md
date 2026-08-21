@@ -8,7 +8,7 @@ description: "This skill should be used when the user asks to 'implement', 'writ
 
 Expert implementation guidance ensuring code follows FP principles, DDD patterns, and is designed for maximum testability.
 
-**This is an IMPLEMENTATION skill** — write production code following the architectural patterns in the rules below. For design decisions and architectural review, use `/architecture-tech-lead` instead.
+**This is an IMPLEMENTATION skill** — write production code following the architectural patterns in the rules below. For design decisions and architectural review, use the `architecture-tech-lead` skill instead.
 
 ## Context Loading
 
@@ -86,6 +86,8 @@ After writing code, verify:
 - [ ] **Invariants enforced**: Constructors validate? Invalid states unrepresentable?
 - [ ] **Error paths typed**: Using Either/Result? No hidden throws?
 - [ ] **Testable without mocks**: Can test core logic with plain data?
+- [ ] **Distilled**: Run a `distill` apply-mode pass over the new code — reuse before rewrite, no dead/speculative code, no pass-throughs, right altitude. Tests stay green after each move.
+- [ ] **Deep enough**: Check the new modules with the `deepen` lens — deletion test on every wrapper, interfaces narrower than their implementations, no seam without two adapters (production + test). Interfaces you created in this task, fix now; shallowness in pre-existing interfaces, report as a recommended `deepen` session — never redesign it inline.
 
 ---
 

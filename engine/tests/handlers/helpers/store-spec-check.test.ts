@@ -47,6 +47,7 @@ describe("store-spec-check helper", () => {
       cwd: tmpDir,
       encoding: "utf-8",
       input: stdin,
+      env: { ...process.env, LOOM_STATE_PATH: statePath },
     });
     return { exitCode: result.status ?? -1, stderr: result.stderr ?? "" };
   }
@@ -80,6 +81,7 @@ describe("store-spec-check helper", () => {
     const { exitCode, stderr } = runHelper(
       [
         "SPEC_CHECK_CRITICAL_COUNT: 0",
+        "SPEC_CHECK_HIGH_COUNT: 0",
         "SPEC_CHECK_VERDICT: PASSED",
         "CRITICAL: requirement REQ-1 not implemented",
       ].join("\n"),

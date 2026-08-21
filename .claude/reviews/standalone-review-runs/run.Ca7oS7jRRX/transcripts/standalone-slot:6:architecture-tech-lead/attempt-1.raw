@@ -1,0 +1,54 @@
+## Executive Summary
+
+The reviewed scope is dominated by a genuinely well-executed pure functional core (`engine/src/core/model-profiles.ts`) — total functions, an ADT-shaped `AgentKind`/`PolicyResult`, a single declarative `AGENT_CATALOG` with derived projections, and typed `PolicyError` failures throughout, with zero I/O. The paired shell facade (`engine/src/handlers/helpers/programs/helpers.ts`) is explicitly documented as I/O-adjacent driver machinery, which is the correct place for `spawnSync`/filesystem work. Running the `deepen` skill in review mode (per this diff's own new wiring) over that facade surfaces one real fusion of business classification logic with I/O, and one interface whose name/documentation over-promises what its implementation checks.
+
+**Testability Score**: ~70% of the reviewed diff is easily unit-testable without mocks — `model-profiles.ts` is ~95% pure; `helpers.ts` is a shell module by design, but roughly half its exported functions (parsers, `requiredSkillMarker`, `renderSpawnTask`, `exactObject`) are already pure and cheaply testable, while the `metadata()` classifier below is the one exception worth deepening.
+
+**Top 3 priorities**
+1. Extract the pure scope-classification rules in `metadata()` from its I/O-bound additions fetch.
+2. Reconcile the `newStructure` heuristic's name/doc contract with what it actually measures.
+3. (No action needed) — `model-profiles.ts` needs no changes; hold it up as the reference shape for the rest of the facade.
+
+## Detailed Findings
+
+**Finding 1: `metadata()` fuses pure scope classification with an I/O-bound additions fetch** (Confidence: 78%)
+- **Location**: `engine/src/handlers/helpers/programs/helpers.ts:168-190`
+- **Problem**: `metadata()` computes several purely syntactic classifications (`docsOnly`, `sourceOrTestChanged`, `typesChanged`, `commentsChanged`, `newStructure`, `languages`) from `scope` alone, but also calls `trackedAdditions()`/`untrackedAdditions()` (line 179), which shell out to `git diff --numstat`. That single I/O call makes the whole function impure.
+- **Impact**: These classifications are exactly the policy `core/standalone-review.ts:299` uses to auto-select the `architecture-tech-lead` reviewer (`additions > 500 || fileCount > 10 || newStructure`) — a business rule, not incidental glue. Because it's fused to I/O, its only test coverage in this diff (`engine/tests/handlers/helpers/quality-programs.test.ts`, `standalone-review.test.ts`) is CLI/subprocess-level integration testing against real temp git repos, rather than a cheap table-driven unit test over plain data.
+- **Root Cause**: The additions count was pulled into the same function as the syntactic checks instead of being fetched by the shell and passed in.
+- **Deepening**: Split into a pure `classifyScope(kind, scope, changed, additions: number): StandaloneReviewMetadata` and keep `metadata()` as a thin shell wrapper that fetches `additions` via `trackedAdditions`/`untrackedAdditions` and forwards it — mirroring the `ShippingCalculator.calculate(order, warehouse, zone)` / orchestrator split already used elsewhere in this codebase's FC/IS convention.
+- **Benefits**: The reviewer auto-selection policy becomes directly unit-testable with plain `DerivedChangedPaths` fixtures and a literal `additions` number — no subprocess, no temp git repos. Locality improves: a bug in the `docsOnly` regex or the `newStructure` threshold would be caught by a one-line table test instead of requiring a full CLI integration run.
+- **Pattern**: FC/IS (Data Transformation Pattern: `fetch (I/O) → transform (pure) → return`).
+
+**Finding 2: `newStructure` is a path-depth proxy, not the "new structure" its name and documentation promise** (Confidence: 77%)
+- **Location**: `engine/src/handlers/helpers/programs/helpers.ts:188`; contract documented in `agents/architecture-tech-lead.md:4` ("auto-triggered by /review-pr for >500 additions, >10 files, or a new service, package, or migration")
+- **Problem**: The field is computed as `scope.some((path) => path.split("/").length >= 4)` — any path with four or more slash-separated segments, regardless of whether anything was actually newly created. It does not check file status (new vs. modified), nor detect a genuinely new package/service/migration.
+- **Impact**: In a codebase whose own source tree routinely nests five and six levels deep (e.g., `engine/src/handlers/helpers/programs/helpers.ts` itself), this heuristic is true for a large fraction of ordinary edits to existing deep files, not just genuine new-structure changes. It consumes the interface's promised semantic ("new structure") to drive the same `architecture-tech-lead` auto-select gate documented in Finding 1, but the two names diverge from what the code actually tests — a reader trusting the field name or the agent doc would misjudge when the gate fires.
+- **Root Cause**: A cheap syntactic proxy was chosen for a semantic condition, and the name/documentation weren't narrowed to match what the proxy actually detects.
+- **Deepening**: Either rename the field/behavior to what it measures (e.g., `deeplyNestedPath` with doc language describing the depth threshold), or, if "new structure" is truly the intent, deepen the check to consult `changed.untracked` / a rename-aware git status so it only fires on paths that didn't exist at the merge-base.
+- **Benefits**: Removes the interface-honesty gap between what the field is named/documented to mean and what it verifies, so the auto-selection policy in `core/standalone-review.ts:299` is driven by a signal a caller can trust from its name alone.
+- **Pattern**: Parse, Don't Validate / interface-contract honesty (deepen: "seam whose contract disagrees with its name").
+
+## Testing Strategy Impact
+
+Extracting `classifyScope` (Finding 1) lets the reviewer-selection policy be covered by a small, fast, mock-free unit suite instead of relying on the CLI-level integration tests already present — those integration tests remain valuable for the I/O wiring but stop being the only way to exercise the classification rules. Fixing Finding 2 (whichever direction is chosen) is a one-line change with an equally small pure test. No property-testing opportunity stands out here beyond simple table tests — the rules are finite boundary conditions (threshold comparisons, regex membership), not algebraic invariants.
+
+## Metrics
+
+- Current testability score (reviewed diff): ~70%
+- Projected score after both deepenings: ~85% (the two shell-adjacent business rules become pure and directly testable; the remaining ~15% is legitimate I/O — git subprocess calls, file reads, hashing — that correctly stays in the shell)
+- Coupling reduction: `core/standalone-review.ts`'s reviewer-selection policy would depend only on a pure `StandaloneReviewMetadata` value it can construct directly in tests, rather than transitively depending on `helpers.ts`'s git subprocess behavior to validate its own selection logic
+
+### Machine Summary
+CRITICAL_COUNT: 0
+ADVISORY_COUNT: 2
+CRITICAL:
+ADVISORY: metadata() in engine/src/handlers/helpers/programs/helpers.ts fuses pure scope classification (docsOnly, sourceOrTestChanged, newStructure, languages) with an I/O-bound additions fetch (trackedAdditions/untrackedAdditions spawning git), so the reviewer-auto-select classification cannot be unit-tested without a real git repo or subprocess mock.
+ADVISORY: The newStructure field in engine/src/handlers/helpers/programs/helpers.ts is computed as a bare path-depth check (>=4 segments), not a genuine new-service/package/migration detector, so its name and the architecture-tech-lead auto-select documentation promise a semantic the implementation does not verify.
+
+```findings
+[
+  { "severity": "advisory", "file": "engine/src/handlers/helpers/programs/helpers.ts", "line": 168, "claim": "metadata() in engine/src/handlers/helpers/programs/helpers.ts fuses pure scope classification (docsOnly, sourceOrTestChanged, newStructure, languages) with an I/O-bound additions fetch (trackedAdditions/untrackedAdditions spawning git), so the reviewer-auto-select classification cannot be unit-tested without a real git repo or subprocess mock." },
+  { "severity": "advisory", "file": "engine/src/handlers/helpers/programs/helpers.ts", "line": 188, "claim": "The newStructure field in engine/src/handlers/helpers/programs/helpers.ts is computed as a bare path-depth check (>=4 segments), not a genuine new-service/package/migration detector, so its name and the architecture-tech-lead auto-select documentation promise a semantic the implementation does not verify." }
+]
+```

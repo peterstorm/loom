@@ -1,14 +1,14 @@
 ---
 name: deepen
 version: "1.0.0"
-description: "This skill should be used when the user asks to 'improve the architecture', 'find refactoring opportunities', 'deepen modules', 'reduce coupling', 'make this more testable', 'simplify the interface', 'consolidate these modules', 'find shallow abstractions', or needs proactive architectural improvement of an existing codebase. Surfaces friction, proposes deepening opportunities, and walks the design tree with the user. NOT for reviewing PRs (use /review-pr) or designing new features (use architecture-tech-lead)."
+description: "This skill should be used when the user asks to 'improve the architecture', 'find refactoring opportunities', 'deepen modules', 'reduce coupling', 'make this more testable', 'simplify the interface', 'consolidate these modules', 'find shallow abstractions', or needs proactive architectural improvement of an existing codebase. Surfaces friction, proposes deepening opportunities, and walks the design tree with the user. Also preloaded by the architecture-tech-lead reviewer during review passes. NOT for reviewing PRs directly (use /review-pr, whose architecture reviewer runs this skill in review mode) or designing new features (use architecture-tech-lead)."
 ---
 
 # Deepen — Proactive Architecture Improvement
 
 Surface architectural friction and propose **deepening opportunities** — refactors that turn shallow modules into deep ones. The goal is testability, locality, and leverage.
 
-**This is a PROACTIVE skill** — you go looking for problems in existing code. For PR review use `/review-pr`. For new feature design use `architecture-tech-lead`.
+**This is a PROACTIVE skill** — you go looking for problems in existing code. For PR review use `/review-pr` (its `architecture-tech-lead` reviewer preloads this skill in review mode). For new feature design use `architecture-tech-lead`. For behavior-preserving cleanup *within* existing interfaces — duplication, dead code, control-flow noise — use `distill`; deepen is for when the interface itself is the problem. The two skills share vocabulary (see `references/LANGUAGE.md`); distill is the smaller knife.
 
 ---
 
@@ -68,6 +68,26 @@ When proposing deepenings, frame them in terms of our FC/IS + DDD model:
 - "This orchestrator imports from infra/ directly — introduce a port in domain/port/, move the concrete to infra/"
 
 Refer to the package structure in `java-patterns.md` or `typescript-patterns.md` → "Package Structure" when proposing where things move.
+
+---
+
+## Two Modes
+
+The skill runs in exactly one of two modes. Decide which before exploring.
+
+### Review mode — findings, never a session
+
+Active when preloaded by the `architecture-tech-lead` reviewer (standalone `/review-pr` or any engine-issued review), or whenever the user asks for an assessment rather than a design session.
+
+- Scope is the exact frozen scope you were given. Explore it with the questions from Process step 1, but never widen it.
+- Report each candidate as a finding: **files**, **problem** (depth/leverage/locality terms), **proposed deepening**, **benefits**. Stop at Process step 2 — the candidates ARE the findings.
+- Do not walk the design tree, do not design interfaces, do not update `CONTEXT.md`, and never edit files. The output is findings.
+
+**Severity discipline.** Deepening findings are almost always **advisory** — an interface can nearly always be deepened later. Reserve **critical** for shallowness that hides *wrongness*: a seam whose adapters disagree about its contract, an invariant enforced in some callers and not others, business logic in the shell that no test can reach. "This module could be deeper" is advisory, always. When the reviewer wire contract applies (Machine Summary), the agent shim defines it — the skill defines judgment, not wire format.
+
+### Session mode — walk the design tree
+
+Active when the user invokes deepen directly. Run the full Process below: explore, present candidates, grill, optionally design interfaces, and update `CONTEXT.md` inline as decisions land.
 
 ---
 
@@ -164,7 +184,9 @@ When deepening, tests change too:
 
 ## Completion
 
-Session complete when:
+**Review mode output:** the candidate findings, each anchored to its files, severity-disciplined as above — nothing designed, nothing written.
+
+**Session mode** — complete when:
 1. Selected candidates are designed to shared understanding
 2. Interface shapes are agreed (if explored)
 3. Testing strategy is clear

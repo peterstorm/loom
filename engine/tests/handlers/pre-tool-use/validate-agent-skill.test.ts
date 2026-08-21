@@ -1,9 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { parseSkillsFromFrontmatter, promptReferencesSkill } from "../../../src/handlers/pre-tool-use/validate-agent-skill";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import validateAgentSkill, {
+  parseSkillsFromFrontmatter,
+  promptReferencesSkill,
+  VALIDATED_AGENTS,
+} from "../../../src/handlers/pre-tool-use/validate-agent-skill";
+import { TASK_GRAPH_PATH } from "../../../src/config";
 
 const TMP = "/tmp/loom-skill-test-" + process.pid;
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
 
 beforeEach(() => mkdirSync(TMP, { recursive: true }));
 afterEach(() => rmSync(TMP, { recursive: true, force: true }));
@@ -26,7 +34,7 @@ describe("parseSkillsFromFrontmatter", () => {
       "",
       "Body text",
     ].join("\n"));
-    expect(parseSkillsFromFrontmatter(path)).toEqual(["brainstorming"]);
+    expect(parseSkillsFromFrontmatter(path)).toEqual({ kind: "skills", names: ["brainstorming"] });
   });
 
   it("parses multiple skills", () => {
@@ -39,26 +47,57 @@ describe("parseSkillsFromFrontmatter", () => {
       "  - architecture-tech-lead",
       "---",
     ].join("\n"));
-    expect(parseSkillsFromFrontmatter(path)).toEqual(["code-implementer", "architecture-tech-lead"]);
+    expect(parseSkillsFromFrontmatter(path)).toEqual({
+      kind: "skills",
+      names: ["code-implementer", "architecture-tech-lead"],
+    });
   });
 
-  it("returns empty for no skills field", () => {
+  it("parses the flow-style skills list too", () => {
+    // `skills: [a, b]` is valid YAML and used to parse as "declares no skills",
+    // which the handler reads as "nothing to enforce" and allows the spawn.
+    const path = writeAgent("test", [
+      "---",
+      "name: test-agent",
+      'skills: [brainstorming, "code-implementer"]',
+      "---",
+    ].join("\n"));
+    expect(parseSkillsFromFrontmatter(path)).toEqual({
+      kind: "skills",
+      names: ["brainstorming", "code-implementer"],
+    });
+  });
+
+  it("parses a CRLF file the same as an LF one", () => {
+    const path = writeAgent("test", [
+      "---",
+      "name: test-agent",
+      "skills:",
+      "  - brainstorming",
+      "---",
+    ].join("\r\n"));
+    expect(parseSkillsFromFrontmatter(path)).toEqual({ kind: "skills", names: ["brainstorming"] });
+  });
+
+  it("reports 'none' for a readable agent that declares no skills", () => {
     const path = writeAgent("test", [
       "---",
       "name: test-agent",
       "model: sonnet",
       "---",
     ].join("\n"));
-    expect(parseSkillsFromFrontmatter(path)).toEqual([]);
+    expect(parseSkillsFromFrontmatter(path)).toEqual({ kind: "none" });
   });
 
-  it("returns empty for no frontmatter", () => {
+  it("reports 'unreadable' — not 'none' — for a file with no frontmatter", () => {
+    // The distinction the union exists for. Both used to be `[]`, and `[]` means
+    // "nothing to enforce, allow the spawn" on a fail-closed route.
     const path = writeAgent("test", "Just a body\nNo frontmatter here");
-    expect(parseSkillsFromFrontmatter(path)).toEqual([]);
+    expect(parseSkillsFromFrontmatter(path).kind).toBe("unreadable");
   });
 
-  it("returns empty for nonexistent file", () => {
-    expect(parseSkillsFromFrontmatter("/tmp/nonexistent-agent-file.md")).toEqual([]);
+  it("reports 'unreadable' for a nonexistent file", () => {
+    expect(parseSkillsFromFrontmatter("/tmp/nonexistent-agent-file.md").kind).toBe("unreadable");
   });
 
   it("handles tools field without skills", () => {
@@ -71,7 +110,7 @@ describe("parseSkillsFromFrontmatter", () => {
       "  - Bash",
       "---",
     ].join("\n"));
-    expect(parseSkillsFromFrontmatter(path)).toEqual([]);
+    expect(parseSkillsFromFrontmatter(path)).toEqual({ kind: "none" });
   });
 
   it("parses skills with trailing whitespace", () => {
@@ -82,7 +121,7 @@ describe("parseSkillsFromFrontmatter", () => {
       "  - brainstorming  ",
       "---",
     ].join("\n"));
-    expect(parseSkillsFromFrontmatter(path)).toEqual(["brainstorming"]);
+    expect(parseSkillsFromFrontmatter(path)).toEqual({ kind: "skills", names: ["brainstorming"] });
   });
 });
 
@@ -136,6 +175,191 @@ describe("promptReferencesSkill", () => {
 });
 
 describe("validate-agent-skill — integration scenarios", () => {
+  it("blocks unknown reserved names and preserves external utility pass-through", async () => {
+    const createdGraph = !existsSync(TASK_GRAPH_PATH);
+    if (createdGraph) {
+      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
+      writeFileSync(TASK_GRAPH_PATH, "{}");
+    }
+    try {
+      const unknown = await validateAgentSkill(JSON.stringify({
+        tool_name: "Task",
+        tool_input: { subagent_type: "loom:not-a-real-agent", prompt: "review" },
+      }), []);
+      expect(unknown).toMatchObject({
+        kind: "block",
+        message: expect.stringContaining("unknown Loom agent"),
+      });
+
+      const external = await validateAgentSkill(JSON.stringify({
+        tool_name: "Task",
+        tool_input: { subagent_type: "external-agent", prompt: "outside workflow" },
+      }), []);
+      expect(external).toEqual({ kind: "allow" });
+    } finally {
+      if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
+    }
+  });
+
+  it("enforces skill policy for the panel designer", () => {
+    expect(VALIDATED_AGENTS.has("arch-designer-agent")).toBe(true);
+    expect(promptReferencesSkill("Use the architecture-tech-lead skill.", "architecture-tech-lead")).toBe(true);
+    expect(promptReferencesSkill("Design a panel candidate.", "architecture-tech-lead")).toBe(false);
+  });
+
+  it("blocks a namespaced panel designer spawn that omits architecture-tech-lead", async () => {
+    const createdGraph = !existsSync(TASK_GRAPH_PATH);
+    const previousRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    if (createdGraph) {
+      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
+      writeFileSync(TASK_GRAPH_PATH, "{}");
+    }
+    process.env.CLAUDE_PLUGIN_ROOT = REPO_ROOT;
+    try {
+      const result = await validateAgentSkill(JSON.stringify({
+        tool_name: "Task",
+        tool_input: { subagent_type: "loom:arch-designer-agent", prompt: "Design one panel candidate." },
+      }), []);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") expect(result.message).toContain("architecture-tech-lead");
+    } finally {
+      if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;
+      if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
+    }
+  });
+
+  it("uses the checkout agent definition for an unnamespaced spawn instead of skipping skill policy", async () => {
+    const createdGraph = !existsSync(TASK_GRAPH_PATH);
+    const previousRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    const previousHome = process.env.HOME;
+    const empty = mkdtempSync(join(tmpdir(), "loom-checkout-agent-resolution-"));
+    if (createdGraph) {
+      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
+      writeFileSync(TASK_GRAPH_PATH, "{}");
+    }
+    process.env.CLAUDE_PLUGIN_ROOT = empty;
+    process.env.HOME = empty;
+    try {
+      const result = await validateAgentSkill(JSON.stringify({
+        tool_name: "Task",
+        tool_input: { subagent_type: "arch-designer-agent", prompt: "Design one panel candidate." },
+      }), []);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") expect(result.message).toContain("architecture-tech-lead");
+    } finally {
+      if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      rmSync(empty, { recursive: true, force: true });
+      if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
+    }
+  });
+
+  it("allows a namespaced panel designer spawn with its declared skill", async () => {
+    const createdGraph = !existsSync(TASK_GRAPH_PATH);
+    const previousRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    if (createdGraph) {
+      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
+      writeFileSync(TASK_GRAPH_PATH, "{}");
+    }
+    process.env.CLAUDE_PLUGIN_ROOT = REPO_ROOT;
+    try {
+      const result = await validateAgentSkill(JSON.stringify({
+        tool_name: "Task",
+        tool_input: {
+          subagent_type: "loom:arch-designer-agent",
+          prompt: "Use the architecture-tech-lead skill to design one panel candidate.",
+        },
+      }), []);
+      expect(result.kind).toBe("allow");
+    } finally {
+      if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;
+      if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
+    }
+  });
+
+  it("BLOCKS a spawn whose agent file cannot be read — fail closed, not open", async () => {
+    // The polarity bug: every parse failure returned `[]`, and `[]` means
+    // "declares no skills, nothing to enforce, allow". On a route that is in
+    // FAIL_CLOSED_ROUTES — in a handler that already blocks on malformed stdin
+    // precisely so a spawn cannot slip through — an unreadable agent file was
+    // the one input that let a Task run without its required skill.
+    // CLAUDE_PLUGIN_ROOT points somewhere with no agents/ directory, so the
+    // resolver finds the repo copy and we shadow it with a broken one.
+    const createdGraph = !existsSync(TASK_GRAPH_PATH);
+    const previousRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    if (createdGraph) {
+      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
+      writeFileSync(TASK_GRAPH_PATH, "{}");
+    }
+    mkdirSync(join(TMP, "agents"), { recursive: true });
+    writeFileSync(join(TMP, "agents", "arch-designer-agent.md"), "no frontmatter at all\n");
+    process.env.CLAUDE_PLUGIN_ROOT = TMP;
+    try {
+      const result = await validateAgentSkill(JSON.stringify({
+        tool_name: "Task",
+        tool_input: {
+          subagent_type: "loom:arch-designer-agent",
+          prompt: "Use the architecture-tech-lead skill to design one panel candidate.",
+        },
+      }), []);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") {
+        expect(result.message).toContain("cannot determine which skills");
+        expect(result.message).toContain("failing closed");
+      }
+    } finally {
+      if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;
+      if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
+    }
+  });
+
+  it("blocks when a validated Loom agent definition cannot be resolved", async () => {
+    // A validated Loom agent without definition authority cannot prove its
+    // required skill preload, so the spawn fails closed.
+    const createdGraph = !existsSync(TASK_GRAPH_PATH);
+    const previousRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    const previousHome = process.env.HOME;
+    if (createdGraph) {
+      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
+      writeFileSync(TASK_GRAPH_PATH, "{}");
+    }
+    // A plugin root and a HOME that both hold no agents/ directory, so every
+    // candidate path misses. (The git-root candidate resolves to this repo,
+    // which has agents/ — so use a name no agent file exists for, but which IS
+    // in VALIDATED_AGENTS.)
+    const empty = mkdtempSync(join(tmpdir(), "loom-no-agents-"));
+    process.env.CLAUDE_PLUGIN_ROOT = empty;
+    process.env.HOME = empty;
+    const written: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+    try {
+      const result = await validateAgentSkill(JSON.stringify({
+        tool_name: "Task",
+        tool_input: { subagent_type: "loom:dotfiles-agent", prompt: "do the thing" },
+      }), []);
+      expect(result.kind).toBe("block");
+      expect(result.kind === "block" ? result.message : "").toContain("skill policy cannot be proven");
+      expect(result.kind === "block" ? result.message : "").toContain("loom:dotfiles-agent");
+      expect(written).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      if (previousRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      rmSync(empty, { recursive: true, force: true });
+      if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
+    }
+  });
+
   it("brainstorm-agent prompt with brainstorming → pass", () => {
     const prompt = "You are an exploration specialist. Follow the process from the preloaded brainstorming skill.";
     expect(promptReferencesSkill(prompt, "brainstorming")).toBe(true);

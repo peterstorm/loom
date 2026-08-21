@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import {
   detectFunctions,
   handler,
-  DEFAULT_MAX_LINES,
 } from "../../../src/linter/programmatic/max-function-lines";
 
 describe("max-function-lines", () => {

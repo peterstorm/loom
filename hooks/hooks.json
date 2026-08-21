@@ -3,7 +3,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Task",
+        "matcher": "Task|Agent|subagent",
         "hooks": [
           {
             "type": "command",
@@ -117,6 +117,15 @@
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": "Task|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/record-orchestration-spawn.sh"
+          }
+        ]
+      },
       {
         "matcher": "Edit",
         "hooks": [

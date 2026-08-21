@@ -1,0 +1,41 @@
+Both TypeScript source files reviewed in full (`model-profiles.ts` — 587 lines, a clean pure functional core with exhaustive `Either`-style `PolicyResult` handling — and `helpers.ts` — 699 lines, the imperative shell for the standalone-review/wave-gate/remediation program drivers). The `.md` files in scope are documentation with no executable error-handling logic, and the included test file exercises no new error paths worth flagging (its only `catch` blocks are narrow, test-only, and documented). Two defects survive scrutiny in `engine/src/handlers/helpers/programs/helpers.ts`.
+
+**Finding 1 — CRITICAL: registration parsing silently discards the specific validation message it already computed**
+
+Location: `engine/src/handlers/helpers/programs/helpers.ts:381-385` (`parseRegistration`), `:415-421` and `:449-456` (`parseRegisteredFacadeProgram`).
+
+`parseStandaloneStartInput`, `parseRemediationStartInput`, and `parseWaveGateStartInput` each return `{ ok: false, message: string }` with a specific, purpose-written diagnostic (e.g. `"standalone-review input must contain exactly kind, files, and dryRun"`). But every call site discards that message the moment it's produced:
+
+```ts
+const input = parseRemediationStartInput(raw.input);
+return input.ok ? Object.freeze({ ... }) : null;   // input.message is dropped
+```
+
+This isn't a "which variant is this" discrimination — by the time each of these three sites runs, the outer `kind` discriminant has already matched (`raw.kind === "remediation"`, `raw.kind === "wave-gate"`, `raw.kind === "standalone-review"`). The function is definitely inside that variant's validation, and the specific reason it failed is sitting in a local variable that gets thrown away in favor of an undifferentiated `null`. `parseRegisteredFacadeProgram` is exported as the entry point for reading back durable program registration (the resume path for wave-gate/remediation/standalone-review runs), so a corrupted or subtly malformed registration file degrades from "here is exactly which field is wrong" to "registration is null" for whatever caller consumes it — there is no way to reconstruct the original diagnostic downstream since it no longer exists anywhere in the returned value.
+
+Hidden errors this pattern can mask: a bad `dryRun` type, a `files` array with an empty string, a negative `wave`, an empty `sourceRun`, a malformed `restart`/`orphanRecovery` shape — all become one indistinguishable `null`.
+
+Recommendation: change `parseRegistration`, the remediation branch, and the wave-gate branch to propagate `Readonly<{ok:true; value:T}> | Readonly<{ok:false; message:string}>` (matching the shape already used by every nested `parseXStartInput`) instead of collapsing to `T | null`. If `parseRegisteredFacadeProgram`'s public signature must stay `T | null` for compatibility, at minimum log the discarded `.message` at the point of collapse so it isn't lost entirely.
+
+**Finding 2 — ADVISORY: git spawn helpers never surface `spawnSync`'s process-level `error`**
+
+Location: `engine/src/handlers/helpers/programs/helpers.ts:87-91` (`gitPaths`), `:93-97` (`gitText`), `:150-155` (`trackedAdditions`), `:157-166` (`untrackedAdditions`).
+
+Each of these checks only `result.status !== 0` and falls back to a generic message (`` `git ${args[0]} failed` ``) when `stderr` is empty. `child_process.spawnSync` also sets `result.error` when the process could never be spawned at all (e.g. `git` missing from `PATH`, `EACCES`) — in that case `status` is `null` and `stderr` is empty, so the thrown error is always the generic fallback, never the actual `Error: spawn git ENOENT` that would tell an operator git isn't installed rather than that some git subcommand failed. It still throws (not a true silent failure), but strips exactly the diagnostic that matters most in the catastrophic case.
+
+Recommendation: check `result.error` first in each of these four functions and include `result.error.message` in the thrown error when present.
+
+**Noted but not flagged:** `publishInitialBatch`, `durablePublicationDigest`, `durableRequests`, and `recoverOrPublishStandaloneRetry` thread `Either`-style results end-to-end with no swallowed branches — this is a good model for the fix in Finding 1. `safeScope` and the outer `frozenScopeSection` catch narrowly on `ENOENT` and rethrow everything else. `model-profiles.ts` is exemplary: every parse function returns a typed `PolicyResult`, there is no unexplained fallback, and the one `throw` (line 485) guards a provably-unreachable invariant rather than swallowing a real failure path.
+
+### Machine Summary
+CRITICAL_COUNT: 1
+ADVISORY_COUNT: 1
+CRITICAL: parseRegisteredFacadeProgram discards parseRemediationStartInput/parseWaveGateStartInput/parseStandaloneStartInput's specific error message, collapsing every validation failure of an already-matched variant into a bare null
+ADVISORY: gitPaths and gitText never check spawnSync's result.error, so a failed process spawn (e.g. missing git binary) throws a generic fallback message instead of the actual spawn failure reason
+
+```findings
+[
+  { "severity": "critical", "file": "engine/src/handlers/helpers/programs/helpers.ts", "line": 420, "claim": "parseRegisteredFacadeProgram discards parseRemediationStartInput/parseWaveGateStartInput/parseStandaloneStartInput's specific error message, collapsing every validation failure of an already-matched variant into a bare null" },
+  { "severity": "advisory", "file": "engine/src/handlers/helpers/programs/helpers.ts", "line": 89, "claim": "gitPaths and gitText never check spawnSync's result.error, so a failed process spawn (e.g. missing git binary) throws a generic fallback message instead of the actual spawn failure reason" }
+]
+```

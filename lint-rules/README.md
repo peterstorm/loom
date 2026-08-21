@@ -1,6 +1,6 @@
 # Lint Rules — Authoring Guide
 
-Loom's PostEdit linter uses declarative JSON rule files and programmatic TypeScript rules to catch bad code patterns. This guide covers writing rules, configuring per-project, and the complete rule reference.
+Loom's PostToolUse linter uses declarative JSON rule files and programmatic TypeScript rules to catch bad code patterns. This guide covers writing rules, project configuration, and the complete rule reference. See [`docs/architecture.md`](../docs/architecture.md) for its place in the engine and [`docs/operations.md`](../docs/operations.md) for run commands.
 
 ## Table of Contents
 
@@ -27,7 +27,8 @@ Each regex rule is a single `.json` file with the following fields:
 | `description` | `string` | ✅ | Human-readable explanation of what the rule catches. |
 | `extensions` | `string[]` | ✅ | File extensions this rule applies to (e.g., `[".ts", ".tsx"]`). Include the leading dot. |
 | `pattern` | `string` | ✅ | Regex source string (without delimiters). Matched against each line. |
-| `flags` | `string` | ✅ | Regex flags (e.g., `"i"` for case-insensitive). Use `""` for none. |
+| `flags` | `string` | No | Regex flags (e.g., `"i"` for case-insensitive). Defaults to `""`. |
+| `excludePatterns` | `string[]` | No | Normalized file-path suffixes this regex rule skips. |
 | `fixHint` | `string` | ✅ | Actionable suggestion shown when the rule triggers. |
 | `enabled` | `boolean` | ✅ | Whether the rule is active. Set to `false` to disable. |
 
@@ -198,7 +199,20 @@ If no `config.json` exists, the programmatic rules use Loom's built-in defaults 
 | `no-any-type` | `:\s*any\b` | ✅ | Explicit `: any` type annotations |
 | `no-console-log` | `console\.log\(` | ✅ | `console.log()` calls |
 | `no-todo-fixme` | `//\s*(TODO\|FIXME)` | ✅ | `// TODO` and `// FIXME` comments |
+| `no-alias-export` | `^export (const\|let) X = Y;` | ✅ | An export that only renames another symbol |
 | `prefer-ts-pattern` | `switch\s*\(` | ❌ | `switch()` statements (opt-in) |
+
+`prefer-ts-pattern` stays **off**, and superseded rather than deleted. It matches
+only `switch (`, so it misses the if-chain form entirely, and it fires on
+exhaustive switches whose `default` binds the scrutinee to `never` — a totality
+proof, not a defect. `exhaustive-discriminant-branching` below covers both forms
+and accepts either proof.
+
+`no-alias-export` is the pattern that produced twelve dead aliases on one branch
+(`parseCorpus = parseCalibrationCorpus` and siblings). It matters because `tsc`
+**cannot** see a dead export — it assumes an external consumer — so an alias whose
+callers all moved to the real name lives forever. Derived values like
+`X.length` are not bare identifiers and do not match.
 
 ### Java Rules (Immediate Tier)
 
@@ -218,6 +232,36 @@ If no `config.json` exists, the programmatic rules use Loom's built-in defaults 
 | `no-cross-boundary-imports` | TS, Java | Import direction between bounded contexts |
 | `no-io-in-pure-modules` | TS, Java | No filesystem/network/console/non-determinism in pure modules |
 | `max-function-lines` | TS, Java | Function bodies ≤ configured max (default: 50 lines) |
+| `fugue-generated-integrity` | TS | Structural projection of Fugue-generated files matches the stamped SHA-256 |
+| `exhaustive-discriminant-branching` | TS | 3+ branches on one discriminant without a totality proof |
+| `no-nested-ternary` | TS | A ternary whose else-branch opens another ternary |
+| `prefer-array-methods` | TS | A mutable accumulator whose loop only pushes into it |
+
+**These three encode judgement, so read what they deliberately do NOT flag.**
+A rule that fires on correct code teaches people the rule is wrong, and then it
+gets disabled — which is worse than not having it.
+
+- `exhaustive-discriminant-branching` ignores one- and two-branch guard clauses.
+  Guards are the *preferred* shape; only at three does an if-chain stop reading
+  as a guard and start reading as a switch. It accepts either
+  `match(…).exhaustive()` or a `never` binding as proof — it is about totality,
+  not about which library you reach for. Chains must be contiguous
+  (10-line max gap), so two unrelated guards on the same tag at opposite ends of
+  a file are not merged into a phantom chain.
+- `no-nested-ternary` exempts **type-level** conditionals. `S extends X ? A : …`
+  is the only way to express a mapped relation in the type system — there is no
+  `if` and no `match` there, so the chain is essential, not incidental.
+- `prefer-array-methods` fires only on the narrow accumulator shape: an array
+  declared immediately before a loop whose single statement pushes into it. Loops
+  with `break`, `continue`, `return`, or `await` are exempt, as are
+  multi-statement bodies — those are folds, and spelling a fold `reduce` is
+  frequently *harder* to read. The bar is that a mechanical rewrite exists AND it
+  deletes a mutable binding.
+
+Both lint tiers are **touch-scoped** — PostToolUse lints the file you edited, and
+the wave gate lints the wave's `files_modified` — so enabling a rule with an
+existing backlog does not turn the tree red. It acts as a ratchet: you cannot
+leave a file worse, and you fix the shape in the file you are already editing.
 
 ---
 
@@ -341,6 +385,12 @@ Uses bracket-depth tracking to detect functions exceeding a line limit.
 
 **Configure per-project:** Set `maxFunctionLines` and `excludeFromMaxLines` in `config.json`.
 
+#### `fugue-generated-integrity`
+
+Recognizes TypeScript generated by `fugue new --from` through its strict `@fugue-integrity sha256:<hex>` banner. It recomputes the hash over the generated structural projection while collapsing sanctioned `@fugue-body-start` / `@fugue-body-end` regions. Implementing a body is allowed; changing imports, schemas, node ids, wiring, or other generated structure blocks at the full tier.
+
+A file with no marker is not Fugue-generated and is ignored. A malformed marker prefix, executable content above the banner, or a digest mismatch is a violation. See [`references/executable-models.md`](../references/executable-models.md).
+
 ---
 
 ## Regex Safety Considerations
@@ -364,9 +414,11 @@ All regex patterns are statically analyzed for ReDoS (Regular Expression Denial 
 4. **Prefer character classes** — `[a-z]+` is safer than `(a|b|c|...|z)+`.
 5. **Test with long inputs** — If your pattern is slow on a 10,000-char line, it may backtrack.
 
-### Runtime Safety Net
+### Cooperative Runtime Deadline
 
-Even if a pattern passes static analysis, the linter enforces a **50ms timeout** per file. If execution exceeds this budget, the linter fails closed with an error identifying the rule.
+Even if a pattern passes static analysis, regex execution checks a **50ms per-file deadline** every 100 lines and after each regex rule. This bounds ordinary multi-line work and fails closed once control returns to a check.
+
+This is cooperative, not a preemptive sandbox: JavaScript cannot interrupt one synchronous `RegExp.test()` that is already catastrophically backtracking, and programmatic handlers are checked before invocation but not preempted while running. Static rejection is therefore the primary defense against a single blocking match; custom programmatic rules are not supported from JSON. Do not describe the deadline as a guarantee that arbitrary regex or handler code cannot hang.
 
 ---
 
@@ -383,8 +435,8 @@ Regex rules are evaluated **line-by-line** against file content:
 
 | Tier | When | Rules | Budget |
 |------|------|-------|--------|
-| `immediate` | After every edit (PostToolUse/tool_result) | Regex rules only | <50ms |
-| `full` | At wave-gate boundaries | All rules (regex + programmatic) | Unbounded |
+| `immediate` | After every edit (PostToolUse/tool_result) | Regex rules only | 50ms cooperative per-file deadline |
+| `full` | At Wave Gate boundaries or explicit scans | All rules (regex + programmatic) | Same checker; programmatic handlers are not preemptible |
 
 The immediate tier runs after every file write to catch surface-level issues instantly. The full tier runs at natural pause points where deeper structural analysis is acceptable.
 

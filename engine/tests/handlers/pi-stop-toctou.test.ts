@@ -36,31 +36,153 @@ const graph = (tasks: Task[], executing: string[]): TaskGraph => ({
 });
 
 const untrustedPass: UntrustedStopResolution = {
-  testResult: { verdict: "untrusted", passed: true, label: "transcript-regex (fallback)" },
-  testEvidence: "transcript-regex (fallback): bun: 5 pass",
+  taskCompleted: true,
+  testResult: { verdict: "untrusted", passed: true, label: "pi-structured: bun: 5 pass", provenance: "pi-structured" },
+  testEvidence: "pi-structured: bun: 5 pass",
   filesModified: ["src/a.ts", "tests/a.test.ts"],
+  changedDeclaredArtifacts: ["src/a.ts", "tests/a.test.ts"],
+  bytesChangedSinceAttempt: true,
   newTestsWritten: true,
   newTestEvidence: "2 new test methods, 4 assertions",
 };
 
-describe("applyUntrustedStopResolution — untrusted resolutions never supersede ground truth (TOCTOU re-check)", () => {
-  it.each<[string, TaskTestResult]>([
-    ["trusted-pass", { verdict: "trusted-pass" }],
-    ["trusted-fail", { verdict: "trusted-fail" }],
-  ])("a concurrent %s verdict stands; executing_tasks is still cleared", (_name, verdict) => {
+describe("applyUntrustedStopResolution — trust and freshness are re-checked atomically", () => {
+  it("preserves a trusted failure while cumulative structural evidence lands", () => {
+    const verdict: TaskTestResult = { verdict: "trusted-fail" };
     const s = graph([task({ id: "T1", status: "implemented", test_result: verdict })], ["T1", "T2"]);
 
     const applied = applyUntrustedStopResolution(s, "T1", untrustedPass);
 
-    expect(applied.skipped).toBe(true);
+    expect(applied.skipped).toBe(false);
     const t1 = applied.state.tasks.find((t) => t.id === "T1")!;
     expect(t1.test_result).toEqual(verdict);
-    expect(t1.status).toBe("implemented");
+    expect(t1.status).toBe("pending");
     expect(t1.test_evidence).toBeUndefined();
-    expect(t1.files_modified).toBeUndefined();
-    // The agent still STOPPED — the task must leave executing_tasks, or it
-    // ghost-blocks duplicate-spawn checks for the rest of the session.
+    expect(t1.files_modified).toEqual(["src/a.ts", "tests/a.test.ts"]);
     expect(applied.state.executing_tasks).toEqual(["T2"]);
+  });
+
+  it("invalidates a trusted pass when the retry changes code and the latest run fails", () => {
+    const s = graph([task({
+      id: "T1", status: "implemented", test_result: { verdict: "trusted-pass" },
+      new_tests_required: true,
+    })], ["T1"]);
+    const latestFailure: UntrustedStopResolution = {
+      ...untrustedPass,
+      testResult: { verdict: "untrusted", passed: false, label: "pi-structured: bun: 1 fail", provenance: "pi-structured" },
+      testEvidence: "pi-structured: bun: 1 fail",
+      newTestsWritten: false,
+      newTestEvidence: "",
+    };
+
+    const applied = applyUntrustedStopResolution(s, "T1", latestFailure);
+
+    expect(applied.skipped).toBe(false);
+    expect(applied.state.tasks[0]).toMatchObject({
+      status: "pending",
+      test_result: latestFailure.testResult,
+      test_evidence: latestFailure.testEvidence,
+    });
+    expect(applied.state.tasks[0]!.proof?.state).toBe("failed");
+    expect(applied.state.wave_gates["1"].impl_complete).toBe(false);
+  });
+
+  it("does not let a failed child satisfy completion with retained artifact attribution", () => {
+    const s = graph([task({
+      id: "T1",
+      status: "implemented",
+      new_tests_required: false,
+      file_list: ["src/a.ts"],
+      files_modified: ["src/a.ts"],
+    })], ["T1"]);
+    const failedChild: UntrustedStopResolution = {
+      ...untrustedPass,
+      taskCompleted: false,
+      testResult: { verdict: "untrusted", passed: false, label: "pi-implementation-failed", provenance: "unverified" },
+      testEvidence: "implementation process failed",
+      filesModified: [],
+      changedDeclaredArtifacts: ["src/a.ts"],
+      newTestsWritten: false,
+      newTestEvidence: "",
+    };
+
+    const applied = applyUntrustedStopResolution(s, "T1", failedChild);
+
+    expect(applied.state.tasks[0]).toMatchObject({
+      status: "pending",
+      test_result: failedChild.testResult,
+      files_modified: ["src/a.ts"],
+    });
+    expect(applied.state.tasks[0]!.proof?.state).toBe("failed");
+    expect(applied.state.tasks[0]!.proof?.results).toContainEqual(expect.objectContaining({
+      state: "failed",
+      obligation: { kind: "task-completed" },
+      failure: { kind: "task-not-completed" },
+    }));
+    expect(applied.state.wave_gates["1"].impl_complete).toBe(false);
+  });
+
+  it("retains a trusted pass only when the attempt byte baseline proves no change", () => {
+    const s = graph([task({
+      id: "T1", status: "implemented", test_result: { verdict: "trusted-pass" },
+      new_tests_required: false,
+    })], ["T1"]);
+    const noWriteFailure: UntrustedStopResolution = {
+      ...untrustedPass,
+      testResult: { verdict: "untrusted", passed: false, label: "no new run", provenance: "unverified" },
+      testEvidence: "",
+      filesModified: [],
+      changedDeclaredArtifacts: [],
+      bytesChangedSinceAttempt: false,
+      newTestsWritten: false,
+      newTestEvidence: "",
+    };
+
+    const applied = applyUntrustedStopResolution(s, "T1", noWriteFailure);
+
+    expect(applied.state.tasks[0]).toMatchObject({
+      status: "implemented",
+      test_result: { verdict: "trusted-pass" },
+    });
+  });
+
+  it("invalidates older evidence when bytes changed despite empty transcript attribution", () => {
+    const s: TaskGraph = {
+      ...graph([task({
+        id: "T1",
+        status: "implemented",
+        test_result: { verdict: "trusted-pass" },
+        new_tests_required: false,
+        review_status: "passed",
+      })], ["T1"]),
+      spec_check: {
+        wave: 1, run_at: "now", verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+    };
+    const unobservedChange: UntrustedStopResolution = {
+      ...untrustedPass,
+      testResult: { verdict: "untrusted", passed: false, label: "no test run", provenance: "unverified" },
+      testEvidence: "",
+      filesModified: [],
+      changedDeclaredArtifacts: [],
+      bytesChangedSinceAttempt: true,
+      newTestsWritten: false,
+      newTestEvidence: "",
+    };
+
+    const applied = applyUntrustedStopResolution(s, "T1", unobservedChange);
+
+    expect(applied.state.tasks[0]).toMatchObject({
+      status: "implemented",
+      review_status: "pending",
+      test_result: unobservedChange.testResult,
+    });
+    expect(applied.state.spec_check).toBeUndefined();
+    expect(applied.state.wave_gates["1"]).toMatchObject({
+      tests_passed: null,
+      reviews_complete: false,
+    });
   });
 
   it("a completed task is never reopened; executing_tasks is still cleared", () => {
@@ -107,12 +229,78 @@ describe("applyUntrustedStopResolution — untrusted resolutions never supersede
     expect(t1.new_tests_written).toBe(true);
     expect(t1.new_test_evidence).toBe(untrustedPass.newTestEvidence);
     expect(applied.state.executing_tasks).toEqual(["T3"]);
+    expect(applied.state.wave_gates["1"].impl_complete).toBe(true);
     // Other tasks untouched.
     expect(applied.state.tasks.find((t) => t.id === "T2")).toEqual(s.tasks[1]);
   });
 
+  it("unions retry writes, recomputes new-test evidence, and invalidates stale review/spec gates", () => {
+    const initial = graph([task({
+      id: "T1",
+      files_modified: ["src/old.ts"],
+      new_tests_written: true,
+      new_test_evidence: "earlier test evidence",
+      review_status: "evidence_capture_failed",
+      review_error: "review transcript did not contain a machine summary",
+      review_evidence_failures: ["code-reviewer"],
+    })], ["T1"]);
+    const s: TaskGraph = {
+      ...initial,
+      spec_check: {
+        wave: 1, run_at: "now", verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+      wave_gates: { ...initial.wave_gates, "1": {
+        impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false,
+      } },
+    };
+    const retry: UntrustedStopResolution = {
+      ...untrustedPass,
+      filesModified: ["src/new.ts"],
+      changedDeclaredArtifacts: [],
+      newTestsWritten: false,
+      newTestEvidence: "",
+    };
+
+    const applied = applyUntrustedStopResolution(s, "T1", retry);
+    const resolved = applied.state.tasks[0]!;
+
+    expect(resolved.files_modified).toEqual(["src/new.ts", "src/old.ts"]);
+    expect(resolved.new_tests_written).toBe(false);
+    expect(resolved.new_test_evidence).toBe("");
+    expect(resolved.review_status).toBe("pending");
+    expect(resolved.review_error).toBeUndefined();
+    expect(resolved.review_evidence_failures).toBeUndefined();
+    expect(applied.state.spec_check).toBeUndefined();
+    expect(applied.state.wave_gates["1"]).toMatchObject({
+      tests_passed: null, reviews_complete: false,
+    });
+  });
+
+  it("a failed re-resolution clears a stale impl_complete bit atomically", () => {
+    const initial = graph([task({ id: "T1", status: "implemented" })], ["T1"]);
+    const stale: TaskGraph = {
+      ...initial,
+      wave_gates: { ...initial.wave_gates, "1": {
+        impl_complete: true, tests_passed: true, reviews_complete: false, blocked: false,
+      } },
+    };
+    const failedResolution: UntrustedStopResolution = {
+      ...untrustedPass,
+      newTestsWritten: false,
+      newTestEvidence: "",
+    };
+
+    const applied = applyUntrustedStopResolution(stale, "T1", failedResolution);
+
+    expect(applied.skipped).toBe(false);
+    expect(applied.state.tasks[0]!.status).toBe("pending");
+    expect(applied.state.tasks[0]!.proof?.state).toBe("failed");
+    expect(applied.state.wave_gates["1"].impl_complete).toBe(false);
+  });
+
   it("an existing UNTRUSTED verdict is superseded (only trusted verdicts stand)", () => {
-    const prior: TaskTestResult = { verdict: "untrusted", passed: false, label: "transcript-regex (fallback)" };
+    const prior: TaskTestResult = { verdict: "untrusted", passed: false, label: "transcript-regex (fallback)", provenance: "unverified" };
     const s = graph([task({ id: "T1", status: "implemented", test_result: prior })], ["T1"]);
 
     const applied = applyUntrustedStopResolution(s, "T1", untrustedPass);

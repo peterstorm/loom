@@ -7,10 +7,10 @@
 import type { HookHandler } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
+import { argumentValue } from "./cli-args";
 
 const handler: HookHandler = async (stdin, args) => {
-  const taskIdx = args.indexOf("--task");
-  const taskId = taskIdx >= 0 ? args[taskIdx + 1] : null;
+  const taskId = argumentValue(args, "--task");
   if (!taskId) return { kind: "error", message: "--task required" };
 
   const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
@@ -46,6 +46,7 @@ const handler: HookHandler = async (stdin, args) => {
           verdict: "untrusted" as const,
           passed,
           label: "helper-reported (store-test-evidence stdin)",
+          provenance: "unverified" as const,
         },
         test_evidence: evidenceMatch?.[1] ?? "",
         new_tests_written: newWritten,

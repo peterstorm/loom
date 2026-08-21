@@ -8,10 +8,8 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  extractTestEvidence,
-  resolveTestEvidence,
-} from "../../src/handlers/subagent-stop/update-task-status";
+import { resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
+import { extractTestEvidence } from "../../src/core/test-evidence";
 import { parseBashTestOutput } from "../../src/parsers/parse-bash-test-output";
 import { classifyTestCommand, extractEvidence, extractBashOutcome } from "../../src/machine/extract-evidence";
 import { foldEvidence, isToolAllowed, isTerminal, blockExplanation } from "../../src/machine/advance";
@@ -125,6 +123,7 @@ describe("R2 — the spoofs the review found are dead", () => {
       verdict: "untrusted",
       passed: true, // documented residual: reporterless fallback
       label: "degraded (machine bound, no ledger evidence; transcript-regex)",
+      provenance: "unverified",
     });
     expect(resolved.evidence).toContain("degraded (machine bound, no ledger evidence");
   });
@@ -137,7 +136,12 @@ describe("R2 — the spoofs the review found are dead", () => {
 
   it("unbound runs keep the plain fallback label", () => {
     const resolved = resolveTestEvidence([], "12 passing", false);
-    expect(resolved.result).toEqual({ verdict: "untrusted", passed: true, label: "transcript-regex (fallback)" });
+    expect(resolved.result).toEqual({
+      verdict: "untrusted",
+      passed: true,
+      label: "transcript-regex (fallback)",
+      provenance: "unverified",
+    });
     expect(resolved.evidence).toContain("transcript-regex (fallback)");
   });
 });
@@ -183,7 +187,7 @@ describe("transcript text is never evidence (standing invariant)", () => {
   });
 
   it("unknown tool_response shapes yield exit: null → judged untrusted, never success", () => {
-    expect(extractBashOutcome({ weird: true })).toEqual({ exit: null, stdout: "" });
+    expect(extractBashOutcome({ weird: true })).toEqual({ exit: null, stdout: "", interrupted: false });
     const ledger = extractEvidence("Bash", { command: "npm test" }, { weird: true, stdout: "5 passing" }, () => null);
     const resolved = resolveTestEvidence(ledger, "", true);
     expect(resolved.result.verdict).toBe("untrusted");

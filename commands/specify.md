@@ -1,16 +1,31 @@
 ---
 name: specify
 version: "1.0.0"
-description: "This skill should be used when the user asks to 'specify a feature', 'write requirements', 'define what we're building', 'capture requirements', 'document the spec', or before invoking /architecture-tech-lead for non-trivial features. Produces formal specifications (WHAT/WHY) that feed into architecture and planning phases."
+description: "This skill should be used when the user asks to 'specify a feature', 'write requirements', 'define what we're building', 'capture requirements', 'document the spec', or before invoking the architecture-tech-lead skill (`/skill:architecture-tech-lead` in Pi) for non-trivial features. Produces formal specifications (WHAT/WHY) that feed into architecture and planning phases."
+argument-hint: "[$feature description] [--update] [--status]"
 ---
 
 # Specify - Requirements Before Design
 
 Formalize requirements into structured specifications before architecture/planning. Focus exclusively on WHAT and WHY - never HOW.
 
-**Position in flow:** `/brainstorming` → `/specify` → `/clarify` (auto) → `/architecture-tech-lead` → `/loom`
+**Position in flow:** `/brainstorming` → `/specify` → `/clarify` (auto) → architecture-tech-lead skill (`/skill:architecture-tech-lead` in Pi) → `/loom`
+
+**Arguments:** "$ARGUMENTS"
 
 ---
+
+## Package resources
+
+Resolve this command's owning package once. Claude Code expands the token in
+source; Loom's Pi adapter renders it from the extension module's `import.meta.url`:
+
+```bash
+LOOM_DIR="${CLAUDE_PLUGIN_ROOT}"
+test -f "$LOOM_DIR/references/spec-template.md" || { echo "FATAL: active Loom package is incomplete: $LOOM_DIR"; exit 1; }
+```
+
+Never infer package identity from cwd or scan another harness's cache.
 
 ## Arguments
 
@@ -51,7 +66,7 @@ Before writing spec:
 
 ### 3. Write Specification
 
-Load the spec template from `${CLAUDE_PLUGIN_ROOT:-$LOOM_PLUGIN_ROOT}/references/spec-template.md` (Pi sets these environment variables via the loom extension; in local development, use the repository root as `LOOM_DIR`). Populate all sections.
+Read `$LOOM_DIR/references/spec-template.md` from the package resolved above and populate its sections.
 
 **Critical constraint:** Spec describes WHAT users need and WHY. NO implementation details:
 - No tech stack mentions

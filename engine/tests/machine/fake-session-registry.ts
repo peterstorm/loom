@@ -1,7 +1,7 @@
 /**
  * In-memory SessionRegistry fake — the port's test double. Mirrors the fs
  * adapter's nominal semantics exactly:
- *   - bind appends; a bind when NO binding is live truncates the ledger
+ *   - bind appends; it never truncates the ledger (see bindMachineAgent)
  *   - unbind removes every binding matching (agentId, agentType)
  *   - soleActiveBinding: the SHARED pure decision (resolveSoleActiveBinding)
  *     — exactly one binding AND the roster is exactly the bound agent
@@ -42,7 +42,6 @@ export function inMemorySessionRegistry(): SessionRegistry {
       // Idempotent on (agentId, agentType), mirroring bindMachineAgent: a
       // duplicated SubagentStart must not create a contended-looking session.
       if (current.some((b) => b.agentId === agentId && b.agentType === agentType)) return;
-      if (current.length === 0) ledger.set(sessionId, []); // truncate previous run
       bindings.set(sessionId, [
         ...current,
         { agentId, agentType, epoch: epochOf(agentId, agentType) },

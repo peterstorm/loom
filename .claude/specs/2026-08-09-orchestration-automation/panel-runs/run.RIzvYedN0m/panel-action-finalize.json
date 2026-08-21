@@ -1,0 +1,54 @@
+{
+  "state": {
+    "panel": "architecture",
+    "input": {
+      "candidateLenses": [
+        "simplicity-first",
+        "type-driven-fp",
+        "risk-security-first"
+      ],
+      "judgeCriteria": [
+        "simplicity",
+        "pure functional core",
+        "codebase fit + effort"
+      ]
+    },
+    "stage": "finalize",
+    "slot": {
+      "request": {
+        "id": "architecture:finalize",
+        "agent": "architecture-agent",
+        "interaction": "interactive",
+        "modelProfile": "architecture-finalize",
+        "attempt": 1,
+        "outputContract": "selected architecture plan with panel decision record"
+      },
+      "status": "pending"
+    },
+    "completedRequestIds": [
+      "architecture:interview",
+      "architecture:candidate:1",
+      "architecture:candidate:2",
+      "architecture:candidate:3",
+      "architecture:judge:1",
+      "architecture:judge:2",
+      "architecture:judge:3"
+    ],
+    "completedOperationIds": [
+      "architecture-prepare-candidates",
+      "architecture-prepare-judges",
+      "architecture-aggregate"
+    ]
+  },
+  "action": {
+    "type": "await-user",
+    "request": {
+      "id": "architecture:finalize",
+      "agent": "architecture-agent",
+      "interaction": "interactive",
+      "modelProfile": "architecture-finalize",
+      "attempt": 1,
+      "outputContract": "selected architecture plan with panel decision record"
+    }
+  }
+}

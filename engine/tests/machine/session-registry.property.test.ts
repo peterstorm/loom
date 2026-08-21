@@ -11,13 +11,14 @@
  *     record, epoch for epoch.
  * (c) the snapshot-before-unbind ordering preserves a stopping agent's
  *     evidence regardless of interleaved binds: the snapshot taken at stop
- *     contains exactly the events attributed to that agent's EPOCH since
- *     the last ledger truncation, even though a later bind may truncate the
- *     live ledger. (Epochs are `<agent_id>:<agent_type>` — agent-keyed, not
- *     run-keyed. A re-bind of the SAME agent id while another binding is
- *     live skips truncation and inherits the epoch's earlier events; the
- *     harness mints unique agent ids per spawn, so this is the honest
- *     statement of the invariant, not a hole the property papers over.)
+ *     contains exactly the events attributed to that agent's EPOCH. No bind
+ *     truncates the ledger any more — that delete raced unlocked
+ *     appendEvidence writers and could destroy a concurrent sibling's
+ *     records — so a stopping agent's history is bounded only by its own
+ *     epoch. (Epochs are `<agent_id>:<agent_type>` — agent-keyed, not
+ *     run-keyed. A re-bind of the SAME agent id inherits the epoch's earlier
+ *     events; the harness mints unique agent ids per spawn, so this is the
+ *     honest statement of the invariant, not a hole the property papers over.)
  *
  * The property runs against the in-memory fake (fast, many runs) and the
  * fs adapter (fewer runs — conformance: the production adapter satisfies
@@ -119,11 +120,6 @@ async function step(reg: SessionRegistry, s: SessionId, m: Model, op: Op): Promi
     await reg.markActive(s, parseAgentId(agent.id)!);
     m.active.push(agent.id);
     if (agent.gated) {
-      if (m.bindings.length === 0) {
-        // bind truncates a dead session's ledger — every epoch's history goes
-        m.ledger = [];
-        m.epochEvents.clear();
-      }
       await reg.bind(s, parseAgentType(agent.type)!, parseAgentId(agent.id)!);
       m.bindings.push(bindingOf(agent));
     }
@@ -153,8 +149,8 @@ async function step(reg: SessionRegistry, s: SessionId, m: Model, op: Op): Promi
     m.active = m.active.filter((a) => a !== agent.id);
 
     // Invariant (c): the pre-unbind snapshot preserves everything the
-    // stopping agent's epoch was credited with — later binds may truncate
-    // the live file, never this snapshot.
+    // stopping agent's epoch was credited with. Binds no longer truncate the
+    // live file at all, so a concurrent sibling cannot erase it either.
     if (agent.gated) {
       const epoch = epochOf(parseAgentId(agent.id)!, parseAgentType(agent.type)!);
       expect(eventsForEpoch(snapshot, epoch)).toEqual(m.epochEvents.get(epoch) ?? []);

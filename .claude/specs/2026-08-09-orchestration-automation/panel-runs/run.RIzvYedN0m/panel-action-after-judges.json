@@ -1,0 +1,38 @@
+{
+  "state": {
+    "panel": "architecture",
+    "input": {
+      "candidateLenses": [
+        "simplicity-first",
+        "type-driven-fp",
+        "risk-security-first"
+      ],
+      "judgeCriteria": [
+        "simplicity",
+        "pure functional core",
+        "codebase fit + effort"
+      ]
+    },
+    "stage": "aggregate",
+    "operation": "architecture-aggregate",
+    "completedRequestIds": [
+      "architecture:interview",
+      "architecture:candidate:1",
+      "architecture:candidate:2",
+      "architecture:candidate:3",
+      "architecture:judge:1",
+      "architecture:judge:2",
+      "architecture:judge:3"
+    ],
+    "completedOperationIds": [
+      "architecture-prepare-candidates",
+      "architecture-prepare-judges"
+    ]
+  },
+  "action": {
+    "type": "engine-operation",
+    "id": "architecture-aggregate",
+    "operation": "architecture-aggregate",
+    "outputContract": "deterministic total ranking over every candidate and criterion"
+  }
+}

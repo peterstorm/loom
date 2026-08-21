@@ -102,8 +102,23 @@ describe("judgeTestRun — the R2 trust rule", () => {
     expect(judgeTestRun(2, report)).toEqual({ verdict: "trusted-fail" });
   });
 
-  it("unknown exit → untrusted", () => {
-    expect(judgeTestRun(null, report)).toEqual({ verdict: "untrusted" });
+  it("unknown exit + no report → untrusted (nothing to judge)", () => {
+    expect(judgeTestRun(null, null)).toEqual({ verdict: "untrusted" });
+  });
+
+  // The report, not the exit code, is the evidence. Harnesses exist whose Bash
+  // tool response carries no exit code at all; gating trust on one made the
+  // whole doctrine inert there while a real JUnit/vitest report sat on disk.
+  it("unknown exit + clean report → trusted-pass (the report is the evidence)", () => {
+    expect(judgeTestRun(null, report)).toEqual({ verdict: "trusted-pass" });
+  });
+
+  it("unknown exit + report with failures → trusted-fail", () => {
+    expect(judgeTestRun(null, parseReportSummary(5, 1, "vitest-json")!)).toEqual({ verdict: "trusted-fail" });
+  });
+
+  it("unknown exit + report with 0 tests → trusted-fail (nothing ran)", () => {
+    expect(judgeTestRun(null, parseReportSummary(0, 0, "vitest-json")!)).toEqual({ verdict: "trusted-fail" });
   });
 });
 

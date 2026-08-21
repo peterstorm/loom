@@ -108,16 +108,36 @@ export type TrustedTestVerdict = Extract<TestVerdict, { verdict: "trusted-pass" 
 
 /**
  * The TestRun trust rule:
- * - exit 0 + report with ≥1 test and 0 failures  → trusted-pass
- * - exit 0 + report with 0 tests                 → trusted-fail (nothing ran)
- * - exit 0 + report with failures                → trusted-fail
- * - exit 0 + no report                           → untrusted (fall back downstream)
- * - nonzero exit                                 → trusted-fail (a real failure is ground truth)
- * - unknown exit                                 → untrusted
+ * - nonzero exit                                    → trusted-fail (a real failure is ground truth)
+ * - exit 0 or unknown + report, ≥1 test, 0 failures → trusted-pass
+ * - exit 0 or unknown + report with 0 tests         → trusted-fail (nothing ran)
+ * - exit 0 or unknown + report with failures        → trusted-fail
+ * - exit 0 or unknown + no report                   → untrusted (fall back downstream)
+ *
+ * An unknown exit does NOT sink a run that produced a report. A structured
+ * JUnit/vitest-JSON report is STRONGER evidence about what happened than a
+ * shell exit code: it enumerates the tests, and `findReport`'s freshness,
+ * staleness, and write-veto guards already refuse a staged or pre-existing
+ * artifact. Requiring an exit code on top of that gated trust on harness
+ * capability rather than on evidence quality — harnesses exist whose Bash
+ * tool response carries no exit code at all, and on those every run was
+ * untrusted and the whole trust doctrine was inert.
+ *
+ * That reasoning holds only because the report is assumed to describe a
+ * FINISHED run, and `attributeExit` nulls the exit for four reasons besides
+ * "the harness reported none". Three of them still leave the test provably
+ * finished (a later segment owns the exit; an `||` guard that a fresh report
+ * disproves; a nonzero exit, which loses to `trusted-fail` above anyway). The
+ * fourth — a BACKGROUNDED segment — does not, so `extract-evidence` records no
+ * report for it at all rather than letting a mid-write report reach this rule.
+ * The completeness precondition is enforced where completeness is knowable.
+ *
+ * A nonzero exit still overrules a green report: a runner that exits nonzero
+ * after writing a passing report failed at something the report does not
+ * describe, and the failure is the ground truth.
  */
 export function judgeTestRun(exit: number | null, report: TestReportSummary | null): TestVerdict {
-  if (exit === null) return { verdict: "untrusted" };
-  if (exit !== 0) return { verdict: "trusted-fail" };
+  if (exit !== null && exit !== 0) return { verdict: "trusted-fail" };
   if (report === null) return { verdict: "untrusted" };
   return report.total > 0 && report.failed === 0
     ? { verdict: "trusted-pass" }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import validateTaskExecution from "../../../src/handlers/pre-tool-use/validate-task-execution";
 import validatePhaseOrder from "../../../src/handlers/pre-tool-use/validate-phase-order";
 import validateTemplateSubstitution from "../../../src/handlers/pre-tool-use/validate-template-substitution";
@@ -37,10 +38,130 @@ describe("spawn-gate handlers — malformed stdin fails CLOSED", () => {
     });
   }
 
-  // validate-agent-model / validate-agent-skill only gate DURING orchestration
-  // (task graph exists), so their parse-catch is reached only then.
+  it("validate-agent-model fails closed before task-graph creation", async () => {
+    const result = await validateAgentModel("{not json", []);
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") expect(result.message).toContain("malformed hook input");
+  });
+
+  it("validate-agent-model blocks unknown reserved names but allows external utilities", async () => {
+    const unknown = await validateAgentModel(JSON.stringify({
+      tool_name: "Agent",
+      tool_input: { subagent_type: "loom:not-a-real-agent", model: "sonnet" },
+    }), []);
+    expect(unknown).toMatchObject({
+      kind: "block",
+      message: expect.stringContaining("no Loom model policy"),
+    });
+
+    const external = await validateAgentModel(JSON.stringify({
+      tool_name: "Agent",
+      tool_input: { subagent_type: "external-agent" },
+    }), []);
+    expect(external).toEqual({ kind: "allow" });
+  });
+
+  it("validate-agent-model rejects graphless Loom model inheritance", async () => {
+    if (existsSync(TASK_GRAPH_PATH)) return;
+    const priorHome = process.env.HOME;
+    const home = join(tmpdir(), `graphless-model-policy-${process.pid}-${Date.now()}`);
+    mkdirSync(join(home, ".claude", "agents"), { recursive: true });
+    writeFileSync(
+      join(home, ".claude", "agents", "code-reviewer.md"),
+      "---\nname: code-reviewer\nmodel-profile: general-review\nmodel: sonnet\n---\n",
+    );
+    process.env.HOME = home;
+    try {
+      const result = await validateAgentModel(JSON.stringify({
+        tool_name: "Agent",
+        tool_input: { subagent_type: "loom:code-reviewer", prompt: "LOOM_REVIEW_CONTEXT: standalone" },
+      }), []);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") expect(result.message).toContain("inheritance is forbidden");
+    } finally {
+      if (priorHome === undefined) delete process.env.HOME;
+      else process.env.HOME = priorHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("validate-agent-model reports the concrete agent-definition read failure", async () => {
+    const priorHome = process.env.HOME;
+    const home = join(tmpdir(), `unreadable-model-policy-${process.pid}-${Date.now()}`);
+    const definition = join(home, ".claude", "agents", "code-reviewer.md");
+    mkdirSync(definition, { recursive: true });
+    process.env.HOME = home;
+    try {
+      const result = await validateAgentModel(JSON.stringify({
+        tool_name: "Agent",
+        tool_input: { subagent_type: "code-reviewer", model: "sonnet" },
+      }), []);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") {
+        expect(result.message).toContain(`cannot read Claude Code agent definition 'code-reviewer' (${definition})`);
+        expect(result.message).toMatch(/EISDIR|illegal operation on a directory/i);
+      }
+    } finally {
+      if (priorHome === undefined) delete process.env.HOME;
+      else process.env.HOME = priorHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("validate-agent-model does not skip an inaccessible higher-priority Claude definition", async () => {
+    const priorHome = process.env.HOME;
+    const home = join(tmpdir(), `looped-model-policy-${process.pid}-${Date.now()}`);
+    const definition = join(home, ".claude", "agents", "code-reviewer.md");
+    mkdirSync(dirname(definition), { recursive: true });
+    symlinkSync(definition, definition);
+    process.env.HOME = home;
+    try {
+      const result = await validateAgentModel(JSON.stringify({
+        tool_name: "Agent",
+        tool_input: { subagent_type: "code-reviewer", model: "sonnet" },
+      }), []);
+
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") {
+        expect(result.message).toContain(`authoritative Claude agent definition candidate ${definition}`);
+        expect(result.message).toMatch(/ELOOP|too many levels of symbolic links/i);
+        expect(result.message).not.toContain("Claude Code model policy failed");
+      }
+    } finally {
+      if (priorHome === undefined) delete process.env.HOME;
+      else process.env.HOME = priorHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("validate-agent-model distinguishes an unreadable Pi definition from absence", async () => {
+    const priorDir = process.env.PI_CODING_AGENT_DIR;
+    const piDir = join(tmpdir(), `unreadable-pi-model-policy-${process.pid}-${Date.now()}`);
+    const definition = join(piDir, "agents", "code-reviewer.md");
+    mkdirSync(join(piDir, "agents"), { recursive: true });
+    symlinkSync("code-reviewer.md", definition);
+    process.env.PI_CODING_AGENT_DIR = piDir;
+    try {
+      const result = await validateAgentModel(JSON.stringify({
+        tool_name: "subagent",
+        tool_input: { agent: "code-reviewer", agentScope: "user" },
+      }), []);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") {
+        expect(result.message).toContain(`Pi agent policy failed for 'code-reviewer' (${definition})`);
+        expect(result.message).toMatch(/ELOOP|too many levels of symbolic links/i);
+        expect(result.message).not.toContain("has no generated definition");
+      }
+    } finally {
+      if (priorDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = priorDir;
+      rmSync(piDir, { recursive: true, force: true });
+    }
+  });
+
+  // Skill policy remains orchestration-gated; model policy above protects
+  // pre-graph panel and standalone Loom spawns too.
   const orchestrationGated: ReadonlyArray<[string, HookHandler]> = [
-    ["validate-agent-model", validateAgentModel],
     ["validate-agent-skill", validateAgentSkill],
   ];
 
