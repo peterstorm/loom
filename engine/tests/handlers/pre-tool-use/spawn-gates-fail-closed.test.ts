@@ -108,6 +108,32 @@ describe("spawn-gate handlers — malformed stdin fails CLOSED", () => {
     }
   });
 
+  it("validate-agent-model does not skip an inaccessible higher-priority Claude definition", async () => {
+    const priorHome = process.env.HOME;
+    const home = join(tmpdir(), `looped-model-policy-${process.pid}-${Date.now()}`);
+    const definition = join(home, ".claude", "agents", "code-reviewer.md");
+    mkdirSync(dirname(definition), { recursive: true });
+    symlinkSync(definition, definition);
+    process.env.HOME = home;
+    try {
+      const result = await validateAgentModel(JSON.stringify({
+        tool_name: "Agent",
+        tool_input: { subagent_type: "code-reviewer", model: "sonnet" },
+      }), []);
+
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") {
+        expect(result.message).toContain(`authoritative Claude agent definition candidate ${definition}`);
+        expect(result.message).toMatch(/ELOOP|too many levels of symbolic links/i);
+        expect(result.message).not.toContain("Claude Code model policy failed");
+      }
+    } finally {
+      if (priorHome === undefined) delete process.env.HOME;
+      else process.env.HOME = priorHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("validate-agent-model distinguishes an unreadable Pi definition from absence", async () => {
     const priorDir = process.env.PI_CODING_AGENT_DIR;
     const piDir = join(tmpdir(), `unreadable-pi-model-policy-${process.pid}-${Date.now()}`);

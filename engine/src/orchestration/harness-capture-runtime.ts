@@ -240,6 +240,9 @@ export function captureAuditLine(prefix: string, outcome: CaptureOutcome): strin
   if (outcome.kind === "rejected") {
     return `${prefix}: rejected (${outcome.reason}): ${outcome.message}\n`;
   }
+  if (outcome.kind === "no-reservation") {
+    return `${prefix}: no reservation for ${outcome.agentId}\n`;
+  }
   if (outcome.kind === "captured") {
     return `${prefix}: captured ${outcome.receipt.requestId} (${outcome.receipt.byteLength} bytes)\n`;
   }

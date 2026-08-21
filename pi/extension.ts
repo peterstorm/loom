@@ -92,12 +92,13 @@ import {
   RUNS_ROOT_ENV,
   type CaptureOutcome,
 } from "../engine/src/orchestration/harness-capture-runtime";
-import { openRunDirectory } from "../engine/src/orchestration/run-directory-handle";
+import { openRunDirectory, type RunDirHandle } from "../engine/src/orchestration/run-directory-handle";
 import {
   readSessionRunBindings,
   type SessionRunBinding,
 } from "../engine/src/orchestration/session-run-bindings";
 import { captureKey } from "../engine/src/core/harness-capture";
+import type { AgentRequestAuthority } from "../engine/src/core/orchestration-contract";
 import { materializePiResources } from "./resources";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
 import {
@@ -391,6 +392,33 @@ export async function recordPiSpawnCorrelators(
   return runBinding;
 }
 
+type PiRequestCorrelation =
+  | Readonly<{ ok: true; handle: RunDirHandle; request: AgentRequestAuthority }>
+  | Readonly<{ ok: false; kind: "run-directory" | "correlator" | "issued-requests"; message: string }>
+  | Readonly<{ ok: false; kind: "no-correlator" }>
+  | Readonly<{ ok: false; kind: "unknown-request"; requestId: string }>;
+
+/** Resolve one Pi result to the exact issued request its durable correlator names. */
+function piRequestCorrelation(
+  runBinding: SessionRunBinding,
+  toolCallId: unknown,
+  resultIndex: number,
+  agentType: string,
+): PiRequestCorrelation {
+  const opened = openRunDirectory(runBinding.runsRoot, runBinding.runDirectory);
+  if (!opened.ok) return { ok: false, kind: "run-directory", message: opened.error.message };
+  const nativeId = piSpawnRosterId(toolCallId, resultIndex, agentType);
+  const correlator = opened.value.readHarnessCorrelator("pi", nativeId);
+  if (!correlator.ok) return { ok: false, kind: "correlator", message: correlator.error.message };
+  if (correlator.value === null) return { ok: false, kind: "no-correlator" };
+  const issued = opened.value.readIssuedRequests();
+  if (!issued.ok) return { ok: false, kind: "issued-requests", message: issued.error.message };
+  const request = issued.value.find(({ requestId }) => requestId === correlator.value?.requestId);
+  return request === undefined
+    ? { ok: false, kind: "unknown-request", requestId: correlator.value.requestId }
+    : { ok: true, handle: opened.value, request };
+}
+
 async function recordPiRequestCaptureRejection(
   runBinding: SessionRunBinding,
   toolCallId: unknown,
@@ -398,37 +426,27 @@ async function recordPiRequestCaptureRejection(
   agentType: string,
   diagnostic: string,
 ): Promise<void> {
-  const opened = openRunDirectory(runBinding.runsRoot, runBinding.runDirectory);
-  if (!opened.ok) {
-    process.stderr.write(
-      `loom(pi): recordPiRequestCaptureRejection: cannot open run directory ${runBinding.runDirectory}: ${opened.error.message}\n`,
-    );
+  const correlation = piRequestCorrelation(runBinding, toolCallId, resultIndex, agentType);
+  if (!correlation.ok) {
+    const problem = (() => {
+      switch (correlation.kind) {
+        case "run-directory":
+          return `cannot open run directory ${runBinding.runDirectory}: ${correlation.message}`;
+        case "correlator":
+          return `cannot resolve correlator for ${agentType}[${resultIndex}]: ${correlation.message}`;
+        case "no-correlator":
+          return `cannot resolve correlator for ${agentType}[${resultIndex}]: no binding found`;
+        case "issued-requests":
+          return `cannot read issued requests: ${correlation.message}`;
+        case "unknown-request":
+          return `correlator request ${correlation.requestId} has no issued authority`;
+      }
+    })();
+    process.stderr.write(`loom(pi): recordPiRequestCaptureRejection: ${problem}\n`);
     return;
   }
-  const correlator = opened.value.readHarnessCorrelator(
-    "pi", piSpawnRosterId(toolCallId, resultIndex, agentType),
-  );
-  if (!correlator.ok || correlator.value === null) {
-    process.stderr.write(
-      `loom(pi): recordPiRequestCaptureRejection: cannot resolve correlator for ${agentType}[${resultIndex}]: ${correlator.ok ? "no binding found" : correlator.error.message}\n`,
-    );
-    return;
-  }
-  const issued = opened.value.readIssuedRequests();
-  if (!issued.ok) {
-    process.stderr.write(
-      `loom(pi): recordPiRequestCaptureRejection: cannot read issued requests: ${issued.error.message}\n`,
-    );
-    return;
-  }
-  const request = issued.value.find(({ requestId }) => requestId === correlator.value?.requestId);
-  if (request === undefined) {
-    process.stderr.write(
-      `loom(pi): recordPiRequestCaptureRejection: correlator request ${correlator.value.requestId} has no issued authority\n`,
-    );
-    return;
-  }
-  const existingEvents = await opened.value.readEvents();
+  const { handle, request } = correlation;
+  const existingEvents = await handle.readEvents();
   const alreadyRecorded = existingEvents.some(({ event }) => {
     if (typeof event !== "object" || event === null || Array.isArray(event)) return false;
     const record = event as Record<string, unknown>;
@@ -436,7 +454,7 @@ async function recordPiRequestCaptureRejection(
       record.slotId === request.slotId && record.attempt === request.attempt;
   });
   if (alreadyRecorded) return;
-  await opened.value.appendEvent({
+  await handle.appendEvent({
     schemaVersion: 1,
     sequence: 0,
     dedupKey: `capture-rejected:${createHash("sha256").update(`${request.requestId}:${request.attempt}`).digest("hex")}`,
@@ -458,19 +476,23 @@ function piResultAuthorityProblem(
   agentType: string,
   markers: PiOrchestrationMarkers,
 ): string | null {
-  const opened = openRunDirectory(runBinding.runsRoot, runBinding.runDirectory);
-  if (!opened.ok) return opened.error.message;
-  const nativeId = piSpawnRosterId(toolCallId, resultIndex, agentType);
-  const correlator = opened.value.readHarnessCorrelator("pi", nativeId);
-  if (!correlator.ok) return correlator.error.message;
-  if (correlator.value === null) return `no durable Pi correlator exists for result index ${resultIndex}`;
-  if (correlator.value.requestId !== markers.requestId) {
-    return `result marker ${markers.requestId} does not match correlated request ${correlator.value.requestId}`;
+  const correlation = piRequestCorrelation(runBinding, toolCallId, resultIndex, agentType);
+  if (!correlation.ok) {
+    switch (correlation.kind) {
+      case "run-directory":
+      case "correlator":
+      case "issued-requests":
+        return correlation.message;
+      case "no-correlator":
+        return `no durable Pi correlator exists for result index ${resultIndex}`;
+      case "unknown-request":
+        return `correlated request ${correlation.requestId} is no longer issued`;
+    }
   }
-  const issued = opened.value.readIssuedRequests();
-  if (!issued.ok) return issued.error.message;
-  const request = issued.value.find(({ requestId }) => requestId === correlator.value?.requestId);
-  if (request === undefined) return `correlated request ${correlator.value.requestId} is no longer issued`;
+  const { request } = correlation;
+  if (request.requestId !== markers.requestId) {
+    return `result marker ${markers.requestId} does not match correlated request ${request.requestId}`;
+  }
   return request.contextDigest === markers.contextDigest
     ? null
     : `result context marker does not match correlated request ${request.requestId}`;

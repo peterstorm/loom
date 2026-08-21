@@ -87,7 +87,15 @@ const handler: HookHandler = async (stdin) => {
   if (UTILITY_AGENTS.has(bareAgent)) return { kind: "allow" };
   if (SKILL_EXEMPT_AGENTS.has(bareAgent)) return { kind: "allow" };
 
-  const agentPath = resolveClaudeAgentDefinitionPath(bareAgent, subagentType);
+  let agentPath: string | null;
+  try {
+    agentPath = resolveClaudeAgentDefinitionPath(bareAgent, subagentType);
+  } catch (error) {
+    return {
+      kind: "block",
+      message: `BLOCKED: Claude Code agent-definition authority for "${subagentType}" is unreadable: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
   if (!agentPath) {
     return {
       kind: "block",

@@ -81,7 +81,7 @@
  */
 
 import type { HookResult } from "../types";
-import { normalizeShellSpan } from "./shell-normalize";
+import { normalizeShellVariants } from "./shell-normalize";
 import { CONTINUE, halt, scanUnquoted, skip } from "./shell-quoting";
 import {
   TASK_GRAPH_PATH,
@@ -163,53 +163,21 @@ function segmentInvokesHelper(segment: string): boolean {
   return WHITELISTED_HELPERS.includes(tokens[3] ?? "");
 }
 
-/**
- * Quote-COLLAPSED view of a piece of command text, for pattern matching only —
- * a thin whole-segment application of the shared normalizeShellSpan
- * ("matching-view" mode). It reproduces the bash word-normalizations that
- * hide a guarded literal WITHIN a word: quote strip, backslash/line-
- * continuation, ANSI-C decode (NUL truncates the ANSI-C body), locale `$"…"`,
- * and `$name`/`${…}` parameter expansion (empty forms deleted, default forms
- * `${x:-w}` revealing their word). The invariant that makes it fail-closed for
- * these: it only ever removes or decodes SHELL-SYNTAX and shell-DROPPED spans,
- * none of which leave a residue inside a guarded pattern (paths of
- * `[A-Za-z0-9._/-]`); deleting an empty expansion only JOINS the literal
- * fragments around it, exactly as bash does. Backticks and `$(…)`/`<(…)` are
- * left LITERAL here (backtickQuotes is off in matching-view), so this single
- * view does NOT model substitution-to-empty — a guarded literal fragmented
- * across `$(:)`/`` `:` `` would survive it. referencesPattern therefore also
- * tests a blankSubstitutions view; do not rely on collapseQuotes alone as the
- * fail-closed boundary. The collapsed text is NEVER substituted back into
- * anything executed or placeholdered — matching only.
- */
-function collapseQuotes(text: string): string {
-  return normalizeShellSpan(text, 0, { mode: "matching-view" }).value;
-}
+/** Maximum per-expansion parameter-state views before the guard fails closed. */
+const MAX_PARAMETER_VIEWS = 256;
 
 /**
- * Every reveal-monotonic collapsed view of `text` the matching layer must test:
- * the cross-product of the two set-state axes a param-expansion span exposes —
- * a colonless default word (`${x-w}`/`${x=w}`) revealed (unset) vs emptied
- * (set-but-empty), and an alternate word (`${x:+w}`/`${x+w}`) emptied (unset) vs
- * revealed (set). Each combination is a real bash output, so a guarded literal
- * that reassembles under ANY variable state appears contiguously in at least one
- * view: `.claude/stat${x-X}e` reassembles in the colonless-empty view;
- * `${PWD:+.claude/state/…}` in the alternate-reveal view. Reveal-monotonic —
- * emptying or revealing a span only joins/exposes literal fragments, never hides
- * one. Deduped by the caller; the common case (no default/alternate forms)
- * yields one identical view.
+ * Every bounded reveal/empty cross-product for optional parameter words.
+ *
+ * Choices are per syntax occurrence, not global axes: separate colonless
+ * defaults and alternate forms can occupy different states in one real shell
+ * invocation. Repeated references to one variable are deliberately allowed to
+ * vary independently here; those extra views over-approximate bash and can only
+ * arm the guard. `null` means the cross-product exceeded the bound, which the
+ * caller treats as a guarded reference rather than silently truncating it.
  */
-function collapseVariants(text: string): string[] {
-  return [
-    collapseQuotes(text),
-    normalizeShellSpan(text, 0, { mode: "matching-view", colonlessDefaultsEmpty: true }).value,
-    normalizeShellSpan(text, 0, { mode: "matching-view", alternateFormsReveal: true }).value,
-    normalizeShellSpan(text, 0, {
-      mode: "matching-view",
-      colonlessDefaultsEmpty: true,
-      alternateFormsReveal: true,
-    }).value,
-  ];
+function collapseVariants(text: string): readonly string[] | null {
+  return normalizeShellVariants(text, 0, MAX_PARAMETER_VIEWS);
 }
 
 /** Product of brace-group sizes above which a braced line is deemed
@@ -520,17 +488,15 @@ function referencesPattern(
   const blanked = blankSubstitutions(text);
   const completed = wildcardSubstitutions(text);
   // Reveal-monotonic bases, deduped: substitutions LITERAL vs EMPTY vs WILDCARD,
-  // each under every default/alternate set-state view (collapseVariants —
-  // colonless default revealed vs emptied × alternate emptied vs revealed). The
-  // common case (no substitutions, no default/alternate forms) collapses to a
-  // single base.
-  const bases = [
-    ...new Set([
-      ...collapseVariants(text),
-      ...collapseVariants(blanked),
-      ...collapseVariants(completed),
-    ]),
+  // each under every bounded per-expansion parameter-state cross-product. An
+  // unbounded parameter view set fails closed, exactly like brace expansion.
+  const variantGroups = [
+    collapseVariants(text),
+    collapseVariants(blanked),
+    collapseVariants(completed),
   ];
+  if (variantGroups.some((group) => group === null)) return true;
+  const bases = [...new Set(variantGroups.flatMap((group) => group ?? []))];
   for (const base of bases) {
     const views = expandBraces(base);
     if (views === null) return true;

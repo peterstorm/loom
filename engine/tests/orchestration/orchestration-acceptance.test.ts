@@ -788,6 +788,36 @@ describe("Claude capture against a real run directory", () => {
     expect(outcome.kind).toBe("no-reservation");
   });
 
+  it("audits and errors when request-bound authority has no matching reservation", async () => {
+    const { runsRoot, runDir } = await stagedRun();
+    const previousRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+    const previousRun = process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = runDir;
+    try {
+      const result = await captureOrchestrationResult(JSON.stringify({
+        session_id: "s1",
+        agent_id: "missing-correlator",
+        agent_type: "code-reviewer",
+        agent_transcript_path: transcript(runDir, "unbound result"),
+      }), []);
+
+      expect(result).toEqual({
+        kind: "error",
+        message: "request-bound capture found no reservation for missing-correlator",
+      });
+      expect(captureAuditLine("capture", {
+        kind: "no-reservation",
+        agentId: "missing-correlator",
+      })).toBe("capture: no reservation for missing-correlator\n");
+    } finally {
+      if (previousRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+      else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;
+      if (previousRun === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+      else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousRun;
+    }
+  });
+
   it("is inert for an agent that is not part of an orchestration run", async () => {
     const outcome = await captureClaudeResult(
       { session_id: "s1", agent_id: "agent-abc", agent_type: "code-reviewer" },

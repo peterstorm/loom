@@ -142,6 +142,10 @@ const agentCollisionOverlap = (
   reserved: ReadonlySet<string>,
 ): string[] => [...panel].filter((agent) => phaseLookupKeys(agent).some((key) => reserved.has(key)));
 
+function assertNoOverlap(overlap: readonly string[], message: string): void {
+  if (overlap.length > 0) throw new Error(message);
+}
+
 /** The panel/phase disjointness invariant, as a live predicate: the panel
  *  agents that are ALSO reachable as phase agents through any key detectPhase
  *  probes (see phaseLookupKeys). Must always be empty — see the comment on
@@ -163,13 +167,12 @@ export function assertPanelPhaseDisjoint(
   phaseMap: Readonly<Record<string, Phase | undefined>> = PHASE_AGENT_MAP,
 ): void {
   const overlap = panelPhaseOverlap(panel, phaseMap);
-  if (overlap.length > 0) {
-    throw new Error(
-      `loom config invariant violated: panel agents must not be phase agents, ` +
-        `but these are in both ARCH_PANEL_AGENTS and PHASE_AGENT_MAP: ${overlap.join(", ")}. ` +
-        `A panel agent in PHASE_AGENT_MAP would advance the phase mid-panel.`,
-    );
-  }
+  assertNoOverlap(
+    overlap,
+    `loom config invariant violated: panel agents must not be phase agents, ` +
+      `but these are in both ARCH_PANEL_AGENTS and PHASE_AGENT_MAP: ${overlap.join(", ")}. ` +
+      `A panel agent in PHASE_AGENT_MAP would advance the phase mid-panel.`,
+  );
 }
 
 // Fail at module load — not just in CI — if a panel agent is ever also a phase
@@ -314,14 +317,13 @@ export function assertReviewPanelDisjoint(
   reserved?: ReadonlySet<string>,
 ): void {
   const overlap = reserved ? reviewPanelOverlap(panel, reserved) : reviewPanelOverlap(panel);
-  if (overlap.length > 0) {
-    throw new Error(
-      `loom config invariant violated: review-panel verifiers must not also be phase, ` +
-        `architecture-panel, impl, review, or utility agents, but these collide: ${overlap.join(", ")}. ` +
-        `A verifier reached through another set would be mis-dispatched — in REVIEW_SUB_AGENTS it ` +
-        `would be parsed for findings it never emits and fail the task's evidence check.`,
-    );
-  }
+  assertNoOverlap(
+    overlap,
+    `loom config invariant violated: review-panel verifiers must not also be phase, ` +
+      `architecture-panel, impl, review, or utility agents, but these collide: ${overlap.join(", ")}. ` +
+      `A verifier reached through another set would be mis-dispatched — in REVIEW_SUB_AGENTS it ` +
+      `would be parsed for findings it never emits and fail the task's evidence check.`,
+  );
 }
 
 assertReviewPanelDisjoint();
@@ -358,14 +360,13 @@ export function assertPanelExecuteDisjoint(
   reserved: ReadonlySet<string> = new Set([...IMPL_AGENTS, ...REVIEW_AGENTS, ...UTILITY_AGENTS]),
 ): void {
   const overlap = panelExecuteOverlap(panel, reserved);
-  if (overlap.length > 0) {
-    throw new Error(
-      `loom config invariant violated: panel agents must not also be execute-phase ` +
-        `or utility agents, but these collide: ${overlap.join(", ")}. detectPhase would ` +
-        `classify them as "execute" (or pass them through as utility) before reaching ` +
-        `the panel branch, so they would never be recognized as architecture work.`,
-    );
-  }
+  assertNoOverlap(
+    overlap,
+    `loom config invariant violated: panel agents must not also be execute-phase ` +
+      `or utility agents, but these collide: ${overlap.join(", ")}. detectPhase would ` +
+      `classify them as "execute" (or pass them through as utility) before reaching ` +
+      `the panel branch, so they would never be recognized as architecture work.`,
+  );
 }
 
 // Fail at module load if a panel agent collides with an execute/utility agent —

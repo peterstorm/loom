@@ -24,7 +24,14 @@ import {
   resolutionsUnionError,
   reviewRunError,
 } from "./core/findings";
-import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, OrphanedWaveGateRetirement, SpecCheck, TaskGraph } from "./types";
+import type {
+  ActiveWaveGateRegistration,
+  CompletedWaveGateRegistration,
+  OrphanedWaveGateRetirement,
+  SpecCheck,
+  TaskGraph,
+  WaveReviewEpochAuthority,
+} from "./types";
 import type { DomainResult } from "./core/orchestration-contract";
 import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
 import {
@@ -230,6 +237,31 @@ function exactFieldsError(
   if (unknownFields.length > 0) return `${label} contains unknown field(s): ${unknownFields.sort().join(", ")}`;
   const missingFields = required.filter((field) => !(field in record));
   return missingFields.length > 0 ? `${label} is missing field(s): ${missingFields.join(", ")}` : null;
+}
+
+const WAVE_REVIEW_EPOCH_FIELDS = ["runId", "wave", "batchEpoch"] as const;
+
+/** Parse the exact request-batch authority persisted beside an active Wave Gate. */
+function parseWaveReviewEpoch(raw: unknown): ParseResult<WaveReviewEpochAuthority | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return parseErr("wave_review_epoch must be an object when present");
+  }
+  const record = raw as Record<string, unknown>;
+  const fieldsError = exactFieldsError(record, WAVE_REVIEW_EPOCH_FIELDS, [], "wave_review_epoch");
+  if (fieldsError !== null) return parseErr(fieldsError);
+  const runId = parseOrchestrationRunId(record.runId);
+  if (!runId.ok) return parseErr(`wave_review_epoch.runId: ${runId.error.message}`);
+  if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
+    return parseErr("wave_review_epoch.wave must be an integer >= 1");
+  }
+  const batchEpoch = parseArtifactDigest(record.batchEpoch);
+  if (!batchEpoch.ok) return parseErr(`wave_review_epoch.batchEpoch: ${batchEpoch.error.message}`);
+  return parseOk(Object.freeze({
+    runId: runId.value,
+    wave: record.wave,
+    batchEpoch: batchEpoch.value,
+  }));
 }
 
 const ACTIVE_WAVE_GATE_FIELDS = [
@@ -1075,6 +1107,15 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
   const registrations = parseWaveGateRegistrations(obj);
   if (!registrations.ok) return parseErr(registrations.error);
   const { activeWaveGate, waveGateHistory } = registrations.value;
+  const waveReviewEpoch = parseWaveReviewEpoch(obj.wave_review_epoch);
+  if (!waveReviewEpoch.ok) return parseErr(waveReviewEpoch.error);
+  if (activeWaveGate !== undefined && waveReviewEpoch.value !== undefined &&
+      (waveReviewEpoch.value.runId !== activeWaveGate.runId || waveReviewEpoch.value.wave !== activeWaveGate.wave)) {
+    return parseErr(
+      `wave_review_epoch must match active_wave_gate run/Wave authority ` +
+      `(expected ${activeWaveGate.runId}/Wave ${activeWaveGate.wave})`,
+    );
+  }
   const orphanedHistory = parseOrphanedWaveGateHistory(obj.orphaned_wave_gate_history);
   if (!orphanedHistory.ok) return parseErr(orphanedHistory.error);
   if (activeWaveGate !== undefined && orphanedHistory.value?.some(({ runId }) => runId === activeWaveGate.runId)) {
@@ -1116,6 +1157,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
     tasks: frozenTasks,
     wave_gates: frozenWaveGates,
     ...(specCheck.value === undefined ? {} : { spec_check: specCheck.value }),
+    ...(waveReviewEpoch.value === undefined ? {} : { wave_review_epoch: waveReviewEpoch.value }),
     ...(activeWaveGate === undefined ? {} : { active_wave_gate: activeWaveGate }),
     ...(waveGateHistory === undefined ? {} : { wave_gate_history: waveGateHistory }),
     ...(orphanedHistory.value === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory.value }),

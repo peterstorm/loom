@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { normalizeShellSpan } from "../../src/core/shell-normalize";
+import { normalizeShellSpan, normalizeShellVariants } from "../../src/core/shell-normalize";
 import { extractShellWriteTargets } from "../../src/machine/extract-evidence";
 import { guardStateFileDecision } from "../../src/core/guard-state-file";
 
@@ -204,6 +204,20 @@ describe("normalizeShellSpan — bash word-normalization rules", () => {
     expect(both(".claude/sta${x-Q}te${y:+/active_task_graph.json}")).toBe(
       ".claude/state/active_task_graph.json",
     );
+  });
+
+  it("enumerates mixed per-expansion states instead of applying one global choice", () => {
+    const text = ".cl${a-a}${b-X}u${c-d}e/sta${d-t}${e-X}e/active_task_gr${f-a}${g-X}ph.json";
+    const variants = normalizeShellVariants(text, 0, 256);
+
+    expect(variants).not.toBeNull();
+    expect(variants).toContain(".claude/state/active_task_graph.json");
+    expect(variants).toContain(".claXude/statXe/active_task_graXph.json");
+  });
+
+  it("returns null rather than truncating an unbounded parameter-state cross-product", () => {
+    const text = Array.from({ length: 9 }, (_, index) => `\${x${index}-x}`).join("");
+    expect(normalizeShellVariants(text, 0, 256)).toBeNull();
   });
 
   it("redirect-word mode stops at unquoted whitespace/redirect metacharacters", () => {

@@ -265,18 +265,27 @@ function resolveMode(opts: NormalizeOptions): {
  *  default/alternate form NESTED inside a revealed word (`${x:-${y-X}}`,
  *  `${x:-${PWD:+Y}}`) follows the same hypothesis at any depth — bash's output
  *  reassembles a fragmented guarded literal beyond one nesting level. */
+type WordVariantCursor = { readonly mask: number; index: number };
+
+function nextVariantReveal(cursor: WordVariantCursor): boolean {
+  const reveal = (cursor.mask & (1 << cursor.index)) !== 0;
+  cursor.index += 1;
+  return reveal;
+}
+
 function revealWord(
   text: string,
   wordStart: number,
   end: number,
   colonlessEmpty: boolean,
   alternateReveal: boolean,
+  variantCursor: WordVariantCursor | undefined,
 ): string {
-  return normalizeShellSpan(text.slice(wordStart, end - 1), 0, {
+  return normalizeShellSpanInternal(text.slice(wordStart, end - 1), 0, {
     mode: "matching-view",
     colonlessDefaultsEmpty: colonlessEmpty,
     alternateFormsReveal: alternateReveal,
-  }).value;
+  }, variantCursor).value;
 }
 
 /**
@@ -296,19 +305,26 @@ function wordContribution(
   pe: Extract<ParamExpansion, { kind: "word" }>,
   colonlessEmpty: boolean,
   alternateReveal: boolean,
+  variantCursor: WordVariantCursor | undefined,
 ): string {
+  let reveal: boolean;
   if (pe.form === "alternate") {
-    return alternateReveal ? revealWord(text, pe.wordStart, pe.end, colonlessEmpty, alternateReveal) : "";
+    reveal = variantCursor === undefined ? alternateReveal : nextVariantReveal(variantCursor);
+  } else if (pe.colonless) {
+    reveal = variantCursor === undefined ? !colonlessEmpty : nextVariantReveal(variantCursor);
+  } else {
+    reveal = true;
   }
-  return colonlessEmpty && pe.colonless
-    ? ""
-    : revealWord(text, pe.wordStart, pe.end, colonlessEmpty, alternateReveal);
+  return reveal
+    ? revealWord(text, pe.wordStart, pe.end, colonlessEmpty, alternateReveal, variantCursor)
+    : "";
 }
 
-export function normalizeShellSpan(
+function normalizeShellSpanInternal(
   text: string,
   start: number,
   opts: NormalizeOptions,
+  variantCursor: WordVariantCursor | undefined,
 ): NormalizedSpan {
   const { stopAtWordBoundary, backtickQuotes } = resolveMode(opts);
   const colonlessEmpty = opts.mode === "matching-view" && opts.colonlessDefaultsEmpty === true;
@@ -333,7 +349,7 @@ export function normalizeShellSpan(
       if (c === "$" && quote === '"') {
         const pe = paramExpansionEnd(text, i);
         if (pe.kind === "word") {
-          value += wordContribution(text, pe, colonlessEmpty, alternateReveal);
+          value += wordContribution(text, pe, colonlessEmpty, alternateReveal, variantCursor);
           i = pe.end - 1; continue;
         }
         if (pe.kind === "empty") { i = pe.end - 1; continue; }
@@ -360,7 +376,7 @@ export function normalizeShellSpan(
       // forms reveal `w`, alternate forms `${x:+w}` reveal it only under
       // alternateFormsReveal, colonless defaults collapse under colonlessDefaultsEmpty.
       if (pe.kind === "word") {
-        value += wordContribution(text, pe, colonlessEmpty, alternateReveal);
+        value += wordContribution(text, pe, colonlessEmpty, alternateReveal, variantCursor);
         i = pe.end - 1; continue;
       }
       if (pe.kind === "empty") { i = pe.end - 1; continue; }
@@ -380,4 +396,38 @@ export function normalizeShellSpan(
     value += c;
   }
   return { value, end: Math.min(i, text.length) };
+}
+
+export function normalizeShellSpan(
+  text: string,
+  start: number,
+  opts: NormalizeOptions,
+): NormalizedSpan {
+  return normalizeShellSpanInternal(text, start, opts, undefined);
+}
+
+/**
+ * Enumerate independent reveal/empty outcomes for every optional word-form
+ * expansion encountered by the shared normalizer. Nested forms participate
+ * only when their enclosing word is revealed. Treating syntax occurrences as
+ * independent deliberately over-approximates bash variables that repeat: extra
+ * views can only arm a guard, never conceal a real output. `null` means the
+ * requested bound cannot cover the cross-product and callers must fail closed.
+ */
+export function normalizeShellVariants(
+  text: string,
+  start: number,
+  maxVariants: number,
+): readonly string[] | null {
+  const allRevealed: WordVariantCursor = { mask: -1, index: 0 };
+  normalizeShellSpanInternal(text, start, { mode: "matching-view" }, allRevealed);
+  const variantCount = 2 ** allRevealed.index;
+  if (!Number.isSafeInteger(variantCount) || variantCount > maxVariants) return null;
+
+  const values = new Set<string>();
+  for (let mask = 0; mask < variantCount; mask += 1) {
+    const cursor: WordVariantCursor = { mask, index: 0 };
+    values.add(normalizeShellSpanInternal(text, start, { mode: "matching-view" }, cursor).value);
+  }
+  return Object.freeze([...values]);
 }

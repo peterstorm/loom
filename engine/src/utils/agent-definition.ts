@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { accessSync, constants as fsConstants } from "node:fs";
 import { join } from "node:path";
 import { extractNamespace } from "./strip-namespace";
 import { LOOM_PACKAGE_ROOT } from "./loom-package-root";
@@ -39,5 +39,17 @@ export function resolveClaudeAgentDefinitionPath(
   candidates.push(join(process.cwd(), "agents", `${agentName}.md`));
   if (repositoryRoot) candidates.push(join(repositoryRoot, "agents", `${agentName}.md`));
 
-  return candidates.find((path) => existsSync(path)) ?? null;
+  for (const path of candidates) {
+    try {
+      accessSync(path, fsConstants.F_OK);
+      return path;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw new Error(
+        `cannot inspect authoritative Claude agent definition candidate ${path}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+  }
+  return null;
 }

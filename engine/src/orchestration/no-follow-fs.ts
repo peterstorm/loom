@@ -407,18 +407,10 @@ function releaseDirectoryLock(directory: AnchoredDirectory, lockName: string, ow
     if (readDirectoryFileNoFollow(directory, lockName).toString("utf-8").trim() !== ownerToken) return;
     unlinkSync(anchoredChildPath(directory, lockName));
   } catch (error) {
-    // ENOENT is the ONLY benign outcome: the lock is already gone, so this
-    // process no longer owns it and there is nothing to release. Every other
-    // code (EACCES, EIO, EPERM) means the unlink genuinely failed and the lock
-    // file is STILL THERE — stranded until a stale-lock recovery notices it,
-    // with every waiter blocked in the meantime. Swallowing them all made that
-    // outcome indistinguishable from a clean release; the sibling catches in
-    // this module already discriminate, and now so does this one.
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    process.stderr.write(
-      `loom: could not release anchored lock ${lockName}: ` +
-      `${error instanceof Error ? error.message : String(error)} — the lock file remains and ` +
-      `blocks other holders until stale-lock recovery reclaims it\n`,
+    throw new Error(
+      `cannot release anchored lock ${lockName}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
 }
@@ -442,10 +434,26 @@ export async function withAnchoredDirectoryLock<T>(
   const anchored = openDirectoryNoFollow(directory);
   try {
     const ownerToken = await acquireDirectoryLock(anchored, lockName);
+    let operationFailed = false;
+    let operationError: unknown;
     try {
       return await operation(anchored);
+    } catch (error) {
+      operationFailed = true;
+      operationError = error;
+      throw error;
     } finally {
-      releaseDirectoryLock(anchored, lockName, ownerToken);
+      try {
+        releaseDirectoryLock(anchored, lockName, ownerToken);
+      } catch (releaseError) {
+        if (operationFailed) {
+          throw new AggregateError(
+            [operationError, releaseError],
+            `anchored operation failed and lock ${lockName} could not be released`,
+          );
+        }
+        throw releaseError;
+      }
     }
   } finally {
     closeAnchoredDirectory(anchored);
@@ -595,14 +603,23 @@ function readAnchoredRunFile(path: string): Buffer {
 }
 
 /**
- * Remove a run artifact from its anchored parent directory without following
- * it. `unlink` never resolves the FINAL component, so a planted symlink loses
- * the link itself and never its target; the anchored parent is what keeps the
- * removal inside the run directory.
+ * Remove a run artifact relative to its retained parent descriptor.
+ *
+ * Darwin's anchor retains a verified textual path because Node exposes no
+ * `unlinkat`. Reusing that path would reopen an ancestor-swap race between the
+ * verified open and `unlinkSync`, so removal fails closed there until a native
+ * descriptor-relative boundary is available. Linux names the leaf through the
+ * retained descriptor; `unlink` removes a planted leaf symlink, never its
+ * target.
  */
 export function removeRunFileNoFollow(path: string): void {
   const parent = openDirectoryNoFollow(dirname(path));
   try {
+    if (parent.anchor !== "descriptor") {
+      throw new Error(
+        `descriptor-relative run artifact removal is unavailable on ${process.platform}; refusing unsafe unlink: ${path}`,
+      );
+    }
     unlinkSync(anchoredChildPath(parent, basename(path)));
   } finally {
     closeAnchoredDirectory(parent);

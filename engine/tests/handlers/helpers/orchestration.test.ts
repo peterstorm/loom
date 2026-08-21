@@ -3446,10 +3446,12 @@ describe("orchestration CLI", () => {
       // recorded here would advance a gate this run does not own.
       const graph = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
       const active = graph["active_wave_gate"] as Record<string, unknown>;
+      const epoch = graph["wave_review_epoch"] as Record<string, unknown>;
       chmodSync(statePath, 0o644);
       writeFileSync(statePath, JSON.stringify({
         ...graph,
         active_wave_gate: { ...active, runId: "run.some-other-wave" },
+        wave_review_epoch: { ...epoch, runId: "run.some-other-wave" },
       }));
 
       const result = runCli(

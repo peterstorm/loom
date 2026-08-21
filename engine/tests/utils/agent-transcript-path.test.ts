@@ -122,6 +122,25 @@ describe("deriveAgentTranscriptPath", () => {
     expect(deriveAgentTranscriptPath("sess", "agent")).toBeNull();
   });
 
+  it("diagnoses an unreadable derived candidate instead of collapsing it into absence", () => {
+    const config = tmp("loom-cfg");
+    const project = tmp("loom-proj");
+    setEnv("CLAUDE_CONFIG_DIR", config);
+    setEnv("CLAUDE_PROJECT_DIR", project);
+    const parent = join(config, "projects", projectSlug(project), "sess-loop", "subagents");
+    const candidate = join(parent, "agent-agent1.jsonl");
+    mkdirSync(parent, { recursive: true });
+    symlinkSync(candidate, candidate);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(deriveAgentTranscriptPath("sess-loop", "agent1")).toBeNull();
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toMatch(/cannot inspect derived subagent file candidate.*(?:ELOOP|too many levels of symbolic links)/i);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it("returns null while preserving realpath and long-slug scan diagnostics", () => {
     const missingRoot = join(tmp("loom-missing-root-parent"), "missing-config");
     const longMissingProject = `/${"missing-project-segment".repeat(12)}`;

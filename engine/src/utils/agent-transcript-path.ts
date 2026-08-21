@@ -23,12 +23,12 @@
  * DERIVATION IS A FALLBACK, NEVER AN OVERRIDE. A harness that supplies an
  * existing `agent_transcript_path` is always believed, so Pi (whose transcripts
  * live nowhere near this layout) and any future harness keep working untouched.
- * Every step is guarded by `existsSync` and the whole thing returns null rather
- * than throwing: a derivation that misses must land on the behaviour we already
- * had, never crash a lifecycle hook.
+ * Every candidate is probed explicitly: `ENOENT` means absent, while other
+ * filesystem failures are diagnosed before lookup continues. A derivation that
+ * misses still returns null and never crashes a lifecycle hook.
  */
 
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseAgentId, parseSessionId } from "../machine/evidence";
@@ -111,6 +111,19 @@ function* subagentFileCandidates(sessionId: string, agentId: string, suffix: str
   }
 }
 
+function derivedCandidateExists(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    process.stderr.write(
+      `loom: cannot inspect derived subagent file candidate ${path}: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return false;
+  }
+}
+
 /**
  * The on-disk transcript for `<sessionId, agentId>`, or null when nothing at
  * the derived location exists.
@@ -126,7 +139,7 @@ export function deriveAgentTranscriptPath(sessionIdRaw: string, agentIdRaw: stri
   if (!sessionId || !agentId) return null;
 
   for (const path of subagentFileCandidates(sessionId, agentId, ".jsonl")) {
-    if (existsSync(path)) return path;
+    if (derivedCandidateExists(path)) return path;
   }
   return null;
 }
@@ -185,7 +198,7 @@ export function deriveAgentType(sessionIdRaw: string, agentIdRaw: string): strin
   if (!sessionId || !agentId) return null;
 
   for (const path of subagentFileCandidates(sessionId, agentId, ".meta.json")) {
-    if (!existsSync(path)) continue;
+    if (!derivedCandidateExists(path)) continue;
     try {
       const meta: unknown = JSON.parse(readFileSync(path, "utf-8"));
       const agentType = typeof meta === "object" && meta !== null && "agentType" in meta

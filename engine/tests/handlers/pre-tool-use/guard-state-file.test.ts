@@ -624,6 +624,21 @@ describe("guard-state-file — edge cases", () => {
     expect(guardDecision("rm .claude/stat${x:=X}e/active_task_grap${x:=X}h.json")).toBe("allow");
   });
 
+  it("separate parameter expansions can occupy mixed states in one guarded path", () => {
+    // The four historical views applied one choice globally to every colonless
+    // default. This real output needs a/c/d/f revealed (unset) while b/e/g are
+    // empty (set-but-empty); neither all-revealed nor all-empty reassembles any
+    // guarded token, but bash reaches the exact State File.
+    const mixed = ".cl${a-a}${b-X}u${c-d}e/sta${d-t}${e-X}e/active_task_gr${f-a}${g-X}ph.json";
+    expect(guardDecision(`rm -rf ${mixed}`)).toBe("block");
+    expect(guardDecision(`echo FORGED > ${mixed}`)).toBe("block");
+    // Once in scope, a read remains a read.
+    expect(guardDecision(`cat ${mixed}`)).toBe("allow");
+    // Colon forms cannot take the empty branch; their decoys therefore never
+    // reassemble a guarded path and should not manufacture a match.
+    expect(guardDecision("rm .cl${a:-a}${b:-X}ude/sta${c:-t}${d:-X}e/scratch.json")).toBe("allow");
+  });
+
   it("a colonless default NESTED inside a colon-form word still reaches its set-empty output (round-22 nested bypass)", () => {
     // Round-21 emptied a TOP-LEVEL colonless default, but the reveal of a colon
     // form's word (`${x:-w}`) dropped the colonless-empty flag, so a colonless

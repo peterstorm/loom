@@ -10,9 +10,9 @@
  * Capture is bound to REQUEST authority, not to the agent that happens to have
  * stopped. Claude's `session_id` + `agent_id` + `agent_type` locate the
  * pre-spawn reservation; the reservation names the request, and the request
- * names the run, slot, attempt, model, and context digest. A stop that matches
- * no reservation is audited and ignored — it is someone else's agent, not
- * evidence for this run.
+ * names the run, slot, attempt, model, and context digest. With request-bound
+ * Run authority, a stop that matches no reservation is audited and rejected:
+ * silently treating it as unrelated would strand the reserved slot.
  *
  * This handler NEVER resolves an unrelated State File. It reads only the run
  * directory it was pointed at, so a standalone review running beside an active
@@ -169,7 +169,13 @@ const handler: HookHandler = async (stdin): Promise<HookResult> => {
   // would look exactly like a run that had nothing to capture.
   const audit = captureAuditLine("capture-orchestration-result", outcome);
   if (audit !== null) process.stderr.write(audit);
-  if (outcome.kind === "rejected" && hasAnyRunAuthority) {
+  if (hasAnyRunAuthority && outcome.kind === "no-reservation") {
+    return {
+      kind: "error",
+      message: `request-bound capture found no reservation for ${outcome.agentId}`,
+    };
+  }
+  if (hasAnyRunAuthority && outcome.kind === "rejected") {
     return {
       kind: "error",
       message: `request-bound capture rejected (${outcome.reason}): ${outcome.message}`,

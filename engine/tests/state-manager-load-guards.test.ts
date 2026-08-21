@@ -234,6 +234,68 @@ describe("taskFindingsError slot_authority validation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Wave review epoch authority
+// ---------------------------------------------------------------------------
+
+const waveReviewEpoch = (overrides: Record<string, unknown> = {}) => ({
+  runId: "run.wave-epoch",
+  wave: 1,
+  batchEpoch: DIGEST("a"),
+  ...overrides,
+});
+
+const activeWaveGate = (overrides: Record<string, unknown> = {}) => ({
+  schemaVersion: 1,
+  kind: "active-wave-gate",
+  runId: "run.wave-epoch",
+  wave: 1,
+  authorityDigest: DIGEST("b"),
+  revision: 0,
+  terminalOutcome: null,
+  ...overrides,
+});
+
+describe("parseTaskGraph wave_review_epoch authority", () => {
+  it("parses and freezes a well-formed epoch instead of retaining raw input", () => {
+    const rawEpoch = waveReviewEpoch();
+    const parsed = parseTaskGraph(graph({ current_wave: 1, wave_review_epoch: rawEpoch }));
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.wave_review_epoch).toEqual(rawEpoch);
+    expect(parsed.value.wave_review_epoch).not.toBe(rawEpoch);
+    expect(Object.isFrozen(parsed.value.wave_review_epoch)).toBe(true);
+  });
+
+  it.each([
+    ["non-object", "forged"],
+    ["bad run id", waveReviewEpoch({ runId: "../escape" })],
+    ["zero Wave", waveReviewEpoch({ wave: 0 })],
+    ["non-integer Wave", waveReviewEpoch({ wave: 1.5 })],
+    ["bad batch digest", waveReviewEpoch({ batchEpoch: "not-a-digest" })],
+    ["unknown field", waveReviewEpoch({ forged: true })],
+  ])("refuses %s", (_label, epoch) => {
+    expect(errorOf(graph({ wave_review_epoch: epoch }))).toContain("wave_review_epoch");
+  });
+
+  it("requires exact agreement with active Wave Gate run and Wave authority", () => {
+    const mismatchedRun = graph({
+      current_wave: 1,
+      active_wave_gate: activeWaveGate(),
+      wave_review_epoch: waveReviewEpoch({ runId: "run.someone-else" }),
+    });
+    expect(errorOf(mismatchedRun)).toContain("must match active_wave_gate run/Wave authority");
+
+    const mismatchedWave = graph({
+      current_wave: 1,
+      active_wave_gate: activeWaveGate(),
+      wave_review_epoch: waveReviewEpoch({ wave: 2 }),
+    });
+    expect(errorOf(mismatchedWave)).toContain("must match active_wave_gate run/Wave authority");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // wave_gates record-key domain (round-40: type-design-analyzer advisory)
 // ---------------------------------------------------------------------------
 

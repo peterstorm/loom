@@ -3573,6 +3573,31 @@ describe("Pi extension tool_call fail-closed backstops", () => {
     }
   });
 
+  it("keeps the direct-edit guard armed when the global TaskGraph is unreadable", async () => {
+    const pi = await extension();
+    rmSync(statePath, { force: true });
+    symlinkSync(statePath, statePath);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const results = await pi.emit("tool_call", {
+        toolName: "edit",
+        toolCallId: "call-unreadable-global-graph",
+        input: { path: "README.md", edits: [] },
+      }, { cwd: ROOT, sessionManager: { getSessionId: () => SESSION } });
+
+      expect(results).toContainEqual(expect.objectContaining({
+        block: true,
+        reason: expect.stringContaining("Direct edits not allowed during loom orchestration"),
+      }));
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toMatch(/pathExistsFailClosed.*ELOOP.*assuming active \(fail closed\)/i);
+    } finally {
+      stderr.mockRestore();
+      rmSync(statePath, { force: true });
+      writeState(initialGraph());
+    }
+  });
+
   it("REFUSES a subagent spawn whose session id cannot be parsed", async () => {
     const pi = await extension();
     // Lifecycle evidence is keyed by session id and names files under the

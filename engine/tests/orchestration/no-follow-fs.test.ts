@@ -182,6 +182,38 @@ describe("anchored lock ownership", () => {
     }
   });
 
+  it("surfaces a release failure instead of reporting the protected operation as successful", async () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    const lockPath = join(directory, "release.lock");
+
+    await expect(withAnchoredDirectoryLock(directory, "release.lock", () => {
+      rmSync(lockPath);
+      mkdirSync(lockPath);
+    })).rejects.toThrow(/cannot release anchored lock release\.lock/i);
+  });
+
+  it("preserves both the operation and release failures", async () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    const lockPath = join(directory, "aggregate.lock");
+
+    try {
+      await withAnchoredDirectoryLock(directory, "aggregate.lock", () => {
+        rmSync(lockPath);
+        mkdirSync(lockPath);
+        throw new Error("operation exploded");
+      });
+      throw new Error("expected the anchored operation to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      const aggregate = error as AggregateError;
+      expect(aggregate.errors).toHaveLength(2);
+      expect(String(aggregate.errors[0])).toContain("operation exploded");
+      expect(String(aggregate.errors[1])).toContain("cannot release anchored lock aggregate.lock");
+    }
+  });
+
   it("never overlaps critical sections while the recorded owner is alive", async () => {
     const root = workspace();
     const directory = join(root, "run");
@@ -224,7 +256,7 @@ describe("captured-attempt inspection fails closed", () => {
 });
 
 describe("removal refuses to follow a planted symlink", () => {
-  it("removeRunFileNoFollow unlinks the LINK, never the file it points at", () => {
+  it.skipIf(process.platform === "darwin")("removeRunFileNoFollow unlinks the LINK, never the file it points at", () => {
     const root = workspace();
     const secret = secretOutsideTheRun(root);
     const link = join(root, "run", "checkpoint.json.staged");
@@ -250,7 +282,7 @@ describe("removal refuses to follow a planted symlink", () => {
     expect(readFileSync(join(real, "staged.json"), "utf-8")).toBe("{}");
   });
 
-  it("still removes a real regular file at the same path", () => {
+  it.skipIf(process.platform === "darwin")("still removes a real regular file at the same path", () => {
     const root = workspace();
     const path = join(root, "run", "staged.json");
     writeRunFileNoFollow(path, "{}");
@@ -258,6 +290,15 @@ describe("removal refuses to follow a planted symlink", () => {
     removeRunFileNoFollow(path);
 
     expect(() => readRunFileNoFollow(path)).toThrow();
+  });
+
+  it.runIf(process.platform === "darwin")("fails closed when descriptor-relative unlink is unavailable", () => {
+    const root = workspace();
+    const path = join(root, "run", "staged.json");
+    writeRunFileNoFollow(path, "{}");
+
+    expect(() => removeRunFileNoFollow(path)).toThrow(/descriptor-relative.*unavailable.*refusing unsafe unlink/i);
+    expect(readRunFileNoFollow(path)).toBe("{}");
   });
 });
 

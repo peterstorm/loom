@@ -145,7 +145,15 @@ const handler: HookHandler = async (stdin) => {
         };
   }
 
-  const path = resolveClaudeAgentDefinitionPath(agent, rawAgent);
+  let path: string | null;
+  try {
+    path = resolveClaudeAgentDefinitionPath(agent, rawAgent);
+  } catch (error) {
+    return {
+      kind: "block",
+      message: `BLOCKED: Claude Code agent-definition authority for '${rawAgent}' is unreadable: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
   if (!path) {
     return {
       kind: "block",

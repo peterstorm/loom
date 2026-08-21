@@ -88,13 +88,19 @@ const preparationInputSchema = z.object({
   tasks: z.array(z.string()),
 }) as unknown as z.ZodType<PreparationInput>;
 
+const preparedPartSchema = z.object({
+  kind: z.literal("derived"),
+  part: z.string().min(1),
+  value: z.unknown(),
+}) as unknown as z.ZodType<PreparedPartValue>;
+
 const derivedPartSchema = z.union([
-  z.object({ kind: z.literal("derived"), part: z.string().min(1), value: z.unknown() }),
+  preparedPartSchema,
   z.object({ kind: z.literal("undeliverable"), part: z.string().min(1), reason: z.string().min(1) }),
 ]) as unknown as z.ZodType<DerivedPart>;
 
 const preparedBatchSchema = z.union([
-  z.object({ kind: z.literal("prepared"), parts: z.array(derivedPartSchema) }),
+  z.object({ kind: z.literal("prepared"), parts: z.array(preparedPartSchema) }),
   z.object({ kind: z.literal("blocked"), reasons: z.array(z.string()) }),
 ]) as unknown as z.ZodType<PreparedBatch>;
 

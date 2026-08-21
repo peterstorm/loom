@@ -556,6 +556,23 @@ describe("wave gate preparation", () => {
     expect(result.value).toEqual({ kind: "blocked", reasons: ["task T3 has an empty review scope"] });
   });
 
+  it("rejects an undeliverable part from the prepared output arm", () => {
+    const join = allGood.nodes.find((node) => node.id === WAVE_GATE_DAG_NODE_IDS.joinPreparation);
+    expect(join).toBeDefined();
+    const outputSchema = (join as unknown as {
+      outputSchema: { safeParse: (value: unknown) => { success: boolean } };
+    }).outputSchema;
+
+    expect(outputSchema.safeParse({
+      kind: "prepared",
+      parts: [{ kind: "undeliverable", part: "models", reason: "missing binding" }],
+    }).success).toBe(false);
+    expect(outputSchema.safeParse({
+      kind: "prepared",
+      parts: [{ kind: "derived", part: "models", value: {} }],
+    }).success).toBe(true);
+  });
+
   it("fans out four derivations from the request and fans them into one join", () => {
     const fromInput = allGood.edges.filter((edge) => edge.from === DAG_INPUT);
     const intoJoin = allGood.edges.filter((edge) => edge.to === WAVE_GATE_DAG_NODE_IDS.joinPreparation);
