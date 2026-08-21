@@ -370,6 +370,35 @@ describe("findReport", () => {
     }
   });
 
+  it("distinguishes inaccessible explicit artifacts from missing files", () => {
+    const bunPath = join(cwd, "loop.xml");
+    const vitestPath = join(cwd, "loop.json");
+    symlinkSync("loop.xml", bunPath);
+    symlinkSync("loop.json", vitestPath);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(findReport(
+        "bun test --reporter=junit --reporter-outfile=loop.xml",
+        cwd,
+        "",
+        { nowMs: Date.now(), callStartMs: callStart },
+      )).toBeNull();
+      expect(findReport(
+        "npx vitest run --reporter=json --outputFile=loop.json",
+        cwd,
+        "",
+        { nowMs: Date.now(), callStartMs: callStart },
+      )).toBeNull();
+      const text = stderrSpy.mock.calls.map((call) => String(call[0])).join("");
+      expect(text).toContain("cannot inspect Bun JUnit report");
+      expect(text).toContain("cannot inspect --outputFile report");
+      expect(text).toMatch(/ELOOP|too many levels of symbolic links/i);
+      expect(text).not.toContain("does not exist");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
   it("an inaccessible JUnit dir stays fail-closed but says so on stderr", () => {
     const dir = join(cwd, "target/surefire-reports");
     mkdirSync(join(cwd, "target"), { recursive: true });

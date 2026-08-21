@@ -1,11 +1,10 @@
 /**
  * Core: Validate that task prompts have no unsubstituted template variables.
- * Harness-agnostic — no stdin parsing. Not pure: resolves the active graph
- * lazily and reads the filesystem (a fail-closed existence probe).
+ * Harness-agnostic and pure: the shell supplies its pre-gathered TaskGraph
+ * existence fact.
  */
 
 import type { HookResult } from "../types";
-import { pathExistsFailClosed, taskGraphPath } from "../config";
 
 const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}"]);
 
@@ -35,20 +34,11 @@ export function findResidualPlaceholders(prompt: string): string[] {
   return matches.filter((v) => !FALSE_POSITIVES.has(v));
 }
 
-/**
- * Default task-graph existence probe, FAIL-CLOSED. `existsSync` returns
- * `false` for ANY error — EACCES, ELOOP, ENOTDIR, EIO all read as "no graph" —
- * so one unreadable path silently disarmed this guard and an unsubstituted
- * `{placeholder}` prompt reached a spawn. ENOENT is the only absent answer;
- * anything unreadable stays armed.
- */
-const defaultTaskGraphExists = (): boolean => pathExistsFailClosed(taskGraphPath());
-
 export function validateTemplateSubstitution(
   prompt: string,
-  taskGraphExists: () => boolean = defaultTaskGraphExists,
+  taskGraphExists: boolean,
 ): HookResult {
-  if (!taskGraphExists()) return { kind: "allow" };
+  if (!taskGraphExists) return { kind: "allow" };
   if (!prompt) return { kind: "allow" };
 
   const realIssues = findResidualPlaceholders(prompt);

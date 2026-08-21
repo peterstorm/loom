@@ -12,6 +12,7 @@ import { StateManager } from "../../state-manager";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
+import { stripNamespace } from "../../utils/strip-namespace";
 
 const handler: HookHandler = async (stdin) => {
   // Guard the standalone CLI route: dispatch parses stdin before calling
@@ -28,7 +29,7 @@ const handler: HookHandler = async (stdin) => {
     };
   }
 
-  const agentType = (input.agent_type ?? "").replace(/^[^:]+:/, "");
+  const agentType = stripNamespace(input.agent_type ?? "");
   if (agentType !== "spec-check-invoker") return { kind: "passthrough" };
 
   const mgr = StateManager.fromSession(input.session_id);

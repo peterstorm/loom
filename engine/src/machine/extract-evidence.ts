@@ -17,128 +17,33 @@
 
 import { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "../core/tool-vocabulary";
 import { normalizeShellSpan } from "../core/shell-normalize";
-import { CONTINUE, halt, scanUnquoted } from "../core/shell-quoting";
+import {
+  classifyFdDupWord,
+  hasUnbalancedQuotes,
+  splitCommandSegments,
+  splitCommandSegmentsWithOps,
+  stripComment,
+  stripEnvPrefix,
+  type SegmentOp,
+} from "../core/shell-command";
 import type { Evidence, TestReportSummary } from "./types";
+
+export {
+  classifyFdDupWord,
+  hasUnbalancedQuotes,
+  splitCommandSegments,
+  splitCommandSegmentsWithOps,
+  stripComment,
+  stripEnvPrefix,
+  type CommandSegment,
+  type SegmentOp,
+} from "../core/shell-command";
 
 const QUOTE_CHARS = ['"', "'", "`"] as const;
 type QuoteChar = (typeof QUOTE_CHARS)[number];
 
 function isQuoteChar(c: string): c is QuoteChar {
   return (QUOTE_CHARS as readonly string[]).includes(c);
-}
-
-/** Shell separator between two simple-command segments. Newlines count as
- *  `;` — both sequence unconditionally with the same exit semantics. A single
- *  `&` backgrounds the segment BEFORE it: that segment's exit is never the
- *  line's exit (the shell reports 0 immediately), so exit attribution must
- *  know about it. */
-export type SegmentOp = "&&" | "||" | ";" | "|" | "&";
-
-/** A simple-command segment plus the operator that PRECEDED it (null for
- *  the first segment) — the fact exit attribution needs. */
-export interface CommandSegment {
-  readonly text: string;
-  readonly opBefore: SegmentOp | null;
-}
-
-/**
- * Split a command line on shell separators (&&, ||, ;, |, newline) —
- * quote-aware: separators inside double quotes, single quotes, or backticks
- * do not split, and a backslash escapes the next character outside single
- * quotes (mirroring sh semantics closely enough that quoted runner text
- * stays inside the segment of the command that owns it). Each segment keeps
- * the operator that preceded it, so exit-status ownership can be decided
- * (see attributeExit): the shell reports ONE exit for the whole line, and
- * which segment owns it depends on these operators.
- */
-export function splitCommandSegmentsWithOps(command: string): CommandSegment[] {
-  const segments: CommandSegment[] = [];
-  let current = "";
-  let pendingOp: SegmentOp | null = null;
-  let quote: QuoteChar | null = null;
-  const push = (op: SegmentOp): void => {
-    segments.push({ text: current, opBefore: pendingOp });
-    current = "";
-    pendingOp = op;
-  };
-  for (let i = 0; i < command.length; i++) {
-    const c = command[i];
-    if (quote !== null) {
-      // Inside single quotes nothing is special but the closing quote.
-      if (quote !== "'" && c === "\\") {
-        current += c + (command[i + 1] ?? "");
-        i++;
-        continue;
-      }
-      if (c === quote) quote = null;
-      current += c;
-      continue;
-    }
-    if (c === "\\") {
-      current += c + (command[i + 1] ?? "");
-      i++;
-      continue;
-    }
-    if (isQuoteChar(c)) {
-      quote = c;
-      current += c;
-      continue;
-    }
-    if (c === "&") {
-      if (command[i + 1] === "&") {
-        push("&&");
-        i++;
-        continue;
-      }
-      // NOT a separator: `&>` / `&>>` redirects and `>&N` fd dups keep the
-      // `&` inside the segment (it belongs to the redirect syntax).
-      if (command[i + 1] === ">" || command[i - 1] === ">") {
-        current += c;
-        continue;
-      }
-      // A single unquoted `&` backgrounds the preceding segment.
-      push("&");
-      continue;
-    }
-    if (c === "|") {
-      if (command[i + 1] === "|") {
-        push("||");
-        i++;
-      } else if (command[i + 1] === "&") {
-        // `|&` is bash shorthand for `2>&1 |` — ONE pipe operator. Parsing
-        // the `&` separately would emit a spurious empty backgrounded
-        // segment and start a new chain, fragmenting the pipe-chain trust
-        // unit downstream (round-15 guard bypass) and mis-attributing
-        // segments here.
-        push("|");
-        i++;
-      } else {
-        push("|");
-      }
-      continue;
-    }
-    if (c === ";" || c === "\n") {
-      push(";");
-      continue;
-    }
-    current += c;
-  }
-  segments.push({ text: current, opBefore: pendingOp });
-  return segments;
-}
-
-/** Segment texts only — the operator-free view most callers need. */
-export function splitCommandSegments(command: string): string[] {
-  return splitCommandSegmentsWithOps(command).map((s) => s.text);
-}
-
-/**
- * A segment with an unbalanced quote can only come from a command whose
- * quoting our splitter (or the shell) could not resolve — classifying it
- * would trust a fragment of someone's string literal. Fail closed: refuse.
- */
-export function hasUnbalancedQuotes(segment: string): boolean {
-  return QUOTE_CHARS.some((q) => (segment.split(q).length - 1) % 2 === 1);
 }
 
 /** The runner pattern must end at a token boundary: `npm testify` is not `npm test`. */
@@ -173,60 +78,6 @@ function hasMavenTestGoal(lowerSegment: string): boolean {
 function isMavenHead(lowerSegment: string): boolean {
   const head = lowerSegment.split(/\s+/, 1)[0] ?? "";
   return head === "mvn" || head === "mvnw" || head === "./mvnw";
-}
-
-/**
- * Strip an unquoted trailing comment — quote-aware, matching the splitter's
- * quote semantics: a `#` inside `"…"`, `'…'`, or backticks is argument text
- * (`npm test -- --grep "issue #123"`), never a comment. Only a `#` at the
- * segment start or preceded by whitespace, OUTSIDE quotes, truncates.
- */
-export function stripComment(segment: string): string {
-  return scanUnquoted<string>(segment, 0, (c, i) =>
-    c === "#" && (i === 0 || /\s/.test(segment[i - 1]!))
-      ? halt(segment.slice(0, i))
-      : CONTINUE) ?? segment;
-}
-
-/**
- * Strip leading VAR=value assignments so `CI=1 npm test` matches — quote-
- * aware: the VALUE may contain quoted whitespace (`FOO="a b" npm test`), so
- * it is consumed with the same quote semantics as the splitter, not up to
- * the first raw space.
- */
-export function stripEnvPrefix(segment: string): string {
-  let rest = segment;
-  for (;;) {
-    const m = rest.match(/^[A-Za-z_][A-Za-z0-9_]*=/);
-    if (!m) return rest;
-    let i = m[0].length;
-    let quote: QuoteChar | null = null;
-    while (i < rest.length) {
-      const c = rest[i];
-      if (quote !== null) {
-        if (quote !== "'" && c === "\\") {
-          i += 2;
-          continue;
-        }
-        if (c === quote) quote = null;
-        i++;
-        continue;
-      }
-      if (c === "\\") {
-        i += 2;
-        continue;
-      }
-      if (isQuoteChar(c)) {
-        quote = c;
-        i++;
-        continue;
-      }
-      if (/\s/.test(c)) break;
-      i++;
-    }
-    rest = rest.slice(i).trimStart();
-    if (rest === "") return "";
-  }
 }
 
 /**
@@ -337,16 +188,6 @@ export function attributeExit(exit: number | null, classified: ClassifiedTestCom
  * digits, so it classifies as a file write (fail-closed).
  * `start` points just past the `&`; `end` is the index just past the word.
  */
-export function classifyFdDupWord(
-  text: string,
-  start: number,
-): { readonly isFdDup: boolean; readonly end: number } {
-  let end = start;
-  while (end < text.length && !/[\s><&|;()]/.test(text[end])) end++;
-  const word = text.slice(start, end);
-  return { isFdDup: word === "-" || /^[0-9]+$/.test(word), end };
-}
-
 /**
  * Read one redirect target starting at `start` (just past the `>`s):
  * skip whitespace, then collect the quote-aware, UNQUOTED word. Fd dups

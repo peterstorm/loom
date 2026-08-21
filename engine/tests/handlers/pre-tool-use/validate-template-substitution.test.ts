@@ -7,6 +7,7 @@ import {
   findResidualPlaceholders,
   validateTemplateSubstitution,
 } from "../../../src/core/validate-template-substitution";
+import validateTemplateSubstitutionHandler from "../../../src/handlers/pre-tool-use/validate-template-substitution";
 
 /**
  * Tests for the template substitution validation logic.
@@ -51,15 +52,25 @@ describe("validate-template-substitution — property tests", () => {
 });
 
 describe("validate-template-substitution — active graph boundary", () => {
-  it("resolves LOOM_STATE_PATH after module import and blocks against a newly created graph", () => {
+  it("keeps the core decision pure over a pre-gathered graph-existence fact", () => {
+    expect(validateTemplateSubstitution("Use {task_id}", false)).toEqual({ kind: "allow" });
+    expect(validateTemplateSubstitution("Use {task_id}", true)).toMatchObject({ kind: "block" });
+  });
+
+  it("resolves LOOM_STATE_PATH in the shell after module import", async () => {
     const temp = mkdtempSync(join(tmpdir(), "loom-template-state-"));
     const statePath = join(temp, "active_task_graph.json");
     const previous = process.env.LOOM_STATE_PATH;
     process.env.LOOM_STATE_PATH = statePath;
+    const stdin = JSON.stringify({
+      tool_name: "Agent",
+      tool_input: { prompt: "Use {task_id}" },
+      session_id: "session",
+    });
     try {
-      expect(validateTemplateSubstitution("Use {task_id}")).toEqual({ kind: "allow" });
+      expect(await validateTemplateSubstitutionHandler(stdin, [])).toEqual({ kind: "allow" });
       writeFileSync(statePath, "{}\n");
-      expect(validateTemplateSubstitution("Use {task_id}")).toMatchObject({ kind: "block" });
+      expect(await validateTemplateSubstitutionHandler(stdin, [])).toMatchObject({ kind: "block" });
     } finally {
       if (previous === undefined) delete process.env.LOOM_STATE_PATH;
       else process.env.LOOM_STATE_PATH = previous;

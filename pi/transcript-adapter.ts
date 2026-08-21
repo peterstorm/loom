@@ -1,7 +1,7 @@
 /** Pi subagent messages adapted to the Claude-compatible JSONL parsers. */
 
 import { attributeExit, classifyTestCommandDetailed, type ClassifiedTestCommand } from "../engine/src/machine";
-import { splitCommandSegmentsWithOps, stripComment, stripEnvPrefix } from "../engine/src/machine/extract-evidence";
+import { splitCommandSegmentsWithOps, stripComment, stripEnvPrefix } from "../engine/src/core/shell-command";
 import { extractTestEvidence } from "../engine/src/core/test-evidence";
 
 const TOOL_NAME_MAP: Readonly<Record<string, string>> = Object.freeze({

@@ -732,9 +732,9 @@ export type LoomStatus = Readonly<{
 }>;
 
 export interface WaveReviewEpochAuthority {
-  readonly runId: string;
+  readonly runId: OrchestrationRunId;
   readonly wave: number;
-  readonly batchEpoch: string;
+  readonly batchEpoch: ArtifactDigest;
 }
 
 export interface TaskGraph {

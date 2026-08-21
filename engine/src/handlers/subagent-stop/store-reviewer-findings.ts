@@ -31,6 +31,7 @@ import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry"
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import { parseFirstUserPrompt } from "../../parsers/parse-transcript";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
+import { stripNamespace } from "../../utils/strip-namespace";
 
 /**
  * A reviewer's output was discarded. Report it and let the stop proceed.
@@ -62,7 +63,7 @@ const handler: HookHandler = async (stdin) => {
     };
   }
 
-  const agentType = (input.agent_type ?? "").replace(/^[^:]+:/, "");
+  const agentType = stripNamespace(input.agent_type ?? "");
   if (!isReviewAgent(agentType)) {
     return { kind: "passthrough" };
   }

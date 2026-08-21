@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,30 @@ describe("exact Pi agent rendering", () => {
     const specify = expectedPiAgentDefinition("specify-agent", ROOT);
     expect(specify).toContain("## Preloaded Loom Skill: specify");
     expect(specify).toContain("# Specify - Requirements Before Design");
+  });
+
+  it("does not fall through when a higher-priority skill candidate is inaccessible", () => {
+    const packageRoot = mkdtempSync(join(tmpdir(), "loom-agent-skill-authority-"));
+    const skillPath = join(packageRoot, "skills", "shadowed", "SKILL.md");
+    try {
+      mkdirSync(dirname(skillPath), { recursive: true });
+      mkdirSync(join(packageRoot, "commands"), { recursive: true });
+      symlinkSync(skillPath, skillPath);
+      writeFileSync(join(packageRoot, "commands", "shadowed.md"), "# Wrong fallback\n");
+      const source = [
+        "---",
+        "name: code-reviewer",
+        "skills:",
+        "  - shadowed",
+        "---",
+        "Review.",
+      ].join("\n");
+
+      expect(() => renderPiAgentDefinition(source, "code-reviewer", packageRoot))
+        .toThrow(/cannot inspect Loom skill candidate.*ELOOP|too many levels of symbolic links/i);
+    } finally {
+      rmSync(packageRoot, { recursive: true, force: true });
+    }
   });
 
   it("is deterministic and changes for any source-body change", () => {

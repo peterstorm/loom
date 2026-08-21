@@ -425,48 +425,46 @@ async function recordPiRequestCaptureRejection(
   resultIndex: number,
   agentType: string,
   diagnostic: string,
-): Promise<void> {
+): Promise<string | null> {
   const correlation = piRequestCorrelation(runBinding, toolCallId, resultIndex, agentType);
   if (!correlation.ok) {
-    const problem = (() => {
-      switch (correlation.kind) {
-        case "run-directory":
-          return `cannot open run directory ${runBinding.runDirectory}: ${correlation.message}`;
-        case "correlator":
-          return `cannot resolve correlator for ${agentType}[${resultIndex}]: ${correlation.message}`;
-        case "no-correlator":
-          return `cannot resolve correlator for ${agentType}[${resultIndex}]: no binding found`;
-        case "issued-requests":
-          return `cannot read issued requests: ${correlation.message}`;
-        case "unknown-request":
-          return `correlator request ${correlation.requestId} has no issued authority`;
-      }
-    })();
-    process.stderr.write(`loom(pi): recordPiRequestCaptureRejection: ${problem}\n`);
-    return;
+    switch (correlation.kind) {
+      case "run-directory":
+        return `cannot open run directory ${runBinding.runDirectory}: ${correlation.message}`;
+      case "correlator":
+        return `cannot resolve correlator for ${agentType}[${resultIndex}]: ${correlation.message}`;
+      case "no-correlator":
+        return `cannot resolve correlator for ${agentType}[${resultIndex}]: no binding found`;
+      case "issued-requests":
+        return `cannot read issued requests: ${correlation.message}`;
+      case "unknown-request":
+        return `correlator request ${correlation.requestId} has no issued authority`;
+    }
   }
+
   const { handle, request } = correlation;
-  const existingEvents = await handle.readEvents();
-  const alreadyRecorded = existingEvents.some(({ event }) => {
-    if (typeof event !== "object" || event === null || Array.isArray(event)) return false;
-    const record = event as Record<string, unknown>;
-    return record.kind === "request-capture-rejected" && record.requestId === request.requestId &&
-      record.slotId === request.slotId && record.attempt === request.attempt;
-  });
-  if (alreadyRecorded) return;
-  await handle.appendEvent({
-    schemaVersion: 1,
-    sequence: 0,
-    dedupKey: `capture-rejected:${createHash("sha256").update(`${request.requestId}:${request.attempt}`).digest("hex")}`,
-    recordedAtMs: Date.now(),
-    event: {
-      kind: "request-capture-rejected",
-      requestId: request.requestId,
-      slotId: request.slotId,
-      attempt: request.attempt,
-      diagnostic,
-    },
-  });
+  const rejected = await handle.rejectCapture(request, diagnostic);
+  if (!rejected.ok) {
+    return `cannot persist capture rejection for ${agentType}[${resultIndex}]: ${rejected.error.message}`;
+  }
+  try {
+    await handle.appendEvent({
+      schemaVersion: 1,
+      sequence: 0,
+      dedupKey: `capture-rejected:${createHash("sha256").update(`${request.requestId}:${request.attempt}`).digest("hex")}`,
+      recordedAtMs: Date.now(),
+      event: {
+        kind: "request-capture-rejected",
+        requestId: request.requestId,
+        slotId: request.slotId,
+        attempt: request.attempt,
+        diagnostic,
+      },
+    });
+    return null;
+  } catch (error) {
+    return `capture rejection for ${agentType}[${resultIndex}] was terminalized but its audit event could not be persisted: ${error instanceof Error ? error.message : String(error)}`;
+  }
 }
 
 function piResultAuthorityProblem(
@@ -868,7 +866,7 @@ export default function (pi: ExtensionAPI) {
           },
           checkTemplateSubstitution: (task) => {
             currentGuard = "validate-template-substitution";
-            return validateTemplateSubstitution(task);
+            return validateTemplateSubstitution(task, graphIsActive);
           },
         });
         if (admission.kind === "block") {
@@ -1357,6 +1355,23 @@ export default function (pi: ExtensionAPI) {
           }],
           isError: true,
         };
+    const persistCaptureRejection = async (
+      runBinding: SessionRunBinding,
+      resultIndex: number,
+      agentType: string,
+      diagnostic: string,
+    ): Promise<void> => {
+      const failure = await recordPiRequestCaptureRejection(
+        runBinding,
+        toolCallId,
+        resultIndex,
+        agentType,
+        diagnostic,
+      );
+      if (failure === null) return;
+      processingErrors.push(failure);
+      process.stderr.write(`loom(pi): ${failure}\n`);
+    };
     if (reservationRecoveryFailed) return processingErrorResponse();
     let parentPointerCleanupAttempted = false;
     const cleanupParentTaskGraphPointer = async (): Promise<void> => {
@@ -1498,6 +1513,14 @@ export default function (pi: ExtensionAPI) {
         const diagnostic = `request-bound result ${index + 1} for ${item.agentType} was missing or mismatched`;
         processingErrors.push(diagnostic);
         process.stderr.write(`loom(pi): ${diagnostic}; run transcript was not captured\n`);
+        const runBinding = reservation.orchestrationRunBinding;
+        if (runBinding === null) {
+          const failure = `cannot terminalize missing ${item.agentType}[${index}]: reservation lost its run binding`;
+          processingErrors.push(failure);
+          process.stderr.write(`loom(pi): ${failure}\n`);
+        } else {
+          await persistCaptureRejection(runBinding, index, item.agentType, diagnostic);
+        }
       }
       if (missingReviews.length > 0 || missingSpecChecks.length > 0) {
         const manager = StateManager.fromSession(reservation.sessionId);
@@ -1647,9 +1670,7 @@ export default function (pi: ExtensionAPI) {
             const diagnostic = `request-bound result authority rejected for ${agentType}: ${authorityProblem}`;
             processingErrors.push(diagnostic);
             process.stderr.write(`loom(pi): ${diagnostic}; transcript was not captured\n`);
-            await recordPiRequestCaptureRejection(
-              durableRunBinding, toolCallId, resultIndex, agentType, diagnostic,
-            );
+            await persistCaptureRejection(durableRunBinding, resultIndex, agentType, diagnostic);
             continue;
           }
         }
@@ -1708,9 +1729,7 @@ export default function (pi: ExtensionAPI) {
             processingErrors.push(diagnostic);
             process.stderr.write(`loom(pi): ${diagnostic}; task state untouched\n`);
             if (durableRunBinding !== null) {
-              await recordPiRequestCaptureRejection(
-                durableRunBinding, toolCallId, resultIndex, agentType, diagnostic,
-              );
+              await persistCaptureRejection(durableRunBinding, resultIndex, agentType, diagnostic);
             }
           } else {
             process.stderr.write(

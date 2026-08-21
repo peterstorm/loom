@@ -8,9 +8,9 @@
  * on this, so a rule taught to one (ANSI-C in round 17, line-continuation + NUL
  * in round 18, parameter expansion in round 19) can never again be missing from
  * the other — the "twin scanners diverged" bug class that recurred rounds 15–18
- * becomes structurally impossible for the normalization layer. (Structural
- * scanning — segment splitting, fd-dup classification — is already shared via
- * extract-evidence's splitCommandSegmentsWithOps / classifyFdDupWord.)
+ * becomes structurally impossible for the normalization layer. Structural
+ * scanning — segment splitting and fd-dup classification — is owned beside it
+ * by `core/shell-command.ts`.
  *
  * Parameter expansion is modeled as the value bash yields when the variable is
  * UNSET — the conservative reveal for a matching layer that cannot know whether

@@ -1319,6 +1319,77 @@ describe("Pi extension review tool_result integration", () => {
     }));
   });
 
+  it("terminalizes a missing Pi result so Standalone Review resumes at attempt 2", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad446";
+    const toolCallId = "call-registered-missing-result-retry";
+    const runsRoot = join(temp, "registered-missing-result-retry-runs");
+    const runId = "run.pi-missing-result-retry";
+    mkdirSync(runsRoot, { recursive: true });
+    const cli = join(ROOT, "engine", "src", "cli.ts");
+    const command = [
+      cli,
+      "helper", "orchestration", "start", "standalone-review",
+      "--runs-root", runsRoot,
+      "--run", runId,
+    ];
+    const env = {
+      ...process.env,
+      PI_CODING_AGENT: "true",
+      PI_SESSION_ID: session,
+      LOOM_SUBAGENT_DIR: subagentDir,
+    };
+    const started = JSON.parse(execFileSync("bun", command, {
+      cwd: ROOT,
+      encoding: "utf-8",
+      input: JSON.stringify({ kind: "comments", files: ["engine/src/types.ts"], dryRun: false }),
+      env,
+    })) as {
+      kind: string;
+      requests: readonly { authority: AgentRequestAuthority; task: string }[];
+    };
+    expect(started.kind).toBe("spawn-batch");
+    expect(started.requests.length).toBeGreaterThan(0);
+    const firstBySlot = new Map(started.requests.map(({ authority }) => [authority.slotId, authority]));
+
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agentScope: "user",
+        tasks: started.requests.map(({ authority, task }) => ({ agent: authority.role, task })),
+      },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
+
+    const responses = await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId,
+      isError: false,
+      input: {},
+      content: [],
+      details: { results: [] },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => session } });
+    expect(responses).toContainEqual(expect.objectContaining({ isError: true }));
+
+    const resumed = JSON.parse(execFileSync("bun", [
+      cli,
+      "helper", "orchestration", "resume",
+      "--runs-root", runsRoot,
+      "--run", runId,
+    ], { cwd: ROOT, encoding: "utf-8", env })) as {
+      kind: string;
+      requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(resumed.kind).toBe("spawn-batch");
+    expect(resumed.requests).toHaveLength(started.requests.length);
+    for (const { authority } of resumed.requests) {
+      const first = firstBySlot.get(authority.slotId);
+      expect(first).toBeDefined();
+      expect(authority.attempt).toBe(2);
+      expect(authority.requestId).not.toBe(first?.requestId);
+    }
+  });
+
   it("does not mutate protected task state when a non-standalone run-bound result is missing", async () => {
     const planPath = join(temp, "run-bound-missing-wave-plan.md");
     writeFileSync(planPath, "# Plan\n");

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseDeclaredSkills } from "../core/agent-skills";
 import { renderPiAgentResource, type PreloadedSkill } from "../core/harness-resources";
@@ -9,7 +9,16 @@ function skillPath(packageRoot: string, skill: string): string | null {
     join(packageRoot, "skills", skill, "SKILL.md"),
     join(packageRoot, "commands", `${skill}.md`),
   ];
-  return candidates.find((path) => existsSync(path)) ?? null;
+  for (const path of candidates) {
+    try {
+      accessSync(path, fsConstants.F_OK);
+      return path;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw new Error(`cannot inspect Loom skill candidate ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return null;
 }
 
 function preloadedSkills(sourceAgent: string, packageRoot: string): readonly PreloadedSkill[] {

@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { awaitUserAction, parseAgentRequestAuthority, parseStoredAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, type AgentRequestAuthority, type AwaitUserAction, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
+import { awaitUserAction, parseAgentRequestAuthority, parseStoredAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, type AgentRequestAuthority, type ArtifactDigest, type AwaitUserAction, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
 import { defaultRefutationThreshold } from '../../../core/review-panel';
 import { completePersistentRefutationPanel, deriveRefutationVerifierBinding, panelRequestIdentity, parseRefutationPanelAuthority, startPersistentRefutationPanel, submitRefutationVerdict } from '../../../core/panel-program';
 import type { FindingOutcome } from '../../../core/review-panel';
@@ -363,7 +363,7 @@ export function prepareOrphanedWaveGateRecovery(
 }
 
 export type WaveRequestBatch = Readonly<{
-  batchEpoch: string;
+  batchEpoch: ArtifactDigest;
   requests: readonly InitialSpawnRequestInput[];
   packets: readonly ContextPacket[];
   taskRuns: readonly WaveTaskRunAuthority[];
@@ -376,7 +376,7 @@ export function waveRequests(
   attempt: 1 | 2,
 ): WaveRequestBatch {
   const tasks = graph.tasks.filter((task) => registration.taskIds.includes(task.id));
-  const batchEpoch = createHash("sha256").update(JSON.stringify({
+  const parsedBatchEpoch = parseArtifactDigest(createHash("sha256").update(JSON.stringify({
     runId: handle.runId,
     wave: registration.input.wave,
     authorityDigest: registration.authorityDigest,
@@ -389,7 +389,9 @@ export function waveRequests(
     })),
     specFile: graph.spec_file ?? null,
     planFile: graph.plan_file ?? null,
-  })).digest("hex");
+  })).digest("hex"));
+  if (!parsedBatchEpoch.ok) throw new Error(parsedBatchEpoch.error.message);
+  const batchEpoch = parsedBatchEpoch.value;
   const taskRuns = tasks.map((task) => Object.freeze({
     taskId: task.id,
     generation: task.review_generation ?? 0,
@@ -753,7 +755,7 @@ export async function installWaveReviewRuns(
     ...locked,
     spec_check: undefined,
     wave_review_epoch: {
-      runId: registration.taskIds.length > 0 ? (batch.requests[0]!.authority as AgentRequestAuthority).runId : "",
+      runId: (batch.requests[0]!.authority as AgentRequestAuthority).runId,
       wave: registration.input.wave ?? locked.current_wave ?? 0,
       batchEpoch: batch.batchEpoch,
     },

@@ -2,8 +2,8 @@
  * The ONE quote-aware shell scan.
  *
  * Three hand-rolled copies of this loop existed — `hasOutputRedirect` and
- * `findClosingParen` in `core/guard-state-file`, `stripComment` in
- * `machine/extract-evidence` — and they had already diverged. Two counted a
+ * `findClosingParen` in `core/guard-state-file`, and the command parser now in
+ * `core/shell-command` — and they had already diverged. Two counted a
  * backtick as a quote opener; `findClosingParen` did not. So in `` $(`a)b`) ``
  * the `)` inside the backtick body was read as the outer substitution's close,
  * and the command guard analysed a truncated body: not fail-closed, because

@@ -7,7 +7,7 @@
  * lives HERE, keeping test-report.ts (and its reducer consumers) pure.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { TestReportSummary } from "./types";
 import { mergeSummaries, parseJunitXml, parseVitestJson } from "./test-report";
@@ -176,6 +176,20 @@ export const CALL_START_SLACK_MS = 2000;
 
 const errMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
+function explicitReportExists(path: string, label: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      process.stderr.write(`findReport: ${label} '${path}' does not exist\n`);
+    } else {
+      process.stderr.write(`findReport: cannot inspect ${label} '${path}': ${errMessage(error)}\n`);
+    }
+    return false;
+  }
+}
+
 /**
  * Ordered freshness: the artifact must postdate the START of the current
  * tool call (within CALL_START_SLACK_MS) AND fall inside the recency
@@ -299,9 +313,7 @@ export function findReport(
       );
     } else if (callStartMs === null) {
       noStamp(`--reporter-outfile '${path}'`);
-    } else if (!existsSync(path)) {
-      process.stderr.write(`findReport: Bun JUnit report '${path}' does not exist\n`);
-    } else if (isFresh(path, nowMs, callStartMs)) {
+    } else if (explicitReportExists(path, "Bun JUnit report") && isFresh(path, nowMs, callStartMs)) {
       try {
         const parsed = parseJunitXml(readFileSync(path, "utf-8"));
         if (parsed) return parsed;
@@ -325,7 +337,7 @@ export function findReport(
       );
     } else if (callStartMs === null) {
       noStamp(`--outputFile '${path}'`);
-    } else if (existsSync(path) && isFresh(path, nowMs, callStartMs)) {
+    } else if (explicitReportExists(path, "--outputFile report") && isFresh(path, nowMs, callStartMs)) {
       try {
         const parsed = parseVitestJson(readFileSync(path, "utf-8"));
         if (parsed) return parsed;
@@ -336,11 +348,6 @@ export function findReport(
         // survive with report: null instead of crashing the recorder.
         process.stderr.write(`findReport: cannot read --outputFile '${path}': ${errMessage(e)}\n`);
       }
-    } else if (!existsSync(path)) {
-      // Sibling sources log the missing-artifact class loudly; the explicit
-      // --outputFile branch must not be the one silent member of the family
-      // (a typo'd or never-written report looks identical to no report).
-      process.stderr.write(`findReport: --outputFile report '${path}' does not exist\n`);
     }
   }
 

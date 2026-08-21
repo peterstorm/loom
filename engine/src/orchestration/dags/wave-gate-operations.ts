@@ -78,9 +78,16 @@ export type DerivedPart =
 
 export type PreparedPartValue = Readonly<{ kind: "derived"; part: string; value: unknown }>;
 
+export type PreparedParts = readonly [
+  PreparedPartValue,
+  PreparedPartValue,
+  PreparedPartValue,
+  PreparedPartValue,
+];
+
 export type PreparedBatch =
-  | Readonly<{ kind: "prepared"; parts: readonly PreparedPartValue[] }>
-  | Readonly<{ kind: "blocked"; reasons: readonly string[] }>;
+  | Readonly<{ kind: "prepared"; parts: PreparedParts }>
+  | Readonly<{ kind: "blocked"; reasons: readonly [string, ...string[]] }>;
 
 const preparationInputSchema = z.object({
   wave: waveNumberSchema,
@@ -100,8 +107,16 @@ const derivedPartSchema = z.union([
 ]) as unknown as z.ZodType<DerivedPart>;
 
 const preparedBatchSchema = z.union([
-  z.object({ kind: z.literal("prepared"), parts: z.array(preparedPartSchema) }),
-  z.object({ kind: z.literal("blocked"), reasons: z.array(z.string()) }),
+  z.object({
+    kind: z.literal("prepared"),
+    parts: z.tuple([
+      preparedPartSchema,
+      preparedPartSchema,
+      preparedPartSchema,
+      preparedPartSchema,
+    ]),
+  }),
+  z.object({ kind: z.literal("blocked"), reasons: z.array(z.string().min(1)).min(1) }),
 ]) as unknown as z.ZodType<PreparedBatch>;
 
 /** How one part of the batch is derived. Pure: it receives the input value. */
@@ -124,26 +139,55 @@ function derivePartNode(id: string, part: PreparationPart) {
  * reaches, so all four arrive as REQUIRED sources and the join sees an object
  * keyed by node id with no absent members.
  */
+type DerivedPartsByNode = Readonly<{
+  [DERIVE_READINESS]: DerivedPart;
+  [DERIVE_PACKETS]: DerivedPart;
+  [DERIVE_MODELS]: DerivedPart;
+  [DERIVE_CONTEXTS]: DerivedPart;
+}>;
+
 const joinSchema = z.object({
   [DERIVE_READINESS]: derivedPartSchema,
   [DERIVE_PACKETS]: derivedPartSchema,
   [DERIVE_MODELS]: derivedPartSchema,
   [DERIVE_CONTEXTS]: derivedPartSchema,
-}) as unknown as z.ZodType<Readonly<Record<string, DerivedPart>>>;
+}) as unknown as z.ZodType<DerivedPartsByNode>;
 
-const joinNode = createTransformNode<Readonly<Record<string, DerivedPart>>, PreparedBatch>({
+function preparedPart(part: DerivedPart): PreparedPartValue {
+  if (part.kind === "undeliverable") {
+    throw new Error(`undeliverable preparation part '${part.part}' reached the prepared arm`);
+  }
+  return part;
+}
+
+function prepareBatch(parts: DerivedPartsByNode): PreparedBatch {
+  const ordered: readonly [DerivedPart, DerivedPart, DerivedPart, DerivedPart] = [
+    parts[DERIVE_READINESS],
+    parts[DERIVE_PACKETS],
+    parts[DERIVE_MODELS],
+    parts[DERIVE_CONTEXTS],
+  ];
+  const reasons = ordered.flatMap((part) => part.kind === "undeliverable" ? [part.reason] : []);
+  const firstReason = reasons[0];
+  if (firstReason !== undefined) {
+    return { kind: "blocked", reasons: [firstReason, ...reasons.slice(1)] };
+  }
+  return {
+    kind: "prepared",
+    parts: [
+      preparedPart(ordered[0]),
+      preparedPart(ordered[1]),
+      preparedPart(ordered[2]),
+      preparedPart(ordered[3]),
+    ],
+  };
+}
+
+const joinNode = createTransformNode<DerivedPartsByNode, PreparedBatch>({
   id: JOIN_PREPARATION,
   inputSchema: joinSchema,
   outputSchema: preparedBatchSchema,
-  transform: (parts) => {
-    const ordered = [DERIVE_READINESS, DERIVE_PACKETS, DERIVE_MODELS, DERIVE_CONTEXTS]
-      .map((id) => parts[id])
-      .filter((part): part is DerivedPart => part !== undefined);
-    const failed = ordered.filter((part) => part.kind === "undeliverable");
-    return ok(failed.length > 0
-      ? { kind: "blocked", reasons: failed.map((part) => part.reason) }
-      : { kind: "prepared", parts: ordered.filter((part): part is PreparedPartValue => part.kind === "derived") });
-  },
+  transform: (parts) => ok(prepareBatch(parts)),
 });
 
 /**

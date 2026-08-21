@@ -76,9 +76,12 @@ function sanitizeDecomposedTask(t: Task): Task {
   };
 }
 
+function taskWaves(tasks: readonly Task[]): readonly number[] {
+  return [...new Set(tasks.map((task) => task.wave))].sort((left, right) => left - right);
+}
+
 /** Build wave gates for all waves */
-function buildWaveGates(tasks: Task[]): Record<string, WaveGate> {
-  const waves = [...new Set(tasks.map((t) => t.wave))].sort((a, b) => a - b);
+function buildWaveGates(waves: readonly number[]): Record<string, WaveGate> {
   const gates: Record<string, WaveGate> = {};
   for (const w of waves) {
     gates[String(w)] = newWaveGate();
@@ -176,6 +179,7 @@ const handler: HookHandler = async (stdin, args) => {
   }
   // checkPlanModelBindings only passes when planFile is a readable string
   const validatedPlanFile = planFile as string;
+  const waves = taskWaves(decompose.tasks);
 
   // Guard against overwriting non-pending tasks
   if (!force && existingState.tasks.some((t) => t.status !== "pending")) {
@@ -207,7 +211,7 @@ const handler: HookHandler = async (stdin, args) => {
       tasks: decompose.tasks.map(sanitizeDecomposedTask),
       current_wave: 1,
       executing_tasks: [],
-      wave_gates: buildWaveGates(decompose.tasks),
+      wave_gates: buildWaveGates(waves),
       ...(issue === undefined ? {} : { github_issue: issue }),
       ...(repo === undefined ? {} : { github_repo: repo }),
     };
@@ -225,7 +229,6 @@ const handler: HookHandler = async (stdin, args) => {
   }
 
   const taskCount = decompose.tasks.length;
-  const waves = [...new Set(decompose.tasks.map((t) => t.wave))].sort((a, b) => a - b);
   process.stderr.write(`Task graph populated: ${taskCount} tasks, waves: ${waves.join(", ")}\n`);
 
   return { kind: "passthrough" };

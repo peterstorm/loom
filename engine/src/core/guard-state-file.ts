@@ -99,7 +99,7 @@ import {
   splitCommandSegmentsWithOps,
   stripComment,
   stripEnvPrefix,
-} from "../machine/extract-evidence";
+} from "./shell-command";
 
 const BLOCK: HookResult = {
   kind: "block",

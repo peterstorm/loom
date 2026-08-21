@@ -36,6 +36,7 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/machine/mermaid.ts",
   "engine/src/machine/test-report.ts",
   "engine/src/machine/evidence.ts",
+  "engine/src/core/shell-command.ts",
 ];
 
 /** Import specifiers that indicate I/O capability or ambient non-determinism */

@@ -570,6 +570,17 @@ describe("wave gate preparation", () => {
     expect(outputSchema.safeParse({
       kind: "prepared",
       parts: [{ kind: "derived", part: "models", value: {} }],
+    }).success).toBe(false);
+    expect(outputSchema.safeParse({ kind: "prepared", parts: [] }).success).toBe(false);
+    expect(outputSchema.safeParse({ kind: "blocked", reasons: [] }).success).toBe(false);
+    expect(outputSchema.safeParse({ kind: "blocked", reasons: ["missing binding"] }).success).toBe(true);
+    expect(outputSchema.safeParse({
+      kind: "prepared",
+      parts: ["readiness", "packets", "models", "contexts"].map((part) => ({
+        kind: "derived",
+        part,
+        value: {},
+      })),
     }).success).toBe(true);
   });
 
