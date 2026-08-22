@@ -1323,7 +1323,8 @@ export default function (pi: ExtensionAPI) {
         };
       }
     } catch (error: unknown) {
-      // Fail-closed: any error \u2192 inject error content to block the edit
+      // Fail-closed: return error feedback so the agent must repair the edit
+      // already on disk; this post-edit hook does not roll the write back.
       const message = error instanceof Error ? error.message : String(error);
       return {
         content: [{ type: "text" as const, text: `\u274c LINT ENGINE ERROR: ${message}` }],
@@ -1785,7 +1786,10 @@ export default function (pi: ExtensionAPI) {
             const rosterId = piSpawnRosterId(toolCallId, resultIndex, agentType);
             await fsSessionRegistry.removeActive(safeSessionId, rosterId);
           } catch (err) {
-            process.stderr.write(`loom: subagent flag cleanup failed: ${(err as Error).message}\n`);
+            const message = err instanceof Error ? err.message : String(err);
+            const diagnostic = `subagent flag cleanup failed for ${agentType}/${safeSessionId}: ${message}`;
+            processingErrors.push(diagnostic);
+            process.stderr.write(`loom: ${diagnostic}\n`);
           }
         }
 

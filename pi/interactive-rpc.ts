@@ -56,10 +56,14 @@ const optionalTimeout = (record: Record<string, unknown>, context: string): RpcP
 const stringArray = (value: unknown, context: string, allowEmpty: boolean): RpcParseResult<readonly string[]> => {
   if (!Array.isArray(value)) return failure(`${context} must be an array`);
   if (!allowEmpty && value.length === 0) return failure(`${context} must be non-empty`);
-  const invalid = value.findIndex((entry) => typeof entry !== "string" || entry.length === 0);
-  return invalid === -1
-    ? success(Object.freeze(value.map((entry) => String(entry))))
-    : failure(`${context}[${invalid}] must be a non-empty string`);
+  const strings: string[] = [];
+  for (const [index, entry] of value.entries()) {
+    if (typeof entry !== "string" || entry.length === 0) {
+      return failure(`${context}[${index}] must be a non-empty string`);
+    }
+    strings.push(entry);
+  }
+  return success(Object.freeze(strings));
 };
 
 function parseDialogRequest(

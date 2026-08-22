@@ -18,9 +18,9 @@
 import type { HookResult } from "../types";
 import { checkAgentSkillPrompt } from "./agent-skills";
 import {
+  agentRequiresInteractiveTransport,
   classifyPiSpawnItems,
   expectedSpawnModel,
-  PI_INTERACTIVE_PHASE_AGENTS,
   type LoomAgentName,
   type PiSpawnItem,
 } from "./model-profiles";
@@ -29,8 +29,6 @@ import { classifyTaskExecutionSpawn, type TaskExecutionSpawn } from "./validate-
 /** Pi's transport cap per native subagent call; larger engine batches are
  *  chunked by the parent. Single source — the extension imports it. */
 export const MAX_PI_ORCHESTRATION_BATCH_SIZE = 8;
-
-export { PI_INTERACTIVE_PHASE_AGENTS } from "./model-profiles";
 
 export type PiSpawnTransport = "headless" | "interactive-rpc";
 
@@ -84,7 +82,7 @@ function transportAdmission(
   items: readonly PiSpawnItem[],
   transport: PiSpawnTransport,
 ): SpawnAdmission | null {
-  const interactiveItems = items.filter((item) => PI_INTERACTIVE_PHASE_AGENTS.has(item.agent));
+  const interactiveItems = items.filter((item) => agentRequiresInteractiveTransport(item.agent));
   if (transport === "headless" && interactiveItems.length > 0) {
     return block(
       "interactive-transport",
@@ -102,13 +100,14 @@ function transportAdmission(
 
 function itemAdmission(item: PiSpawnItem, ports: SpawnAdmissionPorts): SpawnAdmission | null {
   const expected = expectedSpawnModel(item.agent, "pi");
+  if (!expected.ok) return block("definition-identity", expected.error.message);
+
   const definition = ports.validateDefinition(item.agent);
-  if (!expected.ok || !definition.ok) {
+  if (!definition.ok) {
     return block(
       "definition-identity",
-      expected.ok
-        ? `Pi agent '${item.agent}' must be rendered from active Loom package ${ports.packageRoot}: ${definition.ok ? "unknown definition mismatch" : definition.error}. Run "${ports.packageRoot}/scripts/sync-pi-agents.sh" and /reload.`
-        : expected.error.message,
+      `Pi agent '${item.agent}' must be rendered from active Loom package ${ports.packageRoot}: ${definition.error}. ` +
+        `Run "${ports.packageRoot}/scripts/sync-pi-agents.sh" and /reload.`,
     );
   }
   const source = ports.readSourceAgent(item.agent);
@@ -133,6 +132,12 @@ export function admitPiSpawnBatch(rawInput: unknown, ports: SpawnAdmissionPorts)
   const classified = classifyPiSpawnItems(rawInput);
   if (!classified.ok) return block("parse-pi-subagent-batch", classified.error.message);
   if (classified.value.kind === "external") {
+    if (ports.transport === "interactive-rpc") {
+      return block(
+        "interactive-transport",
+        "loom_interactive_subagent accepts exactly one interactive Loom phase Agent; external Agents must use the normal subagent tool.",
+      );
+    }
     // Loom owns only its catalog outside orchestration. During an active
     // graph, an unknown agent would bypass phase/task/model gates; without
     // one, it belongs to another Pi workflow and must pass through.

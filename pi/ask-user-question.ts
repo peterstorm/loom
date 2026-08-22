@@ -20,6 +20,12 @@ const AskUserQuestionParams = Type.Object({
 
 type Question = Static<typeof AskUserQuestionParams>["questions"][number];
 type QuestionOption = Question["options"][number];
+type ToolContext = Parameters<Parameters<ExtensionAPI["registerTool"]>[0]["execute"]>[4];
+
+type UnambiguousQuestion = Readonly<{ question: Question }>;
+type QuestionParseResult =
+  | Readonly<{ ok: true; value: readonly UnambiguousQuestion[] }>
+  | Readonly<{ ok: false; header: string; repeatedLabel: string }>;
 
 type QuestionAnswer = Readonly<{
   header: string;
@@ -30,6 +36,21 @@ type QuestionAnswer = Readonly<{
 
 const OTHER = "Type a different answer…";
 const DONE = "Done selecting";
+
+const parseQuestions = (questions: readonly Question[]): QuestionParseResult => {
+  const parsed: UnambiguousQuestion[] = [];
+  for (const question of questions) {
+    const labels = new Set<string>();
+    for (const option of question.options) {
+      if (labels.has(option.label)) {
+        return Object.freeze({ ok: false, header: question.header, repeatedLabel: option.label });
+      }
+      labels.add(option.label);
+    }
+    parsed.push(Object.freeze({ question }));
+  }
+  return Object.freeze({ ok: true, value: Object.freeze(parsed) });
+};
 
 const displayOption = (option: QuestionOption, index: number, selected = false): string => {
   const marker = selected ? "[x] " : "[ ] ";
@@ -55,7 +76,8 @@ const answerText = (answers: readonly QuestionAnswer[]): string =>
       : `${answer.header}: ${answer.answers.join(", ") || "no options selected"}`
   ).join("\n");
 
-async function askSingle(question: Question, ctx: Parameters<Parameters<ExtensionAPI["registerTool"]>[0]["execute"]>[4]): Promise<QuestionAnswer> {
+async function askSingle(parsed: UnambiguousQuestion, ctx: ToolContext): Promise<QuestionAnswer> {
+  const { question } = parsed;
   const rendered = question.options.map((option, index) => displayOption(option, index));
   const selected = await ctx.ui.select(`${question.header}: ${question.question}`, [...rendered, OTHER]);
   if (selected === undefined) return questionAnswer(question, [], true);
@@ -71,7 +93,8 @@ async function askSingle(question: Question, ctx: Parameters<Parameters<Extensio
     : questionAnswer(question, [question.options[index]!.label], false);
 }
 
-async function askMultiple(question: Question, ctx: Parameters<Parameters<ExtensionAPI["registerTool"]>[0]["execute"]>[4]): Promise<QuestionAnswer> {
+async function askMultiple(parsed: UnambiguousQuestion, ctx: ToolContext): Promise<QuestionAnswer> {
+  const { question } = parsed;
   const selected = new Set<number>();
   while (true) {
     const options = question.options.map((option, index) => displayOption(option, index, selected.has(index)));
@@ -111,9 +134,15 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
     executionMode: "sequential",
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (!ctx.hasUI) throw new Error("AskUserQuestion requires a relayed Pi RPC UI");
+      const parsed = parseQuestions(params.questions);
+      if (!parsed.ok) {
+        throw new Error(
+          `${parsed.header}: option labels must be unique; repeated label ${JSON.stringify(parsed.repeatedLabel)}`,
+        );
+      }
       const answers: QuestionAnswer[] = [];
-      for (const question of params.questions) {
-        const answer = question.multiSelect
+      for (const question of parsed.value) {
+        const answer = question.question.multiSelect
           ? await askMultiple(question, ctx)
           : await askSingle(question, ctx);
         answers.push(answer);

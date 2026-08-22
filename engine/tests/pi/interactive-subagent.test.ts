@@ -72,6 +72,7 @@ describe("interactive Pi subagent shell", () => {
     const piAgentDir = prepareAgentDir();
     const relayed: string[] = [];
     let invocation: Readonly<{ command: string; args: readonly string[]; cwd: string }> | undefined;
+    const updates: unknown[] = [];
 
     const result = await runInteractiveSubagent({
       agent: "arch-interviewer-agent",
@@ -83,6 +84,7 @@ describe("interactive Pi subagent shell", () => {
         relayed.push(`${request.kind}:${request.id}`);
         return { type: "extension_ui_response", id: request.id, value: "Typed" };
       },
+      onUpdate: (update) => updates.push(update),
     }, {
       spawnChild: (command, args, cwd) => {
         invocation = { command, args, cwd };
@@ -108,7 +110,12 @@ describe("interactive Pi subagent shell", () => {
     expect(toolFlag).toBeGreaterThanOrEqual(0);
     expect(invocation?.args[toolFlag + 1]?.split(",")).toContain("AskUserQuestion");
     expect(relayed).toEqual(["select:question-1"]);
+    expect(updates).toEqual([
+      expect.objectContaining({ status: "running", agent: "arch-interviewer-agent" }),
+    ]);
+    expect(updates[0]).not.toHaveProperty("exitCode");
     expect(result).toMatchObject({
+      status: "completed",
       agent: "arch-interviewer-agent",
       task: "Ask and write the interview digest",
       exitCode: 0,
@@ -180,6 +187,18 @@ process.stdin.once("data", () => {
     expect(calls).toEqual(["select", "confirm", "input", "editor"]);
   });
 
+  it("declines a child editor request instead of opening a dialog that abort cannot dismiss", async () => {
+    const controller = new AbortController();
+    let editorOpened = false;
+
+    await expect(relayExtensionUiRequest(
+      { kind: "editor", id: "e", title: "Edit", prefill: "draft" },
+      { ui: { editor: async () => { editorOpened = true; return "edited"; } } } as never,
+      controller.signal,
+    )).resolves.toEqual({ type: "extension_ui_response", id: "e", cancelled: true });
+    expect(editorOpened).toBe(false);
+  });
+
   it("returns the subagent-compatible details envelope from the registered tool", async () => {
     const piAgentDir = prepareAgentDir();
     type ToolExecute = (
@@ -214,7 +233,7 @@ process.stdin.once("data", () => {
       mode: "single",
       agentScope: "user",
       projectAgentsDir: null,
-      results: [{ agent: "arch-interviewer-agent", task: "Ask and return", exitCode: 0 }],
+      results: [{ status: "completed", agent: "arch-interviewer-agent", task: "Ask and return", exitCode: 0 }],
     });
   });
 

@@ -152,6 +152,29 @@ describe("AskUserQuestion RPC child tool", () => {
     expect(multi.content[0]?.text).toBe("Architecture: Custom multi");
   });
 
+  it("rejects duplicate semantic labels before opening a dialog", async () => {
+    const execute = registeredExecute();
+    let dialogOpened = false;
+    const duplicated = {
+      question: "Which duplicate?",
+      header: "Duplicate",
+      options: [
+        { label: "Same", description: "First meaning" },
+        { label: "Same", description: "Second meaning" },
+      ],
+      multiSelect: false,
+    };
+
+    await expect(execute("call-duplicate", { questions: [duplicated] }, undefined, undefined, {
+      hasUI: true,
+      ui: {
+        select: async () => { dialogOpened = true; return undefined; },
+        input: async () => undefined,
+      },
+    })).rejects.toThrow("Duplicate: option labels must be unique; repeated label \"Same\"");
+    expect(dialogOpened).toBe(false);
+  });
+
   it("reports cancellation without inventing an answer", async () => {
     const execute = registeredExecute();
     const result = await execute("call-3", { questions: [question()] }, undefined, undefined, {

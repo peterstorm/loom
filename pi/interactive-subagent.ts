@@ -26,11 +26,10 @@ const MAX_RPC_STREAM_BYTES = 64 * 1024 * 1024;
 const MAX_STDERR_BYTES = 1024 * 1024;
 const MAX_INTERACTIVE_RUNTIME_MS = 60 * 60 * 1000;
 
-export type InteractiveAgentResult = Readonly<{
+type InteractiveAgentSnapshot = Readonly<{
   agent: string;
   agentSource: "user";
   task: string;
-  exitCode: number;
   messages: readonly unknown[];
   stderr: string;
   usage: Readonly<{
@@ -45,6 +44,15 @@ export type InteractiveAgentResult = Readonly<{
   model?: string;
   stopReason?: string;
   errorMessage?: string;
+}>;
+
+export type InteractiveAgentProgress = InteractiveAgentSnapshot & Readonly<{
+  status: "running";
+}>;
+
+export type InteractiveAgentResult = InteractiveAgentSnapshot & Readonly<{
+  status: "completed";
+  exitCode: number;
 }>;
 
 type InteractiveAgentDefinition = Readonly<{
@@ -67,6 +75,8 @@ export type InteractiveSubagentDependencies = Readonly<{
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 const textOfLastAssistant = (messages: readonly unknown[]): string => {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -104,7 +114,7 @@ function piInvocation(args: readonly string[]): Readonly<{ command: string; args
       accessSync(currentScript, fsConstants.F_OK);
       return Object.freeze({ command: process.execPath, args: Object.freeze([currentScript, ...args]) });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorText(error);
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         throw new Error(`active Pi entry point ${currentScript} is unavailable; refusing PATH fallback: ${message}`);
       }
@@ -124,16 +134,6 @@ const rpcOptions = (
   ...(timeout === undefined ? {} : { timeout }),
   ...(signal === undefined ? {} : { signal }),
 });
-
-const abortableDialog = async <T>(dialog: Promise<T>, signal: AbortSignal | undefined): Promise<T | undefined> => {
-  if (signal === undefined) return dialog;
-  if (signal.aborted) return undefined;
-  return new Promise<T | undefined>((resolveDialog, rejectDialog) => {
-    const abort = (): void => resolveDialog(undefined);
-    signal.addEventListener("abort", abort, { once: true });
-    dialog.then(resolveDialog, rejectDialog).finally(() => signal.removeEventListener("abort", abort));
-  });
-};
 
 export async function relayExtensionUiRequest(
   request: ExtensionUiRequest,
@@ -156,7 +156,10 @@ export async function relayExtensionUiRequest(
       return value === undefined ? cancelledUiResponse(request.id) : valueUiResponse(request.id, value);
     }
     case "editor": {
-      const value = await abortableDialog(ctx.ui.editor(request.title, request.prefill), signal);
+      // Pi's editor API has no AbortSignal option. A child-lifetime relay must
+      // not open a modal it cannot dismiss after the child exits.
+      if (signal !== undefined) return cancelledUiResponse(request.id);
+      const value = await ctx.ui.editor(request.title, request.prefill);
       return value === undefined ? cancelledUiResponse(request.id) : valueUiResponse(request.id, value);
     }
     case "notify":
@@ -236,7 +239,7 @@ export async function runInteractiveSubagent(
     packageRoot: string;
     piAgentDir: string;
     signal?: AbortSignal;
-    onUpdate?: (result: InteractiveAgentResult) => void;
+    onUpdate?: (result: InteractiveAgentProgress) => void;
     relay: (request: ExtensionUiRequest, signal: AbortSignal) => Promise<ExtensionUiResponse | null>;
   }>,
   dependencies: InteractiveSubagentDependencies = {},
@@ -291,17 +294,25 @@ export async function runInteractiveSubagent(
     }, 5000);
   };
 
-  const currentResult = (exitCode: number): InteractiveAgentResult => Object.freeze({
+  const currentSnapshot = (): InteractiveAgentSnapshot => Object.freeze({
     agent: input.agent,
     agentSource: "user",
     task: input.task,
-    exitCode,
     messages: Object.freeze([...messages]),
     stderr,
     usage: Object.freeze({ ...usage }),
     ...(model === undefined ? {} : { model }),
     ...(stopReason === undefined ? {} : { stopReason }),
     ...(errorMessage === undefined ? {} : { errorMessage }),
+  });
+  const currentProgress = (): InteractiveAgentProgress => Object.freeze({
+    ...currentSnapshot(),
+    status: "running",
+  });
+  const currentResult = (exitCode: number): InteractiveAgentResult => Object.freeze({
+    ...currentSnapshot(),
+    status: "completed",
+    exitCode,
   });
 
   const writeFrame = (
@@ -340,7 +351,7 @@ export async function runInteractiveSubagent(
         if (typeof message.stopReason === "string") stopReason = message.stopReason;
         if (typeof message.errorMessage === "string") errorMessage = message.errorMessage;
       }
-      input.onUpdate?.(currentResult(-1));
+      input.onUpdate?.(currentProgress());
       return;
     }
     if (type === "extension_error") {
@@ -356,7 +367,7 @@ export async function runInteractiveSubagent(
   };
 
   const failProtocol = (error: unknown): void => {
-    protocolFailure ??= error instanceof Error ? error.message : String(error);
+    protocolFailure ??= errorText(error);
     terminateChild();
   };
   let processing = Promise.resolve();
@@ -386,7 +397,7 @@ export async function runInteractiveSubagent(
     try {
       writeFrame({ type: "abort" });
     } catch (error) {
-      protocolFailure ??= `failed to send Pi RPC abort frame: ${error instanceof Error ? error.message : String(error)}`;
+      protocolFailure ??= `failed to send Pi RPC abort frame: ${errorText(error)}`;
     }
     terminateChild();
   };
@@ -428,23 +439,30 @@ export async function runInteractiveSubagent(
     try {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     } catch (error) {
-      cleanupErrors.push(`kill child: ${error instanceof Error ? error.message : String(error)}`);
+      cleanupErrors.push(`kill child: ${errorText(error)}`);
     }
     try {
       dependencies.onChildSettled?.(child);
     } catch (error) {
-      cleanupErrors.push(`notify child settlement: ${error instanceof Error ? error.message : String(error)}`);
+      cleanupErrors.push(`notify child settlement: ${errorText(error)}`);
     }
     try {
       await rm(promptDir, { recursive: true, force: true });
     } catch (error) {
-      cleanupErrors.push(`remove prompt directory: ${error instanceof Error ? error.message : String(error)}`);
+      cleanupErrors.push(`remove prompt directory: ${errorText(error)}`);
     }
     if (cleanupErrors.length > 0) {
       process.stderr.write(`loom(pi): interactive subagent cleanup failed: ${cleanupErrors.join("; ")}\n`);
     }
   }
 }
+
+const subagentDetails = (result: InteractiveAgentProgress | InteractiveAgentResult) => Object.freeze({
+  mode: "single" as const,
+  agentScope: "user" as const,
+  projectAgentsDir: null,
+  results: Object.freeze([result]),
+});
 
 export function registerInteractiveSubagentTool(
   pi: ExtensionAPI,
@@ -484,7 +502,7 @@ export function registerInteractiveSubagentTool(
         relay: (request, childSignal) => relayExtensionUiRequest(request, ctx, childSignal),
         onUpdate: onUpdate === undefined ? undefined : (partial) => onUpdate({
           content: [{ type: "text", text: textOfLastAssistant(partial.messages) || "Interactive phase agent running…" }],
-          details: { mode: "single", agentScope: "user", projectAgentsDir: null, results: [partial] },
+          details: subagentDetails(partial),
         }),
       }, {
         ...dependencies,
@@ -500,7 +518,7 @@ export function registerInteractiveSubagentTool(
       const output = textOfLastAssistant(result.messages) || result.errorMessage || "(no output)";
       return {
         content: [{ type: "text", text: output }],
-        details: { mode: "single", agentScope: "user", projectAgentsDir: null, results: [result] },
+        details: subagentDetails(result),
       };
     },
     renderCall(args, theme) {

@@ -203,12 +203,10 @@ export const AGENT_POLICIES: readonly AgentPolicy<LoomAgentName>[] = Object.free
   ),
 );
 
-/** Catalog-derived roles whose phase contract requires same-turn user interaction. */
-export const PI_INTERACTIVE_PHASE_AGENTS: ReadonlySet<LoomAgentName> = Object.freeze(new Set(
-  CATALOG_ENTRIES
-    .filter(([, { transport }]) => transport === "interactive-rpc")
-    .map(([agent]) => agent),
-));
+/** Does this catalog Agent require same-turn user interaction in Pi? */
+export function agentRequiresInteractiveTransport(agent: LoomAgentName): boolean {
+  return AGENT_CATALOG[agent].transport === "interactive-rpc";
+}
 
 /** Names of every catalog Agent with the given kind, in catalog order. */
 export function agentsOfKind(k: AgentKind["kind"]): readonly LoomAgentName[] {

@@ -3,10 +3,13 @@ import fc from "fast-check";
 import {
   admitPiSpawnBatch,
   MAX_PI_ORCHESTRATION_BATCH_SIZE,
-  PI_INTERACTIVE_PHASE_AGENTS,
   type SpawnAdmissionPorts,
 } from "../../src/core/spawn-admission";
-import { LOOM_OWNED_AGENTS, type LoomAgentName } from "../../src/core/model-profiles";
+import {
+  agentRequiresInteractiveTransport,
+  LOOM_OWNED_AGENTS,
+  type LoomAgentName,
+} from "../../src/core/model-profiles";
 import { AGENT_REQUIRED_SKILLS } from "../../src/core/orchestration-contract";
 
 /** Spawn Admission is a pure decision exercised through in-memory ports. */
@@ -40,11 +43,17 @@ describe("admitPiSpawnBatch gate sequence", () => {
     expect(admission.guard).toBe("parse-pi-subagent-batch");
   });
 
-  it("passes external batches through when no graph is active, blocks them when one is", () => {
+  it("passes external batches through only on the native transport when no graph is active", () => {
     const external = { agent: "someone-elses-agent", task: "external work" };
     expect(admitPiSpawnBatch(external, allowPorts({ graphActive: false }))).toEqual({ kind: "pass-through" });
-    const blocked = admitPiSpawnBatch(external, allowPorts({ graphActive: true }));
-    expect(blocked).toMatchObject({ kind: "block", guard: "external-agents" });
+    expect(admitPiSpawnBatch(external, allowPorts({ graphActive: true }))).toMatchObject({
+      kind: "block",
+      guard: "external-agents",
+    });
+    expect(admitPiSpawnBatch(external, allowPorts({
+      graphActive: false,
+      transport: "interactive-rpc",
+    }))).toMatchObject({ kind: "block", guard: "interactive-transport" });
   });
 
   it("blocks oversized batches with the exact partitioning instruction", () => {
@@ -140,7 +149,7 @@ describe("spawn admission properties", () => {
     const requiring = LOOM_OWNED_AGENTS.filter((agent) => AGENT_REQUIRED_SKILLS[agent] !== null);
     fc.assert(fc.property(fc.constantFrom(...requiring), (agent) => {
       const skill = AGENT_REQUIRED_SKILLS[agent]!;
-      const transport = PI_INTERACTIVE_PHASE_AGENTS.has(agent) ? "interactive-rpc" : "headless";
+      const transport = agentRequiresInteractiveTransport(agent) ? "interactive-rpc" : "headless";
       const ports = allowPorts({ transport });
       const bare = admitPiSpawnBatch({ agent, task: "do the work" }, ports);
       expect(bare).toMatchObject({ kind: "block", guard: "validate-agent-skill" });

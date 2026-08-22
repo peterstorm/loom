@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { evaluateTaskProof } from "../src/core/proof-obligations";
 import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
+import { fsSessionRegistry } from "../src/machine";
 import { openRunDirectory, type RunDirHandle } from "../src/orchestration/run-directory-handle";
 import { buildContextPacket, encodeByteSection } from "../src/orchestration/context-packets";
 import { registerSessionRunBinding } from "../src/orchestration/session-run-bindings";
@@ -275,6 +276,40 @@ describe("Pi extension review tool_result integration", () => {
     } finally {
       process.chdir(previousCwd);
       rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces non-Error failures from legacy roster cleanup", async () => {
+    const pi = await extension();
+    const cleanup = vi.spyOn(fsSessionRegistry, "removeActive").mockRejectedValue("registry offline");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId: "legacy-call",
+        isError: false,
+        input: {},
+        content: [],
+        details: {
+          results: [{
+            agent: "deepen-agent",
+            task: "ad-hoc utility work",
+            exitCode: 0,
+            messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+          }],
+        },
+      }, {
+        sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad4f2" },
+      });
+
+      expect(JSON.stringify(responses)).toContain(
+        "subagent flag cleanup failed for deepen-agent/019fca39-f989-7510-8e62-50dadbcad4f2: registry offline",
+      );
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toContain("registry offline");
+    } finally {
+      cleanup.mockRestore();
+      stderr.mockRestore();
     }
   });
 
