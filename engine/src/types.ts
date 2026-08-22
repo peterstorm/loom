@@ -213,6 +213,23 @@ export interface ReviewRun {
   readonly evidence: readonly ReviewRunEvidence[];
   /** Present on engine-owned Wave runs; ordered exactly like expected_agents. */
   readonly slot_authority?: readonly [ReviewRunSlotAuthority, ...ReviewRunSlotAuthority[]];
+  /** Exact Wave authority that issued this byte snapshot. */
+  readonly workspace_scope?: readonly string[];
+  readonly workspace_head_sha?: string;
+  readonly wave_gate_run_id?: string;
+  readonly wave_gate_authority_digest?: string;
+}
+
+/** Review authority retained after a roster closes. It is the immutable source
+ * for completion integrity and completed-Wave reopening; graph summaries are
+ * never substituted for it. */
+export interface AcceptedReviewAuthority {
+  readonly generation: number;
+  readonly packet_id: string;
+  readonly head_sha: string;
+  readonly scope: readonly string[];
+  readonly run_id?: string;
+  readonly authority_digest?: string;
 }
 
 export interface FindingResolutionAssessment extends PriorFindingAssessment {
@@ -311,6 +328,10 @@ export interface Task {
   readonly plan_context?: string;
   /** Engine-authored proof aggregate. New graphs always carry it. */
   readonly proof?: TaskProof;
+  /** A completed-Wave recovery preserved historical evidence but requires a
+   * re-spawned implementation Agent to produce fresh test evidence before the
+   * Task can again satisfy a Wave Gate. */
+  readonly revalidation_required?: true;
   /** Files this task creates/modifies (decompose contract); older graphs may lack it */
   readonly file_list?: readonly string[];
   /** Test outcome + trust provenance; absent until an impl agent completes. */
@@ -324,6 +345,8 @@ export interface Task {
   readonly review_generation?: number;
   /** Packet-bound reviewer batch currently collecting evidence. */
   readonly review_run?: ReviewRun;
+  /** Immutable packet/context authority that produced accepted review evidence. */
+  readonly accepted_review_authority?: AcceptedReviewAuthority;
   /**
    * Why evidence capture failed. Meaningful ONLY alongside
    * `review_status: "evidence_capture_failed"` — every writer that moves the
@@ -520,6 +543,19 @@ export type CompletedWaveGateRegistration = Readonly<{
 /** Immutable audit evidence for an active authority whose authoritative Run
  * Directory was proven absent before a replacement was installed. This is not
  * terminal Wave history: the replacement still owns the same active Wave. */
+export type WaveReopeningAudit = Readonly<{
+  schemaVersion: 1;
+  kind: "completed-wave-reopened-for-review-integrity";
+  /** Exact bytes were compared, or historical authority could not prove them. */
+  proofMode: "modern-exact-workspace-drift" | "legacy-workspace-authority-unverifiable";
+  runId: OrchestrationRunId;
+  wave: number;
+  authorityDigest: ArtifactDigest;
+  completionReceipt: ProtectedWaveStateCommitted;
+  /** Reopened Tasks; legacy authority never labels these as proven drift. */
+  reopenedTaskIds: readonly string[];
+}>;
+
 export type OrphanedWaveGateRetirement = Readonly<{
   schemaVersion: 1;
   kind: "orphaned-wave-gate-retirement";
@@ -786,6 +822,8 @@ export interface TaskGraph {
   readonly active_wave_gate?: ActiveWaveGateRegistration;
   /** Immutable terminal registrations, separate from authority for the next Wave. */
   readonly wave_gate_history?: readonly CompletedWaveGateRegistration[];
+  /** Immutable audit of a completed Wave reopened after modern byte proof or legacy authority loss. */
+  readonly wave_reopening_history?: readonly WaveReopeningAudit[];
   /** Nonterminal retirement audit for missing Run Directories replaced in-place. */
   readonly orphaned_wave_gate_history?: readonly OrphanedWaveGateRetirement[];
   /** Abandoned active authority retired only to install Requirement trace v2. */

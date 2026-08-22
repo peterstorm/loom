@@ -214,11 +214,12 @@ fi
 
 # Valid decompose JSON passes
 GOOD_DECOMPOSE='{
+  "spec_trace_version": 2,
   "plan_title": "Test Plan",
   "plan_file": ".claude/plans/test.md",
   "spec_file": ".claude/specs/test/spec.md",
   "tasks": [
-    {"id": "T1", "description": "Impl", "agent": "code-implementer-agent", "wave": 1, "depends_on": []}
+    {"id": "T1", "description": "Impl", "agent": "code-implementer-agent", "wave": 1, "depends_on": [], "spec_anchors": [], "spec_contributions": []}
   ]
 }'
 # The plan_file named by the decompose payload must EXIST: populate-task-graph

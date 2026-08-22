@@ -17,9 +17,10 @@ You MUST follow this exact sequence for every task:
 1. **Read** the plan file and understand the task
 2. **Implement** the code following FP/DDD patterns (functional core, imperative shell, Either-based errors, immutability, parse don't validate)
 3. **Write tests** for your implementation
-4. **Run tests via Bash tool** — this is NON-NEGOTIABLE. You MUST execute the test command using the Bash tool before finishing. Use one of: `bun test`, `npm test`, `npx vitest run`, `mvn test`, `pytest`, etc.
+4. **Run tests via Bash tool** — this is NON-NEGOTIABLE. You MUST execute the test command using the Bash tool before finishing. Use one of: `bun test`, `npm test`, `npx vitest run`, `mvn test`, `pytest`, etc. For a reopened Task, this fresh run is required even when inspection shows the implementation is already correct and you make no production changes.
 5. **Verify all tests pass** — if any fail, fix and re-run until 0 failures
-6. **Stop only after test output shows pass markers** in your Bash tool output (e.g., "X passing", "Tests run: X, Failures: 0", "X pass")
+6. **Report every declared artifact changed during remediation** — do not claim a prior Review Packet remains current after any byte change; Loom increments Review Generation and requires fresh review evidence.
+7. **Stop only after test output shows pass markers** in your Bash tool output (e.g., "X passing", "Tests run: X, Failures: 0", "X pass")
 
 ## Why This Matters
 

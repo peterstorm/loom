@@ -24,7 +24,7 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
     "store-review-findings", "store-spec-check", "mark-tests-passed",
     "suggest-spec-anchors", "extract-task-id", "store-test-evidence",
     "reconcile-implementation-proof", "set-phase", "cleanup-state", "lint-wave-gate", "validate-lint-rules",
-    "panel-contract", "review-panel", "model-profiles", "review-packet",
+    "panel-contract", "review-panel", "model-profiles", "review-packet", "reopen-completed-wave",
     "model-calibration", "panel-program", "standalone-review", "orchestration",
   ]),
 };
@@ -88,6 +88,7 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "helper/set-phase",
   "helper/cleanup-state",
   "helper/review-packet",
+  "helper/reopen-completed-wave",
   "helper/review-panel",
   "helper/standalone-review",
   "helper/orchestration",

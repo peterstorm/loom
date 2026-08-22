@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { reviewedWorkspaceDrift, type ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import type {
   ActiveWaveGateRegistration,
   CanonicalStatusFacts,
@@ -484,7 +485,8 @@ function unreadyTaskMessage(task: Task): string {
   const failures = task.proof?.state === "failed"
     ? `, failures=[${task.proof.failures.map(proofFailureMessage).join(", ")}]`
     : "";
-  return `${task.id} (status=${task.status}, proof=${task.proof?.state ?? "missing"}${failures})`;
+  const revalidation = task.revalidation_required === true ? ", revalidation=fresh-test-evidence-required" : "";
+  return `${task.id} (status=${task.status}, proof=${task.proof?.state ?? "missing"}${revalidation}${failures})`;
 }
 
 export function checkNoExecutingTasks(tasks: readonly Task[], executingTaskIds: readonly string[]): GateCheck {
@@ -497,6 +499,7 @@ export function checkNoExecutingTasks(tasks: readonly Task[], executingTaskIds: 
 
 export function checkImplementationProof(tasks: readonly Task[]): GateCheck {
   const unready = tasks.filter((task) =>
+    task.revalidation_required === true ||
     (task.status !== "implemented" && task.status !== "completed") || task.proof?.state !== "satisfied"
   );
   return unready.length === 0
@@ -622,6 +625,28 @@ export function checkLifecycleArtifacts(
 export interface GateDeps {
   readonly loadPlanModels: (planFile: string | null | undefined) => PlanModelsSource;
   readonly fileExists: (path: string) => boolean;
+  /** Shell observation of current declared bytes. Required whenever accepted
+   * packet authority exists; omitted observations fail closed. */
+  readonly reviewedWorkspace?: (tasks: readonly Task[]) => readonly ReviewedWorkspaceObservation[];
+}
+
+export function checkReviewedWorkspace(tasks: readonly Task[], deps: GateDeps): GateCheck {
+  if (!tasks.some((task) => task.accepted_review_authority !== undefined)) {
+    // Pre-integrity historical packets have no byte snapshot authority to
+    // compare. New engine-owned Wave packets always retain one on acceptance.
+    return pass("8. Review Packet workspace integrity: legacy packet authority unavailable.");
+  }
+  if (deps.reviewedWorkspace === undefined) {
+    return fail("FAILED: Review Packet workspace integrity cannot be observed; refresh review evidence after restoring repository access.");
+  }
+  try {
+    const drift = reviewedWorkspaceDrift(tasks, deps.reviewedWorkspace(tasks));
+    return drift.length === 0
+      ? pass(`8. Review Packet workspace integrity verified (${tasks.length}/${tasks.length} tasks).`)
+      : fail(`FAILED: accepted Review Packet authority is stale:\n  ${drift.join("\n  ")}\n  Protected block: rerun the Wave Gate review batch to refresh evidence.`);
+  } catch (error) {
+    return fail(`FAILED: Review Packet workspace integrity could not be proven (fail-closed): ${error instanceof Error ? error.message : String(error)}. Refresh review evidence after correcting the repository path.`);
+  }
 }
 
 /** Shell-supplied observation of the active registration's authoritative Run
@@ -705,6 +730,7 @@ export function evaluateWaveGate(state: TaskGraph, waveArg: number | null, deps:
     checkSpecAlignment(state, wave),
     checkCriticalFindings(waveTasks),
     checkLifecycleArtifacts(deps.loadPlanModels(state.plan_file ?? state.phase_artifacts?.architecture), waveTasks, deps.fileExists),
+    checkReviewedWorkspace(waveTasks, deps),
   ]);
   const failed = checks.find((check): check is Extract<GateCheck, { passed: false }> => !check.passed);
   return failed

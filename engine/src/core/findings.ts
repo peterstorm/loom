@@ -767,6 +767,23 @@ export function reviewRunError(
   if (priorIds.length !== activeIds.length || priorIds.some((id, index) => id !== activeIds[index])) {
     return `${label}.prior_finding_ids must exactly snapshot the active findings in order`;
   }
+  if (run.workspace_scope !== undefined) {
+    if (!Array.isArray(run.workspace_scope) || run.workspace_scope.length === 0 ||
+        run.workspace_scope.some((path) => typeof path !== "string" || path.trim() !== path || path === "")) {
+      return `${label}.workspace_scope must be a non-empty canonical path array when present`;
+    }
+    const scope = run.workspace_scope as string[];
+    if (new Set(scope).size !== scope.length || scope.some((path, index) => path !== [...scope].sort()[index])) {
+      return `${label}.workspace_scope must be sorted and unique`;
+    }
+    if (typeof run.workspace_head_sha !== "string" || !/^[0-9a-f]{64}$/.test(run.workspace_head_sha) ||
+        typeof run.wave_gate_run_id !== "string" || run.wave_gate_run_id.trim() === "" ||
+        typeof run.wave_gate_authority_digest !== "string" || !/^[0-9a-f]{64}$/.test(run.wave_gate_authority_digest)) {
+      return `${label}.workspace_scope requires exact Wave Gate run authority`;
+    }
+  } else if (run.wave_gate_run_id !== undefined || run.wave_gate_authority_digest !== undefined) {
+    return `${label}.Wave Gate authority requires workspace_scope`;
+  }
   if (!Array.isArray(run.evidence)) return `${label}.evidence must be an array`;
   const evidenceAgents: string[] = [];
   for (const [index, rawEvidence] of run.evidence.entries()) {
@@ -1315,6 +1332,16 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
     review_error: undefined,
     review_evidence_failures: undefined,
     review_run: undefined,
+    ...(run.workspace_scope === undefined ? {} : {
+      accepted_review_authority: {
+        generation: run.generation,
+        packet_id: run.packet_id,
+        head_sha: run.workspace_head_sha!,
+        scope: run.workspace_scope,
+        run_id: run.wave_gate_run_id,
+        authority_digest: run.wave_gate_authority_digest,
+      },
+    }),
     findings: active,
     critical_findings: [...claimsOfSeverity(active, "critical")],
     advisory_findings: [...claimsOfSeverity(active, "advisory")],

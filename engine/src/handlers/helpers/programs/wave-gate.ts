@@ -19,6 +19,7 @@ import { StateManager } from '../../../state-manager';
 import { commitWaveGateCompletion, deriveWaveAdvisoryDecisionRequest, deriveWaveGateDriveStep, deriveWaveReadiness, deriveWaveRefutationPlan, waveAdvisoryDecisionActionRequest, WAVE_REVIEW_AGENTS, type WaveAdvisoryDecisionRequest } from '../../../core/wave-gate-machine';
 import { loadPlanModelsSource } from '../complete-wave-gate';
 import { runFullTierWaveLint } from '../lint-wave-gate';
+import { observeReviewedWorkspace } from '../reviewed-workspace';
 import { applyFindingOutcomes, parseStoredFindings, preserveAcceptedReviewRunFindings } from '../../../core/findings';
 import { applyReviewResolution, constrainReviewResolutionToScope, resolveTaskReviewFindings } from '../../../core/review-output';
 import type { Finding, Task, TaskGraph } from '../../../types';
@@ -28,7 +29,11 @@ import { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } from '../.
 import { parseTaskProof, parseTaskTestResult, type ProofTestResult, type TaskProof } from '../../../core/proof-obligations';
 import { durableCaptureRejection, durableRefutationRequests, exactObject, executableRefutationRequests, failed, parseRegisteredFacadeProgram, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic, renderSpawnTask, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
 
-export const waveGateDeps = Object.freeze({ loadPlanModels: loadPlanModelsSource, fileExists: existsSync });
+export const waveGateDeps = Object.freeze({
+  loadPlanModels: loadPlanModelsSource,
+  fileExists: existsSync,
+  reviewedWorkspace: observeReviewedWorkspace,
+});
 
 export function waveAdvisoryDecisionRequestId(
   runId: string,
@@ -114,7 +119,10 @@ export type WaveTaskRunAuthority = Readonly<{
   taskId: string;
   generation: number;
   packetId: string;
+  /** Existing batch epoch identity for reviewer-slot authority. */
   headSha: string;
+  /** Exact declared-workspace byte snapshot for completion integrity. */
+  workspaceHeadSha?: string;
 }>;
 
 export function waveGateAuthorityDigest(wave: number, taskIds: readonly string[], graph: TaskGraph): string {
@@ -407,6 +415,7 @@ export function waveRequests(
     throw new Error("registered Wave Task roster drifted from the exact protected current-Wave roster");
   }
   const specCheckScope = waveSpecCheckScope(tasks);
+  const workspace = observeReviewedWorkspace(tasks);
   const parsedBatchEpoch = parseArtifactDigest(createHash("sha256").update(JSON.stringify({
     runId: handle.runId,
     wave: registration.input.wave,
@@ -419,6 +428,7 @@ export function waveRequests(
       completionAnchors: task.spec_anchors ?? [],
       contributions: task.spec_contributions ?? [],
       priorFindingIds: task.review_run?.prior_finding_ids ?? (task.findings ?? []).map(({ id }) => id),
+      reviewedHeadSha: workspace.find(({ taskId }) => taskId === task.id)?.headSha ?? null,
     })),
     specFile: graph.spec_file ?? null,
     planFile: graph.plan_file ?? null,
@@ -430,6 +440,7 @@ export function waveRequests(
     generation: task.review_generation ?? 0,
     packetId: createHash("sha256").update(`${batchEpoch}|packet|${task.id}`).digest("hex"),
     headSha: batchEpoch,
+    workspaceHeadSha: workspace.find(({ taskId }) => taskId === task.id)?.headSha ?? (() => { throw new Error(`Task ${task.id} workspace snapshot is missing`); })(),
   }));
   const subjects = [
     { role: "spec-check-invoker" as const, taskId: null as string | null },
@@ -797,7 +808,9 @@ export async function installWaveReviewRuns(
     tasks: locked.tasks.map((task) => {
       if (!registration.taskIds.includes(task.id)) return task;
       const taskRun = batch.taskRuns.find(({ taskId }) => taskId === task.id);
-      if (taskRun === undefined || taskRun.generation !== (task.review_generation ?? 0)) {
+      const currentWorkspace = observeReviewedWorkspace([task])[0];
+      if (taskRun === undefined || taskRun.generation !== (task.review_generation ?? 0) ||
+          currentWorkspace === undefined || currentWorkspace.headSha !== (taskRun.workspaceHeadSha ?? taskRun.headSha)) {
         throw new Error(`Task ${task.id} changed before its current Review Packet could be installed`);
       }
       const authorities = reviewAuthorities.map(({ authority }) => authority as AgentRequestAuthority)
@@ -833,6 +846,10 @@ export async function installWaveReviewRuns(
             slot_id: authority.slotId,
             attempted: 1 as const,
           })) as never,
+          workspace_scope: currentWorkspace.scope,
+          workspace_head_sha: taskRun.workspaceHeadSha ?? taskRun.headSha,
+          wave_gate_run_id: registration.input.wave === null ? undefined : (batch.requests[0]!.authority as AgentRequestAuthority).runId,
+          wave_gate_authority_digest: registration.authorityDigest,
         },
       };
     }),
@@ -1014,14 +1031,16 @@ function parseWaveContextBase(record: Record<string, unknown>): WaveContextParse
 function parseWaveTaskRun(raw: unknown): WaveContextParse<WaveTaskRunAuthority | null> {
   if (raw === null) return { ok: true, value: null };
   if (typeof raw !== "object" || Array.isArray(raw) ||
-      !exactObject(raw as Record<string, unknown>, ["taskId", "generation", "packetId", "headSha"])) {
+      !exactObject(raw as Record<string, unknown>, ["taskId", "generation", "packetId", "headSha"]) &&
+      !exactObject(raw as Record<string, unknown>, ["taskId", "generation", "packetId", "headSha", "workspaceHeadSha"])) {
     return { ok: false, message: "wave-review-authority taskRun has an invalid schema" };
   }
   const candidate = raw as Record<string, unknown>;
   const packetId = parseArtifactDigest(candidate.packetId);
   const headSha = parseArtifactDigest(candidate.headSha);
+  const workspaceHeadSha = candidate.workspaceHeadSha === undefined ? null : parseArtifactDigest(candidate.workspaceHeadSha);
   if (typeof candidate.taskId !== "string" || !Number.isSafeInteger(candidate.generation) ||
-      (candidate.generation as number) < 0 || !packetId.ok || !headSha.ok) {
+      (candidate.generation as number) < 0 || !packetId.ok || !headSha.ok || (workspaceHeadSha !== null && !workspaceHeadSha.ok)) {
     return { ok: false, message: "wave-review-authority taskRun fields are invalid" };
   }
   return { ok: true, value: Object.freeze({
@@ -1029,6 +1048,7 @@ function parseWaveTaskRun(raw: unknown): WaveContextParse<WaveTaskRunAuthority |
     generation: candidate.generation as number,
     packetId: packetId.value,
     headSha: headSha.value,
+    ...(workspaceHeadSha === null ? {} : { workspaceHeadSha: workspaceHeadSha.value }),
   }) };
 }
 

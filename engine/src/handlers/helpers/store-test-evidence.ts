@@ -28,12 +28,17 @@ const handler: HookHandler = async (stdin, args) => {
   // locked update so a concurrently-written trusted verdict is honored.
   let matched = false;
   let skippedTrustedVerdict = false;
+  let requiresAgentRevalidation = false;
   await mgr.update((s) => ({
     ...s,
     tasks: s.tasks.map((t) => {
       if (t.id !== taskId) return t;
       matched = true;
       const verdict = t.test_result?.verdict;
+      if (t.revalidation_required === true) {
+        requiresAgentRevalidation = true;
+        return t;
+      }
       if (verdict === "trusted-pass" || verdict === "trusted-fail") {
         skippedTrustedVerdict = true;
         return t;
@@ -59,6 +64,10 @@ const handler: HookHandler = async (stdin, args) => {
   // believes evidence was stored while the graph is untouched.
   if (!matched) {
     return { kind: "error", message: `store-test-evidence: no task ${taskId} in the task graph — nothing stored` };
+  }
+
+  if (requiresAgentRevalidation) {
+    return { kind: "error", message: `store-test-evidence: ${taskId} requires a re-spawned implementation Agent to record fresh test evidence` };
   }
 
   if (skippedTrustedVerdict) {

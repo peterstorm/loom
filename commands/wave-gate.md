@@ -127,6 +127,19 @@ and returns the replacement `spawn-batch`. Execute that exact batch normally.
 The old transcripts remain immutable audit evidence and cannot bind to the new
 generation. Never repair, copy, or delete exhausted transcripts by hand.
 
+## Reopening a completed Wave after Review Packet integrity loss
+
+If a full-tier lint remediation changed declared bytes after accepted review evidence, completion is protected-blocked until the review is refreshed. For an already completed Wave, use the engine-owned recovery only with the exact terminal registration and the exact engine-derived Task list:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper reopen-completed-wave \
+  --runs-root ".claude/reviews/wave-gate-runs" <<'JSON'
+{"runId":"<completed-run-id>","wave":3,"authorityDigest":"<completed-authority-digest>","taskIds":["T19","T22"]}
+JSON
+```
+
+Modern packets carry `workspaceHeadSha`, so Loom reopens exactly the Tasks whose current declared bytes differ. Historical packets without it carry a batch epoch in `headSha`, not a byte snapshot: Loom never compares that value to workspace bytes, records `legacy-workspace-authority-unverifiable`, and requires every completed Task in that Wave. Caller claims, Git HEAD, and mutable graph summaries are not authority. It refuses active gates, any later-Wave progress evidence, wrong Task lists, or a modern packet with no drift. The atomic audit-preserving transition retains historical proof/test/Finding bytes but returns every reopened Task to protected pending revalidation at a new Review Generation and resets the Wave's implementation/test/review gate bits. Re-spawn every reopened Task before a new Wave Gate; an Agent may make no production change if current code is correct, but must finish with fresh test evidence. Only that fresh task stop clears revalidation. Then start a fresh normal Wave Gate.
+
 ## Recovering an orphaned active run
 
 If `orchestration status --json --runs-root ".claude/reviews/wave-gate-runs"`

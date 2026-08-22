@@ -728,6 +728,7 @@ export function invalidateTaskReview(task: Task): Task {
     review_status: "pending",
     review_generation: (task.review_generation ?? 0) + 1,
     review_run: undefined,
+    accepted_review_authority: undefined,
     review_error: undefined,
     review_evidence_failures: undefined,
   };

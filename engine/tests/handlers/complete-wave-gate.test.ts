@@ -835,7 +835,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
   it("a passing decision carries the wave's task ids and the next wave", () => {
     const decision = evaluateWaveGate(mkGraph(), null, countingDeps().deps);
     expect(decision.wave).toBe(1);
-    expect(decision.checks).toHaveLength(8);
+    expect(decision.checks).toHaveLength(9);
     expect(decision.verdict).toEqual({ kind: "pass", taskIds: ["T1"], nextWave: 2 });
   });
 

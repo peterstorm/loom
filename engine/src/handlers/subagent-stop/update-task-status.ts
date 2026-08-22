@@ -11,7 +11,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import type { HookHandler, HookResult, SubagentStopInput, Task, TaskGraph, TaskTestResult } from "../../types";
-import { legacyTestsPassedNote, newWaveGate } from "../../types";
+import { legacyTestsPassedNote, newWaveGate, testResultPassed } from "../../types";
 import { IMPL_AGENTS, machinesDir } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
@@ -328,8 +328,10 @@ export function applyUntrustedStopResolution(
     return { state: { ...s, executing_tasks: clearedExecuting }, skipped: true };
   }
   const codeChanged = resolution.bytesChangedSinceAttempt;
-  const preserveExistingTrusted = target.test_result?.verdict === "trusted-fail" ||
-    (target.test_result?.verdict === "trusted-pass" && !codeChanged);
+  const preserveExistingTrusted = target.revalidation_required !== true && (
+    target.test_result?.verdict === "trusted-fail" ||
+    (target.test_result?.verdict === "trusted-pass" && !codeChanged)
+  );
   const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, resolution.filesModified);
   const currentNewTests: NewTestEvidence = {
     written: resolution.newTestsWritten,
@@ -365,6 +367,9 @@ export function applyUntrustedStopResolution(
       files_modified: cumulativeFiles,
       new_tests_written: currentNewTests.written,
       new_test_evidence: currentNewTests.evidence,
+      ...(resolution.taskCompleted && testResultPassed(resolution.testResult)
+        ? { revalidation_required: undefined }
+        : {}),
     })),
   };
 }
@@ -771,7 +776,7 @@ export const runUpdateTaskStatus = async (
     }
 
     const codeChanged = bytesChangedSinceAttempt;
-    const preserveExistingTrusted = !incomingTrusted && (
+    const preserveExistingTrusted = target.revalidation_required !== true && !incomingTrusted && (
       verdict === "trusted-fail" || (verdict === "trusted-pass" && !codeChanged)
     );
     const resolvedTestResult = preserveExistingTrusted ? target.test_result : testEvidence.result;
@@ -812,6 +817,7 @@ export const runUpdateTaskStatus = async (
         files_modified: cumulativeFiles,
         new_tests_written: currentNewTestEvidence.written,
         new_test_evidence: currentNewTestEvidence.evidence,
+        ...(testResultPassed(testEvidence.result) ? { revalidation_required: undefined } : {}),
       }),
     );
   });

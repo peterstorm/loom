@@ -24,6 +24,7 @@ import {
 import { parsePlanModels } from "../../parsers/parse-plan-models";
 import { pathsMatch } from "./validate-model-bindings";
 import { inspectRepositoryPath } from "../../utils/repository-path";
+import { observeReviewedWorkspace } from "./reviewed-workspace";
 import {
   commitWaveGateCompletion,
   deriveWaveReadiness,
@@ -103,6 +104,7 @@ export function snapshotGateDeps(state: TaskGraph, io: GateIO): GateDeps {
       };
     },
     fileExists: (path) => exists.get(path) ?? false,
+    ...(io.reviewedWorkspace === undefined ? {} : { reviewedWorkspace: io.reviewedWorkspace }),
   };
 }
 
@@ -437,6 +439,7 @@ async function runCompleteWaveGate(
       const liveDeps = snapshotGateDeps(state, {
         loadPlanModels: loadPlanModelsSource,
         fileExists: existsSync,
+        reviewedWorkspace: observeReviewedWorkspace,
       });
       decision = evaluateCoreWaveGate(state, waveArg, liveDeps);
       if (decision.verdict.kind !== "pass") {

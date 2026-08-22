@@ -28,6 +28,7 @@ import type {
   ActiveWaveGateRegistration,
   CompletedWaveGateRegistration,
   OrphanedWaveGateRetirement,
+  WaveReopeningAudit,
   SpecCheck,
   SpecTraceWaveGateRetirement,
   TaskGraph,
@@ -738,6 +739,38 @@ function taskPacketError(
   index: number,
   id: string,
 ): string | null {
+  if (t.accepted_review_authority !== undefined) {
+    if (typeof t.accepted_review_authority !== "object" || t.accepted_review_authority === null || Array.isArray(t.accepted_review_authority)) {
+      return `tasks[${index}] ("${id}"): accepted_review_authority must be an object`;
+    }
+    const authority = t.accepted_review_authority as Record<string, unknown>;
+    const fields = Object.keys(authority).sort();
+    const allowed = ["generation", "packet_id", "head_sha", "scope", "run_id", "authority_digest"];
+    if (fields.some((field) => !allowed.includes(field)) ||
+        !["generation", "packet_id", "head_sha", "scope"].every((field) => fields.includes(field))) {
+      return `tasks[${index}] ("${id}"): accepted_review_authority has an invalid field set`;
+    }
+    if (typeof authority.generation !== "number" || !Number.isInteger(authority.generation) || authority.generation < 0 ||
+        typeof authority.packet_id !== "string" || !/^[0-9a-f]{64}$/.test(authority.packet_id) ||
+        !isExactGitSha(authority.head_sha)) {
+      return `tasks[${index}] ("${id}"): accepted_review_authority has invalid generation, packet_id, or head_sha`;
+    }
+    if (!Array.isArray(authority.scope) || authority.scope.length === 0) {
+      return `tasks[${index}] ("${id}"): accepted_review_authority.scope must be a non-empty canonical path array`;
+    }
+    const scope = authority.scope.map((path, pathIndex) => parseReviewPath(path, `tasks[${index}] ("${id}"): accepted_review_authority.scope[${pathIndex}]`));
+    const scopeError = scope.find((parsed) => !parsed.ok);
+    if (scopeError !== undefined && !scopeError.ok) return scopeError.errors.join("; ");
+    const scopePaths = scope.map((parsed) => parsed.ok ? parsed.value : "");
+    if (new Set(scopePaths).size !== scopePaths.length || scopePaths.some((path, pathIndex) => path !== [...scopePaths].sort()[pathIndex])) {
+      return `tasks[${index}] ("${id}"): accepted_review_authority.scope must be sorted and unique`;
+    }
+    if ((authority.run_id === undefined) !== (authority.authority_digest === undefined) ||
+        (authority.run_id !== undefined && (!parseOrchestrationRunId(authority.run_id).ok ||
+          typeof authority.authority_digest !== "string" || !/^[0-9a-f]{64}$/.test(authority.authority_digest)))) {
+      return `tasks[${index}] ("${id}"): accepted_review_authority run authority must be complete and valid when present`;
+    }
+  }
   if (t.issued_review_packets !== undefined) {
     if (!Array.isArray(t.issued_review_packets)) {
       return `tasks[${index}] ("${id}"): issued_review_packets must be an array`;
@@ -830,6 +863,12 @@ function taskStatusError(
   if (t.review_run !== undefined && t.review_status !== "pending" && t.review_status !== "evidence_capture_failed") {
     return `tasks[${index}] ("${id}"): an in-progress review_run requires pending or evidence_capture_failed status`;
   }
+  if (t.revalidation_required !== undefined && t.revalidation_required !== true) {
+    return `tasks[${index}] ("${id}"): revalidation_required must be true when present`;
+  }
+  if (t.revalidation_required === true && t.status !== "pending") {
+    return `tasks[${index}] ("${id}"): revalidation_required requires pending status until fresh task evidence is recorded`;
+  }
   const statusClaimsImplementation = t.status === "implemented" || t.status === "completed";
   if (t.proof !== undefined) {
     const proof = parseTaskProof(t.proof);
@@ -850,7 +889,7 @@ function taskStatusError(
     if (!obligationsMatch) {
       return `tasks[${index}] ("${id}"): proof obligations do not exactly match new_tests_required and file_list`;
     }
-    if (statusClaimsImplementation !== (proof.value.state === "satisfied")) {
+    if (t.revalidation_required !== true && statusClaimsImplementation !== (proof.value.state === "satisfied")) {
       return (
         `tasks[${index}] ("${id}"): status/proof lockstep violated — ` +
         `implemented/completed iff proof.state is satisfied`
@@ -1044,6 +1083,46 @@ function parseWaveGateRegistrations(
   return parseOk({ activeWaveGate, waveGateHistory });
 }
 
+function parseWaveReopeningHistory(raw: unknown): ParseResult<readonly WaveReopeningAudit[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr("wave_reopening_history must be an array when present");
+  const audits: WaveReopeningAudit[] = [];
+  for (const [index, rawAudit] of raw.entries()) {
+    if (typeof rawAudit !== "object" || rawAudit === null || Array.isArray(rawAudit)) return parseErr(`wave_reopening_history[${index}] must be an object`);
+    const audit = rawAudit as Record<string, unknown>;
+    const fields = exactFieldsError(audit, ["schemaVersion", "kind", "proofMode", "runId", "wave", "authorityDigest", "completionReceipt", "reopenedTaskIds"], [], `wave_reopening_history[${index}]`);
+    if (fields !== null || audit.schemaVersion !== 1 || audit.kind !== "completed-wave-reopened-for-review-integrity" ||
+        (audit.proofMode !== "modern-exact-workspace-drift" && audit.proofMode !== "legacy-workspace-authority-unverifiable")) {
+      return parseErr(fields ?? `wave_reopening_history[${index}] has invalid schema, kind, or proof mode`);
+    }
+    const runId = parseOrchestrationRunId(audit.runId);
+    const authorityDigest = parseArtifactDigest(audit.authorityDigest);
+    if (!runId.ok || !authorityDigest.ok || typeof audit.wave !== "number" || !Number.isInteger(audit.wave) || audit.wave < 1 ||
+        !Array.isArray(audit.reopenedTaskIds) || audit.reopenedTaskIds.length === 0 ||
+        audit.reopenedTaskIds.some((id) => taskIdError(id, `wave_reopening_history[${index}].reopenedTaskIds`) !== null) ||
+        new Set(audit.reopenedTaskIds).size !== audit.reopenedTaskIds.length ||
+        typeof audit.completionReceipt !== "object" || audit.completionReceipt === null) {
+      return parseErr(`wave_reopening_history[${index}] has invalid authority, receipt, or reopened Task ids`);
+    }
+    const receipt = audit.completionReceipt as Record<string, unknown>;
+    const effectId = parseEffectId(receipt.effectId);
+    const receiptRunId = parseOrchestrationRunId(receipt.runId);
+    const stateDigest = parseArtifactDigest(receipt.stateDigest);
+    const committedRevision = receipt.committedRevision;
+    if (!effectId.ok || !receiptRunId.ok || !stateDigest.ok || receipt.kind !== "protected-wave-state-committed" ||
+        receiptRunId.value !== runId.value || typeof committedRevision !== "number" ||
+        !Number.isSafeInteger(committedRevision) || committedRevision < 1) {
+      return parseErr(`wave_reopening_history[${index}] has an invalid completion receipt`);
+    }
+    audits.push(Object.freeze({ schemaVersion: 1, kind: "completed-wave-reopened-for-review-integrity", proofMode: audit.proofMode,
+      runId: runId.value, wave: audit.wave, authorityDigest: authorityDigest.value,
+      completionReceipt: Object.freeze({ kind: "protected-wave-state-committed" as const, effectId: effectId.value, runId: runId.value, committedRevision, stateDigest: stateDigest.value }),
+      reopenedTaskIds: Object.freeze([...(audit.reopenedTaskIds as string[])]), }));
+  }
+  const identities = audits.map((audit) => `${audit.runId}:${audit.authorityDigest}`);
+  return new Set(identities).size === identities.length ? parseOk(Object.freeze(audits)) : parseErr("wave_reopening_history contains duplicate authority audits");
+}
+
 function parseWaveGateHistory(
   raw: unknown,
   activeWaveGate: ActiveWaveGateRegistration | undefined,
@@ -1200,6 +1279,8 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
       `(expected ${activeWaveGate.runId}/Wave ${activeWaveGate.wave})`,
     );
   }
+  const reopeningHistory = parseWaveReopeningHistory(obj.wave_reopening_history);
+  if (!reopeningHistory.ok) return parseErr(reopeningHistory.error);
   const orphanedHistory = parseOrphanedWaveGateHistory(obj.orphaned_wave_gate_history);
   if (!orphanedHistory.ok) return parseErr(orphanedHistory.error);
   const specTraceRetirements = parseSpecTraceWaveGateRetirements(obj.spec_trace_wave_gate_retirements);
@@ -1261,6 +1342,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
     ...(waveReviewEpoch.value === undefined ? {} : { wave_review_epoch: waveReviewEpoch.value }),
     ...(activeWaveGate === undefined ? {} : { active_wave_gate: activeWaveGate }),
     ...(waveGateHistory === undefined ? {} : { wave_gate_history: waveGateHistory }),
+    ...(reopeningHistory.value === undefined ? {} : { wave_reopening_history: reopeningHistory.value }),
     ...(orphanedHistory.value === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory.value }),
     ...(specTraceRetirements.value === undefined
       ? {}
