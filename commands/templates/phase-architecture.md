@@ -27,8 +27,8 @@ You are running inside `/loom`. Your plan feeds into the decompose phase, which 
 You will run THREE stages before writing the plan:
 
 1. **Read the spec + explore the codebase** silently.
-2. **Interview** — ask ALL the questions listed below, batched in groups of up to 4. In Claude Code, use `AskUserQuestion`; in Pi subagents, output a `QUESTIONS_REQUIRED` block and stop so the main session can ask the user, then resume with answers.
-3. **Approach gate** — present 2-3 viable approaches with a trade-off table; use `AskUserQuestion` when available, otherwise output `APPROACH_SELECTION_REQUIRED` for the main Pi session to ask.
+2. **Interview** — ask ALL the questions listed below via `AskUserQuestion`, batched in groups of up to 4. Under Pi, Loom relays the tool to the parent TUI while preserving this child Agent turn.
+3. **Approach gate** — present 2-3 viable approaches with a trade-off table via `AskUserQuestion` in either harness.
 
 Only THEN write the plan, informed by all three. Skip a specific interview question only if the spec or codebase exploration gives a confident, explicit answer. When in doubt, ask.
 
@@ -82,7 +82,7 @@ Identify **2-3 viable architectural approaches** for the feature. For each, work
 - Fit with the existing codebase
 - Complexity / effort estimate
 
-Present them with a single question and 2-3 options. In Claude Code, **use the `preview` field on each option** to show the full trade-off in monospace; in Pi, include the same previews under `APPROACH_SELECTION_REQUIRED`. Example preview format:
+Present them with a single question and 2-3 options. **Use the `preview` field on each option** to show the full trade-off; Loom preserves previews when relaying Pi questions to the parent TUI. Example preview format:
 
 ```
 Approach A: Event-driven queue

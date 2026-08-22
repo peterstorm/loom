@@ -5,10 +5,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Repo-relative engine entrypoint. This pointed at `../hooks/loom/src/cli.ts`
-# — a path from a pre-restructure layout that has not existed since the initial
-# commit — so every case in this file failed on a missing file rather than on
-# the behaviour it names.
+# Use the repository engine entrypoint so each assertion reaches TaskGraph
+# validation instead of failing at command discovery.
 CLI="$SCRIPT_DIR/../../engine/src/cli.ts"
 
 RED='\033[0;31m'
@@ -214,11 +212,12 @@ fi
 
 # Valid decompose JSON passes
 GOOD_DECOMPOSE='{
+  "spec_trace_version": 2,
   "plan_title": "Test Plan",
   "plan_file": ".claude/plans/test.md",
   "spec_file": ".claude/specs/test/spec.md",
   "tasks": [
-    {"id": "T1", "description": "Impl", "agent": "code-implementer-agent", "wave": 1, "depends_on": []}
+    {"id": "T1", "description": "Impl", "agent": "code-implementer-agent", "wave": 1, "depends_on": [], "spec_anchors": [], "spec_contributions": []}
   ]
 }'
 # The plan_file named by the decompose payload must EXIST: populate-task-graph

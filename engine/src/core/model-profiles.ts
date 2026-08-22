@@ -134,10 +134,13 @@ export type AgentPolicy<Agent extends string = string> = Readonly<{
   requiredSkill: string | null;
 }>;
 
+type AgentTransport = "headless" | "interactive-rpc";
+
 type AgentTraits = Readonly<{
   profile: LlmProfileId;
   kind: AgentKind;
   requiredSkill: string | null;
+  transport: AgentTransport;
 }>;
 
 const phaseKind = (p: Phase): AgentKind => Object.freeze({ kind: "phase", phase: p });
@@ -146,7 +149,8 @@ const traits = (
   selectedProfile: LlmProfileId,
   agentKind: AgentKind,
   requiredSkill: string | null = null,
-): AgentTraits => Object.freeze({ profile: selectedProfile, kind: agentKind, requiredSkill });
+  transport: AgentTransport = "headless",
+): AgentTraits => Object.freeze({ profile: selectedProfile, kind: agentKind, requiredSkill, transport });
 
 /**
  * The Agent Catalog (see CONTEXT.md): the single declarative registry defining
@@ -160,12 +164,12 @@ const traits = (
 export const AGENT_CATALOG = Object.freeze({
   "adr-writer-agent": traits("implementation", plainKind("impl")),
   "arch-designer-agent": traits("panel-design", plainKind("arch-panel"), "architecture-tech-lead"),
-  "arch-interviewer-agent": traits("panel-design", plainKind("arch-panel")),
-  "architecture-agent": traits("architecture-finalize", phaseKind("architecture"), "architecture-tech-lead"),
+  "arch-interviewer-agent": traits("panel-design", plainKind("arch-panel"), null, "interactive-rpc"),
+  "architecture-agent": traits("architecture-finalize", phaseKind("architecture"), "architecture-tech-lead", "interactive-rpc"),
   "architecture-tech-lead": traits("focused-review", plainKind("reviewer"), "deepen"),
   "arch-judge-agent": traits("panel-judge", plainKind("arch-panel")),
   "brainstorm-agent": traits("panel-design", phaseKind("brainstorm"), "brainstorming"),
-  "clarify-agent": traits("panel-design", phaseKind("clarify"), "clarify"),
+  "clarify-agent": traits("panel-design", phaseKind("clarify"), "clarify", "interactive-rpc"),
   "code-implementer-agent": traits("implementation", plainKind("impl"), "code-implementer"),
   "code-reviewer": traits("general-review", plainKind("reviewer")),
   "code-simplifier": traits("focused-review", plainKind("reviewer"), "distill"),
@@ -182,7 +186,7 @@ export const AGENT_CATALOG = Object.freeze({
   "silent-failure-hunter": traits("focused-review", plainKind("reviewer")),
   "skill-content-reviewer": traits("focused-review", plainKind("utility")),
   "spec-check-invoker": traits("general-review", plainKind("spec-check"), "spec-check"),
-  "specify-agent": traits("panel-design", phaseKind("specify"), "specify"),
+  "specify-agent": traits("panel-design", phaseKind("specify"), "specify", "interactive-rpc"),
   "test-engineer": traits("implementation", plainKind("impl")),
   "ts-test-agent": traits("implementation", plainKind("impl"), "ts-test-engineer"),
   "type-design-analyzer": traits("focused-review", plainKind("reviewer")),
@@ -191,11 +195,20 @@ export const AGENT_CATALOG = Object.freeze({
 export type LoomAgentName = keyof typeof AGENT_CATALOG;
 
 /** Row view of the catalog, in catalog order. */
+const CATALOG_ENTRIES = Object.entries(AGENT_CATALOG) as readonly [LoomAgentName, AgentTraits][];
+
 export const AGENT_POLICIES: readonly AgentPolicy<LoomAgentName>[] = Object.freeze(
-  (Object.entries(AGENT_CATALOG) as readonly [LoomAgentName, AgentTraits][]).map(
-    ([agent, agentTraits]) => Object.freeze({ agent, ...agentTraits }),
+  CATALOG_ENTRIES.map(([agent, { profile, kind, requiredSkill }]) =>
+    Object.freeze({ agent, profile, kind, requiredSkill }),
   ),
 );
+
+/** Catalog-derived roles whose phase contract requires same-turn user interaction. */
+export const PI_INTERACTIVE_PHASE_AGENTS: ReadonlySet<LoomAgentName> = Object.freeze(new Set(
+  CATALOG_ENTRIES
+    .filter(([, { transport }]) => transport === "interactive-rpc")
+    .map(([agent]) => agent),
+));
 
 /** Names of every catalog Agent with the given kind, in catalog order. */
 export function agentsOfKind(k: AgentKind["kind"]): readonly LoomAgentName[] {

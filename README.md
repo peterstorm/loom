@@ -127,7 +127,7 @@ The state file is created before planning starts, so hooks enforce phase order a
 
 The ranking is advice, not authority. The user may choose a lower-ranked candidate. Candidates and verdicts remain in a fresh Run Directory; downstream phases still consume exactly one plan.
 
-Pi currently refuses the panel interviewer because Pi children are headless and cannot relay interactive questions. The refusal is fail-fast; no synthetic interview is accepted. See [Pi phase-agent interviews](docs/pi-phase-agent-interviews.md).
+Pi runs the panel interviewer and other live-question phase roles through `loom_interactive_subagent`: a parent-relayed RPC child whose `AskUserQuestion` calls appear in the parent TUI without losing child context. The normal `subagent` transport remains headless and refuses interactive roles. See [Pi Interactive Phase Transport](docs/pi-phase-agent-interviews.md).
 
 ### Execution Waves
 
@@ -300,11 +300,12 @@ The native Pi package registers `pi/extension.ts`. It:
 - maps Pi tool events to the shared engine;
 - issues one-time implementation or scoped artifact write grants;
 - binds Pi batch items to engine request authority;
-- captures result bytes into immutable slots.
+- captures result bytes into immutable slots;
+- relays interactive phase-Agent questions from RPC children to the parent TUI.
 
 The legacy `loom-bridge` extension no longer exists in the package; do not load a cached copy alongside the native extension — both would process `subagent` completion and duplicate state transitions.
 
-Headless interactive interviews remain the main parity gap. Non-interactive registered review, Wave Gate, remediation, guards, lint, and execution machinery use the shared engine. Read [Using Loom with Pi](docs/pi-usage.md) for the exact support contract.
+Interactive phase interviews use the dedicated RPC transport; non-interactive registered review, Wave Gate, remediation, guards, lint, and execution machinery continue through the shared engine and headless subagent path. Read [Using Loom with Pi](docs/pi-usage.md) for the exact support contract.
 
 ## Development
 

@@ -17,7 +17,7 @@ Template for spawning clarify-agent. All template variables must be substituted 
 
 **Every `[NEEDS CLARIFICATION]` marker requires a user decision.** You are NOT allowed to resolve markers on your own or accept pre-resolved answers from the orchestrator.
 
-- Ask each marker's question. In Claude Code, use `AskUserQuestion` (batch related ones, max 4 per call). In Pi, output a `QUESTIONS_REQUIRED` block and stop so the main session can ask the user, then resume with answers.
+- Ask each marker's question via `AskUserQuestion` (batch related ones, max 4 per call). Under Pi, Loom relays the tool to the parent TUI without ending this Agent turn.
 - Present multiple-choice options with clear trade-offs
 - Only update the spec AFTER receiving user answers
 - Technical uncertainties (HOW not WHAT) should be flagged for architecture phase, not asked here

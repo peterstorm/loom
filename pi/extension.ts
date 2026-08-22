@@ -119,6 +119,10 @@ import {
   PI_EXTENSION_RUNTIME_REVISION_ENV,
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../engine/src/runtime-compatibility";
+import {
+  LOOM_INTERACTIVE_SUBAGENT_TOOL,
+  registerInteractiveSubagentTool,
+} from "./interactive-subagent";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 // Capture once, while this extension module is loaded. Fresh CLI processes
@@ -135,6 +139,8 @@ const LOADED_RUNTIME_IDENTITY = captureLoomRuntimeIdentity(PACKAGE_ROOT);
 // which reads no environment, rather than pulling this module in early.
 const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const PI_RESOURCE_CACHE = join(PI_AGENT_DIR, "cache", "loom-resources");
+const isPiSpawnTool = (toolName: string): boolean =>
+  toolName === "subagent" || toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL;
 
 /**
  * Fail-closed path existence check. Returns `true` (assume active) for any
@@ -693,6 +699,8 @@ const emptyParentSessionRuntime = (): PiParentSessionRuntime => ({
 });
 
 export default function (pi: ExtensionAPI) {
+  registerInteractiveSubagentTool(pi, PACKAGE_ROOT, PI_AGENT_DIR);
+
   // A Pi process may host overlapping sessions. Parent reservations and
   // capabilities are therefore aggregates owned by one parsed session, never
   // process-global maps whose shutdown can consume another session's state.
@@ -773,7 +781,7 @@ export default function (pi: ExtensionAPI) {
       // Re-hash only before a spawn, where stale parser/policy code matters.
       // Ordinary read/edit tools stay cheap. A future source update is caught
       // here even before the agent asks a fresh CLI mutator to run.
-      if (event.toolName === "subagent") {
+      if (isPiSpawnTool(event.toolName)) {
         currentGuard = "runtime-compatibility";
         const compatibility = loadedRuntimeCompatibility(
           LOADED_RUNTIME_IDENTITY,
@@ -858,10 +866,17 @@ export default function (pi: ExtensionAPI) {
       // fields never represented. `currentGuard` tracks the executing gate for
       // fail-closed attribution: the port wrappers stamp it before their I/O,
       // and a block stamps the guard the core named.
-      if (event.toolName === "subagent") {
+      if (isPiSpawnTool(event.toolName)) {
         currentGuard = "parse-pi-subagent-batch";
+        if (event.toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL && !ctx.hasUI) {
+          return {
+            block: true,
+            reason: "loom_interactive_subagent requires a parent TUI or RPC UI client; refusing to start an unanswerable interview.",
+          };
+        }
         const admission = admitPiSpawnBatch(event.input, {
           graphActive: graphIsActive,
+          transport: event.toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL ? "interactive-rpc" : "headless",
           packageRoot: PACKAGE_ROOT,
           validateDefinition: (agent) =>
             validatePiAgentDefinitionFile(join(PI_AGENT_DIR, "agents", `${agent}.md`), agent, PACKAGE_ROOT),
@@ -1047,7 +1062,8 @@ export default function (pi: ExtensionAPI) {
         currentGuard = "validate-task-execution";
         let taskResult;
         try {
-          const executionMode = Array.isArray((event.input as { chain?: unknown }).chain)
+          const executionMode = event.toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL ||
+              Array.isArray((event.input as { chain?: unknown }).chain)
             ? "sequential" as const
             : "parallel" as const;
           taskResult = await validateTaskExecutionBatch(
@@ -1322,7 +1338,7 @@ export default function (pi: ExtensionAPI) {
   // updates, and review findings — equivalent of SubagentStop hooks.
 
   pi.on("tool_result", async (event, _ctx) => {
-    if (event.toolName !== "subagent") return;
+    if (!isPiSpawnTool(event.toolName)) return;
 
     const processingErrors: string[] = [];
     const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
@@ -1932,12 +1948,13 @@ export default function (pi: ExtensionAPI) {
         // Loud + isolated: name the agent, the task (best effort), and the
         // cause, then continue with the next result.
         let taskIdForLog = "<unknown>";
+        let taskIdFailure = "";
         try {
           taskIdForLog = extractTaskId(result?.task ?? "") ?? "<unknown>";
-        } catch {
-          /* best-effort only — the log line must never throw */
+        } catch (error) {
+          taskIdFailure = `; task-id extraction failed: ${error instanceof Error ? error.message : String(error)}`;
         }
-        const diagnostic = `result ${resultIndex + 1} for agent ${String(result?.agent ?? "<unknown>")} (task ${taskIdForLog}): ${err instanceof Error ? err.message : String(err)}`;
+        const diagnostic = `result ${resultIndex + 1} for agent ${String(result?.agent ?? "<unknown>")} (task ${taskIdForLog}${taskIdFailure}): ${err instanceof Error ? err.message : String(err)}`;
         processingErrors.push(diagnostic);
         process.stderr.write(
           `loom(pi): subagent-stop processing failed for ${diagnostic} — continuing with remaining results\n`,
@@ -1983,7 +2000,7 @@ export default function (pi: ExtensionAPI) {
           "info",
         );
       } catch (e) {
-        ctx.ui.notify(`Error: ${(e as Error).message}`, "error");
+        ctx.ui.notify(`Error: ${e instanceof Error ? e.message : String(e)}`, "error");
       }
     },
   });

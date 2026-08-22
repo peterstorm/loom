@@ -27,7 +27,7 @@ A feature is not migrated when two prose implementations merely look alike. Shar
 | SessionStart | extension session hooks | cleanup/resume helpers |
 | `${CLAUDE_PLUGIN_ROOT}` | rendered absolute package root | `pi/resources.ts` |
 | in-process child | separate Pi process | Pi write grants and native correlators |
-| `AskUserQuestion` in child | unavailable in headless child | unresolved relay; fail-fast where required |
+| `AskUserQuestion` in child | `loom_interactive_subagent` RPC relay | Interactive Phase Transport + exact UI request ids |
 | `.claude/state/` | `.pi/state/` | `StateManager`, harness-aware config |
 | `.claude/linter/` | `.pi/linter/` | same loader and rule types |
 
@@ -164,13 +164,11 @@ Both adapters reuse phase transition resolution, artifact parsing, task-id extra
 
 Pi structured test evidence is not relabeled as Claude ledger trust. Provenance is part of the persisted result. Likewise, a Pi Agent’s artifact change is checked against its baseline and grant scope before proof is updated.
 
-## Interactive phase limitation
+## Interactive phase transport
 
-Pi’s normal subagent extension launches print/JSON children with no UI. `ctx.ui` dialogs cannot reach the parent session. Therefore templates that require a live questionnaire are not fully equivalent to Claude Code.
+Pi's generic subagent extension remains headless. Loom therefore registers `loom_interactive_subagent` for `specify-agent`, `clarify-agent`, `architecture-agent`, and `arch-interviewer-agent`.
 
-The architecture-panel interviewer is explicitly refused in `pi/extension.ts`; accepting a digest without a real interview would corrupt lens and criterion authority. Standard interactive phase Agents remain subject to the same transport limitation even where no dedicated fail-fast role check exists.
-
-The proposed solution is a parent-driven RPC child with dialog relay, documented in [Pi phase-agent interviews](pi-phase-agent-interviews.md). Until implemented, use Pi for non-interactive workflows or ensure required decisions are already explicit and do not claim questionnaire parity.
+That tool runs one validated Agent in RPC mode, relays standard UI requests to the parent TUI with exact request-id responses, and returns through the same reservation/write-grant/result path as normal Pi subagents. Spawn Admission refuses interactive roles on the headless transport and refuses headless roles on the interactive transport. See [Pi Interactive Phase Transport](pi-phase-agent-interviews.md).
 
 ## State and linter paths
 
@@ -193,10 +191,11 @@ Use this checklist:
 3. **Define adapter inputs.** Keep harness-specific extraction small.
 4. **Wire Claude and Pi.** Preserve each harness’s blocking/error polarity.
 5. **Handle identity.** If subagents/results are involved, use request authority and native correlators.
-6. **Handle writes.** Decide whether the role needs Task-bound, scoped, or no write grant.
-7. **Render resources.** Include any new shared files in Pi materialization.
-8. **Test parity and faults.** Include stale/malformed/missing/symlink/duplicate cases.
-9. **Document the real limitation.** Do not describe unsupported UI or transport as available.
+6. **Handle interactivity.** Route only live-question phase roles through the Interactive Phase Transport; never add UI to the headless transport.
+7. **Handle writes.** Decide whether the role needs Task-bound, scoped, or no write grant.
+8. **Render resources.** Include any new shared files in Pi materialization.
+9. **Test parity and faults.** Include stale/malformed/missing/symlink/duplicate cases.
+10. **Document the real limitation.** Do not describe unsupported UI or transport as available.
 
 ## Validation
 

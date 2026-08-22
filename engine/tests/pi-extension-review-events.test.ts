@@ -20,6 +20,7 @@ type Handler = (event: Record<string, unknown>, context: Record<string, unknown>
 class FakePi {
   readonly handlers = new Map<string, Handler[]>();
   readonly commands = new Map<string, { handler: Handler }>();
+  readonly tools = new Map<string, Record<string, unknown>>();
 
   on(event: string, handler: Handler): void {
     this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
@@ -27,6 +28,10 @@ class FakePi {
 
   registerCommand(name: string, command: { handler: Handler }): void {
     this.commands.set(name, command);
+  }
+
+  registerTool(tool: Record<string, unknown> & { name: string }): void {
+    this.tools.set(tool.name, tool);
   }
 
   async emit(event: string, payload: Record<string, unknown>, context: Record<string, unknown>): Promise<unknown[]> {
@@ -204,13 +209,7 @@ async function piCaptureRun(runSuffix: string, contextText = "Pi capture context
 }
 
 describe("Pi extension review tool_result integration", () => {
-  /**
-   * `piSpawnRosterId` off the SAME module `extension()` loads.
-   *
-   * Five cases re-declared the dynamic import inline, immediately after calling
-   * `extension()`, purely to reach this one function — so "which extension
-   * module is under test" had six answers in one file.
-   */
+  /** Resolve `piSpawnRosterId` from the same extension module the fixture loads. */
   const rosterId = async (toolCallId: unknown, index: number, agent: string): Promise<string> => {
     const extensionSpecifier = "../../pi/extension.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
@@ -219,12 +218,7 @@ describe("Pi extension review tool_result integration", () => {
     return module.piSpawnRosterId(toolCallId, index, agent);
   };
 
-  /**
-   * Bind `session` to a staged run so the extension can resolve its authority.
-   *
-   * Nine cases repeated the same five-field call verbatim; the ONE that differs
-   * — two reserved requests in one binding — says so by passing its ids.
-   */
+  /** Bind a session to staged run authority, with explicit ids for multi-request runs. */
   const bindSession = async (
     session: string,
     staged: Readonly<{ request: AgentRequestAuthority; runsRoot: string; runDir: string }>,
@@ -946,6 +940,25 @@ describe("Pi extension review tool_result integration", () => {
       stderr.mockRestore();
       restoreEnv("LOOM_STATE_PATH", previous);
       rmSync(loop, { force: true });
+    }
+  });
+
+  it("renders non-Error loom-status failures without losing their value", async () => {
+    const pi = await extension();
+    const { StateManager } = await import("../src/state-manager");
+    const load = vi.spyOn(StateManager.prototype, "load").mockImplementationOnce(() => {
+      throw "string status failure";
+    });
+    const notifications: Array<{ message: string; level: string }> = [];
+    try {
+      const status = pi.commands.get("loom-status");
+      expect(status).toBeDefined();
+      await status?.handler({}, {
+        ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
+      });
+      expect(notifications).toContainEqual({ message: "Error: string status failure", level: "error" });
+    } finally {
+      load.mockRestore();
     }
   });
 
@@ -1714,10 +1727,10 @@ describe("Pi extension review tool_result integration", () => {
       task: "## Specify: F6 fugue panel\nOutput location: `.claude/specs/2026-08-12-foo/spec.md`",
     };
     expect(await pi.emit("tool_call", {
-      toolName: "subagent",
+      toolName: "loom_interactive_subagent",
       toolCallId: "call-scoped-specify",
       input,
-    }, { cwd: ROOT, sessionManager: { getSessionId: () => parentSession } })).toEqual([undefined]);
+    }, { cwd: ROOT, hasUI: true, sessionManager: { getSessionId: () => parentSession } })).toEqual([undefined]);
     expect(input.task).toMatch(/LOOM_PI_WRITE_GRANT:[0-9a-f]{64}/);
 
     // The grant carries a phase binding and a prompt-derived artifact scope.
@@ -1848,7 +1861,7 @@ describe("Pi extension review tool_result integration", () => {
     await pi.emit("session_shutdown", {}, { cwd: ROOT, sessionManager: { getSessionId: () => session } });
   });
 
-  it("blocks the panel interview stage under pi with an actionable diagnostic", async () => {
+  it("blocks the panel interview on the headless transport and admits the RPC relay", async () => {
     writeState({
       ...initialGraph(),
       current_phase: "architecture",
@@ -1872,16 +1885,36 @@ describe("Pi extension review tool_result integration", () => {
     }, { cwd: ROOT, sessionManager: { getSessionId: () => session } });
     expect(call).toContainEqual(expect.objectContaining({
       block: true,
-      reason: expect.stringContaining("interview stage cannot run under pi"),
+      reason: expect.stringContaining("loom_interactive_subagent"),
     }));
-    expect(call).toContainEqual(expect.objectContaining({
-      reason: expect.stringContaining("docs/pi-phase-agent-interviews.md"),
-    }));
-    // The spawn is refused up front: no grant, no roster entry, no pointer.
-    // No grant was ever minted: the grants dir does not even exist.
     const grantDir = join(subagentDir, "pi-write-grants");
     expect(existsSync(grantDir) ? readdirSync(grantDir) : []).toEqual([]);
     expect(input.task).not.toMatch(/LOOM_PI_WRITE_GRANT:/);
+
+    const interactive = await pi.emit("tool_call", {
+      toolName: "loom_interactive_subagent",
+      toolCallId: "call-panel-interview-rpc",
+      input,
+    }, {
+      cwd: ROOT,
+      hasUI: true,
+      sessionManager: { getSessionId: () => session },
+    });
+    expect(interactive).toEqual([undefined]);
+    expect(input.task).toMatch(/LOOM_PI_WRITE_GRANT:[0-9a-f]{64}/);
+    const completed = await pi.emit("tool_result", {
+      toolName: "loom_interactive_subagent",
+      toolCallId: "call-panel-interview-rpc",
+      content: [],
+      details: { results: [{
+        agent: "arch-interviewer-agent",
+        task: input.task,
+        exitCode: 0,
+        messages: [{ role: "assistant", content: [{ type: "text", text: "Interview complete" }] }],
+      }] },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => session } });
+    expect(completed.every((result) => result === undefined)).toBe(true);
+    expect(existsSync(grantDir) ? readdirSync(grantDir).filter((name) => name.endsWith(".json")) : []).toEqual([]);
   });
 
   it("continues result reconciliation when write-grant revocation fails", async () => {

@@ -82,7 +82,7 @@ The plan defines boundaries, data flow, file structure, decisions, implementatio
 
 Candidates, verdicts, ranking, and authority stay in a fresh run beneath the spec directory. A plan-alignment loop-back uses standard single-Agent architecture rather than opening a second panel.
 
-**Pi limitation:** the panel interviewer requires interactive user questions. Pi subagents are currently headless, so the extension refuses this spawn rather than accepting a fabricated digest. See [Pi phase-agent interviews](pi-phase-agent-interviews.md).
+**Pi transport:** the panel interviewer and other live-question phase roles run through `loom_interactive_subagent`, which relays the child Agent's standard UI requests to the parent Pi TUI. The normal Pi `subagent` transport remains headless and refuses these roles. See [Pi Interactive Phase Transport](pi-phase-agent-interviews.md).
 
 ### Phase 3.5: plan alignment
 
