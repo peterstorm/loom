@@ -7,7 +7,7 @@ argument-hint: "[scope or instructions]"
 
 # Spec-Check - Drift Detection
 
-Read-only verification that implementation aligns with specification. Mechanically extracts requirements, forces per-FR verdicts, detects coverage gaps and scope creep.
+Read-only verification that implementation aligns with specification. Mechanically extracts requirements, forces one verdict per Requirement Completion Claim, and detects coverage gaps and scope creep.
 
 **Arguments:** "$ARGUMENTS"
 
@@ -19,39 +19,56 @@ Read-only verification that implementation aligns with specification. Mechanical
 
 Every step below that says "Run:" is a command you MUST execute via Bash/Grep/Read tool. Do NOT skip tool calls. Do NOT assess from memory alone.
 
-### Step 1: Load artifacts
+### Step 1: Load artifacts and freeze scope authority
 
-**Run:**
+**Registered Wave Gate (`LOOM_CONTEXT_PATH` is set): Run this decoder.** It reads the immutable packet only; do NOT read `active_task_graph.json` on this path.
+
+```bash
+bun -e '
+const path = process.env.LOOM_CONTEXT_PATH;
+if (!path) throw new Error("LOOM_CONTEXT_PATH is required for registered spec-check");
+const packet = JSON.parse(await Bun.file(path).text());
+const section = packet.fixedContext?.find((entry) => entry.label === "wave-review-authority");
+if (!section) throw new Error("immutable packet lacks wave-review-authority");
+const authority = JSON.parse(new TextDecoder("utf-8", {fatal:true}).decode(Uint8Array.from(section.bytes)));
+if (authority.subject?.role !== "spec-check-invoker" || !Array.isArray(authority.specCheckScope)) {
+  throw new Error("immutable packet lacks registered spec-check scope authority");
+}
+console.log(JSON.stringify({specFile: authority.specFile, wave: authority.wave, tasks: authority.specCheckScope}, null, 2));
+'
+```
+
+Save the exact `specFile`, `wave`, and `tasks` values. Each Task contains `completionAnchors`, `contributions`, and `declaredFiles`. This roster is immutable authority even if the live graph changes later.
+
+**Standalone `/spec-check` only (`LOOM_CONTEXT_PATH` is absent): Run the live-graph fallback:**
+
 ```bash
 SPEC=$(ls -t .claude/specs/*/spec.md | head -1) && echo "$SPEC"
 ```
 
-**Run** (self-contained jq — the guard blocks `WAVE=$(jq … state)`
-capture-into-variable, and shell vars don't persist across Bash tool calls):
 ```bash
 jq -r '.current_wave' .claude/state/active_task_graph.json
 ```
 
-**Run** (wave resolved inside the same jq program):
 ```bash
-jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | {id, description, spec_anchors}' .claude/state/active_task_graph.json
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | {id, description, completionAnchors:(.spec_anchors // []), contributions:(.spec_contributions // []), declaredFiles:(.file_list // [])}' .claude/state/active_task_graph.json
 ```
 
-Save: SPEC path, WAVE number, task list with spec_anchors.
+Normalize this fallback to the same SPEC path, WAVE number, and Task scope shape.
 
-### Step 2: Extract the FR checklist (deterministic)
+### Step 2: Extract the Requirement checklist (deterministic)
 
-**Run:** Use Grep to extract all `FR-\d+:` lines from the spec file. This is the master FR list.
+**Run:** Use Grep to locate every identifier named by `completionAnchors` in the spec (including FR, SC, and US/scenario anchors). A Completion Claim absent from the Spec is a critical trace-contract failure, not an item to skip.
 
-Then from step 1 output, collect all `spec_anchors` across wave tasks into a flat list. These are the **in-scope FRs** for this wave.
+Collect only `completionAnchors` across the frozen Wave Task roster into a flat list. These are the **in-scope Requirements** for this wave. `contributions` are partial traceability evidence only and MUST NOT enter the completion checklist.
 
-**Build a checklist** — one row per in-scope FR:
+**Build a checklist** — one row per in-scope Requirement:
 
 ```
-FR-XXX | <description from spec> | <assigned task> | PENDING
+<anchor> | <description from spec> | <assigned task(s)> | PENDING
 ```
 
-You MUST have one row for every FR in spec_anchors. Count them. You will emit a verdict for every single row.
+You MUST have one row for every Requirement Completion Claim in `completionAnchors`. Count them. You will emit a verdict for every single row. Use `contributions` to understand precursor work, never to broaden the checklist.
 
 ### Step 3: Get changed files (deterministic)
 
@@ -60,35 +77,31 @@ You MUST have one row for every FR in spec_anchors. Count them. You will emit a 
 git diff --name-only origin/main...HEAD
 ```
 
-Also check per-task files_modified if available (wave resolved inside jq — the
-guard blocks `WAVE=$(jq … state)`):
-```bash
-jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | {id, files_modified}' .claude/state/active_task_graph.json
-```
+For a registered Wave Gate, use only each frozen Task's `declaredFiles` for Task-to-file assignment; do not query mutable task fields. For standalone fallback, `declaredFiles` was normalized from the live graph in Step 1.
 
-### Step 4: Coverage check — per-FR verdicts
+### Step 4: Coverage check — per-Requirement verdicts
 
-For EACH FR in the checklist from step 2:
+For EACH Requirement Completion Claim in the checklist from step 2:
 
-1. **Read the FR description** from spec (you already have it)
-2. **Read the relevant source file(s)** — use the changed files list and task assignment to identify which files implement this FR. Use Read tool.
-3. **Assess**: Does the code satisfy the requirement as written in spec?
-4. **Emit verdict**: `FR-XXX: PASS` or `FR-XXX: FAIL — <specific reason>`
+1. **Read the Requirement description** from spec (you already have it)
+2. **Read the relevant source file(s)** — use the changed files list and Task assignment to identify which files implement this Requirement. Use Read tool.
+3. **Assess**: Does the code satisfy the Requirement as written in spec?
+4. **Emit verdict**: `<anchor>: PASS` or `<anchor>: FAIL — <specific reason>`
 
 **Rules:**
-- MUST emit exactly one verdict line per in-scope FR. If checklist has 12 FRs, output has 12 verdict lines.
+- MUST emit exactly one verdict line per in-scope Completion Claim. If the checklist has 12 anchors, output has 12 verdict lines.
 - "Soft compliance" is not PASS. If spec says "MUST do X" and code doesn't do X, it's FAIL.
 - MUST/SHALL requirements that are unimplemented = CRITICAL
 - SHOULD requirements that are unimplemented = HIGH
 - MAY requirements that are unimplemented = MEDIUM
 
-**After all verdicts, count:** How many in-scope FRs from the checklist did you emit? Does it match the total from step 2? If not, you skipped one — go back.
+**After all verdicts, count:** How many in-scope Completion Claims from the checklist did you emit? Does it match the total from step 2? If not, you skipped one — go back.
 
 ### Step 5: Acceptance scenario coverage
 
 **Run:** Use Grep to extract lines matching `Given .* When .* Then` or `- Given` from the spec file. These are acceptance scenarios.
 
-Filter to scenarios belonging to User Stories that map to in-scope tasks (US numbers referenced in spec near the in-scope FRs).
+Filter to scenarios belonging to User Stories that map to the in-scope Completion Claims.
 
 For EACH acceptance scenario:
 
@@ -116,21 +129,21 @@ Severity: MEDIUM for terminology drift.
 
 **Run:** Use Grep to find the "Out of Scope" section in the spec. Extract the exclusion list.
 
-Review the changed files list from step 3. For each new exported function/class/command not traceable to an in-scope FR:
+Review the changed files list from step 3. For each new exported function/class/command not traceable to an in-scope Completion Claim:
 - If it's in the Out of Scope list = CRITICAL (explicitly excluded)
-- If it's a helper/utility supporting an in-scope FR = OK (not scope creep)
-- If it's a new feature with no FR = HIGH
+- If it's a helper/utility supporting an in-scope Requirement = OK (not scope creep)
+- If it's a new feature with no Spec requirement = HIGH
 
 ---
 
 ## Output Format
 
-### Per-FR Verdicts (MANDATORY)
+### Per-Requirement Verdicts (MANDATORY)
 
 ```
-## FR Coverage — Wave {N}
+## Requirement Coverage — Wave {N}
 
-| FR | Description | Task | Verdict |
+| Anchor | Description | Task | Verdict |
 |----|-------------|------|---------|
 | FR-001 | System MUST extract memories... | T15 | PASS |
 | FR-004 | System MUST track cursor... | T15 | PASS |
@@ -224,6 +237,8 @@ SPEC_CHECK_VERDICT: PASSED | BLOCKED
 - Findings only: Report issues, don't fix them
 - Spec is source of truth: Code must align to spec, not vice versa
 - CRITICAL blocks waves: Non-negotiable
-- MUST emit one verdict per in-scope FR — no skipping
+- MUST emit one verdict per in-scope Requirement Completion Claim — no skipping
+- Registered Wave Gate scope comes only from `LOOM_CONTEXT_PATH`; never reread mutable `active_task_graph.json`
+- Requirement Contributions are traceability only and never enter completion scope
 - MUST use tool calls (Grep, Read, Bash) for evidence — no assessing from memory
 - Different from code review: Alignment vs quality are separate concerns

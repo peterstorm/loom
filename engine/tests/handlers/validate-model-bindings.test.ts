@@ -391,10 +391,11 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
 
   function decomposeJson(planFile: string, fileList: string[]): string {
     return JSON.stringify({
+      spec_trace_version: 2,
       plan_title: "t",
       spec_file: "spec.md",
       plan_file: planFile,
-      tasks: [{ id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [], spec_anchors: [], new_tests_required: true, plan_context: "", file_list: fileList }],
+      tasks: [{ id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: [], new_tests_required: true, plan_context: "", file_list: fileList }],
     });
   }
 

@@ -302,7 +302,10 @@ export interface Task {
   readonly wave: number;
   readonly status: TaskStatus;
   readonly depends_on: readonly string[];
+  /** Requirement Completion Claims: this Task's Wave must fully satisfy each Requirement. */
   readonly spec_anchors?: readonly string[];
+  /** Partial Requirement Contributions; never part of Wave Gate spec-check completion scope. */
+  readonly spec_contributions?: readonly string[];
   readonly new_tests_required?: boolean;
   /** Exact architecture context selected for this Task by decompose. */
   readonly plan_context?: string;
@@ -531,6 +534,21 @@ export type OrphanedWaveGateRetirement = Readonly<{
   replacementAuthorityDigest: ArtifactDigest;
 }>;
 
+/** Immutable audit of the exceptional trace-v2 migration that retired an
+ * operator-abandoned Wave Gate. It records the old authority; it is neither
+ * completed Wave history nor orphan recovery. */
+export type SpecTraceWaveGateRetirement = Readonly<{
+  schemaVersion: 1;
+  kind: "spec-trace-wave-gate-retirement";
+  runId: OrchestrationRunId;
+  wave: number;
+  authorityDigest: ArtifactDigest;
+  revision: number;
+  runsRoot: string;
+  reason: string;
+  supersededBy: OrchestrationRunId | null;
+}>;
+
 export type StatusFact<T> =
   | Readonly<{ kind: "known"; value: T }>
   | Readonly<{ kind: "unavailable"; reasons: OrchestrationNonEmpty<StatusReason> }>;
@@ -738,6 +756,8 @@ export interface WaveReviewEpochAuthority {
 }
 
 export interface TaskGraph {
+  /** Absent only on legacy completion-only graphs; every fresh graph uses v2. */
+  readonly spec_trace_version?: 2;
   readonly current_phase: Phase;
   /** Readonly like `tasks`: every mutation must flow through StateManager.update's locked transform. */
   readonly phase_artifacts: Readonly<Partial<Record<Phase, string>>>;
@@ -768,6 +788,8 @@ export interface TaskGraph {
   readonly wave_gate_history?: readonly CompletedWaveGateRegistration[];
   /** Nonterminal retirement audit for missing Run Directories replaced in-place. */
   readonly orphaned_wave_gate_history?: readonly OrphanedWaveGateRetirement[];
+  /** Abandoned active authority retired only to install Requirement trace v2. */
+  readonly spec_trace_wave_gate_retirements?: readonly SpecTraceWaveGateRetirement[];
   readonly updated_at?: string;
 }
 

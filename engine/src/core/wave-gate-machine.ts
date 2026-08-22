@@ -1370,6 +1370,7 @@ function prepareReviewPacketForTask(
       generation: task.review_generation ?? 0,
       planContext: task.plan_context ?? null,
       specAnchors: Object.freeze([...(task.spec_anchors ?? [])]),
+      specContributions: Object.freeze([...(task.spec_contributions ?? [])]),
       declaredFiles: Object.freeze([...(task.file_list ?? [])]),
       modifiedFiles: Object.freeze([...(task.files_modified ?? [])]),
       proof: task.proof ?? null,
@@ -1411,6 +1412,14 @@ function deriveWaveReviewBinding(
     packet,
     task: subject.kind === "task-review"
       ? snapshot.waveTasks.find((task) => task.id === subject.taskId) ?? null
+      : null,
+    specCheckScope: subject.kind === "spec-check"
+      ? snapshot.waveTasks.map((task) => ({
+          id: task.id,
+          completionAnchors: task.spec_anchors ?? [],
+          contributions: task.spec_contributions ?? [],
+          declaredFiles: task.file_list ?? [],
+        }))
       : null,
     specFile: snapshot.graph.spec_file,
     planFile: snapshot.graph.plan_file,

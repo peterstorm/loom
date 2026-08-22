@@ -16,6 +16,14 @@ _Avoid_: Batch, round, iteration
 A discrete unit of implementation work assigned to one agent in one wave. Has a status lifecycle and produces file changes.
 _Avoid_: Job, ticket, story
 
+**Requirement Contribution**:
+A Task's partial traceability claim that it advances a Spec requirement without satisfying it. Stored in `spec_contributions`; it never enters Wave Gate spec-check completion scope and must lead to exactly one same-or-later Requirement Completion Wave.
+_Avoid_: Partial anchor, weak anchor, completion claim
+
+**Requirement Completion Claim**:
+A Task's declaration that its Wave fully satisfies a Spec requirement. Stored in `spec_anchors`; repeated claims are permitted only among Tasks in the same completion Wave.
+_Avoid_: Contribution, coverage hint, partial anchor
+
 **Agent**:
 A specialized AI subagent spawned to perform one phase or task. Defined by a markdown persona with preloaded skills.
 _Avoid_: Worker, bot, assistant
@@ -224,6 +232,9 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 
 - A **Phase** produces one or more artifacts consumed by subsequent **Phases**
 - A **Plan** is decomposed into **Tasks** grouped into **Waves**
+- A **Task** may make **Requirement Contributions** before or during the one Wave that owns the **Requirement Completion Claim**
+- A **Requirement Contribution** never enters Wave Gate completion scope; the **Requirement Completion Claim** does
+- Every **Requirement Contribution** has exactly one same-or-later completion Wave, and none may occur after completion
 - A **Wave Gate** validates all **Tasks** in a **Wave** before the next **Wave** begins
 - A **Tier** determines which lint rules execute: "immediate" runs regex-only after edits, "full" runs all rules at Wave Gate boundaries or explicit scans
 - An **Agent** executes exactly one **Task** or one **Phase**

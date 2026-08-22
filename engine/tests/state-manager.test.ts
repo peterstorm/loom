@@ -272,6 +272,61 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it("strictly parses immutable Spec trace Wave Gate retirement audits and rejects collisions", () => {
+    const retirement = {
+      schemaVersion: 1,
+      kind: "spec-trace-wave-gate-retirement",
+      runId: "run.trace-retired",
+      wave: 1,
+      authorityDigest: "a".repeat(64),
+      revision: 3,
+      runsRoot: "/runs",
+      reason: "legacy scope could not be completed",
+      supersededBy: null,
+    };
+    const v2Graph = {
+      ...validGraph,
+      spec_trace_version: 2,
+      tasks: [{ ...validTask, spec_anchors: ["FR-1"], spec_contributions: [] }],
+      spec_trace_wave_gate_retirements: [retirement],
+    };
+    const parsed = parseTaskGraph(v2Graph);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.value.spec_trace_wave_gate_retirements).toEqual([retirement]);
+      expect(Object.isFrozen(parsed.value.spec_trace_wave_gate_retirements)).toBe(true);
+      expect(Object.isFrozen(parsed.value.spec_trace_wave_gate_retirements?.[0])).toBe(true);
+      expect(parseTaskGraph(JSON.parse(JSON.stringify(parsed.value))).ok).toBe(true);
+    }
+
+    const duplicate = parseTaskGraph({
+      ...v2Graph,
+      spec_trace_wave_gate_retirements: [retirement, retirement],
+    });
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) expect(duplicate.error).toContain("duplicate retired run identities");
+
+    const activeCollision = parseTaskGraph({
+      ...v2Graph,
+      current_wave: 1,
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: retirement.runId, wave: 1,
+        authorityDigest: retirement.authorityDigest, revision: 3, runsRoot: "/runs", terminalOutcome: null,
+      },
+    });
+    expect(activeCollision.ok).toBe(false);
+    if (!activeCollision.ok) expect(activeCollision.error).toContain("already retired for Spec trace v2");
+
+    for (const malformed of [
+      { ...retirement, reason: "" },
+      { ...retirement, runsRoot: "relative" },
+      { ...retirement, supersededBy: retirement.runId },
+      { ...retirement, unknown: true },
+    ]) {
+      expect(parseTaskGraph({ ...v2Graph, spec_trace_wave_gate_retirements: [malformed] }).ok).toBe(false);
+    }
+  });
+
   it("refuses multiple installation audits for one active run and any audit that contradicts it", () => {
     const retirement = (runId: string, digest: string) => ({
       schemaVersion: 1, kind: "orphaned-wave-gate-retirement", runId, wave: 1,

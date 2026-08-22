@@ -178,6 +178,46 @@ Do not repair state. The mutating CLI route compared the Runtime Revision publis
 
 A missing handshake means the Pi session predates this protocol or did not load Loom; it is also resolved by reload/restart, not by deleting fields from the TaskGraph.
 
+### Active graph uses the legacy Requirement trace contract
+
+Legacy graphs without `spec_trace_version` remain readable and auditable. To upgrade exactly one active legacy graph, prepare JSON covering the exact existing Task roster in protected order; provide both arrays for every Task:
+
+```json
+{
+  "spec_trace_version": 2,
+  "tasks": [
+    {"id":"T1","spec_anchors":[],"spec_contributions":["FR-001"]},
+    {"id":"T2","spec_anchors":["FR-001"],"spec_contributions":[]}
+  ]
+}
+```
+
+Then run the sanctioned atomic helper (use `.pi/state/...` through Loom's normal `LOOM_STATE_PATH` under Pi):
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper upgrade-spec-trace \
+  < /path/to/exact-trace-ownership.json
+```
+
+The helper uses StateManager's lock, validates the resulting v2 graph through the same pure trace parser used by normal loading and `validate-task-graph`, and changes only `spec_trace_version`, `spec_anchors`, and `spec_contributions`. It rejects duplicate, missing, reordered, or foreign roster entries; stale conflicting replays; active subagents; and invalid ownership. An exact replay is idempotent.
+
+By default the helper refuses while protected `active_wave_gate` authority exists. Normally, resume and finish that registered Wave Gate until the engine archives it and clears active authority. If the run is blocked specifically because its legacy Requirement scope is wrong, finishing it is impossible. Use this explicit retirement sequence instead, substituting the exact `runsRoot` and `runId` stored in `active_wave_gate`:
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration abandon \
+  --runs-root "<exact-protected-runsRoot>" \
+  --run "<exact-protected-active-runId>" \
+  --reason "legacy Requirement scope prevents this Wave Gate from completing"
+
+bun "$LOOM_DIR/engine/src/cli.ts" helper upgrade-spec-trace \
+  --retire-abandoned-run \
+  < /path/to/exact-trace-ownership.json
+```
+
+Usually omit `--superseded-by` and start the replacement only after migration. If an already-created successor Run Directory was deliberately named during abandonment, the upgrade re-proves that exact direct child and preserves the pointer as audit data; it does not install the successor as protected authority. The upgrade opens the exact protected Run Directory, proves its engine-owned Wave Gate program (Wave, Task roster, and authority digest), reads the immutable abandonment marker, then repeats those proofs under StateManager's lock. Missing/unreadable/foreign markers, authority drift, missing or foreign supersession targets, and non-abandoned runs cause no TaskGraph mutation.
+
+On success, one immutable `SpecTraceWaveGateRetirement` audit preserves the old run id, Wave, authority digest, revision, runs root, and exact abandonment reason/supersession. The same locked commit installs trace v2 and clears only stale `active_wave_gate`, `wave_review_epoch`, and `spec_check` scope. Tasks, proofs, Review Runs, Findings, Refutations, Resolutions, issued packets, completed/orphan retirement history, and implementation evidence remain intact. An exact replay does not append another audit; a different mapping remains refused.
+
 ### State is malformed
 
 Use only when the load boundary explicitly directs recovery:

@@ -17,6 +17,7 @@ import { derivePendingTaskProof } from "../../core/proof-obligations";
 import { argumentValue, hasFlag } from "./cli-args";
 
 interface DecomposeInput {
+  spec_trace_version: 2;
   plan_title: string;
   plan_file?: string;
   spec_file?: string;
@@ -42,8 +43,8 @@ function parseArgs(args: string[]): { issue?: number; repo?: string; fix: boolea
 
 /**
  * Decompose stdin is agent-controlled text: it may DESCRIBE work (id,
- * description, agent, wave, deps, spec anchors, test requirements, file
- * list) but must never carry execution state. The decompose-contract fields
+ * description, agent, wave, deps, Requirement Completion Claims,
+ * Contributions, test requirements, file list) but must never carry execution state. The decompose-contract fields
  * are picked explicitly (never spread) so a payload that pre-stamps
  * `test_result: {verdict: "trusted-pass"}`, `status: "completed"`, or
  * `review_status: "passed"` cannot reach the persisted graph — trusted
@@ -58,7 +59,8 @@ function sanitizeDecomposedTask(t: Task): Task {
     wave: t.wave,
     status: "pending",
     depends_on: t.depends_on ?? [],
-    ...(t.spec_anchors !== undefined ? { spec_anchors: t.spec_anchors } : {}),
+    spec_anchors: Object.freeze([...(t.spec_anchors ?? [])]),
+    spec_contributions: Object.freeze([...(t.spec_contributions ?? [])]),
     ...(t.new_tests_required !== undefined ? { new_tests_required: t.new_tests_required } : {}),
     ...(t.plan_context !== undefined ? { plan_context: t.plan_context } : {}),
     ...(t.file_list !== undefined ? { file_list: t.file_list } : {}),
@@ -205,6 +207,7 @@ const handler: HookHandler = async (stdin, args) => {
     }
     const merged: TaskGraph = {
       ...existing,
+      spec_trace_version: 2,
       plan_title: decompose.plan_title,
       plan_file: validatedPlanFile,
       spec_file: existing.spec_file ?? decompose.spec_file ?? null,

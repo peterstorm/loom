@@ -384,6 +384,7 @@ export const WHITELISTED_HELPERS: readonly string[] = [
   "store-review-findings",
   "store-spec-check",
   "populate-task-graph",
+  "upgrade-spec-trace",
   "repair-task-graph",
   "review-packet",
   "store-test-evidence",

@@ -430,7 +430,7 @@ Substitute variables:
 Run schema validator on agent output:
 
 ```bash
-echo "$DECOMPOSE_OUTPUT" | bun ${LOOM_DIR}/engine/src/cli.ts helper validate-task-graph -
+echo "$DECOMPOSE_OUTPUT" | bun ${LOOM_DIR}/engine/src/cli.ts helper validate-task-graph --decompose-payload -
 ```
 
 The validator also cross-checks executable-model bindings when the plan declares them (`## Lifecycles` / `## Pipeline` / `## Invariants`): every LC-N machine file must appear in a task's `file_list`, the AuthoredDag sidecar must exist and be structurally sound, every checkable INV-N rule file must exist, and near-miss declarations (typo'd headings/labels) are errors. See `references/executable-models.md`. These same checks run fail-closed inside `populate-task-graph` (4d), so they cannot be skipped.
@@ -444,9 +444,9 @@ The validator also cross-checks executable-model bindings when the plan declares
   ```
   Re-spawn architecture-agent with the validator errors appended as additional context.
 
-### 4b. Map Spec Anchors
+### 4b. Confirm Requirement Trace Ownership
 
-If decompose-agent didn't set anchors, use helper:
+Fresh output MUST declare `spec_trace_version: 2`. Every Task carries both `spec_contributions` (partial traceability) and `spec_anchors` (Requirement Completion Claims). If the decompose Agent omitted a likely Requirement, use the helper for suggestions:
 
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper suggest-spec-anchors "task description" .claude/specs/*/spec.md
@@ -457,7 +457,7 @@ Returns JSON with suggested anchors and confidence scores:
 [{"anchor":"FR-003","score":0.85,"text":"System MUST validate email format"},...]
 ```
 
-Review suggestions, adjust as needed, store as `spec_anchors: ["FR-003", "SC-002", "US1.acceptance"]`
+Review suggestions and assign partial work to `spec_contributions`. Assign each Requirement to `spec_anchors` only on its culminating Task/Wave. The validator refuses overlap, duplicate entries, multiple completion Waves, missing completion ownership, and Contributions after completion.
 
 ### 4c. User Approval
 
@@ -488,6 +488,7 @@ echo "$DECOMPOSE_OUTPUT" | bun ${LOOM_DIR}/engine/src/cli.ts helper populate-tas
 ```
 
 This helper:
+- Requires and persists `spec_trace_version: 2`, sanitizing both Task trace arrays
 - Reads existing state (phase tracking fields)
 - Merges with validated decompose output (tasks, waves)
 - Adds `github_issue`, `spec_file`, `plan_file`, `current_wave: 1`
@@ -551,7 +552,8 @@ Substitute variables:
 - `{task_id}`, `{wave}`, `{agent_type}`, `{dependencies}`
 - `{required_skill}` - Read the selected source agent's `skills:` frontmatter and substitute its exact declared skill name (for agents with no declared skill, use `none`). This is both the Claude spawn-gate evidence and the Pi preloaded-skill audit label; never infer it from the agent name.
 - `{task_description}` - From task breakdown
-- `{spec_anchors_formatted}` - Formatted anchor list with requirement text
+- `{spec_anchors_formatted}` - Formatted Requirement Completion Claims with requirement text
+- `{spec_contributions_formatted}` - Formatted partial Requirement Contributions with requirement text
 - `{plan_context}` - Relevant section from plan
 - `{file_list}` - Files to create/modify
 - `{plan_file_path}` - Path to full plan

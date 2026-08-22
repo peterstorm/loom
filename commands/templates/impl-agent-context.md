@@ -57,12 +57,17 @@ If your plan context declares none of these, this section imposes nothing.
 
 {task_description}
 
-## Spec Anchors (MUST satisfy)
+## Requirement Completion Claims (MUST fully satisfy in this Wave)
 
 {spec_anchors_formatted}
 
-These are from the specification - your implementation MUST satisfy these requirements.
-Spec-check at wave gate will verify alignment.
+These are the only Requirements in this Wave's spec-check completion scope.
+
+## Requirement Contributions (partial traceability; not completion claims)
+
+{spec_contributions_formatted}
+
+Contributions identify partial work. Do not claim the Requirement is complete unless it also appears above as a Wave-owned Completion Claim.
 
 ## Context from Plan
 
@@ -87,7 +92,8 @@ Available at: {plan_file_path}
 
 - Follow patterns defined in plan
 - Do not modify scope beyond this task
-- MUST satisfy spec anchors listed above
+- MUST fully satisfy Requirement Completion Claims listed above
+- Implement only the assigned portion of Requirement Contributions; do not treat them as Wave completion authority
 
 ## Required Workflow
 

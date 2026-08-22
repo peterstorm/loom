@@ -61,7 +61,8 @@ Fallback: `general-purpose`
      - `<NNNN>` = pre-allocated. Read existing `docs/adr/` (use Glob/Read), find max 4-digit prefix, increment for first AD, then sequential for subsequent ADs in plan order. If no ADRs exist, start at `0001`.
      - `<slug>` = kebab-case from AD title (e.g., "Hono framework choice" → `hono-framework-choice`). Append `-2`, `-3` etc. on title collision within this run.
    - `description`: `"Write ADR-<NNNN>: <AD title>"`
-   - `spec_anchors`: any FR/SC/US referenced in the AD's Why text (can be empty `[]`)
+   - `spec_anchors`: only requirements this final ADR Wave fully completes (normally empty `[]`)
+   - `spec_contributions`: normally empty `[]` because this dedicated final Wave occurs after implementation completion; use only when the Spec explicitly makes the ADR precursor work for a Requirement completed in this same final Wave
 
    Skip ADR task creation if plan has no `## Architectural Decisions` section or it's empty.
 7. **Lifecycle tasks:** For each `### LC-N:` block in the plan's `## Lifecycles` section (skip rule if section absent):
@@ -76,6 +77,12 @@ Fallback: `general-purpose`
    - Create one wave-1 codegen task — description: `Pipeline codegen: run 'fugue new --from <dag path>' to generate the graph code` — `agent`: `code-implementer-agent`, `new_tests_required`: `false` (deterministic codegen, no hand-written code). `file_list`: the generated output paths if the dag declares them, else `[]`. `plan_context`: the AuthoredDag path plus this failure protocol: `If 'fugue new --from' fails its validation gauntlet, the authored dag itself is defective — report the failure verbatim and stop. Never hand-patch generated graph code to make it pass.`
    - Create one task per node needing a real body (fetch impls, `buildInput`, prompts), depending on the codegen task, `new_tests_required`: `true`. `plan_context` MUST include the node's purpose and declared input/output schemas from the AuthoredDag, plus the line: `Fill only the node body. Never hand-write or edit defineDag/graph wiring — it is generated. The declared schemas are binding contracts.`
 9. **Invariant tasks: none.** Checkable `INV-N` invariants are already lint rules enforced on every edit — do NOT create tasks for them. For tasks working in files an invariant governs, you may append the INV-N statement to `plan_context`. Advisory invariants may be quoted as guidance; never present them as enforced.
+10. **Requirement trace v2 (binding):**
+    - Emit top-level `spec_trace_version: 2` and BOTH trace arrays on every Task.
+    - `spec_contributions` records partial work only. It is traceability, never Wave Gate completion scope.
+    - `spec_anchors` is a Requirement Completion Claim: the containing Wave MUST fully satisfy that Requirement. Assign it only to the culminating Task/Wave.
+    - A Task cannot contribute to and complete the same Requirement. Multiple completion Tasks are allowed only in the same culmination Wave.
+    - Every contribution must have exactly one completion Wave at or after it; no contribution may appear after completion.
 
 ---
 
@@ -85,6 +92,7 @@ Output ONLY valid JSON. No markdown, no explanation, no code fences. Pure JSON:
 
 ```json
 {
+  "spec_trace_version": 2,
   "plan_title": "Short title for GH issue",
   "spec_file": "{spec_file_path}",
   "plan_file": "{plan_file_path}",
@@ -96,6 +104,7 @@ Output ONLY valid JSON. No markdown, no explanation, no code fences. Pure JSON:
       "wave": 1,
       "depends_on": [],
       "spec_anchors": ["FR-001", "SC-001"],
+      "spec_contributions": [],
       "new_tests_required": true,
       "plan_context": "Relevant section from plan (paste key points)",
       "file_list": ["src/models/User.ts", "src/models/User.test.ts"]
@@ -108,6 +117,7 @@ Output ONLY valid JSON. No markdown, no explanation, no code fences. Pure JSON:
 
 | Field | Required | Format | Notes |
 |---|---|---|---|
+| `spec_trace_version` | yes | literal `2` | Fresh decomposition trace contract |
 | `plan_title` | yes | string | Short title for GitHub issue |
 | `spec_file` | yes | string | Absolute path to spec.md |
 | `plan_file` | yes | string | Absolute path to plan.md |
@@ -121,7 +131,8 @@ Output ONLY valid JSON. No markdown, no explanation, no code fences. Pure JSON:
 | `agent` | yes | string | Must be from agent table above |
 | `wave` | yes | int >= 1 | Tasks in same wave run in parallel |
 | `depends_on` | yes | string[] | Task IDs from earlier waves only |
-| `spec_anchors` | yes | string[] | FR/SC/US IDs from spec (can be empty `[]`) |
+| `spec_anchors` | yes | string[] | Requirement Completion Claims fully satisfied by this Wave (can be empty `[]`) |
+| `spec_contributions` | yes | string[] | Partial Requirement Contributions; never completion scope (can be empty `[]`) |
 | `new_tests_required` | yes | boolean | false for config/migration/docs tasks |
 | `plan_context` | yes | string | Key points from plan for this task (can be empty `""`) |
 | `file_list` | yes | string[] | Files to create/modify (can be empty `[]`) |

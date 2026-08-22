@@ -369,13 +369,44 @@ export type WaveRequestBatch = Readonly<{
   taskRuns: readonly WaveTaskRunAuthority[];
 }>;
 
+export type WaveSpecCheckTaskAuthority = Readonly<{
+  id: string;
+  description: string;
+  completionAnchors: readonly string[];
+  contributions: readonly string[];
+  declaredFiles: readonly string[];
+}>;
+
+/** Immutable current-Wave Requirement scope. Contributions are included for
+ * traceability but only completionAnchors define spec-check authority. */
+export function waveSpecCheckScope(tasks: readonly Task[]): readonly WaveSpecCheckTaskAuthority[] {
+  return Object.freeze(tasks.map((task) => Object.freeze({
+    id: task.id,
+    description: task.description,
+    completionAnchors: Object.freeze([...(task.spec_anchors ?? [])]),
+    contributions: Object.freeze([...(task.spec_contributions ?? [])]),
+    declaredFiles: Object.freeze([...(task.file_list ?? [])]),
+  })));
+}
+
 export function waveRequests(
   handle: RunDirHandle,
   registration: RegisteredWaveGateProgram,
   graph: ReturnType<StateManager["load"]>,
   attempt: 1 | 2,
 ): WaveRequestBatch {
-  const tasks = graph.tasks.filter((task) => registration.taskIds.includes(task.id));
+  if (registration.input.wave === null) throw new Error("registered Wave review authority lacks an exact Wave");
+  const currentWaveTasks = graph.tasks.filter((task) => task.wave === registration.input.wave);
+  const tasks = registration.taskIds.map((taskId) => {
+    const task = graph.tasks.find((candidate) => candidate.id === taskId);
+    if (task === undefined) throw new Error(`registered Wave Task ${taskId} disappeared`);
+    return task;
+  });
+  if (tasks.some((task) => task.wave !== registration.input.wave) ||
+      currentWaveTasks.length !== tasks.length || currentWaveTasks.some((task, index) => task.id !== tasks[index]?.id)) {
+    throw new Error("registered Wave Task roster drifted from the exact protected current-Wave roster");
+  }
+  const specCheckScope = waveSpecCheckScope(tasks);
   const parsedBatchEpoch = parseArtifactDigest(createHash("sha256").update(JSON.stringify({
     runId: handle.runId,
     wave: registration.input.wave,
@@ -385,6 +416,8 @@ export function waveRequests(
       generation: task.review_generation ?? 0,
       files: task.file_list ?? [],
       modified: task.files_modified ?? [],
+      completionAnchors: task.spec_anchors ?? [],
+      contributions: task.spec_contributions ?? [],
       priorFindingIds: task.review_run?.prior_finding_ids ?? (task.findings ?? []).map(({ id }) => id),
     })),
     specFile: graph.spec_file ?? null,
@@ -424,6 +457,7 @@ export function waveRequests(
       batchEpoch,
       subject,
       taskRun,
+      specCheckScope: subject.taskId === null ? specCheckScope : null,
       task: subject.taskId === null ? null : (() => {
         const task = tasks.find(({ id }) => id === subject.taskId);
         return task === undefined ? null : {
@@ -433,6 +467,7 @@ export function waveRequests(
           reviewGeneration: task.review_generation ?? 0,
           planContext: task.plan_context ?? null,
           specAnchors: task.spec_anchors ?? [],
+          specContributions: task.spec_contributions ?? [],
           declaredFiles: task.file_list ?? [],
           modifiedFiles: task.files_modified ?? [],
           proof: task.proof ?? null,
@@ -820,6 +855,7 @@ export type WaveReviewTaskAuthority = Readonly<{
   reviewGeneration: number;
   planContext: string | null;
   specAnchors: readonly string[];
+  specContributions: readonly string[];
   declaredFiles: readonly string[];
   modifiedFiles: readonly string[];
   proof: TaskProof | null;
@@ -832,12 +868,14 @@ export type WaveReviewContextAuthority =
       subject: Readonly<{ role: "spec-check-invoker"; taskId: null }>;
       taskRun: null;
       task: null;
+      specCheckScope: readonly WaveSpecCheckTaskAuthority[];
       packetId: null;
     }>
   | Readonly<WaveReviewContextBase & {
       subject: Readonly<{ role: (typeof WAVE_REVIEW_AGENTS)[number]; taskId: string }>;
       taskRun: WaveTaskRunAuthority;
       task: WaveReviewTaskAuthority;
+      specCheckScope: null;
       packetId: string;
     }>;
 
@@ -858,13 +896,43 @@ function parseStringArray(raw: unknown): readonly string[] | null {
     : null;
 }
 
+function parseWaveSpecCheckScope(raw: unknown): readonly WaveSpecCheckTaskAuthority[] | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const scope: WaveSpecCheckTaskAuthority[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry) ||
+        !exactObject(entry as Record<string, unknown>, [
+          "id", "description", "completionAnchors", "contributions", "declaredFiles",
+        ])) return null;
+    const record = entry as Record<string, unknown>;
+    const completionAnchors = parseStringArray(record.completionAnchors);
+    const contributions = parseStringArray(record.contributions);
+    const declaredFiles = parseStringArray(record.declaredFiles);
+    if (typeof record.id !== "string" || record.id.trim() === "" ||
+        typeof record.description !== "string" || completionAnchors === null || contributions === null ||
+        declaredFiles === null || new Set(completionAnchors).size !== completionAnchors.length ||
+        new Set(contributions).size !== contributions.length || new Set(declaredFiles).size !== declaredFiles.length ||
+        completionAnchors.some((anchor) => anchor.trim() === "") ||
+        contributions.some((anchor) => anchor.trim() === "") || declaredFiles.some((path) => path.trim() === "") ||
+        completionAnchors.some((anchor) => contributions.includes(anchor))) return null;
+    scope.push(Object.freeze({
+      id: record.id,
+      description: record.description,
+      completionAnchors,
+      contributions,
+      declaredFiles,
+    }));
+  }
+  return new Set(scope.map(({ id }) => id)).size === scope.length ? Object.freeze(scope) : null;
+}
+
 function parseWaveReviewTaskAuthority(
   raw: unknown,
   taskId: string,
   generation: number,
 ): WaveReviewTaskParse {
   const keys = [
-    "id", "description", "agent", "reviewGeneration", "planContext", "specAnchors",
+    "id", "description", "agent", "reviewGeneration", "planContext", "specAnchors", "specContributions",
     "declaredFiles", "modifiedFiles", "proof", "testResult", "priorFindings",
   ];
   if (typeof raw !== "object" || raw === null || Array.isArray(raw) ||
@@ -873,6 +941,7 @@ function parseWaveReviewTaskAuthority(
   }
   const record = raw as Record<string, unknown>;
   const specAnchors = parseStringArray(record.specAnchors);
+  const specContributions = parseStringArray(record.specContributions);
   const declaredFiles = parseStringArray(record.declaredFiles);
   const modifiedFiles = parseStringArray(record.modifiedFiles);
   const priorFindings = parseStoredFindings(record.priorFindings);
@@ -891,7 +960,7 @@ function parseWaveReviewTaskAuthority(
   }
   if (typeof record.description !== "string" || typeof record.agent !== "string" || record.agent.trim() === "" ||
       (record.planContext !== null && typeof record.planContext !== "string") || specAnchors === null ||
-      declaredFiles === null || modifiedFiles === null || !Array.isArray(record.priorFindings) ||
+      specContributions === null || declaredFiles === null || modifiedFiles === null || !Array.isArray(record.priorFindings) ||
       priorFindings.length !== record.priorFindings.length) {
     return { ok: false, message: "wave-review-authority task fields are invalid" };
   }
@@ -904,6 +973,7 @@ function parseWaveReviewTaskAuthority(
       reviewGeneration: generation,
       planContext: record.planContext,
       specAnchors,
+      specContributions,
       declaredFiles,
       modifiedFiles,
       proof: proof === null ? null : proof.value,
@@ -913,22 +983,111 @@ function parseWaveReviewTaskAuthority(
   };
 }
 
-function parseWaveReviewContextAuthority(raw: unknown): WaveReviewContextRead {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw) || !exactObject(raw as Record<string, unknown>, [
-    "runId", "wave", "authorityDigest", "batchEpoch", "subject", "taskRun", "task",
-    "packetId", "specFile", "planFile",
-  ])) return corruptWaveContext("wave-review-authority section has an invalid top-level schema");
-  const record = raw as Record<string, unknown>;
+type WaveContextParse<T> =
+  | Readonly<{ ok: true; value: T }>
+  | Readonly<{ ok: false; message: string }>;
+
+function parseWaveContextBase(record: Record<string, unknown>): WaveContextParse<WaveReviewContextBase> {
   const runId = parseOrchestrationRunId(record.runId);
   const authorityDigest = parseArtifactDigest(record.authorityDigest);
   const batchEpoch = parseArtifactDigest(record.batchEpoch);
-  if (!runId.ok) return corruptWaveContext(`wave-review-authority runId: ${runId.error.message}`);
+  if (!runId.ok) return { ok: false, message: `wave-review-authority runId: ${runId.error.message}` };
   if (!Number.isSafeInteger(record.wave) || (record.wave as number) < 1) {
-    return corruptWaveContext("wave-review-authority wave must be a positive safe integer");
+    return { ok: false, message: "wave-review-authority wave must be a positive safe integer" };
   }
-  if (!authorityDigest.ok) return corruptWaveContext(`wave-review-authority authorityDigest: ${authorityDigest.error.message}`);
-  if (!batchEpoch.ok) return corruptWaveContext(`wave-review-authority batchEpoch: ${batchEpoch.error.message}`);
+  if (!authorityDigest.ok) return { ok: false, message: `wave-review-authority authorityDigest: ${authorityDigest.error.message}` };
+  if (!batchEpoch.ok) return { ok: false, message: `wave-review-authority batchEpoch: ${batchEpoch.error.message}` };
+  if ((record.specFile !== null && typeof record.specFile !== "string") ||
+      (record.planFile !== null && typeof record.planFile !== "string")) {
+    return { ok: false, message: "wave-review-authority specFile/planFile is invalid" };
+  }
+  return { ok: true, value: Object.freeze({
+    runId: runId.value,
+    wave: record.wave as number,
+    authorityDigest: authorityDigest.value,
+    batchEpoch: batchEpoch.value,
+    specFile: record.specFile as string | null,
+    planFile: record.planFile as string | null,
+  }) };
+}
 
+function parseWaveTaskRun(raw: unknown): WaveContextParse<WaveTaskRunAuthority | null> {
+  if (raw === null) return { ok: true, value: null };
+  if (typeof raw !== "object" || Array.isArray(raw) ||
+      !exactObject(raw as Record<string, unknown>, ["taskId", "generation", "packetId", "headSha"])) {
+    return { ok: false, message: "wave-review-authority taskRun has an invalid schema" };
+  }
+  const candidate = raw as Record<string, unknown>;
+  const packetId = parseArtifactDigest(candidate.packetId);
+  const headSha = parseArtifactDigest(candidate.headSha);
+  if (typeof candidate.taskId !== "string" || !Number.isSafeInteger(candidate.generation) ||
+      (candidate.generation as number) < 0 || !packetId.ok || !headSha.ok) {
+    return { ok: false, message: "wave-review-authority taskRun fields are invalid" };
+  }
+  return { ok: true, value: Object.freeze({
+    taskId: candidate.taskId,
+    generation: candidate.generation as number,
+    packetId: packetId.value,
+    headSha: headSha.value,
+  }) };
+}
+
+function parseSpecCheckContext(
+  record: Record<string, unknown>,
+  common: WaveReviewContextBase,
+  subject: Record<string, unknown>,
+  taskRun: WaveTaskRunAuthority | null,
+): WaveReviewContextRead {
+  if (subject.taskId !== null || taskRun !== null || record.task !== null || record.packetId !== null) {
+    return corruptWaveContext("wave-review-authority spec-check subject cannot carry Task authority");
+  }
+  const specCheckScope = parseWaveSpecCheckScope(record.specCheckScope);
+  if (specCheckScope === null) {
+    return corruptWaveContext("wave-review-authority spec-check subject requires a valid immutable current-Wave scope");
+  }
+  return { kind: "loaded", value: Object.freeze({
+    ...common,
+    subject: Object.freeze({ role: "spec-check-invoker" as const, taskId: null }),
+    taskRun: null,
+    task: null,
+    specCheckScope,
+    packetId: null,
+  }) };
+}
+
+function parseTaskReviewerContext(
+  record: Record<string, unknown>,
+  common: WaveReviewContextBase,
+  subject: Record<string, unknown>,
+  taskRun: WaveTaskRunAuthority | null,
+): WaveReviewContextRead {
+  if (record.specCheckScope !== null || typeof subject.taskId !== "string" || taskRun === null ||
+      subject.taskId !== taskRun.taskId || record.packetId !== taskRun.packetId) {
+    return corruptWaveContext("wave-review-authority Task reviewer subject lacks matching Task authority");
+  }
+  const task = parseWaveReviewTaskAuthority(record.task, subject.taskId, taskRun.generation);
+  if (!task.ok) return corruptWaveContext(task.message);
+  return { kind: "loaded", value: Object.freeze({
+    ...common,
+    subject: Object.freeze({
+      role: subject.role as (typeof WAVE_REVIEW_AGENTS)[number],
+      taskId: subject.taskId,
+    }),
+    taskRun,
+    task: task.value,
+    specCheckScope: null,
+    packetId: taskRun.packetId,
+  }) };
+}
+
+function parseWaveReviewContextAuthority(raw: unknown): WaveReviewContextRead {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw) || !exactObject(raw as Record<string, unknown>, [
+    "runId", "wave", "authorityDigest", "batchEpoch", "subject", "taskRun", "task", "specCheckScope",
+    "packetId", "specFile", "planFile",
+  ])) return corruptWaveContext("wave-review-authority section has an invalid top-level schema");
+  const record = raw as Record<string, unknown>;
+  const common = parseWaveContextBase(record);
+  if (!common.ok) return corruptWaveContext(common.message);
   if (typeof record.subject !== "object" || record.subject === null || Array.isArray(record.subject) ||
       !exactObject(record.subject as Record<string, unknown>, ["role", "taskId"])) {
     return corruptWaveContext("wave-review-authority subject has an invalid schema");
@@ -941,73 +1100,11 @@ function parseWaveReviewContextAuthority(raw: unknown): WaveReviewContextRead {
       (subject.taskId !== null && (typeof subject.taskId !== "string" || subject.taskId.trim() === ""))) {
     return corruptWaveContext("wave-review-authority subject role/taskId is invalid");
   }
-
-  let taskRun: WaveTaskRunAuthority | null = null;
-  if (record.taskRun !== null) {
-    if (typeof record.taskRun !== "object" || Array.isArray(record.taskRun) ||
-        !exactObject(record.taskRun as Record<string, unknown>, ["taskId", "generation", "packetId", "headSha"])) {
-      return corruptWaveContext("wave-review-authority taskRun has an invalid schema");
-    }
-    const candidate = record.taskRun as Record<string, unknown>;
-    const packetId = parseArtifactDigest(candidate.packetId);
-    const headSha = parseArtifactDigest(candidate.headSha);
-    if (typeof candidate.taskId !== "string" || !Number.isSafeInteger(candidate.generation) ||
-        (candidate.generation as number) < 0 || !packetId.ok || !headSha.ok) {
-      return corruptWaveContext("wave-review-authority taskRun fields are invalid");
-    }
-    taskRun = Object.freeze({
-      taskId: candidate.taskId,
-      generation: candidate.generation as number,
-      packetId: packetId.value,
-      headSha: headSha.value,
-    });
-  }
-  if ((record.specFile !== null && typeof record.specFile !== "string") ||
-      (record.planFile !== null && typeof record.planFile !== "string")) {
-    return corruptWaveContext("wave-review-authority specFile/planFile is invalid");
-  }
-  const common: WaveReviewContextBase = Object.freeze({
-    runId: runId.value,
-    wave: record.wave as number,
-    authorityDigest: authorityDigest.value,
-    batchEpoch: batchEpoch.value,
-    specFile: record.specFile as string | null,
-    planFile: record.planFile as string | null,
-  });
-  if (isSpecCheck) {
-    if (subject.taskId !== null || taskRun !== null || record.task !== null || record.packetId !== null) {
-      return corruptWaveContext("wave-review-authority spec-check subject cannot carry Task authority");
-    }
-    return {
-      kind: "loaded",
-      value: Object.freeze({
-        ...common,
-        subject: Object.freeze({ role: "spec-check-invoker" as const, taskId: null }),
-        taskRun: null,
-        task: null,
-        packetId: null,
-      }),
-    };
-  }
-  if (typeof subject.taskId !== "string" || taskRun === null ||
-      subject.taskId !== taskRun.taskId || record.packetId !== taskRun.packetId) {
-    return corruptWaveContext("wave-review-authority Task reviewer subject lacks matching Task authority");
-  }
-  const task = parseWaveReviewTaskAuthority(record.task, subject.taskId, taskRun.generation);
-  if (!task.ok) return corruptWaveContext(task.message);
-  return {
-    kind: "loaded",
-    value: Object.freeze({
-      ...common,
-      subject: Object.freeze({
-        role: subject.role as (typeof WAVE_REVIEW_AGENTS)[number],
-        taskId: subject.taskId,
-      }),
-      taskRun,
-      task: task.value,
-      packetId: taskRun.packetId,
-    }),
-  };
+  const taskRun = parseWaveTaskRun(record.taskRun);
+  if (!taskRun.ok) return corruptWaveContext(taskRun.message);
+  return isSpecCheck
+    ? parseSpecCheckContext(record, common.value, subject, taskRun.value)
+    : parseTaskReviewerContext(record, common.value, subject, taskRun.value);
 }
 
 /**

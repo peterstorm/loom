@@ -10,8 +10,13 @@ Run this after the implementation hook reports that the active Wave is implement
 The engine owns protected-state verification, test readiness, Review Packets,
 reviewer/model/Skill selection, exact request authority, retries, aggregation,
 Refutation Panel routing, advisory suspension, automatic full-tier lint, and
-atomic Wave advancement. Lint runs after semantic readiness and advisory
-approval but before the protected completion commit; violations return the
+atomic Wave advancement. Before the registered spec-check request is issued,
+its immutable Context Packet freezes the exact current-Wave Task roster,
+Requirement Completion Claims (`spec_anchors`), Contributions
+(`spec_contributions`), and declared files. The spec-check consumes that packet
+and never rereads mutable TaskGraph scope. Contributions remain traceability
+only and never enter completion scope. Lint runs after semantic readiness and
+advisory approval but before the protected completion commit; violations return the
 registered run's `blocked` action.
 
 **Arguments:** "$ARGUMENTS"
@@ -71,6 +76,36 @@ Resume is idempotent. Pi and Claude persist exact native-id/request bindings and
 raw final bytes directly into engine-declared slots. Never write transcripts,
 build manifests, select models, tally findings, mutate the protected State File,
 or stage deterministic operation output in the parent.
+
+## Retiring a Wave Gate blocked by legacy Requirement scope
+
+`upgrade-spec-trace` refuses active Wave Gate authority by default. Normally,
+finish the registered run. Only when that exact run cannot finish because its
+legacy Requirement scope is wrong, first record the operator decision on the
+protected run and then request the explicit atomic retirement:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration abandon \
+  --runs-root "<exact-active_wave_gate.runsRoot>" \
+  --run "<exact-active_wave_gate.runId>" \
+  --reason "legacy Requirement scope prevents this Wave Gate from completing"
+
+bun ${LOOM_DIR}/engine/src/cli.ts helper upgrade-spec-trace \
+  --retire-abandoned-run \
+  < /path/to/exact-trace-ownership.json
+```
+
+Normally omit `--superseded-by`; no replacement owns protected authority yet.
+If abandonment deliberately named an already-created successor Run Directory,
+the upgrade re-proves and audits that pointer but does not install it as active
+authority. The upgrade reopens the exact protected Run Directory and re-proves
+its immutable abandonment plus Wave/program authority under StateManager's lock. It atomically
+installs v2 ownership, appends a `SpecTraceWaveGateRetirement` audit, and clears
+only the retired active authority and its stale review epoch/spec-check scope.
+All Task implementation/review evidence and completed history survive. Missing,
+unreadable, foreign, changed, non-abandoned, or superseded authority is refused.
+After success, start a fresh Wave Gate normally; never clear protected fields by
+hand. See `docs/operations.md` for the ownership JSON contract.
 
 ## Restarting an exhausted reviewer run
 

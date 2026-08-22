@@ -19,10 +19,18 @@ function validateFull(
   json: Record<string, unknown>,
   scope: ValidationScope = "state-file",
 ): ValidationResult {
-  return validateFullImplementation(
-    scope === "state-file" ? { ...PERSISTED_LIFECYCLE, ...json } : json,
-    scope,
-  );
+  const input = scope === "state-file"
+    ? { ...PERSISTED_LIFECYCLE, ...json }
+    : {
+        ...json,
+        spec_trace_version: json.spec_trace_version ?? 2,
+        tasks: Array.isArray(json.tasks)
+          ? json.tasks.map((task) => typeof task === "object" && task !== null && !Array.isArray(task)
+            ? { spec_anchors: [], spec_contributions: [], ...task as Record<string, unknown> }
+            : task)
+          : json.tasks,
+      };
+  return validateFullImplementation(input, scope);
 }
 
 /** Narrowing helper: errors of a failed validation, [] when ok */
@@ -121,7 +129,7 @@ describe("validateFull (pure)", () => {
   });
 
   it("keeps decompose payloads independent of persisted lifecycle fields", () => {
-    const result = validateFullImplementation({
+    const result = validateFull({
       plan_title: "Test plan",
       plan_file: ".claude/plans/plan.md",
       spec_file: ".claude/specs/spec.md",
@@ -228,7 +236,7 @@ describe("validateFull (pure)", () => {
     });
     expect(result.ok).toBe(false);
     expect(errorsOf(result)).toContain(
-      "Task T1: 'spec_anchors' must be an array of non-empty strings if present",
+      "Task T1: spec_anchors must be an array of non-empty strings if present",
     );
   });
 
@@ -913,7 +921,7 @@ describe("validateFull agrees with the load boundary about the findings aggregat
     // findings invariants would reject exactly the forged input that
     // sanitization exists to clean, turning a successful strip into a hard fail.
     const forged = graph({ findings: [], critical_findings: ["planted"], advisory_findings: [] });
-    expect(validateFull(forged, "decompose-payload").ok).toBe(true);
+    expect(validateFull({ ...forged, spec_trace_version: 2 }, "decompose-payload").ok).toBe(true);
     expect(validateFull(forged, "state-file").ok).toBe(false);
   });
 

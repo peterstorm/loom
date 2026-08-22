@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
+import fc from "fast-check";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -56,10 +57,11 @@ function existingTask(id: string, status: Task["status"]): Task {
 
 function decomposeJson(planFile: string): string {
   return JSON.stringify({
+    spec_trace_version: 2,
     plan_title: "t",
     spec_file: "spec.md",
     plan_file: planFile,
-    tasks: [{ id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [], spec_anchors: [], new_tests_required: true, plan_context: "", file_list: ["src/other.ts"] }],
+    tasks: [{ id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: [], new_tests_required: true, plan_context: "", file_list: ["src/other.ts"] }],
   });
 }
 
@@ -106,12 +108,13 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     const plan = modelFreePlan(dir);
     const statePath = writeState(dir, plan, []);
     const forged = JSON.stringify({
+      spec_trace_version: 2,
       plan_title: "t",
       spec_file: "spec.md",
       plan_file: plan,
       tasks: [{
         id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1,
-        depends_on: [], spec_anchors: [], new_tests_required: true, plan_context: "", file_list: ["src/other.ts"],
+        depends_on: [], spec_anchors: [], spec_contributions: [], new_tests_required: true, plan_context: "", file_list: ["src/other.ts"],
         // Forged execution state — must never reach the persisted graph.
         status: "completed",
         review_status: "passed",
@@ -163,6 +166,8 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
       { kind: "declared-artifact-changed", artifact: "src/other.ts" },
     ]);
     expect(t9.spec_anchors).toEqual([]);
+    expect(t9.spec_contributions).toEqual([]);
+    expect(after.spec_trace_version).toBe(2);
   });
 
   it("rejects malformed file_list before proof derivation and leaves state untouched", async () => {
@@ -170,12 +175,13 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     const plan = modelFreePlan(dir);
     const statePath = writeState(dir, plan, []);
     const malformed = JSON.stringify({
+      spec_trace_version: 2,
       plan_title: "t",
       spec_file: "spec.md",
       plan_file: plan,
       tasks: [{
         id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1,
-        depends_on: [], spec_anchors: [], new_tests_required: true, file_list: ["src/x.ts", 42],
+        depends_on: [], spec_anchors: [], spec_contributions: [], new_tests_required: true, file_list: ["src/x.ts", 42],
       }],
     });
 
@@ -186,15 +192,54 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     expect((JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph).tasks).toEqual([]);
   });
 
+  it("sanitizes and persists arbitrary valid v2 Contribution/Completion ownership", async () => {
+    await fc.assert(fc.asyncProperty(
+      fc.integer({ min: 1, max: 1_000_000 }).map((n) => `FR-${n}`),
+      async (anchor) => {
+        const dir = tempDir();
+        const plan = modelFreePlan(dir);
+        const statePath = writeState(dir, plan, []);
+        const payload = JSON.stringify({
+          spec_trace_version: 2,
+          plan_title: "property trace",
+          spec_file: "spec.md",
+          plan_file: plan,
+          tasks: [
+            {
+              id: "T1", description: "partial", agent: "code-implementer-agent", wave: 1,
+              depends_on: [], spec_anchors: [], spec_contributions: [anchor], new_tests_required: true,
+              plan_context: "", file_list: ["src/partial.ts"], status: "completed",
+            },
+            {
+              id: "T2", description: "complete", agent: "code-implementer-agent", wave: 1,
+              depends_on: [], spec_anchors: [anchor], spec_contributions: [], new_tests_required: true,
+              plan_context: "", file_list: ["src/complete.ts"], review_status: "passed",
+            },
+          ],
+        });
+        expect((await populate(payload, [])).kind).toBe("passthrough");
+        const after = JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph;
+        expect(after.spec_trace_version).toBe(2);
+        expect(after.tasks.map(({ spec_anchors, spec_contributions, status, review_status }) => ({
+          spec_anchors, spec_contributions, status, review_status,
+        }))).toEqual([
+          { spec_anchors: [], spec_contributions: [anchor], status: "pending", review_status: "pending" },
+          { spec_anchors: [anchor], spec_contributions: [], status: "pending", review_status: "pending" },
+        ]);
+      },
+    ), { numRuns: 30 });
+  });
+
   it("--fix re-validates: unfixable structural errors fail loudly instead of persisting", async () => {
     const dir = tempDir();
     const plan = modelFreePlan(dir);
     const statePath = writeState(dir, plan, []);
     const badAgent = JSON.stringify({
+      spec_trace_version: 2,
       plan_title: "t",
       spec_file: "spec.md",
       plan_file: plan,
-      tasks: [{ id: "T9", description: "impl", agent: "no-such-agent", wave: 1, depends_on: [], spec_anchors: [], new_tests_required: true, file_list: ["src/x.ts"] }],
+      tasks: [{ id: "T9", description: "impl", agent: "no-such-agent", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: [], new_tests_required: true, file_list: ["src/x.ts"] }],
     });
     const result = await populate(badAgent, ["--fix"]);
     expect(result.kind).toBe("error");

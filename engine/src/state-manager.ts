@@ -29,6 +29,7 @@ import type {
   CompletedWaveGateRegistration,
   OrphanedWaveGateRetirement,
   SpecCheck,
+  SpecTraceWaveGateRetirement,
   TaskGraph,
   WaveReviewEpochAuthority,
 } from "./types";
@@ -49,6 +50,7 @@ import { waveHasBlockCause } from "./core/wave-gate-model";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
 import { assertPiCliMutationCompatible, captureLoomRuntimeIdentity } from "./runtime-compatibility";
 import { isExactGitSha } from "./core/git-sha";
+import { parseSpecTraceContract, specTraceDiagnosticMessages } from "./core/spec-trace";
 
 const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
@@ -471,6 +473,93 @@ function parseOrphanedWaveGateHistory(raw: unknown): ParseResult<readonly Orphan
   return parseOk(Object.freeze(history));
 }
 
+const SPEC_TRACE_WAVE_GATE_RETIREMENT_FIELDS = [
+  "schemaVersion", "kind", "runId", "wave", "authorityDigest", "revision", "runsRoot",
+  "reason", "supersededBy",
+] as const;
+
+/** Parse one immutable audit of an abandoned Wave Gate retired for trace v2. */
+export function parseSpecTraceWaveGateRetirement(raw: unknown): ParseResult<SpecTraceWaveGateRetirement> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return parseErr("spec_trace_wave_gate_retirements entry must be an object");
+  }
+  const record = raw as Record<string, unknown>;
+  const fieldsError = exactFieldsError(
+    record,
+    SPEC_TRACE_WAVE_GATE_RETIREMENT_FIELDS,
+    [],
+    "spec_trace_wave_gate_retirements entry",
+  );
+  if (fieldsError !== null) return parseErr(fieldsError);
+  if (record.schemaVersion !== 1 || record.kind !== "spec-trace-wave-gate-retirement") {
+    return parseErr("spec_trace_wave_gate_retirements entry has invalid schema or kind");
+  }
+  const runId = parseOrchestrationRunId(record.runId);
+  const authorityDigest = parseArtifactDigest(record.authorityDigest);
+  if (!runId.ok) return parseErr(`spec_trace_wave_gate_retirements.runId: ${runId.error.message}`);
+  if (!authorityDigest.ok) {
+    return parseErr(`spec_trace_wave_gate_retirements.authorityDigest: ${authorityDigest.error.message}`);
+  }
+  if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
+    return parseErr("spec_trace_wave_gate_retirements.wave must be an integer >= 1");
+  }
+  if (typeof record.revision !== "number" || !Number.isSafeInteger(record.revision) || record.revision < 0) {
+    return parseErr("spec_trace_wave_gate_retirements.revision must be a non-negative safe integer");
+  }
+  if (typeof record.runsRoot !== "string" || !isAbsolute(record.runsRoot) || resolve(record.runsRoot) !== record.runsRoot) {
+    return parseErr("spec_trace_wave_gate_retirements.runsRoot must be an absolute normalized path");
+  }
+  if (typeof record.reason !== "string" || record.reason.length === 0 ||
+      record.reason.length > 512 || record.reason.trim() !== record.reason) {
+    return parseErr("spec_trace_wave_gate_retirements.reason must be exact non-blank trimmed text of at most 512 characters");
+  }
+  let supersededBy: SpecTraceWaveGateRetirement["supersededBy"] = null;
+  if (record.supersededBy !== null) {
+    const parsedSupersededBy = parseOrchestrationRunId(record.supersededBy);
+    if (!parsedSupersededBy.ok) {
+      return parseErr(`spec_trace_wave_gate_retirements.supersededBy: ${parsedSupersededBy.error.message}`);
+    }
+    if (parsedSupersededBy.value === runId.value) {
+      return parseErr("spec_trace_wave_gate_retirements run cannot supersede itself");
+    }
+    supersededBy = parsedSupersededBy.value;
+  }
+  return parseOk(Object.freeze({
+    schemaVersion: 1,
+    kind: "spec-trace-wave-gate-retirement",
+    runId: runId.value,
+    wave: record.wave,
+    authorityDigest: authorityDigest.value,
+    revision: record.revision,
+    runsRoot: record.runsRoot,
+    reason: record.reason,
+    supersededBy,
+  }));
+}
+
+function parseSpecTraceWaveGateRetirements(
+  raw: unknown,
+): ParseResult<readonly SpecTraceWaveGateRetirement[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr("spec_trace_wave_gate_retirements must be an array when present");
+  const retirements: SpecTraceWaveGateRetirement[] = [];
+  for (let index = 0; index < raw.length; index += 1) {
+    const parsed = parseSpecTraceWaveGateRetirement(raw[index]);
+    if (!parsed.ok) return parseErr(`spec_trace_wave_gate_retirements[${index}]: ${parsed.error}`);
+    retirements.push(parsed.value);
+  }
+  const runIds = retirements.map(({ runId }) => runId);
+  if (new Set(runIds).size !== runIds.length) {
+    return parseErr("spec_trace_wave_gate_retirements contains duplicate retired run identities");
+  }
+  const authorityIdentities = retirements.map((entry) =>
+    `${entry.wave}:${entry.authorityDigest}:${entry.revision}:${entry.runsRoot}`);
+  if (new Set(authorityIdentities).size !== authorityIdentities.length) {
+    return parseErr("spec_trace_wave_gate_retirements contains colliding protected authority identities");
+  }
+  return parseOk(Object.freeze(retirements));
+}
+
 export const TASK_ID_PATTERN = /^T\d+$/;
 
 /** One task-identity grammar shared by load and operator-validation boundaries. */
@@ -711,13 +800,6 @@ function taskPacketError(
         seenPaths.add(parsed.value);
       }
     }
-  }
-  if (
-    t.spec_anchors !== undefined &&
-    (!Array.isArray(t.spec_anchors) ||
-      t.spec_anchors.some((anchor) => typeof anchor !== "string" || anchor.trim() === ""))
-  ) {
-    return `tasks[${index}] ("${id}"): spec_anchors must be an array of non-empty strings when present`;
   }
   if (t.plan_context !== undefined && typeof t.plan_context !== "string") {
     return `tasks[${index}] ("${id}"): plan_context must be a string when present`;
@@ -1078,6 +1160,8 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
   if (duplicateTaskId !== undefined) return parseErr(`duplicate task id: ${duplicateTaskId}`);
   const dependencyError = taskDependencyErrors(tasks as Record<string, unknown>[])[0];
   if (dependencyError !== undefined) return parseErr(dependencyError);
+  const trace = parseSpecTraceContract(obj.spec_trace_version, tasks);
+  if (!trace.ok) return parseErr(specTraceDiagnosticMessages(trace).join("; "));
   const waveGates = obj.wave_gates ?? {};
   if (typeof waveGates !== "object" || waveGates === null || Array.isArray(waveGates)) {
     return parseErr("wave_gates must be an object");
@@ -1118,8 +1202,25 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
   }
   const orphanedHistory = parseOrphanedWaveGateHistory(obj.orphaned_wave_gate_history);
   if (!orphanedHistory.ok) return parseErr(orphanedHistory.error);
+  const specTraceRetirements = parseSpecTraceWaveGateRetirements(obj.spec_trace_wave_gate_retirements);
+  if (!specTraceRetirements.ok) return parseErr(specTraceRetirements.error);
+  if ((specTraceRetirements.value?.length ?? 0) > 0 && obj.spec_trace_version !== 2) {
+    return parseErr("spec_trace_wave_gate_retirements requires spec_trace_version 2");
+  }
   if (activeWaveGate !== undefined && orphanedHistory.value?.some(({ runId }) => runId === activeWaveGate.runId)) {
     return parseErr(`active_wave_gate run ${activeWaveGate.runId} is already retired in orphaned_wave_gate_history`);
+  }
+  if (activeWaveGate !== undefined && specTraceRetirements.value?.some(({ runId }) => runId === activeWaveGate.runId)) {
+    return parseErr(`active_wave_gate run ${activeWaveGate.runId} is already retired for Spec trace v2`);
+  }
+  const specTraceRunIds = new Set(specTraceRetirements.value?.map(({ runId }) => runId) ?? []);
+  const completedCollision = waveGateHistory?.find(({ runId }) => specTraceRunIds.has(runId));
+  if (completedCollision !== undefined) {
+    return parseErr(`Spec trace retired run ${completedCollision.runId} collides with completed wave_gate_history`);
+  }
+  const orphanedCollision = orphanedHistory.value?.find(({ runId }) => specTraceRunIds.has(runId));
+  if (orphanedCollision !== undefined) {
+    return parseErr(`Spec trace retired run ${orphanedCollision.runId} collides with orphaned_wave_gate_history`);
   }
   if (activeWaveGate !== undefined) {
     const installedBy = orphanedHistory.value?.filter(({ replacementRunId }) => replacementRunId === activeWaveGate.runId) ?? [];
@@ -1161,6 +1262,9 @@ export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
     ...(activeWaveGate === undefined ? {} : { active_wave_gate: activeWaveGate }),
     ...(waveGateHistory === undefined ? {} : { wave_gate_history: waveGateHistory }),
     ...(orphanedHistory.value === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory.value }),
+    ...(specTraceRetirements.value === undefined
+      ? {}
+      : { spec_trace_wave_gate_retirements: specTraceRetirements.value }),
   } as unknown as TaskGraph);
 }
 

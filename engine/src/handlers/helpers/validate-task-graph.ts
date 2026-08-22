@@ -1,6 +1,6 @@
 /**
  * Validate task graph JSON schema.
- * Usage: bun cli.ts helper validate-task-graph [--minimal] [--fix] [--accept-data-loss]
+ * Usage: bun cli.ts helper validate-task-graph [--minimal] [--decompose-payload] [--fix] [--accept-data-loss]
  * Reads JSON from stdin or file arg.
  */
 
@@ -39,6 +39,7 @@ import {
 } from "../../state-manager";
 import { parseReviewPath } from "../../core/review-packet";
 import { type ValidationResult, ok, fail } from "./validation-result";
+import { parseSpecTraceContract, specTraceDiagnosticMessages } from "../../core/spec-trace";
 export type { ValidationResult } from "./validation-result";
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -220,13 +221,6 @@ export function validateFull(
     }
 
     // Optional field type checks
-    if (
-      task.spec_anchors !== undefined && task.spec_anchors !== null &&
-      (!Array.isArray(task.spec_anchors) ||
-        task.spec_anchors.some((anchor) => typeof anchor !== "string" || anchor.trim() === ""))
-    ) {
-      errors.push(`Task ${tid}: 'spec_anchors' must be an array of non-empty strings if present`);
-    }
     if (task.new_tests_required !== undefined && typeof task.new_tests_required !== "boolean") {
       errors.push(`Task ${tid}: 'new_tests_required' must be boolean if present`);
     }
@@ -238,6 +232,13 @@ export function validateFull(
       }
     }
   }
+
+  const trace = parseSpecTraceContract(
+    json.spec_trace_version,
+    tasks,
+    { requireV2: scope === "decompose-payload" },
+  );
+  errors.push(...specTraceDiagnosticMessages(trace));
 
   // Check wave contiguity — waves must be consecutive (1,2,3 not 1,3,5)
   const waves = [...new Set(validTaskRecords.map((task) => task.wave as number))]
@@ -656,12 +657,13 @@ function tasksOf(json: Record<string, unknown>): Record<string, unknown>[] {
 
 const handler: HookHandler = async (stdin, args) => {
   const isMinimal = args.includes("--minimal");
+  const scope: ValidationScope = args.includes("--decompose-payload") ? "decompose-payload" : "state-file";
   const isFix = args.includes("--fix");
   const acceptsDataLoss = args.includes("--accept-data-loss");
 
   // Read JSON from stdin or file arg
   const fileArg = args.find((a) =>
-    a !== "--minimal" && a !== "--fix" && a !== "--accept-data-loss" && a !== "-"
+    a !== "--minimal" && a !== "--decompose-payload" && a !== "--fix" && a !== "--accept-data-loss" && a !== "-"
   );
   let raw: string;
 
@@ -730,7 +732,7 @@ const handler: HookHandler = async (stdin, args) => {
     // is worth saying; one that did is worth not saying.
     const after = isMinimal
       ? validateMinimal(JSON.parse(repair.json))
-      : validateFull(JSON.parse(repair.json));
+      : validateFull(JSON.parse(repair.json), scope);
     if (!after.ok) {
       process.stderr.write(`Fixed structural defaults; ${after.errors.length} issues remain\n`);
       for (const err of after.errors) process.stderr.write(`  - ${err}\n`);
@@ -748,7 +750,7 @@ const handler: HookHandler = async (stdin, args) => {
     return { kind: "passthrough" };
   }
 
-  const result = isMinimal ? validateMinimal(json) : validateFull(json);
+  const result = isMinimal ? validateMinimal(json) : validateFull(json, scope);
 
   if (!result.ok) {
     return {

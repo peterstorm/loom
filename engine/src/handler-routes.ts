@@ -20,7 +20,7 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
   "subagent-start": new Set(["mark-subagent-active"]),
   "session-start": new Set(["cleanup-stale-subagents", "resume-after-clear"]),
   "helper": new Set([
-    "complete-wave-gate", "populate-task-graph", "validate-task-graph", "repair-task-graph",
+    "complete-wave-gate", "populate-task-graph", "upgrade-spec-trace", "validate-task-graph", "repair-task-graph",
     "store-review-findings", "store-spec-check", "mark-tests-passed",
     "suggest-spec-anchors", "extract-task-id", "store-test-evidence",
     "reconcile-implementation-proof", "set-phase", "cleanup-state", "lint-wave-gate", "validate-lint-rules",
@@ -78,6 +78,7 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "session-start/cleanup-stale-subagents",
   "helper/complete-wave-gate",
   "helper/populate-task-graph",
+  "helper/upgrade-spec-trace",
   "helper/repair-task-graph",
   "helper/store-review-findings",
   "helper/store-spec-check",
