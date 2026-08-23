@@ -17,7 +17,7 @@ import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-
 import { SUBAGENT_DIR } from "../../../src/config";
 import { parseEpoch } from "../../../src/machine";
 import type { EvidenceRecord } from "../../../src/machine";
-import type { AgentRequestAuthority } from "../../../src/core/orchestration-contract";
+import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { openRunDirectory } from "../../../src/orchestration/run-directory-handle";
 import { reportSummary } from "../../machine/report-summary";
 
@@ -110,22 +110,7 @@ describe("request-bound capture gates legacy dispatch", () => {
     mkdirSync(runDir, { recursive: true });
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
-    const request = {
-      runId: "run.dispatch-capture",
-      requestId: "request:reviewer:1",
-      slotId: "slot-1",
-      program: "wave-gate",
-      role: "code-reviewer",
-      attempt: 1,
-      modelProfile: "general-review",
-      harnessBinding: {
-        pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-        claude: { harness: "claude-code", model: "sonnet" },
-      },
-      requiredSkill: null,
-      contextDigest: "a".repeat(64),
-      outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
-    } as AgentRequestAuthority;
+    const request = agentRequestAuthority("run.dispatch-capture");
     expect((await opened.value.reserveRequest(request)).ok).toBe(true);
     expect((await opened.value.recordHarnessCorrelator({
       schemaVersion: 1,

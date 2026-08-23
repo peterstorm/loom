@@ -4,7 +4,7 @@ import { taskGraphPath } from "../../config";
 import { newWaveGate, reconcileWaveBlock } from "../../core/wave-gate-model";
 import { observeReviewedWorkspace } from "./reviewed-workspace";
 import { openRunDirectory } from "../../orchestration/run-directory-handle";
-import { handleWaveReviewContext, type WaveReviewContextAuthority } from "./programs/wave-gate";
+import { handleWaveReviewContext, type WaveReviewContextAuthority } from "./programs";
 import type { HookHandler, Task, TaskGraph, WaveReopeningAudit } from "../../types";
 
 const USAGE = "Usage: helper reopen-completed-wave --runs-root <root> < exact-reopening.json";

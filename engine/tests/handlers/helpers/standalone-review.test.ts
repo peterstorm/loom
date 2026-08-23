@@ -100,7 +100,7 @@ describe("standalone review helper and refutation adapter", () => {
       explicitScope: ["src/x.ts"],
       changedPaths: {
         unstaged: ["src/x.ts"], staged: [], committed: [],
-        base_revision: null, head_revision: "HEAD",
+        base_revision: null, head_revision: "0123456789abcdef0123456789abcdef01234567",
       },
       reviewMetadata: {
         requested_kinds: ["comments"], docs_only: false, source_or_test_changed: false,

@@ -41,6 +41,7 @@ function binding(base: string, suffix: string, requests: readonly string[]): Ses
   return {
     ...identity.value,
     requestIds: requests.map(requestId),
+    resultDigest: null,
   };
 }
 
@@ -66,6 +67,50 @@ describe("Pi session run bindings", () => {
       .toEqual(["request:first:1", "request:first:2"]);
     expect(read.value.find(({ runId }) => runId === second.runId)?.requestIds)
       .toEqual(["request:second:1"]);
+  });
+
+  it("serializes concurrent publication without losing run or request authority", async () => {
+    const base = root();
+    const directory = join(base, "bindings");
+    mkdirSync(directory);
+    const first = binding(base, "concurrent-first", ["request:concurrent:first:1"]);
+    const second = binding(base, "concurrent-second", ["request:concurrent:second:1"]);
+
+    const published = await Promise.all([
+      registerSessionRunBinding(directory, sessionId, first),
+      registerSessionRunBinding(directory, sessionId, {
+        ...first,
+        requestIds: [requestId("request:concurrent:first:2")],
+      }),
+      registerSessionRunBinding(directory, sessionId, second),
+    ]);
+
+    expect(published.every(({ ok }) => ok)).toBe(true);
+    const read = readSessionRunBindings(directory, sessionId);
+    expect(read.ok).toBe(true);
+    if (!read.ok) return;
+    expect(read.value).toHaveLength(2);
+    expect(read.value.find(({ runId }) => runId === first.runId)?.requestIds)
+      .toEqual(["request:concurrent:first:1", "request:concurrent:first:2"]);
+    expect(read.value.find(({ runId }) => runId === second.runId)?.requestIds)
+      .toEqual(["request:concurrent:second:1"]);
+  });
+
+  it("records one immutable completed-result digest without losing request authority", async () => {
+    const base = root();
+    const directory = join(base, "bindings");
+    const issued = binding(base, "completed", ["request:completed:1"]);
+    expect((await registerSessionRunBinding(directory, sessionId, issued)).ok).toBe(true);
+    const digest = "a".repeat(64);
+    expect((await registerSessionRunBinding(directory, sessionId, { ...issued, resultDigest: digest })).ok).toBe(true);
+    expect(readSessionRunBindings(directory, sessionId)).toMatchObject({
+      ok: true,
+      value: [{ requestIds: ["request:completed:1"], resultDigest: digest }],
+    });
+    expect((await registerSessionRunBinding(directory, sessionId, {
+      ...issued,
+      resultDigest: "b".repeat(64),
+    }))).toMatchObject({ ok: false, message: expect.stringContaining("conflicts") });
   });
 
   it("reports failure to remove a staged registry after publication fails", async () => {
@@ -115,7 +160,7 @@ describe("Pi session run bindings", () => {
     const parsed = parseSessionRunBindingRegistry({
       schemaVersion: 1, kind: "session-run-bindings", harness: "pi", sessionId,
       bindings: [{
-        runId: "run.nested", runsRoot, runDirectory: nested, requestIds: ["request:nested:1"],
+        runId: "run.nested", runsRoot, runDirectory: nested, requestIds: ["request:nested:1"], resultDigest: null,
       }],
     }, sessionId);
 

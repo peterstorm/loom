@@ -19,16 +19,10 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import validatePhaseOrder from "../../../src/handlers/pre-tool-use/validate-phase-order";
-import validateTaskExecution from "../../../src/handlers/pre-tool-use/validate-task-execution";
-import validateTemplateSubstitution from "../../../src/handlers/pre-tool-use/validate-template-substitution";
-import validateAgentModel from "../../../src/handlers/pre-tool-use/validate-agent-model";
-import validateAgentSkill from "../../../src/handlers/pre-tool-use/validate-agent-skill";
+import { join, resolve } from "node:path";
 import { SUBAGENT_SPAWN_TOOLS } from "../../../src/core/tool-vocabulary";
-import { TASK_GRAPH_PATH } from "../../../src/config";
 import type { HookHandler } from "../../../src/types";
 
 const REPO_ROOT = resolve(__dirname, "../../../..");
@@ -48,6 +42,10 @@ const TASK_GRAPH = JSON.stringify({
   wave_gates: {},
 });
 
+const lazyHandler = (
+  load: () => Promise<Readonly<{ default: HookHandler }>>,
+): HookHandler => async (stdin, args) => (await load()).default(stdin, args);
+
 /** One spawn payload per gate, each chosen so a LIVE gate must block it. */
 const GATES: ReadonlyArray<{
   readonly name: string;
@@ -59,25 +57,25 @@ const GATES: ReadonlyArray<{
 }> = [
   {
     name: "validate-phase-order",
-    handler: validatePhaseOrder,
+    handler: lazyHandler(() => import("../../../src/handlers/pre-tool-use/validate-phase-order")),
     toolInput: { subagent_type: "rogue-agent", prompt: "Run tests" },
     expect: "Unrecognized agent type",
   },
   {
     name: "validate-task-execution",
-    handler: validateTaskExecution,
+    handler: lazyHandler(() => import("../../../src/handlers/pre-tool-use/validate-task-execution")),
     toolInput: { subagent_type: "code-implementer-agent", prompt: "Task ID: T9", description: "wave-2 task" },
     expect: "current wave is 1",
   },
   {
     name: "validate-template-substitution",
-    handler: validateTemplateSubstitution,
+    handler: lazyHandler(() => import("../../../src/handlers/pre-tool-use/validate-template-substitution")),
     toolInput: { prompt: "Implement the feature at {spec_file_path}" },
     expect: "unsubstituted template variables",
   },
   {
     name: "validate-agent-model",
-    handler: validateAgentModel,
+    handler: lazyHandler(() => import("../../../src/handlers/pre-tool-use/validate-agent-model")),
     toolInput: { subagent_type: "loom:code-implementer-agent", prompt: "Implement T9" },
     expect: "model routing cannot prove a binding",
     // The pi path (subagent) and the claude-code path (Task/Agent) report
@@ -89,16 +87,17 @@ const GATES: ReadonlyArray<{
   },
   {
     name: "validate-agent-skill",
-    handler: validateAgentSkill,
+    handler: lazyHandler(() => import("../../../src/handlers/pre-tool-use/validate-agent-skill")),
     toolInput: { subagent_type: "loom:arch-designer-agent", prompt: "Design one panel candidate." },
     expect: "architecture-tech-lead",
   },
 ];
 
 describe("spawn gates honour every SUBAGENT_SPAWN_TOOLS name", () => {
-  let createdGraph = false;
   let previousRoot: string | undefined;
   let previousHome: string | undefined;
+  let previousPiDir: string | undefined;
+  let previousStatePath: string | undefined;
   let fakeHome = "";
 
   beforeAll(() => {
@@ -118,11 +117,24 @@ describe("spawn gates honour every SUBAGENT_SPAWN_TOOLS name", () => {
     );
     process.env.HOME = fakeHome;
 
-    createdGraph = !existsSync(TASK_GRAPH_PATH);
-    if (createdGraph) {
-      mkdirSync(dirname(TASK_GRAPH_PATH), { recursive: true });
-      writeFileSync(TASK_GRAPH_PATH, TASK_GRAPH);
-    }
+    // The same gate's PI branch (tool_name "subagent") resolves agent files
+    // through PI_CODING_AGENT_DIR before falling back to $HOME/.pi/agent
+    // (validate-agent-model's piAgentPath). An ambient pi agent session
+    // inherits a real PI_CODING_AGENT_DIR with a real synced render, which
+    // flips the subagent case to a different (also blocking) contract
+    // message and fails the assertion. Pin the variable to the empty fake
+    // agent dir so piAgentPath deterministically finds no render, exactly as
+    // the HOME fake arranges for the claude-code branch.
+    previousPiDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = join(fakeHome, ".pi", "agent");
+    mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
+
+    // Resolve every lazily loaded gate against this isolated graph. This keeps
+    // the matrix live even inside an active Loom/Pi session without reading or
+    // replacing that session's protected graph.
+    previousStatePath = process.env.LOOM_STATE_PATH;
+    process.env.LOOM_STATE_PATH = join(fakeHome, "active_task_graph.json");
+    writeFileSync(process.env.LOOM_STATE_PATH, TASK_GRAPH);
   });
 
   afterAll(() => {
@@ -130,14 +142,16 @@ describe("spawn gates honour every SUBAGENT_SPAWN_TOOLS name", () => {
     else process.env.CLAUDE_PLUGIN_ROOT = previousRoot;
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
+    if (previousPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousPiDir;
+    if (previousStatePath === undefined) delete process.env.LOOM_STATE_PATH;
+    else process.env.LOOM_STATE_PATH = previousStatePath;
     rmSync(fakeHome, { recursive: true, force: true });
-    if (createdGraph) rmSync(TASK_GRAPH_PATH, { force: true });
   });
 
   for (const gate of GATES) {
     for (const tool of SUBAGENT_SPAWN_TOOLS) {
       it(`${gate.name} blocks a "${tool}" spawn`, async () => {
-        if (!createdGraph) return; // a real orchestration is in flight; do not read its graph
         const result = await gate.handler(
           JSON.stringify({ tool_name: tool, tool_input: gate.toolInput }),
           [],
@@ -149,7 +163,6 @@ describe("spawn gates honour every SUBAGENT_SPAWN_TOOLS name", () => {
     }
 
     it(`${gate.name} ignores a tool that spawns nothing`, async () => {
-      if (!createdGraph) return;
       const result = await gate.handler(
         JSON.stringify({ tool_name: "Read", tool_input: gate.toolInput }),
         [],

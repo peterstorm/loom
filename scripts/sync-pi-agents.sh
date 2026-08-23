@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 # Render Loom's shared agent definitions into Pi-specific definitions with
-# explicit OpenAI provider/model/thinking bindings. A byte-copy would preserve
+# explicit provider/model/thinking bindings. A byte-copy would preserve
 # Claude aliases (opus/sonnet/haiku), and omitting model would inherit Pi's
 # expensive orchestrator model — both are forbidden by the LLM Profile policy.
+#
+# By default every agent carries its declared (pinned) binding. When the
+# environment names a parent model (PI_PROVIDER/PI_MODEL, as set inside a Pi
+# session) and model-routing.json authorizes it — e.g. a local desktop-vllm
+# parent — the render instead binds agents to the parent model, so child
+# reviewers/refuters inherit the session's local model instead of the pinned
+# cloud one. A malformed routing config degrades to the declared bindings.
 #
 # Usage: ./scripts/sync-pi-agents.sh
 

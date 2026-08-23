@@ -929,7 +929,7 @@ export function findingIdCollisionError(
 }
 
 // ---------------------------------------------------------------------------
-// The two writers that must keep `findings` and its derived views in lockstep
+// The three writers that must keep `findings` and its derived views in lockstep
 // ---------------------------------------------------------------------------
 
 // `NonEmptyRefutations` is defined in `types` and re-exported at the top of

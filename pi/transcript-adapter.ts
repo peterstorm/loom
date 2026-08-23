@@ -255,16 +255,10 @@ export interface PiStructuredTestDiagnostics {
  * One walk over Pi's messages that pairs each classified test toolCall with
  * its toolResult and attributes an exit code to it.
  *
- * `piStructuredTestDiagnostics` and `piStructuredTestResult` each carried a
- * private copy of this walk — the same toolCall map keyed by tool-call id, the
- * same `attributeExitForStructuredEvidence` pairing, the same text join. They
- * are supposed to explain the SAME evidence, one as a verdict and one as a
- * diagnosis, so a divergence between the copies would make the diagnosis
- * describe a run the verdict never saw.
- *
- * Emitted as events rather than a return value because the two consumers
- * accumulate different things: the diagnostic counts classifications and
- * refusals, the verdict only cares about paired results.
+ * Diagnostics and verdicts consume this same event stream, so both describe
+ * the same tool-call pairing and exit attribution. It is emitted as events
+ * rather than one aggregate return value because diagnostics count
+ * classifications and refusals while the verdict only needs paired results.
  */
 type TestPairEvent =
   | Readonly<{ kind: "classified"; command: string }>

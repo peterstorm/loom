@@ -328,6 +328,28 @@ describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () =>
     expect(written.join("")).toContain("falling through to block");
   });
 
+  it("an unstatable roster path returns null AND announces the cause on stderr", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loom-roster-eloop-"));
+    dirs.push(dir);
+    process.env.LOOM_SUBAGENT_DIR = dir;
+    const session = parseSessionId(`roster-eloop-${process.pid}`)!;
+    const active = join(dir, `${session}.active`);
+    symlinkSync(active, active);
+
+    const written: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    try {
+      expect(activeRosterProbe(session)).toBeNull();
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(written.join("")).toContain("block-direct-edits: cannot check");
+    expect(written.join("")).toMatch(/ELOOP|symbolic link/i);
+  });
+
   it("null from the probe makes the gate fail CLOSED", () => {
     const session = parseSessionId(`roster-null-${process.pid}`)!;
     expect(shouldBlockDirectEdit("Edit", session, orchestrating, () => null).kind).toBe("block");

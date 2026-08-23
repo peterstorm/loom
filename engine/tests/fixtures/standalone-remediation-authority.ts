@@ -304,7 +304,7 @@ export function standaloneFixture(
     runId: "run.remediation-1",
     explicitScope: scope,
     changedPaths: {
-      unstaged: scope, staged: [], committed: [], base_revision: null, head_revision: "HEAD",
+      unstaged: scope, staged: [], committed: [], base_revision: null, head_revision: "0123456789abcdef0123456789abcdef01234567",
     },
     reviewMetadata: {
       requested_kinds: ["types"], docs_only: false, source_or_test_changed: false,

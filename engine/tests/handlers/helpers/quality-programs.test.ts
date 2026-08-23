@@ -6,7 +6,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -21,6 +23,13 @@ const CLI = join(ENGINE, "src/cli.ts");
 const cleanup: string[] = [];
 afterEach(() => { for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
+const PROGRAM_VOLUMES = join(ENGINE, "src", "handlers", "helpers", "programs");
+const productionTypeScriptFiles = (root: string): readonly string[] => readdirSync(root).flatMap((entry) => {
+  const path = join(root, entry);
+  if (statSync(path).isDirectory()) return productionTypeScriptFiles(path);
+  return entry.endsWith(".ts") || entry.endsWith(".tsx") ? [path] : [];
+});
+
 function cli(args: string[], stdin = "", env: Record<string, string> = {}): string {
   return execFileSync("bun", [CLI, ...args], {
     cwd: ROOT,
@@ -30,18 +39,39 @@ function cli(args: string[], stdin = "", env: Record<string, string> = {}): stri
   });
 }
 
+/**
+ * Hermetic env for CLI children that render Pi agents: no parent model in the
+ * environment and no routing config on disk. Without it, a test launched from
+ * inside a Pi session inherits PI_PROVIDER/PI_MODEL plus the machine's
+ * model-routing.json, and the render routes to the local model — making the
+ * asserted bindings machine-dependent.
+ */
+function routingIsolatedEnv(piAgentDir?: string): Record<string, string> {
+  const home = mkdtempSync(join(tmpdir(), "loom-pi-home-"));
+  cleanup.push(home);
+  return {
+    PI_PROVIDER: "",
+    PI_MODEL: "",
+    HOME: home,
+    PI_CODING_AGENT_DIR: piAgentDir ?? home,
+  };
+}
+
 describe("quality-program helper boundaries", () => {
   it("keeps the program-driver Public Surface limited to parent caller operations", async () => {
     const surface = await import("../../../src/handlers/helpers/programs");
 
     expect(Object.keys(surface).sort()).toEqual([
       "applyWaveFacadeSubmission",
+      "handleWaveReviewContext",
       "parseRegisteredFacadeProgram",
       "parseRemediationStartInput",
       "parseStandaloneStartInput",
       "parseWaveGateStartInput",
+      "readStandaloneReviewedSource",
       "recoverOrphanedWaveGateFacade",
       "renderSpawnTask",
+      "replayStandaloneResultFromEvidence",
       "restartWaveGateFacade",
       "resumeRemediationFacade",
       "resumeStandaloneFacade",
@@ -52,6 +82,18 @@ describe("quality-program helper boundaries", () => {
       "waveAdvisoryDecisionRequestId",
       "waveGateDecisionMismatch",
     ]);
+  });
+
+  it("keeps production callers on the curated program-driver Public Surface", () => {
+    const productionFiles = [join(ENGINE, "src"), join(ROOT, "pi"), join(ROOT, "hooks"), join(ROOT, "scripts")]
+      .flatMap(productionTypeScriptFiles)
+      .filter((path) => !path.startsWith(PROGRAM_VOLUMES));
+    const owningVolumeImport = /from\s+["'][^"']*\/programs\/(?:helpers|standalone|wave-gate|remediation)["']/;
+    const offenders = productionFiles
+      .filter((path) => owningVolumeImport.test(readFileSync(path, "utf-8")))
+      .map((path) => relative(ROOT, path));
+
+    expect(offenders).toEqual([]);
   });
 
   it("validates source profiles and renders exact Pi OpenAI models", () => {
@@ -69,7 +111,7 @@ describe("quality-program helper boundaries", () => {
       "--agents-dir", "agents",
       "--package-root", ROOT,
       "--output", output,
-    ]);
+    ], "", routingIsolatedEnv());
 
     expect(readFileSync(symlinkTarget, "utf-8")).toBe("source must remain unchanged\n");
     expect(lstatSync(reviewerOutput).isSymbolicLink()).toBe(false);
@@ -90,7 +132,7 @@ describe("quality-program helper boundaries", () => {
     cleanup.push(piRoot);
     execFileSync("bash", [join(ROOT, "scripts", "sync-pi-agents.sh")], {
       cwd: ROOT,
-      env: { ...process.env, PI_CODING_AGENT_DIR: piRoot },
+      env: { ...process.env, PI_CODING_AGENT_DIR: piRoot, ...routingIsolatedEnv(piRoot) },
       encoding: "utf-8",
     });
     const reviewer = readFileSync(join(piRoot, "agents", "code-reviewer.md"), "utf-8");

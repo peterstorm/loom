@@ -187,8 +187,8 @@ export function issuePiWriteGrant(input: {
       if (scopeIsCwdOrAncestor(normalized, input.cwd)) {
         throw new Error(`Pi write grant scope dir ${normalized} is the spawn cwd or an ancestor; refusing scoped grant`);
       }
-      // Actually deduplicate. Both branches used to return `normalized`, so
-      // `seen` was populated and never filtered anything.
+      // Deduplicate after normalization so syntactically different inputs that
+      // resolve to the same capability scope produce one canonical entry.
       if (seen.has(normalized)) continue;
       seen.add(normalized);
       accepted.push(normalized);

@@ -36,6 +36,7 @@ import { stripNamespace } from "../../utils/strip-namespace";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
 import { resolveClaudeAgentDefinitionPath } from "../../utils/agent-definition";
 import { validatePiAgentDefinitionFile } from "../../utils/render-pi-agent";
+import { buildPiRoutingContext } from "../../utils/model-routing-context";
 
 type PiAgentDefinitionLookup =
   | Readonly<{ kind: "found"; path: string }>
@@ -136,7 +137,16 @@ const handler: HookHandler = async (stdin) => {
         message: `BLOCKED: cannot inspect Pi agent definition '${agent}' (${definition.path}): ${definition.error}`,
       };
     }
-    const validation = validatePiAgentDefinitionFile(definition.path, agent, LOOM_PACKAGE_ROOT);
+    // The render may be the declared binding or a routing-authorized inherit of
+    // the (local) parent model; validatePiAgentDefinitionFile accepts exactly
+    // those two Loom-computed renders for the current routing context.
+    const routing = buildPiRoutingContext();
+    const validation = validatePiAgentDefinitionFile(
+      definition.path,
+      agent,
+      LOOM_PACKAGE_ROOT,
+      routing.context,
+    );
     return validation.ok
       ? { kind: "allow" }
       : {
@@ -300,10 +310,6 @@ function grandfatheredModelAuthorization(
         authorized: false,
         diagnostic: `grandfathered model authority issued ${JSON.stringify(lookup.model)}, not ${JSON.stringify(requestedModel)}`,
       };
-}
-
-export function spawnModelIsEngineAuthorized(input: PreToolUseInput, requestedModel: string): boolean {
-  return grandfatheredModelAuthorization(input, requestedModel).authorized;
 }
 
 export default handler;

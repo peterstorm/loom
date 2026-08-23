@@ -1,8 +1,8 @@
 /**
  * Loom Pi Extension
  *
- * Bridges loom's orchestration engine to pi's extension API.
- * Delegates to engine/src/core/ for all business logic.
+ * Bridges Loom's orchestration engine to Pi's extension API.
+ * Reuses engine core decisions while owning Pi-specific adapter and handler policy.
  */
 
 import { createHash } from "node:crypto";
@@ -63,7 +63,7 @@ import {
 // functions above it: it reads the review-agent roster, and `core/review-output`
 // declares itself free of config so its parse/merge rules stay pure. Importing it
 // from the wrong module is a LINK-time ESM failure that takes the whole extension
-// with it — every hook below, not just review capture. `tests/pi-imports.test.ts`
+// with it — every hook below, not just review capture. `engine/tests/pi-imports.test.ts`
 // resolves every engine import in this file against the real exports so the next
 // move of a shared symbol fails a test instead of silently disarming Pi.
 import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
@@ -94,13 +94,22 @@ import {
 } from "../engine/src/orchestration/harness-capture-runtime";
 import { openRunDirectory, type RunDirHandle } from "../engine/src/orchestration/run-directory-handle";
 import {
+  parseRegisteredFacadeProgram,
+  readStandaloneReviewedSource,
+  renderSpawnTask,
+  replayStandaloneResultFromEvidence,
+  type StandaloneReviewedSource,
+} from "../engine/src/handlers/helpers/programs";
+import { readRunBytesNoFollow } from "../engine/src/orchestration/no-follow-fs";
+import {
   readSessionRunBindings,
   type SessionRunBinding,
 } from "../engine/src/orchestration/session-run-bindings";
-import { captureKey } from "../engine/src/core/harness-capture";
+import { captureKey, type CaptureKey } from "../engine/src/core/harness-capture";
 import type { AgentRequestAuthority } from "../engine/src/core/orchestration-contract";
 import { materializePiResources } from "./resources";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
+import { buildPiRoutingContext } from "../engine/src/utils/model-routing-context";
 import {
   compareAttemptBaseline,
 } from "../engine/src/utils/artifact-baseline";
@@ -141,6 +150,40 @@ const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "
 const PI_RESOURCE_CACHE = join(PI_AGENT_DIR, "cache", "loom-resources");
 const isPiSpawnTool = (toolName: string): boolean =>
   toolName === "subagent" || toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL;
+
+const LOOM_REVIEW_AUTHORITY_SYMBOL = Symbol.for("@peterstorm/loom/review-authority/v1");
+
+type TrustedReviewCapture = Readonly<{
+  requestId: string;
+  slotId: string;
+  attempt: 1 | 2;
+  role: string;
+  contextDigest: string;
+  digest: string;
+  byteLength: number;
+}>;
+
+type TrustedReviewRun = {
+  binding: SessionRunBinding;
+  captures: Map<CaptureKey, TrustedReviewCapture>;
+};
+
+type LoomReviewAuthorityReceipt = Readonly<{
+  schemaVersion: 1;
+  kind: "loom-review-authority-receipt";
+  sessionId: string;
+  runId: string;
+  runsRoot: string;
+  runDirectory: string;
+  requestIds: readonly string[];
+  resultDigest: string;
+  reviewedSource: StandaloneReviewedSource;
+}>;
+
+const trustedReviewRuns = new Map<string, Map<string, TrustedReviewRun>>();
+const trustedRunIdentity = ({ runsRoot, runDirectory }: Pick<SessionRunBinding, "runsRoot" | "runDirectory">): string =>
+  `${runsRoot}\0${runDirectory}`;
+const trustedCaptureIdentity = (slotId: string, attempt: 1 | 2): CaptureKey => captureKey(slotId, attempt);
 
 /**
  * Fail-closed path existence check. Returns `true` (assume active) for any
@@ -213,19 +256,13 @@ export function piSpawnCwd(raw: unknown, index: number, defaultCwd: string): str
   return resolve(defaultCwd, cwd);
 }
 
-/**
- * The `command` a Pi bash call carries, or `""`.
- *
- * The harness types a tool call's `input` as an opaque record, so reading
- * `.command` off it is an unchecked assumption about a value that arrives from
- * outside. An absent or non-string command must read as the empty string (which
- * the guard judges as an empty command line) rather than as `undefined` flowing
- * into a function that expects text.
- */
-export function piBashCommand(raw: unknown): string {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return "";
+/** The string command carried by a well-formed Pi bash call. Malformed
+ * external input remains distinguishable so an armed state-file guard can fail
+ * closed instead of treating input-shape drift as an allowed empty command. */
+export function piBashCommand(raw: unknown): string | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
   const command = (raw as Record<string, unknown>).command;
-  return typeof command === "string" ? command : "";
+  return typeof command === "string" ? command : null;
 }
 
 /** Extract the file path(s) a Pi Edit/Write/multi_edit call targets. Returns
@@ -283,6 +320,37 @@ function orchestrationMarkers(task: string, item: string): PiOrchestrationMarker
   return Object.freeze({ requestId: requestIds[0]!, contextDigest: contextDigests[0]! });
 }
 
+function rememberTrustedReviewCapture(
+  sessionId: string,
+  binding: SessionRunBinding,
+  role: string,
+  task: string,
+  outcome: Extract<CaptureOutcome, { kind: "captured" }>,
+): void {
+  const markers = orchestrationMarkers(task, `captured ${outcome.receipt.requestId}`);
+  if (markers === null || markers.requestId !== outcome.receipt.requestId) {
+    throw new Error(`captured request ${outcome.receipt.requestId} is missing its exact task authority markers`);
+  }
+  const sessionRuns = trustedReviewRuns.get(sessionId) ?? new Map<string, TrustedReviewRun>();
+  trustedReviewRuns.set(sessionId, sessionRuns);
+  const identity = trustedRunIdentity(binding);
+  const run = sessionRuns.get(identity) ?? { binding, captures: new Map<CaptureKey, TrustedReviewCapture>() };
+  run.binding = binding;
+  run.captures.set(
+    trustedCaptureIdentity(outcome.receipt.slotId, outcome.receipt.attempt),
+    Object.freeze({
+      requestId: outcome.receipt.requestId,
+      slotId: outcome.receipt.slotId,
+      attempt: outcome.receipt.attempt,
+      role,
+      contextDigest: markers.contextDigest,
+      digest: outcome.receipt.digest,
+      byteLength: outcome.receipt.byteLength,
+    }),
+  );
+  sessionRuns.set(identity, run);
+}
+
 function environmentRunBinding(): SessionRunBinding | null {
   const runsRoot = process.env[RUNS_ROOT_ENV];
   const runDirectory = process.env[RUN_DIR_ENV];
@@ -297,6 +365,7 @@ function environmentRunBinding(): SessionRunBinding | null {
   return Object.freeze({
     ...opened.value.identity,
     requestIds: Object.freeze(issued.value.map(({ requestId }) => requestId)),
+    resultDigest: null,
   });
 }
 
@@ -346,6 +415,7 @@ export async function recordPiSpawnCorrelators(
   items: readonly Readonly<{ agent: string; task: string }>[],
   rosterIds: readonly string[],
   rawSessionId: string,
+  rawInput: unknown,
 ): Promise<SessionRunBinding | null> {
   if (items.length !== rosterIds.length) throw new Error("Pi correlator roster length does not match spawn batch");
   const parsedMarkers = items.map((item, index) =>
@@ -367,6 +437,7 @@ export async function recordPiSpawnCorrelators(
     (request) => !captured.value.has(captureKey(request.slotId, request.attempt)),
   );
   const consumed = new Set<string>();
+  const canonicalTasks: string[] = [];
 
   for (const [index, item] of items.entries()) {
     const markers = parsedMarkers[index]!;
@@ -393,8 +464,15 @@ export async function recordPiSpawnCorrelators(
       attempt: request.attempt,
     });
     if (!recorded.ok) throw new Error(recorded.error.message);
+    canonicalTasks[index] = renderSpawnTask(
+      opened.value,
+      request,
+      "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required result.",
+      { standalone: hasStandaloneReviewContext(item.task) },
+    );
     consumed.add(request.requestId);
   }
+  for (const [index, task] of canonicalTasks.entries()) replacePiSpawnTask(rawInput, index, task);
   return runBinding;
 }
 
@@ -698,8 +776,118 @@ const emptyParentSessionRuntime = (): PiParentSessionRuntime => ({
   taskGraphPointerOwned: false,
 });
 
+export function standaloneCompletionCheckpointProblem(checkpoint: string): string | null {
+  try {
+    const parsed = JSON.parse(checkpoint) as { kind?: unknown };
+    return parsed.kind === "done" ? null : "review is not done";
+  } catch (error) {
+    return `completion checkpoint is invalid JSON: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+async function verifyTrustedStandaloneReview(input: Readonly<{ cwd: string; sessionId: string }>): Promise<unknown> {
+  const expectedRoot = resolve(input.cwd, ".claude/reviews/review-and-fix-runs");
+  const runs = trustedReviewRuns.get(input.sessionId);
+  if (runs === undefined) throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId}`);
+
+  const receipts: LoomReviewAuthorityReceipt[] = [];
+  const rejections: string[] = [];
+  for (const run of runs.values()) {
+    if (resolve(run.binding.runsRoot) !== expectedRoot) continue;
+    const opened = openRunDirectory(run.binding.runsRoot, run.binding.runDirectory);
+    if (!opened.ok) { rejections.push(`${run.binding.runId}: ${opened.error.message}`); continue; }
+    const programRaw = opened.value.readProgramRegistration();
+    if (!programRaw.ok || programRaw.value === null) {
+      rejections.push(`${run.binding.runId}: ${programRaw.ok ? "registered program is missing" : programRaw.error.message}`);
+      continue;
+    }
+    const program = parseRegisteredFacadeProgram(programRaw.value);
+    if (program.kind !== "registered" || program.program.kind !== "standalone-review") {
+      rejections.push(`${run.binding.runId}: registered program is not a valid Standalone Review`);
+      continue;
+    }
+
+    const issued = opened.value.readIssuedRequests();
+    const captured = opened.value.readCapturedAttempts();
+    if (!issued.ok) { rejections.push(`${run.binding.runId}: ${issued.error.message}`); continue; }
+    if (!captured.ok) { rejections.push(`${run.binding.runId}: ${captured.error.message}`); continue; }
+    let captureProblem: string | null = null;
+    for (const key of captured.value) {
+      const authority = issued.value.find((request) => trustedCaptureIdentity(request.slotId, request.attempt) === key);
+      const trusted = run.captures.get(key);
+      if (authority === undefined || trusted === undefined || authority.requestId !== trusted.requestId ||
+          authority.role !== trusted.role || authority.contextDigest !== trusted.contextDigest) {
+        captureProblem = `captured slot ${key} was not witnessed with identical request authority`;
+        break;
+      }
+      const bytes = opened.value.readTranscriptBytes(authority);
+      if (!bytes.ok) { captureProblem = bytes.error.message; break; }
+      const digest = createHash("sha256").update(bytes.value).digest("hex");
+      if (digest !== trusted.digest || bytes.value.byteLength !== trusted.byteLength) {
+        captureProblem = `captured slot ${key} changed after Pi witnessed it`;
+        break;
+      }
+    }
+    if (captureProblem === null) {
+      for (const key of run.captures.keys()) {
+        if (!captured.value.has(key)) {
+          captureProblem = `witnessed slot ${key} is absent from the Run Directory`;
+          break;
+        }
+      }
+    }
+    if (captureProblem !== null || run.captures.size === 0) {
+      rejections.push(`${run.binding.runId}: ${captureProblem ?? "no transcript capture was witnessed"}`);
+      continue;
+    }
+
+    const replayed = replayStandaloneResultFromEvidence(opened.value, program.program, run.captures);
+    if (!replayed.ok) {
+      rejections.push(`${run.binding.runId}: engine evidence replay did not prove completion: ${replayed.message}`);
+      continue;
+    }
+    let resultBytes: Buffer;
+    try {
+      resultBytes = readRunBytesNoFollow(join(opened.value.runDirectory, "result.json"));
+    } catch (error) {
+      rejections.push(`${run.binding.runId}: cannot read canonical result artifact: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
+    if (!resultBytes.equals(Buffer.from(replayed.json, "utf8"))) {
+      rejections.push(`${run.binding.runId}: result.json does not match checkpoint-independent evidence replay`);
+      continue;
+    }
+    const reviewedSource = readStandaloneReviewedSource(opened.value, program.program);
+    if (!reviewedSource.ok) {
+      rejections.push(`${run.binding.runId}: reviewed source attestation failed: ${reviewedSource.message}`);
+      continue;
+    }
+    receipts.push(Object.freeze({
+      schemaVersion: 1 as const,
+      kind: "loom-review-authority-receipt" as const,
+      sessionId: input.sessionId,
+      runId: run.binding.runId,
+      runsRoot: run.binding.runsRoot,
+      runDirectory: run.binding.runDirectory,
+      requestIds: Object.freeze([...new Set([...run.captures.values()].map(({ requestId }) => requestId))].sort()),
+      resultDigest: replayed.digest,
+      reviewedSource: reviewedSource.value,
+    }));
+  }
+  if (receipts.length !== 1 || rejections.length !== 0) {
+    throw new Error(
+      `expected one unambiguous witnessed Standalone Review for Pi session ${input.sessionId}, found ${receipts.length}` +
+      (rejections.length === 0 ? "" : `; rejected: ${rejections.join(" | ")}`),
+    );
+  }
+  return receipts[0]!;
+}
+
 export default function (pi: ExtensionAPI) {
   registerInteractiveSubagentTool(pi, PACKAGE_ROOT, PI_AGENT_DIR);
+  (globalThis as unknown as Record<PropertyKey, unknown>)[LOOM_REVIEW_AUTHORITY_SYMBOL] = Object.freeze({
+    verify: verifyTrustedStandaloneReview,
+  });
 
   // A Pi process may host overlapping sessions. Parent reservations and
   // capabilities are therefore aggregates owned by one parsed session, never
@@ -833,9 +1021,13 @@ export default function (pi: ExtensionAPI) {
       // Guard state file from bash writes
       if (event.toolName === "bash") {
         currentGuard = "guard-state-file";
-        const result = graphIsActive
-          ? guardStateFileDecision(piBashCommand(event.input))
-          : { kind: "allow" as const };
+        const command = graphIsActive ? piBashCommand(event.input) : "";
+        let result: ReturnType<typeof guardStateFileDecision> = { kind: "allow" };
+        if (command === null) {
+          result = { kind: "block", message: "BLOCKED: malformed Pi bash input while the Loom state-file guard is active." };
+        } else if (graphIsActive) {
+          result = guardStateFileDecision(command);
+        }
         // Call-start stamp (PRODUCER only — pi has no PostToolUse evidence
         // recorder yet, so nothing on the pi side consumes these stamps;
         // they exist so the engine's recorder can order artifacts if it
@@ -874,12 +1066,16 @@ export default function (pi: ExtensionAPI) {
             reason: "loom_interactive_subagent requires a parent TUI or RPC UI client; refusing to start an unanswerable interview.",
           };
         }
+        // A spawn's rendered agent may carry the declared binding or a
+        // routing-authorized inherit of the (local) parent model; the routing
+        // context is observed once per batch for the definition check.
+        const routing = buildPiRoutingContext();
         const admission = admitPiSpawnBatch(event.input, {
           graphActive: graphIsActive,
           transport: event.toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL ? "interactive-rpc" : "headless",
           packageRoot: PACKAGE_ROOT,
           validateDefinition: (agent) =>
-            validatePiAgentDefinitionFile(join(PI_AGENT_DIR, "agents", `${agent}.md`), agent, PACKAGE_ROOT),
+            validatePiAgentDefinitionFile(join(PI_AGENT_DIR, "agents", `${agent}.md`), agent, PACKAGE_ROOT, routing.context),
           readSourceAgent: (agent) => {
             currentGuard = "validate-agent-skill";
             const sourceAgentPath = join(PACKAGE_ROOT, "agents", `${agent}.md`);
@@ -1005,7 +1201,7 @@ export default function (pi: ExtensionAPI) {
           // request before the harness can dispatch the batch. The durable run
           // directory, not the in-memory lifecycle map below, owns capture
           // authority for both Pi and Claude.
-          orchestrationRunBinding = await recordPiSpawnCorrelators(parsedItems, rosterIds, safeSessionId);
+          orchestrationRunBinding = await recordPiSpawnCorrelators(parsedItems, rosterIds, safeSessionId, event.input);
           // Implementation items get the classic whole-session capability bound
           // to their task-graph Task ID. Phase/panel agents (non-implementation)
           // get a SCOPED capability bound to their prompt-derived artifact dirs
@@ -1259,24 +1455,32 @@ export default function (pi: ExtensionAPI) {
   // If there's an active task graph in execute phase, inject context
   // so the LLM knows where we are (equivalent of resume-after-clear).
 
-  pi.on("before_agent_start", async (_event, _ctx) => {
+  pi.on("before_agent_start", async (_event, ctx) => {
     const activeTaskGraphPath = taskGraphPath();
     if (!pathExistsFailClosed(activeTaskGraphPath)) return;
 
+    const failResumeContext = (reason: string) => {
+      const message = `Loom resume context unavailable: ${reason}`;
+      process.stderr.write(`loom(pi): ${message}\n`);
+      ctx.ui.notify(message, "error");
+      ctx.abort();
+      return {
+        message: {
+          customType: "loom-context-error",
+          content: `${message}. Do not proceed with this turn.`,
+          display: true,
+        },
+      };
+    };
+
     const sm = StateManager.fromPath(activeTaskGraphPath);
-    if (!sm) {
-      process.stderr.write(`loom(pi): resume context skipped — task graph could not be opened at ${activeTaskGraphPath}\n`);
-      return;
-    }
+    if (!sm) return failResumeContext(`task graph could not be opened at ${activeTaskGraphPath}`);
 
     let state;
     try {
       state = sm.load();
-    } catch (err) {
-      process.stderr.write(
-        `loom(pi): resume context skipped — task graph unreadable: ${err instanceof Error ? err.message : String(err)}\n`,
-      );
-      return;
+    } catch (error) {
+      return failResumeContext(`task graph unreadable: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     if (state.current_phase !== "execute" || state.tasks.length === 0) return;
@@ -1294,9 +1498,9 @@ export default function (pi: ExtensionAPI) {
 
   // ─── PostEdit Lint (tool_result event for edit/write) ─────────────────
   // After edit/write lands on disk, run immediate-tier lint.
-  // If violations: inject error content so agent sees and fixes.
+  // If violations: report error content so the agent can remediate the landed edit.
   // If pass: return undefined (no injection).
-  // If error: fail-closed — inject error content.
+  // If the lint engine errors: report the failure; this post-edit hook cannot roll back the mutation.
 
   pi.on("tool_result", async (event, _ctx) => {
     try {
@@ -1814,6 +2018,15 @@ export default function (pi: ExtensionAPI) {
               result.messages,
               durableRunBinding,
             );
+        if (captureOutcome.kind === "captured" && durableRunBinding !== null && resultSessionId !== null) {
+          try {
+            rememberTrustedReviewCapture(resultSessionId, durableRunBinding, agentType, result.task ?? "", captureOutcome);
+          } catch (error) {
+            const diagnostic = `cannot retain process-local review authority for ${agentType}: ${error instanceof Error ? error.message : String(error)}`;
+            processingErrors.push(diagnostic);
+            process.stderr.write(`loom(pi): ${diagnostic}\n`);
+          }
+        }
 
         // Standalone review/refutation results are run artifacts. Short-circuit
         // before StateManager resolution so an unrelated local graph is neither
@@ -2003,8 +2216,8 @@ export default function (pi: ExtensionAPI) {
           ].filter(Boolean).join(" | "),
           "info",
         );
-      } catch (e) {
-        ctx.ui.notify(`Error: ${e instanceof Error ? e.message : String(e)}`, "error");
+      } catch (error) {
+        ctx.ui.notify(`Error: ${error instanceof Error ? error.message : String(error)}`, "error");
       }
     },
   });

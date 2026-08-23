@@ -183,7 +183,7 @@ describe("session run binding registry validation", () => {
   it("accepts a well-formed registry", () => {
     const { runsRoot, directory } = runDirectory("run.binding1");
     const parsed = parseSessionRunBindingRegistry(registry([{
-      runId: "run.binding1", runsRoot, runDirectory: directory, requestIds: ["request:a"],
+      runId: "run.binding1", runsRoot, runDirectory: directory, requestIds: ["request:a"], resultDigest: null,
     }]), SESSION);
 
     expect(parsed.ok, parsed.ok ? "" : parsed.message).toBe(true);
@@ -192,7 +192,7 @@ describe("session run binding registry validation", () => {
   it("refuses duplicate request ids inside one binding", () => {
     const { runsRoot, directory } = runDirectory("run.binding2");
     const parsed = parseSessionRunBindingRegistry(registry([{
-      runId: "run.binding2", runsRoot, runDirectory: directory, requestIds: ["request:a", "request:a"],
+      runId: "run.binding2", runsRoot, runDirectory: directory, requestIds: ["request:a", "request:a"], resultDigest: null,
     }]), SESSION);
 
     expect(parsed.ok).toBe(false);
@@ -202,7 +202,7 @@ describe("session run binding registry validation", () => {
 
   it("refuses two bindings naming the same run identity", () => {
     const { runsRoot, directory } = runDirectory("run.binding3");
-    const binding = { runId: "run.binding3", runsRoot, runDirectory: directory, requestIds: ["request:a"] };
+    const binding = { runId: "run.binding3", runsRoot, runDirectory: directory, requestIds: ["request:a"], resultDigest: null };
     const parsed = parseSessionRunBindingRegistry(
       registry([binding, { ...binding, requestIds: ["request:b"] }]),
       SESSION,
@@ -216,7 +216,7 @@ describe("session run binding registry validation", () => {
   it("refuses a binding whose runId contradicts its run directory", () => {
     const { runsRoot, directory } = runDirectory("run.binding4");
     const parsed = parseSessionRunBindingRegistry(registry([{
-      runId: "run.somethingelse", runsRoot, runDirectory: directory, requestIds: ["request:a"],
+      runId: "run.somethingelse", runsRoot, runDirectory: directory, requestIds: ["request:a"], resultDigest: null,
     }]), SESSION);
 
     expect(parsed.ok).toBe(false);
@@ -227,7 +227,7 @@ describe("session run binding registry validation", () => {
   it("refuses a registry belonging to another session", () => {
     const { runsRoot, directory } = runDirectory("run.binding5");
     const parsed = parseSessionRunBindingRegistry(registry([{
-      runId: "run.binding5", runsRoot, runDirectory: directory, requestIds: ["request:a"],
+      runId: "run.binding5", runsRoot, runDirectory: directory, requestIds: ["request:a"], resultDigest: null,
     }]), "019fca39-f989-7510-8e62-50dadbcad4ff");
 
     expect(parsed.ok).toBe(false);
@@ -238,7 +238,7 @@ describe("session run binding registry validation", () => {
   it("refuses an empty requestIds list", () => {
     const { runsRoot, directory } = runDirectory("run.binding6");
     const parsed = parseSessionRunBindingRegistry(registry([{
-      runId: "run.binding6", runsRoot, runDirectory: directory, requestIds: [],
+      runId: "run.binding6", runsRoot, runDirectory: directory, requestIds: [], resultDigest: null,
     }]), SESSION);
 
     expect(parsed.ok).toBe(false);
@@ -256,6 +256,7 @@ describe("session run binding registry validation", () => {
       runsRoot,
       runDirectory: directory,
       requestIds: ["request:a" as never],
+      resultDigest: null,
     });
 
     expect(registered.ok, registered.ok ? "" : registered.message).toBe(true);
@@ -344,8 +345,8 @@ describe("--fix clears an in-flight review run whose finding set it changed", ()
 /**
  * Panel reducers reject every UNDECLARED (state, event) pair.
  *
- * Every sibling machine in this diff carries this exhaustive property; the two
- * panel reducers did not, so a stage that silently accepted an event meant for
+ * The other lifecycle machines carry this exhaustive property; the two panel
+ * reducers need the same guard so a stage that silently accepted an event meant for
  * another stage — the classic way a state machine loses its guarantees — had
  * nothing to catch it. Rejection here means a typed refusal, never a throw and
  * never a silent no-op that returns the same state.

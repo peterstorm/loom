@@ -3,6 +3,12 @@ import { join } from "node:path";
 import { parseDeclaredSkills } from "../core/agent-skills";
 import { renderPiAgentResource, type PreloadedSkill } from "../core/harness-resources";
 import { lowerModelProfile, resolveAgentProfile } from "../core/model-profiles";
+import {
+  resolveEffectivePiBinding,
+  type EffectivePiBinding,
+  type ModelRef,
+  type ModelRoutingConfig,
+} from "../core/model-routing";
 
 function skillPath(packageRoot: string, skill: string): string | null {
   const candidates = [
@@ -32,22 +38,14 @@ function preloadedSkills(sourceAgent: string, packageRoot: string): readonly Pre
   });
 }
 
-/** Render the exact Pi definition from one source agent and its owning package. */
-export function renderPiAgentDefinition(
+/** Render the Pi body from an exact `provider/model:thinking` model line. */
+function renderWithExactModel(
   sourceAgent: string,
   agent: string,
   packageRoot: string,
+  exactModel: string,
 ): string {
-  const profile = resolveAgentProfile(agent);
-  if (!profile.ok) throw new Error(profile.error.message);
-  const target = lowerModelProfile(profile.value, "pi");
-  const exactModel = `${target.provider}/${target.model}:${target.thinking}`;
-  const result = renderPiAgentResource(
-    sourceAgent,
-    exactModel,
-    packageRoot,
-    preloadedSkills(sourceAgent, packageRoot),
-  );
+  const result = renderPiAgentResource(sourceAgent, exactModel, packageRoot, preloadedSkills(sourceAgent, packageRoot));
   // The core returns the refusal; this shell is where an unrenderable agent
   // becomes fatal, alongside the sibling throws already here.
   if (!result.ok) throw new Error(result.error.message);
@@ -58,6 +56,28 @@ export function renderPiAgentDefinition(
   return `${rendered.slice(0, bodyStart)}<!-- LOOM_PI_AGENT_ID:${agent} -->\n${rendered.slice(bodyStart)}`;
 }
 
+/** Render the exact Pi definition from one source agent and its owning package. */
+export function renderPiAgentDefinition(
+  sourceAgent: string,
+  agent: string,
+  packageRoot: string,
+): string {
+  const profile = resolveAgentProfile(agent);
+  if (!profile.ok) throw new Error(profile.error.message);
+  const target = lowerModelProfile(profile.value, "pi");
+  return renderWithExactModel(sourceAgent, agent, packageRoot, `${target.provider}/${target.model}:${target.thinking}`);
+}
+
+/** Render the Pi definition with an explicit (possibly routed) binding. */
+export function renderPiAgentDefinitionWithBinding(
+  sourceAgent: string,
+  agent: string,
+  packageRoot: string,
+  binding: EffectivePiBinding,
+): string {
+  return renderWithExactModel(sourceAgent, agent, packageRoot, `${binding.provider}/${binding.model}:${binding.thinking}`);
+}
+
 export function expectedPiAgentDefinition(agent: string, packageRoot: string): string {
   return renderPiAgentDefinition(
     readFileSync(join(packageRoot, "agents", `${agent}.md`), "utf-8"),
@@ -66,15 +86,44 @@ export function expectedPiAgentDefinition(agent: string, packageRoot: string): s
   );
 }
 
+export function expectedPiAgentDefinitionWithBinding(
+  agent: string,
+  packageRoot: string,
+  binding: EffectivePiBinding,
+): string {
+  return renderPiAgentDefinitionWithBinding(
+    readFileSync(join(packageRoot, "agents", `${agent}.md`), "utf-8"),
+    agent,
+    packageRoot,
+    binding,
+  );
+}
+
+/**
+ * The spawn-boundary routing context a caller observes: the parsed config (or
+ * null when absent/unusable) and the parent session's model ref (or null when
+ * unknown). The pure policy decides whether a child inherits the parent model.
+ */
+export type PiRoutingContext = Readonly<{
+  config: ModelRoutingConfig | null;
+  parentRef: ModelRef | null;
+}>;
+
 export type PiAgentFileValidation =
   | { readonly ok: true }
   | { readonly ok: false; readonly error: string };
 
-/** Prove the file Pi will execute is byte-for-byte the active package render. */
+/**
+ * Prove the file Pi will execute is a Loom render for the current routing
+ * context: byte-for-byte the declared render, or — when the routing policy
+ * authorizes inheritance for the observed parent model — the routed render.
+ * Both are Loom-computed from trusted inputs; anything else is a mismatch.
+ */
 export function validatePiAgentDefinitionFile(
   path: string,
   agent: string,
   packageRoot: string,
+  routing: PiRoutingContext | null = null,
 ): PiAgentFileValidation {
   let actual: Buffer;
   try {
@@ -96,10 +145,46 @@ export function validatePiAgentDefinitionFile(
     };
   }
 
-  return actual.equals(Buffer.from(expected, "utf-8"))
-    ? { ok: true }
-    : {
-        ok: false,
-        error: `generated agent ${path} differs from active package ${packageRoot}`,
-      };
+  if (actual.equals(Buffer.from(expected, "utf-8"))) return { ok: true };
+
+  if (routing !== null) {
+    const routed = routedPiAgentDefinitionIfAuthorized(agent, packageRoot, routing);
+    if (!routed.ok) return routed;
+    if (routed.value !== null && actual.equals(Buffer.from(routed.value, "utf-8"))) return { ok: true };
+  }
+
+  return {
+    ok: false,
+    error: `generated agent ${path} differs from active package ${packageRoot}`,
+  };
+}
+
+/**
+ * The routed render for an agent, or null when the policy does not authorize
+ * inheriting the parent model (no config, no parent, non-local parent, or a
+ * `declared` rule). Rendering failures remain distinct from "not authorized"
+ * so the spawn boundary can report the concrete recovery cause.
+ */
+function routedPiAgentDefinitionIfAuthorized(
+  agent: string,
+  packageRoot: string,
+  routing: PiRoutingContext,
+): Readonly<{ ok: true; value: string | null }> | Readonly<{ ok: false; error: string }> {
+  const profile = resolveAgentProfile(agent);
+  if (!profile.ok) {
+    return { ok: false, error: `cannot resolve routed agent '${agent}': ${profile.error.message}` };
+  }
+  const declaredBinding = lowerModelProfile(profile.value, "pi");
+  const effective = resolveEffectivePiBinding(declaredBinding, routing.parentRef, routing.config);
+  if (effective.provider === declaredBinding.provider && effective.model === declaredBinding.model) {
+    return { ok: true, value: null };
+  }
+  try {
+    return { ok: true, value: expectedPiAgentDefinitionWithBinding(agent, packageRoot, effective) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `cannot render routed agent '${agent}': ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }

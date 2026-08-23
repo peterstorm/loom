@@ -582,7 +582,7 @@ function preparationInput(overrides: Readonly<Record<string, unknown>> = {}) {
     explicitScope: ["src/x.ts"],
     changedPaths: {
       unstaged: ["src/x.ts"], staged: [], committed: [],
-      base_revision: null, head_revision: "HEAD",
+      base_revision: null, head_revision: "0123456789abcdef0123456789abcdef01234567",
     },
     reviewMetadata: {
       requested_kinds: ["types"], docs_only: false, source_or_test_changed: false,
@@ -860,7 +860,7 @@ describe("standalone v1 authority and byte-aware complete-roster aggregation", (
       explicitScope: undefined,
       changedPaths: {
         unstaged: ["src/z.ts"], staged: ["src/a.ts"], committed: ["src/z.ts"],
-        base_revision: "main", head_revision: "HEAD",
+        base_revision: "fedcba9876543210fedcba9876543210fedcba98", head_revision: "0123456789abcdef0123456789abcdef01234567",
       },
       scopeSafety: [
         { path: "src/a.ts", status: "safe" },
@@ -872,6 +872,46 @@ describe("standalone v1 authority and byte-aware complete-roster aggregation", (
       expect(prepared.value.authority.scopeSource).toBe("changed-path-union");
       expect(prepared.value.authority.scope).toEqual(["src/a.ts", "src/z.ts"]);
     }
+  });
+
+  it("rejects changed_paths revisions that are not git SHAs, exactly as the sibling boundaries do", () => {
+    const branches = prepareStandaloneReview(preparationInput({
+      changedPaths: {
+        unstaged: ["src/x.ts"], staged: [], committed: [],
+        base_revision: "main", head_revision: "HEAD",
+      },
+    }));
+    expect(branches.ok).toBe(false);
+    if (!branches.ok) {
+      const messages = JSON.stringify(branches.error.errors);
+      expect(messages).toContain("base_revision");
+      expect(messages).toContain("head_revision");
+    }
+    const shortSha = prepareStandaloneReview(preparationInput({
+      changedPaths: {
+        unstaged: ["src/x.ts"], staged: [], committed: [],
+        base_revision: null, head_revision: "0123456789abcdef",
+      },
+    }));
+    expect(shortSha.ok).toBe(false);
+    const padded = prepareStandaloneReview(preparationInput({
+      changedPaths: {
+        unstaged: ["src/x.ts"], staged: [], committed: [],
+        base_revision: null, head_revision: ` ${"0123456789abcdef0123456789abcdef01234567"}`,
+      },
+    }));
+    expect(padded.ok).toBe(false);
+  });
+
+  it("accepts 40-hex and 64-hex revisions and a null base", () => {
+    const sha64 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const prepared = prepareStandaloneReview(preparationInput({
+      changedPaths: {
+        unstaged: ["src/x.ts"], staged: [], committed: [],
+        base_revision: "fedcba9876543210fedcba9876543210fedcba98", head_revision: sha64,
+      },
+    }));
+    expect(prepared.ok).toBe(true);
   });
 
   it.each([

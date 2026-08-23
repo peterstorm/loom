@@ -17,14 +17,22 @@ export {
   type RegisteredStandaloneProgram,
   type RegisteredWaveGateProgram,
 } from './helpers';
-export { resumeStandaloneFacade, startStandaloneFacade } from './standalone';
+export {
+  readStandaloneReviewedSource,
+  replayStandaloneResultFromEvidence,
+  resumeStandaloneFacade,
+  type StandaloneReviewedSource,
+  startStandaloneFacade,
+} from './standalone';
 export {
   applyWaveFacadeSubmission,
+  handleWaveReviewContext,
   recoverOrphanedWaveGateFacade,
   restartWaveGateFacade,
   resumeWaveGateFacade,
   startWaveGateFacade,
   waveAdvisoryDecisionRequestId,
   waveGateDecisionMismatch,
+  type WaveReviewContextAuthority,
 } from './wave-gate';
 export { resumeRemediationFacade, startRemediationFacade } from './remediation';

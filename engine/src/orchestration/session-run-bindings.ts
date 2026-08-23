@@ -19,6 +19,7 @@ export { ORCHESTRATION_RUNS_SUFFIX } from "../machine/evidence";
 
 export type SessionRunBinding = Readonly<RunDirectoryReference & {
   requestIds: readonly RequestId[];
+  resultDigest: string | null;
 }>;
 
 export type SessionRunBindingRegistry = Readonly<{
@@ -35,6 +36,8 @@ type BindingResult<T> =
 
 const ok = <T>(value: T): BindingResult<T> => ({ ok: true, value });
 const failed = <T = never>(message: string): BindingResult<T> => ({ ok: false, message });
+const bindingIdentity = ({ runsRoot, runDirectory }: Pick<SessionRunBinding, "runsRoot" | "runDirectory">): string =>
+  `${runsRoot}\0${runDirectory}`;
 
 function exactRecord(raw: unknown, keys: readonly string[]): raw is Record<string, unknown> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
@@ -44,8 +47,8 @@ function exactRecord(raw: unknown, keys: readonly string[]): raw is Record<strin
 }
 
 function parseBinding(raw: unknown, index: number): BindingResult<SessionRunBinding> {
-  if (!exactRecord(raw, ["runId", "runsRoot", "runDirectory", "requestIds"])) {
-    return failed(`session run binding ${index} must contain exactly runId, runsRoot, runDirectory, and requestIds`);
+  if (!exactRecord(raw, ["runId", "runsRoot", "runDirectory", "requestIds", "resultDigest"])) {
+    return failed(`session run binding ${index} must contain exactly runId, runsRoot, runDirectory, requestIds, and resultDigest`);
   }
   const runId = parseOrchestrationRunId(raw.runId);
   if (!runId.ok) return failed(`session run binding ${index}: ${runId.error.message}`);
@@ -65,6 +68,10 @@ function parseBinding(raw: unknown, index: number): BindingResult<SessionRunBind
   if (new Set(requestIds).size !== requestIds.length) {
     return failed(`session run binding ${index} requestIds must be unique`);
   }
+  if (raw.resultDigest !== null &&
+      (typeof raw.resultDigest !== "string" || !/^[0-9a-f]{64}$/.test(raw.resultDigest))) {
+    return failed(`session run binding ${index} resultDigest must be null or a lowercase SHA-256 digest`);
+  }
   const identity = parseRunDirectoryReference(resolve(raw.runsRoot), resolve(raw.runDirectory));
   if (!identity.ok) return failed(`session run binding ${index}: ${identity.error.message}`);
   if (identity.value.runId !== runId.value) {
@@ -73,6 +80,7 @@ function parseBinding(raw: unknown, index: number): BindingResult<SessionRunBind
   return ok(Object.freeze({
     ...identity.value,
     requestIds: Object.freeze([...requestIds].sort()),
+    resultDigest: raw.resultDigest,
   }));
 }
 
@@ -93,22 +101,27 @@ export function parseSessionRunBindingRegistry(
     if (!parsed.ok) return parsed;
     bindings.push(parsed.value);
   }
-  const identities = bindings.map(({ runsRoot, runDirectory }) => `${runsRoot}\0${runDirectory}`);
+  const identities = bindings.map(bindingIdentity);
   if (new Set(identities).size !== identities.length) {
     return failed("session run binding registry contains duplicate run identities");
   }
-  return ok(Object.freeze({
-    schemaVersion: 1,
-    kind: "session-run-bindings",
-    harness: "pi",
-    sessionId,
-    bindings: Object.freeze(bindings),
-  }));
+  return ok(sessionRunBindingRegistry(sessionId, bindings));
 }
 
 function registryFile(sessionId: SessionId): string {
   return `${sessionId}${ORCHESTRATION_RUNS_SUFFIX}`;
 }
+
+const sessionRunBindingRegistry = (
+  sessionId: SessionId,
+  bindings: readonly SessionRunBinding[],
+): SessionRunBindingRegistry => Object.freeze({
+  schemaVersion: 1,
+  kind: "session-run-bindings",
+  harness: "pi",
+  sessionId,
+  bindings: Object.freeze([...bindings]),
+});
 
 function readRegistryFromDirectory(
   directory: AnchoredDirectory,
@@ -119,13 +132,7 @@ function readRegistryFromDirectory(
     bytes = readDirectoryFileNoFollow(directory, registryFile(sessionId));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return ok(Object.freeze({
-        schemaVersion: 1,
-        kind: "session-run-bindings",
-        harness: "pi",
-        sessionId,
-        bindings: Object.freeze([]),
-      }));
+      return ok(sessionRunBindingRegistry(sessionId, []));
     }
     return failed(`cannot read Pi session run bindings: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -180,32 +187,24 @@ export async function registerSessionRunBinding(
     return await withAnchoredDirectoryLock(base, `${sessionId}.orchestration-runs.lock`, (anchored) => {
       const current = readRegistryFromDirectory(anchored, sessionId);
       if (!current.ok) return current;
-      const identity = `${parsedBinding.value.runsRoot}\0${parsedBinding.value.runDirectory}`;
-      const previous = current.value.bindings.find(
-        ({ runsRoot, runDirectory }) => `${runsRoot}\0${runDirectory}` === identity,
-      );
+      const identity = bindingIdentity(parsedBinding.value);
+      const previous = current.value.bindings.find((binding) => bindingIdentity(binding) === identity);
+      if (previous !== undefined && previous.resultDigest !== null && parsedBinding.value.resultDigest !== null &&
+          previous.resultDigest !== parsedBinding.value.resultDigest) {
+        return failed("Pi session run binding result digest conflicts with its previous completion receipt");
+      }
       const mergedBinding = previous === undefined
         ? parsedBinding.value
         : Object.freeze({
             ...parsedBinding.value,
             requestIds: Object.freeze([...new Set([...previous.requestIds, ...parsedBinding.value.requestIds])].sort()),
+            resultDigest: previous.resultDigest ?? parsedBinding.value.resultDigest,
           });
       const bindings = [
-        ...current.value.bindings.filter(
-          ({ runsRoot, runDirectory }) => `${runsRoot}\0${runDirectory}` !== identity,
-        ),
+        ...current.value.bindings.filter((binding) => bindingIdentity(binding) !== identity),
         mergedBinding,
-      ].sort((left, right) => compareStrings(
-        `${left.runsRoot}\0${left.runDirectory}`,
-        `${right.runsRoot}\0${right.runDirectory}`,
-      ));
-      const next: SessionRunBindingRegistry = Object.freeze({
-        schemaVersion: 1,
-        kind: "session-run-bindings",
-        harness: "pi",
-        sessionId,
-        bindings: Object.freeze(bindings),
-      });
+      ].sort((left, right) => compareStrings(bindingIdentity(left), bindingIdentity(right)));
+      const next = sessionRunBindingRegistry(sessionId, bindings);
       const finalName = registryFile(sessionId);
       const stagedName = `${finalName}.staged-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
       try {

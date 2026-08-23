@@ -108,7 +108,7 @@ export function gitText(args: readonly string[]): string {
 }
 
 export type CanonicalChangedPaths = Readonly<{
-  /** Tracked files whose worktree content differs from HEAD, plus untracked non-ignored files. */
+  /** Tracked files whose worktree content differs from the index, plus untracked non-ignored files. */
   unstaged: readonly string[];
   staged: readonly string[];
   committed: readonly string[];
@@ -265,7 +265,7 @@ export function standaloneRequestId(runId: string, role: string, attempt: 1 | 2)
   return `request:${createHash("sha256").update(`${runId}\u0000${role}\u0000${attempt}`).digest("hex")}`;
 }
 
-export function frozenScopeSection(scope: readonly string[]) {
+export function frozenScopeSection(scope: readonly string[], headRevision: string) {
   const files = scope.map((path) => {
     try {
       const bytes = readRunBytesNoFollow(path);
@@ -294,7 +294,7 @@ export function frozenScopeSection(scope: readonly string[]) {
       throw error;
     }
   });
-  const section = encodeByteSection("standalone-frozen-source", JSON.stringify({ schemaVersion: 1, files }));
+  const section = encodeByteSection("standalone-frozen-source", JSON.stringify({ schemaVersion: 1, headRevision, files }));
   if (!section.ok) throw new Error(section.error.message);
   return section.value;
 }
@@ -303,9 +303,10 @@ export function standalonePackets(
   runId: string,
   reviewMetadata: StandaloneReviewMetadata,
   scope: readonly string[],
+  headRevision: string,
 ): Readonly<{ contexts: readonly Readonly<{ attempts: readonly [string, string] }>[]; packets: readonly ContextPacket[] }> {
   const reviewers = selectStandaloneReviewers(reviewMetadata);
-  const sourceSection = frozenScopeSection(scope);
+  const sourceSection = frozenScopeSection(scope, headRevision);
   const packets: ContextPacket[] = [];
   const contexts = reviewers.map((role) => {
     const attempts = ([1, 2] as const).map((attempt) => {
@@ -796,13 +797,6 @@ export function standaloneRetryTask(task: string, diagnostic: string | null): st
   ].join("\n");
 }
 
-/**
- * Fatal UTF-8 decode like the engine's transcript boundary. A decode failure
- * is a TYPED failure naming the decoder's cause — never prose fed through the
- * semantic validator, which would launder "transcript bytes were not valid
- * UTF-8" into a misleading "CRITICAL_COUNT marker not found" diagnostic. The
- * caller routes the failure to the slot directly.
- */
 /** Deterministic rejection detail recovered from the Refutation Panel event prefix. */
 export function refutationRejectionDiagnostic(event: PersistentRefutationPanelEvent | undefined): string | null {
   return event !== undefined && event.type === "refutation-verdict-rejected" ? event.message : null;
@@ -898,6 +892,11 @@ export async function recoverOrPublishRefutationRetry(
     : { ok: false, message: published.message };
 }
 
+/**
+ * Fatal UTF-8 decode like the engine's transcript boundary. A decode failure
+ * is a typed failure naming the decoder's cause, never prose passed to the
+ * semantic validator and misreported as a missing Machine Summary marker.
+ */
 export function decodeReviewerTranscript(
   bytes: Uint8Array,
   role: string,

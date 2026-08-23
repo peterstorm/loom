@@ -1,14 +1,22 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
-import { renderStatus } from "../../../src/handlers/helpers/orchestration";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { observedAdvisoryApproval, renderStatus } from "../../../src/handlers/helpers/orchestration";
 import { WAVE_REVIEW_AGENTS, type GateDeps } from "../../../src/core/wave-gate-machine";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { parseAgentRequestAuthority, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
+import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
+import { parseRegisteredFacadeProgram } from "../../../src/handlers/helpers/programs";
+import {
+  replayStandaloneResultFromEvidence,
+  type StandaloneCaptureWitness,
+} from "../../../src/handlers/helpers/programs/standalone";
 import { persistedWaveAttemptTwoCompatibilityProblem, prepareOrphanedWaveGateRecovery } from "../../../src/handlers/helpers/programs/wave-gate";
+import { captureKey } from "../../../src/core/harness-capture";
 import { buildContextPacket, encodeByteSection } from "../../../src/orchestration/context-packets";
 import { openRunDirectory, inspectRunDirectoryEntry, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings } from "../../../src/orchestration/session-run-bindings";
@@ -65,6 +73,34 @@ function executeGraph(overrides: Record<string, unknown> = {}): Record<string, u
   };
 }
 
+function replayFromCapturedEvidence(handle: RunDirHandle) {
+  const registration = handle.readProgramRegistration();
+  if (!registration.ok || registration.value === null) throw new Error("expected standalone registration");
+  const parsed = parseRegisteredFacadeProgram(registration.value);
+  if (parsed.kind !== "registered" || parsed.program.kind !== "standalone-review") {
+    throw new Error("expected parsed standalone registration");
+  }
+  const issued = handle.readIssuedRequests();
+  const captured = handle.readCapturedAttempts();
+  if (!issued.ok) throw new Error(issued.error.message);
+  if (!captured.ok) throw new Error(captured.error.message);
+  const witnesses = new Map<string, StandaloneCaptureWitness>();
+  for (const authority of issued.value) {
+    const key = captureKey(authority.slotId, authority.attempt);
+    if (!captured.value.has(key)) continue;
+    const bytes = handle.readTranscriptBytes(authority);
+    if (!bytes.ok) throw new Error(bytes.error.message);
+    witnesses.set(key, Object.freeze({
+      requestId: authority.requestId,
+      role: authority.role,
+      contextDigest: authority.contextDigest,
+      digest: createHash("sha256").update(bytes.value).digest("hex"),
+      byteLength: bytes.value.byteLength,
+    }));
+  }
+  return replayStandaloneResultFromEvidence(handle, parsed.program, witnesses);
+}
+
 function runCli(
   args: readonly string[],
   stdin = "",
@@ -76,6 +112,12 @@ function runCli(
     LOOM_STATE_PATH: join(cwd, ".claude", "state", "active_task_graph.json"),
     ...envOverrides,
   };
+  // The ambient session's own runtime handshake must not leak into the spawned
+  // CLI: it names the runtime the OUTER Pi process loaded, which is stale once
+  // this checkout has changed (exactly the skew the CLI guard is designed to
+  // catch). The test publishes its own checkout-consistent identity below.
+  delete env[PI_EXTENSION_RUNTIME_ROOT_ENV];
+  delete env[PI_EXTENSION_RUNTIME_REVISION_ENV];
   for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
   if (env.PI_CODING_AGENT === "true") {
     env[PI_EXTENSION_RUNTIME_ROOT_ENV] ??= CURRENT_RUNTIME.packageRoot;
@@ -216,6 +258,23 @@ describe("orchestration status", () => {
 });
 
 // --- inspectRunDirectoryEntry (round-29: symlink/non-directory occupied proofs) ---
+
+describe("observedAdvisoryApproval", () => {
+  it("reports malformed graph authority while treating approval as absent", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(await observedAdvisoryApproval({ malformed: true }, {
+        kind: "present",
+        runId: "run.malformed-advisory-graph",
+        path: "/unused/run.malformed-advisory-graph",
+      })).toBe(false);
+      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
+        .toContain("cannot determine advisory approval for run.malformed-advisory-graph");
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+});
 
 describe("inspectRunDirectoryEntry", () => {
   it("classifies a symlink at the run path as occupied, never as a usable directory", () => {
@@ -776,6 +835,7 @@ describe("orchestration CLI", () => {
       runsRoot,
       runDirectory: runDir,
       requestIds: action.requests.map(({ authority }) => authority.requestId).sort(),
+      resultDigest: null,
     })]);
   });
 
@@ -817,6 +877,25 @@ describe("orchestration CLI", () => {
     expect(started.status).not.toBe(0);
     expect(started.stdout).not.toContain('"kind": "spawn-batch"');
     expect(started.stderr).toContain("cannot publish Pi orchestration capture authority");
+  });
+
+  it("rejects a non-canonical explicit scope before publishing reviewer context", () => {
+    const root = repository();
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "secret.ts"), "export const secret = true;\n");
+    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-noncanonical-scope-runs-")));
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.noncanonical-scope");
+    mkdirSync(runDir);
+
+    const started = runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "code", files: ["src/../secret.ts"], dryRun: false }), root);
+
+    expect(started.status).not.toBe(0);
+    expect(started.stderr).toContain("must be canonical and must not contain traversal segments");
+    expect(readdirSync(join(runDir, "contexts"))).toEqual([]);
+    expect(existsSync(join(runDir, "program.json"))).toBe(false);
   });
 
   it("refuses to freeze scope bytes through a symlinked ancestor", () => {
@@ -882,8 +961,10 @@ describe("orchestration CLI", () => {
     const frozenSource = frozenContext.value.fixedContext.find(({ label }) => label === "standalone-frozen-source");
     expect(frozenSource).toBeDefined();
     const frozenPayload = JSON.parse(Buffer.from(frozenSource!.bytes).toString("utf8")) as {
+      headRevision: string;
       files: readonly { path: string; kind: string; content?: string }[];
     };
+    expect(frozenPayload.headRevision).toMatch(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
     expect(frozenPayload.files).toContainEqual(expect.objectContaining({
       path: "src/new-production.ts", kind: "text", content: "export const fresh = 1;\n",
     }));
@@ -2789,6 +2870,8 @@ describe("orchestration CLI", () => {
     const doneResult = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
     expect(doneResult.status, doneResult.stderr).toBe(0);
     expect(JSON.parse(doneResult.stdout).kind).toBe("done");
+    const evidenceReplay = replayFromCapturedEvidence(opened.value);
+    expect(evidenceReplay, evidenceReplay.ok ? "" : evidenceReplay.message).toMatchObject({ ok: true });
 
     // Idempotent done: the durable receipt must restore cleanly after restart.
     const replay = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
@@ -2800,10 +2883,17 @@ describe("orchestration CLI", () => {
     const root = project();
     const runsRoot = join(root, "runs");
     const runDir = join(runsRoot, "run.standalone-facade");
+    const bindingDir = join(root, "pi-session-bindings");
+    const sessionId = "019ff290-ffee-7e86-8ed0-c834c04b7f6f";
+    const piEnv = {
+      PI_CODING_AGENT: "true",
+      PI_SESSION_ID: sessionId,
+      LOOM_SUBAGENT_DIR: bindingDir,
+    } as const;
     mkdirSync(runDir, { recursive: true });
     const started = runCli([
       "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
-    ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), ENGINE);
+    ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), ENGINE, piEnv);
     expect(started.status, started.stderr).toBe(0);
     const action = JSON.parse(started.stdout) as { kind: string; requests: { authority: AgentRequestAuthority }[] };
     expect(action.kind).toBe("spawn-batch");
@@ -2815,11 +2905,43 @@ describe("orchestration CLI", () => {
     for (const request of action.requests) {
       expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
     }
-    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", ENGINE);
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", ENGINE, piEnv);
     expect(resumed.status, resumed.stderr).toBe(0);
-    expect(JSON.parse(resumed.stdout).kind).toBe("done");
-    const replay = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", ENGINE);
+    const done = JSON.parse(resumed.stdout) as { kind: string; outcome: { digest: string } };
+    expect(done.kind).toBe("done");
+    expect(readSessionRunBindings(bindingDir, sessionId)).toMatchObject({
+      ok: true,
+      value: [{ runId: "run.standalone-facade", resultDigest: done.outcome.digest }],
+    });
+    const replay = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", ENGINE, piEnv);
     expect(JSON.parse(replay.stdout).kind).toBe("done");
+  });
+
+  it("returns an actionable failure when an existing result cannot be verified", async () => {
+    const root = repository();
+    writeFileSync(join(root, "a.txt"), "changed\n");
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.standalone-result-collision");
+    mkdirSync(runDir, { recursive: true });
+    const started = runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "comments", files: ["a.txt"], dryRun: false }), root);
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const transcript = [
+      "### Machine Summary", "CRITICAL_COUNT: 0", "ADVISORY_COUNT: 0", "", "```findings", "[]", "```",
+    ].join("\n");
+    for (const { authority } of action.requests) {
+      expect((await opened.value.captureTranscript(authority, [...Buffer.from(transcript)])).ok).toBe(true);
+    }
+    mkdirSync(join(runDir, "result.json"));
+
+    const resumed = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
+
+    expect(resumed.status).not.toBe(0);
+    expect(resumed.stderr).toContain("cannot verify existing standalone result after exclusive publication collision");
   });
 
   it("advances a capture-rejected standalone reviewer attempt 1 to diagnostic-rich attempt 2", async () => {
@@ -2901,6 +3023,8 @@ describe("orchestration CLI", () => {
     const done = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
     expect(done.status, done.stderr).toBe(0);
     expect(JSON.parse(done.stdout).kind).toBe("done");
+    const evidenceReplay = replayFromCapturedEvidence(opened.value);
+    expect(evidenceReplay, evidenceReplay.ok ? "" : evidenceReplay.message).toMatchObject({ ok: true });
     const replay = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
     expect(JSON.parse(replay.stdout).kind).toBe("done");
   }, 30_000);
@@ -3063,7 +3187,8 @@ describe("orchestration CLI", () => {
     );
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("JSON object");
+    expect(result.stderr).toContain("decision must be valid JSON:");
+    expect(result.stderr).toMatch(/Unexpected|JSON/);
   });
 
   it("refuses an empty decision rather than treating silence as approval", () => {
@@ -3269,22 +3394,7 @@ describe("orchestration CLI", () => {
       mkdirSync(runDir, { recursive: true });
       const opened = openRunDirectory(runsRoot, runDir);
       if (!opened.ok) throw new Error(opened.error.message);
-      const request = {
-        runId: "run.unregistered-submit",
-        requestId: "request:reviewer:1",
-        slotId: "slot-1",
-        program: "wave-gate",
-        role: "code-reviewer",
-        attempt: 1,
-        modelProfile: "general-review",
-        harnessBinding: {
-          pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-          claude: { harness: "claude-code", model: "sonnet" },
-        },
-        requiredSkill: null,
-        contextDigest: "a".repeat(64),
-        outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
-      } as AgentRequestAuthority;
+      const request = agentRequestAuthority("run.unregistered-submit");
       const parsed = parseAgentRequestAuthority(request);
       if (!parsed.ok) throw new Error("fixture authority is malformed");
       const submit = () => runCli([
@@ -3610,8 +3720,8 @@ describe("orchestration CLI", () => {
       const root = repository();
       const runsRoot = join(root, "runs");
       mkdirSync(runsRoot, { recursive: true });
-      // A docs scope selects code-reviewer AND comment-analyzer, so the run has
-      // two slots: one to capture and one to reject.
+      // Select a scope whose roster lets this fixture capture one slot and
+      // reject another, exercising both inspection projections.
       writeFileSync(join(root, "README.md"), "fixture, revised\n");
       const started = runCli(
         ["start", "standalone-review", "--runs-root", runsRoot, "--run", label],

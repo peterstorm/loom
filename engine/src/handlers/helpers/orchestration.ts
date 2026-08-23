@@ -93,7 +93,7 @@ import {
   type ObservedFact,
   type RunInspectionObservation,
 } from "../../core/run-inspection";
-import { registerSessionRunBinding } from "../../orchestration/session-run-bindings";
+import { readSessionRunBindings, registerSessionRunBinding } from "../../orchestration/session-run-bindings";
 import {
   AGENT_REQUIRED_SKILLS,
   parseAgentRequestAuthority,
@@ -280,12 +280,18 @@ export async function observedAdvisoryApproval(
   observation: ActiveRunDirectoryObservation,
 ): Promise<boolean> {
   if (observation.kind !== "present") return false;
+  const unavailable = (message: string): false => {
+    process.stderr.write(
+      `orchestration status: cannot determine advisory approval for ${observation.runId}: ${message} — treating approval as absent\n`,
+    );
+    return false;
+  };
   const parsed = parseTaskGraph(rawGraph);
-  if (!parsed.ok) return false;
+  if (!parsed.ok) return unavailable(parsed.error);
   const opened = openRunDirectory(dirname(observation.path), observation.path);
-  if (!opened.ok) return false;
+  if (!opened.ok) return unavailable(opened.error.message);
   const readiness = deriveWaveReadiness(parsed.value, productionGateDeps);
-  if (!readiness.ok) return false;
+  if (!readiness.ok) return unavailable(readiness.error.reasons.map(({ message }) => message).join("; "));
   const findingCounts = readiness.value.facts.findingCounts;
   if (findingCounts.kind !== "known" || findingCounts.value.advisory === 0) return false;
   const decisionId = waveAdvisoryDecisionRequestId(observation.runId, readiness.value.waveTasks);
@@ -516,16 +522,6 @@ function parseRegisteredPanelProgram(raw: unknown): RegisteredPanelProgram | nul
 }
 
 /**
- * The runner for effects a run directory serves ENTIRELY on its own.
- *
- * All three outside ports are unreachable by construction: an operation routed
- * here that reaches for git or protected wave state is a routing bug, and it
- * should fail loudly rather than be served. `submitOperation`'s transcript
- * capture built this same three-stub runner inline instead of calling it, so a
- * change to what "unreachable" means here would have silently missed one of the
- * two run-directory-only paths.
- */
-/**
  * Record how one semantic attempt settled, keyed so a replay is a no-op.
  *
  * The dedup key is derived from the RESERVED request id and attempt (the pair
@@ -557,6 +553,16 @@ async function appendSpawnOutcome(
   });
 }
 
+/**
+ * The runner for effects a run directory serves ENTIRELY on its own.
+ *
+ * All three outside ports are unreachable by construction: an operation routed
+ * here that reaches for git or protected wave state is a routing bug, and it
+ * should fail loudly rather than be served. `submitOperation`'s transcript
+ * capture built this same three-stub runner inline instead of calling it, so a
+ * change to what "unreachable" means here would have silently missed one of the
+ * two run-directory-only paths.
+ */
 const facadeEffectRunner = (handle: RunDirHandle) => {
   const unreachablePort = async (): Promise<never> => {
     throw new Error("effect port is unreachable for this run-directory operation");
@@ -791,14 +797,15 @@ async function driveRegisteredPanel(
 }
 
 async function emitRunAction(handle: RunDirHandle, action: unknown): Promise<HookResult> {
-  if (typeof action === "object" && action !== null &&
-      (action as Record<string, unknown>)["kind"] === "spawn-batch" &&
-      process.env.PI_CODING_AGENT === "true") {
+  const actionRecord = typeof action === "object" && action !== null
+    ? action as Record<string, unknown>
+    : null;
+  if (actionRecord?.["kind"] === "spawn-batch" && process.env.PI_CODING_AGENT === "true") {
     const sessionId = process.env.PI_SESSION_ID;
     if (sessionId === undefined) {
       return { kind: "error", message: "Pi orchestration spawn publication requires PI_SESSION_ID" };
     }
-    const requests = (action as Record<string, unknown>)["requests"];
+    const requests = actionRecord["requests"];
     if (!Array.isArray(requests) || requests.length === 0) {
       return { kind: "error", message: "Pi orchestration spawn action has no request authority" };
     }
@@ -824,9 +831,42 @@ async function emitRunAction(handle: RunDirHandle, action: unknown): Promise<Hoo
       runsRoot: dirname(handle.runDirectory),
       runDirectory: handle.runDirectory,
       requestIds: Object.freeze(requestIds),
+      resultDigest: null,
     }));
     if (!registered.ok) {
       return { kind: "error", message: `cannot publish Pi orchestration capture authority: ${registered.message}` };
+    }
+  }
+  if (actionRecord?.["kind"] === "done" && process.env.PI_CODING_AGENT === "true") {
+    const outcome = actionRecord["outcome"];
+    const outcomeRecord = typeof outcome === "object" && outcome !== null
+      ? outcome as Record<string, unknown>
+      : null;
+    const slot = outcomeRecord?.["slot"];
+    const slotRecord = typeof slot === "object" && slot !== null ? slot as Record<string, unknown> : null;
+    const resultDigest = outcomeRecord?.["digest"];
+    if (slotRecord?.["kind"] === "fixed-artifact-slot" && slotRecord["path"] === "result.json" &&
+        typeof resultDigest === "string" && /^[0-9a-f]{64}$/.test(resultDigest)) {
+      const sessionId = process.env.PI_SESSION_ID;
+      if (sessionId === undefined) {
+        return { kind: "error", message: "Pi orchestration completion publication requires PI_SESSION_ID" };
+      }
+      const bindings = readSessionRunBindings(SUBAGENT_DIR, sessionId);
+      if (!bindings.ok) {
+        return { kind: "error", message: `cannot read Pi orchestration completion authority: ${bindings.message}` };
+      }
+      const binding = bindings.value.find(({ runId, runDirectory }) =>
+        runId === handle.runId && runDirectory === handle.runDirectory);
+      if (binding === undefined) {
+        return { kind: "error", message: `cannot bind completed result for unregistered Pi run ${handle.runId}` };
+      }
+      const registered = await registerSessionRunBinding(SUBAGENT_DIR, sessionId, Object.freeze({
+        ...binding,
+        resultDigest,
+      }));
+      if (!registered.ok) {
+        return { kind: "error", message: `cannot publish Pi orchestration completion authority: ${registered.message}` };
+      }
     }
   }
   process.stdout.write(`${JSON.stringify(action, null, 2)}\n`);
@@ -1473,15 +1513,16 @@ async function decideOperation(stdin: string, args: readonly string[]): Promise<
   }
   if (stdin.trim().length === 0) return { kind: "error", message: "a decision must be supplied on stdin" };
 
-  const decision = ((): unknown => {
-    try {
-      return JSON.parse(stdin) as unknown;
-    } catch (error) {
-      return { __malformed: error instanceof Error ? error.message : String(error) };
-    }
-  })();
-  if (typeof decision !== "object" || decision === null || Array.isArray(decision) ||
-      typeof (decision as Record<string, unknown>)["__malformed"] === "string") {
+  let decision: unknown;
+  try {
+    decision = JSON.parse(stdin) as unknown;
+  } catch (error) {
+    return {
+      kind: "error",
+      message: `decision must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  if (typeof decision !== "object" || decision === null || Array.isArray(decision)) {
     return { kind: "error", message: "decision must be a JSON object" };
   }
   if (facadeRegistration?.kind === "wave-gate" && (

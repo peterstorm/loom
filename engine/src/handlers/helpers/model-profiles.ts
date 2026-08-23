@@ -20,10 +20,12 @@ import {
   validateAgentPolicyCatalog,
   validateAgentPolicyFrontmatter,
 } from "../../core/model-profiles";
-import { renderPiAgentDefinition } from "../../utils/render-pi-agent";
+import { parseModelRef, resolveEffectivePiBinding, type ModelRef } from "../../core/model-routing";
+import { renderPiAgentDefinitionWithBinding } from "../../utils/render-pi-agent";
+import { activeAgentDir, buildPiRoutingContext } from "../../utils/model-routing-context";
 
 const OPERATIONS = ["show", "agent", "validate", "render-pi"] as const;
-const USAGE = `Usage: helper model-profiles <${OPERATIONS.join("|")}> [--agent <name> --agents-dir <dir> --package-root <dir> --output <dir>]`;
+const USAGE = `Usage: helper model-profiles <${OPERATIONS.join("|")}> [--agent <name> --agents-dir <dir> --package-root <dir> --output <dir> [--parent-model <provider/model>]]`;
 
 
 const frontmatter = (content: string): Record<string, unknown> | null =>
@@ -97,11 +99,31 @@ const handler: HookHandler = async (_stdin, args) => {
   const output = argumentValue(args, "--output");
   if (!output) return { kind: "error", message: `${USAGE}\n--output is required for render-pi` };
   const packageRoot = resolve(argumentValue(args, "--package-root") ?? dirname(agentsDir));
+
+  // Routing: resolve each agent's effective binding from the routing policy +
+  // the parent model. With no routing config (or a non-local parent) the
+  // effective binding equals the declared one, so the render is byte-identical
+  // to the un-routed output.
+  const parentOverrideRaw = argumentValue(args, "--parent-model");
+  let parentOverride: ModelRef | null = null;
+  if (parentOverrideRaw !== null) {
+    const parsed = parseModelRef(parentOverrideRaw);
+    if (!parsed.ok) return { kind: "error", message: `invalid --parent-model: ${parsed.error.message}` };
+    parentOverride = parsed.value;
+  }
+  const built = buildPiRoutingContext(process.env, activeAgentDir(), parentOverride);
+  if (built.configError !== null) process.stdout.write(`warning: ${built.configError}\n`);
+  const { parentRef, config } = built.context;
+
   mkdirSync(output, { recursive: true });
   for (const file of files) {
     const agent = basename(file, ".md");
     const content = readFileSync(join(agentsDir, file), "utf-8");
-    writePiAgent(join(output, file), renderPiAgentDefinition(content, agent, packageRoot));
+    const profile = resolveAgentProfile(agent);
+    if (!profile.ok) return { kind: "error", message: profile.error.message };
+    const declared = lowerModelProfile(profile.value, "pi");
+    const effective = resolveEffectivePiBinding(declared, parentRef, config);
+    writePiAgent(join(output, file), renderPiAgentDefinitionWithBinding(content, agent, packageRoot, effective));
   }
   process.stdout.write(`Rendered ${files.length} Pi agent definitions to ${output}.\n`);
   return { kind: "passthrough" };

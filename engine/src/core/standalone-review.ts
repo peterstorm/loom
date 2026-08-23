@@ -186,6 +186,15 @@ function parsePathList(raw: unknown, label: string, errors: string[]): readonly 
   return Object.freeze([...paths].sort(compareStrings));
 }
 
+/**
+ * A git revision at this boundary, exactly as the sibling boundaries SHA it:
+ * `parseGitSha` (review-packet.ts) and `reviewedSourceSchema.headRevision`
+ * (packages/pi-goal loom-review.ts). Producers emit the full hex from
+ * `git rev-parse`/`git merge-base`; accepting any other string let a tampered
+ * frozen authority name a branch where only a SHA was meant.
+ */
+const GIT_REVISION = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
 function parseChangedPaths(raw: unknown): ParseResult<StandaloneChangedPaths> {
   if (!isRecord(raw)) return fail(["changed_paths must be an object"]);
   const errors = exactKeys(raw, ["unstaged", "staged", "committed", "base_revision", "head_revision"], "changed_paths");
@@ -193,16 +202,16 @@ function parseChangedPaths(raw: unknown): ParseResult<StandaloneChangedPaths> {
   const staged = parsePathList(raw.staged, "changed_paths.staged", errors);
   const committed = parsePathList(raw.committed, "changed_paths.committed", errors);
   const baseRevision = raw.base_revision === null ||
-      (typeof raw.base_revision === "string" && raw.base_revision.trim() === raw.base_revision && raw.base_revision !== "")
+      (typeof raw.base_revision === "string" && raw.base_revision.trim() === raw.base_revision && GIT_REVISION.test(raw.base_revision))
     ? raw.base_revision as string | null
     : null;
   if (raw.base_revision !== null && baseRevision === null) {
-    errors.push("changed_paths.base_revision must be null or a non-empty trimmed revision");
+    errors.push("changed_paths.base_revision must be null or a 40/64-hex git SHA without surrounding whitespace");
   }
-  const headRevision = typeof raw.head_revision === "string" && raw.head_revision.trim() === raw.head_revision
+  const headRevision = typeof raw.head_revision === "string" && raw.head_revision.trim() === raw.head_revision && GIT_REVISION.test(raw.head_revision)
     ? raw.head_revision
     : "";
-  if (headRevision === "") errors.push("changed_paths.head_revision must be a non-empty trimmed revision");
+  if (headRevision === "") errors.push("changed_paths.head_revision must be a 40/64-hex git SHA without surrounding whitespace");
   return errors.length > 0
     ? fail(errors)
     : ok(Object.freeze({ unstaged, staged, committed, baseRevision, headRevision }));
@@ -1403,8 +1412,6 @@ export function canonicalStandalonePanelFindings(
     Object.freeze({ id, claim })));
 }
 
-const frozenStandalonePanelAuthorities = new WeakSet<object>();
-
 export function canonicalDigest(value: unknown): ArtifactDigest {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex") as ArtifactDigest;
 }
@@ -1464,7 +1471,6 @@ export function freezeStandalonePanelAuthority(
     manifestDigest: manifestDigest.value,
     threshold: input.threshold as number,
   });
-  frozenStandalonePanelAuthorities.add(authority);
   return resultOk(authority);
 }
 
@@ -1497,12 +1503,6 @@ export function parseFrozenStandalonePanelAuthority(
     }));
   }
   return parsed;
-}
-
-export function isFrozenStandalonePanelAuthority(
-  authority: FrozenStandalonePanelAuthority,
-): boolean {
-  return typeof authority === "object" && authority !== null && frozenStandalonePanelAuthorities.has(authority);
 }
 
 /** Parse the review-panel's serialized tally and prove exact critical coverage. */
