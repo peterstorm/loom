@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { TaskGraph } from "../../src/types";
 import {
@@ -70,6 +74,28 @@ const result = (overrides: Partial<PiSubagentResult> = {}): PiSubagentResult => 
 });
 
 const assistantText = (text: string) => [{ role: "assistant", content: [{ type: "text", text }] }];
+
+const structuredBashPass = () => [
+  {
+    role: "assistant",
+    content: [{
+      type: "toolCall",
+      id: "call-green-tests",
+      name: "bash",
+      arguments: { command: "bun test engine/tests/pi/subagent-result.test.ts" },
+    }],
+  },
+  {
+    role: "toolResult",
+    toolCallId: "call-green-tests",
+    toolName: "bash",
+    isError: false,
+    content: [{
+      type: "text",
+      text: "bun test v1.3.0\n 1 pass\n 0 fail\n 1 expect() calls\nRan 1 test across 1 file.\n",
+    }],
+  },
+];
 
 let toolCallSeq = 0;
 const writeCall = (path: string) => ({
@@ -434,5 +460,116 @@ describe("applyImplementationPiResult", () => {
     expect(logged).toContain("produced no structured test evidence");
     expect(logged).toContain("no Bash call was classified as a test run");
     expect(logged).toContain("the wave gate will reject it");
+  });
+
+  it("accepts structured regression evidence while explicit policy waives only new tests", async () => {
+    const store = fakeStore(implementationGraph({
+      file_list: [],
+      attempt_artifact_baseline: [],
+      verification_policy: {
+        regression: { kind: "required" },
+        new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+      },
+    }));
+
+    await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        messages: structuredBashPass(),
+      }),
+      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    const task = store.current().tasks[0]!;
+    expect(task.status).toBe("implemented");
+    expect(task.new_tests_written).toBe(false);
+    expect(task.new_test_evidence).toContain(
+      "verification_policy.new_tests waived: existing-tests-sufficient",
+    );
+    expect(task.proof?.obligations).toEqual([
+      { kind: "task-completed" },
+      { kind: "regression-test-pass" },
+    ]);
+    expect(task.proof?.state).toBe("satisfied");
+    if (task.proof?.state === "satisfied") {
+      expect(task.proof.evidence).toContainEqual({
+        kind: "regression-test-pass",
+        provenance: "pi-structured",
+        verdict: "untrusted-pass",
+        label: expect.stringMatching(/^pi-structured: /),
+      });
+      expect(task.proof.evidence).not.toContainEqual(expect.objectContaining({ kind: "new-tests" }));
+    }
+  });
+
+  it("accepts attributed new-test evidence without regression evidence when explicit policy waives only regression", async () => {
+    const repositoryRoot = mkdtempSync(join(tmpdir(), "loom-pi-inverse-policy-"));
+    const previousProjectDir = process.env.CLAUDE_PROJECT_DIR;
+    const testPath = "tests/inverse-policy.test.ts";
+    mkdirSync(join(repositoryRoot, "tests"), { recursive: true });
+    execFileSync("git", ["init"], { cwd: repositoryRoot, stdio: "ignore" });
+    writeFileSync(join(repositoryRoot, testPath), "export {};\n");
+    execFileSync("git", ["add", testPath], { cwd: repositoryRoot, stdio: "ignore" });
+    execFileSync(
+      "git",
+      ["-c", "user.name=Loom Tests", "-c", "user.email=loom@example.test", "commit", "-m", "baseline"],
+      { cwd: repositoryRoot, stdio: "ignore" },
+    );
+    writeFileSync(
+      join(repositoryRoot, testPath),
+      'export {};\n\n  it("covers the change", () => {\n    expect(true).toBe(true);\n  });\n',
+    );
+    process.env.CLAUDE_PROJECT_DIR = repositoryRoot;
+
+    try {
+      const store = fakeStore(implementationGraph({
+        file_list: [],
+        attempt_artifact_baseline: [],
+        verification_policy: {
+          regression: { kind: "waived", reason: "documentation-only" },
+          new_tests: { kind: "required" },
+        },
+      }));
+
+      await applyImplementationPiResult({
+        store,
+        repository: repositoryAt(repositoryRoot),
+        agentType: "code-implementer-agent",
+        result: result({
+          agent: "code-implementer-agent",
+          messages: [writeCall(testPath)],
+        }),
+        reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+        parentPrompt: "",
+      });
+
+      const task = store.current().tasks[0]!;
+      expect(task.test_result).toMatchObject({ verdict: "untrusted", passed: false });
+      expect(task.new_tests_written).toBe(true);
+      expect(task.new_test_evidence).toContain("1 new test methods, 1 assertions");
+      expect(task.status).toBe("implemented");
+      expect(task.proof?.obligations).toEqual([
+        { kind: "task-completed" },
+        { kind: "new-tests" },
+      ]);
+      expect(task.proof?.state).toBe("satisfied");
+      if (task.proof?.state === "satisfied") {
+        expect(task.proof.evidence).toContainEqual({
+          kind: "new-tests",
+          detail: expect.stringContaining("1 new test methods, 1 assertions"),
+        });
+        expect(task.proof.evidence).not.toContainEqual(
+          expect.objectContaining({ kind: "regression-test-pass" }),
+        );
+      }
+    } finally {
+      if (previousProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = previousProjectDir;
+      rmSync(repositoryRoot, { recursive: true, force: true });
+    }
   });
 });

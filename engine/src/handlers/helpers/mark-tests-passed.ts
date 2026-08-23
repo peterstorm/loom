@@ -8,6 +8,11 @@ import type { HookHandler } from "../../types";
 import { testResultPassed } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
+import {
+  requiresNewTests,
+  requiresRegression,
+  taskVerificationPolicy,
+} from "../../core/verification-policy";
 
 import { parseWaveArg } from "./wave-args";
 
@@ -35,20 +40,26 @@ const handler: HookHandler = async (_stdin, args) => {
     };
   }
 
-  // Same exemption as complete-wave-gate's checkTestEvidence: a task
-  // declaring new_tests_required == false needs no test_result — the helper
-  // and the final gate must agree or this verifier reports false MISSINGs.
-  const withTests = tasks.filter((t) => t.new_tests_required === false || testResultPassed(t.test_result));
-  const newTestOk = tasks.filter((t) => t.new_tests_required === false || t.new_tests_written);
+  // Same policy projections as the Wave Gate: regression execution and new-test
+  // creation are independent, so waiving one never silently waives the other.
+  const regressionRequired = (task: (typeof tasks)[number]) =>
+    requiresRegression(taskVerificationPolicy(task));
+  const newTestsRequired = (task: (typeof tasks)[number]) =>
+    requiresNewTests(taskVerificationPolicy(task));
+  const withTests = tasks.filter((task) =>
+    !regressionRequired(task) || testResultPassed(task.test_result));
+  const newTestOk = tasks.filter((task) =>
+    !newTestsRequired(task) || task.new_tests_written);
 
   process.stderr.write(`Wave ${wave} test evidence: ${withTests.length}/${tasks.length} passed, ${newTestOk.length}/${tasks.length} new-test OK\n`);
 
   for (const t of tasks) {
-    const testStatus = t.new_tests_required === false && !testResultPassed(t.test_result)
-      ? "N/A"
+    const verification = taskVerificationPolicy(t);
+    const testStatus = verification.regression.kind === "waived"
+      ? `N/A (${verification.regression.reason})`
       : testResultPassed(t.test_result) ? "PASS" : "MISSING";
-    const newStatus = t.new_tests_required === false
-      ? "N/A"
+    const newStatus = verification.newTests.kind === "waived"
+      ? `N/A (${verification.newTests.reason})`
       : t.new_tests_written ? `YES (${t.new_test_evidence})` : "MISSING";
     process.stderr.write(`  ${t.id}: tests=${testStatus} new=${newStatus}\n`);
   }
@@ -59,9 +70,8 @@ const handler: HookHandler = async (_stdin, args) => {
     return { kind: "passthrough" };
   }
 
-  // Derived from the arrays above, not re-derived from the rule: restating the
-  // `new_tests_required` exemption here is what let this verifier disagree with
-  // the gate it is supposed to agree with.
+  // Derived from the arrays above, not re-derived from the rule: the canonical
+  // policy projections keep this verifier aligned with the Wave Gate.
   const missing = tasks.filter((t) => !withTests.includes(t)).map((t) => t.id);
   const missingNew = tasks.filter((t) => !newTestOk.includes(t)).map((t) => t.id);
 

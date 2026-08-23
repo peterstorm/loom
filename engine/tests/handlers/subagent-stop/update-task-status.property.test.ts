@@ -127,14 +127,16 @@ describe("analyzeNewTests — property tests", () => {
     );
   });
 
-  it("new_tests_required=false always returns written:false", () => {
+  it("legacy new_tests_required=false always returns written:false with migration provenance", () => {
     fc.assert(
       fc.property(
         fc.string({ minLength: 0, maxLength: 200 }),
         (diff) => {
           const result = analyzeNewTests(diff, false);
           expect(result.written).toBe(false);
-          expect(result.evidence).toContain("skipped");
+          expect(result.evidence).toContain(
+            "verification_policy.new_tests waived: legacy-new-tests-required-false",
+          );
         },
       ),
     );

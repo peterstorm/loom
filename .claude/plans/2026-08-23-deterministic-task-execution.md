@@ -26,7 +26,7 @@ Make Task and Wave completion an engine-owned decision over immutable authority 
 
 ### A. Task-local completion plus Wave-global verification — recommended
 
-At SubagentStop/result capture, execute or evaluate only checks whose truth cannot be invalidated by a concurrently-writing sibling: attempt identity, process completion, attributed/declared byte changes, explicit verification policy, new-test presence, and full-tier lint over Task-owned paths. Run whole-program build/typecheck/tests only after the Wave is quiescent.
+At SubagentStop/result capture, execute or evaluate only checks whose truth cannot be invalidated by a concurrently-writing sibling: attempt identity, process completion, attributed/declared byte changes, explicit verification policy, and rechecked new-test presence. Run whole-program build/typecheck/tests and full-tier lint only after the Wave is quiescent unless a check is explicitly proven file-local and non-observing.
 
 **Advantages**
 
@@ -105,7 +105,8 @@ type ImplementationAttemptAuthority = Readonly<{
   wave: WaveNumber;
   attempt: SemanticAttempt;
   reservationId: ImplementationReservationId;
-  baselineDigest: ArtifactBaselineDigest;
+  taskScopeBaselineDigest: ArtifactBaselineDigest;
+  dirtySetBaselineDigest: ArtifactBaselineDigest;
 }>;
 ```
 
@@ -253,7 +254,7 @@ No adapter may independently map "child returned" to `status: "implemented"`.
 
 `engine/src/handlers/helpers/programs/wave-gate.ts` runs the Wave suite only after canonical readiness proves `checkNoExecutingTasks`. The suite result becomes another explicit Wave Gate fact before `commitActiveWaveGateCompletion`.
 
-The existing full-tier lint call remains until it is represented as a named completion check; migration must not temporarily remove enforcement.
+The existing full-tier lint call remains Wave-scoped until it is represented as a named completion check proven against the integrated workspace; migration must not temporarily remove enforcement. An accepted Wave suite result and its workspace/suite digests become inputs to Wave readiness and protected completion authority, never an unbound pre-commit side effect.
 
 ### I/O ports
 
@@ -373,30 +374,32 @@ No production subprocess is mocked.
 
 ## Delivery slices
 
-### Slice 1 — verification policy and completion domain
+### Slice 1 — explicit verification policy
 
-- Add `VerificationPolicy` and compatibility parser.
+- Add `VerificationPolicy` and its exact compatibility parser.
 - Split regression/new-test obligation derivation.
-- Add completion process/check/suite ADTs and pure evaluator.
-- Add `ImplementationAttemptAuthority` and pure settlement reducer.
-- Add example and property tests.
-- Update `CONTEXT.md`, state load guards, task graph production, and docs.
-- No subprocess execution and no status/retry behavior change yet.
+- Update `CONTEXT.md`, proof lockstep, state load guards, TaskGraph production, Claude/Pi result settlement, Wave readiness, and docs together.
+- Add example and property tests for independent requirements and legacy migration.
+- Do not add test-only attempt authority, settlement reducers, subprocess ports, or completion-suite abstractions.
 
 ### Slice 2 — quiescent Wave suite
 
+- Add completion process/check/suite ADTs and pure evaluator.
 - Add protected verification manifest and fixed-command parser.
 - Add bounded subprocess shell with orthogonal outcomes.
 - Execute whole-program checks only after Wave quiescence.
+- Bind the accepted Wave suite result and workspace/suite digests into Wave readiness and protected completion authority.
 - Persist result/receipt and expose it through Wave status.
 - Keep existing full-tier lint fail-closed throughout migration.
 
-### Slice 3 — Task-local completion suite
+### Slice 3 — Task-local completion suite and attempt authority
 
-- Add Task-attempt authority to reservations.
-- Run only concurrency-safe checks at Task result settlement.
+- Add protected Task-attempt authority to reservations with separate Task-scope and repository dirty-set baseline digests.
+- Add the pure `settleImplementationAttempt` reducer only when production state can mint and carry that authority.
+- Run only explicitly file-local, non-observing checks at Task result settlement.
 - Route Claude and Pi through `settleImplementationAttempt`.
 - Remove inference-based success authority; inference may remain cleanup-only.
+- Never block SubagentStop to continue the same child in this epic; retries are new engine-issued attempts in both harnesses.
 
 ### Slice 4 — bounded retry/escalation
 
@@ -418,8 +421,8 @@ No production subprocess is mocked.
 2. Exactly one current attempt exists per executing Task.
 3. Attempt 2 is terminal: success, escalation, infrastructure block, or ignored stale result.
 4. Infrastructure failure does not consume semantic attempt budget.
-5. A Task suite never executes a check whose truth can observe sibling intermediate bytes.
-6. A Wave suite executes only after every Wave Agent has stopped.
+5. A Task suite never executes a check whose truth can observe sibling intermediate bytes, and persisted Task proof is rechecked against its exact byte scope.
+6. A Wave suite executes only after every Wave Agent has stopped, and its accepted digest is part of protected Wave completion authority.
 7. One pure evaluator decides equivalent Pi and Claude observations.
 8. Missing, malformed, stale, duplicate, surplus, or conflicting evidence fails closed.
 9. Regression execution and new-test creation are independent policies.

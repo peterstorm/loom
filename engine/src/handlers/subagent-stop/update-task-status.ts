@@ -48,6 +48,11 @@ import {
 } from "../../core/proof-obligations";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { extractTestEvidence } from "../../core/test-evidence";
+import {
+  taskVerificationPolicy,
+  type NewTestWaiverReason,
+  type VerificationRequirement,
+} from "../../core/verification-policy";
 
 /**
  * Is the agent's machine BOUND for evidence purposes? "invalid" counts as
@@ -344,7 +349,7 @@ export function applyUntrustedStopResolution(
   );
   const proof = evaluateTaskProof(
     {
-      newTestsRequired: target.new_tests_required !== false,
+      verificationPolicy: taskVerificationPolicy(target),
       declaredArtifacts: target.file_list ?? [],
     },
     {
@@ -395,12 +400,25 @@ export interface NewTestEvidence {
   readonly evidence: string;
 }
 
+type NewTestRequirement = boolean | undefined | VerificationRequirement<NewTestWaiverReason>;
+
+function newTestWaiverReason(requirement: NewTestRequirement): NewTestWaiverReason | null {
+  if (requirement === false) return "legacy-new-tests-required-false";
+  return typeof requirement === "object" && requirement.kind === "waived"
+    ? requirement.reason
+    : null;
+}
+
 export function analyzeNewTests(
   diff: string,
-  newTestsRequired: boolean | undefined,
+  requirement: NewTestRequirement,
 ): NewTestEvidence {
-  if (newTestsRequired === false) {
-    return { written: false, evidence: "new_tests_required=false (skipped)" };
+  const waiverReason = newTestWaiverReason(requirement);
+  if (waiverReason !== null) {
+    return {
+      written: false,
+      evidence: `verification_policy.new_tests waived: ${waiverReason}`,
+    };
   }
 
   const tests = git.countNewTests(diff);
@@ -486,12 +504,12 @@ export function collectDiff(
  * harness from proving fewer test changes than the other. */
 export function collectNewTestEvidence(
   filesModified: readonly string[],
-  newTestsRequired: boolean | undefined,
+  requirement: NewTestRequirement,
   startSha?: string,
   deps: DiffDeps = REAL_DIFF_DEPS,
 ): NewTestEvidence {
-  if (newTestsRequired === false) return analyzeNewTests("", false);
-  return analyzeNewTests(collectDiff(filesModified, deps, startSha), newTestsRequired);
+  if (newTestWaiverReason(requirement) !== null) return analyzeNewTests("", requirement);
+  return analyzeNewTests(collectDiff(filesModified, deps, startSha), requirement);
 }
 
 /**
@@ -783,14 +801,15 @@ export const runUpdateTaskStatus = async (
     const resolvedTestEvidence = preserveExistingTrusted ? target.test_evidence : testEvidence.evidence;
     const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, filesModified);
     const proofArtifactsChanged = attributedChangedArtifacts(changedDeclaredArtifacts, cumulativeFiles);
+    const verificationPolicy = taskVerificationPolicy(target);
     const currentNewTestEvidence = collectNewTestEvidence(
       cumulativeFiles,
-      target.new_tests_required,
+      verificationPolicy.newTests,
       target.start_sha,
     );
     const proof = evaluateTaskProof(
       {
-        newTestsRequired: target.new_tests_required !== false,
+        verificationPolicy,
         declaredArtifacts: target.file_list ?? [],
       },
       {

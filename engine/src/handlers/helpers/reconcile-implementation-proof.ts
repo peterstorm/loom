@@ -33,6 +33,7 @@ import {
 } from "../subagent-stop/update-task-status";
 import { parseWaveArg } from "./wave-args";
 import { isExactGitSha } from "../../core/git-sha";
+import { taskVerificationPolicy } from "../../core/verification-policy";
 
 export interface RecoveryPacketBinding {
   readonly taskId: string;
@@ -224,7 +225,7 @@ export function reconcileTaskFromStoredEvidence(
   const newTestEvidence = collectedNewTests.evidence;
   const proof = evaluateTaskProof(
     {
-      newTestsRequired: task.new_tests_required !== false,
+      verificationPolicy: taskVerificationPolicy(task),
       declaredArtifacts: task.file_list ?? [],
     },
     {
@@ -356,7 +357,7 @@ const handler: HookHandler = async (_stdin, args) => {
         const proofArtifactsChanged = attributedChangedArtifacts(byteChanges, sourceTask.files_modified ?? []);
         const collectedNewTests = collectNewTestEvidence(
           sourceTask.files_modified ?? [],
-          sourceTask.new_tests_required,
+          taskVerificationPolicy(sourceTask).newTests,
           sourceTask.start_sha,
         );
         return reconcileTaskFromStoredEvidence(sourceTask, proofArtifactsChanged, collectedNewTests);

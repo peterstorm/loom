@@ -102,7 +102,7 @@ schema) next to the plan and declares it:
   code is never hand-patched to pass.
 
 **Decompose** emits a wave-1 task that runs `fugue new --from <sidecar>`
-(deterministic codegen, `new_tests_required: false`), then one task per node
+(deterministic codegen, both Verification Policy arms waived with `generated-artifact`), then one task per node
 body, each depending on the codegen task, with the node's purpose and schemas
 pasted into `plan_context`.
 

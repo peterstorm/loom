@@ -3,6 +3,7 @@
  */
 
 import type { TaskProof } from "./core/proof-obligations";
+import type { StoredVerificationPolicy } from "./core/verification-policy";
 import type { DeclaredArtifactBaseline } from "./core/artifact-baseline";
 import type { IssuedReviewPacketRegistration } from "./core/review-packet";
 import type { Phase } from "./core/phases";
@@ -323,6 +324,9 @@ export interface Task {
   readonly spec_anchors?: readonly string[];
   /** Partial Requirement Contributions; never part of Wave Gate spec-check completion scope. */
   readonly spec_contributions?: readonly string[];
+  /** Explicit independent regression/new-test policy. New graphs carry this;
+   * new_tests_required remains a read-compatible legacy projection. */
+  readonly verification_policy?: StoredVerificationPolicy;
   readonly new_tests_required?: boolean;
   /** Exact architecture context selected for this Task by decompose. */
   readonly plan_context?: string;

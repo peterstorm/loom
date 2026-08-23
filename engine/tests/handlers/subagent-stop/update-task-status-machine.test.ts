@@ -7,6 +7,7 @@
  *   several executing tasks clears executing_tasks and touches no task
  */
 
+import { execFileSync } from "node:child_process";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -226,6 +227,123 @@ describe("wave-completion gate write (round-17 A1 pin)", () => {
     expect(state.tasks.find((t: { id: string }) => t.id === "T1").status).toBe("implemented");
     expect(state.tasks.find((t: { id: string }) => t.id === "T2").status).toBe("pending");
     expect(state.wave_gates["1"].impl_complete).toBe(false);
+  }, 30000);
+
+  it("settles with regression required while explicit policy waives only new tests", async () => {
+    const s = sid("asymmetric-policy");
+    const dir = tempDir();
+    const task = {
+      ...implTask("T1"),
+      new_tests_required: undefined,
+      verification_policy: {
+        regression: { kind: "required" },
+        new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+      },
+    };
+    const statePath = writeState(dir, [task], ["T1"]);
+    pointSessionAt(s, statePath);
+
+    const snapshot: readonly EvidenceRecord[] = [
+      { epoch: parseEpoch("a-1:code-implementer-agent")!, event: pass },
+    ];
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const result = await runUpdateTaskStatus(stopInput(s), [], { kind: "snapshot", events: snapshot });
+    stderrSpy.mockRestore();
+
+    expect(result.kind).toBe("passthrough");
+    const persisted = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+    expect(persisted.status).toBe("implemented");
+    expect(persisted.new_tests_written).toBe(false);
+    expect(persisted.new_test_evidence).toContain(
+      "verification_policy.new_tests waived: existing-tests-sufficient",
+    );
+    expect(persisted.proof.obligations).toEqual([
+      { kind: "task-completed" },
+      { kind: "regression-test-pass" },
+    ]);
+    expect(persisted.proof.state).toBe("satisfied");
+    expect(persisted.proof.evidence).toContainEqual({
+      kind: "regression-test-pass",
+      provenance: "evidence-ledger",
+      verdict: "trusted-pass",
+    });
+    expect(persisted.proof.evidence).not.toContainEqual(expect.objectContaining({ kind: "new-tests" }));
+  }, 30000);
+
+  it("settles with attributed new-test evidence and no regression evidence when explicit policy waives only regression", async () => {
+    const s = sid("inverse-asymmetric-policy");
+    const repositoryRoot = tempDir();
+    const previousProjectDir = process.env.CLAUDE_PROJECT_DIR;
+    const testPath = "tests/inverse-policy.test.ts";
+    mkdirSync(join(repositoryRoot, "tests"), { recursive: true });
+    execFileSync("git", ["init"], { cwd: repositoryRoot, stdio: "ignore" });
+    writeFileSync(join(repositoryRoot, testPath), "export {};\n");
+    execFileSync("git", ["add", testPath], { cwd: repositoryRoot, stdio: "ignore" });
+    execFileSync(
+      "git",
+      ["-c", "user.name=Loom Tests", "-c", "user.email=loom@example.test", "commit", "-m", "baseline"],
+      { cwd: repositoryRoot, stdio: "ignore" },
+    );
+    writeFileSync(
+      join(repositoryRoot, testPath),
+      'export {};\n\n  it("covers the change", () => {\n    expect(true).toBe(true);\n  });\n',
+    );
+    process.env.CLAUDE_PROJECT_DIR = repositoryRoot;
+
+    try {
+      const task = {
+        ...implTask("T1"),
+        new_tests_required: undefined,
+        file_list: [],
+        verification_policy: {
+          regression: { kind: "waived", reason: "documentation-only" },
+          new_tests: { kind: "required" },
+        },
+      };
+      const statePath = writeState(repositoryRoot, [task], ["T1"]);
+      pointSessionAt(s, statePath);
+      const transcriptPath = join(repositoryRoot, "agent-transcript.jsonl");
+      writeFileSync(transcriptPath, JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            { type: "text", text: "**Task ID:** T1\n\nAdded the required test." },
+            { type: "tool_use", name: "Write", input: { file_path: testPath } },
+          ],
+        },
+      }) + "\n");
+
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const result = await runUpdateTaskStatus(JSON.stringify({
+        session_id: s,
+        agent_id: "a-1",
+        agent_type: "code-implementer-agent",
+        agent_transcript_path: transcriptPath,
+      }), [], { kind: "snapshot", events: [] });
+      stderrSpy.mockRestore();
+
+      expect(result.kind).toBe("passthrough");
+      const persisted = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+      expect(persisted.test_result).toMatchObject({ verdict: "untrusted", passed: false });
+      expect(persisted.new_tests_written).toBe(true);
+      expect(persisted.new_test_evidence).toContain("1 new test methods, 1 assertions");
+      expect(persisted.status).toBe("implemented");
+      expect(persisted.proof.obligations).toEqual([
+        { kind: "task-completed" },
+        { kind: "new-tests" },
+      ]);
+      expect(persisted.proof.state).toBe("satisfied");
+      expect(persisted.proof.evidence).toContainEqual({
+        kind: "new-tests",
+        detail: expect.stringContaining("1 new test methods, 1 assertions"),
+      });
+      expect(persisted.proof.evidence).not.toContainEqual(
+        expect.objectContaining({ kind: "regression-test-pass" }),
+      );
+    } finally {
+      if (previousProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = previousProjectDir;
+    }
   }, 30000);
 });
 

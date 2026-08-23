@@ -55,13 +55,18 @@ function existingTask(id: string, status: Task["status"]): Task {
   return { id, description: "x", agent: "code-implementer-agent", wave: 1, status, depends_on: [] };
 }
 
+const REQUIRED_VERIFICATION = Object.freeze({
+  regression: Object.freeze({ kind: "required" as const }),
+  new_tests: Object.freeze({ kind: "required" as const }),
+});
+
 function decomposeJson(planFile: string): string {
   return JSON.stringify({
     spec_trace_version: 2,
     plan_title: "t",
     spec_file: "spec.md",
     plan_file: planFile,
-    tasks: [{ id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: [], new_tests_required: true, plan_context: "", file_list: ["src/other.ts"] }],
+    tasks: [{ id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, plan_context: "", file_list: ["src/other.ts"] }],
   });
 }
 
@@ -114,7 +119,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
       plan_file: plan,
       tasks: [{
         id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1,
-        depends_on: [], spec_anchors: [], spec_contributions: [], new_tests_required: true, plan_context: "", file_list: ["src/other.ts"],
+        depends_on: [], spec_anchors: [], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, plan_context: "", file_list: ["src/other.ts"],
         // Forged execution state — must never reach the persisted graph.
         status: "completed",
         review_status: "passed",
@@ -154,8 +159,12 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     expect(t9.start_sha).toBeUndefined();
     expect(t9.failure_reason).toBeUndefined();
     expect(t9.retry_count).toBeUndefined();
-    // Decompose-contract fields survive.
-    expect(t9.new_tests_required).toBe(true);
+    // Authored decompose policy is parsed and persisted in the explicit form.
+    expect(t9.new_tests_required).toBeUndefined();
+    expect(t9.verification_policy).toEqual({
+      regression: { kind: "required" },
+      new_tests: { kind: "required" },
+    });
     expect(t9.plan_context).toBe("");
     expect(t9.file_list).toEqual(["src/other.ts"]);
     expect(t9.proof?.state).toBe("pending");
@@ -170,6 +179,63 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     expect(after.spec_trace_version).toBe(2);
   });
 
+  it("rejects legacy boolean policy in an authored decompose payload", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, []);
+    const legacy = JSON.stringify({
+      spec_trace_version: 2,
+      plan_title: "legacy policy",
+      spec_file: "spec.md",
+      plan_file: plan,
+      tasks: [{
+        id: "T9", description: "Write migration documentation", agent: "code-implementer-agent", wave: 1,
+        depends_on: [], spec_anchors: [], spec_contributions: [], new_tests_required: false,
+        file_list: ["docs/migration.md"],
+      }],
+    });
+
+    const result = await populate(legacy, []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("verification_policy is required");
+    expect((JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph).tasks).toEqual([]);
+  });
+
+  it("rejects decompose-authored policy that claims migration-only legacy provenance", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, []);
+    const forgedProvenance = JSON.stringify({
+      spec_trace_version: 2,
+      plan_title: "forged policy provenance",
+      spec_file: "spec.md",
+      plan_file: plan,
+      tasks: [{
+        id: "T9", description: "Write migration documentation", agent: "code-implementer-agent", wave: 1,
+        depends_on: [], spec_anchors: [], spec_contributions: [],
+        verification_policy: {
+          regression: { kind: "waived", reason: "legacy-new-tests-required-false" },
+          new_tests: { kind: "waived", reason: "legacy-new-tests-required-false" },
+        },
+        file_list: ["docs/migration.md"],
+      }],
+    });
+
+    const result = await populate(forgedProvenance, []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      expect(result.message).toContain(
+        "reason must be one of documentation-only, generated-artifact",
+      );
+      expect(result.message).toContain(
+        "reason must be one of existing-tests-sufficient, documentation-only, generated-artifact",
+      );
+    }
+    expect((JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph).tasks).toEqual([]);
+  });
+
   it("rejects malformed file_list before proof derivation and leaves state untouched", async () => {
     const dir = tempDir();
     const plan = modelFreePlan(dir);
@@ -181,7 +247,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
       plan_file: plan,
       tasks: [{
         id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1,
-        depends_on: [], spec_anchors: [], spec_contributions: [], new_tests_required: true, file_list: ["src/x.ts", 42],
+        depends_on: [], spec_anchors: [], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, file_list: ["src/x.ts", 42],
       }],
     });
 
@@ -207,12 +273,12 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
           tasks: [
             {
               id: "T1", description: "partial", agent: "code-implementer-agent", wave: 1,
-              depends_on: [], spec_anchors: [], spec_contributions: [anchor], new_tests_required: true,
+              depends_on: [], spec_anchors: [], spec_contributions: [anchor], verification_policy: REQUIRED_VERIFICATION,
               plan_context: "", file_list: ["src/partial.ts"], status: "completed",
             },
             {
               id: "T2", description: "complete", agent: "code-implementer-agent", wave: 1,
-              depends_on: [], spec_anchors: [anchor], spec_contributions: [], new_tests_required: true,
+              depends_on: [], spec_anchors: [anchor], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION,
               plan_context: "", file_list: ["src/complete.ts"], review_status: "passed",
             },
           ],
@@ -239,7 +305,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
       plan_title: "t",
       spec_file: "spec.md",
       plan_file: plan,
-      tasks: [{ id: "T9", description: "impl", agent: "no-such-agent", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: [], new_tests_required: true, file_list: ["src/x.ts"] }],
+      tasks: [{ id: "T9", description: "impl", agent: "no-such-agent", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, file_list: ["src/x.ts"] }],
     });
     const result = await populate(badAgent, ["--fix"]);
     expect(result.kind).toBe("error");

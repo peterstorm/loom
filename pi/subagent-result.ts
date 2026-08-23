@@ -31,7 +31,7 @@ import {
   collectNewTestEvidence,
   cumulativeModifiedPaths,
 } from "../engine/src/handlers/subagent-stop/update-task-status";
-import { extractTestEvidence } from "../engine/src/core/test-evidence";
+import { extractTestEvidence, type TestEvidence } from "../engine/src/core/test-evidence";
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
   applyReviewResolution,
@@ -48,11 +48,13 @@ import type { Phase, TaskGraph } from "../engine/src/types";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
 import { compareAttemptBaseline } from "../engine/src/utils/artifact-baseline";
+import { taskVerificationPolicy } from "../engine/src/core/verification-policy";
 import {
   messagesToClaudeJsonl,
   parsePiMessages,
   piStructuredTestDiagnostics,
   piStructuredTestResult,
+  type PiMessage,
   type PiTranscriptResult,
 } from "./transcript-adapter";
 
@@ -323,6 +325,62 @@ export function writtenPathsOf(
   return Object.freeze(paths);
 }
 
+type PhaseTransition = NonNullable<ReturnType<typeof resolveTransition>>;
+
+async function recordPhaseWrites(args: Readonly<{
+  store: TaskGraphStore;
+  agentType: string;
+  result: PiSubagentResult;
+}>): Promise<PiResultOutcome | null> {
+  const parsed = parsePiMessages(args.result.messages ?? []);
+  if (!parsed.ok) {
+    const diagnostic = `${args.agentType} phase artifact extraction failed: ${parsed.errors.join("; ")}`;
+    return outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]);
+  }
+
+  try {
+    const updates = phaseArtifactUpdates(writtenPathsOf(parsed.value), args.store.load().spec_dir ?? undefined);
+    if (Object.keys(updates).length > 0) await args.store.update((state) => ({ ...state, ...updates }));
+    return null;
+  } catch (error) {
+    const diagnostic =
+      `${args.agentType} phase artifact extraction failed: ${error instanceof Error ? error.message : String(error)}`;
+    return outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]);
+  }
+}
+
+function phaseAlreadyAdvanced(state: TaskGraph, completedPhase: Phase): boolean {
+  const currentIdx = PHASE_ORDER.indexOf(state.current_phase);
+  const completedIdx = PHASE_ORDER.indexOf(completedPhase);
+  return completedIdx >= 0 && currentIdx > completedIdx;
+}
+
+async function applyPhaseTransition(args: Readonly<{
+  store: TaskGraphStore;
+  completedPhase: Phase;
+  transition: PhaseTransition;
+  now: string;
+}>): Promise<PiResultOutcome> {
+  const state = args.store.load();
+  const artifactUpdates = phaseArtifactUpdates([args.transition.artifact], state.spec_dir ?? undefined);
+  try {
+    await args.store.update((current) => ({
+      ...current,
+      current_phase: args.transition.nextPhase,
+      phase_artifacts: { ...current.phase_artifacts, [args.completedPhase]: args.transition.artifact },
+      ...artifactUpdates,
+      skipped_phases: args.transition.skipClarify
+        ? [...new Set([...current.skipped_phases, "clarify" as const])]
+        : current.skipped_phases,
+      updated_at: args.now,
+    }));
+    return outcome();
+  } catch (error) {
+    const diagnostic = `phase advancement failed: ${error instanceof Error ? error.message : String(error)}`;
+    return outcome([`loom: ${diagnostic}`], [diagnostic]);
+  }
+}
+
 /**
  * Record a phase agent's artifacts and advance the phase.
  *
@@ -340,54 +398,13 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
   result: PiSubagentResult;
   now: string;
 }>): Promise<PiResultOutcome> {
-  const { store, agentType, completedPhase, result } = args;
+  const writesOutcome = await recordPhaseWrites(args);
+  if (writesOutcome !== null) return writesOutcome;
 
-  // Parse the untrusted Pi envelope before artifact extraction. A valid
-  // envelope with no write calls may still use the documented filesystem
-  // fallback; a malformed envelope cannot authorize phase advancement.
-  const parsed = parsePiMessages(result.messages ?? []);
-  if (!parsed.ok) {
-    const diagnostic = `${agentType} phase artifact extraction failed: ${parsed.errors.join("; ")}`;
-    return outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]);
-  }
-
-  try {
-    const updates = phaseArtifactUpdates(writtenPathsOf(parsed.value), store.load().spec_dir ?? undefined);
-    if (Object.keys(updates).length > 0) await store.update((state) => ({ ...state, ...updates }));
-  } catch (error) {
-    const diagnostic =
-      `${agentType} phase artifact extraction failed: ${error instanceof Error ? error.message : String(error)}`;
-    return outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]);
-  }
-
-  const state = store.load();
-  const currentIdx = PHASE_ORDER.indexOf(state.current_phase);
-  const completedIdx = PHASE_ORDER.indexOf(completedPhase);
-  if (completedIdx >= 0 && currentIdx > completedIdx) return outcome();
-
-  const transition = resolveTransition(completedPhase, state);
-  if (!transition) return outcome();
-
-  // The transition's artifact is re-classified rather than re-matched on
-  // substrings: `resolveTransition` already proved containment, and reusing the
-  // shared classifier keeps one rule for "is this path the spec/plan file".
-  const artifactUpdates = phaseArtifactUpdates([transition.artifact], state.spec_dir ?? undefined);
-  try {
-    await store.update((current) => ({
-      ...current,
-      current_phase: transition.nextPhase,
-      phase_artifacts: { ...current.phase_artifacts, [completedPhase]: transition.artifact },
-      ...artifactUpdates,
-      skipped_phases: transition.skipClarify
-        ? [...new Set([...current.skipped_phases, "clarify" as const])]
-        : current.skipped_phases,
-      updated_at: args.now,
-    }));
-  } catch (error) {
-    const diagnostic = `phase advancement failed: ${error instanceof Error ? error.message : String(error)}`;
-    return outcome([`loom: ${diagnostic}`], [diagnostic]);
-  }
-  return outcome();
+  const state = args.store.load();
+  if (phaseAlreadyAdvanced(state, args.completedPhase)) return outcome();
+  const transition = resolveTransition(args.completedPhase, state);
+  return transition ? applyPhaseTransition({ ...args, transition }) : outcome();
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +446,269 @@ export function resolveImplementationTaskId(args: Readonly<{
   });
 }
 
+type LoomTask = TaskGraph["tasks"][number];
+
+type ImplementationBindingResolution =
+  | Readonly<{ kind: "unbound"; outcome: PiResultOutcome }>
+  | Readonly<{ kind: "bound"; taskId: string; log: readonly string[] }>;
+
+type ImplementationTranscriptObservation =
+  | Readonly<{ kind: "malformed"; failureReason: string; log: readonly string[] }>
+  | Readonly<{
+      kind: "accepted";
+      resultMessages: readonly PiMessage[];
+      testEvidence: TestEvidence;
+      structuredTestEvidence: TestEvidence | null;
+      log: readonly string[];
+    }>;
+
+async function clearExecutingTask(store: TaskGraphStore, taskId: string): Promise<void> {
+  await store.update((state) => ({
+    ...state,
+    executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== taskId),
+  }));
+}
+
+async function resolveImplementationBindingForResult(args: Readonly<{
+  store: TaskGraphStore;
+  agentType: string;
+  result: PiSubagentResult;
+  reservedSlot: ReservedSlot | undefined;
+  parentPrompt: ParentPromptText;
+}>): Promise<ImplementationBindingResolution> {
+  const binding = resolveImplementationTaskId({
+    agentType: args.agentType,
+    reservedTaskId: args.reservedSlot?.taskId,
+    resultPrompt: args.result.task ?? "",
+    parentPrompt: args.parentPrompt,
+    executingTasks: args.store.load().executing_tasks ?? [],
+  });
+  if (binding.kind === "unbound") {
+    await args.store.update((state) => ({ ...state, executing_tasks: [] }));
+    return { kind: "unbound", outcome: outcome([binding.reason]) };
+  }
+  const log = binding.inferred
+    ? [`WARNING: ${args.agentType} task ID extraction failed, inferred task ${binding.taskId} from executing_tasks`]
+    : [];
+  return { kind: "bound", taskId: binding.taskId, log };
+}
+
+function missingStructuredEvidenceLog(taskId: string, messages: unknown): string | null {
+  const trace = piStructuredTestDiagnostics(messages);
+  if (!trace.ok) return null;
+  const summary = trace.value.classifiedCommands.length === 0
+    ? "no Bash call was classified as a test run"
+    : `verdict=${trace.value.verdict}, classified=[${trace.value.classifiedCommands.join(" | ")}]`;
+  return `loom(pi): ${taskId} produced no structured test evidence (${summary}) — transcript fallback used; ` +
+    `the wave gate will reject it`;
+}
+
+function observeImplementationTranscript(result: PiSubagentResult, taskId: string): ImplementationTranscriptObservation {
+  const log: string[] = [];
+  const parsedMessages = parsePiMessages(result.messages ?? []);
+  const adaptedTranscript = parsedMessages.ok ? messagesToClaudeJsonl(parsedMessages.value) : parsedMessages;
+  const structuredEvidence = parsedMessages.ok ? piStructuredTestResult(parsedMessages.value) : parsedMessages;
+
+  if (structuredEvidence.ok && structuredEvidence.value === null) {
+    const structuredLog = missingStructuredEvidenceLog(taskId, result.messages ?? []);
+    if (structuredLog !== null) log.push(structuredLog);
+  }
+  if (!adaptedTranscript.ok || !structuredEvidence.ok || !parsedMessages.ok) {
+    const errors = firstFailureErrors(adaptedTranscript, structuredEvidence);
+    return {
+      kind: "malformed",
+      failureReason: `Pi transcript evidence capture failed: ${errors.join("; ")}`,
+      log,
+    };
+  }
+
+  const transcriptEvidence = extractTestEvidence(parseBashTestOutput(adaptedTranscript.value));
+  const structuredTestEvidence = structuredEvidence.value;
+  return {
+    kind: "accepted",
+    resultMessages: parsedMessages.value,
+    testEvidence: structuredTestEvidence ?? transcriptEvidence,
+    structuredTestEvidence,
+    log,
+  };
+}
+
+function malformedTranscriptResolutionState(args: Readonly<{
+  state: TaskGraph;
+  taskId: string;
+  failureReason: string;
+  root: string;
+  comparisonFailures: string[];
+}>): TaskGraph {
+  const currentTarget = args.state.tasks.find((candidate) => candidate.id === args.taskId);
+  if (currentTarget === undefined || currentTarget.status === "completed") {
+    return {
+      ...args.state,
+      executing_tasks: (args.state.executing_tasks ?? []).filter((id) => id !== args.taskId),
+    };
+  }
+  const comparison = compareAttemptBaseline(args.root, currentTarget, { kind: "repository-or-declared" });
+  if (comparison.failure !== null) {
+    args.comparisonFailures.push(
+      `loom(pi): cannot compare malformed-transcript attempt baseline for ${args.taskId}: ${comparison.failure} — ` +
+      `invalidating stale evidence`,
+    );
+  }
+  if (!comparison.bytesChangedSinceAttempt) return pendingMalformedTranscriptState(args);
+  return applyUntrustedStopResolution(args.state, args.taskId, {
+    taskCompleted: false,
+    testResult: {
+      verdict: "untrusted",
+      passed: false,
+      label: "pi-transcript-capture-failed",
+      provenance: "unverified",
+    },
+    testEvidence: args.failureReason,
+    filesModified: [],
+    changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,
+    bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,
+    newTestsWritten: false,
+    newTestEvidence: "",
+  }).state;
+}
+
+function pendingMalformedTranscriptState(args: Readonly<{
+  state: TaskGraph;
+  taskId: string;
+  failureReason: string;
+}>): TaskGraph {
+  return {
+    ...args.state,
+    executing_tasks: (args.state.executing_tasks ?? []).filter((id) => id !== args.taskId),
+    tasks: args.state.tasks.map((candidate) =>
+      candidate.id === args.taskId && candidate.status === "pending"
+        ? { ...candidate, failure_reason: args.failureReason }
+        : candidate
+    ),
+  };
+}
+
+async function applyMalformedImplementationTranscript(args: Readonly<{
+  store: TaskGraphStore;
+  repository: RepositoryProbe;
+  taskId: string;
+  failureReason: string;
+}>): Promise<readonly string[]> {
+  const root = args.repository.root();
+  const comparisonFailures: string[] = [];
+  await args.store.update((state) => malformedTranscriptResolutionState({
+    state,
+    taskId: args.taskId,
+    failureReason: args.failureReason,
+    root,
+    comparisonFailures,
+  }));
+  return [
+    ...comparisonFailures,
+    `loom(pi): ${args.failureReason} — ${args.taskId} evidence was not accepted`,
+  ];
+}
+
+type ModifiedPathRead =
+  | Readonly<{ ok: true; filesModified: readonly string[] }>
+  | Readonly<{ ok: false; message: string }>;
+
+function readImplementationModifiedPaths(
+  repository: RepositoryProbe,
+  resultMessages: readonly PiMessage[],
+  taskId: string,
+): ModifiedPathRead {
+  const piJsonl = resultMessages.map((message) => JSON.stringify({ type: "message", message })).join("\n");
+  try {
+    return {
+      ok: true,
+      filesModified: canonicalRepositoryPaths(
+        repository.root(),
+        parseFilesModified(piJsonl, "pi"),
+        "Pi transcript files_modified",
+      ),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `loom(pi): unsafe modified-file evidence for ${taskId}: ` +
+        `${error instanceof Error ? error.message : String(error)} — task left pending`,
+    };
+  }
+}
+
+function implementationTestResult(
+  structuredTestEvidence: TestEvidence | null,
+  testEvidence: TestEvidence,
+) {
+  return structuredTestEvidence !== null
+    ? {
+        verdict: "untrusted" as const,
+        passed: testEvidence.passed,
+        label: `pi-structured: ${structuredTestEvidence.evidence || "test tool result"}`,
+        provenance: "pi-structured" as const,
+      }
+    : {
+        verdict: "untrusted" as const,
+        passed: testEvidence.passed,
+        label: "transcript-regex (fallback)",
+        provenance: "unverified" as const,
+      };
+}
+
+async function applyAcceptedImplementationResolution(args: Readonly<{
+  store: TaskGraphStore;
+  repository: RepositoryProbe;
+  task: LoomTask;
+  taskId: string;
+  filesModified: readonly string[];
+  testEvidence: TestEvidence;
+  structuredTestEvidence: TestEvidence | null;
+}>): Promise<readonly string[]> {
+  const log: string[] = [];
+  const comparison = compareAttemptBaseline(args.repository.root(), args.task, {
+    kind: "repository-or-declared",
+    extraModifiedPaths: args.filesModified,
+  });
+  if (comparison.failure !== null) {
+    log.push(`loom(pi): cannot compare declared-artifact baseline for ${args.taskId}: ${comparison.failure} — ` +
+      `invalidating stale evidence`);
+  }
+
+  let skippedExistingVerdict = false;
+  await args.store.update((state) => {
+    const currentTarget = state.tasks.find((candidate) => candidate.id === args.taskId);
+    const cumulativeFiles = cumulativeModifiedPaths(currentTarget?.files_modified, args.filesModified);
+    const newTestEvidence = args.repository.isRepo()
+      ? collectNewTestEvidence(
+          cumulativeFiles,
+          currentTarget === undefined
+            ? { kind: "required" }
+            : taskVerificationPolicy(currentTarget).newTests,
+          currentTarget?.start_sha,
+        )
+      : { written: false, evidence: "" };
+    const applied = applyUntrustedStopResolution(state, args.taskId, {
+      taskCompleted: true,
+      testResult: implementationTestResult(args.structuredTestEvidence, args.testEvidence),
+      testEvidence: args.testEvidence.evidence,
+      filesModified: args.filesModified,
+      changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,
+      bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,
+      newTestsWritten: newTestEvidence.written,
+      newTestEvidence: newTestEvidence.evidence,
+    });
+    skippedExistingVerdict = applied.skipped;
+    return applied.state;
+  });
+
+  if (skippedExistingVerdict) {
+    log.push(`loom(pi): ${args.taskId} is completed or carries a trusted verdict this untrusted resolution cannot supersede — ` +
+      `leaving it untouched`);
+  }
+  return log;
+}
+
 /**
  * Resolve one implementation agent's completion into task state.
  *
@@ -446,223 +726,135 @@ export async function applyImplementationPiResult(args: Readonly<{
   reservedSlot: ReservedSlot | undefined;
   parentPrompt: ParentPromptText;
 }>): Promise<PiResultOutcome> {
-  const { store, repository, agentType, result, reservedSlot } = args;
-  const log: string[] = [];
+  const binding = await resolveImplementationBindingForResult(args);
+  if (binding.kind === "unbound") return binding.outcome;
+  const log = [...binding.log];
+  const task = args.store.load().tasks.find((candidate) => candidate.id === binding.taskId);
 
-  const binding = resolveImplementationTaskId({
-    agentType,
-    reservedTaskId: reservedSlot?.taskId,
-    resultPrompt: result.task ?? "",
-    parentPrompt: args.parentPrompt,
-    executingTasks: store.load().executing_tasks ?? [],
-  });
-  if (binding.kind === "unbound") {
-    await store.update((state) => ({ ...state, executing_tasks: [] }));
-    return outcome([binding.reason]);
-  }
-  const taskId = binding.taskId;
-  if (binding.inferred) {
-    log.push(`WARNING: ${agentType} task ID extraction failed, inferred task ${taskId} from executing_tasks`);
-  }
-
-  const parsedMessages = parsePiMessages(result.messages ?? []);
-
-  // Pre-lock snapshot: needed for start_sha / new_tests_required in the evidence
-  // collection below. The skip guard is a cheap fast path — the authoritative
-  // re-check runs inside the locked update.
-  const task = store.load().tasks.find((candidate) => candidate.id === taskId);
-  // Evidence collection below needs a live unresolved task. A stopped
-  // missing/completed task still needs locked execution cleanup; skipping it
-  // outright leaves a ghost marker forever.
   if (!task || task.status === "completed") {
-    await store.update((state) => ({
-      ...state,
-      executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== taskId),
-    }));
-    log.push(`loom(pi): ${taskId} stopped; preserved completed/missing state and cleared executing_tasks`);
+    await clearExecutingTask(args.store, binding.taskId);
+    log.push(`loom(pi): ${binding.taskId} stopped; preserved completed/missing state and cleared executing_tasks`);
     return outcome(log);
   }
 
-  // parseBashTestOutput deliberately accepts only paired Bash tool calls and
-  // results in Claude-compatible JSONL. Passing flattened prose here silently
-  // discards every Pi test run as spoofable free text.
-  const adaptedTranscript = parsedMessages.ok ? messagesToClaudeJsonl(parsedMessages.value) : parsedMessages;
-  const structuredEvidence = parsedMessages.ok ? piStructuredTestResult(parsedMessages.value) : parsedMessages;
-  if (structuredEvidence.ok && structuredEvidence.value === null) {
-    // The wave gate rejects the transcript fallback, so a null structured
-    // verdict is a latent blocker: say exactly why, instead of letting the next
-    // gate run surface a bare "untrusted-regression-pass" mystery.
-    const trace = piStructuredTestDiagnostics(result.messages ?? []);
-    if (trace.ok) {
-      const summary = trace.value.classifiedCommands.length === 0
-        ? "no Bash call was classified as a test run"
-        : `verdict=${trace.value.verdict}, classified=[${trace.value.classifiedCommands.join(" | ")}]`;
-      log.push(
-        `loom(pi): ${taskId} produced no structured test evidence (${summary}) — transcript fallback used; ` +
-        `the wave gate will reject it`,
-      );
-    }
-  }
-
-  // `!parsedMessages.ok` is kept in the condition for NARROWING only — both
-  // derived values ARE `parsedMessages` when it failed, so it can never be the
-  // disjunct that fires, and there is no arm for it below.
-  if (!adaptedTranscript.ok || !structuredEvidence.ok || !parsedMessages.ok) {
-    // First failure wins, and the order matters: when `parsedMessages` failed
-    // BOTH derived values carry that same cause, so concatenating them would
-    // report one cause twice.
-    const errors = firstFailureErrors(adaptedTranscript, structuredEvidence);
-    const failureReason = `Pi transcript evidence capture failed: ${errors.join("; ")}`;
-    const root = repository.root();
-    const comparisonFailures: string[] = [];
-    await store.update((current) => {
-      const currentTarget = current.tasks.find((candidate) => candidate.id === taskId);
-      if (currentTarget === undefined || currentTarget.status === "completed") {
-        return {
-          ...current,
-          executing_tasks: (current.executing_tasks ?? []).filter((id) => id !== taskId),
-        };
-      }
-      const comparison = compareAttemptBaseline(root, currentTarget, { kind: "repository-or-declared" });
-      if (comparison.failure !== null) {
-        comparisonFailures.push(
-          `loom(pi): cannot compare malformed-transcript attempt baseline for ${taskId}: ${comparison.failure} — ` +
-          `invalidating stale evidence`,
-        );
-      }
-      if (!comparison.bytesChangedSinceAttempt) {
-        return {
-          ...current,
-          executing_tasks: (current.executing_tasks ?? []).filter((id) => id !== taskId),
-          tasks: current.tasks.map((candidate) =>
-            candidate.id === taskId && candidate.status === "pending"
-              ? { ...candidate, failure_reason: failureReason }
-              : candidate
-          ),
-        };
-      }
-      return applyUntrustedStopResolution(current, taskId, {
-        taskCompleted: false,
-        testResult: {
-          verdict: "untrusted",
-          passed: false,
-          label: "pi-transcript-capture-failed",
-          provenance: "unverified",
-        },
-        testEvidence: failureReason,
-        // Malformed messages provide no task-attributed path evidence. The
-        // batch-wide repository delta is invalidation-only.
-        filesModified: [],
-        changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,
-        bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,
-        newTestsWritten: false,
-        newTestEvidence: "",
-      }).state;
-    });
-    log.push(...comparisonFailures, `loom(pi): ${failureReason} — ${taskId} evidence was not accepted`);
+  const transcript = observeImplementationTranscript(args.result, binding.taskId);
+  log.push(...transcript.log);
+  if (transcript.kind === "malformed") {
+    log.push(...await applyMalformedImplementationTranscript({ ...args, taskId: binding.taskId, ...transcript }));
     return outcome(log);
   }
 
-  const resultMessages = parsedMessages.value;
-  const transcriptEvidence = extractTestEvidence(parseBashTestOutput(adaptedTranscript.value));
-  const structuredTestEvidence = structuredEvidence.value;
-  const testEvidence = structuredTestEvidence ?? transcriptEvidence;
-
-  // files_modified feeds lint-wave-gate's target collection (it collects lint
-  // targets EXCLUSIVELY from tasks' files_modified) — parse it from the
-  // per-result messages, re-encoded as the pi-format JSONL parseFilesModified's
-  // pi branch reads, so the pi path persists the same field the engine does.
-  const piJsonl = resultMessages.map((message) => JSON.stringify({ type: "message", message })).join("\n");
-  let filesModified: readonly string[];
-  try {
-    filesModified = canonicalRepositoryPaths(
-      repository.root(),
-      parseFilesModified(piJsonl, "pi"),
-      "Pi transcript files_modified",
-    );
-  } catch (error) {
-    await store.update((state) => ({
-      ...state,
-      executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== taskId),
-    }));
-    log.push(
-      `loom(pi): unsafe modified-file evidence for ${taskId}: ` +
-      `${error instanceof Error ? error.message : String(error)} — task left pending`,
-    );
+  const modifiedPaths = readImplementationModifiedPaths(args.repository, transcript.resultMessages, binding.taskId);
+  if (!modifiedPaths.ok) {
+    await clearExecutingTask(args.store, binding.taskId);
+    log.push(modifiedPaths.message);
     return outcome(log);
   }
 
-  // The SAME comparison and the SAME fail-closed contract as the other two
-  // sites. The helper fails closed (`bytesChangedSinceAttempt: true`, declared
-  // artifacts from `file_list`) and this path falls through to the untrusted
-  // resolution below, exactly as the others do.
-  const comparison = compareAttemptBaseline(
-    repository.root(),
+  log.push(...await applyAcceptedImplementationResolution({
+    ...args,
     task,
-    { kind: "repository-or-declared", extraModifiedPaths: filesModified },
-  );
-  if (comparison.failure !== null) {
-    log.push(
-      `loom(pi): cannot compare declared-artifact baseline for ${taskId}: ${comparison.failure} — ` +
-      `invalidating stale evidence`,
-    );
-  }
-
-  let skippedExistingVerdict = false;
-  await store.update((state) => {
-    const currentTarget = state.tasks.find((candidate) => candidate.id === taskId);
-    const cumulativeFiles = cumulativeModifiedPaths(currentTarget?.files_modified, filesModified);
-    const newTestEvidence = repository.isRepo()
-      ? collectNewTestEvidence(cumulativeFiles, currentTarget?.new_tests_required, currentTarget?.start_sha)
-      : { written: false, evidence: "" };
-    const applied = applyUntrustedStopResolution(state, taskId, {
-      taskCompleted: true,
-      // Pi has no Loom evidence ledger. Preserve the real provenance: paired
-      // tool-result evidence may discharge Pi's structured proof policy;
-      // flattened transcript output may not.
-      // `provenance` — not the label's spelling — is what the structured
-      // evidence policy reads. This is the ONE site that may claim
-      // `pi-structured`, and only when paired tool-result evidence was
-      // actually recovered; the flattened-transcript fallback stays
-      // `unverified` and can never discharge the regression obligation.
-      testResult: structuredTestEvidence !== null
-        ? {
-            verdict: "untrusted" as const,
-            passed: testEvidence.passed,
-            label: `pi-structured: ${structuredTestEvidence.evidence || "test tool result"}`,
-            provenance: "pi-structured" as const,
-          }
-        : {
-            verdict: "untrusted" as const,
-            passed: testEvidence.passed,
-            label: "transcript-regex (fallback)",
-            provenance: "unverified" as const,
-          },
-      testEvidence: testEvidence.evidence,
-      filesModified,
-      changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,
-      bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,
-      newTestsWritten: newTestEvidence.written,
-      newTestEvidence: newTestEvidence.evidence,
-    });
-    skippedExistingVerdict = applied.skipped;
-    // applyUntrustedStopResolution reconciles impl_complete in both directions
-    // in the same locked state transition as the proof.
-    return applied.state;
-  });
-
-  if (skippedExistingVerdict) {
-    log.push(
-      `loom(pi): ${taskId} is completed or carries a trusted verdict this untrusted resolution cannot supersede — ` +
-      `leaving it untouched`,
-    );
-  }
+    taskId: binding.taskId,
+    filesModified: modifiedPaths.filesModified,
+    testEvidence: transcript.testEvidence,
+    structuredTestEvidence: transcript.structuredTestEvidence,
+  }));
   return outcome(log);
 }
 
 // ---------------------------------------------------------------------------
 // Review agents
 // ---------------------------------------------------------------------------
+
+type ReviewTaskBinding =
+  | Readonly<{ kind: "blocked"; outcome: PiResultOutcome }>
+  | Readonly<{ kind: "bound"; taskId: string; reviewTask: LoomTask }>;
+
+function resolveReviewTaskBinding(args: Readonly<{
+  store: TaskGraphStore;
+  agentType: string;
+  result: PiSubagentResult;
+  reservedSlot: ReservedSlot | undefined;
+  parentPrompt: ParentPromptText;
+}>): ReviewTaskBinding {
+  const taskId = args.reservedSlot?.taskId ?? extractTaskId(args.result.task ?? "") ?? extractTaskId(args.parentPrompt);
+  if (!taskId) {
+    return {
+      kind: "blocked",
+      outcome: outcome([`WARNING: ${args.agentType} review completed without an extractable task ID — findings NOT stored`]),
+    };
+  }
+
+  const reviewTask = args.store.load().tasks.find((task) => task.id === taskId);
+  if (!reviewTask) {
+    return {
+      kind: "blocked",
+      outcome: outcome([
+        `WARNING: ${args.agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored`,
+      ]),
+    };
+  }
+  return { kind: "bound", taskId, reviewTask };
+}
+
+async function applyMalformedReviewMessages(args: Readonly<{
+  store: TaskGraphStore;
+  agentType: string;
+  taskId: string;
+  reviewTask: LoomTask;
+  errors: readonly string[];
+}>): Promise<PiResultOutcome> {
+  const message = `Pi review messages are malformed: ${args.errors.join("; ")}`;
+  const resolution = { kind: "evidence-failed" as const, agent: args.agentType, message };
+  let appliedTask = args.reviewTask;
+  await args.store.update((state) => ({
+    ...state,
+    tasks: state.tasks.map((task) => {
+      if (task.id !== args.taskId) return task;
+      appliedTask = applyReviewResolution(task, resolution);
+      return appliedTask;
+    }),
+  }));
+  return outcome([reviewResolutionLog(args.taskId, resolution, appliedTask, true)]);
+}
+
+async function applyParsedReviewMessages(args: Readonly<{
+  store: TaskGraphStore;
+  agentType: string;
+  taskId: string;
+  reviewTask: LoomTask;
+  messages: readonly PiMessage[];
+}>): Promise<PiResultOutcome> {
+  let resolution: ReviewResolution = {
+    kind: "evidence-failed",
+    agent: args.agentType,
+    message: "review task disappeared before evidence could be applied",
+  };
+  let appliedTask = args.reviewTask;
+  let applicationChanged = false;
+  let taskFound = false;
+  const transcriptText = transcriptTextOf(args.messages);
+  await args.store.update((state) => ({
+    ...state,
+    tasks: state.tasks.map((task) => {
+      if (task.id !== args.taskId) return task;
+      taskFound = true;
+      resolution = constrainReviewResolutionToScope(
+        resolveTaskReviewFindings(transcriptText, args.agentType, task.review_run, task.review_generation),
+        [...(task.file_list ?? []), ...(task.files_modified ?? [])],
+      );
+      appliedTask = applyReviewResolution(task, resolution);
+      applicationChanged = appliedTask !== task;
+      return appliedTask;
+    }),
+  }));
+  if (!taskFound) {
+    return outcome([
+      `WARNING: ${args.agentType} review task ${args.taskId} disappeared before evidence application — findings NOT stored`,
+    ]);
+  }
+  return outcome([reviewResolutionLog(args.taskId, resolution, appliedTask, applicationChanged)]);
+}
 
 /**
  * Store one reviewer's findings against the task it names.
@@ -678,73 +870,14 @@ export async function applyReviewPiResult(args: Readonly<{
   reservedSlot: ReservedSlot | undefined;
   parentPrompt: ParentPromptText;
 }>): Promise<PiResultOutcome> {
-  const { store, agentType, result, reservedSlot } = args;
-  const taskId = reservedSlot?.taskId ?? extractTaskId(result.task ?? "") ?? extractTaskId(args.parentPrompt);
-  if (!taskId) {
-    // A review whose task ID is unextractable stores nothing — its findings
-    // silently never gate the wave. Say so instead of vanishing (review agents
-    // don't sit in executing_tasks, so there is no inference to fall back on).
-    return outcome([`WARNING: ${agentType} review completed without an extractable task ID — findings NOT stored`]);
-  }
+  const binding = resolveReviewTaskBinding(args);
+  if (binding.kind === "blocked") return binding.outcome;
 
-  // `tasks.map` over an id no task holds is a total no-op, and the log below
-  // asserts the findings were stored regardless. `extractTaskId` falls back to
-  // any standalone `T\d+` in the transcript, so a reviewer quoting an unrelated
-  // id resolves to a task the graph does not have — and that reviewer's
-  // criticals were discarded while stderr reported them recorded. Both
-  // harnesses guard it, or they drift.
-  const reviewTask = store.load().tasks.find((task) => task.id === taskId);
-  if (!reviewTask) {
-    return outcome([
-      `WARNING: ${agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored`,
-    ]);
-  }
-
-  const parsedMessages = parsePiMessages(result.messages ?? []);
+  const parsedMessages = parsePiMessages(args.result.messages ?? []);
   if (!parsedMessages.ok) {
-    const message = `Pi review messages are malformed: ${parsedMessages.errors.join("; ")}`;
-    const resolution = { kind: "evidence-failed" as const, agent: agentType, message };
-    let appliedTask = reviewTask;
-    await store.update((state) => ({
-      ...state,
-      tasks: state.tasks.map((task) => {
-        if (task.id !== taskId) return task;
-        appliedTask = applyReviewResolution(task, resolution);
-        return appliedTask;
-      }),
-    }));
-    return outcome([reviewResolutionLog(taskId, resolution, appliedTask, true)]);
+    return applyMalformedReviewMessages({ ...args, ...binding, errors: parsedMessages.errors });
   }
-
-  let resolution: ReviewResolution = {
-    kind: "evidence-failed",
-    agent: agentType,
-    message: "review task disappeared before evidence could be applied",
-  };
-  let appliedTask = reviewTask;
-  let applicationChanged = false;
-  let taskFound = false;
-  const transcriptText = transcriptTextOf(parsedMessages.value);
-  await store.update((state) => ({
-    ...state,
-    tasks: state.tasks.map((task) => {
-      if (task.id !== taskId) return task;
-      taskFound = true;
-      resolution = constrainReviewResolutionToScope(
-        resolveTaskReviewFindings(transcriptText, agentType, task.review_run, task.review_generation),
-        [...(task.file_list ?? []), ...(task.files_modified ?? [])],
-      );
-      appliedTask = applyReviewResolution(task, resolution);
-      applicationChanged = appliedTask !== task;
-      return appliedTask;
-    }),
-  }));
-  if (!taskFound) {
-    return outcome([
-      `WARNING: ${agentType} review task ${taskId} disappeared before evidence application — findings NOT stored`,
-    ]);
-  }
-  return outcome([reviewResolutionLog(taskId, resolution, appliedTask, applicationChanged)]);
+  return applyParsedReviewMessages({ ...args, ...binding, messages: parsedMessages.value });
 }
 
 // ---------------------------------------------------------------------------

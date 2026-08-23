@@ -15,6 +15,10 @@ import { validateFull, fixFull } from "./validate-task-graph";
 import { checkPlanModelBindings, productionModelBindingDeps } from "./validate-model-bindings";
 import { derivePendingTaskProof } from "../../core/proof-obligations";
 import { argumentValue, hasFlag } from "./cli-args";
+import {
+  serializeVerificationPolicy,
+  taskVerificationPolicy,
+} from "../../core/verification-policy";
 
 interface DecomposeInput {
   spec_trace_version: 2;
@@ -52,6 +56,7 @@ function parseArgs(args: string[]): { issue?: number; repo?: string; fix: boolea
  * store-test-evidence.
  */
 function sanitizeDecomposedTask(t: Task): Task {
+  const verificationPolicy = taskVerificationPolicy(t);
   return {
     id: t.id,
     description: t.description,
@@ -61,11 +66,11 @@ function sanitizeDecomposedTask(t: Task): Task {
     depends_on: t.depends_on ?? [],
     spec_anchors: Object.freeze([...(t.spec_anchors ?? [])]),
     spec_contributions: Object.freeze([...(t.spec_contributions ?? [])]),
-    ...(t.new_tests_required !== undefined ? { new_tests_required: t.new_tests_required } : {}),
+    verification_policy: serializeVerificationPolicy(verificationPolicy),
     ...(t.plan_context !== undefined ? { plan_context: t.plan_context } : {}),
     ...(t.file_list !== undefined ? { file_list: t.file_list } : {}),
     proof: derivePendingTaskProof({
-      newTestsRequired: t.new_tests_required !== false,
+      verificationPolicy,
       declaredArtifacts: t.file_list ?? [],
     }),
     review_status: "pending",

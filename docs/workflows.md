@@ -140,7 +140,7 @@ Evidence retains provenance:
 - transcript fallback is explicitly untrusted/degraded;
 - a pass invalidated by later writes does not remain a pass.
 
-A Task can declare `new_tests_required: false` for work where new tests are genuinely inapplicable; that waives both passing-test and new-test checks for the gate’s per-Task test requirements, but not declared-artifact proof or review.
+A Task carries an explicit `verification_policy` with independent `regression` and `new_tests` requirements. Each arm is either `required` or `waived` with a typed reason. For example, `existing-tests-sufficient` waives new-test creation while retaining regression execution; `documentation-only` may waive both. Historical `new_tests_required` booleans remain read-compatible, but new TaskGraphs persist the explicit policy and reject conflicting dual declarations. Neither policy waives declared-artifact proof or review.
 
 ## Wave Gate
 

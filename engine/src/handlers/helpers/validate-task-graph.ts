@@ -40,6 +40,11 @@ import {
 import { parseReviewPath } from "../../core/review-packet";
 import { type ValidationResult, ok, fail } from "./validation-result";
 import { parseSpecTraceContract, specTraceDiagnosticMessages } from "../../core/spec-trace";
+import {
+  parseTaskVerificationPolicy,
+  requiresNewTests,
+  requiresRegression,
+} from "../../core/verification-policy";
 export type { ValidationResult } from "./validation-result";
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -220,16 +225,24 @@ export function validateFull(
       if (stateError !== null) errors.push(stateError);
     }
 
-    // Optional field type checks
-    if (task.new_tests_required !== undefined && typeof task.new_tests_required !== "boolean") {
-      errors.push(`Task ${tid}: 'new_tests_required' must be boolean if present`);
+    const verification = parseTaskVerificationPolicy(
+      task,
+      `Task ${tid}`,
+      scope === "decompose-payload" ? "authored" : "stored",
+    );
+    if (!verification.ok) {
+      errors.push(...verification.errors);
     }
 
-    // Warn on suspicious new_tests_required=false
-    if (task.new_tests_required === false && task.description) {
-      if (!NO_TEST_KEYWORDS.test(task.description as string)) {
-        process.stderr.write(`WARNING: Task ${tid} has new_tests_required=false but description doesn't match no-test patterns\n`);
-      }
+    // A total test waiver remains suspicious for code work. Independent policy
+    // allows existing-tests-sufficient to waive only new-test creation without
+    // suppressing the regression obligation or triggering this warning.
+    if (verification.ok && !requiresRegression(verification.value.policy) &&
+        !requiresNewTests(verification.value.policy) && task.description &&
+        !NO_TEST_KEYWORDS.test(task.description as string)) {
+      process.stderr.write(
+        `WARNING: Task ${tid} waives regression and new-test verification but description doesn't match no-test patterns\n`,
+      );
     }
   }
 
@@ -565,87 +578,92 @@ export interface FixReport {
  * whose output is piped, and a repair that changed a claim's identity must reach
  * the operator's stderr rather than only the file.
  */
+const currentWaveIsValid = (value: unknown): boolean =>
+  typeof value === "number" && Number.isInteger(value) && value >= 1;
+
+function pushDataLoss(notes: string[], dataLoss: string[], note: string): void {
+  notes.push(note);
+  dataLoss.push(note);
+}
+
+function appendDroppedFindingNote(id: string, repair: FindingsRepair, notes: string[], dataLoss: string[]): void {
+  if (repair.dropped === 0) return;
+  const note =
+    `${id}: DROPPED ${repair.dropped} findings entr(y/ies) carrying no usable claim — ` +
+    `data lost; check the reviewer output for this task`;
+  pushDataLoss(notes, dataLoss, note);
+}
+
+function appendDroppedRefutationNote(id: string, repair: FindingsRepair, notes: string[], dataLoss: string[]): void {
+  if (repair.droppedRefutations === 0) return;
+  const note =
+    `${id}: DROPPED ${repair.droppedRefutations} malformed refutation record(s) — ` +
+    `audit trail lost; valid nested findings were preserved or returned to the active set`;
+  pushDataLoss(notes, dataLoss, note);
+}
+
+function appendDroppedResolutionNote(id: string, repair: FindingsRepair, notes: string[], dataLoss: string[]): void {
+  if (repair.droppedResolutions === 0) return;
+  const note =
+    `${id}: DROPPED ${repair.droppedResolutions} malformed remediation resolution record(s) — ` +
+    `audit trail lost; valid nested findings were returned to the active set`;
+  pushDataLoss(notes, dataLoss, note);
+}
+
+function appendUnrecoverableViewNotes(id: string, repair: FindingsRepair, notes: string[], dataLoss: string[]): void {
+  for (const claim of repair.unrecoverableViewClaims) {
+    const note =
+      `${id}: DROPPED view-only claim carrying no finding — "${claim}". ` +
+      `The wave gate counts that view and does not filter sentinels, so this task ` +
+      `blocked the gate before this repair and no longer does`;
+    pushDataLoss(notes, dataLoss, note);
+  }
+}
+
+function appendFindingsRepairNotes(id: string, repair: FindingsRepair, notes: string[], dataLoss: string[]): void {
+  for (const claim of repair.recovered) notes.push(`${id}: recovered view-only claim into findings — "${claim}"`);
+  for (const claim of repair.salvaged) notes.push(`${id}: re-minted identity for a malformed findings entry — "${claim}"`);
+  if (repair.reminted > 0) notes.push(`${id}: re-minted ${repair.reminted} colliding finding id(s)`);
+  appendDroppedFindingNote(id, repair, notes, dataLoss);
+  for (const claim of repair.recoveredRefutationFindings) notes.push(`${id}: recovered finding from malformed refutation record — "${claim}"`);
+  appendDroppedRefutationNote(id, repair, notes, dataLoss);
+  for (const claim of repair.recoveredResolutionFindings) notes.push(`${id}: recovered finding from malformed remediation resolution — "${claim}"`);
+  appendDroppedResolutionNote(id, repair, notes, dataLoss);
+  if (repair.clearedReviewRecord) {
+    notes.push(`${id}: cleared an inconsistent review evidence-failure record and reset review_status to pending`);
+  }
+  appendUnrecoverableViewNotes(id, repair, notes, dataLoss);
+}
+
+function fixTaskRecord(rawTask: unknown, taskIndex: number, notes: string[], dataLoss: string[]): unknown {
+  if (!isRecord(rawTask)) {
+    notes.push(`tasks[${taskIndex}]: cannot repair non-object task entry ${JSON.stringify(rawTask)}; refusing unchanged input`);
+    return rawTask;
+  }
+  const repair = fixTaskFindings(rawTask);
+  const id = typeof rawTask.id === "string" ? rawTask.id : "<task with no id>";
+  appendFindingsRepairNotes(id, repair, notes, dataLoss);
+  return {
+    ...rawTask,
+    depends_on: Array.isArray(rawTask.depends_on) ? rawTask.depends_on : [],
+    status: rawTask.status ?? "pending",
+    review_status: rawTask.review_status ?? "pending",
+    ...repair.fields,
+  };
+}
+
 export function fixFull(json: Record<string, unknown>): FixReport {
   const tasks: readonly unknown[] = Array.isArray(json.tasks) ? json.tasks : [];
   const notes: string[] = [];
   const dataLoss: string[] = [];
-  const currentWaveValid =
-    typeof json.current_wave === "number" && Number.isInteger(json.current_wave) && json.current_wave >= 1;
+  const currentWaveValid = currentWaveIsValid(json.current_wave);
   if (json.current_wave !== undefined && !currentWaveValid) {
     notes.push(`normalized invalid current_wave ${JSON.stringify(json.current_wave)} to 1`);
   }
   const fixed = {
     ...json,
     ...(json.current_wave === undefined ? {} : { current_wave: currentWaveValid ? json.current_wave : 1 }),
-    tasks: tasks.map((rawTask, taskIndex) => {
-      if (!isRecord(rawTask)) {
-        notes.push(
-          `tasks[${taskIndex}]: cannot repair non-object task entry ${JSON.stringify(rawTask)}; refusing unchanged input`,
-        );
-        return rawTask;
-      }
-      const t = rawTask;
-      const repair = fixTaskFindings(t);
-      const id = typeof t.id === "string" ? t.id : "<task with no id>";
-      for (const claim of repair.recovered) {
-        notes.push(`${id}: recovered view-only claim into findings — "${claim}"`);
-      }
-      for (const claim of repair.salvaged) {
-        notes.push(`${id}: re-minted identity for a malformed findings entry — "${claim}"`);
-      }
-      if (repair.reminted > 0) {
-        notes.push(`${id}: re-minted ${repair.reminted} colliding finding id(s)`);
-      }
-      // The only lossy paths in this repair. Loud, and named as data loss —
-      // a dropped critical is indistinguishable from one that was never found.
-      if (repair.dropped > 0) {
-        const note =
-          `${id}: DROPPED ${repair.dropped} findings entr(y/ies) carrying no usable claim — ` +
-          `data lost; check the reviewer output for this task`;
-        notes.push(note);
-        dataLoss.push(note);
-      }
-      for (const claim of repair.recoveredRefutationFindings) {
-        notes.push(`${id}: recovered finding from malformed refutation record — "${claim}"`);
-      }
-      if (repair.droppedRefutations > 0) {
-        const note =
-          `${id}: DROPPED ${repair.droppedRefutations} malformed refutation record(s) — ` +
-          `audit trail lost; valid nested findings were preserved or returned to the active set`;
-        notes.push(note);
-        dataLoss.push(note);
-      }
-      for (const claim of repair.recoveredResolutionFindings) {
-        notes.push(`${id}: recovered finding from malformed remediation resolution — "${claim}"`);
-      }
-      if (repair.droppedResolutions > 0) {
-        const note =
-          `${id}: DROPPED ${repair.droppedResolutions} malformed remediation resolution record(s) — ` +
-          `audit trail lost; valid nested findings were returned to the active set`;
-        notes.push(note);
-        dataLoss.push(note);
-      }
-      if (repair.clearedReviewRecord) {
-        notes.push(
-          `${id}: cleared an inconsistent review evidence-failure record and reset review_status to pending`,
-        );
-      }
-      for (const claim of repair.unrecoverableViewClaims) {
-        const note =
-          `${id}: DROPPED view-only claim carrying no finding — "${claim}". ` +
-          `The wave gate counts that view and does not filter sentinels, so this task ` +
-          `blocked the gate before this repair and no longer does`;
-        notes.push(note);
-        dataLoss.push(note);
-      }
-      return {
-        ...t,
-        depends_on: Array.isArray(t.depends_on) ? t.depends_on : [],
-        status: t.status ?? "pending",
-        review_status: t.review_status ?? "pending",
-        ...repair.fields,
-      };
-    }),
+    tasks: tasks.map((rawTask, taskIndex) => fixTaskRecord(rawTask, taskIndex, notes, dataLoss)),
   };
   return { json: JSON.stringify(fixed, null, 2), notes, dataLoss };
 }

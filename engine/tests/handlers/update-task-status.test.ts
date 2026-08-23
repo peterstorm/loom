@@ -419,11 +419,13 @@ describe("analyzeNewTests (pure)", () => {
     expect(result.evidence).toContain("0 assertions");
   });
 
-  it("skips when new_tests_required=false", () => {
+  it("records migration provenance when legacy new_tests_required=false waives new tests", () => {
     const diff = "+    @Test\n+    assertThat(x).isTrue();";
     const result = analyzeNewTests(diff, false);
     expect(result.written).toBe(false);
-    expect(result.evidence).toContain("skipped");
+    expect(result.evidence).toContain(
+      "verification_policy.new_tests waived: legacy-new-tests-required-false",
+    );
   });
 
   it("detects TypeScript tests with expect()", () => {

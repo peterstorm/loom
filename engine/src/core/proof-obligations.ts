@@ -1,3 +1,11 @@
+import {
+  parseVerificationPolicy,
+  requiresNewTests,
+  requiresRegression,
+  verificationPolicyFromLegacy,
+  type VerificationPolicy,
+} from "./verification-policy";
+
 /** Pure result used by every parser in this module. */
 export type ProofParseResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -28,10 +36,18 @@ export type ProofObligation =
   | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>;
 
 /** Small decomposition-owned input from which obligations are deterministically derived. */
-export interface ProofObligationInput {
-  readonly newTestsRequired: boolean;
-  readonly declaredArtifacts: readonly string[];
-}
+export type ProofObligationInput =
+  | Readonly<{
+      verificationPolicy: VerificationPolicy;
+      newTestsRequired?: never;
+      declaredArtifacts: readonly string[];
+    }>
+  | Readonly<{
+      verificationPolicy?: never;
+      /** Compatibility input for callers not yet holding a Task policy. */
+      newTestsRequired: boolean;
+      declaredArtifacts: readonly string[];
+    }>;
 
 /**
  * Where an untrusted regression verdict came from.
@@ -170,12 +186,13 @@ const freezeObligation = (obligation: ProofObligation): ProofObligation => Objec
  */
 export function deriveProofObligations(input: ProofObligationInput): NonEmpty<ProofObligation> {
   const artifacts = [...new Set(input.declaredArtifacts.map((path) => path.trim()).filter(Boolean))];
+  const policy = input.verificationPolicy ?? verificationPolicyFromLegacy(input.newTestsRequired);
   const tail: ProofObligation[] = [
-    ...(input.newTestsRequired
-      ? [
-          Object.freeze({ kind: "regression-test-pass" as const }),
-          Object.freeze({ kind: "new-tests" as const }),
-        ]
+    ...(requiresRegression(policy)
+      ? [Object.freeze({ kind: "regression-test-pass" as const })]
+      : []),
+    ...(requiresNewTests(policy)
+      ? [Object.freeze({ kind: "new-tests" as const })]
       : []),
     ...artifacts.map((artifact) => Object.freeze({ kind: "declared-artifact-changed" as const, artifact })),
   ];
@@ -404,7 +421,20 @@ export function parseProofObligation(raw: unknown, path = "obligation"): ProofPa
 export function parseProofObligationInput(raw: unknown): ProofParseResult<ProofObligationInput> {
   if (!isRecord(raw)) return fail(["proof obligation input must be an object"]);
   const errors: string[] = [];
-  if (typeof raw.newTestsRequired !== "boolean") errors.push("newTestsRequired must be a boolean");
+  const hasLegacy = raw.newTestsRequired !== undefined;
+  if (hasLegacy && typeof raw.newTestsRequired !== "boolean") {
+    errors.push("newTestsRequired must be a boolean when present");
+  }
+  const explicit = raw.verificationPolicy === undefined
+    ? undefined
+    : parseVerificationPolicy(raw.verificationPolicy, "verificationPolicy");
+  if (explicit !== undefined && !explicit.ok) errors.push(...explicit.errors);
+  if (!hasLegacy && explicit === undefined) {
+    errors.push("verificationPolicy or newTestsRequired must be present");
+  }
+  if (explicit !== undefined && hasLegacy) {
+    errors.push("verificationPolicy and newTestsRequired are mutually exclusive");
+  }
   if (!Array.isArray(raw.declaredArtifacts)) errors.push("declaredArtifacts must be an array");
 
   const artifacts: string[] = [];
@@ -416,12 +446,11 @@ export function parseProofObligationInput(raw: unknown): ProofParseResult<ProofO
     });
     if (new Set(artifacts).size !== artifacts.length) errors.push("declaredArtifacts must be unique");
   }
-  return errors.length > 0
-    ? fail(errors)
-    : ok(Object.freeze({
-        newTestsRequired: raw.newTestsRequired === true,
-        declaredArtifacts: Object.freeze([...artifacts]),
-      }));
+  if (errors.length > 0) return fail(errors);
+  const declaredArtifacts = Object.freeze([...artifacts]);
+  return explicit?.ok
+    ? ok(Object.freeze({ verificationPolicy: explicit.value, declaredArtifacts }))
+    : ok(Object.freeze({ newTestsRequired: raw.newTestsRequired === true, declaredArtifacts }));
 }
 
 export function parseTaskTestResult(raw: unknown, path = "testResult"): ProofParseResult<ProofTestResult> {

@@ -14,6 +14,11 @@ const PERSISTED_LIFECYCLE = {
   skipped_phases: [],
 } as const;
 
+const REQUIRED_VERIFICATION = {
+  regression: { kind: "required" },
+  new_tests: { kind: "required" },
+} as const;
+
 /** Most tests focus on task validation; supply the persisted lifecycle invariant explicitly. */
 function validateFull(
   json: Record<string, unknown>,
@@ -26,7 +31,12 @@ function validateFull(
         spec_trace_version: json.spec_trace_version ?? 2,
         tasks: Array.isArray(json.tasks)
           ? json.tasks.map((task) => typeof task === "object" && task !== null && !Array.isArray(task)
-            ? { spec_anchors: [], spec_contributions: [], ...task as Record<string, unknown> }
+            ? {
+                spec_anchors: [],
+                spec_contributions: [],
+                verification_policy: REQUIRED_VERIFICATION,
+                ...task as Record<string, unknown>,
+              }
             : task)
           : json.tasks,
       };
@@ -246,7 +256,38 @@ describe("validateFull (pure)", () => {
       tasks: [{ ...validTask, new_tests_required: "yes" }],
     });
     expect(result.ok).toBe(false);
-    expect(errorsOf(result)).toContain("Task T1: 'new_tests_required' must be boolean if present");
+    expect(errorsOf(result)).toContain("Task T1.new_tests_required must be a boolean when present");
+  });
+
+  it("rejects conflicting explicit and legacy verification policy", () => {
+    const result = validateFull({
+      plan_title: "x", plan_file: "x", spec_file: "x",
+      tasks: [{
+        ...validTask,
+        new_tests_required: false,
+        verification_policy: {
+          regression: { kind: "required" },
+          new_tests: { kind: "required" },
+        },
+      }],
+    });
+    expect(errorsOf(result)).toContain(
+      "Task T1.verification_policy conflicts with Task T1.new_tests_required",
+    );
+  });
+
+  it("accepts an independent explicit verification policy", () => {
+    const result = validateFull({
+      plan_title: "x", plan_file: "x", spec_file: "x",
+      tasks: [{
+        ...validTask,
+        verification_policy: {
+          regression: { kind: "required" },
+          new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+        },
+      }],
+    });
+    expect(result.ok).toBe(true);
   });
 
   it("validates task ID format", () => {

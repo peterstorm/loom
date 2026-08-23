@@ -13,9 +13,12 @@ describe("implementation prompt required-skill contract", () => {
   const ownedImplementers = [...IMPL_AGENTS].sort()
     .filter((agent) => existsSync(join(ROOT, "agents", `${agent}.md`)));
 
-  it("has an explicit required-skill substitution owned by the Loom runbook", () => {
+  it("has explicit required-skill and verification-policy substitutions owned by the Loom runbook", () => {
     expect(template).toContain("{required_skill}");
-    expect(read("commands", "loom.md")).toContain("`{required_skill}`");
+    expect(template).toContain("{verification_policy}");
+    const runbook = read("commands", "loom.md");
+    expect(runbook).toContain("`{required_skill}`");
+    expect(runbook).toContain("`{verification_policy}`");
   });
 
   it("covers multiple specialized implementation agents", () => {

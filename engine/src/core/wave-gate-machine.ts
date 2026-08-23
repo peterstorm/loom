@@ -26,6 +26,11 @@ import type {
   WaveImplementationRecovery,
 } from "../types";
 import { newWaveGate, reconcileWaveBlock, testResultPassed } from "./wave-gate-model";
+import {
+  requiresNewTests,
+  requiresRegression,
+  taskVerificationPolicy,
+} from "./verification-policy";
 import type { ProofFailure } from "./proof-obligations";
 import {
   WAVE_REVIEW_AGENTS,
@@ -517,23 +522,38 @@ export function checkImplementationProof(tasks: readonly Task[]): GateCheck {
  * is a contradiction the operator has no way to resolve. They read the same
  * fields, so they read them through the same functions.
  */
-const testsExempt = (task: Task): boolean => task.new_tests_required === false;
+const regressionExempt = (task: Task): boolean =>
+  !requiresRegression(taskVerificationPolicy(task));
+const newTestsExempt = (task: Task): boolean =>
+  !requiresNewTests(taskVerificationPolicy(task));
 const testEvidenceSatisfied = (task: Task): boolean =>
-  testsExempt(task) || testResultPassed(task.test_result);
+  regressionExempt(task) || testResultPassed(task.test_result);
 const newTestsSatisfied = (task: Task): boolean =>
-  testsExempt(task) || task.new_tests_written === true;
+  newTestsExempt(task) || task.new_tests_written === true;
+const regressionEvidenceLine = (task: Task): string => {
+  const requirement = taskVerificationPolicy(task).regression;
+  return requirement.kind === "waived"
+    ? `verification_policy.regression waived: ${requirement.reason}`
+    : (task.test_evidence ?? "evidence present");
+};
+const newTestEvidenceLine = (task: Task): string => {
+  const requirement = taskVerificationPolicy(task).newTests;
+  return requirement.kind === "waived"
+    ? `verification_policy.new_tests waived: ${requirement.reason}`
+    : (task.new_test_evidence ?? "new tests present");
+};
 
 export function checkTestEvidence(tasks: readonly Task[]): GateCheck {
   const missing = tasks.filter((task) => !testEvidenceSatisfied(task));
   if (missing.length > 0) return fail(`FAILED: Not all tasks have test evidence.\n  Missing: ${missing.map((task) => task.id).join(", ")}`);
-  const lines = tasks.map((task) => `     ${task.id}: ${testsExempt(task) ? "not required" : (task.test_evidence ?? "evidence present")}`);
+  const lines = tasks.map((task) => `     ${task.id}: ${regressionEvidenceLine(task)}`);
   return pass(`2. Test evidence verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
 }
 
 export function checkNewTests(tasks: readonly Task[]): GateCheck {
   const missing = tasks.filter((task) => !newTestsSatisfied(task));
   if (missing.length > 0) return fail(`FAILED: Not all tasks satisfied new-test requirement.\n  Missing: ${missing.map((task) => task.id).join(", ")}`);
-  const lines = tasks.map((task) => `     ${task.id}: ${task.new_test_evidence ?? (testsExempt(task) ? "not required" : "new tests present")}`);
+  const lines = tasks.map((task) => `     ${task.id}: ${newTestEvidenceLine(task)}`);
   return pass(`3. New tests verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
 }
 
@@ -684,44 +704,41 @@ export function computeNextWave(tasks: readonly Task[], currentWave: number): nu
   return waves.find((wave) => wave > currentWave) ?? null;
 }
 
-export function evaluateWaveGate(state: TaskGraph, waveArg: number | null, deps: GateDeps): GateDecision {
+type WaveGateAuthorityCheck = Readonly<{
+  wave: number;
+  failures: readonly string[];
+}>;
+
+function waveGateAuthorityCheck(state: TaskGraph, waveArg: number | null): WaveGateAuthorityCheck {
   const currentWave = state.current_wave;
   const registration = state.active_wave_gate;
   const requestedWave = waveArg ?? currentWave;
-  const authorityFailures: string[] = [];
-  if (state.current_phase !== "execute") authorityFailures.push(`current Phase is ${state.current_phase}, not execute`);
-  if (currentWave === undefined) authorityFailures.push("protected current_wave authority is missing");
-  if (registration === undefined) authorityFailures.push("active Wave Gate registration is missing; explicitly register or migrate legacy authority first");
+  const failures: string[] = [];
+  if (state.current_phase !== "execute") failures.push(`current Phase is ${state.current_phase}, not execute`);
+  if (currentWave === undefined) failures.push("protected current_wave authority is missing");
+  if (registration === undefined) failures.push("active Wave Gate registration is missing; explicitly register or migrate legacy authority first");
   if (registration?.terminalOutcome !== null && registration !== undefined) {
-    authorityFailures.push(`active Wave Gate run ${registration.runId} is terminal and must be archived before another completion`);
+    failures.push(`active Wave Gate run ${registration.runId} is terminal and must be archived before another completion`);
   }
-  if (requestedWave === undefined) authorityFailures.push("no Wave was selected by protected authority");
+  if (requestedWave === undefined) failures.push("no Wave was selected by protected authority");
   if (waveArg !== null && currentWave !== undefined && waveArg !== currentWave) {
-    authorityFailures.push(`requested wave ${waveArg} does not match protected current_wave ${currentWave}`);
+    failures.push(`requested wave ${waveArg} does not match protected current_wave ${currentWave}`);
   }
   if (registration !== undefined && currentWave !== undefined && registration.wave !== currentWave) {
-    authorityFailures.push(`active Wave Gate wave ${registration.wave} does not match protected current_wave ${currentWave}`);
+    failures.push(`active Wave Gate wave ${registration.wave} does not match protected current_wave ${currentWave}`);
   }
   if (registration !== undefined && requestedWave !== undefined && registration.wave !== requestedWave) {
-    authorityFailures.push(`active Wave Gate wave ${registration.wave} does not authorize requested wave ${requestedWave}`);
+    failures.push(`active Wave Gate wave ${registration.wave} does not authorize requested wave ${requestedWave}`);
   }
-  const wave = requestedWave ?? 0;
-  if (authorityFailures.length > 0) {
-    return canonicalRecord({
-      wave,
-      checks: Object.freeze([]),
-      verdict: canonicalRecord({ kind: "fail", reason: `FAILED: Wave Gate authority unavailable or contradictory:\n  - ${authorityFailures.join("\n  - ")}` }),
-    });
-  }
-  const waveTasks = state.tasks.filter((task) => task.wave === wave);
-  if (waveTasks.length === 0) {
-    return canonicalRecord({
-      wave,
-      checks: Object.freeze([]),
-      verdict: canonicalRecord({ kind: "fail", reason: `FAILED: wave ${wave} has no tasks — nothing to gate (wrong --wave or unpopulated task graph?)` }),
-    });
-  }
-  const checks = Object.freeze([
+  return canonicalRecord({ wave: requestedWave ?? 0, failures: Object.freeze(failures) });
+}
+
+function failedGateDecision(wave: number, checks: readonly GateCheck[], reason: string): GateDecision {
+  return canonicalRecord({ wave, checks, verdict: canonicalRecord({ kind: "fail", reason }) });
+}
+
+function waveGateChecks(state: TaskGraph, wave: number, waveTasks: readonly Task[], deps: GateDeps): readonly GateCheck[] {
+  return Object.freeze([
     checkNoExecutingTasks(waveTasks, state.executing_tasks ?? []),
     checkImplementationProof(waveTasks),
     checkTestEvidence(waveTasks),
@@ -732,14 +749,38 @@ export function evaluateWaveGate(state: TaskGraph, waveArg: number | null, deps:
     checkLifecycleArtifacts(deps.loadPlanModels(state.plan_file ?? state.phase_artifacts?.architecture), waveTasks, deps.fileExists),
     checkReviewedWorkspace(waveTasks, deps),
   ]);
+}
+
+function passedGateDecision(state: TaskGraph, wave: number, checks: readonly GateCheck[], waveTasks: readonly Task[]): GateDecision {
+  return canonicalRecord({
+    wave,
+    checks,
+    verdict: canonicalRecord({ kind: "pass", taskIds: Object.freeze(waveTasks.map((task) => task.id)), nextWave: computeNextWave(state.tasks, wave) }),
+  });
+}
+
+export function evaluateWaveGate(state: TaskGraph, waveArg: number | null, deps: GateDeps): GateDecision {
+  const authority = waveGateAuthorityCheck(state, waveArg);
+  if (authority.failures.length > 0) {
+    return failedGateDecision(
+      authority.wave,
+      Object.freeze([]),
+      `FAILED: Wave Gate authority unavailable or contradictory:\n  - ${authority.failures.join("\n  - ")}`,
+    );
+  }
+  const waveTasks = state.tasks.filter((task) => task.wave === authority.wave);
+  if (waveTasks.length === 0) {
+    return failedGateDecision(
+      authority.wave,
+      Object.freeze([]),
+      `FAILED: wave ${authority.wave} has no tasks — nothing to gate (wrong --wave or unpopulated task graph?)`,
+    );
+  }
+  const checks = waveGateChecks(state, authority.wave, waveTasks, deps);
   const failed = checks.find((check): check is Extract<GateCheck, { passed: false }> => !check.passed);
-  return failed
-    ? canonicalRecord({ wave, checks, verdict: canonicalRecord({ kind: "fail", reason: failed.reason }) })
-    : canonicalRecord({
-        wave,
-        checks,
-        verdict: canonicalRecord({ kind: "pass", taskIds: Object.freeze(waveTasks.map((task) => task.id)), nextWave: computeNextWave(state.tasks, wave) }),
-      });
+  return failed === undefined
+    ? passedGateDecision(state, authority.wave, checks, waveTasks)
+    : failedGateDecision(authority.wave, checks, failed.reason);
 }
 
 export function applyGateDecision(state: TaskGraph, decision: GateDecision): TaskGraph {

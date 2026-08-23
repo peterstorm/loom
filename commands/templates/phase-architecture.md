@@ -169,7 +169,7 @@ Read `references/plan-template.md` from the loom plugin dir (`$LOOM_DIR`, resolv
 | **Component Design** | Task `description` + boundary definitions |
 | **Implementation Phases** | `wave` ordering + `depends_on` |
 | **Architectural Decisions** | `plan_context` quoted to impl agents |
-| **Testing Strategy** | `new_tests_required` per component |
+| **Testing Strategy** | Independent regression/new-test Verification Policy per component |
 | **Lifecycles** (opt-in) | Dedicated machine-file task per LC-N; dependents wired to it |
 | **Pipeline** (opt-in) | Codegen task + one node-body task per node |
 | **Invariants** (opt-in) | Nothing — checkable rules already enforce; advisory quoted as guidance |

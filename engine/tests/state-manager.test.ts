@@ -593,6 +593,68 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     expect(waived.ok).toBe(false);
   });
 
+  it("keeps explicit asymmetric policies and proof obligations in exact lockstep", () => {
+    const cases = [
+      {
+        label: "regression required and new tests waived",
+        stored: {
+          regression: { kind: "required" },
+          new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+        },
+        policy: {
+          regression: { kind: "required" },
+          newTests: { kind: "waived", reason: "existing-tests-sufficient" },
+        },
+        wrongPolicy: {
+          regression: { kind: "waived", reason: "documentation-only" },
+          newTests: { kind: "required" },
+        },
+      },
+      {
+        label: "regression waived and new tests required",
+        stored: {
+          regression: { kind: "waived", reason: "documentation-only" },
+          new_tests: { kind: "required" },
+        },
+        policy: {
+          regression: { kind: "waived", reason: "documentation-only" },
+          newTests: { kind: "required" },
+        },
+        wrongPolicy: {
+          regression: { kind: "required" },
+          newTests: { kind: "waived", reason: "existing-tests-sufficient" },
+        },
+      },
+    ] as const;
+
+    for (const { label, stored, policy, wrongPolicy } of cases) {
+      const exactProof = derivePendingTaskProof({
+        verificationPolicy: policy,
+        declaredArtifacts: [],
+      });
+      const exact = parseTaskGraph({
+        ...validGraph,
+        tasks: [{ ...validTask, verification_policy: stored, proof: exactProof }],
+      });
+      expect(exact.ok, `${label}: exact obligations`).toBe(true);
+
+      const incorrectProof = derivePendingTaskProof({
+        verificationPolicy: wrongPolicy,
+        declaredArtifacts: [],
+      });
+      const incorrect = parseTaskGraph({
+        ...validGraph,
+        tasks: [{ ...validTask, verification_policy: stored, proof: incorrectProof }],
+      });
+      expect(incorrect.ok, `${label}: incorrect obligations`).toBe(false);
+      if (!incorrect.ok) {
+        expect(incorrect.error).toContain(
+          "proof obligations do not exactly match verification policy and file_list",
+        );
+      }
+    }
+  });
+
   it("rejects an out-of-union current_phase loudly, naming the value", () => {
     const parsed = parseTaskGraph({ ...validGraph, current_phase: "vibing" });
     expect(parsed.ok).toBe(false);

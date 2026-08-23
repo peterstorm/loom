@@ -6,7 +6,7 @@ Template for spawning implementation agents during Execute phase. All template v
 
 ## !! MANDATORY FINAL STEP — READ THIS FIRST !!
 
-**Your LAST action before finishing MUST be running tests via the Bash tool — UNLESS this is a docs/config-only task (your task graph entry has `new_tests_required: false`, e.g. ADR writing, migrations, config tweaks). For those, skip the test run; the engine recognizes `new_tests_required: false` and will not block the wave gate on missing test evidence.**
+**Your LAST action before finishing MUST be running the required regression command via the Bash tool when the Verification Policy below says `regression: required`. Skip it only when that policy explicitly carries a typed regression waiver. New-test creation is independent: write new tests exactly when `new_tests: required`; a new-test waiver never waives regression execution.**
 
 ```
 bun test          # TypeScript/Bun projects
@@ -20,7 +20,7 @@ Test evidence is resolved ledger-first: a PostToolUse hook records every Bash te
 Either way, evidence only exists for tests EXECUTED via the Bash tool: if your task DOES require tests and you do not run them via Bash, the task's `test_result` will not show a pass and the wave gate FAILS.
 Writing tests without executing them counts as failure.
 
-**For test-required tasks: do NOT finish without Bash test output showing pass markers (e.g., "X passing", "0 fail", "BUILD SUCCESS").**
+**When regression is required: do NOT finish without Bash test output showing pass markers (e.g., "X passing", "0 fail", "BUILD SUCCESS").**
 
 ---
 
@@ -52,6 +52,12 @@ If your plan context declares none of these, this section imposes nothing.
 **Agent:** {agent_type}
 **Required Loom skill:** {required_skill}
 **Dependencies:** {dependencies}
+
+## Verification Policy
+
+{verification_policy}
+
+Regression execution and new-test creation are separate obligations. Follow each arm independently.
 
 ## Your Task
 
@@ -100,6 +106,6 @@ Available at: {plan_file_path}
 1. Read & apply the **Architecture & Language Rules** inlined above — binding constraints, not suggestions
 2. Read the plan file and understand scope
 3. Implement code following the plan's patterns AND the rules above
-4. Write NEW tests (hook git-diffs for @Test, it(, test(, describe( patterns — no new tests = wave blocked) — **skip for docs/config-only tasks where `new_tests_required: false`**
-5. **Run tests via Bash tool** — fix failures, re-run until 0 failures — **skip for docs/config-only tasks**
+4. If `new_tests` is required, write NEW tests (hook git-diffs for @Test, it(, test(, describe( patterns — no new tests = wave blocked). If it is waived, preserve the stated waiver boundary rather than inventing unrelated tests.
+5. If `regression` is required, **run tests via Bash tool** — fix failures, re-run until 0 failures. Skip only under the explicit regression waiver above.
 6. Only then are you done

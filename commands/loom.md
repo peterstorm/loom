@@ -560,6 +560,7 @@ Re-spawn each pending wave task whose agent did not reach `implemented`.
 
 Substitute variables:
 - `{task_id}`, `{wave}`, `{agent_type}`, `{dependencies}`
+- `{verification_policy}` - Render the Task's exact `verification_policy` object, including both independent `regression` and `new_tests` arms and any waiver reasons. Legacy Tasks are rendered through the engine's compatibility semantics: absent/true means both required; false means both waived under `legacy-new-tests-required-false`.
 - `{required_skill}` - Read the selected source agent's `skills:` frontmatter and substitute its exact declared skill name (for agents with no declared skill, use `none`). This is both the Claude spawn-gate evidence and the Pi preloaded-skill audit label; never infer it from the agent name.
 - `{task_description}` - From task breakdown
 - `{spec_anchors_formatted}` - Formatted Requirement Completion Claims with requirement text
