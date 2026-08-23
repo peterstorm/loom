@@ -23,6 +23,7 @@ import {
   parseFindingId,
   parseFindingSeverity,
   parseFindingsBlock,
+  parseFindingsBlockResult,
   parseStoredFindings,
   parseStoredRefutations,
   salvageFindingsFromMalformedRefutations,
@@ -186,6 +187,18 @@ describe("parseFindingsBlock — the optional structured Machine Summary block",
 
   it("returns null on invalid JSON so the line scraper still runs", () => {
     expect(parseFindingsBlock(block("[{severity: critical}]"))).toBeNull();
+  });
+
+  it("preserves the exact structured-block rejection as typed diagnostic data", () => {
+    expect(parseFindingsBlockResult(block("[{severity: critical}]"))).toMatchObject({
+      kind: "rejected",
+      reason: expect.stringContaining("invalid JSON"),
+    });
+    expect(parseFindingsBlockResult(block(JSON.stringify([{ severity: "high", claim: "x" }])))).toEqual({
+      kind: "rejected",
+      reason: "entry 0.severity is not critical or advisory",
+    });
+    expect(parseFindingsBlockResult("no block")).toEqual({ kind: "absent" });
   });
 
   it("returns null when an entry has an unknown severity or a non-string claim", () => {

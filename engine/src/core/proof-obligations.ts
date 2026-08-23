@@ -691,7 +691,6 @@ const sameValue = (left: unknown, right: unknown): boolean => JSON.stringify(lef
 type ParsedProofParts = {
   readonly obligations: NonEmpty<ProofObligation>;
   readonly results: NonEmpty<ProofObligationResult>;
-  readonly errors: string[];
 };
 
 function parseProofParts(raw: Record<string, unknown>): ProofParseResult<ParsedProofParts> {
@@ -707,11 +706,13 @@ function parseProofParts(raw: Record<string, unknown>): ProofParseResult<ParsedP
       errors.push(`proof.results[${index}] must correspond to proof.obligations[${index}]`);
     }
   });
-  return ok({ obligations: obligations.value, results: results.value, errors });
+  return errors.length > 0
+    ? fail(errors)
+    : ok({ obligations: obligations.value, results: results.value });
 }
 
 function parsePendingProof(parts: ParsedProofParts): ProofParseResult<PendingTaskProof> {
-  const errors = [...parts.errors];
+  const errors: string[] = [];
   if (parts.results.some((result) => result.state !== "pending")) errors.push("pending proof may contain only pending results");
   if (errors.length > 0) return fail(errors);
   return ok(Object.freeze({
@@ -726,7 +727,7 @@ function parsePendingProof(parts: ParsedProofParts): ProofParseResult<PendingTas
 }
 
 function evaluatedResults(parts: ParsedProofParts): ProofParseResult<NonEmpty<EvaluatedProofResult>> {
-  const errors = [...parts.errors];
+  const errors: string[] = [];
   if (parts.results.some((result) => result.state === "pending")) errors.push("evaluated proof may not contain pending results");
   return errors.length > 0
     ? fail(errors)

@@ -1,9 +1,10 @@
 /**
  * Reviewer transcript → findings. The pure half of storing a review.
  *
- * A reviewer emits three overlapping descriptions of what it found: a
- * `CRITICAL_COUNT` marker (its own tally), `CRITICAL:` / `ADVISORY:` marker
- * lines (the claims as text), and — optionally — a fenced ```findings block
+ * A reviewer emits three overlapping descriptions of what it found:
+ * `CRITICAL_COUNT` / `ADVISORY_COUNT` markers (its own tallies),
+ * `CRITICAL:` / `ADVISORY:` marker lines (the claims as text), and —
+ * optionally — a fenced ```findings block
  * (the same claims with file/line). They can disagree; arbitration chooses
  * the primary location-bearing representation, while unmatched claims from
  * the other source are preserved and critical-count shortfalls fail closed.
@@ -13,15 +14,16 @@
  * of each severity as the marker lines name — and, for criticals only, as the
  * reviewer's own `CRITICAL_COUNT` — and any marker claim it does not NAME is
  * carried over beside it.** The asymmetry is deliberate and
- * `chooseSource` states why: `advisoryCount` is not part of the bar, because an
- * advisory shortfall against a self-reported tally degrades triage while a
- * critical shortfall opens a gate. A
- * short block is a truncated or mislabeled emission, and its locations are not
+ * `chooseSource` states why: `advisoryCount` is not part of the BLOCK-WINNER
+ * bar, because an advisory shortfall against a self-reported tally degrades
+ * triage while a critical shortfall opens a gate. A short block is a truncated
+ * or mislabeled emission, and its locations are not
  * worth the claims it would discard; a block that is long enough but names
  * different claims is the same loss wearing a passing count. Whatever wins,
- * `reconcileFindings` backstops the remaining shortfall against
- * `CRITICAL_COUNT` with a self-describing entry, so a parse that lost findings
- * blocks the gate instead of reading green.
+ * `reconcileFindings` then backstops remaining shortfalls against BOTH count
+ * markers with self-describing entries at their original severity. Lost
+ * criticals therefore block instead of reading green, while lost advisories
+ * remain visible for triage.
  *
  * `resolveReviewFindings` + `applyReviewResolution` are the SINGLE path from a
  * review transcript to a task update. Claude Code reaches them through the
@@ -49,9 +51,8 @@ import {
 import {
   claimsOfSeverity,
   draftsFromClaims,
-  hasFindingsBlock,
   mergeFindings,
-  parseFindingsBlock,
+  parseFindingsBlockResult,
   recordReviewRunEvidence,
   type DraftFinding,
 } from "./findings";
@@ -88,7 +89,7 @@ export type FindingsBlockStatus =
   /** The block parsed and named every claim the markers made. It is the source. */
   | { readonly kind: "used" }
   /** A block was present but malformed. The marker lines were parsed instead. */
-  | { readonly kind: "rejected" }
+  | { readonly kind: "rejected"; readonly reason: string }
   /** The block parsed but under-reported findings. The marker lines won, and the
    *  block's unnamed entries came across beside them with file/line intact. */
   | { readonly kind: "superseded"; readonly carriedOver: number }
@@ -411,15 +412,15 @@ function supersededBlockFindings(
 
 function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
   const counts = { criticalCount: scraped.criticalCount, advisoryCount: scraped.advisoryCount };
-  const parsedBlock = parseFindingsBlock(block);
-  if (parsedBlock === null) {
+  const parsedBlock = parseFindingsBlockResult(block);
+  if (parsedBlock.kind !== "parsed") {
     return makeParsedFindings({
       drafts: scraped.drafts,
       ...counts,
-      blockStatus: hasFindingsBlock(block) ? { kind: "rejected" } : { kind: "absent" },
+      blockStatus: parsedBlock,
     });
   }
-  const structured = alignStructuredSeverity(parsedBlock, scraped.drafts);
+  const structured = alignStructuredSeverity(parsedBlock.drafts, scraped.drafts);
   const fromBlock = makeParsedFindings({ drafts: structured, ...counts, blockStatus: { kind: "used" } });
   const claimedCritical = Math.max(scraped.criticalCount ?? 0, scraped.critical.length);
   const accountsForAll =
@@ -824,7 +825,8 @@ function blockStatusNote(status: FindingsBlockStatus): string {
     .with({ kind: "used" }, () => "")
     .with(
       { kind: "rejected" },
-      () => " [findings block was malformed — fell back to marker lines, findings carry no file/line]",
+      (s) => ` [findings block was malformed (${s.reason}) — fell back to marker lines, ` +
+        "findings carry no file/line]",
     )
     .with(
       { kind: "superseded" },

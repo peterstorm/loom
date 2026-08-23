@@ -206,10 +206,11 @@ function recoverPacketEvidence(
 }
 
 function taskCompletionWasObserved(task: Task): boolean {
-  return task.proof?.state !== "pending" && task.proof !== undefined &&
-    task.proof.results.some((result) =>
-      result.state === "satisfied" && result.evidence.kind === "task-completed"
-    );
+  const proof = task.proof;
+  if (proof === undefined || proof.state === "pending") return false;
+  return proof.results.some((result) =>
+    result.state === "satisfied" && result.evidence.kind === "task-completed"
+  );
 }
 
 /** Re-evaluate a failed aggregate from already-persisted evidence. This does

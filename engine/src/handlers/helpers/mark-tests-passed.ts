@@ -42,22 +42,20 @@ const handler: HookHandler = async (_stdin, args) => {
 
   // Same policy projections as the Wave Gate: regression execution and new-test
   // creation are independent, so waiving one never silently waives the other.
-  const regressionRequired = (task: (typeof tasks)[number]) =>
-    requiresRegression(taskVerificationPolicy(task));
-  const newTestsRequired = (task: (typeof tasks)[number]) =>
-    requiresNewTests(taskVerificationPolicy(task));
-  const missing = tasks.filter((task) =>
-    regressionRequired(task) && !testResultPassed(task.test_result));
-  const missingNew = tasks.filter((task) =>
-    newTestsRequired(task) && !task.new_tests_written);
+  const taskEvidence = tasks.map((task) => ({ task, verification: taskVerificationPolicy(task) }));
+  const missing = taskEvidence
+    .filter(({ task, verification }) => requiresRegression(verification) && !testResultPassed(task.test_result))
+    .map(({ task }) => task);
+  const missingNew = taskEvidence
+    .filter(({ task, verification }) => requiresNewTests(verification) && !task.new_tests_written)
+    .map(({ task }) => task);
 
   process.stderr.write(
     `Wave ${wave} test evidence: ${tasks.length - missing.length}/${tasks.length} passed, ` +
     `${tasks.length - missingNew.length}/${tasks.length} new-test OK\n`,
   );
 
-  for (const t of tasks) {
-    const verification = taskVerificationPolicy(t);
+  for (const { task: t, verification } of taskEvidence) {
     const testStatus = verification.regression.kind === "waived"
       ? `N/A (${verification.regression.reason})`
       : testResultPassed(t.test_result) ? "PASS" : "MISSING";

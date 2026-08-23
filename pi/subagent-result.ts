@@ -248,6 +248,35 @@ const transcriptTextOf = (messages: readonly { role: string; content: readonly {
 // Failed results
 // ---------------------------------------------------------------------------
 
+async function applyFailedImplementationResult(args: Readonly<{
+  store: TaskGraphStore;
+  agentType: string;
+  result: PiSubagentResult;
+  reservedSlot: ReservedSlot | undefined;
+  failure: string;
+}>): Promise<PiResultOutcome> {
+  const executingTasks = args.store.load().executing_tasks ?? [];
+  const binding = resolveImplementationTaskId({
+    agentType: args.agentType,
+    reservedTaskId: args.reservedSlot?.taskId,
+    resultPrompt: args.result.task ?? "",
+    parentPrompt: "",
+    executingTasks,
+  });
+  if (binding.kind === "unbound") {
+    const message = `loom(pi): ${args.failure}; ${binding.reason} — completion evidence ignored`;
+    return outcome([message], executingTasks.length > 0 ? [message] : []);
+  }
+  await args.store.update((state) => ({
+    ...state,
+    executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== binding.taskId),
+  }));
+  const inference = binding.inferred ? " (inferred from the sole executing Task)" : "";
+  return outcome([
+    `loom(pi): ${args.failure} — released ${binding.taskId}${inference}; completion evidence ignored`,
+  ]);
+}
+
 /**
  * Record the failure of an agent whose process did not succeed.
  *
@@ -293,18 +322,11 @@ export async function applyFailedPiResult(args: Readonly<{
     return outcome([`loom(pi): ${failure} — marking spec-check evidence_capture_failed`]);
   }
 
+  // The dispatcher normally settled a reserved failure through
+  // finalizeReservedImplementations first. This idempotent release keeps the
+  // applier correct in isolation without overwriting that richer proof.
   if (IMPL_AGENTS.has(agentType)) {
-    const failedTaskId = reservedSlot?.taskId ?? extractTaskId(result.task ?? "");
-    if (failedTaskId !== null) {
-      // The dispatcher normally settled a reserved failure through
-      // finalizeReservedImplementations first. This idempotent release keeps
-      // the applier correct in isolation without overwriting that richer proof.
-      await store.update((state) => ({
-        ...state,
-        executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== failedTaskId),
-      }));
-      return outcome([`loom(pi): ${failure} — released ${failedTaskId}; completion evidence ignored`]);
-    }
+    return applyFailedImplementationResult({ store, agentType, result, reservedSlot, failure });
   }
   return outcome([`loom(pi): ${failure} — completion evidence ignored`]);
 }
@@ -716,7 +738,11 @@ async function applyAcceptedImplementationResolution(
     });
     if (comparison.failure !== null) {
       log.push(`loom(pi): cannot compare declared-artifact baseline for ${args.taskId}: ${comparison.failure} — ` +
-        `invalidating stale evidence`);
+        `completion evidence was not applied`);
+      return {
+        ...state,
+        executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== args.taskId),
+      };
     }
     const cumulativeFiles = cumulativeModifiedPaths(currentTarget.files_modified, args.filesModified);
     const newTestEvidence = repository.kind === "available"

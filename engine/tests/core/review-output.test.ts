@@ -602,7 +602,10 @@ describe("the structured block never costs a claim the markers made", () => {
 
   it("reports a malformed block rather than degrading in silence", () => {
     const result = parseMachineSummary(summary(1, ["unchecked cast"], "[{not json"));
-    expect(result?.blockStatus.kind).toBe("rejected");
+    expect(result?.blockStatus).toMatchObject({
+      kind: "rejected",
+      reason: expect.stringContaining("invalid JSON"),
+    });
     expect(result?.critical).toEqual(["unchecked cast"]);
   });
 
@@ -612,7 +615,7 @@ describe("the structured block never costs a claim the markers made", () => {
 
   it("tells the operator when locations were lost", () => {
     const degraded = resolveReviewFindings(summary(1, ["unchecked cast"], "[{not json"), "code-reviewer");
-    expect(reviewResolutionLog("T1", degraded)).toContain("findings block was malformed");
+    expect(reviewResolutionLog("T1", degraded)).toContain("findings block was malformed (invalid JSON:");
     const clean = resolveReviewFindings(summary(1, ["unchecked cast"], null), "code-reviewer");
     expect(reviewResolutionLog("T1", clean)).toBe("Task T1 review: blocked (1 critical)");
   });

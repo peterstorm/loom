@@ -237,3 +237,63 @@ The canonical panel refuted no critical finding. Intent lenses disputed the rese
 4. `git diff --check`.
 5. Required full command: `env -u PI_CODING_AGENT npm test`.
 6. Registered remediation audit/install through the Orchestration Façade, then commit and push.
+
+---
+
+# Round 5: post-remediation full-branch review
+
+## Authority
+
+- Branch: `feat/deterministic-task-execution`
+- Review scope: exact 45-path branch delta `30241fd..83fa693`, frozen in the authoritative result
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260823T183155Z-deterministic-policy-rereview-5`
+- Review result digest: `c31deaea2a0457d552f91c87c14f8844150d18402e980d6592f4850d51233152`
+- Surviving criticals: 2
+- Refuted criticals: 0
+
+## Mandatory critical remediation
+
+1. `pi/subagent-result.ts`: when the locked current Task's attempt baseline cannot be compared, stop accepted-transcript settlement after releasing execution state. Never pass the comparator's fail-closed artifact fallback into a successful completion proof.
+2. `pi/subagent-result.ts`: resolve failed unreserved implementation results through the same exactly-one executing Task inference used by successful results. Release the inferred Task; preserve parallel siblings and return an explicit processing error when multiple executing Tasks make attribution ambiguous.
+
+## Advisory dispositions
+
+### Accepted
+
+1. Return a typed structured-findings-block parse result with an exact rejection reason and include it in the operator-facing degraded-evidence note while preserving the compatibility parser.
+2. Correct `review-output.ts`'s module contract to name both count markers and describe severity-specific arbitration versus final count reconciliation accurately.
+3. Correct `findings.ts`'s resolved-Finding high-water-mark comment and remove the stray brace.
+4. Make `parseProofParts` return failure when coverage invariants fail rather than carrying errors inside a successful parse result.
+5. Rewrite `taskCompletionWasObserved` in domain order: establish Proof presence/state before inspecting results.
+6. Project each Task's Verification Policy once in `mark-tests-passed` and reuse that immutable projection for counts and reporting.
+
+### Deferred
+
+1. Pair Proof Obligations and results in a new TaskProof ADT. Reason: this stored-state schema change belongs with Slice 3's settlement reducer and explicit migration, not a compatibility-preserving review remediation.
+2. Redesign Task lifecycle states as a discriminated union. Reason: unchanged from prior rounds; it must land atomically with Slice 3's settlement authority and stored migration.
+3. Extract the TaskGraph codec from `StateManager`. Reason: valid architecture work, but it changes a broad parser/I/O seam and requires a dedicated dependency-boundary change.
+4. Move cross-harness completion policy into an engine-owned neutral module. Reason: this is the planned Slice 3 Implementation Completion Oracle and must include attempt authority rather than becoming another transitional seam.
+5. Split the Wave Gate core public surface. Reason: independent broad architecture work that should follow the completion-suite slices with its own checkpoint.
+
+### Dismissed
+
+1. Add coverage for malformed `review_run.slot_authority` before evidence exists. Reason: `engine/tests/state-manager-load-guards.test.ts` already constructs `evidence: []` and tests empty, non-array, incomplete, out-of-order, extra/missing-field, duplicate-slot, and invalid-attempt authority through the real TaskGraph parser.
+
+## Refuted-finding audit
+
+No critical was refuted. Reproduction, intent, and blast-radius lenses unanimously upheld both Pi settlement findings.
+
+## Support paths outside frozen review scope
+
+- `engine/tests/core/findings.test.ts`
+- `engine/tests/core/review-output.test.ts`
+- `engine/tests/core/round15.test.ts`
+
+## Validation
+
+1. Focused Vitest suites for failed Pi binding, accepted Pi baseline failure, findings-block diagnostics, Proof parsing, reconciliation, and mark-tests-passed.
+2. `npm run typecheck` including unused-code checks.
+3. Full-tier Loom lint over every changed production TypeScript file.
+4. `git diff --check`.
+5. Required full command: `env -u PI_CODING_AGENT npm test`.
+6. Registered remediation audit/install through the Orchestration Façade, then commit and push.

@@ -227,9 +227,9 @@ function ordinalOf(id: string, safeAgent: string): number {
  * where one was adjudicated, and attaches the panel's reasoning to the wrong
  * claim. Ids must come from a source that removal cannot rewind.
  *
- * `resolved` holds the same retired-ordinal invariant for the demotion {
- * `applyFindingOutcomes`-style remediation side: a resolved (remediated)
- * finding is also moved OUT of `task.findings` (into `resolved_findings`), so
+ * `resolved` holds the same retired-ordinal invariant on the remediation side:
+ * a resolved Finding is also moved OUT of `task.findings` (into
+ * `resolved_findings`), so
  * its id must keep counting toward the high-water mark exactly like a refuted
  * one — otherwise a later re-review could remint an ordinal still held by a
  * resolved record, re-attaching remediation history to a different claim. Every
@@ -297,49 +297,57 @@ export function attributeFindings(
  */
 const FINDINGS_BLOCK = /^[ \t]*```[ \t]*findings[ \t]*\r?\n([\s\S]*?)^[ \t]*```[ \t]*$/gm;
 
-/**
- * Parse the LAST fenced findings block in `output`, or null when there is none
- * or it is unusable. Last-match for the same reason parseMachineSummary uses
- * it: agents echo the template before emitting their real output.
- *
- * Null (not an empty array) on a malformed block, so the caller falls back to
- * the line scraper instead of silently recording zero findings. An empty JSON
- * array IS meaningful — it means "I found nothing" — and parses to `[]`.
- * The caller reports which of those happened; see FindingsBlockStatus.
- */
-export function parseFindingsBlock(output: string): readonly DraftFinding[] | null {
+/** A structured findings block parsed into evidence, or its exact rejection. */
+export type FindingsBlockParseResult =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "rejected"; reason: string }>
+  | Readonly<{ kind: "parsed"; drafts: readonly DraftFinding[] }>;
+
+/** Parse the LAST fenced block; agents may echo the template before their result. */
+export function parseFindingsBlockResult(output: string): FindingsBlockParseResult {
   FINDINGS_BLOCK.lastIndex = 0;
   let body: string | null = null;
-  for (let m = FINDINGS_BLOCK.exec(output); m !== null; m = FINDINGS_BLOCK.exec(output)) {
-    body = m[1]!;
+  for (let match = FINDINGS_BLOCK.exec(output); match !== null; match = FINDINGS_BLOCK.exec(output)) {
+    body = match[1]!;
   }
-  if (body === null) return null;
+  if (body === null) return Object.freeze({ kind: "absent" });
 
   let raw: unknown;
   try {
     raw = JSON.parse(body);
-  } catch {
-    return null;
+  } catch (error) {
+    const cause = error instanceof Error ? error.message : String(error);
+    return Object.freeze({ kind: "rejected", reason: `invalid JSON: ${cause}` });
   }
-  if (!Array.isArray(raw)) return null;
+  if (!Array.isArray(raw)) {
+    return Object.freeze({ kind: "rejected", reason: "root must be an array" });
+  }
 
   const drafts: DraftFinding[] = [];
-  for (const entry of raw) {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return null;
+  for (const [index, entry] of raw.entries()) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      return Object.freeze({ kind: "rejected", reason: `entry ${index} must be an object` });
+    }
     const record = entry as Record<string, unknown>;
     const severity = parseFindingSeverity(record.severity);
-    if (severity === null || typeof record.claim !== "string") return null;
-    const draft = makeDraftFinding({
-      severity,
-      claim: record.claim,
-      file: record.file,
-      line: record.line,
-    });
-    // A dropped entry is a sentinel or an empty claim, not a malformed block —
-    // the reviewer said "none" in structured form. Skip it, keep the block.
-    if (draft) drafts.push(draft);
+    if (severity === null) {
+      return Object.freeze({ kind: "rejected", reason: `entry ${index}.severity is not critical or advisory` });
+    }
+    if (typeof record.claim !== "string") {
+      return Object.freeze({ kind: "rejected", reason: `entry ${index}.claim must be a string` });
+    }
+    const draft = makeDraftFinding({ severity, claim: record.claim, file: record.file, line: record.line });
+    // A sentinel or empty claim says "none" in structured form; it is not a
+    // malformed envelope and does not invalidate sibling findings.
+    if (draft !== null) drafts.push(draft);
   }
-  return drafts;
+  return Object.freeze({ kind: "parsed", drafts: Object.freeze(drafts) });
+}
+
+/** Compatibility projection for callers that need only drafts-or-fallback. */
+export function parseFindingsBlock(output: string): readonly DraftFinding[] | null {
+  const parsed = parseFindingsBlockResult(output);
+  return parsed.kind === "parsed" ? parsed.drafts : null;
 }
 
 /**

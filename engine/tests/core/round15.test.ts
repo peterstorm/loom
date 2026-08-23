@@ -466,7 +466,7 @@ describe("chooseSource keeps claim identity and marker severity in lockstep", ()
   it("carriedOverCount is zero for every arm that carries nothing", () => {
     expect(carriedOverCount({ kind: "absent" })).toBe(0);
     expect(carriedOverCount({ kind: "used" })).toBe(0);
-    expect(carriedOverCount({ kind: "rejected" })).toBe(0);
+    expect(carriedOverCount({ kind: "rejected", reason: "invalid JSON" })).toBe(0);
     expect(carriedOverCount({ kind: "partial", carriedOver: 3 })).toBe(3);
   });
 });

@@ -286,6 +286,36 @@ describe("applyFailedPiResult", () => {
     expect(applied.log.join("\n")).toContain("released T1");
   });
 
+  it("releases the sole executing Task when an unreserved failure omitted its Task id", async () => {
+    const store = fakeStore(graph({ executing_tasks: ["T1"] }));
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "implementation", exitCode: 1 }),
+      reservedSlot: undefined,
+      now: NOW,
+    });
+
+    expect(store.current().executing_tasks).toEqual([]);
+    expect(applied.processingErrors).toEqual([]);
+    expect(applied.log.join("\n")).toContain("inferred from the sole executing Task");
+  });
+
+  it("preserves parallel execution and reports an unbound failed implementation", async () => {
+    const store = fakeStore(graph({ executing_tasks: ["T1", "T2"] }));
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "implementation", exitCode: 1 }),
+      reservedSlot: undefined,
+      now: NOW,
+    });
+
+    expect(store.current().executing_tasks).toEqual(["T1", "T2"]);
+    expect(applied.processingErrors).toHaveLength(1);
+    expect(applied.processingErrors[0]).toContain("ambiguous");
+  });
+
   it("marks a failed spec-check as evidence_capture_failed", async () => {
     const store = fakeStore(graph());
     await applyFailedPiResult({
@@ -501,6 +531,33 @@ describe("applyImplementationPiResult", () => {
     // Fail-closed: an uncomparable baseline is treated as "bytes moved", so the
     // stale evidence is invalidated rather than preserved.
     expect(store.current().tasks[0]!.status).not.toBe("completed");
+  });
+
+  it("does not apply accepted completion evidence when baseline comparison fails", async () => {
+    const store = fakeStore(implementationGraph({
+      attempt_artifact_baseline: [{ artifact: "engine/src/x.ts", sha256: "a".repeat(64) }],
+      verification_policy: {
+        regression: { kind: "required" },
+        new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+      },
+    }));
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt("/nonexistent/loom-repo-root"),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        messages: [...structuredBashPass(), writeCall("engine/src/x.ts")],
+      }),
+      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    expect(store.current().tasks[0]).toMatchObject({ status: "pending" });
+    expect(store.current().tasks[0]!.proof).toBeUndefined();
+    expect(store.current().tasks[0]!.test_result).toBeUndefined();
+    expect(store.current().executing_tasks).toEqual([]);
+    expect(applied.log.join("\n")).toContain("completion evidence was not applied");
   });
 
   it("compares attempt bytes against the locked current Task, not the pre-lock snapshot", async () => {
