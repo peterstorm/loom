@@ -172,8 +172,28 @@ _Avoid_: Model alias, Sonnet equivalent, current model, implicit model fallback
 A content-addressed identity over Loom's extension, engine, and runtime package bytes. Pi captures it when the extension loads; every fresh Pi-launched CLI mutator must present the same identity before changing a TaskGraph or Run Directory.
 _Avoid_: Package version, schema version, commit hash, current checkout
 
+**Implementation Attempt**:
+One engine-reserved execution of one Task under one semantic attempt ordinal and one immutable byte baseline. Only engine-issued attempt authority can settle it; a Task id inferred from concurrent execution state is cleanup evidence, not completion authority.
+_Avoid_: Agent run, retry (that is a transition between attempts), subagent result
+
+**Verification Policy**:
+A Task's explicit, independently modeled requirements for regression execution and new-test creation, including typed waiver reasons. It replaces the ambiguous `new_tests_required` coupling; legacy booleans are translated only at the TaskGraph parse boundary.
+_Avoid_: Test flag, new-tests flag, test exemption
+
+**Completion Check Result**:
+One engine-observed deterministic check outcome carrying independent exit-code, timeout, signal, and report-production facts under an exact check identity and Task-or-Wave scope. Spawn failure is a separate arm, never disguised as a failed test.
+_Avoid_: Test evidence, command output, exit status
+
+**Completion Suite Result**:
+A non-empty exact set of Completion Check Results bound either to one Implementation Attempt or to one quiescent Wave workspace. Missing, surplus, duplicate, stale, or wrong-scope results cannot settle completion.
+_Avoid_: Test run, CI result, lint result
+
+**Implementation Completion Oracle**:
+The pure aggregate command that combines Implementation Attempt authority, normalized observation, Proof Obligations, Verification Policy, and a Completion Suite Result into exactly one transition: implemented, retry required, escalation required, infrastructure blocked, or ignored stale/duplicate evidence. Pi and Claude Code adapt into it; neither harness is a separate completion authority.
+_Avoid_: SubagentStop hook, Wave Gate check, test runner, completion service
+
 **Proof Obligation**:
-An engine-authored requirement a Task must discharge before its status can become implemented: completion, required regression tests, required new tests, and declared artifacts changed. Evidence keeps its provenance; Pi structured evidence is never relabeled as ledger-trusted.
+An engine-authored requirement a Task must discharge before its status can become implemented: completion, required regression tests, required new tests, and declared artifacts changed. Regression and new-test obligations derive independently from Verification Policy. Evidence keeps its provenance; Pi structured evidence is never relabeled as ledger-trusted.
 _Avoid_: Checklist item, self-report, completion claim
 
 **Review Packet**:
@@ -245,7 +265,10 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - Every Loom-owned **Agent** resolves one explicit requested **LLM Profile** before spawn; Pi launcher overrides are explicit at the transport boundary
 - An interactive Pi phase **Agent** runs through the **Interactive Phase Transport**; every headless role remains on the normal subagent transport
 - A Pi-launched mutating CLI process must match the in-memory extension's **Runtime Revision** before changing protected or run-scoped state
-- A **Task** becomes implemented only after all of its **Proof Obligations** are satisfied
+- A **Task** becomes implemented only after all of its **Proof Obligations** and required Task-scoped Completion Check Results are satisfied
+- An **Implementation Attempt** is settled only by the **Implementation Completion Oracle** under exact engine-issued authority
+- A Task's **Verification Policy** independently determines its regression and new-test **Proof Obligations**
+- A Task-scoped **Completion Suite Result** binds to one **Implementation Attempt**; a Wave-scoped result binds to a quiescent Wave workspace
 - Review Agents consume one immutable **Review Packet** per Task
 - A **Review Run** binds that Review Packet to one **Review Generation**, the expected review Agents, and all prior active Finding IDs
 - A **Resolved Finding** leaves the active set only when every Agent in its Review Run explicitly verifies remediation; any `still_present` assessment keeps it active

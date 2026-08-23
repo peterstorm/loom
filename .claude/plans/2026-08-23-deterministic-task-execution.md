@@ -1,0 +1,436 @@
+# Plan: Deterministic Task Execution
+
+## Status
+
+Proposed architecture, recovered from the 2026-08-22 completion-oracle discussion and reconciled against Loom `main` at `30241fd`.
+
+Implementation worktree: `~/dev/claude-plugins/loom-deterministic-task-execution`
+
+Branch: `feat/deterministic-task-execution`
+
+## Objective
+
+Make Task and Wave completion an engine-owned decision over immutable authority and engine-observed facts. Pi and Claude Code adapt harness events into the same domain command; neither harness independently decides that implementation is complete.
+
+## Current constraints
+
+1. Tasks in one Wave execute concurrently in one shared worktree.
+2. Spawn admission enforces disjoint declared `file_list` ownership, but tests and whole-program compilation can observe sibling intermediate state.
+3. Claude SubagentStop can block a child from stopping, but Loom currently snapshots evidence and cleans up the Guarded Skill Machine binding before the implementation result is settled. Continuing after a blocked stop therefore loses the attribution epoch unless lifecycle ordering changes.
+4. Pi applies implementation evidence only after the child result returns to the parent; the child has already exited. Same-process continuation is not available through the normal Pi subagent transport.
+5. Wave Gate already proves that no Wave Task remains in `executing_tasks` before protected completion.
+6. Full-tier Loom lint over recorded Wave files is already enforced immediately before the Wave completion commit.
+7. Loom does not yet own a project verification-command source. Model-authored shell strings must not become engine authority.
+
+## Approach decision
+
+### A. Task-local completion plus Wave-global verification — recommended
+
+At SubagentStop/result capture, execute or evaluate only checks whose truth cannot be invalidated by a concurrently-writing sibling: attempt identity, process completion, attributed/declared byte changes, explicit verification policy, new-test presence, and full-tier lint over Task-owned paths. Run whole-program build/typecheck/tests only after the Wave is quiescent.
+
+**Advantages**
+
+- Fits the existing shared-worktree Wave model.
+- Reuses disjoint path ownership and `checkNoExecutingTasks`.
+- Adds deterministic value without inventing merge authority.
+- Allows one pure completion evaluator to be reused at Task and Wave scopes.
+- Preserves Pi/Claude state-transition parity even while transport continuation differs.
+
+**Costs**
+
+- Some failures remain Wave-distance until workspaces are isolated or continuation becomes harness-neutral.
+- "Same-Agent retry with hot context" is not promised in the first epic.
+
+### B. Isolated Task worktrees
+
+Each Task writes and verifies in its own worktree, then the engine integrates verified candidates.
+
+**Advantages**
+
+- Strong byte ownership and repeatable Task-local whole-program checks.
+- Enables best-of-N later.
+
+**Costs**
+
+- Introduces a new integration aggregate: candidate revisions, merge order, conflicts, retries, and provenance.
+- Changes Wave semantics substantially.
+- Worktrees are file isolation, not a security boundary.
+
+**Decision**: defer until an engine-owned completion suite exists and can serve as the candidate selector.
+
+### C. Single-writer implementation
+
+Serialize all writing Agents; parallel Agents provide analysis only.
+
+**Advantages**
+
+- Makes whole-program checks sound at every stop.
+- Minimal attribution ambiguity.
+
+**Costs**
+
+- Removes Loom's implementation parallelism.
+- Does not solve Pi continuation.
+
+**Decision**: reject as the default. It may remain an explicit project policy later.
+
+### D. Wave-quiescent verification with Agent continuation
+
+Run all Agents concurrently, wait for Wave quiescence, verify, then resume the responsible Agent.
+
+**Advantages**
+
+- Checks the integrated workspace.
+- Could preserve generation parallelism.
+
+**Costs**
+
+- Requires durable child continuation in both harnesses.
+- Claude cleanup ordering and Pi's exited child currently violate that requirement.
+- A failing integrated check may not identify one responsible Task.
+
+**Decision**: defer until a cross-harness Implementation Program owns continuation requests.
+
+## Domain model
+
+### Implementation Attempt
+
+One engine-reserved execution of one Task under one semantic attempt ordinal and one immutable byte baseline.
+
+```typescript
+type SemanticAttempt = 1 | 2;
+
+type ImplementationAttemptAuthority = Readonly<{
+  taskId: TaskId;
+  wave: WaveNumber;
+  attempt: SemanticAttempt;
+  reservationId: ImplementationReservationId;
+  baselineDigest: ArtifactBaselineDigest;
+}>;
+```
+
+Only a parser/smart constructor mints this value. A Task id inferred from concurrent `executing_tasks` is not attempt authority.
+
+### Verification Policy
+
+Regression execution and new-test creation are independent obligations.
+
+```typescript
+type VerificationRequirement<Waiver extends string> =
+  | Readonly<{ kind: "required" }>
+  | Readonly<{ kind: "waived"; reason: Waiver }>;
+
+type VerificationPolicy = Readonly<{
+  regression: VerificationRequirement<
+    "documentation-only" | "generated-artifact"
+  >;
+  newTests: VerificationRequirement<
+    "existing-tests-sufficient" | "documentation-only" | "generated-artifact"
+  >;
+}>;
+```
+
+Legacy `new_tests_required` is parsed at the TaskGraph boundary:
+
+- `true` or absent → regression required, new tests required.
+- `false` → both waived under one explicit legacy migration reason in the parsed compatibility representation.
+- New TaskGraph production writes `verification_policy`.
+- If both fields are present, the parser requires equivalent semantics; disagreement is invalid state.
+
+### Completion Check Result
+
+A process spawn failure is structurally separate from an observed process. Exit, timeout, signal, and report production remain independent facts because a timeout handler can still produce exit 0 or a report.
+
+```typescript
+type CompletionProcessOutcome =
+  | Readonly<{
+      kind: "spawn-failed";
+      message: NonEmptyString;
+    }>
+  | Readonly<{
+      kind: "observed";
+      exitCode: number | null;
+      timedOut: boolean;
+      signal: NodeJS.Signals | null;
+      report: "not-required" | "produced" | "missing";
+    }>;
+
+type CompletionCheckResult = Readonly<{
+  checkId: CompletionCheckId;
+  scope: "task" | "wave";
+  outcome: CompletionProcessOutcome;
+}>;
+```
+
+### Completion Suite Result
+
+A non-empty immutable set of exact expected check results bound to Task-attempt or Wave authority. Duplicate, missing, surplus, stale, and wrong-scope results are parser or settlement failures.
+
+```typescript
+type CompletionSuiteResult =
+  | Readonly<{
+      kind: "task-suite";
+      authority: ImplementationAttemptAuthority;
+      checks: NonEmpty<CompletionCheckResult>;
+    }>
+  | Readonly<{
+      kind: "wave-suite";
+      wave: WaveNumber;
+      workspaceDigest: WorkspaceDigest;
+      checks: NonEmpty<CompletionCheckResult>;
+    }>;
+```
+
+### Implementation Completion Oracle
+
+The aggregate command owns the transition from observed attempt to the next Task lifecycle action.
+
+```typescript
+settleImplementationAttempt(
+  task: Task,
+  authority: ImplementationAttemptAuthority,
+  observation: ImplementationObservation,
+  suite: CompletionSuiteResult,
+): Either<ImplementationCompletionError, ImplementationCompletionTransition>
+```
+
+```typescript
+type ImplementationCompletionTransition =
+  | Readonly<{ kind: "implemented"; proof: SatisfiedTaskProof }>
+  | Readonly<{
+      kind: "retry-required";
+      attempt: 2;
+      failures: NonEmpty<ImplementationCompletionFailure>;
+    }>
+  | Readonly<{
+      kind: "escalation-required";
+      failures: NonEmpty<ImplementationCompletionFailure>;
+    }>
+  | Readonly<{
+      kind: "blocked";
+      failure: CompletionInfrastructureFailure;
+    }>
+  | Readonly<{
+      kind: "ignored";
+      reason: "stale" | "duplicate" | "already-completed";
+    }>;
+```
+
+Expected verification failures consume a semantic attempt. Infrastructure failures do not.
+
+## Component design
+
+### Functional core
+
+#### `engine/src/core/verification-policy.ts`
+
+Owns `VerificationPolicy`, exact unknown-input parsing, legacy migration, and obligation derivation.
+
+#### `engine/src/core/completion-suite.ts`
+
+Owns process/check/suite ADTs, exact parsers, result evaluation, and failure rendering as data.
+
+#### `engine/src/core/implementation-completion.ts`
+
+Owns `ImplementationAttemptAuthority`, attempt settlement, stale/duplicate classification, and bounded retry/escalation transitions. It composes proof obligations and completion-suite evaluation; it performs no I/O.
+
+#### Existing `engine/src/core/proof-obligations.ts`
+
+Consumes `VerificationPolicy` rather than deriving both test obligations from one boolean. It remains the aggregate for authored proof obligations and evidence.
+
+### Imperative shell
+
+#### Task-result adapters
+
+- Claude: `engine/src/handlers/subagent-stop/update-task-status.ts`
+- Pi: `pi/subagent-result.ts`
+
+Each adapter gathers harness-native observations, parses them once, executes the safe Task-local suite through a shell port, invokes the same aggregate command, and applies its returned transition under the State File lock.
+
+No adapter may independently map "child returned" to `status: "implemented"`.
+
+#### Wave Gate
+
+`engine/src/handlers/helpers/programs/wave-gate.ts` runs the Wave suite only after canonical readiness proves `checkNoExecutingTasks`. The suite result becomes another explicit Wave Gate fact before `commitActiveWaveGateCompletion`.
+
+The existing full-tier lint call remains until it is represented as a named completion check; migration must not temporarily remove enforcement.
+
+### I/O ports
+
+Do not introduce a generic command framework. The completion shell needs two real seams:
+
+```typescript
+type RunCompletionCheck = (
+  check: AuthorizedCompletionCheck,
+  signal: AbortSignal,
+) => Promise<CompletionCheckResult>;
+
+type LoadCompletionSuite = (
+  scope: TaskCompletionScope | WaveCompletionScope,
+) => Either<CompletionSuiteConfigurationError, AuthorizedCompletionSuite>;
+```
+
+The production adapters execute fixed executable/argument arrays. Tests use plain fake functions.
+
+## Verification command authority
+
+Do not execute model-authored shell strings.
+
+The runner slice must introduce one operator-owned, parseable source of fixed commands. The preferred design is a protected Loom verification manifest whose bytes are captured before implementation begins and whose entries contain:
+
+- stable check id;
+- scope (`task` or `wave`);
+- executable;
+- readonly argument array;
+- repository-relative working directory;
+- bounded timeout;
+- report policy.
+
+The manifest must be guarded from implementation Agents for the duration of the loom flow. Automatic package-manager detection may generate an initial manifest, but detection is not runtime authority.
+
+The domain slice deliberately does not invent this manifest format; it establishes the result and policy contracts first.
+
+## Data flow
+
+### Task completion
+
+```text
+reserved Task + attempt baseline
+  → child result / SubagentStop observation
+  → parse harness evidence
+  → run safe Task-local checks
+  → CompletionSuiteResult
+  → settleImplementationAttempt (pure)
+  → locked State File transition
+  → implemented | retry-required | escalation-required | blocked | ignored
+```
+
+### Wave verification
+
+```text
+registered Wave Gate
+  → canonical readiness
+  → prove no executing Wave Tasks
+  → load frozen Wave completion suite
+  → execute checks with bounded process shell
+  → evaluate exact suite (pure)
+  → continue semantic reviews/advisory decision
+  → protected Wave completion commit
+```
+
+## Error handling
+
+### Domain failures
+
+Returned as `Either` values:
+
+- authority mismatch;
+- stale or duplicate attempt;
+- missing/surplus/duplicate check result;
+- non-zero exit;
+- timeout;
+- signal termination;
+- missing required report;
+- unsatisfied proof obligation;
+- attempt budget exhausted.
+
+### Infrastructure failures
+
+Spawn, filesystem, manifest, and protected-state failures are shell-originated typed failures. They block without consuming the semantic implementation-attempt budget.
+
+No catch-all converts infrastructure failure into failed tests.
+
+## Test strategy
+
+### Unit tests
+
+- Parse every ADT from `unknown`, including exact-key rejection.
+- Derive regression and new-test obligations independently.
+- Settle every transition without filesystem/process mocks.
+- Prove Pi and Claude normalized observations produce byte-equal transitions.
+
+### Property tests with fast-check
+
+- Settlement is deterministic for equal inputs.
+- Attempt 2 can never transition to another retry.
+- Infrastructure failure never consumes an attempt.
+- Stale/duplicate outcomes never mutate current proof.
+- Satisfied transition implies every expected obligation and check is satisfied.
+- Missing, duplicate, or surplus check ids can never produce `implemented`.
+- Parsing/serialization round trips preserve valid values.
+- Legacy boolean migration is total and deterministic.
+- Explicit policy disagreement with legacy input is always rejected.
+
+### Integration tests
+
+- Real timeout process that traps termination and exits zero is still a timeout.
+- Real signal termination records the signal independently.
+- Missing required report blocks despite exit zero.
+- Wave suite cannot run while a Wave Task remains in `executing_tasks`.
+- Existing full-tier lint remains enforced during migration.
+
+No production subprocess is mocked.
+
+## Delivery slices
+
+### Slice 1 — verification policy and completion domain
+
+- Add `VerificationPolicy` and compatibility parser.
+- Split regression/new-test obligation derivation.
+- Add completion process/check/suite ADTs and pure evaluator.
+- Add `ImplementationAttemptAuthority` and pure settlement reducer.
+- Add example and property tests.
+- Update `CONTEXT.md`, state load guards, task graph production, and docs.
+- No subprocess execution and no status/retry behavior change yet.
+
+### Slice 2 — quiescent Wave suite
+
+- Add protected verification manifest and fixed-command parser.
+- Add bounded subprocess shell with orthogonal outcomes.
+- Execute whole-program checks only after Wave quiescence.
+- Persist result/receipt and expose it through Wave status.
+- Keep existing full-tier lint fail-closed throughout migration.
+
+### Slice 3 — Task-local completion suite
+
+- Add Task-attempt authority to reservations.
+- Run only concurrency-safe checks at Task result settlement.
+- Route Claude and Pi through `settleImplementationAttempt`.
+- Remove inference-based success authority; inference may remain cleanup-only.
+
+### Slice 4 — bounded retry/escalation
+
+- Freeze attempt-1 and attempt-2 contexts before dispatch.
+- Persist retry diagnostics and issued request identity.
+- One retry for semantic failure; explicit escalation after attempt 2.
+- Infrastructure retry policy remains separate.
+
+### Slice 5 — attributed events and semantic Task output
+
+- Add proven per-Task event identity where the harness exposes or can carry it.
+- Never infer parallel Claude tool attribution from `executing_tasks`.
+- Persist typed Task output for dependent Task briefs.
+- Compile Requirement Completion Claims into frozen assertions where supported.
+
+## Invariants
+
+1. Only engine-issued Implementation Attempt authority can settle a Task.
+2. Exactly one current attempt exists per executing Task.
+3. Attempt 2 is terminal: success, escalation, infrastructure block, or ignored stale result.
+4. Infrastructure failure does not consume semantic attempt budget.
+5. A Task suite never executes a check whose truth can observe sibling intermediate bytes.
+6. A Wave suite executes only after every Wave Agent has stopped.
+7. One pure evaluator decides equivalent Pi and Claude observations.
+8. Missing, malformed, stale, duplicate, surplus, or conflicting evidence fails closed.
+9. Regression execution and new-test creation are independent policies.
+10. Model-authored shell text never becomes completion-command authority.
+
+## Explicit non-goals
+
+- Isolated Task worktrees in the first epic.
+- Same-process Agent continuation parity.
+- Best-of-N implementation candidates.
+- Diff-scoped LLM re-review.
+- Mutation testing.
+- A generic workflow/command DSL.
+- Rewriting the Loom lifecycle onto Fugue primitives that Fugue 0.4 does not expose.
