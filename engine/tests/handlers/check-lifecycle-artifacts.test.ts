@@ -28,9 +28,13 @@ function loaded(lifecycles: PlanModels["lifecycles"]): PlanModelsSource {
 }
 
 describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {
-  it("skips when there is no plan in state (legacy flows)", () => {
+  it("fails closed when no plan authority can prove whether Lifecycle Machines were declared", () => {
     const check = checkLifecycleArtifacts({ kind: "none" }, [waveTask(["a.ts"])], () => false);
-    expect(check.passed).toBe(true);
+    expect(check.passed).toBe(false);
+    if (!check.passed) {
+      expect(check.reason).toContain("plan file is missing");
+      expect(check.reason).toContain("fail-closed");
+    }
   });
 
   it("fails closed when the plan is named but unreadable — and names the cause", () => {

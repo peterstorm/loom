@@ -321,6 +321,50 @@ describe("reconcileTaskFromStoredEvidence", () => {
     expect(reconciled.new_tests_written).toBe(false);
   });
 
+  it("reconciles both asymmetric Verification Policy directions", () => {
+    const baseTask = failedTask();
+    const regressionWaived = reconcileTaskFromStoredEvidence(
+      {
+        ...baseTask,
+        new_tests_required: undefined,
+        test_result: undefined,
+        verification_policy: {
+          regression: { kind: "waived", reason: "documentation-only" },
+          new_tests: { kind: "required" },
+        },
+      },
+      ["src/a.ts"],
+      { written: true, evidence: "1 new test method, 2 assertions" },
+    );
+    const newTestsWaived = reconcileTaskFromStoredEvidence(
+      {
+        ...baseTask,
+        new_tests_required: undefined,
+        verification_policy: {
+          regression: { kind: "required" },
+          new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+        },
+      },
+      ["src/a.ts"],
+      { written: false, evidence: "" },
+    );
+
+    expect(regressionWaived.status).toBe("implemented");
+    expect(regressionWaived.proof?.state).toBe("satisfied");
+    expect(regressionWaived.proof?.obligations).toEqual([
+      { kind: "task-completed" },
+      { kind: "new-tests" },
+      { kind: "declared-artifact-changed", artifact: "src/a.ts" },
+    ]);
+    expect(newTestsWaived.status).toBe("implemented");
+    expect(newTestsWaived.proof?.state).toBe("satisfied");
+    expect(newTestsWaived.proof?.obligations).toEqual([
+      { kind: "task-completed" },
+      { kind: "regression-test-pass" },
+      { kind: "declared-artifact-changed", artifact: "src/a.ts" },
+    ]);
+  });
+
   it("never invents completion when the prior proof did not observe it", () => {
     const reconciled = reconcileTaskFromStoredEvidence(
       failedTask(false),

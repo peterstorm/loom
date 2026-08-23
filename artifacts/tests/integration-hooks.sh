@@ -128,7 +128,49 @@ echo
 # 3/9/11. complete-wave-gate helper
 # ---------------------------------------------------------------------------
 echo "3. complete-wave-gate helper (advance, block, new-test gates)"
-run_gate() { LOOM_STATE_PATH="$GP" bun "$CLI" helper complete-wave-gate </dev/null 2>&1; }
+run_gate() {
+  local plan="$SB/model-free-plan.md"
+  local with_plan="$GP.with-plan"
+  printf '# Model-free plan\n' > "$plan"
+  jq --arg plan "$plan" '
+    def task_obligation: {"kind": "task-completed"};
+    def regression_obligation: {"kind": "regression-test-pass"};
+    def new_tests_obligation: {"kind": "new-tests"};
+    def task_evidence: {"kind": "task-completed"};
+    def regression_evidence: {"kind": "regression-test-pass", "provenance": "evidence-ledger", "verdict": "trusted-pass"};
+    def new_tests_evidence: {"kind": "new-tests", "detail": (.new_test_evidence // null)};
+    def satisfied_proof:
+      if .new_tests_required == false then {
+        "state": "satisfied",
+        "obligations": [task_obligation],
+        "results": [{"state": "satisfied", "obligation": task_obligation, "evidence": task_evidence}],
+        "evidence": [task_evidence]
+      } else {
+        "state": "satisfied",
+        "obligations": [task_obligation, regression_obligation, new_tests_obligation],
+        "results": [
+          {"state": "satisfied", "obligation": task_obligation, "evidence": task_evidence},
+          {"state": "satisfied", "obligation": regression_obligation, "evidence": regression_evidence},
+          {"state": "satisfied", "obligation": new_tests_obligation, "evidence": new_tests_evidence}
+        ],
+        "evidence": [task_evidence, regression_evidence, new_tests_evidence]
+      } end;
+    .plan_file = $plan |
+    if .github_issue == null then del(.github_issue) else . end |
+    .spec_check //= {
+      "wave": .current_wave,
+      "run_at": "integration-fixture",
+      "verdict": "PASSED",
+      "critical_count": 0,
+      "high_count": 0,
+      "critical_findings": [],
+      "high_findings": [],
+      "medium_findings": []
+    } |
+    .tasks |= map(if .status == "implemented" and .proof == null then .proof = satisfied_proof else . end)
+  ' "$GP" > "$with_plan" && mv "$with_plan" "$GP"
+  LOOM_STATE_PATH="$GP" bun "$CLI" helper complete-wave-gate </dev/null 2>&1
+}
 
 # 3a. Happy path: advances wave, marks completed, sets reviews_complete, inits next gate.
 SB="$(mktemp -d)"; mkdir -p "$SB/.claude/state"; GP="$SB/.claude/state/active_task_graph.json"
@@ -243,11 +285,12 @@ cat > "$GP" <<'EOF'
 }
 EOF
 echo '{
+  "spec_trace_version": 2,
   "plan_title": "Test Feature", "plan_file": "plan.md", "spec_file": "spec.md",
   "tasks": [
-    {"id": "T1", "description": "First task",  "wave": 1, "agent": "code-implementer-agent", "depends_on": []},
-    {"id": "T2", "description": "Second task", "wave": 1, "agent": "code-implementer-agent", "depends_on": []},
-    {"id": "T3", "description": "Third task",  "wave": 2, "agent": "code-implementer-agent", "depends_on": ["T1"]}
+    {"id": "T1", "description": "First task",  "wave": 1, "agent": "code-implementer-agent", "depends_on": [], "spec_anchors": [], "spec_contributions": [], "verification_policy": {"regression": {"kind": "required"}, "new_tests": {"kind": "required"}}, "file_list": []},
+    {"id": "T2", "description": "Second task", "wave": 1, "agent": "code-implementer-agent", "depends_on": [], "spec_anchors": [], "spec_contributions": [], "verification_policy": {"regression": {"kind": "required"}, "new_tests": {"kind": "required"}}, "file_list": []},
+    {"id": "T3", "description": "Third task",  "wave": 2, "agent": "code-implementer-agent", "depends_on": ["T1"], "spec_anchors": [], "spec_contributions": [], "verification_policy": {"regression": {"kind": "required"}, "new_tests": {"kind": "required"}}, "file_list": []}
   ]
 }' | ( cd "$SB" && LOOM_STATE_PATH="$GP" bun "$CLI" helper populate-task-graph --issue 42 --repo owner/repo >/dev/null 2>&1 )
 TC=$(jq '.tasks | length' "$GP")
@@ -278,11 +321,11 @@ printf '# Plan\nno model sections\n' > "$SB/plan.md"
 DUMMY="$SB/.claude/state/active_task_graph.json"; mkdir -p "$SB/.claude/state"
 printf '{"current_phase":"init","phase_artifacts":{}}' > "$DUMMY"
 
-CFG='{"plan_title":"Test","plan_file":"plan.md","spec_file":"spec.md","tasks":[{"id":"T1","description":"Update config for new env","wave":1,"agent":"code-implementer-agent","depends_on":[],"new_tests_required":false}]}'
+CFG='{"current_phase":"execute","phase_artifacts":{},"skipped_phases":[],"wave_gates":{},"plan_title":"Test","plan_file":"plan.md","spec_file":"spec.md","tasks":[{"id":"T1","description":"Update config for new env","wave":1,"agent":"code-implementer-agent","depends_on":[],"status":"pending","new_tests_required":false}]}'
 OUT=$(echo "$CFG" | ( cd "$SB" && LOOM_STATE_PATH="$DUMMY" bun "$CLI" helper validate-task-graph 2>&1 ))
 echo "$OUT" | grep -q "WARNING" && fail "no warning for config task + tests=false" "no WARNING" "$OUT" || pass "no warning for config task + tests=false"
 
-SUS='{"plan_title":"Test","plan_file":"plan.md","spec_file":"spec.md","tasks":[{"id":"T1","description":"Implement user authentication with JWT","wave":1,"agent":"code-implementer-agent","depends_on":[],"new_tests_required":false}]}'
+SUS='{"current_phase":"execute","phase_artifacts":{},"skipped_phases":[],"wave_gates":{},"plan_title":"Test","plan_file":"plan.md","spec_file":"spec.md","tasks":[{"id":"T1","description":"Implement user authentication with JWT","wave":1,"agent":"code-implementer-agent","depends_on":[],"status":"pending","new_tests_required":false}]}'
 OUT=$(echo "$SUS" | ( cd "$SB" && LOOM_STATE_PATH="$DUMMY" bun "$CLI" helper validate-task-graph 2>&1 ))
 echo "$OUT" | grep -q "WARNING" && pass "warns for impl task + tests=false" || fail "warns for impl task + tests=false" "contains WARNING" "$OUT"
 
@@ -318,25 +361,25 @@ SB="$(mktemp -d)"; mkdir -p "$SB/.claude/state" "$SB/.claude/specs/test-feature"
 vpo() { echo "$2" | ( cd "$SB" && CLAUDE_PLUGIN_ROOT="$LOOM_ROOT" CLAUDE_PROJECT_DIR="$SB" LOOM_STATE_PATH="$GP" bash "$SHIMS/validate-phase-order.sh" >/dev/null 2>&1; echo $? ); }
 
 cat > "$GP" <<'EOF'
-{"current_phase": "init", "phase_artifacts": {}, "skipped_phases": [], "spec_file": null, "plan_file": null, "current_wave": null, "tasks": [], "wave_gates": {}}
+{"current_phase": "init", "phase_artifacts": {}, "skipped_phases": [], "spec_file": null, "plan_file": null, "tasks": [], "wave_gates": {}}
 EOF
 [ "$(vpo x '{"tool_name":"Task","tool_input":{"prompt":"Explore feature","subagent_type":"brainstorm-agent"}}')" = "0" ] && pass "allows brainstorm from init" || fail "allows brainstorm from init" 0 other
 [ "$(vpo x '{"tool_name":"Task","tool_input":{"prompt":"Create spec","subagent_type":"specify-agent"}}')" = "2" ]      && pass "blocks specify from init"    || fail "blocks specify from init" 2 other
 
 cat > "$GP" <<'EOF'
-{"current_phase": "init", "phase_artifacts": {}, "skipped_phases": ["brainstorm"], "spec_file": null, "plan_file": null, "current_wave": null, "tasks": [], "wave_gates": {}}
+{"current_phase": "init", "phase_artifacts": {}, "skipped_phases": ["brainstorm"], "spec_file": null, "plan_file": null, "tasks": [], "wave_gates": {}}
 EOF
 [ "$(vpo x '{"tool_name":"Task","tool_input":{"prompt":"Create spec","subagent_type":"specify-agent"}}')" = "0" ] && pass "allows specify when brainstorm skipped" || fail "allows specify when brainstorm skipped" 0 other
 
 cat > "$GP" <<'EOF'
-{"current_phase": "specify", "phase_artifacts": {"brainstorm": "completed"}, "skipped_phases": [], "spec_file": null, "plan_file": null, "current_wave": null, "tasks": [], "wave_gates": {}}
+{"current_phase": "specify", "phase_artifacts": {"brainstorm": "completed"}, "skipped_phases": [], "spec_file": null, "plan_file": null, "tasks": [], "wave_gates": {}}
 EOF
 [ "$(vpo x '{"tool_name":"Task","tool_input":{"prompt":"Design architecture","subagent_type":"architecture-agent"}}')" = "2" ] && pass "blocks architecture without spec" || fail "blocks architecture without spec" 2 other
 
 # spec present, <= 3 markers → allowed
 printf '# Test Spec\nSome requirements.\n[NEEDS CLARIFICATION]: One\n[NEEDS CLARIFICATION]: Two\n' > "$SB/.claude/specs/test-feature/spec.md"
 cat > "$GP" <<'EOF'
-{"current_phase": "specify", "phase_artifacts": {"brainstorm": "completed", "specify": ".claude/specs/test-feature/spec.md"}, "skipped_phases": [], "spec_file": ".claude/specs/test-feature/spec.md", "plan_file": null, "current_wave": null, "tasks": [], "wave_gates": {}}
+{"current_phase": "specify", "phase_artifacts": {"brainstorm": "completed", "specify": ".claude/specs/test-feature/spec.md"}, "skipped_phases": [], "spec_file": ".claude/specs/test-feature/spec.md", "plan_file": null, "tasks": [], "wave_gates": {}}
 EOF
 [ "$(vpo x '{"tool_name":"Task","tool_input":{"prompt":"Design architecture","subagent_type":"architecture-agent"}}')" = "0" ] && pass "allows architecture with spec (markers <= 3)" || fail "allows architecture with spec (<=3)" 0 other
 
@@ -421,7 +464,7 @@ echo
 echo "16. advance-phase brainstorm -> specify (via dispatch.sh)"
 SB="$(mktemp -d)"; SUB="$SB/subagents"; mkdir -p "$SB/.claude/state" "$SB/.claude/specs/test-feature" "$SUB"; GP="$SB/.claude/state/active_task_graph.json"
 cat > "$GP" <<'EOF'
-{"current_phase": "init", "phase_artifacts": {}, "skipped_phases": [], "spec_file": null, "plan_file": null, "current_wave": null, "tasks": [], "wave_gates": {}}
+{"current_phase": "init", "phase_artifacts": {}, "skipped_phases": [], "spec_file": null, "plan_file": null, "tasks": [], "wave_gates": {}}
 EOF
 echo "# Brainstorm" > "$SB/.claude/specs/test-feature/brainstorm.md"
 echo "$GP" > "$SUB/advance-test-session.task_graph"

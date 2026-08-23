@@ -217,7 +217,7 @@ GOOD_DECOMPOSE='{
   "plan_file": ".claude/plans/test.md",
   "spec_file": ".claude/specs/test/spec.md",
   "tasks": [
-    {"id": "T1", "description": "Impl", "agent": "code-implementer-agent", "wave": 1, "depends_on": [], "spec_anchors": [], "spec_contributions": [], "verification_policy": {"regression": {"kind": "required"}, "new_tests": {"kind": "required"}}}
+    {"id": "T1", "description": "Impl", "agent": "code-implementer-agent", "wave": 1, "depends_on": [], "spec_anchors": [], "spec_contributions": [], "verification_policy": {"regression": {"kind": "required"}, "new_tests": {"kind": "required"}}, "file_list": []}
   ]
 }'
 # The plan_file named by the decompose payload must EXIST: populate-task-graph

@@ -181,8 +181,8 @@ const obligationKey = (obligation: ProofObligation): string =>
 const freezeObligation = (obligation: ProofObligation): ProofObligation => Object.freeze({ ...obligation });
 
 /**
- * Completion is always observed. Regression and new-test proofs are required
- * together unless decomposition explicitly waives tests for docs/config/codegen.
+ * Completion is always observed. Verification Policy derives regression and
+ * new-test obligations independently; either requirement may be explicitly waived.
  */
 export function deriveProofObligations(input: ProofObligationInput): NonEmpty<ProofObligation> {
   const artifacts = [...new Set(input.declaredArtifacts.map((path) => path.trim()).filter(Boolean))];
@@ -314,6 +314,18 @@ const evaluateOne = (
   }
 };
 
+type SatisfiedProofResult = Extract<EvaluatedProofResult, { state: "satisfied" }>;
+
+function requireSatisfiedResults(results: NonEmpty<EvaluatedProofResult>): NonEmpty<SatisfiedProofResult> {
+  const [head, ...tail] = results;
+  const isSatisfied = (result: EvaluatedProofResult): result is SatisfiedProofResult =>
+    result.state === "satisfied";
+  if (!isSatisfied(head) || !tail.every(isSatisfied)) {
+    throw new Error("proof evaluation invariant: failure-free result set contains a non-satisfied result");
+  }
+  return nonEmpty(head, tail);
+}
+
 /**
  * Evaluate every obligation exactly once. A failed aggregate still retains the
  * satisfied results, so no result is lost merely because a sibling failed.
@@ -346,15 +358,7 @@ export function evaluateProofObligations(
     });
   }
 
-  // Every result is satisfied because the only other arm contributed a failure.
-  const [head, ...tail] = results;
-  if (head.state !== "satisfied" || tail.some((result) => result.state !== "satisfied")) {
-    // This is an internal invariant, not an expected domain failure.
-    throw new Error("proof evaluation invariant: failure-free result set contains a non-satisfied result");
-  }
-  const satisfiedHead = head;
-  const satisfiedTail = tail.flatMap((result) => result.state === "satisfied" ? [result] : []);
-  const satisfiedResults = nonEmpty(satisfiedHead, satisfiedTail);
+  const satisfiedResults = requireSatisfiedResults(results);
   return Object.freeze({
     state: "satisfied",
     obligations: authoredObligations,
@@ -453,30 +457,37 @@ export function parseProofObligationInput(raw: unknown): ProofParseResult<ProofO
     : ok(Object.freeze({ newTestsRequired: raw.newTestsRequired === true, declaredArtifacts }));
 }
 
+function parseUntrustedTestProvenance(
+  raw: unknown,
+  path: string,
+): ProofParseResult<UntrustedTestProvenance> {
+  if (raw === undefined || raw === "unverified") return ok("unverified");
+  if (raw === "pi-structured") return ok("pi-structured");
+  return fail([`${path}.provenance must be pi-structured or unverified`]);
+}
+
 export function parseTaskTestResult(raw: unknown, path = "testResult"): ProofParseResult<ProofTestResult> {
   if (!isRecord(raw)) return fail([`${path} must be an object`]);
   if (raw.verdict === "trusted-pass") return ok(Object.freeze({ verdict: "trusted-pass" }));
   if (raw.verdict === "trusted-fail") return ok(Object.freeze({ verdict: "trusted-fail" }));
   if (raw.verdict === "untrusted") {
-    const errors: string[] = [];
-    if (typeof raw.passed !== "boolean") errors.push(`${path}.passed must be a boolean`);
+    const passed = typeof raw.passed === "boolean"
+      ? ok(raw.passed)
+      : fail<boolean>([`${path}.passed must be a boolean`]);
     const label = parseNonEmptyString(raw.label, `${path}.label`);
-    if (!label.ok) errors.push(...label.errors);
     // Absent provenance reads as `unverified`, never as structured evidence:
     // records written before the field existed must not acquire a trust
     // upgrade by omission. An unrecognized value is a refusal, not a default.
-    if (raw.provenance !== undefined && raw.provenance !== "pi-structured" && raw.provenance !== "unverified") {
-      errors.push(`${path}.provenance must be pi-structured or unverified`);
-    }
-    const provenance: UntrustedTestProvenance = raw.provenance === "pi-structured" ? "pi-structured" : "unverified";
-    return errors.length > 0
-      ? fail(errors)
-      : ok(Object.freeze({
-          verdict: "untrusted",
-          passed: raw.passed === true,
-          label: label.ok ? label.value : "",
-          provenance,
-        }));
+    const provenance = parseUntrustedTestProvenance(raw.provenance, path);
+    const errors = [passed, label, provenance]
+      .flatMap((parsed) => parsed.ok ? [] : parsed.errors);
+    if (!passed.ok || !label.ok || !provenance.ok) return fail(errors);
+    return ok(Object.freeze({
+      verdict: "untrusted",
+      passed: passed.value,
+      label: label.value,
+      provenance: provenance.value,
+    }));
   }
   return fail([`${path}.verdict must be trusted-pass, trusted-fail, or untrusted`]);
 }

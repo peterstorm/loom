@@ -42,7 +42,10 @@ afterEach(async () => {
 });
 
 const deps: GateDeps = {
-  loadPlanModels: () => ({ kind: "none" }),
+  loadPlanModels: () => ({
+    kind: "loaded",
+    models: { lifecycles: [], pipeline: null, invariants: [], strays: [] },
+  }),
   fileExists: () => true,
 };
 
@@ -64,6 +67,7 @@ function executeGraph(overrides: Record<string, unknown> = {}): Record<string, u
     spec_dir: ".claude/specs/x",
     phase_artifacts: {},
     skipped_phases: [],
+    plan_file: "plan.md",
     wave_gates: {},
     tasks: [
       { id: "T1", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", depends_on: [] },
@@ -71,6 +75,12 @@ function executeGraph(overrides: Record<string, unknown> = {}): Record<string, u
     ],
     ...overrides,
   };
+}
+
+function modelFreePlan(root: string): string {
+  const path = join(root, "plan.md");
+  writeFileSync(path, "# Model-free plan\n");
+  return path;
 }
 
 function replayFromCapturedEvidence(handle: RunDirHandle) {
@@ -1517,7 +1527,7 @@ describe("orchestration CLI", () => {
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
+      spec_file: null, plan_file: modelFreePlan(root), wave_gates: {}, tasks: [{
         id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
         status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
         test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
@@ -2701,7 +2711,7 @@ describe("orchestration CLI", () => {
     };
     const graph = {
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {},
+      spec_file: null, plan_file: modelFreePlan(root), wave_gates: {},
       wave_review_epoch: { runId: "run.wave-refuted-tally", wave: 1, batchEpoch: "b".repeat(64) },
       spec_check: {
         wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
@@ -2768,7 +2778,7 @@ describe("orchestration CLI", () => {
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {},
+      spec_file: null, plan_file: modelFreePlan(root), wave_gates: {},
       wave_review_epoch: { runId: "run.wave-lint-block", wave: 1, batchEpoch: "b".repeat(64) },
       spec_check: {
         wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
@@ -3450,7 +3460,7 @@ describe("orchestration CLI", () => {
       const statePath = join(root, ".claude", "state", "active_task_graph.json");
       writeFileSync(statePath, JSON.stringify({
         current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-        spec_file: null, plan_file: null, wave_gates: {},
+        spec_file: null, plan_file: modelFreePlan(root), wave_gates: {},
         tasks: [{
           id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
           status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],

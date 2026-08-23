@@ -101,6 +101,13 @@ const satisfiedProof = evaluateTaskProof(
 );
 if (satisfiedProof.state !== "satisfied") throw new Error("test fixture proof must be satisfied");
 
+const MODEL_FREE_PLAN_MODELS = Object.freeze({
+  lifecycles: Object.freeze([]),
+  pipeline: null,
+  invariants: Object.freeze([]),
+  strays: Object.freeze([]),
+});
+
 const baseTask: Task = {
   id: "T1",
   description: "test",
@@ -641,7 +648,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
-    plan_file: null,
+    plan_file: "plan.md",
     current_wave: 1,
     spec_check: specCheck(1),
     tasks: [baseTask, { ...baseTask, id: "T2", wave: 2 }],
@@ -663,7 +670,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
     const deps: GateDeps = {
       loadPlanModels: () => {
         calls.loadPlanModels++;
-        return { kind: "none" };
+        return { kind: "loaded", models: MODEL_FREE_PLAN_MODELS };
       },
       fileExists: () => {
         calls.fileExists++;
@@ -1159,7 +1166,7 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
 });
 
 const statusDeps: CoreGateDeps = {
-  loadPlanModels: () => ({ kind: "none" }),
+  loadPlanModels: () => ({ kind: "loaded", models: MODEL_FREE_PLAN_MODELS }),
   fileExists: () => true,
 };
 
@@ -1170,7 +1177,7 @@ function registeredGraph(overrides: Partial<TaskGraph> = {}): TaskGraph {
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
-    plan_file: null,
+    plan_file: "plan.md",
     spec_check: {
       wave: 1,
       run_at: "now",
@@ -2369,8 +2376,10 @@ describe("final-Wave compatibility completion replay", () => {
   ): Promise<T> {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-final-wave-replay-")));
     const path = join(root, "active_task_graph.json");
+    const planFile = join(root, "plan.md");
     const previous = process.env.LOOM_STATE_PATH;
-    writeFileSync(path, JSON.stringify(initial, null, 2));
+    writeFileSync(planFile, "# Model-free plan\n");
+    writeFileSync(path, JSON.stringify({ ...initial, plan_file: planFile }, null, 2));
     process.env.LOOM_STATE_PATH = path;
     try {
       return await run(path);

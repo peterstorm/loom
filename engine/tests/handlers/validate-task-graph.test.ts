@@ -35,6 +35,7 @@ function validateFull(
                 spec_anchors: [],
                 spec_contributions: [],
                 verification_policy: REQUIRED_VERIFICATION,
+                file_list: [],
                 ...task as Record<string, unknown>,
               }
             : task)
@@ -210,6 +211,24 @@ describe("validateFull (pure)", () => {
     }
   });
 
+  it("requires authored decompose tasks to state file ownership explicitly", () => {
+    const result = validateFullImplementation({
+      spec_trace_version: 2,
+      plan_title: "x", plan_file: "x", spec_file: "x",
+      tasks: [{
+        ...validTask,
+        status: undefined,
+        spec_anchors: [],
+        spec_contributions: [],
+        verification_policy: REQUIRED_VERIFICATION,
+      }],
+    }, "decompose-payload");
+
+    expect(errorsOf(result)).toContain(
+      "Task T1: missing required 'file_list' (use [] for an explicit no-artifact task)",
+    );
+  });
+
   it("rejects malformed decompose file_list before proof derivation", () => {
     for (const file_list of [["src/x.ts", 42], [""], "src/x.ts"]) {
       const result = validateFull({
@@ -217,7 +236,7 @@ describe("validateFull (pure)", () => {
         tasks: [{ ...validTask, status: undefined, file_list }],
       }, "decompose-payload");
       expect(result.ok).toBe(false);
-      expect(errorsOf(result)).toContain("Task T1: 'file_list' must be an array of non-empty strings if present");
+      expect(errorsOf(result)).toContain("Task T1: 'file_list' must be an array of non-empty strings");
     }
   });
 

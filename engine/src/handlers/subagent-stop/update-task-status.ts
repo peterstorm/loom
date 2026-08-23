@@ -313,10 +313,10 @@ function applyResolvedTask(
  * meant to run INSIDE the locked state update (pi/extension.ts's Stop
  * handler): a pre-lock snapshot can be outdated by a concurrent writer
  * before the write lands (TOCTOU), so the target is re-found and re-checked
- * against the CURRENT state here. An untrusted resolution never overwrites
- * a trusted failure, and preserves a trusted pass only while no newer code
- * bytes were attributed to this retry; historical green evidence cannot prove
- * changed bytes. A completed task is never reopened — but the agent still
+ * against the CURRENT state here. Unless explicit revalidation is required,
+ * an untrusted resolution never overwrites a trusted failure and preserves a
+ * trusted pass only while no newer code bytes were attributed to this retry;
+ * historical green evidence cannot prove changed bytes. A completed task is never reopened — but the agent still
  * STOPPED either way, so the task is
  * always removed from executing_tasks (leaving it would ghost-block
  * duplicate-spawn checks for the rest of the session).

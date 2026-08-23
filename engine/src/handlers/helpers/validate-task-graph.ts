@@ -123,7 +123,7 @@ function findingsErrorsOf(task: Record<string, unknown>, label: string): string[
  */
 export type ValidationScope = "state-file" | "decompose-payload";
 
-/** Validate full decompose task graph */
+/** Validate a full TaskGraph at the stored-state or authored-decompose boundary. */
 export function validateFull(
   json: Record<string, unknown>,
   scope: ValidationScope = "state-file",
@@ -197,9 +197,11 @@ export function validateFull(
       errors.push(`Task ${tid}: 'depends_on' entries must be strings`);
     }
 
-    if (scope === "decompose-payload" && task.file_list !== undefined) {
-      if (!Array.isArray(task.file_list) || task.file_list.some((file) => typeof file !== "string" || file.trim() === "")) {
-        errors.push(`Task ${tid}: 'file_list' must be an array of non-empty strings if present`);
+    if (scope === "decompose-payload") {
+      if (task.file_list === undefined) {
+        errors.push(`Task ${tid}: missing required 'file_list' (use [] for an explicit no-artifact task)`);
+      } else if (!Array.isArray(task.file_list) || task.file_list.some((file) => typeof file !== "string" || file.trim() === "")) {
+        errors.push(`Task ${tid}: 'file_list' must be an array of non-empty strings`);
       } else {
         const seen = new Set<string>();
         for (const [pathIndex, file] of task.file_list.entries()) {

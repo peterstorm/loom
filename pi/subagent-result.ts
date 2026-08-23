@@ -157,6 +157,7 @@ export function parsePiSubagentResults(raw: readonly unknown[]): readonly PiSuba
     if (typeof record.agent !== "string") return reject(`agent is ${typeof record.agent}, expected string`);
     if (typeof record.task !== "string") return reject(`task is ${typeof record.task}, expected string`);
     if (typeof record.exitCode !== "number") return reject(`exitCode is ${typeof record.exitCode}, expected number`);
+    if (!("messages" in record)) return reject("messages is missing, expected transcript evidence");
     const stopReasonProblem = optionalString(record.stopReason);
     if (stopReasonProblem !== null) return reject(`stopReason is ${stopReasonProblem}, expected string or absent`);
     return Object.freeze({
@@ -332,7 +333,7 @@ async function recordPhaseWrites(args: Readonly<{
   agentType: string;
   result: PiSubagentResult;
 }>): Promise<PiResultOutcome | null> {
-  const parsed = parsePiMessages(args.result.messages ?? []);
+  const parsed = parsePiMessages(args.result.messages);
   if (!parsed.ok) {
     const diagnostic = `${args.agentType} phase artifact extraction failed: ${parsed.errors.join("; ")}`;
     return outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]);
@@ -505,12 +506,12 @@ function missingStructuredEvidenceLog(taskId: string, messages: unknown): string
 
 function observeImplementationTranscript(result: PiSubagentResult, taskId: string): ImplementationTranscriptObservation {
   const log: string[] = [];
-  const parsedMessages = parsePiMessages(result.messages ?? []);
+  const parsedMessages = parsePiMessages(result.messages);
   const adaptedTranscript = parsedMessages.ok ? messagesToClaudeJsonl(parsedMessages.value) : parsedMessages;
   const structuredEvidence = parsedMessages.ok ? piStructuredTestResult(parsedMessages.value) : parsedMessages;
 
   if (structuredEvidence.ok && structuredEvidence.value === null) {
-    const structuredLog = missingStructuredEvidenceLog(taskId, result.messages ?? []);
+    const structuredLog = missingStructuredEvidenceLog(taskId, result.messages);
     if (structuredLog !== null) log.push(structuredLog);
   }
   if (!adaptedTranscript.ok || !structuredEvidence.ok || !parsedMessages.ok) {
@@ -656,7 +657,24 @@ function implementationTestResult(
       };
 }
 
-async function applyAcceptedImplementationResolution(args: Readonly<{
+type NewTestRepositoryAvailability =
+  | Readonly<{ kind: "available" }>
+  | Readonly<{ kind: "unavailable"; diagnostic: string }>;
+
+function observeNewTestRepository(
+  repository: RepositoryProbe,
+  taskId: string,
+): NewTestRepositoryAvailability {
+  return repository.isRepo()
+    ? { kind: "available" }
+    : {
+        kind: "unavailable",
+        diagnostic: `loom(pi): cannot collect new-test evidence for ${taskId}: repository probe reports a non-Git working directory — ` +
+          "new-test proof remains unsatisfied",
+      };
+}
+
+type AcceptedImplementationResolutionArgs = Readonly<{
   store: TaskGraphStore;
   repository: RepositoryProbe;
   task: LoomTask;
@@ -664,8 +682,13 @@ async function applyAcceptedImplementationResolution(args: Readonly<{
   filesModified: readonly string[];
   testEvidence: TestEvidence;
   structuredTestEvidence: TestEvidence | null;
-}>): Promise<readonly string[]> {
-  const log: string[] = [];
+}>;
+
+async function applyAcceptedImplementationResolution(
+  args: AcceptedImplementationResolutionArgs,
+): Promise<readonly string[]> {
+  const repository = observeNewTestRepository(args.repository, args.taskId);
+  const log = repository.kind === "available" ? [] : [repository.diagnostic];
   const comparison = compareAttemptBaseline(args.repository.root(), args.task, {
     kind: "repository-or-declared",
     extraModifiedPaths: args.filesModified,
@@ -679,7 +702,7 @@ async function applyAcceptedImplementationResolution(args: Readonly<{
   await args.store.update((state) => {
     const currentTarget = state.tasks.find((candidate) => candidate.id === args.taskId);
     const cumulativeFiles = cumulativeModifiedPaths(currentTarget?.files_modified, args.filesModified);
-    const newTestEvidence = args.repository.isRepo()
+    const newTestEvidence = repository.kind === "available"
       ? collectNewTestEvidence(
           cumulativeFiles,
           currentTarget === undefined
@@ -715,8 +738,9 @@ async function applyAcceptedImplementationResolution(args: Readonly<{
  * Every state decision runs INSIDE the locked update via the shared pure
  * `applyUntrustedStopResolution`: the pre-lock reads here are a fast path only,
  * and a concurrent writer may outdate them (TOCTOU). The incoming resolution is
- * always untrusted, so an existing trusted verdict — or a completed task —
- * always stands.
+ * always untrusted. A completed Task always stands; trusted failures stand
+ * unless explicit revalidation is required, and trusted passes stand only
+ * while no newer Task bytes were attributed.
  */
 export async function applyImplementationPiResult(args: Readonly<{
   store: TaskGraphStore;
@@ -873,7 +897,7 @@ export async function applyReviewPiResult(args: Readonly<{
   const binding = resolveReviewTaskBinding(args);
   if (binding.kind === "blocked") return binding.outcome;
 
-  const parsedMessages = parsePiMessages(args.result.messages ?? []);
+  const parsedMessages = parsePiMessages(args.result.messages);
   if (!parsedMessages.ok) {
     return applyMalformedReviewMessages({ ...args, ...binding, errors: parsedMessages.errors });
   }
@@ -897,7 +921,7 @@ export async function applySpecCheckPiResult(args: Readonly<{
   now: string;
 }>): Promise<PiResultOutcome> {
   const { store, result } = args;
-  const parsedMessages = parsePiMessages(result.messages ?? []);
+  const parsedMessages = parsePiMessages(result.messages);
   if (!parsedMessages.ok) {
     const error = `spec-check-invoker messages are malformed: ${parsedMessages.errors.join("; ")}`;
     await store.update((state) => ({

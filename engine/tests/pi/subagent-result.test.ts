@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import fc from "fast-check";
 import type { TaskGraph } from "../../src/types";
 import {
   applyFailedPiResult,
@@ -11,6 +12,7 @@ import {
   applyReviewPiResult,
   applySpecCheckPiResult,
   piSubagentFailureSignals,
+  parsePiSubagentResults,
   resolveImplementationTaskId,
   writtenPathsOf,
   type PiSubagentResult,
@@ -101,6 +103,31 @@ let toolCallSeq = 0;
 const writeCall = (path: string) => ({
   role: "assistant",
   content: [{ type: "toolCall", id: `call-${(toolCallSeq += 1)}`, name: "write", arguments: { path } }],
+});
+
+describe("parsePiSubagentResults", () => {
+  it("rejects a missing transcript and preserves the following result's position", () => {
+    const parsed = parsePiSubagentResults([
+      { agent: "silent-failure-hunter", task: "Task: T1", exitCode: 0 },
+      { agent: "code-reviewer", task: "Task: T1", exitCode: 0, messages: [] },
+    ]);
+
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0]).toMatchObject({
+      ok: false,
+      problem: expect.stringContaining("messages is missing"),
+    });
+    expect(parsed[1]).toMatchObject({
+      ok: true,
+      result: { agent: "code-reviewer" },
+    });
+  });
+
+  it("retains exactly one positional entry for every unknown result", () => {
+    fc.assert(fc.property(fc.array(fc.anything()), (raw) => {
+      expect(parsePiSubagentResults(raw)).toHaveLength(raw.length);
+    }));
+  });
 });
 
 describe("writtenPathsOf", () => {
@@ -460,6 +487,8 @@ describe("applyImplementationPiResult", () => {
     expect(logged).toContain("produced no structured test evidence");
     expect(logged).toContain("no Bash call was classified as a test run");
     expect(logged).toContain("the wave gate will reject it");
+    expect(logged).toContain("repository probe reports a non-Git working directory");
+    expect(logged).toContain("new-test proof remains unsatisfied");
   });
 
   it("accepts structured regression evidence while explicit policy waives only new tests", async () => {

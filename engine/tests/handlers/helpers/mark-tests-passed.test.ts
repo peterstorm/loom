@@ -90,6 +90,36 @@ describe("mark-tests-passed — error polarity", () => {
     expect(status).toBe(0);
   });
 
+  it("accepts both asymmetric explicit Verification Policy directions", () => {
+    const dir = tempDir();
+    const statePath = join(dir, "active_task_graph.json");
+    writeFileSync(
+      statePath,
+      JSON.stringify(graph([
+        task("T1", {
+          verification_policy: {
+            regression: { kind: "waived", reason: "documentation-only" },
+            new_tests: { kind: "required" },
+          },
+          new_tests_written: true,
+        }),
+        task("T2", {
+          verification_policy: {
+            regression: { kind: "required" },
+            new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+          },
+          test_result: { verdict: "trusted-pass" },
+        }),
+      ])),
+    );
+
+    const { status, stderr } = runHelper(statePath);
+
+    expect(status).toBe(0);
+    expect(stderr).toContain("T1: tests=N/A (documentation-only) new=YES");
+    expect(stderr).toContain("T2: tests=PASS new=N/A (existing-tests-sufficient)");
+  });
+
   it("a trusted-fail verdict is missing evidence — exit 1, never laundered into a pass", () => {
     const dir = tempDir();
     const statePath = join(dir, "active_task_graph.json");

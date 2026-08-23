@@ -236,6 +236,28 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     expect((JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph).tasks).toEqual([]);
   });
 
+  it("rejects a missing authored file_list instead of deriving an ownership-free task", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, []);
+    const missing = JSON.stringify({
+      spec_trace_version: 2,
+      plan_title: "t",
+      spec_file: "spec.md",
+      plan_file: plan,
+      tasks: [{
+        id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1,
+        depends_on: [], spec_anchors: [], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION,
+      }],
+    });
+
+    const result = await populate(missing, []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("missing required 'file_list'");
+    expect((JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph).tasks).toEqual([]);
+  });
+
   it("rejects malformed file_list before proof derivation and leaves state untouched", async () => {
     const dir = tempDir();
     const plan = modelFreePlan(dir);

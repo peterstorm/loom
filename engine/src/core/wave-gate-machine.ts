@@ -621,7 +621,9 @@ export function checkLifecycleArtifacts(
   waveTasks: readonly Task[],
   fileExists: (path: string) => boolean,
 ): GateCheck {
-  if (source.kind === "none") return pass("7. Lifecycle artifacts: skipped (no plan file in state).");
+  if (source.kind === "none") {
+    return fail("FAILED: plan file is missing — cannot verify Lifecycle Machine artifacts (fail-closed).");
+  }
   if (source.kind === "unreadable") {
     return fail(`FAILED: plan file '${source.path}' is unreadable — cannot verify lifecycle machine artifacts (fail-closed): ${source.error}`);
   }
