@@ -303,6 +303,26 @@ describe("packet-bound remediation review runs", () => {
       .toMatchObject({ kind: "evidence-failed", message: expect.stringContaining("exactly one") });
   });
 
+  it("preserves the JSON parser cause for a malformed lifecycle block", () => {
+    const task = start();
+    const run = task.review_run!;
+    const malformed = [
+      "### Machine Summary",
+      `REVIEW_GENERATION: ${run.generation}`,
+      `REVIEW_PACKET_ID: ${run.packet_id}`,
+      "CRITICAL_COUNT: 0",
+      "ADVISORY_COUNT: 0",
+      "```review_lifecycle",
+      '{"prior_findings":[}',
+      "```",
+    ].join("\n");
+
+    expect(resolveBoundReviewFindings(malformed, AGENTS[0], run)).toMatchObject({
+      kind: "evidence-failed",
+      message: expect.stringMatching(/^review_lifecycle block is not valid JSON: .+/),
+    });
+  });
+
   it("fails closed when a rerun omits the lifecycle block or a prior finding", () => {
     const task = start();
     const run = task.review_run!;

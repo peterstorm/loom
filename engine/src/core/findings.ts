@@ -24,11 +24,13 @@
  *
  * This module owns the `Task.findings` aggregate: minting identity, reading it
  * back out of an untrusted state file, proving the lockstep invariant at the
- * load boundary, and the three REVIEW-path writers that must keep the
+ * load boundary, and the four REVIEW-path writers that must keep the
  * authoritative array and its two derived `string[]` views in step —
  * `mergeFindings` (legacy review), `finalizeReviewRun` (packet-bound review),
- * and `applyFindingOutcomes` (the panel adjudicated). They live together because the invariant is one invariant;
- * splitting them across modules is how it drifted before.
+ * `preserveAcceptedReviewRunFindings` (incomplete-run retirement), and
+ * `applyFindingOutcomes` (the panel adjudicated). They live together because
+ * the invariant is one invariant; splitting them across modules is how it
+ * drifted before.
  *
  * Three further lockstep writers live in handlers because none of them is a
  * review step: `updateTaskFindings` (the manual operator override),
@@ -37,7 +39,7 @@
  * through `claimsOfSeverity` here; `sanitizeDecomposedTask` admits a task with
  * no findings at all, so it writes the empty triple directly. All three are
  * held to the same invariant by `findingsLockstepError` at the load boundary —
- * the enumeration of all six writers lives on `Task.findings` in types.ts.
+ * the enumeration of all seven writers lives on `Task.findings` in types.ts.
  *
  * Pure module: no I/O, no clock, no randomness.
  */
@@ -290,8 +292,9 @@ export function attributeFindings(
  * [{ "severity": "critical", "file": "src/x.ts", "line": 42, "claim": "..." }]
  * ```
  *
- * Optional by design. The `CRITICAL_COUNT` / `CRITICAL:` / `ADVISORY:` lines
- * remain the contract every reviewer must satisfy; this block only ADDS
+ * Optional by design. The `CRITICAL_COUNT` / `ADVISORY_COUNT` and
+ * `CRITICAL:` / `ADVISORY:` lines remain the contract every reviewer must
+ * satisfy; this block only ADDS
  * location and per-claim structure when the reviewer can produce it.
  * Verification quality degrades without file/line — it does not break.
  */

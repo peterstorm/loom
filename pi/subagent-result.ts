@@ -27,6 +27,7 @@
 import { parseFilesModified } from "../engine/src/parsers/parse-files-modified";
 import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-output";
 import {
+  applyCompletionInfrastructureFailure,
   applyUntrustedStopResolution,
   collectNewTestEvidence,
   cumulativeModifiedPaths,
@@ -709,11 +710,17 @@ type AcceptedImplementationResolutionArgs = Readonly<{
   structuredTestEvidence: TestEvidence | null;
 }>;
 
+type AcceptedImplementationResolution = Readonly<{
+  log: readonly string[];
+  processingErrors: readonly string[];
+}>;
+
 async function applyAcceptedImplementationResolution(
   args: AcceptedImplementationResolutionArgs,
-): Promise<readonly string[]> {
+): Promise<AcceptedImplementationResolution> {
   const repository = observeNewTestRepository(args.repository, args.taskId);
   const log = repository.kind === "available" ? [] : [repository.diagnostic];
+  const processingErrors: string[] = [];
   const root = args.repository.root();
   let skippedExistingVerdict = false;
   await args.store.update((state) => {
@@ -737,21 +744,37 @@ async function applyAcceptedImplementationResolution(
       extraModifiedPaths: args.filesModified,
     });
     if (comparison.failure !== null) {
-      log.push(`loom(pi): cannot compare declared-artifact baseline for ${args.taskId}: ${comparison.failure} — ` +
-        `completion evidence was not applied`);
-      return {
-        ...state,
-        executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== args.taskId),
-      };
+      const diagnostic = `loom(pi): cannot compare declared-artifact baseline for ${args.taskId}: ${comparison.failure} — ` +
+        `completion evidence was not applied`;
+      log.push(diagnostic);
+      processingErrors.push(diagnostic);
+      return applyCompletionInfrastructureFailure(
+        state,
+        args.taskId,
+        comparison.bytesChangedSinceAttempt,
+      );
     }
     const cumulativeFiles = cumulativeModifiedPaths(currentTarget.files_modified, args.filesModified);
-    const newTestEvidence = repository.kind === "available"
-      ? collectNewTestEvidence(
+    let newTestEvidence = { written: false, evidence: "" };
+    if (repository.kind === "available") {
+      try {
+        newTestEvidence = collectNewTestEvidence(
           cumulativeFiles,
           taskVerificationPolicy(currentTarget).newTests,
           currentTarget.start_sha,
-        )
-      : { written: false, evidence: "" };
+        );
+      } catch (error) {
+        const cause = error instanceof Error ? error.message : String(error);
+        const diagnostic = `loom(pi): cannot collect new-test evidence for ${args.taskId}: ${cause}`;
+        log.push(diagnostic);
+        processingErrors.push(diagnostic);
+        return applyCompletionInfrastructureFailure(
+          state,
+          args.taskId,
+          comparison.bytesChangedSinceAttempt,
+        );
+      }
+    }
     const applied = applyUntrustedStopResolution(state, args.taskId, {
       taskCompleted: true,
       testResult: implementationTestResult(args.structuredTestEvidence, args.testEvidence),
@@ -769,7 +792,7 @@ async function applyAcceptedImplementationResolution(
   if (skippedExistingVerdict) {
     log.push(`loom(pi): ${args.taskId} is completed or missing — leaving task evidence untouched`);
   }
-  return log;
+  return { log, processingErrors };
 }
 
 /**
@@ -815,14 +838,15 @@ export async function applyImplementationPiResult(args: Readonly<{
     return outcome(log);
   }
 
-  log.push(...await applyAcceptedImplementationResolution({
+  const settlement = await applyAcceptedImplementationResolution({
     ...args,
     taskId: binding.taskId,
     filesModified: modifiedPaths.filesModified,
     testEvidence: transcript.testEvidence,
     structuredTestEvidence: transcript.structuredTestEvidence,
-  }));
-  return outcome(log);
+  });
+  log.push(...settlement.log);
+  return outcome(log, settlement.processingErrors);
 }
 
 // ---------------------------------------------------------------------------

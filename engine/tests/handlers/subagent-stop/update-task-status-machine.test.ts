@@ -8,8 +8,9 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -20,6 +21,8 @@ import { SUBAGENT_DIR } from "../../../src/config";
 import { parseEpoch } from "../../../src/machine";
 import type { EvidenceRecord, Requirement } from "../../../src/machine";
 import { reportSummary } from "../../machine/report-summary";
+import { evaluateTaskProof } from "../../../src/core/proof-obligations";
+import * as git from "../../../src/utils/git";
 
 const run = `uts-machine-${process.pid}-${Date.now()}`;
 const sid = (name: string) => `${run}-${name}`;
@@ -344,6 +347,187 @@ describe("wave-completion gate write (round-17 A1 pin)", () => {
       if (previousProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
       else process.env.CLAUDE_PROJECT_DIR = previousProjectDir;
     }
+  }, 30000);
+});
+
+describe("locked implementation settlement failures", () => {
+  it("uses the locked Task attempt baseline before preserving trusted evidence", async () => {
+    const repositoryRoot = tempDir();
+    const artifact = "src/locked.ts";
+    mkdirSync(join(repositoryRoot, "src"), { recursive: true });
+    writeFileSync(join(repositoryRoot, artifact), "current bytes\n", { flag: "w" });
+    execFileSync("git", ["init"], { cwd: repositoryRoot, stdio: "ignore" });
+    execFileSync("git", ["add", artifact], { cwd: repositoryRoot, stdio: "ignore" });
+    execFileSync(
+      "git",
+      ["-c", "user.name=Loom Tests", "-c", "user.email=loom@example.test", "commit", "-m", "baseline"],
+      { cwd: repositoryRoot, stdio: "ignore" },
+    );
+    const digest = (text: string) => createHash("sha256").update(text).digest("hex");
+    const verificationPolicy = {
+      regression: { kind: "required" as const },
+      newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
+    };
+    const proof = evaluateTaskProof(
+      { verificationPolicy, declaredArtifacts: [artifact] },
+      {
+        taskCompleted: true,
+        testResult: { verdict: "trusted-pass" },
+        filesModified: [artifact],
+        newTestsWritten: false,
+      },
+    );
+    expect(proof.state).toBe("satisfied");
+
+    const s = sid("locked-attempt-baseline");
+    const task = {
+      ...implTask("T1"),
+      new_tests_required: undefined,
+      verification_policy: {
+        regression: verificationPolicy.regression,
+        new_tests: verificationPolicy.newTests,
+      },
+      status: "implemented",
+      proof,
+      test_result: { verdict: "trusted-pass" },
+      test_evidence: "older trusted pass",
+      review_status: "passed",
+      file_list: [artifact],
+      files_modified: [artifact],
+      artifact_baseline: [{ artifact, snapshot: { kind: "sha256", digest: digest("old bytes\n") } }],
+      attempt_artifact_baseline: [{ artifact, snapshot: { kind: "sha256", digest: digest("current bytes\n") } }],
+    };
+    const statePath = writeState(repositoryRoot, [task], ["T1"]);
+    pointSessionAt(s, statePath);
+    const transcriptPath = join(repositoryRoot, "agent-transcript.jsonl");
+    writeFileSync(transcriptPath, JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "**Task ID:** T1\n\nRetry finished." }] },
+    }) + "\n");
+
+    let rootReads = 0;
+    vi.spyOn(git, "repositoryRoot").mockImplementation(() => {
+      rootReads += 1;
+      if (rootReads === 2) {
+        const locked = JSON.parse(readFileSync(statePath, "utf-8"));
+        locked.tasks[0].attempt_artifact_baseline = [{
+          artifact,
+          snapshot: { kind: "sha256", digest: digest("old bytes\n") },
+        }];
+        chmodSync(statePath, 0o600);
+        writeFileSync(statePath, JSON.stringify(locked));
+      }
+      return repositoryRoot;
+    });
+
+    const result = await runUpdateTaskStatus(JSON.stringify({
+      session_id: s,
+      agent_id: "a-1",
+      agent_type: "code-implementer-agent",
+      agent_transcript_path: transcriptPath,
+    }), [], { kind: "snapshot", events: [] });
+
+    expect(result.kind).toBe("passthrough");
+    const persisted = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(persisted.tasks[0]).toMatchObject({
+      status: "pending",
+      review_status: "pending",
+      test_result: { verdict: "untrusted", passed: false },
+    });
+    expect(persisted.executing_tasks).toEqual([]);
+  }, 30000);
+
+  it("invalidates stale authority when locked attempt-baseline comparison fails", async () => {
+    const s = sid("baseline-unavailable");
+    const dir = tempDir();
+    const artifact = "engine/src/core/test-evidence.ts";
+    const task = {
+      ...implTask("T1", false),
+      attempt_artifact_baseline: [{
+        artifact,
+        snapshot: { kind: "sha256", digest: "a".repeat(64) },
+      }],
+      review_status: "passed",
+    };
+    const statePath = writeState(dir, [task], ["T1"]);
+    pointSessionAt(s, statePath);
+    const transcriptPath = join(dir, "agent-transcript.jsonl");
+    writeFileSync(transcriptPath, JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "**Task ID:** T1\n\nRetry finished." }] },
+    }) + "\n");
+    let rootReads = 0;
+    vi.spyOn(git, "repositoryRoot").mockImplementation(() => {
+      rootReads += 1;
+      return rootReads === 1 ? process.cwd() : "/nonexistent/loom-baseline-root";
+    });
+
+    const result = await runUpdateTaskStatus(JSON.stringify({
+      session_id: s,
+      agent_id: "a-1",
+      agent_type: "code-implementer-agent",
+      agent_transcript_path: transcriptPath,
+    }), [], { kind: "snapshot", events: [] });
+
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("cannot compare declared-artifact baseline for T1"),
+    });
+    const persisted = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(persisted.executing_tasks).toEqual([]);
+    expect(persisted.tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      review_status: "pending",
+    });
+  }, 30000);
+
+  it("returns a Task-scoped error and releases execution when new-test collection fails", async () => {
+    const s = sid("new-test-evidence-unavailable");
+    const dir = tempDir();
+    const task = {
+      ...implTask("T1"),
+      new_tests_required: undefined,
+      start_sha: "not-a-git-revision",
+      file_list: [],
+      attempt_artifact_baseline: [],
+      verification_policy: {
+        regression: { kind: "waived", reason: "documentation-only" },
+        new_tests: { kind: "required" },
+      },
+      review_status: "passed",
+    };
+    const statePath = writeState(dir, [task], ["T1"]);
+    pointSessionAt(s, statePath);
+    const transcriptPath = join(dir, "agent-transcript.jsonl");
+    writeFileSync(transcriptPath, JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: "**Task ID:** T1\n\nChanged the implementation." },
+          { type: "tool_use", name: "Write", input: { file_path: "engine/src/core/test-evidence.ts" } },
+        ],
+      },
+    }) + "\n");
+
+    const result = await runUpdateTaskStatus(JSON.stringify({
+      session_id: s,
+      agent_id: "a-1",
+      agent_type: "code-implementer-agent",
+      agent_transcript_path: transcriptPath,
+    }), [], { kind: "snapshot", events: [] });
+
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("cannot collect new-test evidence for T1"),
+    });
+    const persisted = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(persisted.executing_tasks).toEqual([]);
+    expect(persisted.tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      review_status: "pending",
+    });
   }, 30000);
 });
 

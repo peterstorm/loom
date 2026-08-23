@@ -19,12 +19,29 @@ import {
   taskVerificationPolicy,
 } from "../../core/verification-policy";
 
+type AuthoredTask = Readonly<
+  Pick<
+    Task,
+    | "id"
+    | "description"
+    | "agent"
+    | "wave"
+    | "depends_on"
+    | "spec_anchors"
+    | "spec_contributions"
+    | "plan_context"
+  > & {
+    verification_policy: NonNullable<Task["verification_policy"]>;
+    file_list: readonly string[];
+  }
+>;
+
 interface DecomposeInput {
   spec_trace_version: 2;
   plan_title: string;
   plan_file?: string;
   spec_file?: string;
-  tasks: Task[];
+  tasks: readonly AuthoredTask[];
 }
 
 /**
@@ -79,7 +96,7 @@ function parseArgs(args: string[]): ParsedPopulateArgs {
  * verdicts exist only via the evidence ledger, mirroring the refusal in
  * store-test-evidence.
  */
-function sanitizeDecomposedTask(t: Task): Task {
+function sanitizeDecomposedTask(t: AuthoredTask): Task {
   const verificationPolicy = taskVerificationPolicy(t);
   return {
     id: t.id,
@@ -107,7 +124,7 @@ function sanitizeDecomposedTask(t: Task): Task {
   };
 }
 
-function taskWaves(tasks: readonly Task[]): readonly number[] {
+function taskWaves(tasks: readonly AuthoredTask[]): readonly number[] {
   return [...new Set(tasks.map((task) => task.wave))].sort((left, right) => left - right);
 }
 

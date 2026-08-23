@@ -461,23 +461,18 @@ export function parseLegacyFindings(output: string): ParsedFindings {
   return chooseSource(scrapeLegacyFindings(output), output);
 }
 
+function legacySectionClaims(output: string, heading: "Critical" | "Advisory"): readonly string[] {
+  const section = output.match(new RegExp(`###?\\s*${heading}(?:\\s+Findings)?[\\s\\S]*?(?=###? |$)`));
+  return section === null
+    ? []
+    : [...section[0].matchAll(/^- (?:\*\*)?(.+?)(?:\*\*)?$/gm)]
+        .map((match) => match[1]!)
+        .filter((claim) => claim !== "None");
+}
+
 function scrapeLegacyFindings(output: string): ParsedFindings {
-  const critical: string[] = [];
-  const advisory: string[] = [];
-
-  const critSection = output.match(/###?\s*Critical(?:\s+Findings)?[\s\S]*?(?=###? |$)/);
-  if (critSection) {
-    for (const m of critSection[0].matchAll(/^- (?:\*\*)?(.+?)(?:\*\*)?$/gm)) {
-      if (m[1] !== "None") critical.push(m[1]);
-    }
-  }
-
-  const advSection = output.match(/###?\s*Advisory(?:\s+Findings)?[\s\S]*?(?=###? |$)/);
-  if (advSection) {
-    for (const m of advSection[0].matchAll(/^- (?:\*\*)?(.+?)(?:\*\*)?$/gm)) {
-      if (m[1] !== "None") advisory.push(m[1]);
-    }
-  }
+  const critical = legacySectionClaims(output, "Critical");
+  const advisory = legacySectionClaims(output, "Advisory");
 
   if (critical.length === 0 && advisory.length === 0) {
     return extractFindings(output);
@@ -580,8 +575,12 @@ function parsePriorAssessments(
   }
   const body = bodies[0]!;
   let raw: unknown;
-  try { raw = JSON.parse(body); }
-  catch { return { ok: false, error: "review_lifecycle block is not valid JSON" }; }
+  try {
+    raw = JSON.parse(body);
+  } catch (error) {
+    const cause = error instanceof Error ? error.message : String(error);
+    return { ok: false, error: `review_lifecycle block is not valid JSON: ${cause}` };
+  }
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return { ok: false, error: "review_lifecycle block must be a JSON object" };
   }

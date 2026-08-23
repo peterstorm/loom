@@ -310,6 +310,28 @@ function applyResolvedTask(
   };
 }
 
+/** Infrastructure could not observe completion. Historical evidence remains
+ * audit data, but pending + revalidation removes its completion authority. */
+export function applyCompletionInfrastructureFailure(
+  state: TaskGraph,
+  taskId: string,
+  bytesChangedSinceAttempt: boolean,
+): TaskGraph {
+  const target = state.tasks.find((task) => task.id === taskId);
+  const clearedExecuting = (state.executing_tasks ?? []).filter((id) => id !== taskId);
+  if (target === undefined || target.status === "completed") {
+    return { ...state, executing_tasks: clearedExecuting };
+  }
+  return applyResolvedTask(
+    state,
+    taskId,
+    target.wave,
+    bytesChangedSinceAttempt,
+    clearedExecuting,
+    (task) => ({ ...task, status: "pending", revalidation_required: true }),
+  );
+}
+
 /**
  * The verdict-resolution decision for an UNTRUSTED Stop-handler resolution,
  * meant to run INSIDE the locked state update (pi/extension.ts's Stop
@@ -779,6 +801,7 @@ export const runUpdateTaskStatus = async (
   // A completed task is never reopened, at any trust level.
   let skippedExistingVerdict = false;
   let comparisonFailure: string | null = null;
+  let newTestEvidenceFailure: string | null = null;
   const repositoryRoot = git.repositoryRoot() ?? process.cwd();
   await mgr.update((s) => {
     const target = s.tasks.find((t) => t.id === taskId);
@@ -804,10 +827,7 @@ export const runUpdateTaskStatus = async (
     );
     if (comparison.failure !== null) {
       comparisonFailure = comparison.failure;
-      return {
-        ...s,
-        executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
-      };
+      return applyCompletionInfrastructureFailure(s, taskId, comparison.bytesChangedSinceAttempt);
     }
     const codeChanged = comparison.bytesChangedSinceAttempt;
     const preserveExistingTrusted = target.revalidation_required !== true && !incomingTrusted && (
@@ -818,11 +838,18 @@ export const runUpdateTaskStatus = async (
     const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, filesModified);
     const proofArtifactsChanged = attributedChangedArtifacts(comparison.changedDeclaredArtifacts, cumulativeFiles);
     const verificationPolicy = taskVerificationPolicy(target);
-    const currentNewTestEvidence = collectNewTestEvidence(
-      cumulativeFiles,
-      verificationPolicy.newTests,
-      target.start_sha,
-    );
+    let currentNewTestEvidence: NewTestEvidence;
+    try {
+      currentNewTestEvidence = collectNewTestEvidence(
+        cumulativeFiles,
+        verificationPolicy.newTests,
+        target.start_sha,
+      );
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : String(error);
+      newTestEvidenceFailure = `update-task-status: cannot collect new-test evidence for ${taskId}: ${cause}`;
+      return applyCompletionInfrastructureFailure(s, taskId, codeChanged);
+    }
     const proof = evaluateTaskProof(
       {
         verificationPolicy,
@@ -862,6 +889,9 @@ export const runUpdateTaskStatus = async (
       kind: "error",
       message: `update-task-status: cannot compare declared-artifact baseline for ${taskId}: ${comparisonFailure}`,
     };
+  }
+  if (newTestEvidenceFailure !== null) {
+    return { kind: "error", message: newTestEvidenceFailure };
   }
 
   if (skippedExistingVerdict) {

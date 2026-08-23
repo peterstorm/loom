@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import type { TaskGraph } from "../../src/types";
+import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import {
   applyFailedPiResult,
   applyImplementationPiResult,
@@ -533,14 +534,48 @@ describe("applyImplementationPiResult", () => {
     expect(store.current().tasks[0]!.status).not.toBe("completed");
   });
 
-  it("does not apply accepted completion evidence when baseline comparison fails", async () => {
-    const store = fakeStore(implementationGraph({
+  it("invalidates stale implemented/review authority when accepted baseline comparison fails", async () => {
+    const verificationPolicy = {
+      regression: { kind: "required" as const },
+      newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
+    };
+    const staleProof = evaluateTaskProof(
+      { verificationPolicy, declaredArtifacts: ["engine/src/x.ts"] },
+      {
+        taskCompleted: true,
+        testResult: { verdict: "trusted-pass" },
+        filesModified: ["engine/src/x.ts"],
+        newTestsWritten: false,
+      },
+    );
+    expect(staleProof.state).toBe("satisfied");
+    const initial = implementationGraph({
+      status: "implemented",
+      proof: staleProof,
+      test_result: { verdict: "trusted-pass" },
+      review_status: "passed",
       attempt_artifact_baseline: [{ artifact: "engine/src/x.ts", sha256: "a".repeat(64) }],
       verification_policy: {
-        regression: { kind: "required" },
-        new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+        regression: verificationPolicy.regression,
+        new_tests: verificationPolicy.newTests,
       },
-    }));
+    });
+    const store = fakeStore({
+      ...initial,
+      spec_check: {
+        wave: 1,
+        run_at: NOW,
+        verdict: "PASSED",
+        critical_count: 0,
+        high_count: 0,
+        critical_findings: [],
+        high_findings: [],
+        medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
+      },
+    });
     const applied = await applyImplementationPiResult({
       store,
       repository: repositoryAt("/nonexistent/loom-repo-root"),
@@ -553,11 +588,57 @@ describe("applyImplementationPiResult", () => {
       parentPrompt: "",
     });
 
-    expect(store.current().tasks[0]).toMatchObject({ status: "pending" });
-    expect(store.current().tasks[0]!.proof).toBeUndefined();
-    expect(store.current().tasks[0]!.test_result).toBeUndefined();
+    expect(store.current().tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      review_status: "pending",
+      proof: { state: "satisfied" },
+      test_result: { verdict: "trusted-pass" },
+    });
+    expect(store.current().spec_check).toBeUndefined();
+    expect(store.current().wave_gates["1"]).toMatchObject({
+      impl_complete: false,
+      tests_passed: null,
+      reviews_complete: false,
+    });
     expect(store.current().executing_tasks).toEqual([]);
+    expect(applied.processingErrors).toHaveLength(1);
     expect(applied.log.join("\n")).toContain("completion evidence was not applied");
+  });
+
+  it("returns a processing error and releases the Task when new-test evidence collection fails", async () => {
+    const store = fakeStore(implementationGraph({
+      file_list: [],
+      start_sha: "not-a-git-revision",
+      attempt_artifact_baseline: [],
+      verification_policy: {
+        regression: { kind: "waived", reason: "documentation-only" },
+        new_tests: { kind: "required" },
+      },
+      review_status: "passed",
+    }));
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        messages: [writeCall("pi/subagent-result.ts")],
+      }),
+      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toHaveLength(1);
+    expect(applied.processingErrors[0]).toContain("cannot collect new-test evidence for T1");
+    expect(applied.log).toContain(applied.processingErrors[0]);
+    expect(store.current().executing_tasks).toEqual([]);
+    expect(store.current().tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      review_status: "pending",
+    });
+    expect(store.current().tasks[0]!.proof).toBeUndefined();
   });
 
   it("compares attempt bytes against the locked current Task, not the pre-lock snapshot", async () => {

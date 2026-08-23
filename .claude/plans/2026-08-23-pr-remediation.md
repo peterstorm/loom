@@ -297,3 +297,60 @@ No critical was refuted. Reproduction, intent, and blast-radius lenses unanimous
 4. `git diff --check`.
 5. Required full command: `env -u PI_CODING_AGENT npm test`.
 6. Registered remediation audit/install through the Orchestration Façade, then commit and push.
+
+---
+
+# Round 6: post-remediation full-branch review
+
+## Authority
+
+- Branch: `feat/deterministic-task-execution`
+- Review scope: exact 48-path branch delta through `c17699d`, frozen in the authoritative result
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260823T201451Z-deterministic-policy-rereview-6`
+- Review result digest: `482b84ee85db07d8f7d89170ce5af49b7e8df5d85c2fad722291ac56bbe10240`
+- Surviving criticals: 3
+- Refuted criticals: 0
+
+## Mandatory critical remediation
+
+1. `pi/subagent-result.ts`: when accepted-transcript attempt-baseline comparison fails for a re-executed implemented Task, apply a fail-closed failed resolution that moves the Task back to pending and invalidates stale review/spec/Wave authority rather than only releasing `executing_tasks`.
+2. `engine/src/handlers/subagent-stop/update-task-status.ts`: catch new-test evidence collection failures inside the locked settlement, release execution, preserve an explicit revalidation state, invalidate stale changed-byte authority, and return a Task-scoped hook error.
+3. `pi/subagent-result.ts`: normalize the same new-test evidence collection failure into a `PiResultOutcome`, release execution through a failed resolution, and report the infrastructure failure through `processingErrors` rather than rejecting the applier promise.
+
+## Advisory dispositions
+
+### Accepted
+
+1. Preserve the `JSON.parse` cause when rejecting a malformed `review_lifecycle` block.
+2. Add a Claude SubagentStop regression proving attempt-baseline comparison consumes the locked current Task rather than a stale pre-lock snapshot.
+3. Model authored decompose Tasks as a dedicated projection containing only planner-authorized fields rather than the full persisted `Task` type.
+4. Correct the findings-module writer documentation to include `preserveAcceptedReviewRunFindings` and the actual seven coordinated writers.
+5. Correct the structured-Finding contract comment to include `ADVISORY_COUNT`.
+6. Extract one private legacy section-claim parser for Critical and Advisory sections.
+7. Extract one private Wave Gate requirement checker shared by regression and new-test evidence checks without changing their public interface or diagnostics.
+
+### Deferred
+
+1. Extract pure protected Wave Gate registration/completion aggregate commands from `StateManager`. Reason: this broad filesystem/domain seam migration is independent of the verification-policy slice and should land in a dedicated architecture change with property coverage.
+2. Split `wave-gate-machine.ts` into lifecycle/readiness/review/refutation/completion/status modules. Reason: this changes the Wave Gate Public Surface and remains intentionally sequenced after the completion-suite slices.
+
+### Dismissed
+
+None.
+
+## Refuted-finding audit
+
+No critical was refuted. Reproduction, intent, and security lenses unanimously upheld the stale Pi authority finding and both uncaught new-test evidence infrastructure failures.
+
+## Support paths outside frozen review scope
+
+None. The plan, production files, and regression suites are all inside the frozen 48-path review scope.
+
+## Validation
+
+1. Focused Vitest suites for Claude/Pi implementation settlement, locked-baseline TOCTOU behavior, review lifecycle parsing, authored decompose typing/runtime validation, findings comments/compatibility parsing, and Wave Gate evidence checks.
+2. `npm run typecheck` including unused-code checks.
+3. Full-tier Loom lint over every changed production TypeScript file.
+4. `git diff --check`.
+5. Required full command: `env -u PI_CODING_AGENT npm test`.
+6. Registered remediation audit/install through the Orchestration Façade, then commit and push.

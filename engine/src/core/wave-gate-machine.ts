@@ -543,18 +543,39 @@ const newTestEvidenceLine = (task: Task): string => {
     : (task.new_test_evidence ?? "new tests present");
 };
 
+function checkTaskRequirement(
+  tasks: readonly Task[],
+  satisfied: (task: Task) => boolean,
+  failure: string,
+  success: string,
+  evidenceLine: (task: Task) => string,
+): GateCheck {
+  const missing = tasks.filter((task) => !satisfied(task));
+  if (missing.length > 0) {
+    return fail(`${failure}\n  Missing: ${missing.map((task) => task.id).join(", ")}`);
+  }
+  const lines = tasks.map((task) => `     ${task.id}: ${evidenceLine(task)}`);
+  return pass(`${success} (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
+}
+
 export function checkTestEvidence(tasks: readonly Task[]): GateCheck {
-  const missing = tasks.filter((task) => !testEvidenceSatisfied(task));
-  if (missing.length > 0) return fail(`FAILED: Not all tasks have test evidence.\n  Missing: ${missing.map((task) => task.id).join(", ")}`);
-  const lines = tasks.map((task) => `     ${task.id}: ${regressionEvidenceLine(task)}`);
-  return pass(`2. Test evidence verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
+  return checkTaskRequirement(
+    tasks,
+    testEvidenceSatisfied,
+    "FAILED: Not all tasks have test evidence.",
+    "2. Test evidence verified",
+    regressionEvidenceLine,
+  );
 }
 
 export function checkNewTests(tasks: readonly Task[]): GateCheck {
-  const missing = tasks.filter((task) => !newTestsSatisfied(task));
-  if (missing.length > 0) return fail(`FAILED: Not all tasks satisfied new-test requirement.\n  Missing: ${missing.map((task) => task.id).join(", ")}`);
-  const lines = tasks.map((task) => `     ${task.id}: ${newTestEvidenceLine(task)}`);
-  return pass(`3. New tests verified (${tasks.length}/${tasks.length} tasks):\n${lines.join("\n")}`);
+  return checkTaskRequirement(
+    tasks,
+    newTestsSatisfied,
+    "FAILED: Not all tasks satisfied new-test requirement.",
+    "3. New tests verified",
+    newTestEvidenceLine,
+  );
 }
 
 export function checkReviews(tasks: readonly Task[]): GateCheck {
