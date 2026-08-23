@@ -533,13 +533,13 @@ const newTestsSatisfied = (task: Task): boolean =>
 const regressionEvidenceLine = (task: Task): string => {
   const requirement = taskVerificationPolicy(task).regression;
   return requirement.kind === "waived"
-    ? `verification_policy.regression waived: ${requirement.reason}`
+    ? `not required (verification_policy.regression waived: ${requirement.reason})`
     : (task.test_evidence ?? "evidence present");
 };
 const newTestEvidenceLine = (task: Task): string => {
   const requirement = taskVerificationPolicy(task).newTests;
   return requirement.kind === "waived"
-    ? `verification_policy.new_tests waived: ${requirement.reason}`
+    ? `not required (verification_policy.new_tests waived: ${requirement.reason})`
     : (task.new_test_evidence ?? "new tests present");
 };
 
