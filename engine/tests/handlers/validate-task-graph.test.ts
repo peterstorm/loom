@@ -544,7 +544,7 @@ describe("handler routes — fixMinimal and the file-arg path (round-10 gap 23)"
 
   it("file-arg route: a missing file is a typed error, an existing file is read and validated", async () => {
     const handler = (await import("../../src/handlers/helpers/validate-task-graph")).default;
-    const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+    const { mkdtempSync, writeFileSync, rmSync, symlinkSync } = await import("node:fs");
     const { join } = await import("node:path");
     const { tmpdir } = await import("node:os");
 
@@ -555,6 +555,15 @@ describe("handler routes — fixMinimal and the file-arg path (round-10 gap 23)"
     const dir = mkdtempSync(join(tmpdir(), "loom-vtg-"));
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
+      const unreadable = join(dir, "loop.json");
+      symlinkSync(unreadable, unreadable);
+      const readFailure = await handler("", ["--minimal", unreadable]);
+      expect(readFailure.kind).toBe("error");
+      if (readFailure.kind === "error") {
+        expect(readFailure.message).toContain("Cannot read task graph file");
+        expect(readFailure.message).toContain("ELOOP");
+      }
+
       const good = join(dir, "minimal.json");
       writeFileSync(good, JSON.stringify({
         current_phase: "init",

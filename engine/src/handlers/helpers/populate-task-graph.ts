@@ -6,7 +6,6 @@
  * Reads decompose JSON from stdin.
  */
 
-import { existsSync } from "node:fs";
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
 import { newWaveGate } from "../../types";
 import { taskGraphPath } from "../../config";
@@ -124,9 +123,8 @@ function buildWaveGates(waves: readonly number[]): Record<string, WaveGate> {
 const handler: HookHandler = async (stdin, args) => {
   // Resolved at call time (not import time) so env re-pointing is honored.
   const statePath = taskGraphPath();
-  if (!existsSync(statePath)) {
-    return { kind: "error", message: `No task graph at ${statePath}` };
-  }
+  const mgr = StateManager.fromPath(statePath);
+  if (!mgr) return { kind: "error", message: `No task graph at ${statePath}` };
 
   const parsedArgs = parseArgs(args);
   if (!parsedArgs.ok) return { kind: "error", message: `populate-task-graph: ${parsedArgs.error}` };
@@ -175,9 +173,6 @@ const handler: HookHandler = async (stdin, args) => {
     }
   }
 
-  const mgr = StateManager.fromPath(statePath);
-  if (!mgr) return { kind: "error", message: "Cannot open task graph" };
-
   // Executable-models policy: bindings are enforced here fail-closed —
   // validate-task-graph's 4a run is advisory to the orchestrator, this is the
   // gate for the populate path. `repair-task-graph` is the ONE other
@@ -192,7 +187,15 @@ const handler: HookHandler = async (stdin, args) => {
   // payload, so a decompose agent cannot re-point plan_file at a model-free
   // file to disarm the check. The SAME resolved path is persisted below —
   // persisting the payload's path would disarm the wave-gate lifecycle check.
-  const existingState = mgr.load();
+  let existingState: TaskGraph;
+  try {
+    existingState = mgr.load();
+  } catch (error) {
+    return {
+      kind: "error",
+      message: `Cannot read task graph at ${statePath}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
   const planFile =
     existingState.plan_file ??
     existingState.phase_artifacts?.architecture ??

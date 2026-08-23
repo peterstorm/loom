@@ -70,6 +70,22 @@ function decomposeJson(planFile: string): string {
   });
 }
 
+describe("populate-task-graph — state authority diagnostics", () => {
+  it("reports a present-but-unreadable graph instead of calling it absent", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    process.env.LOOM_STATE_PATH = dir;
+
+    const result = await populate(decomposeJson(plan), []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      expect(result.message).toContain(`Cannot read task graph at ${dir}`);
+      expect(result.message).not.toContain("No task graph");
+    }
+  });
+});
+
 describe("populate-task-graph — overwrite guard (funneled through the real handler)", () => {
   it("blocks overwriting a graph with a non-pending task (no --force)", async () => {
     const dir = tempDir();

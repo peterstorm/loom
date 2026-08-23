@@ -20,7 +20,7 @@ function fakeDeps(overrides: Partial<DiffDeps> = {}): DiffDeps {
     diffFilesStaged: () => diff(""),
     diffFilesSince: () => diff(""),
     diffUntracked: (f) => diff(`diff --untracked ${f}\n+new content in ${f}`),
-    fileExists: () => true,
+    inspectFilePresence: () => ({ ok: true, exists: true }),
     ...overrides,
   };
 }
@@ -82,6 +82,16 @@ describe("collectDiff", () => {
       ["engine/tests/existing.test.ts"],
       fakeDeps({ isTracked: () => ({ ok: false, error: "git index unreadable" }) }),
     )).toThrow("new-test diff authority unavailable");
+  });
+
+  it("fails closed when an untracked attributed file cannot be inspected", () => {
+    expect(() => collectDiff(
+      ["engine/tests/new.test.ts"],
+      fakeDeps({
+        isTracked: () => ({ ok: true, tracked: false }),
+        inspectFilePresence: () => ({ ok: false, error: "EACCES" }),
+      }),
+    )).toThrow("new-test diff authority unavailable: cannot inspect engine/tests/new.test.ts: EACCES");
   });
 
   it("surfaces a Git diff failure instead of reporting no tests written", () => {

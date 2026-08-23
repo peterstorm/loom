@@ -22,7 +22,9 @@ import {
   parseRecoveredBaselineSha,
   parseRecoveryPacketBindings,
   reconcileTaskFromStoredEvidence,
+  reconciliationFailureMessage,
 } from "../../../src/handlers/helpers/reconcile-implementation-proof";
+import { PostCommitStateProtectionError } from "../../../src/state-manager";
 import type { Task } from "../../../src/types";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
@@ -67,6 +69,28 @@ function failedTask(taskCompleted = true): Task {
     proof,
   };
 }
+
+describe("reconciliation failure diagnostics", () => {
+  it("never reports a post-commit protection failure as unchanged state", () => {
+    const error = new PostCommitStateProtectionError(
+      "/repo/.claude/state/active_task_graph.json",
+      undefined,
+      new Error("EACCES"),
+    );
+
+    const message = reconciliationFailureMessage(error);
+
+    expect(message).toContain("committed state");
+    expect(message).toContain("failed to restore read-only protection");
+    expect(message).not.toContain("without changing state");
+  });
+
+  it("retains the pre-commit unchanged-state diagnostic", () => {
+    expect(reconciliationFailureMessage(new Error("proof mismatch"))).toBe(
+      "reconcile-implementation-proof failed without changing state: proof mismatch",
+    );
+  });
+});
 
 describe("recovery arguments", () => {
   it("parses repeated task-bound packet arguments and rejects malformed mappings", () => {

@@ -116,3 +116,60 @@ Two reviewers claimed reserved Pi implementation failures remain in `executing_t
 5. `git diff --check`.
 6. Required full command: `env -u PI_CODING_AGENT npm test`.
 7. Registered remediation audit/install through the Orchestration Façade, then commit and push.
+
+---
+
+# Round 3: post-remediation full-branch review
+
+## Authority
+
+- Branch: `feat/deterministic-task-execution`
+- Review scope: exact 40-path branch delta `30241fd..2cca1ee`
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260823T171548Z-deterministic-policy-rereview-3`
+- Review result digest: `fa76499d8ffa66f9dd9b1136664209ea919487e68d1a2859d8a3c44224368fd2`
+- Surviving criticals: 1
+- Refuted criticals: 0
+
+## Mandatory critical remediation
+
+1. `engine/src/handlers/helpers/reconcile-implementation-proof.ts`: distinguish `PostCommitStateProtectionError` from pre-commit failures so a durably committed graph is never reported as unchanged; add focused diagnostic coverage.
+
+## Advisory dispositions
+
+### Accepted
+
+1. Remove `populate-task-graph`'s `existsSync` precheck, use `StateManager.fromPath`, and report present-but-unreadable graph failures contextually.
+2. Make `validate-task-graph` distinguish missing input from other read failures and preserve the filesystem cause.
+3. Replace `collectDiff`'s boolean untracked-file presence port with a result-returning inspection so access failures become explicit authority-unavailable errors.
+4. Correct `commands/loom.md`: `mark-tests-passed` reads persisted TaskGraph evidence, not the evidence ledger directly.
+5. Remove unreachable pending/evaluated Proof parser fallback mappings through explicit state narrowing.
+6. Extract repeated standalone/Wave repository setup in the orchestration façade smoke without changing scenarios or assertions.
+
+### Deferred
+
+1. Require implemented/completed stored Tasks to carry satisfied Proof authority. Reason: validation demonstrated 88 failures across 11 legacy-compatible fixture suites; the invariant must land with the Slice 3 Task status/proof ADT and explicit stored-graph migration, not as a partial parser-only break.
+2. Consolidate Claude/Pi implementation settlement behind `settleImplementationAttempt`. Reason: this is the explicitly planned Slice 3 completion-oracle work and must land with protected Task-attempt authority.
+3. Split `wave-gate-machine.ts` into lifecycle/readiness/review/refutation/status modules. Reason: this broad public-interface refactor is independent of Verification Policy correctness and should follow the completion-suite slices with its own architecture checkpoint.
+4. Extract the TaskGraph codec/invariants from filesystem-backed `StateManager`. Reason: this cross-module seam migration is valid but independent, and requires a dedicated dependency-boundary change rather than review-remediation churn.
+
+### Dismissed
+
+None.
+
+## Refuted-finding audit
+
+The panel refuted no critical findings. Reproduction, intent, and blast-radius lenses unanimously upheld the post-commit diagnostic contradiction.
+
+## Support paths outside frozen review scope
+
+- `engine/tests/handlers/collect-diff.test.ts`
+
+## Validation
+
+1. Focused Vitest suites for reconciliation diagnostics, TaskGraph proof lockstep, populate/validate I/O diagnostics, Diff authority, and Proof parsing.
+2. `env -u PI_CODING_AGENT bun scripts/smoke-orchestration-facades.ts`.
+3. `npm run typecheck` including unused-code checks.
+4. Full-tier Loom lint over every changed production TypeScript file.
+5. `git diff --check`.
+6. Required full command: `env -u PI_CODING_AGENT npm test`.
+7. Registered remediation audit/install through the Orchestration Façade, then commit and push.

@@ -10,7 +10,7 @@
  *    the Task pending, then signal /wave-gate only when the Wave is complete
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import type { HookHandler, HookResult, SubagentStopInput, Task, TaskGraph, TaskTestResult } from "../../types";
 import { legacyTestsPassedNote, newWaveGate, testResultPassed } from "../../types";
 import { IMPL_AGENTS, machinesDir } from "../../config";
@@ -451,13 +451,29 @@ export function analyzeNewTests(
  * Injectable I/O seam for collectDiff — tests substitute plain object
  * literals (no module mocking, which bun's vitest shim does not support).
  */
+export type FilePresenceResult =
+  | Readonly<{ ok: true; exists: boolean }>
+  | Readonly<{ ok: false; error: string }>;
+
 export interface DiffDeps {
   readonly isTracked: (file: string) => git.GitTrackedResult;
   readonly diffFiles: (files: string[]) => git.GitDiffResult;
   readonly diffFilesStaged: (files: string[]) => git.GitDiffResult;
   readonly diffFilesSince: (revision: string, files: string[]) => git.GitDiffResult;
   readonly diffUntracked: (file: string) => git.GitDiffResult;
-  readonly fileExists: (path: string) => boolean;
+  readonly inspectFilePresence: (path: string) => FilePresenceResult;
+}
+
+function inspectFilePresence(path: string): FilePresenceResult {
+  try {
+    lstatSync(path);
+    return { ok: true, exists: true };
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? error.code : undefined;
+    return code === "ENOENT"
+      ? { ok: true, exists: false }
+      : { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 const REAL_DIFF_DEPS: DiffDeps = {
@@ -466,7 +482,7 @@ const REAL_DIFF_DEPS: DiffDeps = {
   diffFilesStaged: git.diffFilesStaged,
   diffFilesSince: git.diffFilesSince,
   diffUntracked: git.diffUntracked,
-  fileExists: existsSync,
+  inspectFilePresence,
 };
 
 export function collectDiff(
@@ -485,8 +501,14 @@ export function collectDiff(
     throw new Error(`new-test diff authority unavailable: ${failed.result.error}`);
   }
   const tracked = classified.flatMap(({ file, result }) => result.ok && result.tracked ? [file] : []);
-  const untracked = classified.flatMap(({ file, result }) =>
-    result.ok && !result.tracked && deps.fileExists(file) ? [file] : []);
+  const inspectedUntracked = classified.flatMap(({ file, result }) =>
+    result.ok && !result.tracked ? [{ file, presence: deps.inspectFilePresence(file) }] : []);
+  const inaccessible = inspectedUntracked.find(({ presence }) => !presence.ok);
+  if (inaccessible !== undefined && !inaccessible.presence.ok) {
+    throw new Error(`new-test diff authority unavailable: cannot inspect ${inaccessible.file}: ${inaccessible.presence.error}`);
+  }
+  const untracked = inspectedUntracked.flatMap(({ file, presence }) =>
+    presence.ok && presence.exists ? [file] : []);
   const diffs = [
     startSha === undefined ? { ok: true as const, diff: "" } : deps.diffFilesSince(startSha, tracked),
     deps.diffFiles(tracked),

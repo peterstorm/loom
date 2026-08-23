@@ -316,14 +316,32 @@ const evaluateOne = (
 
 type SatisfiedProofResult = Extract<EvaluatedProofResult, { state: "satisfied" }>;
 
-function requireSatisfiedResults(results: NonEmpty<EvaluatedProofResult>): NonEmpty<SatisfiedProofResult> {
+type ResultStatePredicate<T extends ProofObligationResult> =
+  (result: ProofObligationResult) => result is T;
+
+function requireResultState<T extends ProofObligationResult>(
+  results: NonEmpty<ProofObligationResult>,
+  predicate: ResultStatePredicate<T>,
+  invariantMessage: string,
+): NonEmpty<T> {
   const [head, ...tail] = results;
-  const isSatisfied = (result: EvaluatedProofResult): result is SatisfiedProofResult =>
-    result.state === "satisfied";
-  if (!isSatisfied(head) || !tail.every(isSatisfied)) {
-    throw new Error("proof evaluation invariant: failure-free result set contains a non-satisfied result");
-  }
+  if (!predicate(head) || !tail.every(predicate)) throw new Error(invariantMessage);
   return nonEmpty(head, tail);
+}
+
+const isPendingResult = (result: ProofObligationResult): result is PendingProofResult =>
+  result.state === "pending";
+const isEvaluatedResult = (result: ProofObligationResult): result is EvaluatedProofResult =>
+  result.state !== "pending";
+const isSatisfiedResult = (result: ProofObligationResult): result is SatisfiedProofResult =>
+  result.state === "satisfied";
+
+function requireSatisfiedResults(results: NonEmpty<EvaluatedProofResult>): NonEmpty<SatisfiedProofResult> {
+  return requireResultState(
+    results,
+    isSatisfiedResult,
+    "proof evaluation invariant: failure-free result set contains a non-satisfied result",
+  );
 }
 
 /**
@@ -699,46 +717,59 @@ function parsePendingProof(parts: ParsedProofParts): ProofParseResult<PendingTas
   return ok(Object.freeze({
     state: "pending",
     obligations: parts.obligations,
-    results: mapNonEmpty(parts.results, (result) => result.state === "pending"
-      ? result
-      : Object.freeze({ state: "pending" as const, obligation: result.obligation })),
+    results: requireResultState(
+      parts.results,
+      isPendingResult,
+      "proof parser invariant: validated pending proof contains an evaluated result",
+    ),
   }));
 }
 
-function evaluatedResults(parts: ParsedProofParts): { readonly results: NonEmpty<EvaluatedProofResult>; readonly errors: string[] } {
+function evaluatedResults(parts: ParsedProofParts): ProofParseResult<NonEmpty<EvaluatedProofResult>> {
   const errors = [...parts.errors];
   if (parts.results.some((result) => result.state === "pending")) errors.push("evaluated proof may not contain pending results");
-  return {
-    errors,
-    results: mapNonEmpty(parts.results, (result): EvaluatedProofResult => result.state !== "pending" ? result : Object.freeze({
-      state: "failed", obligation: result.obligation, failure: Object.freeze({ kind: "test-result-missing" }),
-    })),
-  };
+  return errors.length > 0
+    ? fail(errors)
+    : ok(requireResultState(
+        parts.results,
+        isEvaluatedResult,
+        "proof parser invariant: validated evaluated proof contains a pending result",
+      ));
 }
 
 function parseFailedProof(raw: Record<string, unknown>, parts: ParsedProofParts): ProofParseResult<FailedTaskProof> {
   const evaluated = evaluatedResults(parts);
-  const errors = [...evaluated.errors];
+  const errors = evaluated.ok ? [] : [...evaluated.errors];
   const failures = parseNonEmptyArray(raw.failures, "proof.failures", parseProofFailure);
   if (!failures.ok) errors.push(...failures.errors);
-  const derived = evaluated.results.flatMap((result) => result.state === "failed" ? [result.failure] : []);
-  if (derived.length === 0) errors.push("failed proof must contain at least one failed result");
-  if (failures.ok && !sameValue(failures.value, derived)) errors.push("proof.failures must equal the failures derived from proof.results");
-  return errors.length > 0 || !failures.ok ? fail(errors) : ok(Object.freeze({
-    state: "failed", obligations: parts.obligations, results: evaluated.results, failures: failures.value,
+  const derived = evaluated.ok
+    ? evaluated.value.flatMap((result) => result.state === "failed" ? [result.failure] : [])
+    : [];
+  if (evaluated.ok && derived.length === 0) errors.push("failed proof must contain at least one failed result");
+  if (evaluated.ok && failures.ok && !sameValue(failures.value, derived)) {
+    errors.push("proof.failures must equal the failures derived from proof.results");
+  }
+  return errors.length > 0 || !failures.ok || !evaluated.ok ? fail(errors) : ok(Object.freeze({
+    state: "failed", obligations: parts.obligations, results: evaluated.value, failures: failures.value,
   }));
 }
 
 function parseSatisfiedProof(raw: Record<string, unknown>, parts: ParsedProofParts): ProofParseResult<SatisfiedTaskProof> {
   const evaluated = evaluatedResults(parts);
-  const errors = [...evaluated.errors];
+  const errors = evaluated.ok ? [] : [...evaluated.errors];
   const evidence = parseNonEmptyArray(raw.evidence, "proof.evidence", parseProofEvidence);
   if (!evidence.ok) errors.push(...evidence.errors);
-  if (evaluated.results.some((result) => result.state !== "satisfied")) errors.push("satisfied proof may contain only satisfied results");
-  const derived = evaluated.results.flatMap((result) => result.state === "satisfied" ? [result.evidence] : []);
-  if (evidence.ok && !sameValue(evidence.value, derived)) errors.push("proof.evidence must equal the evidence derived from proof.results");
-  if (errors.length > 0 || !evidence.ok) return fail(errors);
-  const satisfiedResults = requireSatisfiedResults(evaluated.results);
+  if (evaluated.ok && evaluated.value.some((result) => result.state !== "satisfied")) {
+    errors.push("satisfied proof may contain only satisfied results");
+  }
+  const derived = evaluated.ok
+    ? evaluated.value.flatMap((result) => result.state === "satisfied" ? [result.evidence] : [])
+    : [];
+  if (evaluated.ok && evidence.ok && !sameValue(evidence.value, derived)) {
+    errors.push("proof.evidence must equal the evidence derived from proof.results");
+  }
+  if (errors.length > 0 || !evidence.ok || !evaluated.ok) return fail(errors);
+  const satisfiedResults = requireSatisfiedResults(evaluated.value);
   return ok(Object.freeze({
     state: "satisfied", obligations: parts.obligations,
     results: satisfiedResults,

@@ -8,7 +8,7 @@ import type {
 } from "../../types";
 import { newWaveGate } from "../../types";
 import { taskGraphPath } from "../../config";
-import { StateManager } from "../../state-manager";
+import { PostCommitStateProtectionError, StateManager } from "../../state-manager";
 import {
   evaluateTaskProof,
   PI_STRUCTURED_EVIDENCE_POLICY,
@@ -255,6 +255,13 @@ function failureSummary(task: Task): string {
   ).join(", ");
 }
 
+export function reconciliationFailureMessage(error: unknown): string {
+  if (error instanceof PostCommitStateProtectionError) {
+    return `reconcile-implementation-proof committed state but failed to restore read-only protection: ${error.message}`;
+  }
+  return `reconcile-implementation-proof failed without changing state: ${error instanceof Error ? error.message : String(error)}`;
+}
+
 const handler: HookHandler = async (_stdin, args) => {
   let requestedWave: number | null;
   let recoveredBaselineSha: string | null;
@@ -381,10 +388,7 @@ const handler: HookHandler = async (_stdin, args) => {
       return reconciled;
     });
   } catch (error) {
-    return {
-      kind: "error",
-      message: `reconcile-implementation-proof failed without changing state: ${error instanceof Error ? error.message : String(error)}`,
-    };
+    return { kind: "error", message: reconciliationFailureMessage(error) };
   }
 
   if (reconciled === null) {

@@ -4,7 +4,7 @@
  * Reads JSON from stdin or file arg.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import type { HookHandler } from "../../types";
 import { PHASE_ORDER, KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
 import {
@@ -689,10 +689,17 @@ const handler: HookHandler = async (stdin, args) => {
   let raw: string;
 
   if (fileArg && fileArg !== "-") {
-    if (!existsSync(fileArg)) {
-      return { kind: "error", message: `File not found: ${fileArg}` };
+    try {
+      raw = readFileSync(fileArg, "utf-8");
+    } catch (error) {
+      const code = error instanceof Error && "code" in error ? error.code : undefined;
+      return {
+        kind: "error",
+        message: code === "ENOENT"
+          ? `File not found: ${fileArg}`
+          : `Cannot read task graph file ${fileArg}: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
-    raw = readFileSync(fileArg, "utf-8");
   } else {
     raw = stdin;
   }

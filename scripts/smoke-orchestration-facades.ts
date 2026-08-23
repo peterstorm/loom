@@ -202,14 +202,19 @@ function refutationOutput(runDir: string, request: SpawnRequest): string {
   return JSON.stringify({ criterion: authority.lens, verdicts });
 }
 
-function standaloneAndRemediationSmoke(): void {
-  const cwd = repository("standalone");
+function changedStandaloneRepository(label: string): Readonly<{ cwd: string; changedPath: string }> {
+  const cwd = repository(label);
   const changedPath = "src/target.ts";
   mkdirSync(dirname(join(cwd, changedPath)), { recursive: true });
   writeFileSync(join(cwd, changedPath), "export const value = 1;\n");
   git(cwd, ["add", changedPath]);
   git(cwd, ["commit", "-qm", "baseline"]);
   writeFileSync(join(cwd, changedPath), "export const value = 2;\n");
+  return { cwd, changedPath };
+}
+
+function standaloneAndRemediationSmoke(): void {
+  const { cwd, changedPath } = changedStandaloneRepository("standalone");
 
   // Run evidence lives outside the repository so remediation's dirty-set audit
   // observes only product changes, exactly as a real review-and-fix run does.
@@ -259,13 +264,7 @@ function standaloneAndRemediationSmoke(): void {
  * dead-end the whole run at aggregation (the pre-retry engine behavior).
  */
 function standaloneReviewerRetrySmoke(): void {
-  const cwd = repository("standalone-retry");
-  const changedPath = "src/target.ts";
-  mkdirSync(dirname(join(cwd, changedPath)), { recursive: true });
-  writeFileSync(join(cwd, changedPath), "export const value = 1;\n");
-  git(cwd, ["add", changedPath]);
-  git(cwd, ["commit", "-qm", "baseline"]);
-  writeFileSync(join(cwd, changedPath), "export const value = 2;\n");
+  const { cwd, changedPath } = changedStandaloneRepository("standalone-retry");
 
   const runsRoot = mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-"));
   temporaryRoots.push(runsRoot);
@@ -329,13 +328,7 @@ function standaloneReviewerRetrySmoke(): void {
  * blocked action — never loop or silently accept.
  */
 function standaloneRetryTerminalBlockSmoke(): void {
-  const cwd = repository("standalone-retry-block");
-  const changedPath = "src/target.ts";
-  mkdirSync(dirname(join(cwd, changedPath)), { recursive: true });
-  writeFileSync(join(cwd, changedPath), "export const value = 1;\n");
-  git(cwd, ["add", changedPath]);
-  git(cwd, ["commit", "-qm", "baseline"]);
-  writeFileSync(join(cwd, changedPath), "export const value = 2;\n");
+  const { cwd, changedPath } = changedStandaloneRepository("standalone-retry-block");
 
   const runsRoot = mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-"));
   temporaryRoots.push(runsRoot);
@@ -411,8 +404,8 @@ function waveState(planFile: string): Record<string, unknown> {
   };
 }
 
-function waveGateCriticalRefutationSmoke(): void {
-  const cwd = repository("wave-critical");
+function registeredWaveRepository(label: string): Readonly<{ cwd: string; statePath: string }> {
+  const cwd = repository(label);
   mkdirSync(join(cwd, "src"), { recursive: true });
   writeFileSync(join(cwd, "src", "x.ts"), "export const x = 1;\n");
   git(cwd, ["add", "src/x.ts"]);
@@ -420,6 +413,11 @@ function waveGateCriticalRefutationSmoke(): void {
   const statePath = join(cwd, ".claude", "state", "active_task_graph.json");
   mkdirSync(dirname(statePath), { recursive: true });
   writeFileSync(statePath, JSON.stringify(waveState(modelFreePlan(cwd))));
+  return { cwd, statePath };
+}
+
+function waveGateCriticalRefutationSmoke(): void {
+  const { cwd, statePath } = registeredWaveRepository("wave-critical");
 
   const runsRoot = join(cwd, ".claude", "reviews", "facade-smoke-runs");
   const runDir = join(runsRoot, "run.wave-critical");
@@ -456,14 +454,7 @@ function waveGateCriticalRefutationSmoke(): void {
 }
 
 function waveGateSmoke(): void {
-  const cwd = repository("wave");
-  mkdirSync(join(cwd, "src"), { recursive: true });
-  writeFileSync(join(cwd, "src", "x.ts"), "export const x = 1;\n");
-  git(cwd, ["add", "src/x.ts"]);
-  git(cwd, ["commit", "-qm", "baseline"]);
-  const statePath = join(cwd, ".claude", "state", "active_task_graph.json");
-  mkdirSync(dirname(statePath), { recursive: true });
-  writeFileSync(statePath, JSON.stringify(waveState(modelFreePlan(cwd))));
+  const { cwd, statePath } = registeredWaveRepository("wave");
 
   const runsRoot = join(cwd, ".claude", "reviews", "facade-smoke-runs");
   const runDir = join(runsRoot, "run.wave-gate");
