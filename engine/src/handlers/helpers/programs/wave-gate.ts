@@ -5,7 +5,6 @@
  * re-exported by index.ts so all existing import sites are unchanged.
  */
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { awaitUserAction, parseAgentRequestAuthority, parseStoredAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, type AgentRequestAuthority, type ArtifactDigest, type AwaitUserAction, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
 import { defaultRefutationThreshold } from '../../../core/review-panel';
@@ -17,7 +16,7 @@ import { inspectRunDirectoryEntry, type RunDirHandle } from '../../../orchestrat
 import { TASK_GRAPH_PATH } from '../../../config';
 import { StateManager } from '../../../state-manager';
 import { commitWaveGateCompletion, deriveWaveAdvisoryDecisionRequest, deriveWaveGateDriveStep, deriveWaveReadiness, deriveWaveRefutationPlan, waveAdvisoryDecisionActionRequest, WAVE_REVIEW_AGENTS, type WaveAdvisoryDecisionRequest } from '../../../core/wave-gate-machine';
-import { loadPlanModelsSource } from '../complete-wave-gate';
+import { inspectFilePresence, loadPlanModelsSource } from '../complete-wave-gate';
 import { runFullTierWaveLint } from '../lint-wave-gate';
 import { observeReviewedWorkspace } from '../reviewed-workspace';
 import { applyFindingOutcomes, parseStoredFindings, preserveAcceptedReviewRunFindings } from '../../../core/findings';
@@ -31,7 +30,7 @@ import { durableCaptureRejection, durableRefutationRequests, exactObject, execut
 
 export const waveGateDeps = Object.freeze({
   loadPlanModels: loadPlanModelsSource,
-  fileExists: existsSync,
+  filePresence: inspectFilePresence,
   reviewedWorkspace: observeReviewedWorkspace,
 });
 
@@ -139,6 +138,20 @@ export type WaveGateRestartResult =
   | Readonly<{ ok: true; value: WaveGateRestartPreparation }>
   | Readonly<{ ok: false; message: string }>;
 
+function retireActiveReviewRun(task: Task): Task {
+  const preserved = preserveAcceptedReviewRunFindings(task);
+  return {
+    ...preserved,
+    review_status: "pending",
+    // Packet retirement changes no implementation bytes. Keep generation
+    // stable; fresh packet/run identities make old transcripts stale.
+    review_generation: task.review_generation,
+    review_run: undefined,
+    review_error: undefined,
+    review_evidence_failures: undefined,
+  };
+}
+
 /**
  * Pure protected-state transition for replacing one exhausted Wave review run.
  * Existing findings survive as prior findings; only packet-bound evidence is
@@ -199,24 +212,10 @@ export function prepareExhaustedWaveGateRestart(
       message: `Wave Gate restart refused before final-attempt rejection for: ${nonExhausted.map(({ task, slot }) => `${task.id}/${slot.agent}`).join(", ")}`,
     };
   }
-  const resetReviewPacket = (task: Task): Task => {
-    const preserved = preserveAcceptedReviewRunFindings(task);
-    return {
-      ...preserved,
-      review_status: "pending",
-      // A packet restart changes no implementation bytes. Keep generation
-      // stable so preserved findings cannot be falsely retired as remediated;
-      // fresh packet/run identities already make old transcripts stale.
-      review_generation: task.review_generation,
-      review_run: undefined,
-      review_error: undefined,
-      review_evidence_failures: undefined,
-    };
-  };
   const resetGraph: TaskGraph = {
     ...graph,
     tasks: graph.tasks.map((task) => previous.taskIds.includes(task.id) && task.review_run !== undefined
-      ? resetReviewPacket(task)
+      ? retireActiveReviewRun(task)
       : task),
     spec_check: undefined,
     wave_review_epoch: undefined,
@@ -301,21 +300,11 @@ export function prepareOrphanedWaveGateRecovery(
   const taskIds = Object.freeze(graph.tasks.filter(({ wave }) => wave === expected.wave).map(({ id }) => id));
   if (taskIds.length === 0) return { ok: false, message: `active Wave ${expected.wave} has no protected tasks` };
 
-  const resetTask = (task: Task): Task => {
-    if (!taskIds.includes(task.id) || task.review_run === undefined) return task;
-    const preserved = preserveAcceptedReviewRunFindings(task);
-    return {
-      ...preserved,
-      review_status: "pending",
-      review_generation: task.review_generation,
-      review_run: undefined,
-      review_error: undefined,
-      review_evidence_failures: undefined,
-    };
-  };
   const resetGraph: TaskGraph = {
     ...graph,
-    tasks: graph.tasks.map(resetTask),
+    tasks: graph.tasks.map((task) => taskIds.includes(task.id) && task.review_run !== undefined
+      ? retireActiveReviewRun(task)
+      : task),
     spec_check: undefined,
     wave_review_epoch: undefined,
     active_wave_gate: undefined,
@@ -1839,31 +1828,10 @@ export async function resumeWaveGateFacade(
         currentIssued = Object.freeze(published.requests.map(({ authority }) => authority));
       }
     }
-    const belongsToCurrentPacket = (request: AgentRequestAuthority): boolean => {
-      const contextRead = handle.readContext(request.contextDigest);
-      const context = handleWaveReviewContext(
-        contextRead.ok ? [contextRead.value] : [],
-        request.contextDigest,
-      );
-      // Corruption is blocked by the pre-scan above; an absent section is the
-      // only legitimate "not one of ours" answer.
-      if (context.kind === "corrupt") throw new Error(context.message);
-      if (context.kind === "absent") return false;
-      if (request.role === "spec-check-invoker") {
-        return currentRuns.length > 0 && typeof context.value.batchEpoch === "string" &&
-          currentRuns.every(({ review_run }) => review_run?.head_sha === context.value.batchEpoch);
-      }
-      const taskRun = context.value.taskRun;
-      if (taskRun === null || taskRun === undefined) return false;
-      const task = currentRuns.find(({ id }) => id === taskRun.taskId);
-      return task?.review_run?.packet_id === taskRun.packetId && task.review_run.generation === taskRun.generation &&
-        task.review_run.slot_authority?.some(({ agent, slot_id, attempted }) =>
-          agent === request.role && slot_id === request.slotId && attempted === request.attempt) === true;
-    };
-
-    // A corrupt wave-review-authority section under a valid digest is evidence
-    // damage, never a silent "not current packet": refuse the whole resume
-    // loudly before any captured transcript is skipped or applied.
+    // Read and classify every current context once. Packet-membership filters
+    // consume this cache rather than translating a later I/O failure into
+    // `absent` or racing a second read against the pre-scan.
+    const currentPacketMembership = new Map<string, boolean>();
     for (const authority of currentIssued.filter((request) => request.program === "wave-gate")) {
       const contextRead = handle.readContext(authority.contextDigest);
       if (!contextRead.ok) return waveBlocked(handle, contextRead.error.message);
@@ -1871,7 +1839,30 @@ export async function resumeWaveGateFacade(
       if (context.kind === "corrupt") {
         return waveBlocked(handle, `${context.message} (request ${authority.requestId})`);
       }
+      if (context.kind === "absent") {
+        currentPacketMembership.set(authority.requestId, false);
+        continue;
+      }
+      if (authority.role === "spec-check-invoker") {
+        currentPacketMembership.set(
+          authority.requestId,
+          currentRuns.length > 0 && currentRuns.every(({ review_run }) =>
+            review_run?.head_sha === context.value.batchEpoch),
+        );
+        continue;
+      }
+      const taskRun = context.value.taskRun;
+      const task = taskRun === null ? undefined : currentRuns.find(({ id }) => id === taskRun.taskId);
+      currentPacketMembership.set(
+        authority.requestId,
+        taskRun !== null && task?.review_run?.packet_id === taskRun.packetId &&
+          task.review_run.generation === taskRun.generation &&
+          task.review_run.slot_authority?.some(({ agent, slot_id, attempted }) =>
+            agent === authority.role && slot_id === authority.slotId && attempted === authority.attempt) === true,
+      );
     }
+    const belongsToCurrentPacket = (request: AgentRequestAuthority): boolean =>
+      currentPacketMembership.get(request.requestId) === true;
 
     // Transcript capture is durable before semantic application. Reconcile the
     // crash window idempotently under exact current packet/slot authority.

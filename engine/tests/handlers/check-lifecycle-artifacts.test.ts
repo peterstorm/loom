@@ -29,7 +29,11 @@ function loaded(lifecycles: PlanModels["lifecycles"]): PlanModelsSource {
 
 describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {
   it("fails closed when no plan authority can prove whether Lifecycle Machines were declared", () => {
-    const check = checkLifecycleArtifacts({ kind: "none" }, [waveTask(["a.ts"])], () => false);
+    const check = checkLifecycleArtifacts(
+      { kind: "none" },
+      [waveTask(["a.ts"])],
+      () => ({ ok: true, exists: false }),
+    );
     expect(check.passed).toBe(false);
     if (!check.passed) {
       expect(check.reason).toContain("plan file is missing");
@@ -41,7 +45,7 @@ describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {
     const check = checkLifecycleArtifacts(
       { kind: "unreadable", path: "/gone/plan.md", error: "ENOENT: no such file or directory" },
       [],
-      () => true,
+      () => ({ ok: true, exists: true }),
     );
     expect(check.passed).toBe(false);
     if (!check.passed) {
@@ -52,14 +56,22 @@ describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {
 
   it("passes when no lifecycle is bound to this wave", () => {
     const source = loaded([{ id: "LC-1", title: "Order", machineFile: "src/order-machine.ts" }]);
-    const check = checkLifecycleArtifacts(source, [waveTask(["src/unrelated.ts"])], () => false);
+    const check = checkLifecycleArtifacts(
+      source,
+      [waveTask(["src/unrelated.ts"])],
+      () => ({ ok: true, exists: false }),
+    );
     expect(check.passed).toBe(true);
     if (check.passed) expect(check.summary).toContain("none bound");
   });
 
   it("FAILS when a bound machine file was not created by the wave", () => {
     const source = loaded([{ id: "LC-1", title: "Order", machineFile: "src/order-machine.ts" }]);
-    const check = checkLifecycleArtifacts(source, [waveTask(["src/order-machine.ts"])], () => false);
+    const check = checkLifecycleArtifacts(
+      source,
+      [waveTask(["src/order-machine.ts"])],
+      () => ({ ok: true, exists: false }),
+    );
     expect(check.passed).toBe(false);
     if (!check.passed) {
       expect(check.reason).toContain("LC-1");
@@ -69,7 +81,11 @@ describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {
 
   it("passes when the bound machine file exists on disk", () => {
     const source = loaded([{ id: "LC-1", title: "Order", machineFile: "src/order-machine.ts" }]);
-    const check = checkLifecycleArtifacts(source, [waveTask(["src/order-machine.ts"])], (p) => p === "src/order-machine.ts");
+    const check = checkLifecycleArtifacts(
+      source,
+      [waveTask(["src/order-machine.ts"])],
+      (p) => ({ ok: true, exists: p === "src/order-machine.ts" }),
+    );
     expect(check.passed).toBe(true);
     if (check.passed) expect(check.summary).toContain("LC-1");
   });
@@ -80,13 +96,21 @@ describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {
       { id: "LC-2", title: "B", machineFile: "src/b-machine.ts" },
     ]);
     // wave contains only LC-1's file; LC-2's file missing on disk is fine here
-    const check = checkLifecycleArtifacts(source, [waveTask(["src/a-machine.ts"])], (p) => p === "src/a-machine.ts");
+    const check = checkLifecycleArtifacts(
+      source,
+      [waveTask(["src/a-machine.ts"])],
+      (p) => ({ ok: true, exists: p === "src/a-machine.ts" }),
+    );
     expect(check.passed).toBe(true);
   });
 
   it("ignores lifecycles with no machine file (blocked earlier at populate)", () => {
     const source = loaded([{ id: "LC-1", title: "A", machineFile: null }]);
-    const check = checkLifecycleArtifacts(source, [waveTask(["x.ts"])], () => false);
+    const check = checkLifecycleArtifacts(
+      source,
+      [waveTask(["x.ts"])],
+      () => ({ ok: true, exists: false }),
+    );
     expect(check.passed).toBe(true);
   });
 
@@ -98,9 +122,23 @@ describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {
     const check = checkLifecycleArtifacts(
       source,
       [waveTask(["engine/src/machines/x.machine.json"])],
-      (p) => p === "engine/src/machines/x.machine.json",
+      (p) => ({ ok: true, exists: p === "engine/src/machines/x.machine.json" }),
     );
     expect(check.passed).toBe(true);
+  });
+
+  it("fails closed with the concrete cause when artifact presence is unavailable", () => {
+    const source = loaded([{ id: "LC-1", title: "X", machineFile: "src/x.machine.ts" }]);
+    const check = checkLifecycleArtifacts(
+      source,
+      [waveTask(["src/x.machine.ts"])],
+      () => ({ ok: false, error: "EACCES: permission denied" }),
+    );
+    expect(check.passed).toBe(false);
+    if (!check.passed) {
+      expect(check.reason).toContain("presence is unavailable");
+      expect(check.reason).toContain("EACCES");
+    }
   });
 
   it("still fails when neither the declared path nor any matched variant exists", () => {
@@ -108,7 +146,7 @@ describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {
     const check = checkLifecycleArtifacts(
       source,
       [waveTask(["engine/src/machines/x.machine.json"])],
-      () => false,
+      () => ({ ok: true, exists: false }),
     );
     expect(check.passed).toBe(false);
     if (!check.passed) expect(check.reason).toContain("LC-1");

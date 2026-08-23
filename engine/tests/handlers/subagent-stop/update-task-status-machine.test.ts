@@ -351,6 +351,69 @@ describe("wave-completion gate write (round-17 A1 pin)", () => {
 });
 
 describe("locked implementation settlement failures", () => {
+  it("invalidates stale authority when modified-path evidence is unsafe", async () => {
+    const s = sid("unsafe-modified-path");
+    const dir = tempDir();
+    const proof = evaluateTaskProof(
+      { newTestsRequired: false, declaredArtifacts: [] },
+      { taskCompleted: true, filesModified: [], newTestsWritten: false },
+    );
+    expect(proof.state).toBe("satisfied");
+    const task = {
+      ...implTask("T1", false),
+      status: "implemented",
+      proof,
+      review_status: "passed",
+      attempt_artifact_baseline: [],
+    };
+    const statePath = writeState(dir, [task], ["T1"]);
+    const seeded = JSON.parse(readFileSync(statePath, "utf-8"));
+    seeded.spec_check = {
+      wave: 1, run_at: "now", verdict: "PASSED", critical_count: 0, high_count: 0,
+      critical_findings: [], high_findings: [], medium_findings: [],
+    };
+    seeded.wave_gates["1"] = {
+      impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false,
+    };
+    writeFileSync(statePath, JSON.stringify(seeded));
+    pointSessionAt(s, statePath);
+    const transcriptPath = join(dir, "agent-transcript.jsonl");
+    writeFileSync(transcriptPath, JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: "**Task ID:** T1\n\nRetry finished." },
+          { type: "tool_use", name: "Write", input: { file_path: "../outside.ts" } },
+        ],
+      },
+    }) + "\n");
+
+    const result = await runUpdateTaskStatus(JSON.stringify({
+      session_id: s,
+      agent_id: "a-1",
+      agent_type: "code-implementer-agent",
+      agent_transcript_path: transcriptPath,
+    }), [], { kind: "snapshot", events: [] });
+
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("unsafe modified-file evidence for T1"),
+    });
+    const persisted = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(persisted.tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      review_status: "pending",
+    });
+    expect(persisted.executing_tasks).toEqual([]);
+    expect(persisted.spec_check).toBeUndefined();
+    expect(persisted.wave_gates["1"]).toMatchObject({
+      impl_complete: false,
+      tests_passed: null,
+      reviews_complete: false,
+    });
+  }, 30000);
+
   it("uses the locked Task attempt baseline before preserving trusted evidence", async () => {
     const repositoryRoot = tempDir();
     const artifact = "src/locked.ts";
@@ -498,6 +561,15 @@ describe("locked implementation settlement failures", () => {
       review_status: "passed",
     };
     const statePath = writeState(dir, [task], ["T1"]);
+    const seeded = JSON.parse(readFileSync(statePath, "utf-8"));
+    seeded.spec_check = {
+      wave: 1, run_at: "now", verdict: "PASSED", critical_count: 0, high_count: 0,
+      critical_findings: [], high_findings: [], medium_findings: [],
+    };
+    seeded.wave_gates["1"] = {
+      impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false,
+    };
+    writeFileSync(statePath, JSON.stringify(seeded));
     pointSessionAt(s, statePath);
     const transcriptPath = join(dir, "agent-transcript.jsonl");
     writeFileSync(transcriptPath, JSON.stringify({
@@ -527,6 +599,12 @@ describe("locked implementation settlement failures", () => {
       status: "pending",
       revalidation_required: true,
       review_status: "pending",
+    });
+    expect(persisted.spec_check).toBeUndefined();
+    expect(persisted.wave_gates["1"]).toMatchObject({
+      impl_complete: false,
+      tests_passed: null,
+      reviews_complete: false,
     });
   }, 30000);
 });

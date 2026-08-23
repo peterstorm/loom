@@ -630,6 +630,10 @@ export type PlanModelsSource =
   | Readonly<{ kind: "unreadable"; path: string; error: string }>
   | Readonly<{ kind: "loaded"; models: PlanModels }>;
 
+export type FilePresence =
+  | Readonly<{ ok: true; exists: boolean }>
+  | Readonly<{ ok: false; error: string }>;
+
 const normalizeBindingPath = (path: string): string => path.replace(/\\/g, "/").replace(/^\.\//, "");
 const lifecyclePathMatches = (taskFile: string, declared: string): boolean => {
   const task = normalizeBindingPath(taskFile);
@@ -640,7 +644,7 @@ const lifecyclePathMatches = (taskFile: string, declared: string): boolean => {
 export function checkLifecycleArtifacts(
   source: PlanModelsSource,
   waveTasks: readonly Task[],
-  fileExists: (path: string) => boolean,
+  filePresence: (path: string) => FilePresence,
 ): GateCheck {
   if (source.kind === "none") {
     return fail("FAILED: plan file is missing — cannot verify Lifecycle Machine artifacts (fail-closed).");
@@ -653,13 +657,27 @@ export function checkLifecycleArtifacts(
     lifecycle.machineFile !== null && waveFiles.some((file) => lifecyclePathMatches(file, lifecycle.machineFile!))
   );
   if (bound.length === 0) return pass("7. Lifecycle artifacts: none bound to this wave.");
-  const missing = bound.filter((lifecycle) => {
-    const variants = [lifecycle.machineFile!, ...waveFiles.filter((file) => lifecyclePathMatches(file, lifecycle.machineFile!))];
-    return !variants.some(fileExists);
+  const observed = bound.map((lifecycle) => {
+    const variants = [...new Set([
+      lifecycle.machineFile!,
+      ...waveFiles.filter((file) => lifecyclePathMatches(file, lifecycle.machineFile!)),
+    ])];
+    return { lifecycle, variants: variants.map((path) => ({ path, presence: filePresence(path) })) };
   });
+  const unresolved = observed.filter(({ variants }) =>
+    !variants.some(({ presence }) => presence.ok && presence.exists)
+  );
+  const unavailable = unresolved.flatMap(({ lifecycle, variants }) =>
+    variants.flatMap(({ path, presence }) => presence.ok ? [] : [{ lifecycle, path, error: presence.error }])
+  );
+  if (unavailable.length > 0) {
+    return fail("FAILED: lifecycle machine artifact presence is unavailable (fail-closed):\n" +
+      unavailable.map(({ lifecycle, path, error }) => `  ${lifecycle.id}: ${path}: ${error}`).join("\n"));
+  }
+  const missing = unresolved;
   if (missing.length > 0) {
     return fail("FAILED: lifecycle machine files declared in the plan were not created by this wave:\n" +
-      missing.map((lifecycle) => `  ${lifecycle.id}: ${lifecycle.machineFile}`).join("\n"));
+      missing.map(({ lifecycle }) => `  ${lifecycle.id}: ${lifecycle.machineFile}`).join("\n"));
   }
   return pass(`7. Lifecycle artifacts verified (${bound.length}):\n` +
     bound.map((lifecycle) => `     ${lifecycle.id}: ${lifecycle.machineFile}`).join("\n"));
@@ -667,7 +685,7 @@ export function checkLifecycleArtifacts(
 
 export interface GateDeps {
   readonly loadPlanModels: (planFile: string | null | undefined) => PlanModelsSource;
-  readonly fileExists: (path: string) => boolean;
+  readonly filePresence: (path: string) => FilePresence;
   /** Shell observation of current declared bytes. Required whenever accepted
    * packet authority exists; omitted observations fail closed. */
   readonly reviewedWorkspace?: (tasks: readonly Task[]) => readonly ReviewedWorkspaceObservation[];
@@ -769,7 +787,7 @@ function waveGateChecks(state: TaskGraph, wave: number, waveTasks: readonly Task
     checkReviews(waveTasks),
     checkSpecAlignment(state, wave),
     checkCriticalFindings(waveTasks),
-    checkLifecycleArtifacts(deps.loadPlanModels(state.plan_file ?? state.phase_artifacts?.architecture), waveTasks, deps.fileExists),
+    checkLifecycleArtifacts(deps.loadPlanModels(state.plan_file ?? state.phase_artifacts?.architecture), waveTasks, deps.filePresence),
     checkReviewedWorkspace(waveTasks, deps),
   ]);
 }

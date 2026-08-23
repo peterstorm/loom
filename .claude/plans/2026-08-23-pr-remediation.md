@@ -354,3 +354,69 @@ None. The plan, production files, and regression suites are all inside the froze
 4. `git diff --check`.
 5. Required full command: `env -u PI_CODING_AGENT npm test`.
 6. Registered remediation audit/install through the Orchestration Façade, then commit and push.
+
+---
+
+# Round 7: post-remediation full-branch review
+
+## Authority
+
+- Branch: `feat/deterministic-task-execution`
+- Review scope: exact 48-path branch delta through `232505d`, frozen in the authoritative result
+- Superseded Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260823T214917Z-deterministic-policy-rereview-7` (terminal invalid attempt-2 intent verdict; preserved and abandoned in favor of the retry)
+- Authoritative Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260823T220918Z-deterministic-policy-rereview-7-retry`
+- Review result digest: `291fdb612eac425f0bdf5621a3089583f7453682df31ac07ac7bb7f9009ea496`
+- Surviving criticals: 2
+- Refuted criticals: 1
+
+## Mandatory critical remediation
+
+1. `engine/src/handlers/subagent-stop/update-task-status.ts`: settle unsafe modified-path evidence through the shared fail-closed infrastructure transition inside the locked update so a re-executed implemented Task becomes pending/revalidation-required and stale proof/review/spec/Wave authority cannot remain green.
+2. `pi/subagent-result.ts`: apply the same locked infrastructure-failure transition for unsafe modified-path evidence and expose the diagnostic through `processingErrors`.
+
+## Advisory dispositions
+
+### Accepted
+
+1. Cache validated current Wave review contexts before packet-membership checks so a `readContext` failure cannot become an absent packet.
+2. Replace Lifecycle Machine artifact boolean existence checks with a typed presence observation that distinguishes absence from filesystem failure.
+3. Wrap `mark-tests-passed` TaskGraph loading with a helper-scoped diagnostic carrying the graph path and cause.
+4. Report required Pi new-test repository unavailability through `processingErrors`, while retaining waiver behavior for Tasks whose policy does not require new tests.
+5. Extend the Claude new-test infrastructure-failure regression with already-green Spec-check and Wave authority and assert both are invalidated.
+6. Normalize legacy untrusted `test_result` provenance into the parsed Task value returned by `parseTaskGraph`, rather than validating one value and returning a differently shaped raw object.
+7. Correct `validateMinimal` documentation to say task fields are ignored.
+8. Correct `types.ts` findings ownership documentation to remove the stale two-writer count.
+9. Scope the findings repair `dropped` comment to malformed active Finding entries rather than all data-loss paths.
+10. Extract one private active-review retirement transition shared by Wave Gate restart and orphan recovery.
+11. Extract one private findings/view projection for writers that replace the complete active Finding aggregate.
+12. Extract one pure trim/filter/deduplicate path normalization used by Proof Obligation derivation and evaluation.
+
+### Deferred
+
+1. Deepen Pi's repository port into an engine-owned completion-evidence port. Reason: the planned Slice 3 Implementation Completion Oracle moves both harnesses behind one neutral settlement/evidence interface; changing the Pi-only seam now would create another transitional interface and duplicate that architecture work.
+
+### Dismissed
+
+None.
+
+## Refuted-finding audit
+
+The malformed Pi transcript baseline claim was refuted by intent and security. `compareAttemptBaseline` returns `bytesChangedSinceAttempt: true` on every comparison failure, so malformed evidence is routed through stale-authority invalidation. A false value is possible only after a successful comparison proves no attempt bytes changed; preserving historical evidence in that case is intentional.
+
+## Support paths outside frozen review scope
+
+- `engine/src/handlers/helpers/complete-wave-gate.ts`
+- `engine/src/handlers/helpers/orchestration.ts`
+- `engine/tests/handlers/helpers/programs/wave-gate-decision-authority.test.ts`
+- `engine/tests/handlers/reopen-completed-wave.test.ts`
+
+The two production adapters and two compatibility callers must adopt the typed Lifecycle Machine artifact-presence port introduced by accepted advisory 2. The orchestration adapter's existing oversized functions were distilled into named operations so the changed production file passes the mandatory full tier.
+
+## Validation
+
+1. Focused Vitest suites for Claude/Pi unsafe-path settlement, required new-test repository failure, Lifecycle Machine artifact presence, Wave context recovery, TaskGraph test-result normalization, mark-tests-passed diagnostics, findings transitions, and Proof Obligation normalization.
+2. `npm run typecheck` including unused-code checks.
+3. Full-tier Loom lint over every changed production TypeScript file.
+4. `git diff --check`.
+5. Required full command: `env -u PI_CODING_AGENT npm test`.
+6. Registered remediation audit/install through the Orchestration Façade, then commit and push.

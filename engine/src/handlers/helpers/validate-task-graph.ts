@@ -53,7 +53,7 @@ const VALID_PHASES = new Set<string>(PHASE_ORDER);
 
 const NO_TEST_KEYWORDS = /migration|config|schema|rename|bump|version|refactor|cleanup|typo|docs|interface|documentation|changelog|readme|ci|cd|pipeline|deploy|→|->|styling|css|formatting|adr|codegen|generated/i;
 
-/** Validate minimal phase-tracking graph (no tasks) */
+/** Validate phase-tracking fields only; task fields are ignored. */
 export function validateMinimal(json: Record<string, unknown>): ValidationResult {
   const errors: string[] = [];
 
@@ -304,9 +304,8 @@ interface FindingsRepair {
   readonly unrecoverableViewClaims: readonly string[];
   /** Ids that collided and were re-minted. */
   readonly reminted: number;
-  /** Malformed `findings` entries carrying nothing salvageable. The one path in
-   *  this file that loses data, so it is counted and reported rather than
-   *  vanishing between the raw array and the parsed one. */
+  /** Malformed active `findings` entries carrying nothing salvageable. Counted
+   *  and reported rather than vanishing between the raw array and parsed one. */
   readonly dropped: number;
   /** Claims returned to the active set from malformed refutation envelopes. */
   readonly recoveredRefutationFindings: readonly string[];

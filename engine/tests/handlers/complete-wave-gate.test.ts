@@ -672,9 +672,9 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
         calls.loadPlanModels++;
         return { kind: "loaded", models: MODEL_FREE_PLAN_MODELS };
       },
-      fileExists: () => {
+      filePresence: () => {
         calls.fileExists++;
-        return true;
+        return { ok: true, exists: true };
       },
     };
     return { deps, calls };
@@ -695,9 +695,9 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
           },
         };
       },
-      fileExists: () => {
+      filePresence: () => {
         calls.fileExists++;
-        return true;
+        return { ok: true, exists: true };
       },
     };
     const state = mkGraph({
@@ -724,9 +724,12 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
   it("snapshotGateDeps fails closed for paths outside the snapshot", () => {
     const deps = snapshotGateDeps(mkGraph(), {
       loadPlanModels: () => ({ kind: "none" }),
-      fileExists: () => true,
+      filePresence: () => ({ ok: true, exists: true }),
     });
-    expect(deps.fileExists("/never/resolved.ts")).toBe(false);
+    expect(deps.filePresence("/never/resolved.ts")).toEqual({
+      ok: false,
+      error: "lifecycle artifact /never/resolved.ts was not snapshotted",
+    });
   });
 
   it("snapshotGateDeps stats suffix-matched task file_list variants too (plan/task path divergence)", () => {
@@ -747,9 +750,9 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
           strays: [],
         },
       }),
-      fileExists: (p) => {
+      filePresence: (p) => {
         statted.push(p);
-        return p === "engine/src/machines/x.machine.json";
+        return { ok: true, exists: p === "engine/src/machines/x.machine.json" };
       },
     });
     expect(statted).toContain("src/machines/x.machine.json");
@@ -763,7 +766,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
   it("snapshotGateDeps.loadPlanModels fails CLOSED when asked for a different plan than it snapshotted", () => {
     const deps = snapshotGateDeps(mkGraph({ plan_file: "plan.md" }), {
       loadPlanModels: () => ({ kind: "none" }),
-      fileExists: () => true,
+      filePresence: () => ({ ok: true, exists: true }),
     });
     // The snapshotted path is served…
     expect(deps.loadPlanModels("plan.md")).toEqual({ kind: "none" });
@@ -782,7 +785,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
     const preRead = mkGraph();
     const deps = snapshotGateDeps(preRead, {
       loadPlanModels: () => ({ kind: "none" }),
-      fileExists: () => true,
+      filePresence: () => ({ ok: true, exists: true }),
     });
 
     // …then a SubagentStop lands before the locked update: T1 now carries a
@@ -1167,7 +1170,7 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
 
 const statusDeps: CoreGateDeps = {
   loadPlanModels: () => ({ kind: "loaded", models: MODEL_FREE_PLAN_MODELS }),
-  fileExists: () => true,
+  filePresence: () => ({ ok: true, exists: true }),
 };
 
 function registeredGraph(overrides: Partial<TaskGraph> = {}): TaskGraph {
@@ -2256,7 +2259,7 @@ describe("protected active Wave Gate registration", () => {
           strays: [],
         },
       }),
-      fileExists: (candidate) => existsSync(join(root, candidate)),
+      filePresence: (candidate) => ({ ok: true, exists: existsSync(join(root, candidate)) }),
     };
     try {
       const stale = snapshotGateDeps(manager.load(), io);

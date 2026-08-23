@@ -150,6 +150,17 @@ describe("mark-tests-passed — error polarity", () => {
     expect(stderr).toContain("No active task graph");
   });
 
+  it("an unreadable or corrupt task graph returns a helper-scoped diagnostic", () => {
+    const statePath = join(tempDir(), "active_task_graph.json");
+    writeFileSync(statePath, "{not json");
+
+    const { status, stderr } = runHelper(statePath);
+
+    expect(status).toBe(1);
+    expect(stderr).toContain(`mark-tests-passed: cannot read task graph ${statePath}`);
+    expect(stderr).toContain("invalid JSON");
+  });
+
   it("an invalid --wave value → exit 1 (an unvalidated Number() would report vacuous success for wave NaN)", () => {
     const dir = tempDir();
     const statePath = join(dir, "active_task_graph.json");

@@ -60,14 +60,14 @@ const modernProof = (taskIds: readonly string[]): WaveReopeningProof => ({ mode:
 describe("reviewed workspace integrity", () => {
   it("fails closed after accepted evidence when current dirty/untracked declared bytes drift", () => {
     const changed = reviewedWorkspaceObservation("T22", ["src/a.ts"], [{ path: "src/a.ts", bytes: Buffer.from("dirty and untracked") }]);
-    const result = checkReviewedWorkspace([task("T22", 3)], { loadPlanModels: () => ({ kind: "none" }), fileExists: () => true, reviewedWorkspace: () => [changed] });
+    const result = checkReviewedWorkspace([task("T22", 3)], { loadPlanModels: () => ({ kind: "none" }), filePresence: () => ({ ok: true, exists: true }), reviewedWorkspace: () => [changed] });
     expect(result.passed).toBe(false);
     if (!result.passed) expect(result.reason).toContain("refresh review evidence");
   });
 
   it("accepts an unchanged declared scope", () => {
     const unchanged = { taskId: "T22", scope: ["src/a.ts"], headSha: head };
-    expect(checkReviewedWorkspace([task("T22", 3)], { loadPlanModels: () => ({ kind: "none" }), fileExists: () => true, reviewedWorkspace: () => [unchanged] }).passed).toBe(true);
+    expect(checkReviewedWorkspace([task("T22", 3)], { loadPlanModels: () => ({ kind: "none" }), filePresence: () => ({ ok: true, exists: true }), reviewedWorkspace: () => [unchanged] }).passed).toBe(true);
   });
 
   it("property: a byte mutation changes the snapshot authority", () => {

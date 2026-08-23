@@ -46,7 +46,7 @@ const deps: GateDeps = {
     kind: "loaded",
     models: { lifecycles: [], pipeline: null, invariants: [], strays: [] },
   }),
-  fileExists: () => true,
+  filePresence: () => ({ ok: true, exists: true }),
 };
 
 const FACT_CATEGORIES = [

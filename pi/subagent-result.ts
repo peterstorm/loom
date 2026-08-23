@@ -49,7 +49,7 @@ import type { Phase, TaskGraph } from "../engine/src/types";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
 import { compareAttemptBaseline } from "../engine/src/utils/artifact-baseline";
-import { taskVerificationPolicy } from "../engine/src/core/verification-policy";
+import { requiresNewTests, taskVerificationPolicy } from "../engine/src/core/verification-policy";
 import {
   messagesToClaudeJsonl,
   parsePiMessages,
@@ -719,7 +719,7 @@ async function applyAcceptedImplementationResolution(
   args: AcceptedImplementationResolutionArgs,
 ): Promise<AcceptedImplementationResolution> {
   const repository = observeNewTestRepository(args.repository, args.taskId);
-  const log = repository.kind === "available" ? [] : [repository.diagnostic];
+  const log: string[] = [];
   const processingErrors: string[] = [];
   const root = args.repository.root();
   let skippedExistingVerdict = false;
@@ -755,25 +755,33 @@ async function applyAcceptedImplementationResolution(
       );
     }
     const cumulativeFiles = cumulativeModifiedPaths(currentTarget.files_modified, args.filesModified);
+    const verificationPolicy = taskVerificationPolicy(currentTarget);
+    if (repository.kind === "unavailable" && requiresNewTests(verificationPolicy)) {
+      log.push(repository.diagnostic);
+      processingErrors.push(repository.diagnostic);
+      return applyCompletionInfrastructureFailure(
+        state,
+        args.taskId,
+        comparison.bytesChangedSinceAttempt,
+      );
+    }
     let newTestEvidence = { written: false, evidence: "" };
-    if (repository.kind === "available") {
-      try {
-        newTestEvidence = collectNewTestEvidence(
-          cumulativeFiles,
-          taskVerificationPolicy(currentTarget).newTests,
-          currentTarget.start_sha,
-        );
-      } catch (error) {
-        const cause = error instanceof Error ? error.message : String(error);
-        const diagnostic = `loom(pi): cannot collect new-test evidence for ${args.taskId}: ${cause}`;
-        log.push(diagnostic);
-        processingErrors.push(diagnostic);
-        return applyCompletionInfrastructureFailure(
-          state,
-          args.taskId,
-          comparison.bytesChangedSinceAttempt,
-        );
-      }
+    try {
+      newTestEvidence = collectNewTestEvidence(
+        cumulativeFiles,
+        verificationPolicy.newTests,
+        currentTarget.start_sha,
+      );
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : String(error);
+      const diagnostic = `loom(pi): cannot collect new-test evidence for ${args.taskId}: ${cause}`;
+      log.push(diagnostic);
+      processingErrors.push(diagnostic);
+      return applyCompletionInfrastructureFailure(
+        state,
+        args.taskId,
+        comparison.bytesChangedSinceAttempt,
+      );
     }
     const applied = applyUntrustedStopResolution(state, args.taskId, {
       taskCompleted: true,
@@ -833,9 +841,11 @@ export async function applyImplementationPiResult(args: Readonly<{
 
   const modifiedPaths = readImplementationModifiedPaths(args.repository, transcript.resultMessages, binding.taskId);
   if (!modifiedPaths.ok) {
-    await clearExecutingTask(args.store, binding.taskId);
+    await args.store.update((state) =>
+      applyCompletionInfrastructureFailure(state, binding.taskId, true)
+    );
     log.push(modifiedPaths.message);
-    return outcome(log);
+    return outcome(log, [modifiedPaths.message]);
   }
 
   const settlement = await applyAcceptedImplementationResolution({

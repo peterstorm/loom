@@ -1249,17 +1249,26 @@ function taskGraphScalarFieldError(obj: Record<string, unknown>): string | null 
 function parseTaskGraphTasks(obj: Record<string, unknown>): ParseResult<readonly unknown[]> {
   const tasks = obj.tasks ?? [];
   if (!Array.isArray(tasks)) return parseErr("tasks must be an array");
+  const parsedTasks: Record<string, unknown>[] = [];
   for (let i = 0; i < tasks.length; i++) {
     const err = taskUnionError(tasks[i], i);
     if (err !== null) return parseErr(err);
+    const task = tasks[i] as Record<string, unknown>;
+    if (task.test_result === undefined) {
+      parsedTasks.push(task);
+      continue;
+    }
+    const testResult = parseTaskTestResult(task.test_result, `tasks[${i}]: test_result`);
+    if (!testResult.ok) return parseErr(testResult.errors.join("; "));
+    parsedTasks.push({ ...task, test_result: testResult.value });
   }
-  const taskIds = tasks.map((task) => (task as Record<string, unknown>).id as string);
+  const taskIds = parsedTasks.map((task) => task.id as string);
   const duplicateTaskId = taskIds.find((id, index) => taskIds.indexOf(id) !== index);
   if (duplicateTaskId !== undefined) return parseErr(`duplicate task id: ${duplicateTaskId}`);
-  const dependencyError = taskDependencyErrors(tasks as Record<string, unknown>[])[0];
+  const dependencyError = taskDependencyErrors(parsedTasks)[0];
   if (dependencyError !== undefined) return parseErr(dependencyError);
-  const trace = parseSpecTraceContract(obj.spec_trace_version, tasks);
-  return trace.ok ? parseOk(tasks) : parseErr(specTraceDiagnosticMessages(trace).join("; "));
+  const trace = parseSpecTraceContract(obj.spec_trace_version, parsedTasks);
+  return trace.ok ? parseOk(parsedTasks) : parseErr(specTraceDiagnosticMessages(trace).join("; "));
 }
 
 function parseTaskGraphWaveGates(obj: Record<string, unknown>): ParseResult<Record<string, unknown>> {

@@ -179,13 +179,15 @@ const obligationKey = (obligation: ProofObligation): string =>
     : obligation.kind;
 
 const freezeObligation = (obligation: ProofObligation): ProofObligation => Object.freeze({ ...obligation });
+const normalizedPaths = (paths: readonly string[]): readonly string[] =>
+  Object.freeze([...new Set(paths.map((path) => path.trim()).filter(Boolean))]);
 
 /**
  * Completion is always observed. Verification Policy derives regression and
  * new-test obligations independently; either requirement may be explicitly waived.
  */
 export function deriveProofObligations(input: ProofObligationInput): NonEmpty<ProofObligation> {
-  const artifacts = [...new Set(input.declaredArtifacts.map((path) => path.trim()).filter(Boolean))];
+  const artifacts = normalizedPaths(input.declaredArtifacts);
   const policy = input.verificationPolicy ?? verificationPolicyFromLegacy(input.newTestsRequired);
   const tail: ProofObligation[] = [
     ...(requiresRegression(policy)
@@ -357,9 +359,7 @@ export function evaluateProofObligations(
   const authoredObligations = mapNonEmpty(obligations, freezeObligation);
   const normalizedObserved: ObservedProofEvidence = {
     ...observed,
-    filesModified: Object.freeze([
-      ...new Set(observed.filesModified.map((path) => path.trim()).filter(Boolean)),
-    ]),
+    filesModified: normalizedPaths(observed.filesModified),
   };
   const results = mapNonEmpty(
     authoredObligations,

@@ -27,7 +27,15 @@ const handler: HookHandler = async (_stdin, args) => {
     return { kind: "error", message: `mark-tests-passed: ${(e as Error).message}` };
   }
 
-  const state = mgr.load();
+  let state: ReturnType<StateManager["load"]>;
+  try {
+    state = mgr.load();
+  } catch (error) {
+    return {
+      kind: "error",
+      message: `mark-tests-passed: cannot read task graph ${TASK_GRAPH_PATH}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
   const wave = waveArg ?? state.current_wave ?? 1;
   const tasks = state.tasks.filter((t) => t.wave === wave);
 

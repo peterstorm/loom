@@ -8,7 +8,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { closeSync, constants as fsConstants, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { HookHandler, HookResult, TaskGraph, Task } from "../../types";
 import { legacyTestsPassedNote } from "../../types";
@@ -32,6 +32,7 @@ import {
   gateCheckMessage as coreGateCheckMessage,
   type GateCheck as CoreGateCheck,
   type GateDecision as CoreGateDecision,
+  type FilePresence,
   type GateDeps as CoreGateDeps,
   type PlanModelsSource as CorePlanModelsSource,
 } from "../../core/wave-gate-machine";
@@ -45,6 +46,18 @@ export function loadPlanModelsSource(planFile: string | null | undefined): PlanM
     // Carry the cause: ENOENT (typo'd path) and EACCES (permissions) demand
     // different operator responses — a bare "unreadable" hides which.
     return { kind: "unreadable", path: planFile, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export function inspectFilePresence(path: string): FilePresence {
+  try {
+    lstatSync(path);
+    return { ok: true, exists: true };
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? error.code : undefined;
+    return code === "ENOENT"
+      ? { ok: true, exists: false }
+      : { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -73,7 +86,7 @@ export type GateIO = GateDeps;
 export function snapshotGateDeps(state: TaskGraph, io: GateIO): GateDeps {
   const snapshotPlan = state.plan_file ?? state.phase_artifacts?.architecture ?? null;
   const source = io.loadPlanModels(snapshotPlan);
-  const exists = new Map<string, boolean>();
+  const presence = new Map<string, FilePresence>();
   if (source.kind === "loaded") {
     // Stat every form a lifecycle artifact can legitimately live at: the
     // declared plan path AND every task file_list entry that suffix-matches
@@ -84,7 +97,7 @@ export function snapshotGateDeps(state: TaskGraph, io: GateIO): GateDeps {
       if (lc.machineFile === null) continue;
       const candidates = [lc.machineFile, ...taskFiles.filter((f) => pathsMatch(f, lc.machineFile!))];
       for (const path of candidates) {
-        if (!exists.has(path)) exists.set(path, io.fileExists(path));
+        if (!presence.has(path)) presence.set(path, io.filePresence(path));
       }
     }
   }
@@ -103,7 +116,7 @@ export function snapshotGateDeps(state: TaskGraph, io: GateIO): GateDeps {
         error: `gate deps were snapshotted for plan '${snapshotPlan ?? "<none>"}' but evaluation requested '${requestedPlan ?? "<none>"}' — plan path drifted between snapshot and locked evaluation`,
       };
     },
-    fileExists: (path) => exists.get(path) ?? false,
+    filePresence: (path) => presence.get(path) ?? { ok: false, error: `lifecycle artifact ${path} was not snapshotted` },
     ...(io.reviewedWorkspace === undefined ? {} : { reviewedWorkspace: io.reviewedWorkspace }),
   };
 }
@@ -438,7 +451,7 @@ async function runCompleteWaveGate(
     committed = await mgr.commitActiveWaveGateCompletion((state) => {
       const liveDeps = snapshotGateDeps(state, {
         loadPlanModels: loadPlanModelsSource,
-        fileExists: existsSync,
+        filePresence: inspectFilePresence,
         reviewedWorkspace: observeReviewedWorkspace,
       });
       decision = evaluateCoreWaveGate(state, waveArg, liveDeps);

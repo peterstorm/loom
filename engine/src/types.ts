@@ -142,7 +142,7 @@ export function legacyTestsPassedNote(task: unknown): string | null {
 // They used to be declared in core/findings and imported back, which made
 // types.ts and core/findings mutually dependent — harmless only for as long as
 // both directions stayed `import type`. core/findings still OWNS the finding
-// aggregate (minting identity, proving lockstep, the two review-path writers)
+// aggregate (minting identity, proving lockstep, and its review-path writers)
 // and re-exports these so no import site had to move.
 
 /** Severity tuple — the source of truth `parseFindingSeverity` proves against. */

@@ -179,6 +179,16 @@ export function claimsOfSeverity(
   return findings.filter((finding) => finding.severity === severity).map((finding) => finding.claim);
 }
 
+function activeFindingAggregate(
+  findings: readonly Finding[],
+): Pick<Task, "findings" | "critical_findings" | "advisory_findings"> {
+  return {
+    findings,
+    critical_findings: [...claimsOfSeverity(findings, "critical")],
+    advisory_findings: [...claimsOfSeverity(findings, "advisory")],
+  };
+}
+
 /**
  * Remove ONE occurrence of each claim, by value — a multiset difference.
  *
@@ -1217,9 +1227,7 @@ export function startReviewRun(task: Task, binding: ReviewRunBinding): ReviewRun
       review_generation: binding.generation,
       review_error: undefined,
       review_evidence_failures: undefined,
-      findings,
-      critical_findings: [...claimsOfSeverity(findings, "critical")],
-      advisory_findings: [...claimsOfSeverity(findings, "advisory")],
+      ...activeFindingAggregate(findings),
       review_run: {
         generation: binding.generation,
         packet_id: binding.packetId,
@@ -1302,9 +1310,7 @@ export function preserveAcceptedReviewRunFindings(task: Task): Task {
   );
   return {
     ...task,
-    findings: active,
-    critical_findings: [...claimsOfSeverity(active, "critical")],
-    advisory_findings: [...claimsOfSeverity(active, "advisory")],
+    ...activeFindingAggregate(active),
   };
 }
 
@@ -1382,9 +1388,7 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
         authority_digest: run.wave_gate_authority_digest,
       },
     }),
-    findings: active,
-    critical_findings: [...claimsOfSeverity(active, "critical")],
-    advisory_findings: [...claimsOfSeverity(active, "advisory")],
+    ...activeFindingAggregate(active),
     resolved_findings: resolved,
   };
 }
@@ -1534,9 +1538,7 @@ export function mergeFindings(
     ...(outstanding.length > 0
       ? { review_evidence_failures: outstanding }
       : { review_error: undefined, review_evidence_failures: undefined }),
-    findings: merged,
-    critical_findings: [...claimsOfSeverity(merged, "critical")],
-    advisory_findings: [...claimsOfSeverity(merged, "advisory")],
+    ...activeFindingAggregate(merged),
   };
 }
 

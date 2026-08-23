@@ -273,7 +273,7 @@ describe("waveGateDecisionMismatch", () => {
   it("derives post-review advisory intent from LC-1 rather than shell predicates", () => {
     const snapshot = deriveWaveReadiness(
       graph(),
-      { loadPlanModels: () => ({ kind: "none" }), fileExists: () => true },
+      { loadPlanModels: () => ({ kind: "none" }), filePresence: () => ({ ok: true, exists: true }) },
     );
     expect(snapshot.ok).toBe(true);
     if (!snapshot.ok) return;
@@ -302,7 +302,7 @@ describe("waveGateDecisionMismatch", () => {
   it("admits the exact await-user request emitted by status", () => {
     const status = deriveLoomStatusFromParsedGraph(
       { ok: true, value: graph() },
-      { loadPlanModels: () => ({ kind: "none" }), fileExists: () => true },
+      { loadPlanModels: () => ({ kind: "none" }), filePresence: () => ({ ok: true, exists: true }) },
       null,
       { kind: "present", runId: RUN_ID, path: `/runs/${RUN_ID}`, advisoryApproved: false },
     );

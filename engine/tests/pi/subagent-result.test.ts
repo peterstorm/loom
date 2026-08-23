@@ -534,6 +534,59 @@ describe("applyImplementationPiResult", () => {
     expect(store.current().tasks[0]!.status).not.toBe("completed");
   });
 
+  it("invalidates stale authority and reports unsafe modified-path evidence", async () => {
+    const proof = evaluateTaskProof(
+      { newTestsRequired: false, declaredArtifacts: [] },
+      { taskCompleted: true, filesModified: [], newTestsWritten: false },
+    );
+    expect(proof.state).toBe("satisfied");
+    const initial = implementationGraph({
+      status: "implemented",
+      proof,
+      new_tests_required: false,
+      review_status: "passed",
+      attempt_artifact_baseline: [],
+    });
+    const store = fakeStore({
+      ...initial,
+      spec_check: {
+        wave: 1, run_at: NOW, verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
+      },
+    });
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        messages: [writeCall("../outside.ts")],
+      }),
+      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("unsafe modified-file evidence for T1"),
+    ]);
+    expect(store.current().tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      review_status: "pending",
+    });
+    expect(store.current().executing_tasks).toEqual([]);
+    expect(store.current().spec_check).toBeUndefined();
+    expect(store.current().wave_gates["1"]).toMatchObject({
+      impl_complete: false,
+      tests_passed: null,
+      reviews_complete: false,
+    });
+  });
+
   it("invalidates stale implemented/review authority when accepted baseline comparison fails", async () => {
     const verificationPolicy = {
       regression: { kind: "required" as const },
@@ -732,6 +785,9 @@ describe("applyImplementationPiResult", () => {
     expect(logged).toContain("the wave gate will reject it");
     expect(logged).toContain("repository probe reports a non-Git working directory");
     expect(logged).toContain("new-test proof remains unsatisfied");
+    expect(outcome.processingErrors).toEqual([
+      expect.stringContaining("repository probe reports a non-Git working directory"),
+    ]);
   });
 
   it("accepts structured regression evidence while explicit policy waives only new tests", async () => {

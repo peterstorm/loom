@@ -765,6 +765,26 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it("returns parser-normalized provenance for legacy untrusted test results", () => {
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        test_result: { verdict: "untrusted", passed: true, label: "legacy transcript fallback" },
+      }],
+    });
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.tasks[0]?.test_result).toEqual({
+      verdict: "untrusted",
+      passed: true,
+      label: "legacy transcript fallback",
+      provenance: "unverified",
+    });
+    expect(Object.isFrozen(parsed.value.tasks[0]?.test_result)).toBe(true);
+  });
+
   it("proves files_modified is an array of strings before consumers read it", () => {
     for (const files_modified of ["src/a.ts", ["src/a.ts", 42], null]) {
       const parsed = parseTaskGraph({

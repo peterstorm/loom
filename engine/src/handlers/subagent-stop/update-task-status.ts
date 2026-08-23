@@ -693,13 +693,11 @@ export const runUpdateTaskStatus = async (
       "transcript files_modified",
     )];
   } catch (error) {
-    // An agent that edited outside the repository cannot satisfy task proof.
-    // Clear its live marker, leave the task pending, and fail loudly rather
-    // than persisting a path later consumers might read.
-    await mgr.update((s) => ({
-      ...s,
-      executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
-    }));
+    // Invalid path evidence makes the attempt's byte effects unobservable.
+    // Settle under the lock and conservatively invalidate changed-byte
+    // authority; clearing only executing_tasks could leave a re-executed
+    // implemented Task green on evidence from before this attempt.
+    await mgr.update((s) => applyCompletionInfrastructureFailure(s, taskId, true));
     return {
       kind: "error",
       message: `update-task-status: unsafe modified-file evidence for ${taskId}: ${error instanceof Error ? error.message : String(error)}`,
