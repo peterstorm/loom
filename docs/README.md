@@ -28,7 +28,7 @@ Architecture Decision Records preserve why the system has its current shape:
 ## Harness and migration notes
 
 - [Claude Code to Pi integration guide](migration-claude-code-to-pi.md) explains how the two adapters map onto one engine.
-- [Pi phase-agent interviews](pi-phase-agent-interviews.md) records the unresolved interactive-child limitation and the implemented fail-fast behavior.
+- [Pi Interactive Phase Transport](pi-phase-agent-interviews.md) documents the shipped parent-relayed RPC child, transport routing, safety boundaries, and tests.
 
 ## Design proposals
 

@@ -5,14 +5,14 @@ import {
   MAX_PI_ORCHESTRATION_BATCH_SIZE,
   type SpawnAdmissionPorts,
 } from "../../src/core/spawn-admission";
-import { LOOM_OWNED_AGENTS, type LoomAgentName } from "../../src/core/model-profiles";
+import {
+  agentRequiresInteractiveTransport,
+  LOOM_OWNED_AGENTS,
+  type LoomAgentName,
+} from "../../src/core/model-profiles";
 import { AGENT_REQUIRED_SKILLS } from "../../src/core/orchestration-contract";
 
-/**
- * Spawn Admission was inline in pi/extension.ts, testable only through a live
- * Pi process. These tests exercise the pure decision with in-memory ports —
- * the first unit coverage the admission gate sequence has ever had.
- */
+/** Spawn Admission is a pure decision exercised through in-memory ports. */
 
 const agentMarkdown = (agent: LoomAgentName): string => {
   const skill = AGENT_REQUIRED_SKILLS[agent];
@@ -21,6 +21,7 @@ const agentMarkdown = (agent: LoomAgentName): string => {
 
 const allowPorts = (overrides: Partial<SpawnAdmissionPorts> = {}): SpawnAdmissionPorts => ({
   graphActive: true,
+  transport: "headless",
   packageRoot: "/pkg",
   validateDefinition: () => ({ ok: true }),
   readSourceAgent: (agent) => ({ ok: true, content: agentMarkdown(agent) }),
@@ -42,11 +43,17 @@ describe("admitPiSpawnBatch gate sequence", () => {
     expect(admission.guard).toBe("parse-pi-subagent-batch");
   });
 
-  it("passes external batches through when no graph is active, blocks them when one is", () => {
+  it("passes external batches through only on the native transport when no graph is active", () => {
     const external = { agent: "someone-elses-agent", task: "external work" };
     expect(admitPiSpawnBatch(external, allowPorts({ graphActive: false }))).toEqual({ kind: "pass-through" });
-    const blocked = admitPiSpawnBatch(external, allowPorts({ graphActive: true }));
-    expect(blocked).toMatchObject({ kind: "block", guard: "external-agents" });
+    expect(admitPiSpawnBatch(external, allowPorts({ graphActive: true }))).toMatchObject({
+      kind: "block",
+      guard: "external-agents",
+    });
+    expect(admitPiSpawnBatch(external, allowPorts({
+      graphActive: false,
+      transport: "interactive-rpc",
+    }))).toMatchObject({ kind: "block", guard: "interactive-transport" });
   });
 
   it("blocks oversized batches with the exact partitioning instruction", () => {
@@ -56,11 +63,24 @@ describe("admitPiSpawnBatch gate sequence", () => {
     if (admission.kind === "block") expect(admission.reason).toContain(String(MAX_PI_ORCHESTRATION_BATCH_SIZE));
   });
 
-  it("refuses the headless panel interview, bare or namespaced", () => {
-    for (const agent of ["arch-interviewer-agent", "loom:arch-interviewer-agent"]) {
-      const admission = admitPiSpawnBatch({ agent, task: "interview the user" }, allowPorts());
-      expect(admission).toMatchObject({ kind: "block", guard: "panel-interview" });
+  it("routes every interactive phase role exclusively through the RPC transport", () => {
+    for (const agent of ["specify-agent", "clarify-agent", "architecture-agent", "arch-interviewer-agent"] as const) {
+      const task = item(agent);
+      expect(admitPiSpawnBatch(task, allowPorts())).toMatchObject({
+        kind: "block",
+        guard: "interactive-transport",
+      });
+      expect(admitPiSpawnBatch(task, allowPorts({ transport: "interactive-rpc" })).kind).toBe("admit");
     }
+  });
+
+  it("refuses headless roles and batches on the single-agent interactive transport", () => {
+    const headless = admitPiSpawnBatch(item("code-reviewer"), allowPorts({ transport: "interactive-rpc" }));
+    expect(headless).toMatchObject({ kind: "block", guard: "interactive-transport" });
+    const batch = admitPiSpawnBatch({
+      tasks: [item("specify-agent"), item("architecture-agent")],
+    }, allowPorts({ transport: "interactive-rpc" }));
+    expect(batch).toMatchObject({ kind: "block", guard: "interactive-transport" });
   });
 
   it("requires agentScope 'user', defaulting an absent scope to 'user'", () => {
@@ -126,14 +146,14 @@ describe("spawn admission properties", () => {
   });
 
   it("every skill-requiring agent is refused without its skill in the task and admitted with it", () => {
-    const requiring = LOOM_OWNED_AGENTS.filter(
-      (agent) => AGENT_REQUIRED_SKILLS[agent] !== null && agent !== "arch-interviewer-agent",
-    );
+    const requiring = LOOM_OWNED_AGENTS.filter((agent) => AGENT_REQUIRED_SKILLS[agent] !== null);
     fc.assert(fc.property(fc.constantFrom(...requiring), (agent) => {
       const skill = AGENT_REQUIRED_SKILLS[agent]!;
-      const bare = admitPiSpawnBatch({ agent, task: "do the work" }, allowPorts());
+      const transport = agentRequiresInteractiveTransport(agent) ? "interactive-rpc" : "headless";
+      const ports = allowPorts({ transport });
+      const bare = admitPiSpawnBatch({ agent, task: "do the work" }, ports);
       expect(bare).toMatchObject({ kind: "block", guard: "validate-agent-skill" });
-      const marked = admitPiSpawnBatch({ agent, task: `LOOM_REQUIRED_SKILL: ${skill}\ndo the work` }, allowPorts());
+      const marked = admitPiSpawnBatch({ agent, task: `LOOM_REQUIRED_SKILL: ${skill}\ndo the work` }, ports);
       expect(marked.kind).toBe("admit");
     }));
   });

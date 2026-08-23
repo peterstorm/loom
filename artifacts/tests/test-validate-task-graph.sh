@@ -5,10 +5,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Repo-relative engine entrypoint. This pointed at `../hooks/loom/src/cli.ts`
-# — a path from a pre-restructure layout that has not existed since the initial
-# commit — so every case in this file failed on a missing file rather than on
-# the behaviour it names.
+# Use the repository engine entrypoint so each assertion reaches TaskGraph
+# validation instead of failing at command discovery.
 CLI="$SCRIPT_DIR/../../engine/src/cli.ts"
 
 RED='\033[0;31m'

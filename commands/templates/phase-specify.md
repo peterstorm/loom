@@ -19,12 +19,12 @@ Template for spawning specify-agent. All template variables must be substituted 
 
 You will:
 1. Read brainstorm.md to understand what's already settled.
-2. **Ask ALL the interview questions** listed below to lock down every aspect of the spec. In Claude Code, use `AskUserQuestion`; in Pi subagents, output a `QUESTIONS_REQUIRED` block and stop so the main session can ask the user, then resume with answers.
+2. **Ask ALL the interview questions** listed below via `AskUserQuestion` to lock down every aspect of the spec. Under Pi, Loom relays this tool through the parent TUI while keeping this child Agent alive.
 3. Only THEN write the spec, informed by both brainstorm and the interview.
 
 If brainstorm.md gives a **confident, explicit, unambiguous** answer to a question, you may skip that specific question. When in doubt, ask. Do not skip questions just to be efficient — the user wants depth, not speed.
 
-When an interactive question tool is available, batch up to 4 related questions per call. In Pi, group the same batches under `QUESTIONS_REQUIRED`.
+Batch up to 4 related questions per `AskUserQuestion` call in either harness.
 
 ---
 

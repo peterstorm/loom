@@ -213,7 +213,7 @@ Determinism is scoped to what Loom can observe and own:
 - Claude’s live per-Agent evidence attribution cannot be sound during ambiguous parallel tool activity, so it stands down;
 - report artifacts remain in an Agent-writable environment, with documented same-call forgery residuals;
 - the shell guard judges command text, not an abstract Bash execution graph;
-- Pi cannot yet relay interactive phase questionnaires into headless child processes;
+- Pi's Interactive Phase Transport supports standard relayed dialogs but not `ctx.ui.custom()` components inside RPC children;
 - legacy readers remain for historical evidence but are frozen in `core/legacy-archive.ts`.
 
 These are documented boundaries, not silent claims of enforcement.

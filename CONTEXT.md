@@ -29,7 +29,7 @@ A specialized AI subagent spawned to perform one phase or task. Defined by a mar
 _Avoid_: Worker, bot, assistant
 
 **Agent Catalog**:
-The single declarative registry defining every Agent's identity: its kind (phase, architecture-panel, implementation, reviewer, spec-check, review-verifier, utility), model profile, and required Skill — one record per Agent, keyed by name so a duplicate or double-kinded Agent is unrepresentable. Every agent set, phase map, and policy table is a derived projection of the catalog, never a second source.
+The single declarative registry defining every Agent's identity: its kind (phase, architecture-panel, implementation, reviewer, spec-check, review-verifier, utility), model profile, required Skill, and Pi transport contract (headless or interactive RPC) — one record per Agent, keyed by name so a duplicate or double-kinded Agent is unrepresentable. Every agent set, phase map, transport projection, and policy table is derived from the catalog, never a second source.
 _Avoid_: Agent list, agent config, roster (a roster is an ordered per-run selection drawn from the catalog, not identity)
 
 **Skill**:
@@ -43,6 +43,10 @@ _Avoid_: Trigger, callback, listener
 **Spawn Admission**:
 The pure decision that accepts or blocks one subagent spawn batch before any state mutation, taking pre-gathered inputs (batch items, Agent Catalog entries, agent definitions, graph state) and returning either an allow or a block naming the exact guard that decided. The Hook is the shell that gathers inputs and applies the decision; the decision itself never performs I/O.
 _Avoid_: Spawn gate (that is the Hook applying the decision), spawn validation
+
+**Interactive Phase Transport**:
+The Pi-only parent-relayed RPC child transport for one interactive phase Agent. It preserves the same child process and Agent turn while translating child `extension_ui_request` frames into parent-TUI dialogs and returning exactly correlated `extension_ui_response` frames. Headless Agents remain on the normal subagent transport.
+_Avoid_: Question-file fallback, parent interview, interactive subagent (that is the tool surface, not the transport contract)
 
 **Wire Contract**:
 The exact machine-readable output shape a review Agent must emit — Machine Summary counts and marker lines, the fenced findings block, and the review_lifecycle assessment schema. Owned by the parser that consumes it; the copy in each reviewer Agent file is stamped from one shared fragment, never hand-edited, and the contract tests execute that fragment against the real parser.
@@ -239,6 +243,7 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - A **Tier** determines which lint rules execute: "immediate" runs regex-only after edits, "full" runs all rules at Wave Gate boundaries or explicit scans
 - An **Agent** executes exactly one **Task** or one **Phase**
 - Every Loom-owned **Agent** resolves one explicit requested **LLM Profile** before spawn; Pi launcher overrides are explicit at the transport boundary
+- An interactive Pi phase **Agent** runs through the **Interactive Phase Transport**; every headless role remains on the normal subagent transport
 - A Pi-launched mutating CLI process must match the in-memory extension's **Runtime Revision** before changing protected or run-scoped state
 - A **Task** becomes implemented only after all of its **Proof Obligations** are satisfied
 - Review Agents consume one immutable **Review Packet** per Task

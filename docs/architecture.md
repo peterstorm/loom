@@ -75,7 +75,8 @@ Claude Code lifecycle coverage:
 - adapting Pi messages through `pi/transcript-adapter.ts`;
 - minting and consuming scoped write grants through `pi/write-grant.ts`;
 - correlating native Pi batch-item identities to engine-issued request identities;
-- capturing exact final result bytes into reserved Run Directory slots.
+- capturing exact final result bytes into reserved Run Directory slots;
+- running interactive phase Agents as RPC children and relaying their standard dialogs to the parent TUI.
 
 The legacy `pi/loom-bridge.ts` bridge was removed; `pi/extension.ts` is the only Pi state adapter, and the Pi package manifest pins the bridge's absence.
 
@@ -253,7 +254,7 @@ Loom’s default is refusal when authority is incomplete or ambiguous:
 - remediation excludes state/review evidence and installs only an audited temporary index;
 - legacy formats are isolated in a read-only archive rather than expanded in canonical parsers.
 
-Known limits are documented where they live: shell-text guarding cannot infer every multi-hop cwd construction; Claude’s evidence attribution stands down during ambiguous parallel activity; Pi’s headless children cannot yet relay interactive phase interviews.
+Known limits are documented where they live: shell-text guarding cannot infer every multi-hop cwd construction; Claude’s evidence attribution stands down during ambiguous parallel activity; Pi RPC children support standard dialogs but not custom TUI components.
 
 ## Dependency direction
 

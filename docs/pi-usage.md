@@ -15,13 +15,13 @@ Supported through the shared engine:
 - immutable Run Directories and exact-byte Agent-result capture;
 - scoped phase/panel artifact writes and Task-bound implementation writes.
 
-Current parity gap:
+Interactive phase parity:
 
-- Pi subagents are headless and cannot relay interactive phase questionnaires to the parent TUI. Architecture-panel interviewer spawns fail fast. Standard specify/architecture questionnaire templates have the same transport limitation even where the role is not separately blocked. See [Pi phase-agent interviews](pi-phase-agent-interviews.md).
+- `specify-agent`, `clarify-agent`, `architecture-agent`, and `arch-interviewer-agent` run through Loom's parent-relayed RPC transport. Their `AskUserQuestion` calls appear in the parent Pi TUI while the same child Agent turn remains alive. See [Pi Interactive Phase Transport](pi-phase-agent-interviews.md).
 
 ## Interactive phase agents in Pi
 
-Pi subagents are non-interactive. When a Loom phase requires user input, its agent emits `QUESTIONS_REQUIRED` or `APPROACH_SELECTION_REQUIRED`; ask those questions in the main Pi session and rerun the agent with the answers.
+Use `loom_interactive_subagent` for the four interactive roles above. The normal `subagent` tool is intentionally headless and refuses them; every reviewer, implementation Agent, designer, judge, verifier, and other non-interactive role remains on normal `subagent`.
 
 ## This workstation: dotfiles-managed local package
 
@@ -168,6 +168,7 @@ Pi’s subagent tool accepts at most eight items per call. Large engine-issued b
 | Agent writes | one-time Task or scoped grants |
 | Agent models/Skills | generated, integrity-checked user definitions |
 | Registered result capture | native correlator + shared capture runtime |
+| Interactive phase questions | parent-relayed RPC child + standard Pi UI request/response protocol |
 | Run persistence | shared anchored Run Directory and orchestration runtime |
 
 The legacy `pi/loom-bridge.ts` bridge was removed; `pi/extension.ts` is the only Pi state adapter, and the package manifest pins the bridge's absence.
@@ -224,9 +225,9 @@ Read the diagnostic:
 
 Never broaden the grant manually.
 
-### Architecture panel is refused
+### Interactive phase Agent is refused by `subagent`
 
-This is intentional until interactive child-to-parent question relay exists. Use Claude Code for the panel interview, or use non-panel architecture only when all required decisions are already explicit and the flow can honestly avoid live questions.
+This is intentional transport routing, not missing UI support. Re-run `specify-agent`, `clarify-agent`, `architecture-agent`, or `arch-interviewer-agent` with `loom_interactive_subagent`. If that tool is absent, reload the active Loom package.
 
 ### `Unknown agent: "code-implementer-agent"`
 

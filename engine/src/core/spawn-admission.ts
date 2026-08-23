@@ -3,8 +3,8 @@
  * one Pi subagent spawn batch before any state mutation.
  *
  * Functional core. Every gate that can be decided from values is decided
- * here — batch classification, size, the panel-interview refusal, agent
- * scope, spawn-model policy, the skill-prompt check. The reads the decision
+ * here — batch classification, size, interactive-transport routing, Agent
+ * scope, spawn-model policy, and the Skill-prompt check. The reads the decision
  * needs (rendered-definition identity, source agent bytes, phase-order state,
  * template/file probes) enter through `SpawnAdmissionPorts`, so the sequence
  * is deterministic given its ports and testable with in-memory fakes. The Pi
@@ -18,23 +18,25 @@
 import type { HookResult } from "../types";
 import { checkAgentSkillPrompt } from "./agent-skills";
 import {
+  agentRequiresInteractiveTransport,
   classifyPiSpawnItems,
   expectedSpawnModel,
   type LoomAgentName,
   type PiSpawnItem,
 } from "./model-profiles";
 import { classifyTaskExecutionSpawn, type TaskExecutionSpawn } from "./validate-task-execution";
-import { stripNamespace } from "../utils/strip-namespace";
 
 /** Pi's transport cap per native subagent call; larger engine batches are
  *  chunked by the parent. Single source — the extension imports it. */
 export const MAX_PI_ORCHESTRATION_BATCH_SIZE = 8;
 
+export type PiSpawnTransport = "headless" | "interactive-rpc";
+
 export type SpawnGuardName =
   | "parse-pi-subagent-batch"
   | "external-agents"
   | "batch-size"
-  | "panel-interview"
+  | "interactive-transport"
   | "agent-scope"
   | "definition-identity"
   | "validate-agent-skill"
@@ -44,6 +46,8 @@ export type SpawnGuardName =
 export type SpawnAdmissionPorts = Readonly<{
   /** Is a Loom task graph active for this session? */
   graphActive: boolean;
+  /** Which parent-owned transport will execute this exact batch. */
+  transport: PiSpawnTransport;
   /** Absolute Loom package root, used verbatim in remediation messages. */
   packageRoot: string;
   /** Prove the rendered Pi definition is the one this package generated. */
@@ -74,6 +78,50 @@ export type SpawnAdmission =
 const block = (guard: SpawnGuardName, reason: string): SpawnAdmission =>
   Object.freeze({ kind: "block", guard, reason });
 
+function transportAdmission(
+  items: readonly PiSpawnItem[],
+  transport: PiSpawnTransport,
+): SpawnAdmission | null {
+  const interactiveItems = items.filter((item) => agentRequiresInteractiveTransport(item.agent));
+  if (transport === "headless" && interactiveItems.length > 0) {
+    return block(
+      "interactive-transport",
+      `BLOCKED: ${interactiveItems.map(({ agent }) => agent).join(", ")} requires live user questions. ` +
+        "Use Loom's loom_interactive_subagent Pi tool so the same child Agent can question the parent TUI over RPC.",
+    );
+  }
+  return transport === "interactive-rpc" && (items.length !== 1 || interactiveItems.length !== items.length)
+    ? block(
+        "interactive-transport",
+        "loom_interactive_subagent accepts exactly one interactive Loom phase Agent; use the normal subagent tool for every headless role.",
+      )
+    : null;
+}
+
+function itemAdmission(item: PiSpawnItem, ports: SpawnAdmissionPorts): SpawnAdmission | null {
+  const expected = expectedSpawnModel(item.agent, "pi");
+  if (!expected.ok) return block("definition-identity", expected.error.message);
+
+  const definition = ports.validateDefinition(item.agent);
+  if (!definition.ok) {
+    return block(
+      "definition-identity",
+      `Pi agent '${item.agent}' must be rendered from active Loom package ${ports.packageRoot}: ${definition.error}. ` +
+        `Run "${ports.packageRoot}/scripts/sync-pi-agents.sh" and /reload.`,
+    );
+  }
+  const source = ports.readSourceAgent(item.agent);
+  if (!source.ok) return block("validate-agent-skill", source.error);
+  const skillCheck = checkAgentSkillPrompt(source.content, item.task);
+  if (!skillCheck.ok) return block("validate-agent-skill", `Pi agent '${item.agent}' skill policy failed: ${skillCheck.error}`);
+  const phaseResult = ports.checkPhaseOrder(item.agent, item.task);
+  if (phaseResult.kind === "block") return block("validate-phase-order", phaseResult.message);
+  const templateResult = ports.checkTemplateSubstitution(item.task);
+  return templateResult.kind === "block"
+    ? block("validate-template-substitution", templateResult.message)
+    : null;
+}
+
 /**
  * Decide one spawn batch. The gate sequence and every reason string are the
  * exact ones the Pi extension enforced inline; a malformed sibling blocks the
@@ -84,6 +132,12 @@ export function admitPiSpawnBatch(rawInput: unknown, ports: SpawnAdmissionPorts)
   const classified = classifyPiSpawnItems(rawInput);
   if (!classified.ok) return block("parse-pi-subagent-batch", classified.error.message);
   if (classified.value.kind === "external") {
+    if (ports.transport === "interactive-rpc") {
+      return block(
+        "interactive-transport",
+        "loom_interactive_subagent accepts exactly one interactive Loom phase Agent; external Agents must use the normal subagent tool.",
+      );
+    }
     // Loom owns only its catalog outside orchestration. During an active
     // graph, an unknown agent would bypass phase/task/model gates; without
     // one, it belongs to another Pi workflow and must pass through.
@@ -100,22 +154,8 @@ export function admitPiSpawnBatch(rawInput: unknown, ports: SpawnAdmissionPorts)
     );
   }
 
-  // Panel mode's interview stage requires interactive AskUserQuestion: an
-  // arch-interviewer-agent must question the USER before writing the digest
-  // that drives lens/judge selection. Pi children are headless (no TUI, no
-  // question relay — see docs/pi-phase-agent-interviews.md), so the agent can
-  // neither ask nor honestly answer. Refuse with an actionable diagnostic
-  // instead of letting a fabricated digest drive the panel.
-  if (items.some((item) => stripNamespace(item.agent) === "arch-interviewer-agent")) {
-    return block(
-      "panel-interview",
-      "BLOCKED: `/loom --panel` interview stage cannot run under pi: " +
-        "arch-interviewer-agent needs interactive AskUserQuestion, which pi " +
-        "children do not support (docs/pi-phase-agent-interviews.md). " +
-        "Panel mode currently requires Claude Code for the interview; a " +
-        "headless interview path or a question relay is not yet implemented.",
-    );
-  }
+  const transport = transportAdmission(items, ports.transport);
+  if (transport !== null) return transport;
 
   const requestedScope = (rawInput as { agentScope?: unknown }).agentScope ?? "user";
   if (requestedScope !== "user") {
@@ -126,31 +166,8 @@ export function admitPiSpawnBatch(rawInput: unknown, ports: SpawnAdmissionPorts)
   }
 
   for (const item of items) {
-    const expected = expectedSpawnModel(item.agent, "pi");
-    const definition = ports.validateDefinition(item.agent);
-    if (!expected.ok || !definition.ok) {
-      return block(
-        "definition-identity",
-        expected.ok
-          ? `Pi agent '${item.agent}' must be rendered from active Loom package ${ports.packageRoot}: ${definition.ok ? "unknown definition mismatch" : definition.error}. Run "${ports.packageRoot}/scripts/sync-pi-agents.sh" and /reload.`
-          : expected.error.message,
-      );
-    }
-
-    const source = ports.readSourceAgent(item.agent);
-    if (!source.ok) return block("validate-agent-skill", source.error);
-    const skillCheck = checkAgentSkillPrompt(source.content, item.task);
-    if (!skillCheck.ok) {
-      return block("validate-agent-skill", `Pi agent '${item.agent}' skill policy failed: ${skillCheck.error}`);
-    }
-
-    const phaseResult = ports.checkPhaseOrder(item.agent, item.task);
-    if (phaseResult.kind === "block") return block("validate-phase-order", phaseResult.message);
-
-    const templateResult = ports.checkTemplateSubstitution(item.task);
-    if (templateResult.kind === "block") {
-      return block("validate-template-substitution", templateResult.message);
-    }
+    const rejected = itemAdmission(item, ports);
+    if (rejected !== null) return rejected;
   }
 
   const taskExecutionSpawns = Object.freeze(items.map((item) =>

@@ -57,6 +57,16 @@ Missing or mismatched requested bindings BLOCK. Never omit a model. Pi launcher
 routing may explicitly inherit a local parent model; that transport policy is
 validated at the Pi spawn seam and is never inferred by this runbook.
 
+### Pi Interactive Phase Transport
+
+Under Pi, spawn `specify-agent`, `clarify-agent`, `architecture-agent`, and
+`arch-interviewer-agent` with the `loom_interactive_subagent` tool, one Agent
+per call. It runs a parent-owned RPC child and relays `AskUserQuestion` dialogs
+to the parent TUI without ending the child turn. The normal `subagent` tool is
+headless and refuses those roles. Continue using normal `subagent` for every
+reviewer, designer, judge, verifier, implementation Agent, and other headless
+role. Under Claude Code, use the native Agent/Task tool as usual.
+
 ---
 
 ## Arguments
@@ -177,7 +187,7 @@ Substitute variables:
 - `{date_slug}` - Same slug as brainstorm (agent reads brainstorm.md from this dir)
 - `{date_slug}` - `YYYY-MM-DD-feature-name` format
 
-**Spawn specify-agent** with the substituted template as prompt.
+**Spawn specify-agent** with the substituted template as prompt. Under Pi, use `loom_interactive_subagent`; under Claude Code, use the native Agent/Task tool.
 
 **Wait for agent completion.** Extract:
 - Spec file path
@@ -200,9 +210,9 @@ Substitute variables:
 - `{spec_file_path}` - Path to spec from Phase 1
 - `{marker_count}` - Number of `[NEEDS CLARIFICATION]` markers
 
-**Spawn clarify-agent** with the substituted template as prompt.
+**Spawn clarify-agent** with the substituted template as prompt. Under Pi, use `loom_interactive_subagent`; under Claude Code, use the native Agent/Task tool.
 
-**IMPORTANT: Do NOT pre-resolve markers in the agent prompt.** The clarify agent MUST ask the user via AskUserQuestion. Pass only the spec path and marker count — let the agent drive the questioning. Under Pi, if the subagent cannot interactively ask questions, have it output the unresolved questions and stop; ask the user in the main session, then re-run the clarify agent with the answers.
+**IMPORTANT: Do NOT pre-resolve markers in the agent prompt.** The clarify agent MUST ask the user via AskUserQuestion. Pass only the spec path and marker count — let the Agent drive the questioning through the harness's interactive transport.
 
 **Wait for agent completion.** Verify markers resolved.
 
@@ -222,7 +232,7 @@ Substitute variables:
 - `{date_slug}` - `YYYY-MM-DD-feature-name` format
 - `{loom_dir}` - the exact `LOOM_DIR` resolved during setup
 
-**Spawn architecture-agent** with the substituted template as prompt.
+**Spawn architecture-agent** with the substituted template as prompt. Under Pi, use `loom_interactive_subagent`; under Claude Code, use the native Agent/Task tool.
 
 **Wait for agent completion.** Extract:
 - Plan file path
@@ -260,7 +270,7 @@ Retain the printed path in orchestration context and substitute its concrete val
 
 **Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-interview.md`. Substitute `{feature_description}`, `{spec_file_path}`, `{interview_file_path}` (= `<panel-run-dir>/interview.md`), and `{loom_dir}` (= the already resolved `LOOM_DIR`).
 
-**Spawn `arch-interviewer-agent`.** Wait for completion. Require the exact new file to be non-empty (`test -s`); because the run directory is unique, a prior run cannot satisfy this check. Validate and canonicalize the digest before fan-out:
+**Spawn `arch-interviewer-agent`.** Under Pi, use `loom_interactive_subagent`; under Claude Code, use the native Agent/Task tool. Wait for completion. Require the exact new file to be non-empty (`test -s`); because the run directory is unique, a prior run cannot satisfy this check. Validate and canonicalize the digest before fan-out:
 
 ```bash
 bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-contract interview \
@@ -370,7 +380,7 @@ bun "{LOOM_DIR}/engine/src/cli.ts" helper panel-contract aggregate \
 
 **Load template:** Read `{LOOM_DIR}/commands/templates/phase-arch-finalize.md`. Substitute `{feature_description}`, `{spec_file_path}`, `{interview_file_path}`, `{candidate_manifest_path}`, `{judge_verdicts}` (the canonical three-verdict JSON array, inlined), `{panel_ranking}` (the contents of `ranking.json`, inlined), `{date_slug}`, and `{loom_dir}`.
 
-**Spawn `architecture-agent`** with this template. It reads the already-computed ranking (it does not rank candidates itself); presents the top 2–3 with summary/trade-offs/testability/codebase-fit/effort; synthesizes the user's choice; writes `.claude/plans/{date_slug}.md` with `### AD-1: Approach selection (panel)`; and commits.
+**Spawn `architecture-agent`** with this template, using `loom_interactive_subagent` under Pi. It reads the already-computed ranking (it does not rank candidates itself); presents the top 2–3 with summary/trade-offs/testability/codebase-fit/effort; synthesizes the user's choice; writes `.claude/plans/{date_slug}.md` with `### AD-1: Approach selection (panel)`; and commits.
 
 **From here, the flow rejoins standard mode.** Its SubagentStop advances to plan-alignment, or directly to decompose when plan-alignment was skipped.
 
