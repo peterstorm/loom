@@ -738,11 +738,10 @@ function parseSatisfiedProof(raw: Record<string, unknown>, parts: ParsedProofPar
   const derived = evaluated.results.flatMap((result) => result.state === "satisfied" ? [result.evidence] : []);
   if (evidence.ok && !sameValue(evidence.value, derived)) errors.push("proof.evidence must equal the evidence derived from proof.results");
   if (errors.length > 0 || !evidence.ok) return fail(errors);
-  const [head, ...tail] = evaluated.results;
-  if (head.state !== "satisfied" || tail.some((result) => result.state !== "satisfied")) return fail(["satisfied proof may contain only satisfied results"]);
+  const satisfiedResults = requireSatisfiedResults(evaluated.results);
   return ok(Object.freeze({
     state: "satisfied", obligations: parts.obligations,
-    results: nonEmpty(head, tail.flatMap((result) => result.state === "satisfied" ? [result] : [])),
+    results: satisfiedResults,
     evidence: evidence.value,
   }));
 }

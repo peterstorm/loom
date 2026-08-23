@@ -391,12 +391,13 @@ export interface Task {
    * prints, so no consumer had to migrate when identity arrived; they can
    * migrate opportunistically.
    *
-   * Exactly six writers keep the three in lockstep, and every one of them
+   * The coordinated writers keep the three in lockstep, and every one of them
    * writes all three together: `sanitizeDecomposedTask` (the initializer, in
    * handlers/helpers/populate-task-graph); `mergeFindings` (legacy/unbound
-   * review), `finalizeReviewRun` (packet-bound review), and
-   * `applyFindingOutcomes` (the panel adjudicated), all in core/findings;
-   * `updateTaskFindings` (the manual operator override) in
+   * review), `finalizeReviewRun` (packet-bound review),
+   * `applyFindingOutcomes` (panel adjudication), and
+   * `preserveAcceptedReviewRunFindings` (incomplete-run retirement), all in
+   * core/findings; `updateTaskFindings` (the manual operator override) in
    * handlers/helpers/store-review-findings; and `fixTaskFindings` (repair) in
    * handlers/helpers/validate-task-graph. A writer that touched only the views
    * would produce a critical no panel can reach and no gate can clear — and one
@@ -406,7 +407,7 @@ export interface Task {
    * `readonly` for the same reason `findings` is. The DERIVED fields were the
    * mutable ones, which is exactly backwards: a holder of a `Task` could
    * `push` a claim into a view and break, in place and with no compile error,
-   * the invariant a load-boundary check, six coordinated writers and a `--fix`
+   * the invariant a load-boundary check, coordinated writers and a `--fix`
    * repair path all exist to protect. Every producer already returns a fresh
    * array, so nothing had to change but the type.
    */

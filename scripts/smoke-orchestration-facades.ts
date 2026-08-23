@@ -369,7 +369,13 @@ function standaloneRetryTerminalBlockSmoke(): void {
   process.stdout.write("  ✓ standalone attempt-2 scope violation → durable terminal block\n");
 }
 
-function waveState(): Record<string, unknown> {
+function modelFreePlan(cwd: string): string {
+  const planFile = join(cwd, "plan.md");
+  writeFileSync(planFile, "# Model-free plan\n");
+  return planFile;
+}
+
+function waveState(planFile: string): Record<string, unknown> {
   const proof = evaluateTaskProof(
     { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
     { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
@@ -381,7 +387,7 @@ function waveState(): Record<string, unknown> {
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
-    plan_file: null,
+    plan_file: planFile,
     tasks: [{
       id: "T1",
       description: "exercise the orchestration façade",
@@ -413,7 +419,7 @@ function waveGateCriticalRefutationSmoke(): void {
   git(cwd, ["commit", "-qm", "baseline"]);
   const statePath = join(cwd, ".claude", "state", "active_task_graph.json");
   mkdirSync(dirname(statePath), { recursive: true });
-  writeFileSync(statePath, JSON.stringify(waveState()));
+  writeFileSync(statePath, JSON.stringify(waveState(modelFreePlan(cwd))));
 
   const runsRoot = join(cwd, ".claude", "reviews", "facade-smoke-runs");
   const runDir = join(runsRoot, "run.wave-critical");
@@ -457,7 +463,7 @@ function waveGateSmoke(): void {
   git(cwd, ["commit", "-qm", "baseline"]);
   const statePath = join(cwd, ".claude", "state", "active_task_graph.json");
   mkdirSync(dirname(statePath), { recursive: true });
-  writeFileSync(statePath, JSON.stringify(waveState()));
+  writeFileSync(statePath, JSON.stringify(waveState(modelFreePlan(cwd))));
 
   const runsRoot = join(cwd, ".claude", "reviews", "facade-smoke-runs");
   const runDir = join(runsRoot, "run.wave-gate");

@@ -61,3 +61,58 @@ The canonical panel refuted no critical findings. One intent lens disputed missi
 4. `git diff --check`
 5. Full Vitest suite with a bounded worker pool: `env -u PI_CODING_AGENT npx vitest run --maxWorkers=4 --minWorkers=1 --testTimeout=15000`
 6. Registered remediation audit/install through the Orchestration Façade.
+
+---
+
+# Round 2: post-remediation full-branch review
+
+## Authority
+
+- Branch: `feat/deterministic-task-execution`
+- Review scope: exact 39-path branch delta `30241fd..82ad6cf`
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260823T144824Z-deterministic-policy-rereview`
+- Review result digest: `c51db2cfa9ec4763a5278cafcfcf58a0e8415e99a2861fb73648670549627cef`
+- Surviving criticals: 2
+- Refuted criticals: 2
+
+## Mandatory critical remediation
+
+1. `scripts/smoke-orchestration-facades.ts`: make Wave Gate smoke repositories create and bind a readable model-free Plan so the required `npm test` command exercises the intended review/refutation paths without weakening fail-closed Lifecycle verification.
+2. `engine/src/types.ts`: remove the stale exact writer count and include `preserveAcceptedReviewRunFindings` in the documented findings-lockstep writers.
+
+## Advisory dispositions
+
+### Accepted
+
+1. Reject malformed `--issue` values in `populate-task-graph` instead of silently treating them as absent; add focused handler coverage.
+2. Correct `update-task-status.ts`'s header to describe proof-driven settlement rather than unconditional `implemented` status.
+3. Correct `validate-task-graph.ts`'s repair enumeration to include malformed remediation resolutions.
+4. Remove the second unreachable satisfied-result check in `parseSatisfiedProof` by reusing the existing explicit narrowing helper.
+5. Distill `mark-tests-passed` around missing evidence arrays rather than mirrored passing/missing collections.
+6. Preserve `WaveLifecycleProof`'s both-or-neither type by destructuring only inside the non-null branch.
+
+### Deferred
+
+1. Redesign `Task` as a status/proof discriminated union. Reason: stored graphs and every settlement writer currently use one compatibility schema, while Slice 3 introduces the engine-owned Implementation Attempt settlement reducer. The union must land with that reducer and stored migration so it cannot create a second transient status model during this verification-policy-only slice.
+
+### Dismissed
+
+None.
+
+## Refuted-finding audit
+
+Two reviewers claimed reserved Pi implementation failures remain in `executing_tasks`. The reproduction and security lenses established that production dispatch first runs `finalizeReservedImplementations`, which clears the reservation directly or through `applyUntrustedStopResolution`; `applyFailedPiResult` handles only unreserved compatibility results afterward. No Pi lifecycle change is authorized by this review.
+
+## Support paths outside frozen review scope
+
+- `scripts/smoke-orchestration-facades.ts`
+
+## Validation
+
+1. Reproduce and then pass `env -u PI_CODING_AGENT bun scripts/smoke-orchestration-facades.ts`.
+2. Focused Vitest suites for populate argument parsing, Proof parsing, Wave readiness, and mark-tests-passed.
+3. `npm run typecheck` including unused-code checks.
+4. Full-tier Loom lint over every changed production TypeScript file.
+5. `git diff --check`.
+6. Required full command: `env -u PI_CODING_AGENT npm test`.
+7. Registered remediation audit/install through the Orchestration Façade, then commit and push.

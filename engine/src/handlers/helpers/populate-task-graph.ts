@@ -34,14 +34,39 @@ interface DecomposeInput {
  * `--fix` silently consumed — the exact divergence `argumentValue` exists to
  * end.
  */
-function parseArgs(args: string[]): { issue?: number; repo?: string; fix: boolean; force: boolean } {
+type PopulateArgs = Readonly<{
+  issue?: number;
+  repo?: string;
+  fix: boolean;
+  force: boolean;
+}>;
+
+type ParsedPopulateArgs =
+  | Readonly<{ ok: true; value: PopulateArgs }>
+  | Readonly<{ ok: false; error: string }>;
+
+function parseArgs(args: string[]): ParsedPopulateArgs {
+  const issueFlagPresent = hasFlag(args, "--issue");
   const rawIssue = argumentValue(args, "--issue");
+  if (issueFlagPresent && rawIssue === null) {
+    return { ok: false, error: "--issue requires a positive integer value" };
+  }
+  if (rawIssue !== null && !/^[1-9]\d*$/.test(rawIssue)) {
+    return { ok: false, error: `--issue must be a positive integer, got '${rawIssue}'` };
+  }
   const issue = rawIssue === null ? undefined : Number(rawIssue);
+  if (issue !== undefined && !Number.isSafeInteger(issue)) {
+    return { ok: false, error: `--issue must be a safe positive integer, got '${rawIssue}'` };
+  }
+  const repo = argumentValue(args, "--repo");
   return {
-    ...(issue === undefined || Number.isNaN(issue) ? {} : { issue }),
-    ...(argumentValue(args, "--repo") === null ? {} : { repo: argumentValue(args, "--repo")! }),
-    fix: hasFlag(args, "--fix"),
-    force: hasFlag(args, "--force"),
+    ok: true,
+    value: {
+      ...(issue === undefined ? {} : { issue }),
+      ...(repo === null ? {} : { repo }),
+      fix: hasFlag(args, "--fix"),
+      force: hasFlag(args, "--force"),
+    },
   };
 }
 
@@ -103,7 +128,9 @@ const handler: HookHandler = async (stdin, args) => {
     return { kind: "error", message: `No task graph at ${statePath}` };
   }
 
-  const { issue, repo, fix, force } = parseArgs(args);
+  const parsedArgs = parseArgs(args);
+  if (!parsedArgs.ok) return { kind: "error", message: `populate-task-graph: ${parsedArgs.error}` };
+  const { issue, repo, fix, force } = parsedArgs.value;
 
   let decompose: DecomposeInput;
   try {

@@ -1129,8 +1129,6 @@ export function deriveWaveReadiness(
   deps: GateDeps,
   lifecycleProof: WaveLifecycleProof | null = null,
 ): DomainResult<WaveReadinessSnapshot, Readonly<{ kind: "wave-readiness-unavailable"; reasons: NonEmpty<StatusReason> }>> {
-  const nextActionAuthority = lifecycleProof?.nextActionAuthority ?? null;
-  const lifecycleCheckpoint = lifecycleProof?.lifecycleCheckpoint ?? null;
   const registration = graph.active_wave_gate;
   const failures: StatusReason[] = [];
   if (graph.current_phase === "execute" && graph.current_wave === undefined) {
@@ -1171,7 +1169,8 @@ export function deriveWaveReadiness(
     waveGateCompletionEligibility: canonicalRecord({ kind: "known", value: eligibility }),
   });
   const completion = completionAuthority(graph, registration, decision);
-  if (nextActionAuthority !== null && lifecycleCheckpoint !== null) {
+  if (lifecycleProof !== null) {
+    const { nextActionAuthority, lifecycleCheckpoint } = lifecycleProof;
     const binding = nextActionAuthority.binding;
     const exactBinding = waveNextActionProofs.has(nextActionAuthority) &&
       waveGateLifecycleProofs.has(lifecycleCheckpoint) &&
@@ -1220,8 +1219,8 @@ export function deriveWaveReadiness(
     facts,
     readinessDigest: completion.readinessDigest,
     completionIntent: completion.completionIntent,
-    nextActionAuthority,
-    lifecycleCheckpointDigest: lifecycleCheckpoint?.checkpointDigest ?? null,
+    nextActionAuthority: lifecycleProof?.nextActionAuthority ?? null,
+    lifecycleCheckpointDigest: lifecycleProof?.lifecycleCheckpoint.checkpointDigest ?? null,
     reasons: readinessReasons(graph, wave, decision, reviews, panel, tests, eligibility),
   });
   waveReadinessProofs.add(snapshot);

@@ -107,6 +107,27 @@ describe("populate-task-graph — overwrite guard (funneled through the real han
   });
 });
 
+describe("populate-task-graph — argument parsing", () => {
+  it.each([
+    { args: ["--issue", "abc"], diagnostic: "positive integer" },
+    { args: ["--issue", "0"], diagnostic: "positive integer" },
+    { args: ["--issue", "-1"], diagnostic: "positive integer" },
+    { args: ["--issue", "1.5"], diagnostic: "positive integer" },
+    { args: ["--issue", "9007199254740992"], diagnostic: "safe positive integer" },
+    { args: ["--issue", "--fix"], diagnostic: "requires a positive integer" },
+  ])("rejects malformed issue authority: $args", async ({ args, diagnostic }) => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, []);
+
+    const result = await populate(decomposeJson(plan), args);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain(diagnostic);
+    expect((JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph).tasks).toEqual([]);
+  });
+});
+
 describe("populate-task-graph — decompose stdin cannot mint execution state", () => {
   it("strips pre-stamped verdicts/statuses from the agent-controlled payload", async () => {
     const dir = tempDir();

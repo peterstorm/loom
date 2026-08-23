@@ -1,12 +1,13 @@
 /**
- * Mark task "implemented" when impl agent completes.
+ * Resolve implementation completion into the Task's proof state.
  *
  * 1. Resolve test evidence — the agent's own epoch in the evidence ledger
  *    (execution-time ground truth) first; transcript regex as the labeled,
  *    lower-trust fallback
  * 2. Verify new tests written via git diff + assertion density
- * 3. Atomic state write: files_modified, test_result, new_tests_written
- * 4. Detect wave completion → signal /wave-gate
+ * 3. Atomically persist evidence and the derived Proof aggregate
+ * 4. Mark implemented only when every obligation is satisfied; otherwise keep
+ *    the Task pending, then signal /wave-gate only when the Wave is complete
  */
 
 import { existsSync, readFileSync } from "node:fs";

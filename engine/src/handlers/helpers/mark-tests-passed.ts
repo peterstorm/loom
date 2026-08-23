@@ -46,12 +46,15 @@ const handler: HookHandler = async (_stdin, args) => {
     requiresRegression(taskVerificationPolicy(task));
   const newTestsRequired = (task: (typeof tasks)[number]) =>
     requiresNewTests(taskVerificationPolicy(task));
-  const withTests = tasks.filter((task) =>
-    !regressionRequired(task) || testResultPassed(task.test_result));
-  const newTestOk = tasks.filter((task) =>
-    !newTestsRequired(task) || task.new_tests_written);
+  const missing = tasks.filter((task) =>
+    regressionRequired(task) && !testResultPassed(task.test_result));
+  const missingNew = tasks.filter((task) =>
+    newTestsRequired(task) && !task.new_tests_written);
 
-  process.stderr.write(`Wave ${wave} test evidence: ${withTests.length}/${tasks.length} passed, ${newTestOk.length}/${tasks.length} new-test OK\n`);
+  process.stderr.write(
+    `Wave ${wave} test evidence: ${tasks.length - missing.length}/${tasks.length} passed, ` +
+    `${tasks.length - missingNew.length}/${tasks.length} new-test OK\n`,
+  );
 
   for (const t of tasks) {
     const verification = taskVerificationPolicy(t);
@@ -64,20 +67,14 @@ const handler: HookHandler = async (_stdin, args) => {
     process.stderr.write(`  ${t.id}: tests=${testStatus} new=${newStatus}\n`);
   }
 
-  const allPass = withTests.length === tasks.length && newTestOk.length === tasks.length;
-  if (allPass) {
+  if (missing.length === 0 && missingNew.length === 0) {
     process.stderr.write("\nAll tasks have test evidence.\n");
     return { kind: "passthrough" };
   }
 
-  // Derived from the arrays above, not re-derived from the rule: the canonical
-  // policy projections keep this verifier aligned with the Wave Gate.
-  const missing = tasks.filter((t) => !withTests.includes(t)).map((t) => t.id);
-  const missingNew = tasks.filter((t) => !newTestOk.includes(t)).map((t) => t.id);
-
   const parts = [];
-  if (missing.length > 0) parts.push(`Missing test evidence: ${missing.join(", ")}`);
-  if (missingNew.length > 0) parts.push(`Missing new-test evidence: ${missingNew.join(", ")}`);
+  if (missing.length > 0) parts.push(`Missing test evidence: ${missing.map((task) => task.id).join(", ")}`);
+  if (missingNew.length > 0) parts.push(`Missing new-test evidence: ${missingNew.map((task) => task.id).join(", ")}`);
 
   return { kind: "error", message: parts.join("\n") };
 };

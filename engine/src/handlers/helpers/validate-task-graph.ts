@@ -444,9 +444,10 @@ function readFindingContainers(t: Record<string, unknown>) {
  *      is what stops a salvaged claim being minted twice.
  *   3. Colliding ids are re-minted, because the load boundary now rejects
  *      duplicates and a rejection with no working repair dead-ends the operator.
- *   4. Malformed refutation records lose their unusable audit decision, but a
- *      valid nested finding is returned to the active set before views are
- *      derived. The malformed record is still counted and reported.
+ *   4. Malformed refutation and remediation-resolution records lose their
+ *      unusable audit decision, but a valid nested finding is returned to the
+ *      active set before views are derived. Each malformed record is still
+ *      counted and reported.
  *
  * The views are then re-derived from the result, which is the lockstep
  * `findingsLockstepError` proves at load.
