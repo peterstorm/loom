@@ -85,6 +85,9 @@ export function resolveTaskGraph(sessionId?: string): string | null {
             `resolveTaskGraph: cannot read session pointer ${sessionFile}: ${e instanceof Error ? e.message : String(e)} — refusing local task-graph fallback`,
           );
         }
+        process.stderr.write(
+          `resolveTaskGraph: session pointer ${sessionFile} is absent — falling back to local task graph\n`,
+        );
       }
     }
   }
@@ -1410,6 +1413,9 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     spec_file: obj.spec_file ?? null,
     plan_file: obj.plan_file ?? null,
     tasks: frozenTasks,
+    ...(obj.executing_tasks === undefined
+      ? {}
+      : { executing_tasks: Object.freeze([...(obj.executing_tasks as string[])]) }),
     wave_gates: frozenWaveGates,
     ...(parts.specCheck === undefined ? {} : { spec_check: parts.specCheck }),
     ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),

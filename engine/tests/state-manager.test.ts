@@ -413,6 +413,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
   });
 
   it("recursively copies and freezes nested Task and Wave Gate data", () => {
+    const executingTasks = ["T1"];
     const dependsOn: string[] = [];
     const fileList = ["src/a.ts"];
     const labels = ["original"];
@@ -425,10 +426,16 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
       blocked: false,
       metadata: { notes: gateNotes },
     };
-    const parsed = parseTaskGraph({ ...validGraph, tasks: [rawTask], wave_gates: { "1": rawGate } });
+    const parsed = parseTaskGraph({
+      ...validGraph,
+      executing_tasks: executingTasks,
+      tasks: [rawTask],
+      wave_gates: { "1": rawGate },
+    });
 
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
+    executingTasks.push("T99");
     dependsOn.push("T99");
     fileList.push("src/foreign.ts");
     labels.push("mutated");
@@ -438,10 +445,12 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     const taskMetadata = task.metadata as Readonly<{ labels: readonly string[] }>;
     const gate = parsed.value.wave_gates["1"] as unknown as Record<string, unknown>;
     const gateMetadata = gate.metadata as Readonly<{ notes: readonly string[] }>;
+    expect(parsed.value.executing_tasks).toEqual(["T1"]);
     expect(task.depends_on).toEqual([]);
     expect(task.file_list).toEqual(["src/a.ts"]);
     expect(taskMetadata.labels).toEqual(["original"]);
     expect(gateMetadata.notes).toEqual(["pending"]);
+    expect(Object.isFrozen(parsed.value.executing_tasks)).toBe(true);
     expect(Object.isFrozen(task.depends_on)).toBe(true);
     expect(Object.isFrozen(taskMetadata)).toBe(true);
     expect(Object.isFrozen(taskMetadata.labels)).toBe(true);
@@ -991,6 +1000,21 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
     } finally {
       rmSync(pointer, { force: true });
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an absent session pointer takes the compatibility fallback loudly", () => {
+    const s = `sm-absent-pointer-${process.pid}-${Date.now()}`;
+    const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
+    rmSync(pointer, { force: true });
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      resolveTaskGraph(s);
+      const text = stderrSpy.mock.calls.map((call) => String(call[0])).join("");
+      expect(text).toContain(`session pointer ${pointer} is absent`);
+      expect(text).toContain("falling back to local task graph");
+    } finally {
+      stderrSpy.mockRestore();
     }
   });
 

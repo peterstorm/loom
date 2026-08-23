@@ -1833,7 +1833,12 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
         head_sha: preparation.packets[0].head_sha,
         expected_agents: [...WAVE_REVIEW_AGENTS] as [string, ...string[]],
         prior_finding_ids: [],
-        evidence: acceptedAgents.map((agent) => ({ agent, prior_assessments: [], new_findings: [] })),
+        evidence: acceptedAgents.map((agent) => {
+          const reviewerIndex = WAVE_REVIEW_AGENTS.indexOf(agent as typeof WAVE_REVIEW_AGENTS[number]);
+          const slotId = slots[reviewerIndex + 1];
+          if (reviewerIndex < 0 || slotId === undefined) throw new Error(`missing slot for ${agent}`);
+          return { agent, slot_id: slotId, attempted: 1 as const, prior_assessments: [], new_findings: [] };
+        }),
         slot_authority: testNonEmpty(WAVE_REVIEW_AGENTS.map((agent, index) => ({
           agent,
           slot_id: slots[index + 1],

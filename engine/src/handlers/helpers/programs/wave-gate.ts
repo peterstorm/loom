@@ -549,7 +549,8 @@ export function resolveWaveReviewerTranscript(task: Task, agent: string, bytes: 
 export function reviewerRejectionReason(task: Task, agent: string, bytes: Uint8Array): string | null {
   const resolution = resolveWaveReviewerTranscript(task, agent, bytes);
   if (resolution.kind === "evidence-failed" || resolution.kind === "ignored-stale") return resolution.message;
-  const applied = applyReviewResolution(task, resolution);
+  const slot = task.review_run?.slot_authority?.find((candidate) => candidate.agent === agent);
+  const applied = applyReviewResolution(task, resolution, slot);
   const accepted = applied.review_run?.evidence.some((evidence) => evidence.agent === agent) === true ||
     // A final valid slot closes the roster and `finalizeReviewRun` removes the
     // packet entirely. That terminal transition is acceptance, not rejection.
@@ -1653,7 +1654,8 @@ export async function applyWaveFacadeSubmission(
       );
       return {
         ...locked,
-        tasks: locked.tasks.map((task) => task.id === taskId ? applyReviewResolution(task, resolution) : task),
+        tasks: locked.tasks.map((task) =>
+          task.id === taskId ? applyReviewResolution(task, resolution, slot) : task),
       };
     });
     return { ok: true };

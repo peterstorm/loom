@@ -185,12 +185,26 @@ export interface PriorFindingAssessment {
   readonly reason: string;
 }
 
-/** Evidence staged by one reviewer. It is not activated until the whole run completes. */
-export interface ReviewRunEvidence {
+interface ReviewRunEvidenceBase {
   readonly agent: string;
   readonly prior_assessments: readonly PriorFindingAssessment[];
   readonly new_findings: readonly DraftFinding[];
 }
+
+/** Evidence from a legacy/non-Wave packet that has no engine-issued slot. */
+export type UnboundReviewRunEvidence = Readonly<ReviewRunEvidenceBase & {
+  readonly slot_id?: never;
+  readonly attempted?: never;
+}>;
+
+/** Evidence whose transcript was accepted under one exact engine-issued slot attempt. */
+export type SlotBoundReviewRunEvidence = Readonly<ReviewRunEvidenceBase & {
+  readonly slot_id: string;
+  readonly attempted: 1 | 2;
+}>;
+
+/** Evidence staged by one reviewer. It is not activated until the whole run completes. */
+export type ReviewRunEvidence = UnboundReviewRunEvidence | SlotBoundReviewRunEvidence;
 
 /** Engine-issued semantic-slot authority for one member of an active Review
  * Run. Legacy runs may omit this field, but exact-slot Wave recovery refuses

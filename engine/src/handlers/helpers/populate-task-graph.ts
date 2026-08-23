@@ -156,8 +156,9 @@ const handler: HookHandler = async (stdin, args) => {
       const repair = fixFull(decompose as unknown as Record<string, unknown>);
       for (const note of repair.notes) process.stderr.write(`  ${note}\n`);
       decompose = JSON.parse(repair.json) as DecomposeInput;
-      // fixFull only defaults missing optional fields — structural errors
-      // (unknown agent, wave gaps, self-dependency) are unfixable. Re-validate
+      // fixFull normalizes repairable graph/task fields and findings/review
+      // state; structural errors (unknown agent, wave gaps, self-dependency)
+      // remain unfixable. Re-validate
       // so they fail loudly instead of reaching the persisted graph under a
       // misleading "Auto-fixed" banner.
       const revalidation = validateFull(decompose as unknown as Record<string, unknown>, "decompose-payload");

@@ -293,13 +293,17 @@ export async function applyFailedPiResult(args: Readonly<{
     return outcome([`loom(pi): ${failure} — marking spec-check evidence_capture_failed`]);
   }
 
-  if (IMPL_AGENTS.has(agentType) && !reservedSlot) {
-    const failedTaskId = extractTaskId(result.task ?? "");
+  if (IMPL_AGENTS.has(agentType)) {
+    const failedTaskId = reservedSlot?.taskId ?? extractTaskId(result.task ?? "");
     if (failedTaskId !== null) {
+      // The dispatcher normally settled a reserved failure through
+      // finalizeReservedImplementations first. This idempotent release keeps
+      // the applier correct in isolation without overwriting that richer proof.
       await store.update((state) => ({
         ...state,
         executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== failedTaskId),
       }));
+      return outcome([`loom(pi): ${failure} — released ${failedTaskId}; completion evidence ignored`]);
     }
   }
   return outcome([`loom(pi): ${failure} — completion evidence ignored`]);
@@ -677,7 +681,6 @@ function observeNewTestRepository(
 type AcceptedImplementationResolutionArgs = Readonly<{
   store: TaskGraphStore;
   repository: RepositoryProbe;
-  task: LoomTask;
   taskId: string;
   filesModified: readonly string[];
   testEvidence: TestEvidence;
@@ -689,26 +692,38 @@ async function applyAcceptedImplementationResolution(
 ): Promise<readonly string[]> {
   const repository = observeNewTestRepository(args.repository, args.taskId);
   const log = repository.kind === "available" ? [] : [repository.diagnostic];
-  const comparison = compareAttemptBaseline(args.repository.root(), args.task, {
-    kind: "repository-or-declared",
-    extraModifiedPaths: args.filesModified,
-  });
-  if (comparison.failure !== null) {
-    log.push(`loom(pi): cannot compare declared-artifact baseline for ${args.taskId}: ${comparison.failure} — ` +
-      `invalidating stale evidence`);
-  }
-
+  const root = args.repository.root();
   let skippedExistingVerdict = false;
   await args.store.update((state) => {
     const currentTarget = state.tasks.find((candidate) => candidate.id === args.taskId);
-    const cumulativeFiles = cumulativeModifiedPaths(currentTarget?.files_modified, args.filesModified);
+    if (currentTarget === undefined || currentTarget.status === "completed") {
+      const applied = applyUntrustedStopResolution(state, args.taskId, {
+        taskCompleted: true,
+        testResult: implementationTestResult(args.structuredTestEvidence, args.testEvidence),
+        testEvidence: args.testEvidence.evidence,
+        filesModified: args.filesModified,
+        changedDeclaredArtifacts: [],
+        bytesChangedSinceAttempt: false,
+        newTestsWritten: false,
+        newTestEvidence: "",
+      });
+      skippedExistingVerdict = applied.skipped;
+      return applied.state;
+    }
+    const comparison = compareAttemptBaseline(root, currentTarget, {
+      kind: "repository-or-declared",
+      extraModifiedPaths: args.filesModified,
+    });
+    if (comparison.failure !== null) {
+      log.push(`loom(pi): cannot compare declared-artifact baseline for ${args.taskId}: ${comparison.failure} — ` +
+        `invalidating stale evidence`);
+    }
+    const cumulativeFiles = cumulativeModifiedPaths(currentTarget.files_modified, args.filesModified);
     const newTestEvidence = repository.kind === "available"
       ? collectNewTestEvidence(
           cumulativeFiles,
-          currentTarget === undefined
-            ? { kind: "required" }
-            : taskVerificationPolicy(currentTarget).newTests,
-          currentTarget?.start_sha,
+          taskVerificationPolicy(currentTarget).newTests,
+          currentTarget.start_sha,
         )
       : { written: false, evidence: "" };
     const applied = applyUntrustedStopResolution(state, args.taskId, {
@@ -726,8 +741,7 @@ async function applyAcceptedImplementationResolution(
   });
 
   if (skippedExistingVerdict) {
-    log.push(`loom(pi): ${args.taskId} is completed or carries a trusted verdict this untrusted resolution cannot supersede — ` +
-      `leaving it untouched`);
+    log.push(`loom(pi): ${args.taskId} is completed or missing — leaving task evidence untouched`);
   }
   return log;
 }
@@ -755,7 +769,7 @@ export async function applyImplementationPiResult(args: Readonly<{
   const log = [...binding.log];
   const task = args.store.load().tasks.find((candidate) => candidate.id === binding.taskId);
 
-  if (!task || task.status === "completed") {
+  if (task?.status === "completed") {
     await clearExecutingTask(args.store, binding.taskId);
     log.push(`loom(pi): ${binding.taskId} stopped; preserved completed/missing state and cleared executing_tasks`);
     return outcome(log);
@@ -777,7 +791,6 @@ export async function applyImplementationPiResult(args: Readonly<{
 
   log.push(...await applyAcceptedImplementationResolution({
     ...args,
-    task,
     taskId: binding.taskId,
     filesModified: modifiedPaths.filesModified,
     testEvidence: transcript.testEvidence,

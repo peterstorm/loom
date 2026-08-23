@@ -116,6 +116,19 @@ function fallbackEvidenceLabel(
   return "transcript-regex (fallback)";
 }
 
+function untrustedTranscriptEvidence(label: string, bashOutput: string): ResolvedTestEvidence {
+  const transcript = extractTestEvidence(bashOutput);
+  return transcript.passed
+    ? {
+        result: { verdict: "untrusted", passed: true, label, provenance: "unverified" },
+        evidence: `${label}: ${transcript.evidence}`,
+      }
+    : {
+        result: { verdict: "untrusted", passed: false, label, provenance: "unverified" },
+        evidence: "",
+      };
+}
+
 export function resolveTestEvidence(
   ledgerEvents: readonly Evidence[],
   bashOutput: string,
@@ -123,15 +136,10 @@ export function resolveTestEvidence(
   snapshotFailed: boolean = false,
 ): ResolvedTestEvidence {
   if (snapshotFailed) {
-    const label = "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)";
-    const fromTranscript = extractTestEvidence(bashOutput);
-    if (!fromTranscript.passed) {
-      return { result: { verdict: "untrusted", passed: false, label, provenance: "unverified" }, evidence: "" };
-    }
-    return {
-      result: { verdict: "untrusted", passed: true, label, provenance: "unverified" },
-      evidence: `${label}: ${fromTranscript.evidence}`,
-    };
+    return untrustedTranscriptEvidence(
+      "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)",
+      bashOutput,
+    );
   }
   // Judge TestRuns keeping their POSITION in the ordered ledger, so later
   // non-TestRun events (FileWrite) can be related to the deciding run.
@@ -183,14 +191,7 @@ export function resolveTestEvidence(
     machineBound,
     ledgerEvents.length === 0,
   );
-  const fallback = extractTestEvidence(bashOutput);
-  if (!fallback.passed) {
-    return { result: { verdict: "untrusted", passed: false, label, provenance: "unverified" }, evidence: "" };
-  }
-  return {
-    result: { verdict: "untrusted", passed: true, label, provenance: "unverified" },
-    evidence: `${label}: ${fallback.evidence}`,
-  };
+  return untrustedTranscriptEvidence(label, bashOutput);
 }
 
 /**
@@ -389,9 +390,9 @@ export function applyUntrustedStopResolution(
  * callers inlined): a wave with NO tasks counts as complete.
  */
 export function isWaveComplete(state: TaskGraph, wave: number): boolean {
-  return !state.tasks
-    .filter((t) => t.wave === wave)
-    .some((t) => t.status !== "implemented" && t.status !== "completed");
+  return state.tasks
+    .filter((task) => task.wave === wave)
+    .every((task) => task.status === "implemented" || task.status === "completed");
 }
 
 // --- Pure: determine new test evidence from diff ---
@@ -683,30 +684,6 @@ export const runUpdateTaskStatus = async (
     };
   }
 
-  // The compact repository boundary detects declared and undeclared writes,
-  // including paths that became clean again; a missing legacy boundary falls
-  // back to the declared-artifact baseline. Shared with the three Pi call sites
-  // through `compareAttemptBaseline` — this was a fourth hand-written copy of
-  // the same comparison, and four copies of one rule are four chances to
-  // disagree about what "the bytes changed" means.
-  const comparison = compareAttemptBaseline(
-    git.repositoryRoot() ?? process.cwd(),
-    task,
-    { kind: "repository-or-declared", extraModifiedPaths: filesModified },
-  );
-  const changedDeclaredArtifacts = comparison.changedDeclaredArtifacts;
-  const bytesChangedSinceAttempt = comparison.bytesChangedSinceAttempt;
-  if (comparison.failure !== null) {
-    await mgr.update((s) => ({
-      ...s,
-      executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
-    }));
-    return {
-      kind: "error",
-      message: `update-task-status: cannot compare declared-artifact baseline for ${taskId}: ${comparison.failure}`,
-    };
-  }
-
   // Pre-refactor graphs carried `tests_passed` on the task (replaced by
   // `test_result`, no compat read — unshipped branch). Explain the
   // otherwise-mystifying "missing evidence" once, where we touch the task.
@@ -784,9 +761,9 @@ export const runUpdateTaskStatus = async (
     }
   }
 
-  // Section 3: Atomic state write. Cumulative attribution and new-test
-  // evidence are derived from the locked Task snapshot below, not the stale
-  // pre-lock task read; the preserve-evidence guards also run INSIDE
+  // Section 3: Atomic state write. Attempt-baseline comparison, cumulative
+  // attribution, and new-test evidence are derived from the locked Task below,
+  // never the stale pre-lock read; the preserve-evidence guards also run INSIDE
   // the locked update (a pre-lock read can be outdated by a concurrent
   // writer before this write lands — TOCTOU) and are TRUST-aware ON BOTH
   // SIDES: an existing trusted failure is preserved against an UNTRUSTED
@@ -801,6 +778,8 @@ export const runUpdateTaskStatus = async (
   // as missing evidence and store-test-evidence also refuses trusted).
   // A completed task is never reopened, at any trust level.
   let skippedExistingVerdict = false;
+  let comparisonFailure: string | null = null;
+  const repositoryRoot = git.repositoryRoot() ?? process.cwd();
   await mgr.update((s) => {
     const target = s.tasks.find((t) => t.id === taskId);
     const verdict = target?.test_result?.verdict;
@@ -816,14 +795,28 @@ export const runUpdateTaskStatus = async (
       };
     }
 
-    const codeChanged = bytesChangedSinceAttempt;
+    // This synchronous repository observation runs under the same StateManager
+    // lock as settlement, so it is derived from this exact attempt authority.
+    const comparison = compareAttemptBaseline(
+      repositoryRoot,
+      target,
+      { kind: "repository-or-declared", extraModifiedPaths: filesModified },
+    );
+    if (comparison.failure !== null) {
+      comparisonFailure = comparison.failure;
+      return {
+        ...s,
+        executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
+      };
+    }
+    const codeChanged = comparison.bytesChangedSinceAttempt;
     const preserveExistingTrusted = target.revalidation_required !== true && !incomingTrusted && (
       verdict === "trusted-fail" || (verdict === "trusted-pass" && !codeChanged)
     );
     const resolvedTestResult = preserveExistingTrusted ? target.test_result : testEvidence.result;
     const resolvedTestEvidence = preserveExistingTrusted ? target.test_evidence : testEvidence.evidence;
     const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, filesModified);
-    const proofArtifactsChanged = attributedChangedArtifacts(changedDeclaredArtifacts, cumulativeFiles);
+    const proofArtifactsChanged = attributedChangedArtifacts(comparison.changedDeclaredArtifacts, cumulativeFiles);
     const verificationPolicy = taskVerificationPolicy(target);
     const currentNewTestEvidence = collectNewTestEvidence(
       cumulativeFiles,
@@ -863,6 +856,13 @@ export const runUpdateTaskStatus = async (
       }),
     );
   });
+
+  if (comparisonFailure !== null) {
+    return {
+      kind: "error",
+      message: `update-task-status: cannot compare declared-artifact baseline for ${taskId}: ${comparisonFailure}`,
+    };
+  }
 
   if (skippedExistingVerdict) {
     return passthroughDiagnostic(`update-task-status: ${taskId} is completed or missing — leaving task evidence untouched\n`);

@@ -1962,7 +1962,10 @@ describe("orchestration CLI", () => {
       wave_review_epoch: { runId: string; batchEpoch: string };
       tasks: readonly (Record<string, unknown> & {
         review_generation: number;
-        review_run: Record<string, unknown> & { packet_id: string };
+        review_run: Record<string, unknown> & {
+          packet_id: string;
+          slot_authority: readonly { agent: string; slot_id: string; attempted: 1 | 2 }[];
+        };
       })[];
     };
     const oldPacketId = startedGraph.tasks[0]!.review_run.packet_id;
@@ -1971,19 +1974,25 @@ describe("orchestration CLI", () => {
     chmodSync(statePath, 0o644);
     writeFileSync(statePath, JSON.stringify({
       ...startedGraph,
-      tasks: startedGraph.tasks.map((task) => ({
-        ...task,
-        review_run: {
-          ...task.review_run,
-          evidence: [{
-            agent: "code-reviewer",
-            prior_assessments: [{
-              finding_id: activeFinding.id, verdict: "still_present", reason: "still present in partial evidence",
+      tasks: startedGraph.tasks.map((task) => {
+        const slot = task.review_run.slot_authority.find(({ agent }) => agent === "code-reviewer");
+        if (slot === undefined) throw new Error("orphan recovery fixture lacks code-reviewer slot authority");
+        return {
+          ...task,
+          review_run: {
+            ...task.review_run,
+            evidence: [{
+              agent: "code-reviewer",
+              slot_id: slot.slot_id,
+              attempted: slot.attempted,
+              prior_assessments: [{
+                finding_id: activeFinding.id, verdict: "still_present", reason: "still present in partial evidence",
+              }],
+              new_findings: [{ severity: "advisory", file: "src/x.ts", line: 4, claim: acceptedPartialClaim }],
             }],
-            new_findings: [{ severity: "advisory", file: "src/x.ts", line: 4, claim: acceptedPartialClaim }],
-          }],
-        },
-      })),
+          },
+        };
+      }),
       spec_check: {
         wave: 1, run_at: "stale", verdict: "PASSED", critical_count: 0, high_count: 0,
         critical_findings: [], high_findings: [], medium_findings: [],

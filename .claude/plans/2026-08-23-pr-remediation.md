@@ -173,3 +173,67 @@ The panel refuted no critical findings. Reproduction, intent, and blast-radius l
 5. `git diff --check`.
 6. Required full command: `env -u PI_CODING_AGENT npm test`.
 7. Registered remediation audit/install through the Orchestration Façade, then commit and push.
+
+---
+
+# Round 4: post-remediation full-branch review
+
+## Authority
+
+- Branch: `feat/deterministic-task-execution`
+- Review scope: exact 41-path branch delta `30241fd..97e3d33`, frozen in the authoritative result
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260823T174724Z-deterministic-policy-rereview-4`
+- Review result digest: `530a7c92a0bc268ed7d0869cb12fc8df537201bae49eb5c2395fb4cd4746a1c9`
+- Surviving criticals: 7
+- Refuted criticals: 0
+
+## Mandatory critical remediation
+
+1. `pi/subagent-result.ts`: make failed implementation settlement defensively release the trusted Task binding even when a reservation is supplied. The production dispatcher already finalizes reserved failures first; the applier remains idempotent and must not overwrite that richer failure settlement.
+2. `engine/src/state-manager.ts`: diagnose an absent session TaskGraph pointer before taking the intentional local compatibility fallback; preserve the existing refusal for non-absence read failures.
+3. `engine/src/types.ts` and the findings/Wave submission core: represent exact-slot review evidence as a discriminated stored shape carrying `slot_id` and `attempted`; require and match it whenever a Review Run has engine-owned slot authority while preserving an explicit legacy/unbound shape for non-Wave runs.
+4. `engine/src/handlers/helpers/validate-task-graph.ts`: narrow the `findingsErrorsOf` comment to the findings aggregate it actually mirrors rather than claiming all `taskUnionError` rules.
+5. `engine/src/handlers/helpers/validate-task-graph.ts`: correct the findings-repair ordering documentation to match the implemented container recovery, collision repair, and salvage sequence.
+6. `engine/src/handlers/helpers/validate-task-graph.ts`: correct `repairReviewRecord` documentation to say blank/duplicate failure entries clear the inconsistent review record fail-closed.
+7. Pi and Claude implementation completion shells: compute attempt-baseline comparison from the current Task inside the locked `StateManager.update` transition so proof and review invalidation cannot consume observations derived from a stale Task snapshot.
+
+## Advisory dispositions
+
+### Accepted
+
+1. Add a focused `messages: null` Pi regression proving malformed transcript evidence fails closed.
+2. Install a frozen defensive copy of `executing_tasks` at the TaskGraph parse boundary.
+3. Correct `populate-task-graph` documentation to describe `fixFull`'s complete normalization/repair role.
+4. Reuse one helper for untrusted transcript fallback evidence in `resolveTestEvidence`.
+5. Express Wave completion as `every` over Wave Tasks, preserving vacuous completion while removing the double negative.
+6. Consolidate duplicate dropped-refutation/dropped-resolution data-loss note builders.
+
+### Deferred
+
+1. Move shared completion policy out of the Claude SubagentStop module into the Slice 3 engine-owned Implementation Completion Oracle. Reason: that planned interface migration must land atomically with semantic attempt authority and cross-harness settlement rather than creating another transitional seam in review remediation.
+
+### Dismissed
+
+None.
+
+## Refuted-finding audit
+
+The canonical panel refuted no critical finding. Intent lenses disputed the reserved-failure, absent-pointer, exact-slot-evidence, and findings-comment claims, but each reached the two-of-three survival threshold. Remediation therefore applies bounded defensive/type/documentation fixes without weakening the existing production dispatcher settlement, local compatibility fallback, or Wave submission authority checks.
+
+## Support paths outside frozen review scope
+
+- `engine/src/core/findings.ts`
+- `engine/src/core/review-output.ts`
+- `engine/src/handlers/helpers/programs/wave-gate.ts`
+- `engine/tests/core/review-remediation-lifecycle.test.ts`
+- `engine/tests/handlers/pi-stop-toctou.test.ts`
+- `engine/tests/pi-extension-review-events.test.ts`
+
+## Validation
+
+1. Focused Vitest suites for Pi result settlement/parsing, TaskGraph session resolution/immutability, exact-slot Review Run evidence, Wave submission recovery, findings repair, and Claude/Pi TOCTOU settlement.
+2. `npm run typecheck` including unused-code checks.
+3. Full-tier Loom lint over every changed production TypeScript file.
+4. `git diff --check`.
+5. Required full command: `env -u PI_CODING_AGENT npm test`.
+6. Registered remediation audit/install through the Orchestration Façade, then commit and push.

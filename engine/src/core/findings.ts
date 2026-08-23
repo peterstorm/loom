@@ -796,6 +796,22 @@ export function reviewRunError(
       return `${evidenceLabel}.agent must be expected by this run`;
     }
     evidenceAgents.push(evidence.agent);
+    const slots = run.slot_authority;
+    if (slots === undefined) {
+      if (evidence.slot_id !== undefined || evidence.attempted !== undefined) {
+        return `${evidenceLabel} cannot carry slot authority for an unbound Review Run`;
+      }
+    } else {
+      if (!Array.isArray(slots)) return `${label}.slot_authority must be an array when present`;
+      const slot = slots.find((candidate) =>
+        typeof candidate === "object" && candidate !== null && !Array.isArray(candidate) &&
+        (candidate as Record<string, unknown>).agent === evidence.agent);
+      if (slot === undefined) return `${evidenceLabel} has no matching engine-issued Review Run slot`;
+      const authority = slot as Record<string, unknown>;
+      if (evidence.slot_id !== authority.slot_id || evidence.attempted !== authority.attempted) {
+        return `${evidenceLabel} must bind the exact slot_id/attempted authority for ${evidence.agent}`;
+      }
+    }
     if (!Array.isArray(evidence.prior_assessments)) return `${evidenceLabel}.prior_assessments must be an array`;
     const assessments = evidence.prior_assessments.map(parseStoredAssessment);
     if (assessments.some((assessment) => assessment === null)) return `${evidenceLabel}.prior_assessments is malformed`;
@@ -1281,9 +1297,11 @@ export function preserveAcceptedReviewRunFindings(task: Task): Task {
   };
 }
 
-function finalizeReviewRun(task: Task, run: ReviewRun): Task {
-  const prior = new Map((task.findings ?? []).map((finding) => [finding.id, finding]));
-  const resolvedIds = new Set(run.prior_finding_ids.filter((id) => {
+function resolvedPriorFindingIds(
+  run: ReviewRun,
+  prior: ReadonlyMap<string, Finding>,
+): ReadonlySet<string> {
+  return new Set(run.prior_finding_ids.filter((id) => {
     const finding = prior.get(id);
     return finding !== undefined &&
       (finding.review_generation === undefined || run.generation > finding.review_generation) &&
@@ -1292,19 +1310,22 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
           "resolved_by_remediation"
       );
   }));
-  const retired: ResolvedFinding[] = run.prior_finding_ids.flatMap((id) => {
+}
+
+function retiredPriorFindings(
+  run: ReviewRun,
+  prior: ReadonlyMap<string, Finding>,
+  resolvedIds: ReadonlySet<string>,
+): readonly ResolvedFinding[] {
+  return run.prior_finding_ids.flatMap((id) => {
     const finding = prior.get(id);
     if (finding === undefined || !resolvedIds.has(id)) return [];
     const assessments = run.expected_agents.map((agent) => {
       const evidence = run.evidence.find((candidate) => candidate.agent === agent)!;
-      return {
-        ...evidence.prior_assessments.find((assessment) => assessment.finding_id === id)!,
-        agent,
-      };
+      return { ...evidence.prior_assessments.find((assessment) => assessment.finding_id === id)!, agent };
     });
     const [firstAssessment, ...remainingAssessments] = assessments;
-    if (firstAssessment === undefined) return [];
-    return [{
+    return firstAssessment === undefined ? [] : [{
       finding,
       resolution: {
         kind: "resolved_by_remediation" as const,
@@ -1316,8 +1337,16 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
       },
     }];
   });
-  const resolved = [...(task.resolved_findings ?? []), ...retired];
+}
+
+function finalizeReviewRun(task: Task, run: ReviewRun): Task {
   const priorFindings = task.findings ?? [];
+  const prior = new Map(priorFindings.map((finding) => [finding.id, finding]));
+  const resolvedIds = resolvedPriorFindingIds(run, prior);
+  const resolved = [
+    ...(task.resolved_findings ?? []),
+    ...retiredPriorFindings(run, prior, resolvedIds),
+  ];
   const active = appendAttributedNewFindings(
     task,
     run,
@@ -1366,6 +1395,17 @@ export function recordReviewRunEvidence(
   }
   if (run.evidence.some((stored) => stored.agent === evidence.agent)) {
     return { ok: false, error: `${evidence.agent} already supplied evidence for review packet ${packetId}` };
+  }
+  const slot = run.slot_authority?.find((candidate) => candidate.agent === evidence.agent);
+  if (slot === undefined) {
+    if (evidence.slot_id !== undefined || evidence.attempted !== undefined) {
+      return { ok: false, error: `${evidence.agent} supplied slot authority to an unbound review packet` };
+    }
+  } else if (evidence.slot_id !== slot.slot_id || evidence.attempted !== slot.attempted) {
+    return {
+      ok: false,
+      error: `${evidence.agent} evidence does not bind exact slot ${slot.slot_id} attempt ${slot.attempted}`,
+    };
   }
   const assessmentIds = evidence.prior_assessments.map((assessment) => assessment.finding_id);
   if (assessmentIds.length !== run.prior_finding_ids.length ||

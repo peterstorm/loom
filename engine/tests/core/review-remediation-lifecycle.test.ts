@@ -483,6 +483,44 @@ describe("packet-bound remediation review runs", () => {
     expect(reviewResolutionLog("T1", resolution, duplicateApplication, false)).not.toContain("staged");
   });
 
+  it("requires exact slot-attempt evidence for an engine-bound Review Run", () => {
+    const task = start();
+    const slots = [
+      { agent: AGENTS[0], slot_id: "wave-slot:code-reviewer", attempted: 2 as const },
+      { agent: AGENTS[1], slot_id: "wave-slot:silent-failure-hunter", attempted: 1 as const },
+    ] as const;
+    const bound: Task = {
+      ...task,
+      review_run: { ...task.review_run!, slot_authority: slots },
+    };
+    const base = {
+      agent: AGENTS[0],
+      prior_assessments: bound.review_run!.prior_finding_ids.map((finding_id) => ({
+        finding_id,
+        verdict: "still_present" as const,
+        reason: "still present",
+      })),
+      new_findings: [],
+    };
+
+    expect(recordReviewRunEvidence(bound, PACKET, 1, base)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("exact slot"),
+    });
+    expect(recordReviewRunEvidence(bound, PACKET, 1, {
+      ...base,
+      slot_id: slots[0].slot_id,
+      attempted: 1,
+    })).toMatchObject({ ok: false });
+    const accepted = recordReviewRunEvidence(bound, PACKET, 1, {
+      ...base,
+      slot_id: slots[0].slot_id,
+      attempted: slots[0].attempted,
+    });
+    expect(accepted.ok).toBe(true);
+    if (accepted.ok) expect(parseTaskGraph(graph(accepted.task)).ok).toBe(true);
+  });
+
   it("opens a new generation on implementation writes without deleting audit or active findings", () => {
     const task = start();
     const invalidated = invalidateTaskReview(task);

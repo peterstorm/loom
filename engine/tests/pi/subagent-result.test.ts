@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -121,6 +122,25 @@ describe("parsePiSubagentResults", () => {
       ok: true,
       result: { agent: "code-reviewer" },
     });
+  });
+
+  it("rejects null transcript evidence rather than accepting it as empty", async () => {
+    const [parsed] = parsePiSubagentResults([
+      { agent: "code-reviewer", task: "Task: T1", exitCode: 0, messages: null },
+    ]);
+
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed?.ok) {
+      const store = fakeStore(graph());
+      await applyReviewPiResult({
+        store,
+        agentType: parsed.result.agent,
+        result: parsed.result,
+        reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+        parentPrompt: "",
+      });
+      expect(store.current().tasks[0]!.review_status).toBe("evidence_capture_failed");
+    }
   });
 
   it("retains exactly one positional entry for every unknown result", () => {
@@ -246,6 +266,24 @@ describe("applyFailedPiResult", () => {
 
     expect(store.current().tasks[0]!.review_status).toBe("pending");
     expect(applied.log.join("\n")).toContain("review evidence NOT stored");
+  });
+
+  it("idempotently releases the reserved implementation task without replacing prior settlement", async () => {
+    const store = fakeStore(graph({
+      executing_tasks: ["T1", "T2"],
+      tasks: [{ ...graph().tasks[0]!, failure_reason: "already settled" }],
+    }));
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", exitCode: 1 }),
+      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      now: NOW,
+    });
+
+    expect(store.current().executing_tasks).toEqual(["T2"]);
+    expect(store.current().tasks[0]!.failure_reason).toBe("already settled");
+    expect(applied.log.join("\n")).toContain("released T1");
   });
 
   it("marks a failed spec-check as evidence_capture_failed", async () => {
@@ -463,6 +501,73 @@ describe("applyImplementationPiResult", () => {
     // Fail-closed: an uncomparable baseline is treated as "bytes moved", so the
     // stale evidence is invalidated rather than preserved.
     expect(store.current().tasks[0]!.status).not.toBe("completed");
+  });
+
+  it("compares attempt bytes against the locked current Task, not the pre-lock snapshot", async () => {
+    const repositoryRoot = mkdtempSync(join(tmpdir(), "loom-pi-locked-baseline-"));
+    const artifact = "engine/src/x.ts";
+    mkdirSync(join(repositoryRoot, "engine", "src"), { recursive: true });
+    writeFileSync(join(repositoryRoot, artifact), "current bytes\n");
+    const digest = (text: string) => createHash("sha256").update(text).digest("hex");
+    const initial = implementationGraph({
+      file_list: [artifact],
+      artifact_baseline: [{ artifact, snapshot: { kind: "sha256", digest: digest("old bytes\n") } }],
+      attempt_artifact_baseline: [{ artifact, snapshot: { kind: "sha256", digest: digest("current bytes\n") } }],
+      verification_policy: {
+        regression: { kind: "required" },
+        new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+      },
+      status: "implemented",
+      test_result: { verdict: "trusted-pass" },
+      review_status: "passed",
+    });
+    let current = initial;
+    let loads = 0;
+    const store: TaskGraphStore & { current(): TaskGraph } = {
+      load: () => {
+        loads += 1;
+        return initial;
+      },
+      update: async (mutate) => {
+        const locked: TaskGraph = {
+          ...initial,
+          tasks: initial.tasks.map((task) => task.id === "T1"
+            ? {
+                ...task,
+                attempt_artifact_baseline: [{
+                  artifact,
+                  snapshot: { kind: "sha256" as const, digest: digest("old bytes\n") },
+                }],
+              }
+            : task),
+        };
+        current = mutate(locked);
+      },
+      current: () => current,
+    };
+
+    try {
+      await applyImplementationPiResult({
+        store,
+        repository: repositoryAt(repositoryRoot),
+        agentType: "code-implementer-agent",
+        result: result({
+          agent: "code-implementer-agent",
+          messages: assistantText("I changed the code but did not run tests."),
+        }),
+        reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+        parentPrompt: "",
+      });
+
+      expect(loads).toBeGreaterThan(0);
+      expect(store.current().tasks[0]).toMatchObject({
+        status: "pending",
+        review_status: "pending",
+        test_result: { verdict: "untrusted", passed: false },
+      });
+    } finally {
+      rmSync(repositoryRoot, { recursive: true, force: true });
+    }
   });
 
   /**

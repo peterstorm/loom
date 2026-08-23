@@ -42,6 +42,7 @@ import {
   type FindingSeverity,
   type PriorFindingAssessment,
   type ReviewRun,
+  type ReviewRunSlotAuthority,
   type ReviewStatus,
   type Task,
 } from "../types";
@@ -376,6 +377,38 @@ function alignStructuredSeverity(
  * `CRITICAL_COUNT` always comes from the markers: the count is the reviewer's
  * own tally and is what distinguishes "zero findings" from "the parse failed".
  */
+function markerClaimsUnnamedByBlock(
+  scraped: ParsedFindings,
+  structured: readonly DraftFinding[],
+): readonly DraftFinding[] {
+  const criticalPool = structured.filter(({ severity }) => severity === "critical").map(({ claim }) => claim);
+  const advisoryPool = structured.filter(({ severity }) => severity === "advisory").map(({ claim }) => claim);
+  return draftsFromClaims(
+    unconsumedClaims(scraped.critical, criticalPool),
+    unconsumedClaims(scraped.advisory, advisoryPool),
+  );
+}
+
+function supersededBlockFindings(
+  scraped: ParsedFindings,
+  structured: readonly DraftFinding[],
+  counts: Pick<ParsedFindings, "criticalCount" | "advisoryCount">,
+): ParsedFindings {
+  // The block lost the cardinal comparison, but claims found only there remain
+  // evidence. Consume marker claims as multisets, separately by severity.
+  const criticalMarkers = [...scraped.critical];
+  const advisoryMarkers = [...scraped.advisory];
+  const recovered = structured.filter((draft) => !consumeClaim(
+    draft.severity === "critical" ? criticalMarkers : advisoryMarkers,
+    draft.claim,
+  ));
+  return makeParsedFindings({
+    drafts: [...scraped.drafts, ...recovered],
+    ...counts,
+    blockStatus: { kind: "superseded", carriedOver: recovered.length },
+  });
+}
+
 function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
   const counts = { criticalCount: scraped.criticalCount, advisoryCount: scraped.advisoryCount };
   const parsedBlock = parseFindingsBlock(block);
@@ -393,55 +426,10 @@ function chooseSource(scraped: ParsedFindings, block: string): ParsedFindings {
     fromBlock.critical.length >= claimedCritical &&
     fromBlock.advisory.length >= scraped.advisory.length;
 
-  // Multiset, not set: two reviewers can legitimately word a claim identically,
-  // and a block naming it once when the markers named it twice has dropped one.
-  // Both sides are `collapseWhitespace`-normalized (every claim reaching either
-  // view is built by makeDraftFinding), so comparison by value is exact.
-  //
-  // After alignment, severity is authoritative identity too. Separate pools
-  // prevent a structured advisory from consuming a same-text CRITICAL marker
-  // merely because critical carry-over is evaluated first. A block entry that
-  // mislabeled its only marker was already moved to that marker's severity by
-  // alignStructuredSeverity, so separate pools do not reintroduce duplicates.
-  const criticalBlockPool = structured
-    .filter((draft) => draft.severity === "critical")
-    .map((draft) => draft.claim);
-  const advisoryBlockPool = structured
-    .filter((draft) => draft.severity === "advisory")
-    .map((draft) => draft.claim);
-  const unnamedByBlock = draftsFromClaims(
-    unconsumedClaims(scraped.critical, criticalBlockPool),
-    unconsumedClaims(scraped.advisory, advisoryBlockPool),
-  );
-
-  if (!accountsForAll) {
-    // The block LOST, and losing must not mean being deleted. Returning the
-    // scraped drafts alone threw away every claim the block named that the
-    // marker lines did not — and a reviewer that emits `CRITICAL_COUNT` plus a
-    // block but no `CRITICAL:` lines has an empty scraped set, so the whole
-    // finding text vanished and `reconcileFindings` replaced real, located
-    // claims with a synthetic "N findings not captured" no verifier can
-    // adjudicate. The union is the same rule the winning side already applies,
-    // in the other direction: the markers lead (they set the count the block
-    // failed to meet), and the block's unnamed entries follow with their
-    // file/line intact.
-    // Consumed multiset-wise, like `removeOnce`: a block naming a claim twice
-    // against markers naming it once contributes exactly one carry-over. One
-    // pool per severity for the same reason as the winning side. Alignment has
-    // already moved a mislabeled block entry onto its marker's severity, while
-    // genuinely separate same-text critical/advisory markers retain two slots.
-    const criticalMarkerPool = [...scraped.critical];
-    const advisoryMarkerPool = [...scraped.advisory];
-    const recovered = structured.filter((draft) => !consumeClaim(
-      draft.severity === "critical" ? criticalMarkerPool : advisoryMarkerPool,
-      draft.claim,
-    ));
-    return makeParsedFindings({
-      drafts: [...scraped.drafts, ...recovered],
-      ...counts,
-      blockStatus: { kind: "superseded", carriedOver: recovered.length },
-    });
-  }
+  // Compare by normalized claim as a severity-partitioned multiset: duplicate
+  // wording and same-text cross-severity findings remain distinct evidence.
+  const unnamedByBlock = markerClaimsUnnamedByBlock(scraped, structured);
+  if (!accountsForAll) return supersededBlockFindings(scraped, structured, counts);
 
   return unnamedByBlock.length === 0
     ? fromBlock
@@ -735,7 +723,11 @@ export function invalidateTaskReview(task: Task): Task {
 }
 
 /** Pure: the complete task transform a resolution implies. */
-export function applyReviewResolution(task: Task, resolution: ReviewResolution): Task {
+export function applyReviewResolution(
+  task: Task,
+  resolution: ReviewResolution,
+  slotAuthority?: ReviewRunSlotAuthority,
+): Task {
   return match(resolution)
     .with({ kind: "ignored-stale" }, (): Task => task)
     .with({ kind: "evidence-failed" }, (r): Task => {
@@ -759,15 +751,23 @@ export function applyReviewResolution(task: Task, resolution: ReviewResolution):
     })
     .with({ kind: "findings" }, (r): Task => mergeFindings(task, r.findings, r.agent))
     .with({ kind: "bound-findings" }, (r): Task => {
+      const baseEvidence = {
+        agent: r.agent,
+        prior_assessments: r.bound.priorAssessments,
+        new_findings: r.findings.drafts,
+      };
+      const evidence = slotAuthority === undefined
+        ? baseEvidence
+        : {
+            ...baseEvidence,
+            slot_id: slotAuthority.slot_id,
+            attempted: slotAuthority.attempted,
+          };
       const transition = recordReviewRunEvidence(
         task,
         r.bound.packetId,
         r.bound.generation,
-        {
-          agent: r.agent,
-          prior_assessments: r.bound.priorAssessments,
-          new_findings: r.findings.drafts,
-        },
+        evidence,
       );
       if (transition.ok) return transition.task;
 

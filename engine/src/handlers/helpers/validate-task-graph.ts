@@ -86,10 +86,11 @@ function fixMinimal(json: Record<string, unknown>): string {
 /**
  * Every findings-aggregate rule the load boundary applies to one task.
  *
- * Exported shape of the agreement: `taskUnionError` (state-manager) runs exactly
- * these, in this order, and `--fix` repairs exactly what they reject. A rule
- * added to one and not the other is the drift that let the operator's validator
- * disagree with the loader.
+ * Shared shape of the findings-aggregate agreement: `taskUnionError`
+ * (state-manager) runs these same aggregate checks before its additional
+ * engine-owned slot-authority checks, and `--fix` repairs what these reject.
+ * A findings rule added to one and not the other is the drift that let the
+ * operator's validator disagree with the loader.
  */
 function findingsErrorsOf(task: Record<string, unknown>, label: string): string[] {
   const errors: string[] = [];
@@ -431,23 +432,16 @@ function readFindingContainers(t: Record<string, unknown>) {
  *
  * Four repairs, in order:
  *
- *   1. Malformed `findings` entries lose their IDENTITY, not their claim. They
- *      are the items a refutation panel votes on, and a malformed one reaches a
- *      verifier as an un-votable item, so it cannot stay as it is — but
- *      `salvageMalformedFindings` re-mints whatever claim it still carries under
- *      RECOVERED_AGENT. Only an entry with no usable severity or claim is truly
- *      dropped, and that is COUNTED and reported, never silent.
- *   2. Claims present only in a view are given identity (`recoverViewOnlyClaims`).
- *      This is what makes a pre-identity task adjudicable, and what makes the
- *      repair idempotent: after one pass the views hold exactly what `findings`
- *      holds, so a second pass finds nothing to recover. Running it AFTER step 1
- *      is what stops a salvaged claim being minted twice.
- *   3. Colliding ids are re-minted, because the load boundary now rejects
- *      duplicates and a rejection with no working repair dead-ends the operator.
- *   4. Malformed refutation and remediation-resolution records lose their
- *      unusable audit decision, but a valid nested finding is returned to the
- *      active set before views are derived. Each malformed record is still
- *      counted and reported.
+ *   1. Findings nested in malformed refutation/remediation records are
+ *      recovered before those unusable audit envelopes are dropped and counted.
+ *   2. Stored and recovered findings with colliding ids are re-minted, because
+ *      the load boundary rejects duplicates and repair must clear that dead end.
+ *   3. Malformed active `findings` entries lose their IDENTITY, not their claim:
+ *      `salvageMalformedFindings` re-mints usable claims under RECOVERED_AGENT;
+ *      entries with no usable severity or claim are counted as dropped.
+ *   4. Claims present only in a view gain identity after salvage. This makes a
+ *      pre-identity task adjudicable and prevents a salvaged claim being minted
+ *      twice when the views are re-derived.
  *
  * The views are then re-derived from the result, which is the lockstep
  * `findingsLockstepError` proves at load.
@@ -549,8 +543,8 @@ function repairReviewRecord(t: Record<string, unknown>): {
     reviewErrorWellFormed && !staleReviewError;
 
   if (wellFormed) {
-    // Still normalize: a duplicate or blank entry loads as an error but carries
-    // no information a repair could lose.
+    // Install the canonical fresh array. Duplicate, blank, or unknown entries
+    // make `wellFormed` false and clear the inconsistent review record below.
     return {
       fields: agents.length > 0 ? { review_evidence_failures: agents } : {},
       cleared: false,
@@ -597,19 +591,16 @@ function appendDroppedFindingNote(id: string, repair: FindingsRepair, notes: str
   pushDataLoss(notes, dataLoss, note);
 }
 
-function appendDroppedRefutationNote(id: string, repair: FindingsRepair, notes: string[], dataLoss: string[]): void {
-  if (repair.droppedRefutations === 0) return;
-  const note =
-    `${id}: DROPPED ${repair.droppedRefutations} malformed refutation record(s) — ` +
-    `audit trail lost; valid nested findings were preserved or returned to the active set`;
-  pushDataLoss(notes, dataLoss, note);
-}
-
-function appendDroppedResolutionNote(id: string, repair: FindingsRepair, notes: string[], dataLoss: string[]): void {
-  if (repair.droppedResolutions === 0) return;
-  const note =
-    `${id}: DROPPED ${repair.droppedResolutions} malformed remediation resolution record(s) — ` +
-    `audit trail lost; valid nested findings were returned to the active set`;
+function appendDroppedAuditNote(
+  id: string,
+  count: number,
+  recordKind: string,
+  preservation: string,
+  notes: string[],
+  dataLoss: string[],
+): void {
+  if (count === 0) return;
+  const note = `${id}: DROPPED ${count} malformed ${recordKind} record(s) — audit trail lost; ${preservation}`;
   pushDataLoss(notes, dataLoss, note);
 }
 
@@ -629,9 +620,23 @@ function appendFindingsRepairNotes(id: string, repair: FindingsRepair, notes: st
   if (repair.reminted > 0) notes.push(`${id}: re-minted ${repair.reminted} colliding finding id(s)`);
   appendDroppedFindingNote(id, repair, notes, dataLoss);
   for (const claim of repair.recoveredRefutationFindings) notes.push(`${id}: recovered finding from malformed refutation record — "${claim}"`);
-  appendDroppedRefutationNote(id, repair, notes, dataLoss);
+  appendDroppedAuditNote(
+    id,
+    repair.droppedRefutations,
+    "refutation",
+    "valid nested findings were preserved or returned to the active set",
+    notes,
+    dataLoss,
+  );
   for (const claim of repair.recoveredResolutionFindings) notes.push(`${id}: recovered finding from malformed remediation resolution — "${claim}"`);
-  appendDroppedResolutionNote(id, repair, notes, dataLoss);
+  appendDroppedAuditNote(
+    id,
+    repair.droppedResolutions,
+    "remediation resolution",
+    "valid nested findings were returned to the active set",
+    notes,
+    dataLoss,
+  );
   if (repair.clearedReviewRecord) {
     notes.push(`${id}: cleared an inconsistent review evidence-failure record and reset review_status to pending`);
   }
