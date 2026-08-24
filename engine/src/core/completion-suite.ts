@@ -35,15 +35,15 @@ export function isProtectedVerificationPath(path: string): boolean {
     path.startsWith(`${COMPLETION_REPORT_ROOT}/`);
 }
 
-const SIGNALS = Object.freeze([
+const COMPLETION_SIGNALS = Object.freeze([
   "SIGABRT", "SIGALRM", "SIGBREAK", "SIGBUS", "SIGCHLD", "SIGCONT", "SIGFPE",
   "SIGHUP", "SIGILL", "SIGINFO", "SIGINT", "SIGIO", "SIGIOT", "SIGKILL",
   "SIGLOST", "SIGPIPE", "SIGPOLL", "SIGPROF", "SIGPWR", "SIGQUIT", "SIGSEGV",
   "SIGSTKFLT", "SIGSTOP", "SIGSYS", "SIGTERM", "SIGTRAP", "SIGTSTP", "SIGTTIN",
   "SIGTTOU", "SIGURG", "SIGUSR1", "SIGUSR2", "SIGVTALRM", "SIGWINCH", "SIGXCPU",
   "SIGXFSZ",
-] satisfies readonly NodeJS.Signals[]);
-const SIGNAL_SET: ReadonlySet<string> = new Set(SIGNALS);
+] as const);
+const COMPLETION_SIGNAL_SET: ReadonlySet<string> = new Set(COMPLETION_SIGNALS);
 
 const MAX_SPAWN_FAILURE_MESSAGE_LENGTH = 4_096;
 export const MIN_COMPLETION_CHECK_TIMEOUT_MS = 1 as const;
@@ -58,6 +58,7 @@ export type CompletionCheckId = string & { readonly [COMPLETION_CHECK_ID]: true 
 export type WaveNumber = number & { readonly [WAVE_NUMBER]: true };
 export type RegistrationRevision = number & { readonly [REGISTRATION_REVISION]: true };
 export type CompletionTimeoutMs = number & { readonly [COMPLETION_TIMEOUT_MS]: true };
+export type CompletionSignal = (typeof COMPLETION_SIGNALS)[number];
 export type RepositoryRelativePath = ReviewPath | ".";
 export type NonEmptyString = string & { readonly __nonEmptyString: true };
 
@@ -102,7 +103,7 @@ export type CompletionProcessOutcome =
       kind: "observed";
       exitCode: number | null;
       timedOut: boolean;
-      signal: NodeJS.Signals | null;
+      signal: CompletionSignal | null;
       report: CompletionReportOutcome;
     }>;
 
@@ -176,7 +177,7 @@ export type CompletionInfrastructureFailure =
 
 export type CompletionSemanticFailure =
   | Readonly<{ kind: "timed-out"; checkId: CompletionCheckId }>
-  | Readonly<{ kind: "signal-termination"; checkId: CompletionCheckId; signal: NodeJS.Signals }>
+  | Readonly<{ kind: "signal-termination"; checkId: CompletionCheckId; signal: CompletionSignal }>
   | Readonly<{ kind: "non-zero-exit"; checkId: CompletionCheckId; exitCode: number }>
   | Readonly<{ kind: "missing-report"; checkId: CompletionCheckId; path: ReviewPath }>;
 
@@ -280,6 +281,13 @@ export function parseCompletionCheckId(raw: unknown, path = "checkId"): Parsed<C
   return total(() => typeof raw === "string" && CHECK_ID_PATTERN.test(raw)
     ? success(raw as CompletionCheckId)
     : failure([`${path} must be a non-empty canonical check id`]));
+}
+
+/** Parse one signal from the completion domain's closed portable allowlist. */
+export function parseCompletionSignal(raw: unknown, path = "signal"): Parsed<CompletionSignal> {
+  return total(() => typeof raw === "string" && COMPLETION_SIGNAL_SET.has(raw)
+    ? success(raw as CompletionSignal)
+    : failure([`${path} must be a recognized completion signal`]));
 }
 
 export function parseWaveNumber(raw: unknown, path = "wave"): Parsed<WaveNumber> {
@@ -687,22 +695,21 @@ function parseOutcome(raw: unknown, path: string): Parsed<CompletionProcessOutco
   const record = exactRecord(raw, ["kind", "exitCode", "timedOut", "signal", "report"], path);
   if (!record.ok) return record;
   const report = parseReportOutcome(record.value.report, `${path}.report`);
-  const errors = report.ok ? [] : [...report.error.errors];
+  const signal: Parsed<CompletionSignal | null> = record.value.signal === null
+    ? success(null)
+    : parseCompletionSignal(record.value.signal, `${path}.signal`);
+  const errors = [report, signal].flatMap((result) => result.ok ? [] : result.error.errors);
   if (record.value.exitCode !== null &&
       !(typeof record.value.exitCode === "number" && Number.isSafeInteger(record.value.exitCode) && record.value.exitCode >= 0)) {
     errors.push(`${path}.exitCode must be null or a non-negative safe integer`);
   }
   if (typeof record.value.timedOut !== "boolean") errors.push(`${path}.timedOut must be a boolean`);
-  if (record.value.signal !== null &&
-      !(typeof record.value.signal === "string" && SIGNAL_SET.has(record.value.signal))) {
-    errors.push(`${path}.signal must be null or a Node.js signal`);
-  }
-  return errors.length === 0 && report.ok
+  return errors.length === 0 && report.ok && signal.ok
     ? success(freeze({
         kind: "observed",
         exitCode: record.value.exitCode as number | null,
         timedOut: record.value.timedOut as boolean,
-        signal: record.value.signal as NodeJS.Signals | null,
+        signal: signal.value,
         report: report.value,
       }))
     : failure(errors);

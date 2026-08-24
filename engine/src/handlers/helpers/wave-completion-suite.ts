@@ -19,7 +19,10 @@ import {
   parseFrozenVerificationManifest,
 } from "../../core/verification-manifest";
 import { canonicalStructuralEquals } from "../../core/orchestration-contract";
-import { runCompletionCheck } from "../../orchestration/completion-check-runner";
+import {
+  runCompletionCheck as productionRunCompletionCheck,
+  type CompletionCheckRunnerResult,
+} from "../../orchestration/completion-check-runner";
 import type { RunDirHandle } from "../../orchestration/run-directory-handle";
 import type { StateManager } from "../../state-manager";
 import type {
@@ -30,6 +33,7 @@ import type {
 import {
   observeWorkspaceDigest,
   resolveCanonicalGitRepositoryRoot,
+  type CanonicalRepositoryRoot,
   type WorkspaceDigestFailure,
 } from "../../utils/workspace-digest";
 import { runFullTierWaveLint } from "./lint-wave-gate";
@@ -72,14 +76,21 @@ type WaveCompletionRegistration = Readonly<{
   authorityDigest: string;
 }>;
 
+type ProjectCommandCheck = Extract<AuthorizedWaveCompletionCheck, { readonly kind: "project-command" }>;
+
+/** Narrow process I/O port used by the Wave completion shell. */
+export type RunCompletionCheck = (
+  check: ProjectCommandCheck,
+  repositoryRoot: CanonicalRepositoryRoot,
+) => Promise<CompletionCheckRunnerResult>;
+
 export type EnsureWaveCompletionSuiteInput = Readonly<{
   handle: RunDirHandle;
   manager: StateManager;
   graph: TaskGraph;
   registration: WaveCompletionRegistration;
+  runCompletionCheck?: RunCompletionCheck;
 }>;
-
-type ProjectCommandCheck = Extract<AuthorizedWaveCompletionCheck, { readonly kind: "project-command" }>;
 
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
 const freezeArray = <T>(values: readonly T[]): readonly T[] => Object.freeze([...values]);
@@ -290,7 +301,7 @@ function observedLintResult(
 }
 
 type CompletionRepositoryAuthority =
-  | Readonly<{ ok: true; repositoryRoot: Parameters<typeof runCompletionCheck>[1] }>
+  | Readonly<{ ok: true; repositoryRoot: CanonicalRepositoryRoot }>
   | Readonly<{ ok: false; category: "authority" | "workspace"; reason: string }>;
 
 function completionRepositoryAuthority(
@@ -391,7 +402,8 @@ async function clearStaleReceipt(
 
 async function executeProjectChecks(
   checks: readonly ProjectCommandCheck[],
-  repositoryRoot: Parameters<typeof runCompletionCheck>[1],
+  repositoryRoot: CanonicalRepositoryRoot,
+  runCompletionCheck: RunCompletionCheck,
 ): Promise<Readonly<{ ok: true; results: readonly CompletionCheckResult[] }> |
   Readonly<{ ok: false; checkId: CompletionCheckId; message: string }>> {
   const results: CompletionCheckResult[] = [];
@@ -525,7 +537,7 @@ async function installAcceptedReceiptAndVerifyWorkspace(
   manager: StateManager,
   graph: TaskGraph,
   receipt: AcceptedWaveCompletionReceipt,
-  repositoryRoot: Parameters<typeof runCompletionCheck>[1],
+  repositoryRoot: CanonicalRepositoryRoot,
   currentWorkspace: Extract<WaveWorkspaceObservation, { readonly kind: "observed" }>,
 ): Promise<EnsureWaveCompletionSuiteResult> {
   try {
@@ -562,7 +574,12 @@ async function installAcceptedReceiptAndVerifyWorkspace(
 export async function ensureWaveCompletionSuite(
   input: EnsureWaveCompletionSuiteInput,
 ): Promise<EnsureWaveCompletionSuiteResult> {
-  const { handle, manager, registration } = input;
+  const {
+    handle,
+    manager,
+    registration,
+    runCompletionCheck = productionRunCompletionCheck,
+  } = input;
   let graph = input.graph;
   if (graph.verification_manifest === undefined) {
     return freeze({
@@ -647,7 +664,7 @@ export async function ensureWaveCompletionSuite(
   const projectChecks = authorized.value.checks.filter(
     (check): check is ProjectCommandCheck => check.kind === "project-command",
   );
-  const projectResults = await executeProjectChecks(projectChecks, repositoryRoot);
+  const projectResults = await executeProjectChecks(projectChecks, repositoryRoot, runCompletionCheck);
   if (!projectResults.ok) {
     return blocked(
       before,

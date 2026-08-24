@@ -565,9 +565,9 @@ export function openRunDirectory(
   if (!identity.ok) return identity;
   const { runId, runDirectory: directory } = identity.value;
 
-  // Prove every hop is a real directory BEFORE creating anything: `resolve`
-  // is pure path math and `statSync` follows links, so a symlinked run
-  // directory would otherwise have the fixed layout built through it.
+  // Identity parsing proves a direct child with existing-directory shape;
+  // `openDirectoryNoFollow` supplies the no-symlink authority before any fixed
+  // layout can be created through that child.
   try {
     closeAnchoredDirectory(openDirectoryNoFollow(directory));
   } catch (error) {

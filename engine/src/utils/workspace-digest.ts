@@ -11,7 +11,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { COMPLETION_REPORT_ROOT } from "../core/completion-suite";
 import { compareStrings } from "../core/ordering";
 import { parseArtifactDigest, type ArtifactDigest } from "../core/orchestration-contract";
-import { parseReviewPath } from "../core/review-packet";
+import { parseReviewPath, type ReviewPath } from "../core/review-packet";
 import { inspectRepositoryPath } from "./repository-path";
 
 declare const CANONICAL_REPOSITORY_ROOT: unique symbol;
@@ -23,7 +23,7 @@ export type WorkspaceEntryType = "regular-file" | "symbolic-link" | "directory" 
 
 /** Pure digest input. Bytes are exact file bytes or exact symlink-target bytes. */
 export type ObservedWorkspaceEntry = Readonly<{
-  path: string;
+  path: ReviewPath;
   mode: bigint;
   type: WorkspaceEntryType;
   bytes: Uint8Array;
@@ -159,8 +159,8 @@ function excluded(path: string, completionReports: ReadonlySet<string>): boolean
 function parseListedPaths(
   bytes: Buffer,
   completionReports: ReadonlySet<string>,
-): WorkspaceDigestResult<readonly string[]> {
-  const byPath = new Set<string>();
+): WorkspaceDigestResult<readonly ReviewPath[]> {
+  const byPath = new Set<ReviewPath>();
   const errors: string[] = [];
   const chunks = bytes.length === 0 ? [] : bytes.subarray(0, bytes.at(-1) === 0 ? -1 : undefined).toString("binary").split("\0");
   for (const [index, binary] of chunks.entries()) {
@@ -184,7 +184,7 @@ function parseListedPaths(
 function listWorkspacePaths(
   root: CanonicalRepositoryRoot,
   completionReports: ReadonlySet<string>,
-): WorkspaceDigestResult<readonly string[]> {
+): WorkspaceDigestResult<readonly ReviewPath[]> {
   const listed = runGit(root, "list-paths", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
   return listed.ok ? parseListedPaths(listed.value, completionReports) : listed;
 }
@@ -203,7 +203,7 @@ function lstatOrMissing(path: string): BigIntStats | null {
 }
 
 function immutableEntry(
-  path: string,
+  path: ReviewPath,
   mode: bigint,
   type: WorkspaceEntryType,
   bytes: Uint8Array,
@@ -218,7 +218,7 @@ type StableObservedEntry = Readonly<{
 
 function observeEntry(
   root: CanonicalRepositoryRoot,
-  path: string,
+  path: ReviewPath,
 ): WorkspaceDigestResult<StableObservedEntry> {
   const absolute = join(root, ...path.split("/"));
   try {

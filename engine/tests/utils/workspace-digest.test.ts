@@ -10,8 +10,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { parseReviewPath, type ReviewPath } from "../../src/core/review-packet";
 import {
   digestObservedWorkspaceEntries,
   observeWorkspaceDigest,
@@ -49,6 +50,55 @@ function digest(root: string, completionReportPaths: readonly string[] = []): st
   const observed = observeWorkspaceDigest(root, { completionReportPaths });
   if (!observed.ok) throw new Error(`${observed.error.kind}: ${"message" in observed.error ? observed.error.message : "drift"}`);
   return observed.value.digest;
+}
+
+function reviewPath(raw: string): ReviewPath {
+  const parsed = parseReviewPath(raw, "workspace digest test path");
+  if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+  return parsed.value;
+}
+
+function observeWithDriftingGit(root: string, drift: "list" | "file") {
+  const bin = mkdtempSync(join(tmpdir(), "loom-fake-git-"));
+  roots.push(bin);
+  const executable = join(bin, "git");
+  const counter = join(bin, "list-count");
+  writeFileSync(executable, `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const root = ${JSON.stringify(root)};
+const counter = ${JSON.stringify(counter)};
+const operation = args.at(-2) === "rev-parse" ? "resolve" : args.includes("ls-files") ? "list" : "unknown";
+if (operation === "resolve") {
+  process.stdout.write(root + "\\n");
+  process.exit(0);
+}
+if (operation !== "list") process.exit(64);
+let count = 0;
+try {
+  count = Number(readFileSync(counter, "utf8"));
+} catch (cause) {
+  if (cause?.code !== "ENOENT") throw new Error(\`cannot read fake Git counter ${counter}\`, { cause });
+}
+count += 1;
+writeFileSync(counter, String(count));
+if (count === 2 && ${JSON.stringify(drift)} === "file") {
+  writeFileSync(root + "/tracked.txt", "changed-during-second-list");
+}
+const paths = count === 2 && ${JSON.stringify(drift)} === "list"
+  ? ["tracked.txt", "added.txt"]
+  : ["tracked.txt"];
+process.stdout.write(Buffer.from(paths.join("\\0") + "\\0"));
+`);
+  chmodSync(executable, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
+  try {
+    return observeWorkspaceDigest(root);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
 }
 
 afterEach(() => {
@@ -121,6 +171,19 @@ describe("workspace digest shell", () => {
     expect(new Set([baseline, bytesChanged, pathChanged, modeChanged, symlinkChanged]).size).toBe(5);
   });
 
+  it.each([
+    ["list", "workspace-list-drift"],
+    ["file", "workspace-file-drift"],
+  ] as const)("returns typed %s drift without minting a digest", (drift, expectedKind) => {
+    const root = repository();
+    write(root, "tracked.txt", "stable-before-observation");
+    write(root, "added.txt", "appears-only-in-the-second-list");
+
+    const observed = observeWithDriftingGit(root, drift);
+
+    expect(observed).toMatchObject({ ok: false, error: { kind: expectedKind } });
+  });
+
   it("returns typed Git and read failures rather than an empty workspace", () => {
     const outside = mkdtempSync(join(tmpdir(), "loom-not-git-"));
     roots.push(outside);
@@ -144,18 +207,18 @@ describe("workspace digest shell", () => {
 describe("pure observed-entry digest", () => {
   it("is ordering-independent and binds path, lstat mode/type, and exact bytes", () => {
     const entry = (
-      path: string,
+      path: ReviewPath,
       mode: bigint,
       type: ObservedWorkspaceEntry["type"],
       bytes: readonly number[],
     ): ObservedWorkspaceEntry => ({ path, mode, type, bytes: Uint8Array.from(bytes) });
-    const left = entry("a", 0o100644n, "regular-file", [0, 255]);
-    const right = entry("b", 0o120777n, "symbolic-link", [0x61]);
+    const left = entry(reviewPath("a"), 0o100644n, "regular-file", [0, 255]);
+    const right = entry(reviewPath("b"), 0o120777n, "symbolic-link", [0x61]);
     const baseline = digestObservedWorkspaceEntries([left, right]);
 
     expect(digestObservedWorkspaceEntries([right, left])).toBe(baseline);
     for (const changed of [
-      [entry("c", left.mode, left.type, [...left.bytes]), right],
+      [entry(reviewPath("c"), left.mode, left.type, [...left.bytes]), right],
       [entry(left.path, 0o100755n, left.type, [...left.bytes]), right],
       [entry(left.path, left.mode, "symbolic-link", [...left.bytes]), right],
       [entry(left.path, left.mode, left.type, [0, 254]), right],

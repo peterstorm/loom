@@ -3,6 +3,7 @@ import { lstatSync, type BigIntStats } from "node:fs";
 import { join } from "node:path";
 import {
   parseAuthorizedWaveCompletionCheck,
+  parseCompletionSignal,
   type AuthorizedWaveCompletionCheck,
   type CompletionCheckResult,
   type CompletionReportOutcome,
@@ -148,21 +149,33 @@ function lstatIfPresent(path: string): BigIntStats | null {
   }
 }
 
+type PreSpawnReportSnapshot =
+  | Readonly<{ kind: "not-required" }>
+  | Readonly<{ kind: "snapshot"; value: ReportSnapshot | null }>
+  | Readonly<{
+      kind: "failure";
+      error: Extract<CompletionCheckRunnerFailure, { readonly kind: "path-rejected" }>;
+    }>;
+
 function preSpawnReportSnapshot(
   root: CanonicalRepositoryRoot,
   check: ProjectCommandCheck,
-): CompletionCheckRunnerResult | ReportSnapshot | null {
-  if (check.reportPolicy.kind === "not-required") return null;
+): PreSpawnReportSnapshot {
+  if (check.reportPolicy.kind === "not-required") return Object.freeze({ kind: "not-required" });
   try {
     const inspected = inspectRepositoryPath(root, check.reportPolicy.path, "completion report path");
-    if (!inspected.exists) return null;
-    const stat = lstatSync(inspected.absolute, { bigint: true });
-    return snapshot(stat);
+    const value = inspected.exists
+      ? snapshot(lstatSync(inspected.absolute, { bigint: true }))
+      : null;
+    return Object.freeze({ kind: "snapshot", value });
   } catch (cause) {
-    return failed({
-      kind: "path-rejected",
-      path: check.reportPolicy.path,
-      message: messageOf(cause),
+    return Object.freeze({
+      kind: "failure",
+      error: Object.freeze({
+        kind: "path-rejected",
+        path: check.reportPolicy.path,
+        message: messageOf(cause),
+      }),
     });
   }
 }
@@ -351,6 +364,15 @@ function observedExecution(
   observation: Extract<ParentObservation, { readonly kind: "closed" }>,
   timedOut: boolean,
 ): CompletionCheckRunnerResult {
+  const output = diagnostics(stdout, stderr);
+  const signal = observation.signal === null ? null : parseCompletionSignal(observation.signal);
+  if (signal !== null && !signal.ok) {
+    return failed({
+      kind: "termination-unconfirmed",
+      message: `Node reported a signal outside the completion allowlist: ${signal.error.errors.join("; ")}`,
+      diagnostics: output,
+    });
+  }
   return succeeded({
     checkResult: Object.freeze({
       checkId: check.checkId,
@@ -359,11 +381,11 @@ function observedExecution(
         kind: "observed",
         exitCode: observation.exitCode,
         timedOut,
-        signal: observation.signal,
+        signal: signal === null ? null : signal.value,
         report: observeReportAfterClose(root, check, beforeReport),
       }),
     }),
-    diagnostics: diagnostics(stdout, stderr),
+    diagnostics: output,
   });
 }
 
@@ -429,8 +451,9 @@ export async function runCompletionCheck(
     return failed({ kind: "path-rejected", path: check.cwd, message: messageOf(cause) });
   }
 
-  const beforeReport = preSpawnReportSnapshot(parsedRoot.value, check);
-  if (beforeReport !== null && "ok" in beforeReport) return beforeReport;
+  const reportObservation = preSpawnReportSnapshot(parsedRoot.value, check);
+  if (reportObservation.kind === "failure") return failed(reportObservation.error);
+  const beforeReport = reportObservation.kind === "snapshot" ? reportObservation.value : null;
   const stdout = new DiagnosticTail(tailBytes);
   const stderr = new DiagnosticTail(tailBytes);
   let child: ChildProcess;
@@ -479,7 +502,7 @@ export async function runCompletionCheck(
       return observedExecution(
         parsedRoot.value,
         check,
-        beforeReport as ReportSnapshot | null,
+        beforeReport,
         stdout,
         stderr,
         trigger.observation,
@@ -537,7 +560,7 @@ export async function runCompletionCheck(
   return observedExecution(
     parsedRoot.value,
     check,
-    beforeReport as ReportSnapshot | null,
+    beforeReport,
     stdout,
     stderr,
     closed,

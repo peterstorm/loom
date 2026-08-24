@@ -81,7 +81,14 @@ const outcome = ${JSON.stringify(options.suiteOutcome ?? "accepted")};
 if (outcome !== "missing-report") {
   mkdirSync(".loom/completion-reports", { recursive: true });
   const path = ".loom/completion-reports/sentinel.txt";
-  const count = (() => { try { return Number(readFileSync(path, "utf8")); } catch { return 0; } })();
+  const count = (() => {
+    try {
+      return Number(readFileSync(path, "utf8"));
+    } catch (cause) {
+      if (cause?.code === "ENOENT") return 0;
+      throw new Error(\`cannot read Wave Gate sentinel \${path}\`, { cause });
+    }
+  })();
   writeFileSync(path, String(count + 1));
 }
 if (outcome === "nonzero") process.exit(7);
@@ -174,10 +181,12 @@ function graph(root: string): TaskGraph {
 }
 
 function sentinelCount(root: string): number {
+  const path = join(root, ".loom/completion-reports/sentinel.txt");
   try {
-    return Number(readFileSync(join(root, ".loom/completion-reports/sentinel.txt"), "utf8"));
-  } catch {
-    return 0;
+    return Number(readFileSync(path, "utf8"));
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw new Error(`cannot read Wave Gate sentinel ${path}`, { cause });
   }
 }
 
@@ -200,6 +209,25 @@ afterEach(() => {
 });
 
 describe("Wave Gate façade completion-suite integration", () => {
+  it("treats only an absent Wave Gate sentinel as zero", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-wave-facade-counter-"));
+    roots.push(root);
+    expect(sentinelCount(root)).toBe(0);
+    const path = join(root, ".loom/completion-reports/sentinel.txt");
+    mkdirSync(path, { recursive: true });
+
+    let observed: unknown;
+    try {
+      sentinelCount(root);
+    } catch (cause) {
+      observed = cause;
+    }
+    expect(observed).toBeInstanceOf(Error);
+    if (!(observed instanceof Error)) throw new Error("sentinel failure must preserve an Error cause");
+    expect(observed.message).toContain(path);
+    expect(observed.cause).toMatchObject({ code: "EISDIR" });
+  });
+
   it("does not execute a modern suite while a current-Wave Task is active", () => {
     const root = repository({ modern: true, executing: true });
     const action = start(root, "run.active-task");

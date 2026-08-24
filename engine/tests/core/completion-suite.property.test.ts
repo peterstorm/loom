@@ -12,6 +12,7 @@ import {
   parseAuthorizedWaveCompletionSuite,
   parseCompletionCheckId,
   parseCompletionCheckResult,
+  parseCompletionSignal,
   parseCompletionProcessOutcome,
   parseCompletionReportOutcome,
   parseRegistrationRevision,
@@ -145,6 +146,7 @@ describe("completion-suite exact parsers", () => {
   it("are total over arbitrary unknown values", () => {
     const parsers = [
       parseCompletionCheckId,
+      parseCompletionSignal,
       parseAcceptedWaveCompletionReceipt,
       parseWaveNumber,
       parseRegistrationRevision,
@@ -265,6 +267,13 @@ describe("completion-suite exact parsers", () => {
       kind: "produced", path: ".loom/completion-reports/completion.json", digest: digest("a"), byteLength: 42,
     }));
     expect(Object.isFrozen(parsedReport)).toBe(true);
+  });
+
+  it("parses the core signal allowlist without exposing Node signal types", () => {
+    expect(parseCompletionSignal("SIGTERM")).toMatchObject({ ok: true, value: "SIGTERM" });
+    for (const raw of ["", "TERM", "SIGUNKNOWN", 15, null]) {
+      expect(parseCompletionSignal(raw).ok).toBe(false);
+    }
   });
 
   it("keeps spawn failure structurally separate from observed process facts", () => {

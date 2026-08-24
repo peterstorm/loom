@@ -10,6 +10,12 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  evaluateWaveCompletionSuite,
+  type AuthorizedWaveCompletionCheck,
+  type CompletionCheckResult,
+} from "../../../src/core/completion-suite";
+import { parseArtifactDigest } from "../../../src/core/orchestration-contract";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import {
   authorizeWaveCompletionSuite,
@@ -18,6 +24,7 @@ import {
 import {
   ensureWaveCompletionSuite,
   observeCurrentWaveWorkspace,
+  type RunCompletionCheck,
 } from "../../../src/handlers/helpers/wave-completion-suite";
 import type { RegisteredWaveGateProgram } from "../../../src/handlers/helpers/programs/helpers";
 import { createRunDirectory, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
@@ -25,6 +32,11 @@ import { StateManager } from "../../../src/state-manager";
 import type { ActiveWaveGateRegistration, TaskGraph } from "../../../src/types";
 
 const roots: string[] = [];
+const fakeReportDigest = (() => {
+  const parsed = parseArtifactDigest("f".repeat(64));
+  if (!parsed.ok) throw new Error(parsed.error.message);
+  return parsed.value;
+})();
 
 function git(root: string, ...args: string[]): string {
   return execFileSync("git", ["-C", root, ...args], { encoding: "utf-8" }).trim();
@@ -70,7 +82,14 @@ const report = ".loom/completion-reports/result.txt";
 const state = JSON.parse(readFileSync(".claude/state/active_task_graph.json", "utf8"));
 if (state.active_wave_completion_suite !== undefined) process.exit(7);
 mkdirSync(".loom/completion-reports", { recursive: true });
-const previous = (() => { try { return Number(readFileSync(report, "utf8")); } catch { return 0; } })();
+const previous = (() => {
+  try {
+    return Number(readFileSync(report, "utf8"));
+  } catch (cause) {
+    if (cause?.code === "ENOENT") return 0;
+    throw new Error(\`cannot read completion counter \${report}\`, { cause });
+  }
+})();
 if (mode === "success") writeFileSync(report, String(previous + 1));
 else if (mode === "nonzero") {
   writeFileSync(report, String(previous + 1));
@@ -164,11 +183,58 @@ async function ensure(f: Fixture) {
 }
 
 function reportCount(root: string): number {
+  const path = join(root, ".loom/completion-reports/result.txt");
   try {
-    return Number(readFileSync(join(root, ".loom/completion-reports/result.txt"), "utf8"));
-  } catch {
-    return 0;
+    return Number(readFileSync(path, "utf8"));
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw new Error(`cannot read completion counter ${path}`, { cause });
   }
+}
+
+function successfulCheckResult(check: AuthorizedWaveCompletionCheck): CompletionCheckResult {
+  return Object.freeze({
+    checkId: check.checkId,
+    scope: check.scope,
+    outcome: Object.freeze({
+      kind: "observed",
+      exitCode: 0,
+      timedOut: false,
+      signal: null,
+      report: check.reportPolicy.kind === "required-file"
+        ? Object.freeze({
+            kind: "produced",
+            path: check.reportPolicy.path,
+            digest: fakeReportDigest,
+            byteLength: 1,
+          })
+        : Object.freeze({ kind: "not-required" }),
+    }),
+  });
+}
+
+function successfulFakeCompletionCheck(beforeResult: () => Promise<void>): RunCompletionCheck {
+  return async (check, _repositoryRoot) => {
+    await beforeResult();
+    return Object.freeze({
+      ok: true,
+      value: Object.freeze({
+        checkResult: successfulCheckResult(check),
+        diagnostics: Object.freeze({
+          stdoutTail: "",
+          stderrTail: "",
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        }),
+      }),
+    });
+  };
+}
+
+function advanceActiveRegistration(locked: TaskGraph): TaskGraph {
+  const active = locked.active_wave_gate;
+  if (active === undefined) throw new Error("fixture requires active Wave Gate authority");
+  return { ...locked, active_wave_gate: { ...active, revision: active.revision + 1 } };
 }
 
 function resultArtifactAuthority(f: Fixture) {
@@ -191,6 +257,18 @@ function resultArtifactRelativePath(f: Fixture): string {
   return `completion-suites/${authority.suiteDigest}/${authority.workspaceDigest}.json`;
 }
 
+function acceptedReceiptForCurrentAuthority(f: Fixture) {
+  const authority = resultArtifactAuthority(f);
+  const checks = authority.checks.map(successfulCheckResult);
+  const evaluated = evaluateWaveCompletionSuite(authority, {
+    ...authority,
+    kind: "wave-completion-suite-result",
+    checks,
+  });
+  if (evaluated.kind !== "accepted") throw new Error("replacement receipt fixture must be accepted");
+  return evaluated.receipt;
+}
+
 async function publishRawResultArtifact(f: Fixture, raw: unknown): Promise<void> {
   const published = await f.handle.publishArtifactSet([{
     relativePath: resultArtifactRelativePath(f),
@@ -211,6 +289,25 @@ afterEach(() => {
 });
 
 describe("modern Wave completion suite shell", () => {
+  it("treats only an absent completion counter as zero", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-wave-suite-counter-"));
+    roots.push(root);
+    expect(reportCount(root)).toBe(0);
+    const path = join(root, ".loom/completion-reports/result.txt");
+    mkdirSync(path, { recursive: true });
+
+    let observed: unknown;
+    try {
+      reportCount(root);
+    } catch (cause) {
+      observed = cause;
+    }
+    expect(observed).toBeInstanceOf(Error);
+    if (!(observed instanceof Error)) throw new Error("counter failure must preserve an Error cause");
+    expect(observed.message).toContain(path);
+    expect(observed.cause).toMatchObject({ code: "EISDIR" });
+  });
+
   it("rejects report exclusions outside the protected completion-report root", () => {
     const parsed = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
       schemaVersion: 1,
@@ -388,6 +485,68 @@ describe("modern Wave completion suite shell", () => {
     expect(reportCount(f.root)).toBe(2);
     expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "reused" } });
     expect(reportCount(f.root)).toBe(2);
+  });
+
+  it("rejects stale-receipt clearing after a concurrent protected-state transition", async () => {
+    const f = fixture("success");
+    expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "installed" } });
+    write(f.root, "source.ts", "export const value = 4;\n");
+    const staleGraph = f.manager.load();
+    const replacementReceipt = acceptedReceiptForCurrentAuthority(f);
+    await f.manager.update((locked) => ({
+      ...locked,
+      active_wave_completion_suite: replacementReceipt,
+    }));
+    const mustNotRun: RunCompletionCheck = async () => {
+      throw new Error("completion check must not run after stale receipt CAS failure");
+    };
+
+    const result = await ensureWaveCompletionSuite({
+      handle: f.handle,
+      manager: f.manager,
+      graph: staleGraph,
+      registration: f.registration,
+      runCompletionCheck: mustNotRun,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        diagnostic: {
+          categories: ["state"],
+          message: expect.stringContaining("concurrent completion receipt replaced"),
+        },
+      },
+    });
+    expect(f.manager.load().active_wave_completion_suite).toEqual(replacementReceipt);
+    expect(reportCount(f.root)).toBe(1);
+  });
+
+  it("rejects receipt installation after a fake check advances protected state", async () => {
+    const f = fixture("success");
+    const runCompletionCheck = successfulFakeCompletionCheck(async () => {
+      await f.manager.update(advanceActiveRegistration);
+    });
+
+    const result = await ensureWaveCompletionSuite({
+      handle: f.handle,
+      manager: f.manager,
+      graph: f.manager.load(),
+      registration: f.registration,
+      runCompletionCheck,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        diagnostic: {
+          categories: ["state"],
+          message: expect.stringContaining("changed before receipt installation"),
+        },
+      },
+    });
+    expect(f.manager.load().active_wave_completion_suite).toBeUndefined();
+    expect(reportCount(f.root)).toBe(0);
   });
 
   it("requires an authority start path for workspace observation", () => {
