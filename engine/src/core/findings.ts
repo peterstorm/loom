@@ -244,9 +244,9 @@ function ordinalOf(id: string, safeAgent: string): number {
  * `resolved_findings`), so
  * its id must keep counting toward the high-water mark exactly like a refuted
  * one — otherwise a later re-review could remint an ordinal still held by a
- * resolved record, re-attaching remediation history to a different claim. Every
- * caller passes it; dropping it from the comment would invite the 'equivalent
- * simplification' that reintroduces the duplicate-ordinal defect.
+ * resolved record, re-attaching remediation history to a different claim.
+ * Production writers always pass it; the default remains only for scoped tests
+ * and compatibility helpers that have no resolved-history input.
  */
 export function nextOrdinal(
   existing: readonly Finding[],
@@ -524,9 +524,13 @@ function parseStoredResolution(raw: unknown): ResolvedFinding | null {
  * whatever survives, restoring lockstep rather than leaving an orphaned claim
  * no panel can adjudicate.
  */
-export function parseStoredFindings(raw: unknown): Finding[] {
+function parseStoredArray<T>(raw: unknown, parse: (entry: unknown) => T | null): T[] {
   if (!Array.isArray(raw)) return [];
-  return raw.map(parseStoredFinding).filter((finding): finding is Finding => finding !== null);
+  return raw.map(parse).filter((entry): entry is T => entry !== null);
+}
+
+export function parseStoredFindings(raw: unknown): Finding[] {
+  return parseStoredArray(raw, parseStoredFinding);
 }
 
 /**
@@ -567,18 +571,12 @@ export function salvageMalformedFindings(raw: unknown): readonly DraftFinding[] 
 
 /** Repair-path parse of `Task.refuted_findings`. Same rationale as above. */
 export function parseStoredRefutations(raw: unknown): RefutedFinding[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map(parseStoredRefutation)
-    .filter((record): record is RefutedFinding => record !== null);
+  return parseStoredArray(raw, parseStoredRefutation);
 }
 
 /** Repair-path parse of `Task.resolved_findings`. */
 export function parseStoredResolutions(raw: unknown): ResolvedFinding[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map(parseStoredResolution)
-    .filter((record): record is ResolvedFinding => record !== null);
+  return parseStoredArray(raw, parseStoredResolution);
 }
 
 function salvageFindingsFromMalformedRecords(

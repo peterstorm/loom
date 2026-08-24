@@ -310,9 +310,21 @@ function consumeClaim(pool: string[], claim: string): boolean {
   return true;
 }
 
-/** The claims `pool` does not account for, drawing `pool` down as it goes. */
-function unconsumedClaims(claims: readonly string[], pool: string[]): readonly string[] {
-  return claims.filter((claim) => !consumeClaim(pool, claim));
+/** Severity-aware multiset subtraction for structured/marker arbitration. */
+function draftsUnaccountedFor(
+  candidates: readonly DraftFinding[],
+  accountedFor: readonly DraftFinding[],
+): readonly DraftFinding[] {
+  const criticalPool = accountedFor
+    .filter(({ severity }) => severity === "critical")
+    .map(({ claim }) => claim);
+  const advisoryPool = accountedFor
+    .filter(({ severity }) => severity === "advisory")
+    .map(({ claim }) => claim);
+  return candidates.filter((draft) => !consumeClaim(
+    draft.severity === "critical" ? criticalPool : advisoryPool,
+    draft.claim,
+  ));
 }
 
 /**
@@ -381,12 +393,7 @@ function markerClaimsUnnamedByBlock(
   scraped: ParsedFindings,
   structured: readonly DraftFinding[],
 ): readonly DraftFinding[] {
-  const criticalPool = structured.filter(({ severity }) => severity === "critical").map(({ claim }) => claim);
-  const advisoryPool = structured.filter(({ severity }) => severity === "advisory").map(({ claim }) => claim);
-  return draftsFromClaims(
-    unconsumedClaims(scraped.critical, criticalPool),
-    unconsumedClaims(scraped.advisory, advisoryPool),
-  );
+  return draftsUnaccountedFor(scraped.drafts, structured);
 }
 
 function supersededBlockFindings(
@@ -396,12 +403,7 @@ function supersededBlockFindings(
 ): ParsedFindings {
   // The block lost the cardinal comparison, but claims found only there remain
   // evidence. Consume marker claims as multisets, separately by severity.
-  const criticalMarkers = [...scraped.critical];
-  const advisoryMarkers = [...scraped.advisory];
-  const recovered = structured.filter((draft) => !consumeClaim(
-    draft.severity === "critical" ? criticalMarkers : advisoryMarkers,
-    draft.claim,
-  ));
+  const recovered = draftsUnaccountedFor(structured, scraped.drafts);
   return makeParsedFindings({
     drafts: [...scraped.drafts, ...recovered],
     ...counts,

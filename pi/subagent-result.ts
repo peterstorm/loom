@@ -449,8 +449,10 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
  * are all the inputs, and the answer is the only output — this function mutates
  * nothing. An unextractable id must not vanish silently: exactly one executing
  * task infers it, while ambiguous or empty is reported as `unbound`. The
- * caller (`applyImplementationPiResult`) then clears `executing_tasks` rather
- * than failing tasks, which would cascade into evidence overwrites downstream.
+ * caller (`applyImplementationPiResult`) reports the binding failure and leaves
+ * execution authority unchanged: without attribution it cannot safely release
+ * one Task, and clearing all would release unrelated parallel Tasks. Only a
+ * bound completed or missing Task is removed from `executing_tasks`.
  */
 export type ImplementationTaskBinding =
   | Readonly<{ kind: "bound"; taskId: string; inferred: boolean }>
@@ -483,13 +485,16 @@ type ImplementationBindingResolution =
   | Readonly<{ kind: "unbound"; outcome: PiResultOutcome }>
   | Readonly<{ kind: "bound"; taskId: string; log: readonly string[] }>;
 
+type ImplementationTestObservation =
+  | Readonly<{ kind: "structured"; evidence: TestEvidence }>
+  | Readonly<{ kind: "fallback"; evidence: TestEvidence }>;
+
 type ImplementationTranscriptObservation =
   | Readonly<{ kind: "malformed"; failureReason: string; log: readonly string[] }>
   | Readonly<{
       kind: "accepted";
       resultMessages: readonly PiMessage[];
-      testEvidence: TestEvidence;
-      structuredTestEvidence: TestEvidence | null;
+      test: ImplementationTestObservation;
       log: readonly string[];
     }>;
 
@@ -570,12 +575,13 @@ function observeImplementationTranscript(result: PiSubagentResult, taskId: strin
   }
 
   const transcriptEvidence = extractTestEvidence(parseBashTestOutput(adaptedTranscript.value));
-  const structuredTestEvidence = structuredEvidence.value;
+  const test: ImplementationTestObservation = structuredEvidence.value === null
+    ? { kind: "fallback", evidence: transcriptEvidence }
+    : { kind: "structured", evidence: structuredEvidence.value };
   return {
     kind: "accepted",
     resultMessages: parsedMessages.value,
-    testEvidence: structuredTestEvidence ?? transcriptEvidence,
-    structuredTestEvidence,
+    test,
     log,
   };
 }
@@ -684,20 +690,18 @@ function readImplementationModifiedPaths(
   }
 }
 
-function implementationTestResult(
-  structuredTestEvidence: TestEvidence | null,
-  testEvidence: TestEvidence,
-) {
-  return structuredTestEvidence !== null
+function implementationTestResult(test: ImplementationTestObservation) {
+  const { evidence } = test;
+  return test.kind === "structured"
     ? {
         verdict: "untrusted" as const,
-        passed: testEvidence.passed,
-        label: `pi-structured: ${structuredTestEvidence.evidence || "test tool result"}`,
+        passed: evidence.passed,
+        label: `pi-structured: ${evidence.evidence || "test tool result"}`,
         provenance: "pi-structured" as const,
       }
     : {
         verdict: "untrusted" as const,
-        passed: testEvidence.passed,
+        passed: evidence.passed,
         label: "transcript-regex (fallback)",
         provenance: "unverified" as const,
       };
@@ -725,8 +729,7 @@ type AcceptedImplementationResolutionArgs = Readonly<{
   repository: RepositoryProbe;
   taskId: string;
   filesModified: readonly string[];
-  testEvidence: TestEvidence;
-  structuredTestEvidence: TestEvidence | null;
+  test: ImplementationTestObservation;
 }>;
 
 type AcceptedImplementationResolution = Readonly<{
@@ -747,8 +750,8 @@ async function applyAcceptedImplementationResolution(
     if (currentTarget === undefined || currentTarget.status === "completed") {
       const applied = applyUntrustedStopResolution(state, args.taskId, {
         taskCompleted: true,
-        testResult: implementationTestResult(args.structuredTestEvidence, args.testEvidence),
-        testEvidence: args.testEvidence.evidence,
+        testResult: implementationTestResult(args.test),
+        testEvidence: args.test.evidence.evidence,
         filesModified: args.filesModified,
         changedDeclaredArtifacts: [],
         bytesChangedSinceAttempt: false,
@@ -797,8 +800,8 @@ async function applyAcceptedImplementationResolution(
     }
     const applied = applyUntrustedStopResolution(state, args.taskId, {
       taskCompleted: true,
-      testResult: implementationTestResult(args.structuredTestEvidence, args.testEvidence),
-      testEvidence: args.testEvidence.evidence,
+      testResult: implementationTestResult(args.test),
+      testEvidence: args.test.evidence.evidence,
       filesModified: args.filesModified,
       changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,
       bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,
@@ -861,8 +864,7 @@ export async function applyImplementationPiResult(args: Readonly<{
     ...args,
     taskId: binding.taskId,
     filesModified: modifiedPaths.filesModified,
-    testEvidence: transcript.testEvidence,
-    structuredTestEvidence: transcript.structuredTestEvidence,
+    test: transcript.test,
   });
   log.push(...settlement.log);
   return outcome(log, settlement.processingErrors);

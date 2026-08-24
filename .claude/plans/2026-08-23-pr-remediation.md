@@ -596,3 +596,60 @@ None. The production files, focused regression files, and cumulative remediation
 5. `git diff --check`.
 6. Required full command: `env -u PI_CODING_AGENT -u LOOM_PI_RUNTIME_REVISION -u LOOM_PI_RUNTIME_ROOT npm test`.
 7. Registered remediation audit/install through the Orchestration Façade, then commit and push.
+
+---
+
+# Round 11 — Full-branch rereview remediation
+
+## Authority
+
+- Branch: `feat/deterministic-task-execution`
+- Review scope: exact 54-path branch delta `30241fd..dc4aad8`, frozen in the authoritative result
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260824T075715Z-deterministic-policy-rereview-11`
+- Review result digest: `9076bbf107a872f8cc1e76211afe34fe72c1c837093743698cf3931c0b92d223`
+- Criticals found: 2
+- Surviving criticals: 1
+- Refuted criticals: 1
+
+## Mandatory critical remediation
+
+1. `pi/subagent-result.ts`: correct the stale unbound implementation-binding comment. Ambiguous or empty bindings are reported as processing errors and preserve execution authority unchanged; only a bound completed/missing Task is released.
+
+## Advisory dispositions
+
+### Accepted
+
+1. Correct `nextOrdinal` documentation: production callers supply `resolved`, while the default remains a compatibility convenience for scoped tests/legacy helpers.
+2. Replace `implementationTestResult`'s independently representable structured/fallback evidence inputs with one discriminated observation selected at transcript parsing.
+3. Extract one generic private stored-array parser shared by `parseStoredFindings`, `parseStoredRefutations`, and `parseStoredResolutions`.
+4. Extract one severity-aware multiset subtraction primitive shared by structured-block arbitration paths.
+
+### Deferred
+
+1. Redesign the Task aggregate as a status/proof discriminated union. Reason: this remains Slice 3 work and requires the Completion Oracle plus explicit stored-state migration.
+2. Extract the TaskGraph codec/invariant proof surface from filesystem-backed `StateManager`. Reason: this broad FC/IS seam migration remains planned as a dedicated architecture slice, not review remediation.
+3. Replace Wave Gate WeakSet authority registries with explicit proof values. Reason: this changes the Wave Gate authority interface and remains assigned to Slice 2's completion-suite architecture checkpoint.
+
+### Dismissed
+
+None.
+
+## Refuted-finding audit
+
+- `code-reviewer-1` (`pi/subagent-result.ts`): the claim that a Task disappearing during locked review application is silently lost was refuted by intent and blast-radius. The branch emits an explicit stderr warning, cannot attach evidence to authority that no longer exists, misapplies nothing to surviving Tasks, and leaves surviving Tasks fail-closed. No processing-error or settlement change is authorized.
+
+## Support paths outside frozen review scope
+
+None. The production files, regression suites, and cumulative remediation plan are all in the frozen 54-path scope.
+
+## Validation
+
+1. Focused Vitest suites for Pi result settlement, Findings storage parsing, and review-output arbitration.
+2. Apply-mode `distill` after a green focused baseline, one behavior-preserving move at a time.
+3. `npm run typecheck` including unused-code checks.
+4. Full-tier Loom lint over every changed production TypeScript file.
+5. `git diff --check`.
+6. Required full command attempted three times: every run passed all 207 files / 5,165 tests with one intentional skip, then Vitest emitted the same post-run worker RPC `Timeout calling "onTaskUpdate"` and exited non-zero before smoke execution.
+7. Bounded-worker full validation: `env -u PI_CODING_AGENT -u LOOM_PI_RUNTIME_REVISION -u LOOM_PI_RUNTIME_ROOT npx vitest run --maxWorkers=4 --minWorkers=1 --testTimeout=15000` — 207 files / 5,165 passed / 1 intentional skip, no runner error.
+8. Complete smoke validation: `env -u PI_CODING_AGENT -u LOOM_PI_RUNTIME_REVISION -u LOOM_PI_RUNTIME_ROOT npm run test:smoke` — panel 22/22, review panel 19/19, standalone review, orchestration façade, Pi resources, and TaskGraph 21/21 all passed.
+9. Registered remediation audit/install through the Orchestration Façade, then commit and push.
