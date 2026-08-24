@@ -1393,6 +1393,21 @@ function finalizeReviewRun(task: Task, run: ReviewRun): Task {
   };
 }
 
+type ReviewEvidenceClearance = Readonly<{
+  outstanding: readonly string[];
+  taskPatch: Pick<Task, "review_error" | "review_evidence_failures">;
+}>;
+
+function clearReviewEvidenceFailure(task: Task, agent: string): ReviewEvidenceClearance {
+  const outstanding = (task.review_evidence_failures ?? []).filter((failed) => failed !== agent);
+  return {
+    outstanding,
+    taskPatch: outstanding.length > 0
+      ? { review_evidence_failures: outstanding }
+      : { review_error: undefined, review_evidence_failures: undefined },
+  };
+}
+
 /** Stage one reviewer atomically; activate changes only after the full roster lands. */
 export function recordReviewRunEvidence(
   task: Task,
@@ -1449,13 +1464,11 @@ export function recordReviewRunEvidence(
   const complete = nextRun.expected_agents.every((agent) =>
     nextRun.evidence.some((stored) => stored.agent === agent)
   );
-  const outstanding = (task.review_evidence_failures ?? []).filter((agent) => agent !== evidence.agent);
+  const clearance = clearReviewEvidenceFailure(task, evidence.agent);
   const staged: Task = {
     ...task,
-    review_status: outstanding.length > 0 ? "evidence_capture_failed" : "pending",
-    ...(outstanding.length > 0
-      ? { review_evidence_failures: outstanding }
-      : { review_error: undefined, review_evidence_failures: undefined }),
+    review_status: clearance.outstanding.length > 0 ? "evidence_capture_failed" : "pending",
+    ...clearance.taskPatch,
     review_run: nextRun,
   };
   return complete
@@ -1508,7 +1521,7 @@ export function mergeFindings(
   // could parse, and a sibling's clean pass is not evidence about it. Erasing
   // the status here — which is what happened while it was a bare per-task
   // value — made the gate outcome depend on which reviewer finished last.
-  const outstanding = (task.review_evidence_failures ?? []).filter((failed) => failed !== agent);
+  const clearance = clearReviewEvidenceFailure(task, agent);
 
   // Either source may say "blocked": `criticalCount` is the reviewer's own
   // tally, and the captured criticals are what the gate will actually count.
@@ -1525,7 +1538,7 @@ export function mergeFindings(
   const hasCritical =
     (findings.criticalCount ?? 0) > 0 || merged.some((finding) => finding.severity === "critical");
   let reviewStatus: ReviewStatus = "passed";
-  if (outstanding.length > 0) reviewStatus = "evidence_capture_failed";
+  if (clearance.outstanding.length > 0) reviewStatus = "evidence_capture_failed";
   else if (task.review_status === "blocked" || hasCritical) reviewStatus = "blocked";
 
   return {
@@ -1535,9 +1548,7 @@ export function mergeFindings(
     // A reviewer that DID emit its evidence supersedes that record — but only
     // once NO reviewer's evidence is outstanding, or the surviving failure
     // would sit at `evidence_capture_failed` with nothing saying why.
-    ...(outstanding.length > 0
-      ? { review_evidence_failures: outstanding }
-      : { review_error: undefined, review_evidence_failures: undefined }),
+    ...clearance.taskPatch,
     ...activeFindingAggregate(merged),
   };
 }

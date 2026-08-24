@@ -325,6 +325,27 @@ describe("unknown-input parsers", () => {
     expect(parseTaskProof(forged).ok).toBe(false);
   });
 
+  it("rejects same-length result binding drift and valid aggregate evidence drift", () => {
+    const satisfied = evaluateTaskProof(input, completeEvidence);
+
+    const wrongResultBinding = JSON.parse(JSON.stringify(satisfied));
+    [wrongResultBinding.results[0], wrongResultBinding.results[1]] =
+      [wrongResultBinding.results[1], wrongResultBinding.results[0]];
+    const binding = parseTaskProof(wrongResultBinding);
+    expect(binding.ok).toBe(false);
+    if (!binding.ok) {
+      expect(binding.errors).toContain("proof.results[0] must correspond to proof.obligations[0]");
+    }
+
+    const wrongAggregateEvidence = JSON.parse(JSON.stringify(satisfied));
+    wrongAggregateEvidence.evidence.reverse();
+    const aggregate = parseTaskProof(wrongAggregateEvidence);
+    expect(aggregate.ok).toBe(false);
+    if (!aggregate.ok) {
+      expect(aggregate.errors).toContain("proof.evidence must equal the evidence derived from proof.results");
+    }
+  });
+
   it("parses only explicit policies", () => {
     expect(parseProofEvaluationPolicy({ untrustedPass: "reject" })).toEqual({
       ok: true,

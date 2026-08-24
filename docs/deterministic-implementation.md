@@ -1,6 +1,6 @@
 # Deterministic implementation and verification
 
-Status: design proposal. This document evaluates possible future changes; it does not describe shipped behavior. For the shipped guarantees this proposal builds on, see [Deterministic core](deterministic-core.md).
+Status: design proposal with explicitly marked shipped-baseline sections. Future changes remain proposals; only passages labeled **Shipped baseline** or **shipped** describe current behavior. For the complete shipped guarantees this proposal builds on, see [Deterministic core](deterministic-core.md).
 
 Loom 1.1 made orchestration *authority* deterministic: state transitions, gate arithmetic, retry accounting, and evidence attribution are code. What remains model judgment is verification *content* — reviewers produce prose findings, spec-check emits an LLM verdict, and implementers generate code with no machine-checkable contract beyond `file_list` byte changes. The remediation phase is where that residual judgment gets paid for, repeatedly and expensively.
 

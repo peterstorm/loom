@@ -420,3 +420,64 @@ The two production adapters and two compatibility callers must adopt the typed L
 4. `git diff --check`.
 5. Required full command: `env -u PI_CODING_AGENT npm test`.
 6. Registered remediation audit/install through the Orchestration Façade, then commit and push.
+
+---
+
+# Round 8: post-remediation full-branch review
+
+## Authority
+
+- Branch: `feat/deterministic-task-execution`
+- Review scope: exact 52-path branch delta `30241fd..976ff00`, frozen in the authoritative result
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260824T050920Z-deterministic-policy-rereview-8`
+- Review result digest: `cd2c4810b50168ceea24109f8d02a461103d85d5faf5a5b8308895af7ac7dbb3`
+- Surviving criticals: 2
+- Refuted criticals: 0
+
+## Mandatory critical remediation
+
+1. `engine/src/handlers/helpers/complete-wave-gate.ts`: follow the declared Lifecycle Machine path when checking presence so a dangling symlink is classified as absent and cannot authorize Wave completion; add a production-handler regression.
+2. `engine/src/core/proof-obligations.ts` parser coverage: add explicit same-length obligation/result mismatch and validly-shaped aggregate-evidence mismatch regressions, including the `parseTaskGraph` load boundary.
+
+## Advisory dispositions
+
+### Accepted
+
+1. Preserve TaskGraph read/JSON-parse causes in `/loom status` instead of passing an opaque sentinel that becomes a generic schema error; add a CLI-boundary regression.
+2. Clarify `docs/deterministic-implementation.md` as a proposal containing explicitly marked shipped-baseline sections.
+3. Guard failed `parsePiMessages` before deriving transcript and structured evidence, so each variable represents one successful concept.
+4. Extract one private review-evidence-failure Task transition shared by both `applyReviewResolution` failure branches.
+5. Extract one private outstanding-reviewer clearance projection shared by packet-bound evidence and legacy findings merge.
+
+### Deferred
+
+1. Add a deterministic test seam for `populate-task-graph`'s in-lock overwrite recheck. Reason: the recheck is implemented and the pre-lock behavior is covered; exposing a new store/resolver interface solely for this race test belongs with the planned TaskGraph codec/store seam rather than this bounded remediation.
+2. Redesign `Task` lifecycle state as a discriminated union. Reason: unchanged from prior rounds; it must land atomically with Slice 3's Completion Oracle and stored-state migration.
+3. Brand stored Review Run slot ids with the orchestration `SlotId`. Reason: the current schema root cannot import the orchestration contract without reversing dependencies; move the shared authority type during the planned completion/authority seam migration.
+4. Replace process-local Wave Gate WeakSet proof registries with explicit proof values. Reason: this changes the Wave Gate authority interface and belongs in Slice 2's quiescent engine-owned Wave completion suite architecture checkpoint.
+5. Split `wave-gate-machine.ts` into lifecycle/readiness/review/refutation/status modules. Reason: this Public Surface decomposition remains planned after the completion-suite slices and is not a bounded verification-policy remediation.
+
+### Dismissed
+
+None.
+
+## Refuted-finding audit
+
+No critical was refuted. The dangling-symlink finding was unanimously upheld. The proof-parser coverage finding survived intent and blast-radius despite the reproduction lens noting adjacent existing coverage; remediation adds the two exact adversarial cases named by the surviving majority rather than changing the already fail-closed parser.
+
+## Support paths outside frozen review scope
+
+- `engine/tests/core/proof-obligations.test.ts`
+- `engine/tests/handlers/helpers/orchestration-status-diagnostics.test.ts`
+
+The focused parser regression pins the exact proof-lockstep cases named by the critical Finding. The focused CLI regression proves the newly preserved TaskGraph read/parse cause without expanding the already oversized orchestration integration suite.
+
+## Validation
+
+1. Focused Vitest suites for Lifecycle Machine presence, Proof parser/load-boundary lockstep, status diagnostics, Pi transcript settlement, and findings/review transitions.
+2. Apply-mode `distill` pass after a green focused baseline; one move at a time with covering tests.
+3. `npm run typecheck` including unused-code checks.
+4. Full-tier Loom lint over every changed production TypeScript file.
+5. `git diff --check`.
+6. Required full command: `env -u PI_CODING_AGENT npm test`.
+7. Registered remediation audit/install through the Orchestration Façade, then commit and push.

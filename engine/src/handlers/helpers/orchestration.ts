@@ -202,14 +202,28 @@ const productionGateDeps: GateDeps = {
  * unavailable, here is why", not a stack trace. The status contract already
  * represents that case, so it is rendered like any other.
  */
+const STATUS_GRAPH_READ_FAILURE: unique symbol = Symbol("status-graph-read-failure");
+type StatusGraphReadFailure = Readonly<{
+  [STATUS_GRAPH_READ_FAILURE]: true;
+  path: string;
+  cause: string;
+}>;
+
+function parseStatusGraph(rawGraph: unknown): ReturnType<typeof parseTaskGraph> {
+  if (typeof rawGraph === "object" && rawGraph !== null && STATUS_GRAPH_READ_FAILURE in rawGraph) {
+    const failure = rawGraph as StatusGraphReadFailure;
+    return { ok: false, error: `cannot read task graph at ${failure.path}: ${failure.cause}` };
+  }
+  return parseTaskGraph(rawGraph);
+}
+
 export function renderStatus(
   rawGraph: unknown,
   deps: GateDeps,
   asJson: boolean,
   runDirectory: ActiveRunDirectoryObservation = Object.freeze({ kind: "unverified" }),
 ): string {
-  const parsed = parseTaskGraph(rawGraph);
-  const status = deriveLoomStatusFromParsedGraph(parsed, deps, null, runDirectory);
+  const status = deriveLoomStatusFromParsedGraph(parseStatusGraph(rawGraph), deps, null, runDirectory);
   return asJson ? renderLoomStatusJson(status) : renderLoomStatusHuman(status);
 }
 
@@ -217,9 +231,11 @@ function readGraph(path: string): unknown {
   try {
     return JSON.parse(readFileSync(path, "utf-8")) as unknown;
   } catch (error) {
-    // A parse failure is itself a status fact: hand the boundary something it
-    // will reject, so the reason travels through the same contract.
-    return { __unreadable: error instanceof Error ? error.message : String(error) };
+    return Object.freeze({
+      [STATUS_GRAPH_READ_FAILURE]: true as const,
+      path,
+      cause: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -228,7 +244,7 @@ function canonicalWaveGateRunsRoot(): string {
 }
 
 function statusRunDirectoryObservation(rawGraph: unknown, args: readonly string[]): ActiveRunDirectoryObservation {
-  const parsed = parseTaskGraph(rawGraph);
+  const parsed = parseStatusGraph(rawGraph);
   if (!parsed.ok || parsed.value.active_wave_gate === undefined ||
       parsed.value.active_wave_gate.terminalOutcome !== null) return Object.freeze({ kind: "unverified" });
   const active = parsed.value.active_wave_gate;
@@ -286,7 +302,7 @@ export async function observedAdvisoryApproval(
     );
     return false;
   };
-  const parsed = parseTaskGraph(rawGraph);
+  const parsed = parseStatusGraph(rawGraph);
   if (!parsed.ok) return unavailable(parsed.error);
   const opened = openRunDirectory(dirname(observation.path), observation.path);
   if (!opened.ok) return unavailable(opened.error.message);

@@ -560,6 +560,38 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }).ok).toBe(false);
   });
 
+  it("rejects result-binding and aggregate-evidence drift at the TaskGraph load boundary", () => {
+    const satisfied = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: [] },
+      {
+        taskCompleted: true,
+        testResult: { verdict: "trusted-pass" },
+        filesModified: [],
+        newTestsWritten: true,
+      },
+    );
+    expect(satisfied.state).toBe("satisfied");
+
+    const wrongResultBinding = JSON.parse(JSON.stringify(satisfied));
+    [wrongResultBinding.results[0], wrongResultBinding.results[1]] =
+      [wrongResultBinding.results[1], wrongResultBinding.results[0]];
+    const binding = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, status: "implemented", new_tests_required: true, proof: wrongResultBinding }],
+    });
+    expect(binding.ok).toBe(false);
+    if (!binding.ok) expect(binding.error).toContain("proof.results[0] must correspond");
+
+    const wrongAggregateEvidence = JSON.parse(JSON.stringify(satisfied));
+    wrongAggregateEvidence.evidence.reverse();
+    const aggregate = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, status: "implemented", new_tests_required: true, proof: wrongAggregateEvidence }],
+    });
+    expect(aggregate.ok).toBe(false);
+    if (!aggregate.ok) expect(aggregate.error).toContain("proof.evidence must equal");
+  });
+
   it("binds persisted proof obligations exactly to new_tests_required and file_list", () => {
     const exact = derivePendingTaskProof({
       newTestsRequired: true,

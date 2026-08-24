@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import gateHandler, {
@@ -238,6 +238,24 @@ describe("complete-wave-gate handler wiring (check 7 is actually in the gate)", 
     const gate = loadGateWithState(statePath);
     const result = await gate("", ["--wave", "1"]);
     expect(result.kind).toBe("passthrough");
+  });
+
+  it("BLOCKS the gate when the declared machine path is a dangling symlink", async () => {
+    const dir = tempDir();
+    const planFile = join(dir, "plan.md");
+    const machineAbsolute = join(dir, "order-machine.ts");
+    const machineFile = relative(process.cwd(), machineAbsolute);
+    writeFileSync(planFile, `# Plan\n\n## Lifecycles\n\n### LC-1: Order\n\n**Machine file:** ${machineFile}\n`);
+    symlinkSync(join(dir, "missing-machine-target.ts"), machineAbsolute);
+    const statePath = writeGateState(dir, planFile, machineFile);
+
+    const result = await loadGateWithState(statePath)("", ["--wave", "1"]);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      expect(result.message).toContain("LC-1");
+      expect(result.message).toContain("not created");
+    }
   });
 
   it("falls back to the architecture phase artifact when plan_file is null", async () => {

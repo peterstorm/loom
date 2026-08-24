@@ -8,7 +8,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { closeSync, constants as fsConstants, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { HookHandler, HookResult, TaskGraph, Task } from "../../types";
 import { legacyTestsPassedNote } from "../../types";
@@ -51,7 +51,9 @@ export function loadPlanModelsSource(planFile: string | null | undefined): PlanM
 
 export function inspectFilePresence(path: string): FilePresence {
   try {
-    lstatSync(path);
+    // Follow the final path component: lstat succeeds for a dangling symlink,
+    // but a link with no reachable target is not a Lifecycle Machine artifact.
+    statSync(path);
     return { ok: true, exists: true };
   } catch (error) {
     const code = error instanceof Error && "code" in error ? error.code : undefined;

@@ -45,7 +45,6 @@ import {
   type PriorFindingAssessment,
   type ReviewRun,
   type ReviewRunSlotAuthority,
-  type ReviewStatus,
   type Task,
 } from "../types";
 import {
@@ -722,6 +721,18 @@ export function invalidateTaskReview(task: Task): Task {
   };
 }
 
+function markReviewEvidenceFailed(task: Task, agent: string, message: string): Task {
+  return {
+    ...task,
+    review_status: "evidence_capture_failed",
+    review_error: message,
+    review_evidence_failures: [
+      ...(task.review_evidence_failures ?? []).filter((failed) => failed !== agent),
+      agent,
+    ],
+  };
+}
+
 /** Pure: the complete task transform a resolution implies. */
 export function applyReviewResolution(
   task: Task,
@@ -736,18 +747,10 @@ export function applyReviewResolution(
       // an otherwise completeable run.
       if (task.review_run !== undefined && !task.review_run.expected_agents.includes(r.agent)) return task;
       if (task.review_run?.evidence.some((evidence) => evidence.agent === r.agent)) return task;
-      return {
-        ...task,
-        review_status: "evidence_capture_failed" as ReviewStatus,
-        review_error: r.message,
-        // Named, not just counted. The status is per-task and the failure is
-        // per-agent, so recording WHICH reviewer could not be parsed is what lets
-        // a clean retry clear exactly its own failed evidence.
-        review_evidence_failures: [
-          ...(task.review_evidence_failures ?? []).filter((failed) => failed !== r.agent),
-          r.agent,
-        ],
-      };
+      // Named, not just counted. The status is per-task and the failure is
+      // per-agent, so recording WHICH reviewer could not be parsed is what lets
+      // a clean retry clear exactly its own failed evidence.
+      return markReviewEvidenceFailed(task, r.agent, r.message);
     })
     .with({ kind: "findings" }, (r): Task => mergeFindings(task, r.findings, r.agent))
     .with({ kind: "bound-findings" }, (r): Task => {
@@ -781,15 +784,7 @@ export function applyReviewResolution(
           currentRun.packet_id !== r.bound.packetId ||
           currentRun.generation !== r.bound.generation ||
           currentRun.evidence.some((evidence) => evidence.agent === r.agent)) return task;
-      return {
-        ...task,
-        review_status: "evidence_capture_failed" as ReviewStatus,
-        review_error: transition.error,
-        review_evidence_failures: [
-          ...(task.review_evidence_failures ?? []).filter((agent) => agent !== r.agent),
-          r.agent,
-        ],
-      };
+      return markReviewEvidenceFailed(task, r.agent, transition.error);
     })
     .exhaustive();
 }

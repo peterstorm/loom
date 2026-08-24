@@ -534,14 +534,21 @@ function missingStructuredEvidenceLog(taskId: string, messages: unknown): string
 function observeImplementationTranscript(result: PiSubagentResult, taskId: string): ImplementationTranscriptObservation {
   const log: string[] = [];
   const parsedMessages = parsePiMessages(result.messages);
-  const adaptedTranscript = parsedMessages.ok ? messagesToClaudeJsonl(parsedMessages.value) : parsedMessages;
-  const structuredEvidence = parsedMessages.ok ? piStructuredTestResult(parsedMessages.value) : parsedMessages;
+  if (!parsedMessages.ok) {
+    return {
+      kind: "malformed",
+      failureReason: `Pi transcript evidence capture failed: ${parsedMessages.errors.join("; ")}`,
+      log,
+    };
+  }
 
+  const adaptedTranscript = messagesToClaudeJsonl(parsedMessages.value);
+  const structuredEvidence = piStructuredTestResult(parsedMessages.value);
   if (structuredEvidence.ok && structuredEvidence.value === null) {
     const structuredLog = missingStructuredEvidenceLog(taskId, result.messages);
     if (structuredLog !== null) log.push(structuredLog);
   }
-  if (!adaptedTranscript.ok || !structuredEvidence.ok || !parsedMessages.ok) {
+  if (!adaptedTranscript.ok || !structuredEvidence.ok) {
     const errors = firstFailureErrors(adaptedTranscript, structuredEvidence);
     return {
       kind: "malformed",
