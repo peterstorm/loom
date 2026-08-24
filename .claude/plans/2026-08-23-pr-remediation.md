@@ -773,3 +773,60 @@ None. The production files, focused regressions, and cumulative remediation plan
 6. Bounded-worker full suite passed: **207 files, 5,171 passed, 1 intentional skip**.
 7. Complete smoke suite passed: panel **22/22**, review panel **19/19**, standalone review, orchestration façade, Pi resources, and TaskGraph **21/21**.
 8. Registered remediation audit/install through the Orchestration Façade, then commit and push.
+
+---
+
+# Round 14 — Full-branch rereview remediation
+
+## Authority
+
+- Branch: `feat/deterministic-task-execution`
+- Review scope: exact 60-path branch delta `30241fd..5c0ac6e`, frozen in the authoritative result
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260824T115050Z-deterministic-policy-rereview-14`
+- Review result digest: `42189eda700f69667c344063dca025e409099621958bd64cefcb3fd80bb84474`
+- Criticals found: 1
+- Surviving criticals: 1
+- Refuted criticals: 0
+
+## Mandatory critical remediation
+
+1. `engine/src/handlers/subagent-stop/update-task-status.ts`: correct the unqualified single-writer comment. Pi settlement also writes Task status through `TaskGraphStore.update` and `applyUntrustedStopResolution`; scope the transcript requirement to Claude SubagentStop settlement.
+
+## Advisory dispositions
+
+### Accepted
+
+1. Repair `parseProofObligationInput`'s explicit-policy surplus-field property fixture to use the persisted `new_tests` spelling and add a positive valid-explicit-policy parser case.
+2. Remove the comment that merely restates the `IMPL_AGENTS` guard.
+3. Delete the unused `ImplementationReadiness` projection and predicates; callers and tests use `TaskProof.state` directly.
+4. Delete the tests-only `parseFindingsBlock` projection and assert `FindingsBlockParseResult` directly.
+5. Delete the unused `hasFindingsBlock` export.
+6. Make authored-only waiver reason constants and `parseAuthoredVerificationPolicy` private behind `parseTaskVerificationPolicy`.
+
+### Deferred
+
+1. Move shared implementation settlement out of the Claude SubagentStop module. Reason: this is the planned Slice 3 Implementation Completion Oracle seam and must land with attempt authority and both harness adapters, not as another transitional relocation.
+2. Split `wave-gate-machine.ts` into focused Public Surface modules. Reason: this broad interface redesign remains sequenced after the completion-suite slices and requires its own architecture checkpoint.
+
+### Dismissed
+
+None.
+
+## Refuted-finding audit
+
+No critical Finding was refuted. Reproduction, intent, and blast-radius unanimously upheld the inaccurate single-writer comment.
+
+## Support paths outside frozen review scope
+
+None. Every changed production file, focused regression, and the cumulative remediation plan is inside the frozen 60-path review scope.
+
+## Validation
+
+1. Focused Proof/Verification Policy, Findings block, and Claude completion suites passed: **5 files, 179/179**.
+2. Apply-mode `distill` removed duplicate test assertions after the Public Surface deletions; the two remaining architecture opportunities were skipped because they change seams and are explicitly deferred. Post-distill focused verification remained **179/179**.
+3. `npm run typecheck` including unused-code checks passed.
+4. Full-tier Loom lint passed for all four changed production TypeScript files.
+5. `git diff --check` passed.
+6. Bounded-worker full suite passed: **207 files, 5,172 passed, 1 intentional skip**.
+7. Complete smoke suite passed: panel **22/22**, review panel **19/19**, standalone review, orchestration façade, Pi resources, and TaskGraph **21/21**.
+8. Registered remediation audit/install through the Orchestration Façade, then commit and push.

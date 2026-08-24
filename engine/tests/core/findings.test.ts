@@ -22,7 +22,6 @@ import {
   nextOrdinal,
   parseFindingId,
   parseFindingSeverity,
-  parseFindingsBlock,
   parseFindingsBlockResult,
   parseStoredFindings,
   parseStoredRefutations,
@@ -168,25 +167,25 @@ describe("attributeFindings — derived, never agent-chosen identity", () => {
 describe("parseFindingsBlock — the optional structured Machine Summary block", () => {
   const block = (body: string) => "prose before\n```findings\n" + body + "\n```\nprose after";
 
-  it("returns null when there is no block, so the caller falls back to the scraper", () => {
-    expect(parseFindingsBlock("### Machine Summary\nCRITICAL_COUNT: 0\n")).toBeNull();
+  it("returns absent when there is no block, so the caller falls back to the scraper", () => {
+    expect(parseFindingsBlockResult("### Machine Summary\nCRITICAL_COUNT: 0\n")).toEqual({ kind: "absent" });
   });
 
   it("parses severity, file, line and claim", () => {
-    const drafts = parseFindingsBlock(block(
+    expect(parseFindingsBlockResult(block(
       JSON.stringify([{ severity: "critical", file: "src/x.ts", line: 42, claim: "unchecked cast" }]),
-    ));
-    expect(drafts).toEqual([
-      { severity: "critical", file: "src/x.ts", line: 42, claim: "unchecked cast" },
-    ]);
+    ))).toEqual({
+      kind: "parsed",
+      drafts: [{ severity: "critical", file: "src/x.ts", line: 42, claim: "unchecked cast" }],
+    });
   });
 
   it("treats an empty array as 'I found nothing', not as a malformed block", () => {
-    expect(parseFindingsBlock(block("[]"))).toEqual([]);
+    expect(parseFindingsBlockResult(block("[]"))).toEqual({ kind: "parsed", drafts: [] });
   });
 
-  it("returns null on invalid JSON so the line scraper still runs", () => {
-    expect(parseFindingsBlock(block("[{severity: critical}]"))).toBeNull();
+  it("rejects invalid JSON so the line scraper can report the degradation", () => {
+    expect(parseFindingsBlockResult(block("[{severity: critical}]"))).toMatchObject({ kind: "rejected" });
   });
 
   it("preserves the exact structured-block rejection as typed diagnostic data", () => {
@@ -201,35 +200,42 @@ describe("parseFindingsBlock — the optional structured Machine Summary block",
     expect(parseFindingsBlockResult("no block")).toEqual({ kind: "absent" });
   });
 
-  it("returns null when an entry has an unknown severity or a non-string claim", () => {
-    expect(parseFindingsBlock(block(JSON.stringify([{ severity: "high", claim: "x" }])))).toBeNull();
-    expect(parseFindingsBlock(block(JSON.stringify([{ severity: "critical", claim: 3 }])))).toBeNull();
+  it("rejects an entry with an unknown severity or a non-string claim", () => {
+    expect(parseFindingsBlockResult(block(JSON.stringify([{ severity: "high", claim: "x" }]))))
+      .toMatchObject({ kind: "rejected" });
+    expect(parseFindingsBlockResult(block(JSON.stringify([{ severity: "critical", claim: 3 }]))))
+      .toMatchObject({ kind: "rejected" });
   });
 
-  it("returns null when the payload is not an array of objects", () => {
-    expect(parseFindingsBlock(block('{"severity":"critical","claim":"x"}'))).toBeNull();
-    expect(parseFindingsBlock(block('["x"]'))).toBeNull();
+  it("rejects a payload that is not an array of objects", () => {
+    expect(parseFindingsBlockResult(block('{"severity":"critical","claim":"x"}')))
+      .toMatchObject({ kind: "rejected" });
+    expect(parseFindingsBlockResult(block('["x"]'))).toMatchObject({ kind: "rejected" });
   });
 
   it("skips sentinel entries without discarding the block", () => {
-    const drafts = parseFindingsBlock(block(JSON.stringify([
+    expect(parseFindingsBlockResult(block(JSON.stringify([
       { severity: "critical", claim: "none" },
       { severity: "advisory", claim: "prefer a named constant" },
-    ])));
-    expect(drafts).toEqual([
-      { severity: "advisory", file: null, line: null, claim: "prefer a named constant" },
-    ]);
+    ])))).toEqual({
+      kind: "parsed",
+      drafts: [{ severity: "advisory", file: null, line: null, claim: "prefer a named constant" }],
+    });
   });
 
   it("uses the LAST block — agents echo the template before their real output", () => {
     const echoed = block(JSON.stringify([{ severity: "critical", claim: "TEMPLATE EXAMPLE" }]))
       + "\n" + block(JSON.stringify([{ severity: "advisory", claim: "the real one" }]));
-    expect(parseFindingsBlock(echoed)?.map((f) => f.claim)).toEqual(["the real one"]);
+    const parsed = parseFindingsBlockResult(echoed);
+    expect(parsed.kind).toBe("parsed");
+    if (parsed.kind === "parsed") expect(parsed.drafts.map((finding) => finding.claim)).toEqual(["the real one"]);
   });
 
   it("tolerates indentation on the fence", () => {
     const indented = "  ```findings\n  " + JSON.stringify([{ severity: "critical", claim: "x" }]) + "\n  ```\n";
-    expect(parseFindingsBlock(indented)?.map((f) => f.claim)).toEqual(["x"]);
+    const parsed = parseFindingsBlockResult(indented);
+    expect(parsed.kind).toBe("parsed");
+    if (parsed.kind === "parsed") expect(parsed.drafts.map((finding) => finding.claim)).toEqual(["x"]);
   });
 });
 

@@ -357,23 +357,6 @@ export function parseFindingsBlockResult(output: string): FindingsBlockParseResu
   return Object.freeze({ kind: "parsed", drafts: Object.freeze(drafts) });
 }
 
-/** Compatibility projection for callers that need only drafts-or-fallback. */
-export function parseFindingsBlock(output: string): readonly DraftFinding[] | null {
-  const parsed = parseFindingsBlockResult(output);
-  return parsed.kind === "parsed" ? parsed.drafts : null;
-}
-
-/**
- * Distinguishes a reviewer that emitted NO structured block from one whose
- * block failed to parse — the `absent` vs `rejected` arms of
- * `FindingsBlockStatus`. Both yield zero drafts, so the draft list alone cannot
- * tell the operator which happened, and only one of the two is a reviewer bug.
- */
-export function hasFindingsBlock(output: string): boolean {
-  FINDINGS_BLOCK.lastIndex = 0;
-  return FINDINGS_BLOCK.test(output);
-}
-
 // ---------------------------------------------------------------------------
 // Reading findings back out of the (untrusted) state file
 // ---------------------------------------------------------------------------

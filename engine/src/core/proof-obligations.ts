@@ -416,20 +416,6 @@ export function reevaluateTaskProof(
   return evaluateProofObligations(proof.obligations, observed, policy);
 }
 
-export type ImplementationReadiness =
-  | Readonly<{ state: "implementation-ready"; proof: SatisfiedTaskProof }>
-  | Readonly<{ state: "blocked"; proof: PendingTaskProof | FailedTaskProof }>;
-
-export function implementationReadiness(proof: TaskProof): ImplementationReadiness {
-  return proof.state === "satisfied"
-    ? Object.freeze({ state: "implementation-ready", proof })
-    : Object.freeze({ state: "blocked", proof });
-}
-
-export function isImplementationReady(proof: TaskProof): proof is SatisfiedTaskProof {
-  return proof.state === "satisfied";
-}
-
 // ---------------------------------------------------------------------------
 // Unknown-input parsers
 // ---------------------------------------------------------------------------

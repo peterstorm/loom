@@ -605,7 +605,6 @@ export const runUpdateTaskStatus = async (
   // resolved it.
   const agentType = stripNamespace(resolveAgentType(input));
 
-  // Skip non-impl agents
   if (!IMPL_AGENTS.has(agentType)) return { kind: "passthrough" };
 
   let mgr: StateManager | null;
@@ -622,8 +621,8 @@ export const runUpdateTaskStatus = async (
   // Parse transcript (read file content, then parse). The path is RESOLVED,
   // not read off the payload: a supplied `agent_transcript_path` wins, and a
   // harness that sends none falls back to the derived on-disk location. This
-  // handler is the only writer of task status, so an unlocatable transcript
-  // costs the whole record — see utils/agent-transcript-path.
+  // Claude's SubagentStop settlement requires this transcript, so an
+  // unlocatable path costs the whole record — see utils/agent-transcript-path.
   const transcriptPath = resolveAgentTranscriptPath(input);
   let transcriptContent = "";
   if (transcriptPath) {

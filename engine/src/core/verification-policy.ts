@@ -1,6 +1,6 @@
 /** Pure verification-policy model and TaskGraph compatibility parser. */
 
-export const AUTHORED_REGRESSION_WAIVER_REASONS = [
+const AUTHORED_REGRESSION_WAIVER_REASONS = [
   "documentation-only",
   "generated-artifact",
 ] as const;
@@ -10,7 +10,7 @@ export const REGRESSION_WAIVER_REASONS = [
 ] as const;
 export type RegressionWaiverReason = (typeof REGRESSION_WAIVER_REASONS)[number];
 
-export const AUTHORED_NEW_TEST_WAIVER_REASONS = [
+const AUTHORED_NEW_TEST_WAIVER_REASONS = [
   "existing-tests-sufficient",
   "documentation-only",
   "generated-artifact",
@@ -131,7 +131,7 @@ export function parseVerificationPolicy(
 }
 
 /** Agent-authored policy cannot claim migration provenance. */
-export function parseAuthoredVerificationPolicy(
+function parseAuthoredVerificationPolicy(
   raw: unknown,
   path = "verification_policy",
 ): VerificationPolicyParseResult<VerificationPolicy> {

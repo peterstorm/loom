@@ -8,8 +8,6 @@ import {
   deriveProofObligations,
   evaluateProofObligations,
   evaluateTaskProof,
-  implementationReadiness,
-  isImplementationReady,
   parseObservedProofEvidence,
   parseProofEvaluationPolicy,
   parseProofEvidence,
@@ -93,8 +91,6 @@ describe("proof evaluation", () => {
     expect(proof.state).toBe("satisfied");
     expect(proof.results).toHaveLength(proof.obligations.length);
     expect(proof.results.every((result) => result.state === "satisfied")).toBe(true);
-    expect(isImplementationReady(proof)).toBe(true);
-    expect(implementationReadiness(proof).state).toBe("implementation-ready");
   });
 
   it("a trusted failure is a typed regression failure", () => {
@@ -107,7 +103,6 @@ describe("proof evaluation", () => {
     if (proof.state === "failed") {
       expect(proof.failures).toContainEqual({ kind: "regression-tests-failed", provenance: "ledger" });
     }
-    expect(isImplementationReady(proof)).toBe(false);
   });
 
   it("rejects an untrusted claimed pass by default as a typed failure", () => {
@@ -350,6 +345,25 @@ describe("unknown-input parsers", () => {
     }
   });
 
+  it("accepts a valid explicit Verification Policy obligation input", () => {
+    expect(parseProofObligationInput({
+      verificationPolicy: {
+        regression: { kind: "required" },
+        new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+      },
+      declaredArtifacts: [],
+    })).toMatchObject({
+      ok: true,
+      value: {
+        verificationPolicy: {
+          regression: { kind: "required" },
+          newTests: { kind: "waived", reason: "existing-tests-sufficient" },
+        },
+        declaredArtifacts: [],
+      },
+    });
+  });
+
   it("parses only explicit policies", () => {
     expect(parseProofEvaluationPolicy({ untrustedPass: "reject" })).toEqual({
       ok: true,
@@ -415,7 +429,7 @@ describe("proof properties", () => {
             })),
           ];
           const proof = evaluateTaskProof(source, variants[removalIndex % variants.length]!);
-          return !isImplementationReady(proof);
+          return proof.state !== "satisfied";
         },
       ),
       { numRuns: 100 },
@@ -469,7 +483,7 @@ describe("proof properties", () => {
         value: {
           verificationPolicy: {
             regression: { kind: "required" },
-            newTests: { kind: "waived", reason: "existing-tests-sufficient" },
+            new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
           },
           declaredArtifacts: [],
         },
