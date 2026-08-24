@@ -4,7 +4,7 @@
  *   requirements (missingRequirements over the epoch fold) cap a
  *   trusted-pass at untrusted, labeled "machine-incomplete: <reqs>"
  * - the ambiguous multi-task inference branch: no extractable task ID with
- *   several executing tasks clears executing_tasks and touches no task
+ *   several executing Tasks preserves every reservation and touches no Task
  */
 
 import { execFileSync } from "node:child_process";
@@ -671,7 +671,7 @@ describe("locked implementation settlement failures", () => {
 });
 
 describe("ambiguous multi-task inference branch (gap 17)", () => {
-  it("no extractable task ID + several executing tasks → warn, clear executing_tasks, touch no task", async () => {
+  it("no extractable task ID + several executing Tasks → error, preserve reservations, touch no Task", async () => {
     const s = sid("ambiguous");
     const dir = tempDir();
     const statePath = writeState(dir, [implTask("T1"), implTask("T2")], ["T1", "T2"]);
@@ -683,11 +683,14 @@ describe("ambiguous multi-task inference branch (gap 17)", () => {
     const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
     stderrSpy.mockRestore();
 
-    expect(result.kind).toBe("passthrough");
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("execution authority was preserved"),
+    });
     expect(text).toContain("2 tasks executing (ambiguous)");
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.executing_tasks).toEqual([]);
+    expect(state.executing_tasks).toEqual(["T1", "T2"]);
     // NEVER marked failed/implemented — the old cascade this branch prevents.
     expect(state.tasks.map((t: { status: string }) => t.status)).toEqual(["pending", "pending"]);
     expect(state.tasks.every((t: { test_result?: unknown }) => t.test_result === undefined)).toBe(true);

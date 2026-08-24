@@ -568,6 +568,10 @@ export type EvidenceSnapshot =
   | { readonly kind: "snapshot"; readonly events: readonly EvidenceRecord[] }
   | { readonly kind: "snapshot-failed" };
 
+type UnreadableTranscriptSettlement =
+  | Readonly<{ kind: "quarantined"; taskId: string }>
+  | Readonly<{ kind: "preserved"; executingCount: number }>;
+
 /**
  * Handler core. `evidenceSnapshot` lets the dispatcher pass ledger records
  * captured BEFORE cleanup unbound the machine: attribution runs through the
@@ -627,20 +631,30 @@ export const runUpdateTaskStatus = async (
       transcriptContent = readFileSync(transcriptPath, "utf-8");
     } catch (error) {
       const cause = error instanceof Error ? error.message : String(error);
-      const executing = mgr.load().executing_tasks ?? [];
-      const [taskId] = executing;
-      if (executing.length === 1 && taskId !== undefined) {
-        await mgr.update((state) => applyCompletionInfrastructureFailure(state, taskId, true));
+      const settlement = await mgr.updateAndReturn<UnreadableTranscriptSettlement>((state) => {
+        const executing = state.executing_tasks ?? [];
+        const [taskId] = executing;
+        return executing.length === 1 && taskId !== undefined
+          ? {
+              state: applyCompletionInfrastructureFailure(state, taskId, true),
+              value: { kind: "quarantined", taskId } as const,
+            }
+          : {
+              state,
+              value: { kind: "preserved", executingCount: executing.length } as const,
+            };
+      });
+      if (settlement.kind === "quarantined") {
         return {
           kind: "error",
-          message: `update-task-status: cannot read transcript at ${transcriptPath}: ${cause}; quarantined ${taskId} for fresh revalidation`,
+          message: `update-task-status: cannot read transcript at ${transcriptPath}: ${cause}; quarantined ${settlement.taskId} for fresh revalidation`,
         };
       }
       return {
         kind: "error",
         message:
           `update-task-status: cannot read transcript at ${transcriptPath}: ${cause}; ` +
-          `${executing.length} executing Tasks make cleanup attribution ${executing.length === 0 ? "unavailable" : "ambiguous"}, so execution authority was preserved`,
+          `${settlement.executingCount} executing Tasks make cleanup attribution ${settlement.executingCount === 0 ? "unavailable" : "ambiguous"}, so execution authority was preserved`,
       };
     }
   }
@@ -661,16 +675,9 @@ export const runUpdateTaskStatus = async (
       taskId = executing[0];
       // Fall through with inferred taskId
     } else {
-      // Ambiguous or empty — just clear executing_tasks, don't mark tasks as failed.
-      // Marking all executing tasks as "failed" causes a cascade where subsequent hooks
-      // bypass the guard and overwrite valid test evidence.
-      //
-      // Both arms MUST speak. The empty arm used to return here in total
-      // silence, which is how a harness that recorded no `executing_tasks` and
-      // sent no transcript path looked exactly like a run with nothing to do:
-      // every task stayed `pending`, no test_result was ever written, and
-      // nothing on stderr said why. An unrecorded task is a wave gate reading
-      // green on no evidence — it has to be loud.
+      // Ambiguous or unavailable attribution cannot release any execution
+      // reservation: in a parallel Wave every entry may belong to a live
+      // sibling. Preserve authority and make the missing settlement explicit.
       if (executing.length > 0) {
         process.stderr.write(`WARNING: ${agentType} completed without task ID, ${executing.length} tasks executing (ambiguous)\n`);
       } else {
@@ -680,11 +687,12 @@ export const runUpdateTaskStatus = async (
             `and executing_tasks is empty, so there is nothing to attribute the run to\n`,
         );
       }
-      await mgr.update((s) => ({
-        ...s,
-        executing_tasks: [],
-      }));
-      return { kind: "passthrough" };
+      return {
+        kind: "error",
+        message:
+          `update-task-status: ${agentType} completion has no task identity; ` +
+          `${executing.length} executing Tasks make attribution ${executing.length === 0 ? "unavailable" : "ambiguous"}, so execution authority was preserved`,
+      };
     }
   }
 

@@ -367,11 +367,11 @@ function alignStructuredSeverity(
  * line, while `blockStatus` still reported `used` so no degradation note was
  * printed. The wave gate's advisory-disposition step (the `await-user` action
  * in `commands/wave-gate.md`) must triage every advisory to fixed/deferred/
- * dismissed; it cannot triage what it never sees. (Every agent
- * file in `REVIEW_SUB_AGENTS` requires the block to account for advisories too
- * — `engine/tests/review-agent-contract.test.ts` proves that claim rather than
- * asserting it — but the arbitration must hold for output that does not honour
- * its prompt, which is the only output worth arbitrating.)
+ * dismissed; it cannot triage what it never sees. Every agent file in
+ * `REVIEW_SUB_AGENTS` includes Machine Summary markers and a fenced findings
+ * block — `engine/tests/review-agent-contract.test.ts` pins that contract
+ * surface — but arbitration must still defend against a block that does not
+ * account for its prompt's advisory entries.
  *
  * Counting is necessary and NOT sufficient. Arbitration stays cardinal on
  * purpose — demanding that the block reproduce marker text verbatim would

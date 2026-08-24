@@ -98,9 +98,9 @@ function parseRequirement<Reason extends string>(
   const errors = [...exactKeys(raw, ["kind", "reason"], path)];
   const reason = reasons.find((candidate) => candidate === raw.reason);
   if (reason === undefined) {
-    errors.push(`${path}.reason must be one of ${reasons.join(", ")}`);
+    return failure([...errors, `${path}.reason must be one of ${reasons.join(", ")}`]);
   }
-  return errors.length > 0 || reason === undefined
+  return errors.length > 0
     ? failure(errors)
     : success(Object.freeze({ kind: "waived", reason }));
 }

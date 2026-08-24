@@ -787,9 +787,9 @@ function parseProofParts(raw: Record<string, unknown>): ProofParseResult<ParsedP
 }
 
 function parsePendingProof(parts: ParsedProofParts): ProofParseResult<PendingTaskProof> {
-  const errors: string[] = [];
-  if (parts.results.some((result) => result.state !== "pending")) errors.push("pending proof may contain only pending results");
-  if (errors.length > 0) return fail(errors);
+  if (parts.results.some((result) => result.state !== "pending")) {
+    return fail(["pending proof may contain only pending results"]);
+  }
   return ok(Object.freeze({
     state: "pending",
     obligations: parts.obligations,
@@ -802,15 +802,14 @@ function parsePendingProof(parts: ParsedProofParts): ProofParseResult<PendingTas
 }
 
 function evaluatedResults(parts: ParsedProofParts): ProofParseResult<NonEmpty<EvaluatedProofResult>> {
-  const errors: string[] = [];
-  if (parts.results.some((result) => result.state === "pending")) errors.push("evaluated proof may not contain pending results");
-  return errors.length > 0
-    ? fail(errors)
-    : ok(requireResultState(
-        parts.results,
-        isEvaluatedResult,
-        "proof parser invariant: validated evaluated proof contains a pending result",
-      ));
+  if (parts.results.some((result) => result.state === "pending")) {
+    return fail(["evaluated proof may not contain pending results"]);
+  }
+  return ok(requireResultState(
+    parts.results,
+    isEvaluatedResult,
+    "proof parser invariant: validated evaluated proof contains a pending result",
+  ));
 }
 
 function parseFailedProof(raw: Record<string, unknown>, parts: ParsedProofParts): ProofParseResult<FailedTaskProof> {

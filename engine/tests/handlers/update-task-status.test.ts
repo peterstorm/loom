@@ -8,6 +8,7 @@ import { extractTestEvidence } from "../../src/core/test-evidence";
 import { legacyTestsPassedNote } from "../../src/types";
 import type { TaskGraph } from "../../src/types";
 import { captureDeclaredArtifactBaseline } from "../../src/utils/artifact-baseline";
+import { StateManager } from "../../src/state-manager";
 
 describe("update-task-status — malformed stdin guard (directly-registered route)", () => {
   it("returns a contextual error naming that status/evidence was NOT updated, not a bare throw", async () => {
@@ -649,6 +650,43 @@ describe("update-task-status — transcript path resolution", () => {
     }
   });
 
+  it("uses locked execution authority when an unreadable transcript races with a sibling reservation", async () => {
+    const initial = await makeSession({ plantTranscript: false, executingTasks: ["T1"] });
+    const unreadableTranscript = mkdtempSync(join(tmpdir(), "loom-racing-transcript-"));
+    let persisted = initial.read();
+    const lockedState: TaskGraph = { ...persisted, executing_tasks: ["T1", "T2"] };
+    const manager = {
+      load: vi.fn(() => persisted),
+      update: vi.fn(async (fn: (state: TaskGraph) => TaskGraph) => {
+        persisted = fn(lockedState);
+      }),
+      updateAndReturn: vi.fn(async <T>(
+        fn: (state: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+      ): Promise<T> => {
+        const transition = fn(lockedState);
+        persisted = transition.state;
+        return transition.value;
+      }),
+    } as unknown as StateManager;
+    const managerSpy = vi.spyOn(StateManager, "fromSession").mockReturnValue(manager);
+    try {
+      const result = await updateTaskStatus(JSON.stringify({
+        session_id: initial.session,
+        agent_id: initial.agentId,
+        agent_type: "code-implementer-agent",
+        agent_transcript_path: unreadableTranscript,
+      }), []);
+
+      expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("ambiguous") });
+      expect(manager.updateAndReturn).toHaveBeenCalledOnce();
+      expect(persisted.executing_tasks).toEqual(["T1", "T2"]);
+      expect(persisted.tasks[0]?.revalidation_required).toBeUndefined();
+    } finally {
+      managerSpy.mockRestore();
+      rmSync(unreadableTranscript, { recursive: true, force: true });
+    }
+  });
+
   it("preserves ambiguous execution authority when an unreadable transcript binds no Task", async () => {
     const s = await makeSession({ plantTranscript: false, executingTasks: ["T1", "T2"] });
     const unreadableTranscript = mkdtempSync(join(tmpdir(), "loom-ambiguous-transcript-"));
@@ -668,7 +706,7 @@ describe("update-task-status — transcript path resolution", () => {
     }
   });
 
-  it("says out loud that nothing was recorded when there is no transcript and nothing executing", async () => {
+  it("errors out loud when nothing was recorded and there is no execution authority", async () => {
     const s = await makeSession({ plantTranscript: false });
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -679,7 +717,10 @@ describe("update-task-status — transcript path resolution", () => {
         agent_id: s.agentId,
         agent_type: "code-implementer-agent",
       }), []);
-      expect(result.kind).toBe("passthrough");
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringContaining("attribution unavailable"),
+      });
       text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
     } finally {
       stderrSpy.mockRestore();

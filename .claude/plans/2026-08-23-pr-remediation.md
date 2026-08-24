@@ -718,3 +718,58 @@ These adapters and the real-CLI fixture complete the mandatory session-authority
 6. Bounded-worker full suite: `env -u PI_CODING_AGENT -u LOOM_PI_RUNTIME_REVISION -u LOOM_PI_RUNTIME_ROOT npx vitest run --maxWorkers=4 --minWorkers=1 --testTimeout=15000` — **207 files, 5,170 passed, 1 intentional skip**.
 7. Complete smoke suite passed: panel **22/22**, review panel **19/19**, standalone review, orchestration façade, Pi resources, and TaskGraph **21/21**.
 8. Registered remediation audit/install through the Orchestration Façade, then commit and push.
+
+---
+
+# Round 13 — Full-branch rereview remediation
+
+## Authority
+
+- Branch: `feat/deterministic-task-execution`
+- Review scope: exact 60-path branch delta `30241fd..acca3c1`, frozen in the authoritative result
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260824T112107Z-deterministic-policy-rereview-13`
+- Review result digest: `e1a42b72e3e99b09301a81b293c87c4907ab74b0cc39d11c5e49175654afea01`
+- Criticals found: 2
+- Surviving criticals: 1
+- Refuted criticals: 1
+
+## Mandatory critical remediation
+
+1. `engine/src/handlers/subagent-stop/update-task-status.ts`: when a readable completion transcript has no Task identity and current execution authority is empty or ambiguous, preserve `executing_tasks` unchanged and return a contextual error. Never release sibling reservations from unbound evidence.
+
+## Advisory dispositions
+
+### Accepted
+
+1. Move unreadable-transcript cleanup attribution inside `StateManager.updateAndReturn`, so the exactly-one decision and quarantine transition consume the same locked TaskGraph. Add a race regression where a sibling reservation appears before the locked decision.
+2. Narrow `review-output.ts`'s contract-test comment to the Machine Summary markers and fenced-block presence that the referenced test actually proves.
+3. Return directly from `parseRequirement` when a waiver reason is absent or invalid, eliminating the redundant post-error undefined check without changing accumulated diagnostics.
+4. Replace single-predicate mutable error accumulators in `parsePendingProof` and `evaluatedResults` with direct fail-closed guards.
+
+### Deferred
+
+1. Brand `WaveReviewContextBase` run ids and digests. Reason: these shared authority brands must move with the planned exact-slot Review Run/roster authority redesign; adding local brands now would create incompatible same-concept types across the orchestration seam.
+2. Extract a pure TaskGraph codec from `StateManager`. Reason: this remains the dedicated FC/IS architecture slice already identified in prior rounds and requires coordinated parser ownership and property-test migration, not bounded review remediation.
+
+### Dismissed
+
+None.
+
+## Refuted-finding audit
+
+- `type-design-analyzer-1` (`engine/src/core/findings.ts`): reproduction and intent established that `taskFindingsError` independently rejects empty, incomplete, duplicate, or misordered `slot_authority` before `parseTaskGraph` returns a typed graph. The existing StateManager load-guard regression pins `slot_authority: []`; no parser change is authorized.
+
+## Support paths outside frozen review scope
+
+None. The production files, focused regressions, and cumulative remediation plan are all inside the frozen 60-path review scope.
+
+## Validation
+
+1. Focused Claude settlement, TaskGraph machine settlement, Verification Policy, Proof parser, review-output, and reviewer-contract suites passed: **6 files, 209/209**.
+2. Apply-mode `distill` retained the direct parser guards and explicit locked-decision union; no further move was applied because the remaining brand/codec opportunities change interfaces and belong to the deferred `deepen` slices. Focused verification remained **209/209**.
+3. `npm run typecheck` including unused-code checks passed.
+4. Full-tier Loom lint passed for all four changed production TypeScript files.
+5. `git diff --check` passed.
+6. Bounded-worker full suite passed: **207 files, 5,171 passed, 1 intentional skip**.
+7. Complete smoke suite passed: panel **22/22**, review panel **19/19**, standalone review, orchestration façade, Pi resources, and TaskGraph **21/21**.
+8. Registered remediation audit/install through the Orchestration Façade, then commit and push.
