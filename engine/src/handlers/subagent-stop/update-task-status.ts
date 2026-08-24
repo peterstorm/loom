@@ -516,31 +516,30 @@ export function collectDiff(
   // attribution therefore fails closed instead of broadening the evidence set.
   if (filesModified.length === 0) return "";
 
-  const classified = filesModified.map((file) => ({ file, result: deps.isTracked(file) }));
-  const failed = classified.find(({ result }) => !result.ok);
-  if (failed !== undefined && !failed.result.ok) {
-    throw new Error(`new-test diff authority unavailable: ${failed.result.error}`);
-  }
-  const tracked = classified.flatMap(({ file, result }) => result.ok && result.tracked ? [file] : []);
-  const inspectedUntracked = classified.flatMap(({ file, result }) =>
-    result.ok && !result.tracked ? [{ file, presence: deps.inspectFilePresence(file) }] : []);
-  const inaccessible = inspectedUntracked.find(({ presence }) => !presence.ok);
-  if (inaccessible !== undefined && !inaccessible.presence.ok) {
-    throw new Error(`new-test diff authority unavailable: cannot inspect ${inaccessible.file}: ${inaccessible.presence.error}`);
-  }
-  const untracked = inspectedUntracked.flatMap(({ file, presence }) =>
-    presence.ok && presence.exists ? [file] : []);
+  const observedTracking = filesModified.map((file) => ({ file, result: deps.isTracked(file) }));
+  const classified = observedTracking.map(({ file, result }) => {
+    if (!result.ok) throw new Error(`new-test diff authority unavailable: ${result.error}`);
+    return { file, tracked: result.tracked };
+  });
+  const tracked = classified.flatMap(({ file, tracked: isTracked }) => isTracked ? [file] : []);
+  const observedUntracked = classified.flatMap(({ file, tracked: isTracked }) =>
+    isTracked ? [] : [{ file, presence: deps.inspectFilePresence(file) }]);
+  const untracked = observedUntracked.flatMap(({ file, presence }) => {
+    if (!presence.ok) {
+      throw new Error(`new-test diff authority unavailable: cannot inspect ${file}: ${presence.error}`);
+    }
+    return presence.exists ? [file] : [];
+  });
   const diffs = [
     startSha === undefined ? { ok: true as const, diff: "" } : deps.diffFilesSince(startSha, tracked),
     deps.diffFiles(tracked),
     deps.diffFilesStaged(tracked),
     ...untracked.map((file) => deps.diffUntracked(file)),
   ];
-  const unavailable = diffs.find((result) => !result.ok);
-  if (unavailable !== undefined && !unavailable.ok) {
-    throw new Error(`new-test diff authority unavailable: ${unavailable.error}`);
-  }
-  return diffs.flatMap((result) => result.ok ? [result.diff] : []).join("\n");
+  return diffs.map((result) => {
+    if (!result.ok) throw new Error(`new-test diff authority unavailable: ${result.error}`);
+    return result.diff;
+  }).join("\n");
 }
 
 /** Shared shell operation for both Claude and Pi completion paths. Keeping

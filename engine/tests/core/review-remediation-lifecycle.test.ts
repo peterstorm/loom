@@ -68,6 +68,21 @@ function start(task = reviewedTask()): Task {
   return transition.task;
 }
 
+function reviewLifecycle(
+  run: ReviewRun,
+  verdicts: readonly PriorFindingVerdict[],
+): Readonly<{ prior_findings: readonly Readonly<Record<string, unknown>>[] }> {
+  return {
+    prior_findings: run.prior_finding_ids.map((finding_id, index) => ({
+      finding_id,
+      verdict: verdicts[index],
+      reason: verdicts[index] === "resolved_by_remediation"
+        ? "Verified the remediation in the packet postimage"
+        : "The packet still contains the failing behavior",
+    })),
+  };
+}
+
 function transcript(
   run: ReviewRun,
   verdicts: readonly PriorFindingVerdict[],
@@ -90,15 +105,7 @@ function transcript(
     JSON.stringify(findings.map((finding) => ({ ...finding, file: "src/x.ts", line: 2 }))),
     "```",
     "```review_lifecycle",
-    JSON.stringify({
-      prior_findings: run.prior_finding_ids.map((finding_id, index) => ({
-        finding_id,
-        verdict: verdicts[index],
-        reason: verdicts[index] === "resolved_by_remediation"
-          ? "Verified the remediation in the packet postimage"
-          : "The packet still contains the failing behavior",
-      })),
-    }),
+    JSON.stringify(reviewLifecycle(run, verdicts)),
     "```",
   ].join("\n");
 }
@@ -320,6 +327,32 @@ describe("packet-bound remediation review runs", () => {
     expect(resolveBoundReviewFindings(malformed, AGENTS[0], run)).toMatchObject({
       kind: "evidence-failed",
       message: expect.stringMatching(/^review_lifecycle block is not valid JSON: .+/),
+    });
+  });
+
+  it("rejects surplus review_lifecycle root authority", () => {
+    const run = start().review_run!;
+    const valid = reviewLifecycle(run, ["still_present", "still_present"]);
+    const drifted = transcript(run, ["still_present", "still_present"])
+      .replace(JSON.stringify(valid), JSON.stringify({ ...valid, extra: "unauthorized" }));
+
+    expect(resolveBoundReviewFindings(drifted, AGENTS[0], run)).toMatchObject({
+      kind: "evidence-failed",
+      message: "review_lifecycle contains unexpected field(s): extra",
+    });
+  });
+
+  it("rejects surplus prior-assessment authority", () => {
+    const run = start().review_run!;
+    const original = transcript(run, ["still_present", "still_present"]);
+    const valid = reviewLifecycle(run, ["still_present", "still_present"]);
+    const priorFindings = valid.prior_findings.map((assessment, index) =>
+      index === 0 ? { ...assessment, confidence: 1 } : assessment);
+    const drifted = original.replace(JSON.stringify(valid), JSON.stringify({ prior_findings: priorFindings }));
+
+    expect(resolveBoundReviewFindings(drifted, AGENTS[0], run)).toMatchObject({
+      kind: "evidence-failed",
+      message: "review_lifecycle.prior_findings[0] contains unexpected field(s): confidence",
     });
   });
 

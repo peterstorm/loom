@@ -536,3 +536,63 @@ None. Every production file, regression file, and this cumulative remediation pl
 5. `git diff --check`.
 6. Required full command: `env -u PI_CODING_AGENT -u LOOM_PI_RUNTIME_REVISION -u LOOM_PI_RUNTIME_ROOT npm test`.
 7. Registered remediation audit/install through the Orchestration Façade, then commit and push.
+
+---
+
+# Round 10 — Full-branch rereview remediation
+
+## Authority
+
+- Branch: `feat/deterministic-task-execution`
+- Review scope: exact 54-path branch delta `30241fd..1d85a12`, frozen in the authoritative result
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260824T071442Z-deterministic-policy-rereview-10`
+- Review result digest: `c571f737c5920d517d02b10a693317b19182f029864306ca9427c2d355b7dce5`
+- Criticals found: 2
+- Surviving criticals: 2
+- Refuted criticals: 0
+
+## Mandatory critical remediation
+
+1. `engine/src/core/review-output.ts`: make packet-bound `review_lifecycle` parsing exact at both levels. The root must contain only `prior_findings`; every assessment must contain only `finding_id`, `verdict`, and `reason`. Add focused surplus-root and surplus-entry regressions.
+2. `pi/subagent-result.ts`: an unbound successful implementation result must preserve all ambiguous `executing_tasks` and return the binding failure through `processingErrors`; it must not erase parallel execution authority while looking successful. Add an ambiguous-success regression.
+
+## Advisory dispositions
+
+### Accepted
+
+1. Return missing/unknown successful review binding diagnostics through `processingErrors`; dropped findings are an orchestration failure, not log-only success.
+2. Return missing/unknown failed review binding diagnostics through `processingErrors`; inability to persist `evidence_capture_failed` must be caller-visible.
+3. Correct the repo-root test reference in `review-output.ts` from `tests/review-agent-contract.test.ts` to `engine/tests/review-agent-contract.test.ts`.
+4. Remove `firstFailureErrors`' unreachable `failed.ok` recheck after selecting only failed transcript results.
+5. Narrow `collectDiff`'s selected failures with typed predicates so success checks are not repeated after `find`.
+6. Carry `snapshotGateDeps`'s non-null Lifecycle Machine path in a local value rather than reasserting it with `!`.
+7. Project bound Lifecycle Machines into records whose `machineFile` is non-null before artifact evaluation, eliminating later assertions without changing diagnostics.
+
+### Deferred
+
+1. Redesign `Task` as a status/proof discriminated union. Reason: this remains Slice 3 work and must land atomically with the Completion Oracle and explicit stored-state migration.
+2. Add a dedicated exact-slot `ReviewRun` union arm. Reason: this is an authority-schema migration coupled to the planned shared `SlotId`/Review Run redesign, not a bounded parser remediation.
+3. Replace `WaveReviewRequestBinding`'s request tuple with a parsed roster-slot value. Reason: this changes the Wave Gate Public Surface and belongs with the planned exact-slot authority migration.
+4. Deepen `TaskGraphStore` to return typed transaction values. Reason: the planned Slice 3 engine-owned Completion Oracle removes the Pi-only settlement seam; migrating all Pi appliers now would create a broad transitional interface immediately replaced by that work.
+
+### Dismissed
+
+None.
+
+## Refuted-finding audit
+
+The canonical reproduction, intent, and blast-radius panel unanimously upheld both critical Findings. No critical Finding was refuted.
+
+## Support paths outside frozen review scope
+
+None. The production files, focused regression files, and cumulative remediation plan are all in the frozen 54-path scope.
+
+## Validation
+
+1. Focused Vitest suites for review lifecycle parsing, Pi implementation/review binding, Diff collection, Lifecycle Machine artifacts, and Wave Gate dependency snapshots.
+2. Apply-mode `distill` after a green focused baseline, one behavior-preserving move at a time.
+3. `npm run typecheck` including unused-code checks.
+4. Full-tier Loom lint over every changed production TypeScript file.
+5. `git diff --check`.
+6. Required full command: `env -u PI_CODING_AGENT -u LOOM_PI_RUNTIME_REVISION -u LOOM_PI_RUNTIME_ROOT npm test`.
+7. Registered remediation audit/install through the Orchestration Façade, then commit and push.

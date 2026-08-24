@@ -96,8 +96,9 @@ export function snapshotGateDeps(state: TaskGraph, io: GateIO): GateDeps {
     // checkLifecycleArtifacts can count ANY matched form as satisfied.
     const taskFiles = state.tasks.flatMap((t) => t.file_list ?? []);
     for (const lc of source.models.lifecycles) {
-      if (lc.machineFile === null) continue;
-      const candidates = [lc.machineFile, ...taskFiles.filter((f) => pathsMatch(f, lc.machineFile!))];
+      const machineFile = lc.machineFile;
+      if (machineFile === null) continue;
+      const candidates = [machineFile, ...taskFiles.filter((f) => pathsMatch(f, machineFile))];
       for (const path of candidates) {
         if (!presence.has(path)) presence.set(path, io.filePresence(path));
       }

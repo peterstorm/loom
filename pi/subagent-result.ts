@@ -132,8 +132,10 @@ export type PiSubagentResultEntry =
 function firstFailureErrors(
   ...results: readonly PiTranscriptResult<unknown>[]
 ): readonly string[] {
-  const failed = results.find((result) => !result.ok);
-  return failed === undefined || failed.ok ? [] : failed.errors;
+  for (const result of results) {
+    if (!result.ok) return result.errors;
+  }
+  return [];
 }
 
 /**
@@ -300,7 +302,8 @@ export async function applyFailedPiResult(args: Readonly<{
   if (isReviewAgent(agentType)) {
     const failedTaskId = reservedSlot?.taskId ?? extractTaskId(result.task ?? "");
     if (failedTaskId === null || !store.load().tasks.some((task) => task.id === failedTaskId)) {
-      return outcome([`loom(pi): ${failure}; trusted task binding is missing or unknown — review evidence NOT stored`]);
+      const message = `loom(pi): ${failure}; trusted task binding is missing or unknown — review evidence NOT stored`;
+      return outcome([message], [message]);
     }
     const resolution = { kind: "evidence-failed" as const, agent: agentType, message: failure };
     await store.update((state) => ({
@@ -522,8 +525,7 @@ async function resolveImplementationBindingForResult(args: Readonly<{
     executingTasks: args.store.load().executing_tasks ?? [],
   });
   if (binding.kind === "unbound") {
-    await args.store.update((state) => ({ ...state, executing_tasks: [] }));
-    return { kind: "unbound", outcome: outcome([binding.reason]) };
+    return { kind: "unbound", outcome: outcome([binding.reason], [binding.reason]) };
   }
   const log = binding.inferred
     ? [`WARNING: ${args.agentType} task ID extraction failed, inferred task ${binding.taskId} from executing_tasks`]
@@ -883,20 +885,14 @@ function resolveReviewTaskBinding(args: Readonly<{
 }>): ReviewTaskBinding {
   const taskId = args.reservedSlot?.taskId ?? extractTaskId(args.result.task ?? "") ?? extractTaskId(args.parentPrompt);
   if (!taskId) {
-    return {
-      kind: "blocked",
-      outcome: outcome([`WARNING: ${args.agentType} review completed without an extractable task ID — findings NOT stored`]),
-    };
+    const message = `WARNING: ${args.agentType} review completed without an extractable task ID — findings NOT stored`;
+    return { kind: "blocked", outcome: outcome([message], [message]) };
   }
 
   const reviewTask = args.store.load().tasks.find((task) => task.id === taskId);
   if (!reviewTask) {
-    return {
-      kind: "blocked",
-      outcome: outcome([
-        `WARNING: ${args.agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored`,
-      ]),
-    };
+    const message = `WARNING: ${args.agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored`;
+    return { kind: "blocked", outcome: outcome([message], [message]) };
   }
   return { kind: "bound", taskId, reviewTask };
 }

@@ -268,6 +268,9 @@ describe("applyFailedPiResult", () => {
 
     expect(store.current().tasks[0]!.review_status).toBe("pending");
     expect(applied.log.join("\n")).toContain("review evidence NOT stored");
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("review evidence NOT stored"),
+    ]);
   });
 
   it("idempotently releases the reserved implementation task without replacing prior settlement", async () => {
@@ -406,6 +409,25 @@ describe("applyReviewPiResult", () => {
     });
 
     expect(applied.log.join("\n")).toContain("is not in the task graph");
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("is not in the task graph"),
+    ]);
+    expect(store.current().tasks[0]!.review_status).toBe("pending");
+  });
+
+  it("reports a successful review with no Task binding as a processing error", async () => {
+    const store = fakeStore(graph());
+    const applied = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ task: "review the implementation", messages: assistantText(machineSummary) }),
+      reservedSlot: undefined,
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("without an extractable task ID"),
+    ]);
     expect(store.current().tasks[0]!.review_status).toBe("pending");
   });
 
@@ -502,6 +524,26 @@ describe("applyImplementationPiResult", () => {
     const recovered = applyCompletionInfrastructureFailure(stale, "T1", false);
     return { ...recovered, executing_tasks: ["T1"] };
   };
+
+  it("preserves parallel execution authority and reports an unbound successful result", async () => {
+    const base = implementationGraph();
+    const second = { ...base.tasks[0]!, id: "T2" };
+    const store = fakeStore({ ...base, executing_tasks: ["T1", "T2"], tasks: [...base.tasks, second] });
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "implementation result" }),
+      reservedSlot: undefined,
+      parentPrompt: "",
+    });
+
+    expect(store.current().executing_tasks).toEqual(["T1", "T2"]);
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("2 tasks executing (ambiguous)"),
+    ]);
+  });
 
   it("clears revalidation when waived regression evidence rebuilds a satisfied Proof", async () => {
     const store = fakeStore(regressionWaivedRecoveryGraph());

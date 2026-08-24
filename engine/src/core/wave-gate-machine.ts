@@ -653,16 +653,19 @@ export function checkLifecycleArtifacts(
     return fail(`FAILED: plan file '${source.path}' is unreadable — cannot verify lifecycle machine artifacts (fail-closed): ${source.error}`);
   }
   const waveFiles = waveTasks.flatMap((task) => task.file_list ?? []);
-  const bound = source.models.lifecycles.filter((lifecycle) =>
-    lifecycle.machineFile !== null && waveFiles.some((file) => lifecyclePathMatches(file, lifecycle.machineFile!))
-  );
+  const bound = source.models.lifecycles.flatMap((lifecycle) => {
+    const machineFile = lifecycle.machineFile;
+    return machineFile !== null && waveFiles.some((file) => lifecyclePathMatches(file, machineFile))
+      ? [{ lifecycle, machineFile }]
+      : [];
+  });
   if (bound.length === 0) return pass("7. Lifecycle artifacts: none bound to this wave.");
-  const observed = bound.map((lifecycle) => {
+  const observed = bound.map(({ lifecycle, machineFile }) => {
     const variants = [...new Set([
-      lifecycle.machineFile!,
-      ...waveFiles.filter((file) => lifecyclePathMatches(file, lifecycle.machineFile!)),
+      machineFile,
+      ...waveFiles.filter((file) => lifecyclePathMatches(file, machineFile)),
     ])];
-    return { lifecycle, variants: variants.map((path) => ({ path, presence: filePresence(path) })) };
+    return { lifecycle, machineFile, variants: variants.map((path) => ({ path, presence: filePresence(path) })) };
   });
   const unresolved = observed.filter(({ variants }) =>
     !variants.some(({ presence }) => presence.ok && presence.exists)
@@ -674,13 +677,12 @@ export function checkLifecycleArtifacts(
     return fail("FAILED: lifecycle machine artifact presence is unavailable (fail-closed):\n" +
       unavailable.map(({ lifecycle, path, error }) => `  ${lifecycle.id}: ${path}: ${error}`).join("\n"));
   }
-  const missing = unresolved;
-  if (missing.length > 0) {
+  if (unresolved.length > 0) {
     return fail("FAILED: lifecycle machine files declared in the plan were not created by this wave:\n" +
-      missing.map(({ lifecycle }) => `  ${lifecycle.id}: ${lifecycle.machineFile}`).join("\n"));
+      unresolved.map(({ lifecycle, machineFile }) => `  ${lifecycle.id}: ${machineFile}`).join("\n"));
   }
   return pass(`7. Lifecycle artifacts verified (${bound.length}):\n` +
-    bound.map((lifecycle) => `     ${lifecycle.id}: ${lifecycle.machineFile}`).join("\n"));
+    bound.map(({ lifecycle, machineFile }) => `     ${lifecycle.id}: ${machineFile}`).join("\n"));
 }
 
 export interface GateDeps {

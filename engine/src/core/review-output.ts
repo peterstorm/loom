@@ -357,7 +357,7 @@ function alignStructuredSeverity(
  * in `commands/wave-gate.md`) must triage every advisory to fixed/deferred/
  * dismissed; it cannot triage what it never sees. (Every agent
  * file in `REVIEW_SUB_AGENTS` requires the block to account for advisories too
- * — `tests/review-agent-contract.test.ts` proves that claim rather than
+ * — `engine/tests/review-agent-contract.test.ts` proves that claim rather than
  * asserting it — but the arbitration must hold for output that does not honour
  * its prompt, which is the only output worth arbitrating.)
  *
@@ -557,6 +557,18 @@ function lastMarker(text: string, name: string): string | null {
   return value;
 }
 
+function unexpectedFields(
+  record: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+  path: string,
+): string | null {
+  const expected = new Set(allowed);
+  const unexpected = Object.keys(record).filter((key) => !expected.has(key)).sort();
+  return unexpected.length === 0
+    ? null
+    : `${path} contains unexpected field(s): ${unexpected.join(", ")}`;
+}
+
 function parsePriorAssessments(
   transcript: string,
   priorIds: readonly string[],
@@ -583,7 +595,10 @@ function parsePriorAssessments(
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return { ok: false, error: "review_lifecycle block must be a JSON object" };
   }
-  const entries = (raw as Record<string, unknown>).prior_findings;
+  const root = raw as Record<string, unknown>;
+  const rootFieldsError = unexpectedFields(root, ["prior_findings"], "review_lifecycle");
+  if (rootFieldsError !== null) return { ok: false, error: rootFieldsError };
+  const entries = root.prior_findings;
   if (!Array.isArray(entries)) return { ok: false, error: "review_lifecycle.prior_findings must be an array" };
   const assessments: PriorFindingAssessment[] = [];
   for (const [index, entry] of entries.entries()) {
@@ -591,6 +606,12 @@ function parsePriorAssessments(
       return { ok: false, error: `review_lifecycle.prior_findings[${index}] must be an object` };
     }
     const record = entry as Record<string, unknown>;
+    const fieldsError = unexpectedFields(
+      record,
+      ["finding_id", "verdict", "reason"],
+      `review_lifecycle.prior_findings[${index}]`,
+    );
+    if (fieldsError !== null) return { ok: false, error: fieldsError };
     const findingId = typeof record.finding_id === "string" ? record.finding_id.trim() : "";
     const reason = typeof record.reason === "string" ? record.reason.trim() : "";
     if (findingId === "" || reason === "" ||
