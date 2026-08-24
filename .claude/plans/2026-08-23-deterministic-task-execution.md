@@ -2,11 +2,11 @@
 
 ## Status
 
-Accepted architecture, recovered from the 2026-08-22 completion-oracle discussion and reconciled against Loom `main`. Slice 1 (Verification Policy) merged at `529ffb9`; Slice 2 (quiescent Wave completion suite) is implemented on the branch below. Slices 3–5 remain planned.
+Accepted architecture, recovered from the 2026-08-22 completion-oracle discussion and reconciled against Loom `main`. Slice 1 (Verification Policy) merged at `529ffb9`; Slice 2 (quiescent Wave completion suite) merged through PR #29 at `bd16fed`. Slice 3 is active; Slices 4–5 remain planned.
 
-Implementation worktree: `~/dev/claude-plugins/loom-deterministic-task-execution`
+Implementation worktree: `~/dev/claude-plugins/loom-deterministic-task-completion-oracle`
 
-Branch: `feat/deterministic-wave-completion-suite`
+Branch: `feat/deterministic-task-completion-oracle`
 
 ## Objective
 
@@ -428,6 +428,125 @@ No production subprocess is mocked.
 - Route Claude and Pi through `settleImplementationAttempt`.
 - Remove inference-based success authority; inference may remain cleanup-only.
 - Never block SubagentStop to continue the same child in this epic; retries are new engine-issued attempts in both harnesses.
+
+#### Slice 3 architecture checkpoint
+
+##### Stored Task lifecycle and migration
+
+`Task` becomes a discriminated union over the existing flat wire fields; no second nested lifecycle source is introduced.
+
+- `pending`: pending or failed Proof; no revalidation marker.
+- `revalidation-required`: `status: "pending"`, any historical Proof, and `revalidation_required: true`.
+- `implemented`: `status: "implemented"` and satisfied Proof.
+- `completed`: `status: "completed"` and satisfied Proof; only Wave Gate mints this arm.
+- `failed`: `status: "failed"` and failed Proof.
+- `legacy-missing-proof`: an implementation-bearing legacy status, absent Proof, and an explicit protected migration marker. It remains readable but cannot receive modern positive completion authority.
+
+The TaskGraph parser derives a pending Proof for legacy pending Tasks that omitted one. It translates implementation-bearing Tasks without Proof into the explicit legacy arm rather than inventing satisfied evidence. New writers cannot mint the legacy arm. The provenance-checked reconciliation helper is the only positive legacy migration: exact registered Review Packet/baseline authority may recover Proof and remove the marker. Ordinary reconciliation may still revoke stale authority.
+
+##### Implementation Attempt authority
+
+`engine/src/core/implementation-completion.ts` owns exact parsers, constructors, digests, lifecycle classification, and settlement:
+
+```typescript
+type SemanticAttempt = 1 | 2;
+
+type ImplementationAttemptAuthority = Readonly<{
+  schemaVersion: 1;
+  kind: "implementation-attempt-authority";
+  taskId: TaskId;
+  wave: WaveNumber;
+  semanticAttempt: SemanticAttempt;
+  reservationId: ImplementationReservationId;
+  headSha: GitSha;
+  reservedAt: IsoInstant;
+  taskScopeBaselineDigest: ArtifactDigest;
+  dirtySetBaselineDigest: ArtifactDigest;
+  authorityDigest: ArtifactDigest;
+}>;
+```
+
+Reservation identity distinguishes repeated executions. `retry_count`, Task id, harness result index, and `executing_tasks` cardinality are never attempt authority. Slice 3 registration defaults to semantic attempt 1; only Slice 4 may explicitly request attempt 2. Manual re-execution therefore receives a fresh reservation id under attempt 1 until the bounded retry program exists.
+
+The Task stores at most one `active_implementation_attempt` and an immutable `implementation_attempt_history` of exact settlement receipts. New graphs enforce:
+
+```text
+Task id in executing_tasks
+  iff Task has active_implementation_attempt
+  iff stored attempt baselines hash to that authority's two baseline digests
+```
+
+Legacy `executing_tasks` entries without active authority remain readable as legacy reservations, but are cleanup/invalidation-only. Stale reservation reclamation removes only the exact active authority it proved abandoned.
+
+Registration captures baselines and reservation ids in the shell, then revalidates and atomically installs baselines, digests, authority, `reserved_at`, and `executing_tasks` under one StateManager lock. The returned authority is the only result correlation capability.
+
+##### Harness correlation
+
+Claude:
+
+1. PreToolUse atomically registers the attempt.
+2. SubagentStart reads the trusted first user prompt, resolves its Task, loads that Task's exact active authority, and writes a session+agent-id sidecar containing the authority.
+3. SubagentStop snapshots and parses that sidecar before roster/machine cleanup deletes it.
+4. Settlement consumes the snapshot. General transcript text and sole-`executing_tasks` inference are cleanup-only.
+
+Pi:
+
+1. Shared registration returns exact attempt authorities in spawn order.
+2. Each implementation `ReservedSlot` stores its exact authority.
+3. Finalization and successful results settle only that authority. Unreserved prompt/parent-prompt/sole-executing binding is cleanup-only.
+
+A stale result whose reservation id differs from the locked active attempt is ignored and cannot release the newer attempt. Duplicate history receipts are idempotently ignored. Missing or ambiguous attribution preserves every modern active attempt.
+
+##### Task-local suite
+
+Slice 3 does not widen the operator Verification Manifest to Task subprocesses. In a shared worktree, even `shell: false` allowlisted commands can observe sibling intermediate bytes; arbitrary Task-scope project commands remain forbidden.
+
+The Task suite is a distinct exact envelope containing only engine-owned checks. Its initial non-empty roster contains `loom:task-byte-scope`, evaluated from parser-proven Task paths and exact attempt baselines. Baseline/read/path uncertainty is infrastructure-blocked. Modified paths outside the attempt's declared plus previously-attributed Task scope are semantic failure. The batch-shared repository dirty-set delta is invalidation evidence, not attribution, and sibling paths never become this Task's Proof.
+
+The existing Wave suite remains the only authority for build, typecheck, tests, package scripts, project reports, and full-tier lint.
+
+##### Completion Oracle
+
+```typescript
+settleImplementationAttempt(
+  task: SettleableTask,
+  currentAuthority: ImplementationAttemptAuthority,
+  suppliedAuthority: ImplementationAttemptAuthority,
+  observation: ImplementationObservation,
+  suite: TaskCompletionSuiteResult,
+): Either<ImplementationCompletionError, ImplementationCompletionTransition>
+```
+
+The pure reducer owns exact authority comparison, suite evaluation, Proof evaluation, evidence preservation, and transition classification:
+
+- `implemented` — exact current authority, accepted Task suite, and satisfied Proof.
+- `retry-required` — semantic failure on attempt 1; recorded but not dispatched in Slice 3.
+- `escalation-required` — semantic failure on attempt 2; recorded but not dispatched in Slice 3.
+- `infrastructure-blocked` — observation/suite infrastructure uncertainty; consumes no semantic attempt.
+- `ignored` — stale, duplicate, or already-completed evidence.
+
+A locked shell applies the returned transition and existing review/spec/Wave invalidation intent atomically, clears only the matching active attempt, appends one receipt, and recomputes `impl_complete`. Pi and Claude may preserve different evidence provenance, but equivalent normalized observations produce byte-equal transitions.
+
+##### Positive-writer cutover
+
+All positive Task-completion writers change in this slice:
+
+- Claude `runUpdateTaskStatus` and Pi `applyImplementationPiResult` call the Oracle.
+- `applyUntrustedStopResolution` becomes an Oracle application/helper rather than a second status decision.
+- `applyCompletionInfrastructureFailure` requires exact modern attempt authority; legacy inference can only quarantine/release legacy reservations.
+- `store-test-evidence` may store evidence but may not set implemented.
+- `reconcile-implementation-proof` may invalidate modern authority; positive settlement is limited to its explicit provenance-checked legacy migration.
+- Population creates canonical pending lifecycle state; Wave Gate alone promotes implemented to completed; reopening creates revalidation-required state.
+
+##### Tests and rollout
+
+Property tests prove exact parser totality/round trips, digest determinism, settlement determinism, no retry after attempt 2, infrastructure failures do not consume semantic attempts, stale/duplicate results never alter current Proof, and implemented implies exact accepted checks plus satisfied obligations.
+
+Parity tests feed equivalent Claude/Pi normalized observations into the same reducer. Integration tests cover Claude sidecar binding/snapshot cleanup, Pi reserved-slot authority, late-result/new-reservation collision, missing/ambiguous cleanup, stale reservation reclamation, out-of-scope writes, legacy graph migration, and every out-of-band positive writer.
+
+Runtime rollout occurs only at a Pi session boundary after merge. A pre-Slice-3 active child has no exact sidecar/reserved authority and therefore requires cleanup/revalidation and a fresh spawn; compatibility inference never upgrades it to implemented.
+
+Slice 4 alone freezes retry contexts, dispatches attempt 2, persists retry diagnostics/request identity, and owns escalation execution. Slice 3 classifies and records those transitions but launches no retry.
 
 ### Slice 4 — bounded retry/escalation
 
