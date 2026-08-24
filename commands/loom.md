@@ -482,7 +482,7 @@ Ask: "Proceed with this plan?"
 
 ### 4d. Create Artifacts
 
-On approval:
+On approval, establish operator-owned completion authority before populating Tasks. If the project needs whole-program commands beyond Loom's reserved full-tier lint, create `.loom/verification-manifest.json` using the exact schema in `docs/workflows.md`. Commands are fixed executable/argument arrays; never copy a model-authored shell string into the manifest. If no file exists, population freezes the engine default containing only reserved checks.
 
 **A. GitHub Issue:**
 ```bash
@@ -500,6 +500,7 @@ echo "$DECOMPOSE_OUTPUT" | bun ${LOOM_DIR}/engine/src/cli.ts helper populate-tas
 This helper:
 - Requires and persists `spec_trace_version: 2`, sanitizing both Task trace arrays
 - Reads existing state (phase tracking fields)
+- Reads, exactly parses, and freezes `.loom/verification-manifest.json` directly from the repository; decompose output cannot provide command authority
 - Merges with validated decompose output (tasks, waves)
 - Adds `github_issue`, `spec_file`, `plan_file`, `current_wave: 1`
 - Initializes `wave_gates`, `executing_tasks`
@@ -531,8 +532,8 @@ For each wave:
 5. **RUN `/wave-gate` — MANDATORY, via subagents** (see below)
 6. If blocked (critical findings): spawn fix agents with the findings, re-run `/wave-gate`
 7. **Triage advisory findings and fix the RELEVANT ones** before advancing (see [Addressing Advisories](#addressing-advisories)). Advisories bypass refutation but pause the lifecycle at `awaiting-advisory-decision`; record an accept/defer disposition before completion.
-8. **Let the registered `/wave-gate` façade run full-tier lint automatically** after advisory disposition and semantic readiness, before its protected completion commit. The PostToolUse `lint-file.sh` hook runs the *immediate* tier only; the registered Wave Gate runs programmatic rules (boundaries, purity, function length, generated-file integrity). Violations return `blocked`; never silence one by editing the rule that caught it.
-9. Once the gate passes AND relevant advisories are addressed AND the full-tier lint is clean: advance to next wave
+8. **Let the registered `/wave-gate` façade run the frozen quiescent completion suite automatically.** It starts only after all current-Wave Agents stop and Task proof/test checks pass, before review publication. Project commands come only from the protected Verification Manifest and run without a shell. The reserved `loom:full-tier-lint` check runs programmatic rules; the existing terminal lint invocation remains a migration canary. Semantic and infrastructure failures return distinct blocked diagnostics. Never run an alternative model-authored command or silence a failure by editing the authority that caught it.
+9. Once the suite, reviews, relevant advisory disposition, spec alignment, and protected completion commit pass: advance to the next Wave.
 
 ### Wave-Gate Enforcement (NON-NEGOTIABLE)
 
@@ -755,8 +756,7 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration status --json   # machine
 
 It reports active Phase and Wave, an exhaustive five-way Task partition,
 failed proof obligations, test readiness, Review Run roster gaps and evidence
-failures, the four Finding counts, Refutation Panel need, Wave Gate completion
-eligibility, exactly one typed next action, and every contributing reason.
+failures, the four Finding counts, Refutation Panel need, quiescent Wave completion-suite readiness/result failures, Wave Gate completion eligibility, exactly one typed next action, and every contributing reason. Status reads persisted result authority but never executes verification commands.
 
 The `jq` recipes below read raw fields directly. They remain useful for
 inspecting a specific stored value, but they do NOT reproduce the engine's
@@ -802,7 +802,7 @@ When blocked (critical findings), Edit/Write blocked too. To fix:
    # Override review findings (e.g. downgrade false critical to advisory)
    echo 'ADVISORY: original finding — reason for downgrade' | bun ${LOOM_DIR}/engine/src/cli.ts helper store-review-findings --task T1
    ```
-   Then run `complete-wave-gate` to advance. Use only when findings are genuinely false positives — requires user approval.
+   For a modern TaskGraph (one with `verification_manifest`), persist the corrected findings and then return to the registered Wave Gate: resume its exact Run Directory with `helper orchestration resume`, or start a fresh `/wave-gate` run when no active registration exists. The registered façade re-observes `currentWaveWorkspace` and owns completion-suite execution. **Do not run direct `complete-wave-gate` for a modern graph**; it is legacy-only and refuses rather than inventing Run Directory or workspace authority. Use overrides only when findings are genuinely false positives — requires user approval.
 4. **Emergency**: the guard blocks a direct `rm` of the state file — use the whitelisted helper `bun ${LOOM_DIR}/engine/src/cli.ts helper cleanup-state`, then fix manually / rebuild from the GH issue
 
 ### Addressing Advisories

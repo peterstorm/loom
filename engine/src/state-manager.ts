@@ -53,6 +53,17 @@ import { assertPiCliMutationCompatible, captureLoomRuntimeIdentity } from "./run
 import { isExactGitSha } from "./core/git-sha";
 import { parseSpecTraceContract, specTraceDiagnosticMessages } from "./core/spec-trace";
 import { parseTaskVerificationPolicy } from "./core/verification-policy";
+import {
+  isProtectedVerificationPath,
+  parseAcceptedWaveCompletionReceipt,
+  type AcceptedWaveCompletionReceipt,
+} from "./core/completion-suite";
+import {
+  authorizeWaveCompletionSuite,
+  defaultVerificationManifest,
+  parseFrozenVerificationManifest,
+  type FrozenVerificationManifest,
+} from "./core/verification-manifest";
 
 const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
@@ -373,9 +384,15 @@ export function parseActiveWaveGateRegistration(raw: unknown): ParseResult<Activ
   }));
 }
 
-const COMPLETED_WAVE_GATE_FIELDS = [
+const COMPLETED_WAVE_GATE_COMMON_FIELDS = [
   "schemaVersion", "kind", "runId", "wave", "authorityDigest", "revision", "completionReceipt",
 ] as const;
+const COMPLETED_WAVE_GATE_V2_FIELDS = [
+  ...COMPLETED_WAVE_GATE_COMMON_FIELDS,
+  "completionSuite",
+] as const;
+
+type CompletedWaveGateCommon = Omit<CompletedWaveGateRegistration, "schemaVersion" | "completionSuite">;
 
 function parseCompletedWaveGateReceipt(
   raw: unknown,
@@ -411,16 +428,9 @@ function parseCompletedWaveGateReceipt(
   }));
 }
 
-/** Parse immutable terminal history independently from active next-Wave authority. */
-export function parseCompletedWaveGateRegistration(raw: unknown): ParseResult<CompletedWaveGateRegistration> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return parseErr("wave_gate_history entry must be an object");
-  }
-  const record = raw as Record<string, unknown>;
-  const fieldsError = exactFieldsError(record, COMPLETED_WAVE_GATE_FIELDS, [], "wave_gate_history entry");
-  if (fieldsError !== null) return parseErr(fieldsError);
-  if (record.schemaVersion !== 1 || record.kind !== "completed-wave-gate") {
-    return parseErr("wave_gate_history entry must be completed-wave-gate schemaVersion 1");
+function parseCompletedWaveGateCommon(record: Record<string, unknown>): ParseResult<CompletedWaveGateCommon> {
+  if (record.kind !== "completed-wave-gate") {
+    return parseErr(`wave_gate_history entry must be completed-wave-gate schemaVersion ${record.schemaVersion}`);
   }
   const runId = parseOrchestrationRunId(record.runId);
   const authorityDigest = parseArtifactDigest(record.authorityDigest);
@@ -435,14 +445,62 @@ export function parseCompletedWaveGateRegistration(raw: unknown): ParseResult<Co
   const completionReceipt = parseCompletedWaveGateReceipt(record.completionReceipt, runId.value, record.revision);
   if (!completionReceipt.ok) return parseErr(completionReceipt.error);
   return parseOk(Object.freeze({
-    schemaVersion: 1,
-    kind: "completed-wave-gate",
+    kind: "completed-wave-gate" as const,
     runId: runId.value,
     wave: record.wave,
     authorityDigest: authorityDigest.value,
     revision: record.revision,
     completionReceipt: completionReceipt.value,
   }));
+}
+
+function parseCompletedWaveGateSuite(
+  record: Record<string, unknown>,
+  common: CompletedWaveGateCommon,
+): ParseResult<AcceptedWaveCompletionReceipt> {
+  const completionSuite = parseAcceptedWaveCompletionReceipt(record.completionSuite);
+  if (!completionSuite.ok) {
+    return parseErr(`wave_gate_history.completionSuite: ${completionSuite.error.errors.join("; ")}`);
+  }
+  const suite = completionSuite.value;
+  if (suite.runId !== common.runId || suite.wave !== common.wave ||
+      suite.authorityDigest !== common.authorityDigest) {
+    return parseErr("wave_gate_history completionSuite must match terminal run/Wave/authority");
+  }
+  if (suite.revision + 1 !== common.revision) {
+    return parseErr("wave_gate_history completionSuite revision must equal terminal revision minus 1");
+  }
+  if (suite.runId !== common.completionReceipt.runId ||
+      suite.revision + 1 !== common.completionReceipt.committedRevision) {
+    return parseErr("wave_gate_history completionSuite contradicts completionReceipt authority");
+  }
+  return parseOk(suite);
+}
+
+/** Parse immutable terminal history independently from active next-Wave authority.
+ * The schema tag selects one exact shape: v1 cannot carry a suite and v2 must. */
+export function parseCompletedWaveGateRegistration(raw: unknown): ParseResult<CompletedWaveGateRegistration> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return parseErr("wave_gate_history entry must be an object");
+  }
+  const record = raw as Record<string, unknown>;
+  if (record.schemaVersion !== 1 && record.schemaVersion !== 2) {
+    return parseErr("wave_gate_history entry schemaVersion must be 1 or 2");
+  }
+  const fields = record.schemaVersion === 1
+    ? COMPLETED_WAVE_GATE_COMMON_FIELDS
+    : COMPLETED_WAVE_GATE_V2_FIELDS;
+  const fieldsError = exactFieldsError(record, fields, [], "wave_gate_history entry");
+  if (fieldsError !== null) return parseErr(fieldsError);
+  const common = parseCompletedWaveGateCommon(record);
+  if (!common.ok) return common;
+  if (record.schemaVersion === 1) {
+    return parseOk(Object.freeze({ schemaVersion: 1, ...common.value }));
+  }
+  const completionSuite = parseCompletedWaveGateSuite(record, common.value);
+  return completionSuite.ok
+    ? parseOk(Object.freeze({ schemaVersion: 2, ...common.value, completionSuite: completionSuite.value }))
+    : completionSuite;
 }
 
 const ORPHANED_WAVE_GATE_RETIREMENT_FIELDS = [
@@ -716,6 +774,12 @@ function taskShapeError(
     for (const [pathIndex, rawPath] of t.file_list.entries()) {
       const path = parseReviewPath(rawPath, `tasks[${index}] ("${id}"): file_list[${pathIndex}]`);
       if (!path.ok) return path.errors.join("; ");
+      if (isProtectedVerificationPath(path.value)) {
+        return (
+          `tasks[${index}] ("${id}"): file_list path '${path.value}' is protected verification infrastructure; ` +
+          `remove it from this Task`
+        );
+      }
       if (seen.has(path.value)) return `tasks[${index}] ("${id}"): file_list repeats '${path.value}'`;
       seen.add(path.value);
     }
@@ -1319,7 +1383,82 @@ type ParsedTaskGraphAuthorityFields = Readonly<{
   activeWaveGate: ActiveWaveGateRegistration | undefined;
   waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined;
   waveReviewEpoch: WaveReviewEpochAuthority | undefined;
+  verificationManifest: FrozenVerificationManifest | undefined;
+  activeWaveCompletionSuite: AcceptedWaveCompletionReceipt | undefined;
 }>;
+
+function parseVerificationManifestField(raw: unknown): ParseResult<FrozenVerificationManifest | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  const parsed = parseFrozenVerificationManifest(raw);
+  return parsed.ok
+    ? parseOk(parsed.value)
+    : parseErr(`verification_manifest: ${parsed.error.errors.join("; ")}`);
+}
+
+function completionRosterConflict(
+  receipt: AcceptedWaveCompletionReceipt,
+  manifest: FrozenVerificationManifest,
+  active: ActiveWaveGateRegistration,
+): string | null {
+  const authorized = authorizeWaveCompletionSuite(manifest, active, receipt.workspaceDigest);
+  if (!authorized.ok) {
+    return `active_wave_completion_suite authority cannot be reconstructed: ${authorized.error.errors.join("; ")}`;
+  }
+  if (receipt.suiteDigest !== authorized.value.suiteDigest) {
+    return "active_wave_completion_suite.suiteDigest does not match verification_manifest authority";
+  }
+  if (receipt.checks.length !== authorized.value.checks.length) {
+    return "active_wave_completion_suite checks must exactly match the verification_manifest roster";
+  }
+  for (let index = 0; index < authorized.value.checks.length; index += 1) {
+    const expected = authorized.value.checks[index]!;
+    const actual = receipt.checks[index]!;
+    if (actual.checkId !== expected.checkId || actual.scope !== expected.scope) {
+      return "active_wave_completion_suite checks must exactly match the verification_manifest roster";
+    }
+    if (actual.outcome.kind !== "observed") {
+      return `active_wave_completion_suite check ${actual.checkId} is not an observed success`;
+    }
+    const reportMatches = expected.reportPolicy.kind === "not-required"
+      ? actual.outcome.report.kind === "not-required"
+      : actual.outcome.report.kind === "produced" && actual.outcome.report.path === expected.reportPolicy.path;
+    if (!reportMatches) {
+      return `active_wave_completion_suite check ${actual.checkId} contradicts its manifest report policy`;
+    }
+  }
+  return null;
+}
+
+function parseActiveWaveCompletionSuiteField(
+  raw: unknown,
+  activeWaveGate: ActiveWaveGateRegistration | undefined,
+  verificationManifest: FrozenVerificationManifest | undefined,
+): ParseResult<AcceptedWaveCompletionReceipt | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  const parsed = parseAcceptedWaveCompletionReceipt(raw);
+  if (!parsed.ok) {
+    return parseErr(`active_wave_completion_suite: ${parsed.error.errors.join("; ")}`);
+  }
+  if (activeWaveGate === undefined || activeWaveGate.terminalOutcome !== null) {
+    return parseErr("active_wave_completion_suite requires a nonterminal active_wave_gate");
+  }
+  const receipt = parsed.value;
+  const mismatches = [
+    receipt.runId === activeWaveGate.runId ? null : "runId",
+    receipt.wave === activeWaveGate.wave ? null : "wave",
+    receipt.revision === activeWaveGate.revision ? null : "revision",
+    receipt.authorityDigest === activeWaveGate.authorityDigest ? null : "authorityDigest",
+  ].filter((field): field is string => field !== null);
+  if (mismatches.length > 0) {
+    return parseErr(`active_wave_completion_suite must match active_wave_gate: ${mismatches.join(", ")}`);
+  }
+  const manifest = verificationManifest ?? defaultVerificationManifest();
+  if (receipt.manifestDigest !== manifest.manifestDigest) {
+    return parseErr("active_wave_completion_suite.manifestDigest must match verification_manifest authority");
+  }
+  const rosterConflict = completionRosterConflict(receipt, manifest, activeWaveGate);
+  return rosterConflict === null ? parseOk(receipt) : parseErr(rosterConflict);
+}
 
 function parseTaskGraphAuthorityFields(obj: Record<string, unknown>): ParseResult<ParsedTaskGraphAuthorityFields> {
   const registrations = parseWaveGateRegistrations(obj);
@@ -1334,7 +1473,21 @@ function parseTaskGraphAuthorityFields(obj: Record<string, unknown>): ParseResul
       `(expected ${activeWaveGate.runId}/Wave ${activeWaveGate.wave})`,
     );
   }
-  return parseOk({ activeWaveGate, waveGateHistory, waveReviewEpoch: waveReviewEpoch.value });
+  const verificationManifest = parseVerificationManifestField(obj.verification_manifest);
+  if (!verificationManifest.ok) return parseErr(verificationManifest.error);
+  const activeWaveCompletionSuite = parseActiveWaveCompletionSuiteField(
+    obj.active_wave_completion_suite,
+    activeWaveGate,
+    verificationManifest.value,
+  );
+  if (!activeWaveCompletionSuite.ok) return parseErr(activeWaveCompletionSuite.error);
+  return parseOk({
+    activeWaveGate,
+    waveGateHistory,
+    waveReviewEpoch: waveReviewEpoch.value,
+    verificationManifest: verificationManifest.value,
+    activeWaveCompletionSuite: activeWaveCompletionSuite.value,
+  });
 }
 
 type ParsedTaskGraphHistoryFields = Readonly<{
@@ -1436,7 +1589,13 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
   const frozenWaveGates = Object.freeze(Object.fromEntries(
     Object.entries(parts.waveGates).map(([wave, gate]) => [wave, frozenJsonCopy(gate)]),
   ));
-  const { activeWaveGate, waveGateHistory, waveReviewEpoch } = parts.authority;
+  const {
+    activeWaveGate,
+    waveGateHistory,
+    waveReviewEpoch,
+    verificationManifest,
+    activeWaveCompletionSuite,
+  } = parts.authority;
   const { reopeningHistory, orphanedHistory, specTraceRetirements } = parts.history;
   // The single blessed cast: every union field above is proven in place.
   return {
@@ -1452,6 +1611,8 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     wave_gates: frozenWaveGates,
     ...(parts.specCheck === undefined ? {} : { spec_check: parts.specCheck }),
     ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
+    ...(verificationManifest === undefined ? {} : { verification_manifest: verificationManifest }),
+    ...(activeWaveCompletionSuite === undefined ? {} : { active_wave_completion_suite: activeWaveCompletionSuite }),
     ...(activeWaveGate === undefined ? {} : { active_wave_gate: activeWaveGate }),
     ...(waveGateHistory === undefined ? {} : { wave_gate_history: waveGateHistory }),
     ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
@@ -1794,8 +1955,16 @@ export class StateManager {
       ) {
         throw new Error("Completion result does not terminalize the exact locked active registration");
       }
-      if (committed.value.graph.active_wave_gate !== undefined) {
-        throw new Error("Completion must retire active authority before the next Wave can register");
+      const activeSuite = state.active_wave_completion_suite;
+      const suiteArchivedExactly = activeSuite === undefined
+        ? terminal.schemaVersion === 1
+        : terminal.schemaVersion === 2 && terminal.completionSuite === activeSuite;
+      if (!suiteArchivedExactly) {
+        throw new Error("Completion must archive the exact active Wave completion suite using the matching history schema");
+      }
+      if (committed.value.graph.active_wave_gate !== undefined ||
+          committed.value.graph.active_wave_completion_suite !== undefined) {
+        throw new Error("Completion must retire active gate and completion-suite authority before the next Wave can register");
       }
       return { state: committed.value.graph, value: committed.value };
     });

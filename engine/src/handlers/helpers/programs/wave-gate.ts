@@ -18,6 +18,7 @@ import { StateManager } from '../../../state-manager';
 import { commitWaveGateCompletion, deriveWaveAdvisoryDecisionRequest, deriveWaveGateDriveStep, deriveWaveReadiness, deriveWaveRefutationPlan, waveAdvisoryDecisionActionRequest, WAVE_REVIEW_AGENTS, type WaveAdvisoryDecisionRequest } from '../../../core/wave-gate-machine';
 import { inspectFilePresence, loadPlanModelsSource } from '../complete-wave-gate';
 import { runFullTierWaveLint } from '../lint-wave-gate';
+import { ensureWaveCompletionSuite, observeCurrentWaveWorkspace } from '../wave-completion-suite';
 import { observeReviewedWorkspace } from '../reviewed-workspace';
 import { applyFindingOutcomes, parseStoredFindings, preserveAcceptedReviewRunFindings } from '../../../core/findings';
 import { applyReviewResolution, constrainReviewResolutionToScope, resolveTaskReviewFindings } from '../../../core/review-output';
@@ -33,6 +34,15 @@ export const waveGateDeps = Object.freeze({
   filePresence: inspectFilePresence,
   reviewedWorkspace: observeReviewedWorkspace,
 });
+
+function currentWaveGateDeps(graph: TaskGraph, authorityStartPath: string) {
+  return graph.verification_manifest === undefined
+    ? waveGateDeps
+    : Object.freeze({
+        ...waveGateDeps,
+        currentWaveWorkspace: observeCurrentWaveWorkspace(graph, authorityStartPath),
+      });
+}
 
 export function waveAdvisoryDecisionRequestId(
   runId: string,
@@ -1719,10 +1729,27 @@ export async function resumeWaveGateFacade(
         active.authorityDigest !== registration.authorityDigest || active.terminalOutcome !== null) {
       return waveBlocked(handle, "protected active Wave Gate authority differs from the registered façade run");
     }
-    const readiness = deriveWaveReadiness(graph, waveGateDeps);
+    const readiness = deriveWaveReadiness(graph, currentWaveGateDeps(graph, handle.runDirectory));
     if (!readiness.ok) return waveBlocked(handle, readiness.error.reasons.map(({ message }) => message).join("; "));
     const preliminary = readiness.value.gateDecision.checks.slice(0, 4).find((check) => !check.passed);
     if (preliminary !== undefined && !preliminary.passed) return waveBlocked(handle, preliminary.reason);
+
+    if (graph.verification_manifest !== undefined) {
+      const ensured = await ensureWaveCompletionSuite({ handle, manager, graph, registration });
+      if (!ensured.ok) {
+        return {
+          ok: true,
+          action: {
+            kind: "blocked",
+            runId: handle.runId,
+            diagnostic: ensured.error.diagnostic,
+          },
+        };
+      }
+      if (ensured.value.disposition === "installed") {
+        return resumeWaveGateFacade(handle, registration, depth + 1);
+      }
+    }
 
     const issued = handle.readIssuedRequests();
     const captured = handle.readCapturedAttempts();
@@ -2091,7 +2118,7 @@ export async function resumeWaveGateFacade(
       } };
     }
 
-    const current = deriveWaveReadiness(refreshed, waveGateDeps);
+    const current = deriveWaveReadiness(refreshed, currentWaveGateDeps(refreshed, handle.runDirectory));
     if (!current.ok) return waveBlocked(handle, current.error.reasons.map(({ message }) => message).join("; "));
     if (current.value.facts.findingCounts.kind === "known" && current.value.facts.findingCounts.value.activeCritical > 0) {
       const preparation = waveRefutationPreparation(handle, current.value);
@@ -2204,7 +2231,7 @@ export async function resumeWaveGateFacade(
     const lint = runFullTierWaveLint(current.value.waveTasks);
     if (lint.kind === "block") return waveBlocked(handle, lint.message);
     const committed = await manager.commitActiveWaveGateCompletion((locked) => {
-      const lockedReadiness = deriveWaveReadiness(locked, waveGateDeps);
+      const lockedReadiness = deriveWaveReadiness(locked, currentWaveGateDeps(locked, handle.runDirectory));
       return lockedReadiness.ok ? commitWaveGateCompletion(lockedReadiness.value) : {
         ok: false as const,
         error: { kind: "wave-completion-commit-rejected" as const, message: lockedReadiness.error.reasons.map(({ message }) => message).join("; ") },

@@ -18,6 +18,7 @@ import { PANEL_BASELINE_LENSES, PANEL_LENSES } from "./core/panel-contract";
 // import adds no cycle. Every agent set and phase map below is a DERIVED
 // projection of the catalog, never a second source.
 import { AGENT_POLICIES, agentsOfKind, WAVE_REVIEW_AGENTS } from "./core/model-profiles";
+import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 
 export { WAVE_REVIEW_AGENTS };
 
@@ -433,7 +434,10 @@ export const MACHINES_DIR = machinesDir();
  * literal is still caught; the subagent and machine-definition dirs are
  * additionally PROTECTED (never helper-writable — see protectedDirs). */
 export const guardedDirs = (): readonly string[] => [
-  ...new Set(taskGraphRelatives().map((path) => dirname(path))),
+  ...new Set([
+    ...taskGraphRelatives().map((path) => dirname(path)),
+    dirname(VERIFICATION_MANIFEST_SOURCE_PATH),
+  ]),
   subagentDir(),
   machinesDir(),
 ];

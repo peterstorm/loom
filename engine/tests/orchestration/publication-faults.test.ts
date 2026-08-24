@@ -700,6 +700,23 @@ describe("artifact set publication", () => {
       expect(readdirSync(join(directory, "artifacts")).some((name) => name.endsWith(".staged"))).toBe(false);
     });
 
+    it("reports a staged-file race cause instead of claiming the bytes differ", () => {
+      const { directory } = freshRun();
+      const final = join(directory, "artifacts", "result.json");
+      const staged = join(directory, "artifacts", "result.json.staged-raced-away");
+      writeFileSync(final, "original");
+
+      const promoted = promoteArtifactSet([{ staged, final }]);
+
+      expect(promoted.ok).toBe(false);
+      if (promoted.ok) return;
+      expect(promoted.error.message).toContain("cannot compare staged artifact bytes");
+      expect(promoted.error.message).toContain(staged);
+      expect(promoted.error.message).toContain("ENOENT");
+      expect(promoted.error.message).not.toContain("a different artifact already occupies");
+      expect(readFileSync(final, "utf-8")).toBe("original");
+    });
+
     it("accepts a byte-identical republish as the idempotent replay it is", async () => {
       const { directory, handle } = freshRun();
       const bytes = [...Buffer.from("{\"surviving\":3}", "utf-8")];

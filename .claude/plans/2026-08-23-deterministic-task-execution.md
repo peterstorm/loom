@@ -2,11 +2,11 @@
 
 ## Status
 
-Proposed architecture, recovered from the 2026-08-22 completion-oracle discussion and reconciled against Loom `main` at `30241fd`.
+Accepted architecture, recovered from the 2026-08-22 completion-oracle discussion and reconciled against Loom `main`. Slice 1 (Verification Policy) merged at `529ffb9`; Slice 2 (quiescent Wave completion suite) is implemented on the branch below. Slices 3–5 remain planned.
 
 Implementation worktree: `~/dev/claude-plugins/loom-deterministic-task-execution`
 
-Branch: `feat/deterministic-task-execution`
+Branch: `feat/deterministic-wave-completion-suite`
 
 ## Objective
 
@@ -391,6 +391,34 @@ No production subprocess is mocked.
 - Bind the accepted Wave suite result and workspace/suite digests into Wave readiness and protected completion authority.
 - Persist result/receipt and expose it through Wave status.
 - Keep existing full-tier lint fail-closed throughout migration.
+
+#### Settled Slice 2 authority and compatibility details
+
+- The operator source is `.loom/verification-manifest.json`. TaskGraph population reads it directly; decompose input can neither provide nor override command authority.
+- The protected TaskGraph stores the parsed immutable manifest and canonical digest before any implementation Task can execute. Runtime suite loading consumes those frozen values, never model output or mutable source bytes.
+- An absent source freezes an engine-owned manifest with no project commands. The resulting authorized suite remains non-empty because it always includes the reserved `loom:full-tier-lint` check. This preserves existing projects and active legacy graphs without inventing project commands.
+- Manifest commands are executable plus readonly argument arrays and always run with `shell: false`; shell/eval program strings are rejected. Working directories and report paths are repository-relative and symlink-confined.
+- The Wave workspace digest covers Git-visible tracked files plus non-ignored untracked files, including their path, mode, and bytes. Git internals, ignored dependencies/caches, State File bytes, and Run Directory artifacts are outside this authority.
+- The suite runs immediately after canonical current-Wave quiescence and implementation/test proof, before semantic review publication. Review-only progress cannot alter workspace bytes; any later workspace change makes the accepted receipt stale and causes a fresh suite execution on resume.
+- Full-tier lint is represented as the engine-owned reserved check and the existing terminal lint invocation remains in place during Slice 2 migration as a fail-closed canary.
+- A successful result is published immutably in the registered Wave Run Directory and then bound into protected TaskGraph state under exact run, Wave, registration revision, authority, manifest, suite, and workspace digests.
+- Current workspace observation participates in canonical Wave readiness. The locked completion path re-observes it; stale, missing, malformed, duplicate, surplus, or conflicting suite evidence cannot commit.
+- Existing TaskGraphs with no manifest/suite fields remain readable and can acquire the built-in suite. Historical completed Wave registrations are never rewritten. New completed registrations carry exact accepted-suite authority.
+- The Wave Gate remains a per-program façade (ADR-0005) and LC-1 remains a projection over durable evidence (ADR-0006); Slice 2 adds no generic command framework or second lifecycle checkpoint.
+
+#### Slice 2 implementation evidence
+
+- Pure exact parsers and deterministic evaluator cover command, process, report, suite, manifest, result, and accepted-receipt authority.
+- The real bounded process shell proves timeout-plus-exit-zero, signal termination, hard-kill escalation, spawn failure, report freshness, and symlink/path failures without subprocess mocks.
+- Git-visible workspace hashing binds tracked and non-ignored untracked path/mode/type/bytes while excluding protected State/Run Directory/report artifacts.
+- Modern TaskGraphs freeze the operator manifest during population; legacy field-absent graphs remain compatible.
+- The registered Wave Gate runs the suite only after current-Wave quiescence/proof readiness, before semantic review publication, and retains terminal full-tier lint as a migration canary.
+- Immutable Run Directory results recover the publication-to-State-File crash window without rerunning commands. Infrastructure results remain retryable and are not frozen into the deterministic slot.
+- Accepted receipts enter protected readiness and schema-v2 terminal history; status projects accepted, stale, rejected, pending, malformed, and unavailable evidence without executing commands.
+- Canonical review `review-20260824T164705Z-deterministic-wave-suite` produced digest `87955ed09e6c9ee63eaed96c7b2f086e5fb2c3ba00b56a8335a99bc3803d9d90`. All three refutation lenses upheld three criticals: modern direct-helper divergence, descendant-process escape, and incomplete inline-eval denial. All were fixed with explicit modern-helper refusal, POSIX process-group containment, and an allowlisted executable/subcommand policy.
+- Accepted bounded advisories fixed Git fallback cause loss, staged-artifact cause loss, two stale comments, and three duplicated internal representations. The `ActiveWaveGateRegistration` union, `WaveGateLifecycleEvidence` redesign, and advisory-projection status interface remain deferred to their planned atomic architecture slices.
+- Final remediated validation: **215 test files, 5,324 passed, 1 intentional skip**; panel smoke **22/22**, review-panel smoke **19/19**, standalone review, orchestration façade, Pi resources, and TaskGraph **23/23**; typecheck, unused checks, full-tier lint, and diff checks passed.
+- Existing live `web/chatbot` (23 Tasks) and `baby-adventure` (63 Tasks) legacy TaskGraphs pass the Slice 2 validator unchanged.
 
 ### Slice 3 — Task-local completion suite and attempt authority
 

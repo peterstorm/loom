@@ -45,6 +45,7 @@ import {
   requiresNewTests,
   requiresRegression,
 } from "../../core/verification-policy";
+import { isProtectedVerificationPath } from "../../core/completion-suite";
 export type { ValidationResult } from "./validation-result";
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -208,7 +209,12 @@ export function validateFull(
         for (const [pathIndex, file] of task.file_list.entries()) {
           const parsed = parseReviewPath(file, `Task ${tid}: file_list[${pathIndex}]`);
           if (!parsed.ok) errors.push(...parsed.errors);
-          else if (seen.has(parsed.value)) errors.push(`Task ${tid}: file_list repeats '${parsed.value}'`);
+          else if (isProtectedVerificationPath(parsed.value)) {
+            errors.push(
+              `Task ${tid}: file_list path '${parsed.value}' is protected verification infrastructure; ` +
+              `remove it from this Task`,
+            );
+          } else if (seen.has(parsed.value)) errors.push(`Task ${tid}: file_list repeats '${parsed.value}'`);
           else seen.add(parsed.value);
         }
       }

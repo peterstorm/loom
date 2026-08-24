@@ -180,6 +180,10 @@ _Avoid_: Agent run, retry (that is a transition between attempts), subagent resu
 A Task's explicit, independently modeled requirements for regression execution and new-test creation, including typed waiver reasons. It replaces the ambiguous `new_tests_required` coupling; legacy booleans are translated only at the TaskGraph parse boundary.
 _Avoid_: Test flag, new-tests flag, test exemption
 
+**Verification Manifest**:
+The operator-owned `.loom/verification-manifest.json` source of fixed Wave completion commands. TaskGraph population parses and freezes its executable/argv/cwd/timeout/report authority before implementation; decompose and implementation Agents cannot supply runtime command authority. An absent source freezes the engine default containing only reserved checks.
+_Avoid_: Test script, model command, shell command, CI config
+
 **Completion Check Result**:
 One engine-observed deterministic check outcome carrying independent exit-code, timeout, signal, and report-production facts under an exact check identity and Task-or-Wave scope. Spawn failure is a separate arm, never disguised as a failed test.
 _Avoid_: Test evidence, command output, exit status
@@ -268,6 +272,7 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - A **Task** becomes implemented only after all of its **Proof Obligations** and required Task-scoped Completion Check Results are satisfied
 - An **Implementation Attempt** is settled only by the **Implementation Completion Oracle** under exact engine-issued authority
 - A Task's **Verification Policy** independently determines its regression and new-test **Proof Obligations**
+- A **Verification Manifest** is frozen by the engine before implementation and cannot be authored through decompose output
 - A Task-scoped **Completion Suite Result** binds to one **Implementation Attempt**; a Wave-scoped result binds to a quiescent Wave workspace
 - Review Agents consume one immutable **Review Packet** per Task
 - A **Review Run** binds that Review Packet to one **Review Generation**, the expected review Agents, and all prior active Finding IDs

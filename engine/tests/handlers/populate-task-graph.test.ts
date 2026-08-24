@@ -1,25 +1,44 @@
 import { describe, it, expect, afterEach } from "vitest";
 import fc from "fast-check";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import populate from "../../src/handlers/helpers/populate-task-graph";
 import type { Task, TaskGraph } from "../../src/types";
+import {
+  defaultVerificationManifest,
+  freezeVerificationManifest,
+} from "../../src/core/verification-manifest";
 
 /**
  * Exercises the REAL populate-task-graph overwrite guard through the handler's
  * entry point — not a re-implemented copy. The handler resolves LOOM_STATE_PATH
  * lazily (taskGraphPath() at call time), so pointing it at a per-test state file
  * needs no module reload. A model-free plan file passes checkPlanModelBindings
- * trivially, so control reaches the overwrite guard at populate-task-graph.ts:126.
+ * trivially, so control reaches the overwrite guard before manifest preparation.
  */
 
 let dirs: string[] = [];
+const originalCwd = process.cwd();
+const originalPath = process.env.PATH;
 
 afterEach(() => {
+  process.chdir(originalCwd);
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
   dirs = [];
   delete process.env.LOOM_STATE_PATH;
+  delete process.env.CLAUDE_PROJECT_DIR;
+  if (originalPath === undefined) delete process.env.PATH;
+  else process.env.PATH = originalPath;
 });
 
 function tempDir(): string {
@@ -35,8 +54,19 @@ function modelFreePlan(dir: string): string {
   return planFile;
 }
 
-function writeState(dir: string, planFile: string, tasks: Task[]): string {
-  const statePath = join(dir, "active_task_graph.json");
+type StateLayout = "custom" | "claude" | "pi";
+
+function writeState(
+  dir: string,
+  planFile: string,
+  tasks: Task[],
+  overrides: Partial<TaskGraph> = {},
+  layout: StateLayout = "claude",
+  setClaudeProjectDir = true,
+): string {
+  const statePath = layout === "custom"
+    ? join(dir, "active_task_graph.json")
+    : join(dir, `.${layout}`, "state", "active_task_graph.json");
   const state: TaskGraph = {
     current_phase: "execute",
     phase_artifacts: {},
@@ -45,10 +75,42 @@ function writeState(dir: string, planFile: string, tasks: Task[]): string {
     plan_file: planFile,
     tasks,
     wave_gates: {},
+    ...overrides,
   };
+  mkdirSync(dirname(statePath), { recursive: true });
   writeFileSync(statePath, JSON.stringify(state));
   process.env.LOOM_STATE_PATH = statePath;
+  if (setClaudeProjectDir) process.env.CLAUDE_PROJECT_DIR = dir;
+  else delete process.env.CLAUDE_PROJECT_DIR;
   return statePath;
+}
+
+function manifestDocument(executable = "bun") {
+  return {
+    schemaVersion: 1,
+    kind: "loom-verification-manifest",
+    checks: [{
+      id: "project:test",
+      scope: "wave",
+      executable,
+      args: ["test"],
+      cwd: ".",
+      timeoutMs: 60_000,
+      report: { kind: "not-required" },
+    }],
+  };
+}
+
+function writeManifest(dir: string, raw: unknown = manifestDocument()): string {
+  const manifestDir = join(dir, ".loom");
+  mkdirSync(manifestDir, { recursive: true });
+  const path = join(manifestDir, "verification-manifest.json");
+  writeFileSync(path, JSON.stringify(raw));
+  return path;
+}
+
+function stateBytes(path: string): string {
+  return readFileSync(path, "utf-8");
 }
 
 function existingTask(id: string, status: Task["status"]): Task {
@@ -112,7 +174,7 @@ describe("populate-task-graph — overwrite guard (funneled through the real han
     expect(after.tasks.map((t) => t.id)).toEqual(["T9"]);
   });
 
-  it("allows overwriting when every existing task is pending (no --force needed)", async () => {
+  it("allows overwriting when every existing task is pending and freezes missing source as default", async () => {
     const dir = tempDir();
     const plan = modelFreePlan(dir);
     const statePath = writeState(dir, plan, [existingTask("T1", "pending"), existingTask("T2", "pending")]);
@@ -120,6 +182,215 @@ describe("populate-task-graph — overwrite guard (funneled through the real han
     expect(result.kind).toBe("passthrough");
     const after = JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph;
     expect(after.tasks.map((t) => t.id)).toEqual(["T9"]);
+    expect(after.verification_manifest).toEqual(defaultVerificationManifest());
+  });
+});
+
+describe("populate-task-graph — protected verification manifest authority", () => {
+  it.each(["claude", "pi"] as const)(
+    "derives a non-Git %s project root from its canonical absolute State File path",
+    async (layout) => {
+      const dir = tempDir();
+      const plan = modelFreePlan(dir);
+      const statePath = writeState(dir, plan, [], {}, layout, false);
+      process.chdir(dir);
+
+      expect((await populate(decomposeJson(plan), [])).kind).toBe("passthrough");
+
+      const after = JSON.parse(stateBytes(statePath)) as TaskGraph;
+      expect(after.verification_manifest).toEqual(defaultVerificationManifest());
+    },
+  );
+
+  it("reads and freezes exact operator bytes from a canonical non-Git project root", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], {}, "claude", false);
+    const manifestPath = writeManifest(dir);
+    const expected = freezeVerificationManifest(readFileSync(manifestPath));
+    if (!expected.ok) throw new Error("fixture manifest failed");
+    process.chdir(dir);
+
+    expect((await populate(decomposeJson(plan), [])).kind).toBe("passthrough");
+
+    const after = JSON.parse(stateBytes(statePath)) as TaskGraph;
+    expect(after.verification_manifest).toEqual(expected.value);
+    expect(after.verification_manifest?.source.kind).toBe("operator-file");
+  });
+
+  it("fails closed for an ambiguous custom State File path outside Git", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], {}, "custom", false);
+    const before = stateBytes(statePath);
+    process.env.CLAUDE_PROJECT_DIR = dir;
+    process.chdir(dir);
+
+    const result = await populate(decomposeJson(plan), []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("non-canonical State File path");
+    expect(stateBytes(statePath)).toBe(before);
+  });
+
+  it("prefers the Git root and preserves custom-layout compatibility inside a repository", async () => {
+    const dir = tempDir();
+    execFileSync("git", ["init", "--quiet"], { cwd: dir });
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], {}, "custom", false);
+    const manifestPath = writeManifest(dir);
+    const expected = freezeVerificationManifest(readFileSync(manifestPath));
+    if (!expected.ok) throw new Error("fixture manifest failed");
+    process.chdir(dir);
+
+    expect((await populate(decomposeJson(plan), [])).kind).toBe("passthrough");
+
+    const after = JSON.parse(stateBytes(statePath)) as TaskGraph;
+    expect(after.verification_manifest).toEqual(expected.value);
+  });
+
+  it.each([
+    {
+      label: "missing git",
+      install: (_bin: string): void => undefined,
+      diagnostic: "ENOENT",
+    },
+    {
+      label: "permission failure",
+      install: (bin: string): void => { writeFileSync(join(bin, "git"), "#!/bin/sh\nexit 0\n"); },
+      diagnostic: "EACCES",
+    },
+    {
+      label: "corrupt repository",
+      install: (bin: string): void => {
+        const git = join(bin, "git");
+        writeFileSync(git, "#!/bin/sh\necho 'fatal: repository metadata is corrupt' >&2\nexit 128\n");
+        chmodSync(git, 0o755);
+      },
+      diagnostic: "repository metadata is corrupt",
+    },
+    {
+      label: "invalid output",
+      install: (bin: string): void => {
+        const git = join(bin, "git");
+        writeFileSync(git, "#!/bin/sh\necho relative/root\n");
+        chmodSync(git, 0o755);
+      },
+      diagnostic: "invalid repository root",
+    },
+    {
+      label: "signal termination",
+      install: (bin: string): void => {
+        const git = join(bin, "git");
+        writeFileSync(git, "#!/bin/sh\nkill -TERM $$\n");
+        chmodSync(git, 0o755);
+      },
+      diagnostic: "signal SIGTERM",
+    },
+  ])("blocks $label instead of treating it as non-Git authority", async ({ install, diagnostic }) => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], {}, "claude", false);
+    const before = stateBytes(statePath);
+    const bin = join(dir, "fake-bin");
+    mkdirSync(bin);
+    install(bin);
+    process.env.PATH = bin;
+    process.chdir(dir);
+
+    const result = await populate(decomposeJson(plan), []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      expect(result.message).toContain("cannot resolve Git repository root");
+      expect(result.message).toContain(diagnostic);
+    }
+    expect(stateBytes(statePath)).toBe(before);
+  });
+
+  it("blocks malformed, symlinked, and unreadable sources without changing state", async () => {
+    const cases = ["malformed", "symlink", "unreadable"] as const;
+    for (const kind of cases) {
+      const dir = tempDir();
+      const plan = modelFreePlan(dir);
+      const statePath = writeState(dir, plan, []);
+      const before = stateBytes(statePath);
+      const manifestDir = join(dir, ".loom");
+      mkdirSync(manifestDir, { recursive: true });
+      const manifestPath = join(manifestDir, "verification-manifest.json");
+      if (kind === "malformed") writeFileSync(manifestPath, "{not-json");
+      if (kind === "symlink") {
+        const target = join(dir, "operator.json");
+        writeFileSync(target, JSON.stringify(manifestDocument()));
+        symlinkSync(target, manifestPath);
+      }
+      if (kind === "unreadable") {
+        writeFileSync(manifestPath, JSON.stringify(manifestDocument()));
+        chmodSync(manifestPath, 0o000);
+      }
+
+      const result = await populate(decomposeJson(plan), []);
+
+      expect(result.kind, kind).toBe("error");
+      expect(stateBytes(statePath), kind).toBe(before);
+      if (kind === "unreadable") chmodSync(manifestPath, 0o600);
+    }
+  });
+
+  it("preserves prepared manifest authority when source bytes change while the state lock is held", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, []);
+    const manifestPath = writeManifest(dir, manifestDocument("bun"));
+    const prepared = freezeVerificationManifest(readFileSync(manifestPath));
+    if (!prepared.ok) throw new Error("fixture manifest failed");
+    const lockDir = join(dirname(statePath), ".task_graph.lock");
+    mkdirSync(lockDir);
+    writeFileSync(join(lockDir, "pid"), `${process.pid}:held-for-manifest-race`);
+    const release = setTimeout(() => {
+      writeFileSync(manifestPath, JSON.stringify(manifestDocument("npm")));
+      rmSync(lockDir, { recursive: true, force: true });
+    }, 50);
+
+    const result = await populate(decomposeJson(plan), []);
+    clearTimeout(release);
+
+    expect(result.kind).toBe("passthrough");
+    const after = JSON.parse(stateBytes(statePath)) as TaskGraph;
+    expect(after.verification_manifest).toEqual(prepared.value);
+    expect(after.verification_manifest?.projectChecks[0]?.executable).toBe("bun");
+  });
+
+  it("force replacement explicitly installs current source authority with no inherited suite", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [existingTask("T1", "completed")], {
+      verification_manifest: defaultVerificationManifest(),
+    });
+    const manifestPath = writeManifest(dir, manifestDocument("npm"));
+    const expected = freezeVerificationManifest(readFileSync(manifestPath));
+    if (!expected.ok) throw new Error("fixture manifest failed");
+
+    expect((await populate(decomposeJson(plan), ["--force"])).kind).toBe("passthrough");
+
+    const after = JSON.parse(stateBytes(statePath)) as TaskGraph;
+    expect(after.verification_manifest).toEqual(expected.value);
+    expect(after.active_wave_completion_suite).toBeUndefined();
+  });
+
+  it("rejects decompose attempts to inject or override manifest authority", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, []);
+    const before = stateBytes(statePath);
+    const injected = JSON.parse(decomposeJson(plan)) as Record<string, unknown>;
+    injected.verification_manifest = defaultVerificationManifest();
+
+    const result = await populate(JSON.stringify(injected), []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("unsupported field(s): verification_manifest");
+    expect(stateBytes(statePath)).toBe(before);
   });
 });
 

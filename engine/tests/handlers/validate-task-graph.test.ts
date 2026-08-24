@@ -241,6 +241,48 @@ describe("validateFull (pure)", () => {
   });
 
   it.each([
+    ".loom/verification-manifest.json",
+    ".loom/completion-reports/result.json",
+    ".loom/completion-reports/nested/result.json",
+  ])("rejects protected decompose path %s with an actionable Task/path diagnostic", (path) => {
+    const result = validateFull({
+      plan_title: "x", plan_file: "x", spec_file: "x",
+      tasks: [{ ...validTask, status: undefined, file_list: [path] }],
+    }, "decompose-payload");
+    expect(errorsOf(result)).toEqual([
+      `Task T1: file_list path '${path}' is protected verification infrastructure; remove it from this Task`,
+    ]);
+  });
+
+  it.each([
+    ["manifest alias", ".loom/./verification-manifest.json"],
+    ["report traversal", ".loom/completion-reports/../result.json"],
+  ])("rejects protected-path %s through the canonical path parser", (_label, path) => {
+    const result = validateFull({
+      plan_title: "x", plan_file: "x", spec_file: "x",
+      tasks: [{ ...validTask, status: undefined, file_list: [path] }],
+    }, "decompose-payload");
+    expect(errorsOf(result)).toEqual([
+      "Task T1: file_list[0] must be canonical and must not contain traversal segments",
+    ]);
+  });
+
+  it.each([
+    ".loom/verification-manifest.json.bak",
+    ".loom/verification-manifests.json",
+    ".loom/completion-reports",
+    ".loom/completion-report/result.json",
+    ".loom/completion-reports.json",
+    ".loom/unrelated/state.json",
+  ])("allows near-miss or unrelated .loom decompose path %s", (path) => {
+    const result = validateFull({
+      plan_title: "x", plan_file: "x", spec_file: "x",
+      tasks: [{ ...validTask, status: undefined, file_list: [path] }],
+    }, "decompose-payload");
+    expect(result.ok).toBe(true);
+  });
+
+  it.each([
     ["absolute", ["/tmp/outside.ts"]],
     ["traversal", ["src/../outside.ts"]],
     ["backslash", ["src\\outside.ts"]],

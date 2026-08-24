@@ -85,6 +85,7 @@ Fallback: `general-purpose`
     - `spec_anchors` is a Requirement Completion Claim: the containing Wave MUST fully satisfy that Requirement. Assign it only to the culminating Task/Wave.
     - A Task cannot contribute to and complete the same Requirement. Multiple completion Tasks are allowed only in the same culmination Wave.
     - Every contribution must have exactly one completion Wave at or after it; no contribution may appear after completion.
+11. **Protected verification paths:** Decompose NEVER assigns the operator manifest `.loom/verification-manifest.json` or any engine report path beneath `.loom/completion-reports/` to a Task's `file_list`. These paths are engine/operator-owned, not implementation artifacts. This rule does not prohibit unrelated `.loom/` paths.
 
 ---
 

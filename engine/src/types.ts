@@ -6,6 +6,13 @@ import type { TaskProof } from "./core/proof-obligations";
 import type { StoredVerificationPolicy } from "./core/verification-policy";
 import type { DeclaredArtifactBaseline } from "./core/artifact-baseline";
 import type { IssuedReviewPacketRegistration } from "./core/review-packet";
+import type {
+  AcceptedWaveCompletionReceipt,
+  CompletionCheckId,
+  CompletionSemanticFailure,
+  WaveCompletionSuiteResult,
+} from "./core/completion-suite";
+import type { FrozenVerificationManifest } from "./core/verification-manifest";
 import type { Phase } from "./core/phases";
 export type { IssuedReviewPacketRegistration } from "./core/review-packet";
 export { PHASES, type Phase } from "./core/phases";
@@ -549,9 +556,7 @@ export type ActiveWaveGateRegistration = Readonly<{
   terminalOutcome: ActiveWaveGateTerminalOutcome | null;
 }>;
 
-/** Terminal audit is not active authority for the newly-current Wave. */
-export type CompletedWaveGateRegistration = Readonly<{
-  schemaVersion: 1;
+type CompletedWaveGateRegistrationCommon = Readonly<{
   kind: "completed-wave-gate";
   runId: OrchestrationRunId;
   wave: number;
@@ -559,6 +564,18 @@ export type CompletedWaveGateRegistration = Readonly<{
   revision: number;
   completionReceipt: ProtectedWaveStateCommitted;
 }>;
+
+/** Terminal audit is not active authority for the newly-current Wave. Schema
+ * v1 is the exact historical shape; schema v2 additionally archives the suite
+ * receipt that authorized the terminal transition. */
+export type CompletedWaveGateRegistration =
+  | Readonly<CompletedWaveGateRegistrationCommon & {
+      schemaVersion: 1;
+    }>
+  | Readonly<CompletedWaveGateRegistrationCommon & {
+      schemaVersion: 2;
+      completionSuite: AcceptedWaveCompletionReceipt;
+    }>;
 
 /** Immutable audit evidence for an active authority whose authoritative Run
  * Directory was proven absent before a replacement was installed. This is not
@@ -696,6 +713,68 @@ export type WaveGateCompletionEligibility =
   | Readonly<{ kind: "eligible"; failedPrerequisites: readonly [] }>
   | Readonly<{ kind: "ineligible"; failedPrerequisites: OrchestrationNonEmpty<string> }>;
 
+/** A shell observation of the current Git-visible Wave workspace. The core
+ * compares it with accepted suite authority and never performs repository I/O. */
+export type WaveWorkspaceObservation =
+  | Readonly<{ kind: "observed"; workspaceDigest: ArtifactDigest }>
+  | Readonly<{ kind: "unavailable"; reason: string }>;
+
+/** A shell observation of the exact persisted completion result for the
+ * current active Wave authority. Absence is ordinary; unreadable or malformed
+ * bytes are unavailable and retain their cause. */
+export type WaveCompletionResultObservation =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "observed"; result: WaveCompletionSuiteResult }>
+  | Readonly<{ kind: "unavailable"; reason: string }>;
+
+export type WaveCompletionSuiteRequiredReason =
+  | "accepted-suite-missing"
+  | "accepted-suite-invalid"
+  | "completion-result-invalid"
+  | "completion-result-unavailable"
+  | "workspace-observation-missing"
+  | "workspace-observation-unavailable";
+
+/** Canonical completion-suite status. Digest/count data is carried by the
+ * status value so JSON and human renderers remain policy-free projections. */
+export type WaveCompletionSuiteReadiness =
+  | Readonly<{
+      kind: "legacy-unavailable";
+      verificationManifestDigest: null;
+    }>
+  | Readonly<{
+      kind: "required";
+      reason: WaveCompletionSuiteRequiredReason;
+      detail: string;
+      verificationManifestDigest: ArtifactDigest | null;
+      acceptedResultDigest: ArtifactDigest | null;
+    }>
+  | Readonly<{
+      kind: "accepted";
+      verificationManifestDigest: ArtifactDigest | null;
+      suiteDigest: ArtifactDigest;
+      resultDigest: ArtifactDigest;
+      workspaceDigest: ArtifactDigest;
+      checkCount: number;
+    }>
+  | Readonly<{
+      kind: "rejected";
+      verificationManifestDigest: ArtifactDigest;
+      suiteDigest: ArtifactDigest;
+      workspaceDigest: ArtifactDigest;
+      failureKinds: readonly CompletionSemanticFailure["kind"][];
+      checkIds: readonly CompletionCheckId[];
+    }>
+  | Readonly<{
+      kind: "stale";
+      verificationManifestDigest: ArtifactDigest | null;
+      suiteDigest: ArtifactDigest;
+      resultDigest: ArtifactDigest;
+      acceptedWorkspaceDigest: ArtifactDigest;
+      currentWorkspaceDigest: ArtifactDigest;
+      checkCount: number;
+    }>;
+
 export type CanonicalStatusFacts = Readonly<{
   location: StatusFact<Readonly<{ activePhase: Phase; activeWave: number | null }>>;
   tasks: StatusFact<Readonly<{ counts: StatusTaskCounts }>>;
@@ -707,6 +786,7 @@ export type CanonicalStatusFacts = Readonly<{
   }>>;
   findingCounts: StatusFact<FindingCounts>;
   refutationPanelNeed: StatusFact<RefutationPanelNeed>;
+  waveCompletionSuiteReadiness: StatusFact<WaveCompletionSuiteReadiness>;
   waveGateCompletionEligibility: StatusFact<WaveGateCompletionEligibility>;
 }>;
 
@@ -838,6 +918,10 @@ export interface TaskGraph {
   readonly spec_check?: SpecCheck;
   /** Exact current Wave review batch epoch, shared by reviewer and spec-check slots. */
   readonly wave_review_epoch?: WaveReviewEpochAuthority;
+  /** Operator-owned verification authority frozen before implementation begins. */
+  readonly verification_manifest?: FrozenVerificationManifest;
+  /** Accepted quiescent-Wave result bound to the exact active registration. */
+  readonly active_wave_completion_suite?: AcceptedWaveCompletionReceipt;
   /** Parser-proven protected registration; absent until a Wave Gate is explicitly registered. */
   readonly active_wave_gate?: ActiveWaveGateRegistration;
   /** Immutable terminal registrations, separate from authority for the next Wave. */
