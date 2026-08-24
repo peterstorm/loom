@@ -785,95 +785,93 @@ export function standaloneCompletionCheckpointProblem(checkpoint: string): strin
   }
 }
 
+type TrustedRunVerification =
+  | Readonly<{ kind: "skipped" }>
+  | Readonly<{ kind: "rejected"; message: string }>
+  | Readonly<{ kind: "accepted"; receipt: LoomReviewAuthorityReceipt }>;
+
+function trustedCaptureProblem(handle: RunDirHandle, run: TrustedReviewRun): string | null {
+  const issued = handle.readIssuedRequests();
+  const captured = handle.readCapturedAttempts();
+  if (!issued.ok) return issued.error.message;
+  if (!captured.ok) return captured.error.message;
+  for (const key of captured.value) {
+    const authority = issued.value.find((request) =>
+      trustedCaptureIdentity(request.slotId, request.attempt) === key);
+    const trusted = run.captures.get(key);
+    if (authority === undefined || trusted === undefined || authority.requestId !== trusted.requestId ||
+        authority.role !== trusted.role || authority.contextDigest !== trusted.contextDigest) {
+      return `captured slot ${key} was not witnessed with identical request authority`;
+    }
+    const bytes = handle.readTranscriptBytes(authority);
+    if (!bytes.ok) return bytes.error.message;
+    const digest = createHash("sha256").update(bytes.value).digest("hex");
+    if (digest !== trusted.digest || bytes.value.byteLength !== trusted.byteLength) {
+      return `captured slot ${key} changed after Pi witnessed it`;
+    }
+  }
+  const absentWitness = [...run.captures.keys()].find((key) => !captured.value.has(key));
+  if (absentWitness !== undefined) {
+    return `witnessed slot ${absentWitness} is absent from the Run Directory`;
+  }
+  return run.captures.size === 0 ? "no transcript capture was witnessed" : null;
+}
+
+function verifyTrustedReviewRun(
+  input: Readonly<{ sessionId: string }>,
+  expectedRoot: string,
+  run: TrustedReviewRun,
+): TrustedRunVerification {
+  if (resolve(run.binding.runsRoot) !== expectedRoot) return { kind: "skipped" };
+  const reject = (message: string): TrustedRunVerification => ({
+    kind: "rejected",
+    message: `${run.binding.runId}: ${message}`,
+  });
+  const opened = openRunDirectory(run.binding.runsRoot, run.binding.runDirectory);
+  if (!opened.ok) return reject(opened.error.message);
+  const programRaw = opened.value.readProgramRegistration();
+  if (!programRaw.ok || programRaw.value === null) {
+    return reject(programRaw.ok ? "registered program is missing" : programRaw.error.message);
+  }
+  const program = parseRegisteredFacadeProgram(programRaw.value);
+  if (program.kind !== "registered" || program.program.kind !== "standalone-review") {
+    return reject("registered program is not a valid Standalone Review");
+  }
+  const captureProblem = trustedCaptureProblem(opened.value, run);
+  if (captureProblem !== null) return reject(captureProblem);
+  const replayed = replayStandaloneResultFromEvidence(opened.value, program.program, run.captures);
+  if (!replayed.ok) return reject(`engine evidence replay did not prove completion: ${replayed.message}`);
+  let resultBytes: Buffer;
+  try {
+    resultBytes = readRunBytesNoFollow(join(opened.value.runDirectory, "result.json"));
+  } catch (error) {
+    return reject(`cannot read canonical result artifact: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!resultBytes.equals(Buffer.from(replayed.json, "utf8"))) {
+    return reject("result.json does not match checkpoint-independent evidence replay");
+  }
+  const reviewedSource = readStandaloneReviewedSource(opened.value, program.program);
+  if (!reviewedSource.ok) return reject(`reviewed source attestation failed: ${reviewedSource.message}`);
+  return { kind: "accepted", receipt: Object.freeze({
+    schemaVersion: 1,
+    kind: "loom-review-authority-receipt",
+    sessionId: input.sessionId,
+    runId: run.binding.runId,
+    runsRoot: run.binding.runsRoot,
+    runDirectory: run.binding.runDirectory,
+    requestIds: Object.freeze([...new Set([...run.captures.values()].map(({ requestId }) => requestId))].sort()),
+    resultDigest: replayed.digest,
+    reviewedSource: reviewedSource.value,
+  }) };
+}
+
 async function verifyTrustedStandaloneReview(input: Readonly<{ cwd: string; sessionId: string }>): Promise<unknown> {
-  const expectedRoot = resolve(input.cwd, ".claude/reviews/review-and-fix-runs");
   const runs = trustedReviewRuns.get(input.sessionId);
   if (runs === undefined) throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId}`);
-
-  const receipts: LoomReviewAuthorityReceipt[] = [];
-  const rejections: string[] = [];
-  for (const run of runs.values()) {
-    if (resolve(run.binding.runsRoot) !== expectedRoot) continue;
-    const opened = openRunDirectory(run.binding.runsRoot, run.binding.runDirectory);
-    if (!opened.ok) { rejections.push(`${run.binding.runId}: ${opened.error.message}`); continue; }
-    const programRaw = opened.value.readProgramRegistration();
-    if (!programRaw.ok || programRaw.value === null) {
-      rejections.push(`${run.binding.runId}: ${programRaw.ok ? "registered program is missing" : programRaw.error.message}`);
-      continue;
-    }
-    const program = parseRegisteredFacadeProgram(programRaw.value);
-    if (program.kind !== "registered" || program.program.kind !== "standalone-review") {
-      rejections.push(`${run.binding.runId}: registered program is not a valid Standalone Review`);
-      continue;
-    }
-
-    const issued = opened.value.readIssuedRequests();
-    const captured = opened.value.readCapturedAttempts();
-    if (!issued.ok) { rejections.push(`${run.binding.runId}: ${issued.error.message}`); continue; }
-    if (!captured.ok) { rejections.push(`${run.binding.runId}: ${captured.error.message}`); continue; }
-    let captureProblem: string | null = null;
-    for (const key of captured.value) {
-      const authority = issued.value.find((request) => trustedCaptureIdentity(request.slotId, request.attempt) === key);
-      const trusted = run.captures.get(key);
-      if (authority === undefined || trusted === undefined || authority.requestId !== trusted.requestId ||
-          authority.role !== trusted.role || authority.contextDigest !== trusted.contextDigest) {
-        captureProblem = `captured slot ${key} was not witnessed with identical request authority`;
-        break;
-      }
-      const bytes = opened.value.readTranscriptBytes(authority);
-      if (!bytes.ok) { captureProblem = bytes.error.message; break; }
-      const digest = createHash("sha256").update(bytes.value).digest("hex");
-      if (digest !== trusted.digest || bytes.value.byteLength !== trusted.byteLength) {
-        captureProblem = `captured slot ${key} changed after Pi witnessed it`;
-        break;
-      }
-    }
-    if (captureProblem === null) {
-      for (const key of run.captures.keys()) {
-        if (!captured.value.has(key)) {
-          captureProblem = `witnessed slot ${key} is absent from the Run Directory`;
-          break;
-        }
-      }
-    }
-    if (captureProblem !== null || run.captures.size === 0) {
-      rejections.push(`${run.binding.runId}: ${captureProblem ?? "no transcript capture was witnessed"}`);
-      continue;
-    }
-
-    const replayed = replayStandaloneResultFromEvidence(opened.value, program.program, run.captures);
-    if (!replayed.ok) {
-      rejections.push(`${run.binding.runId}: engine evidence replay did not prove completion: ${replayed.message}`);
-      continue;
-    }
-    let resultBytes: Buffer;
-    try {
-      resultBytes = readRunBytesNoFollow(join(opened.value.runDirectory, "result.json"));
-    } catch (error) {
-      rejections.push(`${run.binding.runId}: cannot read canonical result artifact: ${error instanceof Error ? error.message : String(error)}`);
-      continue;
-    }
-    if (!resultBytes.equals(Buffer.from(replayed.json, "utf8"))) {
-      rejections.push(`${run.binding.runId}: result.json does not match checkpoint-independent evidence replay`);
-      continue;
-    }
-    const reviewedSource = readStandaloneReviewedSource(opened.value, program.program);
-    if (!reviewedSource.ok) {
-      rejections.push(`${run.binding.runId}: reviewed source attestation failed: ${reviewedSource.message}`);
-      continue;
-    }
-    receipts.push(Object.freeze({
-      schemaVersion: 1 as const,
-      kind: "loom-review-authority-receipt" as const,
-      sessionId: input.sessionId,
-      runId: run.binding.runId,
-      runsRoot: run.binding.runsRoot,
-      runDirectory: run.binding.runDirectory,
-      requestIds: Object.freeze([...new Set([...run.captures.values()].map(({ requestId }) => requestId))].sort()),
-      resultDigest: replayed.digest,
-      reviewedSource: reviewedSource.value,
-    }));
-  }
+  const expectedRoot = resolve(input.cwd, ".claude/reviews/review-and-fix-runs");
+  const outcomes = [...runs.values()].map((run) => verifyTrustedReviewRun(input, expectedRoot, run));
+  const receipts = outcomes.flatMap((outcome) => outcome.kind === "accepted" ? [outcome.receipt] : []);
+  const rejections = outcomes.flatMap((outcome) => outcome.kind === "rejected" ? [outcome.message] : []);
   if (receipts.length !== 1 || rejections.length !== 0) {
     throw new Error(
       `expected one unambiguous witnessed Standalone Review for Pi session ${input.sessionId}, found ${receipts.length}` +
@@ -1656,7 +1654,7 @@ export default function (pi: ExtensionAPI) {
       if (!reservation || !reservation.items.some((item) => item.kind === "implementation")) return [];
       let manager: StateManager | null;
       try {
-        manager = StateManager.fromSession(reservation.sessionId);
+        manager = StateManager.fromLocalSession(reservation.sessionId);
       } catch (error) {
         // Guarded like the sibling `manager.update` below. This handler has no
         // top-level try/catch, so an unguarded throw here — resolveTaskGraph
@@ -1802,7 +1800,7 @@ export default function (pi: ExtensionAPI) {
         let manager: StateManager | null = null;
         let pointerReadFailed = false;
         try {
-          manager = StateManager.fromSession(reservation.sessionId);
+          manager = StateManager.fromLocalSession(reservation.sessionId);
         } catch (error) {
           // Guarded exactly like the sibling `manager.update` below. This
           // handler has no top-level try/catch, so an unguarded throw here —
@@ -2066,7 +2064,7 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
 
-        const mgr = StateManager.fromSession(sessionId);
+        const mgr = StateManager.fromLocalSession(sessionId);
         if (!mgr) {
           // An ad-hoc spawn had no task graph to begin with, so "completion was
           // NOT applied" describes nothing that was lost: the agent's answer is

@@ -1047,7 +1047,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
 });
 
 describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR files", () => {
-  it("resolves a LOOM_STATE_PATH established after module import", () => {
+  it("resolves a late LOOM_STATE_PATH only for callers without session authority", () => {
     const dir = makeTmpDir();
     const latePath = join(dir, "late-active-task-graph.json");
     const previous = process.env.LOOM_STATE_PATH;
@@ -1055,7 +1055,9 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
     process.env.LOOM_STATE_PATH = latePath;
     try {
       expect(resolveTaskGraph()).toBe(latePath);
-      expect(StateManager.fromSession("sm-late-binding")?.getPath()).toBe(latePath);
+      expect(() => StateManager.fromSession("sm-late-binding"))
+        .toThrow("refusing local task-graph fallback");
+      expect(StateManager.fromLocalSession("sm-late-binding")?.getPath()).toBe(latePath);
     } finally {
       if (previous === undefined) delete process.env.LOOM_STATE_PATH;
       else process.env.LOOM_STATE_PATH = previous;
@@ -1079,19 +1081,13 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
     }
   });
 
-  it("an absent session pointer takes the compatibility fallback loudly", () => {
+  it("an absent session pointer refuses local TaskGraph authority", () => {
     const s = `sm-absent-pointer-${process.pid}-${Date.now()}`;
     const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
     rmSync(pointer, { force: true });
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      resolveTaskGraph(s);
-      const text = stderrSpy.mock.calls.map((call) => String(call[0])).join("");
-      expect(text).toContain(`session pointer ${pointer} is absent`);
-      expect(text).toContain("falling back to local task graph");
-    } finally {
-      stderrSpy.mockRestore();
-    }
+
+    expect(() => resolveTaskGraph(s)).toThrow(`session pointer ${pointer} is absent`);
+    expect(() => StateManager.fromSession(s)).toThrow("refusing local task-graph fallback");
   });
 
   it("an unreadable session pointer refuses local fallback", () => {
@@ -1127,38 +1123,26 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
     }
   });
 
-  it("a dangling pointer (names a missing graph) falls back to the local graph LOUDLY", () => {
+  it("a dangling pointer refuses local TaskGraph authority", () => {
     const s = `sm-dangling-${process.pid}-${Date.now()}`;
-    const missing = join(makeTmpDir(), "gone", "active_task_graph.json");
+    const missingRoot = makeTmpDir();
+    const missing = join(missingRoot, "gone", "active_task_graph.json");
     mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
     const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
     writeFileSync(pointer, missing);
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      const result = resolveTaskGraph(s);
-      // Never returns the dangling target — falls back to local resolution.
-      expect(result).not.toBe(missing);
-      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
-      expect(text).toContain("names missing graph");
-      expect(text).toContain("falling back to local task graph");
+      expect(() => resolveTaskGraph(s)).toThrow("names missing graph");
+      expect(() => StateManager.fromSession(s)).toThrow("refusing local task-graph fallback");
     } finally {
-      stderrSpy.mockRestore();
       rmSync(pointer, { force: true });
+      rmSync(missingRoot, { recursive: true, force: true });
     }
   });
 
-  it("a traversal session id is ignored LOUDLY — no path outside SUBAGENT_DIR is ever read", () => {
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      // Falls back to the local task graph resolution (null when none) —
-      // never throws, never reads a `../..`-addressed file.
-      const result = resolveTaskGraph("../../etc/passwd");
-      expect(result === null || !result.includes("..")).toBe(true);
-      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
-      expect(text).toContain("invalid session id");
-    } finally {
-      stderrSpy.mockRestore();
-    }
+  it("a traversal session id fails before any path outside SUBAGENT_DIR is read", () => {
+    expect(() => resolveTaskGraph("../../etc/passwd")).toThrow("invalid session id");
+    expect(() => StateManager.fromSession("../../etc/passwd"))
+      .toThrow("refusing local task-graph fallback");
   });
 });
 

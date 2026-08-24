@@ -653,3 +653,68 @@ None. The production files, regression suites, and cumulative remediation plan a
 7. Bounded-worker full validation: `env -u PI_CODING_AGENT -u LOOM_PI_RUNTIME_REVISION -u LOOM_PI_RUNTIME_ROOT npx vitest run --maxWorkers=4 --minWorkers=1 --testTimeout=15000` — 207 files / 5,165 passed / 1 intentional skip, no runner error.
 8. Complete smoke validation: `env -u PI_CODING_AGENT -u LOOM_PI_RUNTIME_REVISION -u LOOM_PI_RUNTIME_ROOT npm run test:smoke` — panel 22/22, review panel 19/19, standalone review, orchestration façade, Pi resources, and TaskGraph 21/21 all passed.
 9. Registered remediation audit/install through the Orchestration Façade, then commit and push.
+
+---
+
+# Round 12 — Full-branch rereview remediation
+
+## Authority
+
+- Branch: `feat/deterministic-task-execution`
+- Review scope: exact 54-path branch delta `30241fd..620530d`, frozen in the authoritative result
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260824T085330Z-deterministic-policy-rereview-12`
+- Review result digest: `9a609833f0e4914fd61bb1af77118a62df29929aaa120fbf67614fd7d005c2c9`
+- Criticals found: 3
+- Surviving criticals: 2
+- Refuted criticals: 1
+
+## Mandatory critical remediation
+
+1. `engine/src/state-manager.ts`: when a caller supplies a session id, require exact session TaskGraph authority. Invalid ids, absent pointers, and dangling pointers must refuse local fallback so Hook writes cannot retarget the repository-local State File. Preserve local resolution only for callers that supply no session id.
+2. `engine/src/handlers/subagent-stop/update-task-status.ts`: when a resolved transcript becomes unreadable, stop before parsing empty bytes. If exactly one executing Task supplies cleanup attribution, quarantine it through `applyCompletionInfrastructureFailure`; otherwise preserve ambiguous execution authority and return a contextual infrastructure error.
+
+## Advisory dispositions
+
+### Accepted
+
+1. Model advisory-approval observation as a discriminated approved/not-approved/unavailable value and render unavailable event-log evidence as blocked status rather than `false`.
+2. Make GitHub checkbox-update failure actionable by naming the exact affected Tasks and manual `gh issue edit` remediation while preserving its non-authoritative notification status.
+3. Add a Pi bridge regression proving transcript-regex fallback remains unverified and cannot satisfy a regression-required Task.
+4. Correct `engine/src/types.ts`'s module header to describe its shared Loom schemas as well as Hook results.
+5. Document `populate-task-graph --force` and its overwrite semantics in the usage comment.
+6. Parse stored Refutation and Resolution records once before duplicate-id derivation, removing repeated parser calls and non-null assertions without changing diagnostics.
+7. Bind current-Wave Tasks and their ids once in `readinessReasons` rather than repeatedly rescanning the whole TaskGraph.
+
+### Deferred
+
+None.
+
+### Dismissed
+
+None.
+
+## Refuted-finding audit
+
+- `code-reviewer-1` (`pi/subagent-result.ts`): reproduction and intent established that request-bound Pi reviews bypass `applyReviewPiResult`, are captured as immutable run artifacts, and reach `applyReviewResolution` only through the Wave façade's exact slot/attempt validation. The compatibility applier does not process engine-bound Review Runs, so no Pi settlement change is authorized.
+
+## Support paths outside frozen review scope
+
+- `pi/extension.ts`
+- `engine/src/handlers/subagent-stop/dispatch.ts`
+- `engine/src/handlers/subagent-stop/advance-phase.ts`
+- `engine/src/handlers/subagent-stop/store-reviewer-findings.ts`
+- `engine/src/handlers/subagent-stop/store-spec-check-findings.ts`
+- `scripts/smoke-panel-mode.sh`
+
+These adapters and the real-CLI fixture complete the mandatory session-authority split: Claude Hook shells consume strict session pointers, while the Pi parent adapter explicitly consumes local authority but still fails closed on any present unreadable or dangling pointer. The smoke publishes the SessionStart pointer instead of relying on forbidden local fallback.
+
+## Validation
+
+1. Focused regressions: session/transcript/status/notification/Pi/Findings/Wave suites **391/391**; orchestration façade **96/96**; final StateManager + Pi extension integration **200/200**.
+2. Apply-mode `distill`: parsed stored audit records once, bound Wave ids once, removed exactly-one Task assertion, and restored Pi verification-shell altitude through typed run-level outcomes. Covering verification remained green (**56/56** and Pi integration **109/109**).
+3. `npm run typecheck` including unused-code checks passed.
+4. Full-tier Loom lint passed for all 13 changed production TypeScript files.
+5. `git diff --check` passed.
+6. Bounded-worker full suite: `env -u PI_CODING_AGENT -u LOOM_PI_RUNTIME_REVISION -u LOOM_PI_RUNTIME_ROOT npx vitest run --maxWorkers=4 --minWorkers=1 --testTimeout=15000` — **207 files, 5,170 passed, 1 intentional skip**.
+7. Complete smoke suite passed: panel **22/22**, review panel **19/19**, standalone review, orchestration façade, Pi resources, and TaskGraph **21/21**.
+8. Registered remediation audit/install through the Orchestration Façade, then commit and push.

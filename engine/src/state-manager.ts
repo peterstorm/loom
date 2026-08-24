@@ -56,46 +56,67 @@ import { parseTaskVerificationPolicy } from "./core/verification-policy";
 
 const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
-/** Resolve task graph path for cross-repo access. The session id comes from
- *  hook input, so it is PARSED before naming a file under SUBAGENT_DIR — an
- *  unparseable id is ignored loudly (fail closed: no session pointer read)
- *  and resolution falls back to the local task graph. */
+/** Resolve TaskGraph authority for session-bound Hooks or local helpers.
+ * A supplied session id must resolve through its exact `.task_graph` pointer;
+ * malformed, absent, or dangling authority refuses mutation rather than
+ * retargeting the repository-local State File. Only callers with no session
+ * binding may use local TaskGraph resolution. */
 export function resolveTaskGraph(sessionId?: string): string | null {
-  if (sessionId) {
+  if (sessionId !== undefined) {
     const parsed = parseSessionId(sessionId);
     if (parsed === null) {
-      process.stderr.write(
-        `resolveTaskGraph: invalid session id ${JSON.stringify(sessionId)} — ignoring session task-graph pointer\n`,
+      throw new Error(
+        `resolveTaskGraph: invalid session id ${JSON.stringify(sessionId)} — refusing local task-graph fallback`,
       );
-    } else {
-      const sessionFile = sessionScopedPath(parsed, ".task_graph");
-      try {
-        const absPath = readFileSync(sessionFile, "utf-8").trim();
-        if (pathExistsFailClosed(absPath)) return absPath;
-        // A genuinely dangling pointer keeps the documented local fallback.
-        // An unreadable target is treated as present by pathExistsFailClosed,
-        // so StateManager.load surfaces that authority failure instead of
-        // silently retargeting session-scoped work.
-        process.stderr.write(
-          `resolveTaskGraph: session pointer ${sessionFile} names missing graph '${absPath}' — falling back to local task graph\n`,
-        );
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-          throw new Error(
-            `resolveTaskGraph: cannot read session pointer ${sessionFile}: ${e instanceof Error ? e.message : String(e)} — refusing local task-graph fallback`,
-          );
-        }
-        process.stderr.write(
-          `resolveTaskGraph: session pointer ${sessionFile} is absent — falling back to local task graph\n`,
-        );
-      }
     }
+    const sessionFile = sessionScopedPath(parsed, ".task_graph");
+    let absPath: string;
+    try {
+      absPath = readFileSync(sessionFile, "utf-8").trim();
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : String(error);
+      const message = (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? `session pointer ${sessionFile} is absent: ${cause}`
+        : `cannot read session pointer ${sessionFile}: ${cause}`;
+      throw new Error(`resolveTaskGraph: ${message} — refusing local task-graph fallback`);
+    }
+    if (!pathExistsFailClosed(absPath)) {
+      throw new Error(
+        `resolveTaskGraph: session pointer ${sessionFile} names missing graph '${absPath}' — refusing local task-graph fallback`,
+      );
+    }
+    return absPath;
   }
 
   const localTaskGraph = taskGraphPath();
-  if (pathExistsFailClosed(localTaskGraph)) return localTaskGraph;
+  return pathExistsFailClosed(localTaskGraph) ? localTaskGraph : null;
+}
 
-  return null;
+/** Explicit Pi-parent compatibility: an absent session pointer means the Pi
+ * adapter owns the repository-local State File. A present pointer still owns
+ * authority and must be readable and non-dangling; only ENOENT selects local. */
+function resolveLocalSessionTaskGraph(sessionId: string): string | null {
+  const parsed = parseSessionId(sessionId);
+  if (parsed === null) {
+    throw new Error(`resolveTaskGraph: invalid session id ${JSON.stringify(sessionId)}`);
+  }
+  const sessionFile = sessionScopedPath(parsed, ".task_graph");
+  let pointedPath: string;
+  try {
+    pointedPath = readFileSync(sessionFile, "utf-8").trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return resolveTaskGraph();
+    throw new Error(
+      `resolveTaskGraph: cannot read session pointer ${sessionFile}: ` +
+      `${error instanceof Error ? error.message : String(error)} — refusing local task-graph fallback`,
+    );
+  }
+  if (!pathExistsFailClosed(pointedPath)) {
+    throw new Error(
+      `resolveTaskGraph: session pointer ${sessionFile} names missing graph '${pointedPath}' — refusing local task-graph fallback`,
+    );
+  }
+  return pointedPath;
 }
 
 // --- Parse, don't validate: disk JSON → TaskGraph ---
@@ -1629,6 +1650,12 @@ export class StateManager {
 
   static fromSession(sessionId?: string): StateManager | null {
     const path = resolveTaskGraph(sessionId);
+    return path ? new StateManager(path) : null;
+  }
+
+  /** Pi parent adapter seam; see resolveLocalSessionTaskGraph. */
+  static fromLocalSession(sessionId: string): StateManager | null {
+    const path = resolveLocalSessionTaskGraph(sessionId);
     return path ? new StateManager(path) : null;
   }
 

@@ -82,13 +82,10 @@ SESSION="smoke-session-1"
 
 mkdir -p "$SPEC_DIR" "$PLANS_DIR" "$TMP/.claude/state" "$LOOM_SUBAGENT_DIR"
 
-# advance-phase resolves the task graph session-FIRST (a `$SESSION.task_graph`
-# pointer under LOOM_SUBAGENT_DIR), falling back to LOOM_STATE_PATH only when no
-# pointer exists. This test relies on that fallback, so assert the pointer is
-# absent — a stray pointer would silently retarget every stop and make the phase
-# assertions below pass/fail for reasons unrelated to panel logic.
-[ ! -e "$LOOM_SUBAGENT_DIR/$SESSION.task_graph" ] \
-  || { echo "FATAL: unexpected session pointer for $SESSION — test would not exercise LOOM_STATE_PATH"; exit 1; }
+# SubagentStop Hooks require exact session TaskGraph authority. Publish the same
+# pointer SessionStart establishes; local LOOM_STATE_PATH fallback is reserved
+# for non-session helpers and must not authorize these writes.
+printf '%s\n' "$STATE" > "$LOOM_SUBAGENT_DIR/$SESSION.task_graph"
 
 # Spec with zero NEEDS CLARIFICATION markers → architecture gate is satisfied.
 printf '# Smoke spec\n\nFR-001: do the thing.\n' > "$SPEC_DIR/spec.md"

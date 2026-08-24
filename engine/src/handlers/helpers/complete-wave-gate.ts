@@ -194,7 +194,12 @@ export function updateGitHubIssue(
     port.editBody(issue, updated, state.github_repo);
     process.stderr.write(`Updated checkboxes in issue #${issue}\n`);
   } catch (e) {
-    process.stderr.write(`WARNING: Failed to update GH issue #${issue} checkboxes: ${notificationCauseMessage(e)}\n`);
+    const repository = state.github_repo === undefined ? "" : ` --repo ${JSON.stringify(state.github_repo)}`;
+    process.stderr.write(
+      `WARNING: Failed to update GH issue #${issue} checkboxes for Tasks ${taskIds.join(", ")}: ` +
+      `${notificationCauseMessage(e)}. Protected Wave state may already be advanced; remediate manually with ` +
+      `gh issue edit ${issue}${repository} and mark those Task checkboxes complete.\n`,
+    );
   }
 }
 

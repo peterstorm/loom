@@ -119,11 +119,18 @@ const handler: HookHandler = async (stdin, args) => {
     return { kind: "error", message: captureFailure };
   }
 
-  // No task graph → no orchestration hooks
-  const mgr = StateManager.fromSession(input.session_id);
+  // No exact session TaskGraph authority → no orchestration Hooks.
+  let mgr: StateManager | null;
+  try {
+    mgr = StateManager.fromSession(input.session_id);
+  } catch (error) {
+    return passthroughDiagnostic(
+      `[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")}: ` +
+      `${error instanceof Error ? error.message : String(error)} — ` +
+      `SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)\n`,
+    );
+  }
   if (!mgr) {
-    // Silence here is indistinguishable from "nothing to do", and it costs the
-    // whole record: status, evidence and findings are all downstream of this.
     return passthroughDiagnostic(`[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")} — ` +
         `SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)\n`);
   }

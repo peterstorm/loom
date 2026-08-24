@@ -2,8 +2,9 @@
  * Populate task graph with decompose output.
  * Merges existing phase tracking with new tasks.
  *
- * Usage: bun cli.ts helper populate-task-graph [--issue N] [--repo OWNER/REPO] [--fix]
- * Reads decompose JSON from stdin.
+ * Usage: bun cli.ts helper populate-task-graph [--issue N] [--repo OWNER/REPO] [--fix] [--force]
+ * Reads decompose JSON from stdin. `--force` permits replacing Tasks that have
+ * already left pending; without it both the pre-lock and locked guards refuse.
  */
 
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";

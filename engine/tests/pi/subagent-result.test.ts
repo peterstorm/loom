@@ -912,6 +912,55 @@ describe("applyImplementationPiResult", () => {
     ]);
   });
 
+  it("keeps transcript-regex fallback unverified and blocks regression-required completion", async () => {
+    const store = fakeStore(implementationGraph({
+      file_list: [],
+      attempt_artifact_baseline: [],
+      verification_policy: {
+        regression: { kind: "required" },
+        new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+      },
+    }));
+
+    await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        messages: [{
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "call-unclassified-fallback",
+            name: "bash",
+            arguments: { command: "printf '1 passing\\n'" },
+          }],
+        }, {
+          role: "toolResult",
+          toolCallId: "call-unclassified-fallback",
+          toolName: "bash",
+          isError: false,
+          content: [{ type: "text", text: "  1 passing\n" }],
+        }],
+      }),
+      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    const task = store.current().tasks[0]!;
+    expect(task.test_result).toMatchObject({
+      verdict: "untrusted",
+      passed: false,
+      provenance: "unverified",
+    });
+    expect(task.status).toBe("pending");
+    expect(task.proof).toMatchObject({
+      state: "failed",
+      failures: [{ kind: "untrusted-regression-tests-failed" }],
+    });
+  });
+
   it("accepts structured regression evidence while explicit policy waives only new tests", async () => {
     const store = fakeStore(implementationGraph({
       file_list: [],

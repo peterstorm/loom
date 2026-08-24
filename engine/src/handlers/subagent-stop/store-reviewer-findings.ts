@@ -68,7 +68,15 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "passthrough" };
   }
 
-  const mgr = StateManager.fromSession(input.session_id);
+  let mgr: StateManager | null;
+  try {
+    mgr = StateManager.fromSession(input.session_id);
+  } catch (error) {
+    return discarded(
+      `no task graph for session ${input.session_id ?? "<unset>"}: ` +
+      `${error instanceof Error ? error.message : String(error)} — ${agentType} findings NOT stored`,
+    );
+  }
   if (!mgr) {
     return discarded(`no task graph for session ${input.session_id ?? "<unset>"} — ${agentType} findings NOT stored`);
   }

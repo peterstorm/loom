@@ -712,6 +712,11 @@ export function checkReviewedWorkspace(tasks: readonly Task[], deps: GateDeps): 
   }
 }
 
+export type AdvisoryApprovalObservation =
+  | Readonly<{ kind: "approved" }>
+  | Readonly<{ kind: "not-approved" }>
+  | Readonly<{ kind: "unavailable"; reason: string }>;
+
 /** Shell-supplied observation of the active registration's authoritative Run
  * Directory. Core never performs filesystem I/O; status consumes this proof
  * before it describes a registered run as resumable. */
@@ -721,15 +726,9 @@ export type ActiveRunDirectoryObservation =
       kind: "present";
       runId: string;
       path: string;
-      /**
-       * Did the operator already approve this run's advisory request? It is
-       * recorded in the run's event log, not the protected graph, so it is the
-       * one LC-1 evidence field the core cannot derive and the shell must
-       * observe. Absent (legacy callers) reads as "not approved", which is the
-       * fail-closed answer: status keeps asking for a decision rather than
-       * reporting progress that has not happened.
-       */
-      advisoryApproved?: boolean;
+      /** Event-log evidence for this run's exact advisory request. Absent only
+       * for compatibility callers, where it reads as not approved. */
+      advisoryApproval?: AdvisoryApprovalObservation;
     }>
   | Readonly<{ kind: "absent"; runId: string; path: string }>
   | Readonly<{ kind: "invalid"; runId: string; path: string; message: string }>;
@@ -1087,17 +1086,19 @@ function readinessReasons(
   eligibility: WaveGateCompletionEligibility,
 ): NonEmpty<StatusReason> {
   const reasons: StatusReason[] = [];
-  for (const task of graph.tasks.filter((entry) => entry.wave === wave)) {
+  const waveTasks = graph.tasks.filter((task) => task.wave === wave);
+  const waveTaskIds = new Set(waveTasks.map((task) => task.id));
+  for (const task of waveTasks) {
     if ((graph.executing_tasks ?? []).includes(task.id)) reasons.push(reason("task-running", `${task.id} is still executing`, task.id));
     if (task.proof?.state === "failed") reasons.push(reason("proof-failed", `${task.id} has ${task.proof.failures.length} failed proof obligation(s)`, task.id));
   }
   if (tests.kind === "not-ready") {
     for (const affected of tests.affectedTasks) reasons.push(reason("tests-not-ready", `${affected.taskId}: ${affected.reasons.join("; ")}`, affected.taskId));
   }
-  for (const gap of reviews.rosterGaps.filter((entry) => graph.tasks.some((task) => task.id === entry.taskId && task.wave === wave))) {
+  for (const gap of reviews.rosterGaps.filter((entry) => waveTaskIds.has(entry.taskId))) {
     reasons.push(reason("review-roster-gap", `${gap.taskId} is missing review evidence from ${gap.agent}`, gap.taskId));
   }
-  for (const failure of reviews.evidenceFailures.filter((entry) => graph.tasks.some((task) => task.id === entry.taskId && task.wave === wave))) {
+  for (const failure of reviews.evidenceFailures.filter((entry) => waveTaskIds.has(entry.taskId))) {
     reasons.push(reason("review-evidence-failure", `${failure.taskId}/${failure.agent}: ${failure.error}`, failure.taskId));
   }
   if (panel.kind === "needed") reasons.push(reason("refutation-required", panel.reasons.join("; ")));
@@ -2630,7 +2631,7 @@ function projectedAdvisoryStatus(
     rosterComplete,
     activeCritical: counts.value.activeCritical,
     advisoryCount: counts.value.advisory,
-    advisoryApproved: runDirectory.kind === "present" && runDirectory.advisoryApproved === true,
+    advisoryApproved: runDirectory.kind === "present" && runDirectory.advisoryApproval?.kind === "approved",
     committed: null,
   });
 
@@ -2677,6 +2678,13 @@ export function deriveLoomStatusFromParsedGraph(
     if (runDirectory.kind === "invalid") {
       return deriveUnavailableLoomStatus(Object.freeze([
         unavailableStatusReason(`cannot verify authoritative Run Directory ${runDirectory.path}: ${runDirectory.message}`),
+      ]) as NonEmpty<StatusReason>);
+    }
+    if (runDirectory.kind === "present" && runDirectory.advisoryApproval?.kind === "unavailable") {
+      return deriveUnavailableLoomStatus(Object.freeze([
+        unavailableStatusReason(
+          `cannot determine advisory approval for Wave Gate run ${active.runId}: ${runDirectory.advisoryApproval.reason}`,
+        ),
       ]) as NonEmpty<StatusReason>);
     }
   }

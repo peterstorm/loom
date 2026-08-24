@@ -304,7 +304,7 @@ describe("waveGateDecisionMismatch", () => {
       { ok: true, value: graph() },
       { loadPlanModels: () => ({ kind: "none" }), filePresence: () => ({ ok: true, exists: true }) },
       null,
-      { kind: "present", runId: RUN_ID, path: `/runs/${RUN_ID}`, advisoryApproved: false },
+      { kind: "present", runId: RUN_ID, path: `/runs/${RUN_ID}`, advisoryApproval: { kind: "not-approved" } },
     );
     expect(status.next.action.kind).toBe("await-user");
     if (status.next.action.kind !== "await-user") return;
@@ -313,7 +313,7 @@ describe("waveGateDecisionMismatch", () => {
     )).toBeNull();
   });
 
-  it("treats a corrupt advisory event log as unapproved and reports the cause", async () => {
+  it("preserves a corrupt advisory event log as unavailable and reports the cause", async () => {
     const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-advisory-events-"));
     const runDirectory = join(runsRoot, RUN_ID);
     mkdirSync(runDirectory);
@@ -331,9 +331,12 @@ describe("waveGateDecisionMismatch", () => {
         runId: RUN_ID,
         path: runDirectory,
       });
-      expect(approved).toBe(false);
+      expect(approved).toEqual({
+        kind: "unavailable",
+        reason: expect.stringContaining("cannot read advisory decision event log"),
+      });
       expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
-        .toContain(`cannot read advisory decision event log for ${RUN_ID}`);
+        .toContain(`cannot determine advisory approval for ${RUN_ID}`);
     } finally {
       stderr.mockRestore();
       rmSync(runsRoot, { recursive: true, force: true });

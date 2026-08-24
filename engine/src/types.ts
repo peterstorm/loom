@@ -1,5 +1,5 @@
 /**
- * Core types for loom hook handlers
+ * Shared Loom schemas and Hook result/input types.
  */
 
 import type { TaskProof } from "./core/proof-obligations";

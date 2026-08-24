@@ -153,7 +153,14 @@ const handler: HookHandler = async (stdin) => {
   const completedPhase = PHASE_AGENT_MAP[stripNamespace(input.agent_type ?? "")];
   if (!completedPhase) return { kind: "passthrough" };
 
-  const mgr = StateManager.fromSession(input.session_id);
+  let mgr: StateManager | null;
+  try {
+    mgr = StateManager.fromSession(input.session_id);
+  } catch (error) {
+    return passthroughDiagnostic(
+      `advance-phase: session TaskGraph authority unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
   if (!mgr) return { kind: "passthrough" };
 
   // Guard: skip if phase already advanced past this one

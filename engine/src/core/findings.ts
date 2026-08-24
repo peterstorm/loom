@@ -710,14 +710,15 @@ export function findingsLockstepError(
 export function refutationsUnionError(raw: unknown, label: string): string | null {
   if (raw === undefined) return null;
   if (!Array.isArray(raw)) return `${label} must be an array when present`;
-  const index = raw.findIndex((entry) => parseStoredRefutation(entry) === null);
+  const parsed = raw.map(parseStoredRefutation);
+  const index = parsed.findIndex((entry) => entry === null);
   if (index >= 0) {
     return `${label}[${index}] is not a well-formed refutation record (${REPAIR_HINT})`;
   }
   // Within `refuted_findings`, for the reason `findingsUnionError` proves it
   // within `findings`: two records under one id attach two different verdicts
   // to the same claim, and the audit trail can no longer say which was applied.
-  const ids = raw.map((entry) => parseStoredRefutation(entry)!.finding.id);
+  const ids = parsed.flatMap((entry) => entry === null ? [] : [entry.finding.id]);
   const duplicate = ids.findIndex((id, at) => ids.indexOf(id) !== at);
   return duplicate < 0
     ? null
@@ -728,9 +729,10 @@ export function refutationsUnionError(raw: unknown, label: string): string | nul
 export function resolutionsUnionError(raw: unknown, label: string): string | null {
   if (raw === undefined) return null;
   if (!Array.isArray(raw)) return `${label} must be an array when present`;
-  const index = raw.findIndex((entry) => parseStoredResolution(entry) === null);
+  const parsed = raw.map(parseStoredResolution);
+  const index = parsed.findIndex((entry) => entry === null);
   if (index >= 0) return `${label}[${index}] is not a well-formed resolution record (${REPAIR_HINT})`;
-  const ids = raw.map((entry) => parseStoredResolution(entry)!.finding.id);
+  const ids = parsed.flatMap((entry) => entry === null ? [] : [entry.finding.id]);
   const duplicate = ids.findIndex((id, at) => ids.indexOf(id) !== at);
   return duplicate < 0
     ? null

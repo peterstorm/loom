@@ -270,14 +270,17 @@ describe("orchestration status", () => {
 // --- inspectRunDirectoryEntry (round-29: symlink/non-directory occupied proofs) ---
 
 describe("observedAdvisoryApproval", () => {
-  it("reports malformed graph authority while treating approval as absent", async () => {
+  it("preserves malformed graph authority as unavailable rather than not approved", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       expect(await observedAdvisoryApproval({ malformed: true }, {
         kind: "present",
         runId: "run.malformed-advisory-graph",
         path: "/unused/run.malformed-advisory-graph",
-      })).toBe(false);
+      })).toEqual({
+        kind: "unavailable",
+        reason: expect.stringContaining("missing current_phase"),
+      });
       expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
         .toContain("cannot determine advisory approval for run.malformed-advisory-graph");
     } finally {

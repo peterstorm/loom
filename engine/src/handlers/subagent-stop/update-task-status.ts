@@ -604,7 +604,15 @@ export const runUpdateTaskStatus = async (
   // Skip non-impl agents
   if (!IMPL_AGENTS.has(agentType)) return { kind: "passthrough" };
 
-  const mgr = StateManager.fromSession(input.session_id);
+  let mgr: StateManager | null;
+  try {
+    mgr = StateManager.fromSession(input.session_id);
+  } catch (error) {
+    return {
+      kind: "error",
+      message: `update-task-status: session TaskGraph authority unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
   if (!mgr) return { kind: "passthrough" };
 
   // Parse transcript (read file content, then parse). The path is RESOLVED,
@@ -617,13 +625,23 @@ export const runUpdateTaskStatus = async (
   if (transcriptPath) {
     try {
       transcriptContent = readFileSync(transcriptPath, "utf-8");
-    } catch (e) {
-      // The path existed a moment ago (the resolver proved it), so this is a
-      // permission or I/O fault, not a miss. Say so and fall through to the
-      // executing_tasks inference rather than throwing out of the hook.
-      process.stderr.write(
-        `[loom] update-task-status: cannot read transcript at ${transcriptPath}: ${e instanceof Error ? e.message : String(e)}\n`,
-      );
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : String(error);
+      const executing = mgr.load().executing_tasks ?? [];
+      const [taskId] = executing;
+      if (executing.length === 1 && taskId !== undefined) {
+        await mgr.update((state) => applyCompletionInfrastructureFailure(state, taskId, true));
+        return {
+          kind: "error",
+          message: `update-task-status: cannot read transcript at ${transcriptPath}: ${cause}; quarantined ${taskId} for fresh revalidation`,
+        };
+      }
+      return {
+        kind: "error",
+        message:
+          `update-task-status: cannot read transcript at ${transcriptPath}: ${cause}; ` +
+          `${executing.length} executing Tasks make cleanup attribution ${executing.length === 0 ? "unavailable" : "ambiguous"}, so execution authority was preserved`,
+      };
     }
   }
   const transcript = parseTranscript(transcriptContent);

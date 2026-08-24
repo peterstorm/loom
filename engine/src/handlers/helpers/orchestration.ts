@@ -79,6 +79,7 @@ import {
   renderLoomStatusHuman,
   renderLoomStatusJson,
   type ActiveRunDirectoryObservation,
+  type AdvisoryApprovalObservation,
   type GateDeps,
 } from "../../core/wave-gate-machine";
 import { inspectFilePresence, loadPlanModelsSource } from "./complete-wave-gate";
@@ -283,24 +284,17 @@ function statusRunDirectoryObservation(rawGraph: unknown, args: readonly string[
   });
 }
 
-/**
- * Has the operator already approved this run's advisory request?
- *
- * The decision lives in the run's event log, never in the protected graph, so
- * LC-1 cannot derive it — the shell observes it and hands it to the core. Any
- * failure to read reads as "not approved", which keeps status asking for a
- * decision rather than reporting progress that has not happened.
- */
+/** Observe the exact advisory decision without conflating absence and I/O loss. */
 export async function observedAdvisoryApproval(
   rawGraph: unknown,
   observation: ActiveRunDirectoryObservation,
-): Promise<boolean> {
-  if (observation.kind !== "present") return false;
-  const unavailable = (message: string): false => {
+): Promise<AdvisoryApprovalObservation> {
+  if (observation.kind !== "present") return Object.freeze({ kind: "not-approved" });
+  const unavailable = (reason: string): AdvisoryApprovalObservation => {
     process.stderr.write(
-      `orchestration status: cannot determine advisory approval for ${observation.runId}: ${message} — treating approval as absent\n`,
+      `orchestration status: cannot determine advisory approval for ${observation.runId}: ${reason}\n`,
     );
-    return false;
+    return Object.freeze({ kind: "unavailable", reason });
   };
   const parsed = parseStatusGraph(rawGraph);
   if (!parsed.ok) return unavailable(parsed.error);
@@ -309,11 +303,13 @@ export async function observedAdvisoryApproval(
   const readiness = deriveWaveReadiness(parsed.value, productionGateDeps);
   if (!readiness.ok) return unavailable(readiness.error.reasons.map(({ message }) => message).join("; "));
   const findingCounts = readiness.value.facts.findingCounts;
-  if (findingCounts.kind !== "known" || findingCounts.value.advisory === 0) return false;
+  if (findingCounts.kind !== "known" || findingCounts.value.advisory === 0) {
+    return Object.freeze({ kind: "not-approved" });
+  }
   const decisionId = waveAdvisoryDecisionRequestId(observation.runId, readiness.value.waveTasks);
   try {
     const events = await opened.value.readEvents();
-    return events.some(({ event }) => {
+    const approved = events.some(({ event }) => {
       if (typeof event !== "object" || event === null) return false;
       const record = event as Record<string, unknown>;
       const decision = record.decision;
@@ -321,11 +317,11 @@ export async function observedAdvisoryApproval(
         typeof decision === "object" && decision !== null && !Array.isArray(decision) &&
         Object.keys(decision).length === 1 && (decision as Record<string, unknown>).kind === "approve";
     });
+    return Object.freeze({ kind: approved ? "approved" : "not-approved" });
   } catch (error) {
-    process.stderr.write(
-      `orchestration status: cannot read advisory decision event log for ${observation.runId}: ${error instanceof Error ? error.message : String(error)} — treating approval as absent\n`,
+    return unavailable(
+      `cannot read advisory decision event log: ${error instanceof Error ? error.message : String(error)}`,
     );
-    return false;
   }
 }
 
@@ -333,7 +329,7 @@ async function statusOperation(args: readonly string[]): Promise<HookResult> {
   const rawGraph = readGraph(TASK_GRAPH_PATH);
   const base = statusRunDirectoryObservation(rawGraph, args);
   const observation: ActiveRunDirectoryObservation = base.kind === "present"
-    ? Object.freeze({ ...base, advisoryApproved: await observedAdvisoryApproval(rawGraph, base) })
+    ? Object.freeze({ ...base, advisoryApproval: await observedAdvisoryApproval(rawGraph, base) })
     : base;
   const output = renderStatus(rawGraph, productionGateDeps, hasFlag(args, "--json"), observation);
   process.stdout.write(`${output}\n`);

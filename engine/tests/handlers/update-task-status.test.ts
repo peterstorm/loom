@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -471,6 +471,7 @@ describe("update-task-status — transcript path resolution", () => {
     modifiedPath?: string;
     transcriptTaskId?: string;
     failedReview?: boolean;
+    executingTasks?: readonly string[];
   }): Promise<{
     session: string;
     agentId: string;
@@ -506,7 +507,7 @@ describe("update-task-status — transcript path resolution", () => {
       spec_file: null,
       plan_file: null,
       current_wave: 1,
-      executing_tasks: [],
+      executing_tasks: opts.executingTasks ?? [],
       tasks: [
         {
           id: "T1", description: "a task", agent: "code-implementer-agent", status: "pending", wave: 1, depends_on: [],
@@ -623,6 +624,48 @@ describe("update-task-status — transcript path resolution", () => {
       state: "failed",
       failure: { kind: "declared-artifact-not-changed", artifact: "engine/src/types.ts" },
     }));
+  });
+
+  it("quarantines the sole executing Task when a resolved transcript becomes unreadable", async () => {
+    const s = await makeSession({ plantTranscript: false, executingTasks: ["T1"] });
+    const unreadableTranscript = mkdtempSync(join(tmpdir(), "loom-unreadable-transcript-"));
+    try {
+      const result = await updateTaskStatus(JSON.stringify({
+        session_id: s.session,
+        agent_id: s.agentId,
+        agent_type: "code-implementer-agent",
+        agent_transcript_path: unreadableTranscript,
+      }), []);
+
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringContaining("cannot read transcript"),
+      });
+      if (result.kind === "error") expect(result.message).toContain("quarantined T1");
+      expect(s.read().executing_tasks).toEqual([]);
+      expect(s.read().tasks[0]).toMatchObject({ status: "pending", revalidation_required: true });
+    } finally {
+      rmSync(unreadableTranscript, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves ambiguous execution authority when an unreadable transcript binds no Task", async () => {
+    const s = await makeSession({ plantTranscript: false, executingTasks: ["T1", "T2"] });
+    const unreadableTranscript = mkdtempSync(join(tmpdir(), "loom-ambiguous-transcript-"));
+    try {
+      const result = await updateTaskStatus(JSON.stringify({
+        session_id: s.session,
+        agent_id: s.agentId,
+        agent_type: "code-implementer-agent",
+        agent_transcript_path: unreadableTranscript,
+      }), []);
+
+      expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("ambiguous") });
+      expect(s.read().executing_tasks).toEqual(["T1", "T2"]);
+      expect(s.read().tasks[0]?.revalidation_required).toBeUndefined();
+    } finally {
+      rmSync(unreadableTranscript, { recursive: true, force: true });
+    }
   });
 
   it("says out loud that nothing was recorded when there is no transcript and nothing executing", async () => {

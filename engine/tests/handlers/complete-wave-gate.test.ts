@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import fc from "fast-check";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -183,6 +183,24 @@ describe("GitHub issue notification port", () => {
       ["read", 42, "owner/repo; echo unsafe"],
       ["edit", 42, "- [x] T1: implement\n", "owner/repo; echo unsafe"],
     ]);
+  });
+
+  it("makes checkbox-update failure actionable for the exact affected Tasks", () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const failure: GitHubIssuePort = {
+      readBody: () => { throw new Error("offline"); },
+      editBody: () => {},
+      postComment: () => {},
+    };
+    try {
+      updateGitHubIssue(state(), ["T1", "T2"], failure);
+      const warning = stderr.mock.calls.map(([text]) => String(text)).join("");
+      expect(warning).toContain("issue #42 checkboxes for Tasks T1, T2");
+      expect(warning).toContain("Protected Wave state may already be advanced");
+      expect(warning).toContain('gh issue edit 42 --repo "owner/repo; echo unsafe"');
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it("normalizes Error, primitive, and hostile unknown notification causes", () => {
@@ -2046,7 +2064,7 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
       kind: "present" as const,
       runId: graph.active_wave_gate!.runId,
       path: "/runs/registered-wave-run",
-      advisoryApproved: false,
+      advisoryApproval: { kind: "not-approved" as const },
     });
     const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps, null, observation);
     expect(status.next.action.kind).toBe("await-user");
@@ -2059,10 +2077,23 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
       kind: "present" as const,
       runId: graph.active_wave_gate!.runId,
       path: "/runs/registered-wave-run",
-      advisoryApproved: true,
+      advisoryApproval: { kind: "approved" as const },
     });
     const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps, null, observation);
     expect(status.next.action.kind).not.toBe("await-user");
+  });
+
+  it("blocks status when advisory approval evidence is unavailable", () => {
+    const graph = advisoryGraph();
+    const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps, null, {
+      kind: "present",
+      runId: graph.active_wave_gate!.runId,
+      path: "/runs/registered-wave-run",
+      advisoryApproval: { kind: "unavailable", reason: "event log is unreadable" },
+    });
+    expect(Object.values(status.facts).every((fact) => fact.kind === "unavailable")).toBe(true);
+    expect(status.next.action).toMatchObject({ kind: "blocked" });
+    expect(status.next.reasons[0]?.message).toContain("event log is unreadable");
   });
 
   it("treats an unobservable run directory as 'decision still required', never as approved", () => {

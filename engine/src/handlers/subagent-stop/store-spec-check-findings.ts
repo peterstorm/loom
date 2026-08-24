@@ -32,7 +32,14 @@ const handler: HookHandler = async (stdin) => {
   const agentType = stripNamespace(input.agent_type ?? "");
   if (agentType !== "spec-check-invoker") return { kind: "passthrough" };
 
-  const mgr = StateManager.fromSession(input.session_id);
+  let mgr: StateManager | null;
+  try {
+    mgr = StateManager.fromSession(input.session_id);
+  } catch (error) {
+    return passthroughDiagnostic(
+      `store-spec-check-findings: session TaskGraph authority unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
   if (!mgr) return { kind: "passthrough" };
 
   // Resolved, not read off the payload: on a harness that sends no
