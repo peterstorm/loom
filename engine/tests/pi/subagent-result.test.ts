@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import type { TaskGraph } from "../../src/types";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
+import { applyCompletionInfrastructureFailure } from "../../src/handlers/subagent-stop/update-task-status";
 import {
   applyFailedPiResult,
   applyImplementationPiResult,
@@ -476,6 +477,85 @@ describe("applyImplementationPiResult", () => {
       tasks: [{ ...base.tasks[0]!, ...taskOverrides }],
     } as TaskGraph;
   };
+
+  const regressionWaivedRecoveryGraph = (): TaskGraph => {
+    const verificationPolicy = {
+      regression: { kind: "waived" as const, reason: "documentation-only" as const },
+      newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
+    };
+    const proof = evaluateTaskProof(
+      { verificationPolicy, declaredArtifacts: [] },
+      { taskCompleted: true, filesModified: [], newTestsWritten: false },
+    );
+    if (proof.state !== "satisfied") throw new Error("waived recovery fixture must be satisfied");
+    const stale = implementationGraph({
+      status: "implemented",
+      proof,
+      new_tests_required: false,
+      verification_policy: {
+        regression: verificationPolicy.regression,
+        new_tests: verificationPolicy.newTests,
+      },
+      file_list: [],
+      attempt_artifact_baseline: [],
+    });
+    const recovered = applyCompletionInfrastructureFailure(stale, "T1", false);
+    return { ...recovered, executing_tasks: ["T1"] };
+  };
+
+  it("clears revalidation when waived regression evidence rebuilds a satisfied Proof", async () => {
+    const store = fakeStore(regressionWaivedRecoveryGraph());
+
+    await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        messages: assistantText("Revalidation complete without an inapplicable regression run."),
+      }),
+      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    expect(store.current().tasks[0]).toMatchObject({ status: "implemented", proof: { state: "satisfied" } });
+    expect(store.current().tasks[0]!.revalidation_required).toBeUndefined();
+    expect(store.current().executing_tasks).toEqual([]);
+  });
+
+  it("settles a concurrently reopened Task from locked state despite a stale completed pre-read", async () => {
+    const reopened = regressionWaivedRecoveryGraph();
+    const completedView: TaskGraph = {
+      ...reopened,
+      tasks: reopened.tasks.map((task) => ({
+        ...task,
+        status: "completed" as const,
+        revalidation_required: undefined,
+      })),
+    };
+    let current = reopened;
+    const store: TaskGraphStore & { current(): TaskGraph } = {
+      load: () => completedView,
+      update: async (mutate) => { current = mutate(current); },
+      current: () => current,
+    };
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        messages: assistantText("Applied the reopened Task result."),
+      }),
+      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    expect(store.current().tasks[0]).toMatchObject({ status: "implemented", proof: { state: "satisfied" } });
+    expect(store.current().tasks[0]!.revalidation_required).toBeUndefined();
+    expect(applied.log.join("\n")).not.toContain("preserved completed/missing state");
+  });
 
   /**
    * The malformed-transcript branch has TWO exits keyed on whether bytes moved

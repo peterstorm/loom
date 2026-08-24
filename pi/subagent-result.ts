@@ -490,11 +490,21 @@ type ImplementationTranscriptObservation =
       log: readonly string[];
     }>;
 
-async function clearExecutingTask(store: TaskGraphStore, taskId: string): Promise<void> {
-  await store.update((state) => ({
-    ...state,
-    executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== taskId),
-  }));
+async function settleCompletedOrMissingImplementation(
+  store: TaskGraphStore,
+  taskId: string,
+): Promise<boolean> {
+  let settled = false;
+  await store.update((state) => {
+    const task = state.tasks.find((candidate) => candidate.id === taskId);
+    if (task !== undefined && task.status !== "completed") return state;
+    settled = true;
+    return {
+      ...state,
+      executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== taskId),
+    };
+  });
+  return settled;
 }
 
 async function resolveImplementationBindingForResult(args: Readonly<{
@@ -750,9 +760,7 @@ async function applyAcceptedImplementationResolution(
       kind: "repository-or-declared",
       extraModifiedPaths: args.filesModified,
     });
-    if (comparison.failure !== null) {
-      const diagnostic = `loom(pi): cannot compare declared-artifact baseline for ${args.taskId}: ${comparison.failure} — ` +
-        `completion evidence was not applied`;
+    const quarantineCompletionAuthority = (diagnostic: string): TaskGraph => {
       log.push(diagnostic);
       processingErrors.push(diagnostic);
       return applyCompletionInfrastructureFailure(
@@ -760,17 +768,17 @@ async function applyAcceptedImplementationResolution(
         args.taskId,
         comparison.bytesChangedSinceAttempt,
       );
+    };
+    if (comparison.failure !== null) {
+      return quarantineCompletionAuthority(
+        `loom(pi): cannot compare declared-artifact baseline for ${args.taskId}: ${comparison.failure} — ` +
+          `completion evidence was not applied`,
+      );
     }
     const cumulativeFiles = cumulativeModifiedPaths(currentTarget.files_modified, args.filesModified);
     const verificationPolicy = taskVerificationPolicy(currentTarget);
     if (repository.kind === "unavailable" && requiresNewTests(verificationPolicy)) {
-      log.push(repository.diagnostic);
-      processingErrors.push(repository.diagnostic);
-      return applyCompletionInfrastructureFailure(
-        state,
-        args.taskId,
-        comparison.bytesChangedSinceAttempt,
-      );
+      return quarantineCompletionAuthority(repository.diagnostic);
     }
     let newTestEvidence = { written: false, evidence: "" };
     try {
@@ -781,13 +789,8 @@ async function applyAcceptedImplementationResolution(
       );
     } catch (error) {
       const cause = error instanceof Error ? error.message : String(error);
-      const diagnostic = `loom(pi): cannot collect new-test evidence for ${args.taskId}: ${cause}`;
-      log.push(diagnostic);
-      processingErrors.push(diagnostic);
-      return applyCompletionInfrastructureFailure(
-        state,
-        args.taskId,
-        comparison.bytesChangedSinceAttempt,
+      return quarantineCompletionAuthority(
+        `loom(pi): cannot collect new-test evidence for ${args.taskId}: ${cause}`,
       );
     }
     const applied = applyUntrustedStopResolution(state, args.taskId, {
@@ -831,10 +834,7 @@ export async function applyImplementationPiResult(args: Readonly<{
   const binding = await resolveImplementationBindingForResult(args);
   if (binding.kind === "unbound") return binding.outcome;
   const log = [...binding.log];
-  const task = args.store.load().tasks.find((candidate) => candidate.id === binding.taskId);
-
-  if (task?.status === "completed") {
-    await clearExecutingTask(args.store, binding.taskId);
+  if (await settleCompletedOrMissingImplementation(args.store, binding.taskId)) {
     log.push(`loom(pi): ${binding.taskId} stopped; preserved completed/missing state and cleared executing_tasks`);
     return outcome(log);
   }

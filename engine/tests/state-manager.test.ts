@@ -634,6 +634,30 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     expect(waived.ok).toBe(false);
   });
 
+  it("rejects surplus authority inside persisted test and Proof ADTs", () => {
+    const proof = JSON.parse(JSON.stringify(derivePendingTaskProof({
+      newTestsRequired: true,
+      declaredArtifacts: [],
+    })));
+    proof.results[0].evidence = { kind: "task-completed" };
+    const malformedProof = parseTaskGraph({
+      ...validGraph,
+      tasks: [{ ...validTask, proof }],
+    });
+    expect(malformedProof.ok).toBe(false);
+    if (!malformedProof.ok) expect(malformedProof.error).toContain("unexpected field(s): evidence");
+
+    const malformedResult = parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        test_result: { verdict: "trusted-pass", passed: false, provenance: "unverified" },
+      }],
+    });
+    expect(malformedResult.ok).toBe(false);
+    if (!malformedResult.ok) expect(malformedResult.error).toContain("unexpected field(s): passed, provenance");
+  });
+
   it("keeps explicit asymmetric policies and proof obligations in exact lockstep", () => {
     const cases = [
       {

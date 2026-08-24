@@ -12,7 +12,7 @@
 
 import { lstatSync, readFileSync } from "node:fs";
 import type { HookHandler, HookResult, SubagentStopInput, Task, TaskGraph, TaskTestResult } from "../../types";
-import { legacyTestsPassedNote, newWaveGate, testResultPassed } from "../../types";
+import { legacyTestsPassedNote, newWaveGate } from "../../types";
 import { IMPL_AGENTS, machinesDir } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
@@ -396,9 +396,7 @@ export function applyUntrustedStopResolution(
       files_modified: cumulativeFiles,
       new_tests_written: currentNewTests.written,
       new_test_evidence: currentNewTests.evidence,
-      ...(resolution.taskCompleted && testResultPassed(resolution.testResult)
-        ? { revalidation_required: undefined }
-        : {}),
+      ...(proof.state === "satisfied" ? { revalidation_required: undefined } : {}),
     })),
   };
 }
@@ -877,7 +875,7 @@ export const runUpdateTaskStatus = async (
         files_modified: cumulativeFiles,
         new_tests_written: currentNewTestEvidence.written,
         new_test_evidence: currentNewTestEvidence.evidence,
-        ...(testResultPassed(testEvidence.result) ? { revalidation_required: undefined } : {}),
+        ...(proof.state === "satisfied" ? { revalidation_required: undefined } : {}),
       }),
     );
   });

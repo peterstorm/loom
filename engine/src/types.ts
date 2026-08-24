@@ -150,8 +150,9 @@ export const FINDING_SEVERITIES = ["critical", "advisory"] as const;
 export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
 
 /**
- * A finding exactly as a reviewer emitted it: a claim, a severity, and an
- * optional location. Deliberately carries NO identity — see core/findings.
+ * A normalized reviewer finding draft: claim whitespace is canonicalized and
+ * optional locations are sanitized before this shape is constructed. It
+ * deliberately carries NO identity — see core/findings.
  */
 export interface DraftFinding {
   readonly severity: FindingSeverity;
@@ -347,8 +348,8 @@ export interface Task {
   /** Engine-authored proof aggregate. New graphs always carry it. */
   readonly proof?: TaskProof;
   /** A completed-Wave recovery preserved historical evidence but requires a
-   * re-spawned implementation Agent to produce fresh test evidence before the
-   * Task can again satisfy a Wave Gate. */
+   * re-spawned implementation Agent to rebuild a satisfied Proof under the
+   * current Verification Policy before the Task can again satisfy a Wave Gate. */
   readonly revalidation_required?: true;
   /** Files this task creates/modifies (decompose contract); older graphs may lack it */
   readonly file_list?: readonly string[];

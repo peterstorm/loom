@@ -14,6 +14,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  applyCompletionInfrastructureFailure,
   capVerdictForMachineCompletion,
   runUpdateTaskStatus,
 } from "../../../src/handlers/subagent-stop/update-task-status";
@@ -351,6 +352,66 @@ describe("wave-completion gate write (round-17 A1 pin)", () => {
 });
 
 describe("locked implementation settlement failures", () => {
+  it("clears revalidation after a regression-waived Task rebuilds a satisfied Proof", async () => {
+    const s = sid("waived-revalidation");
+    const dir = tempDir();
+    const verificationPolicy = {
+      regression: { kind: "waived" as const, reason: "documentation-only" as const },
+      newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
+    };
+    const proof = evaluateTaskProof(
+      { verificationPolicy, declaredArtifacts: [] },
+      { taskCompleted: true, filesModified: [], newTestsWritten: false },
+    );
+    if (proof.state !== "satisfied") throw new Error("waived revalidation fixture must be satisfied");
+    const recovered = applyCompletionInfrastructureFailure({
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      current_wave: 1,
+      executing_tasks: ["T1"],
+      tasks: [{
+        id: "T1",
+        description: "impl",
+        agent: "code-implementer-agent",
+        wave: 1,
+        status: "implemented",
+        depends_on: [],
+        new_tests_required: false,
+        proof,
+        verification_policy: {
+          regression: verificationPolicy.regression,
+          new_tests: verificationPolicy.newTests,
+        },
+        file_list: [],
+        attempt_artifact_baseline: [],
+      }],
+      wave_gates: { "1": { impl_complete: true, tests_passed: true, reviews_complete: false, blocked: false } },
+    }, "T1", false);
+    const statePath = writeState(dir, [recovered.tasks[0] as unknown as Record<string, unknown>], ["T1"]);
+    pointSessionAt(s, statePath);
+    const transcriptPath = join(dir, "agent-transcript.jsonl");
+    writeFileSync(transcriptPath, JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "**Task ID:** T1\n\nRevalidation complete." }] },
+    }) + "\n");
+
+    const result = await runUpdateTaskStatus(JSON.stringify({
+      session_id: s,
+      agent_id: "a-1",
+      agent_type: "code-implementer-agent",
+      agent_transcript_path: transcriptPath,
+    }), [], { kind: "snapshot", events: [] });
+
+    expect(result.kind).toBe("passthrough");
+    const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+    expect(task.status).toBe("implemented");
+    expect(task.proof.state).toBe("satisfied");
+    expect(task.revalidation_required).toBeUndefined();
+  }, 30000);
+
   it("invalidates stale authority when modified-path evidence is unsafe", async () => {
     const s = sid("unsafe-modified-path");
     const dir = tempDir();

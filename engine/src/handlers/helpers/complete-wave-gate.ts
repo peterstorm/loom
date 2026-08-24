@@ -376,6 +376,45 @@ function legacyCompletionReplayResult(
   return { kind: "passthrough" };
 }
 
+type CompletionReplayAuthority =
+  | Readonly<{ kind: "compatibility"; value: LegacyWaveGateCompatibilityAuthority }>
+  | Readonly<{ kind: "registered"; value: NonNullable<TaskGraph["active_wave_gate"]> }>;
+
+function completionReplayAfterFailure(
+  mgr: StateManager,
+  formattedCommitError: string,
+  authority: CompletionReplayAuthority,
+): HookResult | null {
+  try {
+    if (authority.kind === "compatibility") {
+      return legacyCompletionReplayResult(
+        findLegacyWaveGateCompletionReplay(mgr.load(), authority.value),
+        "concurrently",
+      );
+    }
+    const replay = findRegisteredWaveGateCompletionReplay(mgr.load(), authority.value);
+    if (!replay.ok) {
+      return {
+        kind: "error",
+        message: `[loom] complete-wave-gate: conflicting registered completion replay: ${replay.error.message}`,
+      };
+    }
+    if (replay.value === null) return null;
+    process.stderr.write(
+      `Wave ${replay.value.wave} was concurrently completed by ${replay.value.runId}; ` +
+      `reusing committed receipt ${replay.value.completionReceipt.effectId}.\n`,
+    );
+    return { kind: "passthrough" };
+  } catch (replayReadError) {
+    const replayKind = authority.kind === "compatibility" ? "compatibility terminal" : "registered terminal";
+    return {
+      kind: "error",
+      message: `[loom] complete-wave-gate: locked completion failed: ${formattedCommitError}; ` +
+        `${replayKind} replay read also failed: ${notificationCauseMessage(replayReadError)}`,
+    };
+  }
+}
+
 async function runCompleteWaveGate(
   _stdin: string,
   args: string[],
@@ -486,44 +525,16 @@ async function runCompleteWaveGate(
   }
   const formattedCommitError = commitError === null ? null : completionCommitErrorMessage(commitError);
 
-  if (commitError !== null && compatibilityAuthority !== null) {
-    try {
-      const racedCompletion = legacyCompletionReplayResult(
-        findLegacyWaveGateCompletionReplay(mgr.load(), compatibilityAuthority),
-        "concurrently",
-      );
-      if (racedCompletion !== null) return racedCompletion;
-    } catch (replayReadError) {
-      return {
-        kind: "error",
-        message: `[loom] complete-wave-gate: locked completion failed: ${formattedCommitError}; ` +
-          `compatibility terminal replay read also failed: ${notificationCauseMessage(replayReadError)}`,
-      };
+  if (formattedCommitError !== null) {
+    let replayAuthority: CompletionReplayAuthority | null = null;
+    if (compatibilityAuthority !== null) {
+      replayAuthority = { kind: "compatibility", value: compatibilityAuthority };
+    } else if (registeredCompletionAuthority !== null) {
+      replayAuthority = { kind: "registered", value: registeredCompletionAuthority };
     }
-  }
-
-  if (commitError !== null && registeredCompletionAuthority !== null) {
-    try {
-      const racedCompletion = findRegisteredWaveGateCompletionReplay(mgr.load(), registeredCompletionAuthority);
-      if (!racedCompletion.ok) {
-        return {
-          kind: "error",
-          message: `[loom] complete-wave-gate: conflicting registered completion replay: ${racedCompletion.error.message}`,
-        };
-      }
-      if (racedCompletion.value !== null) {
-        process.stderr.write(
-          `Wave ${racedCompletion.value.wave} was concurrently completed by ${racedCompletion.value.runId}; ` +
-          `reusing committed receipt ${racedCompletion.value.completionReceipt.effectId}.\n`,
-        );
-        return { kind: "passthrough" };
-      }
-    } catch (replayReadError) {
-      return {
-        kind: "error",
-        message: `[loom] complete-wave-gate: locked completion failed: ${formattedCommitError}; ` +
-          `registered terminal replay read also failed: ${notificationCauseMessage(replayReadError)}`,
-      };
+    if (replayAuthority !== null) {
+      const replay = completionReplayAfterFailure(mgr, formattedCommitError, replayAuthority);
+      if (replay !== null) return replay;
     }
   }
 

@@ -16,6 +16,19 @@ const fail = <T>(errors: readonly string[]): ProofParseResult<T> => ({ ok: false
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+function parseExactRecordArm<T>(
+  raw: Record<string, unknown>,
+  path: string,
+  allowedKeys: readonly string[],
+  parse: () => ProofParseResult<T>,
+): ProofParseResult<T> {
+  const allowed = new Set(allowedKeys);
+  const surplus = Object.keys(raw).filter((key) => !allowed.has(key)).sort();
+  return surplus.length === 0
+    ? parse()
+    : fail([`${path} contains unexpected field(s): ${surplus.join(", ")}`]);
+}
+
 export type NonEmpty<T> = readonly [T, ...T[]];
 
 const nonEmpty = <T>(head: T, tail: readonly T[]): NonEmpty<T> => {
@@ -428,20 +441,31 @@ const parseNonEmptyString = (raw: unknown, path: string): ProofParseResult<strin
 
 export function parseProofObligation(raw: unknown, path = "obligation"): ProofParseResult<ProofObligation> {
   if (!isRecord(raw)) return fail([`${path} must be an object`]);
-  if (raw.kind === "task-completed") return ok(Object.freeze({ kind: "task-completed" }));
-  if (raw.kind === "regression-test-pass") return ok(Object.freeze({ kind: "regression-test-pass" }));
-  if (raw.kind === "new-tests") return ok(Object.freeze({ kind: "new-tests" }));
+  if (raw.kind === "task-completed" || raw.kind === "regression-test-pass" || raw.kind === "new-tests") {
+    const kind = raw.kind;
+    return parseExactRecordArm<ProofObligation>(raw, path, ["kind"], () =>
+      ok(Object.freeze({ kind })));
+  }
   if (raw.kind === "declared-artifact-changed") {
-    const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-    return artifact.ok
-      ? ok(Object.freeze({ kind: "declared-artifact-changed", artifact: artifact.value }))
-      : artifact;
+    return parseExactRecordArm(raw, path, ["kind", "artifact"], () => {
+      const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
+      return artifact.ok
+        ? ok(Object.freeze({ kind: "declared-artifact-changed", artifact: artifact.value }))
+        : artifact;
+    });
   }
   return fail([`${path}.kind must be task-completed, regression-test-pass, new-tests, or declared-artifact-changed`]);
 }
 
 export function parseProofObligationInput(raw: unknown): ProofParseResult<ProofObligationInput> {
   if (!isRecord(raw)) return fail(["proof obligation input must be an object"]);
+  const exact = parseExactRecordArm(
+    raw,
+    "proof obligation input",
+    ["verificationPolicy", "newTestsRequired", "declaredArtifacts"],
+    () => ok(true),
+  );
+  if (!exact.ok) return fail(exact.errors);
   const errors: string[] = [];
   const hasLegacy = raw.newTestsRequired !== undefined;
   if (hasLegacy && typeof raw.newTestsRequired !== "boolean") {
@@ -486,32 +510,47 @@ function parseUntrustedTestProvenance(
 
 export function parseTaskTestResult(raw: unknown, path = "testResult"): ProofParseResult<ProofTestResult> {
   if (!isRecord(raw)) return fail([`${path} must be an object`]);
-  if (raw.verdict === "trusted-pass") return ok(Object.freeze({ verdict: "trusted-pass" }));
-  if (raw.verdict === "trusted-fail") return ok(Object.freeze({ verdict: "trusted-fail" }));
+  if (raw.verdict === "trusted-pass") {
+    return parseExactRecordArm(raw, path, ["verdict"], () =>
+      ok(Object.freeze({ verdict: "trusted-pass" })));
+  }
+  if (raw.verdict === "trusted-fail") {
+    return parseExactRecordArm(raw, path, ["verdict"], () =>
+      ok(Object.freeze({ verdict: "trusted-fail" })));
+  }
   if (raw.verdict === "untrusted") {
-    const passed = typeof raw.passed === "boolean"
-      ? ok(raw.passed)
-      : fail<boolean>([`${path}.passed must be a boolean`]);
-    const label = parseNonEmptyString(raw.label, `${path}.label`);
-    // Absent provenance reads as `unverified`, never as structured evidence:
-    // records written before the field existed must not acquire a trust
-    // upgrade by omission. An unrecognized value is a refusal, not a default.
-    const provenance = parseUntrustedTestProvenance(raw.provenance, path);
-    const errors = [passed, label, provenance]
-      .flatMap((parsed) => parsed.ok ? [] : parsed.errors);
-    if (!passed.ok || !label.ok || !provenance.ok) return fail(errors);
-    return ok(Object.freeze({
-      verdict: "untrusted",
-      passed: passed.value,
-      label: label.value,
-      provenance: provenance.value,
-    }));
+    return parseExactRecordArm(raw, path, ["verdict", "passed", "label", "provenance"], () => {
+      const passed = typeof raw.passed === "boolean"
+        ? ok(raw.passed)
+        : fail<boolean>([`${path}.passed must be a boolean`]);
+      const label = parseNonEmptyString(raw.label, `${path}.label`);
+      // Absent provenance reads as `unverified`, never as structured evidence:
+      // records written before the field existed must not acquire a trust
+      // upgrade by omission. An unrecognized value is a refusal, not a default.
+      const provenance = parseUntrustedTestProvenance(raw.provenance, path);
+      const errors = [passed, label, provenance]
+        .flatMap((parsed) => parsed.ok ? [] : parsed.errors);
+      if (!passed.ok || !label.ok || !provenance.ok) return fail(errors);
+      return ok(Object.freeze({
+        verdict: "untrusted",
+        passed: passed.value,
+        label: label.value,
+        provenance: provenance.value,
+      }));
+    });
   }
   return fail([`${path}.verdict must be trusted-pass, trusted-fail, or untrusted`]);
 }
 
 export function parseObservedProofEvidence(raw: unknown): ProofParseResult<ObservedProofEvidence> {
   if (!isRecord(raw)) return fail(["observed proof evidence must be an object"]);
+  const exact = parseExactRecordArm(
+    raw,
+    "observed proof evidence",
+    ["taskCompleted", "testResult", "filesModified", "newTestsWritten", "newTestEvidence"],
+    () => ok(true),
+  );
+  if (!exact.ok) return fail(exact.errors);
   const errors: string[] = [];
   let testResult: ProofTestResult | undefined;
   if (raw.testResult !== undefined) {
@@ -550,9 +589,10 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
 
 export function parseProofEvaluationPolicy(raw: unknown): ProofParseResult<ProofEvaluationPolicy> {
   if (!isRecord(raw)) return fail(["proof evaluation policy must be an object"]);
-  return raw.untrustedPass === "reject" || raw.untrustedPass === "accept-pi-structured"
-    ? ok(Object.freeze({ untrustedPass: raw.untrustedPass }))
-    : fail(["proof evaluation policy.untrustedPass must be reject or accept-pi-structured"]);
+  return parseExactRecordArm(raw, "proof evaluation policy", ["untrustedPass"], () =>
+    raw.untrustedPass === "reject" || raw.untrustedPass === "accept-pi-structured"
+      ? ok(Object.freeze({ untrustedPass: raw.untrustedPass }))
+      : fail(["proof evaluation policy.untrustedPass must be reject or accept-pi-structured"]));
 }
 
 export function parseProofFailure(raw: unknown, path = "failure"): ProofParseResult<ProofFailure> {
@@ -560,21 +600,31 @@ export function parseProofFailure(raw: unknown, path = "failure"): ProofParseRes
   switch (raw.kind) {
     case "task-not-completed":
     case "test-result-missing":
-    case "new-tests-not-observed":
-      return ok(Object.freeze({ kind: raw.kind }));
+    case "new-tests-not-observed": {
+      const kind = raw.kind;
+      return parseExactRecordArm<ProofFailure>(raw, path, ["kind"], () =>
+        ok(Object.freeze({ kind })));
+    }
     case "regression-tests-failed":
-      return raw.provenance === "ledger"
-        ? ok(Object.freeze({ kind: raw.kind, provenance: "ledger" }))
-        : fail([`${path}.provenance must be ledger`]);
+      return parseExactRecordArm<ProofFailure>(raw, path, ["kind", "provenance"], () =>
+        raw.provenance === "ledger"
+          ? ok(Object.freeze({ kind: "regression-tests-failed", provenance: "ledger" }))
+          : fail([`${path}.provenance must be ledger`]));
     case "untrusted-regression-tests-failed":
     case "untrusted-regression-pass": {
-      const label = parseNonEmptyString(raw.label, `${path}.label`);
-      return label.ok ? ok(Object.freeze({ kind: raw.kind, label: label.value })) : label;
+      const kind = raw.kind;
+      return parseExactRecordArm<ProofFailure>(raw, path, ["kind", "label"], () => {
+        const label = parseNonEmptyString(raw.label, `${path}.label`);
+        return label.ok ? ok(Object.freeze({ kind, label: label.value })) : label;
+      });
     }
-    case "declared-artifact-not-changed": {
-      const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-      return artifact.ok ? ok(Object.freeze({ kind: raw.kind, artifact: artifact.value })) : artifact;
-    }
+    case "declared-artifact-not-changed":
+      return parseExactRecordArm<ProofFailure>(raw, path, ["kind", "artifact"], () => {
+        const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
+        return artifact.ok
+          ? ok(Object.freeze({ kind: "declared-artifact-not-changed", artifact: artifact.value }))
+          : artifact;
+      });
     default:
       return fail([`${path}.kind is not a recognized proof failure`]);
   }
@@ -582,28 +632,48 @@ export function parseProofFailure(raw: unknown, path = "failure"): ProofParseRes
 
 export function parseProofEvidence(raw: unknown, path = "evidence"): ProofParseResult<ProofEvidence> {
   if (!isRecord(raw)) return fail([`${path} must be an object`]);
-  if (raw.kind === "task-completed") return ok(Object.freeze({ kind: "task-completed" }));
+  if (raw.kind === "task-completed") {
+    return parseExactRecordArm(raw, path, ["kind"], () => ok(Object.freeze({ kind: "task-completed" })));
+  }
   if (raw.kind === "regression-test-pass") {
-    if (raw.provenance === "evidence-ledger" && raw.verdict === "trusted-pass") {
-      return ok(Object.freeze({ kind: raw.kind, provenance: raw.provenance, verdict: raw.verdict }));
-    }
-    if (raw.provenance === "pi-structured" && raw.verdict === "untrusted-pass") {
-      const label = parseNonEmptyString(raw.label, `${path}.label`);
-      return label.ok
-        ? ok(Object.freeze({ kind: raw.kind, provenance: raw.provenance, verdict: raw.verdict, label: label.value }))
-        : label;
-    }
-    return fail([`${path} has an invalid regression evidence provenance/verdict combination`]);
+    const allowed = raw.provenance === "pi-structured"
+      ? ["kind", "provenance", "verdict", "label"]
+      : ["kind", "provenance", "verdict"];
+    return parseExactRecordArm<ProofEvidence>(raw, path, allowed, () => {
+      if (raw.provenance === "evidence-ledger" && raw.verdict === "trusted-pass") {
+        return ok(Object.freeze({
+          kind: "regression-test-pass", provenance: "evidence-ledger", verdict: "trusted-pass",
+        }));
+      }
+      if (raw.provenance === "pi-structured" && raw.verdict === "untrusted-pass") {
+        const label = parseNonEmptyString(raw.label, `${path}.label`);
+        return label.ok
+          ? ok(Object.freeze({
+              kind: "regression-test-pass",
+              provenance: "pi-structured",
+              verdict: "untrusted-pass",
+              label: label.value,
+            }))
+          : label;
+      }
+      return fail([`${path} has an invalid regression evidence provenance/verdict combination`]);
+    });
   }
   if (raw.kind === "new-tests") {
-    if (raw.detail !== null && typeof raw.detail !== "string") {
-      return fail([`${path}.detail must be a string or null`]);
-    }
-    return ok(Object.freeze({ kind: "new-tests", detail: raw.detail === null ? null : raw.detail }));
+    return parseExactRecordArm(raw, path, ["kind", "detail"], () => {
+      if (raw.detail !== null && typeof raw.detail !== "string") {
+        return fail([`${path}.detail must be a string or null`]);
+      }
+      return ok(Object.freeze({ kind: "new-tests", detail: raw.detail === null ? null : raw.detail }));
+    });
   }
   if (raw.kind === "declared-artifact-changed") {
-    const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-    return artifact.ok ? ok(Object.freeze({ kind: raw.kind, artifact: artifact.value })) : artifact;
+    return parseExactRecordArm<ProofEvidence>(raw, path, ["kind", "artifact"], () => {
+      const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
+      return artifact.ok
+        ? ok(Object.freeze({ kind: "declared-artifact-changed", artifact: artifact.value }))
+        : artifact;
+    });
   }
   return fail([`${path}.kind is not recognized proof evidence`]);
 }
@@ -646,26 +716,31 @@ export function parseProofObligationResult(
   path = "result",
 ): ProofParseResult<ProofObligationResult> {
   if (!isRecord(raw)) return fail([`${path} must be an object`]);
-  const obligation = parseProofObligation(raw.obligation, `${path}.obligation`);
-  if (!obligation.ok) return obligation;
+  let allowed: readonly string[] | null = null;
+  if (raw.state === "pending") allowed = ["state", "obligation"];
+  if (raw.state === "failed") allowed = ["state", "obligation", "failure"];
+  if (raw.state === "satisfied") allowed = ["state", "obligation", "evidence"];
+  if (allowed === null) return fail([`${path}.state must be pending, failed, or satisfied`]);
+  return parseExactRecordArm(raw, path, allowed, () => {
+    const obligation = parseProofObligation(raw.obligation, `${path}.obligation`);
+    if (!obligation.ok) return obligation;
 
-  let result: ProofObligationResult;
-  if (raw.state === "pending") {
-    result = Object.freeze({ state: "pending", obligation: obligation.value });
-  } else if (raw.state === "failed") {
-    const failure = parseProofFailure(raw.failure, `${path}.failure`);
-    if (!failure.ok) return failure;
-    result = Object.freeze({ state: "failed", obligation: obligation.value, failure: failure.value });
-  } else if (raw.state === "satisfied") {
-    const evidence = parseProofEvidence(raw.evidence, `${path}.evidence`);
-    if (!evidence.ok) return evidence;
-    result = Object.freeze({ state: "satisfied", obligation: obligation.value, evidence: evidence.value });
-  } else {
-    return fail([`${path}.state must be pending, failed, or satisfied`]);
-  }
-  return resultMatchesObligation(result)
-    ? ok(result)
-    : fail([`${path} payload does not satisfy its obligation kind`]);
+    let result: ProofObligationResult;
+    if (raw.state === "pending") {
+      result = Object.freeze({ state: "pending", obligation: obligation.value });
+    } else if (raw.state === "failed") {
+      const failure = parseProofFailure(raw.failure, `${path}.failure`);
+      if (!failure.ok) return failure;
+      result = Object.freeze({ state: "failed", obligation: obligation.value, failure: failure.value });
+    } else {
+      const evidence = parseProofEvidence(raw.evidence, `${path}.evidence`);
+      if (!evidence.ok) return evidence;
+      result = Object.freeze({ state: "satisfied", obligation: obligation.value, evidence: evidence.value });
+    }
+    return resultMatchesObligation(result)
+      ? ok(result)
+      : fail([`${path} payload does not satisfy its obligation kind`]);
+  });
 }
 
 const parseNonEmptyArray = <T>(
@@ -781,11 +856,17 @@ function parseSatisfiedProof(raw: Record<string, unknown>, parts: ParsedProofPar
 /** Parse and re-prove exact obligation/result coverage and state lockstep. */
 export function parseTaskProof(raw: unknown): ProofParseResult<TaskProof> {
   if (!isRecord(raw)) return fail(["task proof must be an object"]);
-  const parts = parseProofParts(raw);
-  if (!parts.ok) return parts;
-  if (raw.state === "pending") return parsePendingProof(parts.value);
-  if (raw.state === "failed") return parseFailedProof(raw, parts.value);
-  if (raw.state === "satisfied") return parseSatisfiedProof(raw, parts.value);
-  return fail(["proof.state must be pending, failed, or satisfied"]);
+  let allowed: readonly string[] | null = null;
+  if (raw.state === "pending") allowed = ["state", "obligations", "results"];
+  if (raw.state === "failed") allowed = ["state", "obligations", "results", "failures"];
+  if (raw.state === "satisfied") allowed = ["state", "obligations", "results", "evidence"];
+  if (allowed === null) return fail(["proof.state must be pending, failed, or satisfied"]);
+  return parseExactRecordArm<TaskProof>(raw, "proof", allowed, () => {
+    const parts = parseProofParts(raw);
+    if (!parts.ok) return parts;
+    if (raw.state === "pending") return parsePendingProof(parts.value);
+    if (raw.state === "failed") return parseFailedProof(raw, parts.value);
+    return parseSatisfiedProof(raw, parts.value);
+  });
 }
 

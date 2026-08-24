@@ -481,3 +481,58 @@ The focused parser regression pins the exact proof-lockstep cases named by the c
 5. `git diff --check`.
 6. Required full command: `env -u PI_CODING_AGENT npm test`.
 7. Registered remediation audit/install through the Orchestration Façade, then commit and push.
+
+---
+
+# Round 9 — Full-branch rereview remediation
+
+## Authority
+
+- Branch: `feat/deterministic-task-execution`
+- Review scope: exact 54-path branch delta `30241fd..4231840`, frozen in the authoritative result
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260824T062219Z-deterministic-policy-rereview-9`
+- Review result digest: `2a70ea81b570d9c79085d8bf18112f142c34450e63c053740b782f35268a68e2`
+- Criticals found: 4
+- Surviving criticals: 3
+- Refuted criticals: 1
+
+## Mandatory critical remediation
+
+1. `engine/src/handlers/subagent-stop/update-task-status.ts`: clear `revalidation_required` whenever the newly evaluated Proof is satisfied, including regression-waived recovery. Apply the same rule through the Pi-shared `applyUntrustedStopResolution`; add Claude and Pi recovery regressions.
+2. `pi/subagent-result.ts`: remove the pre-lock completed-Task short circuit. Every completed/missing decision and execution release must be re-evaluated by the existing locked settlement paths; add a stale-pre-read/concurrent-reopen regression.
+3. `engine/src/core/proof-obligations.ts`: require exact keys for every proof/test ADT parser arm, including nested obligation, result, failure, evidence, and aggregate records. Preserve the intentional absent-provenance compatibility rule while rejecting contradictory surplus authority. Add property coverage across every parser arm and pin the State File load boundary.
+
+## Advisory dispositions
+
+### Accepted
+
+1. Correct the `DraftFinding` comment: reviewer output is normalized before becoming a draft, including claim whitespace and optional location sanitation.
+2. Consolidate legacy and registered completion replay-after-failure handling behind one local discriminated helper without changing messages, ordering, or replay semantics.
+3. Consolidate the three accepted Pi completion-infrastructure failure tails into one local operation that records the diagnostic and quarantines authority.
+
+### Deferred
+
+1. Redesign `Task` as a lifecycle/proof discriminated union. Reason: unchanged from prior rounds; it must land atomically with Slice 3's Completion Oracle and explicit stored-state migration.
+2. Move shared implementation-proof settlement out of the Claude SubagentStop shell into an engine-owned functional-core module. Reason: this is the planned Slice 3 Implementation Completion Oracle seam; moving it independently would create a temporary interface immediately replaced by the Oracle.
+
+### Dismissed
+
+None.
+
+## Refuted-finding audit
+
+- `comment-analyzer-1` (`engine/src/types.ts`): the claim that `parseStoredFinding` contradicts the statement that only `attributeFindings` produces Finding identity was refuted by intent and blast-radius. The parser rehydrates an already persisted identity; it does not mint derived identity. No code or comment change is authorized for this finding.
+
+## Support paths outside frozen review scope
+
+None. Every production file, regression file, and this cumulative remediation plan are present in the frozen 54-path branch delta.
+
+## Validation
+
+1. Focused Vitest suites for Proof parsing/load guards, Claude settlement, Pi settlement/TOCTOU, and Wave completion replay.
+2. Apply-mode `distill` pass after the focused baseline is green, one behavior-preserving move at a time.
+3. `npm run typecheck` including unused-code checks.
+4. Full-tier Loom lint over every changed production TypeScript file.
+5. `git diff --check`.
+6. Required full command: `env -u PI_CODING_AGENT -u LOOM_PI_RUNTIME_REVISION -u LOOM_PI_RUNTIME_ROOT npm test`.
+7. Registered remediation audit/install through the Orchestration Façade, then commit and push.

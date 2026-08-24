@@ -12,7 +12,11 @@ import {
   isImplementationReady,
   parseObservedProofEvidence,
   parseProofEvaluationPolicy,
+  parseProofEvidence,
+  parseProofFailure,
+  parseProofObligation,
   parseProofObligationInput,
+  parseProofObligationResult,
   parseTaskProof,
   parseTaskTestResult,
   reevaluateTaskProof,
@@ -415,6 +419,76 @@ describe("proof properties", () => {
         },
       ),
       { numRuns: 100 },
+    );
+  });
+
+  it("PROPERTY: every proof/test ADT arm rejects surplus fields", () => {
+    const pending = derivePendingTaskProof(input);
+    const failed = evaluateTaskProof(input, { taskCompleted: false, filesModified: [] });
+    const satisfied = evaluateTaskProof(input, completeEvidence);
+    const cases: readonly Readonly<{
+      parser: (raw: unknown) => Readonly<{ ok: boolean }>;
+      value: Readonly<Record<string, unknown>>;
+    }>[] = [
+      ...[
+        { kind: "task-completed" },
+        { kind: "regression-test-pass" },
+        { kind: "new-tests" },
+        { kind: "declared-artifact-changed", artifact: "src/a.ts" },
+      ].map((value) => ({ parser: parseProofObligation, value })),
+      ...[
+        { verdict: "trusted-pass" },
+        { verdict: "trusted-fail" },
+        { verdict: "untrusted", passed: true, label: "pi", provenance: "pi-structured" },
+      ].map((value) => ({ parser: parseTaskTestResult, value })),
+      ...[
+        { kind: "task-not-completed" },
+        { kind: "test-result-missing" },
+        { kind: "regression-tests-failed", provenance: "ledger" },
+        { kind: "untrusted-regression-tests-failed", label: "fallback" },
+        { kind: "untrusted-regression-pass", label: "fallback" },
+        { kind: "new-tests-not-observed" },
+        { kind: "declared-artifact-not-changed", artifact: "src/a.ts" },
+      ].map((value) => ({ parser: parseProofFailure, value })),
+      ...[
+        { kind: "task-completed" },
+        { kind: "regression-test-pass", provenance: "evidence-ledger", verdict: "trusted-pass" },
+        { kind: "regression-test-pass", provenance: "pi-structured", verdict: "untrusted-pass", label: "pi" },
+        { kind: "new-tests", detail: null },
+        { kind: "declared-artifact-changed", artifact: "src/a.ts" },
+      ].map((value) => ({ parser: parseProofEvidence, value })),
+      { parser: parseProofObligationResult, value: pending.results[0] },
+      { parser: parseProofObligationResult, value: failed.results[0] },
+      { parser: parseProofObligationResult, value: satisfied.results[0] },
+      { parser: parseTaskProof, value: pending },
+      { parser: parseTaskProof, value: failed },
+      { parser: parseTaskProof, value: satisfied },
+      { parser: parseProofObligationInput, value: { newTestsRequired: false, declaredArtifacts: [] } },
+      {
+        parser: parseProofObligationInput,
+        value: {
+          verificationPolicy: {
+            regression: { kind: "required" },
+            newTests: { kind: "waived", reason: "existing-tests-sufficient" },
+          },
+          declaredArtifacts: [],
+        },
+      },
+      { parser: parseObservedProofEvidence, value: { taskCompleted: true, filesModified: [] } },
+      { parser: parseProofEvaluationPolicy, value: { untrustedPass: "reject" } },
+    ];
+
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: cases.length - 1 }),
+        fc.stringMatching(/^surplus_[a-z]{1,8}$/),
+        fc.jsonValue(),
+        (caseIndex, key, surplusValue) => {
+          const selected = cases[caseIndex]!;
+          return !selected.parser({ ...selected.value, [key]: surplusValue }).ok;
+        },
+      ),
+      { numRuns: 200 },
     );
   });
 

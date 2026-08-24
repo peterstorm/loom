@@ -937,8 +937,9 @@ function taskStatusError(
 /** Test evidence. The acceptance DECISION is delegated to parseTaskTestResult —
  *  the ONE validator for the shared TaskTestResult/ProofTestResult union — so
  *  the load boundary can never drift from the proof evaluator on what shape
- *  the persisted field may have. Only the operator-facing message spelling is
- *  re-derived here, preserving the diagnostics the load-guard suite pins. */
+ *  the persisted field may have. Exact-shape causes pass through verbatim;
+ *  older malformed verdicts retain the operator-facing spelling pinned by the
+ *  load-guard suite. */
 function taskEvidenceError(
   t: Record<string, unknown>,
   index: number,
@@ -948,6 +949,8 @@ function taskEvidenceError(
   const prefix = `tasks[${index}] ("${id}")`;
   const parsed = parseTaskTestResult(t.test_result, `${prefix}: test_result`);
   if (parsed.ok) return null;
+  const exactShapeError = parsed.errors.find((error) => error.includes("unexpected field(s)"));
+  if (exactShapeError !== undefined) return exactShapeError;
   const r = t.test_result as Record<string, unknown>;
   if (typeof r !== "object" || r === null) return `${prefix}: test_result must be an object`;
   if (r.verdict === "untrusted") {
