@@ -416,6 +416,8 @@ export interface RunDirHandle extends ProgramJournal {
   ): Promise<DomainResult<ArtifactRef, RunDirectoryError>>;
   /** Read captured bytes back exactly, for parity and byte-equality proofs. */
   readTranscriptBytes(authority: AgentRequestAuthority): DomainResult<Uint8Array, RunDirectoryError>;
+  /** Read one parser-proven immutable artifact slot; null means only that the slot is absent. */
+  readArtifactBytes(relativePath: unknown): DomainResult<Uint8Array | null, RunDirectoryError>;
   publishArtifactSet(staged: readonly StagedArtifactInput[]): Promise<DomainResult<readonly ArtifactRef[], RunDirectoryError>>;
   recordReceipt(receipt: EffectReceipt): Promise<DomainResult<EffectId, RunDirectoryError>>;
   /** `success(null)` = never recorded; a failure = recorded but unreadable. */
@@ -844,74 +846,105 @@ function abandonmentOperations(runId: OrchestrationRunId, directory: string) {
   };
 }
 
+/**
+ * The sequence prefix is the append ORDER, and O_EXCL on the filename cannot
+ * arbitrate it; the read-count-write is therefore serialized by the directory
+ * lock while the dedup key keeps retry idempotency.
+ */
+function appendEventOperation(directory: string) {
+  return async (record: ProgramEventRecord): Promise<void> => {
+    const parsedInput = parseProgramEventRecord(record, "append input");
+    await withAnchoredDirectoryLock(join(directory, EVENTS), "append.lock", (eventsDirectory) => {
+      const events = readEventRecords(eventsDirectory);
+      if (events.some((event) => event.dedupKey === parsedInput.dedupKey)) return;
+      const sequence = events.length;
+      const sequenced = Object.freeze({ ...parsedInput, sequence });
+      writeDirectoryFileExclusiveNoFollow(
+        eventsDirectory,
+        `${String(sequence).padStart(6, "0")}-${sequenced.dedupKey}.json`,
+        JSON.stringify(sequenced),
+      );
+    });
+  };
+}
+
+function readEventsOperation(directory: string) {
+  return async (): Promise<readonly ProgramEventRecord[]> =>
+    withAnchoredDirectoryLock(
+      join(directory, EVENTS),
+      "append.lock",
+      (eventsDirectory) => readEventRecords(eventsDirectory),
+    );
+}
+
+function readCheckpointOperation(directory: string) {
+  return async (): Promise<string | null> => {
+    try {
+      return readRunFileNoFollow(join(directory, CHECKPOINT_FILE));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  };
+}
+
+function writeCheckpointOperation(directory: string) {
+  return async (json: string): Promise<void> => {
+    const staged = join(directory, `${CHECKPOINT_FILE}.staged`);
+    writeRunFileNoFollow(staged, json);
+    publishStagedRunFile(staged, join(directory, CHECKPOINT_FILE));
+  };
+}
+
 /** Append-only event log plus the checkpoint and progress projections. */
 function journalOperations(directory: string) {
   return {
-    /**
-     * The sequence prefix is the append ORDER, and O_EXCL on the filename
-     * cannot arbitrate it: two appenders carrying different dedup keys observe
-     * the same directory snapshot, compute the same `events.length`, and write
-     * two differently-named files that both claim that sequence. `readEvents`
-     * then reconstructs order by sorting filenames, so a collision degrades
-     * ordering to a comparison of dedup-key text — unrelated to happens-before
-     * — and `replayProgram`/`resumeProgram` fold in that wrong order.
-     *
-     * The read-count-write is therefore serialized. Exclusivity on the
-     * filename still carries idempotency (the dedup key), and the lock carries
-     * the ordering claim that a derived count cannot make on its own.
-     */
-    async appendEvent(record: ProgramEventRecord): Promise<void> {
-      const parsedInput = parseProgramEventRecord(record, "append input");
-      await withAnchoredDirectoryLock(join(directory, EVENTS), "append.lock", (eventsDirectory) => {
-        const events = readEventRecords(eventsDirectory);
-        if (events.some((event) => event.dedupKey === parsedInput.dedupKey)) return;
-        const sequence = events.length;
-        const sequenced = Object.freeze({ ...parsedInput, sequence });
-        writeDirectoryFileExclusiveNoFollow(
-          eventsDirectory,
-          `${String(sequence).padStart(6, "0")}-${sequenced.dedupKey}.json`,
-          JSON.stringify(sequenced),
-        );
-      });
-    },
-
-    async readEvents(): Promise<readonly ProgramEventRecord[]> {
-      return withAnchoredDirectoryLock(
-        join(directory, EVENTS),
-        "append.lock",
-        (eventsDirectory) => readEventRecords(eventsDirectory),
-      );
-    },
-
-    /**
-     * `null` means the run never wrote a checkpoint. Anything that exists but
-     * cannot be READ is a failure, exactly as `readReceipt` treats a receipt:
-     * `resumeProgram` short-circuits on `null` and skips the
-     * checkpoint-vs-replay corruption check entirely, so collapsing "absent"
-     * into "unreadable" would turn an ELOOP from a checkpoint path swapped to a
-     * symlink — the very attack the no-follow reads exist to refuse — into a
-     * clean resume.
-     */
-    async readCheckpoint(): Promise<string | null> {
-      try {
-        return readRunFileNoFollow(join(directory, CHECKPOINT_FILE));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-        throw error;
-      }
-    },
-
-    /** Checkpoints are a projection, so they are replaced through a staged rename. */
-    async writeCheckpoint(json: string): Promise<void> {
-      const staged = join(directory, `${CHECKPOINT_FILE}.staged`);
-      writeRunFileNoFollow(staged, json);
-      publishStagedRunFile(staged, join(directory, CHECKPOINT_FILE));
-    },
-
-    async writeProgress(percent: number): Promise<void> {
+    appendEvent: appendEventOperation(directory),
+    readEvents: readEventsOperation(directory),
+    readCheckpoint: readCheckpointOperation(directory),
+    writeCheckpoint: writeCheckpointOperation(directory),
+    writeProgress: async (percent: number): Promise<void> => {
       writeRunFileNoFollow(join(directory, PROGRESS_FILE), JSON.stringify({ percent }));
     },
   };
+}
+
+function contextPublished(
+  runId: OrchestrationRunId,
+  digest: ContextDigest,
+  path: string,
+): DomainResult<ContextPublishedReceipt, RunDirectoryError> {
+  return success(canonicalRecord({ kind: "context-published" as const, runId, digest, slotPath: path }));
+}
+
+function readContextPacket(directory: string, digest: ContextPacket["digest"]): DomainResult<ContextPacket, RunDirectoryError> {
+  try {
+    const parsed = parseContextPacket(readJsonNoFollow(join(directory, CONTEXTS, `${digest}.json`)));
+    if (!parsed.ok) return failure("context", parsed.error.message);
+    return parsed.value.digest === digest
+      ? success(parsed.value)
+      : failure("context", "stored context packet digest does not match its slot");
+  } catch (error) {
+    return failure("context", `context packet ${digest} is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function decisionContextBody(rawDigest: ContextDigest, bytes: readonly number[]): DomainResult<Readonly<{ digest: ContextDigest; body: string }>, RunDirectoryError> {
+  const digest = parseContextDigest(rawDigest);
+  if (!digest.ok) return failure("context", digest.error.message);
+  if (!Array.isArray(bytes) || !bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+    return failure("context", "decision context bytes must be integers from 0 through 255");
+  }
+  if (contextDigestOf(bytes) !== digest.value) {
+    return failure("context", "decision context digest does not match its exact bytes");
+  }
+  try {
+    const body = new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(bytes));
+    JSON.parse(body);
+    return success(Object.freeze({ digest: digest.value, body }));
+  } catch (error) {
+    return failure("context", `decision context must be valid UTF-8 JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /** Content-addressed context packets. */
@@ -919,70 +952,27 @@ function contextOperations(runId: OrchestrationRunId, directory: string) {
   return {
     async publishContext(packet: ContextPacket): Promise<DomainResult<ContextPublishedReceipt, RunDirectoryError>> {
       const path = join(directory, CONTEXTS, `${packet.digest}.json`);
-      const body = JSON.stringify(packet);
-      // Content-addressed: an identical digest must carry identical bytes.
-      const claimed = claimIdempotentWrite(path, body, "context",
+      const claimed = claimIdempotentWrite(path, JSON.stringify(packet), "context",
         (cause) => `cannot publish context packet: ${cause}`,
         "a different context packet already occupies this digest");
-      if (!claimed.ok) return claimed;
-      return success(canonicalRecord({
-        kind: "context-published" as const,
-        runId,
-        digest: packet.digest,
-        slotPath: path,
-      }));
+      return claimed.ok ? contextPublished(runId, packet.digest, path) : claimed;
     },
 
-    readContext(digest: ContextPacket["digest"]): DomainResult<ContextPacket, RunDirectoryError> {
-      // Same rule as `readRunAuthority`: report WHY the read failed instead of
-      // handing the parser a sentinel and letting a permission or symlink-race
-      // failure surface as a packet-schema complaint.
-      const read = ((): Readonly<{ ok: true; value: unknown }> | Readonly<{ ok: false; cause: string }> => {
-        try {
-          return { ok: true, value: readJsonNoFollow(join(directory, CONTEXTS, `${digest}.json`)) };
-        } catch (error) {
-          return { ok: false, cause: error instanceof Error ? error.message : String(error) };
-        }
-      })();
-      if (!read.ok) return failure("context", `context packet ${digest} is unreadable: ${read.cause}`);
-      const parsed = parseContextPacket(read.value);
-      if (!parsed.ok) return failure("context", parsed.error.message);
-      if (parsed.value.digest !== digest) return failure("context", "stored context packet digest does not match its slot");
-      return success(parsed.value);
-    },
+    readContext: (digest: ContextPacket["digest"]): DomainResult<ContextPacket, RunDirectoryError> =>
+      readContextPacket(directory, digest),
 
     async publishDecisionContext(
       rawDigest: ContextDigest,
       bytes: readonly number[],
     ): Promise<DomainResult<ContextPublishedReceipt, RunDirectoryError>> {
-      const digest = parseContextDigest(rawDigest);
-      if (!digest.ok) return failure("context", digest.error.message);
-      if (!Array.isArray(bytes) || !bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
-        return failure("context", "decision context bytes must be integers from 0 through 255");
-      }
-      if (contextDigestOf(bytes) !== digest.value) {
-        return failure("context", "decision context digest does not match its exact bytes");
-      }
-      let body: string;
-      try {
-        body = new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(bytes));
-        JSON.parse(body);
-      } catch (error) {
-        return failure("context", `decision context must be valid UTF-8 JSON: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      const path = join(directory, CONTEXTS, `${digest.value}.json`);
-      const claimed = claimIdempotentWrite(path, body, "context",
+      const parsed = decisionContextBody(rawDigest, bytes);
+      if (!parsed.ok) return parsed;
+      const path = join(directory, CONTEXTS, `${parsed.value.digest}.json`);
+      const claimed = claimIdempotentWrite(path, parsed.value.body, "context",
         (cause) => `cannot publish decision context: ${cause}`,
         "different decision context bytes already occupy this digest");
-      if (!claimed.ok) return claimed;
-      return success(canonicalRecord({
-        kind: "context-published" as const,
-        runId,
-        digest: digest.value,
-        slotPath: path,
-      }));
+      return claimed.ok ? contextPublished(runId, parsed.value.digest, path) : claimed;
     },
-
   };
 }
 
@@ -1005,330 +995,376 @@ function readReservedAuthority(
     : failure("request", `request ${requestId} authority is malformed: ${reserved.error.violations.map(({ message }) => message).join("; ")}`);
 }
 
+function verifiedReservedRequest(
+  directory: string,
+  runId: OrchestrationRunId,
+  authority: AgentRequestAuthority,
+  malformed: string,
+  foreignRun: string,
+  mismatch: (requestId: string) => string,
+): DomainResult<AgentRequestAuthority, RunDirectoryError> {
+  const supplied = parseStoredAgentRequestAuthority(authority);
+  if (!supplied.ok) {
+    return failure("request", `${malformed}: ${supplied.error.violations.map(({ message }) => message).join("; ")}`);
+  }
+  if (supplied.value.runId !== runId) return failure("request", foreignRun);
+  const reserved = readReservedAuthority(directory, supplied.value.requestId);
+  if (!reserved.ok) return reserved;
+  return canonicalStructuralEquals(reserved.value, supplied.value)
+    ? success(supplied.value)
+    : failure("request", mismatch(supplied.value.requestId));
+}
+
+function reserveRequestOperation(runId: OrchestrationRunId, directory: string): RunDirHandle["reserveRequest"] {
+  return async (authority) => {
+    const parsed = parseStoredAgentRequestAuthority(authority);
+    if (!parsed.ok) {
+      return failure("request", `request authority is malformed: ${parsed.error.violations.map(({ message }) => message).join("; ")}`);
+    }
+    const request = parsed.value;
+    if (request.runId !== runId) return failure("request", "request authority belongs to a different run");
+    const requestPath = join(directory, REQUESTS, `${request.requestId}.json`);
+    const claimed = claimIdempotentWrite(requestPath, JSON.stringify(request), "request",
+      (cause) => `cannot reserve request authority: ${cause}`,
+      `request ${request.requestId} is already reserved under different authority`);
+    if (!claimed.ok) return claimed;
+    try {
+      ensureRunSubdirectories(directory, [join(directory, TRANSCRIPTS, request.slotId)]);
+    } catch (error) {
+      return failure("request", `cannot reserve transcript slot: ${(error as Error).message}`);
+    }
+    return success(canonicalRecord({
+      kind: "transcript-reserved" as const,
+      runId,
+      requestId: request.requestId,
+      slotPath: transcriptSlotPath(directory, request),
+    }));
+  };
+}
+
+function readIssuedRequestsOperation(runId: OrchestrationRunId, directory: string): RunDirHandle["readIssuedRequests"] {
+  return () => {
+    let requests: AnchoredDirectory | null = null;
+    try {
+      requests = openDirectoryNoFollow(join(directory, REQUESTS));
+      const issued: AgentRequestAuthority[] = [];
+      for (const name of listDirectoryNamesNoFollow(requests)) {
+        if (!name.endsWith(".json")) continue;
+        let raw: unknown;
+        try {
+          raw = JSON.parse(readDirectoryFileNoFollow(requests, name).toString("utf-8")) as unknown;
+        } catch (error) {
+          return failure("request", `request authority ${name} is unreadable: ${(error as Error).message}`);
+        }
+        const parsed = parseStoredAgentRequestAuthority(raw);
+        if (!parsed.ok) {
+          return failure("request", `request authority ${name} is malformed: ${parsed.error.violations.map(({ message }) => message).join("; ")}`);
+        }
+        if (parsed.value.runId !== runId) return failure("request", `request authority ${name} belongs to a different run`);
+        issued.push(parsed.value);
+      }
+      return success(Object.freeze(issued));
+    } catch (error) {
+      return failure("request", `cannot inspect issued requests safely: ${(error as Error).message}`);
+    } finally {
+      if (requests !== null) closeAnchoredDirectory(requests);
+    }
+  };
+}
+
+function readCapturedAttemptsOperation(directory: string): RunDirHandle["readCapturedAttempts"] {
+  return () => {
+    let transcripts: AnchoredDirectory | null = null;
+    try {
+      transcripts = openDirectoryNoFollow(join(directory, TRANSCRIPTS));
+      const captured = new Set<CaptureKey>();
+      for (const slot of listDirectoryNamesNoFollow(transcripts)) {
+        const inspected = inspectCapturedSlot(transcripts, slot, captured);
+        if (!inspected.ok) return inspected;
+      }
+      return success(captured);
+    } catch (error) {
+      return failure("transcript", `cannot inspect captured attempts safely: ${(error as Error).message}`);
+    } finally {
+      if (transcripts !== null) closeAnchoredDirectory(transcripts);
+    }
+  };
+}
+
+function inspectCapturedSlot(
+  transcripts: AnchoredDirectory,
+  slot: string,
+  captured: Set<CaptureKey>,
+): DomainResult<void, RunDirectoryError> {
+  if (slot === "capture.lock" || slot === "capture.lock.recovery" || slot.startsWith("capture.lock.tomb-")) {
+    return success(undefined);
+  }
+  let slotDirectory: AnchoredDirectory | null = null;
+  try {
+    slotDirectory = openChildDirectoryNoFollow(transcripts, slot);
+    for (const name of listDirectoryNamesNoFollow(slotDirectory)) {
+      const match = /^attempt-(1|2)\.raw$/.exec(name);
+      if (match !== null) captured.add(captureKey(slot, Number(match[1]) as 1 | 2));
+    }
+    return success(undefined);
+  } catch (error) {
+    return failure(
+      "transcript",
+      `cannot inspect transcript slot ${slot} safely: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  } finally {
+    if (slotDirectory !== null) closeAnchoredDirectory(slotDirectory);
+  }
+}
+
+function writeCaptureRejectionMarker(
+  slotDirectory: AnchoredDirectory,
+  supplied: AgentRequestAuthority,
+  diagnostic: string,
+): void {
+  const markerName = `attempt-${supplied.attempt}.rejected`;
+  try {
+    writeDirectoryFileExclusiveNoFollow(slotDirectory, markerName, JSON.stringify({ requestId: supplied.requestId, diagnostic }));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const existing = JSON.parse(readDirectoryFileNoFollow(slotDirectory, markerName).toString("utf8")) as unknown;
+    if (typeof existing !== "object" || existing === null ||
+        (existing as Record<string, unknown>).requestId !== supplied.requestId) throw error;
+  }
+}
+
+function rejectCaptureOperation(runId: OrchestrationRunId, directory: string): RunDirHandle["rejectCapture"] {
+  return async (authority, diagnostic = "capture was rejected without a diagnostic") => {
+    const supplied = verifiedReservedRequest(
+      directory,
+      runId,
+      authority,
+      "capture rejection authority is malformed",
+      "capture rejection authority belongs to a different run",
+      (requestId) => `request ${requestId} rejection authority does not match its immutable reservation`,
+    );
+    if (!supplied.ok) return supplied;
+    const key = captureKey(supplied.value.slotId, supplied.value.attempt);
+    try {
+      await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsDirectory) => {
+        const slotDirectory = openChildDirectoryNoFollow(transcriptsDirectory, supplied.value.slotId);
+        try {
+          try {
+            readDirectoryFileNoFollow(slotDirectory, `attempt-${supplied.value.attempt}.raw`);
+            throw new Error(`attempt ${supplied.value.attempt} for slot ${supplied.value.slotId} is already captured`);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          }
+          writeCaptureRejectionMarker(slotDirectory, supplied.value, diagnostic);
+        } finally {
+          closeAnchoredDirectory(slotDirectory);
+        }
+      });
+      return success(key);
+    } catch (error) {
+      return failure("transcript", `cannot reject capture safely: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+}
+
+function readCaptureRejectionOperation(directory: string): RunDirHandle["readCaptureRejection"] {
+  return (authority) => {
+    const supplied = parseStoredAgentRequestAuthority(authority);
+    if (!supplied.ok) return failure("request", `capture rejection authority is malformed: ${supplied.error.violations.map(({ message }) => message).join("; ")}`);
+    try {
+      const raw = JSON.parse(readRunFileNoFollow(join(
+        directory, TRANSCRIPTS, supplied.value.slotId, `attempt-${supplied.value.attempt}.rejected`,
+      ))) as unknown;
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw) ||
+          (raw as Record<string, unknown>).requestId !== supplied.value.requestId ||
+          typeof (raw as Record<string, unknown>).diagnostic !== "string") {
+        return failure("transcript", "capture rejection marker is malformed or belongs to different authority");
+      }
+      return success((raw as Record<string, unknown>).diagnostic as string);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? success(null)
+        : failure("transcript", `cannot read capture rejection marker safely: ${(error as Error).message}`);
+    }
+  };
+}
+
+function isPristineOperation(directory: string): RunDirHandle["isPristine"] {
+  return () => {
+    let root: AnchoredDirectory | null = null;
+    try {
+      root = openDirectoryNoFollow(directory);
+      const allowedRoot = new Set([AUTHORITY_FILE, PROGRAM_FILE, ...FIXED_SUBDIRECTORIES.map((path) => path.split("/")[0]!) ]);
+      const rootEntries = listDirectoryNamesNoFollow(root);
+      if (rootEntries.some((entry) => !allowedRoot.has(entry))) return success(false);
+      for (const relative of FIXED_SUBDIRECTORIES) {
+        let child: AnchoredDirectory | null = null;
+        try {
+          child = openDirectoryNoFollow(join(directory, relative));
+          const allowed = relative === REQUESTS ? new Set([CORRELATORS]) : new Set<string>();
+          if (listDirectoryNamesNoFollow(child).some((entry) => !allowed.has(entry))) return success(false);
+        } finally {
+          if (child !== null) closeAnchoredDirectory(child);
+        }
+      }
+      return success(true);
+    } catch (error) {
+      return failure("pristine", `cannot prove replacement run pristine: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      if (root !== null) closeAnchoredDirectory(root);
+    }
+  };
+}
+
+function recordHarnessCorrelatorOperation(directory: string): RunDirHandle["recordHarnessCorrelator"] {
+  return async (binding) => {
+    const parsed = parseHarnessCorrelatorBinding(binding);
+    if (!parsed.ok) return parsed;
+    const reserved = readReservedAuthority(directory, parsed.value.requestId);
+    if (!reserved.ok) return reserved;
+    if (reserved.value.attempt !== parsed.value.attempt) {
+      return failure("correlator", `correlator attempt does not match request ${parsed.value.requestId}`);
+    }
+    if (reserved.value.role !== parsed.value.role) {
+      return failure("correlator", `correlator role ${parsed.value.role} does not match request ${parsed.value.requestId}/${reserved.value.role}`);
+    }
+    const path = correlatorPath(directory, parsed.value.harness, parsed.value.nativeId);
+    const claimed = claimIdempotentWrite(path, JSON.stringify(parsed.value), "correlator",
+      (cause) => `cannot record harness correlator: ${cause}`,
+      "native harness correlator is already bound to different request authority");
+    return claimed.ok ? success(parsed.value) : claimed;
+  };
+}
+
+function readHarnessCorrelatorOperation(directory: string): RunDirHandle["readHarnessCorrelator"] {
+  return (harness, nativeId) => {
+    if ((harness !== "pi" && harness !== "claude") || nativeId.length === 0) return success(null);
+    const path = correlatorPath(directory, harness, nativeId);
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readRunFileNoFollow(path)) as unknown;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? success(null)
+        : failure("correlator", `harness correlator authority is unreadable: ${(error as Error).message}`);
+    }
+    const parsed = parseHarnessCorrelatorBinding(raw);
+    if (!parsed.ok) return parsed;
+    return parsed.value.harness === harness && parsed.value.nativeId === nativeId
+      ? success(parsed.value)
+      : failure("correlator", "stored harness correlator does not match its immutable lookup identity");
+  };
+}
+
+function rejectedCaptureProblem(
+  slotDirectory: AnchoredDirectory,
+  supplied: AgentRequestAuthority,
+): DomainResult<null, RunDirectoryError> {
+  const rejectionName = `attempt-${supplied.attempt}.rejected`;
+  try {
+    const rejected = JSON.parse(readDirectoryFileNoFollow(slotDirectory, rejectionName).toString("utf8")) as unknown;
+    if (typeof rejected !== "object" || rejected === null ||
+        (rejected as Record<string, unknown>).requestId !== supplied.requestId) {
+      return failure("transcript", "capture rejection marker does not match immutable request authority");
+    }
+    return failure("transcript", `attempt ${supplied.attempt} for slot ${supplied.slotId} is terminally rejected`);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? success(null)
+      : failure("transcript", `cannot inspect capture rejection marker safely: ${(error as Error).message}`);
+  }
+}
+
+function publishTranscriptBytes(
+  runId: OrchestrationRunId,
+  slotDirectory: AnchoredDirectory,
+  supplied: AgentRequestAuthority,
+  bytes: readonly number[],
+): DomainResult<ArtifactRef, RunDirectoryError> {
+  const rawName = `attempt-${supplied.attempt}.raw`;
+  const stagedName = `${rawName}.staged-${process.pid}-${createHash("sha256").update(Uint8Array.from(bytes)).digest("hex").slice(0, 16)}`;
+  let publicationAttempted = false;
+  try {
+    writeDirectoryFileExclusiveNoFollow(slotDirectory, stagedName, Uint8Array.from(bytes));
+    publicationAttempted = true;
+    linkSync(anchoredChildPath(slotDirectory, stagedName), anchoredChildPath(slotDirectory, rawName));
+    unlinkSync(anchoredChildPath(slotDirectory, stagedName));
+  } catch (error) {
+    const stagedPath = anchoredChildPath(slotDirectory, stagedName);
+    const cleanupFailures: string[] = [];
+    try {
+      unlinkSync(stagedPath);
+    } catch (cleanupError) {
+      if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
+        cleanupFailures.push(`${stagedPath}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+      }
+    }
+    const primary = publicationAttempted && (error as NodeJS.ErrnoException).code === "EEXIST"
+      ? `attempt ${supplied.attempt} for slot ${supplied.slotId} is already captured`
+      : `cannot capture transcript: ${(error as Error).message}`;
+    return failure("transcript", `${primary}${cleanupFailureSuffix(cleanupFailures)}`);
+  }
+  const byteLength = parseArtifactByteLength(bytes.length);
+  return byteLength.ok
+    ? success(canonicalRecord({
+        runId,
+        slot: canonicalRecord({ kind: "fixed-artifact-slot" as const, path: `${TRANSCRIPTS}/${supplied.slotId}/attempt-${supplied.attempt}.raw` }),
+        digest: digestOf(bytes),
+        byteLength: byteLength.value,
+      }))
+    : failure("transcript", byteLength.error.message);
+}
+
+function captureTranscriptOperation(runId: OrchestrationRunId, directory: string): RunDirHandle["captureTranscript"] {
+  return async (authority, bytes) => {
+    const supplied = verifiedReservedRequest(
+      directory,
+      runId,
+      authority,
+      "capture authority is malformed",
+      "capture authority belongs to a different run",
+      (requestId) => `request ${requestId} capture authority does not match its immutable reservation`,
+    );
+    if (!supplied.ok) return supplied;
+    try {
+      return await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsDirectory) => {
+        const slotDirectory = openChildDirectoryNoFollow(transcriptsDirectory, supplied.value.slotId);
+        try {
+          const rejected = rejectedCaptureProblem(slotDirectory, supplied.value);
+          return rejected.ok ? publishTranscriptBytes(runId, slotDirectory, supplied.value, bytes) : rejected;
+        } finally {
+          closeAnchoredDirectory(slotDirectory);
+        }
+      });
+    } catch (error) {
+      return failure("transcript", `cannot capture transcript safely: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+}
+
+function readTranscriptBytesOperation(directory: string): RunDirHandle["readTranscriptBytes"] {
+  return (authority) => {
+    try {
+      return success(new Uint8Array(readRunBytesNoFollow(transcriptSlotPath(directory, authority))));
+    } catch (error) {
+      return failure("transcript", `cannot read captured transcript: ${(error as Error).message}`);
+    }
+  };
+}
+
 /** Request reservations and their exclusive transcript slots. */
 function requestOperations(runId: OrchestrationRunId, directory: string) {
   return {
-    /**
-     * Reserve one request's authority and transcript slot before it can be
-     * spawned. Exclusive creation makes the reservation the proof: a second
-     * reservation of the same request cannot silently overwrite the first.
-     */
-    async reserveRequest(authority: AgentRequestAuthority): Promise<DomainResult<TranscriptReserved, RunDirectoryError>> {
-      const parsed = parseStoredAgentRequestAuthority(authority);
-      if (!parsed.ok) {
-        return failure("request", `request authority is malformed: ${parsed.error.violations.map(({ message }) => message).join("; ")}`);
-      }
-      const request = parsed.value;
-      if (request.runId !== runId) return failure("request", "request authority belongs to a different run");
-      const requestPath = join(directory, REQUESTS, `${request.requestId}.json`);
-      const body = JSON.stringify(request);
-      const claimed = claimIdempotentWrite(requestPath, body, "request",
-        (cause) => `cannot reserve request authority: ${cause}`,
-        `request ${request.requestId} is already reserved under different authority`);
-      if (!claimed.ok) return claimed;
-      // Anchored creation REFUSES a symlinked or otherwise unsafe component
-      // rather than following it, so this is a reachable failure and belongs in
-      // the result channel: a throw here would escape the DomainResult contract
-      // every other refusal in this handle honours.
-      try {
-        ensureRunSubdirectories(directory, [join(directory, TRANSCRIPTS, request.slotId)]);
-      } catch (error) {
-        return failure("request", `cannot reserve transcript slot: ${(error as Error).message}`);
-      }
-      return success(canonicalRecord({
-        kind: "transcript-reserved" as const,
-        runId,
-        requestId: request.requestId,
-        slotPath: transcriptSlotPath(directory, request),
-      }));
-    },
-
-    readIssuedRequests(): DomainResult<readonly AgentRequestAuthority[], RunDirectoryError> {
-      let requests: AnchoredDirectory | null = null;
-      try {
-        requests = openDirectoryNoFollow(join(directory, REQUESTS));
-        const issued: AgentRequestAuthority[] = [];
-        for (const name of listDirectoryNamesNoFollow(requests)) {
-          if (!name.endsWith(".json")) continue;
-          let raw: unknown;
-          try {
-            raw = JSON.parse(readDirectoryFileNoFollow(requests, name).toString("utf-8")) as unknown;
-          } catch (error) {
-            return failure("request", `request authority ${name} is unreadable: ${(error as Error).message}`);
-          }
-          const parsed = parseStoredAgentRequestAuthority(raw);
-          if (!parsed.ok) {
-            return failure("request", `request authority ${name} is malformed: ${parsed.error.violations.map(({ message }) => message).join("; ")}`);
-          }
-          if (parsed.value.runId !== runId) {
-            return failure("request", `request authority ${name} belongs to a different run`);
-          }
-          issued.push(parsed.value);
-        }
-        return success(Object.freeze(issued));
-      } catch (error) {
-        return failure("request", `cannot inspect issued requests safely: ${(error as Error).message}`);
-      } finally {
-        if (requests !== null) closeAnchoredDirectory(requests);
-      }
-    },
-
-    readCapturedAttempts(): DomainResult<ReadonlySet<CaptureKey>, RunDirectoryError> {
-      let transcripts: AnchoredDirectory | null = null;
-      try {
-        transcripts = openDirectoryNoFollow(join(directory, TRANSCRIPTS));
-        const captured = new Set<CaptureKey>();
-        for (const slot of listDirectoryNamesNoFollow(transcripts)) {
-          if (slot === "capture.lock" || slot === "capture.lock.recovery" || slot.startsWith("capture.lock.tomb-")) continue;
-          let slotDirectory: AnchoredDirectory | null = null;
-          try {
-            slotDirectory = openChildDirectoryNoFollow(transcripts, slot);
-            for (const name of listDirectoryNamesNoFollow(slotDirectory)) {
-              const match = /^attempt-(1|2)\.raw$/.exec(name);
-              if (match !== null) captured.add(captureKey(slot, Number(match[1]) as 1 | 2));
-            }
-          } catch (error) {
-            return failure(
-              "transcript",
-              `cannot inspect transcript slot ${slot} safely: ${error instanceof Error ? error.message : String(error)}`,
-            );
-          } finally {
-            if (slotDirectory !== null) closeAnchoredDirectory(slotDirectory);
-          }
-        }
-        return success(captured);
-      } catch (error) {
-        return failure("transcript", `cannot inspect captured attempts safely: ${(error as Error).message}`);
-      } finally {
-        if (transcripts !== null) closeAnchoredDirectory(transcripts);
-      }
-    },
-
-    async rejectCapture(authority: AgentRequestAuthority, diagnostic = "capture was rejected without a diagnostic"): Promise<DomainResult<CaptureKey, RunDirectoryError>> {
-      const supplied = parseStoredAgentRequestAuthority(authority);
-      if (!supplied.ok) {
-        return failure("request", `capture rejection authority is malformed: ${supplied.error.violations.map(({ message }) => message).join("; ")}`);
-      }
-      if (supplied.value.runId !== runId) return failure("request", "capture rejection authority belongs to a different run");
-      const reserved = readReservedAuthority(directory, supplied.value.requestId);
-      if (!reserved.ok) return reserved;
-      if (!canonicalStructuralEquals(reserved.value, supplied.value)) {
-        return failure("request", `request ${supplied.value.requestId} rejection authority does not match its immutable reservation`);
-      }
-      const key = captureKey(supplied.value.slotId, supplied.value.attempt);
-      try {
-        await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsDirectory) => {
-          const slotDirectory = openChildDirectoryNoFollow(transcriptsDirectory, supplied.value.slotId);
-          try {
-            const rawName = `attempt-${supplied.value.attempt}.raw`;
-            try {
-              readDirectoryFileNoFollow(slotDirectory, rawName);
-              throw new Error(`attempt ${supplied.value.attempt} for slot ${supplied.value.slotId} is already captured`);
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-            }
-            const markerName = `attempt-${supplied.value.attempt}.rejected`;
-            try {
-              writeDirectoryFileExclusiveNoFollow(slotDirectory, markerName, JSON.stringify({
-                requestId: supplied.value.requestId,
-                diagnostic,
-              }));
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-              const existing = JSON.parse(readDirectoryFileNoFollow(slotDirectory, markerName).toString("utf8")) as unknown;
-              if (typeof existing !== "object" || existing === null ||
-                  (existing as Record<string, unknown>).requestId !== supplied.value.requestId) throw error;
-            }
-          } finally {
-            closeAnchoredDirectory(slotDirectory);
-          }
-        });
-        return success(key);
-      } catch (error) {
-        return failure("transcript", `cannot reject capture safely: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    },
-
-    readCaptureRejection(authority: AgentRequestAuthority): DomainResult<string | null, RunDirectoryError> {
-      const supplied = parseStoredAgentRequestAuthority(authority);
-      if (!supplied.ok) return failure("request", `capture rejection authority is malformed: ${supplied.error.violations.map(({ message }) => message).join("; ")}`);
-      try {
-        const raw = JSON.parse(readRunFileNoFollow(join(
-          directory, TRANSCRIPTS, supplied.value.slotId, `attempt-${supplied.value.attempt}.rejected`,
-        ))) as unknown;
-        if (typeof raw !== "object" || raw === null || Array.isArray(raw) ||
-            (raw as Record<string, unknown>).requestId !== supplied.value.requestId ||
-            typeof (raw as Record<string, unknown>).diagnostic !== "string") {
-          return failure("transcript", "capture rejection marker is malformed or belongs to different authority");
-        }
-        return success((raw as Record<string, unknown>).diagnostic as string);
-      } catch (error) {
-        return (error as NodeJS.ErrnoException).code === "ENOENT"
-          ? success(null)
-          : failure("transcript", `cannot read capture rejection marker safely: ${(error as Error).message}`);
-      }
-    },
-
-    isPristine(): DomainResult<boolean, RunDirectoryError> {
-      let root: AnchoredDirectory | null = null;
-      try {
-        root = openDirectoryNoFollow(directory);
-        // ABANDONMENT_FILE is deliberately absent from this set: an abandoned
-        // run is terminal by operator decision, so it must never qualify as the
-        // pristine replacement a restart or orphan recovery installs into.
-        const allowedRoot = new Set([AUTHORITY_FILE, PROGRAM_FILE, ...FIXED_SUBDIRECTORIES.map((path) => path.split("/")[0]!) ]);
-        const rootEntries = listDirectoryNamesNoFollow(root);
-        if (rootEntries.some((entry) => !allowedRoot.has(entry))) return success(false);
-        for (const relative of FIXED_SUBDIRECTORIES) {
-          let child: AnchoredDirectory | null = null;
-          try {
-            child = openDirectoryNoFollow(join(directory, relative));
-            const allowed = relative === REQUESTS ? new Set([CORRELATORS]) : new Set<string>();
-            if (listDirectoryNamesNoFollow(child).some((entry) => !allowed.has(entry))) return success(false);
-          } finally {
-            if (child !== null) closeAnchoredDirectory(child);
-          }
-        }
-        return success(true);
-      } catch (error) {
-        return failure("pristine", `cannot prove replacement run pristine: ${error instanceof Error ? error.message : String(error)}`);
-      } finally {
-        if (root !== null) closeAnchoredDirectory(root);
-      }
-    },
-
-    async recordHarnessCorrelator(
-      binding: HarnessCorrelatorBinding,
-    ): Promise<DomainResult<HarnessCorrelatorBinding, RunDirectoryError>> {
-      const parsed = parseHarnessCorrelatorBinding(binding);
-      if (!parsed.ok) return parsed;
-      const reserved = readReservedAuthority(directory, parsed.value.requestId);
-      if (!reserved.ok) return reserved;
-      if (reserved.value.attempt !== parsed.value.attempt) {
-        return failure("correlator", `correlator attempt does not match request ${parsed.value.requestId}`);
-      }
-      if (reserved.value.role !== parsed.value.role) {
-        return failure("correlator", `correlator role ${parsed.value.role} does not match request ${parsed.value.requestId}/${reserved.value.role}`);
-      }
-      const path = correlatorPath(directory, parsed.value.harness, parsed.value.nativeId);
-      const body = JSON.stringify(parsed.value);
-      const claimed = claimIdempotentWrite(path, body, "correlator",
-        (cause) => `cannot record harness correlator: ${cause}`,
-        "native harness correlator is already bound to different request authority");
-      if (!claimed.ok) return claimed;
-      return success(parsed.value);
-    },
-
-    readHarnessCorrelator(
-      harness: HarnessCorrelatorBinding["harness"],
-      nativeId: string,
-    ): DomainResult<HarnessCorrelatorBinding | null, RunDirectoryError> {
-      if ((harness !== "pi" && harness !== "claude") || nativeId.length === 0) return success(null);
-      const path = correlatorPath(directory, harness, nativeId);
-      let raw: unknown;
-      try {
-        raw = JSON.parse(readRunFileNoFollow(path)) as unknown;
-      } catch (error) {
-        return (error as NodeJS.ErrnoException).code === "ENOENT"
-          ? success(null)
-          : failure("correlator", `harness correlator authority is unreadable: ${(error as Error).message}`);
-      }
-      const parsed = parseHarnessCorrelatorBinding(raw);
-      if (!parsed.ok) return parsed;
-      return parsed.value.harness === harness && parsed.value.nativeId === nativeId
-        ? success(parsed.value)
-        : failure("correlator", "stored harness correlator does not match its immutable lookup identity");
-    },
-
-    /**
-     * Write the exact harness bytes into the reserved attempt slot. The slot is
-     * exclusive: a late or duplicate capture for an attempt that already landed
-     * is refused rather than allowed to replace accepted evidence.
-     */
-    async captureTranscript(
-      authority: AgentRequestAuthority,
-      bytes: readonly number[],
-    ): Promise<DomainResult<ArtifactRef, RunDirectoryError>> {
-      const supplied = parseStoredAgentRequestAuthority(authority);
-      if (!supplied.ok) {
-        return failure("request", `capture authority is malformed: ${supplied.error.violations.map(({ message }) => message).join("; ")}`);
-      }
-      if (supplied.value.runId !== runId) return failure("request", "capture authority belongs to a different run");
-      const reserved = readReservedAuthority(directory, supplied.value.requestId);
-      if (!reserved.ok) return reserved;
-      if (!canonicalStructuralEquals(reserved.value, supplied.value)) {
-        return failure("request", `request ${supplied.value.requestId} capture authority does not match its immutable reservation`);
-      }
-      try {
-        return await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsDirectory) => {
-          const slotDirectory = openChildDirectoryNoFollow(transcriptsDirectory, supplied.value.slotId);
-          try {
-            const rejectionName = `attempt-${supplied.value.attempt}.rejected`;
-            try {
-                const rejected = JSON.parse(readDirectoryFileNoFollow(slotDirectory, rejectionName).toString("utf8")) as unknown;
-              if (typeof rejected !== "object" || rejected === null ||
-                  (rejected as Record<string, unknown>).requestId !== supplied.value.requestId) {
-                return failure("transcript", "capture rejection marker does not match immutable request authority");
-              }
-              return failure("transcript", `attempt ${supplied.value.attempt} for slot ${supplied.value.slotId} is terminally rejected`);
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-                return failure("transcript", `cannot inspect capture rejection marker safely: ${(error as Error).message}`);
-              }
-            }
-            const rawName = `attempt-${supplied.value.attempt}.raw`;
-            const stagedName = `${rawName}.staged-${process.pid}-${createHash("sha256").update(Uint8Array.from(bytes)).digest("hex").slice(0, 16)}`;
-            let publicationAttempted = false;
-            try {
-              writeDirectoryFileExclusiveNoFollow(slotDirectory, stagedName, Uint8Array.from(bytes));
-              publicationAttempted = true;
-              // link(2) is the no-overwrite atomic publication point: the
-              // fully-written staged inode becomes visible at rawName, while
-              // EEXIST preserves the previously published attempt.
-              linkSync(anchoredChildPath(slotDirectory, stagedName), anchoredChildPath(slotDirectory, rawName));
-              unlinkSync(anchoredChildPath(slotDirectory, stagedName));
-            } catch (error) {
-              const stagedPath = anchoredChildPath(slotDirectory, stagedName);
-              const cleanupFailures: string[] = [];
-              try {
-                unlinkSync(stagedPath);
-              } catch (cleanupError) {
-                if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
-                  cleanupFailures.push(`${stagedPath}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
-                }
-              }
-              const primary = publicationAttempted && (error as NodeJS.ErrnoException).code === "EEXIST"
-                ? `attempt ${supplied.value.attempt} for slot ${supplied.value.slotId} is already captured`
-                : `cannot capture transcript: ${(error as Error).message}`;
-              return failure("transcript", `${primary}${cleanupFailureSuffix(cleanupFailures)}`);
-            }
-            const byteLength = parseArtifactByteLength(bytes.length);
-            if (!byteLength.ok) return failure("transcript", byteLength.error.message);
-            return success(canonicalRecord({
-              runId,
-              slot: canonicalRecord({
-                kind: "fixed-artifact-slot" as const,
-                path: `${TRANSCRIPTS}/${supplied.value.slotId}/attempt-${supplied.value.attempt}.raw`,
-              }),
-              digest: digestOf(bytes),
-              byteLength: byteLength.value,
-            }));
-          } finally {
-            closeAnchoredDirectory(slotDirectory);
-          }
-        });
-      } catch (error) {
-        return failure("transcript", `cannot capture transcript safely: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    },
-
-    readTranscriptBytes(authority: AgentRequestAuthority): DomainResult<Uint8Array, RunDirectoryError> {
-      try {
-        return success(new Uint8Array(readRunBytesNoFollow(transcriptSlotPath(directory, authority))));
-      } catch (error) {
-        return failure("transcript", `cannot read captured transcript: ${(error as Error).message}`);
-      }
-    },
+    reserveRequest: reserveRequestOperation(runId, directory),
+    readIssuedRequests: readIssuedRequestsOperation(runId, directory),
+    readCapturedAttempts: readCapturedAttemptsOperation(directory),
+    rejectCapture: rejectCaptureOperation(runId, directory),
+    readCaptureRejection: readCaptureRejectionOperation(directory),
+    isPristine: isPristineOperation(directory),
+    recordHarnessCorrelator: recordHarnessCorrelatorOperation(directory),
+    readHarnessCorrelator: readHarnessCorrelatorOperation(directory),
+    captureTranscript: captureTranscriptOperation(runId, directory),
+    readTranscriptBytes: readTranscriptBytesOperation(directory),
   };
 }
 
@@ -1473,52 +1509,81 @@ export function promoteArtifactSet(
   return success(stagedPaths);
 }
 
-/** All-or-nothing artifact set publication. */
-function artifactOperations(runId: OrchestrationRunId, directory: string) {
-  return {
-    /**
-     * Publish a whole artifact set or none of it. Every member is staged first
-     * and only renamed into place once all of them are on disk, so a fault
-     * mid-set never leaves a partially published set behind.
-     */
-    async publishArtifactSet(
-      staged: readonly StagedArtifactInput[],
-    ): Promise<DomainResult<readonly ArtifactRef[], RunDirectoryError>> {
-      if (staged.length === 0) return failure("artifacts", "an artifact set must not be empty");
+function readArtifactBytesOperation(directory: string) {
+  return (relativePath: unknown): DomainResult<Uint8Array | null, RunDirectoryError> => {
+    const parsed = parseArtifactRelativePath(relativePath);
+    if (!parsed.ok) return parsed;
+    try {
+      return success(new Uint8Array(readRunBytesNoFollow(join(directory, ARTIFACTS, parsed.value))));
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? success(null)
+        : failure(
+            "artifacts",
+            `artifact ${parsed.value} is unreadable: ${error instanceof Error ? error.message : String(error)}`,
+          );
+    }
+  };
+}
 
-      try {
-        return await withAnchoredDirectoryLock(join(directory, ARTIFACTS), "publish.lock", async () => {
+function publishedArtifactRef(
+  runId: OrchestrationRunId,
+  directory: string,
+  artifact: StagedArtifact,
+): DomainResult<ArtifactRef, RunDirectoryError> {
+  let publishedBytes: Uint8Array;
+  try {
+    publishedBytes = readRunBytesNoFollow(join(directory, ARTIFACTS, artifact.relativePath));
+  } catch (error) {
+    return failure("artifacts", `cannot verify published artifact ${artifact.relativePath}: ${(error as Error).message}`);
+  }
+  const byteLength = parseArtifactByteLength(publishedBytes.length);
+  if (!byteLength.ok) return failure("artifacts", byteLength.error.message);
+  return success(canonicalRecord({
+    runId,
+    slot: canonicalRecord({ kind: "fixed-artifact-slot" as const, path: `${ARTIFACTS}/${artifact.relativePath}` }),
+    digest: digestOf([...publishedBytes]),
+    byteLength: byteLength.value,
+  }));
+}
+
+function publishedArtifactRefs(
+  runId: OrchestrationRunId,
+  directory: string,
+  staged: readonly StagedArtifactInput[],
+): DomainResult<readonly ArtifactRef[], RunDirectoryError> {
+  const refs: ArtifactRef[] = [];
+  for (const input of staged) {
+    const parsed = createStagedArtifact(input.relativePath, input.bytes);
+    if (!parsed.ok) return parsed;
+    const ref = publishedArtifactRef(runId, directory, parsed.value);
+    if (!ref.ok) return ref;
+    refs.push(ref.value);
+  }
+  return success(Object.freeze(refs));
+}
+
+function publishArtifactSetOperation(runId: OrchestrationRunId, directory: string) {
+  return async (staged: readonly StagedArtifactInput[]): Promise<DomainResult<readonly ArtifactRef[], RunDirectoryError>> => {
+    if (staged.length === 0) return failure("artifacts", "an artifact set must not be empty");
+    try {
+      return await withAnchoredDirectoryLock(join(directory, ARTIFACTS), "publish.lock", async () => {
         const stagedPaths = stageArtifactSet(directory, staged);
         if (!stagedPaths.ok) return stagedPaths;
         const promoted = promoteArtifactSet(stagedPaths.value);
-        if (!promoted.ok) return promoted;
+        return promoted.ok ? publishedArtifactRefs(runId, directory, staged) : promoted;
+      });
+    } catch (error) {
+      return failure("artifacts", `cannot lock artifact publication safely: ${(error as Error).message}`);
+    }
+  };
+}
 
-        const refs: ArtifactRef[] = [];
-        for (const input of staged) {
-          const parsed = createStagedArtifact(input.relativePath, input.bytes);
-          if (!parsed.ok) return parsed;
-          const artifact = parsed.value;
-          let publishedBytes: Uint8Array;
-          try {
-            publishedBytes = readRunBytesNoFollow(join(directory, ARTIFACTS, artifact.relativePath));
-          } catch (error) {
-            return failure("artifacts", `cannot verify published artifact ${artifact.relativePath}: ${(error as Error).message}`);
-          }
-          const byteLength = parseArtifactByteLength(publishedBytes.length);
-          if (!byteLength.ok) return failure("artifacts", byteLength.error.message);
-          refs.push(canonicalRecord({
-            runId,
-            slot: canonicalRecord({ kind: "fixed-artifact-slot" as const, path: `${ARTIFACTS}/${artifact.relativePath}` }),
-            digest: digestOf([...publishedBytes]),
-            byteLength: byteLength.value,
-          }));
-        }
-        return success(Object.freeze(refs));
-        });
-      } catch (error) {
-        return failure("artifacts", `cannot lock artifact publication safely: ${(error as Error).message}`);
-      }
-    },
+/** All-or-nothing artifact set publication. */
+function artifactOperations(runId: OrchestrationRunId, directory: string) {
+  return {
+    readArtifactBytes: readArtifactBytesOperation(directory),
+    publishArtifactSet: publishArtifactSetOperation(runId, directory),
   };
 }
 

@@ -59,7 +59,8 @@ describe("guard-state-file — property tests", () => {
     fc.assert(
       fc.property(
         fc.string({ minLength: 1, maxLength: 200 }).filter(
-          (s) => !s.includes("active_task_graph") && !s.includes("review-invocations") && !s.includes(SUBAGENT_DIR) && !s.includes(MACHINES_DIR),
+          (s) => !s.includes("active_task_graph") && !s.includes("review-invocations") &&
+            !s.includes(SUBAGENT_DIR) && !s.includes(MACHINES_DIR) && !/[?*{}[\]]/.test(s),
         ),
         (cmd) => {
           expect(guardDecision(cmd)).toBe("allow");
@@ -249,6 +250,14 @@ describe("guard-state-file — edge cases", () => {
     // READ stays allowed (no line-wide false positive).
     expect(guardDecision("bun cli.ts helper set-phase execute")).toBe("allow");
     expect(guardDecision("bun test && jq .current_wave active_task_graph.json")).toBe("allow");
+  });
+
+  it("the verification-manifest source directory is read-only while protected graph state is active", () => {
+    expect(guardDecision("cat .loom/verification-manifest.json")).toBe("allow");
+    expect(guardDecision("jq . .loom/verification-manifest.json")).toBe("allow");
+    expect(guardDecision("tee .loom/verification-manifest.json < /tmp/forged.json")).toBe("block");
+    expect(guardDecision("rm -rf .loom")).toBe("block");
+    expect(guardDecision("cp /tmp/forged.json .loom/verification-manifest.json")).toBe("block");
   });
 
   it("glob / brace state-file paths are caught by the state-DIR guard (round-14 bypass)", () => {
@@ -1078,7 +1087,9 @@ describe("guard-state-file — heredoc script-body detection stays fail-closed (
     expect(guardDecision(`while read l; do sh -c 'echo hi'; done << 'EOF'\n${prose}\nEOF`)).toBe("allow");
     expect(guardDecision(`read x; eval "$x" << 'EOF'\n${prose}\nEOF`)).toBe("allow");
     expect(guardDecision(`echo "$(cat)" << 'EOF'\n${prose}\nEOF`)).toBe("allow");
-    expect(guardDecision(`eval "$(printf 'x')" << 'EOF'\n${prose}\nEOF`)).toBe("allow");
+    // A one-segment guarded `.loom` directory means the conservative
+    // substitution-as-wildcard view can reach protected authority here.
+    expect(guardDecision(`eval "$(printf 'x')" << 'EOF'\n${prose}\nEOF`)).toBe("block");
   });
 
   it("a `<<` inside ${…} word text is not a heredoc opener (concealment fails closed)", () => {

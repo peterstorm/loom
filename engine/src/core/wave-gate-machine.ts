@@ -24,6 +24,9 @@ import type {
   WaveGateProtectedSnapshotBinding,
   WaveImplementationAction,
   WaveImplementationRecovery,
+  WaveCompletionResultObservation,
+  WaveCompletionSuiteReadiness,
+  WaveWorkspaceObservation,
 } from "../types";
 import { newWaveGate, reconcileWaveBlock, testResultPassed } from "./wave-gate-model";
 import {
@@ -32,6 +35,19 @@ import {
   taskVerificationPolicy,
 } from "./verification-policy";
 import type { ProofFailure } from "./proof-obligations";
+import {
+  evaluateWaveCompletionSuite,
+  parseAcceptedWaveCompletionReceipt,
+  type AcceptedWaveCompletionReceipt,
+  type CompletionAuthorityFailure,
+  type CompletionCheckId,
+  type CompletionInfrastructureFailure,
+} from "./completion-suite";
+import { compareStrings } from "./ordering";
+import {
+  authorizeWaveCompletionSuite,
+  defaultVerificationManifest,
+} from "./verification-manifest";
 import {
   WAVE_REVIEW_AGENTS,
   lowerModelProfile,
@@ -442,6 +458,8 @@ export function replayWaveGateTransition(
         event.readiness.graph,
         event.readiness.registration,
         event.readiness.gateDecision,
+        event.readiness.currentWaveWorkspaceObservation,
+        event.readiness.currentWaveCompletionResultObservation,
       );
       if (
         currentAuthority.readinessDigest !== event.readiness.readinessDigest ||
@@ -588,7 +606,7 @@ export function checkReviews(tasks: readonly Task[]): GateCheck {
     if (unreviewed.length > 0) parts.push(`  Unreviewed: ${unreviewed.join(", ")}`);
     return fail(parts.join("\n"));
   }
-  return pass(`4. Reviews verified (${tasks.length}/${tasks.length} tasks):\n${tasks.map((task) => `     ${task.id}: ${task.review_status}`).join("\n")}`);
+  return pass(`5. Reviews verified (${tasks.length}/${tasks.length} tasks):\n${tasks.map((task) => `     ${task.id}: ${task.review_status}`).join("\n")}`);
 }
 
 export function checkSpecAlignment(state: TaskGraph, wave: number): GateCheck {
@@ -606,7 +624,7 @@ export function checkSpecAlignment(state: TaskGraph, wave: number): GateCheck {
   if (state.spec_check.verdict !== "PASSED") {
     return fail(`FAILED: Spec alignment verdict is ${state.spec_check.verdict}; only PASSED with zero critical findings can advance wave ${wave}.`);
   }
-  return pass("5. Spec alignment verified (verdict: PASSED).");
+  return pass("6. Spec alignment verified (verdict: PASSED).");
 }
 
 export function checkCriticalFindings(tasks: readonly Task[]): GateCheck {
@@ -622,7 +640,7 @@ export function checkCriticalFindings(tasks: readonly Task[]): GateCheck {
       .join("\n");
     return fail(`FAILED: ${totalCritical} critical code review findings.\n${details}`);
   }
-  return pass("6. No critical code review findings.");
+  return pass("7. No critical code review findings.");
 }
 
 export type PlanModelsSource =
@@ -659,7 +677,7 @@ export function checkLifecycleArtifacts(
       ? [{ lifecycle, machineFile }]
       : [];
   });
-  if (bound.length === 0) return pass("7. Lifecycle artifacts: none bound to this wave.");
+  if (bound.length === 0) return pass("8. Lifecycle artifacts: none bound to this wave.");
   const observed = bound.map(({ lifecycle, machineFile }) => {
     const variants = [...new Set([
       machineFile,
@@ -681,7 +699,7 @@ export function checkLifecycleArtifacts(
     return fail("FAILED: lifecycle machine files declared in the plan were not created by this wave:\n" +
       unresolved.map(({ lifecycle, machineFile }) => `  ${lifecycle.id}: ${machineFile}`).join("\n"));
   }
-  return pass(`7. Lifecycle artifacts verified (${bound.length}):\n` +
+  return pass(`8. Lifecycle artifacts verified (${bound.length}):\n` +
     bound.map(({ lifecycle, machineFile }) => `     ${lifecycle.id}: ${machineFile}`).join("\n"));
 }
 
@@ -691,13 +709,309 @@ export interface GateDeps {
   /** Shell observation of current declared bytes. Required whenever accepted
    * packet authority exists; omitted observations fail closed. */
   readonly reviewedWorkspace?: (tasks: readonly Task[]) => readonly ReviewedWorkspaceObservation[];
+  /** Shell-supplied current Wave workspace observation. The functional core
+   * compares it with suite authority and performs no repository I/O. */
+  readonly currentWaveWorkspace?: WaveWorkspaceObservation;
+  /** Shell-supplied persisted result observation, separate from workspace
+   * authority so absence cannot be confused with an unreadable artifact. */
+  readonly currentWaveCompletionResult?: WaveCompletionResultObservation;
+}
+
+function exactCompletionSuiteError(
+  registration: ActiveWaveGateRegistration,
+  receipt: AcceptedWaveCompletionReceipt,
+  graph: TaskGraph,
+): string | null {
+  const parsed = parseAcceptedWaveCompletionReceipt(receipt);
+  if (!parsed.ok) return parsed.error.errors.join("; ");
+  if (
+    parsed.value.runId !== registration.runId || parsed.value.wave !== registration.wave ||
+    parsed.value.revision !== registration.revision ||
+    parsed.value.authorityDigest !== registration.authorityDigest
+  ) {
+    return "accepted suite does not match the active Wave Gate run/Wave/revision/authority";
+  }
+  const manifest = graph.verification_manifest ?? defaultVerificationManifest();
+  if (parsed.value.manifestDigest !== manifest.manifestDigest) {
+    return "accepted suite manifest digest does not match protected verification_manifest";
+  }
+  const authorized = authorizeWaveCompletionSuite(manifest, registration, parsed.value.workspaceDigest);
+  if (!authorized.ok) return authorized.error.errors.join("; ");
+  if (parsed.value.manifestDigest !== authorized.value.manifestDigest ||
+      parsed.value.suiteDigest !== authorized.value.suiteDigest ||
+      parsed.value.checks.length !== authorized.value.checks.length) {
+    return "accepted suite does not match the exact protected completion roster";
+  }
+  for (let index = 0; index < authorized.value.checks.length; index += 1) {
+    const expected = authorized.value.checks[index]!;
+    const actual = parsed.value.checks[index]!;
+    if (actual.checkId !== expected.checkId || actual.scope !== expected.scope) {
+      return "accepted suite does not match the exact protected completion roster";
+    }
+    if (actual.outcome.kind !== "observed") return `accepted suite check ${actual.checkId} is not observed`;
+    const reportMatches = expected.reportPolicy.kind === "not-required"
+      ? actual.outcome.report.kind === "not-required"
+      : actual.outcome.report.kind === "produced" && actual.outcome.report.path === expected.reportPolicy.path;
+    if (!reportMatches) return `accepted suite check ${actual.checkId} contradicts its report policy`;
+  }
+  return null;
+}
+
+type CompletionSuiteReadinessSource = Readonly<{
+  receipt: AcceptedWaveCompletionReceipt | undefined;
+  registration: ActiveWaveGateRegistration | CompletedWaveGateRegistration | undefined;
+  legacyHistory: boolean;
+  terminal: boolean;
+}>;
+
+function completionSuiteReadinessSource(
+  graph: TaskGraph,
+  wave: number | null,
+): CompletionSuiteReadinessSource {
+  if (graph.active_wave_gate !== undefined && (wave === null || graph.active_wave_gate.wave === wave)) {
+    return canonicalRecord({
+      receipt: graph.active_wave_completion_suite,
+      registration: graph.active_wave_gate,
+      legacyHistory: false,
+      terminal: false,
+    });
+  }
+  const terminal = wave === null ? undefined : (graph.wave_gate_history ?? []).find((entry) => entry.wave === wave);
+  return terminal?.schemaVersion === 2
+    ? canonicalRecord({ receipt: terminal.completionSuite, registration: terminal, legacyHistory: false, terminal: true })
+    : canonicalRecord({
+        receipt: undefined,
+        registration: terminal,
+        legacyHistory: terminal?.schemaVersion === 1,
+        terminal: terminal !== undefined,
+      });
+}
+
+function completionEvaluationFailureDetail(
+  authorityFailures: readonly CompletionAuthorityFailure[],
+  infrastructureFailures: readonly CompletionInfrastructureFailure[],
+): string {
+  const kinds = [
+    ...authorityFailures.map((failure) => failure.kind),
+    ...infrastructureFailures.map((failure) => failure.kind),
+  ].sort(compareStrings);
+  return `persisted completion result is invalid for current authority: ${kinds.join(", ")}`;
+}
+
+/** Pure canonical status for active or terminal Wave completion-suite evidence. */
+export function deriveWaveCompletionSuiteReadiness(
+  graph: TaskGraph,
+  wave: number | null,
+  currentWorkspace: WaveWorkspaceObservation | undefined,
+  currentResult: WaveCompletionResultObservation | undefined = undefined,
+): WaveCompletionSuiteReadiness {
+  const source = completionSuiteReadinessSource(graph, wave);
+  const manifest = graph.verification_manifest;
+  const manifestDigest = manifest?.manifestDigest ?? null;
+  if (source.receipt === undefined) {
+    if ((manifestDigest === null && graph.active_wave_completion_suite === undefined) || source.legacyHistory) {
+      return canonicalRecord({ kind: "legacy-unavailable", verificationManifestDigest: null });
+    }
+    if (source.registration?.kind !== "active-wave-gate" || manifest === undefined) {
+      return canonicalRecord({
+        kind: "required",
+        reason: "accepted-suite-missing",
+        detail: "an exact accepted Wave completion suite is required",
+        verificationManifestDigest: manifestDigest,
+        acceptedResultDigest: null,
+      });
+    }
+    if (currentWorkspace === undefined) {
+      return canonicalRecord({
+        kind: "required",
+        reason: "workspace-observation-missing",
+        detail: "current Wave workspace observation is missing",
+        verificationManifestDigest: manifestDigest,
+        acceptedResultDigest: null,
+      });
+    }
+    if (currentWorkspace.kind === "unavailable") {
+      return canonicalRecord({
+        kind: "required",
+        reason: "workspace-observation-unavailable",
+        detail: currentWorkspace.reason,
+        verificationManifestDigest: manifestDigest,
+        acceptedResultDigest: null,
+      });
+    }
+    if (currentResult === undefined || currentResult.kind === "absent") {
+      return canonicalRecord({
+        kind: "required",
+        reason: "accepted-suite-missing",
+        detail: "an exact accepted Wave completion suite is required",
+        verificationManifestDigest: manifestDigest,
+        acceptedResultDigest: null,
+      });
+    }
+    if (currentResult.kind === "unavailable") {
+      return canonicalRecord({
+        kind: "required",
+        reason: "completion-result-unavailable",
+        detail: currentResult.reason,
+        verificationManifestDigest: manifestDigest,
+        acceptedResultDigest: null,
+      });
+    }
+    const authorized = authorizeWaveCompletionSuite(
+      manifest,
+      source.registration,
+      currentWorkspace.workspaceDigest,
+    );
+    if (!authorized.ok) {
+      return canonicalRecord({
+        kind: "required",
+        reason: "completion-result-invalid",
+        detail: authorized.error.errors.join("; "),
+        verificationManifestDigest: manifestDigest,
+        acceptedResultDigest: null,
+      });
+    }
+    const evaluation = evaluateWaveCompletionSuite(authorized.value, currentResult.result);
+    if (evaluation.kind === "accepted") {
+      return canonicalRecord({
+        kind: "required",
+        reason: "accepted-suite-missing",
+        detail: "persisted completion result is accepted; protected receipt recovery required",
+        verificationManifestDigest: manifestDigest,
+        acceptedResultDigest: null,
+      });
+    }
+    if (evaluation.authorityFailures.length > 0 || evaluation.infrastructureFailures.length > 0 ||
+        evaluation.semanticFailures.length === 0) {
+      return canonicalRecord({
+        kind: "required",
+        reason: "completion-result-invalid",
+        detail: completionEvaluationFailureDetail(
+          evaluation.authorityFailures,
+          evaluation.infrastructureFailures,
+        ),
+        verificationManifestDigest: manifestDigest,
+        acceptedResultDigest: null,
+      });
+    }
+    const failureKinds = [...new Set(evaluation.semanticFailures.map((failure) => failure.kind))]
+      .sort(compareStrings);
+    const checkIds = [...new Set(evaluation.semanticFailures.map((failure) => failure.checkId))]
+      .sort(compareStrings) as readonly CompletionCheckId[];
+    return canonicalRecord({
+      kind: "rejected",
+      verificationManifestDigest: manifest.manifestDigest,
+      suiteDigest: authorized.value.suiteDigest,
+      workspaceDigest: authorized.value.workspaceDigest,
+      failureKinds: Object.freeze(failureKinds),
+      checkIds: Object.freeze(checkIds),
+    });
+  }
+  if (source.registration === undefined) {
+    return canonicalRecord({
+      kind: "required",
+      reason: "accepted-suite-invalid",
+      detail: "accepted Wave completion suite has no active or terminal registration authority",
+      verificationManifestDigest: manifestDigest,
+      acceptedResultDigest: source.receipt.resultDigest,
+    });
+  }
+  if (source.registration.kind === "active-wave-gate") {
+    const exactError = exactCompletionSuiteError(source.registration, source.receipt, graph);
+    if (exactError !== null) {
+      return canonicalRecord({
+        kind: "required",
+        reason: "accepted-suite-invalid",
+        detail: exactError,
+        verificationManifestDigest: manifestDigest,
+        acceptedResultDigest: source.receipt.resultDigest,
+      });
+    }
+  }
+  if (source.terminal) {
+    return canonicalRecord({
+      kind: "accepted",
+      verificationManifestDigest: source.receipt.manifestDigest,
+      suiteDigest: source.receipt.suiteDigest,
+      resultDigest: source.receipt.resultDigest,
+      workspaceDigest: source.receipt.workspaceDigest,
+      checkCount: source.receipt.checks.length,
+    });
+  }
+  if (currentWorkspace === undefined) {
+    return canonicalRecord({
+      kind: "required",
+      reason: "workspace-observation-missing",
+      detail: "current Wave workspace observation is missing",
+      verificationManifestDigest: manifestDigest,
+      acceptedResultDigest: source.receipt.resultDigest,
+    });
+  }
+  if (currentWorkspace.kind === "unavailable") {
+    return canonicalRecord({
+      kind: "required",
+      reason: "workspace-observation-unavailable",
+      detail: currentWorkspace.reason,
+      verificationManifestDigest: manifestDigest,
+      acceptedResultDigest: source.receipt.resultDigest,
+    });
+  }
+  if (currentWorkspace.workspaceDigest !== source.receipt.workspaceDigest) {
+    return canonicalRecord({
+      kind: "stale",
+      verificationManifestDigest: manifestDigest,
+      suiteDigest: source.receipt.suiteDigest,
+      resultDigest: source.receipt.resultDigest,
+      acceptedWorkspaceDigest: source.receipt.workspaceDigest,
+      currentWorkspaceDigest: currentWorkspace.workspaceDigest,
+      checkCount: source.receipt.checks.length,
+    });
+  }
+  return canonicalRecord({
+    kind: "accepted",
+    verificationManifestDigest: manifestDigest,
+    suiteDigest: source.receipt.suiteDigest,
+    resultDigest: source.receipt.resultDigest,
+    workspaceDigest: source.receipt.workspaceDigest,
+    checkCount: source.receipt.checks.length,
+  });
+}
+
+export function checkWaveCompletionSuite(
+  state: TaskGraph,
+  wave: number,
+  currentWorkspace: WaveWorkspaceObservation | undefined,
+  currentResult: WaveCompletionResultObservation | undefined = undefined,
+): GateCheck {
+  const readiness = deriveWaveCompletionSuiteReadiness(state, wave, currentWorkspace, currentResult);
+  switch (readiness.kind) {
+    case "legacy-unavailable":
+      return pass("4. Wave completion suite: legacy-unavailable (verification_manifest and active receipt absent).");
+    case "required":
+      return fail(`FAILED: Wave completion suite required (${readiness.reason}): ${readiness.detail}.`);
+    case "rejected":
+      return fail(
+        `FAILED: Wave completion suite rejected (${readiness.failureKinds.join(", ")}): ` +
+        `${readiness.checkIds.join(", ")}.`,
+      );
+    case "stale":
+      return fail(
+        "FAILED: accepted Wave completion suite is stale: " +
+        `accepted workspace ${readiness.acceptedWorkspaceDigest}, current workspace ${readiness.currentWorkspaceDigest}.`,
+      );
+    case "accepted":
+      return pass(
+        `4. Wave completion suite accepted (${readiness.checkCount} checks; ` +
+        `result ${readiness.resultDigest}; workspace ${readiness.workspaceDigest}).`,
+      );
+  }
 }
 
 export function checkReviewedWorkspace(tasks: readonly Task[], deps: GateDeps): GateCheck {
   if (!tasks.some((task) => task.accepted_review_authority !== undefined)) {
     // Pre-integrity historical packets have no byte snapshot authority to
     // compare. New engine-owned Wave packets always retain one on acceptance.
-    return pass("8. Review Packet workspace integrity: legacy packet authority unavailable.");
+    return pass("9. Review Packet workspace integrity: legacy packet authority unavailable.");
   }
   if (deps.reviewedWorkspace === undefined) {
     return fail("FAILED: Review Packet workspace integrity cannot be observed; refresh review evidence after restoring repository access.");
@@ -705,7 +1019,7 @@ export function checkReviewedWorkspace(tasks: readonly Task[], deps: GateDeps): 
   try {
     const drift = reviewedWorkspaceDrift(tasks, deps.reviewedWorkspace(tasks));
     return drift.length === 0
-      ? pass(`8. Review Packet workspace integrity verified (${tasks.length}/${tasks.length} tasks).`)
+      ? pass(`9. Review Packet workspace integrity verified (${tasks.length}/${tasks.length} tasks).`)
       : fail(`FAILED: accepted Review Packet authority is stale:\n  ${drift.join("\n  ")}\n  Protected block: rerun the Wave Gate review batch to refresh evidence.`);
   } catch (error) {
     return fail(`FAILED: Review Packet workspace integrity could not be proven (fail-closed): ${error instanceof Error ? error.message : String(error)}. Refresh review evidence after correcting the repository path.`);
@@ -785,6 +1099,12 @@ function waveGateChecks(state: TaskGraph, wave: number, waveTasks: readonly Task
     checkImplementationProof(waveTasks),
     checkTestEvidence(waveTasks),
     checkNewTests(waveTasks),
+    checkWaveCompletionSuite(
+      state,
+      wave,
+      deps.currentWaveWorkspace,
+      deps.currentWaveCompletionResult,
+    ),
     checkReviews(waveTasks),
     checkSpecAlignment(state, wave),
     checkCriticalFindings(waveTasks),
@@ -882,6 +1202,8 @@ export type WaveReadinessSnapshot = Readonly<{
   completionIntent: CommitProtectedWaveState;
   nextActionAuthority: WaveGateNextAction | null;
   lifecycleCheckpointDigest: import("./orchestration-contract").ArtifactDigest | null;
+  currentWaveWorkspaceObservation: WaveWorkspaceObservation | null;
+  currentWaveCompletionResultObservation: WaveCompletionResultObservation | null;
   reasons: NonEmpty<StatusReason>;
 }>;
 
@@ -1114,6 +1436,8 @@ function completionAuthority(
   graph: TaskGraph,
   registration: ActiveWaveGateRegistration,
   decision: GateDecision,
+  currentWaveWorkspaceObservation: WaveWorkspaceObservation | null,
+  currentWaveCompletionResultObservation: WaveCompletionResultObservation | null,
 ): Readonly<{
   readinessDigest: import("./orchestration-contract").ArtifactDigest;
   completionIntent: CommitProtectedWaveState;
@@ -1125,6 +1449,10 @@ function completionAuthority(
     wave: registration.wave,
     authorityDigest: registration.authorityDigest,
     expectedRevision: registration.revision,
+    verificationManifestDigest: graph.verification_manifest?.manifestDigest ?? null,
+    acceptedCompletionSuite: graph.active_wave_completion_suite ?? null,
+    currentWaveWorkspaceObservation,
+    currentWaveCompletionResultObservation,
     decision,
     tasks: graph.tasks.filter((task) => task.wave === registration.wave),
     specCheck: graph.spec_check ?? null,
@@ -1208,9 +1536,30 @@ export function deriveWaveReadiness(
     reviewRuns: canonicalRecord({ kind: "known", value: reviews }),
     findingCounts: canonicalRecord({ kind: "known", value: findings }),
     refutationPanelNeed: canonicalRecord({ kind: "known", value: panel }),
+    waveCompletionSuiteReadiness: canonicalRecord({
+      kind: "known",
+      value: deriveWaveCompletionSuiteReadiness(
+        graph,
+        wave,
+        deps.currentWaveWorkspace,
+        deps.currentWaveCompletionResult,
+      ),
+    }),
     waveGateCompletionEligibility: canonicalRecord({ kind: "known", value: eligibility }),
   });
-  const completion = completionAuthority(graph, registration, decision);
+  const workspaceObservation = deps.currentWaveWorkspace ?? null;
+  const completionResultObservation = graph.verification_manifest !== undefined &&
+    graph.active_wave_completion_suite === undefined &&
+    workspaceObservation?.kind === "observed"
+    ? deps.currentWaveCompletionResult ?? null
+    : null;
+  const completion = completionAuthority(
+    graph,
+    registration,
+    decision,
+    workspaceObservation,
+    completionResultObservation,
+  );
   if (lifecycleProof !== null) {
     const { nextActionAuthority, lifecycleCheckpoint } = lifecycleProof;
     const binding = nextActionAuthority.binding;
@@ -1263,6 +1612,8 @@ export function deriveWaveReadiness(
     completionIntent: completion.completionIntent,
     nextActionAuthority: lifecycleProof?.nextActionAuthority ?? null,
     lifecycleCheckpointDigest: lifecycleProof?.lifecycleCheckpoint.checkpointDigest ?? null,
+    currentWaveWorkspaceObservation: workspaceObservation,
+    currentWaveCompletionResultObservation: completionResultObservation,
     reasons: readinessReasons(graph, wave, decision, reviews, panel, tests, eligibility),
   });
   waveReadinessProofs.add(snapshot);
@@ -1297,7 +1648,13 @@ export function commitWaveGateCompletion(
       message: "snapshot graph active_wave_gate is not the exact readiness registration",
     }) });
   }
-  const currentAuthority = completionAuthority(snapshot.graph, snapshot.registration, snapshot.gateDecision);
+  const currentAuthority = completionAuthority(
+    snapshot.graph,
+    snapshot.registration,
+    snapshot.gateDecision,
+    snapshot.currentWaveWorkspaceObservation,
+    snapshot.currentWaveCompletionResultObservation,
+  );
   if (
     currentAuthority.readinessDigest !== snapshot.readinessDigest ||
     currentAuthority.completionIntent.effectId !== snapshot.completionIntent.effectId
@@ -1338,15 +1695,27 @@ export function commitWaveGateCompletion(
       message: "locked active/current Wave authority drifted before completion",
     }) });
   }
-  const completedRegistration: CompletedWaveGateRegistration = canonicalRecord({
-    schemaVersion: 1,
-    kind: "completed-wave-gate",
-    runId: snapshot.registration.runId,
-    wave: snapshot.wave,
-    authorityDigest: snapshot.registration.authorityDigest,
-    revision: receipt.committedRevision,
-    completionReceipt: receipt,
-  });
+  const activeCompletionSuite = snapshot.graph.active_wave_completion_suite;
+  const completedRegistration: CompletedWaveGateRegistration = activeCompletionSuite === undefined
+    ? canonicalRecord({
+        schemaVersion: 1,
+        kind: "completed-wave-gate",
+        runId: snapshot.registration.runId,
+        wave: snapshot.wave,
+        authorityDigest: snapshot.registration.authorityDigest,
+        revision: receipt.committedRevision,
+        completionReceipt: receipt,
+      })
+    : canonicalRecord({
+        schemaVersion: 2,
+        kind: "completed-wave-gate",
+        runId: snapshot.registration.runId,
+        wave: snapshot.wave,
+        authorityDigest: snapshot.registration.authorityDigest,
+        revision: receipt.committedRevision,
+        completionReceipt: receipt,
+        completionSuite: activeCompletionSuite,
+      });
   const priorHistory = advanced.wave_gate_history ?? [];
   if (priorHistory.some((entry) => entry.runId === completedRegistration.runId)) {
     return canonicalRecord({ ok: false, error: canonicalRecord({
@@ -1354,7 +1723,11 @@ export function commitWaveGateCompletion(
       message: `Wave Gate run ${completedRegistration.runId} is already terminal in history`,
     }) });
   }
-  const { active_wave_gate: _retired, ...withoutActive } = advanced;
+  const {
+    active_wave_gate: _retired,
+    active_wave_completion_suite: _archivedCompletionSuite,
+    ...withoutActive
+  } = advanced;
   const graph: TaskGraph = {
     ...withoutActive,
     wave_gate_history: Object.freeze([...priorHistory, completedRegistration]),
@@ -1612,7 +1985,7 @@ export function prepareWaveReviewBatch(
   if (!waveReadinessProofs.has(snapshot)) return preparationFailure("Wave review preparation requires canonical readiness");
   if (snapshot.registration.terminalOutcome !== null) return preparationFailure("a terminal Wave Gate cannot prepare another review batch");
   if (snapshot.waveTasks.length === 0) return preparationFailure("an empty Wave cannot prepare a review batch");
-  const preliminaryFailure = snapshot.gateDecision.checks.slice(0, 4).find((check) => !check.passed);
+  const preliminaryFailure = snapshot.gateDecision.checks.slice(0, 5).find((check) => !check.passed);
   if (preliminaryFailure !== undefined && !preliminaryFailure.passed) {
     return preparationFailure(`Wave implementation readiness failed: ${preliminaryFailure.reason}`);
   }
@@ -2405,6 +2778,7 @@ export function deriveUnavailableLoomStatus(rawReasons: NonEmpty<StatusReason>):
       reviewRuns: unavailable(),
       findingCounts: unavailable(),
       refutationPanelNeed: unavailable(),
+      waveCompletionSuiteReadiness: unavailable(),
       waveGateCompletionEligibility: unavailable(),
     }),
     next: canonicalRecord({
@@ -2418,7 +2792,11 @@ export function unavailableStatusReason(message: string): StatusReason {
   return reason("authority-unavailable", message);
 }
 
-function deriveNonExecuteLoomStatus(graph: TaskGraph): LoomStatus {
+function deriveNonExecuteLoomStatus(
+  graph: TaskGraph,
+  currentWorkspace: WaveWorkspaceObservation | undefined,
+  currentResult: WaveCompletionResultObservation | undefined,
+): LoomStatus {
   const noWaveReason = reason(
     "completion-prerequisite-failed",
     `Wave Gate completion is unavailable while the active Phase is ${graph.current_phase}`,
@@ -2444,6 +2822,10 @@ function deriveNonExecuteLoomStatus(graph: TaskGraph): LoomStatus {
         findingIds: Object.freeze([]) as readonly [],
         reasons: Object.freeze(["there is no active execute Wave"]) as NonEmpty<string>,
       }),
+    }),
+    waveCompletionSuiteReadiness: canonicalRecord({
+      kind: "known",
+      value: deriveWaveCompletionSuiteReadiness(graph, null, currentWorkspace, currentResult),
     }),
     waveGateCompletionEligibility: canonicalRecord({
       kind: "known",
@@ -2471,6 +2853,8 @@ function waveScopedStatusFacts(
   graph: TaskGraph,
   wave: number,
   eligibility: WaveGateCompletionEligibility,
+  currentWorkspace: WaveWorkspaceObservation | undefined,
+  currentResult: WaveCompletionResultObservation | undefined,
 ): CanonicalStatusFacts {
   const reviews = reviewFacts(graph);
   return canonicalRecord({
@@ -2481,11 +2865,19 @@ function waveScopedStatusFacts(
     reviewRuns: canonicalRecord({ kind: "known", value: reviews }),
     findingCounts: canonicalRecord({ kind: "known", value: deriveFindingCounts(graph) }),
     refutationPanelNeed: canonicalRecord({ kind: "known", value: panelNeed(graph, wave) }),
+    waveCompletionSuiteReadiness: canonicalRecord({
+      kind: "known",
+      value: deriveWaveCompletionSuiteReadiness(graph, wave, currentWorkspace, currentResult),
+    }),
     waveGateCompletionEligibility: canonicalRecord({ kind: "known", value: eligibility }),
   });
 }
 
-function persistedTerminalBlockedStatus(graph: TaskGraph): LoomStatus | null {
+function persistedTerminalBlockedStatus(
+  graph: TaskGraph,
+  currentWorkspace: WaveWorkspaceObservation | undefined,
+  currentResult: WaveCompletionResultObservation | undefined,
+): LoomStatus | null {
   const registration = graph.active_wave_gate;
   if (registration?.terminalOutcome?.kind !== "terminal-blocked") return null;
   const built = blockedAction(registration.terminalOutcome.diagnostic);
@@ -2496,7 +2888,7 @@ function persistedTerminalBlockedStatus(graph: TaskGraph): LoomStatus | null {
     facts: waveScopedStatusFacts(graph, registration.wave, canonicalRecord({
       kind: "ineligible",
       failedPrerequisites: Object.freeze([registration.terminalOutcome.diagnostic.message]) as NonEmpty<string>,
-    })),
+    }), currentWorkspace, currentResult),
     next: canonicalRecord({
       action: built.value,
       reasons: Object.freeze([blockedReason]) as NonEmpty<StatusReason>,
@@ -2504,7 +2896,11 @@ function persistedTerminalBlockedStatus(graph: TaskGraph): LoomStatus | null {
   });
 }
 
-function committedTerminalStatus(graph: TaskGraph): LoomStatus | null {
+function committedTerminalStatus(
+  graph: TaskGraph,
+  currentWorkspace: WaveWorkspaceObservation | undefined,
+  currentResult: WaveCompletionResultObservation | undefined,
+): LoomStatus | null {
   if (graph.active_wave_gate !== undefined || graph.current_wave === undefined) return null;
   const wave = graph.current_wave;
   const terminal = (graph.wave_gate_history ?? []).find((entry) => entry.wave === wave);
@@ -2528,7 +2924,13 @@ function committedTerminalStatus(graph: TaskGraph): LoomStatus | null {
   const completeReason = reason("run-complete", `Wave Gate run ${terminal.runId} completed with committed revision ${terminal.revision}`);
   return canonicalRecord({
     schemaVersion: 1,
-    facts: waveScopedStatusFacts(graph, wave, canonicalRecord({ kind: "eligible", failedPrerequisites: Object.freeze([]) as readonly [] })),
+    facts: waveScopedStatusFacts(
+      graph,
+      wave,
+      canonicalRecord({ kind: "eligible", failedPrerequisites: Object.freeze([]) as readonly [] }),
+      currentWorkspace,
+      currentResult,
+    ),
     next: canonicalRecord({
       action: done.value,
       reasons: Object.freeze([completeReason]) as NonEmpty<StatusReason>,
@@ -2552,7 +2954,11 @@ function committedTerminalStatus(graph: TaskGraph): LoomStatus | null {
  * authority (absent `current_wave`, a Wave with no tasks, terminal history that
  * disagrees with the graph) still falls through and fails closed.
  */
-function unstartedWaveStatus(graph: TaskGraph): LoomStatus | null {
+function unstartedWaveStatus(
+  graph: TaskGraph,
+  currentWorkspace: WaveWorkspaceObservation | undefined,
+  currentResult: WaveCompletionResultObservation | undefined,
+): LoomStatus | null {
   if (graph.active_wave_gate !== undefined || graph.current_wave === undefined) return null;
   const wave = graph.current_wave;
   // A terminal receipt for the current Wave means this is not an unstarted
@@ -2582,7 +2988,7 @@ function unstartedWaveStatus(graph: TaskGraph): LoomStatus | null {
     facts: waveScopedStatusFacts(graph, wave, canonicalRecord({
       kind: "ineligible",
       failedPrerequisites: Object.freeze([message]) as NonEmpty<string>,
-    })),
+    }), currentWorkspace, currentResult),
     next: canonicalRecord({
       action: waveImplementationAction(message, recovery),
       reasons: Object.freeze(reasons) as NonEmpty<StatusReason>,
@@ -2659,7 +3065,13 @@ export function deriveLoomStatusFromParsedGraph(
       unavailableStatusReason(`protected authority is malformed: ${parsed.error}`),
     ]) as NonEmpty<StatusReason>);
   }
-  if (parsed.value.current_phase !== "execute") return deriveNonExecuteLoomStatus(parsed.value);
+  if (parsed.value.current_phase !== "execute") {
+    return deriveNonExecuteLoomStatus(
+      parsed.value,
+      deps.currentWaveWorkspace,
+      deps.currentWaveCompletionResult,
+    );
+  }
   const active = parsed.value.active_wave_gate;
   if (active?.terminalOutcome === null && runDirectory.kind !== "unverified") {
     if (runDirectory.runId !== active.runId) {
@@ -2688,13 +3100,25 @@ export function deriveLoomStatusFromParsedGraph(
       ]) as NonEmpty<StatusReason>);
     }
   }
-  const persistedBlocked = persistedTerminalBlockedStatus(parsed.value);
+  const persistedBlocked = persistedTerminalBlockedStatus(
+    parsed.value,
+    deps.currentWaveWorkspace,
+    deps.currentWaveCompletionResult,
+  );
   if (persistedBlocked !== null) return persistedBlocked;
-  const committed = committedTerminalStatus(parsed.value);
+  const committed = committedTerminalStatus(
+    parsed.value,
+    deps.currentWaveWorkspace,
+    deps.currentWaveCompletionResult,
+  );
   if (committed !== null) return committed;
   // Before the readiness path, which requires a registration: an execute Wave
   // legitimately has none for its whole implementation span.
-  const unstarted = unstartedWaveStatus(parsed.value);
+  const unstarted = unstartedWaveStatus(
+    parsed.value,
+    deps.currentWaveWorkspace,
+    deps.currentWaveCompletionResult,
+  );
   if (unstarted !== null) return unstarted;
   if (lifecycleProof === null) {
     const projected = projectedAdvisoryStatus(parsed.value, deps, runDirectory);
@@ -2728,6 +3152,7 @@ export function renderLoomStatusHuman(status: LoomStatus): string {
     "reviewRuns",
     "findingCounts",
     "refutationPanelNeed",
+    "waveCompletionSuiteReadiness",
     "waveGateCompletionEligibility",
   ];
   return [

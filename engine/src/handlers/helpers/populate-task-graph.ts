@@ -7,6 +7,9 @@
  * already left pending; without it both the pre-lock and locked guards refuse.
  */
 
+import { execFileSync } from "node:child_process";
+import { lstatSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { HookHandler, TaskGraph, Task, WaveGate } from "../../types";
 import { newWaveGate } from "../../types";
 import { taskGraphPath } from "../../config";
@@ -19,6 +22,14 @@ import {
   serializeVerificationPolicy,
   taskVerificationPolicy,
 } from "../../core/verification-policy";
+import {
+  VERIFICATION_MANIFEST_SOURCE_PATH,
+  defaultVerificationManifest,
+  freezeVerificationManifest,
+  type FrozenVerificationManifest,
+} from "../../core/verification-manifest";
+import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
+import { resolveRepositoryRoot } from "../../utils/git";
 
 type AuthoredTask = Readonly<
   Pick<
@@ -43,6 +54,122 @@ interface DecomposeInput {
   plan_file?: string;
   spec_file?: string;
   tasks: readonly AuthoredTask[];
+}
+
+const DECOMPOSE_FIELDS = new Set(["spec_trace_version", "plan_title", "plan_file", "spec_file", "tasks"]);
+
+type PreparedManifest =
+  | Readonly<{ ok: true; value: FrozenVerificationManifest }>
+  | Readonly<{ ok: false; error: string }>;
+
+type ResolvedProjectRoot =
+  | Readonly<{ ok: true; value: string }>
+  | Readonly<{ ok: false; error: string }>;
+
+type ManifestFile =
+  | Readonly<{ kind: "bytes"; value: Uint8Array }>
+  | Readonly<{ kind: "default"; value: FrozenVerificationManifest }>
+  | Readonly<{ kind: "error"; error: string }>;
+
+function defaultManifestIfMissing(path: string, error: unknown): ManifestFile | null {
+  if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    return { kind: "default", value: defaultVerificationManifest() };
+  }
+  return {
+    kind: "error",
+    error: `cannot inspect ${path}: ${error instanceof Error ? error.message : String(error)}`,
+  };
+}
+
+function inspectManifestDirectory(manifestDirectory: string): ManifestFile | null {
+  try {
+    const directoryStat = lstatSync(manifestDirectory);
+    return directoryStat.isDirectory() && !directoryStat.isSymbolicLink()
+      ? null
+      : { kind: "error", error: `${manifestDirectory} must be a regular non-symlink directory` };
+  } catch (error) {
+    return defaultManifestIfMissing(manifestDirectory, error);
+  }
+}
+
+function readManifestFile(manifestPath: string): ManifestFile {
+  try {
+    const fileStat = lstatSync(manifestPath);
+    if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
+      return { kind: "error", error: `${manifestPath} must be a regular non-symlink file` };
+    }
+  } catch (error) {
+    const missing = defaultManifestIfMissing(manifestPath, error);
+    if (missing !== null) return missing;
+  }
+  try {
+    return { kind: "bytes", value: Uint8Array.from(readRunBytesNoFollow(manifestPath)) };
+  } catch (error) {
+    return {
+      kind: "error",
+      error: `cannot read ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+const CANONICAL_STATE_PATHS = Object.freeze([
+  join(".claude", "state", "active_task_graph.json"),
+  join(".pi", "state", "active_task_graph.json"),
+]);
+
+function projectRootFromCanonicalStatePath(statePath: string): ResolvedProjectRoot {
+  const absoluteStatePath = resolve(statePath);
+  const projectRoot = dirname(dirname(dirname(absoluteStatePath)));
+  const isCanonicalLayout = CANONICAL_STATE_PATHS.some(
+    (relativeStatePath) => join(projectRoot, relativeStatePath) === absoluteStatePath,
+  );
+  return isCanonicalLayout
+    ? { ok: true, value: projectRoot }
+    : {
+        ok: false,
+        error:
+          `cannot derive verification manifest authority from non-canonical State File path ${statePath}; ` +
+          "expected <root>/.claude/state/active_task_graph.json or <root>/.pi/state/active_task_graph.json",
+      };
+}
+
+function canonicalGitRoot(): string | undefined {
+  const candidate = resolveRepositoryRoot("populate-task-graph verification manifest");
+  if (candidate === undefined) return undefined;
+  try {
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: candidate,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveManifestProjectRoot(statePath: string): ResolvedProjectRoot {
+  const repositoryRoot = canonicalGitRoot();
+  if (repositoryRoot === undefined) return projectRootFromCanonicalStatePath(statePath);
+  return isAbsolute(repositoryRoot) && resolve(repositoryRoot) === repositoryRoot
+    ? { ok: true, value: repositoryRoot }
+    : { ok: false, error: "cannot resolve one canonical repository root for verification manifest authority" };
+}
+
+function prepareVerificationManifest(statePath: string): PreparedManifest {
+  const projectRoot = resolveManifestProjectRoot(statePath);
+  if (!projectRoot.ok) return projectRoot;
+  const manifestDirectory = join(projectRoot.value, dirname(VERIFICATION_MANIFEST_SOURCE_PATH));
+  const manifestPath = join(projectRoot.value, VERIFICATION_MANIFEST_SOURCE_PATH);
+  const directoryProblem = inspectManifestDirectory(manifestDirectory);
+  if (directoryProblem?.kind === "default") return { ok: true, value: directoryProblem.value };
+  if (directoryProblem?.kind === "error") return { ok: false, error: directoryProblem.error };
+  const file = readManifestFile(manifestPath);
+  if (file.kind === "default") return { ok: true, value: file.value };
+  if (file.kind === "error") return { ok: false, error: file.error };
+  const parsed = freezeVerificationManifest(file.value);
+  return parsed.ok
+    ? { ok: true, value: parsed.value }
+    : { ok: false, error: `${manifestPath} is invalid: ${parsed.error.errors.join("; ")}` };
 }
 
 /**
@@ -160,6 +287,16 @@ const handler: HookHandler = async (stdin, args) => {
     };
   }
 
+  if (typeof decompose !== "object" || decompose === null || Array.isArray(decompose)) {
+    return { kind: "error", message: "Decompose JSON must be an object" };
+  }
+  const surplusFields = Object.keys(decompose).filter((field) => !DECOMPOSE_FIELDS.has(field)).sort();
+  if (surplusFields.length > 0) {
+    return {
+      kind: "error",
+      message: `Decompose JSON contains unsupported field(s): ${surplusFields.join(", ")}`,
+    };
+  }
   if (!Array.isArray(decompose.tasks) || decompose.tasks.length === 0) {
     return { kind: "error", message: "No tasks in decompose JSON" };
   }
@@ -245,6 +382,14 @@ const handler: HookHandler = async (stdin, args) => {
     };
   }
 
+  // Operator command authority is observed once in the repository shell before
+  // lock acquisition. The locked transform below carries this prepared value;
+  // it never re-reads mutable source bytes and never consults decompose input.
+  const preparedManifest = prepareVerificationManifest(statePath);
+  if (!preparedManifest.ok) {
+    return { kind: "error", message: `Verification manifest authority unavailable: ${preparedManifest.error}` };
+  }
+
   const populate = async (): Promise<void> => mgr.update((existing) => {
     // Re-check the guard INSIDE the locked transform. The check above ran on a
     // snapshot loaded before the lock, and this callback receives a freshly
@@ -259,8 +404,10 @@ const handler: HookHandler = async (stdin, args) => {
         "population was being prepared. Use --force to override.",
       );
     }
+    const { active_wave_completion_suite: staleCompletionSuite, ...existingWithoutCompletionSuite } = existing;
+    void staleCompletionSuite;
     const merged: TaskGraph = {
-      ...existing,
+      ...existingWithoutCompletionSuite,
       spec_trace_version: 2,
       plan_title: decompose.plan_title,
       plan_file: validatedPlanFile,
@@ -269,6 +416,7 @@ const handler: HookHandler = async (stdin, args) => {
       current_wave: 1,
       executing_tasks: [],
       wave_gates: buildWaveGates(waves),
+      verification_manifest: preparedManifest.value,
       ...(issue === undefined ? {} : { github_issue: issue }),
       ...(repo === undefined ? {} : { github_repo: repo }),
     };

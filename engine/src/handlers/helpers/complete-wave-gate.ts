@@ -121,6 +121,7 @@ export function snapshotGateDeps(state: TaskGraph, io: GateIO): GateDeps {
     },
     filePresence: (path) => presence.get(path) ?? { ok: false, error: `lifecycle artifact ${path} was not snapshotted` },
     ...(io.reviewedWorkspace === undefined ? {} : { reviewedWorkspace: io.reviewedWorkspace }),
+    ...(io.currentWaveWorkspace === undefined ? {} : { currentWaveWorkspace: io.currentWaveWorkspace }),
   };
 }
 

@@ -57,6 +57,7 @@ const FACT_CATEGORIES = [
   "reviewRuns",
   "findingCounts",
   "refutationPanelNeed",
+  "waveCompletionSuiteReadiness",
   "waveGateCompletionEligibility",
 ] as const;
 

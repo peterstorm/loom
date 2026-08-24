@@ -65,7 +65,7 @@ describe("Pi harness detection", () => {
       expect(legacyRun.status, legacyRun.stderr).toBe(0);
       expect(JSON.parse(legacyRun.stdout)).toEqual({
         taskGraphPath: legacy,
-        guardedDirs: [".pi/state", ".claude/state", "/tmp/claude-subagents", join(REPO_ROOT, "machines")],
+        guardedDirs: [".pi/state", ".claude/state", ".loom", "/tmp/claude-subagents", join(REPO_ROOT, "machines")],
       });
 
       const nested = join(root, "nested", "cwd");

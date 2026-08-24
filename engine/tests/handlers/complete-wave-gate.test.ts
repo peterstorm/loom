@@ -863,7 +863,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
   it("a passing decision carries the wave's task ids and the next wave", () => {
     const decision = evaluateWaveGate(mkGraph(), null, countingDeps().deps);
     expect(decision.wave).toBe(1);
-    expect(decision.checks).toHaveLength(9);
+    expect(decision.checks).toHaveLength(10);
     expect(decision.verdict).toEqual({ kind: "pass", taskIds: ["T1"], nextWave: 2 });
   });
 
@@ -1243,7 +1243,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     expect(status.schemaVersion).toBe(1);
     expect(Object.keys(status.facts)).toEqual([
       "location", "tasks", "failedProofObligations", "testReadiness", "reviewRuns", "findingCounts",
-      "refutationPanelNeed", "waveGateCompletionEligibility",
+      "refutationPanelNeed", "waveCompletionSuiteReadiness", "waveGateCompletionEligibility",
     ]);
     expect(status.facts.location).toEqual({ kind: "known", value: { activePhase: "execute", activeWave: 1 } });
     expect(status.facts.tasks).toMatchObject({ kind: "known", value: { counts: { implemented: 1 } } });
@@ -1515,7 +1515,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
         deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps),
       );
 
-      expect(human).not.toContain("unavailable");
+      expect(human).not.toContain(": unavailable (");
       expect(human).toContain("wave-gate-not-started");
       expect(human).toContain("T1 has not reached implemented");
     });

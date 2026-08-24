@@ -105,9 +105,33 @@ If gaps remain, the user either loops back to architecture with the report or ex
 - spec anchors;
 - executable lifecycle/pipeline/invariant bindings from the plan.
 
-The user approves the proposed Tasks/Waves. Loom creates a GitHub Issue and `populate-task-graph` atomically installs the validated graph. The state file returns to mode `0444`.
+The user approves the proposed Tasks/Waves. Loom creates a GitHub Issue and `populate-task-graph` atomically installs the validated graph. During that same operation, the engine reads the optional operator-owned `.loom/verification-manifest.json`, parses fixed executable/argument arrays, and freezes the resulting authority into the protected TaskGraph. Decompose JSON cannot provide or override it. An absent file selects the engine default with only reserved checks. The state file returns to mode `0444`.
 
 Typical guidance is 8–12 Tasks, 4–5 Waves, and 4–6 parallel Tasks per Wave. These are planning bounds, not a license to force a small feature into needless Tasks.
+
+### Verification manifest
+
+Project-wide Wave checks are declared before Task population:
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "loom-verification-manifest",
+  "checks": [
+    {
+      "id": "project:typecheck",
+      "scope": "wave",
+      "executable": "npm",
+      "args": ["run", "typecheck"],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "report": { "kind": "not-required" }
+    }
+  ]
+}
+```
+
+Commands always execute with `shell: false`. Inline shell/eval programs, generic dispatchers, traversal, duplicate/reserved ids, and surplus fields are rejected. Required reports must live beneath `.loom/completion-reports/`; those report bytes are excluded from workspace authority, while tracked and non-ignored untracked implementation bytes remain bound by the Wave workspace digest. Once the TaskGraph is populated, changing the source file does not change the frozen command authority.
 
 ### Phase 5: execute
 
@@ -184,11 +208,15 @@ Only criticals are refuted. Advisories are user-policy decisions, not verifier w
 
 A Wave with surviving advisories reaches `await-user`. The user records a disposition and reason. The lifecycle has one “decision accepted” transition; fixed/deferred/dismissed meaning remains in the decision payload rather than multiplying lifecycle states.
 
-### Full lint and completion
+### Quiescent completion suite, full lint, and completion
 
-At the Wave boundary, all regex and programmatic rules run. Structural failures such as forbidden imports, I/O in pure modules, oversized functions, or a changed Fugue integrity projection block advancement.
+After every current-Wave implementation Agent has stopped and Task proof/test requirements pass, the registered Wave Gate executes the frozen completion suite against the integrated Git-visible workspace. Exit code, timeout, signal, spawn failure, and required-report production remain independent facts. Missing, duplicate, surplus, stale, malformed, or conflicting results fail closed; infrastructure failures remain distinct from semantic check failures.
 
-The final protected-state commit checks implementation proof, tests, review state, spec alignment, surviving criticals, and required lifecycle artifacts. Success marks Tasks completed and advances the Wave; otherwise a typed diagnostic explains the block.
+The engine publishes the exact result immutably in the Wave Run Directory. An accepted result is then bound into protected state with run, Wave, registration revision, manifest, suite, result, and workspace digests. Resume reuses the protected receipt or recovers it from exact immutable result bytes after a crash; it never reruns commands over ambiguous occupied evidence. `/loom --status` reports accepted, stale, rejected, pending, or unavailable suite authority without executing commands.
+
+Full-tier lint is the reserved `loom:full-tier-lint` suite check. During migration, the existing terminal lint invocation also remains as a fail-closed canary. Structural failures such as forbidden imports, I/O in pure modules, oversized functions, or changed generated integrity block advancement.
+
+The final protected-state commit re-observes the workspace and checks implementation proof, completion-suite authority, reviews, spec alignment, surviving criticals, and required lifecycle artifacts. Success archives a schema-v2 completion record, marks Tasks completed, and advances the Wave; otherwise a typed diagnostic explains the block. Historical schema-v1 Waves and active TaskGraphs created before this feature remain read-compatible and are never rewritten.
 
 ### Exhausted reviewer restart
 

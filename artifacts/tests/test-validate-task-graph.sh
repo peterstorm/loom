@@ -186,7 +186,8 @@ echo ""
 echo "--- populate-task-graph validates decompose input ---"
 
 PTEST_DIR=$(mktemp -d)
-CLEANUP_DIRS="$PTEST_DIR"
+PPI_DIR=$(mktemp -d)
+CLEANUP_DIRS="$PTEST_DIR $PPI_DIR"
 trap "rm -rf $CLEANUP_DIRS" EXIT
 
 # Setup minimal state
@@ -240,10 +241,32 @@ cat > "$PTEST_DIR/.claude/state/active_task_graph.json" << 'EOF'
 }
 EOF
 
-if (cd "$PTEST_DIR" && echo "$GOOD_DECOMPOSE" | bun "$CLI" helper populate-task-graph >/dev/null 2>&1); then
-  pass "populate accepts valid decompose JSON"
+if (cd "$PTEST_DIR" && echo "$GOOD_DECOMPOSE" | env -u PI_CODING_AGENT -u PI_CODING_AGENT_DIR -u CLAUDE_PROJECT_DIR bun "$CLI" helper populate-task-graph >/dev/null 2>&1); then
+  pass "populate accepts valid decompose JSON in a non-Git Claude canonical layout"
 else
-  fail "populate accepts valid decompose JSON" "exit 0" "exit 1"
+  fail "populate accepts valid decompose JSON in a non-Git Claude canonical layout" "exit 0" "exit 1"
+fi
+
+# Pi uses the same non-Git compatibility rule from an absolute LOOM_STATE_PATH:
+# only the exact <root>/.pi/state/active_task_graph.json layout can authorize
+# the optional manifest lookup without a Git root.
+mkdir -p "$PPI_DIR/.pi/state" "$PPI_DIR/.claude/plans"
+cp "$PTEST_DIR/.claude/plans/test.md" "$PPI_DIR/.claude/plans/test.md"
+cat > "$PPI_DIR/.pi/state/active_task_graph.json" << 'EOF'
+{
+  "current_phase": "decompose",
+  "phase_artifacts": {},
+  "skipped_phases": [],
+  "spec_file": null,
+  "plan_file": null
+}
+EOF
+
+if (cd "$PPI_DIR" && echo "$GOOD_DECOMPOSE" | env -u CLAUDE_PROJECT_DIR PI_CODING_AGENT=1 LOOM_STATE_PATH="$PPI_DIR/.pi/state/active_task_graph.json" bun "$CLI" helper populate-task-graph >/dev/null 2>&1) &&
+   jq -e '.verification_manifest.source.kind == "engine-default"' "$PPI_DIR/.pi/state/active_task_graph.json" >/dev/null 2>&1; then
+  pass "populate accepts an absolute Pi canonical State File path outside Git"
+else
+  fail "populate accepts an absolute Pi canonical State File path outside Git" "exit 0 with frozen default manifest" "failure"
 fi
 
 # ===== RESULTS =====
