@@ -29,6 +29,7 @@ import {
 
 let dirs: string[] = [];
 const originalCwd = process.cwd();
+const originalPath = process.env.PATH;
 
 afterEach(() => {
   process.chdir(originalCwd);
@@ -36,6 +37,8 @@ afterEach(() => {
   dirs = [];
   delete process.env.LOOM_STATE_PATH;
   delete process.env.CLAUDE_PROJECT_DIR;
+  if (originalPath === undefined) delete process.env.PATH;
+  else process.env.PATH = originalPath;
 });
 
 function tempDir(): string {
@@ -244,6 +247,65 @@ describe("populate-task-graph — protected verification manifest authority", ()
 
     const after = JSON.parse(stateBytes(statePath)) as TaskGraph;
     expect(after.verification_manifest).toEqual(expected.value);
+  });
+
+  it.each([
+    {
+      label: "missing git",
+      install: (_bin: string): void => undefined,
+      diagnostic: "ENOENT",
+    },
+    {
+      label: "permission failure",
+      install: (bin: string): void => { writeFileSync(join(bin, "git"), "#!/bin/sh\nexit 0\n"); },
+      diagnostic: "EACCES",
+    },
+    {
+      label: "corrupt repository",
+      install: (bin: string): void => {
+        const git = join(bin, "git");
+        writeFileSync(git, "#!/bin/sh\necho 'fatal: repository metadata is corrupt' >&2\nexit 128\n");
+        chmodSync(git, 0o755);
+      },
+      diagnostic: "repository metadata is corrupt",
+    },
+    {
+      label: "invalid output",
+      install: (bin: string): void => {
+        const git = join(bin, "git");
+        writeFileSync(git, "#!/bin/sh\necho relative/root\n");
+        chmodSync(git, 0o755);
+      },
+      diagnostic: "invalid repository root",
+    },
+    {
+      label: "signal termination",
+      install: (bin: string): void => {
+        const git = join(bin, "git");
+        writeFileSync(git, "#!/bin/sh\nkill -TERM $$\n");
+        chmodSync(git, 0o755);
+      },
+      diagnostic: "signal SIGTERM",
+    },
+  ])("blocks $label instead of treating it as non-Git authority", async ({ install, diagnostic }) => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], {}, "claude", false);
+    const before = stateBytes(statePath);
+    const bin = join(dir, "fake-bin");
+    mkdirSync(bin);
+    install(bin);
+    process.env.PATH = bin;
+    process.chdir(dir);
+
+    const result = await populate(decomposeJson(plan), []);
+
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      expect(result.message).toContain("cannot resolve Git repository root");
+      expect(result.message).toContain(diagnostic);
+    }
+    expect(stateBytes(statePath)).toBe(before);
   });
 
   it("blocks malformed, symlinked, and unreadable sources without changing state", async () => {

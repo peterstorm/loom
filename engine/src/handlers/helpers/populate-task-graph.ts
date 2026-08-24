@@ -29,7 +29,6 @@ import {
   type FrozenVerificationManifest,
 } from "../../core/verification-manifest";
 import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
-import { resolveRepositoryRoot } from "../../utils/git";
 
 type AuthoredTask = Readonly<
   Pick<
@@ -133,26 +132,64 @@ function projectRootFromCanonicalStatePath(statePath: string): ResolvedProjectRo
       };
 }
 
-function canonicalGitRoot(): string | undefined {
-  const candidate = resolveRepositoryRoot("populate-task-graph verification manifest");
-  if (candidate === undefined) return undefined;
+type CanonicalGitRootObservation =
+  | Readonly<{ kind: "repository"; root: string }>
+  | Readonly<{ kind: "not-a-repository"; cause: string }>
+  | Readonly<{ kind: "unavailable"; cause: string }>;
+
+function gitFailureCause(error: unknown): string {
+  if (typeof error !== "object" || error === null) return String(error);
+  const detail = error as {
+    code?: unknown;
+    status?: unknown;
+    signal?: unknown;
+    stderr?: unknown;
+    message?: unknown;
+  };
+  const facts = [
+    typeof detail.code === "string" ? detail.code : null,
+    typeof detail.status === "number" ? `exit ${detail.status}` : null,
+    typeof detail.signal === "string" ? `signal ${detail.signal}` : null,
+    detail.stderr === undefined ? null : String(detail.stderr).trim(),
+    typeof detail.message === "string" ? detail.message : null,
+  ].filter((fact): fact is string => fact !== null && fact !== "");
+  return facts.join(": ") || "unknown git failure";
+}
+
+function canonicalGitRoot(): CanonicalGitRootObservation {
+  const candidate = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
   try {
-    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    const output = execFileSync("git", ["rev-parse", "--show-toplevel"], {
       cwd: candidate,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
-    }).trim() || undefined;
-  } catch {
-    return undefined;
+    }).trim();
+    return output !== "" && isAbsolute(output) && resolve(output) === output
+      ? { kind: "repository", root: output }
+      : {
+          kind: "unavailable",
+          cause: `git returned an invalid repository root from ${candidate}: ${JSON.stringify(output)}`,
+        };
+  } catch (error) {
+    const cause = gitFailureCause(error);
+    const stderr = typeof error === "object" && error !== null && "stderr" in error
+      ? String((error as { stderr?: unknown }).stderr ?? "")
+      : "";
+    return /fatal: not a git repository(?: \([^\n]*\))?/i.test(stderr)
+      ? { kind: "not-a-repository", cause }
+      : { kind: "unavailable", cause };
   }
 }
 
 function resolveManifestProjectRoot(statePath: string): ResolvedProjectRoot {
   const repositoryRoot = canonicalGitRoot();
-  if (repositoryRoot === undefined) return projectRootFromCanonicalStatePath(statePath);
-  return isAbsolute(repositoryRoot) && resolve(repositoryRoot) === repositoryRoot
-    ? { ok: true, value: repositoryRoot }
-    : { ok: false, error: "cannot resolve one canonical repository root for verification manifest authority" };
+  if (repositoryRoot.kind === "not-a-repository") return projectRootFromCanonicalStatePath(statePath);
+  return repositoryRoot.kind === "repository"
+    ? { ok: true, value: repositoryRoot.root }
+    : {
+        ok: false,
+        error: `cannot resolve Git repository root for verification manifest authority: ${repositoryRoot.cause}`,
+      };
 }
 
 function prepareVerificationManifest(statePath: string): PreparedManifest {

@@ -40,6 +40,7 @@ import {
 } from "../../src/core/wave-gate-machine";
 import type { CapturedSpecCheck, Task, TaskGraph } from "../../src/types";
 import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
+import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../src/core/model-profiles";
 import {
   commitWaveGateCompletion,
@@ -1427,7 +1428,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
   // Completion retires the outgoing registration in the same commit that
   // advances current_wave, so an execute Wave carries none for its entire
   // implementation span. That window used to be reported as terminal invalid
-  // authority with all eight fact categories blanked.
+  // authority with all fact categories blanked.
   describe("implementation window (execute Wave with no registered gate)", () => {
     const unstarted = (overrides: Partial<TaskGraph> = {}): TaskGraph => {
       const { active_wave_gate: _removed, ...rest } = registeredGraph(overrides);
@@ -2428,6 +2429,33 @@ describe("final-Wave compatibility completion replay", () => {
       rmSync(root, { recursive: true, force: true });
     }
   }
+
+  it("refuses modern suite authority without mutating state and directs registered resume or start", async () => {
+    const modernCases = [
+      {
+        graph: { ...legacyFinalGraph(), verification_manifest: defaultVerificationManifest() },
+        diagnostic: "start a fresh registered `/wave-gate` run",
+      },
+      {
+        graph: { ...registeredGraph(), verification_manifest: defaultVerificationManifest() },
+        diagnostic: "helper orchestration resume",
+      },
+    ];
+    for (const { graph, diagnostic } of modernCases) {
+      await withHandlerState(async (path) => {
+        const before = readFileSync(path, "utf-8");
+        const result = await completeWaveGateHandler("", []);
+        expect(result).toMatchObject({ kind: "error" });
+        if (result.kind !== "error") return;
+        expect(result.message).toContain("refused modern TaskGraph completion");
+        expect(result.message).toContain("direct helper is legacy-only");
+        expect(result.message).toContain("currentWaveWorkspace");
+        expect(result.message).toContain("Store any operator-approved corrected review/spec findings first");
+        expect(result.message).toContain(diagnostic);
+        expect(readFileSync(path, "utf-8")).toBe(before);
+      }, graph);
+    }
+  });
 
   it("returns the exact completed outcome on repeated final-Wave calls with zero state mutation", async () => {
     await withHandlerState(async (path) => {

@@ -422,6 +422,22 @@ function completionReplayAfterFailure(
   }
 }
 
+function modernCompletionRefusal(graph: TaskGraph): HookResult | null {
+  if (graph.verification_manifest === undefined) return null;
+  const active = graph.active_wave_gate;
+  const recovery = active?.terminalOutcome === null
+    ? `resume the registered Wave Gate with \`bun \${LOOM_DIR}/engine/src/cli.ts helper orchestration resume ` +
+      `--runs-root ".claude/reviews/wave-gate-runs" --run ${JSON.stringify(active.runId)}\``
+    : "start a fresh registered `/wave-gate` run";
+  return {
+    kind: "error",
+    message: `[loom] complete-wave-gate: refused modern TaskGraph completion. This direct helper is legacy-only and ` +
+      `cannot execute or bind the frozen completion suite/currentWaveWorkspace authority. Store any operator-approved ` +
+      `corrected review/spec findings first, then ${recovery}. Do not retry direct complete-wave-gate for a graph with ` +
+      `verification_manifest.`,
+  };
+}
+
 async function runCompleteWaveGate(
   _stdin: string,
   args: string[],
@@ -440,6 +456,8 @@ async function runCompleteWaveGate(
   }
 
   let preRead = mgr.load();
+  const modernRefusal = modernCompletionRefusal(preRead);
+  if (modernRefusal !== null) return modernRefusal;
   const registeredCompletionAuthority = preRead.active_wave_gate?.terminalOutcome === null
     ? preRead.active_wave_gate
     : null;

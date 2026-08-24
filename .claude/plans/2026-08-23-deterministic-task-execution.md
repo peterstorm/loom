@@ -415,7 +415,9 @@ No production subprocess is mocked.
 - The registered Wave Gate runs the suite only after current-Wave quiescence/proof readiness, before semantic review publication, and retains terminal full-tier lint as a migration canary.
 - Immutable Run Directory results recover the publication-to-State-File crash window without rerunning commands. Infrastructure results remain retryable and are not frozen into the deterministic slot.
 - Accepted receipts enter protected readiness and schema-v2 terminal history; status projects accepted, stale, rejected, pending, malformed, and unavailable evidence without executing commands.
-- Final validation: **215 test files, 5,313 passed, 1 intentional skip**; panel smoke **22/22**, review-panel smoke **19/19**, standalone review, orchestration façade, Pi resources, and TaskGraph **22/22**; typecheck, unused checks, full-tier lint, and diff checks passed.
+- Canonical review `review-20260824T164705Z-deterministic-wave-suite` produced digest `87955ed09e6c9ee63eaed96c7b2f086e5fb2c3ba00b56a8335a99bc3803d9d90`. All three refutation lenses upheld three criticals: modern direct-helper divergence, descendant-process escape, and incomplete inline-eval denial. All were fixed with explicit modern-helper refusal, POSIX process-group containment, and an allowlisted executable/subcommand policy.
+- Accepted bounded advisories fixed Git fallback cause loss, staged-artifact cause loss, two stale comments, and three duplicated internal representations. The `ActiveWaveGateRegistration` union, `WaveGateLifecycleEvidence` redesign, and advisory-projection status interface remain deferred to their planned atomic architecture slices.
+- Final remediated validation: **215 test files, 5,324 passed, 1 intentional skip**; panel smoke **22/22**, review-panel smoke **19/19**, standalone review, orchestration façade, Pi resources, and TaskGraph **23/23**; typecheck, unused checks, full-tier lint, and diff checks passed.
 - Existing live `web/chatbot` (23 Tasks) and `baby-adventure` (63 Tasks) legacy TaskGraphs pass the Slice 2 validator unchanged.
 
 ### Slice 3 — Task-local completion suite and attempt authority

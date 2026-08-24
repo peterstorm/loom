@@ -238,6 +238,23 @@ function lintCheckId(): CompletionCheckId {
   return parsed.value;
 }
 
+function observedLintCheckResult(
+  checkId: CompletionCheckId,
+  exitCode: 0 | 1,
+): CompletionCheckResult {
+  return freeze({
+    checkId,
+    scope: "wave",
+    outcome: freeze({
+      kind: "observed",
+      exitCode,
+      timedOut: false,
+      signal: null,
+      report: freeze({ kind: "not-required" }),
+    }),
+  });
+}
+
 function observedLintResult(
   graph: TaskGraph,
   wave: number,
@@ -257,35 +274,11 @@ function observedLintResult(
     if (previousProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
     else process.env.CLAUDE_PROJECT_DIR = previousProjectDir;
   }
-  if (lint.kind === "allow") {
-    return freeze({
-      checkId,
-      scope: "wave",
-      outcome: freeze({
-        kind: "observed",
-        exitCode: 0,
-        timedOut: false,
-        signal: null,
-        report: freeze({ kind: "not-required" }),
-      }),
-    });
-  }
+  if (lint.kind === "allow") return observedLintCheckResult(checkId, 0);
   const message = "message" in lint ? lint.message : "full-tier lint returned no terminal result";
   const lintEngineFailure = message.startsWith("🚫 WAVE-GATE LINT ENGINE ERROR:") ||
     message.includes("LINT ENGINE ERROR");
-  if (lint.kind === "block" && !lintEngineFailure) {
-    return freeze({
-      checkId,
-      scope: "wave",
-      outcome: freeze({
-        kind: "observed",
-        exitCode: 1,
-        timedOut: false,
-        signal: null,
-        report: freeze({ kind: "not-required" }),
-      }),
-    });
-  }
+  if (lint.kind === "block" && !lintEngineFailure) return observedLintCheckResult(checkId, 1);
   return freeze({
     checkId,
     scope: "wave",
@@ -363,21 +356,12 @@ function reusableReceipt(
   if (!parsedManifest.ok || !receipt.ok) return null;
   const authority = authorizeWaveCompletionSuite(parsedManifest.value, active, workspace.workspaceDigest);
   if (!authority.ok) return null;
-  const value = receipt.value;
-  if (value.runId !== authority.value.runId || value.wave !== authority.value.wave ||
-      value.revision !== authority.value.revision || value.authorityDigest !== authority.value.authorityDigest ||
-      value.manifestDigest !== authority.value.manifestDigest || value.suiteDigest !== authority.value.suiteDigest ||
-      value.workspaceDigest !== authority.value.workspaceDigest || value.checks.length !== authority.value.checks.length) {
-    return null;
-  }
-  return value.checks.every((check, index) => {
-    const expected = authority.value.checks[index];
-    if (expected === undefined || check.checkId !== expected.checkId || check.scope !== expected.scope ||
-        check.outcome.kind !== "observed") return false;
-    return expected.reportPolicy.kind === "not-required"
-      ? check.outcome.report.kind === "not-required"
-      : check.outcome.report.kind === "produced" && check.outcome.report.path === expected.reportPolicy.path;
-  }) ? value : null;
+  const { kind: _acceptedKind, resultDigest: _resultDigest, ...resultAuthority } = receipt.value;
+  const evaluation = evaluateWaveCompletionSuite(authority.value, {
+    kind: "wave-completion-suite-result",
+    ...resultAuthority,
+  });
+  return evaluation.kind === "accepted" ? receipt.value : null;
 }
 
 function withoutActiveReceipt(graph: TaskGraph): TaskGraph {

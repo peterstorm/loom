@@ -34,8 +34,16 @@ export type CompletionCheckExecution = Readonly<{
 export type CompletionCheckRunnerFailure =
   | Readonly<{ kind: "invalid-runner-authority"; message: string }>
   | Readonly<{ kind: "path-rejected"; path: string; message: string }>
+  | Readonly<{ kind: "containment-unsupported"; message: string }>
   | Readonly<{
       kind: "cancelled";
+      message: string;
+      exitCode: number | null;
+      signal: NodeJS.Signals | null;
+      diagnostics: CompletionCheckDiagnostics;
+    }>
+  | Readonly<{
+      kind: "process-tree-survived";
       message: string;
       exitCode: number | null;
       signal: NodeJS.Signals | null;
@@ -230,17 +238,139 @@ function spawnFailure(
   return succeeded({ checkResult, diagnostics: output });
 }
 
-function terminate(child: ChildProcess, graceMs: number, onHardKill: () => void): NodeJS.Timeout {
-  try { child.kill("SIGTERM"); } catch { /* bounded hard-kill timer still applies */ }
-  return setTimeout(() => {
-    try { child.kill("SIGKILL"); } catch { /* final watchdog reports failure to close */ }
-    onHardKill();
-  }, graceMs);
+type ProcessGroupProbe =
+  | Readonly<{ kind: "gone" }>
+  | Readonly<{ kind: "present" }>
+  | Readonly<{ kind: "error"; message: string }>;
+
+type ParentObservation =
+  | Readonly<{ kind: "spawn-failed"; cause: unknown }>
+  | Readonly<{ kind: "closed"; exitCode: number | null; signal: NodeJS.Signals | null }>;
+
+type ProcessTrigger =
+  | Readonly<{ kind: "parent"; observation: ParentObservation }>
+  | Readonly<{ kind: "timeout" }>
+  | Readonly<{ kind: "cancelled" }>;
+
+const POSIX_PROCESS_GROUP_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set([
+  "aix", "darwin", "freebsd", "linux", "netbsd", "openbsd", "sunos",
+]);
+const GROUP_PROBE_INTERVAL_MS = 10;
+
+function errnoCode(cause: unknown): string | null {
+  return cause instanceof Error && "code" in cause && typeof cause.code === "string" ? cause.code : null;
+}
+
+function probeProcessGroup(processGroupId: number): ProcessGroupProbe {
+  try {
+    process.kill(-processGroupId, 0);
+    return Object.freeze({ kind: "present" });
+  } catch (cause) {
+    return errnoCode(cause) === "ESRCH"
+      ? Object.freeze({ kind: "gone" })
+      : Object.freeze({
+          kind: "error",
+          message: `process-group ${processGroupId} existence check failed: ${messageOf(cause)}`,
+        });
+  }
+}
+
+function signalProcessGroup(processGroupId: number, signal: "SIGTERM" | "SIGKILL"): string | null {
+  try {
+    process.kill(-processGroupId, signal);
+    return null;
+  } catch (cause) {
+    return errnoCode(cause) === "ESRCH"
+      ? null
+      : `process-group ${processGroupId} ${signal} failed: ${messageOf(cause)}`;
+  }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+async function waitForProcessGroupGone(
+  processGroupId: number,
+  maximumWaitMs: number,
+): Promise<ProcessGroupProbe> {
+  const deadline = Date.now() + maximumWaitMs;
+  let latest = probeProcessGroup(processGroupId);
+  while (latest.kind === "present" && Date.now() < deadline) {
+    await delay(Math.min(GROUP_PROBE_INTERVAL_MS, Math.max(1, deadline - Date.now())));
+    latest = probeProcessGroup(processGroupId);
+  }
+  return latest;
+}
+
+async function terminateProcessGroup(
+  processGroupId: number,
+  graceMs: number,
+  hardKillWaitMs: number,
+): Promise<Readonly<{ ok: true }> | Readonly<{ ok: false; message: string }>> {
+  const errors: string[] = [];
+  const termError = signalProcessGroup(processGroupId, "SIGTERM");
+  if (termError !== null) errors.push(termError);
+
+  const afterTerm = await waitForProcessGroupGone(processGroupId, graceMs);
+  if (afterTerm.kind === "error") errors.push(afterTerm.message);
+  if (afterTerm.kind !== "gone") {
+    const killError = signalProcessGroup(processGroupId, "SIGKILL");
+    if (killError !== null) errors.push(killError);
+    const afterKill = await waitForProcessGroupGone(processGroupId, hardKillWaitMs);
+    if (afterKill.kind === "error") errors.push(afterKill.message);
+    if (afterKill.kind !== "gone") {
+      errors.push(`process-group ${processGroupId} still exists after SIGKILL containment`);
+    }
+  }
+
+  return errors.length === 0
+    ? Object.freeze({ ok: true })
+    : Object.freeze({ ok: false, message: errors.join("; ") });
+}
+
+function parentObservation(child: ChildProcess): Promise<ParentObservation> {
+  return new Promise((resolveObservation) => {
+    let observed = false;
+    const resolveOnce = (value: ParentObservation): void => {
+      if (observed) return;
+      observed = true;
+      resolveObservation(value);
+    };
+    child.once("error", (cause) => resolveOnce(Object.freeze({ kind: "spawn-failed", cause })));
+    child.once("close", (exitCode, signal) => resolveOnce(Object.freeze({ kind: "closed", exitCode, signal })));
+  });
+}
+
+function observedExecution(
+  root: CanonicalRepositoryRoot,
+  check: ProjectCommandCheck,
+  beforeReport: ReportSnapshot | null,
+  stdout: DiagnosticTail,
+  stderr: DiagnosticTail,
+  observation: Extract<ParentObservation, { readonly kind: "closed" }>,
+  timedOut: boolean,
+): CompletionCheckRunnerResult {
+  return succeeded({
+    checkResult: Object.freeze({
+      checkId: check.checkId,
+      scope: check.scope,
+      outcome: Object.freeze({
+        kind: "observed",
+        exitCode: observation.exitCode,
+        timedOut,
+        signal: observation.signal,
+        report: observeReportAfterClose(root, check, beforeReport),
+      }),
+    }),
+    diagnostics: diagnostics(stdout, stderr),
+  });
 }
 
 /**
- * Execute one parser-proven project command with no shell. Every expected
- * infrastructure failure is returned as data; the Promise never rejects.
+ * Execute one parser-proven project command with no shell. On POSIX the child
+ * owns a detached process group; no result is returned until that whole group
+ * is proven gone. Every expected infrastructure failure is returned as data.
  */
 export async function runCompletionCheck(
   rawCheck: ProjectCommandCheck,
@@ -259,6 +389,12 @@ export async function runCompletionCheck(
     const message = "message" in parsedRoot.error ? parsedRoot.error.message : "repository root observation drifted";
     return failed({ kind: "invalid-runner-authority", message });
   }
+  if (!POSIX_PROCESS_GROUP_PLATFORMS.has(process.platform)) {
+    return failed({
+      kind: "containment-unsupported",
+      message: `completion checks require owned POSIX process-group containment; platform ${process.platform} is unsupported`,
+    });
+  }
 
   const graceMs = boundedInteger(options.terminationGraceMs, DEFAULT_TERMINATION_GRACE_MS, MAX_TERMINATION_BOUND_MS);
   const hardKillWaitMs = boundedInteger(options.hardKillWaitMs, DEFAULT_HARD_KILL_WAIT_MS, MAX_TERMINATION_BOUND_MS);
@@ -266,13 +402,16 @@ export async function runCompletionCheck(
   if (graceMs === null || hardKillWaitMs === null || tailBytes === null) {
     return failed({ kind: "invalid-runner-authority", message: "runner bounds must be positive bounded integers" });
   }
+  const emptyDiagnostics = Object.freeze({
+    stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false,
+  });
   if (options.signal?.aborted === true) {
     return failed({
       kind: "cancelled",
       message: "completion check cancelled before spawn",
       exitCode: null,
       signal: null,
-      diagnostics: Object.freeze({ stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false }),
+      diagnostics: emptyDiagnostics,
     });
   }
 
@@ -294,91 +433,114 @@ export async function runCompletionCheck(
   if (beforeReport !== null && "ok" in beforeReport) return beforeReport;
   const stdout = new DiagnosticTail(tailBytes);
   const stderr = new DiagnosticTail(tailBytes);
+  let child: ChildProcess;
+  try {
+    child = spawn(check.executable, [...check.args], {
+      cwd,
+      detached: true,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (cause) {
+    return spawnFailure(check, cause, diagnostics(stdout, stderr));
+  }
+  const parent = parentObservation(child);
+  const processGroupId = child.pid;
+  if (processGroupId === undefined) {
+    return spawnFailure(check, "spawn returned no process id", diagnostics(stdout, stderr));
+  }
 
-  return await new Promise<CompletionCheckRunnerResult>((resolveResult) => {
-    let child: ChildProcess;
-    let settled = false;
-    let timedOut = false;
-    let cancelled = false;
-    let timeoutTimer: NodeJS.Timeout | null = null;
-    let graceTimer: NodeJS.Timeout | null = null;
-    let watchdogTimer: NodeJS.Timeout | null = null;
+  child.stdout?.on("data", (chunk: Buffer | string) => stdout.append(chunk));
+  child.stderr?.on("data", (chunk: Buffer | string) => stderr.append(chunk));
+  let timeoutTimer: NodeJS.Timeout | null = null;
+  let abortListener: (() => void) | null = null;
+  const timeout = new Promise<ProcessTrigger>((resolveTimeout) => {
+    timeoutTimer = setTimeout(() => resolveTimeout(Object.freeze({ kind: "timeout" })), check.timeoutMs);
+  });
+  const cancellation = new Promise<ProcessTrigger>((resolveCancellation) => {
+    abortListener = () => resolveCancellation(Object.freeze({ kind: "cancelled" }));
+    options.signal?.addEventListener("abort", abortListener, { once: true });
+  });
 
-    const cleanup = (): void => {
-      if (timeoutTimer !== null) clearTimeout(timeoutTimer);
-      if (graceTimer !== null) clearTimeout(graceTimer);
-      if (watchdogTimer !== null) clearTimeout(watchdogTimer);
-      options.signal?.removeEventListener("abort", onAbort);
-    };
-    const finish = (result: CompletionCheckRunnerResult): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolveResult(result);
-    };
-    const hardKill = (): void => {
-      watchdogTimer = setTimeout(() => finish(failed({
-        kind: "termination-unconfirmed",
-        message: "completion process did not close after SIGKILL",
-        diagnostics: diagnostics(stdout, stderr),
-      })), hardKillWaitMs);
-    };
-    const beginTermination = (): void => {
-      if (graceTimer !== null) return;
-      graceTimer = terminate(child, graceMs, hardKill);
-    };
-    function onAbort(): void {
-      if (timedOut || cancelled || settled) return;
-      cancelled = true;
-      beginTermination();
+  const trigger = await Promise.race<ProcessTrigger>([
+    parent.then((observation) => Object.freeze({ kind: "parent" as const, observation })),
+    timeout,
+    cancellation,
+  ]);
+  if (timeoutTimer !== null) clearTimeout(timeoutTimer);
+  if (abortListener !== null) options.signal?.removeEventListener("abort", abortListener);
+
+  if (trigger.kind === "parent") {
+    if (trigger.observation.kind === "spawn-failed") {
+      return spawnFailure(check, trigger.observation.cause, diagnostics(stdout, stderr));
     }
-
-    try {
-      child = spawn(check.executable, [...check.args], {
-        cwd,
-        shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } catch (cause) {
-      finish(spawnFailure(check, cause, diagnostics(stdout, stderr)));
-      return;
-    }
-
-    child.stdout?.on("data", (chunk: Buffer | string) => stdout.append(chunk));
-    child.stderr?.on("data", (chunk: Buffer | string) => stderr.append(chunk));
-    child.once("error", (cause) => finish(spawnFailure(check, cause, diagnostics(stdout, stderr))));
-    child.once("close", (exitCode, signal) => {
-      const output = diagnostics(stdout, stderr);
-      if (cancelled) {
-        finish(failed({
-          kind: "cancelled",
-          message: "completion check cancelled",
-          exitCode,
-          signal,
-          diagnostics: output,
-        }));
-        return;
-      }
-      const report = observeReportAfterClose(
+    const group = probeProcessGroup(processGroupId);
+    if (group.kind === "gone") {
+      return observedExecution(
         parsedRoot.value,
         check,
         beforeReport as ReportSnapshot | null,
+        stdout,
+        stderr,
+        trigger.observation,
+        false,
       );
-      finish(succeeded({
-        checkResult: Object.freeze({
-          checkId: check.checkId,
-          scope: check.scope,
-          outcome: Object.freeze({ kind: "observed", exitCode, timedOut, signal, report }),
-        }),
+    }
+    const containment = await terminateProcessGroup(processGroupId, graceMs, hardKillWaitMs);
+    const output = diagnostics(stdout, stderr);
+    if (group.kind === "error" || !containment.ok) {
+      const causes = [group.kind === "error" ? group.message : null, containment.ok ? null : containment.message]
+        .filter((message): message is string => message !== null);
+      return failed({
+        kind: "termination-unconfirmed",
+        message: `completion parent closed but process-tree containment could not be proven: ${causes.join("; ")}`,
         diagnostics: output,
-      }));
+      });
+    }
+    return failed({
+      kind: "process-tree-survived",
+      message: `completion parent closed while process-group ${processGroupId} descendants remained; the group was terminated`,
+      exitCode: trigger.observation.exitCode,
+      signal: trigger.observation.signal,
+      diagnostics: output,
     });
+  }
 
-    options.signal?.addEventListener("abort", onAbort, { once: true });
-    timeoutTimer = setTimeout(() => {
-      if (settled) return;
-      timedOut = true;
-      beginTermination();
-    }, check.timeoutMs);
-  });
+  const containment = await terminateProcessGroup(processGroupId, graceMs, hardKillWaitMs);
+  if (!containment.ok) {
+    return failed({
+      kind: "termination-unconfirmed",
+      message: `${trigger.kind} process-tree containment failed: ${containment.message}`,
+      diagnostics: diagnostics(stdout, stderr),
+    });
+  }
+  const closed = await Promise.race<ParentObservation | null>([
+    parent,
+    delay(hardKillWaitMs).then(() => null),
+  ]);
+  if (closed === null || closed.kind !== "closed") {
+    return failed({
+      kind: "termination-unconfirmed",
+      message: `${trigger.kind} process group is gone but the parent close observation is unavailable`,
+      diagnostics: diagnostics(stdout, stderr),
+    });
+  }
+  if (trigger.kind === "cancelled") {
+    return failed({
+      kind: "cancelled",
+      message: "completion check cancelled after its whole process group was terminated",
+      exitCode: closed.exitCode,
+      signal: closed.signal,
+      diagnostics: diagnostics(stdout, stderr),
+    });
+  }
+  return observedExecution(
+    parsedRoot.value,
+    check,
+    beforeReport as ReportSnapshot | null,
+    stdout,
+    stderr,
+    closed,
+    true,
+  );
 }

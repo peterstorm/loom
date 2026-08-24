@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -154,12 +154,40 @@ describe("completion check process shell", () => {
     });
   });
 
-  it("returns spawn-failed data instead of rejecting for a nonexistent executable", async () => {
+  it("returns spawn-failed data for an absent project-local path whose basename is allowlisted", async () => {
     const result = execution(await runCompletionCheck(
-      check("missing-executable", { executable: "loom-definitely-does-not-exist" }),
+      check("missing-executable", { executable: "absent/node" }),
       fixtureRoot(),
     ));
     expect(result.checkResult.outcome).toMatchObject({ kind: "spawn-failed" });
+  });
+
+  it("rejects a successful parent whose redirected descendant survives and kills the whole group", async () => {
+    const root = fixtureRoot();
+    const sentinel = join(root, "parent-exit-sentinel");
+    const result = await runCompletionCheck(check("parent-exits-with-descendant", {
+      args: ["completion-process.mjs", "parent-exits-with-descendant", "parent-exit-sentinel"],
+    }), root, { terminationGraceMs: 100, hardKillWaitMs: 500 });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { kind: "process-tree-survived", exitCode: 0, signal: null },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(existsSync(sentinel)).toBe(false);
+  });
+
+  it("kills timeout descendants before they can mutate the workspace", async () => {
+    const root = fixtureRoot();
+    const sentinel = join(root, "timeout-sentinel");
+    const result = execution(await runCompletionCheck(check("timeout-with-descendant", {
+      args: ["completion-process.mjs", "timeout-with-descendant", "timeout-sentinel"],
+      timeoutMs: 100,
+    }), root, { terminationGraceMs: 100, hardKillWaitMs: 500 }));
+
+    expect(result.checkResult.outcome).toMatchObject({ kind: "observed", timedOut: true });
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(existsSync(sentinel)).toBe(false);
   });
 
   it("escalates an ignored SIGTERM to SIGKILL while retaining timeout", async () => {

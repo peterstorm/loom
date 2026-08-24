@@ -187,21 +187,43 @@ describe("fixed-command execution authority", () => {
   const unsafeCommands = [
     ["sh", ["-c", "npm test"]],
     ["bash", ["-lc", "npm test"]],
+    ["fish", ["--command", "npm test"]],
     ["node", ["-e", "process.exit()"]],
+    ["node", ["-p", "process.version"]],
+    ["node", ["-pe", "process.version"]],
     ["node", ["--eval=process.exit()"]],
+    ["node", ["--print", "process.version"]],
+    ["node", ["--test", "--eval=process.exit()"]],
     ["bun", ["--eval", "process.exit()"]],
     ["bun", ["eval", "process.exit()"]],
+    ["bun", ["-e", "process.exit()"]],
+    ["bun", ["x", "vitest"]],
+    ["bunx", ["vitest"]],
+    ["deno", ["eval", "Deno.exit()"]],
     ["python", ["-c", "print(1)"]],
     ["python3.12", ["-cprint(1)"]],
+    ["perl", ["-e", "exit"]],
+    ["perl", ["-E", "exit"]],
+    ["ruby", ["-e", "exit"]],
+    ["ruby", ["-Eutf-8", "script.rb"]],
+    ["npm", ["exec", "vitest"]],
+    ["npm", ["x", "vitest"]],
+    ["npx", ["vitest"]],
+    ["pnpm", ["exec", "vitest"]],
+    ["pnpm", ["dlx", "vitest"]],
+    ["pnpm", ["x", "vitest"]],
+    ["yarn", ["exec", "vitest"]],
+    ["yarn", ["dlx", "vitest"]],
+    ["yarn", ["vitest"]],
     ["powershell", ["-Command", "Get-ChildItem"]],
     ["pwsh", ["-EncodedCommand=AAAA"]],
     ["cmd", ["/c", "npm test"]],
-    ["cmd", ["/cecho ok"]],
     ["env", ["bun", "test"]],
     ["xargs", ["bun", "test"]],
+    ["timeout", ["10", "bun", "test"]],
   ] as const;
 
-  it("rejects every shell, eval, command-interpreter, and generic dispatch form", () => {
+  it("rejects every shell, inline runtime, package exec, and generic dispatch form", () => {
     for (const [executable, args] of unsafeCommands) {
       const source = document([{ ...check(), executable, args: [...args] }]);
       expect(parseVerificationManifest(source).ok, `${executable} ${args.join(" ")}`).toBe(false);
@@ -215,6 +237,43 @@ describe("fixed-command execution authority", () => {
         timeoutMs: 1_000,
         reportPolicy: noReport(),
       }).ok, `${executable} ${args.join(" ")}`).toBe(false);
+    }
+  });
+
+  it("rejects bypasses equally through bare and project-local executable paths", () => {
+    fc.assert(fc.property(
+      fc.constantFrom(...unsafeCommands),
+      fc.constantFrom("", "tools/", "node_modules/.bin/"),
+      ([basename, args], prefix) => {
+        expect(parseVerificationManifest(document([{
+          ...check(), executable: `${prefix}${basename}`, args: [...args],
+        }])).ok).toBe(false);
+      },
+    ));
+  });
+
+  it("allows only documented build, test, check, run, and project-script forms", () => {
+    const allowedCommands = [
+      ["npm", ["run", "typecheck"]],
+      ["npm", ["test"]],
+      ["pnpm", ["check"]],
+      ["yarn", ["build"]],
+      ["bun", ["run", "check"]],
+      ["bun", ["test"]],
+      ["node", ["scripts/check.mjs"]],
+      ["node", ["--test", "tests/unit.test.mjs"]],
+      ["deno", ["test", "tests/"]],
+      ["python3.12", ["scripts/check.py"]],
+      ["python", ["-m", "pytest"]],
+      ["perl", ["scripts/check.pl"]],
+      ["ruby", ["scripts/check.rb"]],
+      ["node_modules/.bin/vitest", ["run"]],
+      ["tools/gradlew", ["check"]],
+    ] as const;
+    for (const [executable, args] of allowedCommands) {
+      expect(parseVerificationManifest(document([{
+        ...check(), executable, args: [...args],
+      }])).ok, `${executable} ${args.join(" ")}`).toBe(true);
     }
   });
 

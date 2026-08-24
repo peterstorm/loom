@@ -305,30 +305,84 @@ function parseReportPath(raw: unknown, path: string): Parsed<ReviewPath> {
 }
 
 const EXECUTABLE_TOKEN_PATTERN = /^[A-Za-z0-9@%_+=:,.-]+(?:\/[A-Za-z0-9@%_+=:,.-]+)*$/;
-const SHELL_EXECUTABLES = new Set(["ash", "bash", "csh", "dash", "fish", "ksh", "sh", "tcsh", "zsh"]);
-const GENERIC_DISPATCH_EXECUTABLES = new Set(["env", "xargs"]);
+const PACKAGE_SCRIPT_SUBCOMMANDS = new Set(["build", "check", "run", "run-script", "test"]);
+const DIRECT_TOOL_EXECUTABLES = new Set([
+  "biome", "cargo", "cmake", "deno", "dotnet", "eslint", "gcc", "g++", "go", "gradle", "gradlew",
+  "java", "javac", "jest", "make", "mvn", "mvnw", "ninja", "node", "npm", "perl", "pnpm", "pytest",
+  "ruby", "rustc", "tsc", "vitest", "yarn",
+]);
+const PYTHON_EXECUTABLES = new Set([
+  "python", "python3", "python3.10", "python3.11", "python3.12", "python3.13", "python3.14",
+  "pypy3",
+]);
+const ALLOWED_EXECUTABLE_BASENAMES = new Set([
+  ...DIRECT_TOOL_EXECUTABLES,
+  ...PYTHON_EXECUTABLES,
+  "bun",
+]);
+const PROJECT_SCRIPT_PATTERN = /^(?!-)(?:[A-Za-z0-9@%_+=:,.-]+\/)*[A-Za-z0-9@%_+=:,-]+\.(?:cjs|js|mjs|pl|py|rb|ts|tsx)$/;
+const NODE_SCRIPT_EXTENSIONS = new Set(["cjs", "js", "mjs"]);
+const BUN_SCRIPT_EXTENSIONS = new Set(["cjs", "js", "mjs", "ts", "tsx"]);
+const PYTHON_SCRIPT_EXTENSIONS = new Set(["py"]);
+const PERL_SCRIPT_EXTENSIONS = new Set(["pl"]);
+const RUBY_SCRIPT_EXTENSIONS = new Set(["rb"]);
+const PYTHON_MODULES = new Set(["compileall", "pytest", "unittest"]);
 
 function executableBasename(executable: string): string {
   return executable.slice(executable.lastIndexOf("/") + 1).toLowerCase();
 }
 
-function isUnsafeInlineExecution(executable: string, args: readonly string[]): boolean {
-  const head = executableBasename(executable);
-  if (GENERIC_DISPATCH_EXECUTABLES.has(head)) return true;
-  if (SHELL_EXECUTABLES.has(head)) {
-    return args.some((arg) => arg === "--command" || arg.startsWith("--command=") || /^-[^-]*c/.test(arg));
+function isProjectScript(arg: string, extensions: ReadonlySet<string>): boolean {
+  if (!PROJECT_SCRIPT_PATTERN.test(arg) || !parseReviewPath(arg, "runtime script").ok) return false;
+  const extension = arg.slice(arg.lastIndexOf(".") + 1);
+  return extensions.has(extension);
+}
+
+function packageScriptAllowed(args: readonly string[]): boolean {
+  const subcommand = args[0];
+  return subcommand !== undefined && PACKAGE_SCRIPT_SUBCOMMANDS.has(subcommand);
+}
+
+function runtimeInvocationAllowed(executable: string, args: readonly string[]): boolean {
+  const first = args[0];
+  if (first === undefined) return false;
+  if (executable === "node") {
+    const inlineOption = (arg: string): boolean =>
+      arg === "-e" || arg === "-p" || /^-[^-]*[ep]/.test(arg) ||
+      arg === "--eval" || arg.startsWith("--eval=") || arg === "--print" || arg.startsWith("--print=");
+    return (first === "--test" && !args.slice(1).some(inlineOption)) ||
+      (first === "--check" && args[1] !== undefined && isProjectScript(args[1], NODE_SCRIPT_EXTENSIONS)) ||
+      isProjectScript(first, NODE_SCRIPT_EXTENSIONS);
   }
-  if (head === "node" || head === "bun") {
-    return args.some((arg) => arg === "-e" || arg.startsWith("-e") ||
-      arg === "--eval" || arg.startsWith("--eval=") || arg === "eval");
+  if (executable === "bun") {
+    return first === "build" || first === "run" || first === "test" ||
+      isProjectScript(first, BUN_SCRIPT_EXTENSIONS);
   }
-  if (/^(?:python(?:\d+(?:\.\d+)*)?|pypy\d*)$/.test(head)) {
-    return args.some((arg) => arg === "-c" || arg.startsWith("-c"));
+  if (executable === "deno") {
+    return first === "check" || first === "run" || first === "task" || first === "test";
   }
-  if (head === "powershell" || head === "pwsh") {
-    return args.some((arg) => /^(?:-|\/)(?:c|command|commandwithargs|e|encodedcommand)(?:$|[:=])/i.test(arg));
+  if (PYTHON_EXECUTABLES.has(executable)) {
+    return isProjectScript(first, PYTHON_SCRIPT_EXTENSIONS) ||
+      (first === "-m" && args[1] !== undefined && PYTHON_MODULES.has(args[1]));
   }
-  return head === "cmd" && args.some((arg) => /^\/c/i.test(arg));
+  if (executable === "perl") return isProjectScript(first, PERL_SCRIPT_EXTENSIONS);
+  if (executable === "ruby") return isProjectScript(first, RUBY_SCRIPT_EXTENSIONS);
+  return true;
+}
+
+function executablePolicyError(executable: string, args: readonly string[]): string | null {
+  const basename = executableBasename(executable);
+  if (!ALLOWED_EXECUTABLE_BASENAMES.has(basename)) {
+    return `executable basename ${basename} is not in the verification tool allowlist`;
+  }
+  if (basename === "npm" || basename === "pnpm" || basename === "yarn") {
+    return packageScriptAllowed(args)
+      ? null
+      : `${basename} must use an explicit run, test, check, or build script form`;
+  }
+  return runtimeInvocationAllowed(basename, args)
+    ? null
+    : `${basename} arguments do not select an allowed project script, test, check, build, or runtime mode`;
 }
 
 function parseExecutable(raw: unknown, path: string): Parsed<string> {
@@ -421,8 +475,9 @@ function parseProjectAuthorizedCheck(raw: UnknownRecord, path: string): Parsed<A
   if (typeof record.value.checkId === "string" && record.value.checkId.startsWith(RESERVED_CHECK_PREFIX)) {
     errors.push(`${path}.checkId uses the reserved ${RESERVED_CHECK_PREFIX} namespace`);
   }
-  if (executable.ok && args.ok && isUnsafeInlineExecution(executable.value, args.value)) {
-    errors.push(`${path} must not use inline evaluation or generic command dispatch`);
+  if (executable.ok && args.ok) {
+    const policyError = executablePolicyError(executable.value, args.value);
+    if (policyError !== null) errors.push(`${path}: ${policyError}`);
   }
   return errors.length === 0 && id.ok && executable.ok && args.ok && cwd.ok && timeoutMs.ok && reportPolicy.ok
     ? success(freeze({
@@ -731,47 +786,90 @@ function parseAcceptedChecks(raw: unknown, path: string): Parsed<NonEmpty<Comple
     : failure(errors);
 }
 
+type WaveCompletionEnvelope<Checks extends readonly CompletionCheckResult[], Extra extends object> =
+  Readonly<{
+    runId: OrchestrationRunId;
+    wave: WaveNumber;
+    revision: RegistrationRevision;
+    authorityDigest: ArtifactDigest;
+    manifestDigest: ArtifactDigest;
+    suiteDigest: ArtifactDigest;
+    workspaceDigest: ArtifactDigest;
+    checks: Checks;
+  }> & Readonly<Extra>;
+
+type WaveCompletionEnvelopeContract<Checks extends readonly CompletionCheckResult[], Extra extends object> =
+  Readonly<{
+    path: string;
+    expectedKind: "accepted-wave-completion-suite" | "wave-completion-suite-result";
+    extraFields: readonly string[];
+    parseChecks: (raw: unknown, path: string) => Parsed<Checks>;
+    parseExtra: (record: UnknownRecord, path: string) => Parsed<Extra>;
+  }>;
+
+/** Parse the exact authority envelope shared by accepted receipts and observed results. */
+function parseExactWaveCompletionEnvelope<
+  Checks extends readonly CompletionCheckResult[],
+  Extra extends object,
+>(
+  raw: unknown,
+  contract: WaveCompletionEnvelopeContract<Checks, Extra>,
+): Parsed<WaveCompletionEnvelope<Checks, Extra>> {
+  const { path } = contract;
+  const record = exactRecord(raw, [
+    "kind", "runId", "wave", "revision", "authorityDigest", "manifestDigest", "suiteDigest",
+    "workspaceDigest", "checks", ...contract.extraFields,
+  ], path);
+  if (!record.ok) return record;
+  const runId = parseRunId(record.value.runId, `${path}.runId`);
+  const wave = parseWave(record.value.wave, `${path}.wave`);
+  const revision = parseRevision(record.value.revision, `${path}.revision`);
+  const authorityDigest = parseDigest(record.value.authorityDigest, `${path}.authorityDigest`);
+  const manifestDigest = parseDigest(record.value.manifestDigest, `${path}.manifestDigest`);
+  const suiteDigest = parseDigest(record.value.suiteDigest, `${path}.suiteDigest`);
+  const workspaceDigest = parseDigest(record.value.workspaceDigest, `${path}.workspaceDigest`);
+  const checks = contract.parseChecks(record.value.checks, `${path}.checks`);
+  const extra = contract.parseExtra(record.value, path);
+  const parsed = [runId, wave, revision, authorityDigest, manifestDigest, suiteDigest, workspaceDigest, checks, extra];
+  const errors = parsed.flatMap((result) => result.ok ? [] : result.error.errors);
+  if (record.value.kind !== contract.expectedKind) {
+    errors.push(`${path}.kind must equal ${contract.expectedKind}`);
+  }
+  if (errors.length > 0 || !runId.ok || !wave.ok || !revision.ok || !authorityDigest.ok ||
+      !manifestDigest.ok || !suiteDigest.ok || !workspaceDigest.ok || !checks.ok || !extra.ok) {
+    return failure(errors);
+  }
+  return success(freeze({
+    runId: runId.value,
+    wave: wave.value,
+    revision: revision.value,
+    authorityDigest: authorityDigest.value,
+    manifestDigest: manifestDigest.value,
+    suiteDigest: suiteDigest.value,
+    workspaceDigest: workspaceDigest.value,
+    checks: checks.value,
+    ...extra.value,
+  }));
+}
+
 /** Rehydrate only a successful, non-empty, exact accepted roster with intact digest authority. */
 export function parseAcceptedWaveCompletionReceipt(raw: unknown): Parsed<AcceptedWaveCompletionReceipt> {
   return total(() => {
-    const record = exactRecord(raw, [
-      "kind", "runId", "wave", "revision", "authorityDigest", "manifestDigest", "suiteDigest",
-      "workspaceDigest", "checks", "resultDigest",
-    ], "acceptedReceipt");
-    if (!record.ok) return record;
-    const runId = parseRunId(record.value.runId, "acceptedReceipt.runId");
-    const wave = parseWave(record.value.wave, "acceptedReceipt.wave");
-    const revision = parseRevision(record.value.revision, "acceptedReceipt.revision");
-    const authorityDigest = parseDigest(record.value.authorityDigest, "acceptedReceipt.authorityDigest");
-    const manifestDigest = parseDigest(record.value.manifestDigest, "acceptedReceipt.manifestDigest");
-    const suiteDigest = parseDigest(record.value.suiteDigest, "acceptedReceipt.suiteDigest");
-    const workspaceDigest = parseDigest(record.value.workspaceDigest, "acceptedReceipt.workspaceDigest");
-    const checks = parseAcceptedChecks(record.value.checks, "acceptedReceipt.checks");
-    const resultDigest = parseDigest(record.value.resultDigest, "acceptedReceipt.resultDigest");
-    const parsed = [
-      runId, wave, revision, authorityDigest, manifestDigest, suiteDigest, workspaceDigest, checks, resultDigest,
-    ];
-    const errors = parsed.flatMap((result) => result.ok ? [] : result.error.errors);
-    if (record.value.kind !== "accepted-wave-completion-suite") {
-      errors.push("acceptedReceipt.kind must equal accepted-wave-completion-suite");
-    }
-    if (errors.length > 0 || !runId.ok || !wave.ok || !revision.ok || !authorityDigest.ok ||
-        !manifestDigest.ok || !suiteDigest.ok || !workspaceDigest.ok || !checks.ok || !resultDigest.ok) {
-      return failure(errors);
-    }
-    const body = freeze({
-      kind: "accepted-wave-completion-suite" as const,
-      runId: runId.value,
-      wave: wave.value,
-      revision: revision.value,
-      authorityDigest: authorityDigest.value,
-      manifestDigest: manifestDigest.value,
-      suiteDigest: suiteDigest.value,
-      workspaceDigest: workspaceDigest.value,
-      checks: checks.value,
+    const envelope = parseExactWaveCompletionEnvelope(raw, {
+      path: "acceptedReceipt",
+      expectedKind: "accepted-wave-completion-suite",
+      extraFields: ["resultDigest"],
+      parseChecks: parseAcceptedChecks,
+      parseExtra: (record, path) => {
+        const resultDigest = parseDigest(record.resultDigest, `${path}.resultDigest`);
+        return resultDigest.ok ? success(freeze({ resultDigest: resultDigest.value })) : resultDigest;
+      },
     });
+    if (!envelope.ok) return envelope;
+    const { resultDigest, ...authority } = envelope.value;
+    const body = freeze({ kind: "accepted-wave-completion-suite" as const, ...authority });
     const expectedDigest = digest(body);
-    return resultDigest.value === expectedDigest
+    return resultDigest === expectedDigest
       ? success(freeze({ ...body, resultDigest: expectedDigest }))
       : failure(["acceptedReceipt.resultDigest does not match its canonical receipt"]);
   });
@@ -780,37 +878,16 @@ export function parseAcceptedWaveCompletionReceipt(raw: unknown): Parsed<Accepte
 /** Parse unknown observed suite data. Roster exactness is evaluated against authority, not guessed here. */
 export function parseWaveCompletionSuiteResult(raw: unknown): Parsed<WaveCompletionSuiteResult> {
   return total(() => {
-    const record = exactRecord(raw, [
-      "kind", "runId", "wave", "revision", "authorityDigest", "manifestDigest", "suiteDigest",
-      "workspaceDigest", "checks",
-    ], "suiteResult");
-    if (!record.ok) return record;
-    const runId = parseRunId(record.value.runId, "suiteResult.runId");
-    const wave = parseWave(record.value.wave, "suiteResult.wave");
-    const revision = parseRevision(record.value.revision, "suiteResult.revision");
-    const authorityDigest = parseDigest(record.value.authorityDigest, "suiteResult.authorityDigest");
-    const manifestDigest = parseDigest(record.value.manifestDigest, "suiteResult.manifestDigest");
-    const suiteDigest = parseDigest(record.value.suiteDigest, "suiteResult.suiteDigest");
-    const workspaceDigest = parseDigest(record.value.workspaceDigest, "suiteResult.workspaceDigest");
-    const checks = parseCheckResults(record.value.checks, "suiteResult.checks");
-    const parsed = [runId, wave, revision, authorityDigest, manifestDigest, suiteDigest, workspaceDigest, checks];
-    const errors = parsed.flatMap((result) => result.ok ? [] : result.error.errors);
-    if (record.value.kind !== "wave-completion-suite-result") {
-      errors.push("suiteResult.kind must equal wave-completion-suite-result");
-    }
-    if (errors.length > 0 || !runId.ok || !wave.ok || !revision.ok || !authorityDigest.ok ||
-        !manifestDigest.ok || !suiteDigest.ok || !workspaceDigest.ok || !checks.ok) return failure(errors);
-    return success(freeze({
-      kind: "wave-completion-suite-result",
-      runId: runId.value,
-      wave: wave.value,
-      revision: revision.value,
-      authorityDigest: authorityDigest.value,
-      manifestDigest: manifestDigest.value,
-      suiteDigest: suiteDigest.value,
-      workspaceDigest: workspaceDigest.value,
-      checks: checks.value,
-    }));
+    const envelope = parseExactWaveCompletionEnvelope(raw, {
+      path: "suiteResult",
+      expectedKind: "wave-completion-suite-result",
+      extraFields: [],
+      parseChecks: parseCheckResults,
+      parseExtra: () => success(freeze({})),
+    });
+    return envelope.ok
+      ? success(freeze({ kind: "wave-completion-suite-result", ...envelope.value }))
+      : envelope;
   });
 }
 

@@ -43,8 +43,8 @@ function manifest(mode: string, report = true) {
     checks: [{
       id: "project:completion",
       scope: "wave",
-      executable: mode === "spawn-failure" ? "loom-command-does-not-exist" : "node",
-      args: mode === "spawn-failure" ? [] : ["completion-check.mjs", mode],
+      executable: mode === "spawn-failure" ? ".loom/bin/node" : "node",
+      args: ["completion-check.mjs", mode],
       cwd: ".",
       timeoutMs: 5_000,
       report: report
@@ -97,7 +97,7 @@ function fixture(mode: string, report = true): Fixture {
   git(root, "init", "-q");
   git(root, "config", "user.email", "loom-tests@example.invalid");
   git(root, "config", "user.name", "Loom Tests");
-  write(root, ".gitignore", ".loom/completion-reports/\n");
+  write(root, ".gitignore", ".loom/bin/\n.loom/completion-reports/\n");
   write(root, "source.ts", "export const value = 1;\n");
   write(root, "completion-check.mjs", completionScript());
   git(root, "add", "-A");
@@ -284,22 +284,14 @@ describe("modern Wave completion suite shell", () => {
     expect(f.manager.load().active_wave_completion_suite).toBeUndefined();
     expect(f.handle.readArtifactBytes(relativePath)).toEqual({ ok: true, value: null });
 
-    const repairedBin = mkdtempSync(join(tmpdir(), "loom-wave-suite-bin-"));
-    roots.push(repairedBin);
-    const repairedExecutable = join(repairedBin, "loom-command-does-not-exist");
+    const repairedExecutable = join(f.root, ".loom/bin/node");
+    mkdirSync(dirname(repairedExecutable), { recursive: true });
     writeFileSync(repairedExecutable, "#!/usr/bin/env node\nprocess.exit(0);\n");
     chmodSync(repairedExecutable, 0o755);
-    const previousPath = process.env.PATH;
-    process.env.PATH = `${repairedBin}:${previousPath ?? ""}`;
-    try {
-      expect(await ensure(f)).toMatchObject({
-        ok: true,
-        value: { kind: "accepted", disposition: "installed" },
-      });
-    } finally {
-      if (previousPath === undefined) delete process.env.PATH;
-      else process.env.PATH = previousPath;
-    }
+    expect(await ensure(f)).toMatchObject({
+      ok: true,
+      value: { kind: "accepted", disposition: "installed" },
+    });
     const persisted = f.handle.readArtifactBytes(relativePath);
     expect(persisted.ok && persisted.value !== null).toBe(true);
   });

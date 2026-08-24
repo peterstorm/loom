@@ -1425,16 +1425,22 @@ function occupiedArtifactBytes(path: string): Uint8Array | Readonly<{ __unreadab
 const sameBytes = (a: Uint8Array, b: Uint8Array): boolean =>
   a.length === b.length && a.every((byte, index) => byte === b[index]);
 
-/**
- * True only when the staged bytes are provably identical to what already
- * occupies the slot. A staged file that cannot be read answers `false`, so an
- * unreadable member refuses the promotion instead of licensing an overwrite.
- */
-function stagedBytesMatch(stagedPath: string, occupied: Uint8Array): boolean {
+type StagedBytesComparison =
+  | Readonly<{ kind: "identical" }>
+  | Readonly<{ kind: "different" }>
+  | Readonly<{ kind: "unreadable"; cause: string }>;
+
+/** Compare staged bytes without collapsing a read fault into byte inequality. */
+function stagedBytesMatch(stagedPath: string, occupied: Uint8Array): StagedBytesComparison {
   try {
-    return sameBytes(occupied, readRunBytesNoFollow(stagedPath));
-  } catch {
-    return false;
+    return sameBytes(occupied, readRunBytesNoFollow(stagedPath))
+      ? Object.freeze({ kind: "identical" })
+      : Object.freeze({ kind: "different" });
+  } catch (error) {
+    return Object.freeze({
+      kind: "unreadable",
+      cause: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -1449,8 +1455,12 @@ function occupiedArtifactConflict(
     // refusal that dropped it sent all three causes down one unactionable path.
     return `artifact slot is occupied by unreadable bytes: ${entry.final} (${occupied.__unreadable})`;
   }
-  if (!stagedBytesMatch(entry.staged, occupied)) {
+  const comparison = stagedBytesMatch(entry.staged, occupied);
+  if (comparison.kind === "different") {
     return `a different artifact already occupies this slot: ${entry.final}`;
+  }
+  if (comparison.kind === "unreadable") {
+    return `cannot compare staged artifact bytes for ${entry.final}: ${entry.staged} is unreadable (${comparison.cause})`;
   }
   return null;
 }

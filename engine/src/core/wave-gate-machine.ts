@@ -2946,7 +2946,7 @@ function committedTerminalStatus(
  * advances `current_wave`, and the next registration only appears when the
  * gate is started — so every Wave spends its whole implementation span with
  * `active_wave_gate === undefined`. Routing that through the readiness path
- * reported a healthy graph as terminal invalid authority and blanked all eight
+ * reported a healthy graph as terminal invalid authority and blanked all
  * fact categories. Here the facts are derivable and the owed move is known, so
  * both are reported.
  *

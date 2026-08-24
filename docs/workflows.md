@@ -131,7 +131,14 @@ Project-wide Wave checks are declared before Task population:
 }
 ```
 
-Commands always execute with `shell: false`. Inline shell/eval programs, generic dispatchers, traversal, duplicate/reserved ids, and surplus fields are rejected. Required reports must live beneath `.loom/completion-reports/`; those report bytes are excluded from workspace authority, while tracked and non-ignored untracked implementation bytes remain bound by the Wave workspace digest. Once the TaskGraph is populated, changing the source file does not change the frozen command authority.
+Commands always execute with `shell: false` under an explicit executable/subcommand policy:
+
+- allowed basenames are the bounded build/test/runtime set `biome`, `bun`, `cargo`, `cmake`, `deno`, `dotnet`, `eslint`, `gcc`, `g++`, `go`, `gradle`, `gradlew`, `java`, `javac`, `jest`, `make`, `mvn`, `mvnw`, `ninja`, `node`, `npm`, `perl`, `pnpm`, `pytest`, `python`, `python3`, `python3.10`, `python3.11`, `python3.12`, `python3.13`, `python3.14`, `pypy3`, `ruby`, `rustc`, `tsc`, `vitest`, `yarn`;
+- a project-local executable path is accepted only when its basename is in that same set (for example `node_modules/.bin/vitest` or `tools/gradlew`);
+- `npm`, `pnpm`, and `yarn` accept only explicit `run`, `run-script`, `test`, `check`, or `build` script forms; `exec`, `dlx`, `x`, implicit binary dispatch, `npx`, and `bunx` are rejected;
+- runtimes accept bounded file/test/check/build modes. Inline modes are rejected, including Node `-e`/`-p`/`--eval`/`--print`, Bun `eval`/`-e`/`x`, Deno `eval`, Python `-c`, and Perl/Ruby `-e`/`-E`.
+
+Shells and generic dispatchers are not allowlisted. Traversal, duplicate/reserved ids, and surplus fields are also rejected. Required reports must live beneath `.loom/completion-reports/`; those report bytes are excluded from workspace authority, while tracked and non-ignored untracked implementation bytes remain bound by the Wave workspace digest. Once the TaskGraph is populated, changing the source file does not change the frozen command authority.
 
 ### Phase 5: execute
 
@@ -216,7 +223,7 @@ The engine publishes the exact result immutably in the Wave Run Directory. An ac
 
 Full-tier lint is the reserved `loom:full-tier-lint` suite check. During migration, the existing terminal lint invocation also remains as a fail-closed canary. Structural failures such as forbidden imports, I/O in pure modules, oversized functions, or changed generated integrity block advancement.
 
-The final protected-state commit re-observes the workspace and checks implementation proof, completion-suite authority, reviews, spec alignment, surviving criticals, and required lifecycle artifacts. Success archives a schema-v2 completion record, marks Tasks completed, and advances the Wave; otherwise a typed diagnostic explains the block. Historical schema-v1 Waves and active TaskGraphs created before this feature remain read-compatible and are never rewritten.
+The final protected-state commit re-observes the workspace and checks implementation proof, completion-suite authority, reviews, spec alignment, surviving criticals, and required lifecycle artifacts. Success archives a schema-v2 completion record, marks Tasks completed, and advances the Wave; otherwise a typed diagnostic explains the block. Historical schema-v1 Waves and active TaskGraphs created before this feature remain read-compatible and are never rewritten. The direct `complete-wave-gate` helper is compatibility-only: it refuses every graph carrying `verification_manifest`. Modern corrected findings are stored first and then the exact registered Wave Gate is resumed (or `/wave-gate` is started when no registration exists), so no direct helper can bypass suite execution or invent current-workspace/Run Directory authority.
 
 ### Exhausted reviewer restart
 

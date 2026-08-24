@@ -95,7 +95,7 @@ else
 fi
 
 # All valid phase names accepted
-for phase in init brainstorm specify clarify architecture decompose execute; do
+for phase in init brainstorm specify clarify architecture plan-alignment decompose execute; do
   JSON=$(echo "$VALID_MINIMAL" | jq --arg p "$phase" '.current_phase = $p')
   if echo "$JSON" | bun "$CLI" helper validate-task-graph --minimal >/dev/null 2>&1; then
     pass "accepts phase: $phase"

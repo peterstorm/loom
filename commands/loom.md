@@ -802,7 +802,7 @@ When blocked (critical findings), Edit/Write blocked too. To fix:
    # Override review findings (e.g. downgrade false critical to advisory)
    echo 'ADVISORY: original finding — reason for downgrade' | bun ${LOOM_DIR}/engine/src/cli.ts helper store-review-findings --task T1
    ```
-   Then run `complete-wave-gate` to advance. Use only when findings are genuinely false positives — requires user approval.
+   For a modern TaskGraph (one with `verification_manifest`), persist the corrected findings and then return to the registered Wave Gate: resume its exact Run Directory with `helper orchestration resume`, or start a fresh `/wave-gate` run when no active registration exists. The registered façade re-observes `currentWaveWorkspace` and owns completion-suite execution. **Do not run direct `complete-wave-gate` for a modern graph**; it is legacy-only and refuses rather than inventing Run Directory or workspace authority. Use overrides only when findings are genuinely false positives — requires user approval.
 4. **Emergency**: the guard blocks a direct `rm` of the state file — use the whitelisted helper `bun ${LOOM_DIR}/engine/src/cli.ts helper cleanup-state`, then fix manually / rebuild from the GH issue
 
 ### Addressing Advisories
