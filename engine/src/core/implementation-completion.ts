@@ -55,7 +55,6 @@ declare const BASELINE_DIGEST: unique symbol;
 declare const AUTHORITY_DIGEST: unique symbol;
 declare const TASK_SUITE_DIGEST: unique symbol;
 declare const SETTLEMENT_RECEIPT_ID: unique symbol;
-declare const COMPLETE_CLAUDE_JSONL: unique symbol;
 
 export type TaskId = string & { readonly [TASK_ID]: true };
 export type Wave = WaveNumber;
@@ -67,24 +66,6 @@ export type ArtifactBaselineDigest = string & { readonly [BASELINE_DIGEST]: true
 export type ImplementationAuthorityDigest = string & { readonly [AUTHORITY_DIGEST]: true };
 export type TaskCompletionSuiteDigest = string & { readonly [TASK_SUITE_DIGEST]: true };
 export type ImplementationSettlementReceiptId = string & { readonly [SETTLEMENT_RECEIPT_ID]: true };
-export type CompleteClaudeJsonl = string & { readonly [COMPLETE_CLAUDE_JSONL]: true };
-
-/** Integrity result for a complete Claude JSONL transcript. Evidence extractors
- * may consume only the complete arm; malformed/truncated records carry no
- * partial transcript value by construction. */
-export type ClaudeTranscriptRecord = Readonly<Record<string, unknown>>;
-
-export type ClaudeJsonlIntegrity =
-  | Readonly<{
-      kind: "complete";
-      transcript: CompleteClaudeJsonl;
-      records: readonly ClaudeTranscriptRecord[];
-    }>
-  | Readonly<{
-      kind: "malformed";
-      line: number | null;
-      reason: string;
-    }>;
 
 export type ImplementationCompletionParseError = Readonly<{
   kind: "invalid-implementation-completion";
@@ -237,126 +218,6 @@ function parseTaskSuiteDigest(raw: unknown, path: string): Parsed<TaskCompletion
 
 function parseReceiptId(raw: unknown, path: string): Parsed<ImplementationSettlementReceiptId> {
   return parseSha256<ImplementationSettlementReceiptId>(raw, path);
-}
-
-const MAX_CLAUDE_CONTENT_DEPTH = 8;
-
-function nonEmptyStringField(record: UnknownRecord, field: string, path: string): string | null {
-  const value = record[field];
-  return typeof value === "string" && value.trim() !== ""
-    ? null
-    : `${path}.${field} must be a non-empty string`;
-}
-
-function optionalStringField(record: UnknownRecord, field: string, path: string): string | null {
-  return !Object.prototype.hasOwnProperty.call(record, field) || typeof record[field] === "string"
-    ? null
-    : `${path}.${field} must be a string when present`;
-}
-
-function claudeContentError(raw: unknown, path: string, depth: number): string | null {
-  if (typeof raw === "string") return null;
-  if (!Array.isArray(raw)) return `${path} must be a string or an array of content blocks`;
-  if (depth > MAX_CLAUDE_CONTENT_DEPTH) return `${path} exceeds the supported nested content depth`;
-  for (let index = 0; index < raw.length; index += 1) {
-    if (!Object.prototype.hasOwnProperty.call(raw, index)) return `${path}[${index}] must be present`;
-    const block = raw[index];
-    const blockPath = `${path}[${index}]`;
-    if (!isRecord(block)) return `${blockPath} must be a plain object`;
-    const typeError = nonEmptyStringField(block, "type", blockPath);
-    if (typeError !== null) return typeError;
-    const textError = optionalStringField(block, "text", blockPath);
-    if (textError !== null) return textError;
-    const nameError = optionalStringField(block, "name", blockPath);
-    if (nameError !== null || (typeof block.name === "string" && block.name.trim() === "")) {
-      return nameError ?? `${blockPath}.name must be non-empty when present`;
-    }
-    if (Object.prototype.hasOwnProperty.call(block, "input") && !isRecord(block.input)) {
-      return `${blockPath}.input must be a plain object when present`;
-    }
-    if (Object.prototype.hasOwnProperty.call(block, "tool_use_id") &&
-        (typeof block.tool_use_id !== "string" || block.tool_use_id.trim() === "")) {
-      return `${blockPath}.tool_use_id must be a non-empty string when present`;
-    }
-    if (Object.prototype.hasOwnProperty.call(block, "is_error") && typeof block.is_error !== "boolean") {
-      return `${blockPath}.is_error must be a boolean when present`;
-    }
-    if (block.type === "text" && typeof block.text !== "string") {
-      return `${blockPath}.text must be a string for a text block`;
-    }
-    if (block.type === "thinking") {
-      if (typeof block.thinking !== "string") return `${blockPath}.thinking must be a string for a thinking block`;
-      const signatureError = optionalStringField(block, "signature", blockPath);
-      if (signatureError !== null) return signatureError;
-    }
-    if (block.type === "tool_use" || block.type === "server_tool_use") {
-      const toolNameError = nonEmptyStringField(block, "name", blockPath);
-      if (toolNameError !== null) return toolNameError;
-      if (!isRecord(block.input)) return `${blockPath}.input must be a plain object for a tool-use block`;
-    }
-    if (block.type === "tool_result") {
-      if (!Object.prototype.hasOwnProperty.call(block, "content")) {
-        return `${blockPath}.content is required for a tool-result block`;
-      }
-      const nestedError = claudeContentError(block.content, `${blockPath}.content`, depth + 1);
-      if (nestedError !== null) return nestedError;
-    }
-  }
-  return null;
-}
-
-function claudeRecordError(raw: unknown, path: string): string | null {
-  if (!isRecord(raw)) return `${path} must be a plain object`;
-  const typeError = nonEmptyStringField(raw, "type", path);
-  if (typeError !== null) return typeError;
-  if (!Object.prototype.hasOwnProperty.call(raw, "message")) return null;
-  if (!isRecord(raw.message)) return `${path}.message must be a plain object when present`;
-  const roleError = nonEmptyStringField(raw.message, "role", `${path}.message`);
-  if (roleError !== null) return roleError;
-  if (!Object.prototype.hasOwnProperty.call(raw.message, "content")) {
-    return `${path}.message.content is required when message is present`;
-  }
-  return claudeContentError(raw.message.content, `${path}.message.content`, 0);
-}
-
-/** Total strict JSONL integrity parser. Every nonblank line must parse through
- * the forward-compatible Claude transcript-record schema before the original
- * transcript can become modern evidence authority. */
-export function parseCompleteClaudeJsonl(raw: unknown): ClaudeJsonlIntegrity {
-  if (typeof raw !== "string") {
-    return freeze({ kind: "malformed", line: null, reason: "Claude JSONL transcript must be a string" });
-  }
-  const records: ClaudeTranscriptRecord[] = [];
-  const lines = raw.split(/\r?\n/u);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    if (line.trim() === "") continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line) as unknown;
-    } catch (cause) {
-      const detail = cause instanceof Error ? cause.message : String(cause);
-      return freeze({
-        kind: "malformed",
-        line: index + 1,
-        reason: `Claude JSONL transcript record ${index + 1} is malformed or truncated: ${detail}`.slice(0, MAX_REASON_LENGTH),
-      });
-    }
-    const schemaError = claudeRecordError(parsed, `Claude JSONL transcript record ${index + 1}`);
-    if (schemaError !== null || !isRecord(parsed)) {
-      return freeze({
-        kind: "malformed",
-        line: index + 1,
-        reason: (schemaError ?? `Claude JSONL transcript record ${index + 1} is invalid`).slice(0, MAX_REASON_LENGTH),
-      });
-    }
-    records.push(Object.freeze(parsed));
-  }
-  return freeze({
-    kind: "complete",
-    transcript: raw as CompleteClaudeJsonl,
-    records: freezeArray(records),
-  });
 }
 
 function parseSnapshot(raw: unknown, path: string): Parsed<DeclaredArtifactBaseline["snapshot"]> {

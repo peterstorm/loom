@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import updateTaskStatus, { isMachineBound, resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
+import updateTaskStatus, { isMachineBound } from "../../src/handlers/subagent-stop/update-task-status";
+import { resolveTestEvidence } from "../../src/core/implementation-evidence";
 import { analyzeNewTests } from "../../src/handlers/helpers/task-local-completion";
 import { extractTestEvidence } from "../../src/core/test-evidence";
 import { legacyTestsPassedNote } from "../../src/types";

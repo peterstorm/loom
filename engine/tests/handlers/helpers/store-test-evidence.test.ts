@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync, spawnSync } from "node:child_process";
 import type { TaskGraph, Task } from "../../../src/types";
+import { pendingTaskProof } from "../../fixtures/task-lifecycle";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
 
@@ -112,6 +113,29 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
 
     const task = readState().tasks[0];
     expect(task.test_result).toEqual({ verdict: "trusted-pass" });
+  });
+
+  it("rejects helper stdin for a revalidation-required Task without changing any stored evidence", () => {
+    const original = graphWith({
+      status: "pending",
+      revalidation_required: true,
+      proof: pendingTaskProof(),
+      test_result: { verdict: "trusted-pass" },
+      test_evidence: "ledger: 42 tests / 0 failed",
+      new_tests_written: true,
+      new_test_evidence: "4 new tests, 8 assertions",
+      files_modified: ["src/implementation.ts", "tests/implementation.test.ts"],
+      failure_reason: "infrastructure-blocked: transcript unavailable",
+    });
+    writeFileSync(statePath, JSON.stringify(original, null, 2));
+
+    const { exitCode, stderr } = runHelper(
+      "TEST_PASSED: false\nTEST_EVIDENCE: overwrite\nNEW_TESTS_WRITTEN: false\nNEW_TEST_EVIDENCE: overwrite\n",
+    );
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("requires a re-spawned implementation Agent");
+    expect(readState()).toEqual(original);
   });
 
   it("stores labeled untrusted evidence without minting positive completion authority", () => {

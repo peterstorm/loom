@@ -104,20 +104,27 @@ const handler: HookHandler = async (stdin) => {
   //   - the reserved write-grant namespace, which the write gate reads as a
   //     capability — a reported id shaped like one would be granted Edit/Write
   //     with no grant ever consumed.
-  // Refuse the machine BINDING loudly — with no binding the gate stays
-  // unarmed, which the existing fail-closed handling covers. The SAME
-  // constructor governs the roster entry below, so binding and roster identity
-  // can never disagree about which id an agent is.
+  // The SAME constructor governs machine binding and roster identity, so they
+  // can never disagree. A machine-bearing role with no parsed id is blocked
+  // before any per-agent capability is published.
   const agentId = agent_id ? parseReportedAgentId(agent_id) : null;
   const rosterId = agent_id ? reportedRosterAgentId(agent_id) : null;
   if (agent_id && agentId === null) {
     process.stderr.write(
-      `mark-subagent-active: agent_id ${JSON.stringify(agent_id)} is reserved or path-unsafe (whitespace/colon/slash/'..', or the ${WRITE_GRANT_AGENT_NAMESPACE} write-grant namespace) — machine NOT bound, it will run UNGATED; tracked on the roster as ${reportedRosterAgentId(agent_id)} for contention counting\n`,
+      `mark-subagent-active: agent_id ${JSON.stringify(agent_id)} is reserved or path-unsafe (whitespace/colon/slash/'..', or the ${WRITE_GRANT_AGENT_NAMESPACE} write-grant namespace) — no machine identity can be bound\n`,
     );
   }
 
   const rosterAgentTypeRaw = stripNamespace(input.agent_type ?? "");
   const rosterAgentType = rosterAgentTypeRaw ? parseAgentType(rosterAgentTypeRaw) : null;
+  const guardedMachine = rosterAgentType === null
+    ? { kind: "none" as const }
+    : loadMachine(machinesDir(), rosterAgentType);
+  if (guardedMachine.kind !== "none" && (agentId === null || rosterId === null)) {
+    return blockResult(
+      `mark-subagent-active: ${rosterAgentType} has a Guarded Skill Machine but no valid agent_id; refusing to run it ungated`,
+    );
+  }
   const modernImplementationAgent = isImplAgent(rosterAgentTypeRaw);
   let sidecarPublished = false;
   let identifiedAuthority: ImplementationAttemptAuthority | null = null;
@@ -173,8 +180,8 @@ const handler: HookHandler = async (stdin) => {
   // A roster FAILURE (lock/fs error) makes attribution unsound: an agent
   // off the roster runs invisibly, so soleActiveBinding would cross-credit
   // its tool calls into whatever binding exists. An unsound roster must not
-  // coexist with an armed binding — skip the machine bind, but still write
-  // the .task_graph path below (SubagentStop needs it regardless).
+  // coexist with an armed binding. Machine-bearing roles are blocked; a
+  // machine-less role still writes the .task_graph path for SubagentStop.
   //
   // The roster line also records the agent TYPE. PreToolUse authorizes writes
   // by ROLE, and on Claude Code `agent_id` is an opaque handle that no
@@ -201,6 +208,7 @@ const handler: HookHandler = async (stdin) => {
         if (registrationRollback !== null) rollbackFailures.push(`exact registration rollback failed: ${registrationRollback}`);
         return blockResult(rollbackFailures.length === 0 ? message : `${message}; ${rollbackFailures.join("; ")}`);
       }
+      if (guardedMachine.kind !== "none") return blockResult(message);
     }
   }
 
@@ -221,8 +229,7 @@ const handler: HookHandler = async (stdin) => {
   let bindingFailure: string | null = null;
   let machineBound = false;
   if (rosterAgentType && rosterSound) {
-    const loaded = loadMachine(machinesDir(), rosterAgentType);
-    if (loaded.kind !== "none") {
+    if (guardedMachine.kind !== "none") {
       if (agentId && rosterId !== null) {
         try {
           await bindMachineAgent(sessionId, rosterAgentType, agentId);
@@ -232,10 +239,10 @@ const handler: HookHandler = async (stdin) => {
             `mark-subagent-active: bindMachineAgent failed — refusing to run ${rosterAgentType} (${agentId}) ungated: ${error instanceof Error ? error.message : String(error)}`;
         }
       } else {
-        process.stderr.write(`mark-subagent-active: cannot bind machine for ${rosterAgentType} — no valid agent_id in hook input; it will run UNGATED\n`);
+        bindingFailure = `mark-subagent-active: cannot bind machine for ${rosterAgentType} — no valid agent_id; refusing ungated execution`;
       }
-      if (loaded.kind === "invalid") {
-        process.stderr.write(`mark-subagent-active: machine invalid (gate will fail closed) — ${loaded.error}\n`);
+      if (guardedMachine.kind === "invalid") {
+        process.stderr.write(`mark-subagent-active: machine invalid (gate will fail closed) — ${guardedMachine.error}\n`);
       }
     }
   }

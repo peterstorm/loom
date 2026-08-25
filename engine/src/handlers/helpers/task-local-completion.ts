@@ -146,11 +146,15 @@ export function observeTaskLocalCompletion(
 
 type NewTestRequirement = boolean | undefined | VerificationRequirement<NewTestWaiverReason>;
 
-function newTestWaiverReason(requirement: NewTestRequirement): NewTestWaiverReason | null {
-  if (requirement === false) return "legacy-new-tests-required-false";
-  return typeof requirement === "object" && requirement.kind === "waived"
-    ? requirement.reason
-    : null;
+function waivedNewTestEvidence(requirement: NewTestRequirement): NewTestEvidence | null {
+  let reason: NewTestWaiverReason | null = null;
+  if (requirement === false) reason = "legacy-new-tests-required-false";
+  else if (typeof requirement === "object" && requirement.kind === "waived") {
+    reason = requirement.reason;
+  }
+  return reason === null
+    ? null
+    : parseNewTestEvidence(false, `verification_policy.new_tests waived: ${reason}`);
 }
 
 /** Pure new-test evidence classification from already-collected diff bytes. */
@@ -158,13 +162,8 @@ export function analyzeNewTests(
   diff: string,
   requirement: NewTestRequirement,
 ): NewTestEvidence {
-  const waiverReason = newTestWaiverReason(requirement);
-  if (waiverReason !== null) {
-    return parseNewTestEvidence(
-      false,
-      `verification_policy.new_tests waived: ${waiverReason}`,
-    );
-  }
+  const waiver = waivedNewTestEvidence(requirement);
+  if (waiver !== null) return waiver;
 
   const tests = git.countNewTests(diff);
   const assertions = tests.total > 0 ? git.countAssertions(diff) : 0;
@@ -260,7 +259,6 @@ export function collectNewTestEvidence(
   startSha?: string,
   deps: DiffDeps = REAL_DIFF_DEPS,
 ): NewTestEvidence {
-  return newTestWaiverReason(requirement) === null
-    ? analyzeNewTests(collectDiff(filesModified, deps, startSha), requirement)
-    : analyzeNewTests("", requirement);
+  return waivedNewTestEvidence(requirement) ??
+    analyzeNewTests(collectDiff(filesModified, deps, startSha), requirement);
 }

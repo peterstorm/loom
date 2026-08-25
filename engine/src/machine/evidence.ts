@@ -10,6 +10,7 @@
 
 import type { Epoch, Evidence, EvidenceRecord, TestReportSummary } from "./types";
 import { parseReportSummary } from "./test-report";
+export { judgeTestRun, type TrustedTestVerdict } from "./test-report";
 
 // --- Branded agent identity ---
 

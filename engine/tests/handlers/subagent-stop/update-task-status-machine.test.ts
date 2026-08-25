@@ -13,10 +13,8 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  capVerdictForMachineCompletion,
-  runUpdateTaskStatus,
-} from "../../../src/handlers/subagent-stop/update-task-status";
+import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-task-status";
+import { capVerdictForMachineCompletion } from "../../../src/core/implementation-evidence";
 import { applyCompletionInfrastructureFailure } from "../../../src/core/implementation-application";
 import { SUBAGENT_DIR } from "../../../src/config";
 import { parseEpoch } from "../../../src/machine";

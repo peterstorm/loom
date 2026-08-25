@@ -1,6 +1,7 @@
 {"type":"system","subtype":"init","cwd":"/tmp/project","session_id":"fixture-session","tools":["Bash"],"forward_compatible":{"protocol":2}}
 {"type":"user","uuid":"user-1","message":{"role":"user","content":"Task ID: T1","forward_message_field":true},"parent_tool_use_id":null}
 {"type":"assistant","uuid":"assistant-1","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Inspect the task.","signature":"fixture-signature","future_block_field":1},{"type":"text","text":"Implementation complete.","citations":[]},{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"npx vitest run focused.test.ts"},"caller":{"kind":"direct"}}],"model":"claude-fixture"},"requestId":"request-1"}
+{"type":"assistant","uuid":"assistant-fallback","message":{"role":"assistant","content":[{"type":"fallback","from":{"model":"claude-fable-5","future_endpoint_field":true},"to":{"model":"claude-opus-4-8"},"future_block_field":true}],"model":"claude-opus-4-8"},"requestId":"request-fallback"}
 {"type":"user","uuid":"user-2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"text","text":"1 passed (1)","future_nested_field":true}],"is_error":false,"future_result_field":"retained"}]}}
 {"type":"progress","data":{"type":"hook_progress","hook_event":"PostToolUse","stdout":"ok"},"toolUseID":"tool-1"}
 {"type":"file-history-snapshot","messageId":"assistant-1","snapshot":{"trackedFileBackups":{},"timestamp":"2026-08-25T00:00:00.000Z"}}

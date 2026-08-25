@@ -1,5 +1,9 @@
 import type { Task, TaskGraph, TaskTestResult } from "../types";
-import { attributedChangedArtifacts, changedDeclaredArtifacts } from "./artifact-baseline";
+import {
+  attributedChangedArtifacts,
+  changedDeclaredArtifacts,
+  type DeclaredArtifactBaseline,
+} from "./artifact-baseline";
 import {
   createTaskCompletionSuiteResult,
   parseCanonicalArtifactBaseline,
@@ -69,8 +73,11 @@ function compareExactBaselines(
   baseline: unknown,
   current: unknown,
   path: string,
-): Readonly<{ ok: true; changed: readonly ReviewPath[] }> |
-  Readonly<{ ok: false; errors: readonly string[] }> {
+): Readonly<{
+  ok: true;
+  baseline: readonly DeclaredArtifactBaseline[];
+  changed: readonly ReviewPath[];
+}> | Readonly<{ ok: false; errors: readonly string[] }> {
   const parsedBaseline = parseCanonicalArtifactBaseline(baseline, `${path}.baseline`);
   const parsedCurrent = parseCanonicalArtifactBaseline(current, `${path}.current`);
   if (!parsedBaseline.ok || !parsedCurrent.ok) {
@@ -84,7 +91,11 @@ function compareExactBaselines(
   }
   const compared = changedDeclaredArtifacts(parsedBaseline.value, parsedCurrent.value);
   return compared.ok
-    ? freeze({ ok: true, changed: frozenArray(compared.value as readonly ReviewPath[]) })
+    ? freeze({
+        ok: true,
+        baseline: parsedBaseline.value,
+        changed: frozenArray(compared.value as readonly ReviewPath[]),
+      })
     : freeze({ ok: false, errors: frozenArray(compared.errors) });
 }
 
@@ -136,15 +147,13 @@ export function buildTaskLocalByteObservation(
     });
   }
 
-  const parsedAttemptBaseline = parseCanonicalArtifactBaseline(input.attemptBaseline);
-  if (!parsedAttemptBaseline.ok) throw new Error(parsedAttemptBaseline.error.errors.join("; "));
-  const allowed = new Set(parsedAttemptBaseline.value.map(({ artifact }) => artifact));
+  const allowed = new Set(attempt.baseline.map(({ artifact }) => artifact));
   const outside = parserPaths.value.filter((path) => !allowed.has(path));
   const insideParserPaths = parserPaths.value.filter((path) => allowed.has(path));
   const changedAttempt = new Set(attempt.changed);
   const attributedAttempt = insideParserPaths.filter((path) => changedAttempt.has(path));
   const priorAllowedPaths = priorPaths.value.filter((path) => allowed.has(path));
-  const cumulative = frozenArray([...new Set([...priorAllowedPaths, ...insideParserPaths])].sort(compareStrings));
+  const cumulative = frozenArray([...new Set([...priorAllowedPaths, ...attributedAttempt])].sort(compareStrings));
   const cumulativeSet = new Set(cumulative);
   const proofChanges = proof.changed.filter((path) => cumulativeSet.has(path));
   const suite = createTaskCompletionSuiteResult(

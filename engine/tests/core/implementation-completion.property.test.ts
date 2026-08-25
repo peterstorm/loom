@@ -9,7 +9,6 @@ import {
   evaluateTaskCompletionSuite,
   parseArtifactBaselineDigest,
   parseCanonicalArtifactBaseline,
-  parseCompleteClaudeJsonl,
   parseGitSha,
   parseImplementationAttemptAuthority,
   parseImplementationAttemptHistory,
@@ -28,6 +27,10 @@ import {
   type ImplementationAttemptSettlementReceipt,
   type TaskCompletionSuiteAuthority,
 } from "../../src/core/implementation-completion";
+import {
+  CLAUDE_CONTENT_BLOCK_TYPES,
+  parseCompleteClaudeJsonl,
+} from "../../src/core/claude-transcript-integrity";
 import {
   PI_STRUCTURED_EVIDENCE_POLICY,
   TRUSTED_LEDGER_ONLY_POLICY,
@@ -175,7 +178,7 @@ describe("implementation completion exact parsers", () => {
     expect(complete.kind).toBe("complete");
     if (complete.kind !== "complete") return;
     expect(complete.transcript).toBe(valid);
-    expect(complete.records).toHaveLength(6);
+    expect(complete.records).toHaveLength(7);
     expect(complete.records[0]).toMatchObject({
       type: "system",
       forward_compatible: { protocol: 2 },
@@ -186,22 +189,61 @@ describe("implementation completion exact parsers", () => {
   });
 
   it.each([
-    ["empty object", "{}", "type"],
-    ["null", "null", "plain object"],
-    ["scalar", "42", "plain object"],
-    ["array", "[]", "plain object"],
-    ["missing message role", '{"type":"user","message":{"content":"hello"}}', "role"],
-    ["non-string message role", '{"type":"user","message":{"role":1,"content":"hello"}}', "role"],
-    ["unsupported message content", '{"type":"user","message":{"role":"user","content":null}}', "string or an array"],
-    ["non-object block", '{"type":"user","message":{"role":"user","content":["hello"]}}', "plain object"],
-    ["missing block type", '{"type":"assistant","message":{"role":"assistant","content":[{}]}}', "type"],
-    ["malformed text block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":7}]}}', "text"],
-    ["malformed tool-use block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":[]}]}}', "input"],
-    ["malformed tool-result block", '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":null}]}}', "content"],
-  ])("rejects the %s record through the bounded schema", (_name, line, expectedReason) => {
+    ["empty transcript", "", "at least one supported record", null],
+    ["blank transcript", "\n\n", "at least one supported record", null],
+    ["empty object", "{}", "type", 1],
+    ["null", "null", "plain object", 1],
+    ["scalar", "42", "plain object", 1],
+    ["array", "[]", "plain object", 1],
+    ["missing message role", '{"type":"user","message":{"content":"hello"}}', "role", 1],
+    ["non-string message role", '{"type":"user","message":{"role":1,"content":"hello"}}', "role", 1],
+    ["unsupported message content", '{"type":"user","message":{"role":"user","content":null}}', "string or an array", 1],
+    ["non-object block", '{"type":"user","message":{"role":"user","content":["hello"]}}', "plain object", 1],
+    ["missing block type", '{"type":"assistant","message":{"role":"assistant","content":[{}]}}', "type", 1],
+    ["malformed text block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":7}]}}', "text", 1],
+    ["malformed tool-use block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":[]}]}}', "input", 1],
+    ["malformed tool-result block", '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":null}]}}', "content", 1],
+    ["unknown block discriminant", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"future_block","text":"no"}]}}', "must be one of", 1],
+    ["misspelled block discriminant", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_uses","id":"tool-1","name":"Bash","input":{}}]}}', "must be one of", 1],
+    ["malformed fallback block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"fallback","from":{"model":""},"to":{"model":"claude"}}]}}', "model", 1],
+  ] as const)("rejects the %s record through the bounded schema", (_name, line, expectedReason, expectedLine) => {
     const parsed = parseCompleteClaudeJsonl(`${line}\n`);
-    expect(parsed).toMatchObject({ kind: "malformed", line: 1, reason: expect.stringContaining(expectedReason) });
+    expect(parsed).toMatchObject({ kind: "malformed", line: expectedLine, reason: expect.stringContaining(expectedReason) });
     expect(parsed).not.toHaveProperty("transcript");
+  });
+
+  it("accepts every explicit supported arm with surplus fields", () => {
+    const blocks = [
+      { type: "text", text: "done", future: true },
+      { type: "thinking", thinking: "work", signature: "sig", future: true },
+      { type: "tool_use", id: "tool-1", name: "Bash", input: {}, future: true },
+      { type: "server_tool_use", id: "server-1", name: "search", input: {}, future: true },
+      { type: "tool_result", tool_use_id: "tool-1", content: "pass", is_error: false, future: true },
+      { type: "fallback", from: { model: "claude-fable", future: true }, to: { model: "claude-opus" }, future: true },
+    ];
+    expect(blocks.map(({ type }) => type)).toEqual(CLAUDE_CONTENT_BLOCK_TYPES);
+    for (const block of blocks) {
+      expect(parseCompleteClaudeJsonl(JSON.stringify({
+        type: "assistant",
+        message: { role: "assistant", content: [block], future_message_field: true },
+        future_record_field: true,
+      }) + "\n").kind).toBe("complete");
+    }
+  });
+
+  it("property: every unsupported nonblank block discriminant fails closed", () => {
+    fc.assert(fc.property(
+      fc.string({ minLength: 1, maxLength: 40 })
+        .filter((type) => type.trim() !== "" && !(CLAUDE_CONTENT_BLOCK_TYPES as readonly string[]).includes(type)),
+      (type) => {
+        const parsed = parseCompleteClaudeJsonl(JSON.stringify({
+          type: "assistant",
+          message: { role: "assistant", content: [{ type, text: "plausible" }] },
+        }));
+        expect(parsed.kind).toBe("malformed");
+        expect(parsed).not.toHaveProperty("transcript");
+      },
+    ), { numRuns: 500 });
   });
 
   it("rejects a syntactically malformed tail without exposing partial transcript authority", () => {

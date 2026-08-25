@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { analyzeNewTests, resolveTestEvidence } from "../../../src/handlers/subagent-stop/update-task-status";
+import { resolveTestEvidence } from "../../../src/core/implementation-evidence";
+import { analyzeNewTests } from "../../../src/handlers/helpers/task-local-completion";
 import { extractTestEvidence } from "../../../src/core/test-evidence";
 import { judgeTestRun } from "../../../src/machine";
 import type { Evidence } from "../../../src/machine";

@@ -150,85 +150,57 @@ describe("guarded machine — full hook lifecycle", () => {
     await cleanup(start(s, "a-9", "brainstorm-agent"), []);
   });
 
-  it("an agent_id with reserved characters is refused LOUDLY at the bind boundary (never desyncs the epoch)", async () => {
+  it("blocks a machine-bearing agent whose agent_id has reserved characters without publishing capabilities", async () => {
     const s = sid("e2e-6");
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      // ':' in the id would make the recorded epoch ambiguous with epochOf
-      await markActive(start(s, "evil:id"), []);
-      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
-      expect(text).toContain("is reserved or path-unsafe");
-      expect(text).toContain("UNGATED");
+      const result = await markActive(start(s, "evil:id"), []);
+      expect(result).toMatchObject({
+        kind: "block",
+        message: expect.stringContaining("no valid agent_id"),
+      });
+      expect(stderrSpy.mock.calls.map((call) => String(call[0])).join(""))
+        .toContain("is reserved or path-unsafe");
     } finally {
       stderrSpy.mockRestore();
     }
-    // No binding was written — the session is simply ungated (fail-unarmed,
-    // which the gate's binding-exists checks already cover). But the agent
-    // IS on the roster (as a sanitized placeholder) so contention counting
-    // still sees it.
     expect(existsSync(machineBindingPath(s))).toBe(false);
-    expect(countActiveAgents(s)).toBe(1);
+    expect(countActiveAgents(s)).toBe(0);
+    expect(existsSync(`${SUBAGENT_DIR}/${s}.task_graph`)).toBe(false);
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
-    await cleanup(stop(s, "evil:id"), []);
-    expect(countActiveAgents(s)).toBe(0); // stop removes the same placeholder
   });
 
-  it("a self-reported agent_id in the write-grant namespace never reaches the roster", async () => {
-    // The write gate authorizes Edit/Write on a `pi-grant-` identity because
-    // the grant record is burnt at consume time and cannot be re-checked. That
-    // recognition is only sound while the namespace is unreachable from
-    // harness-reported input — this is the boundary that makes it so.
+  it("blocks a machine-bearing self-reported agent_id in the write-grant namespace", async () => {
     const s = sid("e2e-6b");
     const forged = "pi-grant-0123456789abcdef";
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      await markActive(start(s, forged), []);
-      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
-      expect(text).toContain("write-grant namespace");
-      expect(text).toContain("UNGATED");
+      const result = await markActive(start(s, forged), []);
+      expect(result.kind).toBe("block");
+      expect(stderrSpy.mock.calls.map((call) => String(call[0])).join(""))
+        .toContain("write-grant namespace");
     } finally {
       stderrSpy.mockRestore();
     }
-
-    // Counted (attribution must still see it) but under a placeholder, so the
-    // roster's identity column carries no capability.
-    expect(countActiveAgents(s)).toBe(1);
-    expect(readActiveAgentRoles(s).some(({ agentId }) => agentId === forged)).toBe(false);
-    expect(readActiveAgentRoles(s).every(({ agentId }) => agentId.startsWith("unparseable-"))).toBe(true);
-    // No machine binding, and the direct-edit gate is not opened by it.
+    expect(countActiveAgents(s)).toBe(0);
+    expect(readActiveAgentRoles(s)).toEqual([]);
     expect(existsSync(machineBindingPath(s))).toBe(false);
-
-    await cleanup(stop(s, forged), []);
-    expect(countActiveAgents(s)).toBe(0); // stop removes the same placeholder
+    expect(existsSync(`${SUBAGENT_DIR}/${s}.task_graph`)).toBe(false);
   });
 
-  it("an unparseable agent_id still counts on the roster — attribution stands down instead of cross-crediting", async () => {
+  it("a rejected unparseable sibling cannot disable an existing machine binding", async () => {
     const s = sid("e2e-7");
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      // A validly-bound agent…
       await markActive(start(s), []);
       expect(soleActiveBinding(s)?.agentId).toBe("a-1");
 
-      // …then a rogue agent whose id the bind boundary rejects joins the
-      // session. It cannot be bound — but it MUST still count as active,
-      // otherwise its tool calls (including trusted TestRun evidence)
-      // would be attributed to a-1's epoch.
-      await markActive(start(s, "evil:id"), []);
-      expect(countActiveAgents(s)).toBe(2);
-      expect(soleActiveBinding(s)).toBeNull(); // contended → stand down
-
-      // Gate and recorder both stand down while contended.
-      expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
-      await recordEvidence(
-        post(s, "Bash", { command: "npm test" }, { exit_code: 0, stdout: "5 passing" }),
-        [],
-      );
-      expect(readEvidence(s)).toEqual([]); // the rogue run credited NOTHING
-
-      // The rogue agent stops → symmetric placeholder removal re-arms a-1.
-      await cleanup(stop(s, "evil:id"), []);
+      const rejected = await markActive(start(s, "evil:id"), []);
+      expect(rejected.kind).toBe("block");
+      expect(countActiveAgents(s)).toBe(1);
       expect(soleActiveBinding(s)?.agentId).toBe("a-1");
+      expect((await enforce(pre(s, "Write"), [])).kind).toBe("block");
+
       await cleanup(stop(s), []);
     } finally {
       stderrSpy.mockRestore();

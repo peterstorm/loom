@@ -101,6 +101,23 @@ describe("collectDiff", () => {
     )).toThrow("new-test diff authority unavailable: git object database unreadable");
   });
 
+  it.each([
+    [false, "legacy-new-tests-required-false"],
+    [{ kind: "waived" as const, reason: "existing-tests-sufficient" as const }, "existing-tests-sufficient"],
+  ])("returns waiver evidence directly without touching the diff seam", (requirement, reason) => {
+    const evidence = collectNewTestEvidence(
+      ["engine/tests/existing.test.ts"],
+      requirement,
+      undefined,
+      fakeDeps({ isTracked: () => { throw new Error("diff seam must not run"); } }),
+    );
+    expect(evidence).toEqual({
+      kind: "not-written",
+      written: false,
+      evidence: `verification_policy.new_tests waived: ${reason}`,
+    });
+  });
+
   it("proves new tests from tracked unstaged worktree changes for every harness", () => {
     const evidence = collectNewTestEvidence(
       ["engine/tests/existing.test.ts"],

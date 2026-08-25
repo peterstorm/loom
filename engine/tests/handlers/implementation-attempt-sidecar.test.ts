@@ -348,6 +348,53 @@ describe("Claude implementation authority sidecar", () => {
     expect(stored.wave_gates["1"]?.impl_complete).toBe(true);
   });
 
+  it("settles a modern stop with no resolvable transcript as exact infrastructure and releases only that authority", async () => {
+    const dir = root();
+    const statePath = join(dir, "active_task_graph.json");
+    const attempt = authority("T1", "claude-missing-transcript");
+    modernGraph(statePath, attempt, {
+      new_tests_required: false,
+      proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+    });
+    process.env.LOOM_STATE_PATH = statePath;
+    mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
+    writeFileSync(join(process.env.LOOM_SUBAGENT_DIR!, `${SESSION}.task_graph`), statePath);
+    publishImplementationAttemptSidecar({
+      sessionId: SESSION,
+      agentId: AGENT,
+      taskGraphPath: statePath,
+      authority: attempt,
+    });
+
+    const result = await dispatch(JSON.stringify({
+      session_id: SESSION,
+      agent_id: AGENT,
+      agent_type: "code-implementer-agent",
+    }), []);
+
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("no resolvable transcript path"),
+    });
+    expect(result).toMatchObject({
+      message: expect.stringContaining("exact non-consuming infrastructure Oracle receipt"),
+    });
+    const stored = JSON.parse(readFileSync(statePath, "utf8")) as TaskGraph;
+    expect(stored.executing_tasks).toEqual([]);
+    expect(stored.tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      implementation_attempt_history: [{
+        authorityDigest: attempt.authorityDigest,
+        transition: "infrastructure-blocked",
+        consumesSemanticAttempt: false,
+      }],
+    });
+    expect(stored.tasks[0]?.active_implementation_attempt).toBeUndefined();
+    expect(stored.tasks[0]).not.toHaveProperty("test_result");
+    expect(stored.wave_gates["1"]?.impl_complete).toBe(false);
+  });
+
   it("settles a valid partial transcript with a malformed tail as non-consuming infrastructure, never implemented", async () => {
     const dir = root();
     const statePath = join(dir, "active_task_graph.json");
@@ -417,6 +464,8 @@ describe("Claude implementation authority sidecar", () => {
     ["null", "null"],
     ["scalar", "42"],
     ["array", "[]"],
+    ["unknown content block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"future_block","text":"done"}]}}'],
+    ["misspelled content block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_uses","id":"tool-1","name":"Bash","input":{}}]}}'],
     ["invalid tail", '{"type":"assistant","message":'],
   ])("settles a syntactically invalid or schema-invalid modern %s as non-consuming infrastructure", async (name, invalidRecord) => {
     const { result, stored } = await settleInvalidModernRecord(

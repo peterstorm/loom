@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, afterAll } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import cleanup, {
@@ -23,6 +23,7 @@ import {
   IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
   SESSION_SUFFIXES,
 } from "../../../src/machine";
+import { SUBAGENT_DIR } from "../../../src/config";
 
 const subDir = mkdtempSync(join(tmpdir(), "loom-sweep-"));
 
@@ -173,8 +174,28 @@ describe("sweepStaleSessions (fs)", () => {
     ]);
   });
 
-  it("a missing dir is a no-op, and the handler wrapper passes through", async () => {
+  it("SessionStart surfaces best-effort cleanup failures through systemMessage", async () => {
+    mkdirSync(SUBAGENT_DIR, { recursive: true });
+    const path = join(SUBAGENT_DIR, `cleanup-diagnostic-${process.pid}-${Date.now()}.active`);
+    symlinkSync(path, path);
+    try {
+      const result = await cleanup("", []);
+      expect(result).toMatchObject({
+        kind: "passthrough",
+        systemMessage: expect.stringContaining(`cleanup-stale-subagents: stat failed for ${path}`),
+      });
+      if (result.kind === "passthrough") {
+        expect(result.systemMessage).toMatch(/ELOOP|too many levels of symbolic links/i);
+      }
+    } finally {
+      rmSync(path, { force: true });
+    }
+  });
+
+  it("a missing dir is a no-op, and a clean handler wrapper passes through without diagnostics", async () => {
     expect(sweepStaleSessions(join(subDir, "nope"), Date.now())).toEqual([]);
-    expect((await cleanup("", [])).kind).toBe("passthrough");
+    const result = await cleanup("", []);
+    expect(result.kind).toBe("passthrough");
+    if (result.kind === "passthrough") expect(result.systemMessage).toBeUndefined();
   });
 });

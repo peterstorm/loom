@@ -32,6 +32,16 @@ import type { TaskGraph } from "../../../src/types";
 const uniq = `roster-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const stateDir = mkdtempSync(join(tmpdir(), "loom-roster-state-"));
 const statePath = join(stateDir, "active_task_graph.json");
+const guardedReviewMachines = join(stateDir, "guarded-review-machines");
+mkdirSync(guardedReviewMachines);
+writeFileSync(join(guardedReviewMachines, "guarded-review-agent.machine.json"), JSON.stringify({
+  agent: "guarded-review-agent",
+  enforcedTools: ["Edit"],
+  phases: [
+    { id: "inspect", allowedTools: [], advance: { event: "FileRead", min: 1 } },
+    { id: "review", terminal: true, allowedTools: [], requires: [] },
+  ],
+}));
 const instant = parseIsoInstant("2026-08-24T00:00:00.000Z");
 const reservationId = parseReservationId("roster-modern-attempt");
 if (!instant.ok || !reservationId.ok) throw new Error("fixture identity failed");
@@ -82,12 +92,12 @@ afterAll(() => {
   rmSync(stateDir, { recursive: true, force: true });
 });
 
-const start = (s: string, agentId = "a-1", agentType = "loom:code-implementer-agent") => {
+const start = (s: string, agentId: string | null = "a-1", agentType = "loom:code-implementer-agent") => {
   const transcript = join(stateDir, `${s}.jsonl`);
   writeFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user", content: "Task ID: T1" } }) + "\n");
   return JSON.stringify({
     session_id: s,
-    agent_id: agentId,
+    ...(agentId === null ? {} : { agent_id: agentId }),
     agent_type: agentType,
     agent_transcript_path: transcript,
   });
@@ -236,6 +246,29 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     expect(existsSync(join(SUBAGENT_DIR, `${evil}.task_graph`))).toBe(false);
     expect(existsSync(join(SUBAGENT_DIR, `${evil}.active`))).toBe(false);
     expect(existsSync(join(SUBAGENT_DIR, `${evil}.machine`))).toBe(false);
+  });
+
+  it.each([
+    ["missing", null],
+    ["invalid", "evil:id"],
+  ])("a machine-bearing review role with a %s agent_id is blocked before roster or pointer capability publication", async (_label, agentId) => {
+    const s = session(`review-${_label}`);
+    process.env.LOOM_STATE_PATH = statePath;
+    const previousMachines = process.env.LOOM_MACHINES_DIR;
+    process.env.LOOM_MACHINES_DIR = guardedReviewMachines;
+    try {
+      const result = await markActive(start(s, agentId, "loom:guarded-review-agent"), []);
+      expect(result).toMatchObject({
+        kind: "block",
+        message: expect.stringContaining("Guarded Skill Machine"),
+      });
+    } finally {
+      if (previousMachines === undefined) delete process.env.LOOM_MACHINES_DIR;
+      else process.env.LOOM_MACHINES_DIR = previousMachines;
+    }
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.active`))).toBe(false);
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.machine`))).toBe(false);
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(false);
   });
 
   it("an unparseable agent_type (path traversal) never reaches loadMachine — no bind, loud stderr", async () => {

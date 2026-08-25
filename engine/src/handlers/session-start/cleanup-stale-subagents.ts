@@ -14,7 +14,7 @@
 
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { HookHandler } from "../../types";
+import { passthroughResult, type HookHandler } from "../../types";
 import { STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../../config";
 import {
   IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
@@ -101,6 +101,10 @@ function diagnostic(
   });
 }
 
+function renderDiagnostic(failure: StaleCleanupDiagnostic): string {
+  return `cleanup-stale-subagents: ${failure.operation} failed for ${failure.path}: ${failure.cause}`;
+}
+
 /** Shell: returns every failed operation with its exact path and cause. */
 export function sweepStaleSessions(
   dir: string,
@@ -134,17 +138,15 @@ export function sweepStaleSessions(
       diagnostics.push(diagnostic("remove", path, error));
     }
   }
-  for (const failure of diagnostics) {
-    process.stderr.write(
-      `cleanup-stale-subagents: ${failure.operation} failed for ${failure.path}: ${failure.cause}\n`,
-    );
-  }
+  for (const failure of diagnostics) process.stderr.write(`${renderDiagnostic(failure)}\n`);
   return Object.freeze(diagnostics);
 }
 
 const handler: HookHandler = async (_stdin, _args) => {
-  sweepStaleSessions(SUBAGENT_DIR, Date.now() - STALE_SUBAGENT_TTL_MS);
-  return { kind: "passthrough" };
+  const diagnostics = sweepStaleSessions(SUBAGENT_DIR, Date.now() - STALE_SUBAGENT_TTL_MS);
+  return passthroughResult(
+    diagnostics.length === 0 ? undefined : diagnostics.map(renderDiagnostic).join("\n"),
+  );
 };
 
 export default handler;

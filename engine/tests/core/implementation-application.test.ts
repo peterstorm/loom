@@ -135,6 +135,30 @@ describe("Task-local byte-scope application core", () => {
     expect(bytes.taskBytesChangedOrUnobservable).toBe(true);
   });
 
+  it("does not let a parser-reported no-op path credit proof bytes from an older attempt", () => {
+    const bytes = observedBytes(authority(), {
+      currentAttemptScope: baseline("src/a.ts", digest("a")),
+      currentProofScope: baseline("src/a.ts", digest("b")),
+      parserModifiedPaths: ["src/a.ts"],
+      priorAttributedPaths: [],
+    });
+    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(bytes.attributedAttemptChangedPaths).toEqual([]);
+    expect(bytes.cumulativeModifiedPaths).toEqual([]);
+    expect(bytes.cumulativeProofArtifactChanges).toEqual([]);
+  });
+
+  it("retains a prior allowed attribution while refusing an additional no-op parser credit", () => {
+    const bytes = observedBytes(authority(), {
+      currentAttemptScope: baseline("src/a.ts", digest("a")),
+      currentProofScope: baseline("src/a.ts", digest("b")),
+      parserModifiedPaths: ["src/a.ts"],
+      priorAttributedPaths: ["src/a.ts"],
+    });
+    expect(bytes.cumulativeModifiedPaths).toEqual(["src/a.ts"]);
+    expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
+  });
+
   it("classifies transcript paths outside the registered attempt scope as semantic failure", () => {
     const bytes = observedBytes(authority(), { parserModifiedPaths: ["foreign.ts"] });
     expect(bytes.suite.checks[0]?.outcome).toEqual({

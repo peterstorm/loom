@@ -4262,11 +4262,12 @@ describe("Pi extension review tool_result integration", () => {
       expect(state.tasks[0].files_modified ?? []).not.toContain(path);
     });
 
-    it("accepts an in-repository relative path through the same boundary", async () => {
+    it("accepts an in-repository no-op path as safe without crediting unchanged bytes", async () => {
       const { state, audit } = await runImplementerWith("pi/extension.ts", "call-safe-in-repo");
 
       expect(audit).not.toContain("unsafe modified-file evidence");
-      expect(state.tasks[0].files_modified ?? []).toContain("pi/extension.ts");
+      expect(state.tasks[0].files_modified ?? []).not.toContain("pi/extension.ts");
+      expect(state.tasks[0].status).toBe("pending");
     });
   });
 });

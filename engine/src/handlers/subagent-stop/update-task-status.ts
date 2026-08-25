@@ -11,7 +11,7 @@
  */
 
 import { readFileSync, realpathSync } from "node:fs";
-import type { HookHandler, HookResult, SubagentStopInput, TaskTestResult } from "../../types";
+import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
 import { legacyTestsPassedNote } from "../../types";
 import { IMPL_AGENTS, machinesDir } from "../../config";
 import { StateManager } from "../../state-manager";
@@ -30,7 +30,6 @@ import {
   epochOf,
   eventsForEpoch,
   foldEvidence,
-  judgeTestRun,
   loadMachine,
   missingRequirements,
   parseAgentId,
@@ -38,16 +37,20 @@ import {
   parseSessionId,
   readEvidence,
 } from "../../machine";
-import type { Evidence, EvidenceRecord, LoadedMachine, Requirement, TrustedTestVerdict } from "../../machine";
+import type { EvidenceRecord, LoadedMachine } from "../../machine";
 import { TRUSTED_LEDGER_ONLY_POLICY } from "../../core/proof-obligations";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
-import { extractTestEvidence } from "../../core/test-evidence";
 import { taskVerificationPolicy } from "../../core/verification-policy";
 import type { ImplementationAuthorityObservation } from "../../implementation-attempt-sidecar";
+import { parseCompleteClaudeJsonl } from "../../core/claude-transcript-integrity";
 import {
-  parseCompleteClaudeJsonl,
   parseIsoInstant,
+  type ImplementationAttemptAuthority,
 } from "../../core/implementation-completion";
+import {
+  capVerdictForMachineCompletion,
+  resolveTestEvidence,
+} from "../../core/implementation-evidence";
 import {
   applyCompletionInfrastructureFailure,
   applyUntrustedStopResolution,
@@ -81,158 +84,6 @@ export function isMachineBound(loaded: LoadedMachine): boolean {
   return loaded.kind !== "none";
 }
 
-// --- Pure: resolve test evidence, ledger first ---
-
-export interface ResolvedTestEvidence {
-  /** Verdict + trust provenance — exactly what gets persisted on the Task. */
-  readonly result: TaskTestResult;
-  /** Human-readable provenance line for test_evidence. */
-  readonly evidence: string;
-}
-
-type TestRunEvidence = Extract<Evidence, { kind: "TestRun" }>;
-
-/**
- * Ground truth beats transcript regex. The agent's own epoch in the
- * evidence ledger decides when it has a trusted TestRun (judgment derived
- * from stored FACTS via judgeTestRun — never read back from the ledger).
- * The verdict comes from the LAST trusted run — except that a trusted
- * FAILURE is considered stale once a later exit-0 run exists (the agent
- * plausibly fixed and re-ran without a report artifact): that case routes
- * to the labeled low-trust fallback, and an untrusted run is NEVER
- * promoted to a trusted pass. The transcript-regex extractor is the
- * explicit lower-trust fallback, labeled by exactly how weak it is:
- * - "low-trust"  — some exit-0 ledger run exists but the verdict could not
- *                  be trusted (no report artifact for the deciding run), OR
- *                  files were modified AFTER the deciding trusted pass (the
- *                  pass vouches for code that no longer exists)
- * - "degraded"   — the machine was bound but the ledger is empty (recorder
- *                  failure: the fallback is running where ground truth was
- *                  expected)
- * - "fallback"   — no machine is bound for this agent type (unbound/legacy
- *                  runs): ground truth was never expected here, so the
- *                  transcript regex is the NORMAL source for the run, not a
- *                  degradation — the label still marks it untrusted
- * - "snapshot-read-failed" — the dispatcher could not READ the ledger
- *                  (`snapshotFailed`): ledger contents are unknown, which is
- *                  distinct from a genuinely-empty ledger — never mislabel
- *                  it "degraded". `ledgerEvents` are ignored in this mode.
- */
-function fallbackEvidenceLabel(
-  demotionLabel: string | null,
-  sawExitZero: boolean,
-  machineBound: boolean,
-  ledgerEmpty: boolean,
-): string {
-  if (demotionLabel !== null) return demotionLabel;
-  if (sawExitZero) return "low-trust (exit 0, no report artifact; transcript-regex)";
-  if (machineBound && ledgerEmpty) {
-    return "degraded (machine bound, no ledger evidence; transcript-regex)";
-  }
-  return "transcript-regex (fallback)";
-}
-
-function untrustedTranscriptEvidence(label: string, bashOutput: string): ResolvedTestEvidence {
-  const transcript = extractTestEvidence(bashOutput);
-  return transcript.passed
-    ? {
-        result: { verdict: "untrusted", passed: true, label, provenance: "unverified" },
-        evidence: `${label}: ${transcript.evidence}`,
-      }
-    : {
-        result: { verdict: "untrusted", passed: false, label, provenance: "unverified" },
-        evidence: "",
-      };
-}
-
-export function resolveTestEvidence(
-  ledgerEvents: readonly Evidence[],
-  bashOutput: string,
-  machineBound: boolean,
-  snapshotFailed: boolean = false,
-): ResolvedTestEvidence {
-  if (snapshotFailed) {
-    return untrustedTranscriptEvidence(
-      "snapshot-read-failed (ledger snapshot unreadable; transcript-regex)",
-      bashOutput,
-    );
-  }
-  // Judge TestRuns keeping their POSITION in the ordered ledger, so later
-  // non-TestRun events (FileWrite) can be related to the deciding run.
-  const judged = ledgerEvents.flatMap((event, index) =>
-    event.kind === "TestRun"
-      ? [{ run: event as TestRunEvidence, index, verdict: judgeTestRun(event.exit, event.report) }]
-      : [],
-  );
-
-  // Last GROUND-TRUTH run (trusted-pass or trusted-fail), with its ledger index.
-  const lastTrusted = judged.reduce<
-    { index: number; run: TestRunEvidence; verdict: TrustedTestVerdict } | null
-  >((acc, { run, index, verdict }) => {
-    return verdict.verdict === "untrusted" ? acc : { index, run, verdict };
-  }, null);
-
-  let demotionLabel: string | null = null;
-  if (lastTrusted !== null) {
-    // A trusted PASS is stale once any FileWrite follows it in the ledger:
-    // the run vouched for code that has since been modified. Demote to the
-    // labeled low-trust fallback — never keep (or re-mint) trusted-pass.
-    const laterFileWrite = ledgerEvents
-      .slice(lastTrusted.index + 1)
-      .some((e) => e.kind === "FileWrite");
-    // A stale trusted failure must not outrank a later untrusted exit-0
-    // run — but that later run earns only the low-trust fallback below,
-    // never a trusted pass.
-    const laterExitZero = judged.some((j) => j.index > lastTrusted.index && j.run.exit === 0);
-
-    const keepTrusted =
-      lastTrusted.verdict.verdict === "trusted-pass" ? !laterFileWrite : !laterExitZero;
-    if (keepTrusted) {
-      const report = lastTrusted.run.report
-        ? `, report: ${lastTrusted.run.report.total} tests / ${lastTrusted.run.report.failed} failed`
-        : "";
-      return {
-        result: lastTrusted.verdict,
-        evidence: `ledger: exit ${lastTrusted.run.exit}${report} (${lastTrusted.run.command})`,
-      };
-    }
-    if (lastTrusted.verdict.verdict === "trusted-pass") {
-      demotionLabel = "low-trust (files modified after last trusted pass; transcript-regex)";
-    }
-  }
-
-  const label = fallbackEvidenceLabel(
-    demotionLabel,
-    judged.some((judgment) => judgment.run.exit === 0),
-    machineBound,
-    ledgerEvents.length === 0,
-  );
-  return untrustedTranscriptEvidence(label, bashOutput);
-}
-
-/**
- * The machine's completion judgment, applied to the resolved verdict: when
- * the agent's machine declares terminal requirements the epoch's evidence
- * does not satisfy, a resolution claiming a TRUSTED PASS is capped at
- * untrusted with a "machine-incomplete" label naming exactly what is
- * missing — completion must not be self-reported past the machine. A
- * trusted FAIL is already ground truth of non-completion (the gate treats
- * it as missing evidence) and is kept as-is; untrusted resolutions are
- * already at the floor.
- */
-export function capVerdictForMachineCompletion(
-  resolved: ResolvedTestEvidence,
-  missing: readonly Requirement[],
-): ResolvedTestEvidence {
-  if (missing.length === 0 || resolved.result.verdict !== "trusted-pass") return resolved;
-  const reqs = missing.map((r) => `${r.event} ≥ ${r.min}`).join(", ");
-  const label = `machine-incomplete: ${reqs}`;
-  return {
-    result: { verdict: "untrusted", passed: true, label, provenance: "unverified" },
-    evidence: `${label} — ${resolved.evidence}`,
-  };
-}
-
 /**
  * The dispatcher's pre-unbind ledger snapshot, as a discriminated union so
  * a FAILED read is never confused with a genuinely empty ledger:
@@ -246,9 +97,42 @@ export type EvidenceSnapshot =
   | { readonly kind: "snapshot"; readonly events: readonly EvidenceRecord[] }
   | { readonly kind: "snapshot-failed" };
 
-type UnreadableTranscriptSettlement =
+type LegacyUnreadableTranscriptSettlement =
   | Readonly<{ kind: "quarantined"; taskId: string }>
   | Readonly<{ kind: "preserved"; executingCount: number }>;
+
+async function settleModernTranscriptUnavailable(
+  manager: StateManager,
+  authority: ImplementationAttemptAuthority,
+  reason: string,
+): Promise<HookResult> {
+  const observedAt = parseIsoInstant(new Date().toISOString(), "Claude transcript failure instant");
+  if (!observedAt.ok) {
+    return { kind: "error", message: `update-task-status: ${observedAt.error.errors.join("; ")}` };
+  }
+  const settlement = await manager.updateAndReturn((state) => {
+    const applied = settleUnavailableImplementation(state, authority, observedAt.value, reason);
+    return { state: applied.kind === "applied" ? applied.state : state, value: applied };
+  });
+  if (settlement.kind === "error") {
+    return {
+      kind: "error",
+      message: `update-task-status: Oracle transcript infrastructure settlement failed: ${JSON.stringify(settlement.error)}`,
+    };
+  }
+  if (settlement.kind === "ignored") {
+    return {
+      kind: "error",
+      message: `update-task-status: unavailable Claude transcript delivery was ignored as ${settlement.reason}; current authority was preserved`,
+    };
+  }
+  return {
+    kind: "error",
+    message:
+      `update-task-status: ${reason}; ${authority.taskId} received an exact non-consuming ` +
+      "infrastructure Oracle receipt and cannot become implemented",
+  };
+}
 
 /**
  * Handler core. `evidenceSnapshot` lets the dispatcher pass ledger records
@@ -357,43 +241,28 @@ export const runUpdateTaskStatus = async (
   // Claude's SubagentStop settlement requires this transcript, so an
   // unlocatable path costs the whole record — see utils/agent-transcript-path.
   const transcriptPath = resolveAgentTranscriptPath(input);
+  if (authority !== null && transcriptPath === null) {
+    return settleModernTranscriptUnavailable(
+      mgr,
+      authority,
+      "Claude transcript unavailable: no resolvable transcript path",
+    );
+  }
   let transcriptContent = "";
   if (transcriptPath) {
     try {
       transcriptContent = readFileSync(transcriptPath, "utf-8");
     } catch (error) {
       const cause = error instanceof Error ? error.message : String(error);
-      const observedAt = parseIsoInstant(new Date().toISOString(), "Claude transcript failure instant");
-      if (!observedAt.ok) {
-        return { kind: "error", message: `update-task-status: ${observedAt.error.errors.join("; ")}` };
+      if (authority !== null) {
+        return settleModernTranscriptUnavailable(mgr, authority, `Claude transcript unreadable: ${cause}`);
       }
-      let oracleFailure: string | null = null;
-      const settlement = await mgr.updateAndReturn<UnreadableTranscriptSettlement>((state) => {
+      const settlement = await mgr.updateAndReturn<LegacyUnreadableTranscriptSettlement>((state) => {
         const executing = state.executing_tasks ?? [];
-        const legacyTaskId = executing.length === 1 ? executing[0] : undefined;
-        const taskId = authority?.taskId ?? legacyTaskId;
+        const taskId = executing.length === 1 ? executing[0] : undefined;
         const target = taskId === undefined ? undefined : state.tasks.find((task) => task.id === taskId);
-        const exactModern = authority !== null &&
-          target?.active_implementation_attempt?.authorityDigest === authority.authorityDigest;
-        const exactLegacy = authority === null && legacyTaskId !== undefined &&
-          target?.active_implementation_attempt === undefined;
-        if (taskId !== undefined && exactModern && authority !== null) {
-          const applied = settleUnavailableImplementation(
-            state,
-            authority,
-            observedAt.value,
-            `Claude transcript unreadable: ${cause}`,
-          );
-          if (applied.kind === "error") {
-            oracleFailure = JSON.stringify(applied.error);
-            return { state, value: { kind: "preserved", executingCount: executing.length } as const };
-          }
-          return {
-            state: applied.state,
-            value: { kind: "quarantined", taskId } as const,
-          };
-        }
-        return taskId !== undefined && exactLegacy
+        const exactLegacy = taskId !== undefined && target?.active_implementation_attempt === undefined;
+        return exactLegacy
           ? {
               state: applyCompletionInfrastructureFailure(state, taskId, true),
               value: { kind: "quarantined", taskId } as const,
@@ -403,9 +272,6 @@ export const runUpdateTaskStatus = async (
               value: { kind: "preserved", executingCount: executing.length } as const,
             };
       });
-      if (oracleFailure !== null) {
-        return { kind: "error", message: `update-task-status: Oracle infrastructure settlement failed: ${oracleFailure}` };
-      }
       if (settlement.kind === "quarantined") {
         return {
           kind: "error",
@@ -426,40 +292,7 @@ export const runUpdateTaskStatus = async (
   if (authority !== null) {
     const integrity = parseCompleteClaudeJsonl(transcriptContent);
     if (integrity.kind === "malformed") {
-      const observedAt = parseIsoInstant(new Date().toISOString(), "Claude transcript integrity failure instant");
-      if (!observedAt.ok) {
-        return { kind: "error", message: `update-task-status: ${observedAt.error.errors.join("; ")}` };
-      }
-      const settlement = await mgr.updateAndReturn((state) => {
-        const applied = settleUnavailableImplementation(
-          state,
-          authority,
-          observedAt.value,
-          integrity.reason,
-        );
-        return {
-          state: applied.kind === "applied" ? applied.state : state,
-          value: applied,
-        };
-      });
-      if (settlement.kind === "error") {
-        return {
-          kind: "error",
-          message: `update-task-status: Oracle transcript-integrity settlement failed: ${JSON.stringify(settlement.error)}`,
-        };
-      }
-      if (settlement.kind === "ignored") {
-        return {
-          kind: "error",
-          message: `update-task-status: malformed Claude JSONL delivery was ignored as ${settlement.reason}; current authority was preserved`,
-        };
-      }
-      return {
-        kind: "error",
-        message:
-          `update-task-status: ${integrity.reason}; ${authority.taskId} received an exact non-consuming ` +
-          "infrastructure Oracle receipt and cannot become implemented",
-      };
+      return settleModernTranscriptUnavailable(mgr, authority, integrity.reason);
     }
     transcriptContent = integrity.transcript;
   }
