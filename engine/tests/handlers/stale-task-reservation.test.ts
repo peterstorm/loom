@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { anyActiveSubagent } from "../../src/machine";
+import { taskFixture } from "../fixtures/task-lifecycle";
 
 const created: string[] = [];
 const previousDir = process.env.LOOM_SUBAGENT_DIR;
@@ -199,15 +200,15 @@ describe("Pi ordering parity", () => {
       current_wave: 1,
       wave_gates: {},
       executing_tasks: ["T1"],
-      tasks: [{
+      tasks: [taskFixture({
         id: "T1",
         description: "pi spawn",
         agent: "code-implementer-agent",
-        status: "pending" as const,
+        status: "pending",
         wave: 1,
         depends_on: [],
         file_list: ["src/a.ts"],
-      }],
+      })],
     };
 
     // Once Pi has marked its roster and graph pointer, the ordinary liveness

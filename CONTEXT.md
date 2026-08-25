@@ -193,8 +193,16 @@ A non-empty exact set of Completion Check Results bound either to one Implementa
 _Avoid_: Test run, CI result, lint result
 
 **Implementation Completion Oracle**:
-The pure aggregate command that combines Implementation Attempt authority, normalized observation, Proof Obligations, Verification Policy, and a Completion Suite Result into exactly one transition: implemented, retry required, escalation required, infrastructure blocked, or ignored stale/duplicate evidence. Pi and Claude Code adapt into it; neither harness is a separate completion authority.
+The pure aggregate command that combines Implementation Attempt authority, normalized observation, Proof Obligations, Verification Policy, and a Completion Suite Result into exactly one transition: implemented, retry required, escalation required, infrastructure blocked, or ignored stale/duplicate evidence. Pi and Claude Code adapt into it; neither harness is a separate completion authority. One exact transition applier consumes its output, appends the settlement receipt, releases only matching authority, and performs review/spec/Wave invalidation atomically.
 _Avoid_: SubagentStop hook, Wave Gate check, test runner, completion service
+
+**Task-local Byte Scope**:
+The exact path set captured in `attempt_artifact_baseline`: declared Task paths plus previously attributed Task paths at registration. `loom:task-byte-scope` compares only those bytes against that attempt baseline. Parser-proven transcript paths outside the set are semantic failure; baseline/path/read/Git uncertainty is infrastructure unavailable. Repository dirty-set delta is conservative invalidation evidence only—never Task attribution, Proof, or sibling evidence. The Task-local suite runs no Task/project subprocesses; build, test, typecheck, reports, and full-tier lint remain Wave-quiescent checks.
+_Avoid_: Repository dirty set, transcript file list, Task test command
+
+**Implementation Settlement Receipt**:
+The immutable, self-digested audit record for one exact Implementation Attempt transition. Retry/escalation receipts consume the semantic attempt; implemented and infrastructure-blocked receipts do not. Receipt identity makes duplicate delivery idempotent and prevents late results from releasing a newer reservation.
+_Avoid_: Rollback receipt, cleanup log, retry counter
 
 **Proof Obligation**:
 An engine-authored requirement a Task must discharge before its status can become implemented: completion, required regression tests, required new tests, and declared artifacts changed. Regression and new-test obligations derive independently from Verification Policy. Evidence keeps its provenance; Pi structured evidence is never relabeled as ledger-trusted.
@@ -270,7 +278,10 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - An interactive Pi phase **Agent** runs through the **Interactive Phase Transport**; every headless role remains on the normal subagent transport
 - A Pi-launched mutating CLI process must match the in-memory extension's **Runtime Revision** before changing protected or run-scoped state
 - A **Task** becomes implemented only after all of its **Proof Obligations** and required Task-scoped Completion Check Results are satisfied
-- An **Implementation Attempt** is settled only by the **Implementation Completion Oracle** under exact engine-issued authority
+- An **Implementation Attempt** is settled only by the **Implementation Completion Oracle** under exact engine-issued authority and one **Implementation Settlement Receipt**
+- A Task-local Completion Suite contains only `loom:task-byte-scope`; it runs no Task/project subprocesses
+- Repository dirty-set delta may invalidate stale authority but never becomes Task attribution, Proof, or sibling evidence
+- Slice 3 classifies retry-required/escalation-required without dispatch; Slice 4 alone freezes retry context and launches semantic attempt 2 or escalation
 - A Task's **Verification Policy** independently determines its regression and new-test **Proof Obligations**
 - A **Verification Manifest** is frozen by the engine before implementation and cannot be authored through decompose output
 - A Task-scoped **Completion Suite Result** binds to one **Implementation Attempt**; a Wave-scoped result binds to a quiescent Wave workspace

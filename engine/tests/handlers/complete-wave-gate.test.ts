@@ -40,6 +40,7 @@ import {
 } from "../../src/core/wave-gate-machine";
 import type { CapturedSpecCheck, Task, TaskGraph } from "../../src/types";
 import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
+import { taskFixture, type TaskFixtureInput } from "../fixtures/task-lifecycle";
 import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../src/core/model-profiles";
 import {
@@ -125,6 +126,11 @@ const baseTask: Task = {
   critical_findings: [],
   advisory_findings: [],
 };
+
+const taskState = (overrides: Partial<TaskFixtureInput> = {}): Task => taskFixture({
+  ...baseTask,
+  ...overrides,
+});
 
 describe("wave-gate durable summary fallback", () => {
   it("writes the documented fallback path", () => {
@@ -248,9 +254,9 @@ describe("checkImplementationProof (pure)", () => {
     );
     expect(checkImplementationProof([baseTask]).passed).toBe(true);
     for (const task of [
-      { ...baseTask, status: "pending" as const },
-      { ...baseTask, status: "pending" as const, proof: failedProof },
-      { ...baseTask, proof: undefined },
+      taskState({ status: "pending" }),
+      taskState({ status: "pending", proof: failedProof }),
+      taskState({ status: "implemented", proof: undefined }),
     ]) {
       const result = checkImplementationProof([task]);
       expect(result.passed).toBe(false);
@@ -523,8 +529,7 @@ describe("computeNextWave (pure)", () => {
 });
 
 describe("generateWaveGateSummary (pure)", () => {
-  const mkTask = (id: string, overrides: Partial<Task> = {}): Task => ({
-    ...baseTask,
+  const mkTask = (id: string, overrides: Partial<TaskFixtureInput> = {}): Task => taskState({
     id,
     description: `Task ${id}`,
     test_evidence: "5 tests passed",
@@ -852,7 +857,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
       { taskCompleted: true, filesModified: [] },
     );
     const state = mkGraph({
-      tasks: [{ ...baseTask, status: "pending", proof: failedProof, new_tests_required: false }],
+      tasks: [taskState({ status: "pending", proof: failedProof, new_tests_required: false })],
     });
     const decision = evaluateWaveGate(state, null, countingDeps().deps);
     expect(decision.verdict.kind).toBe("fail");
@@ -1264,19 +1269,19 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
   it("partitions every Task exactly once and reports roster/evidence/finding gaps", () => {
     const pendingProof = derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] });
     const tasks: Task[] = [
-      { ...baseTask, id: "T1", wave: 1, status: "completed" },
-      { ...baseTask, id: "T2", wave: 2, status: "pending", proof: pendingProof, review_status: "pending",
+      taskState({ id: "T1", wave: 1, status: "completed" }),
+      { ...taskState({ id: "T2", wave: 2, status: "pending", proof: pendingProof }), review_status: "pending",
         review_generation: 1,
         review_run: {
           generation: 1, packet_id: "packet-2", head_sha: "head", prior_finding_ids: [],
           expected_agents: ["code-reviewer", "comment-analyzer"],
           evidence: [{ agent: "code-reviewer", prior_assessments: [], new_findings: [] }],
         } },
-      { ...baseTask, id: "T3", wave: 2, status: "failed", proof: undefined,
+      { ...taskState({ id: "T3", wave: 2, status: "failed" }),
         review_status: "evidence_capture_failed", review_error: "malformed summary",
         review_evidence_failures: ["type-design-analyzer"] },
-      { ...baseTask, id: "T4", wave: 2, status: "implemented" },
-      { ...baseTask, id: "T5", wave: 2, status: "pending", proof: pendingProof, review_status: "pending",
+      taskState({ id: "T4", wave: 2, status: "implemented" }),
+      { ...taskState({ id: "T5", wave: 2, status: "pending", proof: pendingProof }), review_status: "pending",
         critical_findings: ["critical"], advisory_findings: ["advisory"],
         refuted_findings: [{
           finding: { id: "old-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "old" },
@@ -1438,9 +1443,9 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     it("keeps every fact known and names the implementation still owed", () => {
       const graph = unstarted({
         tasks: [
-          { ...baseTask, id: "T1", wave: 1, status: "completed" },
-          { ...baseTask, id: "T2", wave: 1, status: "pending" },
-          { ...baseTask, id: "T3", wave: 1, status: "pending" },
+          taskState({ id: "T1", wave: 1, status: "completed" }),
+          taskState({ id: "T2", wave: 1, status: "pending" }),
+          taskState({ id: "T3", wave: 1, status: "pending" }),
         ],
       });
 
@@ -1475,8 +1480,8 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     it("asks for the Wave Gate once every Task in the Wave is implemented", () => {
       const graph = unstarted({
         tasks: [
-          { ...baseTask, id: "T1", wave: 1, status: "implemented" },
-          { ...baseTask, id: "T2", wave: 1, status: "completed" },
+          taskState({ id: "T1", wave: 1, status: "implemented" }),
+          taskState({ id: "T2", wave: 1, status: "completed" }),
         ],
       });
 
@@ -1497,8 +1502,8 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     it("scopes the owed implementation to the current Wave, ignoring later Waves", () => {
       const graph = unstarted({
         tasks: [
-          { ...baseTask, id: "T1", wave: 1, status: "implemented" },
-          { ...baseTask, id: "T2", wave: 2, status: "pending" },
+          taskState({ id: "T1", wave: 1, status: "implemented" }),
+          taskState({ id: "T2", wave: 2, status: "pending" }),
         ],
       });
 
@@ -1510,7 +1515,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     });
 
     it("renders as a status rather than an authority failure", () => {
-      const graph = unstarted({ tasks: [{ ...baseTask, id: "T1", wave: 1, status: "pending" }] });
+      const graph = unstarted({ tasks: [taskState({ id: "T1", wave: 1, status: "pending" })] });
 
       const human = renderCoreLoomStatusHuman(
         deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps),
@@ -1524,7 +1529,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     // deriveWaveReadiness is the program/resume path; it must keep failing
     // closed on a missing registration even though status no longer does.
     it("leaves the readiness path failing closed on the same graph", () => {
-      const graph = unstarted({ tasks: [{ ...baseTask, id: "T1", wave: 1, status: "pending" }] });
+      const graph = unstarted({ tasks: [taskState({ id: "T1", wave: 1, status: "pending" })] });
 
       expect(deriveWaveReadiness(graph, statusDeps)).toMatchObject({
         ok: false,

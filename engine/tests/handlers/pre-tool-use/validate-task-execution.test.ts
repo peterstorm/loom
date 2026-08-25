@@ -15,6 +15,7 @@ import {
 } from "../../../src/core/validate-task-execution";
 import { validateTaskExecutionBatch } from "../../../src/handlers/task-execution";
 import type { TaskGraph, Task, WaveGate } from "../../../src/types";
+import { taskFixture, type TaskFixtureInput } from "../../fixtures/task-lifecycle";
 
 /** Exercise the production pure decision while preserving concise assertions. */
 function validateExecution(
@@ -28,14 +29,14 @@ function validateExecution(
 }
 
 /** Helper to build a task */
-function mkTask(overrides: Partial<Task> & { id: string; wave: number }): Task {
-  return {
+function mkTask(overrides: Partial<TaskFixtureInput> & { id: string; wave: number }): Task {
+  return taskFixture({
     description: `task ${overrides.id}`,
     agent: "code-implementer-agent",
     status: "pending",
     depends_on: [],
     ...overrides,
-  };
+  });
 }
 
 /** Helper to build a gate */
@@ -294,7 +295,7 @@ describe("validate-task-execution — exclusive ownership", () => {
       mkState([pending], { current_wave: 1 }), input, ["T1"], "parallel", baselines,
     )).toBeNull();
     expect(taskExecutionRegistrationError(
-      mkState([{ ...pending, status: "completed" }], { current_wave: 1 }),
+      mkState([taskFixture({ ...pending, status: "completed" })], { current_wave: 1 }),
       input, ["T1"], "parallel", baselines,
     )).toContain("already completed");
     expect(taskExecutionRegistrationError(
@@ -339,19 +340,19 @@ describe("validate-task-execution — reservation grace window (startup-race saf
     // Wave remediation re-spawns against an already-implemented task; a sibling
     // gate vetoes it AFTER this registration committed. No stop hook will ever
     // clear the entry, so past grace with no active agent it must be reclaimed.
-    const done = { ...reserved("T1", T0), status: "implemented" as const };
+    const done = taskFixture({ ...reserved("T1", T0), status: "implemented" });
     const state = mkState([done], { executing_tasks: ["T1"] });
     expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS + 1)).toEqual(new Set(["T1"]));
   });
 
   it("reclaims a stranded reservation on a failed task", () => {
-    const failed = { ...reserved("T1", T0), status: "failed" as const };
+    const failed = taskFixture({ ...reserved("T1", T0), status: "failed" });
     const state = mkState([failed], { executing_tasks: ["T1"] });
     expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS + 1)).toEqual(new Set(["T1"]));
   });
 
   it("never reclaims a completed task, which can no longer be executed at all", () => {
-    const done = { ...reserved("T1", T0), status: "completed" as const };
+    const done = taskFixture({ ...reserved("T1", T0), status: "completed" });
     const state = mkState([done], { executing_tasks: ["T1"] });
     expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS * 100)).toEqual(new Set());
   });
@@ -362,13 +363,13 @@ describe("validate-task-execution — reservation grace window (startup-race saf
   });
 
   it("still shields an implemented task's reservation inside the grace window", () => {
-    const done = { ...reserved("T1", T0), status: "implemented" as const };
+    const done = taskFixture({ ...reserved("T1", T0), status: "implemented" });
     const state = mkState([done], { executing_tasks: ["T1"] });
     expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS)).toEqual(new Set());
   });
 
   it("still shields an aged implemented reservation while an agent is active for the graph", () => {
-    const done = { ...reserved("T1", T0), status: "implemented" as const };
+    const done = taskFixture({ ...reserved("T1", T0), status: "implemented" });
     const state = mkState([done], { executing_tasks: ["T1"] });
     expect(staleReservationsFromState(state, true, T0 + RESERVATION_GRACE_MS * 100)).toEqual(new Set());
   });

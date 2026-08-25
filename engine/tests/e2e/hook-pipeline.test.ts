@@ -3,6 +3,8 @@ import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, chmodSync,
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { TaskGraph, Task, WaveGate } from "../../src/types";
+import { evaluateProofObligations } from "../../src/core/proof-obligations";
+import { pendingTaskProof } from "../fixtures/task-lifecycle";
 
 /**
  * E2E integration test: simulates full hook lifecycle with real filesystem.
@@ -35,6 +37,7 @@ function mkTask(id: string, wave: number, deps: string[] = []): Task {
     agent: "code-implementer-agent",
     wave,
     status: "pending",
+    proof: pendingTaskProof(),
     depends_on: deps,
   };
 }
@@ -68,20 +71,41 @@ function validateExecution(taskId: string, state: TaskGraph): "allow" | "block" 
 function markImplemented(path: string, taskId: string, testsPassed: boolean) {
   updateState(path, (s) => ({
     ...s,
-    tasks: s.tasks.map((t) =>
-      t.id === taskId
+    tasks: s.tasks.map((t): Task => {
+      if (t.id !== taskId || t.proof === undefined) return t;
+      const proof = evaluateProofObligations(t.proof.obligations, {
+        taskCompleted: true,
+        testResult: testsPassed ? { verdict: "trusted-pass" } : { verdict: "trusted-fail" },
+        filesModified: [],
+        newTestsWritten: true,
+        newTestEvidence: "1 new test, 1 assertion",
+      });
+      const evidence = {
+        test_result: testsPassed
+          ? ({ verdict: "trusted-pass" } as const)
+          : ({ verdict: "trusted-fail" } as const),
+        test_evidence: testsPassed ? "mock evidence" : "",
+        new_tests_written: true,
+        new_test_evidence: "1 new test, 1 assertion",
+      };
+      return proof.state === "satisfied"
         ? {
             ...t,
-            status: "implemented" as const,
-            test_result: testsPassed
-              ? ({ verdict: "trusted-pass" } as const)
-              : ({ verdict: "trusted-fail" } as const),
-            test_evidence: testsPassed ? "mock evidence" : "",
-            new_tests_written: true,
-            new_test_evidence: "1 new test, 1 assertion",
+            status: "implemented",
+            proof,
+            revalidation_required: undefined,
+            legacy_missing_proof: undefined,
+            ...evidence,
           }
-        : t,
-    ),
+        : {
+            ...t,
+            status: "pending",
+            proof,
+            revalidation_required: t.revalidation_required,
+            legacy_missing_proof: undefined,
+            ...evidence,
+          };
+    }),
     executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
   }));
 }
@@ -206,10 +230,11 @@ describe("E2E: hook pipeline state machine", () => {
     expect(state.tasks.every((t) => t.status === "completed")).toBe(true);
   });
 
-  it("task with failed tests still marks implemented", () => {
+  it("task with failed tests remains pending with failed Proof", () => {
     markImplemented(statePath, "T1", false);
     const state = readState(statePath);
-    expect(state.tasks.find((t) => t.id === "T1")!.status).toBe("implemented");
+    expect(state.tasks.find((t) => t.id === "T1")!.status).toBe("pending");
+    expect(state.tasks.find((t) => t.id === "T1")!.proof?.state).toBe("failed");
     expect(state.tasks.find((t) => t.id === "T1")!.test_result).toEqual({ verdict: "trusted-fail" });
   });
 

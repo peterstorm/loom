@@ -44,7 +44,12 @@ import {
   parseOrchestrationRunId,
   parseSlotId,
 } from "./core/orchestration-contract";
-import { deriveProofObligations, parseTaskProof, parseTaskTestResult } from "./core/proof-obligations";
+import {
+  derivePendingTaskProof,
+  deriveProofObligations,
+  parseTaskProof,
+  parseTaskTestResult,
+} from "./core/proof-obligations";
 import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
 import { parseStoredSpecCheck } from "./core/spec-check";
 import { waveHasBlockCause } from "./core/wave-gate-model";
@@ -58,6 +63,11 @@ import {
   parseAcceptedWaveCompletionReceipt,
   type AcceptedWaveCompletionReceipt,
 } from "./core/completion-suite";
+import {
+  canonicalArtifactBaselineDigest,
+  parseImplementationAttemptAuthority,
+  parseImplementationAttemptHistory,
+} from "./core/implementation-completion";
 import {
   authorizeWaveCompletionSuite,
   defaultVerificationManifest,
@@ -737,6 +747,7 @@ export function taskUnionError(v: unknown, index: number): string | null {
   // its own. The first failure wins, so the operator sees the outermost cause.
   return taskShapeError(t, index, id)
     ?? taskBaselineError(t, index, id)
+    ?? taskAttemptAuthorityError(t, index, id)
     ?? taskPacketError(t, index, id)
     ?? taskStatusError(t, index, id)
     ?? taskEvidenceError(t, index, id)
@@ -799,9 +810,6 @@ function taskBaselineError(
   index: number,
   id: string,
 ): string | null {
-  // Both baselines answer the same question — does the declared baseline agree
-  // with file_list, in order — and differ only in whether file_list must be the
-  // WHOLE baseline or just its prefix. One comparison, two coverage rules.
   const fileListAgreement = (
     raw: unknown,
     field: "artifact_baseline" | "attempt_artifact_baseline",
@@ -833,13 +841,35 @@ function taskBaselineError(
     if (error !== null) return error;
   }
   if (t.attempt_artifact_baseline !== undefined) {
-    const error = fileListAgreement(
-      t.attempt_artifact_baseline,
-      "attempt_artifact_baseline",
-      "prefix",
-      "must cover file_list first and in order",
-    );
-    if (error !== null) return error;
+    const label = `tasks[${index}] ("${id}"): attempt_artifact_baseline`;
+    const baseline = parseDeclaredArtifactBaseline(t.attempt_artifact_baseline, label);
+    if (!baseline.ok) return baseline.errors.join("; ");
+    if (t.active_implementation_attempt !== undefined) {
+      const expectedRaw = [
+        ...(Array.isArray(t.file_list) ? t.file_list : []),
+        ...(Array.isArray(t.files_modified) ? t.files_modified : []),
+      ];
+      const expected: string[] = [];
+      for (const [pathIndex, rawPath] of expectedRaw.entries()) {
+        const parsed = parseReviewPath(rawPath, `${label}.registration_scope[${pathIndex}]`);
+        if (!parsed.ok) return parsed.errors.join("; ");
+        if (!expected.includes(parsed.value)) expected.push(parsed.value);
+      }
+      const actual = baseline.value.map(({ artifact }) => artifact);
+      const actualSet = new Set(actual);
+      if (actual.length !== expected.length || actualSet.size !== expected.length ||
+          expected.some((path) => !actualSet.has(path))) {
+        return `${label} path set must exactly equal unique(file_list + files_modified) at registration scope`;
+      }
+    } else {
+      const error = fileListAgreement(
+        t.attempt_artifact_baseline,
+        "attempt_artifact_baseline",
+        "prefix",
+        "must cover file_list first and in order",
+      );
+      if (error !== null) return error;
+    }
   }
   if (t.attempt_repository_baseline !== undefined) {
     const baseline = parseDeclaredArtifactBaseline(
@@ -847,6 +877,66 @@ function taskBaselineError(
       `tasks[${index}] ("${id}"): attempt_repository_baseline`,
     );
     if (!baseline.ok) return baseline.errors.join("; ");
+  }
+  return null;
+}
+
+/** Modern attempt authority, baseline digest lockstep, and exact receipt history. */
+function taskAttemptAuthorityError(
+  t: Record<string, unknown>,
+  index: number,
+  id: string,
+): string | null {
+  const label = `tasks[${index}] ("${id}")`;
+  const history = t.implementation_attempt_history === undefined
+    ? undefined
+    : parseImplementationAttemptHistory(
+        t.implementation_attempt_history,
+        `${label}: implementation_attempt_history`,
+      );
+  if (history !== undefined) {
+    if (!history.ok) return history.error.errors.join("; ");
+    if (history.value.some((receipt) => receipt.taskId !== id)) {
+      return `${label}: implementation_attempt_history receipt taskId must equal ${id}`;
+    }
+  }
+  if (t.legacy_execution_reservation !== undefined && t.legacy_execution_reservation !== true) {
+    return `${label}: legacy_execution_reservation must be true when present`;
+  }
+  if (t.active_implementation_attempt === undefined) return null;
+  if (t.legacy_execution_reservation === true) {
+    return `${label}: active_implementation_attempt cannot coexist with legacy_execution_reservation`;
+  }
+  if (t.legacy_missing_proof === true || t.proof === undefined) {
+    return `${label}: active_implementation_attempt requires modern authored Proof`;
+  }
+  const authority = parseImplementationAttemptAuthority(t.active_implementation_attempt);
+  if (!authority.ok) return `${label}: invalid active_implementation_attempt: ${authority.error.errors.join("; ")}`;
+  if (authority.value.taskId !== id || authority.value.wave !== t.wave) {
+    return `${label}: active_implementation_attempt must match Task id and Wave`;
+  }
+  if (history?.ok && history.value.some((receipt) =>
+    receipt.authorityDigest === authority.value.authorityDigest ||
+    receipt.reservationId === authority.value.reservationId)) {
+    return `${label}: active_implementation_attempt authorityDigest and reservationId must be absent from implementation_attempt_history`;
+  }
+  if (t.reserved_at !== authority.value.reservedAt) {
+    return `${label}: reserved_at must equal active_implementation_attempt.reservedAt`;
+  }
+  if (t.attempt_artifact_baseline === undefined || t.attempt_repository_baseline === undefined) {
+    return `${label}: active_implementation_attempt requires both attempt baselines`;
+  }
+  const taskDigest = canonicalArtifactBaselineDigest(t.attempt_artifact_baseline);
+  const dirtyDigest = canonicalArtifactBaselineDigest(t.attempt_repository_baseline);
+  if (!taskDigest.ok || !dirtyDigest.ok) {
+    return `${label}: active attempt baseline is invalid: ${[
+      ...(taskDigest.ok ? [] : taskDigest.error.errors),
+      ...(dirtyDigest.ok ? [] : dirtyDigest.error.errors),
+    ].join("; ")}`;
+  }
+  if (taskDigest.value !== authority.value.taskScopeBaselineDigest ||
+      dirtyDigest.value !== authority.value.dirtySetBaselineDigest) {
+    return `${label}: active attempt baseline digests do not match active_implementation_attempt`;
   }
   return null;
 }
@@ -958,65 +1048,75 @@ function taskPacketError(
   return null;
 }
 
-/** Status, review status/generation/run, and proof obligations. */
+/** Status, review status/generation/run, and exact flat lifecycle invariants. */
 function taskStatusError(
   t: Record<string, unknown>,
   index: number,
   id: string,
 ): string | null {
+  const label = `tasks[${index}] ("${id}")`;
   if (!(TASK_STATUSES as readonly string[]).includes(t.status as string)) {
-    return `tasks[${index}] ("${id}"): status ${JSON.stringify(t.status)} is not one of ${TASK_STATUSES.join(", ")}`;
+    return `${label}: status ${JSON.stringify(t.status)} is not one of ${TASK_STATUSES.join(", ")}`;
   }
-  const verification = parseTaskVerificationPolicy(t, `tasks[${index}] ("${id}")`);
+  const verification = parseTaskVerificationPolicy(t, label);
   if (!verification.ok) return verification.errors.join("; ");
   if (t.review_status !== undefined && !(REVIEW_STATUSES as readonly string[]).includes(t.review_status as string)) {
-    return `tasks[${index}] ("${id}"): review_status ${JSON.stringify(t.review_status)} is not one of ${REVIEW_STATUSES.join(", ")}`;
+    return `${label}: review_status ${JSON.stringify(t.review_status)} is not one of ${REVIEW_STATUSES.join(", ")}`;
   }
   if (t.review_generation !== undefined && (
     typeof t.review_generation !== "number" || !Number.isInteger(t.review_generation) || t.review_generation < 0
-  )) {
-    return `tasks[${index}] ("${id}"): review_generation must be a non-negative integer`;
-  }
-  if (t.review_run !== undefined && t.review_generation === undefined) {
-    return `tasks[${index}] ("${id}"): review_run requires review_generation`;
-  }
+  )) return `${label}: review_generation must be a non-negative integer`;
+  if (t.review_run !== undefined && t.review_generation === undefined) return `${label}: review_run requires review_generation`;
   if (t.review_run !== undefined && t.review_status !== "pending" && t.review_status !== "evidence_capture_failed") {
-    return `tasks[${index}] ("${id}"): an in-progress review_run requires pending or evidence_capture_failed status`;
+    return `${label}: an in-progress review_run requires pending or evidence_capture_failed status`;
   }
   if (t.revalidation_required !== undefined && t.revalidation_required !== true) {
-    return `tasks[${index}] ("${id}"): revalidation_required must be true when present`;
+    return `${label}: revalidation_required must be true when present`;
   }
   if (t.revalidation_required === true && t.status !== "pending") {
-    return `tasks[${index}] ("${id}"): revalidation_required requires pending status until fresh task evidence is recorded`;
+    return `${label}: revalidation_required requires pending status until fresh task evidence is recorded`;
   }
-  const statusClaimsImplementation = t.status === "implemented" || t.status === "completed";
-  if (t.proof !== undefined) {
-    const proof = parseTaskProof(t.proof);
-    if (!proof.ok) {
-      return `tasks[${index}] ("${id}"): invalid proof: ${proof.errors.join("; ")}`;
+  if (t.legacy_missing_proof !== undefined && t.legacy_missing_proof !== true) {
+    return `${label}: legacy_missing_proof must be true when present`;
+  }
+
+  if (t.proof === undefined) {
+    if (t.status === "pending") {
+      return t.legacy_missing_proof === undefined
+        ? null
+        : `${label}: pending lifecycle cannot carry legacy_missing_proof`;
     }
-    const expectedObligations = deriveProofObligations({
-      verificationPolicy: verification.value.policy,
-      declaredArtifacts: Array.isArray(t.file_list) ? t.file_list : [],
+    if (t.status === "implemented" || t.status === "completed") return null;
+    return `${label}: modern failed lifecycle requires failed Proof`;
+  }
+  if (t.legacy_missing_proof === true) return `${label}: legacy_missing_proof requires absent Proof`;
+  const proof = parseTaskProof(t.proof);
+  if (!proof.ok) return `${label}: invalid proof: ${proof.errors.join("; ")}`;
+  const expectedObligations = deriveProofObligations({
+    verificationPolicy: verification.value.policy,
+    declaredArtifacts: Array.isArray(t.file_list) ? t.file_list : [],
+  });
+  const obligationsMatch = proof.value.obligations.length === expectedObligations.length &&
+    proof.value.obligations.every((actual, obligationIndex) => {
+      const expected = expectedObligations[obligationIndex];
+      return expected !== undefined && actual.kind === expected.kind &&
+        (actual.kind !== "declared-artifact-changed" ||
+          (expected.kind === "declared-artifact-changed" && actual.artifact === expected.artifact));
     });
-    const obligationsMatch = proof.value.obligations.length === expectedObligations.length &&
-      proof.value.obligations.every((actual, obligationIndex) => {
-        const expected = expectedObligations[obligationIndex];
-        return expected !== undefined && actual.kind === expected.kind &&
-          (actual.kind !== "declared-artifact-changed" ||
-            (expected.kind === "declared-artifact-changed" && actual.artifact === expected.artifact));
-      });
-    if (!obligationsMatch) {
-      return `tasks[${index}] ("${id}"): proof obligations do not exactly match verification policy and file_list`;
-    }
-    if (t.revalidation_required !== true && statusClaimsImplementation !== (proof.value.state === "satisfied")) {
-      return (
-        `tasks[${index}] ("${id}"): status/proof lockstep violated — ` +
-        `implemented/completed iff proof.state is satisfied`
-      );
-    }
+  if (!obligationsMatch) return `${label}: proof obligations do not exactly match verification policy and file_list`;
+  if (t.status === "pending") {
+    return t.revalidation_required === true || proof.value.state !== "satisfied"
+      ? null
+      : `${label}: status/proof lockstep violated — pending lifecycle without revalidation cannot carry satisfied Proof`;
   }
-  return null;
+  if (t.status === "implemented" || t.status === "completed") {
+    return proof.value.state === "satisfied"
+      ? null
+      : `${label}: status/proof lockstep violated — ${t.status} lifecycle requires satisfied Proof`;
+  }
+  return proof.value.state === "failed"
+    ? null
+    : `${label}: status/proof lockstep violated — failed lifecycle requires failed Proof`;
 }
 
 /** Test evidence. The acceptance DECISION is delegated to parseTaskTestResult —
@@ -1334,25 +1434,79 @@ function taskGraphScalarFieldError(obj: Record<string, unknown>): string | null 
   return null;
 }
 
+function migrateParsedTask(
+  task: Record<string, unknown>,
+  index: number,
+  executing: ReadonlySet<string>,
+): ParseResult<Record<string, unknown>> {
+  const verification = parseTaskVerificationPolicy(task, `tasks[${index}]`);
+  if (!verification.ok) return parseErr(verification.errors.join("; "));
+  let migrated = { ...task };
+  if (task.proof === undefined && task.status === "pending") {
+    migrated = {
+      ...migrated,
+      proof: derivePendingTaskProof({
+        verificationPolicy: verification.value.policy,
+        declaredArtifacts: Array.isArray(task.file_list) ? task.file_list : [],
+      }),
+    };
+  } else if (task.proof === undefined && (task.status === "implemented" || task.status === "completed")) {
+    migrated = { ...migrated, legacy_missing_proof: true };
+  } else if (task.proof !== undefined) {
+    const proof = parseTaskProof(task.proof);
+    if (!proof.ok) return parseErr(proof.errors.join("; "));
+    migrated = { ...migrated, proof: proof.value };
+  }
+  if (task.active_implementation_attempt !== undefined) {
+    const authority = parseImplementationAttemptAuthority(task.active_implementation_attempt);
+    if (!authority.ok) return parseErr(authority.error.errors.join("; "));
+    migrated = { ...migrated, active_implementation_attempt: authority.value };
+  } else if (executing.has(String(task.id))) {
+    migrated = { ...migrated, legacy_execution_reservation: true };
+  } else {
+    const { legacy_execution_reservation: staleLegacyClassification, ...withoutLegacyClassification } = migrated;
+    void staleLegacyClassification;
+    migrated = withoutLegacyClassification;
+  }
+  if (task.implementation_attempt_history !== undefined) {
+    const history = parseImplementationAttemptHistory(task.implementation_attempt_history);
+    if (!history.ok) return parseErr(history.error.errors.join("; "));
+    migrated = { ...migrated, implementation_attempt_history: history.value };
+  }
+  if (task.test_result !== undefined) {
+    const testResult = parseTaskTestResult(task.test_result, `tasks[${index}]: test_result`);
+    if (!testResult.ok) return parseErr(testResult.errors.join("; "));
+    migrated = { ...migrated, test_result: testResult.value };
+  }
+  return parseOk(migrated);
+}
+
 function parseTaskGraphTasks(obj: Record<string, unknown>): ParseResult<readonly unknown[]> {
   const tasks = obj.tasks ?? [];
   if (!Array.isArray(tasks)) return parseErr("tasks must be an array");
+  const executing = new Set(Array.isArray(obj.executing_tasks) ? obj.executing_tasks.map(String) : []);
   const parsedTasks: Record<string, unknown>[] = [];
   for (let i = 0; i < tasks.length; i++) {
     const err = taskUnionError(tasks[i], i);
     if (err !== null) return parseErr(err);
-    const task = tasks[i] as Record<string, unknown>;
-    if (task.test_result === undefined) {
-      parsedTasks.push(task);
-      continue;
-    }
-    const testResult = parseTaskTestResult(task.test_result, `tasks[${i}]: test_result`);
-    if (!testResult.ok) return parseErr(testResult.errors.join("; "));
-    parsedTasks.push({ ...task, test_result: testResult.value });
+    const migrated = migrateParsedTask(tasks[i] as Record<string, unknown>, i, executing);
+    if (!migrated.ok) return migrated;
+    parsedTasks.push(migrated.value);
   }
   const taskIds = parsedTasks.map((task) => task.id as string);
   const duplicateTaskId = taskIds.find((id, index) => taskIds.indexOf(id) !== index);
   if (duplicateTaskId !== undefined) return parseErr(`duplicate task id: ${duplicateTaskId}`);
+  const relationError = parsedTasks.flatMap((task) => {
+    const id = task.id as string;
+    const isExecuting = executing.has(id);
+    const modern = task.active_implementation_attempt !== undefined;
+    const legacy = task.legacy_execution_reservation === true;
+    if (modern && !isExecuting) return [`Task ${id}: active_implementation_attempt requires executing_tasks membership`];
+    if (legacy && !isExecuting) return [`Task ${id}: legacy_execution_reservation requires executing_tasks membership`];
+    if (isExecuting && !modern && !legacy) return [`Task ${id}: executing reservation is unclassified`];
+    return [];
+  })[0];
+  if (relationError !== undefined) return parseErr(relationError);
   const dependencyError = taskDependencyErrors(parsedTasks)[0];
   if (dependencyError !== undefined) return parseErr(dependencyError);
   const trace = parseSpecTraceContract(obj.spec_trace_version, parsedTasks);

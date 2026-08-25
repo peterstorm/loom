@@ -45,7 +45,8 @@ const handler: HookHandler = async (stdin, args) => {
       }
       return {
         ...t,
-        status: "implemented" as const,
+        // Evidence storage is not positive completion authority. The
+        // Implementation Completion Oracle alone may change Task lifecycle.
         // Helper-reported stdin is agent-controlled text — never trusted.
         test_result: {
           verdict: "untrusted" as const,

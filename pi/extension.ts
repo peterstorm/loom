@@ -28,15 +28,16 @@ import {
   type TaskExecutionRosterObservation,
   type TaskExecutionSpawn,
 } from "../engine/src/core/validate-task-execution";
-import { validateTaskExecutionBatch } from "../engine/src/handlers/task-execution";
+import {
+  registerTaskExecutionBatch,
+  rollbackTaskExecutionRegistration,
+} from "../engine/src/handlers/task-execution";
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { admitPiSpawnBatch, MAX_PI_ORCHESTRATION_BATCH_SIZE } from "../engine/src/core/spawn-admission";
 
 
 // Engine SubagentStop logic (harness-agnostic functions already exported)
-import {
-  applyUntrustedStopResolution,
-} from "../engine/src/handlers/subagent-stop/update-task-status";
+import { settleUnavailableImplementation } from "../engine/src/core/implementation-application";
 import {
   applyReviewResolution,
   hasStandaloneReviewContext,
@@ -55,6 +56,7 @@ import {
   piSubagentFailureSignals,
   piSubagentResultFailed,
   type PiResultOutcome,
+  type PiSubagentResultEntry,
   type RepositoryProbe,
   type TaskGraphStore,
 } from "./subagent-result";
@@ -73,14 +75,17 @@ import { anyActiveSubagent, fsSessionRegistry, parseAgentId, parseSessionId, ros
 import type { AgentId } from "../engine/src/machine/evidence";
 import { buildContextOutput } from "../engine/src/handlers/session-start/resume-after-clear";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
-import { classifyMissingReservedResults } from "./reserved-results";
+import {
+  alignPiImplementationAuthorities,
+  classifyMissingReservedResults,
+} from "./reserved-results";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import * as git from "../engine/src/utils/git";
 
 // Linter integration (PostEdit lint via tool_result)
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
 import { lintFile } from "../engine/src/linter/index";
-import { piResultFinalPayloadCandidates } from "./transcript-adapter";
+import { parsePiMessages, piResultFinalPayloadCandidates } from "./transcript-adapter";
 // FR-033: Pi and Claude Code capture each completed reviewer/verifier output
 // into the SAME engine-declared slot under the same refusals. Both drive this
 // one runtime; only the native correlator and the payload observation differ.
@@ -107,12 +112,13 @@ import {
 } from "../engine/src/orchestration/session-run-bindings";
 import { captureKey, type CaptureKey } from "../engine/src/core/harness-capture";
 import type { AgentRequestAuthority } from "../engine/src/core/orchestration-contract";
+import {
+  parseIsoInstant,
+  type ImplementationAttemptAuthority,
+} from "../engine/src/core/implementation-completion";
 import { materializePiResources } from "./resources";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
 import { buildPiRoutingContext } from "../engine/src/utils/model-routing-context";
-import {
-  compareAttemptBaseline,
-} from "../engine/src/utils/artifact-baseline";
 import { planPiWriteGrants } from "../engine/src/core/pi-write-grant-plan";
 import {
   consumePiWriteGrant,
@@ -660,6 +666,7 @@ type PiSpawnReservation = Readonly<{
     agentType: string;
     rosterId: AgentId;
     taskId: string | null;
+    implementationAuthority: ImplementationAttemptAuthority | null;
     /** The closed lifecycle union, not an independent boolean pair: two
      *  booleans admitted the impossible {implementation: true, standalone:
      *  true} and left the third lifecycle state nameless. The source union's
@@ -678,6 +685,32 @@ type PiSpawnReservation = Readonly<{
  */
 function spawnedWithoutTaskGraph(reservation: PiSpawnReservation | undefined): boolean {
   return reservation !== undefined && !reservation.graphActiveAtSpawn;
+}
+
+function reservedImplementationFailure(
+  expectedAgent: string,
+  expectedTaskId: string,
+  authorityTaskId: string,
+  entry: PiSubagentResultEntry | undefined,
+): string | null {
+  if (entry === undefined) return "reserved implementation result was missing";
+  if (!entry.ok) return `reserved implementation result was malformed: ${entry.problem}`;
+  const resultAgent = stripNamespace(entry.result.agent);
+  if (resultAgent !== expectedAgent) {
+    return `reserved ${expectedAgent} result was returned as ${resultAgent}`;
+  }
+  const parsedMessages = parsePiMessages(entry.result.messages);
+  if (!parsedMessages.ok) {
+    return `reserved implementation transcript was malformed: ${parsedMessages.errors.join("; ")}`;
+  }
+  const returnedTaskId = extractTaskId(entry.result.task);
+  if (returnedTaskId === null || returnedTaskId !== expectedTaskId || returnedTaskId !== authorityTaskId) {
+    return `reserved implementation result Task identity mismatch: returned=${returnedTaskId ?? "missing"}, ` +
+      `reserved=${expectedTaskId}, authority=${authorityTaskId}`;
+  }
+  return piSubagentResultFailed(entry.result)
+    ? `${expectedAgent} failed before implementation evidence completed`
+    : null;
 }
 
 function recoverPiSpawnReservation(
@@ -748,6 +781,7 @@ function recoverPiSpawnReservation(
           agentType: item.agentType,
           rosterId: item.rosterId,
           taskId: null,
+          implementationAuthority: null,
           kind: "standalone" as const,
         });
       })),
@@ -1254,13 +1288,13 @@ export default function (pi: ExtensionAPI) {
         }
 
         currentGuard = "validate-task-execution";
-        let taskResult;
+        let taskRegistration;
         try {
           const executionMode = event.toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL ||
               Array.isArray((event.input as { chain?: unknown }).chain)
             ? "sequential" as const
             : "parallel" as const;
-          taskResult = await validateTaskExecutionBatch(
+          taskRegistration = await registerTaskExecutionBatch(
             taskExecutionSpawns,
             executionMode,
             rosterObservation,
@@ -1272,9 +1306,31 @@ export default function (pi: ExtensionAPI) {
             error instanceof Error ? { cause: error } : undefined,
           );
         }
-        if (taskResult.kind === "block") {
+        if (taskRegistration.kind === "block") {
           const cleanupErrors = await rollbackLifecycle();
-          return { block: true, reason: `${taskResult.message}${cleanupFailureSuffix(cleanupErrors)}` };
+          return { block: true, reason: `${taskRegistration.message}${cleanupFailureSuffix(cleanupErrors)}` };
+        }
+        const alignment = graphIsActive
+          ? alignPiImplementationAuthorities(
+              parsedItems,
+              taskExecutionSpawns,
+              taskRegistration.authorities,
+            )
+          : {
+              ok: true as const,
+              authoritiesBySlot: Object.freeze(parsedItems.map(() => null)),
+            };
+        if (!alignment.ok) {
+          const registrationRollback = await rollbackTaskExecutionRegistration(taskRegistration.authorities);
+          const cleanupErrors = await rollbackLifecycle();
+          const rollbackErrors = [
+            ...(registrationRollback.kind === "block" ? [registrationRollback.message] : []),
+            ...cleanupErrors,
+          ];
+          return {
+            block: true,
+            reason: `BLOCKED: ${alignment.error}${cleanupFailureSuffix(rollbackErrors)}`,
+          };
         }
         const sessionRuntime = runtimeFor(safeSessionId);
         if (writeGrants.length > 0) {
@@ -1290,6 +1346,7 @@ export default function (pi: ExtensionAPI) {
             agentType: item.agent,
             rosterId: rosterIds[index]!,
             taskId: extractTaskId(item.task),
+            implementationAuthority: alignment.authoritiesBySlot[index] ?? null,
             kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
           })),
         });
@@ -1649,7 +1706,7 @@ export default function (pi: ExtensionAPI) {
     };
 
     const finalizeReservedImplementations = async (
-      rawResults: readonly unknown[],
+      entries: readonly PiSubagentResultEntry[],
     ): Promise<readonly string[]> => {
       if (!reservation || !reservation.items.some((item) => item.kind === "implementation")) return [];
       let manager: StateManager | null;
@@ -1681,84 +1738,58 @@ export default function (pi: ExtensionAPI) {
         process.stderr.write(`loom(pi): ${diagnostic}\n`);
         return [diagnostic];
       }
-      const root = git.repositoryRoot() ?? process.cwd();
+      const finalizedAt = parseIsoInstant(new Date().toISOString(), "Pi finalization instant");
+      if (!finalizedAt.ok) return [finalizedAt.error.errors.join("; ")];
       try {
-        await manager.update((initial) => {
+        const committed = await manager.updateAndReturn((initial) => {
           let state = initial;
+          const diagnostics: string[] = [];
+          const logs: string[] = [];
           for (const [index, item] of reservation.items.entries()) {
             if (item.kind !== "implementation" || item.taskId === null) continue;
-            const raw = rawResults[index];
-            const envelope = typeof raw === "object" && raw !== null && !Array.isArray(raw)
-              ? raw as Record<string, unknown>
-              : null;
-            const resultAgent = typeof envelope?.agent === "string"
-              ? stripNamespace(envelope.agent)
-              : null;
-            const succeeded = resultAgent === item.agentType && !piSubagentResultFailed({
-              exitCode: envelope?.exitCode,
-              stopReason: envelope?.stopReason,
-            });
-            if (succeeded) continue;
-
-            const task = state.tasks.find((candidate) => candidate.id === item.taskId);
-            if (!task) {
-              state = {
-                ...state,
-                executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== item.taskId),
-              };
-              continue;
-            }
-
-            const comparison = compareAttemptBaseline(root, task, { kind: "repository" });
-            const { changedDeclaredArtifacts, bytesChangedSinceAttempt } = comparison;
-            if (comparison.failure !== null) {
-              // Comparison failure cannot prove the old evidence still matches
-              // current bytes. The shared helper already failed closed
-              // (bytesChangedSinceAttempt: true); retain the concrete
-              // diagnostic for the operator.
-              process.stderr.write(
-                `loom(pi): failed-attempt baseline comparison failed for ${item.taskId}: ${comparison.failure} — invalidating stale evidence\n`,
+            if (item.implementationAuthority === null) {
+              logs.push(
+                `implementation slot ${index + 1}/${item.taskId} has no exact attempt authority — current reservation preserved`,
               );
-            }
-
-            if (!bytesChangedSinceAttempt) {
-              state = {
-                ...state,
-                executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== item.taskId),
-              };
               continue;
             }
+            const failure = reservedImplementationFailure(
+              item.agentType,
+              item.taskId,
+              item.implementationAuthority.taskId,
+              entries[index],
+            );
+            if (failure === null) continue;
 
-            let failure: string;
-            if (resultAgent !== null && resultAgent !== item.agentType) {
-              failure = `reserved ${item.agentType} result was returned as ${resultAgent}`;
-            } else if (envelope === null) {
-              failure = "reserved implementation result was missing or malformed";
-            } else {
-              failure = `${item.agentType} failed before implementation evidence completed`;
+            const applied = settleUnavailableImplementation(
+              state,
+              item.implementationAuthority,
+              finalizedAt.value,
+              failure,
+            );
+            if (applied.kind === "error") {
+              const diagnostic = `Oracle could not finalize ${item.taskId}: ${JSON.stringify(applied.error)}`;
+              diagnostics.push(diagnostic);
+              logs.push(`${diagnostic}; current attempt preserved`);
+              continue;
             }
-            state = applyUntrustedStopResolution(state, item.taskId, {
-              taskCompleted: false,
-              testResult: {
-                verdict: "untrusted",
-                passed: false,
-                label: "pi-implementation-failed",
-                provenance: "unverified",
-              },
-              testEvidence: failure,
-              // The repository attempt baseline is shared by a parallel batch.
-              // Its delta proves stale evidence must be invalidated, but cannot
-              // attribute any sibling's paths to this failed task.
-              filesModified: [],
-              changedDeclaredArtifacts,
-              bytesChangedSinceAttempt: true,
-              newTestsWritten: false,
-              newTestEvidence: "",
-            }).state;
+            state = applied.state;
+            if (applied.kind === "ignored" && applied.reason === "stale") {
+              logs.push(`late result for ${item.taskId} does not match its current attempt authority — replacement preserved`);
+            }
           }
-          return state;
+          return {
+            state,
+            value: Object.freeze({
+              diagnostics: Object.freeze(diagnostics),
+              logs: Object.freeze(logs),
+            }),
+          };
         });
-        return [];
+        // StateManager callbacks are side-effect free. Emit only after the
+        // protected-state commit proves the diagnostics describe durable state.
+        for (const line of committed.logs) process.stderr.write(`loom(pi): ${line}\n`);
+        return committed.diagnostics;
       } catch (error) {
         const diagnostic = `reserved implementation finalization failed: ${error instanceof Error ? error.message : String(error)}`;
         process.stderr.write(`loom(pi): ${diagnostic}\n`);
@@ -1770,7 +1801,11 @@ export default function (pi: ExtensionAPI) {
     const rawResults = details && "results" in details && Array.isArray(details.results)
       ? details.results
       : [];
-    processingErrors.push(...await finalizeReservedImplementations(rawResults));
+    // Exact per-entry parsing precedes finalization. A matching-agent/exit-0
+    // shell is not a successful implementation envelope until transcript shape
+    // and exact returned Task identity have both parsed.
+    const entries = parsePiSubagentResults(rawResults);
+    processingErrors.push(...await finalizeReservedImplementations(entries));
 
     // A reservation is the authoritative expected batch. Pi may return a
     // shorter or reordered results array after a child disappears. Reconcile
@@ -1915,7 +1950,6 @@ export default function (pi: ExtensionAPI) {
     // Per-element parse, not a cast: the array-shape guard above says nothing
     // about any individual element, and `agent`/`task`/`exitCode` are read as
     // guaranteed strings and numbers downstream.
-    const entries = parsePiSubagentResults(rawResults);
     if (reservation && entries.length > reservation.items.length) {
       const diagnostic =
         `subagent tool_result returned ${entries.length} result(s) for ${reservation.items.length} reserved slot(s) — surplus evidence ignored`;

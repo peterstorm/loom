@@ -13,7 +13,8 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TaskGraph, Task } from "../../../src/types";
+import type { TaskGraph, Task, TaskCommonMetadata } from "../../../src/types";
+import { taskFixture } from "../../fixtures/task-lifecycle";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
 
@@ -41,8 +42,8 @@ function graph(tasks: Task[]): TaskGraph {
   };
 }
 
-function task(id: string, over: Partial<Task> = {}): Task {
-  return {
+function task(id: string, over: Partial<TaskCommonMetadata> = {}): Task {
+  return taskFixture({
     id,
     description: "t",
     agent: "code-implementer-agent",
@@ -50,7 +51,7 @@ function task(id: string, over: Partial<Task> = {}): Task {
     status: "implemented",
     depends_on: [],
     ...over,
-  };
+  });
 }
 
 function runHelper(statePath: string, extraArgs: string[] = []): { status: number | null; stderr: string } {

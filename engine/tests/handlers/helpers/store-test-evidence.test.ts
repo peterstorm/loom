@@ -114,7 +114,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     expect(task.test_result).toEqual({ verdict: "trusted-pass" });
   });
 
-  it("without a trusted verdict the helper stores the (labeled untrusted) result as before", () => {
+  it("stores labeled untrusted evidence without minting positive completion authority", () => {
     writeFileSync(statePath, JSON.stringify(graphWith({}), null, 2));
 
     const { exitCode } = runHelper(
@@ -123,7 +123,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     expect(exitCode).toBe(0);
 
     const task = readState().tasks[0];
-    expect(task.status).toBe("implemented");
+    expect(task.status).toBe("pending");
     expect(task.test_result).toEqual({
       verdict: "untrusted",
       passed: true,

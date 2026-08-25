@@ -26,6 +26,7 @@ import {
 } from "../../../src/handlers/helpers/reconcile-implementation-proof";
 import { PostCommitStateProtectionError } from "../../../src/state-manager";
 import type { Task } from "../../../src/types";
+import { taskFixture } from "../../fixtures/task-lifecycle";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const CLI = join(ENGINE, "src", "cli.ts");
@@ -52,6 +53,7 @@ function failedTask(taskCompleted = true): Task {
     },
     PI_STRUCTURED_EVIDENCE_POLICY,
   );
+  if (proof.state !== "failed") throw new Error("failed Task fixture must carry failed Proof");
   return {
     id: "T5",
     description: "implementation",
@@ -134,10 +136,6 @@ describe("historical baseline recovery CLI", () => {
     execFileSync("git", ["add", "."], { cwd: root });
     execFileSync("git", ["commit", "--quiet", "-m", "wave 2 implementation"], { cwd: root });
     const poisonedStart = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
-    const proof = evaluateTaskProof(
-      { newTestsRequired: false, declaredArtifacts: ["src/a.ts"] },
-      { taskCompleted: true, filesModified: [] },
-    );
     const packet = createReviewPacket({
       task: { id: "T5", description: "implementation" },
       baseSha: base(historical),
@@ -167,11 +165,11 @@ describe("historical baseline recovery CLI", () => {
       },
       tasks: [{
         id: "T5", description: "implementation", agent: "code-implementer-agent",
-        wave: 2, status: "pending", depends_on: [], new_tests_required: false,
+        wave: 2, status: "implemented", legacy_missing_proof: true, depends_on: [], new_tests_required: false,
         review_status: "evidence_capture_failed",
         review_error: "review transcript missing evidence",
         review_evidence_failures: ["code-reviewer"],
-        file_list: ["src/a.ts"], files_modified: ["latest-only.ts"], proof,
+        file_list: ["src/a.ts"], files_modified: ["latest-only.ts"],
         start_sha: poisonedStart,
         artifact_baseline: [{
           artifact: "src/a.ts",
@@ -317,22 +315,25 @@ describe("reconcileTaskFromStoredEvidence", () => {
   });
 
   it("reopens an implemented task when deleted tests invalidate a previously satisfied proof", () => {
-    const withProof = {
+    const satisfiedProof = evaluateTaskProof(
+      { newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
+      {
+        taskCompleted: true,
+        testResult,
+        filesModified: ["src/a.ts"],
+        newTestsWritten: true,
+        newTestEvidence: "1 new test method, 2 assertions",
+      },
+      PI_STRUCTURED_EVIDENCE_POLICY,
+    );
+    if (satisfiedProof.state !== "satisfied") throw new Error("fixture must carry satisfied Proof");
+    const withProof: Task = {
       ...failedTask(),
-      status: "implemented" as const,
-      proof: evaluateTaskProof(
-        { newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
-        {
-          taskCompleted: true,
-          testResult,
-          filesModified: ["src/a.ts"],
-          newTestsWritten: true,
-          newTestEvidence: "1 new test method, 2 assertions",
-        },
-        PI_STRUCTURED_EVIDENCE_POLICY,
-      ),
+      status: "implemented",
+      proof: satisfiedProof,
+      revalidation_required: undefined,
+      legacy_missing_proof: undefined,
     };
-    expect(withProof.proof.state).toBe("satisfied");
 
     const reconciled = reconcileTaskFromStoredEvidence(
       withProof,
@@ -373,20 +374,44 @@ describe("reconcileTaskFromStoredEvidence", () => {
       { written: false, evidence: "" },
     );
 
-    expect(regressionWaived.status).toBe("implemented");
+    expect(regressionWaived.status).toBe("pending");
+    expect(regressionWaived.revalidation_required).toBe(true);
     expect(regressionWaived.proof?.state).toBe("satisfied");
     expect(regressionWaived.proof?.obligations).toEqual([
       { kind: "task-completed" },
       { kind: "new-tests" },
       { kind: "declared-artifact-changed", artifact: "src/a.ts" },
     ]);
-    expect(newTestsWaived.status).toBe("implemented");
+    expect(newTestsWaived.status).toBe("pending");
+    expect(newTestsWaived.revalidation_required).toBe(true);
     expect(newTestsWaived.proof?.state).toBe("satisfied");
     expect(newTestsWaived.proof?.obligations).toEqual([
       { kind: "task-completed" },
       { kind: "regression-test-pass" },
       { kind: "declared-artifact-changed", artifact: "src/a.ts" },
     ]);
+  });
+
+  it("permits positive settlement only for explicit legacy_missing_proof migration", () => {
+    const legacy = taskFixture({
+      id: "T5",
+      description: "legacy migration",
+      agent: "code-implementer-agent",
+      wave: 1,
+      status: "implemented",
+      depends_on: [],
+      new_tests_required: false,
+      file_list: ["src/a.ts"],
+      files_modified: ["src/a.ts"],
+    });
+    const migrated = reconcileTaskFromStoredEvidence(
+      legacy,
+      ["src/a.ts"],
+      { written: false, evidence: "verification waived" },
+      true,
+    );
+    expect(migrated).toMatchObject({ status: "implemented", proof: { state: "satisfied" } });
+    expect(migrated.legacy_missing_proof).toBeUndefined();
   });
 
   it("never invents completion when the prior proof did not observe it", () => {

@@ -1152,9 +1152,17 @@ export function applyGateDecision(state: TaskGraph, decision: GateDecision): Tas
     state.active_wave_gate.terminalOutcome !== null
   ) return state;
   const defaultGate = newWaveGate();
-  const clearedTasks = state.tasks.map((task) => task.wave === decision.wave
-    ? { ...task, status: "completed" as const, review_status: "passed" as const }
-    : task);
+  const clearedTasks = state.tasks.map((task): Task => {
+    if (task.wave !== decision.wave || task.status === "completed") return task;
+    if (task.status !== "implemented" || task.proof?.state !== "satisfied") return task;
+    return {
+      ...task,
+      status: "completed",
+      proof: task.proof,
+      legacy_missing_proof: undefined,
+      review_status: "passed",
+    };
+  });
   // `blocked` is DERIVED, never asserted. `wave-gate-model`'s `waveHasBlockCause`
   // is documented as the only copy of the rule every writer computes from, and a
   // literal `blocked: false` here was the writer that made that false. On a pass

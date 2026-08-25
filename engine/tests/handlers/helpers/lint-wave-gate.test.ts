@@ -11,7 +11,8 @@ import {
   lintFiles,
   type FileLintResult,
 } from "../../../src/handlers/helpers/lint-wave-gate";
-import type { Task } from "../../../src/types";
+import type { Task, TaskCommonMetadata } from "../../../src/types";
+import { taskFixture } from "../../fixtures/task-lifecycle";
 import type { LintResult } from "../../../src/linter/types";
 import { formatOutput } from "../../../src/linter/formatter";
 
@@ -23,11 +24,12 @@ const baseTask: Task = {
   agent: "code-implementer-agent",
   wave: 1,
   status: "implemented",
+  legacy_missing_proof: true,
   depends_on: [],
 };
 
-function makeTask(overrides: Partial<Task> = {}): Task {
-  return { ...baseTask, ...overrides };
+function makeTask(overrides: Partial<TaskCommonMetadata> = {}): Task {
+  return taskFixture({ ...baseTask, ...overrides });
 }
 
 function makeFileLintResult(file: string, result: LintResult): FileLintResult {

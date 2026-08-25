@@ -34,6 +34,7 @@ const baseTask: Task = {
   agent: "code-implementer-agent",
   wave: 1,
   status: "implemented",
+  legacy_missing_proof: true,
   depends_on: [],
 };
 
@@ -276,7 +277,7 @@ describe("derived views match the authoritative findings array", () => {
   const REVIEWERS = ["code-reviewer", "silent-failure-hunter", "pr-test-analyzer", "type-design-analyzer", "comment-analyzer"];
 
   it("holds after every reviewer in a wave has merged", () => {
-    let task = baseTask;
+    let task: Task = baseTask;
     for (const [index, agent] of REVIEWERS.entries()) {
       task = mergeFindings(task, makeParsedFindings({
         critical: index % 2 === 0 ? [`critical from ${agent}`] : [],

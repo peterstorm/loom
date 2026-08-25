@@ -10,9 +10,9 @@
  *   - existing-but-unreadable SUBAGENT_DIR → exit 0 WITH a stderr note
  *     (dropping evidence silently would be indistinguishable from "nothing ran")
  *
- * mark-subagent-active.sh (fail-OPEN binder — must never block spawning):
- *   - graph present + runtime unavailable → exit 0 WITH a stderr note naming
- *     the consequence (machine NOT bound, agent runs UNGATED)
+ * mark-subagent-active.sh (fail-CLOSED authority binder):
+ *   - graph present + runtime unavailable → exit 2 because exact modern
+ *     implementation authority cannot be published
  */
 
 import { describe, it, expect, afterAll } from "vitest";
@@ -229,7 +229,7 @@ function projectDirWithGraph(): string {
   return dir;
 }
 
-describe("mark-subagent-active.sh — fails OPEN loudly (machine NOT bound = agent runs UNGATED)", () => {
+describe("mark-subagent-active.sh — fails closed when authority binding cannot run", () => {
   it("no graph → exit 0 fast path, quiet (nothing to bind)", () => {
     const { status, stderr } = runShim(MARK, {
       CLAUDE_PROJECT_DIR: graphlessProjectDir(),
@@ -238,24 +238,24 @@ describe("mark-subagent-active.sh — fails OPEN loudly (machine NOT bound = age
     expect(status).toBe(0);
   });
 
-  it("graph present + CLAUDE_PLUGIN_ROOT unset → exit 0 WITH the UNGATED warning (SubagentStart is never blocked)", () => {
+  it("graph present + CLAUDE_PLUGIN_ROOT unset → exit 2 with exact-authority diagnostic", () => {
     const { status, stderr } = runShim(MARK, {
       CLAUDE_PROJECT_DIR: projectDirWithGraph(),
     });
-    expect(stderr).toContain("machine NOT bound");
-    expect(stderr).toContain("UNGATED");
-    expect(status).toBe(0);
+    expect(stderr).toContain("exact SubagentStart authority cannot be bound");
+    expect(stderr).toContain("refusing spawn");
+    expect(status).toBe(2);
   });
 
-  it("graph present + bun not found on PATH → exit 0 WITH the UNGATED warning", () => {
+  it("graph present + bun not found on PATH → exit 2 with exact-authority diagnostic", () => {
     const { status, stderr } = runShim(MARK, {
       CLAUDE_PROJECT_DIR: projectDirWithGraph(),
       CLAUDE_PLUGIN_ROOT: "/tmp/fake-plugin-root",
       PATH: bunlessPath(),
     });
-    expect(stderr).toContain("machine NOT bound");
-    expect(stderr).toContain("UNGATED");
-    expect(status).toBe(0);
+    expect(stderr).toContain("exact SubagentStart authority cannot be bound");
+    expect(stderr).toContain("refusing spawn");
+    expect(status).toBe(2);
   });
 });
 

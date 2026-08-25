@@ -32,16 +32,19 @@ function write(root: string, path: string, contents: string): void {
   writeFileSync(absolute, contents);
 }
 
-const proof = evaluateTaskProof(
-  { newTestsRequired: true, declaredArtifacts: ["source.ts"] },
-  {
-    taskCompleted: true,
-    testResult: { verdict: "trusted-pass" },
-    filesModified: ["source.ts"],
-    newTestsWritten: true,
-  },
-);
-if (proof.state !== "satisfied") throw new Error("proof fixture must be satisfied");
+const proof = (() => {
+  const evaluated = evaluateTaskProof(
+    { newTestsRequired: true, declaredArtifacts: ["source.ts"] },
+    {
+      taskCompleted: true,
+      testResult: { verdict: "trusted-pass" },
+      filesModified: ["source.ts"],
+      newTestsWritten: true,
+    },
+  );
+  if (evaluated.state !== "satisfied") throw new Error("proof fixture must be satisfied");
+  return evaluated;
+})();
 
 function operatorManifest() {
   const parsed = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({

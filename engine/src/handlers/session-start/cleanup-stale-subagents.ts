@@ -16,11 +16,24 @@ import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { HookHandler } from "../../types";
 import { STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../../config";
-import { SESSION_SUFFIXES } from "../../machine";
+import {
+  IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
+  SESSION_SUFFIXES,
+} from "../../machine";
 
 /** Pure: session id for a tracking file, or null when the name matches no
  *  known per-session suffix. */
 export function sessionOfEntry(entry: string): string | null {
+  if (entry.endsWith(IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX)) {
+    const keyed = entry.slice(0, -IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX.length);
+    const separator = keyed.lastIndexOf(".");
+    const encodedAgent = separator < 0 ? "" : keyed.slice(separator + 1);
+    if (separator > 0 && encodedAgent.length > 0 && encodedAgent.length % 2 === 0 &&
+        /^[0-9a-f]+$/.test(encodedAgent)) {
+      return keyed.slice(0, separator);
+    }
+    return null;
+  }
   for (const suffix of SESSION_SUFFIXES) {
     if (entry.endsWith(suffix) && entry.length > suffix.length) {
       return entry.slice(0, -suffix.length);

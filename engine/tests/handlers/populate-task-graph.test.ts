@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import populate from "../../src/handlers/helpers/populate-task-graph";
 import type { Task, TaskGraph } from "../../src/types";
+import { taskFixture } from "../fixtures/task-lifecycle";
 import {
   defaultVerificationManifest,
   freezeVerificationManifest,
@@ -114,7 +115,7 @@ function stateBytes(path: string): string {
 }
 
 function existingTask(id: string, status: Task["status"]): Task {
-  return { id, description: "x", agent: "code-implementer-agent", wave: 1, status, depends_on: [] };
+  return taskFixture({ id, description: "x", agent: "code-implementer-agent", wave: 1, status, depends_on: [] });
 }
 
 const REQUIRED_VERIFICATION = Object.freeze({

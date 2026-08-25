@@ -18,6 +18,7 @@ function waveTask(fileList: string[]): Task {
     agent: "code-implementer-agent",
     wave: 1,
     status: "implemented",
+    legacy_missing_proof: true,
     depends_on: [],
     file_list: fileList,
   };

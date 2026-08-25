@@ -220,6 +220,7 @@ export function reconcileTaskFromStoredEvidence(
   task: Task,
   proofArtifactsChanged: readonly string[],
   collectedNewTests: NewTestEvidence,
+  allowLegacyPositiveMigration = false,
 ): Task {
   if (task.status === "completed") return task;
   const newTestsWritten = collectedNewTests.written;
@@ -230,7 +231,8 @@ export function reconcileTaskFromStoredEvidence(
       declaredArtifacts: task.file_list ?? [],
     },
     {
-      taskCompleted: taskCompletionWasObserved(task),
+      taskCompleted: taskCompletionWasObserved(task) ||
+        (allowLegacyPositiveMigration && task.legacy_missing_proof === true),
       testResult: task.test_result,
       filesModified: proofArtifactsChanged,
       newTestsWritten,
@@ -238,13 +240,36 @@ export function reconcileTaskFromStoredEvidence(
     },
     PI_STRUCTURED_EVIDENCE_POLICY,
   );
-  return {
-    ...task,
-    status: proof.state === "satisfied" ? "implemented" : "pending",
-    proof,
-    new_tests_written: newTestsWritten,
-    new_test_evidence: newTestEvidence,
-  };
+  if (proof.state === "satisfied" && task.legacy_missing_proof === true && allowLegacyPositiveMigration) {
+    return {
+      ...task,
+      status: "implemented",
+      proof,
+      revalidation_required: undefined,
+      legacy_missing_proof: undefined,
+      new_tests_written: newTestsWritten,
+      new_test_evidence: newTestEvidence,
+    };
+  }
+  return proof.state === "satisfied"
+    ? {
+        ...task,
+        status: "pending",
+        proof,
+        revalidation_required: true,
+        legacy_missing_proof: undefined,
+        new_tests_written: newTestsWritten,
+        new_test_evidence: newTestEvidence,
+      }
+    : {
+        ...task,
+        status: "pending",
+        proof,
+        revalidation_required: task.revalidation_required,
+        legacy_missing_proof: undefined,
+        new_tests_written: newTestsWritten,
+        new_test_evidence: newTestEvidence,
+      };
 }
 
 function failureSummary(task: Task): string {
@@ -326,6 +351,7 @@ const handler: HookHandler = async (_stdin, args) => {
       let recoveredWritesApplied = false;
       const tasks = state.tasks.map((task) => {
         if (task.wave !== wave || task.status === "completed" || task.proof?.state === "satisfied") return task;
+        if (task.legacy_missing_proof === true && recoveredBaselineSha === null) return task;
         const recoveredPaths = recoveredPackets.modifiedPathsByTask.get(task.id) ?? [];
         // Historical recovery may alter only Tasks carrying engine-issued,
         // registration-verified packet evidence. Ordinary reconciliation has
@@ -368,7 +394,12 @@ const handler: HookHandler = async (_stdin, args) => {
           taskVerificationPolicy(sourceTask).newTests,
           sourceTask.start_sha,
         );
-        return reconcileTaskFromStoredEvidence(sourceTask, proofArtifactsChanged, collectedNewTests);
+        return reconcileTaskFromStoredEvidence(
+          sourceTask,
+          proofArtifactsChanged,
+          collectedNewTests,
+          recoveredBaselineSha !== null && recoveredPaths.length > 0,
+        );
       });
       const resolved: TaskGraph = {
         ...state,

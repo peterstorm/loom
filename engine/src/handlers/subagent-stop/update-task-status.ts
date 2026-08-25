@@ -10,7 +10,7 @@
  *    the Task pending, then signal /wave-gate only when the Wave is complete
  */
 
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import type { HookHandler, HookResult, SubagentStopInput, Task, TaskGraph, TaskTestResult } from "../../types";
 import { legacyTestsPassedNote, newWaveGate } from "../../types";
 import { IMPL_AGENTS, machinesDir } from "../../config";
@@ -54,6 +54,17 @@ import {
   type NewTestWaiverReason,
   type VerificationRequirement,
 } from "../../core/verification-policy";
+import type { ImplementationAuthorityObservation } from "../../implementation-attempt-sidecar";
+import {
+  parseIsoInstant,
+  type ImplementationAttemptAuthority,
+} from "../../core/implementation-completion";
+import {
+  settleObservedImplementation,
+  settleUnavailableImplementation,
+  type ImplementationSettlementApplicationResult,
+} from "../../core/implementation-application";
+import { observeTaskLocalCompletion } from "../helpers/task-local-completion";
 
 /**
  * Is the agent's machine BOUND for evidence purposes? "invalid" counts as
@@ -224,7 +235,7 @@ export interface UntrustedStopResolution {
   /** Process-level completion observed by the harness. A failed child may
    * retain structural attribution, but it must never mint completion proof. */
   readonly taskCompleted: boolean;
-  readonly testResult: Extract<TaskTestResult, { verdict: "untrusted" }>;
+  readonly testResult: TaskTestResult;
   readonly testEvidence: string;
   /** Files the agent modified (parsed from its transcript) — persisted on
    *  the task because lint-wave-gate collects its lint targets EXCLUSIVELY
@@ -316,10 +327,15 @@ export function applyCompletionInfrastructureFailure(
   state: TaskGraph,
   taskId: string,
   bytesChangedSinceAttempt: boolean,
+  expectedAuthority?: ImplementationAttemptAuthority,
 ): TaskGraph {
   const target = state.tasks.find((task) => task.id === taskId);
+  // Modern attempts may be released only by an exact Oracle receipt. This
+  // helper is retained for legacy cleanup/evidence compatibility only.
+  if (target?.active_implementation_attempt !== undefined) return state;
+  if (expectedAuthority !== undefined) return state;
   const clearedExecuting = (state.executing_tasks ?? []).filter((id) => id !== taskId);
-  if (target === undefined || target.status === "completed") {
+  if (target === undefined || target.status === "completed" || target.legacy_missing_proof === true) {
     return { ...state, executing_tasks: clearedExecuting };
   }
   return applyResolvedTask(
@@ -328,7 +344,17 @@ export function applyCompletionInfrastructureFailure(
     target.wave,
     bytesChangedSinceAttempt,
     clearedExecuting,
-    (task) => ({ ...task, status: "pending", revalidation_required: true }),
+    (task) => task.proof === undefined ? task : ({
+      ...task,
+      status: "pending",
+      proof: task.proof,
+      revalidation_required: true,
+      legacy_missing_proof: undefined,
+      active_implementation_attempt: undefined,
+      attempt_artifact_baseline: undefined,
+      attempt_repository_baseline: undefined,
+      reserved_at: undefined,
+    }),
   );
 }
 
@@ -351,16 +377,23 @@ export function applyUntrustedStopResolution(
   resolution: UntrustedStopResolution,
   proofPolicy: ProofEvaluationPolicy = PI_STRUCTURED_EVIDENCE_POLICY,
 ): AppliedStopResolution {
-  const clearedExecuting = (s.executing_tasks ?? []).filter((id) => id !== taskId);
+  const executing = s.executing_tasks ?? [];
   const target = s.tasks.find((t) => t.id === taskId);
+  // This path has no engine-issued capability. It may release only a proven
+  // legacy reservation; a modern or non-executing Task remains untouched.
+  if (!executing.includes(taskId) || target?.active_implementation_attempt !== undefined) {
+    return { state: s, skipped: true };
+  }
+  const clearedExecuting = executing.filter((id) => id !== taskId);
   if (!target || target.status === "completed") {
     return { state: { ...s, executing_tasks: clearedExecuting }, skipped: true };
   }
   const codeChanged = resolution.bytesChangedSinceAttempt;
-  const preserveExistingTrusted = target.revalidation_required !== true && (
-    target.test_result?.verdict === "trusted-fail" ||
-    (target.test_result?.verdict === "trusted-pass" && !codeChanged)
-  );
+  const preserveExistingTrusted = target.revalidation_required !== true &&
+    resolution.testResult.verdict === "untrusted" && (
+      target.test_result?.verdict === "trusted-fail" ||
+      (target.test_result?.verdict === "trusted-pass" && !codeChanged)
+    );
   const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, resolution.filesModified);
   const currentNewTests: NewTestEvidence = {
     written: resolution.newTestsWritten,
@@ -377,7 +410,10 @@ export function applyUntrustedStopResolution(
       declaredArtifacts: target.file_list ?? [],
     },
     {
-      taskCompleted: resolution.taskCompleted,
+      // Authority-free delivery is diagnostic evidence, never positive
+      // completion evidence. Keep the completion obligation failed even when
+      // the legacy child reported success.
+      taskCompleted: false,
       testResult: proofTestResult,
       filesModified: proofArtifactsChanged,
       newTestsWritten: currentNewTests.written,
@@ -387,17 +423,26 @@ export function applyUntrustedStopResolution(
   );
   return {
     skipped: false,
-    state: applyResolvedTask(s, taskId, target.wave, codeChanged, clearedExecuting, (t) => ({
-      ...t,
-      status: proof.state === "satisfied" ? "implemented" : "pending",
-      proof,
-      test_result: proofTestResult,
-      test_evidence: preserveExistingTrusted ? t.test_evidence : resolution.testEvidence,
-      files_modified: cumulativeFiles,
-      new_tests_written: currentNewTests.written,
-      new_test_evidence: currentNewTests.evidence,
-      ...(proof.state === "satisfied" ? { revalidation_required: undefined } : {}),
-    })),
+    state: applyResolvedTask(s, taskId, target.wave, codeChanged, clearedExecuting, (t): Task => {
+      const evidence = {
+        test_result: proofTestResult,
+        test_evidence: preserveExistingTrusted ? t.test_evidence : resolution.testEvidence,
+        files_modified: cumulativeFiles,
+        new_tests_written: currentNewTests.written,
+        new_test_evidence: currentNewTests.evidence,
+      };
+      // Legacy cleanup can retain diagnostic evidence, but cannot mint a
+      // satisfied Proof or clear revalidation. A fresh exact Implementation
+      // Attempt is the only route back to implemented.
+      return {
+        ...t,
+        status: "pending",
+        proof,
+        revalidation_required: true,
+        legacy_missing_proof: undefined,
+        ...evidence,
+      };
+    }),
   };
 }
 
@@ -585,6 +630,7 @@ export const runUpdateTaskStatus = async (
   stdin: string,
   _args: string[],
   evidenceSnapshot?: EvidenceSnapshot,
+  authorityObservation?: ImplementationAuthorityObservation,
 ): Promise<HookResult> => {
   // Guard the standalone CLI route: dispatch parses stdin before calling
   // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
@@ -605,7 +651,12 @@ export const runUpdateTaskStatus = async (
   // resolved it.
   const agentType = stripNamespace(resolveAgentType(input));
 
-  if (!IMPL_AGENTS.has(agentType)) return { kind: "passthrough" };
+  // A parsed sidecar is stronger routing authority than optional Claude
+  // agent_type metadata. Dispatch passes the retained snapshot before cleanup;
+  // the standalone route still requires a recognized implementation Agent.
+  if (!IMPL_AGENTS.has(agentType) && authorityObservation?.kind !== "authority-observed") {
+    return { kind: "passthrough" };
+  }
 
   let mgr: StateManager | null;
   try {
@@ -617,6 +668,55 @@ export const runUpdateTaskStatus = async (
     };
   }
   if (!mgr) return { kind: "passthrough" };
+
+  const authority = authorityObservation?.kind === "authority-observed"
+    ? authorityObservation.sidecar.authority
+    : null;
+  const graphBeforeTranscript = mgr.load();
+  const modernAttempts = graphBeforeTranscript.tasks.filter((task) => task.active_implementation_attempt !== undefined);
+  if (authorityObservation?.kind === "authority-unavailable" && modernAttempts.length > 0) {
+    return {
+      kind: "error",
+      message: `update-task-status: ${authorityObservation.failure.kind}: ${authorityObservation.failure.message}; modern implementation authority was preserved`,
+    };
+  }
+  if (authorityObservation === undefined && modernAttempts.length > 0) {
+    return {
+      kind: "error",
+      message: "update-task-status: modern implementation settlement requires a snapshotted Claude authority sidecar; execution authority was preserved",
+    };
+  }
+  if (authorityObservation?.kind === "authority-observed") {
+    let managerGraphPath: string;
+    try {
+      managerGraphPath = realpathSync.native(mgr.getPath());
+    } catch (error) {
+      return {
+        kind: "error",
+        message: `update-task-status: cannot canonicalize session TaskGraph path: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    if (managerGraphPath !== authorityObservation.sidecar.canonicalTaskGraphPath) {
+      return {
+        kind: "error",
+        message: "update-task-status: implementation sidecar belongs to a different canonical TaskGraph; execution authority was preserved",
+      };
+    }
+    const observedAuthority = authorityObservation.sidecar.authority;
+    const task = graphBeforeTranscript.tasks.find((candidate) => candidate.id === observedAuthority.taskId);
+    const alreadyReceipted = task?.implementation_attempt_history?.some(
+      (receipt) => receipt.authorityDigest === observedAuthority.authorityDigest,
+    ) === true;
+    if (!alreadyReceipted && (
+      task?.active_implementation_attempt?.authorityDigest !== observedAuthority.authorityDigest ||
+      !(graphBeforeTranscript.executing_tasks ?? []).includes(observedAuthority.taskId)
+    )) {
+      return {
+        kind: "error",
+        message: `update-task-status: stale implementation authority for ${observedAuthority.taskId}; late result was ignored without releasing the current attempt`,
+      };
+    }
+  }
 
   // Parse transcript (read file content, then parse). The path is RESOLVED,
   // not read off the payload: a supplied `agent_transcript_path` wins, and a
@@ -630,10 +730,37 @@ export const runUpdateTaskStatus = async (
       transcriptContent = readFileSync(transcriptPath, "utf-8");
     } catch (error) {
       const cause = error instanceof Error ? error.message : String(error);
+      const observedAt = parseIsoInstant(new Date().toISOString(), "Claude transcript failure instant");
+      if (!observedAt.ok) {
+        return { kind: "error", message: `update-task-status: ${observedAt.error.errors.join("; ")}` };
+      }
+      let oracleFailure: string | null = null;
       const settlement = await mgr.updateAndReturn<UnreadableTranscriptSettlement>((state) => {
         const executing = state.executing_tasks ?? [];
-        const [taskId] = executing;
-        return executing.length === 1 && taskId !== undefined
+        const legacyTaskId = executing.length === 1 ? executing[0] : undefined;
+        const taskId = authority?.taskId ?? legacyTaskId;
+        const target = taskId === undefined ? undefined : state.tasks.find((task) => task.id === taskId);
+        const exactModern = authority !== null &&
+          target?.active_implementation_attempt?.authorityDigest === authority.authorityDigest;
+        const exactLegacy = authority === null && legacyTaskId !== undefined &&
+          target?.active_implementation_attempt === undefined;
+        if (taskId !== undefined && exactModern && authority !== null) {
+          const applied = settleUnavailableImplementation(
+            state,
+            authority,
+            observedAt.value,
+            `Claude transcript unreadable: ${cause}`,
+          );
+          if (applied.kind === "error") {
+            oracleFailure = JSON.stringify(applied.error);
+            return { state, value: { kind: "preserved", executingCount: executing.length } as const };
+          }
+          return {
+            state: applied.state,
+            value: { kind: "quarantined", taskId } as const,
+          };
+        }
+        return taskId !== undefined && exactLegacy
           ? {
               state: applyCompletionInfrastructureFailure(state, taskId, true),
               value: { kind: "quarantined", taskId } as const,
@@ -643,6 +770,9 @@ export const runUpdateTaskStatus = async (
               value: { kind: "preserved", executingCount: executing.length } as const,
             };
       });
+      if (oracleFailure !== null) {
+        return { kind: "error", message: `update-task-status: Oracle infrastructure settlement failed: ${oracleFailure}` };
+      }
       if (settlement.kind === "quarantined") {
         return {
           kind: "error",
@@ -661,8 +791,9 @@ export const runUpdateTaskStatus = async (
   const rawFilesModified = parseFilesModified(transcriptContent);
   const bashTestOutput = parseBashTestOutput(transcriptContent);
 
-  // Extract task ID
-  let taskId = extractTaskId(transcript);
+  // Modern identity comes only from the snapshotted sidecar. Transcript and
+  // sole-executing inference remain compatibility-only for legacy graphs.
+  let taskId = authority?.taskId ?? extractTaskId(transcript);
 
   // When transcript parse fails, try to infer task ID from executing_tasks.
   // If exactly one task is executing, it's unambiguous.
@@ -719,10 +850,33 @@ export const runUpdateTaskStatus = async (
     // Settle under the lock and conservatively invalidate changed-byte
     // authority; clearing only executing_tasks could leave a re-executed
     // implemented Task green on evidence from before this attempt.
-    await mgr.update((s) => applyCompletionInfrastructureFailure(s, taskId, true));
+    const cause = error instanceof Error ? error.message : String(error);
+    if (authority === null) {
+      await mgr.update((s) => applyCompletionInfrastructureFailure(s, taskId, true));
+    } else {
+      const observedAt = parseIsoInstant(new Date().toISOString(), "Claude unsafe-path instant");
+      if (!observedAt.ok) return { kind: "error", message: observedAt.error.errors.join("; ") };
+      let oracleFailure: string | null = null;
+      await mgr.update((state) => {
+        const applied = settleUnavailableImplementation(
+          state,
+          authority,
+          observedAt.value,
+          `Unsafe Claude modified-file evidence: ${cause}`,
+        );
+        if (applied.kind === "error") {
+          oracleFailure = JSON.stringify(applied.error);
+          return state;
+        }
+        return applied.state;
+      });
+      if (oracleFailure !== null) {
+        return { kind: "error", message: `update-task-status: Oracle infrastructure settlement failed: ${oracleFailure}` };
+      }
+    }
     return {
       kind: "error",
-      message: `update-task-status: unsafe modified-file evidence for ${taskId}: ${error instanceof Error ? error.message : String(error)}`,
+      message: `update-task-status: unsafe modified-file evidence for ${taskId}: ${cause}`,
     };
   }
 
@@ -819,27 +973,144 @@ export const runUpdateTaskStatus = async (
   // real red run would wedge the task forever (the gate treats trusted-fail
   // as missing evidence and store-test-evidence also refuses trusted).
   // A completed task is never reopened, at any trust level.
+  const repositoryRoot = git.repositoryRoot() ?? process.cwd();
+  if (authority !== null) {
+    const observedAt = parseIsoInstant(new Date().toISOString(), "Claude implementation observation instant");
+    if (!observedAt.ok) return { kind: "error", message: observedAt.error.errors.join("; ") };
+    const modernOutcome: {
+      settlement?: ImplementationSettlementApplicationResult;
+      diagnostic?: string;
+    } = {};
+    await mgr.update((locked) => {
+      const target = locked.tasks.find((candidate) => candidate.id === authority.taskId);
+      if (target?.implementation_attempt_history?.some(
+        (receipt) => receipt.authorityDigest === authority.authorityDigest,
+      )) {
+        modernOutcome.settlement = settleUnavailableImplementation(
+          locked,
+          authority,
+          observedAt.value,
+          "duplicate Claude result delivery",
+        );
+        return locked;
+      }
+      if (target?.active_implementation_attempt?.authorityDigest !== authority.authorityDigest) {
+        modernOutcome.diagnostic = `update-task-status: ${authority.taskId} active implementation attempt changed during settlement; late result was ignored`;
+        return locked;
+      }
+      const bytes = observeTaskLocalCompletion({
+        repositoryRoot,
+        task: target,
+        authority,
+        parserModifiedPaths: filesModified,
+        parserPathLabel: "Claude transcript files_modified",
+      });
+      const suiteOutcome = bytes.suite.checks[0]?.outcome;
+      if (suiteOutcome?.kind === "observation-unavailable") {
+        modernOutcome.settlement = settleUnavailableImplementation(
+          locked,
+          authority,
+          observedAt.value,
+          suiteOutcome.reason,
+          bytes,
+        );
+      } else {
+        const verificationPolicy = taskVerificationPolicy(target);
+        let currentNewTestEvidence: NewTestEvidence;
+        try {
+          currentNewTestEvidence = collectNewTestEvidence(
+            bytes.cumulativeModifiedPaths,
+            verificationPolicy.newTests,
+            target.start_sha,
+          );
+        } catch (error) {
+          const unavailable = settleUnavailableImplementation(
+            locked,
+            authority,
+            observedAt.value,
+            `Claude new-test observation unavailable: ${error instanceof Error ? error.message : String(error)}`,
+            bytes,
+          );
+          modernOutcome.settlement = unavailable;
+          return unavailable.kind === "error" ? locked : unavailable.state;
+        }
+        modernOutcome.settlement = settleObservedImplementation(
+          locked,
+          authority,
+          observedAt.value,
+          {
+            taskCompleted: true,
+            testResult: testEvidence.result,
+            testEvidence: testEvidence.evidence,
+            newTestsWritten: currentNewTestEvidence.written,
+            newTestEvidence: currentNewTestEvidence.evidence,
+          },
+          TRUSTED_LEDGER_ONLY_POLICY,
+          bytes,
+        );
+      }
+      const settlement = modernOutcome.settlement;
+      return settlement === undefined || settlement.kind === "error" ? locked : settlement.state;
+    });
+    if (modernOutcome.diagnostic !== undefined) {
+      return { kind: "error", message: modernOutcome.diagnostic };
+    }
+    const modernSettlement = modernOutcome.settlement;
+    if (modernSettlement === undefined) {
+      return { kind: "error", message: "update-task-status: modern Oracle settlement produced no transition" };
+    }
+    if (modernSettlement.kind === "error") {
+      return {
+        kind: "error",
+        message: `update-task-status: modern Oracle settlement failed: ${JSON.stringify(modernSettlement.error)}`,
+      };
+    }
+    if (modernSettlement.kind === "ignored") {
+      return passthroughDiagnostic(
+        `update-task-status: ${authority.taskId} result ignored (${modernSettlement.reason}); current authority preserved\n`,
+      );
+    }
+    process.stderr.write(`Task ${authority.taskId} settlement: ${modernSettlement.transition.kind}.\n`);
+    const updated = modernSettlement.state;
+    const currentWave = updated.current_wave ?? 1;
+    if (isWaveComplete(updated, currentWave)) {
+      process.stderr.write(`\nWave ${currentWave} implementation complete. Run: /wave-gate\n`);
+    }
+    return modernSettlement.transition.kind === "infrastructure-blocked"
+      ? {
+          kind: "error",
+          message: `update-task-status: ${authority.taskId} completion infrastructure unavailable; exact attempt was released with an Oracle receipt`,
+        }
+      : { kind: "passthrough" };
+  }
+
   let skippedExistingVerdict = false;
   let comparisonFailure: string | null = null;
   let newTestEvidenceFailure: string | null = null;
-  const repositoryRoot = git.repositoryRoot() ?? process.cwd();
   await mgr.update((s) => {
-    const target = s.tasks.find((t) => t.id === taskId);
-    const verdict = target?.test_result?.verdict;
-    const incomingTrusted = testEvidence.result.verdict !== "untrusted";
-    if (!target || target.status === "completed") {
+    const target = s.tasks.find((candidate) => candidate.id === taskId);
+    if (target === undefined || target.status === "completed") {
       skippedExistingVerdict = true;
-      // The verdict stands down, but the agent still STOPPED: leaving the
-      // task on executing_tasks would ghost-block validate-task-execution's
-      // duplicate-spawn check for the rest of the session.
-      return {
-        ...s,
-        executing_tasks: (s.executing_tasks ?? []).filter((id) => id !== taskId),
-      };
+      return applyUntrustedStopResolution(s, taskId, {
+        taskCompleted: false,
+        testResult: testEvidence.result,
+        testEvidence: testEvidence.evidence,
+        filesModified,
+        changedDeclaredArtifacts: [],
+        bytesChangedSinceAttempt: false,
+        newTestsWritten: false,
+        newTestEvidence: "",
+      }, TRUSTED_LEDGER_ONLY_POLICY).state;
     }
 
-    // This synchronous repository observation runs under the same StateManager
-    // lock as settlement, so it is derived from this exact attempt authority.
+    // No-authority Claude settlement is compatibility quarantine only. It may
+    // compare and invalidate a proven legacy reservation, but never consume a
+    // modern attempt or decide positive completion.
+    if (target.active_implementation_attempt !== undefined ||
+        !(s.executing_tasks ?? []).includes(taskId)) {
+      skippedExistingVerdict = true;
+      return s;
+    }
     const comparison = compareAttemptBaseline(
       repositoryRoot,
       target,
@@ -849,14 +1120,7 @@ export const runUpdateTaskStatus = async (
       comparisonFailure = comparison.failure;
       return applyCompletionInfrastructureFailure(s, taskId, comparison.bytesChangedSinceAttempt);
     }
-    const codeChanged = comparison.bytesChangedSinceAttempt;
-    const preserveExistingTrusted = target.revalidation_required !== true && !incomingTrusted && (
-      verdict === "trusted-fail" || (verdict === "trusted-pass" && !codeChanged)
-    );
-    const resolvedTestResult = preserveExistingTrusted ? target.test_result : testEvidence.result;
-    const resolvedTestEvidence = preserveExistingTrusted ? target.test_evidence : testEvidence.evidence;
     const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, filesModified);
-    const proofArtifactsChanged = attributedChangedArtifacts(comparison.changedDeclaredArtifacts, cumulativeFiles);
     const verificationPolicy = taskVerificationPolicy(target);
     let currentNewTestEvidence: NewTestEvidence;
     try {
@@ -868,40 +1132,20 @@ export const runUpdateTaskStatus = async (
     } catch (error) {
       const cause = error instanceof Error ? error.message : String(error);
       newTestEvidenceFailure = `update-task-status: cannot collect new-test evidence for ${taskId}: ${cause}`;
-      return applyCompletionInfrastructureFailure(s, taskId, codeChanged);
+      return applyCompletionInfrastructureFailure(s, taskId, comparison.bytesChangedSinceAttempt);
     }
-    const proof = evaluateTaskProof(
-      {
-        verificationPolicy,
-        declaredArtifacts: target.file_list ?? [],
-      },
-      {
-        taskCompleted: true,
-        testResult: resolvedTestResult,
-        filesModified: proofArtifactsChanged,
-        newTestsWritten: currentNewTestEvidence.written,
-        newTestEvidence: currentNewTestEvidence.evidence,
-      },
-      TRUSTED_LEDGER_ONLY_POLICY,
-    );
-    return applyResolvedTask(
-      s,
-      taskId,
-      target.wave,
-      codeChanged,
-      (s.executing_tasks ?? []).filter((id) => id !== taskId),
-      (t) => ({
-        ...t,
-        status: proof.state === "satisfied" ? "implemented" : "pending",
-        proof,
-        test_result: resolvedTestResult,
-        test_evidence: resolvedTestEvidence,
-        files_modified: cumulativeFiles,
-        new_tests_written: currentNewTestEvidence.written,
-        new_test_evidence: currentNewTestEvidence.evidence,
-        ...(proof.state === "satisfied" ? { revalidation_required: undefined } : {}),
-      }),
-    );
+    const applied = applyUntrustedStopResolution(s, taskId, {
+      taskCompleted: true,
+      testResult: testEvidence.result,
+      testEvidence: testEvidence.evidence,
+      filesModified,
+      changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,
+      bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,
+      newTestsWritten: currentNewTestEvidence.written,
+      newTestEvidence: currentNewTestEvidence.evidence,
+    }, TRUSTED_LEDGER_ONLY_POLICY);
+    skippedExistingVerdict = applied.skipped;
+    return applied.state;
   });
 
   if (comparisonFailure !== null) {
@@ -919,14 +1163,12 @@ export const runUpdateTaskStatus = async (
   }
 
   const persistedTask = mgr.load().tasks.find((candidate) => candidate.id === taskId);
-  if (persistedTask?.proof?.state === "satisfied") {
-    process.stderr.write(`Task ${taskId} implemented with all proof obligations satisfied.\n`);
-  } else {
-    const failures = persistedTask?.proof?.state === "failed"
-      ? persistedTask.proof.failures.map((failure) => failure.kind).join(", ")
-      : "proof unavailable";
-    process.stderr.write(`Task ${taskId} remains pending — proof obligations failed: ${failures}.\n`);
-  }
+  const failures = persistedTask?.proof?.state === "failed"
+    ? persistedTask.proof.failures.map((failure) => failure.kind).join(", ")
+    : "positive Proof unavailable without exact attempt authority";
+  process.stderr.write(
+    `Task ${taskId} legacy completion quarantined pending fresh revalidation: ${failures}.\n`,
+  );
 
   // The same locked update that landed the resolution reconciled the wave's
   // implementation bit in both directions. Report completion from that state.

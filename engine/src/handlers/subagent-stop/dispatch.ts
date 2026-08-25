@@ -19,6 +19,10 @@ import { runUpdateTaskStatus, type EvidenceSnapshot } from "./update-task-status
 import storeReviewerFindings from "./store-reviewer-findings";
 import storeSpecCheckFindings from "./store-spec-check-findings";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
+import {
+  snapshotImplementationAttemptSidecar,
+  type ImplementationAuthorityObservation,
+} from "../../implementation-attempt-sidecar";
 
 type AgentCategory = "phase" | "impl" | "review" | "spec-check" | "unknown";
 
@@ -30,7 +34,11 @@ export function categorize(agentType: string): AgentCategory {
   return "unknown";
 }
 
-const handler: HookHandler = async (stdin, args) => {
+export const runDispatch = async (
+  stdin: string,
+  args: string[],
+  cleanup: HookHandler = cleanupSubagentFlag,
+): Promise<HookResult> => {
   let input: SubagentStopInput;
   try {
     input = JSON.parse(stdin);
@@ -40,14 +48,6 @@ const handler: HookHandler = async (stdin, args) => {
     // until the SessionStart stale-sweep runs.
     return passthroughDiagnostic(`dispatch: malformed SubagentStop input — cleanup skipped, bindings may leak: ${e instanceof Error ? e.message : String(e)}\n`);
   }
-
-  const safeRun = async (name: string, fn: () => Promise<unknown>) => {
-    try {
-      await fn();
-    } catch (e) {
-      process.stderr.write(`ERROR in ${name}: ${e instanceof Error ? e.message : String(e)}\n`);
-    }
-  };
 
   // Category handlers are evidence boundaries, not best-effort side effects:
   // a child that reports an error (e.g. storeReviewerFindings could not read
@@ -96,6 +96,27 @@ const handler: HookHandler = async (stdin, args) => {
     }
   }
 
+  // Resolve routing before cleanup: Claude's payload may omit agent_type, and
+  // the transcript metadata used by the fallback survives cleanup. Modern
+  // implementation correlation is snapshotted here too — never reconstructed
+  // from assistant text or executing_tasks after the sidecar is removed.
+  const resolvedAgentType = resolveAgentType(input);
+  const reportedCategory = categorize(stripNamespace(resolvedAgentType));
+  const sidecarObservation = snapshotImplementationAttemptSidecar(
+    input.session_id ?? "",
+    input.agent_id ?? "",
+  );
+  // A valid sidecar is engine-issued implementation routing authority. Claude
+  // may omit or corrupt agent_type metadata, so routing cannot be conditional
+  // on that weaker field. Unavailable sidecars do not reclassify unrelated
+  // agents.
+  const category: AgentCategory = sidecarObservation.kind === "authority-observed"
+    ? "impl"
+    : reportedCategory;
+  const authorityObservation: ImplementationAuthorityObservation | undefined = category === "impl"
+    ? sidecarObservation
+    : undefined;
+
   // Request-bound capture runs BEFORE any legacy routing, and before the task
   // graph is resolved at all. Both orderings are load-bearing: the graph lookup
   // below returns early when there is none, which would skip capture for every
@@ -112,8 +133,19 @@ const handler: HookHandler = async (stdin, args) => {
 
   // Cleanup always runs — but must never abort the rest of the pipeline
   // (a lock-acquisition failure here would otherwise leave the task stuck
-  // in executing with no status update).
-  await safeRun("cleanupSubagentFlag", () => cleanupSubagentFlag(stdin, args));
+  // in executing with no status update). A failed cleanup remains explicit and
+  // is returned after category evidence has had its one chance to settle.
+  let cleanupFailure: string | null = null;
+  try {
+    const cleanupResult = await cleanup(stdin, args);
+    if (cleanupResult.kind === "error" || cleanupResult.kind === "block") {
+      cleanupFailure = cleanupResult.message;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    cleanupFailure = `cleanupSubagentFlag crashed: ${message}`;
+    process.stderr.write(`ERROR in cleanupSubagentFlag: ${message}\n`);
+  }
 
   if (captureFailure !== null) {
     return { kind: "error", message: captureFailure };
@@ -124,6 +156,7 @@ const handler: HookHandler = async (stdin, args) => {
   try {
     mgr = StateManager.fromSession(input.session_id);
   } catch (error) {
+    if (cleanupFailure !== null) return { kind: "error", message: cleanupFailure };
     return passthroughDiagnostic(
       `[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")}: ` +
       `${error instanceof Error ? error.message : String(error)} — ` +
@@ -131,32 +164,17 @@ const handler: HookHandler = async (stdin, args) => {
     );
   }
   if (!mgr) {
+    if (cleanupFailure !== null) return { kind: "error", message: cleanupFailure };
     return passthroughDiagnostic(`[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")} — ` +
         `SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)\n`);
   }
 
-  // Claude Code does not send agent_type. resolveAgentType falls back to the
-  // metadata the harness writes beside the transcript; without it EVERY
-  // implementation run categorises "unknown" and is discarded.
-  const resolvedAgentType = resolveAgentType(input);
-  const category = categorize(stripNamespace(resolvedAgentType));
-
-  let childFailure: HookResult | null = null;
-  await match(category)
-    .with("phase", async () => {
-      childFailure = await runChild("advancePhase", () => advancePhase(stdin, args));
-    })
-    .with("impl", async () => {
-      childFailure = await runChild("updateTaskStatus", () =>
-        runUpdateTaskStatus(stdin, args, evidenceSnapshot),
-      );
-    })
-    .with("review", async () => {
-      childFailure = await runChild("storeReviewerFindings", () => storeReviewerFindings(stdin, args));
-    })
-    .with("spec-check", async () => {
-      childFailure = await runChild("storeSpecCheckFindings", () => storeSpecCheckFindings(stdin, args));
-    })
+  const childFailure: HookResult | null = await match(category)
+    .with("phase", () => runChild("advancePhase", () => advancePhase(stdin, args)))
+    .with("impl", () => runChild("updateTaskStatus", () =>
+      runUpdateTaskStatus(stdin, args, evidenceSnapshot, authorityObservation)))
+    .with("review", () => runChild("storeReviewerFindings", () => storeReviewerFindings(stdin, args)))
+    .with("spec-check", () => runChild("storeSpecCheckFindings", () => storeSpecCheckFindings(stdin, args)))
     .with("unknown", async () => {
       // Genuinely-unknown agents (a user's own subagent) legitimately have no
       // orchestration hooks. An UNNAMEABLE one does not: it means neither the
@@ -169,11 +187,20 @@ const handler: HookHandler = async (stdin, args) => {
             `nothing was recorded; if this was a loom agent its result is LOST\n`
           : `[loom] dispatch: no orchestration route for agent type ${JSON.stringify(resolvedAgentType)} — nothing recorded\n`,
       );
+      return null;
     })
     .exhaustive();
 
+  if (cleanupFailure !== null) {
+    const categoryMessage = childFailure !== null && (childFailure.kind === "error" || childFailure.kind === "block")
+      ? `; category settlement also failed: ${childFailure.message}`
+      : "";
+    return { kind: "error", message: `${cleanupFailure}${categoryMessage}` };
+  }
   if (childFailure !== null) return childFailure;
   return { kind: "passthrough" };
 };
+
+const handler: HookHandler = (stdin, args) => runDispatch(stdin, args);
 
 export default handler;

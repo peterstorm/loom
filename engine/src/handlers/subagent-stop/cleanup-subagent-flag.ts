@@ -5,18 +5,22 @@
 
 import type { HookHandler, SubagentStopInput } from "../../types";
 import { stripNamespace } from "../../utils/strip-namespace";
+import { resolveAgentType } from "../../utils/agent-transcript-path";
 import {
   fsSessionRegistry,
   parseAgentId,
   parseAgentType,
+  parseReportedAgentId,
   parseSessionId,
   reportedRosterAgentId,
   type SessionRegistry,
 } from "../../machine";
+import { removeImplementationAttemptSidecar } from "../../implementation-attempt-sidecar";
 
 export const runCleanupSubagentFlag = async (
   stdin: string,
   registry: SessionRegistry = fsSessionRegistry,
+  removeSidecar: typeof removeImplementationAttemptSidecar = removeImplementationAttemptSidecar,
 ) => {
   // Guard the standalone CLI route: dispatch parses stdin before calling
   // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
@@ -50,27 +54,53 @@ export const runCleanupSubagentFlag = async (
   // an unparseable id could never have been bound — skipping the call is the
   // exact harmless no-op the old raw-string path produced, and branding both
   // params removes the adjacent-string argument-swap hazard.
-  const boundAgentType = agent_id ? parseAgentType(stripNamespace(input.agent_type ?? "")) : null;
+  const failures: string[] = [];
+  let boundAgentType = agent_id ? parseAgentType(stripNamespace(resolveAgentType(input))) : null;
   const boundAgentId = agent_id ? parseAgentId(agent_id) : null;
+  if (boundAgentType === null && boundAgentId !== null) {
+    try {
+      const matchingBindings = registry.readBindings(sessionId)
+        .filter((binding) => binding.agentId === boundAgentId);
+      if (matchingBindings.length === 1) boundAgentType = matchingBindings[0]!.agentType;
+      else if (matchingBindings.length > 1) {
+        failures.push(`machine unbind identity is ambiguous for ${agent_id}/${sessionId}`);
+      }
+    } catch (error) {
+      failures.push(`machine binding lookup failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   if (boundAgentType && boundAgentId) {
     try {
       await registry.unbind(sessionId, boundAgentType, boundAgentId);
-    } catch (e) {
-      process.stderr.write(`cleanup-subagent-flag: unbind failed for ${agent_id}/${sessionId}: ${e}\n`);
+    } catch (error) {
+      failures.push(`machine unbind failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   if (!agent_id) return { kind: "passthrough" as const };
 
-  // removeActive locks internally (same per-session lock) and logs its own
-  // rewrite failures; a lock-acquisition failure propagates to the
-  // dispatcher's safeRun, which reports it without aborting the pipeline.
+  if (parseReportedAgentId(agent_id) !== null) {
+    try {
+      removeSidecar(sessionId, agent_id);
+    } catch (error) {
+      failures.push(`implementation sidecar cleanup failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  // Each cleanup capability is independent. Attempt roster removal even when
+  // unbind or sidecar deletion failed, then return the complete failure set.
   // reportedRosterAgentId mirrors SubagentStart: an id that constructor
   // refused — unparseable, or inside the reserved write-grant namespace — was
   // tracked under its sanitized placeholder, so remove that same placeholder.
-  await registry.removeActive(sessionId, reportedRosterAgentId(agent_id));
+  try {
+    await registry.removeActive(sessionId, reportedRosterAgentId(agent_id));
+  } catch (error) {
+    failures.push(`roster cleanup failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
-  return { kind: "passthrough" as const };
+  return failures.length === 0
+    ? { kind: "passthrough" as const }
+    : { kind: "error" as const, message: `cleanup-subagent-flag: ${failures.join("; ")}` };
 };
 
 const handler: HookHandler = (stdin) => runCleanupSubagentFlag(stdin);

@@ -18,23 +18,27 @@ import type { Task, TaskGraph } from "../../src/types";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import { applyUntrustedStopResolution } from "../../src/handlers/subagent-stop/update-task-status";
 import type { WaveReviewContextAuthority } from "../../src/handlers/helpers/programs/wave-gate";
+import { taskFixture } from "../fixtures/task-lifecycle";
 
-const proof = evaluateTaskProof({ newTestsRequired: false, declaredArtifacts: [] }, {
-  taskCompleted: true, testResult: undefined, filesModified: [], newTestsWritten: false,
-});
-if (proof.state !== "satisfied") throw new Error("fixture proof must satisfy");
+const proof = (() => {
+  const evaluated = evaluateTaskProof({ newTestsRequired: false, declaredArtifacts: [] }, {
+    taskCompleted: true, testResult: undefined, filesModified: [], newTestsWritten: false,
+  });
+  if (evaluated.state !== "satisfied") throw new Error("fixture proof must satisfy");
+  return evaluated;
+})();
 const ENGINE = fileURLToPath(new URL("../../", import.meta.url));
 const CLI = join(ENGINE, "src", "cli.ts");
 const digest = "a".repeat(64);
 const head = "b".repeat(64);
 const receipt = { kind: "protected-wave-state-committed" as const, effectId: "wave-completion:12345678901234567890123456789012", runId: "wave-run", committedRevision: 1, stateDigest: digest };
-const task = (id: string, wave: number, status: Task["status"] = "completed"): Task => ({
+const task = (id: string, wave: number, status: Task["status"] = "completed"): Task => taskFixture({
   id, description: id, agent: "code-implementer-agent", wave, status, depends_on: [], proof,
   new_tests_required: false, review_status: "passed", review_generation: 7, file_list: ["src/a.ts"],
   accepted_review_authority: { generation: 7, packet_id: digest, head_sha: head, scope: ["src/a.ts"], run_id: "wave-run", authority_digest: digest },
   critical_findings: [], advisory_findings: [],
 });
-const pendingTask = (id: string, wave: number): Task => ({
+const pendingTask = (id: string, wave: number): Task => taskFixture({
   id, description: id, agent: "code-implementer-agent", wave, status: "pending", depends_on: [],
 });
 const graph = (tasks: readonly Task[] = [task("T19", 3), task("T22", 3), pendingTask("T23", 4)]): TaskGraph => ({
@@ -126,11 +130,11 @@ describe("completed Wave reopening proof", () => {
 
 describe("later-Wave progress refusal", () => {
   const progressMutations: readonly [(task: Task) => Task, string][] = [
-    [(entry) => ({ ...entry, status: "implemented" }), "status"],
+    [(entry) => taskFixture({ ...entry, status: "implemented" }), "status"],
     [(entry) => ({ ...entry, reserved_at: "2026-08-22T00:00:00.000Z" }), "reservation"],
     [(entry) => ({ ...entry, start_sha: "a".repeat(40) }), "start SHA"],
     [(entry) => ({ ...entry, files_modified: [] }), "files"],
-    [(entry) => ({ ...entry, proof }), "proof"],
+    [(entry) => taskFixture({ ...entry, status: "pending", proof, revalidation_required: true }), "proof"],
     [(entry) => ({ ...entry, test_result: { verdict: "trusted-pass" } }), "test result"],
     [(entry) => ({ ...entry, test_evidence: "ran" }), "test evidence"],
     [(entry) => ({ ...entry, new_tests_written: false }), "new-test result"],
@@ -196,7 +200,7 @@ describe("reopen completed Wave", () => {
     expect(() => reopenCompletedWave(reopened, request, legacyProof)).toThrow("current_wave exactly");
   });
 
-  it("blocks immediate Wave Gate preparation, then starts normally after fresh task-stop revalidation", () => {
+  it("blocks immediate Wave Gate preparation and forbids legacy task-stop positive bypass", () => {
     const root = mkdtempSync(join(tmpdir(), "loom-reopened-wave-"));
     const runsRoot = mkdtempSync(join(tmpdir(), "loom-reopened-wave-runs-"));
     try {
@@ -211,7 +215,9 @@ describe("reopen completed Wave", () => {
       const reopened = reopenCompletedWave(graph(), request, legacyProof);
       const awaitingRevalidation = {
         ...reopened,
-        tasks: reopened.tasks.map((entry) => entry.wave === 3 ? { ...entry, proof: e2eProof, files_modified: ["src/a.ts"] } : entry),
+        tasks: reopened.tasks.map((entry) => entry.wave === 3
+          ? taskFixture({ ...entry, status: "pending", proof: e2eProof, revalidation_required: true, files_modified: ["src/a.ts"] })
+          : entry),
       };
       expect(checkImplementationProof(awaitingRevalidation.tasks.filter((entry) => entry.wave === 3))).toMatchObject({ passed: false });
       mkdirSync(join(root, ".claude", "state"), { recursive: true });
@@ -240,10 +246,10 @@ describe("reopen completed Wave", () => {
         applyUntrustedStopResolution({ ...state, executing_tasks: [taskId] }, taskId, freshStop).state,
       awaitingRevalidation);
       expect(revalidated.tasks.slice(0, 2)).toMatchObject([
-        { status: "implemented", revalidation_required: undefined },
-        { status: "implemented", revalidation_required: undefined },
+        { status: "pending", proof: { state: "failed" }, revalidation_required: true },
+        { status: "pending", proof: { state: "failed" }, revalidation_required: true },
       ]);
-      expect(checkImplementationProof(revalidated.tasks.filter((entry) => entry.wave === 3))).toMatchObject({ passed: true });
+      expect(checkImplementationProof(revalidated.tasks.filter((entry) => entry.wave === 3))).toMatchObject({ passed: false });
       chmodSync(statePath, 0o644);
       writeFileSync(statePath, JSON.stringify(revalidated));
       const runDir = join(runsRoot, "run.revalidated-wave");
@@ -253,7 +259,7 @@ describe("reopen completed Wave", () => {
         env: { ...env, LOOM_STATE_PATH: statePath },
       });
       expect(started.status, started.stderr).toBe(0);
-      expect((JSON.parse(started.stdout) as { kind: string }).kind, started.stdout).toBe("spawn-batch");
+      expect((JSON.parse(started.stdout) as { kind: string }).kind, started.stdout).toBe("blocked");
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(runsRoot, { recursive: true, force: true });

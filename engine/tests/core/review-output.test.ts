@@ -387,6 +387,7 @@ describe("mergeFindings (pure)", () => {
     agent: "test",
     wave: 1,
     status: "implemented",
+    legacy_missing_proof: true,
     depends_on: [],
   };
 
@@ -477,7 +478,7 @@ describe("mergeFindings (pure)", () => {
   });
 
   it("accumulates across three agents", () => {
-    let task = baseTask;
+    let task: Task = baseTask;
     task = mergeFindings(task, makeParsedFindings({ critical: ["C1"], advisory: ["A1"], criticalCount: 1 }), "code-reviewer");
     task = mergeFindings(task, makeParsedFindings({ critical: [], advisory: ["A2"], criticalCount: 0 }), "silent-failure-hunter");
     task = mergeFindings(task, makeParsedFindings({ critical: ["C2"], advisory: ["A3"], criticalCount: 1 }), "pr-test-analyzer");
@@ -541,6 +542,7 @@ const partialTask: Task = {
   agent: "code-implementer-agent",
   wave: 1,
   status: "implemented",
+  legacy_missing_proof: true,
   depends_on: [],
 };
 

@@ -31,6 +31,7 @@ import {
   applyUntrustedStopResolution,
   collectNewTestEvidence,
   cumulativeModifiedPaths,
+  type NewTestEvidence,
 } from "../engine/src/handlers/subagent-stop/update-task-status";
 import { extractTestEvidence, type TestEvidence } from "../engine/src/core/test-evidence";
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
@@ -46,6 +47,18 @@ import { reconcileWaveBlock } from "../engine/src/core/wave-gate-model";
 import { phaseArtifactUpdates } from "../engine/src/core/phase-artifact-paths";
 import { IMPL_AGENTS, PHASE_ORDER, isReviewAgent } from "../engine/src/config";
 import type { Phase, TaskGraph } from "../engine/src/types";
+import {
+  parseIsoInstant,
+  type ImplementationAttemptAuthority,
+  type IsoInstant,
+} from "../engine/src/core/implementation-completion";
+import {
+  settleObservedImplementation,
+  settleUnavailableImplementation,
+  type ImplementationSettlementApplicationResult,
+} from "../engine/src/core/implementation-application";
+import { PI_STRUCTURED_EVIDENCE_POLICY } from "../engine/src/core/proof-obligations";
+import { observeTaskLocalCompletion } from "../engine/src/handlers/helpers/task-local-completion";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
 import { compareAttemptBaseline } from "../engine/src/utils/artifact-baseline";
@@ -236,7 +249,12 @@ export function piSubagentFailureSignals(result: {
 }
 
 /** The reserved slot this result answers for, when the spawn reserved one. */
-export type ReservedSlot = Readonly<{ agentType: string; taskId: string | null }>;
+export type ReservedSlot = Readonly<{
+  agentType: string;
+  taskId: string | null;
+  /** Required on every modern implementation reservation; absent/null is legacy compatibility-only. */
+  implementationAuthority?: ImplementationAttemptAuthority | null;
+}>;
 
 /** Text of the parent's own tool-call content, the last task-id fallback. */
 export type ParentPromptText = string;
@@ -251,17 +269,105 @@ const transcriptTextOf = (messages: readonly { role: string; content: readonly {
 // Failed results
 // ---------------------------------------------------------------------------
 
-async function applyFailedImplementationResult(args: Readonly<{
+function reservedAuthorityIsCurrent(
+  state: TaskGraph,
+  taskId: string,
+  reservedSlot: ReservedSlot | undefined,
+): boolean {
+  const expected = reservedSlot?.implementationAuthority;
+  const task = state.tasks.find((candidate) => candidate.id === taskId);
+  return expected === undefined || expected === null
+    ? task?.active_implementation_attempt === undefined
+    : task?.active_implementation_attempt?.authorityDigest === expected.authorityDigest;
+}
+
+function clearCurrentReservedAuthority(
+  state: TaskGraph,
+  taskId: string,
+  reservedSlot: ReservedSlot | undefined,
+): TaskGraph {
+  const expected = reservedSlot?.implementationAuthority;
+  if (expected == null) return state;
+  return {
+    ...state,
+    tasks: state.tasks.map((task) =>
+      task.id === taskId && task.active_implementation_attempt?.authorityDigest === expected.authorityDigest
+        ? {
+            ...task,
+            active_implementation_attempt: undefined,
+            attempt_artifact_baseline: undefined,
+            attempt_repository_baseline: undefined,
+            reserved_at: undefined,
+          }
+        : task),
+  };
+}
+
+type FailedImplementationArgs = Readonly<{
   store: TaskGraphStore;
   agentType: string;
   result: PiSubagentResult;
   reservedSlot: ReservedSlot | undefined;
   failure: string;
-}>): Promise<PiResultOutcome> {
+  now: string;
+}>;
+
+type BoundImplementation = Readonly<{ kind: "bound"; taskId: string; inferred: boolean }>;
+
+async function settleFailedExactImplementation(
+  args: FailedImplementationArgs,
+  binding: BoundImplementation,
+  authority: ImplementationAttemptAuthority,
+): Promise<PiResultOutcome> {
+  const observedAt = parseIsoInstant(args.now, "Pi failed-result instant");
+  if (!observedAt.ok) return outcome(observedAt.error.errors, observedAt.error.errors);
+  const settled: { value?: ImplementationSettlementApplicationResult } = {};
+  await args.store.update((state) => {
+    const settlement = settleUnavailableImplementation(state, authority, observedAt.value, args.failure);
+    settled.value = settlement;
+    return settlement.kind === "error" ? state : settlement.state;
+  });
+  const settlement = settled.value;
+  if (settlement === undefined || settlement.kind === "error") {
+    const message = `loom(pi): ${args.failure}; exact Oracle settlement failed — current attempt preserved`;
+    return outcome([message], [message]);
+  }
+  return settlement.kind === "ignored"
+    ? outcome([`loom(pi): ${args.failure}; exact result ignored (${settlement.reason})`])
+    : outcome([`loom(pi): ${args.failure} — ${settlement.transition.kind} receipt stored for ${binding.taskId}`]);
+}
+
+async function cleanupFailedLegacyImplementation(
+  args: FailedImplementationArgs,
+  binding: BoundImplementation,
+): Promise<PiResultOutcome> {
+  let released = false;
+  await args.store.update((state) => {
+    const task = state.tasks.find((candidate) => candidate.id === binding.taskId);
+    if (task?.active_implementation_attempt !== undefined) return state;
+    released = true;
+    return {
+      ...state,
+      executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== binding.taskId),
+      tasks: state.tasks.map((candidate) => candidate.id === binding.taskId
+        ? { ...candidate, reserved_at: undefined, legacy_execution_reservation: undefined }
+        : candidate),
+    };
+  });
+  if (!released) {
+    const message = `loom(pi): ${args.failure}; modern attempt lacks exact ReservedSlot authority — current attempt preserved`;
+    return outcome([message], [message]);
+  }
+  const inference = binding.inferred ? " (inferred from the sole executing Task; legacy cleanup only)" : "";
+  return outcome([`loom(pi): ${args.failure} — released ${binding.taskId} legacy reservation${inference}; completion evidence ignored`]);
+}
+
+async function applyFailedImplementationResult(args: FailedImplementationArgs): Promise<PiResultOutcome> {
   const executingTasks = args.store.load().executing_tasks ?? [];
   const binding = resolveImplementationTaskId({
     agentType: args.agentType,
     reservedTaskId: args.reservedSlot?.taskId,
+    reservedAuthority: args.reservedSlot?.implementationAuthority,
     resultPrompt: args.result.task ?? "",
     parentPrompt: "",
     executingTasks,
@@ -270,14 +376,10 @@ async function applyFailedImplementationResult(args: Readonly<{
     const message = `loom(pi): ${args.failure}; ${binding.reason} — completion evidence ignored`;
     return outcome([message], executingTasks.length > 0 ? [message] : []);
   }
-  await args.store.update((state) => ({
-    ...state,
-    executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== binding.taskId),
-  }));
-  const inference = binding.inferred ? " (inferred from the sole executing Task)" : "";
-  return outcome([
-    `loom(pi): ${args.failure} — released ${binding.taskId}${inference}; completion evidence ignored`,
-  ]);
+  const authority = args.reservedSlot?.implementationAuthority;
+  return authority == null
+    ? cleanupFailedLegacyImplementation(args, binding)
+    : settleFailedExactImplementation(args, binding, authority);
 }
 
 /**
@@ -330,7 +432,7 @@ export async function applyFailedPiResult(args: Readonly<{
   // finalizeReservedImplementations first. This idempotent release keeps the
   // applier correct in isolation without overwriting that richer proof.
   if (IMPL_AGENTS.has(agentType)) {
-    return applyFailedImplementationResult({ store, agentType, result, reservedSlot, failure });
+    return applyFailedImplementationResult({ store, agentType, result, reservedSlot, failure, now: args.now });
   }
   return outcome([`loom(pi): ${failure} — completion evidence ignored`]);
 }
@@ -461,11 +563,13 @@ export type ImplementationTaskBinding =
 export function resolveImplementationTaskId(args: Readonly<{
   agentType: string;
   reservedTaskId: string | null | undefined;
+  reservedAuthority?: ImplementationAttemptAuthority | null;
   resultPrompt: string;
   parentPrompt: ParentPromptText;
   executingTasks: readonly string[];
 }>): ImplementationTaskBinding {
-  const direct = args.reservedTaskId ?? extractTaskId(args.resultPrompt) ?? extractTaskId(args.parentPrompt);
+  const direct = args.reservedAuthority?.taskId ?? args.reservedTaskId ??
+    extractTaskId(args.resultPrompt) ?? extractTaskId(args.parentPrompt);
   if (direct) return Object.freeze({ kind: "bound" as const, taskId: direct, inferred: false });
   const executing = args.executingTasks;
   if (executing.length === 1) {
@@ -501,16 +605,18 @@ type ImplementationTranscriptObservation =
 async function settleCompletedOrMissingImplementation(
   store: TaskGraphStore,
   taskId: string,
+  reservedSlot: ReservedSlot | undefined,
 ): Promise<boolean> {
   let settled = false;
   await store.update((state) => {
+    if (!reservedAuthorityIsCurrent(state, taskId, reservedSlot)) return state;
     const task = state.tasks.find((candidate) => candidate.id === taskId);
     if (task !== undefined && task.status !== "completed") return state;
     settled = true;
-    return {
+    return clearCurrentReservedAuthority({
       ...state,
       executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== taskId),
-    };
+    }, taskId, reservedSlot);
   });
   return settled;
 }
@@ -525,6 +631,7 @@ async function resolveImplementationBindingForResult(args: Readonly<{
   const binding = resolveImplementationTaskId({
     agentType: args.agentType,
     reservedTaskId: args.reservedSlot?.taskId,
+    reservedAuthority: args.reservedSlot?.implementationAuthority,
     resultPrompt: args.result.task ?? "",
     parentPrompt: args.parentPrompt,
     executingTasks: args.store.load().executing_tasks ?? [],
@@ -589,11 +696,13 @@ function observeImplementationTranscript(result: PiSubagentResult, taskId: strin
 function malformedTranscriptResolutionState(args: Readonly<{
   state: TaskGraph;
   taskId: string;
+  reservedSlot: ReservedSlot | undefined;
   failureReason: string;
   root: string;
   comparisonFailures: string[];
 }>): TaskGraph {
   const currentTarget = args.state.tasks.find((candidate) => candidate.id === args.taskId);
+  if (!reservedAuthorityIsCurrent(args.state, args.taskId, args.reservedSlot)) return args.state;
   if (currentTarget === undefined || currentTarget.status === "completed") {
     return {
       ...args.state,
@@ -608,7 +717,7 @@ function malformedTranscriptResolutionState(args: Readonly<{
     );
   }
   if (!comparison.bytesChangedSinceAttempt) return pendingMalformedTranscriptState(args);
-  return applyUntrustedStopResolution(args.state, args.taskId, {
+  return clearCurrentReservedAuthority(applyUntrustedStopResolution(args.state, args.taskId, {
     taskCompleted: false,
     testResult: {
       verdict: "untrusted",
@@ -622,15 +731,16 @@ function malformedTranscriptResolutionState(args: Readonly<{
     bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,
     newTestsWritten: false,
     newTestEvidence: "",
-  }).state;
+  }).state, args.taskId, args.reservedSlot);
 }
 
 function pendingMalformedTranscriptState(args: Readonly<{
   state: TaskGraph;
   taskId: string;
+  reservedSlot: ReservedSlot | undefined;
   failureReason: string;
 }>): TaskGraph {
-  return {
+  return clearCurrentReservedAuthority({
     ...args.state,
     executing_tasks: (args.state.executing_tasks ?? []).filter((id) => id !== args.taskId),
     tasks: args.state.tasks.map((candidate) =>
@@ -638,13 +748,14 @@ function pendingMalformedTranscriptState(args: Readonly<{
         ? { ...candidate, failure_reason: args.failureReason }
         : candidate
     ),
-  };
+  }, args.taskId, args.reservedSlot);
 }
 
 async function applyMalformedImplementationTranscript(args: Readonly<{
   store: TaskGraphStore;
   repository: RepositoryProbe;
   taskId: string;
+  reservedSlot: ReservedSlot | undefined;
   failureReason: string;
 }>): Promise<readonly string[]> {
   const root = args.repository.root();
@@ -652,6 +763,7 @@ async function applyMalformedImplementationTranscript(args: Readonly<{
   await args.store.update((state) => malformedTranscriptResolutionState({
     state,
     taskId: args.taskId,
+    reservedSlot: args.reservedSlot,
     failureReason: args.failureReason,
     root,
     comparisonFailures,
@@ -724,28 +836,34 @@ function observeNewTestRepository(
       };
 }
 
-type AcceptedImplementationResolutionArgs = Readonly<{
+type LegacyImplementationQuarantineArgs = Readonly<{
   store: TaskGraphStore;
   repository: RepositoryProbe;
   taskId: string;
+  reservedSlot: ReservedSlot | undefined;
   filesModified: readonly string[];
   test: ImplementationTestObservation;
 }>;
 
-type AcceptedImplementationResolution = Readonly<{
+type LegacyImplementationQuarantine = Readonly<{
   log: readonly string[];
   processingErrors: readonly string[];
 }>;
 
-async function applyAcceptedImplementationResolution(
-  args: AcceptedImplementationResolutionArgs,
-): Promise<AcceptedImplementationResolution> {
+async function applyLegacyImplementationQuarantine(
+  args: LegacyImplementationQuarantineArgs,
+): Promise<LegacyImplementationQuarantine> {
   const repository = observeNewTestRepository(args.repository, args.taskId);
   const log: string[] = [];
   const processingErrors: string[] = [];
   const root = args.repository.root();
   let skippedExistingVerdict = false;
   await args.store.update((state) => {
+    if (!reservedAuthorityIsCurrent(state, args.taskId, args.reservedSlot)) {
+      const diagnostic = `loom(pi): reserved authority for ${args.taskId} is stale — current attempt preserved`;
+      log.push(diagnostic);
+      return state;
+    }
     const currentTarget = state.tasks.find((candidate) => candidate.id === args.taskId);
     if (currentTarget === undefined || currentTarget.status === "completed") {
       const applied = applyUntrustedStopResolution(state, args.taskId, {
@@ -759,7 +877,7 @@ async function applyAcceptedImplementationResolution(
         newTestEvidence: "",
       });
       skippedExistingVerdict = applied.skipped;
-      return applied.state;
+      return clearCurrentReservedAuthority(applied.state, args.taskId, args.reservedSlot);
     }
     const comparison = compareAttemptBaseline(root, currentTarget, {
       kind: "repository-or-declared",
@@ -772,6 +890,7 @@ async function applyAcceptedImplementationResolution(
         state,
         args.taskId,
         comparison.bytesChangedSinceAttempt,
+        args.reservedSlot?.implementationAuthority ?? undefined,
       );
     };
     if (comparison.failure !== null) {
@@ -809,7 +928,7 @@ async function applyAcceptedImplementationResolution(
       newTestEvidence: newTestEvidence.evidence,
     });
     skippedExistingVerdict = applied.skipped;
-    return applied.state;
+    return clearCurrentReservedAuthority(applied.state, args.taskId, args.reservedSlot);
   });
 
   if (skippedExistingVerdict) {
@@ -818,56 +937,227 @@ async function applyAcceptedImplementationResolution(
   return { log, processingErrors };
 }
 
-/**
- * Resolve one implementation agent's completion into task state.
- *
- * Every state decision runs INSIDE the locked update via the shared pure
- * `applyUntrustedStopResolution`: the pre-lock reads here are a fast path only,
- * and a concurrent writer may outdate them (TOCTOU). The incoming resolution is
- * always untrusted. A completed Task always stands; trusted failures stand
- * unless explicit revalidation is required, and trusted passes stand only
- * while no newer Task bytes were attributed.
- */
-export async function applyImplementationPiResult(args: Readonly<{
+type ImplementationPiResultArgs = Readonly<{
   store: TaskGraphStore;
   repository: RepositoryProbe;
   agentType: string;
   result: PiSubagentResult;
   reservedSlot: ReservedSlot | undefined;
   parentPrompt: ParentPromptText;
-}>): Promise<PiResultOutcome> {
-  const binding = await resolveImplementationBindingForResult(args);
-  if (binding.kind === "unbound") return binding.outcome;
-  const log = [...binding.log];
-  if (await settleCompletedOrMissingImplementation(args.store, binding.taskId)) {
-    log.push(`loom(pi): ${binding.taskId} stopped; preserved completed/missing state and cleared executing_tasks`);
-    return outcome(log);
-  }
+}>;
 
+type ResultImplementationBinding = Extract<ImplementationBindingResolution, { kind: "bound" }>;
+
+type ExactPiSettlementArgs = ImplementationPiResultArgs & Readonly<{
+  binding: ResultImplementationBinding;
+  authority: ImplementationAttemptAuthority;
+  observedAt: IsoInstant;
+  log: string[];
+}>;
+
+type LockedPiSettlement = Readonly<{
+  application: ImplementationSettlementApplicationResult;
+  infrastructureReason?: string;
+}>;
+
+function applicationState(state: TaskGraph, application: ImplementationSettlementApplicationResult): TaskGraph {
+  return application.kind === "error" ? state : application.state;
+}
+
+function renderExactPiSettlement(
+  args: ExactPiSettlementArgs,
+  settled: LockedPiSettlement | undefined,
+): PiResultOutcome {
+  const applied = settled?.application;
+  if (applied === undefined || applied.kind === "error") {
+    const diagnostic = `loom(pi): exact Oracle settlement failed for ${args.binding.taskId} — current attempt preserved`;
+    return outcome([...args.log, diagnostic], [diagnostic]);
+  }
+  if (applied.kind === "ignored") {
+    return outcome([...args.log, `loom(pi): ${args.binding.taskId} result ignored (${applied.reason})`]);
+  }
+  const reason = settled?.infrastructureReason;
+  const log = [...args.log, `loom(pi): ${args.binding.taskId} settlement: ${applied.transition.kind}`];
+  if (applied.transition.kind === "infrastructure-blocked" && reason !== undefined) {
+    log.push(`loom(pi): ${reason}`);
+  }
+  return outcome(log, applied.transition.kind === "infrastructure-blocked" ? [reason ?? "infrastructure unavailable"] : []);
+}
+
+async function settleExactPiInfrastructure(
+  args: ExactPiSettlementArgs,
+  reason: string,
+): Promise<PiResultOutcome> {
+  const settled: { value?: LockedPiSettlement } = {};
+  await args.store.update((state) => {
+    const application = settleUnavailableImplementation(state, args.authority, args.observedAt, reason);
+    settled.value = { application, infrastructureReason: reason };
+    return applicationState(state, application);
+  });
+  return renderExactPiSettlement(args, settled.value);
+}
+
+type PiNewTestObservation =
+  | Readonly<{ ok: true; evidence: NewTestEvidence }>
+  | Readonly<{ ok: false; reason: string }>;
+
+function observePiNewTests(
+  args: ExactPiSettlementArgs,
+  task: LoomTask,
+  paths: readonly string[],
+): PiNewTestObservation {
+  const policy = taskVerificationPolicy(task);
+  if (!args.repository.isRepo() && requiresNewTests(policy)) {
+    return { ok: false, reason: `Pi new-test observation unavailable for ${args.binding.taskId}: repository probe reports a non-Git working directory` };
+  }
+  try {
+    return {
+      ok: true,
+      evidence: collectNewTestEvidence(paths, policy.newTests, task.start_sha),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `Pi new-test observation unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+function settleCurrentPiTask(
+  state: TaskGraph,
+  task: LoomTask,
+  args: ExactPiSettlementArgs,
+  transcript: Extract<ImplementationTranscriptObservation, { kind: "accepted" }>,
+  modifiedPaths: readonly string[],
+): LockedPiSettlement {
+  const bytes = observeTaskLocalCompletion({
+    repositoryRoot: args.repository.root(),
+    task,
+    authority: args.authority,
+    parserModifiedPaths: modifiedPaths,
+    parserPathLabel: "Pi transcript files_modified",
+  });
+  const suiteOutcome = bytes.suite.checks[0]?.outcome;
+  if (suiteOutcome?.kind === "observation-unavailable") {
+    return {
+      application: settleUnavailableImplementation(state, args.authority, args.observedAt, suiteOutcome.reason, bytes),
+      infrastructureReason: suiteOutcome.reason,
+    };
+  }
+  const newTests = observePiNewTests(args, task, bytes.cumulativeModifiedPaths);
+  if (!newTests.ok) {
+    return {
+      application: settleUnavailableImplementation(state, args.authority, args.observedAt, newTests.reason, bytes),
+      infrastructureReason: newTests.reason,
+    };
+  }
+  return {
+    application: settleObservedImplementation(
+      state,
+      args.authority,
+      args.observedAt,
+      {
+        taskCompleted: true,
+        testResult: implementationTestResult(transcript.test),
+        testEvidence: transcript.test.evidence.evidence,
+        newTestsWritten: newTests.evidence.written,
+        newTestEvidence: newTests.evidence.evidence,
+      },
+      PI_STRUCTURED_EVIDENCE_POLICY,
+      bytes,
+    ),
+  };
+}
+
+function settleLockedPiResult(
+  state: TaskGraph,
+  args: ExactPiSettlementArgs,
+  transcript: Extract<ImplementationTranscriptObservation, { kind: "accepted" }>,
+  modifiedPaths: readonly string[],
+): LockedPiSettlement {
+  const task = state.tasks.find((candidate) => candidate.id === args.authority.taskId);
+  if (task?.implementation_attempt_history?.some(
+    (receipt) => receipt.authorityDigest === args.authority.authorityDigest,
+  )) {
+    return { application: settleUnavailableImplementation(state, args.authority, args.observedAt, "duplicate Pi result delivery") };
+  }
+  if (task?.active_implementation_attempt?.authorityDigest !== args.authority.authorityDigest) {
+    return { application: settleUnavailableImplementation(state, args.authority, args.observedAt, "late Pi result delivery") };
+  }
+  return settleCurrentPiTask(state, task, args, transcript, modifiedPaths);
+}
+
+async function applyExactImplementationPiResult(args: ExactPiSettlementArgs): Promise<PiResultOutcome> {
+  const transcript = observeImplementationTranscript(args.result, args.binding.taskId);
+  args.log.push(...transcript.log);
+  if (transcript.kind === "malformed") return settleExactPiInfrastructure(args, transcript.failureReason);
+  const modified = readImplementationModifiedPaths(args.repository, transcript.resultMessages, args.binding.taskId);
+  if (!modified.ok) return settleExactPiInfrastructure(args, modified.message);
+  const settled: { value?: LockedPiSettlement } = {};
+  await args.store.update((state) => {
+    const application = settleLockedPiResult(state, args, transcript, modified.filesModified);
+    settled.value = application;
+    return applicationState(state, application.application);
+  });
+  return renderExactPiSettlement(args, settled.value);
+}
+
+async function applyLegacyImplementationPiResult(
+  args: ImplementationPiResultArgs,
+  binding: ResultImplementationBinding,
+  log: string[],
+): Promise<PiResultOutcome> {
+  if (await settleCompletedOrMissingImplementation(args.store, binding.taskId, args.reservedSlot)) {
+    return outcome([...log, `loom(pi): ${binding.taskId} stopped; preserved completed/missing legacy state`]);
+  }
   const transcript = observeImplementationTranscript(args.result, binding.taskId);
   log.push(...transcript.log);
   if (transcript.kind === "malformed") {
     log.push(...await applyMalformedImplementationTranscript({ ...args, taskId: binding.taskId, ...transcript }));
     return outcome(log);
   }
-
-  const modifiedPaths = readImplementationModifiedPaths(args.repository, transcript.resultMessages, binding.taskId);
-  if (!modifiedPaths.ok) {
-    await args.store.update((state) =>
-      applyCompletionInfrastructureFailure(state, binding.taskId, true)
-    );
-    log.push(modifiedPaths.message);
-    return outcome(log, [modifiedPaths.message]);
+  const modified = readImplementationModifiedPaths(args.repository, transcript.resultMessages, binding.taskId);
+  if (!modified.ok) {
+    await args.store.update((state) => applyCompletionInfrastructureFailure(state, binding.taskId, true));
+    return outcome([...log, modified.message], [modified.message]);
   }
-
-  const settlement = await applyAcceptedImplementationResolution({
+  const settlement = await applyLegacyImplementationQuarantine({
     ...args,
     taskId: binding.taskId,
-    filesModified: modifiedPaths.filesModified,
+    reservedSlot: args.reservedSlot,
+    filesModified: modified.filesModified,
     test: transcript.test,
   });
-  log.push(...settlement.log);
-  return outcome(log, settlement.processingErrors);
+  return outcome([...log, ...settlement.log], settlement.processingErrors);
+}
+
+/** Resolve one Pi implementation result through exact modern or cleanup-only legacy authority. */
+export async function applyImplementationPiResult(args: ImplementationPiResultArgs): Promise<PiResultOutcome> {
+  const binding = await resolveImplementationBindingForResult(args);
+  if (binding.kind === "unbound") return binding.outcome;
+  const log = [...binding.log];
+  const authority = args.reservedSlot?.implementationAuthority;
+  const currentTask = args.store.load().tasks.find((task) => task.id === binding.taskId);
+  if (currentTask?.active_implementation_attempt !== undefined && authority == null) {
+    const diagnostic = `loom(pi): modern implementation ${binding.taskId} has no exact ReservedSlot authority — current attempt preserved`;
+    return outcome([...log, diagnostic], [diagnostic]);
+  }
+  if (authority == null) return applyLegacyImplementationPiResult(args, binding, log);
+  const observedAt = parseIsoInstant(new Date().toISOString(), "Pi implementation observation instant");
+  if (!observedAt.ok) return outcome(observedAt.error.errors, observedAt.error.errors);
+  const exactArgs = { ...args, binding, authority, observedAt: observedAt.value, log };
+  const returnedTaskId = extractTaskId(args.result.task);
+  const reservedTaskId = args.reservedSlot?.taskId;
+  if (returnedTaskId === null || reservedTaskId === null || reservedTaskId === undefined ||
+      returnedTaskId !== reservedTaskId || returnedTaskId !== authority.taskId ||
+      binding.taskId !== authority.taskId) {
+    return settleExactPiInfrastructure(
+      exactArgs,
+      `Pi result Task identity mismatch: returned=${returnedTaskId ?? "missing"}, ` +
+        `reserved=${reservedTaskId ?? "missing"}, authority=${authority.taskId}`,
+    );
+  }
+  return applyExactImplementationPiResult(exactArgs);
 }
 
 // ---------------------------------------------------------------------------

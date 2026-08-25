@@ -153,7 +153,13 @@ For each Wave, the orchestrator spawns all dependency-ready implementation Tasks
 
 Direct parent edits are blocked while an orchestration is active. Implementation happens through Agents so completion, files, test evidence, and proof can be attributed.
 
-A Task reaches `implemented` only when its proof obligations are satisfied. Completion prose alone is not authority.
+A Task reaches `implemented` only when its proof obligations are satisfied **and** the Implementation Completion Oracle accepts an exact Task Completion Suite for the engine-issued Implementation Attempt. Completion prose, a Task id inferred from `executing_tasks`, and an unreserved harness result are cleanup evidence only.
+
+Claude binds authority through a session+Agent sidecar published with no-replace semantics at SubagentStart; Pi stores the exact authority on its ReservedSlot. Duplicate delivery is idempotent, and a late result cannot release a newer reservation. Every applied transition appends one immutable settlement receipt and atomically updates lifecycle/evidence, clears only matching attempt fields, invalidates review/spec/Wave authority when required, and recomputes `impl_complete`.
+
+The Slice 3 Task-local suite has one engine-owned check: `loom:task-byte-scope`. Its allowed set is the current `attempt_artifact_baseline` (declared plus previously attributed paths captured at registration). Current-attempt bytes compare that baseline; cumulative declared-artifact Proof still compares the first `artifact_baseline`. A transcript path outside the allowed set is semantic failure. Baseline/path/read/Git uncertainty is infrastructure-blocked. Repository dirty-set delta may conservatively invalidate stale authority, but never becomes Task attribution, Proof, or sibling evidence.
+
+Task-local settlement runs **no arbitrary Task/project subprocesses**. Build, typecheck, test commands, package scripts, reports, and full-tier lint execute only in the quiescent Wave suite. Slice 3 records retry-required after semantic attempt 1 and escalation-required after semantic attempt 2, but dispatches neither. Slice 4 alone freezes retry diagnostics/context and launches attempt 2 or escalation.
 
 ## Task proof obligations
 

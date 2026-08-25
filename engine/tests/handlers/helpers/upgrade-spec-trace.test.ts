@@ -7,6 +7,7 @@ import { prepareSpecTraceUpgrade } from "../../../src/core/spec-trace-migration"
 import { createRunDirectory } from "../../../src/orchestration/run-directory-handle";
 import { StateManager, parseTaskGraph } from "../../../src/state-manager";
 import type { TaskGraph } from "../../../src/types";
+import { pendingTaskProof } from "../../fixtures/task-lifecycle";
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -37,13 +38,13 @@ function legacyGraph(): TaskGraph {
     tasks: [
       {
         id: "T1", description: "partial", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [], spec_anchors: [], review_status: "pending",
+        status: "pending", proof: pendingTaskProof(), depends_on: [], spec_anchors: [], review_status: "pending",
         review_generation: 3, findings: [finding], critical_findings: [],
         advisory_findings: [finding.claim], refuted_findings: [], resolved_findings: [],
       },
       {
         id: "T2", description: "complete", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [], spec_anchors: ["FR-1"], review_status: "pending",
+        status: "pending", proof: pendingTaskProof(), depends_on: [], spec_anchors: ["FR-1"], review_status: "pending",
         review_generation: 7, findings: [], critical_findings: [], advisory_findings: [],
         refuted_findings: [], resolved_findings: [],
       },

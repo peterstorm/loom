@@ -1,10 +1,19 @@
+import { randomUUID } from "node:crypto";
 import type { HookResult, TaskGraph } from "../types";
 import { pathExistsFailClosed, taskGraphPath } from "../config";
 import { StateManager } from "../state-manager";
 import {
+  parseIsoInstant,
+  parseReservationId,
+  type ImplementationAttemptAuthority,
+} from "../core/implementation-completion";
+import {
+  applyTaskExecutionAuthorityBatch,
   classifyTaskExecutionSpawn,
+  createTaskExecutionAuthorityBatch,
   parseImplementationTaskBindings,
-  registerTaskExecutionBaseline,
+  proveStaleReservations,
+  rollbackTaskExecutionAuthorityBatch,
   staleReservationsForRosterObservation,
   taskExecutionDecision,
   taskExecutionOwnershipError,
@@ -58,21 +67,35 @@ function activeSubagentForGraph(taskGraphPath: string): boolean {
  * spawn denied by a SIBLING HOOK, which this registration cannot observe, is
  * reclaimed by `staleTaskReservations` on the next attempt.
  */
-export async function validateTaskExecutionBatch(
+export type TaskExecutionRegistrationOutcome =
+  | Readonly<{
+      kind: "registered";
+      authorities: readonly ImplementationAttemptAuthority[];
+    }>
+  | Readonly<{ kind: "block"; message: string }>;
+
+class LockedRegistrationRefusal extends Error {}
+
+/**
+ * Typed registration operation used by Pi. The Claude Hook wrapper below keeps
+ * the historical HookResult API while intentionally discarding capabilities
+ * that Claude correlates through its SubagentStart sidecar.
+ */
+export async function registerTaskExecutionBatch(
   spawns: readonly TaskExecutionSpawn[],
   mode: ExecutionBatchMode = "parallel",
   rosterObservation?: TaskExecutionRosterObservation,
-): Promise<HookResult> {
+): Promise<TaskExecutionRegistrationOutcome> {
   const inputs = spawns.filter(
     (spawn): spawn is Extract<TaskExecutionSpawn, { kind: "implementation" }> =>
       spawn.kind === "implementation",
   );
-  if (inputs.length === 0) return { kind: "allow" };
+  if (inputs.length === 0) return { kind: "registered", authorities: Object.freeze([]) };
   const statePath = taskGraphPath();
   // Fail CLOSED on an unreadable graph: `existsSync` collapses EACCES/ELOOP/
   // ENOTDIR/EIO into `false`, which would wave the whole implementation batch
   // through with no ownership, staleness, or baseline check and no trace.
-  if (!pathExistsFailClosed(statePath)) return { kind: "allow" };
+  if (!pathExistsFailClosed(statePath)) return { kind: "registered", authorities: Object.freeze([]) };
   // Past the fail-closed probe the graph is PRESENT-or-unprovable, so every
   // remaining failure to read it is a refusal, never a pass: returning "allow"
   // here is the same fail-open the probe above was introduced to close.
@@ -162,49 +185,88 @@ export async function validateTaskExecutionBatch(
     };
   }
 
-  const reservedAt = new Date(now).toISOString();
-  let lockedRegistrationError: string | null = null;
-  await manager.update((current) => {
-    // Re-derive staleness against the LOCKED graph (pure — same clock and
-    // roster fact). If a racing sibling already committed one of these
-    // reservations, its `reserved_at` is now young and it is no longer stale,
-    // so this batch will not reclaim a live registration out from under it.
-    const lockedStale = staleFor(current);
-    lockedRegistrationError = taskExecutionRegistrationError(
-      current, inputs, taskIds, mode, baselines, lockedStale,
-    );
-    if (lockedRegistrationError !== null) return current;
+  const parsedReservedAt = parseIsoInstant(new Date(now).toISOString(), "reservation instant");
+  if (!parsedReservedAt.ok) {
+    return { kind: "block", message: `BLOCKED: ${parsedReservedAt.error.errors.join("; ")}` };
+  }
+  const reservedAt = parsedReservedAt.value;
+  const reservationIds = inputs.map(() => parseReservationId(randomUUID(), "generated reservation id"));
+  const invalidReservation = reservationIds.find((result) => !result.ok);
+  if (invalidReservation !== undefined && !invalidReservation.ok) {
+    return { kind: "block", message: `BLOCKED: ${invalidReservation.error.errors.join("; ")}` };
+  }
+  const authorityBatch = createTaskExecutionAuthorityBatch(
+    state,
+    taskIds,
+    reservationIds.flatMap((result) => result.ok ? [result.value] : []),
+    repository.headSha,
+    reservedAt,
+    baselines,
+  );
+  if (!authorityBatch.ok) return { kind: "block", message: `BLOCKED: ${authorityBatch.error}` };
+
+  try {
+    const authorities = await manager.updateAndReturn((current) => {
+      // Every graph-derived preflight fact is recomputed under the State File
+      // lock. The stale proofs are minted from THIS snapshot, and application
+      // still compares their exact authority digests before releasing anything.
+      const lockedStale = staleFor(current);
+      const lockedPlansError = taskExecutionRegistrationError(
+        current,
+        inputs,
+        taskIds,
+        mode,
+        baselines,
+        lockedStale,
+        authorityBatch.plans,
+      );
+      if (lockedPlansError !== null) throw new LockedRegistrationRefusal(lockedPlansError);
+      const staleProofs = proveStaleReservations(current, lockedStale);
+      return {
+        state: applyTaskExecutionAuthorityBatch(current, authorityBatch.plans, staleProofs, reservedAt),
+        value: Object.freeze(authorityBatch.plans.map(({ authority }) => authority)),
+      };
+    });
+    return { kind: "registered", authorities };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     return {
-      ...current,
-      // Released reservations are dropped rather than carried forward, so a
-      // reclaimed task is registered once instead of accumulating a duplicate
-      // entry that would survive its own SubagentStop cleanup.
-      executing_tasks: [...new Set([
-        ...(current.executing_tasks ?? []).filter((taskId) => !lockedStale.has(taskId)),
-        ...baselines.keys(),
-      ])],
-      tasks: current.tasks.map((task) => {
-        const artifactBaselines = baselines.get(task.id);
-        return artifactBaselines === undefined
-          ? task
-          : {
-              ...registerTaskExecutionBaseline(
-                task,
-                repository.headSha,
-                artifactBaselines.proof,
-                artifactBaselines.attempt,
-                artifactBaselines.repositoryAttempt,
-              ),
-              // Stamp the reservation instant so the grace window can shield
-              // this task while its agent starts. Refreshed every attempt.
-              reserved_at: reservedAt,
-            };
-      }),
+      kind: "block",
+      message: `BLOCKED: ${error instanceof LockedRegistrationRefusal ? message : `Cannot atomically register implementation attempts: ${message}`}`,
     };
-  });
-  return lockedRegistrationError === null
-    ? { kind: "allow" }
-    : { kind: "block", message: `BLOCKED: ${lockedRegistrationError}` };
+  }
+}
+
+/** Exact rollback used when a harness cannot carry a just-minted capability. */
+export async function rollbackTaskExecutionRegistration(
+  authorities: readonly ImplementationAttemptAuthority[],
+): Promise<HookResult> {
+  if (authorities.length === 0) return { kind: "allow" };
+  const statePath = taskGraphPath();
+  const manager = StateManager.fromPath(statePath);
+  if (manager === null) {
+    return { kind: "block", message: `BLOCKED: Cannot roll back implementation registration; task graph ${statePath} is unavailable.` };
+  }
+  const rolledBackAt = parseIsoInstant(new Date().toISOString(), "rollback instant");
+  if (!rolledBackAt.ok) return { kind: "block", message: `BLOCKED: ${rolledBackAt.error.errors.join("; ")}` };
+  try {
+    await manager.update((state) => rollbackTaskExecutionAuthorityBatch(state, authorities, rolledBackAt.value));
+    return { kind: "allow" };
+  } catch (error) {
+    return {
+      kind: "block",
+      message: `BLOCKED: Cannot roll back implementation registration: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+export async function validateTaskExecutionBatch(
+  spawns: readonly TaskExecutionSpawn[],
+  mode: ExecutionBatchMode = "parallel",
+  rosterObservation?: TaskExecutionRosterObservation,
+): Promise<HookResult> {
+  const result = await registerTaskExecutionBatch(spawns, mode, rosterObservation);
+  return result.kind === "registered" ? { kind: "allow" } : result;
 }
 
 export async function validateTaskExecution(input: ValidateTaskExecutionInput): Promise<HookResult> {

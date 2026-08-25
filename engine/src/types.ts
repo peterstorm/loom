@@ -2,7 +2,16 @@
  * Shared Loom schemas and Hook result/input types.
  */
 
-import type { TaskProof } from "./core/proof-obligations";
+import type {
+  FailedTaskProof,
+  PendingTaskProof,
+  SatisfiedTaskProof,
+  TaskProof,
+} from "./core/proof-obligations";
+import type {
+  ImplementationAttemptAuthority,
+  ImplementationAttemptSettlementReceipt,
+} from "./core/implementation-completion";
 import type { StoredVerificationPolicy } from "./core/verification-policy";
 import type { DeclaredArtifactBaseline } from "./core/artifact-baseline";
 import type { IssuedReviewPacketRegistration } from "./core/review-packet";
@@ -331,7 +340,7 @@ export interface RecoveredArtifactWriteEvidence {
   readonly modified_paths: readonly string[];
 }
 
-export interface Task {
+export interface TaskCommonMetadata {
   /** Base fields are `readonly` like the rest: every mutation flows through
    *  StateManager.update's locked transform, which returns a NEW task object.
    *  An in-place assignment on a loaded graph would bypass that transform and
@@ -340,7 +349,6 @@ export interface Task {
   readonly description: string;
   readonly agent: string;
   readonly wave: number;
-  readonly status: TaskStatus;
   readonly depends_on: readonly string[];
   /** Requirement Completion Claims: this Task's Wave must fully satisfy each Requirement. */
   readonly spec_anchors?: readonly string[];
@@ -352,12 +360,6 @@ export interface Task {
   readonly new_tests_required?: boolean;
   /** Exact architecture context selected for this Task by decompose. */
   readonly plan_context?: string;
-  /** Engine-authored proof aggregate. New graphs always carry it. */
-  readonly proof?: TaskProof;
-  /** A completed-Wave recovery preserved historical evidence but requires a
-   * re-spawned implementation Agent to rebuild a satisfied Proof under the
-   * current Verification Policy before the Task can again satisfy a Wave Gate. */
-  readonly revalidation_required?: true;
   /** Files this task creates/modifies (decompose contract); older graphs may lack it */
   readonly file_list?: readonly string[];
   /** Test outcome + trust provenance; absent until an impl agent completes. */
@@ -448,16 +450,13 @@ export interface Task {
    *  starts. Proof compares current bytes to this baseline; transcript tool
    *  calls remain lint targets and cannot vouch that a change occurred. */
   readonly artifact_baseline?: readonly DeclaredArtifactBaseline[];
-  /** Exact declared and previously-attributed artifact state captured
-   * immediately before the current implementation attempt. Unlike
-   * artifact_baseline, this advances on every accepted retry so byte changes
-   * from that attempt invalidate older evidence even when current transcript
-   * tool attribution is missing. */
+  /** Current implementation-attempt fields are compatibility-optional on the
+   * shared metadata; StateManager proves their all-or-none digest lockstep. */
+  readonly active_implementation_attempt?: ImplementationAttemptAuthority;
   readonly attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
-  /** Compact snapshot of every Git-visible dirty path immediately before the
-   * current implementation attempt. Comparing this boundary with the later
-   * dirty set detects writes outside declared/previously-attributed scope. */
   readonly attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
+  readonly reserved_at?: string;
+  readonly legacy_execution_reservation?: true;
   /** Engine-issued packet authority retained after a review run closes. A
    * self-hashed packet is integrity evidence, not provenance; historical write
    * recovery accepts a packet only when every registration field matches. */
@@ -470,16 +469,53 @@ export interface Task {
    * attribution after a legacy retry replaced files_modified. */
   readonly recovered_artifact_writes?: readonly RecoveredArtifactWriteEvidence[];
   readonly start_sha?: string;
-  /** ISO-8601 instant this task's execution reservation was committed (task
-   * added to `executing_tasks` during PreToolUse). Refreshed on every spawn
-   * attempt. Reservation reclamation shields any reservation younger than the
-   * grace window (see RESERVATION_GRACE_MS) so a live agent that has not yet
-   * reached its SubagentStart roster mark is never mistaken for one stranded by
-   * a vetoed spawn. */
-  readonly reserved_at?: string;
   readonly failure_reason?: string;
   readonly retry_count?: number;
+  /** Immutable exact receipts; append-only settlement audit in wire order. */
+  readonly implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
 }
+
+/** Existing flat wire fields, represented as a closed lifecycle union. */
+export type TaskLifecycle =
+  | Readonly<{
+      status: "pending";
+      proof: PendingTaskProof | FailedTaskProof;
+      revalidation_required?: never;
+      legacy_missing_proof?: never;
+    }>
+  | Readonly<{
+      status: "pending";
+      proof: TaskProof;
+      revalidation_required: true;
+      legacy_missing_proof?: never;
+    }>
+  | Readonly<{
+      status: "implemented";
+      proof: SatisfiedTaskProof;
+      revalidation_required?: never;
+      legacy_missing_proof?: never;
+    }>
+  | Readonly<{
+      status: "completed";
+      proof: SatisfiedTaskProof;
+      revalidation_required?: never;
+      legacy_missing_proof?: never;
+    }>
+  | Readonly<{
+      status: "failed";
+      proof: FailedTaskProof;
+      revalidation_required?: never;
+      legacy_missing_proof?: never;
+    }>
+  | Readonly<{
+      status: "implemented" | "completed";
+      proof?: never;
+      revalidation_required?: never;
+      /** Protected migration marker; ordinary writers cannot claim modern completion with it. */
+      legacy_missing_proof: true;
+    }>;
+
+export type Task = Readonly<TaskCommonMetadata & TaskLifecycle>;
 
 // WaveGate + newWaveGate moved to the pure core module core/wave-gate-model
 // (re-exported above); the functional core must not pull runtime values from

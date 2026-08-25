@@ -2,6 +2,8 @@ import { argumentValue } from "./cli-args";
 import { StateManager } from "../../state-manager";
 import { taskGraphPath } from "../../config";
 import { newWaveGate, reconcileWaveBlock } from "../../core/wave-gate-model";
+import { derivePendingTaskProof } from "../../core/proof-obligations";
+import { taskVerificationPolicy } from "../../core/verification-policy";
 import { observeReviewedWorkspace } from "./reviewed-workspace";
 import { openRunDirectory } from "../../orchestration/run-directory-handle";
 import { handleWaveReviewContext, type WaveReviewContextAuthority } from "./programs";
@@ -188,20 +190,29 @@ export function reopenCompletedWave(
     completionReceipt: completed.completionReceipt,
     reopenedTaskIds: Object.freeze([...proof.taskIds]),
   });
-  const tasks = graph.tasks.map((task): Task => !proof.taskIds.includes(task.id) ? task : ({
-    ...task,
-    // Historical proof/test/finding bytes remain audit evidence, not authority
-    // for the current workspace. Only a fresh implementation-agent stop clears
-    // this marker after recording fresh passing test evidence.
-    status: "pending",
-    revalidation_required: true,
-    review_status: "pending",
-    review_generation: (task.review_generation ?? 0) + 1,
-    review_run: undefined,
-    accepted_review_authority: undefined,
-    review_error: undefined,
-    review_evidence_failures: undefined,
-  }));
+  const tasks = graph.tasks.map((task): Task => {
+    if (!proof.taskIds.includes(task.id)) return task;
+    const historicalProof = task.proof ?? derivePendingTaskProof({
+      verificationPolicy: taskVerificationPolicy(task),
+      declaredArtifacts: task.file_list ?? [],
+    });
+    return {
+      ...task,
+      // Historical proof/test/finding bytes remain audit evidence, not authority
+      // for the current workspace. Only a fresh implementation-agent stop clears
+      // this marker after recording fresh passing test evidence.
+      status: "pending",
+      proof: historicalProof,
+      revalidation_required: true,
+      legacy_missing_proof: undefined,
+      review_status: "pending",
+      review_generation: (task.review_generation ?? 0) + 1,
+      review_run: undefined,
+      accepted_review_authority: undefined,
+      review_error: undefined,
+      review_evidence_failures: undefined,
+    };
+  });
   const gate = {
     ...(graph.wave_gates[String(request.wave)] ?? newWaveGate()),
     impl_complete: false,

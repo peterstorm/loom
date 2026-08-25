@@ -11,7 +11,8 @@
 
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import type { Task } from "../../src/types";
+import type { Task, TaskCommonMetadata } from "../../src/types";
+import { taskFixture } from "../fixtures/task-lifecycle";
 import {
   attributeFindings,
   deduplicateFindingIds,
@@ -33,8 +34,8 @@ import { updateTaskFindings } from "../../src/handlers/helpers/store-review-find
 const draft = (severity: "critical" | "advisory", claim: string) =>
   makeDraftFinding({ severity, claim })!;
 
-function task(overrides: Partial<Task> = {}): Task {
-  return {
+function task(overrides: Partial<TaskCommonMetadata> = {}): Task {
+  return taskFixture({
     id: "T1",
     description: "d",
     agent: "code-implementer-agent",
@@ -42,7 +43,7 @@ function task(overrides: Partial<Task> = {}): Task {
     status: "implemented",
     depends_on: [],
     ...overrides,
-  };
+  });
 }
 
 function graphWith(t: Record<string, unknown>): unknown {

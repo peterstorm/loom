@@ -7,6 +7,13 @@ import { stripNamespace } from "../utils/strip-namespace";
 import { hasStandaloneReviewContext } from "./review-output";
 import { waveBlockCauses } from "./wave-gate-model";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
+import {
+  createImplementationAttemptAuthority,
+  createReclaimedImplementationAttemptReceipt,
+  type ImplementationAttemptAuthority,
+  type IsoInstant,
+  type ReservationId,
+} from "./implementation-completion";
 
 export interface ValidateTaskExecutionInput {
   readonly agentType: string;
@@ -35,6 +42,25 @@ export function classifyTaskExecutionSpawn(input: ValidateTaskExecutionInput): T
     : { kind: "non-implementation" };
 }
 
+function dependencyExecutionBlock(state: TaskGraph, task: Task): HookResult | null {
+  for (const dependencyId of task.depends_on) {
+    const dependency = state.tasks.find((candidate) => candidate.id === dependencyId);
+    if (dependency === undefined) {
+      return {
+        kind: "block",
+        message: `BLOCKED: Cannot execute ${task.id} - dependency ${dependencyId} not found in task graph`,
+      };
+    }
+    if (dependency.status !== "completed") {
+      return {
+        kind: "block",
+        message: `BLOCKED: Cannot execute ${task.id} - dependency ${dependencyId} not complete (status: ${dependency.status})`,
+      };
+    }
+  }
+  return null;
+}
+
 /** Pure task gate used by both single and batch shell entry points. */
 export function taskExecutionDecision(state: TaskGraph, taskId: string): HookResult {
   const task = state.tasks.find((candidate) => candidate.id === taskId);
@@ -54,21 +80,8 @@ export function taskExecutionDecision(state: TaskGraph, taskId: string): HookRes
     };
   }
 
-  for (const dep of task.depends_on) {
-    const depTask = state.tasks.find((candidate) => candidate.id === dep);
-    if (!depTask) {
-      return {
-        kind: "block",
-        message: `BLOCKED: Cannot execute ${taskId} - dependency ${dep} not found in task graph`,
-      };
-    }
-    if (depTask.status !== "completed") {
-      return {
-        kind: "block",
-        message: `BLOCKED: Cannot execute ${taskId} - dependency ${dep} not complete (status: ${depTask.status})`,
-      };
-    }
-  }
+  const dependencyBlock = dependencyExecutionBlock(state, task);
+  if (dependencyBlock !== null) return dependencyBlock;
 
   if (task.wave === currentWave && currentWave > 1) {
     const prevWave = String(currentWave - 1);
@@ -302,6 +315,178 @@ export type TaskExecutionBaselines = ReadonlyMap<string, Readonly<{
   repositoryAttempt: readonly DeclaredArtifactBaseline[];
 }>>;
 
+export type TaskExecutionAuthorityPlan = Readonly<{
+  taskId: string;
+  authority: ImplementationAttemptAuthority;
+  baselines: Readonly<{
+    proof: readonly DeclaredArtifactBaseline[];
+    attempt: readonly DeclaredArtifactBaseline[];
+    repositoryAttempt: readonly DeclaredArtifactBaseline[];
+  }>;
+}>;
+
+export type TaskExecutionAuthorityBatch =
+  | Readonly<{ ok: true; plans: readonly TaskExecutionAuthorityPlan[] }>
+  | Readonly<{ ok: false; error: string }>;
+
+/** Mint one exact authority per bound Task while preserving binding order. */
+export function createTaskExecutionAuthorityBatch(
+  state: TaskGraph,
+  taskIds: readonly string[],
+  reservationIds: readonly ReservationId[],
+  headSha: string,
+  reservedAt: IsoInstant,
+  baselines: TaskExecutionBaselines,
+): TaskExecutionAuthorityBatch {
+  if (taskIds.length !== reservationIds.length) {
+    return { ok: false, error: "Implementation reservation identity count does not match bound Task count." };
+  }
+  const plans: TaskExecutionAuthorityPlan[] = [];
+  for (const [index, taskId] of taskIds.entries()) {
+    const task = state.tasks.find((candidate) => candidate.id === taskId);
+    const taskBaselines = baselines.get(taskId);
+    const reservationId = reservationIds[index];
+    if (task === undefined || taskBaselines === undefined || reservationId === undefined) {
+      return { ok: false, error: `Cannot mint exact implementation authority for ${taskId}.` };
+    }
+    const authority = createImplementationAttemptAuthority({
+      taskId,
+      wave: task.wave,
+      semanticAttempt: 1,
+      reservationId,
+      headSha,
+      reservedAt,
+      taskScopeBaseline: taskBaselines.attempt,
+      dirtySetBaseline: taskBaselines.repositoryAttempt,
+    });
+    if (!authority.ok) {
+      return { ok: false, error: authority.error.errors.join("; ") };
+    }
+    plans.push(Object.freeze({ taskId, authority: authority.value, baselines: taskBaselines }));
+  }
+  return { ok: true, plans: Object.freeze(plans) };
+}
+
+export type ProvenStaleReservation =
+  | Readonly<{ kind: "modern"; taskId: string; authority: ImplementationAttemptAuthority }>
+  | Readonly<{ kind: "legacy"; taskId: string }>
+  | Readonly<{ kind: "orphan"; taskId: string }>;
+
+/** Lift Task-id staleness into the exact reservation identities held now. */
+export function proveStaleReservations(
+  state: TaskGraph,
+  staleTaskIds: ReadonlySet<string>,
+): readonly ProvenStaleReservation[] {
+  return Object.freeze([...staleTaskIds].map((taskId): ProvenStaleReservation => {
+    const task = state.tasks.find((candidate) => candidate.id === taskId);
+    if (task === undefined) return Object.freeze({ kind: "orphan", taskId });
+    return task.active_implementation_attempt === undefined
+      ? Object.freeze({ kind: "legacy", taskId })
+      : Object.freeze({ kind: "modern", taskId, authority: task.active_implementation_attempt });
+  }));
+}
+
+function exactStaleTaskIds(
+  state: TaskGraph,
+  stale: readonly ProvenStaleReservation[],
+): ReadonlySet<string> {
+  return new Set(stale.flatMap((proof) => {
+    const task = state.tasks.find((candidate) => candidate.id === proof.taskId);
+    if (proof.kind === "orphan") return task === undefined ? [proof.taskId] : [];
+    if (proof.kind === "legacy") {
+      return task !== undefined && task.active_implementation_attempt === undefined ? [proof.taskId] : [];
+    }
+    return task?.active_implementation_attempt?.authorityDigest === proof.authority.authorityDigest
+      ? [proof.taskId]
+      : [];
+  }));
+}
+
+function reclaimTaskAttempt(
+  task: Task,
+  stale: readonly ProvenStaleReservation[],
+  reclaimedAt: IsoInstant,
+): Task {
+  const proof = stale.find((candidate) => candidate.taskId === task.id);
+  if (proof === undefined) return task;
+  if (proof.kind === "modern") {
+    if (task.active_implementation_attempt?.authorityDigest !== proof.authority.authorityDigest) return task;
+    const receipt = createReclaimedImplementationAttemptReceipt(proof.authority, reclaimedAt);
+    if (!receipt.ok) return task;
+    const history = task.implementation_attempt_history ?? [];
+    const archived = history.some((candidate) => candidate.authorityDigest === proof.authority.authorityDigest)
+      ? history
+      : [...history, receipt.value];
+    return {
+      ...task,
+      active_implementation_attempt: undefined,
+      attempt_artifact_baseline: undefined,
+      attempt_repository_baseline: undefined,
+      reserved_at: undefined,
+      implementation_attempt_history: archived,
+    };
+  }
+  if (proof.kind === "legacy" && task.active_implementation_attempt === undefined) {
+    return { ...task, reserved_at: undefined, legacy_execution_reservation: undefined };
+  }
+  return task;
+}
+
+/** Install a prevalidated batch and retire only exact stale identities. */
+export function applyTaskExecutionAuthorityBatch(
+  state: TaskGraph,
+  plans: readonly TaskExecutionAuthorityPlan[],
+  stale: readonly ProvenStaleReservation[],
+  reclaimedAt: IsoInstant,
+): TaskGraph {
+  const staleTaskIds = exactStaleTaskIds(state, stale);
+  const planByTask = new Map(plans.map((plan) => [plan.taskId, plan]));
+  return {
+    ...state,
+    executing_tasks: [...new Set([
+      ...(state.executing_tasks ?? []).filter((taskId) => !staleTaskIds.has(taskId)),
+      ...plans.map(({ taskId }) => taskId),
+    ])],
+    tasks: state.tasks.map((original): Task => {
+      const task = reclaimTaskAttempt(original, stale, reclaimedAt);
+      const plan = planByTask.get(task.id);
+      if (plan === undefined) return task;
+      return {
+        ...registerTaskExecutionBaseline(
+          task,
+          plan.authority.headSha,
+          plan.baselines.proof,
+          plan.baselines.attempt,
+          plan.baselines.repositoryAttempt,
+        ),
+        active_implementation_attempt: plan.authority,
+        reserved_at: plan.authority.reservedAt,
+        legacy_execution_reservation: undefined,
+      };
+    }),
+  };
+}
+
+/** Roll back only authorities that are still current; late replacements stand. */
+export function rollbackTaskExecutionAuthorityBatch(
+  state: TaskGraph,
+  authorities: readonly ImplementationAttemptAuthority[],
+  rolledBackAt: IsoInstant,
+): TaskGraph {
+  const stale = authorities.map((authority) => Object.freeze({
+    kind: "modern" as const,
+    taskId: authority.taskId,
+    authority,
+  }));
+  const exact = exactStaleTaskIds(state, stale);
+  if (exact.size === 0) return state;
+  return {
+    ...state,
+    executing_tasks: (state.executing_tasks ?? []).filter((taskId) => !exact.has(taskId)),
+    tasks: state.tasks.map((task) => reclaimTaskAttempt(task, stale, rolledBackAt)),
+  };
+}
+
 function samePaths(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((path, index) => path === right[index]);
 }
@@ -315,6 +500,7 @@ export function taskExecutionRegistrationError(
   mode: ExecutionBatchMode,
   baselines: TaskExecutionBaselines,
   staleReservations: ReadonlySet<string> = new Set(),
+  authorityPlans?: readonly TaskExecutionAuthorityPlan[],
 ): string | null {
   const rebound = parseImplementationTaskBindings(current, inputs);
   if (!rebound.ok) return rebound.error;
@@ -340,6 +526,16 @@ export function taskExecutionRegistrationError(
         !samePaths(attemptScope, baseline.attempt.map(({ artifact }) => artifact))) {
       return `Task ${taskId} artifact scope changed before execution registration.`;
     }
+    if (authorityPlans !== undefined) {
+      const plan = authorityPlans.find((candidate) => candidate.taskId === taskId);
+      if (plan === undefined || plan.authority.taskId !== taskId || plan.authority.wave !== task.wave ||
+          plan.baselines !== baseline) {
+        return `Task ${taskId} implementation authority changed before execution registration.`;
+      }
+    }
+  }
+  if (authorityPlans !== undefined && authorityPlans.length !== expectedTaskIds.length) {
+    return "Implementation authority batch no longer matches the bound Task roster.";
   }
   return null;
 }

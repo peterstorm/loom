@@ -6,8 +6,15 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import type { TaskGraph } from "../../src/types";
-import { evaluateTaskProof } from "../../src/core/proof-obligations";
+import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
 import { applyCompletionInfrastructureFailure } from "../../src/handlers/subagent-stop/update-task-status";
+import { taskFixture } from "../fixtures/task-lifecycle";
+import { createImplementationAttemptAuthority } from "../../src/core/implementation-completion";
+import { taskVerificationPolicy } from "../../src/core/verification-policy";
+import {
+  captureDeclaredArtifactBaseline,
+  captureRepositoryChangeBaseline,
+} from "../../src/utils/artifact-baseline";
 import {
   applyFailedPiResult,
   applyImplementationPiResult,
@@ -52,6 +59,7 @@ function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
       agent: "code-implementer-agent",
       wave: 1,
       status: "pending",
+      proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["engine/src/x.ts"] }),
       depends_on: [],
       review_status: "pending",
       file_list: ["engine/src/x.ts"],
@@ -500,6 +508,53 @@ describe("applyImplementationPiResult", () => {
     } as TaskGraph;
   };
 
+  const modernize = (state: TaskGraph, root: string, reservationId: string): Readonly<{
+    graph: TaskGraph;
+    reservedSlot: NonNullable<Parameters<typeof applyImplementationPiResult>[0]["reservedSlot"]>;
+  }> => {
+    const task = state.tasks[0]!;
+    const attemptScope = [...new Set([...(task.file_list ?? []), ...(task.files_modified ?? [])])];
+    const artifactBaseline = captureDeclaredArtifactBaseline(root, task.file_list ?? []);
+    const attemptBaseline = captureDeclaredArtifactBaseline(root, attemptScope);
+    const repositoryBaseline = captureRepositoryChangeBaseline(root);
+    const authority = createImplementationAttemptAuthority({
+      taskId: task.id,
+      wave: task.wave,
+      semanticAttempt: 1,
+      reservationId,
+      headSha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
+      reservedAt: "2026-08-24T00:00:00.000Z",
+      taskScopeBaseline: attemptBaseline,
+      dirtySetBaseline: repositoryBaseline,
+    });
+    if (!authority.ok) throw new Error(authority.error.errors.join("; "));
+    return {
+      graph: {
+        ...state,
+        executing_tasks: [task.id],
+        tasks: [taskFixture({
+          ...task,
+          status: "pending",
+          proof: derivePendingTaskProof({
+            verificationPolicy: taskVerificationPolicy(task),
+            declaredArtifacts: task.file_list ?? [],
+          }),
+          revalidation_required: undefined,
+          artifact_baseline: artifactBaseline,
+          attempt_artifact_baseline: attemptBaseline,
+          attempt_repository_baseline: repositoryBaseline,
+          active_implementation_attempt: authority.value,
+          reserved_at: authority.value.reservedAt,
+        })],
+      },
+      reservedSlot: {
+        agentType: "code-implementer-agent",
+        taskId: task.id,
+        implementationAuthority: authority.value,
+      },
+    };
+  };
+
   const regressionWaivedRecoveryGraph = (): TaskGraph => {
     const verificationPolicy = {
       regression: { kind: "waived" as const, reason: "documentation-only" as const },
@@ -545,7 +600,7 @@ describe("applyImplementationPiResult", () => {
     ]);
   });
 
-  it("clears revalidation when waived regression evidence rebuilds a satisfied Proof", async () => {
+  it("keeps an extracted legacy success pending with failed completion proof", async () => {
     const store = fakeStore(regressionWaivedRecoveryGraph());
 
     await applyImplementationPiResult({
@@ -560,19 +615,46 @@ describe("applyImplementationPiResult", () => {
       parentPrompt: "",
     });
 
-    expect(store.current().tasks[0]).toMatchObject({ status: "implemented", proof: { state: "satisfied" } });
-    expect(store.current().tasks[0]!.revalidation_required).toBeUndefined();
+    expect(store.current().tasks[0]).toMatchObject({
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
+    });
     expect(store.current().executing_tasks).toEqual([]);
   });
 
-  it("settles a concurrently reopened Task from locked state despite a stale completed pre-read", async () => {
+  it("keeps a sole-executing inferred legacy success pending with failed completion proof", async () => {
+    const store = fakeStore(regressionWaivedRecoveryGraph());
+
+    await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        task: "implementation completed",
+        messages: assistantText("All requested work completed."),
+      }),
+      reservedSlot: undefined,
+      parentPrompt: "",
+    });
+
+    expect(store.current().tasks[0]).toMatchObject({
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
+    });
+    expect(store.current().executing_tasks).toEqual([]);
+  });
+
+  it("keeps a concurrently reopened unreserved Task pending despite a stale completed pre-read", async () => {
     const reopened = regressionWaivedRecoveryGraph();
     const completedView: TaskGraph = {
       ...reopened,
-      tasks: reopened.tasks.map((task) => ({
+      tasks: reopened.tasks.map((task) => taskFixture({
         ...task,
-        status: "completed" as const,
-        revalidation_required: undefined,
+        status: "completed",
+        proof: task.proof,
       })),
     };
     let current = reopened;
@@ -594,8 +676,11 @@ describe("applyImplementationPiResult", () => {
       parentPrompt: "",
     });
 
-    expect(store.current().tasks[0]).toMatchObject({ status: "implemented", proof: { state: "satisfied" } });
-    expect(store.current().tasks[0]!.revalidation_required).toBeUndefined();
+    expect(store.current().tasks[0]).toMatchObject({
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
+    });
     expect(applied.log.join("\n")).not.toContain("preserved completed/missing state");
   });
 
@@ -813,7 +898,7 @@ describe("applyImplementationPiResult", () => {
       revalidation_required: true,
       review_status: "pending",
     });
-    expect(store.current().tasks[0]!.proof).toBeUndefined();
+    expect(store.current().tasks[0]!.proof?.state).toBe("pending");
   });
 
   it("compares attempt bytes against the locked current Task, not the pre-lock snapshot", async () => {
@@ -955,21 +1040,23 @@ describe("applyImplementationPiResult", () => {
       provenance: "unverified",
     });
     expect(task.status).toBe("pending");
-    expect(task.proof).toMatchObject({
-      state: "failed",
-      failures: [{ kind: "untrusted-regression-tests-failed" }],
-    });
+    expect(task.proof).toMatchObject({ state: "failed" });
+    expect(task.proof?.state === "failed" ? task.proof.failures : []).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "task-not-completed" }),
+      expect.objectContaining({ kind: "untrusted-regression-tests-failed" }),
+    ]));
   });
 
   it("accepts structured regression evidence while explicit policy waives only new tests", async () => {
-    const store = fakeStore(implementationGraph({
+    const modern = modernize(implementationGraph({
       file_list: [],
       attempt_artifact_baseline: [],
       verification_policy: {
         regression: { kind: "required" },
         new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
       },
-    }));
+    }), process.cwd(), "pi-structured-regression");
+    const store = fakeStore(modern.graph);
 
     await applyImplementationPiResult({
       store,
@@ -979,7 +1066,7 @@ describe("applyImplementationPiResult", () => {
         agent: "code-implementer-agent",
         messages: structuredBashPass(),
       }),
-      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      reservedSlot: modern.reservedSlot,
       parentPrompt: "",
     });
 
@@ -1005,6 +1092,106 @@ describe("applyImplementationPiResult", () => {
     }
   });
 
+  it.each([
+    ["wrong", "Task ID: T2"],
+    ["missing", "implementation completed"],
+  ] as const)("infrastructure-settles an exact reserved slot when returned Task identity is %s", async (_label, returnedTask) => {
+    const modern = modernize(implementationGraph({
+      file_list: [],
+      verification_policy: {
+        regression: { kind: "waived", reason: "documentation-only" },
+        new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+      },
+    }), process.cwd(), `pi-result-task-${_label}`);
+    const store = fakeStore(modern.graph);
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        task: returnedTask,
+        messages: structuredBashPass(),
+      }),
+      reservedSlot: modern.reservedSlot,
+      parentPrompt: "Task ID: T1",
+    });
+
+    expect(applied.processingErrors).toEqual([expect.stringContaining("Task identity mismatch")]);
+    expect(store.current().executing_tasks).toEqual([]);
+    expect(store.current().tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      implementation_attempt_history: [{
+        authorityDigest: modern.reservedSlot.implementationAuthority?.authorityDigest,
+        transition: "infrastructure-blocked",
+      }],
+    });
+    expect(store.current().tasks[0]?.test_result).toBeUndefined();
+  });
+
+  it("preserves a replacement when a stale successful Pi authority arrives", async () => {
+    const first = modernize(implementationGraph({ file_list: [] }), process.cwd(), "pi-stale-first");
+    const replacement = modernize(first.graph, process.cwd(), "pi-stale-replacement");
+    const store = fakeStore(replacement.graph);
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: structuredBashPass() }),
+      reservedSlot: first.reservedSlot,
+      parentPrompt: "",
+    });
+
+    expect(applied.log.join("\n")).toContain("result ignored (stale)");
+    expect(store.current().tasks[0]?.active_implementation_attempt).toEqual(
+      replacement.reservedSlot.implementationAuthority,
+    );
+    expect(store.current().executing_tasks).toEqual(["T1"]);
+    expect(store.current().tasks[0]?.implementation_attempt_history ?? []).toEqual([]);
+  });
+
+  it("preserves spec-check, tests, and reviews when exact successful application changed no bytes", async () => {
+    const base = implementationGraph({
+      file_list: [],
+      review_status: "passed",
+      verification_policy: {
+        regression: { kind: "waived", reason: "documentation-only" },
+        new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+      },
+    });
+    const modern = modernize({
+      ...base,
+      spec_check: {
+        wave: 1, run_at: NOW, verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: false, tests_passed: true, reviews_complete: true, blocked: false },
+      },
+    }, process.cwd(), "pi-no-change-preserves-green");
+    const store = fakeStore(modern.graph);
+
+    await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: [] }),
+      reservedSlot: modern.reservedSlot,
+      parentPrompt: "",
+    });
+
+    expect(store.current().tasks[0]).toMatchObject({ status: "implemented", review_status: "passed" });
+    expect(store.current().spec_check).toMatchObject({ verdict: "PASSED" });
+    expect(store.current().wave_gates["1"]).toMatchObject({
+      impl_complete: true,
+      tests_passed: true,
+      reviews_complete: true,
+    });
+  });
+
   it("accepts attributed new-test evidence without regression evidence when explicit policy waives only regression", async () => {
     const repositoryRoot = mkdtempSync(join(tmpdir(), "loom-pi-inverse-policy-"));
     const previousProjectDir = process.env.CLAUDE_PROJECT_DIR;
@@ -1018,21 +1205,22 @@ describe("applyImplementationPiResult", () => {
       ["-c", "user.name=Loom Tests", "-c", "user.email=loom@example.test", "commit", "-m", "baseline"],
       { cwd: repositoryRoot, stdio: "ignore" },
     );
-    writeFileSync(
-      join(repositoryRoot, testPath),
-      'export {};\n\n  it("covers the change", () => {\n    expect(true).toBe(true);\n  });\n',
-    );
     process.env.CLAUDE_PROJECT_DIR = repositoryRoot;
 
     try {
-      const store = fakeStore(implementationGraph({
-        file_list: [],
+      const modern = modernize(implementationGraph({
+        file_list: [testPath],
         attempt_artifact_baseline: [],
         verification_policy: {
           regression: { kind: "waived", reason: "documentation-only" },
           new_tests: { kind: "required" },
         },
-      }));
+      }), repositoryRoot, "pi-inverse-policy");
+      const store = fakeStore(modern.graph);
+      writeFileSync(
+        join(repositoryRoot, testPath),
+        'export {};\n\n  it("covers the change", () => {\n    expect(true).toBe(true);\n  });\n',
+      );
 
       await applyImplementationPiResult({
         store,
@@ -1042,7 +1230,7 @@ describe("applyImplementationPiResult", () => {
           agent: "code-implementer-agent",
           messages: [writeCall(testPath)],
         }),
-        reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+        reservedSlot: modern.reservedSlot,
         parentPrompt: "",
       });
 
@@ -1054,6 +1242,7 @@ describe("applyImplementationPiResult", () => {
       expect(task.proof?.obligations).toEqual([
         { kind: "task-completed" },
         { kind: "new-tests" },
+        { kind: "declared-artifact-changed", artifact: testPath },
       ]);
       expect(task.proof?.state).toBe("satisfied");
       if (task.proof?.state === "satisfied") {

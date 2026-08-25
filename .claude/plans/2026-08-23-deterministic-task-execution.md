@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted architecture, recovered from the 2026-08-22 completion-oracle discussion and reconciled against Loom `main`. Slice 1 (Verification Policy) merged at `529ffb9`; Slice 2 (quiescent Wave completion suite) merged through PR #29 at `bd16fed`. Slice 3 is active; Slices 4–5 remain planned.
+Accepted architecture, recovered from the 2026-08-22 completion-oracle discussion and reconciled against Loom `main`. Slice 1 (Verification Policy) merged at `529ffb9`; Slice 2 (quiescent Wave completion suite) merged through PR #29 at `bd16fed`. Slice 3 production-cutover implementation is present as current uncommitted work; no Slice 3 review or merge is claimed. Slices 4–5 remain planned.
 
 Implementation worktree: `~/dev/claude-plugins/loom-deterministic-task-completion-oracle`
 
@@ -547,6 +547,17 @@ Parity tests feed equivalent Claude/Pi normalized observations into the same red
 Runtime rollout occurs only at a Pi session boundary after merge. A pre-Slice-3 active child has no exact sidecar/reserved authority and therefore requires cleanup/revalidation and a fresh spawn; compatibility inference never upgrades it to implemented.
 
 Slice 4 alone freezes retry contexts, dispatches attempt 2, persists retry diagnostics/request identity, and owns escalation execution. Slice 3 classifies and records those transitions but launches no retry.
+
+#### Slice 3 implementation evidence (uncommitted; not review/merge evidence)
+
+- `engine/src/core/implementation-completion.ts` owns exact attempt/suite/observation/receipt parsers and the pure Oracle; `engine/src/core/implementation-application.ts` owns Task-byte-scope construction, one evidence-preservation rule, and one exact transition applier.
+- `engine/src/handlers/helpers/task-local-completion.ts` is the thin filesystem/Git shell. It reads exact registered paths and fixed Git dirty-set facts only; it runs no Task/project subprocess.
+- The allowed Task scope is exactly `attempt_artifact_baseline`. Current-attempt attribution requires parser-proven paths whose bytes changed from that baseline. Cumulative declared-artifact Proof compares the first `artifact_baseline`. Foreign transcript paths are semantic failure; baseline/path/read/Git uncertainty is infrastructure-blocked. Repository dirty-set delta is invalidation-only and never Task attribution, Proof, or sibling evidence.
+- Claude modern settlement requires the exact no-replace SubagentStart sidecar; Pi modern settlement requires the exact ReservedSlot authority. Both gather harness evidence, invoke the same Oracle under the State File lock, and apply the same transition core. Missing/inferred legacy identity can clean/quarantine only and cannot set implemented.
+- Failed/malformed/unsafe exact attempts settle as non-consuming infrastructure receipts before release. Duplicate results are idempotent; late results preserve newer attempts. Sidecar publication is atomic no-replace and permits only byte-identical duplicate delivery; post-identification start failure rolls back only the exact registration and capabilities created by that start.
+- `store-test-evidence` remains evidence-only. Ordinary `reconcile-implementation-proof` can reopen/invalidate only; positive reconciliation is limited to explicit, packet-authorized `legacy_missing_proof` migration and clears the marker.
+- Attempt 1 semantic failure records retry-required; attempt 2 records escalation-required. No retry/escalation dispatch exists in Slice 3; that remains Slice 4.
+- Focused production/property/integration suites, the full bounded unit suite, smoke, typecheck/unused, full-tier lint, and diff checks are the required cutover evidence. Counts are recorded only from final fresh runs; this subsection does not claim review or merge.
 
 ### Slice 4 — bounded retry/escalation
 

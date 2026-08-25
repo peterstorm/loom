@@ -565,7 +565,7 @@ describe("update-task-status — transcript path resolution", () => {
   }
 
   it("resolves the task from the DERIVED transcript when the payload names none", async () => {
-    const s = await makeSession({ plantTranscript: true });
+    const s = await makeSession({ plantTranscript: true, executingTasks: ["T1"] });
 
     const result = await updateTaskStatus(JSON.stringify({
       session_id: s.session,
@@ -603,6 +603,7 @@ describe("update-task-status — transcript path resolution", () => {
       plantTranscript: true,
       modifiedPath: join(dirname(fileURLToPath(import.meta.url)), "../../src/types.ts"),
       failedReview: true,
+      executingTasks: ["T1"],
     });
 
     const result = await updateTaskStatus(JSON.stringify({

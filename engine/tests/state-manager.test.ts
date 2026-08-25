@@ -98,7 +98,15 @@ describe("StateManager", () => {
     const newState: TaskGraph = {
       ...minimalGraph(),
       current_phase: "execute",
-      tasks: [{ id: "T1", description: "test", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [] }],
+      tasks: [{
+        id: "T1",
+        description: "test",
+        agent: "code-implementer-agent",
+        wave: 1,
+        status: "pending",
+        depends_on: [],
+        proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] }),
+      }],
       wave_gates: {},
     };
 

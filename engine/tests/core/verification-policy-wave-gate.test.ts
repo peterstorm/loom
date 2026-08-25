@@ -5,6 +5,7 @@ import {
 } from "../../src/core/wave-gate-machine";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import type { Task } from "../../src/types";
+import { pendingTaskProof } from "../fixtures/task-lifecycle";
 
 const task = (verification_policy: Task["verification_policy"]): Task => ({
   id: "T1",
@@ -12,6 +13,7 @@ const task = (verification_policy: Task["verification_policy"]): Task => ({
   agent: "code-implementer-agent",
   wave: 1,
   status: "pending",
+  proof: pendingTaskProof(),
   depends_on: [],
   verification_policy,
 });

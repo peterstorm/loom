@@ -5,6 +5,7 @@ import { prepareSpecTraceUpgrade } from "../../src/core/spec-trace-migration";
 import type { TaskGraph } from "../../src/types";
 import { validateFull } from "../../src/handlers/helpers/validate-task-graph";
 import { parseTaskGraph } from "../../src/state-manager";
+import { pendingTaskProof } from "../fixtures/task-lifecycle";
 
 const anchorArbitrary = fc.integer({ min: 1, max: 1000 }).map((n) => `FR-${n}`);
 
@@ -104,12 +105,12 @@ describe("Requirement trace properties", () => {
         tasks: [
           {
             id: "T1", description: "partial", agent: "code-implementer-agent", wave: 1,
-            status: "pending", depends_on: [], spec_anchors: [], review_generation: generation,
+            status: "pending", proof: pendingTaskProof(), depends_on: [], spec_anchors: [], review_generation: generation,
             findings: [], critical_findings: [], advisory_findings: [], refuted_findings: [], resolved_findings: [],
           },
           {
             id: "T2", description: "complete", agent: "code-implementer-agent", wave: 1,
-            status: "pending", depends_on: [], spec_anchors: [anchor], review_generation: generation,
+            status: "pending", proof: pendingTaskProof(), depends_on: [], spec_anchors: [anchor], review_generation: generation,
             findings: [], critical_findings: [], advisory_findings: [], refuted_findings: [], resolved_findings: [],
           },
         ],

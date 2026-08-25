@@ -68,11 +68,14 @@ function manifest(mode: string, report = true) {
   return parsed.value;
 }
 
-const proof = evaluateTaskProof(
-  { newTestsRequired: true, declaredArtifacts: [] },
-  { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: [], newTestsWritten: true },
-);
-if (proof.state !== "satisfied") throw new Error("proof fixture must be satisfied");
+const proof = (() => {
+  const evaluated = evaluateTaskProof(
+    { newTestsRequired: true, declaredArtifacts: [] },
+    { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: [], newTestsWritten: true },
+  );
+  if (evaluated.state !== "satisfied") throw new Error("proof fixture must be satisfied");
+  return evaluated;
+})();
 
 function completionScript(): string {
   return `

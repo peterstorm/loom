@@ -2,9 +2,9 @@
  * Roster failure handling in mark-subagent-active: a markAgentActive
  * lock/fs failure means the agent is OFF the roster — soleActiveBinding
  * would then cross-credit its tool calls into any armed binding. The
- * handler must (a) say so on stderr, (b) SKIP the machine bind (an unsound
- * roster must not coexist with an armed binding), and (c) STILL write the
- * .task_graph path — SubagentStop needs it regardless.
+ * handler must (a) say so, (b) block the implementation start, and (c)
+ * roll back the sidecar/roster/machine capability set. Modern exact authority
+ * fails closed; there is no child SubagentStop to justify a ghost pointer.
  *
  * SUBAGENT_DIR freezes at first config import, so this suite uses the
  * shared dir with unique session ids (the pattern every other suite uses).
@@ -12,20 +12,57 @@
  * handler, so per-test env re-pointing works without a module reload.
  */
 
-import { describe, it, expect, afterAll, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { describe, it, expect, afterAll, beforeEach, vi } from "vitest";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { SUBAGENT_DIR } from "../../../src/config";
 import { shouldBlockDirectEdit } from "../../../src/core/block-direct-edits";
 import { activeRosterProbe } from "../../../src/handlers/pre-tool-use/block-direct-edits";
 import markActive from "../../../src/handlers/subagent-start/mark-subagent-active";
 import { parseSessionId } from "../../../src/machine";
+import {
+  createImplementationAttemptAuthority,
+  parseIsoInstant,
+  parseReservationId,
+} from "../../../src/core/implementation-completion";
+import { taskFixture } from "../../fixtures/task-lifecycle";
+import type { TaskGraph } from "../../../src/types";
 
 const uniq = `roster-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const stateDir = mkdtempSync(join(tmpdir(), "loom-roster-state-"));
 const statePath = join(stateDir, "active_task_graph.json");
-writeFileSync(statePath, "{}");
+const instant = parseIsoInstant("2026-08-24T00:00:00.000Z");
+const reservationId = parseReservationId("roster-modern-attempt");
+if (!instant.ok || !reservationId.ok) throw new Error("fixture identity failed");
+const createdAuthority = createImplementationAttemptAuthority({
+  taskId: "T1", wave: 1, semanticAttempt: 1, reservationId: reservationId.value,
+  headSha: "1".repeat(40), reservedAt: instant.value,
+  taskScopeBaseline: [], dirtySetBaseline: [],
+});
+if (!createdAuthority.ok) throw new Error(createdAuthority.error.errors.join("; "));
+const modernGraph: TaskGraph = {
+  current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+  spec_file: null, plan_file: null, current_wave: 1, executing_tasks: ["T1"],
+  tasks: [taskFixture({
+    id: "T1", description: "roster", agent: "code-implementer-agent",
+    wave: 1, status: "pending", depends_on: [], file_list: [],
+    active_implementation_attempt: createdAuthority.value,
+    attempt_artifact_baseline: [], attempt_repository_baseline: [],
+    reserved_at: createdAuthority.value.reservedAt,
+  })],
+  wave_gates: {},
+};
+writeFileSync(statePath, JSON.stringify(modernGraph, null, 2));
+
+beforeEach(() => {
+  try {
+    chmodSync(statePath, 0o600);
+  } catch {
+    // First test setup may run before StateManager has protected the file.
+  }
+  writeFileSync(statePath, JSON.stringify(modernGraph, null, 2));
+});
 
 const sessions: string[] = [];
 const session = (label: string) => {
@@ -40,15 +77,24 @@ afterAll(() => {
     for (const suffix of ["active", "active.tmp", "machine", "task_graph", "evidence.jsonl", "cleanup"]) {
       rmSync(join(SUBAGENT_DIR, `${s}.${suffix}`), { recursive: true, force: true });
     }
+    rmSync(join(SUBAGENT_DIR, `${s}.a-1.implementation-attempt.json`), { force: true });
   }
   rmSync(stateDir, { recursive: true, force: true });
 });
 
-const start = (s: string, agentId = "a-1", agentType = "loom:code-implementer-agent") =>
-  JSON.stringify({ session_id: s, agent_id: agentId, agent_type: agentType });
+const start = (s: string, agentId = "a-1", agentType = "loom:code-implementer-agent") => {
+  const transcript = join(stateDir, `${s}.jsonl`);
+  writeFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user", content: "Task ID: T1" } }) + "\n");
+  return JSON.stringify({
+    session_id: s,
+    agent_id: agentId,
+    agent_type: agentType,
+    agent_transcript_path: transcript,
+  });
+};
 
 describe("mark-subagent-active — roster failure is contained, never silent", () => {
-  it("roster write failure: loud stderr, machine NOT bound, .task_graph still written", async () => {
+  it("roster write failure blocks and rolls back every modern capability", async () => {
     const s = session("fail");
     process.env.LOOM_STATE_PATH = statePath;
     // A DIRECTORY at the .active path makes markAgentActive's append throw.
@@ -57,7 +103,7 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const result = await markActive(start(s), []);
-      expect(result.kind).toBe("passthrough");
+      expect(result.kind).toBe("block");
 
       const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
       expect(text).toContain("roster update failed");
@@ -66,14 +112,11 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
       stderrSpy.mockRestore();
     }
 
-    // (b) unsound roster ⇒ no armed binding…
     expect(existsSync(join(SUBAGENT_DIR, `${s}.machine`))).toBe(false);
-    // (c) …but the .task_graph path write still happened.
-    expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(true);
-    expect(readFileSync(join(SUBAGENT_DIR, `${s}.task_graph`), "utf-8")).toBe(resolve(statePath));
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(false);
   });
 
-  it("machine binding failure blocks the Agent after writing .task_graph", async () => {
+  it("machine binding failure blocks the Agent and rolls back the created .task_graph pointer", async () => {
     const s = session("bind-fail");
     process.env.LOOM_STATE_PATH = statePath;
     mkdirSync(join(SUBAGENT_DIR, `${s}.machine`), { recursive: true });
@@ -85,8 +128,7 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
       expect(result.message).toContain("bindMachineAgent failed");
       expect(result.message).toContain("refusing to run code-implementer-agent (a-1) ungated");
     }
-    expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(true);
-    expect(readFileSync(join(SUBAGENT_DIR, `${s}.task_graph`), "utf-8")).toBe(resolve(statePath));
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(false);
 
     const parsedSession = parseSessionId(s);
     expect(parsedSession).not.toBeNull();
@@ -127,7 +169,7 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     expect(shouldBlockDirectEdit("Edit", s, () => true, activeRosterProbe).kind).toBe("allow");
   });
 
-  it("an inaccessible Task Graph still writes the fail-closed cross-repo pointer", async () => {
+  it("an inaccessible TaskGraph blocks before publishing any cross-repo pointer", async () => {
     const s = session("graph-eloop");
     const loop = join(stateDir, "graph-loop");
     symlinkSync(loop, loop);
@@ -135,11 +177,11 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const result = await markActive(start(s), []);
-      expect(result.kind).toBe("passthrough");
+      expect(result.kind).toBe("block");
     } finally {
       stderrSpy.mockRestore();
     }
-    expect(readFileSync(join(SUBAGENT_DIR, `${s}.task_graph`), "utf-8")).toBe(resolve(loop));
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(false);
   });
 
   it("reports an unreadable stored task_graph pointer before attempting repair", async () => {
@@ -150,7 +192,7 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const result = await markActive(start(s), []);
-      expect(result.kind).toBe("passthrough");
+      expect(result.kind).toBe("block");
       const text = stderrSpy.mock.calls.map(([value]) => String(value)).join("");
       expect(text).toContain(`cannot read task_graph pointer ${pointer}`);
       expect(text).toContain("attempting rewrite");

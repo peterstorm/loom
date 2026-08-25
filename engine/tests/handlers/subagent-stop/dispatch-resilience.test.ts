@@ -11,7 +11,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import dispatch from "../../../src/handlers/subagent-stop/dispatch";
+import dispatch, { runDispatch } from "../../../src/handlers/subagent-stop/dispatch";
 import markActive from "../../../src/handlers/subagent-start/mark-subagent-active";
 import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-task-status";
 import { SUBAGENT_DIR } from "../../../src/config";
@@ -224,7 +224,7 @@ describe("dispatch names what it discarded (audit diagnostics)", () => {
 });
 
 describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)", () => {
-  it("held cleanup lock crashes cleanup; T1 evidence is still recorded but untrusted proof stays pending", async () => {
+  it("held cleanup lock reports cleanup failure after T1 quarantine still runs", async () => {
     const s = sid("cleanup-crash");
     const dir = tempDir();
     const statePath = writeState(dir);
@@ -248,9 +248,9 @@ describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)
         JSON.stringify({ session_id: s, agent_id: "a-1", agent_type: "code-implementer-agent" }),
         [],
       );
-      expect(result.kind).toBe("passthrough");
+      expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("cleanup-subagent-flag") });
       const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
-      expect(text).toContain("ERROR in cleanupSubagentFlag");
+      expect(text).not.toContain("ERROR in cleanupSubagentFlag");
     } finally {
       rmSync(lockDir, { recursive: true, force: true });
     }
@@ -260,6 +260,31 @@ describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)
     expect(state.tasks[0].proof.state).toBe("failed");
     expect(state.executing_tasks).toEqual([]);
   }, 30000);
+
+  it("catches a thrown cleanup dependency, still runs category quarantine, and returns the cleanup error", async () => {
+    const s = sid("cleanup-throws");
+    const dir = tempDir();
+    const statePath = writeState(dir, { new_tests_required: false });
+    pointSessionAt(s, statePath);
+
+    const result = await runDispatch(
+      JSON.stringify({ session_id: s, agent_id: "a-1", agent_type: "code-implementer-agent" }),
+      [],
+      async () => { throw new Error("injected cleanup crash"); },
+    );
+
+    expect(result).toEqual({
+      kind: "error",
+      message: expect.stringContaining("cleanupSubagentFlag crashed: injected cleanup crash"),
+    });
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(state.executing_tasks).toEqual([]);
+    expect(state.tasks[0]).toMatchObject({
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
+    });
+  });
 });
 
 describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7)", () => {
@@ -292,10 +317,46 @@ describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7
     expect(result.kind).toBe("passthrough");
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.tasks[0].status).toBe("implemented");
+    expect(state.tasks[0].status).toBe("pending");
+    expect(state.tasks[0].proof.state).toBe("failed");
+    expect(state.tasks[0].revalidation_required).toBe(true);
     expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-pass" });
     expect(state.tasks[0].test_evidence).toContain("ledger: exit 0");
   }, 30000);
+});
+
+describe("legacy Claude completion has no positive authority", () => {
+  it("an extracted transcript Task id and passing ledger evidence remain cleanup-only", async () => {
+    const s = sid("legacy-extracted-pass");
+    const dir = tempDir();
+    const statePath = writeState(dir, { new_tests_required: false });
+    pointSessionAt(s, statePath);
+    const transcriptPath = join(dir, "legacy-extracted.jsonl");
+    writeFileSync(transcriptPath, [
+      JSON.stringify({ type: "user", message: { role: "user", content: "Task ID: T1" } }),
+      JSON.stringify({ type: "assistant", message: { role: "assistant", content: "1 passing" } }),
+    ].join("\n"));
+    const snapshot: readonly EvidenceRecord[] = [{
+      epoch: parseEpoch("a-1:code-implementer-agent")!,
+      event: { kind: "TestRun", command: "npm test", exit: 0, report: reportSummary(1, 0) },
+    }];
+
+    const result = await runUpdateTaskStatus(JSON.stringify({
+      session_id: s,
+      agent_id: "a-1",
+      agent_type: "code-implementer-agent",
+      agent_transcript_path: transcriptPath,
+    }), [], { kind: "snapshot", events: snapshot });
+
+    expect(result.kind).toBe("passthrough");
+    const task = JSON.parse(readFileSync(statePath, "utf8")).tasks[0];
+    expect(task).toMatchObject({
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
+      test_result: { verdict: "trusted-pass" },
+    });
+  });
 });
 
 describe("trust-aware skip guard — decided INSIDE the locked update", () => {

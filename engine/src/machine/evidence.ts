@@ -143,6 +143,10 @@ export const CALL_START_SUFFIX = ".callstart.json" as const;
 /** Engine-issued Pi run bindings available to the parent session's spawn hook. */
 export const ORCHESTRATION_RUNS_SUFFIX = ".orchestration-runs.json" as const;
 
+/** Claude implementation authority sidecars encode the reported Agent id
+ * before this suffix; the stale-session sweep decodes the session prefix. */
+export const IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX = ".implementation-attempt.json" as const;
+
 /**
  * Every per-session file suffix written under SUBAGENT_DIR — the single
  * source of truth for the ledger's path helpers (ledger.ts) and the
@@ -158,6 +162,7 @@ export const SESSION_SUFFIXES = [
   ".task_graph",
   CALL_START_SUFFIX,
   ORCHESTRATION_RUNS_SUFFIX,
+  IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
 ] as const;
 
 export type SessionFileSuffix = (typeof SESSION_SUFFIXES)[number];

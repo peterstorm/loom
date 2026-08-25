@@ -18,6 +18,7 @@ const baseTask: Task = {
   agent: "test",
   wave: 1,
   status: "implemented",
+  legacy_missing_proof: true,
   depends_on: [],
 };
 

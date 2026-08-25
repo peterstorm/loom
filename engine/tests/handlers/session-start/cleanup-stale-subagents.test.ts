@@ -19,7 +19,10 @@ import cleanup, {
   staleEntries,
   sweepStaleSessions,
 } from "../../../src/handlers/session-start/cleanup-stale-subagents";
-import { SESSION_SUFFIXES } from "../../../src/machine";
+import {
+  IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
+  SESSION_SUFFIXES,
+} from "../../../src/machine";
 
 const subDir = mkdtempSync(join(tmpdir(), "loom-sweep-"));
 
@@ -32,7 +35,10 @@ describe("sessionOfEntry (pure)", () => {
     // Driven by the shared machine/evidence tuple — a suffix added to the
     // ledger's path helpers is automatically covered here.
     for (const suffix of SESSION_SUFFIXES) {
-      expect(sessionOfEntry(`s-1${suffix}`), suffix).toBe("s-1");
+      const entry = suffix === IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX
+        ? `s-1.${Buffer.from("agent-1").toString("hex")}${suffix}`
+        : `s-1${suffix}`;
+      expect(sessionOfEntry(entry), suffix).toBe("s-1");
       expect(sessionOfEntry(suffix), `bare ${suffix}`).toBeNull();
     }
   });
@@ -51,6 +57,15 @@ describe("staleEntries (pure) — group max mtime governs", () => {
       ["live.active", cutoff - 900_000], // old on its own mtime
       ["live.evidence.jsonl", cutoff - 900_000],
       ["live.cleanup", cutoff - 900_000],
+    ]);
+    expect(staleEntries(mtimes, cutoff)).toEqual([]);
+  });
+
+  it("a fresh machine anchor keeps an older implementation sidecar alive", () => {
+    const sidecar = `live.${Buffer.from("agent-1").toString("hex")}${IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX}`;
+    const mtimes = new Map([
+      ["live.machine", cutoff + 1],
+      [sidecar, cutoff - 900_000],
     ]);
     expect(staleEntries(mtimes, cutoff)).toEqual([]);
   });
