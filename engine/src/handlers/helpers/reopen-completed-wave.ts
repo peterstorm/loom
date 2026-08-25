@@ -3,6 +3,7 @@ import { StateManager } from "../../state-manager";
 import { taskGraphPath } from "../../config";
 import { newWaveGate, reconcileWaveBlock } from "../../core/wave-gate-model";
 import { derivePendingTaskProof } from "../../core/proof-obligations";
+import { parseTaskId } from "../../core/task-id";
 import { taskVerificationPolicy } from "../../core/verification-policy";
 import { observeReviewedWorkspace } from "./reviewed-workspace";
 import { openRunDirectory } from "../../orchestration/run-directory-handle";
@@ -43,7 +44,7 @@ function parseRequest(raw: string): ReopenRequest {
       typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1 ||
       typeof record.authorityDigest !== "string" || !/^[0-9a-f]{64}$/.test(record.authorityDigest) ||
       !Array.isArray(record.taskIds) || record.taskIds.length === 0 ||
-      record.taskIds.some((id) => typeof id !== "string" || !/^T\d+$/.test(id)) ||
+      record.taskIds.some((id) => !parseTaskId(id, "reopening.taskId").ok) ||
       new Set(record.taskIds).size !== record.taskIds.length) {
     throw new Error("reopening payload has invalid run/wave/authority/task ids");
   }

@@ -241,11 +241,13 @@ export function cumulativeModifiedPaths(
   return [...new Set([...(previous ?? []), ...current])].sort();
 }
 
+function tasksAreImplementationComplete(tasks: readonly Task[]): boolean {
+  return tasks.every((task) => task.status === "implemented" || task.status === "completed");
+}
+
 /** Wave completion projection shared by both harness shells. */
 export function isWaveComplete(state: TaskGraph, wave: number): boolean {
-  return state.tasks
-    .filter((task) => task.wave === wave)
-    .every((task) => task.status === "implemented" || task.status === "completed");
+  return tasksAreImplementationComplete(state.tasks.filter((task) => task.wave === wave));
 }
 
 function applyResolvedTask(
@@ -338,11 +340,11 @@ export function applyUntrustedStopResolution(
     return { state: { ...state, executing_tasks: clearedExecuting }, skipped: true };
   }
   const codeChanged = resolution.bytesChangedSinceAttempt;
-  const preserveExistingTrusted = target.revalidation_required !== true &&
-    resolution.testResult.verdict === "untrusted" && (
-      target.test_result?.verdict === "trusted-fail" ||
-      (target.test_result?.verdict === "trusted-pass" && !codeChanged)
-    );
+  const preserveExistingTrusted = shouldPreserveTrustedEvidence(
+    target,
+    resolution.testResult,
+    codeChanged,
+  );
   const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, resolution.filesModified);
   const currentNewTests = parseNewTestEvidence(
     resolution.newTestsWritten,
@@ -399,16 +401,27 @@ export type NormalizedImplementationEvidence = Readonly<{
   newTests: NewTestEvidence;
 }>;
 
+function shouldPreserveTrustedEvidence(
+  task: Task,
+  incoming: TaskTestResult | undefined,
+  bytesChangedOrUnobservable: boolean,
+): boolean {
+  return task.revalidation_required !== true && incoming?.verdict === "untrusted" && (
+    task.test_result?.verdict === "trusted-fail" ||
+    (task.test_result?.verdict === "trusted-pass" && !bytesChangedOrUnobservable)
+  );
+}
+
 /** One preservation rule shared by Claude and Pi, without provenance relabeling. */
 export function normalizeImplementationEvidence(
   task: Task,
   incoming: IncomingImplementationEvidence,
   bytes: TaskLocalByteObservation,
 ): NormalizedImplementationEvidence {
-  const incomingUntrusted = incoming.testResult?.verdict === "untrusted";
-  const preserveTrusted = task.revalidation_required !== true && incomingUntrusted && (
-    task.test_result?.verdict === "trusted-fail" ||
-    (task.test_result?.verdict === "trusted-pass" && !bytes.taskBytesChangedOrUnobservable)
+  const preserveTrusted = shouldPreserveTrustedEvidence(
+    task,
+    incoming.testResult,
+    bytes.taskBytesChangedOrUnobservable,
   );
   return freeze({
     ...(preserveTrusted
@@ -535,9 +548,9 @@ export function applyImplementationCompletionTransition(
   const tasks = state.tasks.map((task) => task.id === target.id ? nextTask : task);
   const specCheckCleared = facts.bytes.invalidationBytesChanged && state.spec_check?.wave === target.wave;
   const existingGate = state.wave_gates[String(target.wave)] ?? newWaveGate();
-  const implComplete = tasks
-    .filter((task) => task.wave === target.wave)
-    .every((task) => task.status === "implemented" || task.status === "completed");
+  const implComplete = tasksAreImplementationComplete(
+    tasks.filter((task) => task.wave === target.wave),
+  );
   const specCheck = specCheckCleared ? undefined : state.spec_check;
   const updatedGates = {
     ...state.wave_gates,

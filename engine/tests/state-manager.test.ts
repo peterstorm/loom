@@ -516,6 +516,11 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it.each(["T0", "T00", "T999999999999999999999999"])(
+    "accepts canonical task id %j through the StateManager boundary",
+    (id) => expect(parseTaskGraph({ ...validGraph, tasks: [{ ...validTask, id }] }).ok).toBe(true),
+  );
+
   it.each(["bad:id", " T1", "T 1", "task-1"])(
     "rejects task id %j that cannot form a wave finding identity",
     (id) => {

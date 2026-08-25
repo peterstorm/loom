@@ -13,11 +13,12 @@
 import { match } from "ts-pattern";
 import type { HookResult, Phase, TaskGraph } from "../types";
 import {
-  PHASE_AGENT_MAP, isImplAgent, REVIEW_AGENTS,
+  PHASE_AGENT_MAP, REVIEW_AGENTS,
   REVIEW_PANEL_AGENTS, UTILITY_AGENTS, VALID_TRANSITIONS, CLARIFY_THRESHOLD,
-  ARCH_PANEL_AGENTS, ARCH_PANEL_PHASE, isStandaloneReviewAgent,
+  ARCH_PANEL_AGENTS, ARCH_PANEL_PHASE,
 } from "../config";
 import { stripNamespace } from "../utils/strip-namespace";
+import { isImplementationAgent, isStandaloneReviewAgent } from "./model-profiles";
 import { hasStandaloneReviewContext } from "./review-output";
 
 /**
@@ -95,7 +96,7 @@ export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   if (direct) return direct;
   const suffixed = PHASE_AGENT_MAP[agent + "-agent"];
   if (suffixed) return suffixed;
-  if (isImplAgent(agent) || REVIEW_AGENTS.has(agent) || REVIEW_AGENTS.has(agent + "-agent")) return "execute";
+  if (isImplementationAgent(agent) || REVIEW_AGENTS.has(agent) || REVIEW_AGENTS.has(agent + "-agent")) return "execute";
   if (isReviewPanelAgent(agent)) return "execute";
   // Architecture-panel agents (--panel) are architecture-phase work. Recognized
   // here so validate-phase-order allows them, but never added to PHASE_AGENT_MAP

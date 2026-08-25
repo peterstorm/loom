@@ -1210,9 +1210,8 @@ async function applyParsedReviewMessages(args: Readonly<{
     }),
   }));
   if (!taskFound) {
-    return outcome([
-      `WARNING: ${args.agentType} review task ${args.taskId} disappeared before evidence application — findings NOT stored`,
-    ]);
+    const message = `WARNING: ${args.agentType} review task ${args.taskId} disappeared before evidence application — findings NOT stored`;
+    return outcome([message], [message]);
   }
   return outcome([reviewResolutionLog(args.taskId, resolution, appliedTask, applicationChanged)]);
 }

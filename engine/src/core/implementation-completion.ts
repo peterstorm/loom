@@ -35,8 +35,15 @@ import {
   type ReviewPath,
 } from "./review-packet";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
+import {
+  parseTaskId,
+  type CanonicalTaskIdParseError,
+  type CanonicalTaskIdParseResult,
+  type TaskId,
+} from "./task-id";
 
-const TASK_ID_PATTERN = /^T\d+$/;
+export { parseTaskId, type TaskId } from "./task-id";
+
 const RESERVATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -46,7 +53,6 @@ export const TASK_BYTE_SCOPE_CHECK_ID_TEXT = "loom:task-byte-scope" as const;
 
 // Brands prevent adjacent authority fields with identical runtime primitives
 // from being transposed after parsing.
-declare const TASK_ID: unique symbol;
 declare const SEMANTIC_ATTEMPT: unique symbol;
 declare const RESERVATION_ID: unique symbol;
 declare const GIT_SHA: unique symbol;
@@ -56,7 +62,6 @@ declare const AUTHORITY_DIGEST: unique symbol;
 declare const TASK_SUITE_DIGEST: unique symbol;
 declare const SETTLEMENT_RECEIPT_ID: unique symbol;
 
-export type TaskId = string & { readonly [TASK_ID]: true };
 export type Wave = WaveNumber;
 export type SemanticAttempt = (1 | 2) & { readonly [SEMANTIC_ATTEMPT]: true };
 export type ReservationId = string & { readonly [RESERVATION_ID]: true };
@@ -67,14 +72,8 @@ export type ImplementationAuthorityDigest = string & { readonly [AUTHORITY_DIGES
 export type TaskCompletionSuiteDigest = string & { readonly [TASK_SUITE_DIGEST]: true };
 export type ImplementationSettlementReceiptId = string & { readonly [SETTLEMENT_RECEIPT_ID]: true };
 
-export type ImplementationCompletionParseError = Readonly<{
-  kind: "invalid-implementation-completion";
-  errors: readonly [string, ...string[]];
-}>;
-
-export type ImplementationCompletionParseResult<T> =
-  | Readonly<{ ok: true; value: T }>
-  | Readonly<{ ok: false; error: ImplementationCompletionParseError }>;
+export type ImplementationCompletionParseError = CanonicalTaskIdParseError;
+export type ImplementationCompletionParseResult<T> = CanonicalTaskIdParseResult<T>;
 
 type UnknownRecord = Record<string, unknown>;
 type Parsed<T> = ImplementationCompletionParseResult<T>;
@@ -148,13 +147,6 @@ function parseBoundedReason(raw: unknown, path: string): Parsed<string> {
   return typeof raw === "string" && raw.trim().length > 0 && raw.length <= MAX_REASON_LENGTH
     ? success(raw)
     : failure([`${path} must be non-empty and at most ${MAX_REASON_LENGTH} characters`]);
-}
-
-/** Exact Task identity smart constructor. */
-export function parseTaskId(raw: unknown, path = "taskId"): Parsed<TaskId> {
-  return total(() => typeof raw === "string" && TASK_ID_PATTERN.test(raw)
-    ? success(raw as TaskId)
-    : failure([`${path} must match T\\d+`]));
 }
 
 /** Reuses the existing positive Wave schema; Task authority cannot weaken it. */
@@ -395,9 +387,11 @@ export function parseImplementationAttemptAuthority(raw: unknown): Parsed<Implem
   });
 }
 
+export type TaskByteScopeCheckId = CompletionCheckId & typeof TASK_BYTE_SCOPE_CHECK_ID_TEXT;
+
 export type AuthorizedTaskCompletionCheck = Readonly<{
   kind: "engine-task-byte-scope";
-  checkId: CompletionCheckId;
+  checkId: TaskByteScopeCheckId;
   scope: "task";
 }>;
 
@@ -411,7 +405,7 @@ export type TaskCompletionSuiteAuthority = Readonly<{
 
 function taskByteScopeCheck(): AuthorizedTaskCompletionCheck {
   // Parser proof site: this engine-owned literal is pinned to the shared check-id grammar.
-  const checkId = TASK_BYTE_SCOPE_CHECK_ID_TEXT as CompletionCheckId;
+  const checkId = TASK_BYTE_SCOPE_CHECK_ID_TEXT as TaskByteScopeCheckId;
   return freeze({ kind: "engine-task-byte-scope", checkId, scope: "task" });
 }
 
@@ -431,7 +425,11 @@ function parseAuthorizedTaskCheck(raw: unknown, path: string): Parsed<Authorized
   }
   if (record.value.scope !== "task") errors.push(`${path}.scope must equal task`);
   return errors.length === 0 && checkId.ok
-    ? success(freeze({ kind: "engine-task-byte-scope", checkId: checkId.value, scope: "task" }))
+    ? success(freeze({
+        kind: "engine-task-byte-scope",
+        checkId: checkId.value as TaskByteScopeCheckId,
+        scope: "task",
+      }))
     : failure(errors);
 }
 
@@ -507,18 +505,34 @@ export type TaskByteScopeOutcome =
   | Readonly<{ kind: "out-of-scope-writes"; paths: readonly [ReviewPath, ...ReviewPath[]] }>
   | Readonly<{ kind: "observation-unavailable"; reason: string }>;
 
-export type TaskCompletionCheckResult = Readonly<{
+type UncheckedTaskCompletionCheckResult = Readonly<{
   checkId: CompletionCheckId;
   scope: "task" | "wave";
   outcome: TaskByteScopeOutcome;
 }>;
 
+type UncheckedTaskCompletionSuiteResult = Readonly<{
+  schemaVersion: 1;
+  kind: "task-completion-suite-result";
+  implementationAuthorityDigest: ImplementationAuthorityDigest;
+  suiteDigest: TaskCompletionSuiteDigest;
+  checks: readonly UncheckedTaskCompletionCheckResult[];
+}>;
+
+/** The only check a parsed Task-local suite can carry. */
+export type TaskCompletionCheckResult = Readonly<{
+  checkId: TaskByteScopeCheckId;
+  scope: "task";
+  outcome: TaskByteScopeOutcome;
+}>;
+
+/** Parser-proven exact Task-local suite; malformed rosters never inhabit it. */
 export type TaskCompletionSuiteResult = Readonly<{
   schemaVersion: 1;
   kind: "task-completion-suite-result";
   implementationAuthorityDigest: ImplementationAuthorityDigest;
   suiteDigest: TaskCompletionSuiteDigest;
-  checks: readonly TaskCompletionCheckResult[];
+  checks: readonly [TaskCompletionCheckResult];
 }>;
 
 function parseCanonicalPaths(raw: unknown, path: string): Parsed<readonly ReviewPath[]> {
@@ -571,7 +585,7 @@ function parseTaskCheckOutcome(raw: unknown, path: string): Parsed<TaskByteScope
   return failure([`${path}.kind must be accepted, out-of-scope-writes, or observation-unavailable`]);
 }
 
-function parseTaskCheckResult(raw: unknown, path: string): Parsed<TaskCompletionCheckResult> {
+function parseTaskCheckResult(raw: unknown, path: string): Parsed<UncheckedTaskCompletionCheckResult> {
   const record = exactRecord(raw, ["checkId", "scope", "outcome"], path);
   if (!record.ok) return record;
   const checkId = parseCompletionCheckId(record.value.checkId, `${path}.checkId`);
@@ -613,7 +627,7 @@ export function createTaskCompletionSuiteResult(
   });
 }
 
-export function parseTaskCompletionSuiteResult(raw: unknown): Parsed<TaskCompletionSuiteResult> {
+function parseUncheckedTaskCompletionSuiteResult(raw: unknown): Parsed<UncheckedTaskCompletionSuiteResult> {
   return total(() => {
     const record = exactRecord(raw, [
       "schemaVersion", "kind", "implementationAuthorityDigest", "suiteDigest", "checks",
@@ -643,6 +657,32 @@ export function parseTaskCompletionSuiteResult(raw: unknown): Parsed<TaskComplet
         }))
       : failure(errors);
   });
+}
+
+function exactTaskCompletionSuiteResult(
+  unchecked: UncheckedTaskCompletionSuiteResult,
+): Parsed<TaskCompletionSuiteResult> {
+  const [check, ...surplus] = unchecked.checks;
+  if (check === undefined || surplus.length > 0 ||
+      check.checkId !== TASK_BYTE_SCOPE_CHECK_ID_TEXT || check.scope !== "task") {
+    return failure([
+      `taskSuiteResult.checks must contain exactly one task-scoped ${TASK_BYTE_SCOPE_CHECK_ID_TEXT} result`,
+    ]);
+  }
+  return success(freeze({
+    ...unchecked,
+    checks: Object.freeze([freeze({
+      checkId: check.checkId as TaskByteScopeCheckId,
+      scope: "task",
+      outcome: check.outcome,
+    })]),
+  }));
+}
+
+/** Parse untrusted Task-suite JSON into the exact one-check domain type. */
+export function parseTaskCompletionSuiteResult(raw: unknown): Parsed<TaskCompletionSuiteResult> {
+  const unchecked = parseUncheckedTaskCompletionSuiteResult(raw);
+  return unchecked.ok ? exactTaskCompletionSuiteResult(unchecked.value) : unchecked;
 }
 
 export type TaskSuiteAuthorityFailure =
@@ -685,7 +725,10 @@ export function evaluateTaskCompletionSuite(
   rawResult: unknown,
 ): TaskCompletionSuiteEvaluation {
   const authority = parseTaskCompletionSuiteAuthority(rawAuthority);
-  const result = parseTaskCompletionSuiteResult(rawResult);
+  // Keep the unchecked roster internal so evaluation can preserve its precise
+  // missing/surplus/duplicate/wrong-scope diagnostics. Only the accepted arm
+  // is lifted into TaskCompletionSuiteResult below.
+  const result = parseUncheckedTaskCompletionSuiteResult(rawResult);
   if (!authority.ok || !result.ok) {
     const errors = [
       ...(authority.ok ? [] : authority.error.errors),
@@ -711,7 +754,9 @@ export function evaluateTaskCompletionSuite(
     });
   }
 
-  const expectedIds = new Set(authority.value.checks.map((check) => check.checkId));
+  const expectedIds: ReadonlySet<CompletionCheckId> = new Set<CompletionCheckId>(
+    authority.value.checks.map((check) => check.checkId),
+  );
   const counts = new Map<CompletionCheckId, number>();
   result.value.checks.forEach((check) => counts.set(check.checkId, (counts.get(check.checkId) ?? 0) + 1));
   const missing = authority.value.checks.filter((check) => !counts.has(check.checkId)).map((check) => check.checkId);
@@ -732,8 +777,17 @@ export function evaluateTaskCompletionSuite(
 
   const semanticFailures: TaskSuiteSemanticFailure[] = [];
   const infrastructureFailures: TaskSuiteInfrastructureFailure[] = [];
-  if (authorityFailures.length === 0) {
-    result.value.checks.forEach((check) => {
+  const exactResult = authorityFailures.length === 0
+    ? exactTaskCompletionSuiteResult(result.value)
+    : null;
+  if (exactResult !== null && !exactResult.ok) {
+    authorityFailures.push(freeze({
+      kind: "invalid-task-suite-result",
+      errors: exactResult.error.errors,
+    }));
+  }
+  if (exactResult?.ok) {
+    exactResult.value.checks.forEach((check) => {
       if (check.outcome.kind === "out-of-scope-writes") {
         semanticFailures.push(freeze({ kind: "task-byte-scope-violation", checkId: check.checkId, paths: check.outcome.paths }));
       } else if (check.outcome.kind === "observation-unavailable") {
@@ -745,8 +799,9 @@ export function evaluateTaskCompletionSuite(
       }
     });
   }
-  return authorityFailures.length === 0 && semanticFailures.length === 0 && infrastructureFailures.length === 0
-    ? freeze({ kind: "accepted", result: result.value })
+  return authorityFailures.length === 0 && semanticFailures.length === 0 &&
+      infrastructureFailures.length === 0 && exactResult?.ok
+    ? freeze({ kind: "accepted", result: exactResult.value })
     : freeze({
         kind: "rejected",
         authorityFailures: freezeArray(authorityFailures),

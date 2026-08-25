@@ -1,8 +1,8 @@
 /** Pure task-execution lifecycle classification and gate decisions. */
 
 import type { Task, TaskGraph } from "../types";
-import { isImplAgent, isStandaloneReviewAgent } from "../config";
 import { extractTaskId } from "../utils/extract-task-id";
+import { isImplementationAgent, isStandaloneReviewAgent } from "./model-profiles";
 import { stripNamespace } from "../utils/strip-namespace";
 import { hasStandaloneReviewContext } from "./review-output";
 import { waveBlockCauses } from "./wave-gate-model";
@@ -43,7 +43,7 @@ export function classifyTaskExecutionSpawn(input: ValidateTaskExecutionInput): T
   if (hasStandaloneReviewContext(input.prompt) && isStandaloneReviewAgent(agent)) {
     return { kind: "standalone" };
   }
-  return isImplAgent(agent)
+  return isImplementationAgent(agent)
     ? { kind: "implementation", prompt: input.prompt, description: input.description }
     : { kind: "non-implementation" };
 }

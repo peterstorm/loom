@@ -192,6 +192,15 @@ describe("implementation completion exact parsers", () => {
       tool_name: "Bash",
       future_reference_field: true,
     });
+    expect(nestedResult?.content?.[0]?.content?.[1]).toMatchObject({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: "image/png",
+        data: expect.stringMatching(/^iVBOR/),
+      },
+      future_image_field: "retained",
+    });
   });
 
   it.each([
@@ -210,6 +219,11 @@ describe("implementation completion exact parsers", () => {
     ["malformed tool-use block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":[]}]}}', "input", 1],
     ["malformed tool-result block", '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":null}]}}', "content", 1],
     ["malformed tool-reference block", '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"tool_reference","tool_name":"   "}]}]}}', "tool_name", 1],
+    ["image without source", '{"type":"user","message":{"role":"user","content":[{"type":"image"}]}}', "source must be a plain object", 1],
+    ["image with URL source", '{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"url","media_type":"image/png","data":"https://example.test/x.png"}}]}}', "type must equal base64", 1],
+    ["image with unsupported media type", '{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/svg+xml","data":"PHN2Zz4="}}]}}', "media_type", 1],
+    ["image with empty data", '{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":""}}]}}', "data must be a non-empty string", 1],
+    ["image with surplus source field", '{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA==","url":"https://example.test"}}]}}', "exactly type, media_type, and data", 1],
     ["unknown block discriminant", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"future_block","text":"no"}]}}', "must be one of", 1],
     ["misspelled block discriminant", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_uses","id":"tool-1","name":"Bash","input":{}}]}}', "must be one of", 1],
     ["malformed fallback block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"fallback","from":{"model":""},"to":{"model":"claude"}}]}}', "model", 1],
@@ -227,6 +241,7 @@ describe("implementation completion exact parsers", () => {
       { type: "server_tool_use", id: "server-1", name: "search", input: {}, future: true },
       { type: "tool_result", tool_use_id: "tool-1", content: "pass", is_error: false, future: true },
       { type: "tool_reference", tool_name: "Bash", future: true },
+      { type: "image", source: { type: "base64", media_type: "image/webp", data: "UklGRg==" }, future: true },
       { type: "fallback", from: { model: "claude-fable", future: true }, to: { model: "claude-opus" }, future: true },
     ];
     expect(blocks.map(({ type }) => type)).toEqual(CLAUDE_CONTENT_BLOCK_TYPES);
@@ -406,6 +421,12 @@ describe("canonical baseline and self-digest policy", () => {
 describe("pure Task suite evaluation", () => {
   it("accepts only the exact engine-owned byte-scope result", () => {
     const attempt = authority();
+    const parsed = parseTaskCompletionSuiteResult(suiteResult(attempt));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      const [only] = parsed.value.checks;
+      expect(only).toMatchObject({ checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task" });
+    }
     const evaluated = evaluateTaskCompletionSuite(suiteAuthority(attempt), suiteResult(attempt));
     expect(evaluated.kind).toBe("accepted");
   });
@@ -425,6 +446,7 @@ describe("pure Task suite evaluation", () => {
     ]],
   ])("rejects %s roster evidence", (_label, checks) => {
     const attempt = authority();
+    expect(parseTaskCompletionSuiteResult(suiteResult(attempt, checks)).ok).toBe(false);
     const evaluated = evaluateTaskCompletionSuite(suiteAuthority(attempt), suiteResult(attempt, checks));
     expect(evaluated.kind).toBe("rejected");
     if (evaluated.kind === "rejected") expect(evaluated.authorityFailures.length).toBeGreaterThan(0);

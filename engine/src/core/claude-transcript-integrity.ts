@@ -17,6 +17,7 @@ export const CLAUDE_CONTENT_BLOCK_TYPES = Object.freeze([
   "server_tool_use",
   "tool_result",
   "tool_reference",
+  "image",
   "fallback",
 ] as const);
 
@@ -54,6 +55,27 @@ export type ClaudeToolReferenceBlock = SurplusFields & Readonly<{
   tool_name: string;
 }>;
 
+export const CLAUDE_IMAGE_MEDIA_TYPES = Object.freeze([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+] as const);
+
+export type ClaudeImageMediaType = typeof CLAUDE_IMAGE_MEDIA_TYPES[number];
+
+/** Anthropic image source is exact even though its containing block is extensible. */
+export type ClaudeImageSource = Readonly<{
+  type: "base64";
+  media_type: ClaudeImageMediaType;
+  data: string;
+}>;
+
+export type ClaudeImageBlock = SurplusFields & Readonly<{
+  type: "image";
+  source: ClaudeImageSource;
+}>;
+
 export type ClaudeFallbackBlock = SurplusFields & Readonly<{
   type: "fallback";
   from: Readonly<Record<string, unknown>> & Readonly<{ model: string }>;
@@ -66,6 +88,7 @@ export type ClaudeContentBlock =
   | ClaudeToolUseBlock
   | ClaudeToolResultBlock
   | ClaudeToolReferenceBlock
+  | ClaudeImageBlock
   | ClaudeFallbackBlock;
 
 export type ClaudeMessageContent = string | readonly ClaudeContentBlock[];
@@ -129,6 +152,22 @@ function modelEndpointError(raw: unknown, path: string): string | null {
   return nonEmptyStringField(raw, "model", path);
 }
 
+function imageSourceError(raw: unknown, path: string): string | null {
+  if (!isRecord(raw)) return `${path} must be a plain object`;
+  const fields = ["type", "media_type", "data"] as const;
+  const keys = Reflect.ownKeys(raw);
+  if (keys.length !== fields.length || fields.some((field) => !owns(raw, field)) ||
+      keys.some((key) => typeof key !== "string" || !fields.includes(key as typeof fields[number]))) {
+    return `${path} must contain exactly type, media_type, and data`;
+  }
+  if (raw.type !== "base64") return `${path}.type must equal base64`;
+  if (typeof raw.media_type !== "string" ||
+      !(CLAUDE_IMAGE_MEDIA_TYPES as readonly string[]).includes(raw.media_type)) {
+    return `${path}.media_type must be one of ${CLAUDE_IMAGE_MEDIA_TYPES.join(", ")}`;
+  }
+  return nonEmptyStringField(raw, "data", path);
+}
+
 function supportedBlockType(raw: unknown): raw is ClaudeContentBlockType {
   return typeof raw === "string" &&
     (CLAUDE_CONTENT_BLOCK_TYPES as readonly string[]).includes(raw);
@@ -164,6 +203,8 @@ function contentBlockError(block: UnknownRecord, path: string, depth: number): s
     }
     case "tool_reference":
       return nonEmptyStringField(block, "tool_name", path);
+    case "image":
+      return imageSourceError(block.source, `${path}.source`);
     case "fallback": {
       const fromError = modelEndpointError(block.from, `${path}.from`);
       return fromError ?? modelEndpointError(block.to, `${path}.to`);

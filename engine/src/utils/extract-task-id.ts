@@ -3,7 +3,9 @@
  * Port of helpers/extract-task-id.sh
  */
 
-const PATTERNS: Array<{ re: RegExp; extract: (m: RegExpMatchArray) => string }> = [
+import { parseTaskId } from "../core/task-id";
+
+const PATTERNS: Array<{ re: RegExp; extract: (m: RegExpMatchArray) => string | undefined }> = [
   // 1. **Task ID:** T1
   { re: /\*\*Task ID:\*\* ?(T\d+)/, extract: (m) => m[1] },
   // 2. Task ID: T1
@@ -22,12 +24,15 @@ const PATTERNS: Array<{ re: RegExp; extract: (m: RegExpMatchArray) => string }> 
 
 export function extractTaskId(prompt: string): string | null {
   for (const { re, extract } of PATTERNS) {
-    const m = prompt.match(re);
-    if (m) return extract(m);
+    const match = prompt.match(re);
+    if (match === null) continue;
+    const parsed = parseTaskId(extract(match), "extractedTaskId");
+    if (parsed.ok) return parsed.value;
   }
   return null;
 }
 
 export function isCanonicalFormat(prompt: string): boolean {
-  return /\*\*Task ID:\*\* ?T\d+/.test(prompt);
+  const match = prompt.match(/\*\*Task ID:\*\* ?(T\d+)/);
+  return match !== null && parseTaskId(match[1], "canonicalTaskId").ok;
 }

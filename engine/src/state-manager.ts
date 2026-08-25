@@ -68,6 +68,9 @@ import {
   parseImplementationAttemptAuthority,
   parseImplementationAttemptHistory,
 } from "./core/implementation-completion";
+import { parseTaskId } from "./core/task-id";
+
+export { TASK_ID_PATTERN } from "./core/task-id";
 import {
   authorizeWaveCompletionSuite,
   defaultVerificationManifest,
@@ -683,14 +686,12 @@ function parseSpecTraceWaveGateRetirements(
   return parseOk(Object.freeze(retirements));
 }
 
-export const TASK_ID_PATTERN = /^T\d+$/;
-
 /** One task-identity grammar shared by load and operator-validation boundaries. */
 export function taskIdError(value: unknown, label: string): string | null {
   if (typeof value !== "string" || value === "") {
     return `${label}: id must be a non-empty string, got ${JSON.stringify(value)}`;
   }
-  return TASK_ID_PATTERN.test(value)
+  return parseTaskId(value, `${label}: id`).ok
     ? null
     : `${label}: id must match T\\d+, got ${JSON.stringify(value)}`;
 }

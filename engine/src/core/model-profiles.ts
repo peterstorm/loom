@@ -215,6 +215,23 @@ export function agentsOfKind(k: AgentKind["kind"]): readonly LoomAgentName[] {
   );
 }
 
+function catalogKind(agent: string): AgentKind["kind"] | null {
+  return Object.prototype.hasOwnProperty.call(AGENT_CATALOG, agent)
+    ? AGENT_CATALOG[agent as LoomAgentName].kind.kind
+    : null;
+}
+
+/** Pure Agent Catalog projection preserving the harness's omitted-suffix alias. */
+export function isImplementationAgent(agent: string): boolean {
+  return catalogKind(agent) === "impl" || catalogKind(`${agent}-agent`) === "impl";
+}
+
+/** Pure control-plane projection for standalone review evidence producers. */
+export function isStandaloneReviewAgent(agent: string): boolean {
+  const kind = catalogKind(agent);
+  return kind === "reviewer" || kind === "review-verifier";
+}
+
 /** Ordered Wave review roster policy — a selection FROM the catalog, not a
  *  second identity source. Ordering is load-bearing: wave-gate slot authority
  *  binds reviewers by index. Lives beside the catalog (this module is a pure

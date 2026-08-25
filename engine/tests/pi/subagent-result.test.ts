@@ -462,6 +462,29 @@ describe("applyReviewPiResult", () => {
     expect(store.current().tasks[0]!.review_status).toBe("pending");
   });
 
+  it("reports a task disappearing during locked evidence application as a processing error", async () => {
+    const initial = graph();
+    const withoutTask = { ...initial, tasks: [] };
+    const store: TaskGraphStore = {
+      load: () => initial,
+      update: async (mutate) => { mutate(withoutTask); },
+      updateAndReturn: async (mutate) => mutate(withoutTask).value,
+    };
+
+    const applied = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ messages: assistantText(machineSummary) }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    expect(applied.log).toEqual([expect.stringContaining("disappeared before evidence application")]);
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("disappeared before evidence application"),
+    ]);
+  });
+
   it("reports a successful review with no Task binding as a processing error", async () => {
     const store = fakeStore(graph());
     const applied = await applyReviewPiResult({

@@ -348,7 +348,7 @@ describe("Claude implementation authority sidecar", () => {
     expect(stored.wave_gates["1"]?.impl_complete).toBe(true);
   });
 
-  it("accepts and settles the real nested tool_reference transcript fixture", async () => {
+  it("accepts and settles the real nested tool_reference and image transcript fixture", async () => {
     const dir = root();
     const statePath = join(dir, "active_task_graph.json");
     const attempt = authority("T1", "claude-nested-tool-reference");

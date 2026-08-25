@@ -147,8 +147,7 @@ describe("sweepStaleSessions (fs)", () => {
   it("returns stat and remove diagnostics with operation, exact path, and cause", () => {
     const removed: string[] = [];
     const diagnostics = sweepStaleSessions("/tracking", 100, {
-      exists: () => true,
-      entries: () => ["unstatable.active", "stale.active"],
+      probeDirectory: () => ({ kind: "present", entries: ["unstatable.active", "stale.active"] }),
       mtime: (path) => {
         if (path.endsWith("unstatable.active")) throw new Error("EACCES stat");
         return 10;
@@ -172,6 +171,25 @@ describe("sweepStaleSessions (fs)", () => {
         cause: "EROFS remove",
       },
     ]);
+  });
+
+  it("distinguishes ENOENT absence from a directory probe failure", () => {
+    expect(sweepStaleSessions("/missing", 100, {
+      probeDirectory: () => ({ kind: "absent" }),
+      mtime: () => { throw new Error("must not stat an absent directory"); },
+      remove: () => { throw new Error("must not remove from an absent directory"); },
+    })).toEqual([]);
+
+    const diagnostics = sweepStaleSessions("/unreadable", 100, {
+      probeDirectory: () => ({ kind: "unavailable", cause: "EACCES readdir" }),
+      mtime: () => { throw new Error("must not stat an unreadable directory"); },
+      remove: () => { throw new Error("must not remove from an unreadable directory"); },
+    });
+    expect(diagnostics).toEqual([{
+      operation: "read-directory",
+      path: "/unreadable",
+      cause: "EACCES readdir",
+    }]);
   });
 
   it("SessionStart surfaces best-effort cleanup failures through systemMessage", async () => {

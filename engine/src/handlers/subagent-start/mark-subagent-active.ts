@@ -12,7 +12,8 @@
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { blockResult, type HookHandler, type SubagentStartInput } from "../../types";
-import { isImplAgent, machinesDir, pathExistsFailClosed, subagentDir, taskGraphPath } from "../../config";
+import { machinesDir, pathExistsFailClosed, subagentDir, taskGraphPath } from "../../config";
+import { isImplementationAgent } from "../../core/model-profiles";
 import { stripNamespace } from "../../utils/strip-namespace";
 import {
   bindMachineAgent,
@@ -126,7 +127,7 @@ const handler: HookHandler = async (stdin) => {
       `mark-subagent-active: ${rosterAgentType} has a Guarded Skill Machine but no valid agent_id; refusing to run it ungated`,
     );
   }
-  const modernImplementationAgent = isImplAgent(rosterAgentTypeRaw);
+  const modernImplementationAgent = isImplementationAgent(rosterAgentTypeRaw);
   const loomOwnedAgent = parseAgentName(rosterAgentTypeRaw).ok || modernImplementationAgent;
   let sidecarPublished = false;
   let identifiedAuthority: ImplementationAttemptAuthority | null = null;

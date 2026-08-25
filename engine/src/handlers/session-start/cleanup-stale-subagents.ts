@@ -12,7 +12,7 @@
  * fall back to their own mtime.
  */
 
-import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
+import { readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { passthroughResult, type HookHandler } from "../../types";
 import { STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../../config";
@@ -75,16 +75,33 @@ export type StaleCleanupDiagnostic = Readonly<{
   cause: string;
 }>;
 
+export type DirectoryProbe =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "present"; entries: readonly string[] }>
+  | Readonly<{ kind: "unavailable"; cause: string }>;
+
 export type StaleSessionOperations = Readonly<{
-  exists: (path: string) => boolean;
-  entries: (path: string) => readonly string[];
+  probeDirectory: (path: string) => DirectoryProbe;
   mtime: (path: string) => number;
   remove: (path: string) => void;
 }>;
 
+function probeDirectory(path: string): DirectoryProbe {
+  try {
+    return Object.freeze({ kind: "present", entries: Object.freeze(readdirSync(path)) });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return Object.freeze({ kind: "absent" });
+    }
+    return Object.freeze({
+      kind: "unavailable",
+      cause: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 const REAL_STALE_SESSION_OPERATIONS: StaleSessionOperations = Object.freeze({
-  exists: existsSync,
-  entries: readdirSync,
+  probeDirectory,
   mtime: (path) => statSync(path).mtimeMs,
   remove: (path) => rmSync(path, { recursive: true, force: true }),
 });
@@ -111,18 +128,17 @@ export function sweepStaleSessions(
   cutoffMs: number,
   operations: StaleSessionOperations = REAL_STALE_SESSION_OPERATIONS,
 ): readonly StaleCleanupDiagnostic[] {
-  if (!operations.exists(dir)) return Object.freeze([]);
-  const diagnostics: StaleCleanupDiagnostic[] = [];
-  let entries: readonly string[];
-  try {
-    entries = operations.entries(dir);
-  } catch (error) {
-    diagnostics.push(diagnostic("read-directory", dir, error));
-    entries = [];
+  const directory = operations.probeDirectory(dir);
+  if (directory.kind === "absent") return Object.freeze([]);
+  if (directory.kind === "unavailable") {
+    const diagnostics = Object.freeze([diagnostic("read-directory", dir, directory.cause)]);
+    process.stderr.write(`${renderDiagnostic(diagnostics[0]!)}\n`);
+    return diagnostics;
   }
 
+  const diagnostics: StaleCleanupDiagnostic[] = [];
   const mtimes = new Map<string, number>();
-  for (const entry of entries) {
+  for (const entry of directory.entries) {
     const path = join(dir, entry);
     try {
       mtimes.set(entry, operations.mtime(path));

@@ -631,9 +631,9 @@ describe("the structured block never costs a claim the markers made", () => {
     // reporting "used" so no degradation note was printed. The wave gate's
     // advisory-disposition step (the `await-user` action in `commands/wave-gate.md`)
     // must triage every advisory to fixed/deferred/dismissed; it cannot triage
-    // what it never sees. And a criticals-only block is exactly what a reviewer
-    // following the prompt literally emits — the prompt scopes its mandatory
-    // block accounting to criticals.
+    // what it never sees. A criticals-only block remains a legacy/malformed
+    // compatibility case: the current Machine Summary contract requires both
+    // critical and advisory findings in the structured findings block.
     const result = parseMachineSummary(
       summary(1, ["unchecked cast"], JSON.stringify([entry("unchecked cast")]), [
         "advisory one",

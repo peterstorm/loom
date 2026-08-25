@@ -185,14 +185,13 @@ export const runDispatch = async (
       // orchestration hooks. An UNNAMEABLE one does not: it means neither the
       // payload nor the harness metadata could say what ran, so a loom agent
       // may have just been discarded. Name which case this is.
-      process.stderr.write(
-        resolvedAgentType === ""
-          ? `[loom] dispatch: SubagentStop carried no agent_type and none could be derived for ` +
-            `session ${JSON.stringify(input.session_id ?? "")} / agent ${JSON.stringify(input.agent_id ?? "")} — ` +
-            `nothing was recorded; if this was a loom agent its result is LOST\n`
-          : `[loom] dispatch: no orchestration route for agent type ${JSON.stringify(resolvedAgentType)} — nothing recorded\n`,
-      );
-      return null;
+      const message = resolvedAgentType === ""
+        ? `[loom] dispatch: SubagentStop carried no agent_type and none could be derived for ` +
+          `session ${JSON.stringify(input.session_id ?? "")} / agent ${JSON.stringify(input.agent_id ?? "")} — ` +
+          `nothing was recorded; if this was a loom agent its result is LOST`
+        : `[loom] dispatch: no orchestration route for agent type ${JSON.stringify(resolvedAgentType)} — nothing recorded`;
+      process.stderr.write(`${message}\n`);
+      return resolvedAgentType === "" ? { kind: "error" as const, message } : null;
     })
     .exhaustive();
 

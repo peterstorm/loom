@@ -17,7 +17,11 @@ import { PANEL_BASELINE_LENSES, PANEL_LENSES } from "./core/panel-contract";
 // (kind, profile, required Skill). model-profiles is a pure leaf module — this
 // import adds no cycle. Every agent set and phase map below is a DERIVED
 // projection of the catalog, never a second source.
-import { AGENT_POLICIES, agentsOfKind, WAVE_REVIEW_AGENTS } from "./core/model-profiles";
+import {
+  AGENT_POLICIES,
+  agentsOfKind,
+  WAVE_REVIEW_AGENTS,
+} from "./core/model-profiles";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 
 export { WAVE_REVIEW_AGENTS };
@@ -230,18 +234,6 @@ export const PANEL_JUDGES_DEFAULT = 3;
  *  validate-task-graph.ts via KNOWN_AGENTS.has(agent). */
 export const IMPL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("impl"));
 
-/**
- * Is this agent name an implementation agent, with or without the `-agent`
- * suffix the harness sometimes drops?
- *
- * One predicate rather than the `has(a) || has(`${a}-agent`)` pair written out
- * at each gate: the pair IS the rule, and two gates deciding "may this spawn
- * touch a task" from two copies of it is two chances to disagree about who
- * counts as an implementer.
- */
-export const isImplAgent = (agent: string): boolean =>
-  IMPL_AGENTS.has(agent) || IMPL_AGENTS.has(`${agent}-agent`);
-
 /** Known agents for task graph validation */
 export const KNOWN_AGENTS: ReadonlySet<string> = frozenSet([...IMPL_AGENTS, ...Object.keys(PHASE_AGENT_MAP)]);
 
@@ -288,14 +280,6 @@ export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
  *  ARCH_PANEL_AGENTS is: recognized by phase validation, invisible to the
  *  SubagentStop dispatcher. Frozen, symmetric with ARCH_PANEL_AGENTS. */
 export const REVIEW_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("review-verifier"));
-
-/** Closed control-plane authority for the standalone review lifecycle marker.
- * Only Machine-Summary review producers and refutation verifiers create
- * standalone run evidence; implementation, phase, and spec-check agents must
- * remain attached to orchestration state even if their prompt is untrusted. */
-export function isStandaloneReviewAgent(agentType: string): boolean {
-  return REVIEW_SUB_AGENTS.has(agentType) || REVIEW_PANEL_AGENTS.has(agentType);
-}
 
 /** Review-panel agents that would be MISROUTED by colliding with a phase,
  *  impl, review, or utility agent — detectPhase probes bare and `-agent`-

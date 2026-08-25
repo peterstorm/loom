@@ -166,19 +166,18 @@ describe("malformed hook input is caught, not crashed on (Advisory 4)", () => {
   });
 });
 
-/**
- * Each of these three paths ends in `passthrough` — indistinguishable, from the
- * hook's return value alone, from "nothing to do". The stderr line IS the
- * record that something was discarded. Untested, a refactor could drop any of
- * them and every assertion in this file would still pass, silently undoing the
- * observability they were added for.
- */
+/** Every discarded result is named; an unnameable active-graph stop also
+ * fails the evidence boundary, while known unrelated custom roles retain
+ * legacy passthrough compatibility. */
 describe("dispatch names what it discarded (audit diagnostics)", () => {
-  const stderrOf = async (payload: Record<string, unknown>): Promise<string> => {
+  const stderrOf = async (
+    payload: Record<string, unknown>,
+    expectedKind: "passthrough" | "error" = "passthrough",
+  ): Promise<string> => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const result = await dispatch(JSON.stringify(payload), []);
-      expect(result.kind).toBe("passthrough");
+      expect(result.kind).toBe(expectedKind);
       return stderrSpy.mock.calls.map((c) => String(c[0])).join("");
     } finally {
       stderrSpy.mockRestore();
@@ -205,7 +204,10 @@ describe("dispatch names what it discarded (audit diagnostics)", () => {
     // Neither the payload nor the harness metadata can say what ran — a loom
     // agent's result may have just been lost, which is not the same as a user's
     // own subagent legitimately having no orchestration hooks.
-    const unnameable = await stderrOf({ session_id: session, agent_id: "agent-unnameable" });
+    const unnameable = await stderrOf(
+      { session_id: session, agent_id: "agent-unnameable" },
+      "error",
+    );
     expect(unnameable).toContain("carried no agent_type and none could be derived");
     expect(unnameable).toContain("its result is LOST");
   });
